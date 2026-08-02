@@ -9,11 +9,16 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private let outputQueue = DispatchQueue(label: "espdisp.capture")
     private var rgbBuffer = [UInt8](repeating: 0, count: PixelConvert.width * PixelConvert.height * 2)
-    private let onFrame: ([UInt8]) -> Void
+    private let onFrame: ([UInt8], Bool) -> Void
+    private var landscape = false
+    private var outW = PixelConvert.width
+    private var outH = PixelConvert.height
 
     private(set) var framesCaptured: UInt64 = 0
+    /// Set when the stream dies (display unplugged, reconfigured, etc.).
+    private(set) var stopped = false
 
-    init(onFrame: @escaping ([UInt8]) -> Void) {
+    init(onFrame: @escaping ([UInt8], Bool) -> Void) {
         self.onFrame = onFrame
     }
 
@@ -50,12 +55,18 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Start capturing. Orientation follows the display's aspect ratio:
+    /// wider than tall captures landscape (320x172), else portrait (172x320).
     func start(display: SCDisplay, fps: Int) async throws {
+        landscape = display.width > display.height
+        outW = landscape ? PixelConvert.height : PixelConvert.width
+        outH = landscape ? PixelConvert.width : PixelConvert.height
+
         let filter = SCContentFilter(display: display, excludingWindows: [])
 
         let config = SCStreamConfiguration()
-        config.width = PixelConvert.width
-        config.height = PixelConvert.height
+        config.width = outW
+        config.height = outH
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.queueDepth = 3
@@ -95,13 +106,14 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
 
-        if PixelConvert.bgraToRGB565BE(pixelBuffer, into: &rgbBuffer) {
+        if PixelConvert.bgraToRGB565BE(pixelBuffer, width: outW, height: outH, into: &rgbBuffer) {
             framesCaptured &+= 1
-            onFrame(rgbBuffer)
+            onFrame(rgbBuffer, landscape)
         }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         FileHandle.standardError.write(Data("capture stopped: \(error)\n".utf8))
+        stopped = true
     }
 }

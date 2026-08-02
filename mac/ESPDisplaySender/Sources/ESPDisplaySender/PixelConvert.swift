@@ -7,10 +7,13 @@ enum PixelConvert {
     static let width = 172
     static let height = 320
 
-    /// Convert a BGRA CVPixelBuffer (must be at least 172x320) into a
-    /// 110,080-byte RGB565BE array. Rows are read via bytesPerRow so padded
-    /// buffers are handled.
-    static func bgraToRGB565BE(_ pixelBuffer: CVPixelBuffer, into out: inout [UInt8]) -> Bool {
+    /// Convert a BGRA CVPixelBuffer into RGB565BE. `width`/`height` are the
+    /// expected capture dimensions (172x320 portrait or 320x172 landscape);
+    /// the byte count is identical either way. Rows are read via bytesPerRow
+    /// so padded buffers are handled.
+    static func bgraToRGB565BE(
+        _ pixelBuffer: CVPixelBuffer, width: Int, height: Int, into out: inout [UInt8]
+    ) -> Bool {
         guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else {
             return false
         }
