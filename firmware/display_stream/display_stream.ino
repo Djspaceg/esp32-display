@@ -70,6 +70,9 @@ static uint8_t *volatile dmaBuf = nullptr;      // owned by SPI DMA
 static uint16_t rxFrameId = 0;
 static uint16_t rxChunksSeen = 0;
 static bool rxFrameActive = false;
+static bool rxLandscape = false;                 // orientation of frame being assembled
+static volatile bool readyLandscape = false;     // orientation of readyBuf
+static bool panelLandscape = false;              // current panel MADCTL state
 
 // Stats.
 static volatile uint32_t statFramesShown = 0;
@@ -99,7 +102,10 @@ static void onPacket(AsyncUDPPacket packet) {
   uint16_t frameId = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
   uint16_t chunkIndex = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
   uint16_t chunkCount = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
-  if (chunkCount != CHUNK_COUNT || chunkIndex >= CHUNK_COUNT) {
+  // Top bit of chunk_count carries orientation: 0 = portrait (172x320),
+  // 1 = landscape (320x172). Same byte count either way.
+  bool landscape = (chunkCount & 0x8000) != 0;
+  if ((chunkCount & 0x7FFF) != CHUNK_COUNT || chunkIndex >= CHUNK_COUNT) {
     return;  // geometry mismatch - sender misconfigured
   }
 
@@ -110,6 +116,7 @@ static void onPacket(AsyncUDPPacket packet) {
     rxFrameId = frameId;
     rxChunksSeen = 0;
     rxFrameActive = true;
+    rxLandscape = landscape;
   }
 
   memcpy(backBuf + (size_t)chunkIndex * CHUNK_PAYLOAD, data + HEADER_BYTES,
@@ -121,6 +128,7 @@ static void onPacket(AsyncUDPPacket packet) {
     uint8_t *other = (backBuf == bufA) ? bufB : bufA;
     if (readyBuf == nullptr && other != dmaBuf) {
       // Hand off the completed frame; start filling the free buffer.
+      readyLandscape = rxLandscape;
       readyBuf = backBuf;
       backBuf = other;
     } else {
@@ -240,10 +248,26 @@ void setup() {
 void loop() {
   uint8_t *frame = readyBuf;
   if (frame != nullptr && dmaBuf == nullptr) {
+    bool landscape = readyLandscape;
     dmaBuf = frame;
     readyBuf = nullptr;
+    if (landscape != panelLandscape) {
+      // MADCTL MV swaps the panel's row/column addressing; after the swap,
+      // draw x spans the 320px axis and y the 172px axis, so the 34px
+      // centering gap moves from x to y. mirror(true,false) with MV gives
+      // the "rotation 1" landscape (connector on the right).
+      esp_lcd_panel_swap_xy(panel, landscape);
+      esp_lcd_panel_mirror(panel, landscape, false);
+      esp_lcd_panel_set_gap(panel, landscape ? 0 : COL_OFFSET,
+                            landscape ? COL_OFFSET : 0);
+      panelLandscape = landscape;
+    }
     // Queues the DMA transfer and returns; onColorTransDone releases dmaBuf.
-    esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, frame);
+    if (landscape) {
+      esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_H, PANEL_W, frame);
+    } else {
+      esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, frame);
+    }
     statFramesShown = statFramesShown + 1;
   } else {
     delay(1);

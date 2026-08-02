@@ -60,12 +60,14 @@ final class FrameSender {
     }
 
     /// Send one full frame. `pixels` must be exactly 110,080 bytes of
-    /// big-endian RGB565. Synchronous chunking; sends are async on the
-    /// connection's queue.
-    func send(frame pixels: [UInt8]) {
+    /// big-endian RGB565. The top bit of the chunk_count header field
+    /// carries orientation (0 = portrait 172x320, 1 = landscape 320x172).
+    /// Synchronous chunking; sends are async on the connection's queue.
+    func send(frame pixels: [UInt8], landscape: Bool = false) {
         precondition(pixels.count == Self.frameBytes, "bad frame size \(pixels.count)")
         let id = frameId
         frameId &+= 1
+        let countField = UInt16(Self.chunkCount) | (landscape ? 0x8000 : 0)
 
         for chunk in 0..<Self.chunkCount {
             var packet = Data(capacity: 6 + Self.chunkPayload)
@@ -73,8 +75,8 @@ final class FrameSender {
             packet.append(UInt8(id >> 8))
             packet.append(UInt8(chunk & 0xFF))
             packet.append(UInt8(chunk >> 8))
-            packet.append(UInt8(Self.chunkCount & 0xFF))
-            packet.append(UInt8(Self.chunkCount >> 8))
+            packet.append(UInt8(countField & 0xFF))
+            packet.append(UInt8(countField >> 8))
             let start = chunk * Self.chunkPayload
             packet.append(contentsOf: pixels[start..<(start + Self.chunkPayload)])
 

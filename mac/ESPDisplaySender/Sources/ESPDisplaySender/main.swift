@@ -116,23 +116,54 @@ Task {
             }
 
         case "capture":
-            guard let display = try await DisplayCapture.findDisplay(named: opts.displayName)
-            else {
-                FileHandle.standardError.write(
-                    Data("no display matching \"\(opts.displayName)\" - try --list-displays\n".utf8))
-                exit(1)
-            }
-            let name = DisplayCapture.name(for: display.displayID) ?? "?"
-            print("capturing \"\(name)\" (\(display.width)x\(display.height)) at \(opts.fps) fps")
-
-            let capture = DisplayCapture { rgb565 in
-                sender.send(frame: rgb565)
-            }
-            try await capture.start(display: display, fps: opts.fps)
-            print("capture running - Ctrl-C to stop")
+            // Outer loop restarts capture whenever the display disappears or
+            // changes shape. Display reconfiguration (e.g. rotating it in
+            // BetterDisplay) kills the SCStream *silently* - no delegate
+            // error fires - so we poll the shareable content and compare.
+            var announced = false
             while true {
-                try await Task.sleep(nanoseconds: 5_000_000_000)
-                reportProgress("streamed", sender.framesSent)
+                guard let display = try? await DisplayCapture.findDisplay(named: opts.displayName)
+                else {
+                    if !announced {
+                        print("waiting for display \"\(opts.displayName)\" ...")
+                        announced = true
+                    }
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                }
+                announced = false
+                let name = DisplayCapture.name(for: display.displayID) ?? "?"
+                let shape = (display.displayID, display.width, display.height)
+                print("capturing \"\(name)\" (\(display.width)x\(display.height)) at \(opts.fps) fps")
+
+                let capture = DisplayCapture { rgb565, landscape in
+                    sender.send(frame: rgb565, landscape: landscape)
+                }
+                do {
+                    try await capture.start(display: display, fps: opts.fps)
+                } catch {
+                    FileHandle.standardError.write(Data("capture start failed: \(error), retrying\n".utf8))
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                }
+
+                // Watchdog: poll for death or reconfiguration.
+                while true {
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                    reportProgress("streamed", sender.framesSent)
+                    if capture.stopped {
+                        print("capture stream died - restarting")
+                        break
+                    }
+                    let current = try? await DisplayCapture.findDisplay(named: opts.displayName)
+                    if current == nil
+                        || (current!.displayID, current!.width, current!.height) != shape
+                    {
+                        print("display configuration changed - restarting capture")
+                        break
+                    }
+                }
+                await capture.stop()
             }
 
         default:
