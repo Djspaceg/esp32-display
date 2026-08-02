@@ -17,6 +17,11 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private(set) var framesCaptured: UInt64 = 0
     /// Set when the stream dies (display unplugged, reconfigured, etc.).
     private(set) var stopped = false
+    /// Last time ANY sample arrived (including idle/incomplete status
+    /// frames). A healthy SCStream emits these periodically even for a
+    /// static screen, so a long silence means the stream is dead - some
+    /// deaths (sleep/wake) never fire the delegate error.
+    private(set) var lastSampleAt = Date()
 
     init(onFrame: @escaping ([UInt8], Bool) -> Void) {
         self.onFrame = onFrame
@@ -106,8 +111,9 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         _ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        guard type == .screen,
-            sampleBuffer.isValid,
+        guard type == .screen else { return }
+        lastSampleAt = Date()
+        guard sampleBuffer.isValid,
             let pixelBuffer = sampleBuffer.imageBuffer
         else { return }
 
