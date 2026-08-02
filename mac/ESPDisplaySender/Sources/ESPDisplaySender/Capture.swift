@@ -81,6 +81,39 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let viaMirror: Bool         // capturing the mirror source's pixels
     }
 
+    static func listWindows() async throws -> [(id: UInt32, app: String, title: String, width: Int, height: Int)] {
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            true, onScreenWindowsOnly: false)
+        return content.windows
+            .filter { $0.windowLayer == 0 && $0.frame.width >= 100 && $0.frame.height >= 100 }
+            .map {
+                (id: $0.windowID, app: $0.owningApplication?.applicationName ?? "?",
+                 title: $0.title ?? "", width: Int($0.frame.width), height: Int($0.frame.height))
+            }
+    }
+
+    /// Find a normal application window whose app name or title contains
+    /// `matching` (case-insensitive). Largest match wins, preferring
+    /// on-screen windows.
+    static func findWindow(matching: String) async -> SCWindow? {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(
+            true, onScreenWindowsOnly: false)
+        else { return nil }
+        let candidates = content.windows.filter { w in
+            guard w.windowLayer == 0, w.frame.width >= 100, w.frame.height >= 100
+            else { return false }
+            let app = w.owningApplication?.applicationName ?? ""
+            let title = w.title ?? ""
+            return app.localizedCaseInsensitiveContains(matching)
+                || title.localizedCaseInsensitiveContains(matching)
+        }
+        return candidates.max { a, b in
+            let scoreA = (a.isOnScreen ? 1e9 : 0) + a.frame.width * a.frame.height
+            let scoreB = (b.isOnScreen ? 1e9 : 0) + b.frame.width * b.frame.height
+            return scoreA < scoreB
+        }
+    }
+
     /// Find the target display, robust to whatever macOS/BetterDisplay just
     /// did to it. Match order:
     ///   1. Known UUID among capturable displays (survives all reconfigs)
@@ -144,14 +177,26 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         return nil
     }
 
-    /// Start capturing. Orientation follows the display's aspect ratio:
+    /// Start capturing a display. Orientation follows the aspect ratio:
     /// wider than tall captures landscape (320x172), else portrait (172x320).
     func start(display: SCDisplay, fps: Int) async throws {
-        landscape = display.width > display.height
+        try await start(
+            filter: SCContentFilter(display: display, excludingWindows: []),
+            landscape: display.width > display.height, fps: fps)
+    }
+
+    /// Start capturing a single window, independent of any display - works
+    /// even when the window is occluded or the virtual display is gone.
+    func start(window: SCWindow, fps: Int) async throws {
+        try await start(
+            filter: SCContentFilter(desktopIndependentWindow: window),
+            landscape: window.frame.width > window.frame.height, fps: fps)
+    }
+
+    private func start(filter: SCContentFilter, landscape: Bool, fps: Int) async throws {
+        self.landscape = landscape
         outW = landscape ? PixelConvert.height : PixelConvert.width
         outH = landscape ? PixelConvert.width : PixelConvert.height
-
-        let filter = SCContentFilter(display: display, excludingWindows: [])
 
         let config = SCStreamConfiguration()
         config.width = outW

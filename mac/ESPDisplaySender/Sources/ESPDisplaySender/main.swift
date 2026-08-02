@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import ScreenCaptureKit
 
@@ -17,6 +18,8 @@ struct Options {
     var displayName = "Tiny Monitor"
     var fps = 40
     var listDisplays = false
+    var listWindows = false
+    var windowName = ""
     var landscape = false
     var adaptivePacing = true
     var spacingMicros: UInt32 = 200
@@ -42,14 +45,22 @@ func parseOptions() -> Options {
         case "--fps": opts.fps = Int(value(arg)) ?? opts.fps
         case "--spacing-us": opts.spacingMicros = UInt32(value(arg)) ?? opts.spacingMicros
         case "--list-displays": opts.listDisplays = true
+        case "--list-windows": opts.listWindows = true
+        case "--window":
+            opts.windowName = value(arg)
+            opts.mode = "window"
         case "--landscape": opts.landscape = true
         case "--fixed-pacing": opts.adaptivePacing = false
         case "--help", "-h":
             print("""
                 ESPDisplaySender
                   --list-displays          show capturable displays and exit
-                  --mode test|capture      test pattern or screen capture (default capture)
+                  --mode test|capture|window  test pattern, display capture (default), or
+                                           single-window capture
                   --display <name>         display name substring (default "Tiny Monitor")
+                  --window <name>          app or window title substring; captures that
+                                           window directly, no virtual display needed
+                  --list-windows           show capturable windows and exit
                   --host <host>            ESP32 host (default espdisplay.local)
                   --port <port>            UDP port (default 5568)
                   --fps <n>                target frame rate (default 40)
@@ -67,11 +78,16 @@ func parseOptions() -> Options {
 
 setbuf(stdout, nil)  // line-visible logs when redirected to a file
 
+// Establish a window-server connection: window-level capture
+// (SCContentFilter(desktopIndependentWindow:)) asserts CGS_REQUIRE_INIT in a
+// plain CLI process without one.
+_ = NSApplication.shared
+
 let opts = parseOptions()
 
 // Single-instance guard: two senders interleave frame IDs and the receiver
 // drops nearly everything (each stream invalidates the other's reassembly).
-if !opts.listDisplays {
+if !opts.listDisplays && !opts.listWindows {
     let lockFd = open("/tmp/espdisplaysender.lock", O_CREAT | O_RDWR, 0o644)
     if lockFd < 0 || flock(lockFd, LOCK_EX | LOCK_NB) != 0 {
         FileHandle.standardError.write(
@@ -90,6 +106,14 @@ Task {
             print("Capturable displays:")
             for d in displays {
                 print("  [\(d.id)] \"\(d.name)\" \(d.width)x\(d.height)")
+            }
+            exit(0)
+        }
+        if opts.listWindows {
+            let windows = try await DisplayCapture.listWindows()
+            print("Capturable windows:")
+            for w in windows.sorted(by: { $0.app < $1.app }) {
+                print("  [\(w.id)] \(w.app): \"\(w.title)\" \(w.width)x\(w.height)")
             }
             exit(0)
         }
@@ -241,6 +265,80 @@ Task {
                     // (Firmware only learns our reply address after our first
                     // packet, so a nil age right after connect is normal -
                     // the 2s keepalive pings bootstrap it.)
+                    if let age = sender.heartbeatAge, age > 10,
+                        Date().timeIntervalSince(lastReconnectAt) > 15
+                    {
+                        print(String(format: "no device heartbeat for %.0fs", age))
+                        lastReconnectAt = Date()
+                        await sender.reconnect()
+                    }
+                }
+                await capture.stop()
+            }
+
+        case "window":
+            guard !opts.windowName.isEmpty else {
+                FileHandle.standardError.write(
+                    Data("window mode needs --window <name> - try --list-windows\n".utf8))
+                exit(2)
+            }
+            // Window capture bypasses the virtual display entirely - it
+            // follows the app's window even when occluded, moved between
+            // displays, or when no virtual display exists at all.
+            var announced = false
+            var lastReconnectAt = Date.distantPast
+            while true {
+                guard let window = await DisplayCapture.findWindow(matching: opts.windowName)
+                else {
+                    if !announced {
+                        print("waiting for a window matching \"\(opts.windowName)\" ...")
+                        announced = true
+                    }
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                }
+                announced = false
+                let app = window.owningApplication?.applicationName ?? "?"
+                let title = window.title ?? ""
+                let windowID = window.windowID
+                let wasLandscape = window.frame.width > window.frame.height
+                print("capturing window [\(windowID)] \(app): \"\(title)\" "
+                    + "(\(Int(window.frame.width))x\(Int(window.frame.height))) at \(opts.fps) fps")
+
+                let capture = DisplayCapture { rgb565, landscape in
+                    sender.send(frame: rgb565, landscape: landscape)
+                }
+                do {
+                    try await capture.start(window: window, fps: opts.fps)
+                } catch {
+                    FileHandle.standardError.write(
+                        Data("window capture start failed: \(error), retrying\n".utf8))
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                }
+
+                while true {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    reportProgress("streamed", sender.framesSent)
+                    if capture.stopped {
+                        print("window capture died - restarting")
+                        break
+                    }
+                    if Date().timeIntervalSince(capture.lastSampleAt) > 30 {
+                        print("no capture samples for 30s - restarting capture")
+                        break
+                    }
+                    // Window closed, or resized across the aspect boundary
+                    // (orientation is baked into the stream config).
+                    let current = await DisplayCapture.findWindow(matching: opts.windowName)
+                    if current == nil || current!.windowID != windowID {
+                        print("window changed or closed - restarting capture")
+                        break
+                    }
+                    if (current!.frame.width > current!.frame.height) != wasLandscape {
+                        print("window aspect flipped - restarting capture")
+                        break
+                    }
                     if let age = sender.heartbeatAge, age > 10,
                         Date().timeIntervalSince(lastReconnectAt) > 15
                     {
