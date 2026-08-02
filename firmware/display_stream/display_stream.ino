@@ -27,6 +27,7 @@
 #include <AsyncUDP.h>
 #include <ESPmDNS.h>
 #include <WiFi.h>
+#include <esp_task_wdt.h>
 
 #include <driver/spi_master.h>
 #include <esp_lcd_panel_io.h>
@@ -78,6 +79,7 @@ static uint8_t *volatile dmaBuf = nullptr;      // owned by SPI DMA
 static uint16_t rxFrameId = 0;
 static uint16_t rxChunksSeen = 0;
 static bool rxFrameActive = false;
+static uint8_t rxChunkBitmap[(80 + 7) / 8];      // dedup: WiFi retransmits duplicate chunks
 static bool rxLandscape = false;                 // orientation of frame being assembled
 static volatile bool readyLandscape = false;     // orientation of readyBuf
 static bool panelLandscape = false;              // current panel MADCTL state
@@ -90,6 +92,15 @@ static volatile uint32_t statFramesDropped = 0;  // incomplete, abandoned
 static volatile uint32_t statFramesSkipped = 0;  // complete but no free buffer
 static volatile uint32_t statPackets = 0;
 static volatile uint32_t statBadLen = 0;
+static volatile uint32_t statDrawErrors = 0;
+static uint32_t dmaQueuedAt = 0;  // for DMA-stall detection
+
+// Reply endpoint: source of the most recent packet from the Mac. Used for
+// the 1Hz heartbeat so the sender can detect blackholing (wrong IP after a
+// reboot, WiFi drop) and see delivery stats. u32+u16 writes are effectively
+// atomic on this 32-bit core.
+static volatile uint32_t hbIp = 0;
+static volatile uint16_t hbPort = 0;
 
 AsyncUDP udp;
 
@@ -103,6 +114,14 @@ static bool IRAM_ATTR onColorTransDone(esp_lcd_panel_io_handle_t,
 static void onPacket(AsyncUDPPacket packet) {
   const uint8_t *data = packet.data();
   size_t len = packet.length();
+
+  // Any packet from the sender refreshes the heartbeat reply endpoint.
+  hbIp = (uint32_t)packet.remoteIP();
+  hbPort = packet.remotePort();
+
+  if (len == 4 && memcmp(data, "EPNG", 4) == 0) {
+    return;  // keepalive ping: endpoint refresh only
+  }
   if (len != HEADER_BYTES + CHUNK_PAYLOAD) {
     statBadLen = statBadLen + 1;
     return;
@@ -119,15 +138,45 @@ static void onPacket(AsyncUDPPacket packet) {
     return;  // geometry mismatch - sender misconfigured
   }
 
-  if (!rxFrameActive || frameId != rxFrameId) {
-    if (rxFrameActive && rxChunksSeen > 0) {
+  if (!rxFrameActive) {
+    rxFrameId = frameId;
+    rxChunksSeen = 0;
+    memset(rxChunkBitmap, 0, sizeof(rxChunkBitmap));
+    rxFrameActive = true;
+    rxLandscape = landscape;
+  } else if (frameId != rxFrameId) {
+    // Wraparound-aware ordering: only a NEWER frame abandons the current
+    // one. Stale chunks (WiFi retransmissions delivered late, reordering)
+    // are ignored - adopting them used to thrash the reassembler and kill
+    // both frames.
+    int16_t diff = (int16_t)(frameId - rxFrameId);
+    if (diff <= 0) {
+      // Late chunk of an older frame - ignore. But a persistent stream of
+      // "stale" IDs means the sender restarted (its IDs reset to 0):
+      // force-resync after ~2 frames' worth instead of rejecting for up
+      // to 32k frames.
+      static uint16_t staleStreak = 0;
+      if (++staleStreak < 2 * CHUNK_COUNT) {
+        return;
+      }
+      staleStreak = 0;
+    }
+    if (rxChunksSeen > 0) {
       statFramesDropped = statFramesDropped + 1;
     }
     rxFrameId = frameId;
     rxChunksSeen = 0;
-    rxFrameActive = true;
+    memset(rxChunkBitmap, 0, sizeof(rxChunkBitmap));
     rxLandscape = landscape;
   }
+
+  // Duplicate chunks (802.11 retry artifacts) must not double-count toward
+  // completion - that would display frames with holes.
+  uint8_t mask = 1 << (chunkIndex & 7);
+  if (rxChunkBitmap[chunkIndex >> 3] & mask) {
+    return;
+  }
+  rxChunkBitmap[chunkIndex >> 3] |= mask;
 
   memcpy(backBuf + (size_t)chunkIndex * CHUNK_PAYLOAD, data + HEADER_BYTES,
          CHUNK_PAYLOAD);
@@ -255,6 +304,10 @@ static void fillPanel(uint16_t rgb565) {
 
 void setup() {
   Serial.begin(115200);
+  // A host that opens the CDC port but stops draining it would otherwise
+  // block every Serial write and hang the whole loop task (observed as
+  // total silence + frozen pipeline). Never wait on USB.
+  Serial.setTxTimeoutMs(0);
   unsigned long start = millis();
   while (!Serial && millis() - start < 5000) {
     delay(50);
@@ -280,7 +333,8 @@ void setup() {
   fillPanel(0x2104);  // dark gray: display alive, waiting for WiFi
 
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);  // latency: don't doze between beacons
+  WiFi.setAutoReconnect(true);  // rejoin on AP drop (default, but explicit)
+  WiFi.setSleep(false);         // latency: don't doze between beacons
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) {
     delay(200);
@@ -302,9 +356,23 @@ void setup() {
   } else {
     Serial.println("FATAL: UDP listen failed");
   }
+
+  // Task watchdog on the loop task: any unforeseen hang panics and reboots;
+  // the Mac's heartbeat supervision then reconnects automatically. The
+  // Arduino core usually pre-initializes the TWDT, so try init then
+  // reconfigure to our timeout either way.
+  esp_task_wdt_config_t wdtConfig = {};
+  wdtConfig.timeout_ms = 10000;
+  wdtConfig.idle_core_mask = 0;
+  wdtConfig.trigger_panic = true;
+  if (esp_task_wdt_init(&wdtConfig) != ESP_OK) {
+    esp_task_wdt_reconfigure(&wdtConfig);
+  }
+  esp_task_wdt_add(NULL);
 }
 
 void loop() {
+  esp_task_wdt_reset();
   handleButton();
 
   uint8_t *frame = readyBuf;
@@ -316,22 +384,58 @@ void loop() {
       applyPanelConfig(landscape);
     }
     // Queues the DMA transfer and returns; onColorTransDone releases dmaBuf.
+    // A failed queue never fires the callback - releasing here prevents a
+    // permanent pipeline wedge (observed once in the field).
+    esp_err_t err;
     if (landscape) {
-      esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_H, PANEL_W, frame);
+      err = esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_H, PANEL_W, frame);
     } else {
-      esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, frame);
+      err = esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, frame);
     }
-    statFramesShown = statFramesShown + 1;
+    if (err != ESP_OK) {
+      statDrawErrors = statDrawErrors + 1;
+      dmaBuf = nullptr;
+    } else {
+      dmaQueuedAt = millis();
+      statFramesShown = statFramesShown + 1;
+    }
   } else {
     delay(1);
+  }
+
+  // DMA-stall failsafe: the 110KB transfer takes ~14ms at 80MHz. If the
+  // completion callback hasn't released the buffer after 500ms, it's lost -
+  // reclaim rather than wedge forever.
+  if (dmaBuf != nullptr && millis() - dmaQueuedAt > 500) {
+    statDrawErrors = statDrawErrors + 1;
+    dmaBuf = nullptr;
+  }
+
+  // 1Hz heartbeat back to the sender: "EHB1" + 5 x u32 LE stats. Lets the
+  // Mac detect blackholing and auto-tune its send pacing from real drops.
+  static uint32_t lastHeartbeat = 0;
+  if (hbPort != 0 && millis() - lastHeartbeat >= 1000) {
+    lastHeartbeat = millis();
+    uint8_t pkt[24];
+    memcpy(pkt, "EHB1", 4);
+    uint32_t vals[5] = {statFramesShown, statFramesDropped, statFramesSkipped,
+                        statPackets, (uint32_t)ESP.getFreeHeap()};
+    for (int i = 0; i < 5; i++) {
+      pkt[4 + i * 4] = vals[i] & 0xFF;
+      pkt[5 + i * 4] = (vals[i] >> 8) & 0xFF;
+      pkt[6 + i * 4] = (vals[i] >> 16) & 0xFF;
+      pkt[7 + i * 4] = (vals[i] >> 24) & 0xFF;
+    }
+    udp.writeTo(pkt, sizeof(pkt), IPAddress(hbIp), hbPort);
   }
 
   static uint32_t lastReport = 0;
   if (millis() - lastReport >= 5000) {
     lastReport = millis();
-    Serial.printf("frames=%lu dropped=%lu skipped=%lu packets=%lu badlen=%lu heap=%lu\n",
+    Serial.printf("frames=%lu dropped=%lu skipped=%lu packets=%lu badlen=%lu drawerr=%lu heap=%lu rssi=%d\n",
                   (unsigned long)statFramesShown, (unsigned long)statFramesDropped,
                   (unsigned long)statFramesSkipped, (unsigned long)statPackets,
-                  (unsigned long)statBadLen, (unsigned long)ESP.getFreeHeap());
+                  (unsigned long)statBadLen, (unsigned long)statDrawErrors,
+                  (unsigned long)ESP.getFreeHeap(), (int)WiFi.RSSI());
   }
 }

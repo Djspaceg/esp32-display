@@ -1,4 +1,5 @@
 import Foundation
+import ScreenCaptureKit
 
 // ESPDisplaySender: captures a macOS display (BetterDisplay virtual screen)
 // with ScreenCaptureKit, converts to RGB565BE, and streams it over UDP to
@@ -17,6 +18,7 @@ struct Options {
     var fps = 40
     var listDisplays = false
     var landscape = false
+    var adaptivePacing = true
     var spacingMicros: UInt32 = 200
 }
 
@@ -41,6 +43,7 @@ func parseOptions() -> Options {
         case "--spacing-us": opts.spacingMicros = UInt32(value(arg)) ?? opts.spacingMicros
         case "--list-displays": opts.listDisplays = true
         case "--landscape": opts.landscape = true
+        case "--fixed-pacing": opts.adaptivePacing = false
         case "--help", "-h":
             print("""
                 ESPDisplaySender
@@ -66,6 +69,18 @@ setbuf(stdout, nil)  // line-visible logs when redirected to a file
 
 let opts = parseOptions()
 
+// Single-instance guard: two senders interleave frame IDs and the receiver
+// drops nearly everything (each stream invalidates the other's reassembly).
+if !opts.listDisplays {
+    let lockFd = open("/tmp/espdisplaysender.lock", O_CREAT | O_RDWR, 0o644)
+    if lockFd < 0 || flock(lockFd, LOCK_EX | LOCK_NB) != 0 {
+        FileHandle.standardError.write(
+            Data("another ESPDisplaySender instance is already running - exiting\n".utf8))
+        exit(1)
+    }
+    // lockFd stays open (and locked) for the process lifetime.
+}
+
 let semaphore = DispatchSemaphore(value: 0)
 
 Task {
@@ -80,10 +95,20 @@ Task {
         }
 
         let sender = FrameSender(host: opts.host, port: opts.port,
-                                 spacingMicros: opts.spacingMicros)
+                                 spacingMicros: opts.spacingMicros,
+                                 adaptivePacing: opts.adaptivePacing)
         print("connecting to \(opts.host):\(opts.port) ...")
-        try await sender.start()
-        print("UDP ready")
+        // mDNS resolution fails while the ESP32 is booting or off the
+        // network; keep retrying instead of dying.
+        while true {
+            do {
+                try await sender.start()
+                break
+            } catch {
+                print("connect failed (\(error.localizedDescription)) - retrying in 5s")
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
 
         var lastReport = Date()
         var lastCount: UInt64 = 0
@@ -92,8 +117,13 @@ Task {
             let dt = now.timeIntervalSince(lastReport)
             if dt >= 5 {
                 let fps = Double(count - lastCount) / dt
-                print(String(format: "%@: %.1f fps (%llu total, %llu send errors)",
-                             label, fps, count, sender.sendErrors))
+                let stats = sender.deviceStats
+                let hb = sender.heartbeatAge.map { String(format: "%.0fs ago", $0) } ?? "never"
+                print(String(
+                    format: "%@: %.1f fps (%llu total, %llu send errors) | device: "
+                        + "shown=%u dropped=%u heap=%u hb=%@ pacing=%uus",
+                    label, fps, count, sender.sendErrors,
+                    stats.shown, stats.dropped, stats.heap, hb, sender.spacingMicros))
                 lastReport = now
                 lastCount = count
             }
@@ -119,11 +149,25 @@ Task {
             }
 
         case "capture":
+            // Fail fast with a clear message if screen capture permission is
+            // missing - otherwise the retry loop below would mask it as
+            // "waiting for display" forever.
+            do {
+                _ = try await SCShareableContent.excludingDesktopWindows(
+                    false, onScreenWindowsOnly: false)
+            } catch {
+                let msg = "cannot enumerate displays - grant Screen Recording permission "
+                    + "in System Settings > Privacy & Security (\(error.localizedDescription))\n"
+                FileHandle.standardError.write(Data(msg.utf8))
+                exit(1)
+            }
+
             // Outer loop restarts capture whenever the display disappears or
             // changes shape. Display reconfiguration (e.g. rotating it in
             // BetterDisplay) kills the SCStream *silently* - no delegate
             // error fires - so we poll the shareable content and compare.
             var announced = false
+            var lastReconnectAt = Date.distantPast
             while true {
                 guard let display = try? await DisplayCapture.findDisplay(named: opts.displayName)
                 else {
@@ -150,12 +194,21 @@ Task {
                     continue
                 }
 
-                // Watchdog: poll for death or reconfiguration.
+                // Watchdog: poll for death, reconfiguration, silent stalls,
+                // and a blackholed network path.
                 while true {
                     try await Task.sleep(nanoseconds: 3_000_000_000)
                     reportProgress("streamed", sender.framesSent)
+
                     if capture.stopped {
                         print("capture stream died - restarting")
+                        break
+                    }
+                    // Sleep/wake can kill the stream without firing the
+                    // delegate; a healthy stream emits status samples even
+                    // when the screen is static.
+                    if Date().timeIntervalSince(capture.lastSampleAt) > 30 {
+                        print("no capture samples for 30s - restarting capture")
                         break
                     }
                     let current = try? await DisplayCapture.findDisplay(named: opts.displayName)
@@ -164,6 +217,18 @@ Task {
                     {
                         print("display configuration changed - restarting capture")
                         break
+                    }
+                    // Device heartbeats stop when the ESP32 rebooted onto a
+                    // new address or dropped off WiFi; re-resolving heals it.
+                    // (Firmware only learns our reply address after our first
+                    // packet, so a nil age right after connect is normal -
+                    // the 2s keepalive pings bootstrap it.)
+                    if let age = sender.heartbeatAge, age > 10,
+                        Date().timeIntervalSince(lastReconnectAt) > 15
+                    {
+                        print(String(format: "no device heartbeat for %.0fs", age))
+                        lastReconnectAt = Date()
+                        await sender.reconnect()
                     }
                 }
                 await capture.stop()
