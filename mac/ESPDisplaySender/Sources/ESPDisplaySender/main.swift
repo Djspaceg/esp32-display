@@ -16,6 +16,7 @@ struct Options {
     var displayName = "Tiny Monitor"
     var fps = 40
     var listDisplays = false
+    var landscape = false
     var spacingMicros: UInt32 = 200
 }
 
@@ -39,6 +40,7 @@ func parseOptions() -> Options {
         case "--fps": opts.fps = Int(value(arg)) ?? opts.fps
         case "--spacing-us": opts.spacingMicros = UInt32(value(arg)) ?? opts.spacingMicros
         case "--list-displays": opts.listDisplays = true
+        case "--landscape": opts.landscape = true
         case "--help", "-h":
             print("""
                 ESPDisplaySender
@@ -99,14 +101,15 @@ Task {
 
         switch opts.mode {
         case "test":
-            print("test pattern at \(opts.fps) fps -> \(opts.host)")
+            print("test pattern at \(opts.fps) fps -> \(opts.host)"
+                + (opts.landscape ? " (landscape)" : ""))
             var frame = [UInt8](repeating: 0, count: FrameSender.frameBytes)
             var tick = 0
             let interval = 1.0 / Double(opts.fps)
             while true {
                 let t0 = Date()
-                TestPattern.frame(tick: tick, into: &frame)
-                sender.send(frame: frame)
+                TestPattern.frame(tick: tick, landscape: opts.landscape, into: &frame)
+                sender.send(frame: frame, landscape: opts.landscape)
                 tick += 1
                 reportProgress("sent", sender.framesSent)
                 let elapsed = Date().timeIntervalSince(t0)

@@ -24,7 +24,13 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Name of a display (as shown in System Settings / BetterDisplay) for a
     /// CGDirectDisplayID, via NSScreen.
+    ///
+    /// NSScreen only refreshes when the main run loop processes display
+    /// change notifications - which never happens in a plain CLI tool. Pump
+    /// it briefly so re-created displays (e.g. after a BetterDisplay
+    /// rotation) show up with their new IDs.
     static func name(for displayID: CGDirectDisplayID) -> String? {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
         for screen in NSScreen.screens {
             if let num = screen.deviceDescription[
                 NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
@@ -46,12 +52,22 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// Find the SCDisplay whose NSScreen name contains `nameSubstring`
-    /// (case-insensitive).
+    /// (case-insensitive). Falls back to matching the panel's distinctive
+    /// 172:320 aspect ratio (either orientation), since name lookup can
+    /// fail when NSScreen lags a display re-creation.
     static func findDisplay(named nameSubstring: String) async throws -> SCDisplay? {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
-        return content.displays.first { d in
+        if let byName = content.displays.first(where: { d in
             (name(for: d.displayID) ?? "").localizedCaseInsensitiveContains(nameSubstring)
+        }) {
+            return byName
+        }
+        let target = Double(PixelConvert.width) / Double(PixelConvert.height)  // 0.5375
+        return content.displays.first { d in
+            guard d.width > 0, d.height > 0 else { return false }
+            let aspect = Double(d.width) / Double(d.height)
+            return abs(aspect - target) < 0.01 || abs(aspect - 1.0 / target) < 0.035
         }
     }
 
