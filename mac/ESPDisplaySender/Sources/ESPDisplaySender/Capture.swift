@@ -56,24 +56,92 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    /// Find the SCDisplay whose NSScreen name contains `nameSubstring`
-    /// (case-insensitive). Falls back to matching the panel's distinctive
-    /// 172:320 aspect ratio (either orientation), since name lookup can
-    /// fail when NSScreen lags a display re-creation.
-    static func findDisplay(named nameSubstring: String) async throws -> SCDisplay? {
-        let content = try await SCShareableContent.excludingDesktopWindows(
+    /// Stable identity for a display: the CoreGraphics UUID survives
+    /// displayID reassignment, rotation, resolution changes, and mirroring -
+    /// unlike displayID (reissued) and NSScreen names (mirrored displays
+    /// vanish from NSScreen entirely).
+    static func uuid(for displayID: CGDirectDisplayID) -> String? {
+        guard let cfUUID = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue()
+        else { return nil }
+        return CFUUIDCreateString(nil, cfUUID) as String?
+    }
+
+    /// All online displays per CoreGraphics - includes mirror targets that
+    /// SCShareableContent and NSScreen both hide.
+    static func onlineDisplayIDs() -> [CGDirectDisplayID] {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(16, &ids, &count) == .success else { return [] }
+        return Array(ids.prefix(Int(count)))
+    }
+
+    struct Resolved {
+        let display: SCDisplay      // what to hand to SCStream
+        let targetUUID: String?     // stable identity of the *target* display
+        let viaMirror: Bool         // capturing the mirror source's pixels
+    }
+
+    /// Find the target display, robust to whatever macOS/BetterDisplay just
+    /// did to it. Match order:
+    ///   1. Known UUID among capturable displays (survives all reconfigs)
+    ///   2. NSScreen name (learns the UUID for subsequent lookups)
+    ///   3. Mirror traversal: if the UUID exists online but isn't
+    ///      capturable, it became a mirror target - capture the mirror
+    ///      SOURCE, which shows the identical pixels
+    ///   4. The panel's distinctive 172:320 aspect ratio, either orientation
+    static func resolve(named nameSubstring: String, knownUUID: String?) async -> Resolved? {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
-        if let byName = content.displays.first(where: { d in
+        else { return nil }
+        let displays = content.displays
+
+        if let known = knownUUID,
+            let d = displays.first(where: { uuid(for: $0.displayID) == known })
+        {
+            return Resolved(display: d, targetUUID: known, viaMirror: false)
+        }
+
+        if let d = displays.first(where: { d in
             (name(for: d.displayID) ?? "").localizedCaseInsensitiveContains(nameSubstring)
         }) {
-            return byName
+            return Resolved(display: d, targetUUID: uuid(for: d.displayID), viaMirror: false)
         }
+
+        if let known = knownUUID {
+            for id in onlineDisplayIDs() where uuid(for: id) == known {
+                let source = CGDisplayMirrorsDisplay(id)
+                if source != kCGNullDirectDisplay,
+                    let d = displays.first(where: { $0.displayID == source })
+                {
+                    return Resolved(display: d, targetUUID: known, viaMirror: true)
+                }
+            }
+        }
+
+        // Cold start while already mirrored (no UUID learned yet, name gone
+        // from NSScreen): an online display that mirrors another, isn't
+        // built-in, and isn't independently capturable is our virtual
+        // display. Capture its source and learn the UUID for later.
+        for id in onlineDisplayIDs() {
+            let source = CGDisplayMirrorsDisplay(id)
+            if source != kCGNullDirectDisplay,
+                CGDisplayIsBuiltin(id) == 0,
+                !displays.contains(where: { $0.displayID == id }),
+                let d = displays.first(where: { $0.displayID == source })
+            {
+                return Resolved(display: d, targetUUID: uuid(for: id), viaMirror: true)
+            }
+        }
+
         let target = Double(PixelConvert.width) / Double(PixelConvert.height)  // 0.5375
-        return content.displays.first { d in
+        if let d = displays.first(where: { d in
             guard d.width > 0, d.height > 0 else { return false }
             let aspect = Double(d.width) / Double(d.height)
             return abs(aspect - target) < 0.01 || abs(aspect - 1.0 / target) < 0.035
+        }) {
+            return Resolved(display: d, targetUUID: uuid(for: d.displayID), viaMirror: false)
         }
+        return nil
     }
 
     /// Start capturing. Orientation follows the display's aspect ratio:
