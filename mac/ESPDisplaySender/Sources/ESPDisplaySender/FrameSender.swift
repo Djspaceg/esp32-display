@@ -37,6 +37,8 @@ final class FrameSender {
 
     private let lock = NSLock()
     private var _spacingMicros: UInt32
+    private let spacingInitial: UInt32
+    private var stallStreak = 0
     private var _lastHeartbeatAt: Date?
     private var _stats = DeviceStats()
     private var prevStats = DeviceStats()
@@ -75,6 +77,7 @@ final class FrameSender {
         self.host = host
         self.port = port
         self._spacingMicros = spacingMicros
+        self.spacingInitial = spacingMicros
         self.adaptivePacing = adaptivePacing
     }
 
@@ -185,6 +188,24 @@ final class FrameSender {
         let shownDelta = Int64(stats.shown) - Int64(prev.shown)
         let droppedDelta = Int64(stats.dropped) - Int64(prev.dropped)
         guard shownDelta >= 0, droppedDelta >= 0, shownDelta + droppedDelta > 0 else { return }
+
+        // Sustained total failure (drops but zero completions) is a broken
+        // link, not oversubscription - ratcheting pacing to max doesn't help
+        // and makes recovery sluggish. Reset to the default and hold until
+        // frames complete again (the device heals its own radio meanwhile).
+        if shownDelta == 0 {
+            stallStreak += 1
+            if stallStreak == 15 {
+                lock.lock()
+                _spacingMicros = spacingInitial
+                lock.unlock()
+                print("pacing: reset to \(spacingInitial)us (no frames completing - not a rate problem)")
+            }
+            if stallStreak >= 15 { return }
+        } else {
+            stallStreak = 0
+        }
+
         let dropRatio = Double(droppedDelta) / Double(shownDelta + droppedDelta)
         let old = spacing
         if dropRatio > 0.05 {
