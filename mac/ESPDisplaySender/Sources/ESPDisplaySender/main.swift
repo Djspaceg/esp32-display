@@ -162,14 +162,22 @@ Task {
                 exit(1)
             }
 
-            // Outer loop restarts capture whenever the display disappears or
-            // changes shape. Display reconfiguration (e.g. rotating it in
-            // BetterDisplay) kills the SCStream *silently* - no delegate
-            // error fires - so we poll the shareable content and compare.
+            // Outer loop restarts capture whenever the display disappears,
+            // changes shape, or resolves to a different capture source
+            // (e.g. becomes a mirror target). Display reconfiguration kills
+            // the SCStream *silently* - no delegate error fires - so we poll
+            // and compare. Identity is anchored on the display's UUID, which
+            // survives every reconfiguration; it's cached to disk so even a
+            // sender restart mid-mirror re-finds the display.
+            let uuidCachePath = "/tmp/espdisplaysender-display-uuid"
+            var knownUUID = try? String(
+                contentsOfFile: uuidCachePath, encoding: .utf8
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
             var announced = false
             var lastReconnectAt = Date.distantPast
             while true {
-                guard let display = try? await DisplayCapture.findDisplay(named: opts.displayName)
+                guard let resolved = await DisplayCapture.resolve(
+                    named: opts.displayName, knownUUID: knownUUID)
                 else {
                     if !announced {
                         print("waiting for display \"\(opts.displayName)\" ...")
@@ -179,9 +187,16 @@ Task {
                     continue
                 }
                 announced = false
+                if let uuid = resolved.targetUUID, uuid != knownUUID {
+                    knownUUID = uuid
+                    try? uuid.write(toFile: uuidCachePath, atomically: true, encoding: .utf8)
+                }
+                let display = resolved.display
                 let name = DisplayCapture.name(for: display.displayID) ?? "?"
-                let shape = (display.displayID, display.width, display.height)
-                print("capturing \"\(name)\" (\(display.width)x\(display.height)) at \(opts.fps) fps")
+                let shape = (display.displayID, display.width, display.height,
+                             resolved.viaMirror)
+                print("capturing \"\(name)\" (\(display.width)x\(display.height)) at "
+                    + "\(opts.fps) fps\(resolved.viaMirror ? " [mirror source]" : "")")
 
                 let capture = DisplayCapture { rgb565, landscape in
                     sender.send(frame: rgb565, landscape: landscape)
@@ -195,9 +210,10 @@ Task {
                 }
 
                 // Watchdog: poll for death, reconfiguration, silent stalls,
-                // and a blackholed network path.
+                // and a blackholed network path. 2s cadence keeps the gap
+                // between a macOS display operation and our reattach short.
                 while true {
-                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
                     reportProgress("streamed", sender.framesSent)
 
                     if capture.stopped {
@@ -211,9 +227,11 @@ Task {
                         print("no capture samples for 30s - restarting capture")
                         break
                     }
-                    let current = try? await DisplayCapture.findDisplay(named: opts.displayName)
+                    let current = await DisplayCapture.resolve(
+                        named: opts.displayName, knownUUID: knownUUID)
                     if current == nil
-                        || (current!.displayID, current!.width, current!.height) != shape
+                        || (current!.display.displayID, current!.display.width,
+                            current!.display.height, current!.viaMirror) != shape
                     {
                         print("display configuration changed - restarting capture")
                         break
