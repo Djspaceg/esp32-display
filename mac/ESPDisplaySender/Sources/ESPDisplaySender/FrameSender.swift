@@ -85,7 +85,11 @@ final class FrameSender {
                         self?.sendErrors &+= 1
                     }
                 })
-            if spacingMicros > 0 && chunk % 8 == 7 {
+            // Pace every packet: the ESP32's lwIP UDP receive mailbox is only
+            // a handful of packets deep, so an unpaced 80-packet burst is
+            // mostly dropped on the device. ~250us/packet = ~20ms/frame,
+            // matching the ESP32's ~5.5MB/s ingest ceiling.
+            if spacingMicros > 0 {
                 usleep(spacingMicros)
             }
         }

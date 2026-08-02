@@ -3,22 +3,36 @@
 // Pipeline (per docs/esp32-wireless-display-plan.md):
 //   Mac sends raw RGB565 frames (172x320, big-endian / panel byte order)
 //   chunked over UDP. Each packet: [frame_id u16 LE][chunk_index u16 LE]
-//   [chunk_count u16 LE][payload]. We reassemble into the back buffer of a
-//   double buffer; on completion, swap and push the front buffer to the
-//   ST7789 over 80MHz SPI in one bulk DMA write.
+//   [chunk_count u16 LE][payload]. Chunks reassemble into the back buffer
+//   of a double buffer; completed frames are pushed to the ST7789 with
+//   esp_lcd's interrupt-driven SPI DMA at 80MHz.
 //
-// Chunk payload is 1376 bytes = 4 rows (4 * 172 * 2), so a frame is exactly
-// 80 chunks and every packet (1382B) stays under conservative MTU.
+// Why esp_lcd instead of Arduino_GFX for the push: Arduino_GFX's SPI paths
+// busy-wait the CPU for the whole ~14-24ms frame transfer. On the C6's
+// single core that starves the WiFi/lwIP task and drops most UDP chunks
+// (measured: throughput plateaued ~20fps with heavy loss). esp_lcd queues
+// the transfer and returns; the CPU services WiFi while the SPI peripheral
+// streams the frame, and an ISR callback tells us when the buffer is free.
 //
-// Reassembly happens in the AsyncUDP callback (lwIP task); the SPI push
-// happens in loop() (Arduino task). Missing chunks: if packets from a newer
-// frame arrive while the current one is incomplete, the old frame is
-// abandoned (favor recency over completeness).
+// Chunk payload is 1376 bytes = 4 rows (4 * 172 * 2): exactly 80 chunks per
+// frame, every packet 1382B, under conservative MTU.
+//
+// Buffer ownership (single writer per buffer at all times):
+//   backBuf  - being filled by the UDP callback (lwIP task)
+//   readyBuf - complete frame awaiting display (handoff slot)
+//   dmaBuf   - currently being read by SPI DMA
+// The UDP side only swaps into a buffer that DMA isn't reading; otherwise
+// it keeps overwriting its current back buffer (recency over completeness).
 
-#include <Arduino_GFX_Library.h>
 #include <AsyncUDP.h>
 #include <ESPmDNS.h>
 #include <WiFi.h>
+
+#include <driver/spi_master.h>
+#include <esp_lcd_panel_io.h>
+#include <esp_lcd_panel_ops.h>
+#include <esp_lcd_panel_st7789.h>
+#include <esp_lcd_panel_vendor.h>
 
 #include "wifi_config.h"  // defines WIFI_SSID / WIFI_PASSWORD (gitignored)
 
@@ -32,15 +46,11 @@ static const int PIN_BL = 22;
 
 static const int16_t PANEL_W = 172;
 static const int16_t PANEL_H = 320;
-static const uint8_t COL_OFFSET = 34;
-static const uint8_t ROW_OFFSET = 0;
+static const int COL_OFFSET = 34;  // 172-wide panel centered on 240-wide ST7789 RAM
+static const int ROW_OFFSET = 0;
 static const uint32_t SPI_HZ = 80000000;
 
-Arduino_DataBus *bus = new Arduino_ESP32SPIDMA(PIN_DC, PIN_CS, PIN_SCLK, PIN_MOSI,
-                                               GFX_NOT_DEFINED /* MISO */);
-Arduino_GFX *gfx = new Arduino_ST7789(bus, PIN_RST, 0, true /* IPS */,
-                                      PANEL_W, PANEL_H,
-                                      COL_OFFSET, ROW_OFFSET, COL_OFFSET, ROW_OFFSET);
+static esp_lcd_panel_handle_t panel = nullptr;
 
 // ---- Protocol ----------------------------------------------------------
 static const uint16_t UDP_PORT = 5568;
@@ -49,32 +59,40 @@ static const size_t CHUNK_PAYLOAD = 1376;                         // 4 rows
 static const uint16_t CHUNK_COUNT = FRAME_BYTES / CHUNK_PAYLOAD;  // 80
 static const size_t HEADER_BYTES = 6;
 
-// ---- Double buffer -----------------------------------------------------
+// ---- Buffers -----------------------------------------------------------
 static uint8_t *bufA = nullptr;
 static uint8_t *bufB = nullptr;
 
-// Owned by the UDP callback (lwIP task):
-static uint8_t *backBuf = nullptr;
+static uint8_t *backBuf = nullptr;              // owned by UDP callback
+static uint8_t *volatile readyBuf = nullptr;    // handoff: UDP -> loop
+static uint8_t *volatile dmaBuf = nullptr;      // owned by SPI DMA
+
 static uint16_t rxFrameId = 0;
 static uint16_t rxChunksSeen = 0;
 static bool rxFrameActive = false;
 
-// Handoff to loop(): pointer written by callback, consumed by loop.
-static uint8_t *volatile readyBuf = nullptr;
-
 // Stats.
 static volatile uint32_t statFramesShown = 0;
-static volatile uint32_t statFramesDropped = 0;   // incomplete, abandoned
-static volatile uint32_t statFramesSkipped = 0;   // complete but display busy
+static volatile uint32_t statFramesDropped = 0;  // incomplete, abandoned
+static volatile uint32_t statFramesSkipped = 0;  // complete but no free buffer
 static volatile uint32_t statPackets = 0;
+static volatile uint32_t statBadLen = 0;
 
 AsyncUDP udp;
+
+// ISR context: DMA finished reading dmaBuf; it's free for reuse.
+static bool IRAM_ATTR onColorTransDone(esp_lcd_panel_io_handle_t,
+                                       esp_lcd_panel_io_event_data_t *, void *) {
+  dmaBuf = nullptr;
+  return false;
+}
 
 static void onPacket(AsyncUDPPacket packet) {
   const uint8_t *data = packet.data();
   size_t len = packet.length();
   if (len != HEADER_BYTES + CHUNK_PAYLOAD) {
-    return;  // not a valid chunk
+    statBadLen = statBadLen + 1;
+    return;
   }
   statPackets = statPackets + 1;
 
@@ -86,7 +104,6 @@ static void onPacket(AsyncUDPPacket packet) {
   }
 
   if (!rxFrameActive || frameId != rxFrameId) {
-    // New frame begins. If the previous one was mid-assembly, drop it.
     if (rxFrameActive && rxChunksSeen > 0) {
       statFramesDropped = statFramesDropped + 1;
     }
@@ -99,20 +116,75 @@ static void onPacket(AsyncUDPPacket packet) {
          CHUNK_PAYLOAD);
   rxChunksSeen++;
 
-  // Note: duplicate chunks would double-count, but UDP duplication on a
-  // local WLAN is rare enough that a full bitmap isn't worth the cycles.
   if (rxChunksSeen >= CHUNK_COUNT) {
     rxFrameActive = false;
-    if (readyBuf == nullptr) {
-      // Hand the completed buffer to loop() and start filling the other.
+    uint8_t *other = (backBuf == bufA) ? bufB : bufA;
+    if (readyBuf == nullptr && other != dmaBuf) {
+      // Hand off the completed frame; start filling the free buffer.
       readyBuf = backBuf;
-      backBuf = (backBuf == bufA) ? bufB : bufA;
+      backBuf = other;
     } else {
-      // Display still busy with the previous frame: keep the buffer,
-      // next frame overwrites it (recency wins).
+      // No free buffer: keep this one, newer frames overwrite it.
       statFramesSkipped = statFramesSkipped + 1;
     }
   }
+}
+
+static bool initDisplay() {
+  spi_bus_config_t buscfg = {};
+  buscfg.mosi_io_num = PIN_MOSI;
+  buscfg.miso_io_num = -1;
+  buscfg.sclk_io_num = PIN_SCLK;
+  buscfg.quadwp_io_num = -1;
+  buscfg.quadhd_io_num = -1;
+  buscfg.max_transfer_sz = (int)FRAME_BYTES;
+  if (spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO) != ESP_OK) {
+    return false;
+  }
+
+  esp_lcd_panel_io_spi_config_t io_config = {};
+  io_config.cs_gpio_num = PIN_CS;
+  io_config.dc_gpio_num = PIN_DC;
+  io_config.spi_mode = 0;
+  io_config.pclk_hz = SPI_HZ;
+  io_config.trans_queue_depth = 2;
+  io_config.on_color_trans_done = onColorTransDone;
+  io_config.user_ctx = nullptr;
+  io_config.lcd_cmd_bits = 8;
+  io_config.lcd_param_bits = 8;
+
+  esp_lcd_panel_io_handle_t io = nullptr;
+  if (esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config,
+                               &io) != ESP_OK) {
+    return false;
+  }
+
+  esp_lcd_panel_dev_config_t panel_config = {};
+  panel_config.reset_gpio_num = PIN_RST;
+  panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
+  panel_config.data_endian = LCD_RGB_DATA_ENDIAN_BIG;  // buffer arrives panel-ready
+  panel_config.bits_per_pixel = 16;
+  if (esp_lcd_new_panel_st7789(io, &panel_config, &panel) != ESP_OK) {
+    return false;
+  }
+
+  esp_lcd_panel_reset(panel);
+  esp_lcd_panel_init(panel);
+  esp_lcd_panel_invert_color(panel, true);  // IPS panel
+  esp_lcd_panel_set_gap(panel, COL_OFFSET, ROW_OFFSET);
+  esp_lcd_panel_disp_on_off(panel, true);
+  return true;
+}
+
+// Fill the whole panel with one RGB565 color (used for status feedback).
+static void fillPanel(uint16_t rgb565) {
+  uint8_t hi = rgb565 >> 8, lo = rgb565 & 0xFF;
+  for (size_t i = 0; i < FRAME_BYTES; i += 2) {
+    bufA[i] = hi;
+    bufA[i + 1] = lo;
+  }
+  esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, bufA);
+  delay(30);  // let DMA finish before bufA is reused
 }
 
 void setup() {
@@ -121,10 +193,10 @@ void setup() {
   while (!Serial && millis() - start < 5000) {
     delay(50);
   }
-  Serial.println("=== display_stream ===");
+  Serial.println("=== display_stream (esp_lcd DMA) ===");
 
-  bufA = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_8BIT);
-  bufB = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_8BIT);
+  bufA = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_DMA);
+  bufB = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_DMA);
   if (!bufA || !bufB) {
     Serial.println("FATAL: frame buffer alloc failed");
     while (true) delay(1000);
@@ -134,15 +206,11 @@ void setup() {
 
   pinMode(PIN_BL, OUTPUT);
   analogWrite(PIN_BL, 128);  // 50% cap per Waveshare guidance
-  if (!gfx->begin(SPI_HZ)) {
+  if (!initDisplay()) {
     Serial.println("FATAL: display init failed");
     while (true) delay(1000);
   }
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->setTextColor(RGB565_WHITE);
-  gfx->setTextSize(1);
-  gfx->setCursor(8, 8);
-  gfx->print("connecting to WiFi...");
+  fillPanel(0x2104);  // dark gray: display alive, waiting for WiFi
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // latency: don't doze between beacons
@@ -159,12 +227,7 @@ void setup() {
     Serial.println("WARN: mDNS failed to start");
   }
 
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->setCursor(8, 8);
-  gfx->print("ready ");
-  gfx->print(WiFi.localIP());
-  gfx->setCursor(8, 24);
-  gfx->printf("udp :%u  espdisplay.local", UDP_PORT);
+  fillPanel(0x0210);  // dark teal: WiFi up, waiting for stream
 
   if (udp.listen(UDP_PORT)) {
     udp.onPacket(onPacket);
@@ -176,10 +239,11 @@ void setup() {
 
 void loop() {
   uint8_t *frame = readyBuf;
-  if (frame != nullptr) {
-    // Bulk big-endian push: sender already swapped to panel byte order.
-    gfx->draw16bitBeRGBBitmap(0, 0, (uint16_t *)frame, PANEL_W, PANEL_H);
+  if (frame != nullptr && dmaBuf == nullptr) {
+    dmaBuf = frame;
     readyBuf = nullptr;
+    // Queues the DMA transfer and returns; onColorTransDone releases dmaBuf.
+    esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, frame);
     statFramesShown = statFramesShown + 1;
   } else {
     delay(1);
@@ -188,9 +252,9 @@ void loop() {
   static uint32_t lastReport = 0;
   if (millis() - lastReport >= 5000) {
     lastReport = millis();
-    Serial.printf("frames=%lu dropped=%lu skipped=%lu packets=%lu heap=%lu\n",
+    Serial.printf("frames=%lu dropped=%lu skipped=%lu packets=%lu badlen=%lu heap=%lu\n",
                   (unsigned long)statFramesShown, (unsigned long)statFramesDropped,
                   (unsigned long)statFramesSkipped, (unsigned long)statPackets,
-                  (unsigned long)ESP.getFreeHeap());
+                  (unsigned long)statBadLen, (unsigned long)ESP.getFreeHeap());
   }
 }
