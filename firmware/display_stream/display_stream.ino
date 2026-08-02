@@ -411,6 +411,78 @@ void loop() {
     dmaBuf = nullptr;
   }
 
+  // WiFi association fully lost for over a minute: autoReconnect isn't
+  // getting us back, reboot for a clean radio state.
+  static uint32_t wifiDownSince = 0;
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiDownSince = 0;
+  } else if (wifiDownSince == 0) {
+    wifiDownSince = millis();
+  } else if (millis() - wifiDownSince > 60000) {
+    Serial.println("WiFi down >60s, restarting");
+    Serial.flush();
+    delay(100);
+    ESP.restart();
+  }
+
+  // Link supervisor: if the sender is actively pushing chunks (packets
+  // climbing) but no frame has completed in 20s, the WiFi association has
+  // rotted (observed: RSSI decayed to -81 and stayed; a fresh association
+  // on the same radio read -56 with perfect delivery). Heal in stages:
+  // reconnect WiFi first, hard-reboot if that doesn't take - the Mac's
+  // heartbeat supervision reconnects automatically either way.
+  static uint32_t lastLinkCheck = 0;
+  static uint32_t lastShownVal = 0;
+  static uint32_t lastShownChangeAt = 0;
+  static uint32_t lastPacketsVal = 0;
+  static uint8_t healStage = 0;
+  static uint32_t healStartedAt = 0;
+  if (millis() - lastLinkCheck >= 5000) {
+    lastLinkCheck = millis();
+    if (statFramesShown != lastShownVal) {
+      lastShownVal = statFramesShown;
+      lastShownChangeAt = millis();
+      if (healStage != 0) {
+        Serial.println("link heal: recovered");
+        healStage = 0;
+      }
+    }
+    uint32_t packetsDelta = statPackets - lastPacketsVal;
+    lastPacketsVal = statPackets;
+    bool starving = packetsDelta > 2 * CHUNK_COUNT &&
+                    millis() - lastShownChangeAt > 20000;
+    if (starving && healStage == 0) {
+      Serial.printf("link heal: reconnecting WiFi (rssi=%d)\n", (int)WiFi.RSSI());
+      WiFi.disconnect();
+      WiFi.reconnect();
+      healStage = 1;
+      healStartedAt = millis();
+    } else if (starving && healStage == 1 &&
+               millis() - healStartedAt > 30000) {
+      Serial.println("link heal: reconnect insufficient, restarting");
+      Serial.flush();
+      delay(100);
+      ESP.restart();
+    }
+  }
+
+  // After a heal reconnect completes, re-announce mDNS so the Mac's
+  // re-resolution finds us.
+  static bool mdnsRestartPending = false;
+  static uint8_t lastHealStage = 0;
+  if (healStage == 1 && lastHealStage == 0) {
+    mdnsRestartPending = true;
+  }
+  lastHealStage = healStage;
+  if (mdnsRestartPending && WiFi.status() == WL_CONNECTED) {
+    mdnsRestartPending = false;
+    MDNS.end();
+    if (MDNS.begin("espdisplay")) {
+      MDNS.addService("espdisp", "udp", UDP_PORT);
+      Serial.printf("mDNS re-announced, IP %s\n", WiFi.localIP().toString().c_str());
+    }
+  }
+
   // 1Hz heartbeat back to the sender: "EHB1" + 5 x u32 LE stats. Lets the
   // Mac detect blackholing and auto-tune its send pacing from real drops.
   static uint32_t lastHeartbeat = 0;
