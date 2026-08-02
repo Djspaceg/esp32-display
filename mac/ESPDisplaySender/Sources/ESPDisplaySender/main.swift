@@ -16,7 +16,7 @@ struct Options {
     var displayName = "Tiny Monitor"
     var fps = 40
     var listDisplays = false
-    var spacingMicros: UInt32 = 150
+    var spacingMicros: UInt32 = 200
 }
 
 func parseOptions() -> Options {
@@ -48,7 +48,8 @@ func parseOptions() -> Options {
                   --host <host>            ESP32 host (default espdisplay.local)
                   --port <port>            UDP port (default 5568)
                   --fps <n>                target frame rate (default 40)
-                  --spacing-us <n>         pacing sleep per 8 chunks (default 150)
+                  --spacing-us <n>         pacing sleep per chunk in microseconds (default 200;
+                                           higher = fewer dropped frames, lower peak fps)
                 """)
             exit(0)
         default:
@@ -58,6 +59,8 @@ func parseOptions() -> Options {
     }
     return opts
 }
+
+setbuf(stdout, nil)  // line-visible logs when redirected to a file
 
 let opts = parseOptions()
 

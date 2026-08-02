@@ -7,15 +7,17 @@ import serial
 
 port = sys.argv[1] if len(sys.argv) > 1 else "/dev/cu.usbmodem1101"
 duration = float(sys.argv[2]) if len(sys.argv) > 2 else 12.0
-stop_marker = sys.argv[3].encode() if len(sys.argv) > 3 else None
+stop_marker = sys.argv[3].encode() if len(sys.argv) > 3 and sys.argv[3] != "-" else None
+no_reset = "noreset" in sys.argv[4:]
 
 s = serial.Serial(port, 115200, timeout=1)
-# Native USB-Serial/JTAG: pulse RTS (with DTR low) to hard-reset the chip so
-# we capture output from boot.
-s.setDTR(False)
-s.setRTS(True)
-time.sleep(0.1)
-s.setRTS(False)
+if not no_reset:
+    # Native USB-Serial/JTAG: pulse RTS (with DTR low) to hard-reset the
+    # chip so we capture output from boot.
+    s.setDTR(False)
+    s.setRTS(True)
+    time.sleep(0.1)
+    s.setRTS(False)
 end = time.time() + duration
 buf = b""
 while time.time() < end:
