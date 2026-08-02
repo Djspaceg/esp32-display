@@ -2,10 +2,12 @@ import Foundation
 
 /// Animated RGB565BE test pattern: scrolling hue gradient with a moving
 /// white bar, so dropped/duplicated frames are visible on the panel.
+/// In landscape the frame is 320 wide by 172 tall and the bar moves along
+/// the short axis.
 enum TestPattern {
-    static func frame(tick: Int, into out: inout [UInt8]) {
-        let w = PixelConvert.width
-        let h = PixelConvert.height
+    static func frame(tick: Int, landscape: Bool = false, into out: inout [UInt8]) {
+        let w = landscape ? PixelConvert.height : PixelConvert.width
+        let h = landscape ? PixelConvert.width : PixelConvert.height
         let barY = tick % h
         out.withUnsafeMutableBytes { raw in
             let dst = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
