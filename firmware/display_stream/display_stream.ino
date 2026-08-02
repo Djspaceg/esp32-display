@@ -52,6 +52,14 @@ static const uint32_t SPI_HZ = 80000000;
 
 static esp_lcd_panel_handle_t panel = nullptr;
 
+// ---- BOOT button (GPIO9, ESP32-C6 boot strap; plain input after boot) ----
+// Short press: toggle backlight high/low. Long press: flip display 180.
+static const int PIN_BOOT = 9;
+static const uint32_t LONG_PRESS_MS = 600;
+static const uint32_t DEBOUNCE_MS = 30;
+static const uint8_t BL_HIGH = 128;  // 50%, Waveshare's recommended ceiling
+static const uint8_t BL_LOW = 24;    // ~10%
+
 // ---- Protocol ----------------------------------------------------------
 static const uint16_t UDP_PORT = 5568;
 static const size_t FRAME_BYTES = (size_t)PANEL_W * PANEL_H * 2;  // 110080
@@ -73,6 +81,8 @@ static bool rxFrameActive = false;
 static bool rxLandscape = false;                 // orientation of frame being assembled
 static volatile bool readyLandscape = false;     // orientation of readyBuf
 static bool panelLandscape = false;              // current panel MADCTL state
+static bool panelFlip180 = false;                // user flip via BOOT long press
+static bool madctlDirty = false;                 // panel config needs reapplying
 
 // Stats.
 static volatile uint32_t statFramesShown = 0;
@@ -184,6 +194,54 @@ static bool initDisplay() {
   return true;
 }
 
+// Apply orientation + user flip to the panel. MADCTL affects how incoming
+// pixel writes are addressed (not the scan-out), so the change becomes
+// visible on the next drawn frame.
+//   portrait:  MADCTL 0        flipped: MX|MY
+//   landscape: MV|MX           flipped: MV|MY
+// The 34px centering gap sits on the physical-column axis (172px), which is
+// symmetric in the 240-wide RAM, so gaps are unaffected by mirroring.
+static void applyPanelConfig(bool landscape) {
+  bool mx = landscape ? !panelFlip180 : panelFlip180;
+  bool my = panelFlip180;
+  esp_lcd_panel_swap_xy(panel, landscape);
+  esp_lcd_panel_mirror(panel, mx, my);
+  esp_lcd_panel_set_gap(panel, landscape ? 0 : COL_OFFSET,
+                        landscape ? COL_OFFSET : 0);
+  panelLandscape = landscape;
+  madctlDirty = false;
+}
+
+// Poll the BOOT button: short press toggles backlight, long press (fires
+// while still held) flips the display 180 degrees.
+static void handleButton() {
+  static bool wasDown = false;
+  static bool longFired = false;
+  static uint32_t downAt = 0;
+  static bool blHigh = true;
+
+  bool down = digitalRead(PIN_BOOT) == LOW;
+  uint32_t now = millis();
+
+  if (down && !wasDown) {
+    wasDown = true;
+    longFired = false;
+    downAt = now;
+  } else if (down && wasDown && !longFired && now - downAt >= LONG_PRESS_MS) {
+    longFired = true;
+    panelFlip180 = !panelFlip180;
+    madctlDirty = true;
+    Serial.printf("button: long press -> flip180=%d\n", panelFlip180);
+  } else if (!down && wasDown) {
+    wasDown = false;
+    if (!longFired && now - downAt >= DEBOUNCE_MS) {
+      blHigh = !blHigh;
+      analogWrite(PIN_BL, blHigh ? BL_HIGH : BL_LOW);
+      Serial.printf("button: short press -> backlight %s\n", blHigh ? "high" : "low");
+    }
+  }
+}
+
 // Fill the whole panel with one RGB565 color (used for status feedback).
 static void fillPanel(uint16_t rgb565) {
   uint8_t hi = rgb565 >> 8, lo = rgb565 & 0xFF;
@@ -212,8 +270,9 @@ void setup() {
   backBuf = bufA;
   Serial.printf("buffers ok, free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
 
+  pinMode(PIN_BOOT, INPUT_PULLUP);
   pinMode(PIN_BL, OUTPUT);
-  analogWrite(PIN_BL, 128);  // 50% cap per Waveshare guidance
+  analogWrite(PIN_BL, BL_HIGH);  // 50% cap per Waveshare guidance
   if (!initDisplay()) {
     Serial.println("FATAL: display init failed");
     while (true) delay(1000);
@@ -246,21 +305,15 @@ void setup() {
 }
 
 void loop() {
+  handleButton();
+
   uint8_t *frame = readyBuf;
   if (frame != nullptr && dmaBuf == nullptr) {
     bool landscape = readyLandscape;
     dmaBuf = frame;
     readyBuf = nullptr;
-    if (landscape != panelLandscape) {
-      // MADCTL MV swaps the panel's row/column addressing; after the swap,
-      // draw x spans the 320px axis and y the 172px axis, so the 34px
-      // centering gap moves from x to y. mirror(true,false) with MV gives
-      // the "rotation 1" landscape (connector on the right).
-      esp_lcd_panel_swap_xy(panel, landscape);
-      esp_lcd_panel_mirror(panel, landscape, false);
-      esp_lcd_panel_set_gap(panel, landscape ? 0 : COL_OFFSET,
-                            landscape ? COL_OFFSET : 0);
-      panelLandscape = landscape;
+    if (landscape != panelLandscape || madctlDirty) {
+      applyPanelConfig(landscape);
     }
     // Queues the DMA transfer and returns; onColorTransDone releases dmaBuf.
     if (landscape) {
