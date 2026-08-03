@@ -5,6 +5,9 @@ import Foundation
 /// In landscape the frame is 320 wide by 172 tall and the bar moves along
 /// the short axis.
 enum TestPattern {
+    /// Render one animation frame for `tick` into `out` (RGB565BE,
+    /// preallocated to the full frame size). Orientation picks the
+    /// 172x320 or 320x172 layout.
     static func frame(tick: Int, landscape: Bool = false, into out: inout [UInt8]) {
         let w = landscape ? PixelConvert.height : PixelConvert.width
         let h = landscape ? PixelConvert.width : PixelConvert.height

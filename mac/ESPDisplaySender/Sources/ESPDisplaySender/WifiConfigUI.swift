@@ -76,6 +76,9 @@ enum WifiConfigUI {
         return .failure("no response from the device (is display_stream flashed?)")
     }
 
+    /// Save new WiFi credentials to the board via the CFGWIFI command.
+    /// SSID and password travel base64-encoded so any characters survive
+    /// the space-delimited serial line. The board reboots on success.
     static func setWifi(ssid: String, password: String, port: String) -> CommandResult {
         let b64Ssid = Data(ssid.utf8).base64EncodedString()
         let b64Pass = Data(password.utf8).base64EncodedString()
@@ -172,6 +175,8 @@ enum WifiConfigUI {
 final class ReopenDelegate: NSObject, NSApplicationDelegate {
     private var dialogShowing = false
 
+    /// Answer a Finder double-click on the running app with the WiFi
+    /// configuration dialog, showing at most one dialog at a time.
     func applicationShouldHandleReopen(_ sender: NSApplication,
                                        hasVisibleWindows: Bool) -> Bool {
         guard !dialogShowing else { return false }

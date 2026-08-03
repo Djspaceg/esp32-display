@@ -96,6 +96,11 @@ final class FrameSender {
         return _stats
     }
 
+    /// - Parameters:
+    ///   - host: device hostname or IP (typically the mDNS name).
+    ///   - port: UDP port the firmware listens on.
+    ///   - spacingMicros: initial per-chunk pacing sleep in microseconds.
+    ///   - adaptivePacing: auto-tune pacing from device heartbeat stats.
     init(host: String, port: UInt16, spacingMicros: UInt32 = 200, adaptivePacing: Bool = true) {
         self.host = host
         self.port = port
@@ -106,6 +111,8 @@ final class FrameSender {
 
     private static let ipCachePath = "/tmp/espdisplaysender-device-ip"
 
+    /// The device IP cached from the last successful connection, or nil.
+    /// Used as a unicast fallback when mDNS resolution fails.
     static func cachedIP() -> String? {
         guard let s = try? String(contentsOfFile: ipCachePath, encoding: .utf8) else { return nil }
         let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -23,6 +23,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// deaths (sleep/wake) never fire the delegate error.
     private(set) var lastSampleAt = Date()
 
+    /// - Parameter onFrame: called on the capture queue with each converted
+    ///   RGB565BE frame and whether it is landscape (320x172).
     init(onFrame: @escaping ([UInt8], Bool) -> Void) {
         self.onFrame = onFrame
     }
@@ -47,6 +49,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         return nil
     }
 
+    /// Displays ScreenCaptureKit can capture, with names and pixel sizes
+    /// (what --list-displays prints).
     static func listDisplays() async throws -> [(id: CGDirectDisplayID, name: String, width: Int, height: Int)] {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
@@ -81,6 +85,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let viaMirror: Bool         // capturing the mirror source's pixels
     }
 
+    /// Normal application windows large enough to be worth capturing
+    /// (what --list-windows prints).
     static func listWindows() async throws -> [(id: UInt32, app: String, title: String, width: Int, height: Int)] {
         let content = try await SCShareableContent.excludingDesktopWindows(
             true, onScreenWindowsOnly: false)
@@ -222,6 +228,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         self.stream = stream
     }
 
+    /// Stop the capture stream, ignoring shutdown errors.
     func stop() async {
         try? await stream?.stopCapture()
         stream = nil
@@ -229,6 +236,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: SCStreamOutput
 
+    /// SCStreamOutput callback: convert each complete BGRA sample to
+    /// RGB565BE and forward it to `onFrame`.
     func stream(
         _ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
@@ -256,6 +265,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// SCStreamDelegate callback: mark the stream dead so the supervisor
+    /// loop restarts capture.
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         FileHandle.standardError.write(Data("capture stopped: \(error)\n".utf8))
         stopped = true

@@ -26,6 +26,8 @@ struct Options {
     var spacingMicros: UInt32 = 200
 }
 
+/// Parse CommandLine.arguments into Options. Prints usage and exits on
+/// --help or any unknown flag / missing value.
 func parseOptions() -> Options {
     var opts = Options()
     var args = Array(CommandLine.arguments.dropFirst())

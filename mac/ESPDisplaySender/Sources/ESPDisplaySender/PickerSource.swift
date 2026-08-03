@@ -53,6 +53,7 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
         picker.isActive = true
     }
 
+    /// Stop observing the picker and hand the system UI back.
     func deactivate() {
         let picker = SCContentSharingPicker.shared
         picker.remove(self)
@@ -77,6 +78,8 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
 
     // MARK: SCContentSharingPickerObserver
 
+    /// Observer callback: store the user's new selection and bump the
+    /// generation so the capture loop switches to it.
     func contentSharingPicker(
         _ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter,
         for stream: SCStream?
@@ -89,17 +92,22 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
         print("picker: user selected \(describe(filter)) (selection #\(gen))")
     }
 
+    /// Observer callback: the user dismissed the picker without choosing;
+    /// the previous selection (or automatic tracking) stays in effect.
     func contentSharingPicker(
         _ picker: SCContentSharingPicker, didCancelFor stream: SCStream?
     ) {
         print("picker: cancelled by user")
     }
 
+    /// Observer callback: the picker itself failed to start (system UI
+    /// error). Logged only; automatic display tracking continues.
     func contentSharingPickerStartDidFailWithError(_ error: Error) {
         FileHandle.standardError.write(
             Data("picker failed to start: \(error.localizedDescription)\n".utf8))
     }
 
+    /// Human-readable summary of a filter's kind and size, for logs.
     func describe(_ filter: SCContentFilter) -> String {
         let rect = filter.contentRect
         let dims = "\(Int(rect.width))x\(Int(rect.height))"
