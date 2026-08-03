@@ -28,6 +28,9 @@ enum Capability : uint32_t {
   // to firmware that supports it and the old toggle to firmware that does
   // not, without either side needing a protocol version bump.
   CAP_BRIGHTNESS_LEVEL = 1u << 7,
+  // Accepts ETXT, so the panel can show something chosen by the user while no
+  // sender is driving it.
+  CAP_IDLE_TEXT = 1u << 8,
 };
 
 enum class ControlOpcode : uint8_t {
@@ -146,6 +149,93 @@ inline size_t writeAck(uint8_t out[ACK_PACKET_BYTES], ControlOpcode opcode,
   out[10] = brightness;
   out[11] = 0;
   return ACK_PACKET_BYTES;
+}
+
+// ---- Idle text ("ETXT") -------------------------------------------------
+// Lines the panel shows on its status card while no sender is driving it, so
+// an idle panel can carry something the user picked instead of only its own
+// IP and signal strength.
+//
+// Deliberately narrow: the panel's font is a 5x7 ASCII bitmap, so anything
+// outside printable ASCII is rejected rather than substituted - a sender that
+// sends unrenderable bytes should find out, not watch the panel draw blanks.
+static const uint8_t IDLE_TEXT_VERSION = 1;
+static const size_t IDLE_TEXT_MAX_LINES = 4;
+// 28 characters is what fits the 172px-wide portrait panel at the smaller of
+// the two text scales.
+static const size_t IDLE_TEXT_MAX_LINE_BYTES = 28;
+static const size_t IDLE_TEXT_HEADER_BYTES = 8;
+static const size_t IDLE_TEXT_MAX_BYTES =
+    IDLE_TEXT_HEADER_BYTES +
+    IDLE_TEXT_MAX_LINES * (1 + IDLE_TEXT_MAX_LINE_BYTES);
+
+struct IdleTextMessage {
+  uint8_t lineCount;
+  char lines[IDLE_TEXT_MAX_LINES][IDLE_TEXT_MAX_LINE_BYTES + 1];
+};
+
+inline bool printableAscii(uint8_t byte) { return byte >= 0x20 && byte <= 0x7E; }
+
+// ["ETXT"][version][lineCount][reserved x2] then per line [length][bytes].
+inline size_t writeIdleText(uint8_t *out, size_t capacity,
+                            const char *const *lines, size_t lineCount) {
+  if (lineCount > IDLE_TEXT_MAX_LINES) return 0;
+  size_t needed = IDLE_TEXT_HEADER_BYTES;
+  for (size_t i = 0; i < lineCount; i++) {
+    size_t n = strnlen(lines[i], IDLE_TEXT_MAX_LINE_BYTES + 1);
+    if (n > IDLE_TEXT_MAX_LINE_BYTES) return 0;
+    for (size_t j = 0; j < n; j++) {
+      if (!printableAscii((uint8_t)lines[i][j])) return 0;
+    }
+    needed += 1 + n;
+  }
+  if (capacity < needed) return 0;
+
+  memcpy(out, "ETXT", 4);
+  out[4] = IDLE_TEXT_VERSION;
+  out[5] = (uint8_t)lineCount;
+  out[6] = 0;
+  out[7] = 0;
+  size_t offset = IDLE_TEXT_HEADER_BYTES;
+  for (size_t i = 0; i < lineCount; i++) {
+    size_t n = strnlen(lines[i], IDLE_TEXT_MAX_LINE_BYTES + 1);
+    out[offset++] = (uint8_t)n;
+    memcpy(out + offset, lines[i], n);
+    offset += n;
+  }
+  return offset;
+}
+
+inline bool parseIdleText(const uint8_t *data, size_t len, IdleTextMessage &out) {
+  if (len < IDLE_TEXT_HEADER_BYTES || len > IDLE_TEXT_MAX_BYTES ||
+      memcmp(data, "ETXT", 4) != 0 || data[4] != IDLE_TEXT_VERSION) {
+    return false;
+  }
+  const uint8_t lineCount = data[5];
+  if (lineCount > IDLE_TEXT_MAX_LINES) return false;
+
+  IdleTextMessage parsed;
+  parsed.lineCount = lineCount;
+  memset(parsed.lines, 0, sizeof(parsed.lines));
+
+  size_t offset = IDLE_TEXT_HEADER_BYTES;
+  for (uint8_t i = 0; i < lineCount; i++) {
+    if (offset >= len) return false;
+    const size_t n = data[offset++];
+    if (n > IDLE_TEXT_MAX_LINE_BYTES || offset + n > len) return false;
+    for (size_t j = 0; j < n; j++) {
+      if (!printableAscii(data[offset + j])) return false;
+    }
+    memcpy(parsed.lines[i], data + offset, n);
+    parsed.lines[i][n] = '\0';
+    offset += n;
+  }
+  // Trailing bytes mean the sender and this parser disagree about the
+  // layout, which is worth refusing rather than half-accepting.
+  if (offset != len) return false;
+
+  out = parsed;
+  return true;
 }
 
 }  // namespace deviceproto

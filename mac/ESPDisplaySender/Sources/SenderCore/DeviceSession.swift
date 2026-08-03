@@ -135,6 +135,7 @@ final class DeviceSession {
         if !adaptive { sender.setSpacingMicros(spacingMicros) }
     }
     func restartDevice() { sender.restartDevice() }
+    func sendIdleText(_ lines: [String]) { sender.sendIdleText(lines) }
 
     func usePickerFilter(_ filter: SCContentFilter) {
         stateLock.lock()

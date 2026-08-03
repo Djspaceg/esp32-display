@@ -580,6 +580,23 @@ final class FrameSender {
         sendManagementControl(.restart, value: 1)
     }
 
+    /// Push the lines the panel should show while nothing is driving it. An
+    /// empty array clears them. Only valid for firmware advertising `idleText`,
+    /// which is why the caller gates on the capability.
+    ///
+    /// Repeated like the other one-shot commands because it is UDP: the panel
+    /// only shows this when its sender has gone, which is exactly when a lost
+    /// packet would be least recoverable.
+    func sendIdleText(_ lines: [String]) {
+        guard let conn = connection, let packet = IdleText.packet(lines: lines) else {
+            return
+        }
+        for _ in 0..<3 {
+            conn.send(content: packet, completion: .contentProcessed { _ in })
+            usleep(20_000)
+        }
+    }
+
     private func sendManagementControl(
         _ opcode: DeviceProtocol.ControlOpcode, value: Int32
     ) {

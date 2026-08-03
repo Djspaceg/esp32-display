@@ -159,6 +159,7 @@ private struct PanelDetailView: View {
     @State private var editedName = ""
     @State private var isEditingName = false
     @State private var selectedSSID = ""
+    @State private var editedIdleText = ""
     @FocusState private var nameIsFocused: Bool
 
     private var normalizedName: String {
@@ -345,6 +346,60 @@ private struct PanelDetailView: View {
                     }
                 }
 
+                if panel.capabilities.contains(.idleText) {
+                    CompactGroup("When Idle") {
+                        CompactGrid {
+                            InfoRow("Show") {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    TextEditor(text: $editedIdleText)
+                                        .font(.body.monospaced())
+                                        .frame(height: 68)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 4)
+                                                .stroke(.separator))
+                                        .accessibilityLabel("Idle text")
+                                    HStack(spacing: 6) {
+                                        Button("Save") {
+                                            manager.setIdleText(
+                                                editedIdleText, for: panel.serviceName)
+                                        }
+                                        .controlSize(.small)
+                                        .disabled(editedIdleText == panel.idleText)
+                                        Button("Clear") {
+                                            editedIdleText = ""
+                                            manager.setIdleText("", for: panel.serviceName)
+                                        }
+                                        .controlSize(.small)
+                                        .disabled(panel.idleText.isEmpty
+                                            && editedIdleText.isEmpty)
+                                    }
+                                }
+                            }
+                            InfoRow("On the panel") {
+                                let preview = manager.idleTextPreview(for: panel.serviceName)
+                                if preview.isEmpty {
+                                    Text("Name, address, and signal strength only")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        ForEach(Array(preview.enumerated()), id: \.offset) {
+                                            _, line in
+                                            Text(line)
+                                                .font(.caption.monospaced())
+                                        }
+                                    }
+                                }
+                            }
+                            InfoRow("") {
+                                Text("Up to \(IdleText.maxLines) lines of \(IdleText.maxLineBytes) characters, shown with how long ago they were sent. The panel's font is plain ASCII, so anything else is dropped.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+
                 CompactGroup("Firmware") {
                     CompactGrid {
                         InfoRow("Version", panel.firmwareVersion ?? "Legacy firmware")
@@ -387,7 +442,11 @@ private struct PanelDetailView: View {
         }
         .onAppear {
             editedName = panel.displayName
+            editedIdleText = panel.idleText
             selectInitialNetwork()
+        }
+        .onChange(of: panel.idleText) { _, newValue in
+            editedIdleText = newValue
         }
         .onChange(of: panel.displayName) { _, newValue in
             if !isEditingName { editedName = newValue }
