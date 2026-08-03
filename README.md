@@ -31,6 +31,13 @@ The board itself has two physical controls on its BOOT button: a short press
 toggles backlight brightness, a long press flips the image 180° for
 upside-down mounting.
 
+WiFi credentials live in the board's flash, not in the firmware — change
+networks by plugging the board into the Mac over USB and double-clicking the
+app: a dialog shows the current network (fetched from the board) and saves
+new credentials over serial. No reflashing, and the recovery path works even
+when the stored credentials are wrong. SSIDs with spaces, emoji, and
+extended Unicode all work — everything crosses the wire base64-encoded.
+
 ## Performance
 
 The panel's SPI bus tops out around 41 fps for full-frame pushes, and the
@@ -106,6 +113,10 @@ The device replies with a 1Hz heartbeat (`EHB1` + frame/drop/packet/heap
 counters) to whoever sent it packets last; the sender emits a 2s `EPNG`
 keepalive so that address stays fresh through static screens.
 
+Over USB serial (115200), the firmware also accepts configuration commands:
+`CFGWIFI <base64 ssid> <base64 password>` saves credentials to NVS and
+reboots; `CFGSHOW` reports the current network, IP, and signal strength.
+
 ## Repo layout
 
 | Path                       | What                                                                      |
@@ -162,4 +173,13 @@ Monitor"), learns its UUID, and tracks it from then on.
 
 The panel itself tells you where the firmware is: dark gray means alive and
 waiting for WiFi, dark teal means connected and waiting for a stream.
+
+The RGB LED behind the display glows with live WiFi signal quality, updated
+every 2 seconds:
+
+| Color | Meaning |
+| --- | --- |
+| Green | Strong signal (-55 dBm or better) |
+| Yellow → orange | Fading signal (-55 to -90 dBm, continuous gradient) |
+| Red | Very weak signal, or not connected |
 ````
