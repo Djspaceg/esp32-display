@@ -114,3 +114,52 @@ final class DeviceSourceConfigTests: XCTestCase {
         XCTAssertThrowsError(try DeviceSourceConfig.parse(Data("[1,2]".utf8)))
     }
 }
+
+final class ConfigCommandsTests: XCTestCase {
+    // A blank password field must NOT wipe the device's saved password: the
+    // command omits the argument entirely, which the firmware reads as
+    // "keep what's in use".
+    func testKeepCurrentPasswordOmitsArgument() {
+        let cmd = ConfigCommands.setWifi(ssid: "Stephens Manor", password: .keepCurrent)
+        XCTAssertEqual(cmd, "CFGWIFI U3RlcGhlbnMgTWFub3I=")
+        XCTAssertEqual(cmd.split(separator: " ").count, 2)  // no password arg
+    }
+
+    // An open network is a deliberate, distinct case: the argument is
+    // present but empty.
+    func testOpenNetworkSendsEmptyArgument() {
+        let cmd = ConfigCommands.setWifi(ssid: "Cafe", password: .openNetwork)
+        XCTAssertEqual(cmd, "CFGWIFI Q2FmZQ== ")
+        XCTAssertTrue(cmd.hasSuffix(" "))
+    }
+
+    func testSetPasswordEncodesBoth() {
+        let cmd = ConfigCommands.setWifi(ssid: "Net", password: .set("p ss"))
+        XCTAssertEqual(cmd, "CFGWIFI TmV0 cCBzcw==")
+        // Round-trip the password through base64 to prove the space survives.
+        let arg = cmd.split(separator: " ")[2]
+        XCTAssertEqual(
+            String(data: Data(base64Encoded: String(arg))!, encoding: .utf8), "p ss")
+    }
+
+    // Unicode and emoji survive because everything is bytes.
+    func testUnicodeSsidRoundTrips() {
+        let ssid = "café 📺"
+        let cmd = ConfigCommands.setWifi(ssid: ssid, password: .keepCurrent)
+        let arg = String(cmd.split(separator: " ")[1])
+        XCTAssertEqual(
+            String(data: Data(base64Encoded: arg)!, encoding: .utf8), ssid)
+    }
+
+    func testDecodeFieldHandlesSpacesAndMissingKeys() {
+        let line = "CFGINFO ssid64=U3RlcGhlbnMgTWFub3I= name64=ZXNwZGlzcGxheS05MDUw "
+            + "connected=1 ip=192.168.1.120 rssi=-67 ssid=Stephens Manor"
+        XCTAssertEqual(ConfigCommands.decodeField("ssid64=", from: line), "Stephens Manor")
+        XCTAssertEqual(ConfigCommands.decodeField("name64=", from: line), "espdisplay-9050")
+        XCTAssertNil(ConfigCommands.decodeField("nope64=", from: line))
+    }
+
+    func testSetName() {
+        XCTAssertEqual(ConfigCommands.setName("panel-2"), "CFGNAME cGFuZWwtMg==")
+    }
+}
