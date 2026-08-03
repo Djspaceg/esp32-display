@@ -96,6 +96,12 @@ enum WifiConfigUI {
         case unavailable(String)
     }
 
+    /// A message worth showing after a configuration change went through.
+    struct Confirmation: Equatable {
+        var title: String
+        var message: String
+    }
+
     private final class DialogCoordinator: NSObject {
         let port: String
         let savedPopup: NSPopUpButton
@@ -307,29 +313,29 @@ enum WifiConfigUI {
 
     // MARK: direct manager actions
 
+    /// Rename the display over USB. Returns the name that was actually applied,
+    /// which is the normalised form of `newName`.
     static func renameDevice(
         currentName: String,
         newName: String,
         preferredPort: String? = nil
-    ) -> String? {
+    ) -> Result<String, ConfigFailure> {
         let normalized = normalizedDeviceName(newName)
         guard !normalized.isEmpty else {
-            alert(style: .warning, title: "Invalid name",
-                  text: "Use letters, numbers, spaces, underscores, or dashes.")
-            return nil
+            return .failure(ConfigFailure(
+                title: "Invalid name",
+                message: "Use letters, numbers, spaces, underscores, or dashes."))
         }
-        guard let port = matchingPort(
-            for: currentName,
-            preferredPort: preferredPort)
-        else { return nil }
+        let port: String
+        switch matchingPort(for: currentName, preferredPort: preferredPort) {
+        case .success(let resolved): port = resolved
+        case .failure(let failure): return .failure(failure)
+        }
         switch sendCommand(ConfigCommands.setName(normalized), port: port) {
         case .success:
-            alert(style: .informational, title: "Name saved",
-                  text: "The display is restarting as \"\(normalized)\". Streaming reconnects automatically.")
-            return normalized
+            return .success(normalized)
         case .failure(let reason):
-            alert(style: .critical, title: "Rename failed", text: reason)
-            return nil
+            return .failure(ConfigFailure(title: "Rename failed", message: reason))
         }
     }
 
@@ -337,47 +343,38 @@ enum WifiConfigUI {
         _ ssid: String,
         currentName: String,
         preferredPort: String? = nil
-    ) -> Bool {
+    ) -> Result<Void, ConfigFailure> {
         guard let credential = WifiCredentialStore.credential(for: ssid) else {
-            alert(style: .warning, title: "Credential not found",
-                  text: "Add \"\(ssid)\" again to store it in Keychain.")
-            return false
+            return .failure(ConfigFailure(
+                title: "Credential not found",
+                message: "Add \"\(ssid)\" again to store it in Keychain."))
         }
-        guard let port = matchingPort(
-            for: currentName,
-            preferredPort: preferredPort)
-        else { return false }
+        let port: String
+        switch matchingPort(for: currentName, preferredPort: preferredPort) {
+        case .success(let resolved): port = resolved
+        case .failure(let failure): return .failure(failure)
+        }
         let change: ConfigCommands.PasswordChange = credential.password.isEmpty
             ? .openNetwork : .set(credential.password)
         switch sendCommand(
             ConfigCommands.setWifi(ssid: credential.ssid, password: change), port: port)
         {
         case .success:
-            alert(style: .informational, title: "WiFi saved",
-                  text: "The display is restarting and joining \"\(ssid)\". Streaming reconnects automatically.")
-            return true
+            return .success(())
         case .failure(let reason):
-            alert(style: .critical, title: "Configuration failed", text: reason)
-            return false
+            return .failure(ConfigFailure(title: "Configuration failed", message: reason))
         }
     }
 
     private static func matchingPort(
         for currentName: String?,
         preferredPort: String? = nil
-    ) -> String? {
-        switch selectPort(
+    ) -> Result<String, ConfigFailure> {
+        selectPort(
             expectedName: currentName,
             preferredPort: preferredPort,
             availablePorts: candidatePorts(),
             probe: probePort)
-        {
-        case .success(let port):
-            return port
-        case .failure(let failure):
-            alert(style: .warning, title: failure.title, text: failure.message)
-            return nil
-        }
     }
 
     /// Ask a port to identify itself. CFGSHOW answering at all is what proves
@@ -393,20 +390,25 @@ enum WifiConfigUI {
 
     // MARK: dialog
 
+    /// Show the WiFi configuration dialog. Returns the confirmation to show on
+    /// success, or nil when the user cancelled. Nothing here presents its own
+    /// alert, so the manager can report the outcome the same way it reports
+    /// every other action.
     static func run(
         currentName: String? = nil,
         preferredPort: String? = nil,
         preferredSSID: String? = nil
-    ) {
+    ) -> Result<Confirmation?, ConfigFailure> {
         if NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.accessory)
         }
         NSApp.activate(ignoringOtherApps: true)
 
-        guard let port = matchingPort(
-            for: currentName,
-            preferredPort: preferredPort)
-        else { return }
+        let port: String
+        switch matchingPort(for: currentName, preferredPort: preferredPort) {
+        case .success(let resolved): port = resolved
+        case .failure(let failure): return .failure(failure)
+        }
 
         let alert = NSAlert()
         alert.messageText = "Configure WiFi"
@@ -441,13 +443,13 @@ enum WifiConfigUI {
         alert.accessoryView = accessory
         alert.window.initialFirstResponder = ssidField
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn else { return .success(nil) }
 
         let ssid = ssidField.stringValue.trimmingCharacters(in: .whitespaces)
         guard !ssid.isEmpty, ssid.utf8.count <= 32 else {
-            self.alert(style: .warning, title: "Invalid SSID",
-                       text: "The network name must be 1–32 bytes.")
-            return
+            return .failure(ConfigFailure(
+                title: "Invalid SSID",
+                message: "The network name must be 1–32 bytes."))
         }
 
         let typedPassword = passField.stringValue
@@ -463,9 +465,9 @@ enum WifiConfigUI {
         if ssid == coordinator.deviceSSID, passwordChange == .keepCurrent,
            !coordinator.deviceSSID.isEmpty
         {
-            self.alert(style: .informational, title: "No changes",
-                       text: "The display is already configured for \"\(ssid)\".")
-            return
+            return .success(Confirmation(
+                title: "No changes",
+                message: "The display is already configured for \"\(ssid)\"."))
         }
 
         switch sendCommand(
@@ -486,10 +488,27 @@ enum WifiConfigUI {
                 break
             }
             let kept = passwordChange == .keepCurrent ? " (keeping the display password)" : ""
-            self.alert(style: .informational, title: "Saved",
-                       text: "The display is restarting and joining \"\(ssid)\"\(kept).\(keychainNote)")
+            return .success(Confirmation(
+                title: "Saved",
+                message: "The display is restarting and joining \"\(ssid)\"\(kept)."
+                    + keychainNote))
         case .failure(let reason):
-            self.alert(style: .critical, title: "Configuration failed", text: reason)
+            return .failure(ConfigFailure(
+                title: "Configuration failed", message: reason))
+        }
+    }
+
+    /// Present an outcome as a modal alert. Only for the standalone path, where
+    /// the process runs the configuration dialog with no manager window to show
+    /// the result in.
+    static func presentOutcome(_ result: Result<Confirmation?, ConfigFailure>) {
+        switch result {
+        case .success(let confirmation):
+            guard let confirmation else { return }
+            alert(style: .informational, title: confirmation.title,
+                  text: confirmation.message)
+        case .failure(let failure):
+            alert(style: .warning, title: failure.title, text: failure.message)
         }
     }
 
@@ -511,7 +530,9 @@ final class ReopenDelegate: NSObject, NSApplicationDelegate {
     ) -> Bool {
         guard !dialogShowing else { return false }
         dialogShowing = true
-        WifiConfigUI.run()
+        // No manager window exists on this path, so this is the one place that
+        // still presents a configuration outcome as a modal alert.
+        WifiConfigUI.presentOutcome(WifiConfigUI.run())
         dialogShowing = false
         return false
     }
