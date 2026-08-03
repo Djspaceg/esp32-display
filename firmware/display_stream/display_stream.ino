@@ -26,8 +26,10 @@
 
 #include <AsyncUDP.h>
 #include <ESPmDNS.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <esp_task_wdt.h>
+#include <mbedtls/base64.h>
 
 #include <driver/spi_master.h>
 #include <esp_lcd_panel_io.h>
@@ -35,7 +37,13 @@
 #include <esp_lcd_panel_st7789.h>
 #include <esp_lcd_panel_vendor.h>
 
-#include "wifi_config.h"  // defines WIFI_SSID / WIFI_PASSWORD (gitignored)
+#include "wifi_config.h"  // compile-time fallback WIFI_SSID / WIFI_PASSWORD (gitignored)
+
+// WiFi credentials live in NVS flash and are reconfigurable over the USB
+// serial port without reflashing (see handleSerialConfig). The compiled-in
+// wifi_config.h values are only the first-boot fallback.
+static String cfgSsid;
+static String cfgPass;
 
 // ---- Display ----------------------------------------------------------
 static const int PIN_MOSI = 6;
@@ -296,6 +304,76 @@ static void applyPanelConfig(bool landscape) {
   madctlDirty = false;
 }
 
+// Serial configuration protocol (USB CDC), so credentials can change
+// without reflashing:
+//   CFGWIFI <base64 ssid> <base64 password>\n  -> save to NVS, reply
+//     CFGOK, reboot onto the new network (empty password = open network)
+//   CFGSHOW\n  -> CFGINFO ssid=... ip=... rssi=...
+// Base64 avoids every quoting hazard SSIDs and passwords can contain.
+static void processConfigLine(char *line) {
+  if (strncmp(line, "CFGWIFI ", 8) == 0) {
+    char *b64Ssid = line + 8;
+    char *sep = strchr(b64Ssid, ' ');
+    if (!sep) {
+      Serial.println("CFGERR expected: CFGWIFI <b64 ssid> <b64 pass>");
+      return;
+    }
+    *sep = 0;
+    char *b64Pass = sep + 1;
+
+    unsigned char ssid[33], pass[65];
+    size_t ssidLen = 0, passLen = 0;
+    if (mbedtls_base64_decode(ssid, sizeof(ssid) - 1, &ssidLen,
+                              (const unsigned char *)b64Ssid, strlen(b64Ssid)) != 0 ||
+        mbedtls_base64_decode(pass, sizeof(pass) - 1, &passLen,
+                              (const unsigned char *)b64Pass, strlen(b64Pass)) != 0) {
+      Serial.println("CFGERR bad base64 (ssid max 32 bytes, password max 64)");
+      return;
+    }
+    ssid[ssidLen] = 0;
+    pass[passLen] = 0;
+    if (ssidLen == 0) {
+      Serial.println("CFGERR empty ssid");
+      return;
+    }
+
+    Preferences prefs;
+    prefs.begin("espdisp", false);
+    prefs.putString("ssid", (const char *)ssid);
+    prefs.putString("pass", (const char *)pass);
+    prefs.end();
+
+    Serial.printf("CFGOK saved \"%s\", restarting\n", (const char *)ssid);
+    Serial.flush();
+    delay(200);
+    ESP.restart();
+  } else if (strcmp(line, "CFGSHOW") == 0) {
+    Serial.printf("CFGINFO ssid=%s connected=%d ip=%s rssi=%d\n",
+                  cfgSsid.c_str(), WiFi.status() == WL_CONNECTED,
+                  WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+  }
+  // Anything else on serial is ignored (a monitor typing away is harmless).
+}
+
+static void handleSerialConfig() {
+  static char line[256];
+  static size_t lineLen = 0;
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (lineLen > 0) {
+        line[lineLen] = 0;
+        lineLen = 0;
+        processConfigLine(line);
+      }
+    } else if (lineLen < sizeof(line) - 1) {
+      line[lineLen++] = c;
+    } else {
+      lineLen = 0;  // oversized garbage: reset
+    }
+  }
+}
+
 // Poll the BOOT button: short press toggles backlight, long press (fires
 // while still held) flips the display 180 degrees.
 static void handleButton() {
@@ -372,14 +450,37 @@ void setup() {
   }
   fillPanel(0x2104);  // dark gray: display alive, waiting for WiFi
 
+  {
+    Preferences prefs;
+    prefs.begin("espdisp", true /* read-only */);
+    cfgSsid = prefs.getString("ssid", WIFI_SSID);
+    cfgPass = prefs.getString("pass", WIFI_PASSWORD);
+    prefs.end();
+  }
+  Serial.printf("WiFi credentials: \"%s\" (%s)\n", cfgSsid.c_str(),
+                cfgSsid == WIFI_SSID ? "compiled default" : "from NVS");
+
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);  // rejoin on AP drop (default, but explicit)
   WiFi.setSleep(false);         // latency: don't doze between beacons
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
+  // Bounded wait that keeps servicing serial config: with wrong credentials
+  // (mistyped, or the board moved to a new network) an unbounded wait would
+  // make the device unconfigurable - CFGWIFI over USB must always work.
+  uint32_t wifiWaitStart = millis();
   while (WiFi.status() != WL_CONNECTED) {
-    delay(200);
+    handleSerialConfig();
+    delay(100);
+    if (millis() - wifiWaitStart > 30000) {
+      Serial.printf("WiFi connect timeout for \"%s\" - continuing; fix via "
+                    "CFGWIFI over USB or wait for auto-reconnect\n",
+                    cfgSsid.c_str());
+      break;
+    }
   }
-  Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
+  }
 
   if (MDNS.begin("espdisplay")) {
     MDNS.addService("espdisp", "udp", UDP_PORT);
@@ -414,6 +515,7 @@ void setup() {
 void loop() {
   esp_task_wdt_reset();
   handleButton();
+  handleSerialConfig();
 
   static uint32_t lastCompleted = 0;
   if (framesCompleted != lastCompleted && dmaInFlight == 0) {
