@@ -24,6 +24,7 @@
 // The UDP side only swaps into a buffer that DMA isn't reading; otherwise
 // it keeps overwriting its current back buffer (recency over completeness).
 
+#include <Adafruit_NeoPixel.h>
 #include <AsyncUDP.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
@@ -60,6 +61,16 @@ static const int ROW_OFFSET = 0;
 static const uint32_t SPI_HZ = 80000000;
 
 static esp_lcd_panel_handle_t panel = nullptr;
+
+// ---- Onboard RGB LED(s): WiFi signal quality indicator ------------------
+// WS2812-style addressable LED(s) on GPIO8, glowing through the board's
+// acrylic layer. Driven as a short strip with every pixel the same color:
+// data past the real LED count is ignored, so this works whether the board
+// has one LED or several.
+static const int PIN_RGB = 8;
+static const int RGB_COUNT = 8;         // safe upper bound, extras ignored
+static const uint8_t RGB_LED_BRIGHTNESS = 28;  // subtle glow, not a lamp
+Adafruit_NeoPixel rgbLed(RGB_COUNT, PIN_RGB, NEO_GRB + NEO_KHZ800);
 
 // ---- BOOT button (GPIO9, ESP32-C6 boot strap; plain input after boot) ----
 // Short press: toggle backlight high/low. Long press: flip display 180.
@@ -382,6 +393,29 @@ static void handleSerialConfig() {
   }
 }
 
+// WiFi signal quality on the RGB LED(s): green is strong, fading through
+// yellow and orange to red as RSSI drops; red also means disconnected.
+//   >= -55 dBm  green      solid, excellent
+//   -55..-90    gradient   green -> yellow -> orange -> red
+//   down / < -90  red
+static void updateSignalLed() {
+  uint8_t r, g;
+  if (WiFi.status() != WL_CONNECTED) {
+    r = 255;
+    g = 0;
+  } else {
+    int rssi = WiFi.RSSI();
+    if (rssi > -55) rssi = -55;
+    if (rssi < -90) rssi = -90;
+    // 0.0 at -90 (red) .. 1.0 at -55 (green)
+    float t = (rssi + 90) / 35.0f;
+    r = (uint8_t)(255 * (1.0f - t));
+    g = (uint8_t)(255 * t);
+  }
+  rgbLed.fill(rgbLed.Color(r, g, 0));
+  rgbLed.show();
+}
+
 // Poll the BOOT button: short press toggles backlight, long press (fires
 // while still held) flips the display 180 degrees.
 static void handleButton() {
@@ -448,6 +482,10 @@ void setup() {
   // Undelivered bands must show black, not heap garbage.
   memset(bufA, 0, FRAME_BYTES);
   Serial.printf("buffers ok, free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
+
+  rgbLed.begin();
+  rgbLed.setBrightness(RGB_LED_BRIGHTNESS);
+  updateSignalLed();  // red until WiFi is up
 
   pinMode(PIN_BOOT, INPUT_PULLUP);
   pinMode(PIN_BL, OUTPUT);
@@ -708,6 +746,12 @@ void loop() {
       pkt[7 + i * 4] = (vals[i] >> 24) & 0xFF;
     }
     udp.writeTo(pkt, sizeof(pkt), IPAddress(hbIp), hbPort);
+  }
+
+  static uint32_t lastLedUpdate = 0;
+  if (millis() - lastLedUpdate >= 2000) {
+    lastLedUpdate = millis();
+    updateSignalLed();
   }
 
   static uint32_t lastReport = 0;
