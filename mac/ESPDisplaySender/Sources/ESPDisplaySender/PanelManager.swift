@@ -522,7 +522,6 @@ extension PanelManager {
             .union(.flip)
             .union(.identify)
             .union(.restart)
-            .union(.ota)
         return PanelManager(
             previewPanels: [
                 PanelSnapshot(

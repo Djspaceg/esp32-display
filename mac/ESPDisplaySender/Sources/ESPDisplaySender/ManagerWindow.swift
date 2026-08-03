@@ -248,12 +248,6 @@ private struct PanelDetailView: View {
                         InfoRow("Frame protocol", panel.frameProtocolVersion.map(String.init) ?? "2")
                         InfoRow("Control protocol", panel.controlProtocolVersion.map(String.init) ?? "Not available")
                         InfoRow("Uptime", panel.uptimeDescription)
-                        if panel.capabilities.contains(.ota) {
-                            InfoRow("Update") {
-                                Button("Install Firmware Update…") { showOTANotice() }
-                                    .controlSize(.small)
-                            }
-                        }
                     }
                 }
 
@@ -397,13 +391,6 @@ private struct PanelDetailView: View {
         if selectedSSID.isEmpty || !manager.savedNetworkNames.contains(selectedSSID) {
             selectedSSID = manager.savedNetworkNames.first ?? ""
         }
-    }
-
-    private func showOTANotice() {
-        let alert = NSAlert()
-        alert.messageText = "Firmware Update"
-        alert.informativeText = "The device advertises OTA support, but no signed firmware bundle is installed in this app build."
-        alert.runModal()
     }
 }
 
