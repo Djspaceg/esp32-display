@@ -425,6 +425,29 @@ void loop() {
     ESP.restart();
   }
 
+  // Silent-but-associated failsafe: the heal below needs packets flowing to
+  // detect trouble, but a link can rot so badly that nothing arrives at all
+  // (measured: still associated at RSSI -92, multicast/mDNS dead, so the Mac
+  // could not even resolve us). Association alone is not health. If nothing
+  // has arrived for 2 minutes and the signal is poor, re-associate - it is
+  // cheap, and the panel is useless in this state anyway.
+  static uint32_t lastPacketSeenAt = 0;
+  static uint32_t lastPacketsForIdle = 0;
+  static uint32_t lastIdleReassoc = 0;
+  if (statPackets != lastPacketsForIdle) {
+    lastPacketsForIdle = statPackets;
+    lastPacketSeenAt = millis();
+  } else if (lastPacketSeenAt == 0) {
+    lastPacketSeenAt = millis();
+  }
+  if (millis() - lastPacketSeenAt > 120000 && WiFi.RSSI() < -85 &&
+      millis() - lastIdleReassoc > 120000) {
+    lastIdleReassoc = millis();
+    Serial.printf("idle+weak link (rssi=%d), re-associating\n", (int)WiFi.RSSI());
+    WiFi.disconnect();
+    WiFi.reconnect();
+  }
+
   // Link supervisor: if the sender is actively pushing chunks (packets
   // climbing) but no frame has completed in 20s, the WiFi association has
   // rotted (observed: RSSI decayed to -81 and stayed; a fresh association
