@@ -80,6 +80,22 @@ enum WifiConfigUI {
         case failure(String)
     }
 
+    /// Why a configuration action could not proceed, as data rather than a
+    /// modal. Keeping the reason separate from its presentation is what lets
+    /// the port-selection rules below be tested without hardware.
+    struct ConfigFailure: Error, Equatable {
+        var title: String
+        var message: String
+    }
+
+    /// What a serial port reported when asked to identify itself.
+    enum PortProbe: Equatable {
+        /// CFGSHOW answered. The name is empty if the device has none set.
+        case named(String)
+        /// The port could not be verified, with the reason to show the user.
+        case unavailable(String)
+    }
+
     private final class DialogCoordinator: NSObject {
         let port: String
         let savedPopup: NSPopUpButton
@@ -212,6 +228,83 @@ enum WifiConfigUI {
         return output
     }
 
+    // MARK: port selection
+
+    /// Decide which serial port a configuration command should be sent to.
+    ///
+    /// Pure policy: no serial I/O and no alerts, so the disambiguation rules
+    /// can be exercised without a board attached. `probe` supplies what each
+    /// port reports and receives the timeout to use, because scanning several
+    /// ports has to be quicker per port than checking a single known one.
+    ///
+    /// An explicitly assigned `preferredPort` is the user's identity override:
+    /// it is accepted whatever name the device reports, as long as the port
+    /// answers the configuration protocol at all.
+    static func selectPort(
+        expectedName: String?,
+        preferredPort: String?,
+        availablePorts: [String],
+        probe: (String, TimeInterval) -> PortProbe
+    ) -> Result<String, ConfigFailure> {
+        let expectedName = expectedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let preferredPort,
+           !preferredPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            switch probe(preferredPort, 3) {
+            case .named:
+                return .success(preferredPort)
+            case .unavailable(let reason):
+                return .failure(ConfigFailure(
+                    title: "Assigned USB device unavailable",
+                    message: "Could not verify \(preferredPort): \(reason)"))
+            }
+        }
+
+        guard !availablePorts.isEmpty else {
+            return .failure(ConfigFailure(
+                title: "No device found",
+                message: "Connect the display board to this Mac with a USB cable, then try again."))
+        }
+
+        if availablePorts.count == 1 {
+            let port = availablePorts[0]
+            switch probe(port, 3) {
+            case .named(let reportedName):
+                guard let expectedName, !expectedName.isEmpty else { return .success(port) }
+                guard reportedName == expectedName else {
+                    return .failure(ConfigFailure(
+                        title: "USB device mismatch",
+                        message: "The connected USB device at \(port) reports \"\(reportedName)\", not \"\(expectedName)\". Assign the correct port under Connection before changing the display."))
+                }
+                return .success(port)
+            case .unavailable(let reason):
+                return .failure(ConfigFailure(
+                    title: "USB device unavailable",
+                    message: "Could not verify \(port): \(reason)"))
+            }
+        }
+
+        guard let expectedName, !expectedName.isEmpty else {
+            return .failure(ConfigFailure(
+                title: "Select a USB device",
+                message: "More than one USB serial device is connected. Select a display in the manager and assign its USB device under Connection."))
+        }
+
+        // A port that does not answer is simply not a match here; alerting on
+        // each one would bury the real problem behind unrelated devices.
+        let matches = availablePorts.filter { probe($0, 2) == .named(expectedName) }
+        if matches.count == 1 { return .success(matches[0]) }
+        if matches.count > 1 {
+            return .failure(ConfigFailure(
+                title: "USB device is ambiguous",
+                message: "More than one USB device reports the name \"\(expectedName)\". Assign the correct port under Connection before changing the display."))
+        }
+        return .failure(ConfigFailure(
+            title: "Display not found",
+            message: "No connected USB device reports the name \"\(expectedName)\". Assign its port under Connection, or reconnect the display and try again."))
+    }
+
     // MARK: direct manager actions
 
     static func renameDevice(
@@ -273,76 +366,28 @@ enum WifiConfigUI {
         for currentName: String?,
         preferredPort: String? = nil
     ) -> String? {
-        let expectedName = currentName?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if let preferredPort,
-           !preferredPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        switch selectPort(
+            expectedName: currentName,
+            preferredPort: preferredPort,
+            availablePorts: candidatePorts(),
+            probe: probePort)
         {
-            return validate(
-                port: preferredPort,
-                expectedName: expectedName,
-                assignment: true)
-        }
-
-        let ports = candidatePorts()
-        guard !ports.isEmpty else {
-            alert(style: .warning, title: "No device found",
-                  text: "Connect the display board to this Mac with a USB cable, then try again.")
+        case .success(let port):
+            return port
+        case .failure(let failure):
+            alert(style: .warning, title: failure.title, text: failure.message)
             return nil
         }
-        if ports.count == 1 {
-            return validate(
-                port: ports[0],
-                expectedName: expectedName,
-                assignment: false)
-        }
-        guard let expectedName, !expectedName.isEmpty else {
-            alert(style: .warning, title: "Select a USB device",
-                  text: "More than one USB serial device is connected. Select a display in the manager and assign its USB device under Connection.")
-            return nil
-        }
-
-        let matches = ports.filter { port in
-            guard case .success(let info) = sendCommand(
-                "CFGSHOW", port: port, timeout: 2)
-            else { return false }
-            return ConfigCommands.decodeField("name64=", from: info) == expectedName
-        }
-        if matches.count == 1 { return matches[0] }
-        if matches.count > 1 {
-            alert(style: .warning, title: "USB device is ambiguous",
-                  text: "More than one USB device reports the name \"\(expectedName)\". Assign the correct port under Connection before changing the display.")
-            return nil
-        }
-        alert(style: .warning, title: "Display not found",
-              text: "No connected USB device reports the name \"\(expectedName)\". Assign its port under Connection, or reconnect the display and try again.")
-        return nil
     }
 
-    private static func validate(
-        port: String,
-        expectedName: String?,
-        assignment: Bool
-    ) -> String? {
-        switch sendCommand("CFGSHOW", port: port, timeout: 3) {
+    /// Ask a port to identify itself. CFGSHOW answering at all is what proves
+    /// the path speaks our configuration protocol.
+    private static func probePort(_ port: String, timeout: TimeInterval) -> PortProbe {
+        switch sendCommand("CFGSHOW", port: port, timeout: timeout) {
         case .success(let info):
-            // Choosing a concrete port is the user's explicit identity override.
-            // CFGSHOW still proves that the path speaks our configuration protocol.
-            if assignment { return port }
-            guard let expectedName, !expectedName.isEmpty else { return port }
-            let reportedName = ConfigCommands.decodeField("name64=", from: info) ?? ""
-            guard reportedName == expectedName else {
-                alert(style: .warning, title: "USB device mismatch",
-                      text: "The connected USB device at \(port) reports \"\(reportedName)\", not \"\(expectedName)\". Assign the correct port under Connection before changing the display.")
-                return nil
-            }
-            return port
+            return .named(ConfigCommands.decodeField("name64=", from: info) ?? "")
         case .failure(let reason):
-            let title = assignment ? "Assigned USB device unavailable" : "USB device unavailable"
-            alert(style: .warning, title: title,
-                  text: "Could not verify \(port): \(reason)")
-            return nil
+            return .unavailable(reason)
         }
     }
 

@@ -92,8 +92,13 @@ final class PanelManager: ObservableObject {
     private var pickerTarget: String?
     private var refreshTimer: Timer?
     private var lastPersistedAt = Date.distantPast
+    /// Where the durable records live, or nil to disable persistence entirely.
+    /// Previews and tests run without a file so they cannot overwrite the
+    /// records belonging to the installed app.
+    private let persistenceURL: URL?
 
     init() {
+        persistenceURL = Self.defaultPersistenceURL
         panels = Self.loadPersistedPanels()
             .map(\.snapshot)
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
@@ -110,11 +115,13 @@ final class PanelManager: ObservableObject {
     }
 
 #if DEBUG
+    /// Preview and test seam: no disk, no timers, no discovery.
     init(
         previewPanels: [PanelSnapshot],
         savedNetworkNames: [String],
         usbSerialPorts: [String]
     ) {
+        persistenceURL = nil
         panels = previewPanels
         self.savedNetworkNames = savedNetworkNames
         self.usbSerialPorts = usbSerialPorts
@@ -484,19 +491,18 @@ final class PanelManager: ObservableObject {
     }
 
     private func persistIfNeeded(force: Bool = false) {
+        guard let url = persistenceURL else { return }
         let now = Date()
         guard force || now.timeIntervalSince(lastPersistedAt) >= 30 else { return }
         lastPersistedAt = now
         let records = panels.map(PersistedPanel.init(snapshot:))
-        guard let url = Self.persistenceURL,
-              let data = try? JSONEncoder.espDisplay.encode(records)
-        else { return }
+        guard let data = try? JSONEncoder.espDisplay.encode(records) else { return }
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)
     }
 
-    private static var persistenceURL: URL? {
+    private static var defaultPersistenceURL: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first?
             .appendingPathComponent("ESPDisplaySender", isDirectory: true)
@@ -504,7 +510,7 @@ final class PanelManager: ObservableObject {
     }
 
     private static func loadPersistedPanels() -> [PersistedPanel] {
-        guard let url = persistenceURL,
+        guard let url = defaultPersistenceURL,
               let data = try? Data(contentsOf: url),
               let records = try? JSONDecoder.espDisplay.decode([PersistedPanel].self, from: data)
         else { return [] }
