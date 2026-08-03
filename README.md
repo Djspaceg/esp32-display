@@ -282,7 +282,9 @@ are exposed to untrusted LAN clients.
 ## Status lights
 
 The panel itself tells you where the firmware is: dark gray means alive and
-waiting for WiFi, dark teal means connected and waiting for a stream.
+waiting for WiFi, dark teal means connected and waiting for a stream, and dark
+red means the WiFi connect attempt timed out — fix it with **Add…**/**Edit…**
+beside the panel's saved WiFi network, over USB.
 
 Dimming follows the Mac, never the picture. Unchanging content — a photo, a
 dashboard, a paused video — stays at full brightness indefinitely:
