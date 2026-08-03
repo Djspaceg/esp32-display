@@ -94,6 +94,70 @@ final class BandProtocolTests: XCTestCase {
     }
 }
 
+final class DeviceProtocolTests: XCTestCase {
+    func testControlPacketMatchesFirmwareVector() {
+        let packet = DeviceProtocol.controlPacket(
+            opcode: .flip, sequence: 0x1234, value: 1)
+        XCTAssertEqual(
+            [UInt8](packet),
+            [0x45, 0x43, 0x54, 0x4C, 0x01, 0x02, 0x34, 0x12,
+             0x01, 0x00, 0x00, 0x00])
+    }
+
+    func testParseDeviceInfoMatchesFirmwareVector() {
+        var packet = Data("EINF".utf8)
+        packet.append(contentsOf: [
+            0x01, 0x02, 0x01, 0x13,             // versions + flags
+            0x3F, 0x00, 0x00, 0x00,             // capabilities
+            0x04, 0x03, 0x02, 0x01,             // uptime
+            0xCD, 0xFF, 0x80,                    // RSSI -51, brightness 128
+            0x05, 0x05,                          // string lengths
+            0x02, 0x00, 0x00, 0x12, 0x34, 0x56, // device ID
+        ])
+        packet.append(contentsOf: "panel".utf8)
+        packet.append(contentsOf: "1.2.3".utf8)
+
+        let info = DeviceProtocol.parseInfo(packet)
+        XCTAssertEqual(info?.deviceID, "020000123456")
+        XCTAssertEqual(info?.name, "panel")
+        XCTAssertEqual(info?.firmwareVersion, "1.2.3")
+        XCTAssertEqual(info?.rssi, -51)
+        XCTAssertEqual(info?.uptimeSeconds, 0x0102_0304)
+        XCTAssertEqual(info?.brightness, 128)
+        XCTAssertEqual(info?.capabilities.rawValue, 0x3F)
+        XCTAssertEqual(info?.frameProtocolVersion, 2)
+        XCTAssertTrue(info?.brightnessHigh == true)
+        XCTAssertTrue(info?.flipped == true)
+        XCTAssertTrue(info?.wifiConnected == true)
+        XCTAssertTrue(info?.sleeping == false)
+    }
+
+    func testParseAck() {
+        let packet = Data([
+            0x45, 0x41, 0x43, 0x4B, 0x01, 0x02, 0x34, 0x12,
+            0x00, 0x03, 0x80, 0x00,
+        ])
+        let ack = DeviceProtocol.parseAck(packet)
+        XCTAssertEqual(ack?.opcode, .flip)
+        XCTAssertEqual(ack?.sequence, 0x1234)
+        XCTAssertTrue(ack?.succeeded == true)
+        XCTAssertTrue(ack?.brightnessHigh == true)
+        XCTAssertTrue(ack?.flipped == true)
+        XCTAssertEqual(ack?.brightness, 128)
+    }
+
+    func testRejectsMalformedManagementPackets() {
+        XCTAssertNil(DeviceProtocol.parseInfo(Data("EINF".utf8)))
+        XCTAssertNil(DeviceProtocol.parseInfo(Data(repeating: 0, count: 27)))
+        XCTAssertNil(DeviceProtocol.parseAck(Data("EACK".utf8)))
+
+        var badVersion = Data(repeating: 0, count: 12)
+        badVersion.replaceSubrange(0..<4, with: "EACK".utf8)
+        badVersion[4] = 99
+        XCTAssertNil(DeviceProtocol.parseAck(badVersion))
+    }
+}
+
 final class DeviceSourceConfigTests: XCTestCase {
     func testParseValidConfig() throws {
         let json = """

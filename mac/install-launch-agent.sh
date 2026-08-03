@@ -1,6 +1,6 @@
 #!/bin/zsh
-# Install (or reinstall) the LaunchAgent that starts ESPDisplaySender at
-# login and restarts it if it exits. Run make-app.sh first.
+# Install (or reinstall) the LaunchAgent that starts ESPDisplaySender in the
+# background at login and restarts it after abnormal exits. Run make-app.sh first.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -25,6 +25,8 @@ echo "logs: /tmp/espdisplaysender.log"
 echo
 echo "First run: grant Screen Recording to ESPDisplaySender when macOS"
 echo "prompts (System Settings > Privacy & Security > Screen Recording)."
-echo "launchd will keep retrying every ~10s until the permission is granted."
+echo "launchd retries startup failures, while a clean Quit stays stopped until"
+echo "the next login or a foreground app launch."
 echo
+echo "open manager: open $HOME/Applications/ESPDisplaySender.app"
 echo "uninstall: launchctl bootout gui/$(id -u) $PLIST && rm $PLIST"

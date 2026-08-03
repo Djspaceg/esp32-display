@@ -9,6 +9,22 @@ import SenderProtocol
 /// deaths, display reconfiguration, device reboots, WiFi rot). With
 /// discovery, one of these runs per panel on the network.
 final class DeviceSession {
+    struct Status {
+        let serviceName: String
+        let displayFPS: Double
+        let framesSent: UInt64
+        let sendErrors: UInt64
+        let diffPercent: Double
+        let heartbeatAge: TimeInterval?
+        let stats: BandProtocol.DeviceStats
+        let info: DeviceProtocol.DeviceInfo?
+        let resolvedAddress: String?
+        let spacingMicros: UInt32
+        let paused: Bool
+        let sourceDescription: String
+        let updatedAt: Date
+    }
+
     /// What this device should show, from the per-device config file:
     /// - auto: the user's picker selection if any, else display tracking
     /// - display: track a named virtual display (mirror-aware)
@@ -24,21 +40,63 @@ final class DeviceSession {
     private let source: Source
     private let picker: PickerSource?
     private let fps: Int
+    private let onStatus: ((Status) -> Void)?
+    private let stateLock = NSLock()
+    private var pickedFilter: SCContentFilter?
+    private var pickedGeneration: UInt64 = 0
 
     private var lastReport = Date()
     private var lastCount: UInt64 = 0
 
-    init(name: String, sender: FrameSender, source: Source, picker: PickerSource?, fps: Int) {
+    init(name: String, sender: FrameSender, source: Source, picker: PickerSource?, fps: Int,
+         onStatus: ((Status) -> Void)? = nil) {
         self.name = name
         self.sender = sender
         self.source = source
         self.picker = picker
         self.fps = fps
+        self.onStatus = onStatus
     }
 
     func sendDisplaySleep() { sender.sendDisplaySleep() }
     func sendDisplayWake() { sender.sendDisplayWake() }
     func forceKeyframe() { sender.forceKeyframe() }
+    func setPaused(_ paused: Bool) { sender.setPaused(paused) }
+    func setBrightness(high: Bool) { sender.setBrightness(high: high) }
+    func setFlip(_ flipped: Bool) {
+        sender.setFlip(flipped)
+        sender.forceKeyframe()
+    }
+    func identify() { sender.identify() }
+    func restartDevice() { sender.restartDevice() }
+
+    func usePickerFilter(_ filter: SCContentFilter) {
+        stateLock.lock()
+        pickedFilter = filter
+        pickedGeneration &+= 1
+        stateLock.unlock()
+        forceKeyframe()
+    }
+
+    private func clearPickerFilter() {
+        stateLock.lock()
+        pickedFilter = nil
+        pickedGeneration &+= 1
+        stateLock.unlock()
+    }
+
+    private var currentPickerSelection: (filter: SCContentFilter, generation: UInt64)? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let pickedFilter else { return nil }
+        return (pickedFilter, pickedGeneration)
+    }
+
+    private var sourceGeneration: UInt64 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return pickedGeneration
+    }
 
     private func trackedDisplayName() -> String {
         switch source {
@@ -46,11 +104,6 @@ final class DeviceSession {
         case .display(let d): return d
         case .window: return ""
         }
-    }
-
-    private var isAuto: Bool {
-        if case .auto = source { return true }
-        return false
     }
 
     /// Runs until the session gives up connecting. Returns false if the
@@ -93,14 +146,16 @@ final class DeviceSession {
             let capture = DisplayCapture { [sender] rgb565, landscape in
                 sender.submit(frame: rgb565, landscape: landscape)
             }
-            let baselinePickerGen = picker?.generation ?? 0
+            let baselineSourceGeneration = sourceGeneration
             var displayShape: (CGDirectDisplayID, Int, Int, Bool)?
             var trackedWindowID: UInt32?
             var trackedWindowLandscape = false
 
             // ---- Source selection & capture start
-            var pickerSelection: (filter: SCContentFilter, generation: UInt64)?
-            if isAuto { pickerSelection = picker?.current }
+            // A manager selection is a runtime override for every configured
+            // source type. Clearing a failed picker selection falls back to
+            // the original automatic/display/window source.
+            let pickerSelection = currentPickerSelection
 
             if let selection = pickerSelection {
                 do {
@@ -116,7 +171,7 @@ final class DeviceSession {
                     FileHandle.standardError.write(
                         Data("[\(name)] picker source failed: \(error.localizedDescription)\n".utf8))
                     if pickerFailures >= 3 {
-                        picker?.clearSelection()
+                        clearPickerFilter()
                         pickerFailures = 0
                     }
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -186,7 +241,7 @@ final class DeviceSession {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 reportProgress()
 
-                if isAuto, let p = picker, p.generation != baselinePickerGen {
+                if sourceGeneration != baselineSourceGeneration {
                     print("[\(name)] source selection changed - switching")
                     break
                 }
@@ -251,6 +306,31 @@ final class DeviceSession {
         let hb = sender.heartbeatAge.map { String(format: "%.0fs ago", $0) } ?? "never"
         let diffPct = sender.bandsConsidered > 0
             ? Double(sender.bandsSent) * 100 / Double(sender.bandsConsidered) : 0
+        let sourceDescription: String
+        if let selection = currentPickerSelection, let picker {
+            sourceDescription = picker.describe(selection.filter)
+        } else {
+            switch source {
+            case .auto(let display):
+                sourceDescription = display.isEmpty ? "Automatic" : "Automatic: \(display)"
+            case .display(let display): sourceDescription = "Display: \(display)"
+            case .window(let window): sourceDescription = "Window: \(window)"
+            }
+        }
+        onStatus?(Status(
+            serviceName: name,
+            displayFPS: fps,
+            framesSent: count,
+            sendErrors: sender.sendErrors,
+            diffPercent: diffPct,
+            heartbeatAge: sender.heartbeatAge,
+            stats: stats,
+            info: sender.deviceInfo,
+            resolvedAddress: sender.resolvedAddress,
+            spacingMicros: sender.spacingMicros,
+            paused: sender.paused,
+            sourceDescription: sourceDescription,
+            updatedAt: now))
         print(String(
             format: "[%@] %.1f fps (%llu total, %llu send errors, diff %.0f%%) | device: "
                 + "shown=%u dropped=%u heap=%u hb=%@ pacing=%uus",
@@ -263,7 +343,7 @@ final class DeviceSession {
 
 /// Thread-safe collection of live sessions; the browser adds from its own
 /// queue while workspace sleep notifications iterate from the main queue.
-final class SessionRegistry {
+final class SessionRegistry: @unchecked Sendable {
     /// How long a retired (unreachable) device is skipped before we try it
     /// again. Long enough that an mDNS ghost's TTL expires in the meantime,
     /// short enough that a device which was merely rebooting comes back.

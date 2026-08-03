@@ -6,6 +6,10 @@ let package = Package(
     platforms: [
         .macOS(.v14)
     ],
+    products: [
+        .library(name: "SenderProtocol", targets: ["SenderProtocol"]),
+        .executable(name: "ESPDisplaySender", targets: ["ESPDisplaySender"]),
+    ],
     targets: [
         .target(
             name: "SenderProtocol",

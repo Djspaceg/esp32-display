@@ -22,6 +22,8 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
     private let lock = NSLock()
     private var _filter: SCContentFilter?
     private var _generation: UInt64 = 0
+    var onSelection: ((SCContentFilter) -> Void)?
+    var onCancellation: (() -> Void)?
 
     /// Latest user selection and a generation counter. The capture loop
     /// compares generations to notice a new pick without polling system UI.
@@ -89,6 +91,7 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
         _generation &+= 1
         let gen = _generation
         lock.unlock()
+        onSelection?(filter)
         print("picker: user selected \(describe(filter)) (selection #\(gen))")
     }
 
@@ -97,12 +100,14 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
     func contentSharingPicker(
         _ picker: SCContentSharingPicker, didCancelFor stream: SCStream?
     ) {
+        onCancellation?()
         print("picker: cancelled by user")
     }
 
     /// Observer callback: the picker itself failed to start (system UI
     /// error). Logged only; automatic display tracking continues.
     func contentSharingPickerStartDidFailWithError(_ error: Error) {
+        onCancellation?()
         FileHandle.standardError.write(
             Data("picker failed to start: \(error.localizedDescription)\n".utf8))
     }

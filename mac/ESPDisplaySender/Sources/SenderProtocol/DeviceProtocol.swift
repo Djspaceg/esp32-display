@@ -1,0 +1,161 @@
+import Foundation
+
+/// Versioned management protocol layered beside the existing frame and EHB1
+/// packets. Keeping device information and controls separate lets old senders
+/// and firmware continue streaming while newer peers negotiate capabilities.
+public enum DeviceProtocol {
+    public static let infoVersion: UInt8 = 1
+    public static let frameProtocolVersion: UInt8 = 2
+    public static let controlProtocolVersion: UInt8 = 1
+
+    public struct Capabilities: OptionSet, Equatable, Sendable {
+        public let rawValue: UInt32
+
+        public init(rawValue: UInt32) {
+            self.rawValue = rawValue
+        }
+
+        public static let brightness = Capabilities(rawValue: 1 << 0)
+        public static let flip = Capabilities(rawValue: 1 << 1)
+        public static let identify = Capabilities(rawValue: 1 << 2)
+        public static let restart = Capabilities(rawValue: 1 << 3)
+        public static let ota = Capabilities(rawValue: 1 << 4)
+        public static let sleepSync = Capabilities(rawValue: 1 << 5)
+        public static let telemetry = Capabilities(rawValue: 1 << 6)
+    }
+
+    public struct DeviceInfo: Equatable, Sendable {
+        public let infoVersion: UInt8
+        public let frameProtocolVersion: UInt8
+        public let controlProtocolVersion: UInt8
+        public let capabilities: Capabilities
+        public let uptimeSeconds: UInt32
+        public let rssi: Int16
+        public let brightness: UInt8
+        public let brightnessHigh: Bool
+        public let flipped: Bool
+        public let sleeping: Bool
+        public let idle: Bool
+        public let wifiConnected: Bool
+        public let deviceID: String
+        public let name: String
+        public let firmwareVersion: String
+    }
+
+    public enum ControlOpcode: UInt8, CaseIterable, Sendable {
+        case brightness = 1
+        case flip = 2
+        case identify = 3
+        case restart = 4
+    }
+
+    public struct ControlAck: Equatable, Sendable {
+        public let opcode: ControlOpcode
+        public let sequence: UInt16
+        public let status: UInt8
+        public let brightnessHigh: Bool
+        public let flipped: Bool
+        public let sleeping: Bool
+        public let brightness: UInt8
+
+        public var succeeded: Bool { status == 0 }
+    }
+
+    /// Parse an EINF packet. The fixed 27-byte prefix is followed by UTF-8
+    /// device-name and firmware-version strings whose lengths are in bytes.
+    public static func parseInfo(_ data: Data) -> DeviceInfo? {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 27,
+              Array(bytes[0..<4]) == Array("EINF".utf8),
+              bytes[4] == infoVersion
+        else { return nil }
+
+        func u16(_ offset: Int) -> UInt16 {
+            UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+        }
+        func u32(_ offset: Int) -> UInt32 {
+            UInt32(bytes[offset])
+                | (UInt32(bytes[offset + 1]) << 8)
+                | (UInt32(bytes[offset + 2]) << 16)
+                | (UInt32(bytes[offset + 3]) << 24)
+        }
+
+        let nameLength = Int(bytes[19])
+        let firmwareLength = Int(bytes[20])
+        guard nameLength <= 32, firmwareLength <= 24,
+              bytes.count == 27 + nameLength + firmwareLength
+        else { return nil }
+
+        let nameStart = 27
+        let firmwareStart = nameStart + nameLength
+        guard let name = String(bytes: bytes[nameStart..<firmwareStart], encoding: .utf8),
+              let firmware = String(
+                bytes: bytes[firmwareStart..<(firmwareStart + firmwareLength)],
+                encoding: .utf8)
+        else { return nil }
+
+        let flags = bytes[7]
+        let deviceID = bytes[21..<27].map { String(format: "%02x", $0) }.joined()
+        return DeviceInfo(
+            infoVersion: bytes[4],
+            frameProtocolVersion: bytes[5],
+            controlProtocolVersion: bytes[6],
+            capabilities: Capabilities(rawValue: u32(8)),
+            uptimeSeconds: u32(12),
+            rssi: Int16(bitPattern: u16(16)),
+            brightness: bytes[18],
+            brightnessHigh: flags & 0x01 != 0,
+            flipped: flags & 0x02 != 0,
+            sleeping: flags & 0x04 != 0,
+            idle: flags & 0x08 != 0,
+            wifiConnected: flags & 0x10 != 0,
+            deviceID: deviceID,
+            name: name,
+            firmwareVersion: firmware)
+    }
+
+    /// Encode a fixed-size ECTL packet. Values are intentionally explicit:
+    /// brightness/flip use 0 or 1, identify uses seconds, and restart uses 1.
+    public static func controlPacket(
+        opcode: ControlOpcode, sequence: UInt16, value: Int32
+    ) -> Data {
+        var packet = Data("ECTL".utf8)
+        packet.append(controlProtocolVersion)
+        packet.append(opcode.rawValue)
+        appendLE(sequence, to: &packet)
+        appendLE(UInt32(bitPattern: value), to: &packet)
+        return packet
+    }
+
+    /// Parse the device's fixed-size EACK response.
+    public static func parseAck(_ data: Data) -> ControlAck? {
+        let bytes = [UInt8](data)
+        guard bytes.count == 12,
+              Array(bytes[0..<4]) == Array("EACK".utf8),
+              bytes[4] == controlProtocolVersion,
+              let opcode = ControlOpcode(rawValue: bytes[5])
+        else { return nil }
+        let sequence = UInt16(bytes[6]) | (UInt16(bytes[7]) << 8)
+        let flags = bytes[9]
+        return ControlAck(
+            opcode: opcode,
+            sequence: sequence,
+            status: bytes[8],
+            brightnessHigh: flags & 0x01 != 0,
+            flipped: flags & 0x02 != 0,
+            sleeping: flags & 0x04 != 0,
+            brightness: bytes[10])
+    }
+
+    private static func appendLE(_ value: UInt16, to data: inout Data) {
+        data.append(UInt8(value & 0xFF))
+        data.append(UInt8(value >> 8))
+    }
+
+    private static func appendLE(_ value: UInt32, to data: inout Data) {
+        data.append(UInt8(value & 0xFF))
+        data.append(UInt8((value >> 8) & 0xFF))
+        data.append(UInt8((value >> 16) & 0xFF))
+        data.append(UInt8((value >> 24) & 0xFF))
+    }
+}
