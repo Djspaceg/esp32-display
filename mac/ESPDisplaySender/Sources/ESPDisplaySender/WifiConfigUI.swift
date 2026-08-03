@@ -155,3 +155,22 @@ enum WifiConfigUI {
         a.runModal()
     }
 }
+
+/// Answers Finder double-clicks on the already-running app. LaunchServices
+/// never starts a second process for a running app bundle - it sends the
+/// existing instance a "reopen" event (and shows "the application is not
+/// open anymore" if nobody answers it). We answer with the device WiFi
+/// configuration dialog: double-click the app -> configure the board.
+/// Streaming continues in the background while the dialog is up.
+final class ReopenDelegate: NSObject, NSApplicationDelegate {
+    private var dialogShowing = false
+
+    func applicationShouldHandleReopen(_ sender: NSApplication,
+                                       hasVisibleWindows: Bool) -> Bool {
+        guard !dialogShowing else { return false }
+        dialogShowing = true
+        WifiConfigUI.run()
+        dialogShowing = false
+        return false
+    }
+}
