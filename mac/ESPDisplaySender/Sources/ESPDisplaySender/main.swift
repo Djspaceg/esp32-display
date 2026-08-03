@@ -450,8 +450,11 @@ Task {
     }
 }
 
-// Keep the main run loop alive and serviced (instead of blocking on a
-// semaphore): AppKit UI like the content picker needs it, and it drains the
-// main dispatch queue - the SIGUSR1 handler is scheduled there and could
-// never fire while the main thread was parked in a semaphore wait.
-RunLoop.main.run()
+// Run the full AppKit event loop (not just a bare run loop): it services
+// the main dispatch queue and AppKit UI, and it registers with Launch
+// Services so a Finder double-click of the already-running app arrives as a
+// reopen event - which the delegate answers with the device WiFi
+// configuration dialog.
+let reopenDelegate = ReopenDelegate()
+NSApplication.shared.delegate = reopenDelegate
+NSApplication.shared.run()
