@@ -18,11 +18,25 @@ hostname to configure. Plug in a second board and it gets its own stream.
 The native ESPDisplaySender manager lists discovered and previously known
 panels with online state, IP address, RSSI, displayed frame rate, firmware
 version, and diagnostics. Select a panel to choose its ScreenCaptureKit source,
-pause or resume it, change brightness or orientation, identify it, restart it,
-or configure WiFi over USB. Device names are static until you click the selected
-panel's title to enter explicit rename mode. Known panels persist in
+pause or resume it, set brightness or orientation, give it something to show
+while idle, identify it, restart it, or configure WiFi over USB. Device names
+are static until you click the selected panel's title to enter explicit rename
+mode. Anything you choose for a panel — its source, its idle text, its name,
+its USB port — persists in
 `~/Library/Application Support/ESPDisplaySender/panels.json`, so powered-off
-panels remain visible as offline.
+panels remain visible as offline with their settings intact. Only your choices
+are stored there; live telemetry is not, so a fresh launch shows a restored
+panel as offline rather than replaying last week's RSSI as if it were current.
+
+When something goes wrong the window says so. A denied Screen Recording
+permission, an unreadable config file, or a panel that stopped answering each
+raise a banner or a per-panel notice instead of only reaching
+`/tmp/espdisplaysender.log`.
+
+**Settings** (⌘,) exposes frame rate, packet pacing, and the identify duration,
+stored in `settings.json` beside `panels.json`. The matching command-line flags
+still work and override the stored values for that run only, so a one-off
+`--fps 20` never quietly rewrites what the UI shows.
 
 The app starts invisibly at login and owns no persistent menu bar item. Opening
 it from Finder shows the manager and a Dock icon; closing the manager hides the
@@ -40,8 +54,10 @@ Each panel shows whatever you point it at:
   (Control Center), no configuration files or flags.
 
 Use **Choose Source** in the manager to assign macOS's native display, window,
-or application picker to the selected panel. For advanced unattended defaults,
-you can still assign sources by device name in
+or application picker to the selected panel. That choice is remembered, so it
+still applies after a relaunch; **Use Automatic** puts the panel back to
+automatic selection. For unattended defaults on a panel you have never picked a
+source for, you can still assign sources by device name in
 `~/.config/espdisplay/devices.json` — one board mirrors a display while another
 follows a specific app window:
 
@@ -52,9 +68,10 @@ follows a specific app window:
 }
 ```
 
-Devices with no entry use automatic selection. Names default to
-`espdisplay-XXXX` (from the board's MAC); click the selected panel's title to
-rename it over USB.
+Devices with no entry use automatic selection. A source chosen in the manager
+wins over `devices.json`, since it is the more recent and more deliberate
+instruction. Names default to `espdisplay-XXXX` (from the board's MAC); click
+the selected panel's title to rename it over USB.
 
 The panel follows macOS. Rotate the virtual display and the panel rotates
 with it, re-laying-out in landscape or portrait. Change mirroring modes,
@@ -62,10 +79,12 @@ resize, close the window you were streaming — the sender notices within a
 couple of seconds and reattaches on its own.
 
 The board itself has two physical controls on its BOOT button: a short press
-toggles backlight brightness, a long press flips the image 180° for
-upside-down mounting. Both are saved to the board's flash, so they survive
-reboots and firmware reflashes — set the orientation once for how the board
-is mounted and forget it. (A full flash erase does reset them.)
+toggles backlight brightness between high and low, a long press flips the image
+180° for upside-down mounting. Both are saved to the board's flash, so they
+survive reboots and firmware reflashes — set the orientation once for how the
+board is mounted and forget it. (A full flash erase does reset them.) The
+manager's brightness slider covers the full range in between; the button's
+toggle is the two ends of it.
 
 WiFi credentials live in the board's flash, not in the firmware — change
 networks by plugging the board into the Mac over USB and choosing **Add…** or
@@ -104,6 +123,11 @@ did. Everything below exists because the failure actually happened:
   rebooted or readdressed device and reconnect with fresh mDNS resolution —
   and if mDNS itself is down (multicast dies before unicast on weak links),
   it falls back to the device's last known IP.
+- **A panel that stops answering parks its session.** After 30 seconds of
+  silence the Mac stops capturing and sending for that panel and just keeps
+  re-resolving it, resuming on the first reply. Before this, an unplugged panel
+  cost a live capture stream and hundreds of thousands of send errors for as
+  long as it stayed gone.
 - **Display identity is anchored on the display UUID**, which survives the
   rotations, re-creations, and mirror-set changes that invalidate display
   IDs and NSScreen names. The UUID is cached to disk, so even a sender
@@ -161,8 +185,16 @@ emits a 2s `EPNG` keepalive so that address stays fresh through static screens.
 Firmware 1.1 also sends versioned `EINF` telemetry every 2 seconds with firmware,
 frame/control protocol versions, capabilities, stable hardware ID, uptime,
 RSSI, brightness, orientation, and sleep state. Fixed-size `ECTL` commands and
-`EACK` responses provide typed brightness, flip, identify, and restart control
-without changing the frame or legacy heartbeat formats.
+`EACK` responses provide typed brightness (both a high/low toggle and an exact
+1–255 level), flip, identify, and restart control without changing the frame or
+legacy heartbeat formats. `ETXT` pushes up to four short ASCII lines for the
+panel to show while idle.
+
+The Mac gates every control on the capability bits the panel advertises, so a
+board running older firmware simply does not offer the newer controls rather
+than sending commands it will reject. That is also why the continuous
+brightness level arrived as a new capability bit instead of a protocol version
+bump: a bump would have made every un-reflashed panel refuse *all* controls.
 
 The device name is also sent as the DHCP hostname (option 12), so the router
 lists the board by name rather than `esp32c6-XXXXXX`, and — on routers that
@@ -198,8 +230,8 @@ button; `CFGLED <r> <g> <b>` shows a literal LED color for 10s.
 | `firmware/display_test/` | Standalone panel bring-up test (colors, offsets, SPI timing benchmark) |
 | `firmware/board_probe/` | I2C-scan sketch that identifies which board variant you have |
 | `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
-| `firmware/test/` | Host-side unit tests for the protocol logic (`run_tests.sh`) |
-| `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol logic (`swift test`) |
+| `firmware/test/` | Host-side unit tests for the protocol, control-queue, and panel-state logic (`run_tests.sh`) |
+| `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
 | `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
 | `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
 | `docs/` | Original project plan |
@@ -297,12 +329,21 @@ dashboard, a paused video — stays at full brightness indefinitely:
 | Mac wakes | Restored immediately (`EWAK`) |
 | Sender gone ~45s (quit, crashed, WiFi down) | Dimmed status card |
 
-The status card shows device name, IP, and WiFi strength in outlined text
-over the last frame, repositioning every 30 seconds to avoid burn-in. It
-means "nothing is driving this panel", so it keys off the sender's 2-second
-keepalive rather than frame arrivals — with dirty-band diffing a still image
-sends no frame data for minutes, and treating that as idleness made the
-panel dim itself during normal use.
+The status card shows whatever lines you gave the panel under **When Idle**,
+followed by how long ago they arrived, then device name, IP, and WiFi strength
+— all in outlined text over the last frame, repositioning every 30 seconds to
+avoid burn-in. It means "nothing is driving this panel", so it keys off the
+sender's 2-second keepalive rather than frame arrivals — with dirty-band diffing
+a still image sends no frame data for minutes, and treating that as idleness
+made the panel dim itself during normal use.
+
+Idle text is up to four lines of 28 printable ASCII characters, pushed over the
+network and re-sent whenever the panel reconnects. The age line is there because
+the board has no clock of any kind — no RTC, no SNTP, only `millis()` — so it
+cannot know whether "Build: green" is current. Saying "as of 4m ago" is honest
+about that; showing the line alone would not be. Non-ASCII input is refused at
+both ends rather than substituted, because the panel's font is an ASCII bitmap
+and a row of blank glyphs looks like a bug.
 
 The RGB LED behind the display glows with live WiFi signal quality, updated
 every 2 seconds:
