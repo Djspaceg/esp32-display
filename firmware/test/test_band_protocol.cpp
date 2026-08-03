@@ -7,7 +7,9 @@
 #include <vector>
 
 #include "../display_stream/band_protocol.h"
+#include "../display_stream/control_queue.h"
 #include "../display_stream/device_protocol.h"
+#include "../display_stream/panel_state.h"
 
 using namespace bandproto;
 
@@ -339,6 +341,149 @@ int main() {
     CHECK(keep.lineCount == 3);
 
     CHECK(deviceproto::CAP_IDLE_TEXT == 0x100u);
+  }
+
+  // --- backlight priority: sleep beats idle beats the user's level
+  {
+    CHECK(panelstate::backlightLevel(false, false, 128, 10) == 128);
+    CHECK(panelstate::backlightLevel(false, true, 128, 10) == 10);
+    CHECK(panelstate::backlightLevel(true, false, 128, 10) == 0);
+    // Asleep wins even while idle: the Mac's screens being off is the
+    // strongest signal there is nothing worth lighting.
+    CHECK(panelstate::backlightLevel(true, true, 128, 10) == 0);
+    // The user's level is honoured exactly, not rounded to high/low.
+    CHECK(panelstate::backlightLevel(false, false, 1, 10) == 1);
+    CHECK(panelstate::backlightLevel(false, false, 255, 10) == 255);
+  }
+
+  // --- the high/low flag is derived, so it cannot disagree with the level
+  {
+    CHECK(!panelstate::brightnessIsHigh(24, 24));
+    CHECK(!panelstate::brightnessIsHigh(1, 24));
+    CHECK(panelstate::brightnessIsHigh(25, 24));
+    CHECK(panelstate::brightnessIsHigh(128, 24));
+    CHECK(panelstate::brightnessIsHigh(255, 24));
+  }
+
+  // --- flags byte packing, which the sender reads back as device state
+  {
+    CHECK(panelstate::deviceFlags(false, false, false, false, false) == 0x00);
+    CHECK(panelstate::deviceFlags(true, false, false, false, false) == 0x01);
+    CHECK(panelstate::deviceFlags(false, true, false, false, false) == 0x02);
+    CHECK(panelstate::deviceFlags(false, false, true, false, false) == 0x04);
+    CHECK(panelstate::deviceFlags(false, false, false, true, false) == 0x08);
+    CHECK(panelstate::deviceFlags(false, false, false, false, true) == 0x10);
+    CHECK(panelstate::deviceFlags(true, true, false, false, true) == 0x13);
+    CHECK(panelstate::deviceFlags(true, true, true, true, true) == 0x1F);
+  }
+
+  // --- control admission: the sender repeats every command three times, so
+  //     de-duplication decides whether a brightness change is applied once or
+  //     three times, and when a lost acknowledgement is replayed
+  {
+    auto make = [](uint16_t sequence, int32_t value) {
+      deviceproto::ControlCommand command;
+      command.opcode = deviceproto::ControlOpcode::Brightness;
+      command.sequence = sequence;
+      command.value = value;
+      return command;
+    };
+
+    controlq::ControlQueue queue;
+    CHECK(queue.pending() == 0);
+
+    // First arrival is queued; its repeats are dropped rather than applied
+    // again, and must NOT be acknowledged yet because nothing has happened.
+    CHECK(queue.offer(make(1, 1)) == controlq::Admission::Enqueued);
+    CHECK(queue.pending() == 1);
+    CHECK(queue.offer(make(1, 1)) == controlq::Admission::Dropped);
+    CHECK(queue.offer(make(1, 1)) == controlq::Admission::Dropped);
+    CHECK(queue.pending() == 1);
+    CHECK(!queue.hasDuplicateAck());
+
+    // The loop applies it.
+    deviceproto::ControlCommand taken;
+    CHECK(queue.take(taken));
+    CHECK(taken.sequence == 1);
+    CHECK(queue.pending() == 0);
+    CHECK(!queue.take(taken));  // nothing left
+    queue.markApplied(1);
+
+    // Now a late repeat is worth acknowledging again: the sender may not have
+    // received the first acknowledgement.
+    CHECK(queue.offer(make(1, 1)) == controlq::Admission::ReplayAck);
+    CHECK(queue.pending() == 0);  // not re-applied
+    deviceproto::ControlCommand replay;
+    CHECK(queue.takeDuplicateAck(replay));
+    CHECK(replay.sequence == 1);
+    CHECK(!queue.takeDuplicateAck(replay));  // consumed
+
+    // A different sequence is a different command even with the same value.
+    CHECK(queue.offer(make(2, 1)) == controlq::Admission::Enqueued);
+  }
+
+  // --- control queue: a full queue drops rather than overwriting
+  {
+    auto make = [](uint16_t sequence) {
+      deviceproto::ControlCommand command;
+      command.opcode = deviceproto::ControlOpcode::Identify;
+      command.sequence = sequence;
+      command.value = 5;
+      return command;
+    };
+
+    controlq::ControlQueue queue;
+    for (uint16_t i = 0; i < controlq::QUEUE_CAPACITY; i++) {
+      CHECK(queue.offer(make((uint16_t)(100 + i))) == controlq::Admission::Enqueued);
+    }
+    CHECK(queue.pending() == controlq::QUEUE_CAPACITY);
+
+    // Overflow is dropped, and must not corrupt what is already queued.
+    CHECK(queue.offer(make(200)) == controlq::Admission::Dropped);
+    CHECK(queue.pending() == controlq::QUEUE_CAPACITY);
+
+    // Everything queued comes back in order.
+    for (uint16_t i = 0; i < controlq::QUEUE_CAPACITY; i++) {
+      deviceproto::ControlCommand taken;
+      CHECK(queue.take(taken));
+      CHECK(taken.sequence == (uint16_t)(100 + i));
+    }
+    CHECK(queue.pending() == 0);
+
+    // The ring wraps: after draining, new commands are accepted again.
+    CHECK(queue.offer(make(300)) == controlq::Admission::Enqueued);
+  }
+
+  // --- control queue: the ring forgets, so a sequence reused much later is
+  //     treated as new rather than silently ignored
+  {
+    auto make = [](uint16_t sequence) {
+      deviceproto::ControlCommand command;
+      command.opcode = deviceproto::ControlOpcode::Flip;
+      command.sequence = sequence;
+      command.value = 1;
+      return command;
+    };
+
+    controlq::ControlQueue queue;
+    CHECK(queue.offer(make(7)) == controlq::Admission::Enqueued);
+    deviceproto::ControlCommand taken;
+    CHECK(queue.take(taken));
+    queue.markApplied(7);
+    CHECK(queue.offer(make(7)) == controlq::Admission::ReplayAck);
+    CHECK(queue.takeDuplicateAck(taken));
+
+    // Push capacity-many other sequences through both rings.
+    for (uint16_t i = 0; i < controlq::QUEUE_CAPACITY; i++) {
+      CHECK(queue.offer(make((uint16_t)(500 + i))) == controlq::Admission::Enqueued);
+      CHECK(queue.take(taken));
+      queue.markApplied((uint16_t)(500 + i));
+    }
+
+    // 7 has aged out of both rings, so it is accepted again. This is correct:
+    // the sender picks a random starting sequence and wraps, so refusing
+    // forever would eventually wedge a control.
+    CHECK(queue.offer(make(7)) == controlq::Admission::Enqueued);
   }
   {
     uint8_t info[96] = {0};
