@@ -41,6 +41,11 @@ final class MainMenuController: NSObject {
                      action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                      keyEquivalent: "")
         menu.addItem(.separator())
+        let settings = menu.addItem(
+            withTitle: "Settings\u{2026}", action: #selector(openSettings(_:)),
+            keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(.separator())
 
         let services = NSMenu(title: "Services")
         let servicesItem = menu.addItem(
@@ -131,5 +136,11 @@ final class MainMenuController: NSObject {
 
     @objc private func openHelp(_ sender: Any?) {
         NSWorkspace.shared.open(Self.helpURL)
+    }
+
+    /// Posted rather than calling into the view, so the menu does not need a
+    /// reference to whichever window is showing.
+    @objc private func openSettings(_ sender: Any?) {
+        NotificationCenter.default.post(name: .espDisplayShowSettings, object: nil)
     }
 }

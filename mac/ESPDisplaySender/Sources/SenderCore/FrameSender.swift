@@ -88,9 +88,39 @@ final class FrameSender {
     /// must leave room to throttle below a *degraded* link's clean capacity:
     /// measured on a marginal RSSI (-70dBm) link, ~900 pkt/s collapsed while
     /// ~600 pkt/s was lossless. 2500us/chunk ~= 4fps ~= 320 pkt/s floor.
-    private let spacingMin: UInt32 = 120
-    private let spacingMax: UInt32 = 2500
-    let adaptivePacing: Bool
+    ///
+    /// Static so the settings UI offers exactly the range the sender enforces,
+    /// rather than a second copy of these numbers that could drift.
+    static let spacingRange: ClosedRange<UInt32> = 120...2500
+    private var spacingMin: UInt32 { Self.spacingRange.lowerBound }
+    private var spacingMax: UInt32 { Self.spacingRange.upperBound }
+
+    private var _adaptivePacing: Bool
+
+    var adaptivePacing: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _adaptivePacing
+    }
+
+    /// Turn self-tuning on or off at runtime. Switching it off leaves pacing
+    /// wherever the climb had reached, which is the value the user can then set
+    /// explicitly.
+    func setAdaptivePacing(_ enabled: Bool) {
+        lock.lock()
+        _adaptivePacing = enabled
+        lock.unlock()
+    }
+
+    /// Set pacing explicitly. Ignored silently while self-tuning is on would be
+    /// confusing, so the caller is expected to turn that off first; the value is
+    /// still clamped to the range the climb itself respects.
+    func setSpacingMicros(_ micros: UInt32) {
+        lock.lock()
+        _spacingMicros = min(max(micros, Self.spacingRange.lowerBound),
+                            Self.spacingRange.upperBound)
+        lock.unlock()
+    }
 
     var spacingMicros: UInt32 {
         lock.lock()
@@ -190,7 +220,7 @@ final class FrameSender {
         self.serviceEndpoint = nil
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
-        self.adaptivePacing = adaptivePacing
+        self._adaptivePacing = adaptivePacing
         self.onDeviceEvent = onDeviceEvent
     }
 
@@ -202,7 +232,7 @@ final class FrameSender {
         self.serviceEndpoint = endpoint
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
-        self.adaptivePacing = adaptivePacing
+        self._adaptivePacing = adaptivePacing
         self.onDeviceEvent = onDeviceEvent
     }
 
@@ -540,7 +570,10 @@ final class FrameSender {
     }
 
     func identify(seconds: Int = 8) {
-        sendManagementControl(.identify, value: Int32(max(1, min(seconds, 30))))
+        let bounded = min(
+            max(seconds, DeviceProtocol.identifySecondsRange.lowerBound),
+            DeviceProtocol.identifySecondsRange.upperBound)
+        sendManagementControl(.identify, value: Int32(bounded))
     }
 
     func restartDevice() {

@@ -32,6 +32,12 @@ struct Options {
     var adaptivePacing = true
     var spacingMicros: UInt32 = 200
     var background = false
+    /// Whether the user actually passed the flag. Saved settings are the source
+    /// of truth otherwise, so a LaunchAgent's fixed argument list cannot keep
+    /// overriding what was chosen in the window.
+    var fpsExplicit = false
+    var spacingExplicit = false
+    var pacingExplicit = false
 }
 
 /// Parse CommandLine.arguments into Options. Prints usage and exits on
@@ -62,8 +68,12 @@ func parseOptions() -> Options {
         case "--port": opts.port = UInt16(value(arg)) ?? opts.port
         case "--mode": opts.mode = value(arg)
         case "--display": opts.displayName = value(arg)
-        case "--fps": opts.fps = Int(value(arg)) ?? opts.fps
-        case "--spacing-us": opts.spacingMicros = UInt32(value(arg)) ?? opts.spacingMicros
+        case "--fps":
+            opts.fps = Int(value(arg)) ?? opts.fps
+            opts.fpsExplicit = true
+        case "--spacing-us":
+            opts.spacingMicros = UInt32(value(arg)) ?? opts.spacingMicros
+            opts.spacingExplicit = true
         case "--list-displays": opts.listDisplays = true
         case "--list-windows": opts.listWindows = true
         case "--configure": opts.configure = true
@@ -71,7 +81,9 @@ func parseOptions() -> Options {
             opts.windowName = value(arg)
             opts.mode = "window"
         case "--landscape": opts.landscape = true
-        case "--fixed-pacing": opts.adaptivePacing = false
+        case "--fixed-pacing":
+            opts.adaptivePacing = false
+            opts.pacingExplicit = true
         case "--background": opts.background = true
         case "--help", "-h":
             print("""
@@ -189,7 +201,17 @@ public enum ESPDisplaySenderApp {
         }
 
         let panelManager = MainActor.assumeIsolated {
-            let manager = PanelManager()
+            // Only flags the user actually passed override the saved settings,
+            // and those overrides are not written back.
+            var overrides: SenderSettings?
+            if opts.fpsExplicit || opts.spacingExplicit || opts.pacingExplicit {
+                var partial = SettingsStore.load(from: SettingsStore.defaultURL).settings
+                if opts.fpsExplicit { partial.fps = opts.fps }
+                if opts.spacingExplicit { partial.spacingMicros = opts.spacingMicros }
+                if opts.pacingExplicit { partial.adaptivePacing = opts.adaptivePacing }
+                overrides = partial
+            }
+            let manager = PanelManager(settings: overrides)
             let window = ManagerWindowController(manager: manager)
             let delegate = ESPDisplayApplicationDelegate(
                 managerWindow: window,
@@ -387,6 +409,10 @@ public enum ESPDisplaySenderApp {
                 }
             }
             let savedSources = await MainActor.run { panelManager.persistedSources() }
+            let streaming = await MainActor.run { panelManager.settings }
+            print("streaming settings: \(streaming.fps) fps, pacing "
+                + "\(streaming.adaptivePacing ? "adaptive" : "\(streaming.spacingMicros)us fixed")"
+                + ", identify \(streaming.identifySeconds)s")
             let namedSources = savedSources.filter { $0.value != .automatic }
             if !namedSources.isEmpty {
                 print("saved per-display sources: "
@@ -409,7 +435,7 @@ public enum ESPDisplaySenderApp {
             func launchSession(name: String, sender: FrameSender) {
                 let session = DeviceSession(
                     name: name, sender: sender, source: sourceFor(name),
-                    picker: picker, fps: opts.fps,
+                    picker: picker, fps: streaming.fps,
                     onStatus: { status in
                         Task { @MainActor in panelManager.update(status) }
                     })
@@ -431,8 +457,8 @@ public enum ESPDisplaySenderApp {
                     name: "device",
                     sender: FrameSender(
                         host: opts.host, port: opts.port,
-                        spacingMicros: opts.spacingMicros,
-                        adaptivePacing: opts.adaptivePacing,
+                        spacingMicros: streaming.spacingMicros,
+                        adaptivePacing: streaming.adaptivePacing,
                         onDeviceEvent: { event in
                             Task { @MainActor in
                                 panelManager.update(event, for: "device")
@@ -452,8 +478,8 @@ public enum ESPDisplaySenderApp {
                             name: device.name,
                             sender: FrameSender(
                                 endpoint: device.endpoint,
-                                spacingMicros: opts.spacingMicros,
-                                adaptivePacing: opts.adaptivePacing,
+                                spacingMicros: streaming.spacingMicros,
+                                adaptivePacing: streaming.adaptivePacing,
                                 onDeviceEvent: { event in
                                     Task { @MainActor in
                                         panelManager.update(event, for: device.name)
