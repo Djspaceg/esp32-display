@@ -27,10 +27,13 @@ struct Options {
     var landscape = false
     var adaptivePacing = true
     var spacingMicros: UInt32 = 200
+    var background = false
 }
 
 /// Parse CommandLine.arguments into Options. Prints usage and exits on
-/// --help or any unknown flag / missing value.
+/// --help or any unknown app flag / missing value. AppKit and Xcode may add
+/// single-dash NS/Apple user-default pairs; those belong to the framework and
+/// are intentionally ignored here.
 func parseOptions() -> Options {
     var opts = Options()
     var args = Array(CommandLine.arguments.dropFirst())
@@ -42,6 +45,10 @@ func parseOptions() -> Options {
                 exit(2)
             }
             return args.removeFirst()
+        }
+        if arg.hasPrefix("-NS") || arg.hasPrefix("-Apple") {
+            _ = value(arg)
+            continue
         }
         switch arg {
         case "--host":
@@ -61,6 +68,7 @@ func parseOptions() -> Options {
             opts.mode = "window"
         case "--landscape": opts.landscape = true
         case "--fixed-pacing": opts.adaptivePacing = false
+        case "--background": opts.background = true
         case "--help", "-h":
             print("""
                 ESPDisplaySender
@@ -79,9 +87,8 @@ func parseOptions() -> Options {
                   --window <name>          app or window title substring; captures that
                                            window directly, no virtual display needed
                   --list-windows           show capturable windows and exit
-                  --configure              device WiFi setup dialog (USB serial);
-                                           also opens when the app is double-clicked
-                                           while the agent is already running
+                  --configure              device WiFi setup dialog (USB serial)
+                  --background             run without showing the manager window
                   --host <host>            skip discovery and stream to one host
                   --devices-config <path>  per-device sources as JSON, keyed by device
                                            name (default ~/.config/espdisplay/devices.json):
@@ -110,6 +117,8 @@ setbuf(stdout, nil)  // line-visible logs when redirected to a file
 _ = NSApplication.shared
 
 let opts = parseOptions()
+let launchedInBackground = opts.background
+    || ProcessInfo.processInfo.environment["ESPDISP_AGENT"] != nil
 
 if opts.configure {
     WifiConfigUI.run()
@@ -121,22 +130,43 @@ if opts.configure {
 if !opts.listDisplays && !opts.listWindows {
     let lockFd = open("/tmp/espdisplaysender.lock", O_CREAT | O_RDWR, 0o644)
     if lockFd < 0 || flock(lockFd, LOCK_EX | LOCK_NB) != 0 {
-        // The streaming agent is already running. If this launch is a human
-        // (double-click, not the launchd agent - the agent marks itself via
-        // ESPDISP_AGENT so its KeepAlive respawns can never pop dialogs),
-        // offer the device WiFi configuration UI instead of dying silently.
-        if ProcessInfo.processInfo.environment["ESPDISP_AGENT"] == nil {
-            WifiConfigUI.run()
-            exit(0)
+        // The primary process owns the manager. Ask it to show its window,
+        // then leave without creating a second frame stream.
+        if !launchedInBackground {
+            // The primary may still be installing its observer immediately
+            // after acquiring the lock. Repeat the idempotent request across
+            // that short startup window instead of losing the open action.
+            for _ in 0..<5 {
+                DistributedNotificationCenter.default().post(
+                    name: .espDisplayShowManager, object: nil)
+                usleep(200_000)
+            }
+        } else {
+            FileHandle.standardError.write(
+                Data("another ESPDisplaySender instance is already running - exiting\n".utf8))
         }
-        FileHandle.standardError.write(
-            Data("another ESPDisplaySender instance is already running - exiting\n".utf8))
-        exit(1)
+        // Lock contention means the requested service already exists, not
+        // that this process crashed. A successful exit prevents launchd's
+        // abnormal-exit policy from creating a respawn loop.
+        exit(0)
     }
     // lockFd stays open (and locked) for the process lifetime.
 }
 
-
+let appComponents = MainActor.assumeIsolated {
+    let manager = PanelManager()
+    let window = ManagerWindowController(manager: manager)
+    let delegate = ESPDisplayApplicationDelegate(
+        managerWindow: window,
+        manager: manager,
+        showAtLaunch: !launchedInBackground && !opts.listDisplays && !opts.listWindows)
+    NSApplication.shared.delegate = delegate
+    return (manager, window, delegate)
+}
+let panelManager = appComponents.0
+// Keep these alive for the full application lifetime.
+let managerWindow = appComponents.1
+let applicationDelegate = appComponents.2
 
 Task {
     do {
@@ -244,17 +274,18 @@ Task {
             }
 
         case "capture":
-            // Fail fast with a clear message if screen capture permission is
-            // missing - otherwise the retry loop below would mask it as
-            // "waiting for display" forever.
+            // Keep the manager, discovery, telemetry, and device controls
+            // alive when Screen Recording permission is unavailable. A newly
+            // signed app may need macOS approval again; capture sessions keep
+            // retrying and become usable after the next permitted launch.
             do {
                 _ = try await SCShareableContent.excludingDesktopWindows(
                     false, onScreenWindowsOnly: false)
             } catch {
-                let msg = "cannot enumerate displays - grant Screen Recording permission "
-                    + "in System Settings > Privacy & Security (\(error.localizedDescription))\n"
-                FileHandle.standardError.write(Data(msg.utf8))
-                exit(1)
+                let message = "screen capture is unavailable - allow ESPDisplaySender in "
+                    + "System Settings > Privacy & Security > Screen & System Audio Recording "
+                    + "to resume streaming (\(error.localizedDescription))\n"
+                FileHandle.standardError.write(Data(message.utf8))
             }
 
             // One supervised session per device. Source priority within a
@@ -263,6 +294,7 @@ Task {
             // automatic virtual-display tracking.
             let picker = PickerSource()
             picker.activate()
+            await MainActor.run { panelManager.attachPicker(picker) }
             print("macOS content picker active - pick or change the source any time from "
                 + "the screen-sharing icon in the menu bar (or send SIGUSR1 to open it)")
 
@@ -295,14 +327,19 @@ Task {
             func launchSession(name: String, sender: FrameSender) {
                 let session = DeviceSession(
                     name: name, sender: sender, source: sourceFor(name),
-                    picker: picker, fps: opts.fps)
+                    picker: picker, fps: opts.fps,
+                    onStatus: { status in
+                        Task { @MainActor in panelManager.update(status) }
+                    })
                 registry.add(session)
+                Task { @MainActor in panelManager.register(session) }
                 Task {
                     // run() only returns if the device never became
                     // reachable; retire it so the browser can retry later
                     // instead of spinning on an mDNS ghost.
                     if await session.run() == false {
                         registry.retire(name)
+                        await MainActor.run { panelManager.retire(name) }
                     }
                 }
             }
@@ -310,9 +347,15 @@ Task {
             if opts.hostExplicit {
                 launchSession(
                     name: "device",
-                    sender: FrameSender(host: opts.host, port: opts.port,
-                                        spacingMicros: opts.spacingMicros,
-                                        adaptivePacing: opts.adaptivePacing))
+                    sender: FrameSender(
+                        host: opts.host, port: opts.port,
+                        spacingMicros: opts.spacingMicros,
+                        adaptivePacing: opts.adaptivePacing,
+                        onDeviceEvent: { [weak panelManager] event in
+                            Task { @MainActor in
+                                panelManager?.update(event, for: "device")
+                            }
+                        }))
             } else {
                 // Discovery: every _espdisp._udp service gets a session as
                 // it appears. Disappearance is deliberately NOT fatal - mDNS
@@ -320,13 +363,20 @@ Task {
                 // self-heal through unreachable devices.
                 print("discovering devices (_espdisp._udp) - sessions start as panels appear")
                 let browser = DeviceBrowser { devices in
+                    Task { @MainActor in panelManager.noteDiscovery(devices) }
                     for device in devices where !registry.shouldSkip(device.name) {
                         print("discovered device \"\(device.name)\"")
                         launchSession(
                             name: device.name,
-                            sender: FrameSender(endpoint: device.endpoint,
-                                                spacingMicros: opts.spacingMicros,
-                                                adaptivePacing: opts.adaptivePacing))
+                            sender: FrameSender(
+                                endpoint: device.endpoint,
+                                spacingMicros: opts.spacingMicros,
+                                adaptivePacing: opts.adaptivePacing,
+                                onDeviceEvent: { [weak panelManager] event in
+                                    Task { @MainActor in
+                                        panelManager?.update(event, for: device.name)
+                                    }
+                                }))
                     }
                 }
                 browser.start()
@@ -366,11 +416,7 @@ Task {
     }
 }
 
-// Run the full AppKit event loop (not just a bare run loop): it services
-// the main dispatch queue and AppKit UI, and it registers with Launch
-// Services so a Finder double-click of the already-running app arrives as a
-// reopen event - which the delegate answers with the device WiFi
-// configuration dialog.
-let reopenDelegate = ReopenDelegate()
-NSApplication.shared.delegate = reopenDelegate
+// Run the full AppKit event loop. The delegate shows the manager for an
+// explicit app launch and keeps login/background launches invisible. Closing
+// the manager returns to accessory mode without interrupting capture.
 NSApplication.shared.run()

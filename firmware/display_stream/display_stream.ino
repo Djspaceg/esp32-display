@@ -52,15 +52,15 @@ static String cfgPass;
 // resolving a hardcoded hostname. Default is unique per board
 // (espdisplay-XXXX from the MAC); changeable via CFGNAME over USB.
 static String cfgName;
+static const char *FW_VERSION = "1.1.0";
+static uint8_t deviceId[6] = {0};
 
 // Reads the MAC straight from eFuse rather than via WiFi.macAddress(),
 // because the name is needed before WiFi is initialized: the DHCP hostname
 // is latched inside WiFi.mode() when entering STA mode.
 static String defaultDeviceName() {
-  uint8_t mac[6] = {0};
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
   char buf[24];
-  snprintf(buf, sizeof(buf), "espdisplay-%02x%02x", mac[4], mac[5]);
+  snprintf(buf, sizeof(buf), "espdisplay-%02x%02x", deviceId[4], deviceId[5]);
   return String(buf);
 }
 
@@ -124,7 +124,13 @@ static bool displaySleeping = false;
 // live in band_protocol.h, which is hardware-free and unit tested on the
 // host (firmware/test/run_tests.sh).
 #include "band_protocol.h"
+#include "device_protocol.h"
 using namespace bandproto;
+
+static const uint32_t DEVICE_CAPABILITIES =
+    deviceproto::CAP_BRIGHTNESS | deviceproto::CAP_FLIP |
+    deviceproto::CAP_IDENTIFY | deviceproto::CAP_RESTART |
+    deviceproto::CAP_SLEEP_SYNC | deviceproto::CAP_TELEMETRY;
 
 static const uint16_t UDP_PORT = 5568;
 static const size_t FRAME_BYTES = (size_t)PANEL_W * PANEL_H * 2;  // 110080
@@ -168,6 +174,25 @@ static uint32_t dmaQueuedAt = 0;          // for DMA-stall detection
 static volatile uint32_t hbIp = 0;
 static volatile uint16_t hbPort = 0;
 
+// Management controls arrive on lwIP's callback task and are applied by the
+// Arduino loop. NVS writes, panel changes, LED work, and restarts must never
+// run inside the network callback.
+static portMUX_TYPE controlMux = portMUX_INITIALIZER_UNLOCKED;
+static const uint8_t CONTROL_QUEUE_CAPACITY = 8;
+static deviceproto::ControlCommand controlQueue[CONTROL_QUEUE_CAPACITY];
+static uint8_t controlQueueHead = 0;
+static uint8_t controlQueueTail = 0;
+static uint8_t controlQueueCount = 0;
+static uint16_t recentControlSequences[CONTROL_QUEUE_CAPACITY] = {0};
+static uint8_t recentControlCount = 0;
+static uint8_t recentControlNext = 0;
+static uint16_t appliedControlSequences[CONTROL_QUEUE_CAPACITY] = {0};
+static uint8_t appliedControlCount = 0;
+static uint8_t appliedControlNext = 0;
+static deviceproto::ControlCommand duplicateControlAck = {};
+static volatile bool duplicateControlAckPending = false;
+static uint32_t restartAt = 0;
+
 AsyncUDP udp;
 
 // ISR context: one queued strip transfer finished.
@@ -202,6 +227,52 @@ static void onPacket(AsyncUDPPacket packet) {
     // static content there is nothing to send, and waiting for a frame
     // would leave the panel dark.
     wakeRequested = true;
+    return;
+  }
+  if (len >= 4 && memcmp(data, "ECTL", 4) == 0) {
+    deviceproto::ControlCommand command;
+    if (!deviceproto::parseControl(data, len, command)) {
+      statBadLen = statBadLen + 1;
+      return;
+    }
+    portENTER_CRITICAL(&controlMux);
+    bool alreadyApplied = false;
+    for (uint8_t i = 0; i < appliedControlCount; i++) {
+      if (appliedControlSequences[i] == command.sequence) {
+        alreadyApplied = true;
+        break;
+      }
+    }
+    bool recentlySeen = alreadyApplied;
+    for (uint8_t i = 0; !recentlySeen && i < recentControlCount; i++) {
+      if (recentControlSequences[i] == command.sequence) {
+        recentlySeen = true;
+      }
+    }
+    if (recentlySeen) {
+      // Only replay an ACK after that sequence has actually been applied.
+      // Duplicates of a queued command are dropped; the original emits its
+      // acknowledgement after the loop applies it. Checking both rings also
+      // prevents a late duplicate from being re-enqueued when the recent ring
+      // advances before the applied ring does.
+      if (alreadyApplied) {
+        duplicateControlAck = command;
+        duplicateControlAckPending = true;
+      }
+    } else if (controlQueueCount < CONTROL_QUEUE_CAPACITY) {
+      controlQueue[controlQueueTail] = command;
+      controlQueueTail = (controlQueueTail + 1) % CONTROL_QUEUE_CAPACITY;
+      controlQueueCount++;
+      recentControlSequences[recentControlNext] = command.sequence;
+      recentControlNext = (recentControlNext + 1) % CONTROL_QUEUE_CAPACITY;
+      if (recentControlCount < CONTROL_QUEUE_CAPACITY) recentControlCount++;
+    }
+    portEXIT_CRITICAL(&controlMux);
+    return;
+  }
+  // Never parse a frame header before proving all six bytes are present.
+  if (len < HEADER_BYTES) {
+    statBadLen = statBadLen + 1;
     return;
   }
   bandproto::Header h = parseHeader(data);
@@ -322,6 +393,102 @@ static void applyPanelConfig(bool landscape) {
   madctlDirty = false;
 }
 
+static uint8_t currentDeviceFlags() {
+  uint8_t flags = 0;
+  if (userBlHigh) flags |= 0x01;
+  if (panelFlip180) flags |= 0x02;
+  if (displaySleeping) flags |= 0x04;
+  if (idleActive) flags |= 0x08;
+  if (WiFi.status() == WL_CONNECTED) flags |= 0x10;
+  return flags;
+}
+
+static uint8_t currentBrightness() {
+  if (displaySleeping) return 0;
+  if (idleActive) return BL_IDLE;
+  return userBlHigh ? BL_HIGH : BL_LOW;
+}
+
+static void sendDeviceInfo() {
+  if (hbPort == 0) return;
+  uint8_t packet[96];
+  size_t len = deviceproto::writeInfo(
+      packet, sizeof(packet), currentDeviceFlags(), DEVICE_CAPABILITIES,
+      millis() / 1000, WiFi.status() == WL_CONNECTED ? (int16_t)WiFi.RSSI() : -127,
+      currentBrightness(), deviceId, cfgName.c_str(), FW_VERSION);
+  if (len > 0) {
+    udp.writeTo(packet, len, IPAddress(hbIp), hbPort);
+  }
+}
+
+static void sendControlAck(const deviceproto::ControlCommand &command,
+                           uint8_t status = 0) {
+  if (hbPort == 0) return;
+  uint8_t packet[deviceproto::ACK_PACKET_BYTES];
+  deviceproto::writeAck(packet, command.opcode, command.sequence, status,
+                        currentDeviceFlags(), currentBrightness());
+  udp.writeTo(packet, sizeof(packet), IPAddress(hbIp), hbPort);
+}
+
+static void applyPendingControl() {
+  deviceproto::ControlCommand command;
+  deviceproto::ControlCommand duplicateAck;
+  bool hasCommand = false;
+  bool hasDuplicateAck = false;
+  portENTER_CRITICAL(&controlMux);
+  if (controlQueueCount > 0) {
+    command = controlQueue[controlQueueHead];
+    controlQueueHead = (controlQueueHead + 1) % CONTROL_QUEUE_CAPACITY;
+    controlQueueCount--;
+    hasCommand = true;
+  }
+  if (duplicateControlAckPending) {
+    duplicateAck = duplicateControlAck;
+    duplicateControlAckPending = false;
+    hasDuplicateAck = true;
+  }
+  portEXIT_CRITICAL(&controlMux);
+
+  if (hasCommand) {
+    switch (command.opcode) {
+      case deviceproto::ControlOpcode::Brightness:
+        userBlHigh = command.value != 0;
+        saveDisplayPrefs();
+        if (!displaySleeping && !idleActive) {
+          analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+        }
+        Serial.printf("network: backlight %s (saved)\n", userBlHigh ? "high" : "low");
+        break;
+      case deviceproto::ControlOpcode::Flip:
+        panelFlip180 = command.value != 0;
+        madctlDirty = true;
+        saveDisplayPrefs();
+        Serial.printf("network: flip180=%d (saved)\n", panelFlip180);
+        break;
+      case deviceproto::ControlOpcode::Identify:
+        rgbLed.fill(rgbLed.Color(0, 96, 255));
+        rgbLed.show();
+        ledOverrideUntil = millis() + (uint32_t)command.value * 1000;
+        Serial.printf("network: identify for %lds\n", (long)command.value);
+        break;
+      case deviceproto::ControlOpcode::Restart:
+        restartAt = millis() + 500;
+        Serial.println("network: restart requested");
+        break;
+    }
+    portENTER_CRITICAL(&controlMux);
+    appliedControlSequences[appliedControlNext] = command.sequence;
+    appliedControlNext = (appliedControlNext + 1) % CONTROL_QUEUE_CAPACITY;
+    if (appliedControlCount < CONTROL_QUEUE_CAPACITY) appliedControlCount++;
+    portEXIT_CRITICAL(&controlMux);
+    sendControlAck(command);
+    sendDeviceInfo();
+  }
+  if (hasDuplicateAck) {
+    sendControlAck(duplicateAck);
+  }
+}
+
 // Serial configuration protocol (USB CDC), so credentials can change
 // without reflashing:
 //   CFGWIFI <base64 ssid> <base64 password>\n  -> save to NVS, reply
@@ -421,8 +588,8 @@ static void processConfigLine(char *line) {
     panelFlip180 = (want != 0);
     madctlDirty = true;
     saveDisplayPrefs();
-    applyPanelConfig(panelLandscape);
-    Serial.printf("CFGOK flip180=%d (saved)\n", panelFlip180);
+    Serial.printf("CFGOK flip180=%d (saved; applies with next frame)\n",
+                  panelFlip180);
   } else if (strncmp(line, "CFGLED ", 7) == 0) {
     // Diagnostic: show a literal color for 10s (CFGLED <r> <g> <b>, 0-255).
     // Lets channel-order problems be diagnosed over serial: send pure red,
@@ -653,6 +820,10 @@ void setup() {
     delay(50);
   }
   Serial.println("=== display_stream (esp_lcd DMA) ===");
+  Serial.printf("firmware %s, frame protocol %u, control protocol %u\n",
+                FW_VERSION, deviceproto::FRAME_PROTOCOL_VERSION,
+                deviceproto::CONTROL_PROTOCOL_VERSION);
+  esp_read_mac(deviceId, ESP_MAC_WIFI_STA);
 
   bufA = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_DMA);
   bufB = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_DMA);
@@ -744,6 +915,9 @@ void setup() {
     MDNS.addService("espdisp", "udp", UDP_PORT);
     MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
     MDNS.addServiceTxt("espdisp", "udp", "res", "172x320");
+    MDNS.addServiceTxt("espdisp", "udp", "fw", FW_VERSION);
+    MDNS.addServiceTxt("espdisp", "udp", "proto", "2");
+    MDNS.addServiceTxt("espdisp", "udp", "caps", "0000006f");
     Serial.printf("mDNS: %s.local, service _espdisp._udp\n", cfgName.c_str());
   } else {
     Serial.println("WARN: mDNS failed to start");
@@ -780,6 +954,12 @@ void loop() {
   esp_task_wdt_reset();
   handleButton();
   handleSerialConfig();
+  applyPendingControl();
+  if (restartAt != 0 && (int32_t)(millis() - restartAt) >= 0) {
+    Serial.flush();
+    delay(50);
+    ESP.restart();
+  }
 
   static uint32_t lastCompleted = 0;
   if (framesCompleted != lastCompleted && dmaInFlight == 0) {
@@ -988,6 +1168,10 @@ void loop() {
       MDNS.setInstanceName(cfgName);
       MDNS.addService("espdisp", "udp", UDP_PORT);
       MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
+      MDNS.addServiceTxt("espdisp", "udp", "res", "172x320");
+      MDNS.addServiceTxt("espdisp", "udp", "fw", FW_VERSION);
+      MDNS.addServiceTxt("espdisp", "udp", "proto", "2");
+      MDNS.addServiceTxt("espdisp", "udp", "caps", "0000006f");
       Serial.printf("mDNS re-announced, IP %s\n", WiFi.localIP().toString().c_str());
     }
   }
@@ -1008,6 +1192,14 @@ void loop() {
       pkt[7 + i * 4] = (vals[i] >> 24) & 0xFF;
     }
     udp.writeTo(pkt, sizeof(pkt), IPAddress(hbIp), hbPort);
+  }
+
+  // Versioned capabilities and live state for the manager window. EHB1
+  // remains unchanged for compatibility with older senders.
+  static uint32_t lastInfo = 0;
+  if (hbPort != 0 && millis() - lastInfo >= 2000) {
+    lastInfo = millis();
+    sendDeviceInfo();
   }
 
   static uint32_t lastLedUpdate = 0;

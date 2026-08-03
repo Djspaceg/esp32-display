@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "../display_stream/band_protocol.h"
+#include "../display_stream/device_protocol.h"
 
 using namespace bandproto;
 
@@ -162,6 +163,57 @@ int main() {
     std::vector<std::pair<int, int>> out;
     forEachRun(bits, 80, [&](int s, int e) { out.push_back({s, e}); });
     CHECK((out == std::vector<std::pair<int, int>>{{0, 80}}));
+  }
+
+  // --- versioned device information and management controls
+  {
+    deviceproto::ControlCommand command;
+    const uint8_t control[12] = {
+        0x45, 0x43, 0x54, 0x4c, 0x01, 0x02, 0x34, 0x12,
+        0x01, 0x00, 0x00, 0x00};
+    CHECK(deviceproto::parseControl(control, sizeof(control), command));
+    CHECK(command.opcode == deviceproto::ControlOpcode::Flip);
+    CHECK(command.sequence == 0x1234);
+    CHECK(command.value == 1);
+    CHECK(!deviceproto::parseControl(control, sizeof(control) - 1, command));
+
+    uint8_t badVersion[12];
+    memcpy(badVersion, control, sizeof(control));
+    badVersion[4] = 99;
+    CHECK(!deviceproto::parseControl(badVersion, sizeof(badVersion), command));
+    uint8_t badOpcode[12];
+    memcpy(badOpcode, control, sizeof(control));
+    badOpcode[5] = 99;
+    CHECK(!deviceproto::parseControl(badOpcode, sizeof(badOpcode), command));
+    uint8_t badValue[12];
+    memcpy(badValue, control, sizeof(control));
+    badValue[8] = 2;
+    CHECK(!deviceproto::parseControl(badValue, sizeof(badValue), command));
+  }
+  {
+    uint8_t info[96] = {0};
+    const uint8_t id[6] = {0x02, 0x00, 0x00, 0x12, 0x34, 0x56};
+    size_t infoLen = deviceproto::writeInfo(
+        info, sizeof(info), 0x13, 0x3f, 0x01020304, -51, 128,
+        id, "panel", "1.2.3");
+    CHECK(infoLen == 37);
+    const uint8_t expectedPrefix[27] = {
+        0x45, 0x49, 0x4e, 0x46, 0x01, 0x02, 0x01, 0x13,
+        0x3f, 0x00, 0x00, 0x00, 0x04, 0x03, 0x02, 0x01,
+        0xcd, 0xff, 0x80, 0x05, 0x05,
+        0x02, 0x00, 0x00, 0x12, 0x34, 0x56};
+    CHECK(memcmp(info, expectedPrefix, sizeof(expectedPrefix)) == 0);
+    CHECK(memcmp(info + 27, "panel1.2.3", 10) == 0);
+    CHECK(deviceproto::writeInfo(
+              info, 10, 0, 0, 0, 0, 0, id, "panel", "1.2.3") == 0);
+
+    uint8_t ack[deviceproto::ACK_PACKET_BYTES] = {0};
+    CHECK(deviceproto::writeAck(
+              ack, deviceproto::ControlOpcode::Flip, 0x1234, 0, 0x03, 128) == 12);
+    const uint8_t expectedAck[12] = {
+        0x45, 0x41, 0x43, 0x4b, 0x01, 0x02, 0x34, 0x12,
+        0x00, 0x03, 0x80, 0x00};
+    CHECK(memcmp(ack, expectedAck, sizeof(expectedAck)) == 0);
   }
 
   printf("OK: %d checks passed\n", checks);

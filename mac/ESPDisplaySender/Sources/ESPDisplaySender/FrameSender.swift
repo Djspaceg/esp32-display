@@ -21,6 +21,12 @@ final class FrameSender {
 
     typealias DeviceStats = BandProtocol.DeviceStats
 
+    enum DeviceEvent {
+        case heartbeat(DeviceStats)
+        case info(DeviceProtocol.DeviceInfo)
+        case acknowledgement(DeviceProtocol.ControlAck)
+    }
+
     private let host: String
     private let port: UInt16
     private let queue = DispatchQueue(label: "espdisp.sender")
@@ -50,7 +56,13 @@ final class FrameSender {
     private var prevFramesSentAtHb: UInt64 = 0
     private var _lastHeartbeatAt: Date?
     private var _stats = DeviceStats()
+    private var _deviceInfo: DeviceProtocol.DeviceInfo?
+    private var _lastControlAck: DeviceProtocol.ControlAck?
+    private var _resolvedAddress: String?
+    private var _paused = false
+    private var nextControlSequence = UInt16.random(in: 1...UInt16.max)
     private var prevStats = DeviceStats()
+    private let onDeviceEvent: ((DeviceEvent) -> Void)?
 
     private(set) var framesSent: UInt64 = 0
     private(set) var sendErrors: UInt64 = 0
@@ -93,6 +105,40 @@ final class FrameSender {
         return _stats
     }
 
+    var deviceInfo: DeviceProtocol.DeviceInfo? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _deviceInfo
+    }
+
+    var lastControlAck: DeviceProtocol.ControlAck? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _lastControlAck
+    }
+
+    var resolvedAddress: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _resolvedAddress
+    }
+
+    var paused: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _paused
+    }
+
+    func setPaused(_ paused: Bool) {
+        lock.lock()
+        _paused = paused
+        if paused {
+            pendingFrame = nil
+        }
+        lock.unlock()
+        if !paused { forceKeyframe() }
+    }
+
     /// - Parameters:
     ///   - host: device hostname or IP (typically the mDNS name).
     ///   - port: UDP port the firmware listens on.
@@ -103,22 +149,28 @@ final class FrameSender {
     /// device address changes with no name/IP bookkeeping at all.
     private let serviceEndpoint: NWEndpoint?
 
-    init(host: String, port: UInt16, spacingMicros: UInt32 = 200, adaptivePacing: Bool = true) {
+    init(host: String, port: UInt16, spacingMicros: UInt32 = 200,
+         adaptivePacing: Bool = true,
+         onDeviceEvent: ((DeviceEvent) -> Void)? = nil) {
         self.host = host
         self.port = port
         self.serviceEndpoint = nil
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
         self.adaptivePacing = adaptivePacing
+        self.onDeviceEvent = onDeviceEvent
     }
 
-    init(endpoint: NWEndpoint, spacingMicros: UInt32 = 200, adaptivePacing: Bool = true) {
+    init(endpoint: NWEndpoint, spacingMicros: UInt32 = 200,
+         adaptivePacing: Bool = true,
+         onDeviceEvent: ((DeviceEvent) -> Void)? = nil) {
         self.host = "\(endpoint)"
         self.port = 0
         self.serviceEndpoint = endpoint
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
         self.adaptivePacing = adaptivePacing
+        self.onDeviceEvent = onDeviceEvent
     }
 
     private static let ipCachePath = "/tmp/espdisplaysender-device-ip"
@@ -207,9 +259,9 @@ final class FrameSender {
                 // Grace period: treat "connected just now" as a fresh
                 // heartbeat so staleness is measured from this attempt -
                 // a permanently dead device keeps re-triggering reconnects.
-                lock.lock()
-                _lastHeartbeatAt = Date()
-                lock.unlock()
+                lock.withLock {
+                    _lastHeartbeatAt = Date()
+                }
                 return
             }
             if case .failed(let error) = conn.state {
@@ -252,7 +304,11 @@ final class FrameSender {
             }
             // Strip any interface scope ("192.168.1.120%en0").
             if let raw = ip, let bare = raw.split(separator: "%").first {
-                try? String(bare).write(
+                let address = String(bare)
+                lock.lock()
+                _resolvedAddress = address
+                lock.unlock()
+                try? address.write(
                     toFile: Self.ipCachePath, atomically: true, encoding: .utf8)
             }
         }
@@ -273,6 +329,26 @@ final class FrameSender {
     }
 
     private func handleInbound(_ data: Data) {
+        if let info = DeviceProtocol.parseInfo(data) {
+            lock.lock()
+            _deviceInfo = info
+            _lastHeartbeatAt = Date()
+            lock.unlock()
+            onDeviceEvent?(.info(info))
+            return
+        }
+        if let acknowledgement = DeviceProtocol.parseAck(data) {
+            lock.withLock {
+                _lastControlAck = acknowledgement
+            }
+            if !acknowledgement.succeeded {
+                let message = "control \(acknowledgement.sequence) failed with status "
+                    + "\(acknowledgement.status)\n"
+                FileHandle.standardError.write(Data(message.utf8))
+            }
+            onDeviceEvent?(.acknowledgement(acknowledgement))
+            return
+        }
         guard let stats = BandProtocol.parseHeartbeat(data) else { return }
 
         lock.lock()
@@ -282,6 +358,7 @@ final class FrameSender {
         _stats = stats
         var spacing = _spacingMicros
         lock.unlock()
+        onDeviceEvent?(.heartbeat(stats))
 
         // Counter regression = device rebooted with an empty framebuffer;
         // resend everything.
@@ -398,17 +475,49 @@ final class FrameSender {
     /// backlight instead of glowing on stale pixels all night. Sent a few
     /// times because it's UDP.
     func sendDisplaySleep() {
-        sendControl("ESLP")
+        sendLegacyControl("ESLP")
     }
 
     /// Explicit wake. Needed because the Mac may wake onto static content,
     /// in which case there is no frame to send and the panel would stay
     /// dark waiting for one.
     func sendDisplayWake() {
-        sendControl("EWAK")
+        sendLegacyControl("EWAK")
     }
 
-    private func sendControl(_ tag: String) {
+    func setBrightness(high: Bool) {
+        sendManagementControl(.brightness, value: high ? 1 : 0)
+    }
+
+    func setFlip(_ flipped: Bool) {
+        sendManagementControl(.flip, value: flipped ? 1 : 0)
+    }
+
+    func identify(seconds: Int = 8) {
+        sendManagementControl(.identify, value: Int32(max(1, min(seconds, 30))))
+    }
+
+    func restartDevice() {
+        sendManagementControl(.restart, value: 1)
+    }
+
+    private func sendManagementControl(
+        _ opcode: DeviceProtocol.ControlOpcode, value: Int32
+    ) {
+        guard let conn = connection else { return }
+        lock.lock()
+        let sequence = nextControlSequence
+        nextControlSequence &+= 1
+        lock.unlock()
+        let packet = DeviceProtocol.controlPacket(
+            opcode: opcode, sequence: sequence, value: value)
+        for _ in 0..<3 {
+            conn.send(content: packet, completion: .contentProcessed { _ in })
+            usleep(20_000)
+        }
+    }
+
+    private func sendLegacyControl(_ tag: String) {
         guard let conn = connection else { return }
         for _ in 0..<3 {
             conn.send(content: Data(tag.utf8), completion: .contentProcessed { _ in })
@@ -444,6 +553,10 @@ final class FrameSender {
     /// the sender frees up is the one that goes out.
     func submit(frame: [UInt8], landscape: Bool) {
         lock.lock()
+        guard !_paused else {
+            lock.unlock()
+            return
+        }
         pendingFrame = frame
         pendingLandscape = landscape
         let needsDispatch = !sendInFlight

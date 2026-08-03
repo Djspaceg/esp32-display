@@ -14,6 +14,20 @@ Hardware: [ESP32-C6-LCD-1.47](https://spotpear.com/shop/ESP32-C6-1.47-inch-LCD-D
 Plug the board into USB power anywhere on your network. It joins WiFi,
 announces itself over mDNS, and the Mac finds it automatically — no IP or
 hostname to configure. Plug in a second board and it gets its own stream.
+
+The native ESPDisplaySender manager lists discovered and previously known
+panels with online state, IP address, RSSI, displayed frame rate, firmware
+version, and diagnostics. Select a panel to choose its ScreenCaptureKit source,
+pause or resume it, change brightness or orientation, identify it, restart it,
+or open USB WiFi/name configuration. Known panels persist in
+`~/Library/Application Support/ESPDisplaySender/panels.json`, so powered-off
+panels remain visible as offline.
+
+The app starts invisibly at login and owns no persistent menu bar item. Opening
+it from Finder shows the manager and a Dock icon; closing the manager hides the
+Dock icon again without stopping capture. macOS may still show its system
+screen-sharing indicator while ScreenCaptureKit is active.
+
 Each panel shows whatever you point it at:
 
 - **A tiny extended desktop** — create a virtual display with
@@ -24,9 +38,11 @@ Each panel shows whatever you point it at:
 - **A single window or app** — pick one in macOS's screen-sharing picker
   (Control Center), no configuration files or flags.
 
-With more than one panel, assign each a source by device name in
-`~/.config/espdisplay/devices.json` — one board mirrors a display while
-another follows a specific app window:
+Use **Choose Source** in the manager to assign macOS's native display, window,
+or application picker to the selected panel. For advanced unattended defaults,
+you can still assign sources by device name in
+`~/.config/espdisplay/devices.json` — one board mirrors a display while another
+follows a specific app window:
 
 ```json
 {
@@ -36,8 +52,8 @@ another follows a specific app window:
 ```
 
 Devices with no entry use automatic selection. Names default to
-`espdisplay-XXXX` (from the board's MAC) and are changeable in the same USB
-dialog as the WiFi credentials.
+`espdisplay-XXXX` (from the board's MAC) and are changeable from the manager's
+USB configuration action.
 
 The panel follows macOS. Rotate the virtual display and the panel rotates
 with it, re-laying-out in landscape or portrait. Change mirroring modes,
@@ -51,11 +67,12 @@ reboots and firmware reflashes — set the orientation once for how the board
 is mounted and forget it. (A full flash erase does reset them.)
 
 WiFi credentials live in the board's flash, not in the firmware — change
-networks by plugging the board into the Mac over USB and double-clicking the
-app: a dialog shows the current network (fetched from the board) and saves
-new credentials over serial. No reflashing, and the recovery path works even
-when the stored credentials are wrong. SSIDs with spaces, emoji, and
-extended Unicode all work — everything crosses the wire base64-encoded.
+networks by plugging the board into the Mac over USB and choosing **Configure
+WiFi or Name over USB** in the manager. A dialog shows the current network
+(fetched from the board) and saves new credentials over serial. No reflashing,
+and the recovery path works even when the stored credentials are wrong. SSIDs
+with spaces, emoji, and extended Unicode all work — everything crosses the
+wire base64-encoded.
 
 ## Performance
 
@@ -130,13 +147,18 @@ little-endian, where bit 15 of `dirty_count` carries orientation. Bands are
 orientation-native so they align to whole rows:
 
 | Orientation | Band | Bands/frame | Packet size |
-| ----------------- | ------------- | ----------- | ----------- |
+| --- | --- | --- | --- |
 | Portrait 172×320 | 4 rows × 344B | 80 | 1382B |
 | Landscape 320×172 | 2 rows × 640B | 86 | 1286B |
 
-The device replies with a 1Hz heartbeat (`EHB1` + frame/drop/packet/heap
-counters) to whoever sent it packets last; the sender emits a 2s `EPNG`
-keepalive so that address stays fresh through static screens.
+The device replies with a compatible 1Hz heartbeat (`EHB1` +
+frame/drop/packet/heap counters) to whoever sent it packets last; the sender
+emits a 2s `EPNG` keepalive so that address stays fresh through static screens.
+Firmware 1.1 also sends versioned `EINF` telemetry every 2 seconds with firmware,
+frame/control protocol versions, capabilities, stable hardware ID, uptime,
+RSSI, brightness, orientation, and sleep state. Fixed-size `ECTL` commands and
+`EACK` responses provide typed brightness, flip, identify, and restart control
+without changing the frame or legacy heartbeat formats.
 
 The device name is also sent as the DHCP hostname (option 12), so the router
 lists the board by name rather than `esp32c6-XXXXXX`, and — on routers that
@@ -167,11 +189,11 @@ button; `CFGLED <r> <g> <b>` shows a literal LED color for 10s.
 ## Repo layout
 
 | Path | What |
-| ----------------------------- | ------------------------------------------------------------------------- |
-| `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button controls |
+| --- | --- |
+| `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls |
 | `firmware/display_test/` | Standalone panel bring-up test (colors, offsets, SPI timing benchmark) |
 | `firmware/board_probe/` | I2C-scan sketch that identifies which board variant you have |
-| `mac/ESPDisplaySender/` | Swift CLI: capture, diff, pace, send, supervise |
+| `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
 | `firmware/test/` | Host-side unit tests for the protocol logic (`run_tests.sh`) |
 | `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol logic (`swift test`) |
 | `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
@@ -190,38 +212,66 @@ arduino-cli compile -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" .
 arduino-cli upload  -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" -p /dev/cu.usbmodem* .
 ```
 
-Mac sender - the set-and-forget way:
+Mac app — the set-and-forget way:
 
 ```sh
 mac/make-app.sh                 # builds ~/Applications/ESPDisplaySender.app
-mac/install-launch-agent.sh     # starts at login, restarts if it exits
+mac/install-launch-agent.sh     # starts hidden at login; restarts abnormal exits
+open ~/Applications/ESPDisplaySender.app
 ```
 
-Grant Local Network and Screen Recording when macOS asks (once per build -
-the ad-hoc signature resets TCC on rebuild). Logs land in
-/tmp/espdisplaysender.log. Double-clicking the app while the agent runs
-opens the device configuration dialog (board attached over USB) - WiFi
-credentials and the device name live in the board's flash and never require
-reflashing to change.
+`make-app.sh` builds the checked-in Xcode project and shared
+`ESPDisplaySender App` scheme. It uses ad-hoc signing by default. To preserve a
+stable designated requirement and avoid repeatedly granting Screen Recording,
+provide a signing identity installed in your keychain:
 
-Leaving the password field blank keeps the password already saved on the
-device, so changing the network name or renaming the board doesn't mean
-retyping it. Joining a genuinely open network is the explicit checkbox, so a
-blank field can't silently replace a working password with an empty one.
+```sh
+ESPDISPLAY_CODE_SIGN_IDENTITY="Developer ID Application: Example" mac/make-app.sh
+```
 
-Or run it by hand:
+Grant Local Network and Screen Recording when macOS asks. Logs land in
+`/tmp/espdisplaysender.log`. A foreground launch opens the manager; closing its
+window leaves streaming active in accessory mode. **Quit ESPDisplaySender**
+stops it cleanly, and the LaunchAgent does not restart a clean exit until the
+next login or foreground launch.
 
-````sh
+Leaving the USB configuration password field blank keeps the password already
+saved on the device, so changing the network name or renaming the board doesn't
+mean retyping it. Joining a genuinely open network is an explicit checkbox, so
+a blank field cannot silently replace a working password with an empty one.
+
+The project remains usable directly from Xcode or SwiftPM:
+
+```sh
 cd mac/ESPDisplaySender
+xcodebuild -project ESPDisplaySender.xcodeproj \
+  -scheme "ESPDisplaySender App" -configuration Debug \
+  CODE_SIGNING_ALLOWED=NO build
+swift test
 swift build
-./.build/debug/ESPDisplaySender                  # auto mode: follows macOS
+./.build/debug/ESPDisplaySender                  # manager plus automatic capture
+./.build/debug/ESPDisplaySender --background     # hidden background mode
 ./.build/debug/ESPDisplaySender --list-displays  # see what's capturable
-./.build/debug/ESPDisplaySender --configure      # device WiFi setup dialog
+./.build/debug/ESPDisplaySender --configure      # USB WiFi/name setup dialog
 ./.build/debug/ESPDisplaySender --help           # all options
-``` For the extended-desktop
-use case, create a virtual display in BetterDisplay sized to a multiple of
-172×320 (e.g. 688×1280) — the sender finds it by name (default "Tiny
-Monitor"), learns its UUID, and tracks it from then on.
+```
+
+For the extended-desktop use case, create a virtual display in BetterDisplay
+sized to a multiple of 172×320 (for example, 688×1280). The sender finds it by
+name (default `Tiny Monitor`), learns its UUID, and tracks it from then on.
+
+### Firmware update status
+
+Firmware 1.1 reports version and capability metadata, but it deliberately does
+not advertise OTA support yet, so the manager does not offer a nonfunctional
+update action. The remaining OTA stage needs an 8MB dual-partition layout,
+reliable transfer, SHA-256 and signature verification, provisional boot health
+validation, and automatic rollback. Until that is implemented and tested, USB
+remains required for firmware installation and recovery.
+
+The management datagrams are unauthenticated and intended for a trusted local
+network. Pairing or authenticated control should accompany OTA before panels
+are exposed to untrusted LAN clients.
 
 ## Status lights
 
@@ -254,4 +304,3 @@ every 2 seconds:
 | Green | Strong signal (-55 dBm or better) |
 | Yellow → orange | Fading signal (-55 to -90 dBm, continuous gradient) |
 | Red | Very weak signal, or not connected |
-````

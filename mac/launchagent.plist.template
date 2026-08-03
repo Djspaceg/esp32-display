@@ -7,20 +7,24 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>__BIN__</string>
+		<string>--background</string>
 		<string>--fps</string>
 		<string>40</string>
 	</array>
 	<!-- Start at login... -->
 	<key>RunAtLoad</key>
 	<true/>
-	<!-- ...and restart if it ever exits. launchd throttles respawns to
-	     every ~10s, so a crash loop stays cheap. The sender's own
-	     single-instance lock makes a manual double-click coexist safely. -->
+	<!-- Restart after crashes or startup failures, but not after a clean Quit.
+	     launchd throttles abnormal respawns, and the sender's single-instance
+	     lock makes a manual double-click coexist safely. -->
 	<key>KeepAlive</key>
-	<true/>
-	<!-- Marks the agent so a lock collision on its respawn exits quietly;
-	     an unmarked (human, double-clicked) launch that collides opens the
-	     device WiFi configuration dialog instead. -->
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<!-- Marks abnormal agent respawns so a lock collision exits quietly;
+	     a foreground launch instead asks the primary process to show its
+	     manager window. -->
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>ESPDISP_AGENT</key>
