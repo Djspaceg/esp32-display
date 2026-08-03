@@ -6,6 +6,8 @@
 	<string>ESPDisplaySender</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.espdisplay.sender</string>
+	<key>CFBundleIconFile</key>
+	<string>app-icon-square.png</string>
 	<key>CFBundleName</key>
 	<string>ESPDisplaySender</string>
 	<key>CFBundlePackageType</key>

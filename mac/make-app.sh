@@ -1,9 +1,9 @@
 #!/bin/zsh
 # Build the native ESPDisplaySender app into ~/Applications.
 #
-# Set ESPDISPLAY_CODE_SIGN_IDENTITY to a stable signing identity to preserve
-# the app's designated requirement across rebuilds. Without one, the script
-# uses ad-hoc signing, which can require Screen Recording permission again.
+# Xcode signs with the Apple Development team configured in the project,
+# preserving the app's designated requirement across rebuilds so macOS privacy
+# permissions remain attached to the same application identity.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -11,7 +11,6 @@ PROJECT="$HERE/ESPDisplaySender/ESPDisplaySender.xcodeproj"
 SCHEME="ESPDisplaySender App"
 APP="$HOME/Applications/ESPDisplaySender.app"
 STAGED_APP="$HOME/Applications/.ESPDisplaySender.app.staged"
-SIGNING_IDENTITY="${ESPDISPLAY_CODE_SIGN_IDENTITY:--}"
 DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/espdisplaysender.XXXXXX")"
 
 cleanup() {
@@ -25,7 +24,7 @@ xcodebuild \
   -configuration Release \
   -destination "platform=macOS" \
   -derivedDataPath "$DERIVED_DATA" \
-  CODE_SIGNING_ALLOWED=NO \
+  -allowProvisioningUpdates \
   build
 
 BUILT_APP="$DERIVED_DATA/Build/Products/Release/ESPDisplaySender.app"
@@ -37,20 +36,12 @@ fi
 mkdir -p "$HOME/Applications"
 rm -rf "$STAGED_APP"
 ditto "$BUILT_APP" "$STAGED_APP"
-
-if [[ "$SIGNING_IDENTITY" == "-" ]]; then
-  codesign --force --sign - "$STAGED_APP"
-  SIGNING_NOTE="ad-hoc signed; a rebuild may require Screen Recording permission again"
-else
-  codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$STAGED_APP"
-  codesign --verify --strict --verbose=1 "$STAGED_APP"
-  SIGNING_NOTE="signed with $SIGNING_IDENTITY"
-fi
+codesign --verify --deep --strict --verbose=1 "$STAGED_APP"
 
 rm -rf "$APP"
 mv "$STAGED_APP" "$APP"
 
-echo "built $APP"
-echo "$SIGNING_NOTE"
+codesign --display --verbose=2 "$APP"
+echo "built and Apple Development signed $APP"
 echo "open manager:      open $APP"
 echo "install at login:  $HERE/install-launch-agent.sh"

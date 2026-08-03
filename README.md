@@ -19,7 +19,8 @@ The native ESPDisplaySender manager lists discovered and previously known
 panels with online state, IP address, RSSI, displayed frame rate, firmware
 version, and diagnostics. Select a panel to choose its ScreenCaptureKit source,
 pause or resume it, change brightness or orientation, identify it, restart it,
-or open USB WiFi/name configuration. Known panels persist in
+or configure WiFi over USB. Device names are static until you click the selected
+panel's title to enter explicit rename mode. Known panels persist in
 `~/Library/Application Support/ESPDisplaySender/panels.json`, so powered-off
 panels remain visible as offline.
 
@@ -52,8 +53,8 @@ follows a specific app window:
 ```
 
 Devices with no entry use automatic selection. Names default to
-`espdisplay-XXXX` (from the board's MAC) and are changeable from the manager's
-USB configuration action.
+`espdisplay-XXXX` (from the board's MAC); click the selected panel's title to
+rename it over USB.
 
 The panel follows macOS. Rotate the virtual display and the panel rotates
 with it, re-laying-out in landscape or portrait. Change mirroring modes,
@@ -67,12 +68,15 @@ reboots and firmware reflashes — set the orientation once for how the board
 is mounted and forget it. (A full flash erase does reset them.)
 
 WiFi credentials live in the board's flash, not in the firmware — change
-networks by plugging the board into the Mac over USB and choosing **Configure
-WiFi or Name over USB** in the manager. A dialog shows the current network
-(fetched from the board) and saves new credentials over serial. No reflashing,
-and the recovery path works even when the stored credentials are wrong. SSIDs
-with spaces, emoji, and extended Unicode all work — everything crosses the
-wire base64-encoded.
+networks by plugging the board into the Mac over USB and choosing **Add…** or
+**Edit…** beside the selected panel's saved WiFi network. The WiFi-only dialog
+shows the current network and saves new credentials over serial. The
+**USB device** setting under Connection defaults to automatic name matching;
+choose a specific `cu.usbserial` or `cu.usbmodem` port there when more than one
+device is connected or automatic matching cannot identify the panel. Manual
+assignments persist with the known panel. No reflashing, and the recovery path
+works even when the stored credentials are wrong. SSIDs with spaces, emoji, and
+extended Unicode all work — everything crosses the wire base64-encoded.
 
 ## Performance
 
@@ -221,13 +225,11 @@ open ~/Applications/ESPDisplaySender.app
 ```
 
 `make-app.sh` builds the checked-in Xcode project and shared
-`ESPDisplaySender App` scheme. It uses ad-hoc signing by default. To preserve a
-stable designated requirement and avoid repeatedly granting Screen Recording,
-provide a signing identity installed in your keychain:
-
-```sh
-ESPDISPLAY_CODE_SIGN_IDENTITY="Developer ID Application: Example" mac/make-app.sh
-```
+`ESPDisplaySender App` scheme. The project uses automatic Apple Development
+signing for the configured personal team, preserving its designated requirement
+across rebuilds so macOS can retain Screen Recording and Local Network grants.
+Xcode must be signed into that Apple Account and have an Apple Development
+certificate before running the script on a new Mac.
 
 Grant Local Network and Screen Recording when macOS asks. Logs land in
 `/tmp/espdisplaysender.log`. A foreground launch opens the manager; closing its
@@ -235,10 +237,9 @@ window leaves streaming active in accessory mode. **Quit ESPDisplaySender**
 stops it cleanly, and the LaunchAgent does not restart a clean exit until the
 next login or foreground launch.
 
-Leaving the USB configuration password field blank keeps the password already
-saved on the device, so changing the network name or renaming the board doesn't
-mean retyping it. Joining a genuinely open network is an explicit checkbox, so
-a blank field cannot silently replace a working password with an empty one.
+Leaving the USB WiFi password field blank keeps the password already saved on
+the device. Joining a genuinely open network is an explicit checkbox, so a
+blank field cannot silently replace a working password with an empty one.
 
 The project remains usable directly from Xcode or SwiftPM:
 
@@ -246,15 +247,20 @@ The project remains usable directly from Xcode or SwiftPM:
 cd mac/ESPDisplaySender
 xcodebuild -project ESPDisplaySender.xcodeproj \
   -scheme "ESPDisplaySender App" -configuration Debug \
-  CODE_SIGNING_ALLOWED=NO build
+  -allowProvisioningUpdates build
 swift test
 swift build
 ./.build/debug/ESPDisplaySender                  # manager plus automatic capture
 ./.build/debug/ESPDisplaySender --background     # hidden background mode
 ./.build/debug/ESPDisplaySender --list-displays  # see what's capturable
-./.build/debug/ESPDisplaySender --configure      # USB WiFi/name setup dialog
+./.build/debug/ESPDisplaySender --configure      # USB WiFi setup dialog
 ./.build/debug/ESPDisplaySender --help           # all options
 ```
+
+For a deterministic SwiftUI preview, open `ManagerWindow.swift` in Xcode and
+choose **Editor → Canvas**. The `Display Manager` preview uses sample online and
+offline panels and does not read Keychain, probe USB, discover devices, or start
+capture.
 
 For the extended-desktop use case, create a virtual display in BetterDisplay
 sized to a multiple of 172×320 (for example, 688×1280). The sender finds it by

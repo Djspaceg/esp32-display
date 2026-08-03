@@ -81,37 +81,25 @@ enum WifiConfigUI {
     }
 
     private final class DialogCoordinator: NSObject {
-        let portPopup: NSPopUpButton
+        let port: String
         let savedPopup: NSPopUpButton
         let ssidField: NSTextField
         let passField: NSSecureTextField
         let openCheck: NSButton
-        let nameField: NSTextField
-        var deviceName = ""
         var deviceSSID = ""
 
         init(
-            portPopup: NSPopUpButton,
+            port: String,
             savedPopup: NSPopUpButton,
             ssidField: NSTextField,
             passField: NSSecureTextField,
-            openCheck: NSButton,
-            nameField: NSTextField
+            openCheck: NSButton
         ) {
-            self.portPopup = portPopup
+            self.port = port
             self.savedPopup = savedPopup
             self.ssidField = ssidField
             self.passField = passField
             self.openCheck = openCheck
-            self.nameField = nameField
-        }
-
-        var selectedPort: String {
-            portPopup.titleOfSelectedItem ?? ""
-        }
-
-        @objc func portChanged(_ sender: NSPopUpButton) {
-            reloadDevice()
         }
 
         @objc func savedNetworkChanged(_ sender: NSPopUpButton) {
@@ -125,13 +113,10 @@ enum WifiConfigUI {
         }
 
         func reloadDevice() {
-            guard !selectedPort.isEmpty,
-                  case .success(let info) = WifiConfigUI.sendCommand(
-                    "CFGSHOW", port: selectedPort, timeout: 3)
+            guard case .success(let info) = WifiConfigUI.sendCommand(
+                "CFGSHOW", port: port, timeout: 3)
             else { return }
             deviceSSID = ConfigCommands.decodeField("ssid64=", from: info) ?? ""
-            deviceName = ConfigCommands.decodeField("name64=", from: info) ?? ""
-            nameField.stringValue = deviceName
             if savedPopup.indexOfSelectedItem == 0 {
                 ssidField.stringValue = deviceSSID
                 passField.stringValue = ""
@@ -229,14 +214,21 @@ enum WifiConfigUI {
 
     // MARK: direct manager actions
 
-    static func renameDevice(currentName: String, newName: String) -> String? {
+    static func renameDevice(
+        currentName: String,
+        newName: String,
+        preferredPort: String? = nil
+    ) -> String? {
         let normalized = normalizedDeviceName(newName)
         guard !normalized.isEmpty else {
             alert(style: .warning, title: "Invalid name",
                   text: "Use letters, numbers, spaces, underscores, or dashes.")
             return nil
         }
-        guard let port = matchingPort(for: currentName) else { return nil }
+        guard let port = matchingPort(
+            for: currentName,
+            preferredPort: preferredPort)
+        else { return nil }
         switch sendCommand(ConfigCommands.setName(normalized), port: port) {
         case .success:
             alert(style: .informational, title: "Name saved",
@@ -248,13 +240,20 @@ enum WifiConfigUI {
         }
     }
 
-    static func applySavedNetwork(_ ssid: String, currentName: String) -> Bool {
+    static func applySavedNetwork(
+        _ ssid: String,
+        currentName: String,
+        preferredPort: String? = nil
+    ) -> Bool {
         guard let credential = WifiCredentialStore.credential(for: ssid) else {
             alert(style: .warning, title: "Credential not found",
                   text: "Add \"\(ssid)\" again to store it in Keychain.")
             return false
         }
-        guard let port = matchingPort(for: currentName) else { return false }
+        guard let port = matchingPort(
+            for: currentName,
+            preferredPort: preferredPort)
+        else { return false }
         let change: ConfigCommands.PasswordChange = credential.password.isEmpty
             ? .openNetwork : .set(credential.password)
         switch sendCommand(
@@ -270,125 +269,134 @@ enum WifiConfigUI {
         }
     }
 
-    private static func matchingPort(for currentName: String) -> String? {
+    private static func matchingPort(
+        for currentName: String?,
+        preferredPort: String? = nil
+    ) -> String? {
+        let expectedName = currentName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let preferredPort,
+           !preferredPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return validate(
+                port: preferredPort,
+                expectedName: expectedName,
+                assignment: true)
+        }
+
         let ports = candidatePorts()
         guard !ports.isEmpty else {
             alert(style: .warning, title: "No device found",
                   text: "Connect the display board to this Mac with a USB cable, then try again.")
             return nil
         }
-        if ports.count == 1 { return ports[0] }
-        for port in ports {
-            guard case .success(let info) = sendCommand("CFGSHOW", port: port, timeout: 2)
-            else { continue }
-            if ConfigCommands.decodeField("name64=", from: info) == currentName {
-                return port
-            }
+        if ports.count == 1 {
+            return validate(
+                port: ports[0],
+                expectedName: expectedName,
+                assignment: false)
+        }
+        guard let expectedName, !expectedName.isEmpty else {
+            alert(style: .warning, title: "Select a USB device",
+                  text: "More than one USB serial device is connected. Select a display in the manager and assign its USB device under Connection.")
+            return nil
+        }
+
+        let matches = ports.filter { port in
+            guard case .success(let info) = sendCommand(
+                "CFGSHOW", port: port, timeout: 2)
+            else { return false }
+            return ConfigCommands.decodeField("name64=", from: info) == expectedName
+        }
+        if matches.count == 1 { return matches[0] }
+        if matches.count > 1 {
+            alert(style: .warning, title: "USB device is ambiguous",
+                  text: "More than one USB device reports the name \"\(expectedName)\". Assign the correct port under Connection before changing the display.")
+            return nil
         }
         alert(style: .warning, title: "Display not found",
-              text: "Multiple USB serial devices are connected, but none reports the name \"\(currentName)\".")
+              text: "No connected USB device reports the name \"\(expectedName)\". Assign its port under Connection, or reconnect the display and try again.")
         return nil
     }
 
-    private static func waitForPort(named name: String, timeout: TimeInterval) -> String? {
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while Date() < deadline {
-            for port in candidatePorts() {
-                guard case .success(let info) = sendCommand("CFGSHOW", port: port, timeout: 1)
-                else { continue }
-                if ConfigCommands.decodeField("name64=", from: info) == name {
-                    return port
-                }
+    private static func validate(
+        port: String,
+        expectedName: String?,
+        assignment: Bool
+    ) -> String? {
+        switch sendCommand("CFGSHOW", port: port, timeout: 3) {
+        case .success(let info):
+            // Choosing a concrete port is the user's explicit identity override.
+            // CFGSHOW still proves that the path speaks our configuration protocol.
+            if assignment { return port }
+            guard let expectedName, !expectedName.isEmpty else { return port }
+            let reportedName = ConfigCommands.decodeField("name64=", from: info) ?? ""
+            guard reportedName == expectedName else {
+                alert(style: .warning, title: "USB device mismatch",
+                      text: "The connected USB device at \(port) reports \"\(reportedName)\", not \"\(expectedName)\". Assign the correct port under Connection before changing the display.")
+                return nil
             }
-            Thread.sleep(forTimeInterval: 0.5)
+            return port
+        case .failure(let reason):
+            let title = assignment ? "Assigned USB device unavailable" : "USB device unavailable"
+            alert(style: .warning, title: title,
+                  text: "Could not verify \(port): \(reason)")
+            return nil
         }
-        return nil
     }
 
     // MARK: dialog
 
-    static func run(initialName: String? = nil, preferredSSID: String? = nil) {
+    static func run(
+        currentName: String? = nil,
+        preferredPort: String? = nil,
+        preferredSSID: String? = nil
+    ) {
         if NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.accessory)
         }
         NSApp.activate(ignoringOtherApps: true)
 
-        let ports = candidatePorts()
-        guard !ports.isEmpty else {
-            alert(style: .warning, title: "No device found",
-                  text: "Connect the display board to this Mac with a USB cable, then open this again.")
-            return
-        }
+        guard let port = matchingPort(
+            for: currentName,
+            preferredPort: preferredPort)
+        else { return }
 
         let alert = NSAlert()
-        alert.messageText = "Configure Display"
-        alert.informativeText = "Saves settings over USB. WiFi passwords you enter are kept in your login Keychain. The board restarts after a change and streaming reconnects automatically."
-        alert.addButton(withTitle: "Save to Device")
+        alert.messageText = "Configure WiFi"
+        alert.informativeText = "Saves network settings to the selected display over USB. Passwords you enter are kept in your login Keychain. The display restarts after a change and streaming reconnects automatically."
+        alert.addButton(withTitle: "Save to Display")
         alert.addButton(withTitle: "Cancel")
 
         let width: CGFloat = 340
-        let portPopup = NSPopUpButton(frame: NSRect(x: 0, y: 170, width: width, height: 26))
-        portPopup.addItems(withTitles: ports)
-
-        let savedPopup = NSPopUpButton(frame: NSRect(x: 0, y: 136, width: width, height: 26))
+        let savedPopup = NSPopUpButton(frame: NSRect(x: 0, y: 106, width: width, height: 26))
         savedPopup.addItem(withTitle: "Custom network…")
         savedPopup.addItems(withTitles: WifiCredentialStore.savedNetworkNames())
 
-        let ssidField = NSTextField(frame: NSRect(x: 0, y: 102, width: width, height: 24))
+        let ssidField = NSTextField(frame: NSRect(x: 0, y: 72, width: width, height: 24))
         ssidField.placeholderString = "Network name (SSID)"
-        let passField = NSSecureTextField(frame: NSRect(x: 0, y: 68, width: width, height: 24))
+        let passField = NSSecureTextField(frame: NSRect(x: 0, y: 38, width: width, height: 24))
         passField.placeholderString = "Password (blank = keep current)"
         let openCheck = NSButton(checkboxWithTitle: "Open network (no password)",
                                  target: nil, action: nil)
-        openCheck.frame = NSRect(x: 0, y: 40, width: width, height: 20)
-        let nameField = NSTextField(frame: NSRect(x: 0, y: 6, width: width, height: 24))
-        nameField.placeholderString = "Device name (a-z, 0-9, dashes)"
-        nameField.stringValue = initialName ?? ""
+        openCheck.frame = NSRect(x: 0, y: 10, width: width, height: 20)
 
         let coordinator = DialogCoordinator(
-            portPopup: portPopup, savedPopup: savedPopup,
+            port: port, savedPopup: savedPopup,
             ssidField: ssidField, passField: passField,
-            openCheck: openCheck, nameField: nameField)
-        portPopup.target = coordinator
-        portPopup.action = #selector(DialogCoordinator.portChanged(_:))
+            openCheck: openCheck)
         savedPopup.target = coordinator
         savedPopup.action = #selector(DialogCoordinator.savedNetworkChanged(_:))
         coordinator.reloadDevice()
         if let preferredSSID { coordinator.selectSavedNetwork(preferredSSID) }
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 200))
-        [portPopup, savedPopup, ssidField, passField, openCheck, nameField]
-            .forEach(accessory.addSubview)
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 142))
+        [savedPopup, ssidField, passField, openCheck].forEach(accessory.addSubview)
         alert.accessoryView = accessory
-        alert.window.initialFirstResponder = passField
+        alert.window.initialFirstResponder = ssidField
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        var port = coordinator.selectedPort
-        let newName = normalizedDeviceName(nameField.stringValue)
-        let renaming = !newName.isEmpty && newName != coordinator.deviceName
-        if renaming {
-            if case .failure(let reason) = sendCommand(
-                ConfigCommands.setName(newName), port: port)
-            {
-                self.alert(style: .critical, title: "Rename failed", text: reason)
-                return
-            }
-            let wifiUnchanged = ssidField.stringValue.trimmingCharacters(in: .whitespaces)
-                    == coordinator.deviceSSID
-                && passField.stringValue.isEmpty && openCheck.state == .off
-            if wifiUnchanged {
-                self.alert(style: .informational, title: "Renamed",
-                           text: "The display is restarting as \"\(newName)\".")
-                return
-            }
-            guard let reconnectedPort = waitForPort(named: newName, timeout: 15) else {
-                self.alert(style: .critical, title: "WiFi not saved",
-                           text: "The name was saved, but the USB serial port did not return after restart. Open Configure Display again to save WiFi.")
-                return
-            }
-            port = reconnectedPort
-        }
 
         let ssid = ssidField.stringValue.trimmingCharacters(in: .whitespaces)
         guard !ssid.isEmpty, ssid.utf8.count <= 32 else {
@@ -411,7 +419,7 @@ enum WifiConfigUI {
            !coordinator.deviceSSID.isEmpty
         {
             self.alert(style: .informational, title: "No changes",
-                       text: "Already configured for \"\(ssid)\" as \"\(coordinator.deviceName)\".")
+                       text: "The display is already configured for \"\(ssid)\".")
             return
         }
 
@@ -424,15 +432,15 @@ enum WifiConfigUI {
             case .set(let password):
                 keychainNote = WifiCredentialStore.save(ssid: ssid, password: password)
                     ? " The credential is saved in Keychain."
-                    : " The board was configured, but Keychain storage failed."
+                    : " The display was configured, but Keychain storage failed."
             case .openNetwork:
                 keychainNote = WifiCredentialStore.save(ssid: ssid, password: "")
                     ? " The open network is saved in Keychain."
-                    : " The board was configured, but Keychain storage failed."
+                    : " The display was configured, but Keychain storage failed."
             case .keepCurrent:
                 break
             }
-            let kept = passwordChange == .keepCurrent ? " (keeping the device password)" : ""
+            let kept = passwordChange == .keepCurrent ? " (keeping the display password)" : ""
             self.alert(style: .informational, title: "Saved",
                        text: "The display is restarting and joining \"\(ssid)\"\(kept).\(keychainNote)")
         case .failure(let reason):

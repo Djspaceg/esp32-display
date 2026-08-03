@@ -11,6 +11,7 @@ struct PanelSnapshot: Identifiable, Codable, Equatable {
     var displayName: String
     var hardwareID: String?
     var address: String?
+    var usbPort: String?
     var discovered = false
     var lastSeen: Date?
     var lastHeartbeatAt: Date?
@@ -78,6 +79,7 @@ struct PanelSnapshot: Identifiable, Codable, Equatable {
 final class PanelManager: ObservableObject {
     @Published private(set) var panels: [PanelSnapshot] = []
     @Published private(set) var savedNetworkNames: [String] = []
+    @Published private(set) var usbSerialPorts: [String] = []
     @Published var selectedServiceName: String?
     @Published private(set) var operationError: String?
 
@@ -100,11 +102,28 @@ final class PanelManager: ObservableObject {
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         selectedServiceName = panels.first?.serviceName
         savedNetworkNames = WifiCredentialStore.savedNetworkNames()
+        usbSerialPorts = WifiConfigUI.candidatePorts()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) {
             [weak self] _ in
-            self?.objectWillChange.send()
+            Task { @MainActor in
+                self?.refreshUSBPorts()
+                self?.objectWillChange.send()
+            }
         }
     }
+
+#if DEBUG
+    init(
+        previewPanels: [PanelSnapshot],
+        savedNetworkNames: [String],
+        usbSerialPorts: [String]
+    ) {
+        panels = previewPanels
+        self.savedNetworkNames = savedNetworkNames
+        self.usbSerialPorts = usbSerialPorts
+        selectedServiceName = previewPanels.first?.serviceName
+    }
+#endif
 
     deinit {
         refreshTimer?.invalidate()
@@ -304,7 +323,9 @@ final class PanelManager: ObservableObject {
     func rename(_ newName: String, for serviceName: String) {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else { return }
         guard let appliedName = WifiConfigUI.renameDevice(
-            currentName: panel.displayName, newName: newName)
+            currentName: panel.displayName,
+            newName: newName,
+            preferredPort: panel.usbPort)
         else { return }
         updatePanel(serviceName) { $0.displayName = appliedName }
         persistIfNeeded(force: true)
@@ -316,14 +337,46 @@ final class PanelManager: ObservableObject {
             operationError = "Select a saved WiFi network first."
             return
         }
-        _ = WifiConfigUI.applySavedNetwork(ssid, currentName: panel.displayName)
+        _ = WifiConfigUI.applySavedNetwork(
+            ssid,
+            currentName: panel.displayName,
+            preferredPort: panel.usbPort)
     }
 
     func configureUSB(preferredSSID: String? = nil) {
+        guard let panel = selectedPanel else {
+            operationError = "Select a display before configuring WiFi."
+            return
+        }
         WifiConfigUI.run(
-            initialName: selectedPanel?.displayName,
+            currentName: panel.displayName,
+            preferredPort: panel.usbPort,
             preferredSSID: preferredSSID)
         refreshSavedNetworks()
+        refreshUSBPorts()
+    }
+
+    func usbPortOptions(for serviceName: String) -> [String] {
+        guard let assigned = panels.first(where: { $0.serviceName == serviceName })?.usbPort,
+              !assigned.isEmpty,
+              !usbSerialPorts.contains(assigned)
+        else { return usbSerialPorts }
+        return [assigned] + usbSerialPorts
+    }
+
+    func setUSBPort(_ port: String?, for serviceName: String) {
+        let normalized = port?.trimmingCharacters(in: .whitespacesAndNewlines)
+        updatePanel(serviceName) { panel in
+            panel.usbPort = normalized?.isEmpty == false ? normalized : nil
+        }
+        persistIfNeeded(force: true)
+    }
+
+    func refreshUSBPorts() {
+        let current = WifiConfigUI.candidatePorts()
+        if current != usbSerialPorts {
+            usbSerialPorts = current
+        }
     }
 
     func refreshSavedNetworks() {
@@ -460,6 +513,70 @@ final class PanelManager: ObservableObject {
         return panels
     }
 }
+
+#if DEBUG
+extension PanelManager {
+    static var preview: PanelManager {
+        let now = Date()
+        let controls = DeviceProtocol.Capabilities.brightness
+            .union(.flip)
+            .union(.identify)
+            .union(.restart)
+            .union(.ota)
+        return PanelManager(
+            previewPanels: [
+                PanelSnapshot(
+                    serviceName: "studio-display",
+                    displayName: "studio-display",
+                    hardwareID: "esp32c6-a1b2c3d4",
+                    address: "192.168.1.42",
+                    usbPort: "/dev/cu.usbserial-A1B2C3D4",
+                    discovered: true,
+                    lastSeen: now,
+                    lastHeartbeatAt: now,
+                    rssi: -52,
+                    displayFPS: 39.8,
+                    framesSent: 128_440,
+                    sendErrors: 0,
+                    diffPercent: 18,
+                    framesShown: 128_397,
+                    framesDropped: 43,
+                    freeHeap: 186_624,
+                    spacingMicros: 200,
+                    firmwareVersion: "1.1.0",
+                    frameProtocolVersion: 2,
+                    controlProtocolVersion: Int(DeviceProtocol.controlProtocolVersion),
+                    capabilitiesRaw: controls.rawValue,
+                    uptimeSeconds: 93_840,
+                    brightness: 255,
+                    brightnessHigh: true,
+                    flipped: false,
+                    sleeping: false,
+                    idle: false,
+                    paused: false,
+                    sourceDescription: "Tiny Monitor"),
+                PanelSnapshot(
+                    serviceName: "travel-display",
+                    displayName: "travel-display",
+                    hardwareID: "esp32c6-e5f60718",
+                    address: "192.168.1.87",
+                    discovered: false,
+                    lastSeen: now.addingTimeInterval(-3_600),
+                    firmwareVersion: "1.1.0",
+                    frameProtocolVersion: 2,
+                    controlProtocolVersion: Int(DeviceProtocol.controlProtocolVersion),
+                    capabilitiesRaw: controls.rawValue,
+                    brightness: 255,
+                    sourceDescription: "Automatic"),
+            ],
+            savedNetworkNames: ["Studio WiFi", "Phone Hotspot"],
+            usbSerialPorts: [
+                "/dev/cu.usbserial-A1B2C3D4",
+                "/dev/cu.usbmodem-E5F60718",
+            ])
+    }
+}
+#endif
 
 private extension JSONEncoder {
     static var espDisplay: JSONEncoder {
