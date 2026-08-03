@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.espdisplay.sender</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__BIN__</string>
+		<string>--fps</string>
+		<string>40</string>
+	</array>
+	<!-- Start at login... -->
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- ...and restart if it ever exits. launchd throttles respawns to
+	     every ~10s, so a crash loop stays cheap. The sender's own
+	     single-instance lock makes a manual double-click coexist safely. -->
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/tmp/espdisplaysender.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/espdisplaysender.log</string>
+</dict>
+</plist>

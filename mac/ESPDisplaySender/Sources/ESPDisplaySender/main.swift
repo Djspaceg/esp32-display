@@ -105,7 +105,7 @@ if !opts.listDisplays && !opts.listWindows {
     // lockFd stays open (and locked) for the process lifetime.
 }
 
-let semaphore = DispatchSemaphore(value: 0)
+
 
 Task {
     do {
@@ -432,4 +432,8 @@ Task {
     }
 }
 
-semaphore.wait()
+// Keep the main run loop alive and serviced (instead of blocking on a
+// semaphore): AppKit UI like the content picker needs it, and it drains the
+// main dispatch queue - the SIGUSR1 handler is scheduled there and could
+// never fire while the main thread was parked in a semaphore wait.
+RunLoop.main.run()
