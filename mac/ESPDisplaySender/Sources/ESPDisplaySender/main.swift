@@ -162,6 +162,23 @@ Task {
             }
         }
 
+        // Backlight sync: when the Mac's displays sleep, tell the device so
+        // it turns its backlight off instead of glowing on stale pixels;
+        // on wake, force a keyframe so the panel repaints promptly.
+        let workspaceNC = NSWorkspace.shared.notificationCenter
+        workspaceNC.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main
+        ) { _ in
+            print("displays slept - sending device to sleep")
+            sender.sendDisplaySleep()
+        }
+        workspaceNC.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+        ) { _ in
+            print("displays woke - forcing keyframe")
+            sender.forceKeyframe()
+        }
+
         var lastReport = Date()
         var lastCount: UInt64 = 0
         func reportProgress(_ label: String, _ count: UInt64) {
