@@ -39,6 +39,12 @@ final class FrameSender {
     private var _spacingMicros: UInt32
     private let spacingInitial: UInt32
     private var stallStreak = 0
+
+    // Hill-climb state (touched only from the heartbeat receive path).
+    private var climbFrames: Int64 = 0
+    private var climbSamples = 0
+    private var climbBaselineFps: Double?
+    private var climbDirection = 0.85  // start by probing toward faster
     private var _lastHeartbeatAt: Date?
     private var _stats = DeviceStats()
     private var prevStats = DeviceStats()
@@ -250,6 +256,10 @@ final class FrameSender {
                 lock.lock()
                 _spacingMicros = spacingInitial
                 lock.unlock()
+                climbFrames = 0
+                climbSamples = 0
+                climbBaselineFps = nil
+                climbDirection = 0.85
                 print("pacing: reset to \(spacingInitial)us (no frames completing - not a rate problem)")
             }
             if stallStreak >= 15 { return }
@@ -259,22 +269,70 @@ final class FrameSender {
 
         let dropRatio = Double(droppedDelta) / Double(shownDelta + droppedDelta)
         let old = spacing
-        if dropRatio > 0.05 {
-            // Back off fast: a collapsing link makes the AP downshift rates,
-            // which shrinks capacity further - lingering makes it worse.
-            spacing = min(UInt32(Double(spacing) * 1.3), spacingMax)
-        } else if dropRatio < 0.01 {
-            // Recover gently to avoid oscillating around the knee.
-            spacing = max(UInt32(Double(spacing) * 0.97), spacingMin)
-        }
-        if spacing != old {
+
+        // Collapse guard: extreme loss means the link is genuinely
+        // oversubscribed (or the AP has downshifted rates), so react
+        // immediately rather than waiting for a probe window.
+        if dropRatio > 0.5 {
+            spacing = min(UInt32(Double(spacing) * 1.4), spacingMax)
+            climbFrames = 0
+            climbSamples = 0
+            climbBaselineFps = nil
             lock.lock()
             _spacingMicros = spacing
             lock.unlock()
-            if abs(Int(spacing) - Int(old)) > Int(old) / 10 {
-                print(String(format: "pacing: %dus -> %dus (drop ratio %.1f%%)",
-                             old, spacing, dropRatio * 100))
-            }
+            print(String(format: "pacing: %dus -> %dus (severe loss %.0f%%)",
+                         old, spacing, dropRatio * 100))
+            return
+        }
+
+        // Hill-climb on *delivered* frame rate. Optimizing for zero drops is
+        // the wrong objective for a video stream - trading a few percent of
+        // dropped frames for a much higher displayed rate is a clear win -
+        // and a drop-ratio controller with thresholds also strands itself in
+        // the dead band between them (measured: stuck at 600us / ~15fps with
+        // drops sitting at 4%, when 200us delivered 33fps).
+        climbFrames += shownDelta
+        climbSamples += 1
+        guard climbSamples >= 3 else { return }  // ~3s per probe: averages out jitter
+        let fps = Double(climbFrames) / Double(climbSamples)
+        climbFrames = 0
+        climbSamples = 0
+
+        guard let baseline = climbBaselineFps else {
+            // First window: record and take one step to get a gradient.
+            climbBaselineFps = fps
+            spacing = clampSpacing(Double(spacing) * climbDirection)
+            applySpacing(spacing, from: old, fps: fps)
+            return
+        }
+
+        if fps > baseline * 1.03 {
+            // Improving: keep stepping the same way.
+        } else if fps < baseline * 0.97 {
+            // Worse: reverse.
+            climbDirection = climbDirection < 1 ? 1.18 : 0.85
+        } else {
+            // Plateau: nudge toward lower latency, since equal delivered fps
+            // at tighter pacing means fresher frames.
+            climbDirection = 0.92
+        }
+        climbBaselineFps = fps
+        spacing = clampSpacing(Double(spacing) * climbDirection)
+        applySpacing(spacing, from: old, fps: fps)
+    }
+
+    private func clampSpacing(_ value: Double) -> UInt32 {
+        UInt32(max(Double(spacingMin), min(value, Double(spacingMax))))
+    }
+
+    private func applySpacing(_ new: UInt32, from old: UInt32, fps: Double) {
+        guard new != old else { return }
+        lock.lock()
+        _spacingMicros = new
+        lock.unlock()
+        if abs(Int(new) - Int(old)) > Int(old) / 8 {
+            print(String(format: "pacing: %dus -> %dus (delivering %.1f fps)", old, new, fps))
         }
     }
 
@@ -291,6 +349,44 @@ final class FrameSender {
     }
 
     // MARK: frames
+
+    private let sendQueue = DispatchQueue(label: "espdisp.send", qos: .userInteractive)
+    private var pendingFrame: [UInt8]?
+    private var pendingLandscape = false
+    private var sendInFlight = false
+
+    /// Queue a frame for sending, keeping only the newest.
+    ///
+    /// Sending is paced (80 chunks x spacing, tens of milliseconds), so doing
+    /// it synchronously inside the ScreenCaptureKit callback back-pressures
+    /// capture and puts stale frames on the wire. A depth-1 slot decouples
+    /// the two: capture returns immediately and whatever frame is newest when
+    /// the sender frees up is the one that goes out.
+    func submit(frame: [UInt8], landscape: Bool) {
+        lock.lock()
+        pendingFrame = frame
+        pendingLandscape = landscape
+        let needsDispatch = !sendInFlight
+        if needsDispatch { sendInFlight = true }
+        lock.unlock()
+        guard needsDispatch else { return }
+        sendQueue.async { [weak self] in self?.drainPending() }
+    }
+
+    private func drainPending() {
+        while true {
+            lock.lock()
+            guard let frame = pendingFrame else {
+                sendInFlight = false
+                lock.unlock()
+                return
+            }
+            pendingFrame = nil
+            let landscape = pendingLandscape
+            lock.unlock()
+            send(frame: frame, landscape: landscape)
+        }
+    }
 
     /// Send one full frame. `pixels` must be exactly 110,080 bytes of
     /// big-endian RGB565. Synchronous chunking with pacing; sends are async
