@@ -39,6 +39,10 @@ struct PanelSnapshot: Identifiable, Equatable {
     var idle = false
     var paused = false
     var sourceDescription = "Automatic"
+    /// Why this panel is not usable, when the reason is something the user
+    /// would otherwise only find in the log. Cleared as soon as the device
+    /// reports in again.
+    var lastError: String?
 
     var capabilities: DeviceProtocol.Capabilities {
         DeviceProtocol.Capabilities(rawValue: capabilitiesRaw)
@@ -75,6 +79,31 @@ struct PanelSnapshot: Identifiable, Equatable {
     }
 }
 
+/// A process-wide problem the app cannot resolve on its own, so the user has
+/// to be told rather than having it recorded in a log they will never read.
+enum AppIssue: String, CaseIterable, Sendable {
+    case screenRecording
+    case deviceConfig
+    case persistence
+
+    var title: String {
+        switch self {
+        case .screenRecording: return "Screen Recording permission needed"
+        case .deviceConfig: return "Per-display source file ignored"
+        case .persistence: return "Display settings could not be saved"
+        }
+    }
+}
+
+/// An `AppIssue` together with the specific detail behind it.
+struct ReportedIssue: Identifiable, Equatable {
+    let issue: AppIssue
+    let detail: String
+
+    var id: String { issue.rawValue }
+    var title: String { issue.title }
+}
+
 /// Main-actor model exposed to SwiftUI. Networking and capture continue in
 /// DeviceSession; this registry only publishes immutable snapshots and routes
 /// user actions to the live session for the selected panel.
@@ -85,6 +114,8 @@ final class PanelManager: ObservableObject {
     @Published private(set) var usbSerialPorts: [String] = []
     @Published var selectedServiceName: String?
     @Published private(set) var operationError: String?
+    /// Standing problems, at most one per kind, in the order first reported.
+    @Published private(set) var issues: [ReportedIssue] = []
 
     private var sessions: [String: DeviceSession] = [:]
     private var supersededServiceNames: Set<String> = []
@@ -98,13 +129,19 @@ final class PanelManager: ObservableObject {
     private let persistenceURL: URL?
 
     init() {
-        persistenceURL = Self.defaultPersistenceURL
-        panels = Self.loadPersistedPanels()
+        let url = PanelStore.defaultURL
+        persistenceURL = url
+        let loaded = PanelStore.load(from: url)
+        panels = loaded.records
             .map(\.snapshot)
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         selectedServiceName = panels.first?.serviceName
         savedNetworkNames = WifiCredentialStore.savedNetworkNames()
         usbSerialPorts = WifiConfigUI.candidatePorts()
+        if let failure = loaded.failure {
+            report(.persistence, detail: "Saved display settings could not be read "
+                + "from \(url?.path ?? "disk"): \(failure)")
+        }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) {
             [weak self] _ in
             Task { @MainActor in
@@ -187,7 +224,34 @@ final class PanelManager: ObservableObject {
         updatePanel(serviceName) { panel in
             panel.discovered = false
             panel.displayFPS = 0
+            panel.lastError = "Gave up trying to reach this display. It is retried "
+                + "automatically once it reappears on the network."
         }
+    }
+
+    // MARK: problem reporting
+
+    /// Record a standing problem, replacing any earlier report of the same kind
+    /// so a repeating failure does not stack up.
+    func report(_ issue: AppIssue, detail: String) {
+        let reported = ReportedIssue(issue: issue, detail: detail)
+        if let index = issues.firstIndex(where: { $0.issue == issue }) {
+            guard issues[index] != reported else { return }
+            issues[index] = reported
+        } else {
+            issues.append(reported)
+        }
+    }
+
+    /// Withdraw a problem because it no longer applies.
+    func resolve(_ issue: AppIssue) {
+        issues.removeAll { $0.issue == issue }
+    }
+
+    /// Dismiss a problem the user has read. Identical to `resolve`, but named
+    /// for the UI so the intent at each call site is obvious.
+    func dismissIssue(_ issue: AppIssue) {
+        resolve(issue)
     }
 
     func update(_ status: DeviceSession.Status) {
@@ -234,6 +298,7 @@ final class PanelManager: ObservableObject {
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
                 panel.lastHeartbeatAt = now
+                panel.lastError = nil
                 panel.framesShown = stats.shown
                 panel.framesDropped = stats.dropped
                 panel.freeHeap = stats.heap
@@ -244,6 +309,7 @@ final class PanelManager: ObservableObject {
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
                 panel.lastHeartbeatAt = now
+                panel.lastError = nil
                 Self.apply(info, to: &panel)
             }
         case .acknowledgement(let acknowledgement):
@@ -495,26 +561,13 @@ final class PanelManager: ObservableObject {
         let now = Date()
         guard force || now.timeIntervalSince(lastPersistedAt) >= 30 else { return }
         lastPersistedAt = now
-        let records = panels.map(PersistedPanel.init(snapshot:))
-        guard let data = try? JSONEncoder.espDisplay.encode(records) else { return }
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: url, options: .atomic)
-    }
-
-    private static var defaultPersistenceURL: URL? {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent("ESPDisplaySender", isDirectory: true)
-            .appendingPathComponent("panels.json")
-    }
-
-    private static func loadPersistedPanels() -> [PersistedPanel] {
-        guard let url = defaultPersistenceURL,
-              let data = try? Data(contentsOf: url),
-              let records = try? JSONDecoder.espDisplay.decode([PersistedPanel].self, from: data)
-        else { return [] }
-        return records
+        do {
+            try PanelStore.save(panels.map(PersistedPanel.init(snapshot:)), to: url)
+            resolve(.persistence)
+        } catch {
+            report(.persistence, detail: "Display names and USB assignments could not "
+                + "be written to \(url.path): \(error.localizedDescription)")
+        }
     }
 }
 
@@ -570,7 +623,9 @@ extension PanelManager {
                     controlProtocolVersion: Int(DeviceProtocol.controlProtocolVersion),
                     capabilitiesRaw: controls.rawValue,
                     brightness: 255,
-                    sourceDescription: "Automatic"),
+                    sourceDescription: "Automatic",
+                    lastError: "Gave up trying to reach this display. It is retried "
+                        + "automatically once it reappears on the network."),
             ],
             savedNetworkNames: ["Studio WiFi", "Phone Hotspot"],
             usbSerialPorts: [

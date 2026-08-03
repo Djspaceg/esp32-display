@@ -10,36 +10,49 @@ struct ManagerView: View {
     @ObservedObject var manager: PanelManager
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $manager.selectedServiceName) {
-                Section("Displays") {
-                    ForEach(manager.panels) { panel in
-                        PanelRow(panel: panel)
-                            .tag(panel.serviceName)
-                            .contextMenu {
-                                Button("Identify") { manager.identify(panel.serviceName) }
-                                    .disabled(!panel.capabilities.contains(.identify))
-                                Button(panel.paused ? "Resume" : "Pause") {
-                                    manager.setPaused(!panel.paused, for: panel.serviceName)
-                                }
-                                Divider()
-                                Button("Forget Display", role: .destructive) {
-                                    manager.forget(panel.serviceName)
-                                }
-                                .disabled(!manager.canForget(panel.serviceName))
-                            }
+        VStack(spacing: 0) {
+            if !manager.issues.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(manager.issues) { issue in
+                        IssueBanner(issue: issue) {
+                            manager.dismissIssue(issue.issue)
+                        }
+                        Divider()
                     }
                 }
+                .background(.quaternary.opacity(0.4))
             }
-            .navigationSplitViewColumnWidth(min: 230, ideal: 280, max: 340)
-        } detail: {
-            if let panel = manager.selectedPanel {
-                PanelDetailView(panel: panel, manager: manager)
-                    .id(panel.serviceName)
-            } else {
-                ContentUnavailableView(
-                    "No Display Selected", systemImage: "display",
-                    description: Text("Discovered and previously known panels appear in the sidebar."))
+            NavigationSplitView {
+                List(selection: $manager.selectedServiceName) {
+                    Section("Displays") {
+                        ForEach(manager.panels) { panel in
+                            PanelRow(panel: panel)
+                                .tag(panel.serviceName)
+                                .contextMenu {
+                                    Button("Identify") { manager.identify(panel.serviceName) }
+                                        .disabled(!panel.capabilities.contains(.identify))
+                                    Button(panel.paused ? "Resume" : "Pause") {
+                                        manager.setPaused(!panel.paused, for: panel.serviceName)
+                                    }
+                                    Divider()
+                                    Button("Forget Display", role: .destructive) {
+                                        manager.forget(panel.serviceName)
+                                    }
+                                    .disabled(!manager.canForget(panel.serviceName))
+                                }
+                        }
+                    }
+                }
+                .navigationSplitViewColumnWidth(min: 230, ideal: 280, max: 340)
+            } detail: {
+                if let panel = manager.selectedPanel {
+                    PanelDetailView(panel: panel, manager: manager)
+                        .id(panel.serviceName)
+                } else {
+                    ContentUnavailableView(
+                        "No Display Selected", systemImage: "display",
+                        description: Text("Discovered and previously known panels appear in the sidebar."))
+                }
             }
         }
         .frame(minWidth: 820, minHeight: 560)
@@ -54,6 +67,39 @@ struct ManagerView: View {
         } message: {
             Text(manager.operationError ?? "The display did not accept the command.")
         }
+    }
+}
+
+/// A standing problem the app cannot fix by itself. Shown above everything
+/// because it usually explains why the rest of the window looks wrong.
+private struct IssueBanner: View {
+    let issue: ReportedIssue
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(issue.title)
+                    .fontWeight(.medium)
+                Text(issue.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Dismiss this message")
+            .accessibilityLabel("Dismiss: \(issue.title)")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 }
 
@@ -80,9 +126,15 @@ private struct PanelRow: View {
                 .foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
+            if panel.lastError != nil {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Has a problem")
+            }
             if panel.paused {
                 Image(systemName: "pause.circle.fill")
                     .foregroundStyle(.secondary)
+                    .accessibilityLabel("Paused")
             }
         }
         .padding(.vertical, 3)
@@ -116,6 +168,10 @@ private struct PanelDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 header
+
+                if let lastError = panel.lastError {
+                    PanelNotice(text: lastError)
+                }
 
                 CompactGroup("Source") {
                     CompactGrid {
@@ -391,6 +447,26 @@ private struct PanelDetailView: View {
         if selectedSSID.isEmpty || !manager.savedNetworkNames.contains(selectedSSID) {
             selectedSSID = manager.savedNetworkNames.first ?? ""
         }
+    }
+}
+
+/// Why one panel is unusable, kept next to that panel rather than in the
+/// window-wide banner.
+private struct PanelNotice: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            Text(text)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.orange.opacity(0.12)))
     }
 }
 
