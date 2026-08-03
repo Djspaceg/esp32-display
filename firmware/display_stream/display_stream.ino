@@ -41,6 +41,10 @@
 
 #include "wifi_config.h"  // compile-time fallback WIFI_SSID / WIFI_PASSWORD (gitignored)
 
+// Hardware-free and unit tested on the host (firmware/test/run_tests.sh).
+// Included here rather than further down because the helpers below use them.
+#include "panel_state.h"
+
 // WiFi credentials live in NVS flash and are reconfigurable over the USB
 // serial port without reflashing (see handleSerialConfig). The compiled-in
 // wifi_config.h values are only the first-boot fallback.
@@ -108,7 +112,9 @@ static uint8_t userBlLevel = BL_HIGH;
 
 // True when the level is nearer high than low, which is what the high/low
 // toggle and the reported flag mean now that any level is possible.
-static inline bool blIsHigh() { return userBlLevel > BL_LOW; }
+static inline bool blIsHigh() {
+  return panelstate::brightnessIsHigh(userBlLevel, BL_LOW);
+}
 
 // ---- Status card & display sleep ----------------------------------------
 // The status card means "nothing is driving this panel", NOT "the picture
@@ -133,6 +139,7 @@ static bool displaySleeping = false;
 // host (firmware/test/run_tests.sh).
 #include "band_protocol.h"
 #include "device_protocol.h"
+#include "control_queue.h"
 using namespace bandproto;
 
 static const uint32_t DEVICE_CAPABILITIES =
@@ -194,19 +201,7 @@ static volatile uint16_t hbPort = 0;
 // Arduino loop. NVS writes, panel changes, LED work, and restarts must never
 // run inside the network callback.
 static portMUX_TYPE controlMux = portMUX_INITIALIZER_UNLOCKED;
-static const uint8_t CONTROL_QUEUE_CAPACITY = 8;
-static deviceproto::ControlCommand controlQueue[CONTROL_QUEUE_CAPACITY];
-static uint8_t controlQueueHead = 0;
-static uint8_t controlQueueTail = 0;
-static uint8_t controlQueueCount = 0;
-static uint16_t recentControlSequences[CONTROL_QUEUE_CAPACITY] = {0};
-static uint8_t recentControlCount = 0;
-static uint8_t recentControlNext = 0;
-static uint16_t appliedControlSequences[CONTROL_QUEUE_CAPACITY] = {0};
-static uint8_t appliedControlCount = 0;
-static uint8_t appliedControlNext = 0;
-static deviceproto::ControlCommand duplicateControlAck = {};
-static volatile bool duplicateControlAckPending = false;
+static controlq::ControlQueue controls;
 static uint32_t restartAt = 0;
 
 AsyncUDP udp;
@@ -264,37 +259,7 @@ static void onPacket(AsyncUDPPacket packet) {
       return;
     }
     portENTER_CRITICAL(&controlMux);
-    bool alreadyApplied = false;
-    for (uint8_t i = 0; i < appliedControlCount; i++) {
-      if (appliedControlSequences[i] == command.sequence) {
-        alreadyApplied = true;
-        break;
-      }
-    }
-    bool recentlySeen = alreadyApplied;
-    for (uint8_t i = 0; !recentlySeen && i < recentControlCount; i++) {
-      if (recentControlSequences[i] == command.sequence) {
-        recentlySeen = true;
-      }
-    }
-    if (recentlySeen) {
-      // Only replay an ACK after that sequence has actually been applied.
-      // Duplicates of a queued command are dropped; the original emits its
-      // acknowledgement after the loop applies it. Checking both rings also
-      // prevents a late duplicate from being re-enqueued when the recent ring
-      // advances before the applied ring does.
-      if (alreadyApplied) {
-        duplicateControlAck = command;
-        duplicateControlAckPending = true;
-      }
-    } else if (controlQueueCount < CONTROL_QUEUE_CAPACITY) {
-      controlQueue[controlQueueTail] = command;
-      controlQueueTail = (controlQueueTail + 1) % CONTROL_QUEUE_CAPACITY;
-      controlQueueCount++;
-      recentControlSequences[recentControlNext] = command.sequence;
-      recentControlNext = (recentControlNext + 1) % CONTROL_QUEUE_CAPACITY;
-      if (recentControlCount < CONTROL_QUEUE_CAPACITY) recentControlCount++;
-    }
+    controls.offer(command);
     portEXIT_CRITICAL(&controlMux);
     return;
   }
@@ -422,19 +387,13 @@ static void applyPanelConfig(bool landscape) {
 }
 
 static uint8_t currentDeviceFlags() {
-  uint8_t flags = 0;
-  if (blIsHigh()) flags |= 0x01;
-  if (panelFlip180) flags |= 0x02;
-  if (displaySleeping) flags |= 0x04;
-  if (idleActive) flags |= 0x08;
-  if (WiFi.status() == WL_CONNECTED) flags |= 0x10;
-  return flags;
+  return panelstate::deviceFlags(blIsHigh(), panelFlip180, displaySleeping,
+                                 idleActive, WiFi.status() == WL_CONNECTED);
 }
 
 static uint8_t currentBrightness() {
-  if (displaySleeping) return 0;
-  if (idleActive) return BL_IDLE;
-  return userBlLevel;
+  return panelstate::backlightLevel(displaySleeping, idleActive, userBlLevel,
+                                    BL_IDLE);
 }
 
 // Drive the backlight to whatever the current state calls for. Every place
@@ -469,17 +428,8 @@ static void applyPendingControl() {
   bool hasCommand = false;
   bool hasDuplicateAck = false;
   portENTER_CRITICAL(&controlMux);
-  if (controlQueueCount > 0) {
-    command = controlQueue[controlQueueHead];
-    controlQueueHead = (controlQueueHead + 1) % CONTROL_QUEUE_CAPACITY;
-    controlQueueCount--;
-    hasCommand = true;
-  }
-  if (duplicateControlAckPending) {
-    duplicateAck = duplicateControlAck;
-    duplicateControlAckPending = false;
-    hasDuplicateAck = true;
-  }
+  hasCommand = controls.take(command);
+  hasDuplicateAck = controls.takeDuplicateAck(duplicateAck);
   portEXIT_CRITICAL(&controlMux);
 
   if (hasCommand) {
@@ -514,9 +464,7 @@ static void applyPendingControl() {
         break;
     }
     portENTER_CRITICAL(&controlMux);
-    appliedControlSequences[appliedControlNext] = command.sequence;
-    appliedControlNext = (appliedControlNext + 1) % CONTROL_QUEUE_CAPACITY;
-    if (appliedControlCount < CONTROL_QUEUE_CAPACITY) appliedControlCount++;
+    controls.markApplied(command.sequence);
     portEXIT_CRITICAL(&controlMux);
     sendControlAck(command);
     sendDeviceInfo();
