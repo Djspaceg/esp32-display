@@ -89,9 +89,24 @@ final class FrameSender {
     ///   - port: UDP port the firmware listens on.
     ///   - spacingMicros: initial per-chunk pacing sleep in microseconds.
     ///   - adaptivePacing: auto-tune pacing from device heartbeat stats.
+    /// Bonjour service endpoint to connect to instead of host:port. Service
+    /// endpoints re-resolve on every connection attempt, so reconnects heal
+    /// device address changes with no name/IP bookkeeping at all.
+    private let serviceEndpoint: NWEndpoint?
+
     init(host: String, port: UInt16, spacingMicros: UInt32 = 200, adaptivePacing: Bool = true) {
         self.host = host
         self.port = port
+        self.serviceEndpoint = nil
+        self._spacingMicros = spacingMicros
+        self.spacingInitial = spacingMicros
+        self.adaptivePacing = adaptivePacing
+    }
+
+    init(endpoint: NWEndpoint, spacingMicros: UInt32 = 200, adaptivePacing: Bool = true) {
+        self.host = "\(endpoint)"
+        self.port = 0
+        self.serviceEndpoint = endpoint
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
         self.adaptivePacing = adaptivePacing
@@ -116,6 +131,12 @@ final class FrameSender {
     /// timing out at RSSI -92 while ping ran at 0% loss). Without this the
     /// stream would be dead despite a perfectly usable path.
     func start(timeoutSeconds: Double = 8) async throws {
+        // Service endpoints (from discovery) re-resolve themselves; only
+        // host-based connections need the cached-IP fallback dance.
+        if serviceEndpoint != nil {
+            try await connect(to: nil, timeoutSeconds: timeoutSeconds)
+            return
+        }
         var candidates = [host]
         if let cached = Self.cachedIP(), cached != host {
             candidates.append(cached)
@@ -138,16 +159,21 @@ final class FrameSender {
                 userInfo: [NSLocalizedDescriptionKey: "no reachable endpoint for \(host)"])
     }
 
-    private func connect(to endpointHost: String, timeoutSeconds: Double) async throws {
+    private func connect(to endpointHost: String?, timeoutSeconds: Double) async throws {
         connection?.cancel()
 
         let params = NWParameters.udp
         params.serviceClass = .interactiveVideo
-        let conn = NWConnection(
-            host: NWEndpoint.Host(endpointHost),
-            port: NWEndpoint.Port(rawValue: port)!,
-            using: params
-        )
+        let conn: NWConnection
+        if let service = serviceEndpoint {
+            conn = NWConnection(to: service, using: params)
+        } else {
+            conn = NWConnection(
+                host: NWEndpoint.Host(endpointHost!),
+                port: NWEndpoint.Port(rawValue: port)!,
+                using: params
+            )
+        }
         connection = conn
         conn.stateUpdateHandler = { state in
             switch state {

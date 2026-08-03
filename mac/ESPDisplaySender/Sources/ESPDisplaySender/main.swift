@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import ScreenCaptureKit
+import SenderProtocol
 
 // ESPDisplaySender: captures a macOS display (BetterDisplay virtual screen)
 // with ScreenCaptureKit, converts to RGB565BE, and streams it over UDP to
@@ -20,6 +21,8 @@ struct Options {
     var listDisplays = false
     var listWindows = false
     var configure = false
+    var hostExplicit = false
+    var devicesConfig = "~/.config/espdisplay/devices.json"
     var windowName = ""
     var landscape = false
     var adaptivePacing = true
@@ -41,7 +44,10 @@ func parseOptions() -> Options {
             return args.removeFirst()
         }
         switch arg {
-        case "--host": opts.host = value(arg)
+        case "--host":
+            opts.host = value(arg)
+            opts.hostExplicit = true
+        case "--devices-config": opts.devicesConfig = value(arg)
         case "--port": opts.port = UInt16(value(arg)) ?? opts.port
         case "--mode": opts.mode = value(arg)
         case "--display": opts.displayName = value(arg)
@@ -76,7 +82,12 @@ func parseOptions() -> Options {
                   --configure              device WiFi setup dialog (USB serial);
                                            also opens when the app is double-clicked
                                            while the agent is already running
-                  --host <host>            ESP32 host (default espdisplay.local)
+                  --host <host>            skip discovery and stream to one host
+                  --devices-config <path>  per-device sources as JSON, keyed by device
+                                           name (default ~/.config/espdisplay/devices.json):
+                                             {"espdisplay-9050": {"display": "Tiny Monitor"},
+                                              "espdisplay-abcd": {"window": "Music"}}
+                                           devices with no entry use automatic selection
                   --port <port>            UDP port (default 5568)
                   --fps <n>                target frame rate (default 40)
                   --spacing-us <n>         pacing sleep per chunk in microseconds (default 200;
@@ -146,73 +157,74 @@ Task {
             exit(0)
         }
 
-        let sender = FrameSender(host: opts.host, port: opts.port,
-                                 spacingMicros: opts.spacingMicros,
-                                 adaptivePacing: opts.adaptivePacing)
-        print("connecting to \(opts.host):\(opts.port) ...")
-        // mDNS resolution fails while the ESP32 is booting or off the
-        // network; keep retrying instead of dying.
-        while true {
-            do {
-                try await sender.start()
-                break
-            } catch {
-                print("connect failed (\(error.localizedDescription)) - retrying in 5s")
-                try await Task.sleep(nanoseconds: 5_000_000_000)
-            }
-        }
-
-        // Backlight sync: when the Mac's displays sleep, tell the device so
-        // it turns its backlight off instead of glowing on stale pixels;
-        // on wake, force a keyframe so the panel repaints promptly.
+        // Sessions register here; backlight sync fans out to all of them.
+        let registry = SessionRegistry()
         let workspaceNC = NSWorkspace.shared.notificationCenter
         workspaceNC.addObserver(
             forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main
         ) { _ in
-            print("displays slept - sending device to sleep")
-            sender.sendDisplaySleep()
+            print("displays slept - sending devices to sleep")
+            registry.all.forEach { $0.sendDisplaySleep() }
         }
         workspaceNC.addObserver(
             forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
         ) { _ in
-            print("displays woke - forcing keyframe")
-            sender.forceKeyframe()
+            print("displays woke - forcing keyframes")
+            registry.all.forEach { $0.forceKeyframe() }
         }
 
-        var lastReport = Date()
-        var lastCount: UInt64 = 0
-        func reportProgress(_ label: String, _ count: UInt64) {
-            let now = Date()
-            let dt = now.timeIntervalSince(lastReport)
-            if dt >= 5 {
-                let fps = Double(count - lastCount) / dt
-                let stats = sender.deviceStats
-                let hb = sender.heartbeatAge.map { String(format: "%.0fs ago", $0) } ?? "never"
-                let diffPct = sender.bandsConsidered > 0
-                    ? Double(sender.bandsSent) * 100 / Double(sender.bandsConsidered) : 0
-                print(String(
-                    format: "%@: %.1f fps (%llu total, %llu send errors, diff %.0f%%) | device: "
-                        + "shown=%u dropped=%u heap=%u hb=%@ pacing=%uus",
-                    label, fps, count, sender.sendErrors, diffPct,
-                    stats.shown, stats.dropped, stats.heap, hb, sender.spacingMicros))
-                lastReport = now
-                lastCount = count
+        // Single device for test/window modes: explicit --host wins,
+        // otherwise the first discovered _espdisp._udp service.
+        func makeSingleSender() async -> FrameSender {
+            if opts.hostExplicit {
+                return FrameSender(host: opts.host, port: opts.port,
+                                   spacingMicros: opts.spacingMicros,
+                                   adaptivePacing: opts.adaptivePacing)
+            }
+            print("discovering devices (_espdisp._udp) ...")
+            while true {
+                if let device = await discoverFirstDevice(timeoutSeconds: 8) {
+                    print("using device \"\(device.name)\"")
+                    return FrameSender(endpoint: device.endpoint,
+                                       spacingMicros: opts.spacingMicros,
+                                       adaptivePacing: opts.adaptivePacing)
+                }
+                print("no devices found yet - still browsing ...")
             }
         }
 
         switch opts.mode {
         case "test":
-            print("test pattern at \(opts.fps) fps -> \(opts.host)"
-                + (opts.landscape ? " (landscape)" : ""))
+            let sender = await makeSingleSender()
+            while true {
+                do {
+                    try await sender.start()
+                    break
+                } catch {
+                    print("connect failed (\(error.localizedDescription)) - retrying in 5s")
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                }
+            }
+            print("test pattern at \(opts.fps) fps" + (opts.landscape ? " (landscape)" : ""))
             var frame = [UInt8](repeating: 0, count: FrameSender.frameBytes)
             var tick = 0
+            var lastReport = Date()
+            var lastCount: UInt64 = 0
             let interval = 1.0 / Double(opts.fps)
             while true {
                 let t0 = Date()
                 TestPattern.frame(tick: tick, landscape: opts.landscape, into: &frame)
                 sender.send(frame: frame, landscape: opts.landscape)
                 tick += 1
-                reportProgress("sent", sender.framesSent)
+                if Date().timeIntervalSince(lastReport) >= 5 {
+                    let fps = Double(sender.framesSent - lastCount)
+                        / Date().timeIntervalSince(lastReport)
+                    let stats = sender.deviceStats
+                    print(String(format: "sent: %.1f fps | device: shown=%u dropped=%u pacing=%uus",
+                                 fps, stats.shown, stats.dropped, sender.spacingMicros))
+                    lastReport = Date()
+                    lastCount = sender.framesSent
+                }
                 let elapsed = Date().timeIntervalSince(t0)
                 if elapsed < interval {
                     try await Task.sleep(nanoseconds: UInt64((interval - elapsed) * 1e9))
@@ -233,23 +245,10 @@ Task {
                 exit(1)
             }
 
-            // Outer loop restarts capture whenever the display disappears,
-            // changes shape, or resolves to a different capture source
-            // (e.g. becomes a mirror target). Display reconfiguration kills
-            // the SCStream *silently* - no delegate error fires - so we poll
-            // and compare. Identity is anchored on the display's UUID, which
-            // survives every reconfiguration; it's cached to disk so even a
-            // sender restart mid-mirror re-finds the display.
-            // Source priority, re-evaluated continuously so the stream
-            // follows whatever macOS is doing without any command:
-            //   1. The user's explicit pick in macOS's content picker
-            //      (Control Center / menu bar). This covers the mirroring
-            //      dialog's "Window or App" case, which tears the virtual
-            //      display down entirely, and can be changed at any time.
-            //   2. Automatic virtual-display tracking: "Extended Display"
-            //      leaves an independently capturable display, "Entire
-            //      Screen" leaves a mirror-set member we traverse to its
-            //      source.
+            // One supervised session per device. Source priority within a
+            // session (see DeviceSession): explicit per-device config entry
+            // (window or display), else the user's picker selection, else
+            // automatic virtual-display tracking.
             let picker = PickerSource()
             picker.activate()
             print("macOS content picker active - pick or change the source any time from "
@@ -260,129 +259,72 @@ Task {
             sigSource.resume()
             signal(SIGUSR1, SIG_IGN)
 
-            let uuidCachePath = "/tmp/espdisplaysender-display-uuid"
-            var knownUUID = try? String(
-                contentsOfFile: uuidCachePath, encoding: .utf8
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
-            var announced = false
-            var lastReconnectAt = Date.distantPast
-            var pickerFailures = 0
-
-            while true {
-                let capture = DisplayCapture { rgb565, landscape in
-                    sender.submit(frame: rgb565, landscape: landscape)
+            // Optional per-device sources: {"espdisplay-9050": {"display":
+            // "Tiny Monitor"}, "espdisplay-abcd": {"window": "Music"}}.
+            var sourceConfig: [String: SourceSpec] = [:]
+            let configPath = (opts.devicesConfig as NSString).expandingTildeInPath
+            if let data = FileManager.default.contents(atPath: configPath) {
+                do {
+                    sourceConfig = try DeviceSourceConfig.parse(data)
+                    print("device sources from \(configPath): "
+                        + "\(sourceConfig.keys.sorted().joined(separator: ", "))")
+                } catch {
+                    FileHandle.standardError.write(
+                        Data("ignoring malformed \(configPath): \(error.localizedDescription)\n".utf8))
                 }
-                // Any picker activity (new pick, re-pick, or clear) bumps the
-                // generation; comparing against this baseline detects a user
-                // choice in either direction - display -> picked source and
-                // picked source -> re-picked.
-                let baselinePickerGen = picker.generation
-                var displayShape: (CGDirectDisplayID, Int, Int, Bool)?
-
-                if let selection = picker.current {
-                    do {
-                        try await capture.start(contentFilter: selection.filter, fps: opts.fps)
-                        pickerFailures = 0
-                        announced = false
-                        print("capturing \(picker.describe(selection.filter)) "
-                            + "from picker selection at \(opts.fps) fps")
-                    } catch {
-                        // A picked window that closed would otherwise wedge
-                        // us here; after a few tries fall back to automatic
-                        // display tracking rather than freeze.
-                        pickerFailures += 1
-                        FileHandle.standardError.write(
-                            Data("picker source failed: \(error.localizedDescription)\n".utf8))
-                        if pickerFailures >= 3 {
-                            picker.clearSelection()
-                            pickerFailures = 0
-                        }
-                        try await Task.sleep(nanoseconds: 2_000_000_000)
-                        continue
-                    }
-                } else if let resolved = await DisplayCapture.resolve(
-                    named: opts.displayName, knownUUID: knownUUID)
-                {
-                    if let uuid = resolved.targetUUID, uuid != knownUUID {
-                        knownUUID = uuid
-                        try? uuid.write(toFile: uuidCachePath, atomically: true, encoding: .utf8)
-                    }
-                    let display = resolved.display
-                    displayShape = (display.displayID, display.width, display.height,
-                                    resolved.viaMirror)
-                    do {
-                        try await capture.start(display: display, fps: opts.fps)
-                        announced = false
-                        let name = DisplayCapture.name(for: display.displayID) ?? "?"
-                        print("capturing \"\(name)\" (\(display.width)x\(display.height)) at "
-                            + "\(opts.fps) fps\(resolved.viaMirror ? " [mirror source]" : "")")
-                    } catch {
-                        FileHandle.standardError.write(
-                            Data("capture start failed: \(error.localizedDescription), retrying\n".utf8))
-                        try await Task.sleep(nanoseconds: 2_000_000_000)
-                        continue
-                    }
-                } else {
-                    if !announced {
-                        print("no source available: \"\(opts.displayName)\" isn't a capturable "
-                            + "display and nothing is picked. Set the display to Extended "
-                            + "Display or Entire Screen, or pick a window/app from the "
-                            + "menu bar screen-sharing icon.")
-                        announced = true
-                    }
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
-                    continue
+            }
+            func sourceFor(_ name: String) -> DeviceSession.Source {
+                if let spec = sourceConfig[name] {
+                    if let w = spec.window { return .window(w) }
+                    if let d = spec.display { return .display(d) }
                 }
+                return .auto(defaultDisplay: opts.displayName)
+            }
+            func launchSession(name: String, sender: FrameSender) {
+                let session = DeviceSession(
+                    name: name, sender: sender, source: sourceFor(name),
+                    picker: picker, fps: opts.fps)
+                registry.add(session)
+                Task {
+                    // run() only returns if the device never became
+                    // reachable; retire it so the browser can retry later
+                    // instead of spinning on an mDNS ghost.
+                    if await session.run() == false {
+                        registry.retire(name)
+                    }
+                }
+            }
 
-                // Watchdog: poll for death, reconfiguration, silent stalls,
-                // a user source change, and a blackholed network path. 2s
-                // cadence keeps the gap after a macOS display operation short.
+            if opts.hostExplicit {
+                launchSession(
+                    name: "device",
+                    sender: FrameSender(host: opts.host, port: opts.port,
+                                        spacingMicros: opts.spacingMicros,
+                                        adaptivePacing: opts.adaptivePacing))
+            } else {
+                // Discovery: every _espdisp._udp service gets a session as
+                // it appears. Disappearance is deliberately NOT fatal - mDNS
+                // flaps during network transitions, and sessions already
+                // self-heal through unreachable devices.
+                print("discovering devices (_espdisp._udp) - sessions start as panels appear")
+                let browser = DeviceBrowser { devices in
+                    for device in devices where !registry.shouldSkip(device.name) {
+                        print("discovered device \"\(device.name)\"")
+                        launchSession(
+                            name: device.name,
+                            sender: FrameSender(endpoint: device.endpoint,
+                                                spacingMicros: opts.spacingMicros,
+                                                adaptivePacing: opts.adaptivePacing))
+                    }
+                }
+                browser.start()
+                // Park forever; `browser` stays retained by this scope.
                 while true {
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
-                    reportProgress("streamed", sender.framesSent)
-
-                    if picker.generation != baselinePickerGen {
-                        print("source selection changed - switching")
-                        break
-                    }
-                    if capture.stopped {
-                        print("capture stream died - restarting")
-                        break
-                    }
-                    // Sleep/wake can kill the stream without firing the
-                    // delegate; a healthy stream emits status samples even
-                    // when the screen is static.
-                    if Date().timeIntervalSince(capture.lastSampleAt) > 30 {
-                        print("no capture samples for 30s - restarting capture")
-                        break
-                    }
-                    // Only relevant while tracking a display; a picked source
-                    // is independent of display topology.
-                    if let shape = displayShape {
-                        let current = await DisplayCapture.resolve(
-                            named: opts.displayName, knownUUID: knownUUID)
-                        if current == nil
-                            || (current!.display.displayID, current!.display.width,
-                                current!.display.height, current!.viaMirror) != shape
-                        {
-                            print("display configuration changed - restarting capture")
-                            break
-                        }
-                    }
-                    // Device heartbeats stop when the ESP32 rebooted onto a
-                    // new address or dropped off WiFi; re-resolving heals it.
-                    // (Firmware only learns our reply address after our first
-                    // packet, so a nil age right after connect is normal -
-                    // the 2s keepalive pings bootstrap it.)
-                    if let age = sender.heartbeatAge, age > 10,
-                        Date().timeIntervalSince(lastReconnectAt) > 15
-                    {
-                        print(String(format: "no device heartbeat for %.0fs", age))
-                        lastReconnectAt = Date()
-                        await sender.reconnect()
-                    }
+                    try await Task.sleep(nanoseconds: 60_000_000_000)
                 }
-                await capture.stop()
+            }
+            while true {
+                try await Task.sleep(nanoseconds: 60_000_000_000)
             }
 
         case "window":
@@ -393,71 +335,14 @@ Task {
             }
             // Window capture bypasses the virtual display entirely - it
             // follows the app's window even when occluded, moved between
-            // displays, or when no virtual display exists at all.
-            var announced = false
-            var lastReconnectAt = Date.distantPast
-            while true {
-                guard let window = await DisplayCapture.findWindow(matching: opts.windowName)
-                else {
-                    if !announced {
-                        print("waiting for a window matching \"\(opts.windowName)\" ...")
-                        announced = true
-                    }
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
-                    continue
-                }
-                announced = false
-                let app = window.owningApplication?.applicationName ?? "?"
-                let title = window.title ?? ""
-                let windowID = window.windowID
-                let wasLandscape = window.frame.width > window.frame.height
-                print("capturing window [\(windowID)] \(app): \"\(title)\" "
-                    + "(\(Int(window.frame.width))x\(Int(window.frame.height))) at \(opts.fps) fps")
-
-                let capture = DisplayCapture { rgb565, landscape in
-                    sender.submit(frame: rgb565, landscape: landscape)
-                }
-                do {
-                    try await capture.start(window: window, fps: opts.fps)
-                } catch {
-                    FileHandle.standardError.write(
-                        Data("window capture start failed: \(error), retrying\n".utf8))
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
-                    continue
-                }
-
-                while true {
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
-                    reportProgress("streamed", sender.framesSent)
-                    if capture.stopped {
-                        print("window capture died - restarting")
-                        break
-                    }
-                    if Date().timeIntervalSince(capture.lastSampleAt) > 30 {
-                        print("no capture samples for 30s - restarting capture")
-                        break
-                    }
-                    // Window closed, or resized across the aspect boundary
-                    // (orientation is baked into the stream config).
-                    let current = await DisplayCapture.findWindow(matching: opts.windowName)
-                    if current == nil || current!.windowID != windowID {
-                        print("window changed or closed - restarting capture")
-                        break
-                    }
-                    if (current!.frame.width > current!.frame.height) != wasLandscape {
-                        print("window aspect flipped - restarting capture")
-                        break
-                    }
-                    if let age = sender.heartbeatAge, age > 10,
-                        Date().timeIntervalSince(lastReconnectAt) > 15
-                    {
-                        print(String(format: "no device heartbeat for %.0fs", age))
-                        lastReconnectAt = Date()
-                        await sender.reconnect()
-                    }
-                }
-                await capture.stop()
-            }
+            // displays, or when no virtual display exists at all. Runs as a
+            // single DeviceSession with a window source.
+            let sender = await makeSingleSender()
+            let session = DeviceSession(
+                name: "device", sender: sender,
+                source: .window(opts.windowName), picker: nil, fps: opts.fps)
+            registry.add(session)
+            await session.run()
 
         default:
             FileHandle.standardError.write(Data("unknown mode \(opts.mode)\n".utf8))
