@@ -4,7 +4,10 @@ import Network
 import ScreenCaptureKit
 import SenderProtocol
 
-struct PanelSnapshot: Identifiable, Codable, Equatable {
+/// The live view of a panel: persisted identity merged with whatever the
+/// device has reported during this run. Intentionally not `Codable` — see
+/// `PersistedPanel` for the subset that reaches disk.
+struct PanelSnapshot: Identifiable, Equatable {
     var id: String { serviceName }
 
     var serviceName: String
@@ -92,13 +95,7 @@ final class PanelManager: ObservableObject {
 
     init() {
         panels = Self.loadPersistedPanels()
-            .map { panel in
-                var offline = panel
-                offline.discovered = false
-                offline.lastHeartbeatAt = nil
-                offline.displayFPS = 0
-                return offline
-            }
+            .map(\.snapshot)
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         selectedServiceName = panels.first?.serviceName
         savedNetworkNames = WifiCredentialStore.savedNetworkNames()
@@ -490,8 +487,9 @@ final class PanelManager: ObservableObject {
         let now = Date()
         guard force || now.timeIntervalSince(lastPersistedAt) >= 30 else { return }
         lastPersistedAt = now
+        let records = panels.map(PersistedPanel.init(snapshot:))
         guard let url = Self.persistenceURL,
-              let data = try? JSONEncoder.espDisplay.encode(panels)
+              let data = try? JSONEncoder.espDisplay.encode(records)
         else { return }
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -505,12 +503,12 @@ final class PanelManager: ObservableObject {
             .appendingPathComponent("panels.json")
     }
 
-    private static func loadPersistedPanels() -> [PanelSnapshot] {
+    private static func loadPersistedPanels() -> [PersistedPanel] {
         guard let url = persistenceURL,
               let data = try? Data(contentsOf: url),
-              let panels = try? JSONDecoder.espDisplay.decode([PanelSnapshot].self, from: data)
+              let records = try? JSONDecoder.espDisplay.decode([PersistedPanel].self, from: data)
         else { return [] }
-        return panels
+        return records
     }
 }
 
@@ -577,19 +575,3 @@ extension PanelManager {
 }
 #endif
 
-private extension JSONEncoder {
-    static var espDisplay: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return encoder
-    }
-}
-
-private extension JSONDecoder {
-    static var espDisplay: JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
-    }
-}
