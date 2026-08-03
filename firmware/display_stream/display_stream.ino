@@ -61,27 +61,49 @@ static const uint32_t DEBOUNCE_MS = 30;
 static const uint8_t BL_HIGH = 128;  // 50%, Waveshare's recommended ceiling
 static const uint8_t BL_LOW = 24;    // ~10%
 
-// ---- Protocol ----------------------------------------------------------
+// ---- Protocol (v2: dirty bands) -----------------------------------------
+// The frame is tiled into row bands; the sender transmits only bands that
+// changed since its previous frame (plus periodic keyframes). Packet:
+//   [frame_id u16 LE][band_index u16 LE][dirty_count u16 LE][band payload]
+// dirty_count = number of bands in THIS frame (bit15 = landscape).
+// Bands are orientation-native so they align to whole rows:
+//   portrait  172px rows: 4 rows x 344B = 1376B, 80 bands
+//   landscape 320px rows: 2 rows x 640B = 1280B, 86 bands
 static const uint16_t UDP_PORT = 5568;
 static const size_t FRAME_BYTES = (size_t)PANEL_W * PANEL_H * 2;  // 110080
-static const size_t CHUNK_PAYLOAD = 1376;                         // 4 rows
-static const uint16_t CHUNK_COUNT = FRAME_BYTES / CHUNK_PAYLOAD;  // 80
 static const size_t HEADER_BYTES = 6;
+static const uint16_t BANDS_PORTRAIT = 80;
+static const uint16_t BANDS_LANDSCAPE = 86;
+static const size_t BAND_BYTES_PORTRAIT = 1376;
+static const size_t BAND_BYTES_LANDSCAPE = 1280;
+static const int ROWS_PER_BAND_PORTRAIT = 4;
+static const int ROWS_PER_BAND_LANDSCAPE = 2;
+static const uint16_t MAX_BANDS = 86;
+static const size_t BITMAP_BYTES = (MAX_BANDS + 7) / 8;
 
 // ---- Buffers -----------------------------------------------------------
+// bufA: persistent assembled frame, written by the UDP callback per band.
+// bufB: DMA staging - dirty strips are memcpy'd here before queueing, so
+//       SPI DMA never reads memory the network path is writing.
 static uint8_t *bufA = nullptr;
 static uint8_t *bufB = nullptr;
 
-static uint8_t *backBuf = nullptr;              // owned by UDP callback
-static uint8_t *volatile readyBuf = nullptr;    // handoff: UDP -> loop
-static uint8_t *volatile dmaBuf = nullptr;      // owned by SPI DMA
-
 static uint16_t rxFrameId = 0;
-static uint16_t rxChunksSeen = 0;
+static uint16_t rxBandsSeen = 0;
+static uint16_t rxBandsExpected = 0;
 static bool rxFrameActive = false;
-static uint8_t rxChunkBitmap[(80 + 7) / 8];      // dedup: WiFi retransmits duplicate chunks
+static uint8_t rxBandBitmap[BITMAP_BYTES];       // dedup within the current frame
 static bool rxLandscape = false;                 // orientation of frame being assembled
-static volatile bool readyLandscape = false;     // orientation of readyBuf
+static bool bufLandscape = false;                // orientation of bufA's content
+
+// Bands applied to bufA but not yet drawn. Accumulates across frames so
+// bands from an abandoned partial frame still reach the panel with the next
+// completed frame. Guarded by drawMux (UDP callback runs in the lwIP task).
+static uint8_t pendingDrawBitmap[BITMAP_BYTES];
+static portMUX_TYPE drawMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t framesCompleted = 0;    // completion signal: UDP -> loop
+static volatile bool pendingLandscape = false;   // orientation for the pending draw
+
 static bool panelLandscape = false;              // current panel MADCTL state
 static bool panelFlip180 = false;                // user flip via BOOT long press
 static bool madctlDirty = false;                 // panel config needs reapplying
@@ -93,7 +115,8 @@ static volatile uint32_t statFramesSkipped = 0;  // complete but no free buffer
 static volatile uint32_t statPackets = 0;
 static volatile uint32_t statBadLen = 0;
 static volatile uint32_t statDrawErrors = 0;
-static uint32_t dmaQueuedAt = 0;  // for DMA-stall detection
+static volatile int32_t dmaInFlight = 0;  // queued strip draws not yet completed
+static uint32_t dmaQueuedAt = 0;          // for DMA-stall detection
 
 // Reply endpoint: source of the most recent packet from the Mac. Used for
 // the 1Hz heartbeat so the sender can detect blackholing (wrong IP after a
@@ -104,10 +127,12 @@ static volatile uint16_t hbPort = 0;
 
 AsyncUDP udp;
 
-// ISR context: DMA finished reading dmaBuf; it's free for reuse.
+// ISR context: one queued strip transfer finished.
 static bool IRAM_ATTR onColorTransDone(esp_lcd_panel_io_handle_t,
                                        esp_lcd_panel_io_event_data_t *, void *) {
-  dmaBuf = nullptr;
+  if (dmaInFlight > 0) {
+    dmaInFlight = dmaInFlight - 1;
+  }
   return false;
 }
 
@@ -122,26 +147,28 @@ static void onPacket(AsyncUDPPacket packet) {
   if (len == 4 && memcmp(data, "EPNG", 4) == 0) {
     return;  // keepalive ping: endpoint refresh only
   }
-  if (len != HEADER_BYTES + CHUNK_PAYLOAD) {
+  uint16_t frameId = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+  uint16_t bandIndex = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+  uint16_t countField = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
+  bool landscape = (countField & 0x8000) != 0;
+  uint16_t dirtyCount = countField & 0x7FFF;
+  uint16_t totalBands = landscape ? BANDS_LANDSCAPE : BANDS_PORTRAIT;
+  size_t bandBytes = landscape ? BAND_BYTES_LANDSCAPE : BAND_BYTES_PORTRAIT;
+
+  if (len != HEADER_BYTES + bandBytes) {
     statBadLen = statBadLen + 1;
     return;
   }
-  statPackets = statPackets + 1;
-
-  uint16_t frameId = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
-  uint16_t chunkIndex = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
-  uint16_t chunkCount = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
-  // Top bit of chunk_count carries orientation: 0 = portrait (172x320),
-  // 1 = landscape (320x172). Same byte count either way.
-  bool landscape = (chunkCount & 0x8000) != 0;
-  if ((chunkCount & 0x7FFF) != CHUNK_COUNT || chunkIndex >= CHUNK_COUNT) {
+  if (dirtyCount == 0 || dirtyCount > totalBands || bandIndex >= totalBands) {
     return;  // geometry mismatch - sender misconfigured
   }
+  statPackets = statPackets + 1;
 
   if (!rxFrameActive) {
     rxFrameId = frameId;
-    rxChunksSeen = 0;
-    memset(rxChunkBitmap, 0, sizeof(rxChunkBitmap));
+    rxBandsSeen = 0;
+    rxBandsExpected = dirtyCount;
+    memset(rxBandBitmap, 0, sizeof(rxBandBitmap));
     rxFrameActive = true;
     rxLandscape = landscape;
   } else if (frameId != rxFrameId) {
@@ -156,44 +183,52 @@ static void onPacket(AsyncUDPPacket packet) {
       // force-resync after ~2 frames' worth instead of rejecting for up
       // to 32k frames.
       static uint16_t staleStreak = 0;
-      if (++staleStreak < 2 * CHUNK_COUNT) {
+      if (++staleStreak < 2 * MAX_BANDS) {
         return;
       }
       staleStreak = 0;
     }
-    if (rxChunksSeen > 0) {
+    if (rxBandsSeen > 0) {
+      // Incomplete frame abandoned - but its bands are already applied to
+      // bufA and marked in pendingDrawBitmap, so they still reach the
+      // panel with the next completed frame (per-band recency).
       statFramesDropped = statFramesDropped + 1;
     }
     rxFrameId = frameId;
-    rxChunksSeen = 0;
-    memset(rxChunkBitmap, 0, sizeof(rxChunkBitmap));
+    rxBandsSeen = 0;
+    rxBandsExpected = dirtyCount;
+    memset(rxBandBitmap, 0, sizeof(rxBandBitmap));
     rxLandscape = landscape;
   }
 
-  // Duplicate chunks (802.11 retry artifacts) must not double-count toward
-  // completion - that would display frames with holes.
-  uint8_t mask = 1 << (chunkIndex & 7);
-  if (rxChunkBitmap[chunkIndex >> 3] & mask) {
+  // Orientation flip invalidates everything in bufA (band geometry and
+  // pixel layout both change). The sender guarantees a full keyframe on
+  // flip, so dropping stale pending bands is safe.
+  if (landscape != bufLandscape) {
+    portENTER_CRITICAL(&drawMux);
+    memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
+    portEXIT_CRITICAL(&drawMux);
+    bufLandscape = landscape;
+  }
+
+  // Duplicate bands (802.11 retry artifacts) must not double-count toward
+  // completion - that would complete frames with holes.
+  uint8_t mask = 1 << (bandIndex & 7);
+  if (rxBandBitmap[bandIndex >> 3] & mask) {
     return;
   }
-  rxChunkBitmap[chunkIndex >> 3] |= mask;
+  rxBandBitmap[bandIndex >> 3] |= mask;
 
-  memcpy(backBuf + (size_t)chunkIndex * CHUNK_PAYLOAD, data + HEADER_BYTES,
-         CHUNK_PAYLOAD);
-  rxChunksSeen++;
+  memcpy(bufA + (size_t)bandIndex * bandBytes, data + HEADER_BYTES, bandBytes);
+  portENTER_CRITICAL(&drawMux);
+  pendingDrawBitmap[bandIndex >> 3] |= mask;
+  portEXIT_CRITICAL(&drawMux);
+  rxBandsSeen++;
 
-  if (rxChunksSeen >= CHUNK_COUNT) {
+  if (rxBandsSeen >= rxBandsExpected) {
     rxFrameActive = false;
-    uint8_t *other = (backBuf == bufA) ? bufB : bufA;
-    if (readyBuf == nullptr && other != dmaBuf) {
-      // Hand off the completed frame; start filling the free buffer.
-      readyLandscape = rxLandscape;
-      readyBuf = backBuf;
-      backBuf = other;
-    } else {
-      // No free buffer: keep this one, newer frames overwrite it.
-      statFramesSkipped = statFramesSkipped + 1;
-    }
+    pendingLandscape = rxLandscape;
+    framesCompleted = framesCompleted + 1;  // loop draws the pending bands
   }
 }
 
@@ -292,14 +327,18 @@ static void handleButton() {
 }
 
 // Fill the whole panel with one RGB565 color (used for status feedback).
+// Draws from staging (bufB) - bufA belongs to the network path.
 static void fillPanel(uint16_t rgb565) {
   uint8_t hi = rgb565 >> 8, lo = rgb565 & 0xFF;
   for (size_t i = 0; i < FRAME_BYTES; i += 2) {
-    bufA[i] = hi;
-    bufA[i + 1] = lo;
+    bufB[i] = hi;
+    bufB[i + 1] = lo;
   }
-  esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, bufA);
-  delay(30);  // let DMA finish before bufA is reused
+  dmaInFlight = dmaInFlight + 1;  // its completion fires onColorTransDone
+  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, bufB) != ESP_OK) {
+    dmaInFlight = dmaInFlight - 1;
+  }
+  delay(30);  // let DMA finish before bufB is reused
 }
 
 void setup() {
@@ -320,7 +359,8 @@ void setup() {
     Serial.println("FATAL: frame buffer alloc failed");
     while (true) delay(1000);
   }
-  backBuf = bufA;
+  // Undelivered bands must show black, not heap garbage.
+  memset(bufA, 0, FRAME_BYTES);
   Serial.printf("buffers ok, free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
 
   pinMode(PIN_BOOT, INPUT_PULLUP);
@@ -375,40 +415,74 @@ void loop() {
   esp_task_wdt_reset();
   handleButton();
 
-  uint8_t *frame = readyBuf;
-  if (frame != nullptr && dmaBuf == nullptr) {
-    bool landscape = readyLandscape;
-    dmaBuf = frame;
-    readyBuf = nullptr;
+  static uint32_t lastCompleted = 0;
+  if (framesCompleted != lastCompleted && dmaInFlight == 0) {
+    lastCompleted = framesCompleted;
+
+    // Snapshot-and-clear the pending set; the UDP task keeps marking bands
+    // for the next frame while we draw this one.
+    uint8_t bands[BITMAP_BYTES];
+    portENTER_CRITICAL(&drawMux);
+    memcpy(bands, pendingDrawBitmap, sizeof(bands));
+    memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
+    bool landscape = pendingLandscape;
+    portEXIT_CRITICAL(&drawMux);
+
     if (landscape != panelLandscape || madctlDirty) {
       applyPanelConfig(landscape);
     }
-    // Queues the DMA transfer and returns; onColorTransDone releases dmaBuf.
-    // A failed queue never fires the callback - releasing here prevents a
-    // permanent pipeline wedge (observed once in the field).
-    esp_err_t err;
-    if (landscape) {
-      err = esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_H, PANEL_W, frame);
-    } else {
-      err = esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, frame);
-    }
-    if (err != ESP_OK) {
-      statDrawErrors = statDrawErrors + 1;
-      dmaBuf = nullptr;
-    } else {
+
+    uint16_t totalBands = landscape ? BANDS_LANDSCAPE : BANDS_PORTRAIT;
+    size_t bandBytes = landscape ? BAND_BYTES_LANDSCAPE : BAND_BYTES_PORTRAIT;
+    int rowsPerBand = landscape ? ROWS_PER_BAND_LANDSCAPE : ROWS_PER_BAND_PORTRAIT;
+    int drawWidth = landscape ? PANEL_H : PANEL_W;
+
+    // Coalesce runs of contiguous dirty bands into single DMA transfers.
+    // Contiguous bands are contiguous in memory, so a run needs just one
+    // memcpy to staging and one draw_bitmap. Staging (bufB) keeps DMA reads
+    // off the buffer the network task writes.
+    int i = 0;
+    bool drewAny = false;
+    while (i < totalBands) {
+      if (!(bands[i >> 3] & (1 << (i & 7)))) {
+        i++;
+        continue;
+      }
+      int runStart = i;
+      while (i < totalBands && (bands[i >> 3] & (1 << (i & 7)))) {
+        i++;
+      }
+      size_t off = (size_t)runStart * bandBytes;
+      size_t bytes = (size_t)(i - runStart) * bandBytes;
+      memcpy(bufB + off, bufA + off, bytes);
+      dmaInFlight = dmaInFlight + 1;
       dmaQueuedAt = millis();
+      // Queues async; blocks briefly only if the 2-deep transaction queue
+      // is full. A failed queue never fires the completion callback, so
+      // roll the counter back to avoid a permanent wedge.
+      esp_err_t err = esp_lcd_panel_draw_bitmap(
+          panel, 0, runStart * rowsPerBand, drawWidth, i * rowsPerBand,
+          bufB + off);
+      if (err != ESP_OK) {
+        statDrawErrors = statDrawErrors + 1;
+        dmaInFlight = dmaInFlight - 1;
+      } else {
+        drewAny = true;
+      }
+    }
+    if (drewAny) {
       statFramesShown = statFramesShown + 1;
     }
   } else {
     delay(1);
   }
 
-  // DMA-stall failsafe: the 110KB transfer takes ~14ms at 80MHz. If the
-  // completion callback hasn't released the buffer after 500ms, it's lost -
+  // DMA-stall failsafe: strips take ~14ms worst case at 80MHz. If completion
+  // callbacks haven't drained the counter after 500ms, they're lost -
   // reclaim rather than wedge forever.
-  if (dmaBuf != nullptr && millis() - dmaQueuedAt > 500) {
+  if (dmaInFlight != 0 && millis() - dmaQueuedAt > 500) {
     statDrawErrors = statDrawErrors + 1;
-    dmaBuf = nullptr;
+    dmaInFlight = 0;
   }
 
   // WiFi association fully lost for over a minute: autoReconnect isn't
@@ -472,7 +546,9 @@ void loop() {
     }
     uint32_t packetsDelta = statPackets - lastPacketsVal;
     lastPacketsVal = statPackets;
-    bool starving = packetsDelta > 2 * CHUNK_COUNT &&
+    // With dirty bands, low steady packet flow is normal for static
+    // content; require sustained volume before judging the link rotten.
+    bool starving = packetsDelta > 2 * MAX_BANDS &&
                     millis() - lastShownChangeAt > 20000;
     if (starving && healStage == 0) {
       Serial.printf("link heal: reconnecting WiFi (rssi=%d)\n", (int)WiFi.RSSI());

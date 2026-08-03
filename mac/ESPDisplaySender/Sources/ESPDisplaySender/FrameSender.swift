@@ -17,8 +17,13 @@ import Network
 ///   replacing a hand-tuned constant.
 final class FrameSender {
     static let frameBytes = 172 * 320 * 2  // 110_080
-    static let chunkPayload = 1376
-    static let chunkCount = frameBytes / chunkPayload  // 80
+
+    /// Band geometry is orientation-native so bands align to whole rows:
+    /// portrait 172px rows: 4 rows x 344B; landscape 320px rows: 2 rows x
+    /// 640B. Both tile the frame exactly and stay under a 1400B safe MTU.
+    static func bandGeometry(landscape: Bool) -> (bands: Int, bandBytes: Int) {
+        landscape ? (86, 1280) : (80, 1376)
+    }
 
     struct DeviceStats {
         var shown: UInt32 = 0
@@ -45,12 +50,24 @@ final class FrameSender {
     private var climbSamples = 0
     private var climbBaselineFps: Double?
     private var climbDirection = 0.85  // start by probing toward faster
+    private var prevFramesSentAtHb: UInt64 = 0
     private var _lastHeartbeatAt: Date?
     private var _stats = DeviceStats()
     private var prevStats = DeviceStats()
 
     private(set) var framesSent: UInt64 = 0
     private(set) var sendErrors: UInt64 = 0
+    private(set) var bandsSent: UInt64 = 0
+    private(set) var bandsConsidered: UInt64 = 0
+
+    // Diffing state (touched only on sendQueue).
+    private var prevFrame: [UInt8]?
+    private var prevLandscape = false
+    private var lastKeyframeAt = Date.distantPast
+    /// Full-frame refresh cadence: bounds the staleness of any band the
+    /// device missed (UDP loss on a band the diff then skips forever), and
+    /// repaints everything after a device reboot.
+    var keyframeInterval: TimeInterval = 2.0
 
     /// Bounds for adaptive pacing (per-chunk usleep, microseconds). The max
     /// must leave room to throttle below a *degraded* link's clean capacity:
@@ -180,6 +197,9 @@ final class FrameSender {
         print("reconnecting to \(host):\(port) (re-resolving) ...")
         do {
             try await start()  // start() refreshes the heartbeat grace period
+            // The device may have rebooted with an empty framebuffer; the
+            // diff would otherwise skip every unchanged band forever.
+            forceKeyframe()
         } catch {
             FileHandle.standardError.write(Data("reconnect failed: \(error)\n".utf8))
         }
@@ -239,12 +259,26 @@ final class FrameSender {
         var spacing = _spacingMicros
         lock.unlock()
 
-        guard adaptivePacing else { return }
-        // Auto-tune pacing from the delta since the previous heartbeat.
-        // Counters reset on device reboot; skip those samples.
+        // Counter regression = device rebooted with an empty framebuffer;
+        // resend everything.
         let shownDelta = Int64(stats.shown) - Int64(prev.shown)
         let droppedDelta = Int64(stats.dropped) - Int64(prev.dropped)
-        guard shownDelta >= 0, droppedDelta >= 0, shownDelta + droppedDelta > 0 else { return }
+        if shownDelta < 0 || droppedDelta < 0 {
+            print("device counters reset (reboot?) - sending keyframe")
+            forceKeyframe()
+            return
+        }
+
+        guard adaptivePacing else { return }
+        // With dirty-band diffing, offered load tracks content activity: a
+        // static screen legitimately delivers ~0 fps. Feeding those windows
+        // to the hill-climb would read as regression and send pacing
+        // wandering; freeze the climb unless we actually sent frames.
+        let sentNow = framesSent
+        let sentDelta = Int64(sentNow) - Int64(prevFramesSentAtHb)
+        prevFramesSentAtHb = sentNow
+        guard sentDelta >= 3 else { return }
+        guard shownDelta + droppedDelta > 0 else { return }
 
         // Sustained total failure (drops but zero completions) is a broken
         // link, not oversubscription - ratcheting pacing to max doesn't help
@@ -388,27 +422,62 @@ final class FrameSender {
         }
     }
 
-    /// Send one full frame. `pixels` must be exactly 110,080 bytes of
-    /// big-endian RGB565. Synchronous chunking with pacing; sends are async
-    /// on the connection's queue.
+    /// Force the next frame to be sent in full (after reconnects or a
+    /// detected device reboot, when the device's buffer state is unknown).
+    func forceKeyframe() {
+        sendQueue.async { [weak self] in self?.prevFrame = nil }
+    }
+
+    /// Send one frame, transmitting only the bands that changed since the
+    /// previous frame (dirty-rectangle diffing at row-band granularity).
+    /// `pixels` must be exactly 110,080 bytes of big-endian RGB565. Packet:
+    /// [frame_id][band_index][dirty_count, bit15 = landscape][band payload].
     func send(frame pixels: [UInt8], landscape: Bool = false) {
         precondition(pixels.count == Self.frameBytes, "bad frame size \(pixels.count)")
         guard let conn = connection else { return }
+        let (bands, bandBytes) = Self.bandGeometry(landscape: landscape)
+
+        var dirty: [Int]
+        let keyframeDue = Date().timeIntervalSince(lastKeyframeAt) > keyframeInterval
+        if prevFrame == nil || landscape != prevLandscape || keyframeDue {
+            dirty = Array(0..<bands)
+            lastKeyframeAt = Date()
+        } else {
+            var changed = [Int]()
+            let prev = prevFrame!
+            pixels.withUnsafeBytes { newRaw in
+                prev.withUnsafeBytes { oldRaw in
+                    for band in 0..<bands {
+                        let off = band * bandBytes
+                        if memcmp(newRaw.baseAddress! + off, oldRaw.baseAddress! + off,
+                                  bandBytes) != 0 {
+                            changed.append(band)
+                        }
+                    }
+                }
+            }
+            dirty = changed
+        }
+        prevFrame = pixels
+        prevLandscape = landscape
+        bandsConsidered &+= UInt64(bands)
+        guard !dirty.isEmpty else { return }  // identical frame: send nothing
+
         let id = frameId
         frameId &+= 1
-        let countField = UInt16(Self.chunkCount) | (landscape ? 0x8000 : 0)
+        let countField = UInt16(dirty.count) | (landscape ? 0x8000 : 0)
         let spacing = spacingMicros
 
-        for chunk in 0..<Self.chunkCount {
-            var packet = Data(capacity: 6 + Self.chunkPayload)
+        for band in dirty {
+            var packet = Data(capacity: 6 + bandBytes)
             packet.append(UInt8(id & 0xFF))
             packet.append(UInt8(id >> 8))
-            packet.append(UInt8(chunk & 0xFF))
-            packet.append(UInt8(chunk >> 8))
+            packet.append(UInt8(band & 0xFF))
+            packet.append(UInt8(band >> 8))
             packet.append(UInt8(countField & 0xFF))
             packet.append(UInt8(countField >> 8))
-            let start = chunk * Self.chunkPayload
-            packet.append(contentsOf: pixels[start..<(start + Self.chunkPayload)])
+            let start = band * bandBytes
+            packet.append(contentsOf: pixels[start..<(start + bandBytes)])
 
             conn.send(
                 content: packet,
@@ -418,12 +487,13 @@ final class FrameSender {
                     }
                 })
             // Pace every packet: the ESP32's WiFi/lwIP receive path drops
-            // heavily above ~3000 packets/s; unpaced 80-packet bursts lose
-            // nearly everything.
+            // heavily above ~3000 packets/s; unpaced bursts lose nearly
+            // everything.
             if spacing > 0 {
                 usleep(spacing)
             }
         }
+        bandsSent &+= UInt64(dirty.count)
         framesSent &+= 1
     }
 }
