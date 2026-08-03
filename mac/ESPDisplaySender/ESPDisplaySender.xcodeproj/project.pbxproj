@@ -18,12 +18,14 @@
 		A00000000000000000000208 /* TestPattern.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000108 /* TestPattern.swift */; };
 		A00000000000000000000209 /* WifiConfigUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000109 /* WifiConfigUI.swift */; };
 		A00000000000000000000210 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000110 /* main.swift */; };
+		A00000000000000000000211 /* app-icon-square.png in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000111 /* app-icon-square.png */; };
 		A00000000000000000000302 /* SenderProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000301 /* SenderProtocol */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		A00000000000000000000003 /* ESPDisplaySender.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ESPDisplaySender.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ../Info.plist; sourceTree = "<group>"; };
+		A00000000000000000000111 /* app-icon-square.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = ../app-icon-square.png; sourceTree = "<group>"; };
 		A00000000000000000000100 /* Capture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Capture.swift; sourceTree = "<group>"; };
 		A00000000000000000000101 /* DeviceBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceBrowser.swift; sourceTree = "<group>"; };
 		A00000000000000000000102 /* DeviceSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceSession.swift; sourceTree = "<group>"; };
@@ -53,6 +55,7 @@
 			isa = PBXGroup;
 			children = (
 				A00000000000000000000009 /* Info.plist */,
+				A00000000000000000000111 /* app-icon-square.png */,
 				A00000000000000000000006 /* Sources */,
 				A00000000000000000000005 /* Products */,
 			);
@@ -156,6 +159,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A00000000000000000000211 /* app-icon-square.png in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -218,9 +222,11 @@
 		A00000000000000000000022 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = YSHQQLS73U;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ../Info.plist;
@@ -240,9 +246,11 @@
 		A00000000000000000000023 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = YSHQQLS73U;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ../Info.plist;

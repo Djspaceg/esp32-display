@@ -116,6 +116,15 @@ setbuf(stdout, nil)  // line-visible logs when redirected to a file
 // plain CLI process without one.
 _ = NSApplication.shared
 
+// Xcode's Canvas injects the preview view into this process. Keep the AppKit
+// event loop alive, but skip the sender's lock, persistence, discovery, capture,
+// serial, and Keychain startup paths while previews are running.
+if ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" {
+    NSApplication.shared.setActivationPolicy(.accessory)
+    NSApplication.shared.run()
+    exit(0)
+}
+
 let opts = parseOptions()
 let launchedInBackground = opts.background
     || ProcessInfo.processInfo.environment["ESPDISP_AGENT"] != nil

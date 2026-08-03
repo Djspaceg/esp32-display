@@ -31,18 +31,7 @@ struct ManagerView: View {
                     }
                 }
             }
-            .navigationTitle("ESP Displays")
             .navigationSplitViewColumnWidth(min: 230, ideal: 280, max: 340)
-            .toolbar {
-                ToolbarItem {
-                    Button {
-                        manager.configureUSB()
-                    } label: {
-                        Label("Configure USB Device", systemImage: "cable.connector")
-                    }
-                    .help("Configure WiFi and device name over USB")
-                }
-            }
         } detail: {
             if let panel = manager.selectedPanel {
                 PanelDetailView(panel: panel, manager: manager)
@@ -105,6 +94,7 @@ private struct PanelDetailView: View {
     @ObservedObject var manager: PanelManager
     @State private var confirmRestart = false
     @State private var editedName = ""
+    @State private var isEditingName = false
     @State private var selectedSSID = ""
     @FocusState private var nameIsFocused: Bool
 
@@ -114,6 +104,12 @@ private struct PanelDetailView: View {
 
     private var nameHasChanges: Bool {
         !normalizedName.isEmpty && normalizedName != panel.displayName
+    }
+
+    private var usbPortSelection: Binding<String> {
+        Binding(
+            get: { panel.usbPort ?? "" },
+            set: { manager.setUSBPort($0.isEmpty ? nil : $0, for: panel.serviceName) })
     }
 
     var body: some View {
@@ -182,6 +178,35 @@ private struct PanelDetailView: View {
                             } else {
                                 Text("Never")
                             }
+                        }
+                        InfoRow("USB device") {
+                            HStack(spacing: 6) {
+                                Picker("USB device", selection: usbPortSelection) {
+                                    Text("Automatic (match by name)").tag("")
+                                    ForEach(manager.usbPortOptions(
+                                        for: panel.serviceName), id: \.self)
+                                    { port in
+                                        Text((port as NSString).lastPathComponent).tag(port)
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(maxWidth: 260)
+                                .controlSize(.small)
+                                .help(panel.usbPort ?? "Automatically match this display by its reported name")
+
+                                Button {
+                                    manager.refreshUSBPorts()
+                                } label: {
+                                    Image(systemName: "arrow.clockwise")
+                                }
+                                .controlSize(.small)
+                                .help("Refresh connected USB serial devices")
+                            }
+                        }
+                        InfoRow("") {
+                            Text("Automatic verifies the reported display name. A manual assignment is saved with this display.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         InfoRow("Saved WiFi") {
                             HStack(spacing: 6) {
@@ -262,13 +287,12 @@ private struct PanelDetailView: View {
             }
             .padding(14)
         }
-        .navigationTitle(panel.displayName)
         .onAppear {
             editedName = panel.displayName
             selectInitialNetwork()
         }
         .onChange(of: panel.displayName) { _, newValue in
-            if !nameIsFocused { editedName = newValue }
+            if !isEditingName { editedName = newValue }
         }
         .onChange(of: manager.savedNetworkNames) { _, _ in
             selectInitialNetwork()
@@ -291,20 +315,40 @@ private struct PanelDetailView: View {
                 .font(.system(size: 30))
                 .foregroundStyle(panel.isOnline ? Color.accentColor : Color.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    TextField("Device name", text: $editedName)
-                        .textFieldStyle(.plain)
-                        .font(.title2.bold())
-                        .focused($nameIsFocused)
-                        .onSubmit(saveName)
-                        .frame(maxWidth: 320)
-                    if nameHasChanges {
+                HStack(spacing: 6) {
+                    if isEditingName {
+                        TextField("Device name", text: $editedName)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.title2.bold())
+                            .focused($nameIsFocused)
+                            .onSubmit(saveName)
+                            .frame(maxWidth: 320)
+                            .onExitCommand(perform: cancelNameEdit)
                         Button(action: saveName) {
                             Image(systemName: "checkmark.circle.fill")
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(Color.accentColor)
+                        .disabled(!nameHasChanges)
                         .help("Save this name to the USB-connected display")
+                        Button(action: cancelNameEdit) {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Cancel renaming")
+                    } else {
+                        Button(action: beginNameEdit) {
+                            HStack(spacing: 5) {
+                                Text(panel.displayName)
+                                    .font(.title2.bold())
+                                Image(systemName: "pencil")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help("Click to rename this display")
                     }
                 }
                 Text(panel.statusText)
@@ -323,11 +367,30 @@ private struct PanelDetailView: View {
         }
     }
 
+    private func beginNameEdit() {
+        editedName = panel.displayName
+        isEditingName = true
+        Task { @MainActor in
+            nameIsFocused = true
+        }
+    }
+
     private func saveName() {
-        guard nameHasChanges else { return }
+        guard isEditingName else { return }
+        guard nameHasChanges else {
+            cancelNameEdit()
+            return
+        }
         nameIsFocused = false
+        isEditingName = false
         editedName = normalizedName
         manager.rename(normalizedName, for: panel.serviceName)
+    }
+
+    private func cancelNameEdit() {
+        nameIsFocused = false
+        isEditingName = false
+        editedName = panel.displayName
     }
 
     private func selectInitialNetwork() {
@@ -425,6 +488,9 @@ final class ManagerWindowController: NSObject, NSWindowDelegate {
         let window = makeWindowIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        window.toolbar = nil
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
     }
 
     private func makeWindowIfNeeded() -> NSWindow {
@@ -435,6 +501,8 @@ final class ManagerWindowController: NSObject, NSWindowDelegate {
         window.setContentSize(NSSize(width: 980, height: 680))
         window.minSize = NSSize(width: 820, height: 560)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.center()
         window.setFrameAutosaveName("ESPDisplaySender.Manager")
@@ -510,3 +578,10 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
         managerWindow.show()
     }
 }
+
+#if DEBUG
+#Preview("Display Manager") {
+    ManagerView(manager: PanelManager.preview)
+        .frame(width: 980, height: 680)
+}
+#endif
