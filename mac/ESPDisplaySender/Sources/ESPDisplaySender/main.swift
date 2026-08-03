@@ -231,7 +231,7 @@ Task {
 
             while true {
                 let capture = DisplayCapture { rgb565, landscape in
-                    sender.send(frame: rgb565, landscape: landscape)
+                    sender.submit(frame: rgb565, landscape: landscape)
                 }
                 // Any picker activity (new pick, re-pick, or clear) bumps the
                 // generation; comparing against this baseline detects a user
@@ -376,7 +376,7 @@ Task {
                     + "(\(Int(window.frame.width))x\(Int(window.frame.height))) at \(opts.fps) fps")
 
                 let capture = DisplayCapture { rgb565, landscape in
-                    sender.send(frame: rgb565, landscape: landscape)
+                    sender.submit(frame: rgb565, landscape: landscape)
                 }
                 do {
                     try await capture.start(window: window, fps: opts.fps)
