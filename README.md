@@ -46,7 +46,9 @@ couple of seconds and reattaches on its own.
 
 The board itself has two physical controls on its BOOT button: a short press
 toggles backlight brightness, a long press flips the image 180° for
-upside-down mounting.
+upside-down mounting. Both are saved to the board's flash, so they survive
+reboots and firmware reflashes — set the orientation once for how the board
+is mounted and forget it. (A full flash erase does reset them.)
 
 WiFi credentials live in the board's flash, not in the firmware — change
 networks by plugging the board into the Mac over USB and double-clicking the
@@ -158,8 +160,9 @@ Over USB serial (115200), the firmware also accepts configuration commands:
 `CFGWIFI <base64 ssid> <base64 password>` saves credentials to NVS and
 reboots, and `CFGWIFI <base64 ssid>` (password argument omitted) keeps the
 password currently in use; `CFGNAME <base64 name>` sets the device name;
-`CFGSHOW` reports the current network, name, IP, and signal strength;
-`CFGLED <r> <g> <b>` shows a literal LED color for 10s.
+`CFGSHOW` reports the current network, name, IP, signal strength, and the
+saved orientation/brightness; `CFGFLIP 0|1` sets the 180° flip without the
+button; `CFGLED <r> <g> <b>` shows a literal LED color for 10s.
 
 ## Repo layout
 

@@ -301,6 +301,16 @@ static bool initDisplay() {
 //   landscape: MV|MX           flipped: MV|MY
 // The 34px centering gap sits on the physical-column axis (172px), which is
 // symmetric in the 240-wide RAM, so gaps are unaffected by mirroring.
+// Persist the physical-mounting settings. Only written on a button press, so
+// NVS wear is a non-issue.
+static void saveDisplayPrefs() {
+  Preferences prefs;
+  prefs.begin("espdisp", false);
+  prefs.putBool("flip", panelFlip180);
+  prefs.putBool("blhigh", userBlHigh);
+  prefs.end();
+}
+
 static void applyPanelConfig(bool landscape) {
   bool mx = landscape ? !panelFlip180 : panelFlip180;
   bool my = panelFlip180;
@@ -404,6 +414,15 @@ static void processConfigLine(char *line) {
     Serial.flush();
     delay(200);
     ESP.restart();
+  } else if (strncmp(line, "CFGFLIP ", 8) == 0) {
+    // Set 180-degree flip without the button: CFGFLIP 0|1. Persisted, and
+    // applied on the next drawn frame.
+    int want = atoi(line + 8);
+    panelFlip180 = (want != 0);
+    madctlDirty = true;
+    saveDisplayPrefs();
+    applyPanelConfig(panelLandscape);
+    Serial.printf("CFGOK flip180=%d (saved)\n", panelFlip180);
   } else if (strncmp(line, "CFGLED ", 7) == 0) {
     // Diagnostic: show a literal color for 10s (CFGLED <r> <g> <b>, 0-255).
     // Lets channel-order problems be diagnosed over serial: send pure red,
@@ -428,11 +447,11 @@ static void processConfigLine(char *line) {
     mbedtls_base64_encode(name64, sizeof(name64) - 1, &name64Len,
                           (const unsigned char *)cfgName.c_str(), cfgName.length());
     name64[name64Len] = 0;
-    Serial.printf("CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d ssid=%s\n",
-                  (const char *)b64, (const char *)name64,
-                  WiFi.status() == WL_CONNECTED,
-                  WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(),
-                  cfgSsid.c_str());
+    Serial.printf(
+        "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d bl=%s ssid=%s\n",
+        (const char *)b64, (const char *)name64, WiFi.status() == WL_CONNECTED,
+        WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), panelFlip180,
+        userBlHigh ? "high" : "low", cfgSsid.c_str());
   }
   // Anything else on serial is ignored (a monitor typing away is harmless).
 }
@@ -594,13 +613,16 @@ static void handleButton() {
     longFired = true;
     panelFlip180 = !panelFlip180;
     madctlDirty = true;
-    Serial.printf("button: long press -> flip180=%d\n", panelFlip180);
+    saveDisplayPrefs();
+    Serial.printf("button: long press -> flip180=%d (saved)\n", panelFlip180);
   } else if (!down && wasDown) {
     wasDown = false;
     if (!longFired && now - downAt >= DEBOUNCE_MS) {
       userBlHigh = !userBlHigh;
       analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
-      Serial.printf("button: short press -> backlight %s\n", userBlHigh ? "high" : "low");
+      saveDisplayPrefs();
+      Serial.printf("button: short press -> backlight %s (saved)\n",
+                    userBlHigh ? "high" : "low");
     }
   }
 }
@@ -642,19 +664,9 @@ void setup() {
   memset(bufA, 0, FRAME_BYTES);
   Serial.printf("buffers ok, free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
 
-  rgbLed.begin();
-  rgbLed.setBrightness(RGB_LED_BRIGHTNESS);
-  updateSignalLed();  // red until WiFi is up
-
-  pinMode(PIN_BOOT, INPUT_PULLUP);
-  pinMode(PIN_BL, OUTPUT);
-  analogWrite(PIN_BL, BL_HIGH);  // 50% cap per Waveshare guidance
-  if (!initDisplay()) {
-    Serial.println("FATAL: display init failed");
-    while (true) delay(1000);
-  }
-  fillPanel(0x2104);  // dark gray: display alive, waiting for WiFi
-
+  // Load persisted settings before anything is drawn or the radio starts:
+  // orientation and brightness must be known for the very first fill, and
+  // the device name before WiFi latches its DHCP hostname.
   bool ssidFromNvs = false;
   {
     Preferences prefs;
@@ -663,6 +675,12 @@ void setup() {
     cfgSsid = prefs.getString("ssid", WIFI_SSID);
     cfgPass = prefs.getString("pass", WIFI_PASSWORD);
     cfgName = prefs.getString("name", "");
+    // Physical orientation and brightness are properties of how the board is
+    // mounted, so they belong in flash - re-flipping after every reflash is
+    // needless. NVS survives sketch uploads (only the app partition is
+    // rewritten); a full flash erase does reset them.
+    panelFlip180 = prefs.getBool("flip", false);
+    userBlHigh = prefs.getBool("blhigh", true);
     prefs.end();
   }
   // Report the actual source, not a value comparison: stored credentials
@@ -670,10 +688,28 @@ void setup() {
   // sends you hunting for a config that is in fact saved.
   Serial.printf("WiFi credentials: \"%s\" (%s)\n", cfgSsid.c_str(),
                 ssidFromNvs ? "from NVS" : "compiled default");
+  Serial.printf("display prefs: flip180=%d backlight=%s\n", panelFlip180,
+                userBlHigh ? "high" : "low");
 
   if (cfgName.isEmpty()) {
     cfgName = defaultDeviceName();
   }
+
+  rgbLed.begin();
+  rgbLed.setBrightness(RGB_LED_BRIGHTNESS);
+  updateSignalLed();  // red until WiFi is up
+
+  pinMode(PIN_BOOT, INPUT_PULLUP);
+  pinMode(PIN_BL, OUTPUT);
+  analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+  if (!initDisplay()) {
+    Serial.println("FATAL: display init failed");
+    while (true) delay(1000);
+  }
+  // Apply the saved flip up front so even the boot status fills land the
+  // right way up, not just streamed frames.
+  applyPanelConfig(false);
+  fillPanel(0x2104);  // dark gray: display alive, waiting for WiFi
   // The device name doubles as the DHCP hostname (option 12), so the router
   // lists this board by name instead of "esp32c6-XXXXXX". This MUST precede
   // WiFi.mode(): the core latches the hostname onto the STA netif inside
