@@ -809,6 +809,30 @@ static void fillPanel(uint16_t rgb565) {
   delay(30);  // let DMA finish before bufB is reused
 }
 
+// Advertise the service and every TXT record. Both the initial announce and
+// the post-heal re-announce call this, and every value is derived from the
+// constant it describes - the previous copies hardcoded "caps" and "res" in
+// two places, so adding a capability would have silently left the advertised
+// value stale.
+static void addMdnsService() {
+  char capsBuf[9], resBuf[16], protoBuf[4];
+  snprintf(capsBuf, sizeof(capsBuf), "%08lx", (unsigned long)DEVICE_CAPABILITIES);
+  snprintf(resBuf, sizeof(resBuf), "%ux%u", (unsigned)PANEL_W, (unsigned)PANEL_H);
+  snprintf(protoBuf, sizeof(protoBuf), "%u",
+           (unsigned)deviceproto::FRAME_PROTOCOL_VERSION);
+  // Bind as const char *: ESPmDNS overloads addServiceTxt on char *,
+  // const char *, and String, and a mutable buffer makes all three viable
+  // under the -fpermissive the Arduino build uses, which is ambiguous.
+  const char *caps = capsBuf, *res = resBuf, *proto = protoBuf;
+  MDNS.setInstanceName(cfgName);
+  MDNS.addService("espdisp", "udp", UDP_PORT);
+  MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
+  MDNS.addServiceTxt("espdisp", "udp", "res", res);
+  MDNS.addServiceTxt("espdisp", "udp", "fw", FW_VERSION);
+  MDNS.addServiceTxt("espdisp", "udp", "proto", proto);
+  MDNS.addServiceTxt("espdisp", "udp", "caps", caps);
+}
+
 void setup() {
   Serial.begin(115200);
   // A host that opens the CDC port but stops draining it would otherwise
@@ -911,19 +935,20 @@ void setup() {
   }
 
   if (MDNS.begin(cfgName.c_str())) {
-    MDNS.setInstanceName(cfgName);
-    MDNS.addService("espdisp", "udp", UDP_PORT);
-    MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
-    MDNS.addServiceTxt("espdisp", "udp", "res", "172x320");
-    MDNS.addServiceTxt("espdisp", "udp", "fw", FW_VERSION);
-    MDNS.addServiceTxt("espdisp", "udp", "proto", "2");
-    MDNS.addServiceTxt("espdisp", "udp", "caps", "0000006f");
+    addMdnsService();
     Serial.printf("mDNS: %s.local, service _espdisp._udp\n", cfgName.c_str());
   } else {
     Serial.println("WARN: mDNS failed to start");
   }
 
-  fillPanel(0x0210);  // dark teal: WiFi up, waiting for stream
+  // Ready fill, honest about the radio. The WiFi wait above is bounded and
+  // falls through on timeout, so painting "connected" unconditionally told
+  // you the network was fine on a board that never associated.
+  if (WiFi.status() == WL_CONNECTED) {
+    fillPanel(0x0210);  // dark teal: WiFi up, waiting for stream
+  } else {
+    fillPanel(0x9000);  // dark red: no WiFi - fix with CFGWIFI over USB
+  }
 
   if (udp.listen(UDP_PORT)) {
     udp.onPacket(onPacket);
@@ -1165,13 +1190,7 @@ void loop() {
     mdnsRestartPending = false;
     MDNS.end();
     if (MDNS.begin(cfgName.c_str())) {
-      MDNS.setInstanceName(cfgName);
-      MDNS.addService("espdisp", "udp", UDP_PORT);
-      MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
-      MDNS.addServiceTxt("espdisp", "udp", "res", "172x320");
-      MDNS.addServiceTxt("espdisp", "udp", "fw", FW_VERSION);
-      MDNS.addServiceTxt("espdisp", "udp", "proto", "2");
-      MDNS.addServiceTxt("espdisp", "udp", "caps", "0000006f");
+      addMdnsService();
       Serial.printf("mDNS re-announced, IP %s\n", WiFi.localIP().toString().c_str());
     }
   }
