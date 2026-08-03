@@ -102,18 +102,21 @@ static const uint8_t BL_HIGH = 128;  // 50%, Waveshare's recommended ceiling
 static const uint8_t BL_LOW = 24;    // ~10%
 static bool userBlHigh = true;       // user's brightness choice (BOOT short press)
 
-// ---- Idle screen & display sleep ----------------------------------------
-// No frames for a while -> overlay device name / IP / signal on the last
-// frame at reduced backlight, repositioning periodically to avoid burn-in.
-// "ESLP" packet from the Mac (its displays slept) -> backlight fully off;
-// any arriving frame wakes both states.
-static const uint32_t IDLE_AFTER_MS = 60000;
+// ---- Status card & display sleep ----------------------------------------
+// The status card means "nothing is driving this panel", NOT "the picture
+// hasn't changed". Liveness comes from the sender's 2s keepalive, which
+// arrives regardless of whether any pixels changed - with dirty-band
+// diffing, a static photo legitimately sends no frame data for minutes, and
+// keying off frame arrivals made the panel dim itself mid-use.
+// Backlight off is driven by the Mac's own display/system sleep ("ESLP").
+static const uint32_t SENDER_GONE_MS = 45000;
 static const uint32_t IDLE_REPOSITION_MS = 30000;
 static const uint8_t BL_IDLE = 10;
 static bool idleActive = false;
-static uint32_t lastFrameShownAt = 0;
+static volatile uint32_t lastSenderPacketAt = 0;  // any packet, incl. keepalive
 static uint32_t lastIdleDrawAt = 0;
 static volatile bool sleepRequested = false;  // set by UDP task on ESLP
+static volatile bool wakeRequested = false;   // set by UDP task on EWAK
 static bool displaySleeping = false;
 
 // ---- Protocol (v2: dirty bands) -----------------------------------------
@@ -180,15 +183,25 @@ static void onPacket(AsyncUDPPacket packet) {
   const uint8_t *data = packet.data();
   size_t len = packet.length();
 
-  // Any packet from the sender refreshes the heartbeat reply endpoint.
+  // Any packet from the sender refreshes the heartbeat reply endpoint and
+  // proves the sender is alive - keepalives arrive even when the screen is
+  // perfectly static, which is why liveness keys off this and not frames.
   hbIp = (uint32_t)packet.remoteIP();
   hbPort = packet.remotePort();
+  lastSenderPacketAt = millis();
 
   if (len == 4 && memcmp(data, "EPNG", 4) == 0) {
     return;  // keepalive ping: endpoint refresh only
   }
   if (len == 4 && memcmp(data, "ESLP", 4) == 0) {
     sleepRequested = true;  // Mac's displays slept: loop turns backlight off
+    return;
+  }
+  if (len == 4 && memcmp(data, "EWAK", 4) == 0) {
+    // Explicit wake, because a frame may never come: if the Mac wakes onto
+    // static content there is nothing to send, and waiting for a frame
+    // would leave the panel dark.
+    wakeRequested = true;
     return;
   }
   bandproto::Header h = parseHeader(data);
@@ -709,9 +722,9 @@ void setup() {
     Serial.println("FATAL: UDP listen failed");
   }
 
-  // Arm the idle screen: if no stream arrives, the device announces its
-  // name/IP/signal over the ready fill instead of sitting mute.
-  lastFrameShownAt = millis();
+  // Arm the status card: if no sender ever appears, the device announces
+  // its name/IP/signal over the ready fill instead of sitting mute.
+  lastSenderPacketAt = millis();
 
   // Task watchdog on the loop task: any unforeseen hang panics and reboots;
   // the Mac's heartbeat supervision then reconnects automatically. The
@@ -779,7 +792,8 @@ void loop() {
     });
     if (drewAny) {
       statFramesShown = statFramesShown + 1;
-      lastFrameShownAt = millis();
+      // A drawn frame implies the sender is present and the Mac's displays
+      // are awake, so leave both dimmed states.
       if (idleActive || displaySleeping) {
         idleActive = false;
         displaySleeping = false;
@@ -801,19 +815,38 @@ void loop() {
       Serial.println("display sleeping (ESLP from sender)");
     }
   }
+  if (wakeRequested) {
+    wakeRequested = false;
+    if (displaySleeping || idleActive) {
+      displaySleeping = false;
+      idleActive = false;
+      analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+      Serial.println("display awake (EWAK from sender)");
+    }
+  }
 
-  // Idle screen: no frames for a while -> overlay device info on the last
-  // frame at reduced backlight, repositioning periodically against burn-in.
-  if (!displaySleeping && dmaInFlight == 0 && lastFrameShownAt != 0 &&
-      millis() - lastFrameShownAt > IDLE_AFTER_MS) {
+  // Status card: the sender has stopped talking to us entirely (crashed,
+  // quit, WiFi down, Mac asleep without telling us). Show where to find
+  // this device, dimmed, repositioning against burn-in. Static content is
+  // explicitly NOT this state - keepalives keep arriving for a still photo.
+  uint32_t senderSilence = millis() - lastSenderPacketAt;
+  if (!displaySleeping && dmaInFlight == 0 && lastSenderPacketAt != 0 &&
+      senderSilence > SENDER_GONE_MS) {
     if (!idleActive) {
       idleActive = true;
       analogWrite(PIN_BL, BL_IDLE);
       drawIdleScreen();
-      Serial.println("idle screen on");
+      Serial.printf("sender silent %lus - status card on\n",
+                    (unsigned long)(senderSilence / 1000));
     } else if (millis() - lastIdleDrawAt > IDLE_REPOSITION_MS) {
       drawIdleScreen();  // new random position, fresh RSSI/IP
     }
+  } else if (idleActive && senderSilence < SENDER_GONE_MS) {
+    // Sender came back but has no new pixels to send (static content):
+    // restore brightness without waiting for a frame.
+    idleActive = false;
+    analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+    Serial.println("sender back - status card off");
   }
 
   // DMA-stall failsafe: strips take ~14ms worst case at 80MHz. If completion

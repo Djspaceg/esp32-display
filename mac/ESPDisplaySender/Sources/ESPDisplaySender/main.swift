@@ -159,18 +159,30 @@ Task {
 
         // Sessions register here; backlight sync fans out to all of them.
         let registry = SessionRegistry()
+        // Panels follow the Mac's display state - not their own content
+        // activity. Screensaver and system sleep both count, so a panel goes
+        // dark exactly when the Mac's own screens do.
         let workspaceNC = NSWorkspace.shared.notificationCenter
-        workspaceNC.addObserver(
-            forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main
-        ) { _ in
-            print("displays slept - sending devices to sleep")
-            registry.all.forEach { $0.sendDisplaySleep() }
+        for name: NSNotification.Name in [
+            NSWorkspace.screensDidSleepNotification,
+            NSWorkspace.willSleepNotification,
+        ] {
+            workspaceNC.addObserver(forName: name, object: nil, queue: .main) { _ in
+                print("Mac sleeping (\(name.rawValue)) - sending devices to sleep")
+                registry.all.forEach { $0.sendDisplaySleep() }
+            }
         }
-        workspaceNC.addObserver(
-            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
-        ) { _ in
-            print("displays woke - forcing keyframes")
-            registry.all.forEach { $0.forceKeyframe() }
+        for name: NSNotification.Name in [
+            NSWorkspace.screensDidWakeNotification,
+            NSWorkspace.didWakeNotification,
+        ] {
+            workspaceNC.addObserver(forName: name, object: nil, queue: .main) { _ in
+                print("Mac waking (\(name.rawValue)) - waking devices")
+                registry.all.forEach {
+                    $0.sendDisplayWake()
+                    $0.forceKeyframe()
+                }
+            }
         }
 
         // Single device for test/window modes: explicit --host wins,
