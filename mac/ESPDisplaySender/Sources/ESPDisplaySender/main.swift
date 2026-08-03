@@ -151,10 +151,12 @@ Task {
                 let fps = Double(count - lastCount) / dt
                 let stats = sender.deviceStats
                 let hb = sender.heartbeatAge.map { String(format: "%.0fs ago", $0) } ?? "never"
+                let diffPct = sender.bandsConsidered > 0
+                    ? Double(sender.bandsSent) * 100 / Double(sender.bandsConsidered) : 0
                 print(String(
-                    format: "%@: %.1f fps (%llu total, %llu send errors) | device: "
+                    format: "%@: %.1f fps (%llu total, %llu send errors, diff %.0f%%) | device: "
                         + "shown=%u dropped=%u heap=%u hb=%@ pacing=%uus",
-                    label, fps, count, sender.sendErrors,
+                    label, fps, count, sender.sendErrors, diffPct,
                     stats.shown, stats.dropped, stats.heap, hb, sender.spacingMicros))
                 lastReport = now
                 lastCount = count
