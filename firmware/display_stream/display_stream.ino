@@ -29,6 +29,7 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <esp_mac.h>
 #include <esp_task_wdt.h>
 #include <mbedtls/base64.h>
 
@@ -52,9 +53,12 @@ static String cfgPass;
 // (espdisplay-XXXX from the MAC); changeable via CFGNAME over USB.
 static String cfgName;
 
+// Reads the MAC straight from eFuse rather than via WiFi.macAddress(),
+// because the name is needed before WiFi is initialized: the DHCP hostname
+// is latched inside WiFi.mode() when entering STA mode.
 static String defaultDeviceName() {
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
   char buf[24];
   snprintf(buf, sizeof(buf), "espdisplay-%02x%02x", mac[4], mac[5]);
   return String(buf);
@@ -654,6 +658,15 @@ void setup() {
   Serial.printf("WiFi credentials: \"%s\" (%s)\n", cfgSsid.c_str(),
                 ssidFromNvs ? "from NVS" : "compiled default");
 
+  if (cfgName.isEmpty()) {
+    cfgName = defaultDeviceName();
+  }
+  // The device name doubles as the DHCP hostname (option 12), so the router
+  // lists this board by name instead of "esp32c6-XXXXXX". This MUST precede
+  // WiFi.mode(): the core latches the hostname onto the STA netif inside
+  // mode() when entering STA, so setting it after has no effect on DHCP.
+  WiFi.setHostname(cfgName.c_str());
+
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);  // rejoin on AP drop (default, but explicit)
   WiFi.setSleep(false);         // latency: don't doze between beacons
@@ -673,12 +686,10 @@ void setup() {
     }
   }
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("WiFi up: %s (dhcp hostname \"%s\")\n",
+                  WiFi.localIP().toString().c_str(), WiFi.getHostname());
   }
 
-  if (cfgName.isEmpty()) {
-    cfgName = defaultDeviceName();
-  }
   if (MDNS.begin(cfgName.c_str())) {
     MDNS.setInstanceName(cfgName);
     MDNS.addService("espdisp", "udp", UDP_PORT);
