@@ -157,6 +157,8 @@ final class PanelManager: ObservableObject {
     @Published private(set) var operationOutcome: OperationOutcome?
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []
+    /// Streaming settings shared by every panel.
+    @Published private(set) var settings = SenderSettings()
 
     private var sessions: [String: DeviceSession] = [:]
     private var supersededServiceNames: Set<String> = []
@@ -168,11 +170,19 @@ final class PanelManager: ObservableObject {
     /// Previews and tests run without a file so they cannot overwrite the
     /// records belonging to the installed app.
     private let persistenceURL: URL?
+    /// Where the shared settings live, or nil to disable persistence.
+    private let settingsURL: URL?
 
-    init() {
+    init(settings: SenderSettings? = nil) {
         let url = PanelStore.defaultURL
         persistenceURL = url
+        settingsURL = SettingsStore.defaultURL
         let loaded = PanelStore.load(from: url)
+        let loadedSettings = SettingsStore.load(from: SettingsStore.defaultURL)
+        // An explicit value from the command line wins for this run without
+        // being written back, so a one-off invocation cannot silently rewrite
+        // what the UI saved.
+        self.settings = (settings ?? loadedSettings.settings).validated
         panels = loaded.records
             .map(\.snapshot)
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
@@ -182,6 +192,10 @@ final class PanelManager: ObservableObject {
         if let failure = loaded.failure {
             report(.persistence, detail: "Saved display settings could not be read "
                 + "from \(url?.path ?? "disk"): \(failure)")
+        }
+        if let failure = loadedSettings.failure {
+            report(.persistence, detail: "Streaming settings could not be read, so "
+                + "the defaults are in use: \(failure)")
         }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) {
             [weak self] _ in
@@ -200,6 +214,7 @@ final class PanelManager: ObservableObject {
         usbSerialPorts: [String]
     ) {
         persistenceURL = nil
+        settingsURL = nil
         panels = previewPanels
         self.savedNetworkNames = savedNetworkNames
         self.usbSerialPorts = usbSerialPorts
@@ -249,9 +264,41 @@ final class PanelManager: ObservableObject {
         persistIfNeeded(force: true)
     }
 
+    /// Apply new streaming settings to every live session and remember them.
+    ///
+    /// Pacing and identify duration take effect immediately. Frame rate is
+    /// handed to ScreenCaptureKit when a stream starts, so each session
+    /// restarts its capture to pick it up.
+    func updateSettings(_ new: SenderSettings) {
+        let validated = new.validated
+        guard validated != settings else { return }
+        settings = validated
+        for session in sessions.values {
+            session.setFPS(validated.fps)
+            session.applyPacing(
+                spacingMicros: validated.spacingMicros,
+                adaptive: validated.adaptivePacing)
+        }
+        guard let settingsURL else { return }
+        do {
+            try SettingsStore.save(validated, to: settingsURL)
+            resolve(.persistence)
+        } catch {
+            report(.persistence, detail: "Streaming settings could not be saved to "
+                + "\(settingsURL.path): \(error.localizedDescription)")
+        }
+    }
+
     func register(_ session: DeviceSession) {
         guard !supersededServiceNames.contains(session.name) else { return }
         sessions[session.name] = session
+        // Bring the session up to the current settings whatever it was built
+        // with. A session created after the user changed something would
+        // otherwise keep the old rate; a frame-rate difference restarts its
+        // capture within a couple of seconds, so this self-heals.
+        session.setFPS(settings.fps)
+        session.applyPacing(
+            spacingMicros: settings.spacingMicros, adaptive: settings.adaptivePacing)
         if !panels.contains(where: { $0.serviceName == session.name }) {
             panels.append(PanelSnapshot(serviceName: session.name, displayName: session.name,
                                         discovered: true, lastSeen: Date()))
@@ -484,7 +531,8 @@ final class PanelManager: ObservableObject {
     }
 
     func identify(_ serviceName: String) {
-        control(serviceName, capability: .identify) { $0.identify() }
+        let seconds = settings.identifySeconds
+        control(serviceName, capability: .identify) { $0.identify(seconds: seconds) }
     }
 
     func restart(_ serviceName: String) {

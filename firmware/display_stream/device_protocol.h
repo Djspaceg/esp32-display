@@ -71,13 +71,17 @@ inline void writeU32LE(uint8_t *p, uint32_t value) {
 static const int32_t BRIGHTNESS_LEVEL_MIN = 1;
 static const int32_t BRIGHTNESS_LEVEL_MAX = 255;
 
+// How long an Identify may light the LED for.
+static const int32_t IDENTIFY_SECONDS_MIN = 1;
+static const int32_t IDENTIFY_SECONDS_MAX = 30;
+
 inline bool validControlValue(ControlOpcode opcode, int32_t value) {
   switch (opcode) {
     case ControlOpcode::Brightness:
     case ControlOpcode::Flip:
       return value == 0 || value == 1;
     case ControlOpcode::Identify:
-      return value >= 1 && value <= 30;
+      return value >= IDENTIFY_SECONDS_MIN && value <= IDENTIFY_SECONDS_MAX;
     case ControlOpcode::Restart:
       return value == 1;
     case ControlOpcode::BrightnessLevel:

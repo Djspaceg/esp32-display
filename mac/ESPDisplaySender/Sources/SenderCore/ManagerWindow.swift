@@ -4,10 +4,12 @@ import SwiftUI
 
 extension Notification.Name {
     static let espDisplayShowManager = Notification.Name("com.espdisplay.sender.showManager")
+    static let espDisplayShowSettings = Notification.Name("com.espdisplay.sender.showSettings")
 }
 
 struct ManagerView: View {
     @ObservedObject var manager: PanelManager
+    @State private var showingSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,6 +59,14 @@ struct ManagerView: View {
             }
         }
         .frame(minWidth: 820, minHeight: 560)
+        .sheet(isPresented: $showingSettings) {
+            SettingsSheet(manager: manager)
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .espDisplayShowSettings)
+        ) { _ in
+            showingSettings = true
+        }
         .alert(
             manager.operationOutcome?.title ?? "",
             isPresented: Binding(

@@ -60,6 +60,10 @@ public enum DeviceProtocol {
     /// display off already has its own command.
     public static let brightnessLevelRange: ClosedRange<Int> = 1...255
 
+    /// Range an `identify` command may request, in seconds. Mirrors the
+    /// firmware's own check, which rejects anything outside it.
+    public static let identifySecondsRange: ClosedRange<Int> = 1...30
+
     public struct ControlAck: Equatable, Sendable {
         public let opcode: ControlOpcode
         public let sequence: UInt16

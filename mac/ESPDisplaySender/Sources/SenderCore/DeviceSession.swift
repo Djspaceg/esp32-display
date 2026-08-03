@@ -42,11 +42,14 @@ final class DeviceSession {
     private let sender: FrameSender
     private let source: Source
     private let picker: PickerSource?
-    private let fps: Int
     private let onStatus: ((Status) -> Void)?
     private let stateLock = NSLock()
     private var pickedFilter: SCContentFilter?
     private var pickedGeneration: UInt64 = 0
+    private var _fps: Int
+    /// Bumped when a setting that capture was started with changes, so the
+    /// watchdog restarts the stream rather than leaving the old rate running.
+    private var settingsGeneration: UInt64 = 0
 
     /// How long the device may stay silent before capture is torn down.
     ///
@@ -87,8 +90,30 @@ final class DeviceSession {
         self.sender = sender
         self.source = source
         self.picker = picker
-        self.fps = fps
+        self._fps = fps
         self.onStatus = onStatus
+    }
+
+    /// Capture rate. ScreenCaptureKit takes this when the stream starts, so
+    /// changing it makes the watchdog restart capture.
+    var fps: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _fps
+    }
+
+    func setFPS(_ fps: Int) {
+        stateLock.lock()
+        let changed = _fps != fps
+        _fps = fps
+        if changed { settingsGeneration &+= 1 }
+        stateLock.unlock()
+    }
+
+    private var currentSettingsGeneration: UInt64 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return settingsGeneration
     }
 
     func sendDisplaySleep() { sender.sendDisplaySleep() }
@@ -101,7 +126,14 @@ final class DeviceSession {
         sender.setFlip(flipped)
         sender.forceKeyframe()
     }
-    func identify() { sender.identify() }
+    func identify(seconds: Int = 8) { sender.identify(seconds: seconds) }
+
+    /// Apply pacing settings. Self-tuning is switched off first so an explicit
+    /// value is not immediately overwritten by the next climb step.
+    func applyPacing(spacingMicros: UInt32, adaptive: Bool) {
+        sender.setAdaptivePacing(adaptive)
+        if !adaptive { sender.setSpacingMicros(spacingMicros) }
+    }
     func restartDevice() { sender.restartDevice() }
 
     func usePickerFilter(_ filter: SCContentFilter) {
@@ -182,6 +214,8 @@ final class DeviceSession {
                 sender.submit(frame: rgb565, landscape: landscape)
             }
             let baselineSourceGeneration = sourceGeneration
+            let baselineSettingsGeneration = currentSettingsGeneration
+            let fps = self.fps
             var displayShape: (CGDirectDisplayID, Int, Int, Bool)?
             var trackedWindowID: UInt32?
             var trackedWindowLandscape = false
@@ -278,6 +312,10 @@ final class DeviceSession {
 
                 if sourceGeneration != baselineSourceGeneration {
                     print("[\(name)] source selection changed - switching")
+                    break
+                }
+                if currentSettingsGeneration != baselineSettingsGeneration {
+                    print("[\(name)] capture settings changed - restarting capture")
                     break
                 }
                 if capture.stopped {
