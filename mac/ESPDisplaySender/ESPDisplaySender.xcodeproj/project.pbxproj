@@ -7,38 +7,16 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A00000000000000000000200 /* Capture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000100 /* Capture.swift */; };
-		A00000000000000000000201 /* DeviceBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000101 /* DeviceBrowser.swift */; };
-		A00000000000000000000202 /* DeviceSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000102 /* DeviceSession.swift */; };
-		A00000000000000000000203 /* FrameSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000103 /* FrameSender.swift */; };
-		A00000000000000000000204 /* ManagerWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000104 /* ManagerWindow.swift */; };
-		A00000000000000000000212 /* MainMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000112 /* MainMenu.swift */; };
-		A00000000000000000000205 /* PanelManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000105 /* PanelManager.swift */; };
-		A00000000000000000000206 /* PickerSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000106 /* PickerSource.swift */; };
-		A00000000000000000000207 /* PixelConvert.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000107 /* PixelConvert.swift */; };
-		A00000000000000000000208 /* TestPattern.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000108 /* TestPattern.swift */; };
-		A00000000000000000000209 /* WifiConfigUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000109 /* WifiConfigUI.swift */; };
 		A00000000000000000000210 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000110 /* main.swift */; };
 		A00000000000000000000211 /* app-icon-square.png in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000111 /* app-icon-square.png */; };
-		A00000000000000000000302 /* SenderProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000301 /* SenderProtocol */; };
+		A00000000000000000000304 /* SenderCore in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000303 /* SenderCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		A00000000000000000000003 /* ESPDisplaySender.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ESPDisplaySender.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ../Info.plist; sourceTree = "<group>"; };
-		A00000000000000000000111 /* app-icon-square.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = ../app-icon-square.png; sourceTree = "<group>"; };
-		A00000000000000000000100 /* Capture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Capture.swift; sourceTree = "<group>"; };
-		A00000000000000000000101 /* DeviceBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceBrowser.swift; sourceTree = "<group>"; };
-		A00000000000000000000102 /* DeviceSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceSession.swift; sourceTree = "<group>"; };
-		A00000000000000000000103 /* FrameSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameSender.swift; sourceTree = "<group>"; };
-		A00000000000000000000104 /* ManagerWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagerWindow.swift; sourceTree = "<group>"; };
-		A00000000000000000000112 /* MainMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainMenu.swift; sourceTree = "<group>"; };
-		A00000000000000000000105 /* PanelManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelManager.swift; sourceTree = "<group>"; };
-		A00000000000000000000106 /* PickerSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PickerSource.swift; sourceTree = "<group>"; };
-		A00000000000000000000107 /* PixelConvert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelConvert.swift; sourceTree = "<group>"; };
-		A00000000000000000000108 /* TestPattern.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestPattern.swift; sourceTree = "<group>"; };
-		A00000000000000000000109 /* WifiConfigUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WifiConfigUI.swift; sourceTree = "<group>"; };
 		A00000000000000000000110 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		A00000000000000000000111 /* app-icon-square.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = ../app-icon-square.png; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -46,7 +24,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A00000000000000000000302 /* SenderProtocol in Frameworks */,
+				A00000000000000000000304 /* SenderCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -82,17 +60,6 @@
 		A00000000000000000000007 /* ESPDisplaySender */ = {
 			isa = PBXGroup;
 			children = (
-				A00000000000000000000100 /* Capture.swift */,
-				A00000000000000000000101 /* DeviceBrowser.swift */,
-				A00000000000000000000102 /* DeviceSession.swift */,
-				A00000000000000000000103 /* FrameSender.swift */,
-				A00000000000000000000104 /* ManagerWindow.swift */,
-				A00000000000000000000112 /* MainMenu.swift */,
-				A00000000000000000000105 /* PanelManager.swift */,
-				A00000000000000000000106 /* PickerSource.swift */,
-				A00000000000000000000107 /* PixelConvert.swift */,
-				A00000000000000000000108 /* TestPattern.swift */,
-				A00000000000000000000109 /* WifiConfigUI.swift */,
 				A00000000000000000000110 /* main.swift */,
 			);
 			path = ESPDisplaySender;
@@ -115,7 +82,7 @@
 			);
 			name = ESPDisplaySender;
 			packageProductDependencies = (
-				A00000000000000000000301 /* SenderProtocol */,
+				A00000000000000000000303 /* SenderCore */,
 			);
 			productName = ESPDisplaySender;
 			productReference = A00000000000000000000003 /* ESPDisplaySender.app */;
@@ -173,17 +140,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A00000000000000000000200 /* Capture.swift in Sources */,
-				A00000000000000000000201 /* DeviceBrowser.swift in Sources */,
-				A00000000000000000000202 /* DeviceSession.swift in Sources */,
-				A00000000000000000000203 /* FrameSender.swift in Sources */,
-				A00000000000000000000204 /* ManagerWindow.swift in Sources */,
-				A00000000000000000000212 /* MainMenu.swift in Sources */,
-				A00000000000000000000205 /* PanelManager.swift in Sources */,
-				A00000000000000000000206 /* PickerSource.swift in Sources */,
-				A00000000000000000000207 /* PixelConvert.swift in Sources */,
-				A00000000000000000000208 /* TestPattern.swift in Sources */,
-				A00000000000000000000209 /* WifiConfigUI.swift in Sources */,
 				A00000000000000000000210 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -302,10 +258,10 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		A00000000000000000000301 /* SenderProtocol */ = {
+		A00000000000000000000303 /* SenderCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A00000000000000000000300 /* XCLocalSwiftPackageReference "." */;
-			productName = SenderProtocol;
+			productName = SenderCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
