@@ -96,6 +96,7 @@ final class DeviceSession {
     func forceKeyframe() { sender.forceKeyframe() }
     func setPaused(_ paused: Bool) { sender.setPaused(paused) }
     func setBrightness(high: Bool) { sender.setBrightness(high: high) }
+    func setBrightnessLevel(_ level: Int) { sender.setBrightnessLevel(level) }
     func setFlip(_ flipped: Bool) {
         sender.setFlip(flipped)
         sender.forceKeyframe()

@@ -429,6 +429,7 @@ final class PanelManager: ObservableObject {
     private static func describe(_ capability: DeviceProtocol.Capabilities) -> String {
         switch capability {
         case .brightness: return "brightness control"
+        case .brightnessLevel: return "brightness levels"
         case .flip: return "rotation"
         case .identify: return "identify"
         case .restart: return "remote restart"
@@ -457,6 +458,21 @@ final class PanelManager: ObservableObject {
         control(serviceName, capability: .brightness) { session in
             updatePanel(serviceName) { $0.brightnessHigh = high }
             session.setBrightness(high: high)
+        }
+    }
+
+    /// Set an exact backlight level on firmware that accepts one.
+    ///
+    /// The panel value is updated straight away so a slider tracks the finger
+    /// rather than waiting a round trip; the acknowledgement then confirms
+    /// whatever the device actually applied.
+    func setBrightnessLevel(_ level: Int, for serviceName: String) {
+        control(serviceName, capability: .brightnessLevel) { session in
+            let clamped = min(
+                max(level, DeviceProtocol.brightnessLevelRange.lowerBound),
+                DeviceProtocol.brightnessLevelRange.upperBound)
+            updatePanel(serviceName) { $0.brightness = clamped }
+            session.setBrightnessLevel(clamped)
         }
     }
 
@@ -713,6 +729,7 @@ extension PanelManager {
     static var preview: PanelManager {
         let now = Date()
         let controls = DeviceProtocol.Capabilities.brightness
+            .union(.brightnessLevel)
             .union(.flip)
             .union(.identify)
             .union(.restart)
