@@ -60,6 +60,12 @@ final class FrameSender {
     private var _lastControlAck: DeviceProtocol.ControlAck?
     private var _resolvedAddress: String?
     private var _paused = false
+    private var _parked = false
+    /// Genuine replies from the device: heartbeats, info, and control
+    /// acknowledgements. Unlike `heartbeatAge` this is never advanced by the
+    /// reconnect grace period, so it is the only sound evidence that the panel
+    /// is really answering rather than merely having been reconnected to.
+    private var _deviceReplies: UInt64 = 0
     private var nextControlSequence = UInt16.random(in: 1...UInt16.max)
     private var prevStats = DeviceStats()
     private let onDeviceEvent: ((DeviceEvent) -> Void)?
@@ -127,6 +133,33 @@ final class FrameSender {
         lock.lock()
         defer { lock.unlock() }
         return _paused
+    }
+
+    /// True while the session has parked this sender because the device stopped
+    /// answering. Frames are dropped instead of queued and the periodic full
+    /// repaint is skipped, so an unreachable panel stops costing send attempts.
+    /// The keepalive ping keeps running: it is what makes a return noticeable.
+    var parked: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _parked
+    }
+
+    var deviceRepliesReceived: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return _deviceReplies
+    }
+
+    func setParked(_ parked: Bool) {
+        lock.lock()
+        let changed = _parked != parked
+        _parked = parked
+        if parked { pendingFrame = nil }
+        lock.unlock()
+        // The panel's framebuffer is unknown after an absence, and the diff
+        // would otherwise skip every band that has not changed since.
+        if changed, !parked { forceKeyframe() }
     }
 
     func setPaused(_ paused: Bool) {
@@ -333,6 +366,7 @@ final class FrameSender {
             lock.lock()
             _deviceInfo = info
             _lastHeartbeatAt = Date()
+            _deviceReplies &+= 1
             lock.unlock()
             onDeviceEvent?(.info(info))
             return
@@ -340,6 +374,7 @@ final class FrameSender {
         if let acknowledgement = DeviceProtocol.parseAck(data) {
             lock.withLock {
                 _lastControlAck = acknowledgement
+                _deviceReplies &+= 1
             }
             if !acknowledgement.succeeded {
                 let message = "control \(acknowledgement.sequence) failed with status "
@@ -353,6 +388,7 @@ final class FrameSender {
 
         lock.lock()
         _lastHeartbeatAt = Date()
+        _deviceReplies &+= 1
         let prev = prevStats
         prevStats = stats
         _stats = stats
@@ -553,7 +589,7 @@ final class FrameSender {
     /// the sender frees up is the one that goes out.
     func submit(frame: [UInt8], landscape: Bool) {
         lock.lock()
-        guard !_paused else {
+        guard !_paused, !_parked else {
             lock.unlock()
             return
         }
@@ -654,6 +690,7 @@ final class FrameSender {
         timer.schedule(deadline: .now() + refreshInterval, repeating: refreshInterval)
         timer.setEventHandler { [weak self] in
             guard let self, let frame = self.lastSentFrame else { return }
+            guard !self.parked else { return }
             guard Date().timeIntervalSince(self.lastSendAt) >= self.refreshInterval else {
                 return  // real frames are flowing; nothing to do
             }

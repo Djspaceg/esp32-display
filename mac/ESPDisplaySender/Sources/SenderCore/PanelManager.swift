@@ -314,6 +314,12 @@ final class PanelManager: ObservableObject {
             panel.spacingMicros = status.spacingMicros
             panel.paused = status.paused
             panel.sourceDescription = status.sourceDescription
+            // A parked session is alive but deliberately not capturing, which
+            // otherwise looks identical to a panel that is simply idle.
+            panel.lastError = status.parked
+                ? "Not reachable, so capture is stopped for this display. It resumes "
+                    + "automatically as soon as the panel answers again."
+                : nil
             if let address = status.resolvedAddress { panel.address = address }
             if let info = status.info {
                 Self.apply(info, to: &panel)
