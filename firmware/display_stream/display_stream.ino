@@ -139,7 +139,14 @@ static const uint32_t DEVICE_CAPABILITIES =
     deviceproto::CAP_BRIGHTNESS | deviceproto::CAP_BRIGHTNESS_LEVEL |
     deviceproto::CAP_FLIP |
     deviceproto::CAP_IDENTIFY | deviceproto::CAP_RESTART |
-    deviceproto::CAP_SLEEP_SYNC | deviceproto::CAP_TELEMETRY;
+    deviceproto::CAP_SLEEP_SYNC | deviceproto::CAP_TELEMETRY |
+    deviceproto::CAP_IDLE_TEXT;
+
+// Lines the sender asked the panel to show on its status card, with when they
+// arrived so the card can say how old they are. Written by the UDP task and
+// read by the loop, so both go through controlMux.
+static deviceproto::IdleTextMessage idleText;
+static uint32_t idleTextAt = 0;
 
 static const uint16_t UDP_PORT = 5568;
 static const size_t FRAME_BYTES = (size_t)PANEL_W * PANEL_H * 2;  // 110080
@@ -236,6 +243,18 @@ static void onPacket(AsyncUDPPacket packet) {
     // static content there is nothing to send, and waiting for a frame
     // would leave the panel dark.
     wakeRequested = true;
+    return;
+  }
+  if (len >= 4 && memcmp(data, "ETXT", 4) == 0) {
+    deviceproto::IdleTextMessage message;
+    if (!deviceproto::parseIdleText(data, len, message)) {
+      statBadLen = statBadLen + 1;
+      return;
+    }
+    portENTER_CRITICAL(&controlMux);
+    idleText = message;
+    idleTextAt = millis();
+    portEXIT_CRITICAL(&controlMux);
     return;
   }
   if (len >= 4 && memcmp(data, "ECTL", 4) == 0) {
@@ -709,7 +728,15 @@ static void drawIdleScreen() {
   int w = bufLandscape ? PANEL_H : PANEL_W;
   int hgt = bufLandscape ? PANEL_W : PANEL_H;
 
-  char lineIp[24], lineWifi[24];
+  // Copy the pushed lines out from under the UDP task before formatting.
+  deviceproto::IdleTextMessage pushed;
+  uint32_t pushedAt;
+  portENTER_CRITICAL(&controlMux);
+  pushed = idleText;
+  pushedAt = idleTextAt;
+  portEXIT_CRITICAL(&controlMux);
+
+  char lineIp[24], lineWifi[24], lineAge[32];
   const char *lineName = cfgName.c_str();
   snprintf(lineIp, sizeof(lineIp), "%s", WiFi.localIP().toString().c_str());
   if (WiFi.status() == WL_CONNECTED) {
@@ -717,17 +744,47 @@ static void drawIdleScreen() {
   } else {
     snprintf(lineWifi, sizeof(lineWifi), "wifi down");
   }
-  const char *lines[3] = {lineName, lineIp, lineWifi};
 
-  const int scale = 2;
-  const int lineH = 9 * scale;  // 7px glyph + spacing
+  // Room for the pushed lines, an age line, and the three status lines.
+  const char *lines[deviceproto::IDLE_TEXT_MAX_LINES + 4];
+  int lineCount = 0;
+  if (pushed.lineCount > 0) {
+    for (uint8_t i = 0; i < pushed.lineCount; i++) {
+      lines[lineCount++] = pushed.lines[i];
+    }
+    // Say how stale it is. The panel has no clock, so pushed content silently
+    // ageing would be worse than not showing it at all.
+    const uint32_t ageSeconds = (millis() - pushedAt) / 1000;
+    if (ageSeconds < 60) {
+      snprintf(lineAge, sizeof(lineAge), "as of %lus ago",
+               (unsigned long)ageSeconds);
+    } else if (ageSeconds < 3600) {
+      snprintf(lineAge, sizeof(lineAge), "as of %lum ago",
+               (unsigned long)(ageSeconds / 60));
+    } else {
+      snprintf(lineAge, sizeof(lineAge), "as of %luh ago",
+               (unsigned long)(ageSeconds / 3600));
+    }
+    lines[lineCount++] = lineAge;
+  }
+  lines[lineCount++] = lineName;
+  lines[lineCount++] = lineIp;
+  lines[lineCount++] = lineWifi;
+
   size_t maxLen = 0;
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < lineCount; i++) {
     size_t n = strlen(lines[i]);
     if (n > maxLen) maxLen = n;
   }
+  // Prefer the larger text, but drop a size rather than run off the panel:
+  // pushed lines can be far longer than the three status lines ever are.
+  int scale = 2;
+  if ((int)maxLen * 6 * scale > w - 8 || lineCount * 9 * scale > hgt - 8) {
+    scale = 1;
+  }
+  const int lineH = 9 * scale;  // 7px glyph + spacing
   int blockW = (int)maxLen * 6 * scale;
-  int blockH = 3 * lineH;
+  int blockH = lineCount * lineH;
 
   // Pseudo-random position within margins; esp_random is hardware RNG.
   int maxX = w - blockW - 4;
@@ -736,7 +793,7 @@ static void drawIdleScreen() {
   int y = 4 + (maxY > 4 ? (int)(esp_random() % (uint32_t)(maxY - 3)) : 0);
 
   memcpy(bufB, bufA, FRAME_BYTES);  // bufA stays pristine for the overlay
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < lineCount; i++) {
     drawOutlinedText(bufB, w, hgt, x, y + i * lineH, lines[i], scale);
   }
 

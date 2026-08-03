@@ -238,6 +238,108 @@ int main() {
     CHECK(deviceproto::CAP_BRIGHTNESS_LEVEL == 0x80u);
     CHECK((deviceproto::CAP_BRIGHTNESS & deviceproto::CAP_BRIGHTNESS_LEVEL) == 0u);
   }
+
+  // --- idle text: what the panel shows when no sender is driving it
+  {
+    const char *two[2] = {"Studio", "back at 14:30"};
+    uint8_t packet[deviceproto::IDLE_TEXT_MAX_BYTES];
+    size_t len = deviceproto::writeIdleText(packet, sizeof(packet), two, 2);
+    CHECK(len == 8 + (1 + 6) + (1 + 13));
+
+    const uint8_t expectedHeader[8] = {0x45, 0x54, 0x58, 0x54, 0x01, 0x02, 0x00, 0x00};
+    CHECK(memcmp(packet, expectedHeader, sizeof(expectedHeader)) == 0);
+
+    deviceproto::IdleTextMessage parsed;
+    CHECK(deviceproto::parseIdleText(packet, len, parsed));
+    CHECK(parsed.lineCount == 2);
+    CHECK(strcmp(parsed.lines[0], "Studio") == 0);
+    CHECK(strcmp(parsed.lines[1], "back at 14:30") == 0);
+
+    // Clearing is an empty push, not a special packet.
+    size_t emptyLen = deviceproto::writeIdleText(packet, sizeof(packet), nullptr, 0);
+    CHECK(emptyLen == 8);
+    CHECK(deviceproto::parseIdleText(packet, emptyLen, parsed));
+    CHECK(parsed.lineCount == 0);
+
+    // A full-size push must fit the stated maximum exactly.
+    const char *maxLine = "abcdefghijklmnopqrstuvwxyz01";
+    CHECK(strlen(maxLine) == deviceproto::IDLE_TEXT_MAX_LINE_BYTES);
+    const char *four[4] = {maxLine, maxLine, maxLine, maxLine};
+    size_t fullLen = deviceproto::writeIdleText(packet, sizeof(packet), four, 4);
+    CHECK(fullLen == deviceproto::IDLE_TEXT_MAX_BYTES);
+    CHECK(deviceproto::parseIdleText(packet, fullLen, parsed));
+    CHECK(parsed.lineCount == 4);
+    CHECK(strcmp(parsed.lines[3], maxLine) == 0);
+
+    // More lines than the panel has room for is refused, not truncated.
+    const char *five[5] = {"a", "b", "c", "d", "e"};
+    CHECK(deviceproto::writeIdleText(packet, sizeof(packet), five, 5) == 0);
+
+    // The font is a 5x7 ASCII bitmap, so unrenderable bytes are refused at
+    // both ends rather than drawn as blanks.
+    const char *tab[1] = {"a\tb"};
+    CHECK(deviceproto::writeIdleText(packet, sizeof(packet), tab, 1) == 0);
+    const char *high[1] = {"caf\xc3\xa9"};
+    CHECK(deviceproto::writeIdleText(packet, sizeof(packet), high, 1) == 0);
+
+    // A line longer than the maximum is refused.
+    const char *tooLong[1] = {"abcdefghijklmnopqrstuvwxyz012"};
+    CHECK(deviceproto::writeIdleText(packet, sizeof(packet), tooLong, 1) == 0);
+
+    // Not enough room to write means nothing is written.
+    uint8_t tiny[9];
+    CHECK(deviceproto::writeIdleText(tiny, sizeof(tiny), two, 2) == 0);
+  }
+
+  // --- idle text: malformed input is refused
+  {
+    deviceproto::IdleTextMessage parsed;
+    uint8_t good[16];
+    const char *one[1] = {"hello"};
+    size_t len = deviceproto::writeIdleText(good, sizeof(good), one, 1);
+    CHECK(len == 14);
+
+    CHECK(!deviceproto::parseIdleText(good, 7, parsed));  // short header
+
+    uint8_t badMagic[16];
+    memcpy(badMagic, good, len);
+    badMagic[0] = 'X';
+    CHECK(!deviceproto::parseIdleText(badMagic, len, parsed));
+
+    uint8_t badVersion[16];
+    memcpy(badVersion, good, len);
+    badVersion[4] = 99;
+    CHECK(!deviceproto::parseIdleText(badVersion, len, parsed));
+
+    uint8_t tooManyLines[16];
+    memcpy(tooManyLines, good, len);
+    tooManyLines[5] = 5;
+    CHECK(!deviceproto::parseIdleText(tooManyLines, len, parsed));
+
+    // A length that runs past the packet must not read out of bounds.
+    uint8_t overrun[16];
+    memcpy(overrun, good, len);
+    overrun[8] = 250;
+    CHECK(!deviceproto::parseIdleText(overrun, len, parsed));
+
+    // Trailing bytes mean the two sides disagree about the layout.
+    uint8_t trailing[17];
+    memcpy(trailing, good, len);
+    trailing[len] = 0x41;
+    CHECK(!deviceproto::parseIdleText(trailing, len + 1, parsed));
+
+    // A declared line the packet does not contain at all.
+    uint8_t missingLine[8] = {0x45, 0x54, 0x58, 0x54, 0x01, 0x01, 0x00, 0x00};
+    CHECK(!deviceproto::parseIdleText(missingLine, sizeof(missingLine), parsed));
+
+    // Refusing must leave the caller's message untouched.
+    deviceproto::IdleTextMessage keep;
+    keep.lineCount = 3;
+    CHECK(!deviceproto::parseIdleText(badMagic, len, keep));
+    CHECK(keep.lineCount == 3);
+
+    CHECK(deviceproto::CAP_IDLE_TEXT == 0x100u);
+  }
   {
     uint8_t info[96] = {0};
     const uint8_t id[6] = {0x02, 0x00, 0x00, 0x12, 0x34, 0x56};

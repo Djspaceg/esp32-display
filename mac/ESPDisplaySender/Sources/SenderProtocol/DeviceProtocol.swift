@@ -27,6 +27,9 @@ public enum DeviceProtocol {
         /// supports it and the old toggle to firmware that does not, with no
         /// protocol version bump and so no forced reflash.
         public static let brightnessLevel = Capabilities(rawValue: 1 << 7)
+        /// Accepts pushed idle text, so the panel can show something the user
+        /// chose while no sender is driving it.
+        public static let idleText = Capabilities(rawValue: 1 << 8)
     }
 
     public struct DeviceInfo: Equatable, Sendable {

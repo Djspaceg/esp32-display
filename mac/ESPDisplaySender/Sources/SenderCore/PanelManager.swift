@@ -44,6 +44,9 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// What the session is actually capturing right now, which can differ from
     /// `source` while a display is being resolved or a window is missing.
     var sourceDescription = "Automatic"
+    /// Lines to show on the panel's own status card while no sender is driving
+    /// it. Persisted, and pushed to the device whenever it reports in.
+    var idleText = ""
     /// Why this panel is not usable, when the reason is something the user
     /// would otherwise only find in the log. Cleared as soon as the device
     /// reports in again.
@@ -406,6 +409,10 @@ final class PanelManager: ObservableObject {
                 panel.lastError = nil
                 Self.apply(info, to: &panel)
             }
+            // EINF means the device just connected or rebooted, so anything it
+            // was told before is gone. This is the only moment the sender knows
+            // to push it again.
+            pushIdleText(to: serviceName)
         case .acknowledgement(let acknowledgement):
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
@@ -684,6 +691,33 @@ final class PanelManager: ObservableObject {
         Dictionary(
             panels.map { ($0.serviceName, $0.source) },
             uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Set the lines the panel shows while nothing is driving it.
+    ///
+    /// Stored as the user typed it so the text field round-trips, and sanitized
+    /// only on the way to the device, whose font is a 5x7 ASCII bitmap.
+    func setIdleText(_ text: String, for serviceName: String) {
+        guard panels.contains(where: { $0.serviceName == serviceName }) else { return }
+        updatePanel(serviceName) { $0.idleText = text }
+        persistIfNeeded(force: true)
+        pushIdleText(to: serviceName)
+    }
+
+    /// How the stored text will actually appear on the panel, so the UI can show
+    /// what was dropped rather than leaving the user to guess.
+    func idleTextPreview(for serviceName: String) -> [String] {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return [] }
+        return IdleText.sanitize(panel.idleText)
+    }
+
+    private func pushIdleText(to serviceName: String) {
+        guard let session = sessions[serviceName],
+              let panel = panels.first(where: { $0.serviceName == serviceName }),
+              panel.capabilities.contains(.idleText)
+        else { return }
+        session.sendIdleText(IdleText.sanitize(panel.idleText))
     }
 
     private static func apply(

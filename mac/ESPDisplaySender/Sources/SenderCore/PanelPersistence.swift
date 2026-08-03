@@ -27,6 +27,8 @@ struct PersistedPanel: Codable, Equatable {
     /// What the user chose this panel should show, absent for automatic. Stored
     /// in the same shape as a `devices.json` entry.
     var source: SourceSpec?
+    /// Lines the panel shows on its own status card while nothing is driving it.
+    var idleText: String?
 
     init(snapshot: PanelSnapshot) {
         serviceName = snapshot.serviceName
@@ -36,6 +38,7 @@ struct PersistedPanel: Codable, Equatable {
         address = snapshot.address
         lastSeen = snapshot.lastSeen
         source = snapshot.source.spec
+        idleText = snapshot.idleText.isEmpty ? nil : snapshot.idleText
     }
 
     /// Rebuild a runtime snapshot. Everything not persisted starts at its
@@ -50,6 +53,7 @@ struct PersistedPanel: Codable, Equatable {
             usbPort: usbPort,
             lastSeen: lastSeen)
         panel.source = PanelSource(source)
+        panel.idleText = idleText ?? ""
         return panel
     }
 }
