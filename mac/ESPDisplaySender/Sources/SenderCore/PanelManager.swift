@@ -79,6 +79,41 @@ struct PanelSnapshot: Identifiable, Equatable {
     }
 }
 
+private extension String {
+    /// Sentence-cases a phrase for use at the start of a title, without
+    /// touching the rest of the words.
+    var capitalizedFirst: String {
+        guard let first else { return self }
+        return first.uppercased() + dropFirst()
+    }
+}
+
+/// The result of something the user just asked for, success or failure, shown
+/// in one place. Previously failures arrived either here or as an NSAlert put
+/// up by the serial layer, depending on which code path produced them.
+struct OperationOutcome: Equatable {
+    enum Kind: Equatable {
+        case success
+        case failure
+    }
+
+    var kind: Kind
+    var title: String
+    var message: String
+
+    static func failure(_ failure: WifiConfigUI.ConfigFailure) -> OperationOutcome {
+        OperationOutcome(kind: .failure, title: failure.title, message: failure.message)
+    }
+
+    static func failure(_ title: String, _ message: String) -> OperationOutcome {
+        OperationOutcome(kind: .failure, title: title, message: message)
+    }
+
+    static func success(_ title: String, _ message: String) -> OperationOutcome {
+        OperationOutcome(kind: .success, title: title, message: message)
+    }
+}
+
 /// A process-wide problem the app cannot resolve on its own, so the user has
 /// to be told rather than having it recorded in a log they will never read.
 enum AppIssue: String, CaseIterable, Sendable {
@@ -113,7 +148,8 @@ final class PanelManager: ObservableObject {
     @Published private(set) var savedNetworkNames: [String] = []
     @Published private(set) var usbSerialPorts: [String] = []
     @Published var selectedServiceName: String?
-    @Published private(set) var operationError: String?
+    /// The outcome of the most recent user-initiated action, cleared when read.
+    @Published private(set) var operationOutcome: OperationOutcome?
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []
 
@@ -322,8 +358,10 @@ final class PanelManager: ObservableObject {
                 panel.sleeping = acknowledgement.sleeping
             }
             if !acknowledgement.succeeded {
-                operationError = "The display rejected the \(acknowledgement.opcode) "
-                    + "command (status \(acknowledgement.status))."
+                operationOutcome = .failure(
+                    "Display command failed",
+                    "The display rejected the \(acknowledgement.opcode) "
+                        + "command (status \(acknowledgement.status)).")
             }
         }
         persistIfNeeded(force: reconciledIdentity)
@@ -341,89 +379,153 @@ final class PanelManager: ObservableObject {
         updatePanel(serviceName) { $0.paused = paused }
     }
 
+    /// Why a control cannot be used right now, or nil when it can.
+    ///
+    /// The single source of truth for both the disabled state and the refusal
+    /// message, so the two can never disagree, and specific enough to show as a
+    /// tooltip on the disabled control rather than only as a message the user
+    /// can never actually trigger.
+    func controlUnavailableReason(
+        _ serviceName: String, capability: DeviceProtocol.Capabilities
+    ) -> String? {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
+            return "This display is not known yet."
+        }
+        guard sessions[serviceName] != nil else {
+            return "No streaming session is connected to this display."
+        }
+        guard panel.isOnline else {
+            return "This display is offline."
+        }
+        guard panel.controlProtocolVersion
+            == Int(DeviceProtocol.controlProtocolVersion)
+        else {
+            return "Flash the current firmware to enable remote controls."
+        }
+        guard panel.capabilities.contains(capability) else {
+            return "This display does not report support for "
+                + "\(Self.describe(capability))."
+        }
+        return nil
+    }
+
     func canControl(
         _ serviceName: String, capability: DeviceProtocol.Capabilities
     ) -> Bool {
-        guard sessions[serviceName] != nil,
-              let panel = panels.first(where: { $0.serviceName == serviceName })
-        else { return false }
-        return panel.isOnline
-            && panel.controlProtocolVersion == Int(DeviceProtocol.controlProtocolVersion)
-            && panel.capabilities.contains(capability)
+        controlUnavailableReason(serviceName, capability: capability) == nil
+    }
+
+    private static func describe(_ capability: DeviceProtocol.Capabilities) -> String {
+        switch capability {
+        case .brightness: return "brightness control"
+        case .flip: return "rotation"
+        case .identify: return "identify"
+        case .restart: return "remote restart"
+        default: return "this control"
+        }
+    }
+
+    /// Run a control action, refusing with an accurate reason if the display
+    /// cannot honour it. The UI disables these controls using the same check,
+    /// so the refusal is a backstop for a panel that went offline mid-click.
+    private func control(
+        _ serviceName: String,
+        capability: DeviceProtocol.Capabilities,
+        action: (DeviceSession) -> Void
+    ) {
+        if let reason = controlUnavailableReason(serviceName, capability: capability) {
+            operationOutcome = .failure(
+                "\(Self.describe(capability).capitalizedFirst) unavailable", reason)
+            return
+        }
+        guard let session = sessions[serviceName] else { return }
+        action(session)
     }
 
     func setBrightness(high: Bool, for serviceName: String) {
-        guard canControl(serviceName, capability: .brightness),
-              let session = sessions[serviceName]
-        else {
-            operationError = "Brightness control is not available for this display."
-            return
+        control(serviceName, capability: .brightness) { session in
+            updatePanel(serviceName) { $0.brightnessHigh = high }
+            session.setBrightness(high: high)
         }
-        updatePanel(serviceName) { $0.brightnessHigh = high }
-        session.setBrightness(high: high)
     }
 
     func setFlip(_ flipped: Bool, for serviceName: String) {
-        guard canControl(serviceName, capability: .flip),
-              let session = sessions[serviceName]
-        else {
-            operationError = "Rotation control is not available for this display."
-            return
+        control(serviceName, capability: .flip) { session in
+            updatePanel(serviceName) { $0.flipped = flipped }
+            session.setFlip(flipped)
         }
-        updatePanel(serviceName) { $0.flipped = flipped }
-        session.setFlip(flipped)
     }
 
     func identify(_ serviceName: String) {
-        guard canControl(serviceName, capability: .identify) else {
-            operationError = "Identify is not available for this display."
-            return
-        }
-        sessions[serviceName]?.identify()
+        control(serviceName, capability: .identify) { $0.identify() }
     }
 
     func restart(_ serviceName: String) {
-        guard canControl(serviceName, capability: .restart) else {
-            operationError = "Restart is not available for this display."
-            return
-        }
-        sessions[serviceName]?.restartDevice()
+        control(serviceName, capability: .restart) { $0.restartDevice() }
     }
 
     func rename(_ newName: String, for serviceName: String) {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else { return }
-        guard let appliedName = WifiConfigUI.renameDevice(
+        switch WifiConfigUI.renameDevice(
             currentName: panel.displayName,
             newName: newName,
             preferredPort: panel.usbPort)
-        else { return }
-        updatePanel(serviceName) { $0.displayName = appliedName }
-        persistIfNeeded(force: true)
+        {
+        case .success(let appliedName):
+            updatePanel(serviceName) { $0.displayName = appliedName }
+            persistIfNeeded(force: true)
+            operationOutcome = .success(
+                "Name saved",
+                "The display is restarting as \"\(appliedName)\". Streaming "
+                    + "reconnects automatically.")
+        case .failure(let failure):
+            operationOutcome = .failure(failure)
+        }
     }
 
     func applySavedNetwork(_ ssid: String, to serviceName: String) {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else { return }
         guard !ssid.isEmpty else {
-            operationError = "Select a saved WiFi network first."
+            operationOutcome = .failure(
+                "No network selected", "Select a saved WiFi network first.")
             return
         }
-        _ = WifiConfigUI.applySavedNetwork(
+        switch WifiConfigUI.applySavedNetwork(
             ssid,
             currentName: panel.displayName,
             preferredPort: panel.usbPort)
+        {
+        case .success:
+            operationOutcome = .success(
+                "WiFi saved",
+                "The display is restarting and joining \"\(ssid)\". Streaming "
+                    + "reconnects automatically.")
+        case .failure(let failure):
+            operationOutcome = .failure(failure)
+        }
     }
 
     func configureUSB(preferredSSID: String? = nil) {
         guard let panel = selectedPanel else {
-            operationError = "Select a display before configuring WiFi."
+            operationOutcome = .failure(
+                "No display selected", "Select a display before configuring WiFi.")
             return
         }
-        WifiConfigUI.run(
+        let result = WifiConfigUI.run(
             currentName: panel.displayName,
             preferredPort: panel.usbPort,
             preferredSSID: preferredSSID)
         refreshSavedNetworks()
         refreshUSBPorts()
+        switch result {
+        case .success(let confirmation):
+            // nil means the user cancelled, which needs no announcement.
+            if let confirmation {
+                operationOutcome = .success(confirmation.title, confirmation.message)
+            }
+        case .failure(let failure):
+            operationOutcome = .failure(failure)
+        }
     }
 
     func usbPortOptions(for serviceName: String) -> [String] {
@@ -453,8 +555,8 @@ final class PanelManager: ObservableObject {
         savedNetworkNames = WifiCredentialStore.savedNetworkNames()
     }
 
-    func clearOperationError() {
-        operationError = nil
+    func clearOperationOutcome() {
+        operationOutcome = nil
     }
 
     func canForget(_ serviceName: String) -> Bool {

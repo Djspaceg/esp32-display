@@ -30,7 +30,8 @@ struct ManagerView: View {
                                 .tag(panel.serviceName)
                                 .contextMenu {
                                     Button("Identify") { manager.identify(panel.serviceName) }
-                                        .disabled(!panel.capabilities.contains(.identify))
+                                        .disabled(!manager.canControl(
+                                            panel.serviceName, capability: .identify))
                                     Button(panel.paused ? "Resume" : "Pause") {
                                         manager.setPaused(!panel.paused, for: panel.serviceName)
                                     }
@@ -57,15 +58,15 @@ struct ManagerView: View {
         }
         .frame(minWidth: 820, minHeight: 560)
         .alert(
-            "Display Command Failed",
+            manager.operationOutcome?.title ?? "",
             isPresented: Binding(
-                get: { manager.operationError != nil },
-                set: { if !$0 { manager.clearOperationError() } }
+                get: { manager.operationOutcome != nil },
+                set: { if !$0 { manager.clearOperationOutcome() } }
             )
         ) {
-            Button("OK") { manager.clearOperationError() }
+            Button("OK") { manager.clearOperationOutcome() }
         } message: {
-            Text(manager.operationError ?? "The display did not accept the command.")
+            Text(manager.operationOutcome?.message ?? "")
         }
     }
 }
@@ -201,6 +202,7 @@ private struct PanelDetailView: View {
                                 .controlSize(.small)
                                 .disabled(!manager.canControl(
                                     panel.serviceName, capability: .brightness))
+                                .help(controlHelp(.brightness, "Set the panel backlight"))
                         }
                         InfoRow("Orientation") {
                             Toggle("Rotate 180°", isOn: Binding(
@@ -210,6 +212,7 @@ private struct PanelDetailView: View {
                                 .controlSize(.small)
                                 .disabled(!manager.canControl(
                                     panel.serviceName, capability: .flip))
+                                .help(controlHelp(.flip, "Rotate the image on the panel"))
                         }
                         if panel.controlProtocolVersion
                             != Int(DeviceProtocol.controlProtocolVersion)
@@ -328,6 +331,7 @@ private struct PanelDetailView: View {
                         confirmRestart = true
                     }
                     .disabled(!manager.canControl(panel.serviceName, capability: .restart))
+                    .help(controlHelp(.restart, "Reboot the panel"))
                     Button("Forget Display", role: .destructive) {
                         manager.forget(panel.serviceName)
                     }
@@ -414,7 +418,18 @@ private struct PanelDetailView: View {
             Button("Identify") { manager.identify(panel.serviceName) }
                 .controlSize(.small)
                 .disabled(!manager.canControl(panel.serviceName, capability: .identify))
+                .help(controlHelp(.identify, "Flash this panel so you can spot it"))
         }
+    }
+
+    /// Tooltip for a control: why it is unavailable, or what it does. The reason
+    /// comes from the same check that disables the control, so a greyed-out
+    /// switch can always explain itself.
+    private func controlHelp(
+        _ capability: DeviceProtocol.Capabilities, _ available: String
+    ) -> String {
+        manager.controlUnavailableReason(panel.serviceName, capability: capability)
+            ?? available
     }
 
     private func beginNameEdit() {

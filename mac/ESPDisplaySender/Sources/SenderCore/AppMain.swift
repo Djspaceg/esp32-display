@@ -150,7 +150,11 @@ public enum ESPDisplaySenderApp {
             || ProcessInfo.processInfo.environment["ESPDISP_AGENT"] != nil
 
         if opts.configure {
-            MainActor.assumeIsolated { WifiConfigUI.run() }
+            // Standalone invocation: no manager window exists to show the
+            // result in, so present it modally.
+            MainActor.assumeIsolated {
+                WifiConfigUI.presentOutcome(WifiConfigUI.run())
+            }
             exit(0)
         }
 
