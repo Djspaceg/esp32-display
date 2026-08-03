@@ -476,6 +476,7 @@ private struct InfoRow<Content: View>: View {
 @MainActor
 final class ManagerWindowController: NSObject, NSWindowDelegate {
     private let manager: PanelManager
+    private let mainMenu = MainMenuController()
     private var window: NSWindow?
 
     init(manager: PanelManager) {
@@ -484,7 +485,7 @@ final class ManagerWindowController: NSObject, NSWindowDelegate {
 
     func show() {
         NSApp.setActivationPolicy(.regular)
-        installMainMenuIfNeeded()
+        mainMenu.installIfNeeded()
         let window = makeWindowIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -516,25 +517,6 @@ final class ManagerWindowController: NSObject, NSWindowDelegate {
             guard NSApp.windows.allSatisfy({ !$0.isVisible }) else { return }
             NSApp.setActivationPolicy(.accessory)
         }
-    }
-
-    private func installMainMenuIfNeeded() {
-        guard NSApp.mainMenu == nil else { return }
-        let main = NSMenu()
-        let appItem = NSMenuItem()
-        main.addItem(appItem)
-        let app = NSMenu()
-        app.addItem(withTitle: "About ESPDisplaySender",
-                    action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
-                    keyEquivalent: "")
-        app.addItem(.separator())
-        app.addItem(withTitle: "Hide ESPDisplaySender",
-                    action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        app.addItem(.separator())
-        app.addItem(withTitle: "Quit ESPDisplaySender",
-                    action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = app
-        NSApp.mainMenu = main
     }
 }
 

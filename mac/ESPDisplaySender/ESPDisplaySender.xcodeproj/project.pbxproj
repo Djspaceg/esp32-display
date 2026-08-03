@@ -12,6 +12,7 @@
 		A00000000000000000000202 /* DeviceSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000102 /* DeviceSession.swift */; };
 		A00000000000000000000203 /* FrameSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000103 /* FrameSender.swift */; };
 		A00000000000000000000204 /* ManagerWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000104 /* ManagerWindow.swift */; };
+		A00000000000000000000212 /* MainMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000112 /* MainMenu.swift */; };
 		A00000000000000000000205 /* PanelManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000105 /* PanelManager.swift */; };
 		A00000000000000000000206 /* PickerSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000106 /* PickerSource.swift */; };
 		A00000000000000000000207 /* PixelConvert.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000107 /* PixelConvert.swift */; };
@@ -31,6 +32,7 @@
 		A00000000000000000000102 /* DeviceSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceSession.swift; sourceTree = "<group>"; };
 		A00000000000000000000103 /* FrameSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameSender.swift; sourceTree = "<group>"; };
 		A00000000000000000000104 /* ManagerWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagerWindow.swift; sourceTree = "<group>"; };
+		A00000000000000000000112 /* MainMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainMenu.swift; sourceTree = "<group>"; };
 		A00000000000000000000105 /* PanelManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelManager.swift; sourceTree = "<group>"; };
 		A00000000000000000000106 /* PickerSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PickerSource.swift; sourceTree = "<group>"; };
 		A00000000000000000000107 /* PixelConvert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelConvert.swift; sourceTree = "<group>"; };
@@ -85,6 +87,7 @@
 				A00000000000000000000102 /* DeviceSession.swift */,
 				A00000000000000000000103 /* FrameSender.swift */,
 				A00000000000000000000104 /* ManagerWindow.swift */,
+				A00000000000000000000112 /* MainMenu.swift */,
 				A00000000000000000000105 /* PanelManager.swift */,
 				A00000000000000000000106 /* PickerSource.swift */,
 				A00000000000000000000107 /* PixelConvert.swift */,
@@ -175,6 +178,7 @@
 				A00000000000000000000202 /* DeviceSession.swift in Sources */,
 				A00000000000000000000203 /* FrameSender.swift in Sources */,
 				A00000000000000000000204 /* ManagerWindow.swift in Sources */,
+				A00000000000000000000212 /* MainMenu.swift in Sources */,
 				A00000000000000000000205 /* PanelManager.swift in Sources */,
 				A00000000000000000000206 /* PickerSource.swift in Sources */,
 				A00000000000000000000207 /* PixelConvert.swift in Sources */,
