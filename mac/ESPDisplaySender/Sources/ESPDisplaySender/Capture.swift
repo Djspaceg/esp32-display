@@ -193,6 +193,15 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             landscape: window.frame.width > window.frame.height, fps: fps)
     }
 
+    /// Start capturing whatever the user chose in macOS's content picker.
+    /// Orientation comes from the filter's content rect, so a picked portrait
+    /// window streams portrait and a landscape display streams landscape.
+    func start(contentFilter: SCContentFilter, fps: Int) async throws {
+        let rect = contentFilter.contentRect
+        try await start(
+            filter: contentFilter, landscape: rect.width > rect.height, fps: fps)
+    }
+
     private func start(filter: SCContentFilter, landscape: Bool, fps: Int) async throws {
         self.landscape = landscape
         outW = landscape ? PixelConvert.height : PixelConvert.width

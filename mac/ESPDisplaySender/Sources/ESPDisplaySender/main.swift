@@ -55,8 +55,16 @@ func parseOptions() -> Options {
             print("""
                 ESPDisplaySender
                   --list-displays          show capturable displays and exit
-                  --mode test|capture|window  test pattern, display capture (default), or
-                                           single-window capture
+                  --mode test|capture|window  test pattern, automatic capture (default),
+                                           or a named single window.
+                                           Automatic mode follows macOS: it honors a
+                                           source picked in Control Center's screen-
+                                           sharing picker, otherwise it tracks the
+                                           virtual display (Extended Display directly,
+                                           Entire Screen via its mirror source), and
+                                           re-evaluates every 2s so changes made in
+                                           System Settings are picked up on their own.
+                                           Send SIGUSR1 to open the picker.
                   --display <name>         display name substring (default "Tiny Monitor")
                   --window <name>          app or window title substring; captures that
                                            window directly, no virtual display needed
@@ -193,53 +201,111 @@ Task {
             // and compare. Identity is anchored on the display's UUID, which
             // survives every reconfiguration; it's cached to disk so even a
             // sender restart mid-mirror re-finds the display.
+            // Source priority, re-evaluated continuously so the stream
+            // follows whatever macOS is doing without any command:
+            //   1. The user's explicit pick in macOS's content picker
+            //      (Control Center / menu bar). This covers the mirroring
+            //      dialog's "Window or App" case, which tears the virtual
+            //      display down entirely, and can be changed at any time.
+            //   2. Automatic virtual-display tracking: "Extended Display"
+            //      leaves an independently capturable display, "Entire
+            //      Screen" leaves a mirror-set member we traverse to its
+            //      source.
+            let picker = PickerSource()
+            picker.activate()
+            print("macOS content picker active - pick or change the source any time from "
+                + "the screen-sharing icon in the menu bar (or send SIGUSR1 to open it)")
+
+            let sigSource = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+            sigSource.setEventHandler { picker.present() }
+            sigSource.resume()
+            signal(SIGUSR1, SIG_IGN)
+
             let uuidCachePath = "/tmp/espdisplaysender-display-uuid"
             var knownUUID = try? String(
                 contentsOfFile: uuidCachePath, encoding: .utf8
             ).trimmingCharacters(in: .whitespacesAndNewlines)
             var announced = false
             var lastReconnectAt = Date.distantPast
+            var pickerFailures = 0
+
             while true {
-                guard let resolved = await DisplayCapture.resolve(
+                let capture = DisplayCapture { rgb565, landscape in
+                    sender.send(frame: rgb565, landscape: landscape)
+                }
+                // Any picker activity (new pick, re-pick, or clear) bumps the
+                // generation; comparing against this baseline detects a user
+                // choice in either direction - display -> picked source and
+                // picked source -> re-picked.
+                let baselinePickerGen = picker.generation
+                var displayShape: (CGDirectDisplayID, Int, Int, Bool)?
+
+                if let selection = picker.current {
+                    do {
+                        try await capture.start(contentFilter: selection.filter, fps: opts.fps)
+                        pickerFailures = 0
+                        announced = false
+                        print("capturing \(picker.describe(selection.filter)) "
+                            + "from picker selection at \(opts.fps) fps")
+                    } catch {
+                        // A picked window that closed would otherwise wedge
+                        // us here; after a few tries fall back to automatic
+                        // display tracking rather than freeze.
+                        pickerFailures += 1
+                        FileHandle.standardError.write(
+                            Data("picker source failed: \(error.localizedDescription)\n".utf8))
+                        if pickerFailures >= 3 {
+                            picker.clearSelection()
+                            pickerFailures = 0
+                        }
+                        try await Task.sleep(nanoseconds: 2_000_000_000)
+                        continue
+                    }
+                } else if let resolved = await DisplayCapture.resolve(
                     named: opts.displayName, knownUUID: knownUUID)
-                else {
+                {
+                    if let uuid = resolved.targetUUID, uuid != knownUUID {
+                        knownUUID = uuid
+                        try? uuid.write(toFile: uuidCachePath, atomically: true, encoding: .utf8)
+                    }
+                    let display = resolved.display
+                    displayShape = (display.displayID, display.width, display.height,
+                                    resolved.viaMirror)
+                    do {
+                        try await capture.start(display: display, fps: opts.fps)
+                        announced = false
+                        let name = DisplayCapture.name(for: display.displayID) ?? "?"
+                        print("capturing \"\(name)\" (\(display.width)x\(display.height)) at "
+                            + "\(opts.fps) fps\(resolved.viaMirror ? " [mirror source]" : "")")
+                    } catch {
+                        FileHandle.standardError.write(
+                            Data("capture start failed: \(error.localizedDescription), retrying\n".utf8))
+                        try await Task.sleep(nanoseconds: 2_000_000_000)
+                        continue
+                    }
+                } else {
                     if !announced {
-                        print("waiting for display \"\(opts.displayName)\" ...")
+                        print("no source available: \"\(opts.displayName)\" isn't a capturable "
+                            + "display and nothing is picked. Set the display to Extended "
+                            + "Display or Entire Screen, or pick a window/app from the "
+                            + "menu bar screen-sharing icon.")
                         announced = true
                     }
                     try await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
                 }
-                announced = false
-                if let uuid = resolved.targetUUID, uuid != knownUUID {
-                    knownUUID = uuid
-                    try? uuid.write(toFile: uuidCachePath, atomically: true, encoding: .utf8)
-                }
-                let display = resolved.display
-                let name = DisplayCapture.name(for: display.displayID) ?? "?"
-                let shape = (display.displayID, display.width, display.height,
-                             resolved.viaMirror)
-                print("capturing \"\(name)\" (\(display.width)x\(display.height)) at "
-                    + "\(opts.fps) fps\(resolved.viaMirror ? " [mirror source]" : "")")
-
-                let capture = DisplayCapture { rgb565, landscape in
-                    sender.send(frame: rgb565, landscape: landscape)
-                }
-                do {
-                    try await capture.start(display: display, fps: opts.fps)
-                } catch {
-                    FileHandle.standardError.write(Data("capture start failed: \(error), retrying\n".utf8))
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
-                    continue
-                }
 
                 // Watchdog: poll for death, reconfiguration, silent stalls,
-                // and a blackholed network path. 2s cadence keeps the gap
-                // between a macOS display operation and our reattach short.
+                // a user source change, and a blackholed network path. 2s
+                // cadence keeps the gap after a macOS display operation short.
                 while true {
                     try await Task.sleep(nanoseconds: 2_000_000_000)
                     reportProgress("streamed", sender.framesSent)
 
+                    if picker.generation != baselinePickerGen {
+                        print("source selection changed - switching")
+                        break
+                    }
                     if capture.stopped {
                         print("capture stream died - restarting")
                         break
@@ -251,14 +317,18 @@ Task {
                         print("no capture samples for 30s - restarting capture")
                         break
                     }
-                    let current = await DisplayCapture.resolve(
-                        named: opts.displayName, knownUUID: knownUUID)
-                    if current == nil
-                        || (current!.display.displayID, current!.display.width,
-                            current!.display.height, current!.viaMirror) != shape
-                    {
-                        print("display configuration changed - restarting capture")
-                        break
+                    // Only relevant while tracking a display; a picked source
+                    // is independent of display topology.
+                    if let shape = displayShape {
+                        let current = await DisplayCapture.resolve(
+                            named: opts.displayName, knownUUID: knownUUID)
+                        if current == nil
+                            || (current!.display.displayID, current!.display.width,
+                                current!.display.height, current!.viaMirror) != shape
+                        {
+                            print("display configuration changed - restarting capture")
+                            break
+                        }
                     }
                     // Device heartbeats stop when the ESP32 rebooted onto a
                     // new address or dropped off WiFi; re-resolving heals it.

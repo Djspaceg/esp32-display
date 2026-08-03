@@ -81,15 +81,52 @@ final class FrameSender {
         self.adaptivePacing = adaptivePacing
     }
 
-    /// Resolve and connect. Retries are the caller's job; this makes one
-    /// attempt with a timeout. Safe to call again later (reconnect).
+    private static let ipCachePath = "/tmp/espdisplaysender-device-ip"
+
+    static func cachedIP() -> String? {
+        guard let s = try? String(contentsOfFile: ipCachePath, encoding: .utf8) else { return nil }
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Connect, preferring the mDNS name but falling back to the device's
+    /// last known IP.
+    ///
+    /// Why the fallback matters: mDNS is multicast, which WiFi sends at the
+    /// lowest basic rate with no acks or retransmissions. On a marginal link
+    /// it fails while unicast still works fine (measured: mDNS resolution
+    /// timing out at RSSI -92 while ping ran at 0% loss). Without this the
+    /// stream would be dead despite a perfectly usable path.
     func start(timeoutSeconds: Double = 8) async throws {
+        var candidates = [host]
+        if let cached = Self.cachedIP(), cached != host {
+            candidates.append(cached)
+        }
+        var lastError: Error?
+        for candidate in candidates {
+            do {
+                try await connect(to: candidate, timeoutSeconds: timeoutSeconds)
+                if candidate != host {
+                    print("connected via cached IP \(candidate) (mDNS name did not resolve)")
+                }
+                return
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError
+            ?? NSError(
+                domain: "ESPDisplaySender", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "no reachable endpoint for \(host)"])
+    }
+
+    private func connect(to endpointHost: String, timeoutSeconds: Double) async throws {
         connection?.cancel()
 
         let params = NWParameters.udp
         params.serviceClass = .interactiveVideo
         let conn = NWConnection(
-            host: NWEndpoint.Host(host),
+            host: NWEndpoint.Host(endpointHost),
             port: NWEndpoint.Port(rawValue: port)!,
             using: params
         )
@@ -143,10 +180,24 @@ final class FrameSender {
     }
 
     private func logResolvedPath(_ conn: NWConnection) {
-        if let endpoint = conn.currentPath?.remoteEndpoint {
-            print("UDP ready -> \(endpoint)")
-        } else {
+        guard let endpoint = conn.currentPath?.remoteEndpoint else {
             print("UDP ready")
+            return
+        }
+        print("UDP ready -> \(endpoint)")
+        // Cache the resolved address so a future mDNS failure isn't fatal.
+        if case .hostPort(let host, _) = endpoint {
+            var ip: String?
+            switch host {
+            case .ipv4(let addr): ip = "\(addr)"
+            case .ipv6(let addr): ip = "\(addr)"
+            default: break
+            }
+            // Strip any interface scope ("192.168.1.120%en0").
+            if let raw = ip, let bare = raw.split(separator: "%").first {
+                try? String(bare).write(
+                    toFile: Self.ipCachePath, atomically: true, encoding: .utf8)
+            }
         }
     }
 
