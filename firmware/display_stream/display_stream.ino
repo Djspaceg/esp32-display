@@ -46,6 +46,20 @@
 static String cfgSsid;
 static String cfgPass;
 
+// Device name: mDNS hostname + service instance name, so multiple panels
+// coexist and the Mac discovers them by browsing _espdisp._udp instead of
+// resolving a hardcoded hostname. Default is unique per board
+// (espdisplay-XXXX from the MAC); changeable via CFGNAME over USB.
+static String cfgName;
+
+static String defaultDeviceName() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char buf[24];
+  snprintf(buf, sizeof(buf), "espdisplay-%02x%02x", mac[4], mac[5]);
+  return String(buf);
+}
+
 // ---- Display ----------------------------------------------------------
 static const int PIN_MOSI = 6;
 static const int PIN_SCLK = 7;
@@ -89,7 +103,7 @@ static bool userBlHigh = true;       // user's brightness choice (BOOT short pre
 // frame at reduced backlight, repositioning periodically to avoid burn-in.
 // "ESLP" packet from the Mac (its displays slept) -> backlight fully off;
 // any arriving frame wakes both states.
-static const uint32_t IDLE_AFTER_MS = 15000;
+static const uint32_t IDLE_AFTER_MS = 60000;
 static const uint32_t IDLE_REPOSITION_MS = 30000;
 static const uint8_t BL_IDLE = 10;
 static bool idleActive = false;
@@ -324,6 +338,41 @@ static void processConfigLine(char *line) {
     Serial.flush();
     delay(200);
     ESP.restart();
+  } else if (strncmp(line, "CFGNAME ", 8) == 0) {
+    // Set the device name (mDNS hostname + service instance). Base64 like
+    // CFGWIFI; sanitized to hostname-safe [a-z0-9-], max 32 chars.
+    unsigned char raw[48];
+    size_t rawLen = 0;
+    if (mbedtls_base64_decode(raw, sizeof(raw) - 1, &rawLen,
+                              (const unsigned char *)(line + 8),
+                              strlen(line + 8)) != 0) {
+      Serial.println("CFGERR bad base64");
+      return;
+    }
+    raw[rawLen] = 0;
+    char clean[33];
+    size_t n = 0;
+    for (size_t i = 0; i < rawLen && n < sizeof(clean) - 1; i++) {
+      char c = (char)tolower(raw[i]);
+      if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+        clean[n++] = c;
+      } else if (c == ' ' || c == '_') {
+        clean[n++] = '-';
+      }
+    }
+    clean[n] = 0;
+    if (n == 0) {
+      Serial.println("CFGERR name has no hostname-safe characters");
+      return;
+    }
+    Preferences prefs;
+    prefs.begin("espdisp", false);
+    prefs.putString("name", clean);
+    prefs.end();
+    Serial.printf("CFGOK name \"%s\", restarting\n", clean);
+    Serial.flush();
+    delay(200);
+    ESP.restart();
   } else if (strncmp(line, "CFGLED ", 7) == 0) {
     // Diagnostic: show a literal color for 10s (CFGLED <r> <g> <b>, 0-255).
     // Lets channel-order problems be diagnosed over serial: send pure red,
@@ -340,13 +389,17 @@ static void processConfigLine(char *line) {
   } else if (strcmp(line, "CFGSHOW") == 0) {
     // ssid64 first: base64 keeps SSIDs with spaces parseable in a
     // space-delimited line. Plain ssid goes last, for humans on a monitor.
-    unsigned char b64[48];
-    size_t b64Len = 0;
+    unsigned char b64[48], name64[48];
+    size_t b64Len = 0, name64Len = 0;
     mbedtls_base64_encode(b64, sizeof(b64) - 1, &b64Len,
                           (const unsigned char *)cfgSsid.c_str(), cfgSsid.length());
     b64[b64Len] = 0;
-    Serial.printf("CFGINFO ssid64=%s connected=%d ip=%s rssi=%d ssid=%s\n",
-                  (const char *)b64, WiFi.status() == WL_CONNECTED,
+    mbedtls_base64_encode(name64, sizeof(name64) - 1, &name64Len,
+                          (const unsigned char *)cfgName.c_str(), cfgName.length());
+    name64[name64Len] = 0;
+    Serial.printf("CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d ssid=%s\n",
+                  (const char *)b64, (const char *)name64,
+                  WiFi.status() == WL_CONNECTED,
                   WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(),
                   cfgSsid.c_str());
   }
@@ -422,7 +475,7 @@ static void drawIdleScreen() {
   int hgt = bufLandscape ? PANEL_W : PANEL_H;
 
   char lineIp[24], lineWifi[24];
-  const char *lineName = "espdisplay";
+  const char *lineName = cfgName.c_str();
   snprintf(lineIp, sizeof(lineIp), "%s", WiFi.localIP().toString().c_str());
   if (WiFi.status() == WL_CONNECTED) {
     snprintf(lineWifi, sizeof(lineWifi), "wifi %d dBm", (int)WiFi.RSSI());
@@ -571,15 +624,21 @@ void setup() {
   }
   fillPanel(0x2104);  // dark gray: display alive, waiting for WiFi
 
+  bool ssidFromNvs = false;
   {
     Preferences prefs;
     prefs.begin("espdisp", true /* read-only */);
+    ssidFromNvs = prefs.isKey("ssid");
     cfgSsid = prefs.getString("ssid", WIFI_SSID);
     cfgPass = prefs.getString("pass", WIFI_PASSWORD);
+    cfgName = prefs.getString("name", "");
     prefs.end();
   }
+  // Report the actual source, not a value comparison: stored credentials
+  // often equal the compiled ones, and claiming "compiled default" then
+  // sends you hunting for a config that is in fact saved.
   Serial.printf("WiFi credentials: \"%s\" (%s)\n", cfgSsid.c_str(),
-                cfgSsid == WIFI_SSID ? "compiled default" : "from NVS");
+                ssidFromNvs ? "from NVS" : "compiled default");
 
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);  // rejoin on AP drop (default, but explicit)
@@ -603,9 +662,15 @@ void setup() {
     Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
   }
 
-  if (MDNS.begin("espdisplay")) {
+  if (cfgName.isEmpty()) {
+    cfgName = defaultDeviceName();
+  }
+  if (MDNS.begin(cfgName.c_str())) {
+    MDNS.setInstanceName(cfgName);
     MDNS.addService("espdisp", "udp", UDP_PORT);
-    Serial.println("mDNS: espdisplay.local, service _espdisp._udp");
+    MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
+    MDNS.addServiceTxt("espdisp", "udp", "res", "172x320");
+    Serial.printf("mDNS: %s.local, service _espdisp._udp\n", cfgName.c_str());
   } else {
     Serial.println("WARN: mDNS failed to start");
   }
@@ -825,8 +890,10 @@ void loop() {
   if (mdnsRestartPending && WiFi.status() == WL_CONNECTED) {
     mdnsRestartPending = false;
     MDNS.end();
-    if (MDNS.begin("espdisplay")) {
+    if (MDNS.begin(cfgName.c_str())) {
+      MDNS.setInstanceName(cfgName);
       MDNS.addService("espdisp", "udp", UDP_PORT);
+      MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
       Serial.printf("mDNS re-announced, IP %s\n", WiFi.localIP().toString().c_str());
     }
   }

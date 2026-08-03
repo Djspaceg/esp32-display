@@ -12,7 +12,9 @@ Hardware: [ESP32-C6-LCD-1.47](https://spotpear.com/shop/ESP32-C6-1.47-inch-LCD-D
 ## What it does
 
 Plug the board into USB power anywhere on your network. It joins WiFi,
-announces itself over mDNS, and shows whatever you point it at:
+announces itself over mDNS, and the Mac finds it automatically — no IP or
+hostname to configure. Plug in a second board and it gets its own stream.
+Each panel shows whatever you point it at:
 
 - **A tiny extended desktop** — create a virtual display with
   [BetterDisplay](https://betterdisplay.dev) (free tier) and drag windows
@@ -21,6 +23,21 @@ announces itself over mDNS, and shows whatever you point it at:
   the sender follows the mirror relationship automatically.
 - **A single window or app** — pick one in macOS's screen-sharing picker
   (Control Center), no configuration files or flags.
+
+With more than one panel, assign each a source by device name in
+`~/.config/espdisplay/devices.json` — one board mirrors a display while
+another follows a specific app window:
+
+```json
+{
+  "espdisplay-9050": { "display": "Tiny Monitor" },
+  "espdisplay-abcd": { "window": "Music" }
+}
+```
+
+Devices with no entry use automatic selection. Names default to
+`espdisplay-XXXX` (from the board's MAC) and are changeable in the same USB
+dialog as the WiFi credentials.
 
 The panel follows macOS. Rotate the virtual display and the panel rotates
 with it, re-laying-out in landscape or portrait. Change mirroring modes,
@@ -68,6 +85,10 @@ did. Everything below exists because the failure actually happened:
   rotations, re-creations, and mirror-set changes that invalidate display
   IDs and NSScreen names. The UUID is cached to disk, so even a sender
   restart mid-mirror re-finds the display.
+- **Discovery tolerates mDNS ghosts**: a renamed device leaves its old
+  service name in caches until the TTL expires, resolving to nothing. Such
+  a device is retired after a few attempts and retried later, rather than
+  retrying forever.
 - **Capture watchdogs** restart the stream when macOS kills it silently
   (display reconfiguration and sleep/wake both do this without firing the
   delegate error).
@@ -115,9 +136,16 @@ The device replies with a 1Hz heartbeat (`EHB1` + frame/drop/packet/heap
 counters) to whoever sent it packets last; the sender emits a 2s `EPNG`
 keepalive so that address stays fresh through static screens.
 
+Devices advertise `_espdisp._udp` over mDNS with their name in a TXT record,
+so the Mac browses for panels instead of resolving a fixed hostname, and
+connects to the Bonjour endpoint directly (which re-resolves itself on every
+reconnect — address changes need no bookkeeping).
+
 Over USB serial (115200), the firmware also accepts configuration commands:
 `CFGWIFI <base64 ssid> <base64 password>` saves credentials to NVS and
-reboots; `CFGSHOW` reports the current network, IP, and signal strength.
+reboots; `CFGNAME <base64 name>` sets the device name; `CFGSHOW` reports the
+current network, name, IP, and signal strength; `CFGLED <r> <g> <b>` shows a
+literal LED color for 10s.
 
 ## Repo layout
 
@@ -178,7 +206,7 @@ Monitor"), learns its UUID, and tracks it from then on.
 The panel itself tells you where the firmware is: dark gray means alive and
 waiting for WiFi, dark teal means connected and waiting for a stream.
 
-When no frames arrive for 15 seconds, the panel becomes its own status
+When no frames arrive for 60 seconds, the panel becomes its own status
 display: device name, IP, and WiFi strength in outlined text over the last
 frame, at reduced backlight, repositioning every 30 seconds to avoid
 burn-in. And when the Mac's displays sleep, the device's backlight turns

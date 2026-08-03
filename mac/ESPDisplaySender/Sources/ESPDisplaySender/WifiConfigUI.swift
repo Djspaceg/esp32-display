@@ -109,35 +109,59 @@ enum WifiConfigUI {
         alert.addButton(withTitle: "Cancel")
 
         let width: CGFloat = 300
-        let portPopup = NSPopUpButton(frame: NSRect(x: 0, y: 72, width: width, height: 26))
+        let portPopup = NSPopUpButton(frame: NSRect(x: 0, y: 106, width: width, height: 26))
         portPopup.addItems(withTitles: ports)
-        let ssidField = NSTextField(frame: NSRect(x: 0, y: 38, width: width, height: 24))
+        let ssidField = NSTextField(frame: NSRect(x: 0, y: 72, width: width, height: 24))
         ssidField.placeholderString = "Network name (SSID)"
-        // Prefill with what the device currently uses, when it answers. The
-        // SSID travels base64-encoded (ssid64=) because SSIDs can contain
-        // spaces, which a space-delimited line can't carry raw.
-        if case .success(let info) = sendCommand("CFGSHOW", port: ports[0], timeout: 3),
-            let range = info.range(of: "ssid64=")
-        {
-            let rest = info[range.upperBound...]
-            let b64 = String(rest.prefix(while: { $0 != " " }))
-            if let data = Data(base64Encoded: b64),
-                let ssid = String(data: data, encoding: .utf8)
-            {
-                ssidField.stringValue = ssid
-            }
-        }
-        let passField = NSSecureTextField(frame: NSRect(x: 0, y: 4, width: width, height: 24))
+        let passField = NSSecureTextField(frame: NSRect(x: 0, y: 38, width: width, height: 24))
         passField.placeholderString = "Password (empty for open network)"
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 4, width: width, height: 24))
+        nameField.placeholderString = "Device name (a-z, 0-9, dashes)"
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 102))
+        // Prefill from the device. Values travel base64-encoded because
+        // SSIDs can contain spaces, which a space-delimited line can't
+        // carry raw.
+        var deviceName = ""
+        if case .success(let info) = sendCommand("CFGSHOW", port: ports[0], timeout: 3) {
+            func field(_ key: String) -> String? {
+                guard let range = info.range(of: key) else { return nil }
+                let b64 = String(info[range.upperBound...].prefix(while: { $0 != " " }))
+                guard let data = Data(base64Encoded: b64) else { return nil }
+                return String(data: data, encoding: .utf8)
+            }
+            ssidField.stringValue = field("ssid64=") ?? ""
+            deviceName = field("name64=") ?? ""
+            nameField.stringValue = deviceName
+        }
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 136))
         accessory.addSubview(portPopup)
         accessory.addSubview(ssidField)
         accessory.addSubview(passField)
+        accessory.addSubview(nameField)
         alert.accessoryView = accessory
         alert.window.initialFirstResponder = ssidField
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        // Name changed? Apply it first (its own save + reboot). Kept
+        // separate from CFGWIFI so either can change independently.
+        let newName = nameField.stringValue.trimmingCharacters(in: .whitespaces)
+        if !newName.isEmpty, newName != deviceName {
+            let port = portPopup.titleOfSelectedItem ?? ports[0]
+            let b64 = Data(newName.utf8).base64EncodedString()
+            if case .failure(let why) = sendCommand("CFGNAME \(b64)", port: port) {
+                self.alert(style: .critical, title: "Rename failed", text: why)
+                return
+            }
+            // Device is rebooting; give it a moment before any WiFi write.
+            if ssidField.stringValue.isEmpty { 
+                self.alert(style: .informational, title: "Renamed",
+                           text: "The device is restarting as \"\(newName)\".")
+                return
+            }
+            Thread.sleep(forTimeInterval: 8)
+        }
 
         let ssid = ssidField.stringValue.trimmingCharacters(in: .whitespaces)
         guard !ssid.isEmpty, ssid.utf8.count <= 32 else {

@@ -93,3 +93,24 @@ final class BandProtocolTests: XCTestCase {
         XCTAssertNil(BandProtocol.parseHeartbeat(Data("EPNG".utf8)))       // wrong type
     }
 }
+
+final class DeviceSourceConfigTests: XCTestCase {
+    func testParseValidConfig() throws {
+        let json = """
+            {
+              "espdisplay-9050": { "display": "Tiny Monitor" },
+              "espdisplay-abcd": { "window": "Music" }
+            }
+            """
+        let config = try DeviceSourceConfig.parse(Data(json.utf8))
+        XCTAssertEqual(config["espdisplay-9050"], SourceSpec(display: "Tiny Monitor"))
+        XCTAssertEqual(config["espdisplay-abcd"], SourceSpec(window: "Music"))
+        XCTAssertNil(config["espdisplay-none"])
+    }
+
+    func testParseEmptyAndMalformed() throws {
+        XCTAssertEqual(try DeviceSourceConfig.parse(Data("{}".utf8)), [:])
+        XCTAssertThrowsError(try DeviceSourceConfig.parse(Data("not json".utf8)))
+        XCTAssertThrowsError(try DeviceSourceConfig.parse(Data("[1,2]".utf8)))
+    }
+}
