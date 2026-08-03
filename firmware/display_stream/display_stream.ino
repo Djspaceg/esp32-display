@@ -70,7 +70,10 @@ static esp_lcd_panel_handle_t panel = nullptr;
 static const int PIN_RGB = 8;
 static const int RGB_COUNT = 8;         // safe upper bound, extras ignored
 static const uint8_t RGB_LED_BRIGHTNESS = 28;  // subtle glow, not a lamp
-Adafruit_NeoPixel rgbLed(RGB_COUNT, PIN_RGB, NEO_GRB + NEO_KHZ800);
+static uint32_t ledOverrideUntil = 0;          // CFGLED diagnostic hold
+// NEO_RGB, not the usual NEO_GRB: this board's LED takes red first.
+// (Diagnosed with CFGLED - pure red displayed as green under GRB.)
+Adafruit_NeoPixel rgbLed(RGB_COUNT, PIN_RGB, NEO_RGB + NEO_KHZ800);
 
 // ---- BOOT button (GPIO9, ESP32-C6 boot strap; plain input after boot) ----
 // Short press: toggle backlight high/low. Long press: flip display 180.
@@ -358,6 +361,19 @@ static void processConfigLine(char *line) {
     Serial.flush();
     delay(200);
     ESP.restart();
+  } else if (strncmp(line, "CFGLED ", 7) == 0) {
+    // Diagnostic: show a literal color for 10s (CFGLED <r> <g> <b>, 0-255).
+    // Lets channel-order problems be diagnosed over serial: send pure red,
+    // ask what color appears.
+    int r, g, b;
+    if (sscanf(line + 7, "%d %d %d", &r, &g, &b) != 3) {
+      Serial.println("CFGERR expected: CFGLED <r> <g> <b>");
+      return;
+    }
+    rgbLed.fill(rgbLed.Color(r & 0xFF, g & 0xFF, b & 0xFF));
+    rgbLed.show();
+    ledOverrideUntil = millis() + 10000;
+    Serial.printf("CFGOK led r=%d g=%d b=%d for 10s\n", r & 0xFF, g & 0xFF, b & 0xFF);
   } else if (strcmp(line, "CFGSHOW") == 0) {
     // ssid64 first: base64 keeps SSIDs with spaces parseable in a
     // space-delimited line. Plain ssid goes last, for humans on a monitor.
@@ -399,16 +415,24 @@ static void handleSerialConfig() {
 //   -55..-90    gradient   green -> yellow -> orange -> red
 //   down / < -90  red
 static void updateSignalLed() {
+  if (millis() < ledOverrideUntil) {
+    return;  // a CFGLED test color is being shown
+  }
   uint8_t r, g;
   if (WiFi.status() != WL_CONNECTED) {
     r = 255;
     g = 0;
   } else {
+    // Smooth with an EMA: instantaneous RSSI jitters a few dB between
+    // reads, which made the color visibly flicker at the band edges.
+    static float rssiAvg = 0;
     int rssi = WiFi.RSSI();
-    if (rssi > -55) rssi = -55;
-    if (rssi < -90) rssi = -90;
+    rssiAvg = (rssiAvg == 0) ? rssi : rssiAvg * 0.7f + rssi * 0.3f;
+    float clamped = rssiAvg;
+    if (clamped > -55) clamped = -55;
+    if (clamped < -90) clamped = -90;
     // 0.0 at -90 (red) .. 1.0 at -55 (green)
-    float t = (rssi + 90) / 35.0f;
+    float t = (clamped + 90) / 35.0f;
     r = (uint8_t)(255 * (1.0f - t));
     g = (uint8_t)(255 * t);
   }
