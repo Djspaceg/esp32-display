@@ -22,6 +22,11 @@ public enum DeviceProtocol {
         public static let ota = Capabilities(rawValue: 1 << 4)
         public static let sleepSync = Capabilities(rawValue: 1 << 5)
         public static let telemetry = Capabilities(rawValue: 1 << 6)
+        /// Accepts any backlight level, not only high or low. Advertised apart
+        /// from `brightness` so a sender can offer a slider to firmware that
+        /// supports it and the old toggle to firmware that does not, with no
+        /// protocol version bump and so no forced reflash.
+        public static let brightnessLevel = Capabilities(rawValue: 1 << 7)
     }
 
     public struct DeviceInfo: Equatable, Sendable {
@@ -47,7 +52,13 @@ public enum DeviceProtocol {
         case flip = 2
         case identify = 3
         case restart = 4
+        case brightnessLevel = 5
     }
+
+    /// Range a `brightnessLevel` command may request. Zero is excluded: a black
+    /// backlight is indistinguishable from a broken panel, and switching the
+    /// display off already has its own command.
+    public static let brightnessLevelRange: ClosedRange<Int> = 1...255
 
     public struct ControlAck: Equatable, Sendable {
         public let opcode: ControlOpcode
@@ -115,7 +126,8 @@ public enum DeviceProtocol {
     }
 
     /// Encode a fixed-size ECTL packet. Values are intentionally explicit:
-    /// brightness/flip use 0 or 1, identify uses seconds, and restart uses 1.
+    /// brightness/flip use 0 or 1, brightnessLevel uses 1-255, identify uses
+    /// seconds, and restart uses 1.
     public static func controlPacket(
         opcode: ControlOpcode, sequence: UInt16, value: Int32
     ) -> Data {

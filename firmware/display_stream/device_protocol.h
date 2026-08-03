@@ -23,6 +23,11 @@ enum Capability : uint32_t {
   CAP_OTA = 1u << 4,
   CAP_SLEEP_SYNC = 1u << 5,
   CAP_TELEMETRY = 1u << 6,
+  // Accepts BrightnessLevel, i.e. any level rather than only high/low.
+  // Advertised separately from CAP_BRIGHTNESS so a sender can offer a slider
+  // to firmware that supports it and the old toggle to firmware that does
+  // not, without either side needing a protocol version bump.
+  CAP_BRIGHTNESS_LEVEL = 1u << 7,
 };
 
 enum class ControlOpcode : uint8_t {
@@ -30,6 +35,7 @@ enum class ControlOpcode : uint8_t {
   Flip = 2,
   Identify = 3,
   Restart = 4,
+  BrightnessLevel = 5,
 };
 
 struct ControlCommand {
@@ -59,6 +65,12 @@ inline void writeU32LE(uint8_t *p, uint32_t value) {
   p[3] = (value >> 24) & 0xFF;
 }
 
+// Lowest and highest backlight level a BrightnessLevel command may request.
+// Zero is excluded deliberately: a black backlight is indistinguishable from a
+// broken panel, and turning the display off already has its own command.
+static const int32_t BRIGHTNESS_LEVEL_MIN = 1;
+static const int32_t BRIGHTNESS_LEVEL_MAX = 255;
+
 inline bool validControlValue(ControlOpcode opcode, int32_t value) {
   switch (opcode) {
     case ControlOpcode::Brightness:
@@ -68,6 +80,8 @@ inline bool validControlValue(ControlOpcode opcode, int32_t value) {
       return value >= 1 && value <= 30;
     case ControlOpcode::Restart:
       return value == 1;
+    case ControlOpcode::BrightnessLevel:
+      return value >= BRIGHTNESS_LEVEL_MIN && value <= BRIGHTNESS_LEVEL_MAX;
   }
   return false;
 }
@@ -78,7 +92,7 @@ inline bool parseControl(const uint8_t *data, size_t len, ControlCommand &out) {
     return false;
   }
   if (data[5] < (uint8_t)ControlOpcode::Brightness ||
-      data[5] > (uint8_t)ControlOpcode::Restart) {
+      data[5] > (uint8_t)ControlOpcode::BrightnessLevel) {
     return false;
   }
   out.opcode = (ControlOpcode)data[5];

@@ -100,7 +100,15 @@ static const uint32_t LONG_PRESS_MS = 600;
 static const uint32_t DEBOUNCE_MS = 30;
 static const uint8_t BL_HIGH = 128;  // 50%, Waveshare's recommended ceiling
 static const uint8_t BL_LOW = 24;    // ~10%
-static bool userBlHigh = true;       // user's brightness choice (BOOT short press)
+// The backlight level to use when awake and being driven, 1..255. This is the
+// single source of truth: the BOOT button steps it between BL_LOW and BL_HIGH,
+// and the sender can set any level. Keeping one value instead of a high/low
+// flag is what lets both live together without them disagreeing.
+static uint8_t userBlLevel = BL_HIGH;
+
+// True when the level is nearer high than low, which is what the high/low
+// toggle and the reported flag mean now that any level is possible.
+static inline bool blIsHigh() { return userBlLevel > BL_LOW; }
 
 // ---- Status card & display sleep ----------------------------------------
 // The status card means "nothing is driving this panel", NOT "the picture
@@ -128,7 +136,8 @@ static bool displaySleeping = false;
 using namespace bandproto;
 
 static const uint32_t DEVICE_CAPABILITIES =
-    deviceproto::CAP_BRIGHTNESS | deviceproto::CAP_FLIP |
+    deviceproto::CAP_BRIGHTNESS | deviceproto::CAP_BRIGHTNESS_LEVEL |
+    deviceproto::CAP_FLIP |
     deviceproto::CAP_IDENTIFY | deviceproto::CAP_RESTART |
     deviceproto::CAP_SLEEP_SYNC | deviceproto::CAP_TELEMETRY;
 
@@ -378,7 +387,7 @@ static void saveDisplayPrefs() {
   Preferences prefs;
   prefs.begin("espdisp", false);
   prefs.putBool("flip", panelFlip180);
-  prefs.putBool("blhigh", userBlHigh);
+  prefs.putUChar("bllevel", userBlLevel);
   prefs.end();
 }
 
@@ -395,7 +404,7 @@ static void applyPanelConfig(bool landscape) {
 
 static uint8_t currentDeviceFlags() {
   uint8_t flags = 0;
-  if (userBlHigh) flags |= 0x01;
+  if (blIsHigh()) flags |= 0x01;
   if (panelFlip180) flags |= 0x02;
   if (displaySleeping) flags |= 0x04;
   if (idleActive) flags |= 0x08;
@@ -406,8 +415,13 @@ static uint8_t currentDeviceFlags() {
 static uint8_t currentBrightness() {
   if (displaySleeping) return 0;
   if (idleActive) return BL_IDLE;
-  return userBlHigh ? BL_HIGH : BL_LOW;
+  return userBlLevel;
 }
+
+// Drive the backlight to whatever the current state calls for. Every place
+// that used to repeat the sleep/idle/high/low ternary now goes through here,
+// so the pin can no longer disagree with what is reported over the network.
+static void applyBacklight() { analogWrite(PIN_BL, currentBrightness()); }
 
 static void sendDeviceInfo() {
   if (hbPort == 0) return;
@@ -452,12 +466,16 @@ static void applyPendingControl() {
   if (hasCommand) {
     switch (command.opcode) {
       case deviceproto::ControlOpcode::Brightness:
-        userBlHigh = command.value != 0;
+        userBlLevel = command.value != 0 ? BL_HIGH : BL_LOW;
         saveDisplayPrefs();
-        if (!displaySleeping && !idleActive) {
-          analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
-        }
-        Serial.printf("network: backlight %s (saved)\n", userBlHigh ? "high" : "low");
+        applyBacklight();
+        Serial.printf("network: backlight %s (saved)\n", blIsHigh() ? "high" : "low");
+        break;
+      case deviceproto::ControlOpcode::BrightnessLevel:
+        userBlLevel = (uint8_t)command.value;
+        saveDisplayPrefs();
+        applyBacklight();
+        Serial.printf("network: backlight level %u (saved)\n", userBlLevel);
         break;
       case deviceproto::ControlOpcode::Flip:
         panelFlip180 = command.value != 0;
@@ -618,7 +636,7 @@ static void processConfigLine(char *line) {
         "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d bl=%s ssid=%s\n",
         (const char *)b64, (const char *)name64, WiFi.status() == WL_CONNECTED,
         WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), panelFlip180,
-        userBlHigh ? "high" : "low", cfgSsid.c_str());
+        blIsHigh() ? "high" : "low", cfgSsid.c_str());
   }
   // Anything else on serial is ignored (a monitor typing away is harmless).
 }
@@ -785,11 +803,14 @@ static void handleButton() {
   } else if (!down && wasDown) {
     wasDown = false;
     if (!longFired && now - downAt >= DEBOUNCE_MS) {
-      userBlHigh = !userBlHigh;
-      analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+      // The button stays a two-position switch even though any level is now
+      // reachable over the network: stepping through a range by pressing a
+      // single button would be worse than useless.
+      userBlLevel = blIsHigh() ? BL_LOW : BL_HIGH;
+      applyBacklight();
       saveDisplayPrefs();
       Serial.printf("button: short press -> backlight %s (saved)\n",
-                    userBlHigh ? "high" : "low");
+                    blIsHigh() ? "high" : "low");
     }
   }
 }
@@ -875,7 +896,11 @@ void setup() {
     // needless. NVS survives sketch uploads (only the app partition is
     // rewritten); a full flash erase does reset them.
     panelFlip180 = prefs.getBool("flip", false);
-    userBlHigh = prefs.getBool("blhigh", true);
+    // Migrate the old high/low flag: devices flashed before continuous
+    // brightness have "blhigh" and no "bllevel".
+    userBlLevel = prefs.getUChar(
+        "bllevel", prefs.getBool("blhigh", true) ? BL_HIGH : BL_LOW);
+    if (userBlLevel == 0) userBlLevel = BL_HIGH;
     prefs.end();
   }
   // Report the actual source, not a value comparison: stored credentials
@@ -883,8 +908,8 @@ void setup() {
   // sends you hunting for a config that is in fact saved.
   Serial.printf("WiFi credentials: \"%s\" (%s)\n", cfgSsid.c_str(),
                 ssidFromNvs ? "from NVS" : "compiled default");
-  Serial.printf("display prefs: flip180=%d backlight=%s\n", panelFlip180,
-                userBlHigh ? "high" : "low");
+  Serial.printf("display prefs: flip180=%d backlight=%u (%s)\n", panelFlip180,
+                userBlLevel, blIsHigh() ? "high" : "low");
 
   if (cfgName.isEmpty()) {
     cfgName = defaultDeviceName();
@@ -896,7 +921,7 @@ void setup() {
 
   pinMode(PIN_BOOT, INPUT_PULLUP);
   pinMode(PIN_BL, OUTPUT);
-  analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+  applyBacklight();
   if (!initDisplay()) {
     Serial.println("FATAL: display init failed");
     while (true) delay(1000);
@@ -1038,7 +1063,7 @@ void loop() {
       if (idleActive || displaySleeping) {
         idleActive = false;
         displaySleeping = false;
-        analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+        applyBacklight();
       }
     }
   } else {
@@ -1052,7 +1077,7 @@ void loop() {
     if (!displaySleeping) {
       displaySleeping = true;
       idleActive = false;
-      analogWrite(PIN_BL, 0);
+      applyBacklight();
       Serial.println("display sleeping (ESLP from sender)");
     }
   }
@@ -1061,7 +1086,7 @@ void loop() {
     if (displaySleeping || idleActive) {
       displaySleeping = false;
       idleActive = false;
-      analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+      applyBacklight();
       Serial.println("display awake (EWAK from sender)");
     }
   }
@@ -1075,7 +1100,7 @@ void loop() {
       senderSilence > SENDER_GONE_MS) {
     if (!idleActive) {
       idleActive = true;
-      analogWrite(PIN_BL, BL_IDLE);
+      applyBacklight();
       drawIdleScreen();
       Serial.printf("sender silent %lus - status card on\n",
                     (unsigned long)(senderSilence / 1000));
@@ -1086,7 +1111,7 @@ void loop() {
     // Sender came back but has no new pixels to send (static content):
     // restore brightness without waiting for a frame.
     idleActive = false;
-    analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+    applyBacklight();
     Serial.println("sender back - status card off");
   }
 

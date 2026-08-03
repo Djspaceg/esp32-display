@@ -525,6 +525,16 @@ final class FrameSender {
         sendManagementControl(.brightness, value: high ? 1 : 0)
     }
 
+    /// Set an exact backlight level. Only valid for firmware advertising
+    /// `brightnessLevel`; older firmware rejects the opcode outright, which is
+    /// why the caller gates on the capability.
+    func setBrightnessLevel(_ level: Int) {
+        let clamped = min(
+            max(level, DeviceProtocol.brightnessLevelRange.lowerBound),
+            DeviceProtocol.brightnessLevelRange.upperBound)
+        sendManagementControl(.brightnessLevel, value: Int32(clamped))
+    }
+
     func setFlip(_ flipped: Bool) {
         sendManagementControl(.flip, value: flipped ? 1 : 0)
     }

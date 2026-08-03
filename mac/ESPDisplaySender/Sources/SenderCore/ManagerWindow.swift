@@ -203,15 +203,40 @@ private struct PanelDetailView: View {
 
                 CompactGroup("Display") {
                     CompactGrid {
-                        InfoRow("Brightness") {
-                            Toggle("High", isOn: Binding(
-                                get: { panel.brightnessHigh },
-                                set: { manager.setBrightness(high: $0, for: panel.serviceName) }))
-                                .toggleStyle(.switch)
-                                .controlSize(.small)
-                                .disabled(!manager.canControl(
-                                    panel.serviceName, capability: .brightness))
-                                .help(controlHelp(.brightness, "Set the panel backlight"))
+                        if manager.canControl(
+                            panel.serviceName, capability: .brightnessLevel)
+                            || panel.capabilities.contains(.brightnessLevel)
+                        {
+                            InfoRow("Brightness") {
+                                HStack(spacing: 8) {
+                                    Slider(
+                                        value: brightnessLevel,
+                                        in: brightnessBounds,
+                                        step: 1)
+                                    .frame(maxWidth: 220)
+                                    .disabled(!manager.canControl(
+                                        panel.serviceName, capability: .brightnessLevel))
+                                    .help(controlHelp(
+                                        .brightnessLevel, "Set the panel backlight"))
+                                    .accessibilityLabel("Brightness level")
+                                    Text("\(brightnessPercent)%")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .monospacedDigit()
+                                        .frame(width: 34, alignment: .trailing)
+                                }
+                            }
+                        } else {
+                            InfoRow("Brightness") {
+                                Toggle("High", isOn: Binding(
+                                    get: { panel.brightnessHigh },
+                                    set: { manager.setBrightness(high: $0, for: panel.serviceName) }))
+                                    .toggleStyle(.switch)
+                                    .controlSize(.small)
+                                    .disabled(!manager.canControl(
+                                        panel.serviceName, capability: .brightness))
+                                    .help(controlHelp(.brightness, "Set the panel backlight"))
+                            }
                         }
                         InfoRow("Orientation") {
                             Toggle("Rotate 180°", isOn: Binding(
@@ -439,6 +464,29 @@ private struct PanelDetailView: View {
     ) -> String {
         manager.controlUnavailableReason(panel.serviceName, capability: capability)
             ?? available
+    }
+
+    private var brightnessBounds: ClosedRange<Double> {
+        Double(DeviceProtocol.brightnessLevelRange.lowerBound)
+            ... Double(DeviceProtocol.brightnessLevelRange.upperBound)
+    }
+
+    /// Bound to the slider. Reads the level the device last reported and writes
+    /// through the manager, which clamps and sends it.
+    private var brightnessLevel: Binding<Double> {
+        Binding(
+            get: {
+                let reported = Double(panel.brightness)
+                return min(max(reported, brightnessBounds.lowerBound),
+                           brightnessBounds.upperBound)
+            },
+            set: { manager.setBrightnessLevel(Int($0.rounded()), for: panel.serviceName) })
+    }
+
+    private var brightnessPercent: Int {
+        let upper = DeviceProtocol.brightnessLevelRange.upperBound
+        let clamped = min(max(panel.brightness, 0), upper)
+        return Int((Double(clamped) / Double(upper) * 100).rounded())
     }
 
     private func beginNameEdit() {

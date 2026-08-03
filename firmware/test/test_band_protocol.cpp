@@ -190,6 +190,54 @@ int main() {
     badValue[8] = 2;
     CHECK(!deviceproto::parseControl(badValue, sizeof(badValue), command));
   }
+
+  // --- continuous brightness: any level 1..255, and 0 is refused because a
+  //     black backlight looks like a dead panel (sleep has its own command)
+  {
+    deviceproto::ControlCommand command;
+    uint8_t level[12] = {
+        0x45, 0x43, 0x54, 0x4c, 0x01, 0x05, 0x34, 0x12,
+        0x00, 0x00, 0x00, 0x00};
+
+    for (int wanted : {1, 24, 128, 200, 255}) {
+      level[8] = (uint8_t)wanted;
+      CHECK(deviceproto::parseControl(level, sizeof(level), command));
+      CHECK(command.opcode == deviceproto::ControlOpcode::BrightnessLevel);
+      CHECK(command.value == wanted);
+    }
+
+    level[8] = 0;
+    CHECK(!deviceproto::parseControl(level, sizeof(level), command));
+
+    // 256 and above cannot fit the backlight register.
+    level[8] = 0;
+    level[9] = 1;
+    CHECK(!deviceproto::parseControl(level, sizeof(level), command));
+
+    // A negative value must not wrap into a plausible level.
+    memset(level + 8, 0xff, 4);
+    CHECK(!deviceproto::parseControl(level, sizeof(level), command));
+
+    // Opcode 6 does not exist yet; the range check has to still reject it.
+    uint8_t future[12] = {
+        0x45, 0x43, 0x54, 0x4c, 0x01, 0x06, 0x34, 0x12,
+        0x01, 0x00, 0x00, 0x00};
+    CHECK(!deviceproto::parseControl(future, sizeof(future), command));
+
+    // The binary high/low command keeps its old 0-or-1 contract.
+    uint8_t binary[12] = {
+        0x45, 0x43, 0x54, 0x4c, 0x01, 0x01, 0x34, 0x12,
+        0x01, 0x00, 0x00, 0x00};
+    CHECK(deviceproto::parseControl(binary, sizeof(binary), command));
+    CHECK(command.opcode == deviceproto::ControlOpcode::Brightness);
+    binary[8] = 128;
+    CHECK(!deviceproto::parseControl(binary, sizeof(binary), command));
+
+    // The level capability is advertised separately, so a sender can tell a
+    // panel that accepts levels from one that only accepts high/low.
+    CHECK(deviceproto::CAP_BRIGHTNESS_LEVEL == 0x80u);
+    CHECK((deviceproto::CAP_BRIGHTNESS & deviceproto::CAP_BRIGHTNESS_LEVEL) == 0u);
+  }
   {
     uint8_t info[96] = {0};
     const uint8_t id[6] = {0x02, 0x00, 0x00, 0x12, 0x34, 0x56};
