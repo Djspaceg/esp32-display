@@ -348,9 +348,17 @@ static void processConfigLine(char *line) {
     delay(200);
     ESP.restart();
   } else if (strcmp(line, "CFGSHOW") == 0) {
-    Serial.printf("CFGINFO ssid=%s connected=%d ip=%s rssi=%d\n",
-                  cfgSsid.c_str(), WiFi.status() == WL_CONNECTED,
-                  WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+    // ssid64 first: base64 keeps SSIDs with spaces parseable in a
+    // space-delimited line. Plain ssid goes last, for humans on a monitor.
+    unsigned char b64[48];
+    size_t b64Len = 0;
+    mbedtls_base64_encode(b64, sizeof(b64) - 1, &b64Len,
+                          (const unsigned char *)cfgSsid.c_str(), cfgSsid.length());
+    b64[b64Len] = 0;
+    Serial.printf("CFGINFO ssid64=%s connected=%d ip=%s rssi=%d ssid=%s\n",
+                  (const char *)b64, WiFi.status() == WL_CONNECTED,
+                  WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(),
+                  cfgSsid.c_str());
   }
   // Anything else on serial is ignored (a monitor typing away is harmless).
 }

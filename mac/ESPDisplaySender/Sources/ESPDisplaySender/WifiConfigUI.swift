@@ -110,12 +110,19 @@ enum WifiConfigUI {
         portPopup.addItems(withTitles: ports)
         let ssidField = NSTextField(frame: NSRect(x: 0, y: 38, width: width, height: 24))
         ssidField.placeholderString = "Network name (SSID)"
-        // Prefill with what the device currently uses, when it answers.
+        // Prefill with what the device currently uses, when it answers. The
+        // SSID travels base64-encoded (ssid64=) because SSIDs can contain
+        // spaces, which a space-delimited line can't carry raw.
         if case .success(let info) = sendCommand("CFGSHOW", port: ports[0], timeout: 3),
-            let range = info.range(of: "ssid="),
-            let end = info[range.upperBound...].firstIndex(of: " ")
+            let range = info.range(of: "ssid64=")
         {
-            ssidField.stringValue = String(info[range.upperBound..<end])
+            let rest = info[range.upperBound...]
+            let b64 = String(rest.prefix(while: { $0 != " " }))
+            if let data = Data(base64Encoded: b64),
+                let ssid = String(data: data, encoding: .utf8)
+            {
+                ssidField.stringValue = ssid
+            }
         }
         let passField = NSSecureTextField(frame: NSRect(x: 0, y: 4, width: width, height: 24))
         passField.placeholderString = "Password (empty for open network)"
