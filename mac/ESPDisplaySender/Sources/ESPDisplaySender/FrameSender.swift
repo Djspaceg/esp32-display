@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SenderProtocol
 
 /// Sends raw RGB565 (big-endian) frames to the ESP32 over UDP, chunked to
 /// match the firmware protocol:
@@ -16,22 +17,9 @@ import Network
 /// - Send pacing auto-tunes from the device's reported dropped-frame rate,
 ///   replacing a hand-tuned constant.
 final class FrameSender {
-    static let frameBytes = 172 * 320 * 2  // 110_080
+    static let frameBytes = BandProtocol.frameBytes  // 110_080
 
-    /// Band geometry is orientation-native so bands align to whole rows:
-    /// portrait 172px rows: 4 rows x 344B; landscape 320px rows: 2 rows x
-    /// 640B. Both tile the frame exactly and stay under a 1400B safe MTU.
-    static func bandGeometry(landscape: Bool) -> (bands: Int, bandBytes: Int) {
-        landscape ? (86, 1280) : (80, 1376)
-    }
-
-    struct DeviceStats {
-        var shown: UInt32 = 0
-        var dropped: UInt32 = 0
-        var skipped: UInt32 = 0
-        var packets: UInt32 = 0
-        var heap: UInt32 = 0
-    }
+    typealias DeviceStats = BandProtocol.DeviceStats
 
     private let host: String
     private let port: UInt16
@@ -249,14 +237,7 @@ final class FrameSender {
     }
 
     private func handleInbound(_ data: Data) {
-        // "EHB1" + shown/dropped/skipped/packets/heap as u32 LE.
-        guard data.count == 24, data.prefix(4) == Data("EHB1".utf8) else { return }
-        func u32(_ offset: Int) -> UInt32 {
-            let b = [UInt8](data[(4 + offset * 4)..<(8 + offset * 4)])
-            return UInt32(b[0]) | (UInt32(b[1]) << 8) | (UInt32(b[2]) << 16) | (UInt32(b[3]) << 24)
-        }
-        let stats = DeviceStats(
-            shown: u32(0), dropped: u32(1), skipped: u32(2), packets: u32(3), heap: u32(4))
+        guard let stats = BandProtocol.parseHeartbeat(data) else { return }
 
         lock.lock()
         _lastHeartbeatAt = Date()
@@ -377,6 +358,17 @@ final class FrameSender {
         }
     }
 
+    /// Tell the device the Mac's displays slept, so it can kill its
+    /// backlight instead of glowing on stale pixels all night. Sent a few
+    /// times because it's UDP; any subsequent frame wakes the device.
+    func sendDisplaySleep() {
+        guard let conn = connection else { return }
+        for _ in 0..<3 {
+            conn.send(content: Data("ESLP".utf8), completion: .contentProcessed { _ in })
+            usleep(20_000)
+        }
+    }
+
     private func startPingTimer() {
         pingTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -442,7 +434,7 @@ final class FrameSender {
     func send(frame pixels: [UInt8], landscape: Bool = false) {
         precondition(pixels.count == Self.frameBytes, "bad frame size \(pixels.count)")
         guard let conn = connection else { return }
-        let (bands, bandBytes) = Self.bandGeometry(landscape: landscape)
+        let (bands, bandBytes) = BandProtocol.bandGeometry(landscape: landscape)
 
         var dirty: [Int]
         let keyframeDue = Date().timeIntervalSince(lastKeyframeAt) > keyframeInterval
@@ -450,20 +442,8 @@ final class FrameSender {
             dirty = Array(0..<bands)
             lastKeyframeAt = Date()
         } else {
-            var changed = [Int]()
-            let prev = prevFrame!
-            pixels.withUnsafeBytes { newRaw in
-                prev.withUnsafeBytes { oldRaw in
-                    for band in 0..<bands {
-                        let off = band * bandBytes
-                        if memcmp(newRaw.baseAddress! + off, oldRaw.baseAddress! + off,
-                                  bandBytes) != 0 {
-                            changed.append(band)
-                        }
-                    }
-                }
-            }
-            dirty = changed
+            dirty = BandProtocol.dirtyBands(new: pixels, previous: prevFrame!,
+                                            landscape: landscape)
         }
         prevFrame = pixels
         prevLandscape = landscape
@@ -472,17 +452,11 @@ final class FrameSender {
 
         let id = frameId
         frameId &+= 1
-        let countField = UInt16(dirty.count) | (landscape ? 0x8000 : 0)
         let spacing = spacingMicros
 
         for band in dirty {
-            var packet = Data(capacity: 6 + bandBytes)
-            packet.append(UInt8(id & 0xFF))
-            packet.append(UInt8(id >> 8))
-            packet.append(UInt8(band & 0xFF))
-            packet.append(UInt8(band >> 8))
-            packet.append(UInt8(countField & 0xFF))
-            packet.append(UInt8(countField >> 8))
+            var packet = BandProtocol.packetHeader(
+                frameId: id, band: band, dirtyCount: dirty.count, landscape: landscape)
             let start = band * bandBytes
             packet.append(contentsOf: pixels[start..<(start + bandBytes)])
 

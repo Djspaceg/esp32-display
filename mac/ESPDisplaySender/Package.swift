@@ -7,9 +7,19 @@ let package = Package(
         .macOS(.v14)
     ],
     targets: [
+        .target(
+            name: "SenderProtocol",
+            path: "Sources/SenderProtocol"
+        ),
         .executableTarget(
             name: "ESPDisplaySender",
+            dependencies: ["SenderProtocol"],
             path: "Sources/ESPDisplaySender"
-        )
+        ),
+        .testTarget(
+            name: "SenderProtocolTests",
+            dependencies: ["SenderProtocol"],
+            path: "Tests/SenderProtocolTests"
+        ),
     ]
 )

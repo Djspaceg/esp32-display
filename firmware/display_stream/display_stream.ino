@@ -82,26 +82,31 @@ static const uint32_t LONG_PRESS_MS = 600;
 static const uint32_t DEBOUNCE_MS = 30;
 static const uint8_t BL_HIGH = 128;  // 50%, Waveshare's recommended ceiling
 static const uint8_t BL_LOW = 24;    // ~10%
+static bool userBlHigh = true;       // user's brightness choice (BOOT short press)
+
+// ---- Idle screen & display sleep ----------------------------------------
+// No frames for a while -> overlay device name / IP / signal on the last
+// frame at reduced backlight, repositioning periodically to avoid burn-in.
+// "ESLP" packet from the Mac (its displays slept) -> backlight fully off;
+// any arriving frame wakes both states.
+static const uint32_t IDLE_AFTER_MS = 15000;
+static const uint32_t IDLE_REPOSITION_MS = 30000;
+static const uint8_t BL_IDLE = 10;
+static bool idleActive = false;
+static uint32_t lastFrameShownAt = 0;
+static uint32_t lastIdleDrawAt = 0;
+static volatile bool sleepRequested = false;  // set by UDP task on ESLP
+static bool displaySleeping = false;
 
 // ---- Protocol (v2: dirty bands) -----------------------------------------
-// The frame is tiled into row bands; the sender transmits only bands that
-// changed since its previous frame (plus periodic keyframes). Packet:
-//   [frame_id u16 LE][band_index u16 LE][dirty_count u16 LE][band payload]
-// dirty_count = number of bands in THIS frame (bit15 = landscape).
-// Bands are orientation-native so they align to whole rows:
-//   portrait  172px rows: 4 rows x 344B = 1376B, 80 bands
-//   landscape 320px rows: 2 rows x 640B = 1280B, 86 bands
+// All wire-format constants and the reassembly/coalescing decision logic
+// live in band_protocol.h, which is hardware-free and unit tested on the
+// host (firmware/test/run_tests.sh).
+#include "band_protocol.h"
+using namespace bandproto;
+
 static const uint16_t UDP_PORT = 5568;
 static const size_t FRAME_BYTES = (size_t)PANEL_W * PANEL_H * 2;  // 110080
-static const size_t HEADER_BYTES = 6;
-static const uint16_t BANDS_PORTRAIT = 80;
-static const uint16_t BANDS_LANDSCAPE = 86;
-static const size_t BAND_BYTES_PORTRAIT = 1376;
-static const size_t BAND_BYTES_LANDSCAPE = 1280;
-static const int ROWS_PER_BAND_PORTRAIT = 4;
-static const int ROWS_PER_BAND_LANDSCAPE = 2;
-static const uint16_t MAX_BANDS = 86;
-static const size_t BITMAP_BYTES = (MAX_BANDS + 7) / 8;
 
 // ---- Buffers -----------------------------------------------------------
 // bufA: persistent assembled frame, written by the UDP callback per band.
@@ -110,12 +115,7 @@ static const size_t BITMAP_BYTES = (MAX_BANDS + 7) / 8;
 static uint8_t *bufA = nullptr;
 static uint8_t *bufB = nullptr;
 
-static uint16_t rxFrameId = 0;
-static uint16_t rxBandsSeen = 0;
-static uint16_t rxBandsExpected = 0;
-static bool rxFrameActive = false;
-static uint8_t rxBandBitmap[BITMAP_BYTES];       // dedup within the current frame
-static bool rxLandscape = false;                 // orientation of frame being assembled
+static Reassembler reassembler;                  // tested logic: band_protocol.h
 static bool bufLandscape = false;                // orientation of bufA's content
 
 // Bands applied to bufA but not yet drawn. Accumulates across frames so
@@ -169,87 +169,50 @@ static void onPacket(AsyncUDPPacket packet) {
   if (len == 4 && memcmp(data, "EPNG", 4) == 0) {
     return;  // keepalive ping: endpoint refresh only
   }
-  uint16_t frameId = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
-  uint16_t bandIndex = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
-  uint16_t countField = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
-  bool landscape = (countField & 0x8000) != 0;
-  uint16_t dirtyCount = countField & 0x7FFF;
-  uint16_t totalBands = landscape ? BANDS_LANDSCAPE : BANDS_PORTRAIT;
-  size_t bandBytes = landscape ? BAND_BYTES_LANDSCAPE : BAND_BYTES_PORTRAIT;
-
-  if (len != HEADER_BYTES + bandBytes) {
+  if (len == 4 && memcmp(data, "ESLP", 4) == 0) {
+    sleepRequested = true;  // Mac's displays slept: loop turns backlight off
+    return;
+  }
+  bandproto::Header h = parseHeader(data);
+  if (len != HEADER_BYTES + bandBytes(h.landscape)) {
     statBadLen = statBadLen + 1;
     return;
   }
-  if (dirtyCount == 0 || dirtyCount > totalBands || bandIndex >= totalBands) {
+
+  bool droppedFrame = false;
+  ChunkAction action = reassembler.onChunk(h, droppedFrame);
+  if (droppedFrame) {
+    // Incomplete frame abandoned - but its bands are already applied to
+    // bufA and marked in pendingDrawBitmap, so they still reach the panel
+    // with the next completed frame (per-band recency).
+    statFramesDropped = statFramesDropped + 1;
+  }
+  if (action == ChunkAction::Reject) {
     return;  // geometry mismatch - sender misconfigured
   }
   statPackets = statPackets + 1;
-
-  if (!rxFrameActive) {
-    rxFrameId = frameId;
-    rxBandsSeen = 0;
-    rxBandsExpected = dirtyCount;
-    memset(rxBandBitmap, 0, sizeof(rxBandBitmap));
-    rxFrameActive = true;
-    rxLandscape = landscape;
-  } else if (frameId != rxFrameId) {
-    // Wraparound-aware ordering: only a NEWER frame abandons the current
-    // one. Stale chunks (WiFi retransmissions delivered late, reordering)
-    // are ignored - adopting them used to thrash the reassembler and kill
-    // both frames.
-    int16_t diff = (int16_t)(frameId - rxFrameId);
-    if (diff <= 0) {
-      // Late chunk of an older frame - ignore. But a persistent stream of
-      // "stale" IDs means the sender restarted (its IDs reset to 0):
-      // force-resync after ~2 frames' worth instead of rejecting for up
-      // to 32k frames.
-      static uint16_t staleStreak = 0;
-      if (++staleStreak < 2 * MAX_BANDS) {
-        return;
-      }
-      staleStreak = 0;
-    }
-    if (rxBandsSeen > 0) {
-      // Incomplete frame abandoned - but its bands are already applied to
-      // bufA and marked in pendingDrawBitmap, so they still reach the
-      // panel with the next completed frame (per-band recency).
-      statFramesDropped = statFramesDropped + 1;
-    }
-    rxFrameId = frameId;
-    rxBandsSeen = 0;
-    rxBandsExpected = dirtyCount;
-    memset(rxBandBitmap, 0, sizeof(rxBandBitmap));
-    rxLandscape = landscape;
+  if (action == ChunkAction::IgnoreStale || action == ChunkAction::Duplicate) {
+    return;
   }
 
   // Orientation flip invalidates everything in bufA (band geometry and
   // pixel layout both change). The sender guarantees a full keyframe on
   // flip, so dropping stale pending bands is safe.
-  if (landscape != bufLandscape) {
+  if (h.landscape != bufLandscape) {
     portENTER_CRITICAL(&drawMux);
     memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
     portEXIT_CRITICAL(&drawMux);
-    bufLandscape = landscape;
+    bufLandscape = h.landscape;
   }
 
-  // Duplicate bands (802.11 retry artifacts) must not double-count toward
-  // completion - that would complete frames with holes.
-  uint8_t mask = 1 << (bandIndex & 7);
-  if (rxBandBitmap[bandIndex >> 3] & mask) {
-    return;
-  }
-  rxBandBitmap[bandIndex >> 3] |= mask;
-
-  memcpy(bufA + (size_t)bandIndex * bandBytes, data + HEADER_BYTES, bandBytes);
+  memcpy(bufA + (size_t)h.bandIndex * bandBytes(h.landscape),
+         data + HEADER_BYTES, bandBytes(h.landscape));
   portENTER_CRITICAL(&drawMux);
-  pendingDrawBitmap[bandIndex >> 3] |= mask;
+  pendingDrawBitmap[h.bandIndex >> 3] |= 1 << (h.bandIndex & 7);
   portEXIT_CRITICAL(&drawMux);
-  rxBandsSeen++;
 
-  if (rxBandsSeen >= rxBandsExpected) {
-    rxFrameActive = false;
-    pendingLandscape = rxLandscape;
+  if (action == ChunkAction::ApplyComplete) {
+    pendingLandscape = h.landscape;
     framesCompleted = framesCompleted + 1;  // loop draws the pending bands
   }
 }
@@ -409,6 +372,95 @@ static void handleSerialConfig() {
   }
 }
 
+#include "font5x7.h"  // classic 5x7 ASCII font (Adafruit GFX, BSD license)
+
+// Draw scaled 5x7 text into an RGB565 big-endian buffer of bufW x bufH.
+static void drawText(uint8_t *buf, int bufW, int bufH, int x, int y,
+                     const char *s, uint16_t color, int scale) {
+  for (; *s; s++) {
+    for (int col = 0; col < 5; col++) {
+      uint8_t bits = font[(size_t)(unsigned char)*s * 5 + col];
+      for (int row = 0; row < 7; row++) {
+        if (!(bits & (1 << row))) {
+          continue;
+        }
+        for (int sy = 0; sy < scale; sy++) {
+          for (int sx = 0; sx < scale; sx++) {
+            int px = x + col * scale + sx;
+            int py = y + row * scale + sy;
+            if (px < 0 || py < 0 || px >= bufW || py >= bufH) {
+              continue;
+            }
+            size_t off = ((size_t)py * bufW + px) * 2;
+            buf[off] = color >> 8;
+            buf[off + 1] = color & 0xFF;
+          }
+        }
+      }
+    }
+    x += 6 * scale;
+  }
+}
+
+// White text with a 1px black outline so it reads over any frame content.
+static void drawOutlinedText(uint8_t *buf, int bufW, int bufH, int x, int y,
+                             const char *s, int scale) {
+  for (int dy = -1; dy <= 1; dy++) {
+    for (int dx = -1; dx <= 1; dx++) {
+      if (dx || dy) {
+        drawText(buf, bufW, bufH, x + dx, y + dy, s, 0x0000, scale);
+      }
+    }
+  }
+  drawText(buf, bufW, bufH, x, y, s, 0xFFFF, scale);
+}
+
+// Compose the idle card over the (pristine) last frame in bufA and push it.
+// Text position moves on every draw to avoid burn-in.
+static void drawIdleScreen() {
+  int w = bufLandscape ? PANEL_H : PANEL_W;
+  int hgt = bufLandscape ? PANEL_W : PANEL_H;
+
+  char lineIp[24], lineWifi[24];
+  const char *lineName = "espdisplay";
+  snprintf(lineIp, sizeof(lineIp), "%s", WiFi.localIP().toString().c_str());
+  if (WiFi.status() == WL_CONNECTED) {
+    snprintf(lineWifi, sizeof(lineWifi), "wifi %d dBm", (int)WiFi.RSSI());
+  } else {
+    snprintf(lineWifi, sizeof(lineWifi), "wifi down");
+  }
+  const char *lines[3] = {lineName, lineIp, lineWifi};
+
+  const int scale = 2;
+  const int lineH = 9 * scale;  // 7px glyph + spacing
+  size_t maxLen = 0;
+  for (int i = 0; i < 3; i++) {
+    size_t n = strlen(lines[i]);
+    if (n > maxLen) maxLen = n;
+  }
+  int blockW = (int)maxLen * 6 * scale;
+  int blockH = 3 * lineH;
+
+  // Pseudo-random position within margins; esp_random is hardware RNG.
+  int maxX = w - blockW - 4;
+  int maxY = hgt - blockH - 4;
+  int x = 4 + (maxX > 4 ? (int)(esp_random() % (uint32_t)(maxX - 3)) : 0);
+  int y = 4 + (maxY > 4 ? (int)(esp_random() % (uint32_t)(maxY - 3)) : 0);
+
+  memcpy(bufB, bufA, FRAME_BYTES);  // bufA stays pristine for the overlay
+  for (int i = 0; i < 3; i++) {
+    drawOutlinedText(bufB, w, hgt, x, y + i * lineH, lines[i], scale);
+  }
+
+  dmaInFlight = dmaInFlight + 1;
+  dmaQueuedAt = millis();
+  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, w, hgt, bufB) != ESP_OK) {
+    statDrawErrors = statDrawErrors + 1;
+    dmaInFlight = dmaInFlight - 1;
+  }
+  lastIdleDrawAt = millis();
+}
+
 // WiFi signal quality on the RGB LED(s): green is strong, fading through
 // yellow and orange to red as RSSI drops; red also means disconnected.
 //   >= -55 dBm  green      solid, excellent
@@ -446,7 +498,6 @@ static void handleButton() {
   static bool wasDown = false;
   static bool longFired = false;
   static uint32_t downAt = 0;
-  static bool blHigh = true;
 
   bool down = digitalRead(PIN_BOOT) == LOW;
   uint32_t now = millis();
@@ -463,9 +514,9 @@ static void handleButton() {
   } else if (!down && wasDown) {
     wasDown = false;
     if (!longFired && now - downAt >= DEBOUNCE_MS) {
-      blHigh = !blHigh;
-      analogWrite(PIN_BL, blHigh ? BL_HIGH : BL_LOW);
-      Serial.printf("button: short press -> backlight %s\n", blHigh ? "high" : "low");
+      userBlHigh = !userBlHigh;
+      analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+      Serial.printf("button: short press -> backlight %s\n", userBlHigh ? "high" : "low");
     }
   }
 }
@@ -568,6 +619,10 @@ void setup() {
     Serial.println("FATAL: UDP listen failed");
   }
 
+  // Arm the idle screen: if no stream arrives, the device announces its
+  // name/IP/signal over the ready fill instead of sitting mute.
+  lastFrameShownAt = millis();
+
   // Task watchdog on the loop task: any unforeseen hang panics and reboots;
   // the Mac's heartbeat supervision then reconnects automatically. The
   // Arduino core usually pre-initializes the TWDT, so try init then
@@ -604,28 +659,18 @@ void loop() {
       applyPanelConfig(landscape);
     }
 
-    uint16_t totalBands = landscape ? BANDS_LANDSCAPE : BANDS_PORTRAIT;
-    size_t bandBytes = landscape ? BAND_BYTES_LANDSCAPE : BAND_BYTES_PORTRAIT;
-    int rowsPerBand = landscape ? ROWS_PER_BAND_LANDSCAPE : ROWS_PER_BAND_PORTRAIT;
     int drawWidth = landscape ? PANEL_H : PANEL_W;
+    size_t bandLen = bandBytes(landscape);
+    int bandRows = rowsPerBand(landscape);
 
     // Coalesce runs of contiguous dirty bands into single DMA transfers.
     // Contiguous bands are contiguous in memory, so a run needs just one
     // memcpy to staging and one draw_bitmap. Staging (bufB) keeps DMA reads
     // off the buffer the network task writes.
-    int i = 0;
     bool drewAny = false;
-    while (i < totalBands) {
-      if (!(bands[i >> 3] & (1 << (i & 7)))) {
-        i++;
-        continue;
-      }
-      int runStart = i;
-      while (i < totalBands && (bands[i >> 3] & (1 << (i & 7)))) {
-        i++;
-      }
-      size_t off = (size_t)runStart * bandBytes;
-      size_t bytes = (size_t)(i - runStart) * bandBytes;
+    forEachRun(bands, bandCount(landscape), [&](int runStart, int runEnd) {
+      size_t off = (size_t)runStart * bandLen;
+      size_t bytes = (size_t)(runEnd - runStart) * bandLen;
       memcpy(bufB + off, bufA + off, bytes);
       dmaInFlight = dmaInFlight + 1;
       dmaQueuedAt = millis();
@@ -633,7 +678,7 @@ void loop() {
       // is full. A failed queue never fires the completion callback, so
       // roll the counter back to avoid a permanent wedge.
       esp_err_t err = esp_lcd_panel_draw_bitmap(
-          panel, 0, runStart * rowsPerBand, drawWidth, i * rowsPerBand,
+          panel, 0, runStart * bandRows, drawWidth, runEnd * bandRows,
           bufB + off);
       if (err != ESP_OK) {
         statDrawErrors = statDrawErrors + 1;
@@ -641,12 +686,44 @@ void loop() {
       } else {
         drewAny = true;
       }
-    }
+    });
     if (drewAny) {
       statFramesShown = statFramesShown + 1;
+      lastFrameShownAt = millis();
+      if (idleActive || displaySleeping) {
+        idleActive = false;
+        displaySleeping = false;
+        analogWrite(PIN_BL, userBlHigh ? BL_HIGH : BL_LOW);
+      }
     }
   } else {
     delay(1);
+  }
+
+  // Display sleep: the Mac's screens slept, so stale pixels are pointless -
+  // kill the backlight (heat + burn-in). Any drawn frame wakes it above.
+  if (sleepRequested) {
+    sleepRequested = false;
+    if (!displaySleeping) {
+      displaySleeping = true;
+      idleActive = false;
+      analogWrite(PIN_BL, 0);
+      Serial.println("display sleeping (ESLP from sender)");
+    }
+  }
+
+  // Idle screen: no frames for a while -> overlay device info on the last
+  // frame at reduced backlight, repositioning periodically against burn-in.
+  if (!displaySleeping && dmaInFlight == 0 && lastFrameShownAt != 0 &&
+      millis() - lastFrameShownAt > IDLE_AFTER_MS) {
+    if (!idleActive) {
+      idleActive = true;
+      analogWrite(PIN_BL, BL_IDLE);
+      drawIdleScreen();
+      Serial.println("idle screen on");
+    } else if (millis() - lastIdleDrawAt > IDLE_REPOSITION_MS) {
+      drawIdleScreen();  // new random position, fresh RSSI/IP
+    }
   }
 
   // DMA-stall failsafe: strips take ~14ms worst case at 80MHz. If completion
