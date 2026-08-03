@@ -19,6 +19,7 @@ struct Options {
     var fps = 40
     var listDisplays = false
     var listWindows = false
+    var configure = false
     var windowName = ""
     var landscape = false
     var adaptivePacing = true
@@ -46,6 +47,7 @@ func parseOptions() -> Options {
         case "--spacing-us": opts.spacingMicros = UInt32(value(arg)) ?? opts.spacingMicros
         case "--list-displays": opts.listDisplays = true
         case "--list-windows": opts.listWindows = true
+        case "--configure": opts.configure = true
         case "--window":
             opts.windowName = value(arg)
             opts.mode = "window"
@@ -69,6 +71,9 @@ func parseOptions() -> Options {
                   --window <name>          app or window title substring; captures that
                                            window directly, no virtual display needed
                   --list-windows           show capturable windows and exit
+                  --configure              device WiFi setup dialog (USB serial);
+                                           also opens when the app is double-clicked
+                                           while the agent is already running
                   --host <host>            ESP32 host (default espdisplay.local)
                   --port <port>            UDP port (default 5568)
                   --fps <n>                target frame rate (default 40)
@@ -93,11 +98,24 @@ _ = NSApplication.shared
 
 let opts = parseOptions()
 
+if opts.configure {
+    WifiConfigUI.run()
+    exit(0)
+}
+
 // Single-instance guard: two senders interleave frame IDs and the receiver
 // drops nearly everything (each stream invalidates the other's reassembly).
 if !opts.listDisplays && !opts.listWindows {
     let lockFd = open("/tmp/espdisplaysender.lock", O_CREAT | O_RDWR, 0o644)
     if lockFd < 0 || flock(lockFd, LOCK_EX | LOCK_NB) != 0 {
+        // The streaming agent is already running. If this launch is a human
+        // (double-click, not the launchd agent - the agent marks itself via
+        // ESPDISP_AGENT so its KeepAlive respawns can never pop dialogs),
+        // offer the device WiFi configuration UI instead of dying silently.
+        if ProcessInfo.processInfo.environment["ESPDISP_AGENT"] == nil {
+            WifiConfigUI.run()
+            exit(0)
+        }
         FileHandle.standardError.write(
             Data("another ESPDisplaySender instance is already running - exiting\n".utf8))
         exit(1)

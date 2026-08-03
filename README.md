@@ -97,10 +97,10 @@ Each packet: `[frame_id u16][band_index u16][dirty_count u16][band payload]`,
 little-endian, where bit 15 of `dirty_count` carries orientation. Bands are
 orientation-native so they align to whole rows:
 
-| Orientation | Band | Bands/frame | Packet size |
+| Orientation       | Band          | Bands/frame | Packet size |
 | ----------------- | ------------- | ----------- | ----------- |
-| Portrait 172×320 | 4 rows × 344B | 80 | 1382B |
-| Landscape 320×172 | 2 rows × 640B | 86 | 1286B |
+| Portrait 172×320  | 4 rows × 344B | 80          | 1382B       |
+| Landscape 320×172 | 2 rows × 640B | 86          | 1286B       |
 
 The device replies with a 1Hz heartbeat (`EHB1` + frame/drop/packet/heap
 counters) to whoever sent it packets last; the sender emits a 2s `EPNG`
@@ -108,15 +108,15 @@ keepalive so that address stays fresh through static screens.
 
 ## Repo layout
 
-| Path | What |
+| Path                       | What                                                                      |
 | -------------------------- | ------------------------------------------------------------------------- |
 | `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button controls |
-| `firmware/display_test/` | Standalone panel bring-up test (colors, offsets, SPI timing benchmark) |
-| `firmware/board_probe/` | I2C-scan sketch that identifies which board variant you have |
-| `mac/ESPDisplaySender/` | Swift CLI: capture, diff, pace, send, supervise |
-| `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
-| `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
-| `docs/` | Original project plan |
+| `firmware/display_test/`   | Standalone panel bring-up test (colors, offsets, SPI timing benchmark)    |
+| `firmware/board_probe/`    | I2C-scan sketch that identifies which board variant you have              |
+| `mac/ESPDisplaySender/`    | Swift CLI: capture, diff, pace, send, supervise                           |
+| `tools/read_serial.py`     | Serial monitor with optional hard-reset (native USB-Serial/JTAG)          |
+| `tools/sweep.py`           | Pacing parameter sweep, measuring displayed fps from device stats         |
+| `docs/`                    | Original project plan                                                     |
 
 ## Getting started
 
@@ -130,17 +130,30 @@ arduino-cli compile -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" .
 arduino-cli upload  -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" -p /dev/cu.usbmodem* .
 ```
 
-Mac sender:
+Mac sender - the set-and-forget way:
 
 ```sh
+mac/make-app.sh                 # builds ~/Applications/ESPDisplaySender.app
+mac/install-launch-agent.sh     # starts at login, restarts if it exits
+```
+
+Grant Local Network and Screen Recording when macOS asks (once per build -
+the ad-hoc signature resets TCC on rebuild). Logs land in
+/tmp/espdisplaysender.log. Double-clicking the app while the agent runs
+opens the device WiFi configuration dialog (board attached over USB) - WiFi
+credentials live in the board's flash and never require reflashing to
+change.
+
+Or run it by hand:
+
+````sh
 cd mac/ESPDisplaySender
 swift build
 ./.build/debug/ESPDisplaySender                  # auto mode: follows macOS
 ./.build/debug/ESPDisplaySender --list-displays  # see what's capturable
+./.build/debug/ESPDisplaySender --configure      # device WiFi setup dialog
 ./.build/debug/ESPDisplaySender --help           # all options
-```
-
-Grant Screen Recording permission when prompted. For the extended-desktop
+``` For the extended-desktop
 use case, create a virtual display in BetterDisplay sized to a multiple of
 172×320 (e.g. 688×1280) — the sender finds it by name (default "Tiny
 Monitor"), learns its UUID, and tracks it from then on.
@@ -149,3 +162,4 @@ Monitor"), learns its UUID, and tracks it from then on.
 
 The panel itself tells you where the firmware is: dark gray means alive and
 waiting for WiFi, dark teal means connected and waiting for a stream.
+````

@@ -18,6 +18,14 @@
 	     single-instance lock makes a manual double-click coexist safely. -->
 	<key>KeepAlive</key>
 	<true/>
+	<!-- Marks the agent so a lock collision on its respawn exits quietly;
+	     an unmarked (human, double-clicked) launch that collides opens the
+	     device WiFi configuration dialog instead. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>ESPDISP_AGENT</key>
+		<string>1</string>
+	</dict>
 	<key>StandardOutPath</key>
 	<string>/tmp/espdisplaysender.log</string>
 	<key>StandardErrorPath</key>
