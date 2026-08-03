@@ -143,9 +143,10 @@ reconnect — address changes need no bookkeeping).
 
 Over USB serial (115200), the firmware also accepts configuration commands:
 `CFGWIFI <base64 ssid> <base64 password>` saves credentials to NVS and
-reboots; `CFGNAME <base64 name>` sets the device name; `CFGSHOW` reports the
-current network, name, IP, and signal strength; `CFGLED <r> <g> <b>` shows a
-literal LED color for 10s.
+reboots, and `CFGWIFI <base64 ssid>` (password argument omitted) keeps the
+password currently in use; `CFGNAME <base64 name>` sets the device name;
+`CFGSHOW` reports the current network, name, IP, and signal strength;
+`CFGLED <r> <g> <b>` shows a literal LED color for 10s.
 
 ## Repo layout
 
@@ -183,9 +184,14 @@ mac/install-launch-agent.sh     # starts at login, restarts if it exits
 Grant Local Network and Screen Recording when macOS asks (once per build -
 the ad-hoc signature resets TCC on rebuild). Logs land in
 /tmp/espdisplaysender.log. Double-clicking the app while the agent runs
-opens the device WiFi configuration dialog (board attached over USB) - WiFi
-credentials live in the board's flash and never require reflashing to
-change.
+opens the device configuration dialog (board attached over USB) - WiFi
+credentials and the device name live in the board's flash and never require
+reflashing to change.
+
+Leaving the password field blank keeps the password already saved on the
+device, so changing the network name or renaming the board doesn't mean
+retyping it. Joining a genuinely open network is the explicit checkbox, so a
+blank field can't silently replace a working password with an empty one.
 
 Or run it by hand:
 

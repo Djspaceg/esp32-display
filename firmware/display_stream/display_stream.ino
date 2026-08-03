@@ -303,38 +303,52 @@ static void applyPanelConfig(bool landscape) {
 // Base64 avoids every quoting hazard SSIDs and passwords can contain.
 static void processConfigLine(char *line) {
   if (strncmp(line, "CFGWIFI ", 8) == 0) {
+    // CFGWIFI <b64 ssid> <b64 pass>  set both (empty pass = open network)
+    // CFGWIFI <b64 ssid>             keep the password currently in use
+    // The second form exists so changing the SSID (or just re-saving)
+    // doesn't force the user to retype their password - and so a blank
+    // field can never silently wipe a working password.
     char *b64Ssid = line + 8;
     char *sep = strchr(b64Ssid, ' ');
-    if (!sep) {
-      Serial.println("CFGERR expected: CFGWIFI <b64 ssid> <b64 pass>");
-      return;
+    bool keepPassword = (sep == nullptr);
+    char *b64Pass = nullptr;
+    if (!keepPassword) {
+      *sep = 0;
+      b64Pass = sep + 1;
     }
-    *sep = 0;
-    char *b64Pass = sep + 1;
 
     unsigned char ssid[33], pass[65];
     size_t ssidLen = 0, passLen = 0;
     if (mbedtls_base64_decode(ssid, sizeof(ssid) - 1, &ssidLen,
-                              (const unsigned char *)b64Ssid, strlen(b64Ssid)) != 0 ||
-        mbedtls_base64_decode(pass, sizeof(pass) - 1, &passLen,
-                              (const unsigned char *)b64Pass, strlen(b64Pass)) != 0) {
-      Serial.println("CFGERR bad base64 (ssid max 32 bytes, password max 64)");
+                              (const unsigned char *)b64Ssid, strlen(b64Ssid)) != 0) {
+      Serial.println("CFGERR bad base64 ssid (max 32 bytes)");
       return;
     }
     ssid[ssidLen] = 0;
-    pass[passLen] = 0;
     if (ssidLen == 0) {
       Serial.println("CFGERR empty ssid");
       return;
+    }
+    if (!keepPassword) {
+      if (mbedtls_base64_decode(pass, sizeof(pass) - 1, &passLen,
+                                (const unsigned char *)b64Pass, strlen(b64Pass)) != 0) {
+        Serial.println("CFGERR bad base64 password (max 64 bytes)");
+        return;
+      }
+      pass[passLen] = 0;
     }
 
     Preferences prefs;
     prefs.begin("espdisp", false);
     prefs.putString("ssid", (const char *)ssid);
-    prefs.putString("pass", (const char *)pass);
+    // When keeping, persist the *effective* password (which may have come
+    // from the compiled fallback) so "keep" means exactly "what works now"
+    // regardless of where it came from.
+    prefs.putString("pass", keepPassword ? cfgPass : String((const char *)pass));
     prefs.end();
 
-    Serial.printf("CFGOK saved \"%s\", restarting\n", (const char *)ssid);
+    Serial.printf("CFGOK saved \"%s\"%s, restarting\n", (const char *)ssid,
+                  keepPassword ? " (password kept)" : "");
     Serial.flush();
     delay(200);
     ESP.restart();
