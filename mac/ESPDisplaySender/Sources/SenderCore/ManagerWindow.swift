@@ -176,16 +176,25 @@ private struct PanelDetailView: View {
 
                 CompactGroup("Source") {
                     CompactGrid {
+                        InfoRow("Saved choice", panel.source.label)
                         InfoRow("Currently showing", panel.sourceDescription)
                         InfoRow("Selection") {
-                            Button("Choose Source…") {
-                                manager.chooseSource(for: panel.serviceName)
+                            HStack(spacing: 6) {
+                                Button("Choose Source…") {
+                                    manager.chooseSource(for: panel.serviceName)
+                                }
+                                .controlSize(.small)
+                                .disabled(!panel.isOnline)
+                                Button("Use Automatic") {
+                                    manager.useAutomaticSource(for: panel.serviceName)
+                                }
+                                .controlSize(.small)
+                                .disabled(panel.source == .automatic)
+                                .help("Go back to tracking the configured display")
                             }
-                            .controlSize(.small)
-                            .disabled(!panel.isOnline)
                         }
                         InfoRow("") {
-                            Text("Uses the macOS ScreenCaptureKit picker for displays, windows, and applications.")
+                            Text("Uses the macOS ScreenCaptureKit picker for displays, windows, and applications. The choice is remembered and reapplied when the sender restarts.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

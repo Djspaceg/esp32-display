@@ -38,6 +38,11 @@ struct PanelSnapshot: Identifiable, Equatable {
     var sleeping = false
     var idle = false
     var paused = false
+    /// What the user chose this panel should show. Persisted, so a source picked
+    /// once is still in effect after a restart.
+    var source: PanelSource = .automatic
+    /// What the session is actually capturing right now, which can differ from
+    /// `source` while a display is being resolved or a window is missing.
     var sourceDescription = "Automatic"
     /// Why this panel is not usable, when the reason is something the user
     /// would otherwise only find in the log. Cleared as soon as the device
@@ -588,9 +593,33 @@ final class PanelManager: ObservableObject {
         pickerTarget = nil
         guard let target, let session = sessions[target] else { return }
         session.usePickerFilter(filter)
+        // Record what was picked, not just how it reads: the filter itself
+        // cannot be stored, but the display or application it names can be
+        // resolved again on the next launch.
+        let source = PanelSource.from(filter)
         updatePanel(target) { panel in
+            panel.source = source
             panel.sourceDescription = picker?.describe(filter) ?? "Selected content"
         }
+        persistIfNeeded(force: true)
+    }
+
+    /// Return this panel to automatic display tracking.
+    func useAutomaticSource(for serviceName: String) {
+        updatePanel(serviceName) { panel in
+            panel.source = .automatic
+            panel.sourceDescription = "Automatic"
+        }
+        picker?.clearSelection()
+        persistIfNeeded(force: true)
+    }
+
+    /// The stored source for every panel, keyed by service name. Read once at
+    /// startup to decide what each session should capture.
+    func persistedSources() -> [String: PanelSource] {
+        Dictionary(
+            panels.map { ($0.serviceName, $0.source) },
+            uniquingKeysWith: { first, _ in first })
     }
 
     private static func apply(
@@ -718,6 +747,7 @@ extension PanelManager {
                     sleeping: false,
                     idle: false,
                     paused: false,
+                    source: .display("Tiny Monitor"),
                     sourceDescription: "Tiny Monitor"),
                 PanelSnapshot(
                     serviceName: "travel-display",

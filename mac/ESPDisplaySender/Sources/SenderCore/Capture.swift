@@ -38,6 +38,13 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// rotation) show up with their new IDs.
     static func name(for displayID: CGDirectDisplayID) -> String? {
         RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+        return currentName(for: displayID)
+    }
+
+    /// Name lookup without pumping the run loop, for callers already inside a
+    /// main-thread callback where re-entering it is not acceptable. Safe there
+    /// because AppKit has just processed the display notifications itself.
+    static func currentName(for displayID: CGDirectDisplayID) -> String? {
         for screen in NSScreen.screens {
             if let num = screen.deviceDescription[
                 NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,

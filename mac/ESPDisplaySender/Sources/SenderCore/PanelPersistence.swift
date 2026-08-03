@@ -1,4 +1,5 @@
 import Foundation
+import SenderProtocol
 
 /// The durable half of a panel record.
 ///
@@ -23,6 +24,9 @@ struct PersistedPanel: Codable, Equatable {
     var address: String?
     /// When the panel was last heard from, so "last seen" survives a restart.
     var lastSeen: Date?
+    /// What the user chose this panel should show, absent for automatic. Stored
+    /// in the same shape as a `devices.json` entry.
+    var source: SourceSpec?
 
     init(snapshot: PanelSnapshot) {
         serviceName = snapshot.serviceName
@@ -31,19 +35,22 @@ struct PersistedPanel: Codable, Equatable {
         usbPort = snapshot.usbPort
         address = snapshot.address
         lastSeen = snapshot.lastSeen
+        source = snapshot.source.spec
     }
 
     /// Rebuild a runtime snapshot. Everything not persisted starts at its
     /// default, so a freshly loaded panel reads as offline with no telemetry
     /// until the device actually reports in.
     var snapshot: PanelSnapshot {
-        PanelSnapshot(
+        var panel = PanelSnapshot(
             serviceName: serviceName,
             displayName: displayName,
             hardwareID: hardwareID,
             address: address,
             usbPort: usbPort,
             lastSeen: lastSeen)
+        panel.source = PanelSource(source)
+        return panel
     }
 }
 

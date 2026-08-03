@@ -386,7 +386,20 @@ public enum ESPDisplaySenderApp {
                     }
                 }
             }
+            let savedSources = await MainActor.run { panelManager.persistedSources() }
+            let namedSources = savedSources.filter { $0.value != .automatic }
+            if !namedSources.isEmpty {
+                print("saved per-display sources: "
+                    + namedSources.keys.sorted().joined(separator: ", "))
+            }
             func sourceFor(_ name: String) -> DeviceSession.Source {
+                // The manager's own record wins. It is what the picker writes,
+                // so a source chosen in the window is still in effect after a
+                // restart. devices.json remains supported for panels the UI has
+                // never been told about, and as a hand-written default.
+                if let saved = savedSources[name], saved != .automatic {
+                    return saved.sessionSource(defaultDisplay: opts.displayName)
+                }
                 if let spec = sourceConfig[name] {
                     if let w = spec.window { return .window(w) }
                     if let d = spec.display { return .display(d) }
