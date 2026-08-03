@@ -225,11 +225,23 @@ Monitor"), learns its UUID, and tracks it from then on.
 The panel itself tells you where the firmware is: dark gray means alive and
 waiting for WiFi, dark teal means connected and waiting for a stream.
 
-When no frames arrive for 60 seconds, the panel becomes its own status
-display: device name, IP, and WiFi strength in outlined text over the last
-frame, at reduced backlight, repositioning every 30 seconds to avoid
-burn-in. And when the Mac's displays sleep, the device's backlight turns
-off entirely (a `ESLP` packet from the sender) - the next frame wakes it.
+Dimming follows the Mac, never the picture. Unchanging content — a photo, a
+dashboard, a paused video — stays at full brightness indefinitely:
+
+| Condition | Panel |
+| --- | --- |
+| Streaming, even perfectly static content | Last frame, full brightness |
+| Mac's displays sleep, or screensaver | Backlight off (`ESLP`) |
+| Mac system sleep | Backlight off (`ESLP`) |
+| Mac wakes | Restored immediately (`EWAK`) |
+| Sender gone ~45s (quit, crashed, WiFi down) | Dimmed status card |
+
+The status card shows device name, IP, and WiFi strength in outlined text
+over the last frame, repositioning every 30 seconds to avoid burn-in. It
+means "nothing is driving this panel", so it keys off the sender's 2-second
+keepalive rather than frame arrivals — with dirty-band diffing a still image
+sends no frame data for minutes, and treating that as idleness made the
+panel dim itself during normal use.
 
 The RGB LED behind the display glows with live WiFi signal quality, updated
 every 2 seconds:

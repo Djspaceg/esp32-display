@@ -27,6 +27,15 @@ final class FrameSender {
     private var connection: NWConnection?
     private var frameId: UInt16 = 0
     private var pingTimer: DispatchSourceTimer?
+    private var refreshTimer: DispatchSourceTimer?
+    /// Last frame handed to send(), kept so a static screen can still be
+    /// refreshed periodically (touched only on sendQueue).
+    private var lastSentFrame: [UInt8]?
+    private var lastSentLandscape = false
+    private var lastSendAt = Date.distantPast
+    /// How often an unchanging screen gets a full repaint. Cheap (80 packets)
+    /// and bounds how long a UDP-lost band can stay visible.
+    private let refreshInterval: TimeInterval = 5
 
     private let lock = NSLock()
     private var _spacingMicros: UInt32
@@ -193,6 +202,7 @@ final class FrameSender {
             if conn.state == .ready {
                 startReceiveLoop(on: conn)
                 startPingTimer()
+                startRefreshTimer()
                 logResolvedPath(conn)
                 // Grace period: treat "connected just now" as a fresh
                 // heartbeat so staleness is measured from this attempt -
@@ -386,11 +396,22 @@ final class FrameSender {
 
     /// Tell the device the Mac's displays slept, so it can kill its
     /// backlight instead of glowing on stale pixels all night. Sent a few
-    /// times because it's UDP; any subsequent frame wakes the device.
+    /// times because it's UDP.
     func sendDisplaySleep() {
+        sendControl("ESLP")
+    }
+
+    /// Explicit wake. Needed because the Mac may wake onto static content,
+    /// in which case there is no frame to send and the panel would stay
+    /// dark waiting for one.
+    func sendDisplayWake() {
+        sendControl("EWAK")
+    }
+
+    private func sendControl(_ tag: String) {
         guard let conn = connection else { return }
         for _ in 0..<3 {
-            conn.send(content: Data("ESLP".utf8), completion: .contentProcessed { _ in })
+            conn.send(content: Data(tag.utf8), completion: .contentProcessed { _ in })
             usleep(20_000)
         }
     }
@@ -502,5 +523,31 @@ final class FrameSender {
         }
         bandsSent &+= UInt64(dirty.count)
         framesSent &+= 1
+        lastSentFrame = pixels
+        lastSentLandscape = landscape
+        lastSendAt = Date()
+    }
+
+    /// Periodically re-send the current frame when capture has gone quiet.
+    ///
+    /// ScreenCaptureKit delivers nothing at all while content is static, and
+    /// the keyframe interval is evaluated inside send() - so on a still
+    /// screen the "keyframe every 2s" guarantee never actually fired, and a
+    /// band lost to UDP would stay wrong indefinitely. This timer makes the
+    /// refresh real without spending bandwidth on unchanged content.
+    private func startRefreshTimer() {
+        refreshTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: sendQueue)
+        timer.schedule(deadline: .now() + refreshInterval, repeating: refreshInterval)
+        timer.setEventHandler { [weak self] in
+            guard let self, let frame = self.lastSentFrame else { return }
+            guard Date().timeIntervalSince(self.lastSendAt) >= self.refreshInterval else {
+                return  // real frames are flowing; nothing to do
+            }
+            self.prevFrame = nil  // full repaint, healing any lost bands
+            self.send(frame: frame, landscape: self.lastSentLandscape)
+        }
+        timer.resume()
+        refreshTimer = timer
     }
 }

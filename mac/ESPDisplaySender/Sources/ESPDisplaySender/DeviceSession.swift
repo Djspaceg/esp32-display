@@ -37,6 +37,7 @@ final class DeviceSession {
     }
 
     func sendDisplaySleep() { sender.sendDisplaySleep() }
+    func sendDisplayWake() { sender.sendDisplayWake() }
     func forceKeyframe() { sender.forceKeyframe() }
 
     private func trackedDisplayName() -> String {
