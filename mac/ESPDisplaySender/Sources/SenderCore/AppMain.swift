@@ -328,11 +328,21 @@ public enum ESPDisplaySenderApp {
             do {
                 _ = try await SCShareableContent.excludingDesktopWindows(
                     false, onScreenWindowsOnly: false)
+                await MainActor.run { panelManager.resolve(.screenRecording) }
             } catch {
                 let message = "screen capture is unavailable - allow ESPDisplaySender in "
                     + "System Settings > Privacy & Security > Screen & System Audio Recording "
                     + "to resume streaming (\(error.localizedDescription))\n"
                 FileHandle.standardError.write(Data(message.utf8))
+                // Without this the window shows panels that are online and
+                // idle with no indication that macOS is blocking capture.
+                await MainActor.run {
+                    panelManager.report(.screenRecording, detail:
+                        "Allow ESPDisplaySender under System Settings > Privacy & Security > "
+                        + "Screen & System Audio Recording, then relaunch. Displays stay "
+                        + "connected and controllable, but no picture can be sent "
+                        + "(\(error.localizedDescription)).")
+                }
             }
 
             // One supervised session per device. Source priority within a
@@ -362,6 +372,14 @@ public enum ESPDisplaySenderApp {
                 } catch {
                     FileHandle.standardError.write(
                         Data("ignoring malformed \(configPath): \(error.localizedDescription)\n".utf8))
+                    // The user edited this file expecting it to take effect;
+                    // silently falling back to automatic sources looks like the
+                    // app ignoring them for no reason.
+                    await MainActor.run {
+                        panelManager.report(.deviceConfig, detail:
+                            "\(configPath) could not be read, so every display is using "
+                            + "automatic source selection: \(error.localizedDescription)")
+                    }
                 }
             }
             func sourceFor(_ name: String) -> DeviceSession.Source {

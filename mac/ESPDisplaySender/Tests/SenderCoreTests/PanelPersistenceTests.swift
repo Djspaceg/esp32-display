@@ -43,7 +43,8 @@ final class PanelPersistenceTests: XCTestCase {
             sleeping: true,
             idle: true,
             paused: true,
-            sourceDescription: "Tiny Monitor")
+            sourceDescription: "Tiny Monitor",
+            lastError: "gave up reaching this display")
     }
 
     /// Asserts a snapshot carries no device-reported readings.
@@ -73,6 +74,7 @@ final class PanelPersistenceTests: XCTestCase {
         XCTAssertFalse(panel.paused, "paused", file: file, line: line)
         XCTAssertEqual(panel.sourceDescription, "Automatic", "sourceDescription",
                        file: file, line: line)
+        XCTAssertNil(panel.lastError, "lastError", file: file, line: line)
     }
 
     // MARK: projection
@@ -133,7 +135,7 @@ final class PanelPersistenceTests: XCTestCase {
                     "diffPercent", "brightness", "brightnessHigh", "flipped", "sleeping",
                     "idle", "paused", "discovered", "lastHeartbeatAt", "firmwareVersion",
                     "capabilitiesRaw", "frameProtocolVersion", "controlProtocolVersion",
-                    "sourceDescription"] {
+                    "sourceDescription", "lastError"] {
             XCTAssertFalse(json.contains("\"\(key)\""), "\(key) reached disk")
         }
         for key in ["serviceName", "displayName", "hardwareID", "usbPort", "address",

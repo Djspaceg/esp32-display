@@ -47,6 +47,41 @@ struct PersistedPanel: Codable, Equatable {
     }
 }
 
+/// Reading and writing the durable records. Split out from `PanelManager` so
+/// the manager decides *when* to save while this decides *how*, and so failures
+/// are returned rather than swallowed: the file holds the user's display names
+/// and USB port assignments, and losing it silently is not acceptable.
+enum PanelStore {
+    static var defaultURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("ESPDisplaySender", isDirectory: true)
+            .appendingPathComponent("panels.json")
+    }
+
+    /// A missing file is the normal first-run case and reports no failure. A
+    /// file that exists but cannot be read or decoded does, because that means
+    /// settings the user entered are about to be silently dropped.
+    static func load(from url: URL?) -> (records: [PersistedPanel], failure: String?) {
+        guard let url, FileManager.default.fileExists(atPath: url.path) else {
+            return ([], nil)
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            return (try JSONDecoder.espDisplay.decode([PersistedPanel].self, from: data), nil)
+        } catch {
+            return ([], error.localizedDescription)
+        }
+    }
+
+    static func save(_ records: [PersistedPanel], to url: URL) throws {
+        let data = try JSONEncoder.espDisplay.encode(records)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+    }
+}
+
 extension JSONEncoder {
     static var espDisplay: JSONEncoder {
         let encoder = JSONEncoder()
