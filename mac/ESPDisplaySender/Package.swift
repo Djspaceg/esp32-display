@@ -8,6 +8,7 @@ let package = Package(
     ],
     products: [
         .library(name: "SenderProtocol", targets: ["SenderProtocol"]),
+        .library(name: "SenderCore", targets: ["SenderCore"]),
         .executable(name: "ESPDisplaySender", targets: ["ESPDisplaySender"]),
     ],
     targets: [
@@ -15,15 +16,28 @@ let package = Package(
             name: "SenderProtocol",
             path: "Sources/SenderProtocol"
         ),
+        // The application layer: capture, streaming, discovery, persistence,
+        // and UI. A library rather than part of the executable so tests can
+        // import it - executable targets cannot be imported.
+        .target(
+            name: "SenderCore",
+            dependencies: ["SenderProtocol"],
+            path: "Sources/SenderCore"
+        ),
         .executableTarget(
             name: "ESPDisplaySender",
-            dependencies: ["SenderProtocol"],
+            dependencies: ["SenderCore"],
             path: "Sources/ESPDisplaySender"
         ),
         .testTarget(
             name: "SenderProtocolTests",
             dependencies: ["SenderProtocol"],
             path: "Tests/SenderProtocolTests"
+        ),
+        .testTarget(
+            name: "SenderCoreTests",
+            dependencies: ["SenderCore"],
+            path: "Tests/SenderCoreTests"
         ),
     ]
 )
