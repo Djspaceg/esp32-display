@@ -8,9 +8,12 @@
 	<array>
 		<string>__BIN__</string>
 		<string>--background</string>
-		<string>--fps</string>
-		<string>40</string>
 	</array>
+	<!-- No --fps here on purpose. An explicitly passed flag overrides the frame
+	     rate saved from the Settings sheet, so hardcoding one would silently
+	     revert the user's choice at every login. The stored default is already
+	     40, so dropping the flag changes nothing for anyone who never opens
+	     Settings. -->
 	<!-- Start at login... -->
 	<key>RunAtLoad</key>
 	<true/>
