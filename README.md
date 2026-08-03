@@ -136,6 +136,19 @@ The device replies with a 1Hz heartbeat (`EHB1` + frame/drop/packet/heap
 counters) to whoever sent it packets last; the sender emits a 2s `EPNG`
 keepalive so that address stays fresh through static screens.
 
+The device name is also sent as the DHCP hostname (option 12), so the router
+lists the board by name rather than `esp32c6-XXXXXX`, and — on routers that
+register DHCP leases in their DNS — the plain name resolves on the LAN:
+
+```
+$ dig +short @192.168.1.1 blakes-teeny-screen
+192.168.1.120
+```
+
+Note the hostname is latched when the WiFi interface enters station mode, so
+the firmware sets it before `WiFi.mode()`; setting it later affects only
+mDNS, not DHCP.
+
 Devices advertise `_espdisp._udp` over mDNS with their name in a TXT record,
 so the Mac browses for panels instead of resolving a fixed hostname, and
 connects to the Bonjour endpoint directly (which re-resolves itself on every
