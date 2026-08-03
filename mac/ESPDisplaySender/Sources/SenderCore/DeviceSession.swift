@@ -21,6 +21,9 @@ final class DeviceSession {
         let resolvedAddress: String?
         let spacingMicros: UInt32
         let paused: Bool
+        /// Capture and sending are suspended because the device stopped
+        /// answering. Distinct from `paused`, which is the user's choice.
+        let parked: Bool
         let sourceDescription: String
         let updatedAt: Date
     }
@@ -44,6 +47,36 @@ final class DeviceSession {
     private let stateLock = NSLock()
     private var pickedFilter: SCContentFilter?
     private var pickedGeneration: UInt64 = 0
+
+    /// How long the device may stay silent before capture is torn down.
+    ///
+    /// Comfortably longer than the 10s reconnect trigger, so a brief WiFi
+    /// stumble is healed by re-resolving rather than by stopping capture. Past
+    /// this point the device is genuinely gone, and continuing to capture the
+    /// screen and push frames at it only burns CPU and counts send errors
+    /// (observed: 213,000 of them against one panel that was switched off).
+    private static let parkAfterSilence: TimeInterval = 30
+
+    /// How often a parked session re-resolves the device while waiting.
+    private static let parkedRetryInterval: TimeInterval = 15
+
+    /// Whether capture should be torn down, given how long the device has been
+    /// silent. A nil age means nothing has ever been heard from it, which the
+    /// connect retries in `run()` already handle, so it never parks here.
+    static func shouldPark(silentFor age: TimeInterval?) -> Bool {
+        guard let age else { return false }
+        return age > parkAfterSilence
+    }
+
+    /// Whether a parked session should resume, judged by a genuine new reply
+    /// rather than by heartbeat age, which a reconnect resets. Compared for
+    /// inequality so the counter wrapping around cannot wedge a session parked
+    /// forever.
+    static func hasDeviceReturned(
+        repliesNow: UInt64, repliesWhenParked: UInt64
+    ) -> Bool {
+        repliesNow != repliesWhenParked
+    }
 
     private var lastReport = Date()
     private var lastCount: UInt64 = 0
@@ -141,6 +174,7 @@ final class DeviceSession {
         var announced = false
         var lastReconnectAt = Date.distantPast
         var pickerFailures = 0
+        var parkRequested = false
 
         while true {
             let capture = DisplayCapture { [sender] rgb565, landscape in
@@ -291,17 +325,59 @@ final class DeviceSession {
                     lastReconnectAt = Date()
                     await sender.reconnect()
                 }
+                // Reconnecting has not helped for long enough that the device
+                // is gone rather than flapping. Stop capturing for it.
+                if Self.shouldPark(silentFor: sender.heartbeatAge) {
+                    parkRequested = true
+                    break
+                }
             }
             await capture.stop()
+            if parkRequested {
+                parkRequested = false
+                await waitForDeviceToReturn()
+                announced = false
+            }
         }
     }
 
-    private func reportProgress() {
+    /// Hold capture and sending down until the device answers again.
+    ///
+    /// Waits on a reply counter rather than `heartbeatAge`, because a reconnect
+    /// refreshes the heartbeat grace period: using the age here would unpark on
+    /// every retry and thrash capture up and down against a dead panel.
+    private func waitForDeviceToReturn() async {
+        let repliesBeforeParking = sender.deviceRepliesReceived
+        sender.setParked(true)
+        print("[\(name)] no reply for \(Int(Self.parkAfterSilence))s - capture stopped, "
+            + "waiting for the display to come back")
+        reportProgress(force: true)
+
+        var lastAttemptAt = Date()
+        while !Self.hasDeviceReturned(
+            repliesNow: sender.deviceRepliesReceived,
+            repliesWhenParked: repliesBeforeParking)
+        {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if Date().timeIntervalSince(lastAttemptAt) > Self.parkedRetryInterval {
+                lastAttemptAt = Date()
+                await sender.reconnect()
+            }
+        }
+
+        sender.setParked(false)
+        print("[\(name)] display answered again - resuming capture")
+    }
+
+    private func reportProgress(force: Bool = false) {
         let now = Date()
         let dt = now.timeIntervalSince(lastReport)
-        guard dt >= 5 else { return }
+        guard force || dt >= 5 else { return }
+        let parked = sender.parked
         let count = sender.framesSent
-        let fps = Double(count - lastCount) / dt
+        // A parked session is sending nothing, so report zero rather than a
+        // rate divided by however short the forced interval happened to be.
+        let fps = parked || dt <= 0 ? 0 : Double(count - lastCount) / dt
         let stats = sender.deviceStats
         let hb = sender.heartbeatAge.map { String(format: "%.0fs ago", $0) } ?? "never"
         let diffPct = sender.bandsConsidered > 0
@@ -329,8 +405,16 @@ final class DeviceSession {
             resolvedAddress: sender.resolvedAddress,
             spacingMicros: sender.spacingMicros,
             paused: sender.paused,
+            parked: parked,
             sourceDescription: sourceDescription,
             updatedAt: now))
+        // A parked session has nothing to report every five seconds; the park
+        // and resume lines say all there is to say.
+        guard !parked else {
+            lastReport = now
+            lastCount = count
+            return
+        }
         print(String(
             format: "[%@] %.1f fps (%llu total, %llu send errors, diff %.0f%%) | device: "
                 + "shown=%u dropped=%u heap=%u hb=%@ pacing=%uus",
