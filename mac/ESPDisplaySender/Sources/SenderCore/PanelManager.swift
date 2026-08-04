@@ -175,6 +175,14 @@ final class PanelManager: ObservableObject {
     private let persistenceURL: URL?
     /// Where the shared settings live, or nil to disable persistence.
     private let settingsURL: URL?
+    /// The brightness each panel was last asked for, and when. Used to hold off
+    /// the device's own reports while a drag is in flight; see
+    /// `ignoreReportedBrightness`.
+    private var commandedBrightness: [String: (level: Int, at: Date)] = [:]
+    /// How long to keep preferring the commanded level over the device's
+    /// reports. Long enough to cover a coalesced drag plus a round trip, short
+    /// enough that a lost command self-corrects while the user is still there.
+    private static let brightnessEchoGrace: TimeInterval = 1.5
 
     init(settings: SenderSettings? = nil) {
         let url = PanelStore.defaultURL
@@ -403,21 +411,27 @@ final class PanelManager: ObservableObject {
         case .info(let info):
             reconciledIdentity = reconcilePanelIdentity(
                 hardwareID: info.deviceID, serviceName: serviceName)
+            let keepBrightness = ignoreReportedBrightness(
+                Int(info.brightness), for: serviceName)
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
                 panel.lastHeartbeatAt = now
                 panel.lastError = nil
-                Self.apply(info, to: &panel)
+                Self.apply(info, to: &panel, keepBrightness: keepBrightness)
             }
             // EINF means the device just connected or rebooted, so anything it
             // was told before is gone. This is the only moment the sender knows
             // to push it again.
             pushIdleText(to: serviceName)
         case .acknowledgement(let acknowledgement):
+            let keepBrightness = ignoreReportedBrightness(
+                Int(acknowledgement.brightness), for: serviceName)
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
                 panel.lastHeartbeatAt = now
-                panel.brightness = Int(acknowledgement.brightness)
+                if !keepBrightness {
+                    panel.brightness = Int(acknowledgement.brightness)
+                }
                 panel.brightnessHigh = acknowledgement.brightnessHigh
                 panel.flipped = acknowledgement.flipped
                 panel.sleeping = acknowledgement.sleeping
@@ -518,16 +532,40 @@ final class PanelManager: ObservableObject {
     /// Set an exact backlight level on firmware that accepts one.
     ///
     /// The panel value is updated straight away so a slider tracks the finger
-    /// rather than waiting a round trip; the acknowledgement then confirms
-    /// whatever the device actually applied.
+    /// rather than waiting a round trip. The device's own reports are then
+    /// suppressed until it catches up, because they lag the drag and would
+    /// otherwise fight the thumb.
     func setBrightnessLevel(_ level: Int, for serviceName: String) {
         control(serviceName, capability: .brightnessLevel) { session in
             let clamped = min(
                 max(level, DeviceProtocol.brightnessLevelRange.lowerBound),
                 DeviceProtocol.brightnessLevelRange.upperBound)
             updatePanel(serviceName) { $0.brightness = clamped }
+            commandedBrightness[serviceName] = (level: clamped, at: Date())
             session.setBrightnessLevel(clamped)
         }
+    }
+
+    /// Whether a level the device reported should be ignored in favour of what
+    /// the user just asked for.
+    ///
+    /// Reports are ignored until the device converges on the commanded value,
+    /// or until the grace period lapses. The timeout is what makes this safe:
+    /// without it a dropped command would leave the UI permanently disagreeing
+    /// with the panel.
+    private func ignoreReportedBrightness(
+        _ reported: Int, for serviceName: String
+    ) -> Bool {
+        guard let commanded = commandedBrightness[serviceName] else { return false }
+        guard reported != commanded.level else {
+            commandedBrightness[serviceName] = nil
+            return false
+        }
+        guard Date().timeIntervalSince(commanded.at) < Self.brightnessEchoGrace else {
+            commandedBrightness[serviceName] = nil
+            return false
+        }
+        return true
     }
 
     func setFlip(_ flipped: Bool, for serviceName: String) {
@@ -721,7 +759,8 @@ final class PanelManager: ObservableObject {
     }
 
     private static func apply(
-        _ info: DeviceProtocol.DeviceInfo, to panel: inout PanelSnapshot
+        _ info: DeviceProtocol.DeviceInfo, to panel: inout PanelSnapshot,
+        keepBrightness: Bool = false
     ) {
         panel.displayName = info.name
         panel.hardwareID = info.deviceID
@@ -731,7 +770,12 @@ final class PanelManager: ObservableObject {
         panel.controlProtocolVersion = Int(info.controlProtocolVersion)
         panel.capabilitiesRaw = info.capabilities.rawValue
         panel.uptimeSeconds = info.uptimeSeconds
-        panel.brightness = Int(info.brightness)
+        // Only the level is held back. The high/low flag is derived on the
+        // device from a PWM threshold the Mac does not know, so guessing at it
+        // locally would be inventing state; the device stays authoritative.
+        if !keepBrightness {
+            panel.brightness = Int(info.brightness)
+        }
         panel.brightnessHigh = info.brightnessHigh
         panel.flipped = info.flipped
         panel.sleeping = info.sleeping

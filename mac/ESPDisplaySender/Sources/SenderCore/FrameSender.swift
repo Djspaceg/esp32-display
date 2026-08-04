@@ -67,6 +67,22 @@ final class FrameSender {
     /// is really answering rather than merely having been reconnected to.
     private var _deviceReplies: UInt64 = 0
     private var nextControlSequence = UInt16.random(in: 1...UInt16.max)
+    /// Coalescing state for the brightness slider, guarded by `lock`.
+    ///
+    /// A drag emits far more values than either the link or the panel's
+    /// control queue can absorb, and only the newest one matters, so pending
+    /// values are replaced rather than queued. `_brightnessSettled` tracks
+    /// whether the value the drag ended on has been re-sent with the usual
+    /// redundancy - during the drag single datagrams are enough because a loss
+    /// is superseded within an interval, but the final one has to arrive.
+    private var _pendingBrightnessLevel: Int?
+    private var _lastBrightnessSent: Int?
+    private var _brightnessFlushScheduled = false
+    private var _brightnessSettled = true
+    /// Minimum gap between brightness datagrams while the slider is moving.
+    /// Well inside a frame interval, so the panel tracks the cursor visibly
+    /// but the stream cannot crowd out actual frames.
+    private let brightnessInterval: TimeInterval = 0.05
     private var prevStats = DeviceStats()
     private let onDeviceEvent: ((DeviceEvent) -> Void)?
 
@@ -558,11 +574,54 @@ final class FrameSender {
     /// Set an exact backlight level. Only valid for firmware advertising
     /// `brightnessLevel`; older firmware rejects the opcode outright, which is
     /// why the caller gates on the capability.
+    ///
+    /// Safe to call at whatever rate a slider produces: values are coalesced
+    /// and sent on a background queue, so the caller never waits on the wire.
     func setBrightnessLevel(_ level: Int) {
         let clamped = min(
             max(level, DeviceProtocol.brightnessLevelRange.lowerBound),
             DeviceProtocol.brightnessLevelRange.upperBound)
-        sendManagementControl(.brightnessLevel, value: Int32(clamped))
+        lock.lock()
+        _pendingBrightnessLevel = clamped
+        let needsSchedule = !_brightnessFlushScheduled
+        _brightnessFlushScheduled = true
+        lock.unlock()
+        guard needsSchedule else { return }
+        queue.asyncAfter(deadline: .now() + brightnessInterval) { [weak self] in
+            self?.flushBrightnessLevel()
+        }
+    }
+
+    /// Send the newest pending level and keep going while the slider moves.
+    ///
+    /// When a tick finds nothing pending the drag has stopped, so the value it
+    /// ended on is re-sent redundantly and the loop retires. That guarantees
+    /// the panel settles where the user left it even if the single datagram
+    /// carrying the last value was dropped.
+    private func flushBrightnessLevel() {
+        lock.lock()
+        let pending = _pendingBrightnessLevel
+        _pendingBrightnessLevel = nil
+        if let pending {
+            _lastBrightnessSent = pending
+            _brightnessSettled = false
+        }
+        let settleValue = pending == nil && !_brightnessSettled
+            ? _lastBrightnessSent : nil
+        if pending == nil {
+            _brightnessSettled = true
+            _brightnessFlushScheduled = false
+        }
+        lock.unlock()
+
+        if let pending {
+            transmitControl(.brightnessLevel, value: Int32(pending), repeats: 1)
+            queue.asyncAfter(deadline: .now() + brightnessInterval) { [weak self] in
+                self?.flushBrightnessLevel()
+            }
+        } else if let settleValue {
+            transmitControl(.brightnessLevel, value: Int32(settleValue), repeats: 3)
+        }
     }
 
     func setFlip(_ flipped: Bool) {
@@ -588,36 +647,48 @@ final class FrameSender {
     /// only shows this when its sender has gone, which is exactly when a lost
     /// packet would be least recoverable.
     func sendIdleText(_ lines: [String]) {
-        guard let conn = connection, let packet = IdleText.packet(lines: lines) else {
-            return
-        }
-        for _ in 0..<3 {
-            conn.send(content: packet, completion: .contentProcessed { _ in })
-            usleep(20_000)
-        }
+        guard let packet = IdleText.packet(lines: lines) else { return }
+        transmit(packet, repeats: 3)
     }
 
     private func sendManagementControl(
         _ opcode: DeviceProtocol.ControlOpcode, value: Int32
     ) {
-        guard let conn = connection else { return }
+        transmitControl(opcode, value: value, repeats: 3)
+    }
+
+    private func transmitControl(
+        _ opcode: DeviceProtocol.ControlOpcode, value: Int32, repeats: Int
+    ) {
         lock.lock()
         let sequence = nextControlSequence
         nextControlSequence &+= 1
         lock.unlock()
         let packet = DeviceProtocol.controlPacket(
             opcode: opcode, sequence: sequence, value: value)
-        for _ in 0..<3 {
-            conn.send(content: packet, completion: .contentProcessed { _ in })
-            usleep(20_000)
-        }
+        transmit(packet, repeats: repeats)
     }
 
     private func sendLegacyControl(_ tag: String) {
-        guard let conn = connection else { return }
-        for _ in 0..<3 {
-            conn.send(content: Data(tag.utf8), completion: .contentProcessed { _ in })
-            usleep(20_000)
+        transmit(Data(tag.utf8), repeats: 3)
+    }
+
+    /// Put a one-shot datagram on the wire, repeated and spaced so a single
+    /// burst of loss cannot swallow the whole command.
+    ///
+    /// Always hops to `queue` first. This used to run inline on the caller's
+    /// thread, which for anything driven from the UI meant the main actor sat
+    /// through 60ms of spacing sleeps per call - tolerable for a button, and
+    /// the reason a slider felt like treacle.
+    private func transmit(_ packet: Data, repeats: Int) {
+        let count = max(1, repeats)
+        queue.async { [weak self] in
+            guard let conn = self?.connection else { return }
+            for index in 0..<count {
+                conn.send(content: packet, completion: .contentProcessed { _ in })
+                // No reason to sleep after the last one.
+                if index + 1 < count { usleep(20_000) }
+            }
         }
     }
 
