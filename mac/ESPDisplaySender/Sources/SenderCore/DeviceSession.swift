@@ -305,10 +305,16 @@ final class DeviceSession {
                 }
             }
 
+            // Capture has just (re)started, so publish the new source now.
+            // reportProgress throttles itself to one report every five seconds,
+            // which left the window describing the previous source for seconds
+            // after a pick had already taken effect.
+            reportProgress(force: true)
+
             // ---- Watchdog: poll for death, reconfiguration, silent stalls,
             // source changes, and a blackholed network path.
             while true {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                await waitForWatchdogTick(baselineSource: baselineSourceGeneration)
                 reportProgress()
 
                 if sourceGeneration != baselineSourceGeneration {
@@ -407,6 +413,28 @@ final class DeviceSession {
 
         sender.setParked(false)
         print("[\(name)] display answered again - resuming capture")
+    }
+
+    /// How long the watchdog waits between checks, and how finely it slices
+    /// that wait while watching for a source change.
+    private static let watchdogInterval: TimeInterval = 2
+    private static let sourcePollInterval: TimeInterval = 0.2
+
+    /// Wait out one watchdog interval, returning early the moment the user
+    /// picks a different source.
+    ///
+    /// A flat two-second sleep made picking a source feel broken: the switch
+    /// could not even begin until the current tick elapsed, so a pick appeared
+    /// to do nothing and invited a second and third attempt. Every other
+    /// condition the watchdog checks tolerates a coarse poll; this one is the
+    /// only one a human is sitting and waiting on.
+    private func waitForWatchdogTick(baselineSource: UInt64) async {
+        let slices = max(1, Int((Self.watchdogInterval / Self.sourcePollInterval).rounded()))
+        let slice = UInt64(Self.sourcePollInterval * 1_000_000_000)
+        for _ in 0..<slices {
+            try? await Task.sleep(nanoseconds: slice)
+            if sourceGeneration != baselineSource { return }
+        }
     }
 
     private func reportProgress(force: Bool = false) {

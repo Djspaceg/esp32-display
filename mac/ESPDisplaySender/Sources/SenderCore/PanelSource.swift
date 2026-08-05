@@ -72,33 +72,38 @@ enum PanelSource: Equatable, Sendable {
     /// The accessors that reveal what a filter points at arrived in macOS 15.2.
     /// Below that a picker choice still applies to the running session; it just
     /// cannot be stored, because nothing in the filter identifies it.
+    ///
+    /// Returns nil when the pick cannot be identified. That is deliberately not
+    /// `.automatic`: reporting a failure as "Automatic" overwrote a deliberate
+    /// choice with the opposite of what the user just asked for, so the saved
+    /// choice appeared not to stick and invited another attempt.
     @MainActor
-    static func from(_ filter: SCContentFilter) -> PanelSource {
-        guard #available(macOS 15.2, *) else { return .automatic }
+    static func from(_ filter: SCContentFilter) -> PanelSource? {
+        guard #available(macOS 15.2, *) else { return nil }
         switch filter.style {
         case .display:
             guard let display = filter.includedDisplays.first,
                   let name = DisplayCapture.currentName(for: display.displayID),
                   !name.isEmpty
-            else { return .automatic }
+            else { return nil }
             return .display(name)
 
         case .window:
-            guard let window = filter.includedWindows.first else { return .automatic }
+            guard let window = filter.includedWindows.first else { return nil }
             if let app = window.owningApplication?.applicationName, !app.isEmpty {
                 return .window(app)
             }
             if let title = window.title, !title.isEmpty { return .window(title) }
-            return .automatic
+            return nil
 
         case .application:
             guard let app = filter.includedApplications.first,
                   !app.applicationName.isEmpty
-            else { return .automatic }
+            else { return nil }
             return .window(app.applicationName)
 
         default:
-            return .automatic
+            return nil
         }
     }
 }
