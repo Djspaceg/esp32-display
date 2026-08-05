@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Install (or reinstall) the LaunchAgent that starts ESPDisplaySender in the
-# background at login and restarts it after abnormal exits. Run make-app.sh first.
+# background at login and restarts it after abnormal exits. Run make-app.sh
+# first, or use build-and-restart.command, which runs both.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
