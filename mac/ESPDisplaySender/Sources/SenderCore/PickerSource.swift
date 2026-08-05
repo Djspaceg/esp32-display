@@ -44,6 +44,12 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
     func activate() {
         let picker = SCContentSharingPicker.shared
         var config = SCContentSharingPickerConfiguration()
+        // Spell the modes out rather than relying on the default, so which
+        // kinds of content the picker offers is this app's decision and not
+        // whatever a given macOS version happens to default to.
+        config.allowedPickerModes = [
+            .singleDisplay, .singleWindow, .singleApplication,
+        ]
         // Let the user switch source after the first pick - this is what
         // makes the menu bar affordance useful.
         config.allowsChangingSelectedContent = true
@@ -64,8 +70,19 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
 
     /// Show the picker now (used on demand, e.g. SIGUSR1, or when no source
     /// can be found automatically).
-    func present() {
-        SCContentSharingPicker.shared.present()
+    ///
+    /// `style` asks the picker to open directly in display, window, or
+    /// application mode, which saves the user hunting for the right tab. It
+    /// may also matter for reachability: Firefox reported that on macOS 15 the
+    /// picker's initial screen offered no route to window selection at all
+    /// (bugzilla 1918996). Whether that still applies here is untested, but
+    /// asking for the mode explicitly costs nothing either way.
+    func present(style: SCShareableContentStyle? = nil) {
+        guard let style else {
+            SCContentSharingPicker.shared.present()
+            return
+        }
+        SCContentSharingPicker.shared.present(using: style)
     }
 
     /// Forget the current selection so automatic display resolution takes

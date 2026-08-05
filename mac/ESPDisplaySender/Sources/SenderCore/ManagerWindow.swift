@@ -191,11 +191,26 @@ private struct PanelDetailView: View {
                         InfoRow("Currently showing", panel.sourceDescription)
                         InfoRow("Selection") {
                             HStack(spacing: 6) {
-                                Button("Choose Source…") {
-                                    manager.chooseSource(for: panel.serviceName)
+                                Menu("Choose Source…") {
+                                    Button("Display…") {
+                                        manager.chooseSource(
+                                            for: panel.serviceName, style: .display)
+                                    }
+                                    Button("Window…") {
+                                        manager.chooseSource(
+                                            for: panel.serviceName, style: .window)
+                                    }
+                                    Button("Application…") {
+                                        manager.chooseSource(
+                                            for: panel.serviceName, style: .application)
+                                    }
                                 }
+                                .menuStyle(.borderlessButton)
+                                .fixedSize()
                                 .controlSize(.small)
                                 .disabled(!panel.isOnline)
+                                .help("Pick what this panel shows. Opens the "
+                                    + "macOS picker directly in the chosen mode.")
                                 Button("Use Automatic") {
                                     manager.useAutomaticSource(for: panel.serviceName)
                                 }
