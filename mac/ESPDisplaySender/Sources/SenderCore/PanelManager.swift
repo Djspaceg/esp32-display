@@ -712,9 +712,14 @@ final class PanelManager: ObservableObject {
         // Record what was picked, not just how it reads: the filter itself
         // cannot be stored, but the display or application it names can be
         // resolved again on the next launch.
-        let source = PanelSource.from(filter)
+        //
+        // A pick that cannot be identified leaves the saved choice alone. It
+        // still applies to the running session via the filter; what it must not
+        // do is replace a good stored choice with "Automatic", which is how a
+        // deliberate selection used to appear to revert on its own.
+        let identified = PanelSource.from(filter)
         updatePanel(target) { panel in
-            panel.source = source
+            if let identified { panel.source = identified }
             panel.sourceDescription = picker?.describe(filter) ?? "Selected content"
         }
         persistIfNeeded(force: true)
