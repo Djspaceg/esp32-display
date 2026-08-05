@@ -446,11 +446,18 @@ final class PanelManager: ObservableObject {
         persistIfNeeded(force: reconciledIdentity)
     }
 
-    func chooseSource(for serviceName: String) {
+    /// Open the system content picker for a panel.
+    ///
+    /// `style` opens the picker directly in display, window, or application
+    /// mode, so the user lands where they meant to go instead of hunting for
+    /// the right tab.
+    func chooseSource(
+        for serviceName: String, style: SCShareableContentStyle? = nil
+    ) {
         guard sessions[serviceName] != nil, let picker else { return }
         pickerTarget = serviceName
         selectedServiceName = serviceName
-        picker.present()
+        picker.present(style: style)
     }
 
     func setPaused(_ paused: Bool, for serviceName: String) {
