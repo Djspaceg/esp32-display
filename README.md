@@ -114,7 +114,7 @@ controller or pin map:
 | SCLK / MOSI         | 7 / 6             | 1 / 2                        |
 | CS / DC             | 14 / 15           | 14 / 15                      |
 | RST / backlight     | 21 / 22           | 22 / 23                      |
-| BOOT button         | GPIO9             | GPIO8                        |
+| BOOT button         | GPIO9             | GPIO9 (see note)             |
 | Addressable RGB LED | GPIO8             | none                         |
 | Extras              | —                 | AXS5106L touch, QMI8658A IMU |
 
@@ -132,17 +132,31 @@ An inconclusive probe resolves to the **Touch** board, which inverts this
 project's historical default on purpose. The two possible misdetections are not
 equally cheap:
 
-- A Touch board mistaken for a non-touch one drives GPIO8 as an LED output, and
-  GPIO8 is that board's BOOT button, switched to ground — a pressed button then
-  shorts a driven pad. It would also contend with the IMU and touch interrupt
-  lines on GPIO6 and GPIO21.
-- A non-touch board mistaken for a Touch one writes the panel on the wrong SPI
-  pins. The screen stays dark. Nothing is stressed, and USB still answers.
+- A Touch board mistaken for a non-touch one puts SPI clock and data on GPIO7 and
+  GPIO6 and panel reset on GPIO21. On that board GPIO6 is the IMU's interrupt 2
+  and GPIO21 is the touch controller's interrupt — both are chip _outputs_, so the
+  ESP32 would be driving against two live drivers. It would also PWM GPIO22, which
+  is that board's panel reset, and drive GPIO8, which has no LED and no known
+  function there.
+- A non-touch board mistaken for a Touch one writes the panel on GPIO1/GPIO2 and
+  resets GPIO22 — pins of unknown function on that board, but none of them
+  confirmed to be driven from the other end.
 
-A dark screen is diagnosable and recoverable; a shorted pad is not. If detection
-ever gets it wrong, `CFGBOARD st7789|jd9853|auto` over USB forces the answer.
-Only an explicit override is stored — an auto-detected verdict is deliberately
-not cached, so a single bad probe cannot become permanent.
+Only one of those directions is known to fight two chip outputs, so that is the
+one the fallback avoids. If detection ever gets it wrong, `CFGBOARD
+st7789|jd9853|auto` over USB forces the answer. Only an explicit override is
+stored — an auto-detected verdict is deliberately not cached, so a single bad
+probe cannot become permanent.
+
+**Where the vendor documentation is wrong.** Waveshare's pinout table for the
+Touch board lists the BOOT button on GPIO8 and omits GPIO9 entirely. It is
+actually GPIO9, the same pin the non-touch board uses. Measured by holding both
+candidates `INPUT_PULLUP` and watching which one moves: every press pulls GPIO9
+low and GPIO8 never changes. Taking the table at its word shipped a firmware
+whose short-press and long-press controls silently did nothing on this board, so
+the board table now carries the measured value and a unit test pins it there.
+What GPIO8 _is_ on the Touch board remains unknown — it reads high with a pull-up
+and is not the button — which is why nothing drives it.
 
 Features that depend on hardware the board does not have degrade rather than
 break. The Touch board has no addressable LED, so the WiFi-signal colour
@@ -153,8 +167,14 @@ boards that have one. Because identify keeps working everywhere, the capability
 bits the panel advertises are unchanged — the Mac app needs no modification and
 older senders keep working.
 
-Touch input and the IMU are not used by this project. They are only read as the
-signal that says which board this is.
+The IMU is not used by this project; it is only read as part of the signal that
+says which board this is.
+
+Touch is read but not yet acted on. `firmware/libraries/espdisp_board` contains
+the AXS5106L reader and the coordinate transform that puts a touch through the
+same orientation and flip the pixels went through, and `firmware/display_test`
+has an interactive mode that draws a marker where you touch so the transform can
+be checked against a finger. The streaming firmware does not use touch yet.
 
 ## Performance
 
@@ -285,19 +305,19 @@ boards that have an addressable LED and reports an error on those that do not;
 
 ## Repo layout
 
-| Path                                 | What                                                                                                      |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `firmware/display_stream/`           | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls                      |
-| `firmware/display_test/`             | Panel bring-up test on either board (colors, offsets, orientation, SPI timing benchmark)                  |
-| `firmware/board_probe/`              | I2C-scan diagnostic reporting which board variant you have                                                |
-| `firmware/libraries/espdisp_board/`  | Board variant table, runtime detection, and the panel bring-up shared by both sketches                    |
-| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance)                                 |
-| `mac/ESPDisplaySender/`              | Native manager app plus SwiftPM command-line workflows                                                    |
-| `firmware/test/`                     | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
-| `mac/ESPDisplaySender/Tests/`        | Swift tests for the sender's protocol and application logic (`swift test`)                                |
-| `tools/read_serial.py`               | Serial monitor with optional hard-reset (native USB-Serial/JTAG)                                          |
-| `tools/sweep.py`                     | Pacing parameter sweep, measuring displayed fps from device stats                                         |
-| `docs/`                              | Original project plan                                                                                     |
+| Path                                 | What                                                                                                          |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `firmware/display_stream/`           | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls                          |
+| `firmware/display_test/`             | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping |
+| `firmware/board_probe/`              | I2C-scan diagnostic reporting which board variant you have                                                    |
+| `firmware/libraries/espdisp_board/`  | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform       |
+| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance)                                     |
+| `mac/ESPDisplaySender/`              | Native manager app plus SwiftPM command-line workflows                                                        |
+| `firmware/test/`                     | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`)     |
+| `mac/ESPDisplaySender/Tests/`        | Swift tests for the sender's protocol and application logic (`swift test`)                                    |
+| `tools/read_serial.py`               | Serial monitor with optional hard-reset (native USB-Serial/JTAG)                                              |
+| `tools/sweep.py`                     | Pacing parameter sweep, measuring displayed fps from device stats                                             |
+| `docs/`                              | Original project plan                                                                                         |
 
 ## Getting started
 
