@@ -10,6 +10,7 @@
 #include "../display_stream/control_queue.h"
 #include "../display_stream/device_protocol.h"
 #include "../display_stream/panel_state.h"
+#include "../libraries/espdisp_board/src/board_config.h"
 
 using namespace bandproto;
 
@@ -509,6 +510,97 @@ int main() {
         0x45, 0x41, 0x43, 0x4b, 0x01, 0x02, 0x34, 0x12,
         0x00, 0x03, 0x80, 0x00};
     CHECK(memcmp(ack, expectedAck, sizeof(expectedAck)) == 0);
+  }
+
+  // --- board variant detection: one binary, two boards ---------------------
+  {
+    using board::Variant;
+
+    // The discriminator: the Touch board carries an AXS5106L touch controller
+    // and a QMI8658A IMU on the shared I2C bus (observed at 0x63 and 0x6B);
+    // the non-touch board has nothing there.
+    CHECK(board::variantFromI2cProbe(true, 2) == Variant::TouchJd9853);
+    CHECK(board::variantFromI2cProbe(true, 1) == Variant::TouchJd9853);
+    CHECK(board::variantFromI2cProbe(true, 0) == Variant::LcdSt7789);
+
+    // Fail toward Touch. A probe that could not run says nothing about which
+    // board this is, and the two wrong answers are not equally cheap: calling a
+    // Touch board "non-touch" drives GPIO8 as a LED output, and GPIO8 is that
+    // board's BOOT button switched to ground.
+    CHECK(board::variantFromI2cProbe(false, 0) == Variant::TouchJd9853);
+    CHECK(board::variantFromI2cProbe(false, 5) == Variant::TouchJd9853);
+    CHECK(board::resolve(Variant::Unknown) == Variant::TouchJd9853);
+    CHECK(board::configFor(Variant::Unknown).driver == board::PanelDriver::Jd9853);
+
+    // ...but resolve() must never disturb a verdict we do have.
+    CHECK(board::resolve(Variant::LcdSt7789) == Variant::LcdSt7789);
+    CHECK(board::resolve(Variant::TouchJd9853) == Variant::TouchJd9853);
+
+    const board::Config &st = board::configFor(Variant::LcdSt7789);
+    const board::Config &jd = board::configFor(Variant::TouchJd9853);
+    CHECK(st.variant == Variant::LcdSt7789);
+    CHECK(jd.variant == Variant::TouchJd9853);
+    CHECK(st.driver == board::PanelDriver::St7789);
+    CHECK(jd.driver == board::PanelDriver::Jd9853);
+
+    // Pin tables, asserted so a copy-paste between rows cannot pass silently.
+    CHECK(st.pinSclk == 7 && st.pinMosi == 6 && st.pinRst == 21 && st.pinBl == 22);
+    CHECK(jd.pinSclk == 1 && jd.pinMosi == 2 && jd.pinRst == 22 && jd.pinBl == 23);
+    // CS and DC are the only panel pins the two boards agree on.
+    CHECK(st.pinCs == jd.pinCs && st.pinCs == 14);
+    CHECK(st.pinDc == jd.pinDc && st.pinDc == 15);
+    // Every other panel pin must actually differ, or the table is wrong.
+    CHECK(st.pinSclk != jd.pinSclk);
+    CHECK(st.pinMosi != jd.pinMosi);
+    CHECK(st.pinRst != jd.pinRst);
+    CHECK(st.pinBl != jd.pinBl);
+
+    // The GPIO8 hazard as an assertion: one board's LED pin is the other's BOOT
+    // button, so the Touch board must claim no addressable LED at all.
+    CHECK(st.hasRgbLed() && st.pinRgbLed == 8);
+    CHECK(!jd.hasRgbLed() && jd.pinRgbLed == board::NO_PIN);
+    CHECK(st.pinBootButton == 9);
+    CHECK(jd.pinBootButton == 8);
+    CHECK(jd.pinBootButton == st.pinRgbLed);  // the collision, spelled out
+
+    // No board may drive a LED on a pin it also reads as a button.
+    CHECK(st.pinRgbLed != st.pinBootButton);
+    CHECK(jd.pinRgbLed != jd.pinBootButton);
+
+    // The old firmware's backlight pin is the new board's reset line: proof
+    // that reusing the ST7789 table on a Touch board would PWM LCD_RST.
+    CHECK(st.pinBl == jd.pinRst);
+
+    // Panel geometry is shared, which is exactly why the Mac side, the band
+    // protocol, and the buffer sizing need no board awareness.
+    CHECK(st.colOffset == 34 && jd.colOffset == 34);
+    CHECK(st.invertColor && jd.invertColor);
+
+    // The stored CFGBOARD override: round-trips, and an unrecognised byte falls
+    // back to auto-detection rather than pinning the board to a value this
+    // firmware cannot interpret. Note only an explicit override is persisted -
+    // an auto-detected verdict deliberately is not cached, so a one-off bad
+    // probe cannot become permanent.
+    CHECK(board::variantFromStored((uint8_t)Variant::LcdSt7789) == Variant::LcdSt7789);
+    CHECK(board::variantFromStored((uint8_t)Variant::TouchJd9853) == Variant::TouchJd9853);
+    CHECK(board::variantFromStored(0) == Variant::Unknown);
+    CHECK(board::variantFromStored(99) == Variant::Unknown);
+
+    // CFGBOARD override tokens, including the empty and null cases.
+    CHECK(board::variantFromName("st7789") == Variant::LcdSt7789);
+    CHECK(board::variantFromName("jd9853") == Variant::TouchJd9853);
+    CHECK(board::variantFromName("auto") == Variant::Unknown);
+    CHECK(board::variantFromName("") == Variant::Unknown);
+    CHECK(board::variantFromName(nullptr) == Variant::Unknown);
+    CHECK(board::variantFromName("st") == Variant::Unknown);  // prefixes are not tokens
+
+    // Tokens round-trip through the parser, so CFGSHOW output can be fed back
+    // into CFGBOARD verbatim.
+    CHECK(board::variantFromName(board::variantToken(Variant::LcdSt7789)) ==
+          Variant::LcdSt7789);
+    CHECK(board::variantFromName(board::variantToken(Variant::TouchJd9853)) ==
+          Variant::TouchJd9853);
+    CHECK(strcmp(board::variantToken(Variant::Unknown), "auto") == 0);
   }
 
   printf("OK: %d checks passed\n", checks);

@@ -33,11 +33,12 @@
 #include <esp_task_wdt.h>
 #include <mbedtls/base64.h>
 
-#include <driver/spi_master.h>
-#include <esp_lcd_panel_io.h>
-#include <esp_lcd_panel_ops.h>
-#include <esp_lcd_panel_st7789.h>
-#include <esp_lcd_panel_vendor.h>
+// Board table, runtime detection, and the shared panel bring-up. These live in
+// firmware/libraries/espdisp_board so display_test builds the panel exactly the
+// way this firmware does. panel_init.h pulls in the esp_lcd and SPI headers.
+#include <board_config.h>
+#include <board_detect.h>
+#include <panel_init.h>
 
 #include "wifi_config.h"  // compile-time fallback WIFI_SSID / WIFI_PASSWORD (gitignored)
 
@@ -68,38 +69,42 @@ static String defaultDeviceName() {
   return String(buf);
 }
 
-// ---- Display ----------------------------------------------------------
-static const int PIN_MOSI = 6;
-static const int PIN_SCLK = 7;
-static const int PIN_CS = 14;
-static const int PIN_DC = 15;
-static const int PIN_RST = 21;
-static const int PIN_BL = 22;
+// ---- Board identity ---------------------------------------------------
+// One binary serves both Waveshare 1.47" ESP32-C6 boards. The panel controller
+// and pin map differ; the 172x320 resolution does not, which is why nothing
+// above the panel (protocol, buffers, the Mac) is board-aware. Detected at boot
+// and cached in NVS; overridable with CFGBOARD over USB.
+static board::Variant boardVariant = board::Variant::Unknown;
+static const board::Config *bcfg = &board::configFor(board::Variant::Unknown);
 
+// ---- Display ----------------------------------------------------------
+// Pins, panel driver, centring gap and inversion all come from bcfg. The only
+// panel facts shared by both boards are the resolution and the SPI clock.
 static const int16_t PANEL_W = 172;
 static const int16_t PANEL_H = 320;
-static const int COL_OFFSET = 34;  // 172-wide panel centered on 240-wide ST7789 RAM
-static const int ROW_OFFSET = 0;
 static const uint32_t SPI_HZ = 80000000;
 
 static esp_lcd_panel_handle_t panel = nullptr;
 
 // ---- Onboard RGB LED(s): WiFi signal quality indicator ------------------
-// WS2812-style addressable LED(s) on GPIO8, glowing through the board's
-// acrylic layer. Driven as a short strip with every pixel the same color:
-// data past the real LED count is ignored, so this works whether the board
-// has one LED or several.
-static const int PIN_RGB = 8;
-static const int RGB_COUNT = 8;         // safe upper bound, extras ignored
+// WS2812-style addressable LED(s) glowing through the board's acrylic layer,
+// on the non-touch board only. Driven as a short strip with every pixel the
+// same color: data past the real LED count is ignored, so this works whether
+// the board has one LED or several.
+//
+// Constructed lazily, after detection, and only when the board actually has an
+// LED. That is not tidiness: the pin the non-touch board wires to its LED
+// (GPIO8) is the Touch board's BOOT button, switched to ground. Adafruit_NeoPixel
+// drives the pin in begin(), so a static instance plus an unconditional begin()
+// would configure a pushed button as a driven output.
+static const int RGB_COUNT = 8;                // safe upper bound, extras ignored
 static const uint8_t RGB_LED_BRIGHTNESS = 28;  // subtle glow, not a lamp
 static uint32_t ledOverrideUntil = 0;          // CFGLED diagnostic hold
-// NEO_RGB, not the usual NEO_GRB: this board's LED takes red first.
-// (Diagnosed with CFGLED - pure red displayed as green under GRB.)
-Adafruit_NeoPixel rgbLed(RGB_COUNT, PIN_RGB, NEO_RGB + NEO_KHZ800);
+static Adafruit_NeoPixel *rgbLed = nullptr;
 
-// ---- BOOT button (GPIO9, ESP32-C6 boot strap; plain input after boot) ----
+// ---- BOOT button (ESP32-C6 boot strap; plain input after boot) ----------
 // Short press: toggle backlight high/low. Long press: flip display 180.
-static const int PIN_BOOT = 9;
+// GPIO9 on the non-touch board, GPIO8 on the Touch board - see bcfg.
 static const uint32_t LONG_PRESS_MS = 600;
 static const uint32_t DEBOUNCE_MS = 30;
 static const uint8_t BL_HIGH = 128;  // 50%, Waveshare's recommended ceiling
@@ -312,61 +317,16 @@ static void onPacket(AsyncUDPPacket packet) {
   }
 }
 
+// Bring up SPI and the panel for whichever board this is. The body lives in
+// boardpanel::init so display_test exercises the identical path - a bring-up
+// test that constructs the panel its own way can pass while this is broken.
 static bool initDisplay() {
-  spi_bus_config_t buscfg = {};
-  buscfg.mosi_io_num = PIN_MOSI;
-  buscfg.miso_io_num = -1;
-  buscfg.sclk_io_num = PIN_SCLK;
-  buscfg.quadwp_io_num = -1;
-  buscfg.quadhd_io_num = -1;
-  buscfg.max_transfer_sz = (int)FRAME_BYTES;
-  if (spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO) != ESP_OK) {
-    return false;
-  }
-
-  esp_lcd_panel_io_spi_config_t io_config = {};
-  io_config.cs_gpio_num = PIN_CS;
-  io_config.dc_gpio_num = PIN_DC;
-  io_config.spi_mode = 0;
-  io_config.pclk_hz = SPI_HZ;
-  io_config.trans_queue_depth = 2;
-  io_config.on_color_trans_done = onColorTransDone;
-  io_config.user_ctx = nullptr;
-  io_config.lcd_cmd_bits = 8;
-  io_config.lcd_param_bits = 8;
-
-  esp_lcd_panel_io_handle_t io = nullptr;
-  if (esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config,
-                               &io) != ESP_OK) {
-    return false;
-  }
-
-  esp_lcd_panel_dev_config_t panel_config = {};
-  panel_config.reset_gpio_num = PIN_RST;
-  panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
-  panel_config.data_endian = LCD_RGB_DATA_ENDIAN_BIG;  // buffer arrives panel-ready
-  panel_config.bits_per_pixel = 16;
-  if (esp_lcd_new_panel_st7789(io, &panel_config, &panel) != ESP_OK) {
-    return false;
-  }
-
-  esp_lcd_panel_reset(panel);
-  esp_lcd_panel_init(panel);
-  esp_lcd_panel_invert_color(panel, true);  // IPS panel
-  esp_lcd_panel_set_gap(panel, COL_OFFSET, ROW_OFFSET);
-  esp_lcd_panel_disp_on_off(panel, true);
-  return true;
+  return boardpanel::init(*bcfg, SPI2_HOST, SPI_HZ, FRAME_BYTES,
+                          onColorTransDone, nullptr, nullptr, &panel);
 }
 
-// Apply orientation + user flip to the panel. MADCTL affects how incoming
-// pixel writes are addressed (not the scan-out), so the change becomes
-// visible on the next drawn frame.
-//   portrait:  MADCTL 0        flipped: MX|MY
-//   landscape: MV|MX           flipped: MV|MY
-// The 34px centering gap sits on the physical-column axis (172px), which is
-// symmetric in the 240-wide RAM, so gaps are unaffected by mirroring.
-// Persist the physical-mounting settings. Only written on a button press, so
-// NVS wear is a non-issue.
+// Persist the physical-mounting settings. Only written on a button press or an
+// explicit command, so NVS wear is a non-issue.
 static void saveDisplayPrefs() {
   Preferences prefs;
   prefs.begin("espdisp", false);
@@ -375,13 +335,12 @@ static void saveDisplayPrefs() {
   prefs.end();
 }
 
+// Apply orientation + the user's 180 flip, then record what the panel now holds.
+// The MADCTL/gap arithmetic itself is in boardpanel::applyOrientation, shared
+// with display_test; it is identical on both boards (verified against
+// Waveshare's own example for the JD9853, not assumed from the ST7789).
 static void applyPanelConfig(bool landscape) {
-  bool mx = landscape ? !panelFlip180 : panelFlip180;
-  bool my = panelFlip180;
-  esp_lcd_panel_swap_xy(panel, landscape);
-  esp_lcd_panel_mirror(panel, mx, my);
-  esp_lcd_panel_set_gap(panel, landscape ? 0 : COL_OFFSET,
-                        landscape ? COL_OFFSET : 0);
+  boardpanel::applyOrientation(panel, *bcfg, landscape, panelFlip180);
   panelLandscape = landscape;
   madctlDirty = false;
 }
@@ -399,7 +358,35 @@ static uint8_t currentBrightness() {
 // Drive the backlight to whatever the current state calls for. Every place
 // that used to repeat the sleep/idle/high/low ternary now goes through here,
 // so the pin can no longer disagree with what is reported over the network.
-static void applyBacklight() { analogWrite(PIN_BL, currentBrightness()); }
+static void applyBacklight() { analogWrite(bcfg->pinBl, currentBrightness()); }
+
+// ---- Identify ----------------------------------------------------------
+// "Which panel is this?" must work on both boards, and only one of them has an
+// addressable LED, so the primary signal is a backlight pulse: present on every
+// board and visible across a room. Where an LED does exist it still turns blue
+// as well, so nothing regresses on the boards that already had that.
+static const uint32_t IDENTIFY_BLINK_MS = 250;
+static uint32_t identifyUntil = 0;
+static uint32_t identifyPhaseAt = 0;
+static bool identifyPhaseHigh = false;
+
+// Deliberately not folded into applyBacklight()/currentBrightness(): the
+// brightness reported over EINF/EACK must stay the steady value the user chose.
+// If the pulse went through the reported path, every telemetry packet during an
+// identify would carry a different number and the manager's slider would twitch.
+static void updateIdentify() {
+  if (identifyUntil == 0) return;
+  uint32_t now = millis();
+  if ((int32_t)(now - identifyUntil) >= 0) {
+    identifyUntil = 0;
+    applyBacklight();  // hand the pin back to the sleep/idle/user state machine
+    return;
+  }
+  if (now - identifyPhaseAt < IDENTIFY_BLINK_MS) return;
+  identifyPhaseAt = now;
+  identifyPhaseHigh = !identifyPhaseHigh;
+  analogWrite(bcfg->pinBl, identifyPhaseHigh ? 255 : BL_LOW);
+}
 
 static void sendDeviceInfo() {
   if (hbPort == 0) return;
@@ -453,9 +440,14 @@ static void applyPendingControl() {
         Serial.printf("network: flip180=%d (saved)\n", panelFlip180);
         break;
       case deviceproto::ControlOpcode::Identify:
-        rgbLed.fill(rgbLed.Color(0, 96, 255));
-        rgbLed.show();
-        ledOverrideUntil = millis() + (uint32_t)command.value * 1000;
+        // Backlight pulse on every board; LED too where there is one.
+        identifyUntil = millis() + (uint32_t)command.value * 1000;
+        identifyPhaseAt = 0;  // pulse on the next loop pass, not one blink later
+        if (bcfg->hasRgbLed() && rgbLed != nullptr) {
+          rgbLed->fill(rgbLed->Color(0, 96, 255));
+          rgbLed->show();
+          ledOverrideUntil = identifyUntil;
+        }
         Serial.printf("network: identify for %lds\n", (long)command.value);
         break;
       case deviceproto::ControlOpcode::Restart:
@@ -575,6 +567,27 @@ static void processConfigLine(char *line) {
     saveDisplayPrefs();
     Serial.printf("CFGOK flip180=%d (saved; applies with next frame)\n",
                   panelFlip180);
+  } else if (strncmp(line, "CFGBOARD ", 9) == 0) {
+    // Override board auto-detection: CFGBOARD st7789|jd9853|auto.
+    // The escape hatch for a board whose I2C peripherals do not answer, and the
+    // way to undo a wrong forcing ("auto"). Reboots, because the pin map and
+    // panel driver are chosen during setup and cannot be swapped underneath a
+    // running panel.
+    const char *token = line + 9;
+    board::Variant want = board::variantFromName(token);
+    bool isAuto = strcmp(token, "auto") == 0;
+    if (want == board::Variant::Unknown && !isAuto) {
+      Serial.println("CFGERR expected: CFGBOARD st7789|jd9853|auto");
+      return;
+    }
+    Preferences prefs;
+    prefs.begin("espdisp", false);
+    prefs.putUChar("board", (uint8_t)want);
+    prefs.end();
+    Serial.printf("CFGOK board=%s, restarting\n", board::variantToken(want));
+    Serial.flush();
+    delay(200);
+    ESP.restart();
   } else if (strncmp(line, "CFGLED ", 7) == 0) {
     // Diagnostic: show a literal color for 10s (CFGLED <r> <g> <b>, 0-255).
     // Lets channel-order problems be diagnosed over serial: send pure red,
@@ -584,8 +597,14 @@ static void processConfigLine(char *line) {
       Serial.println("CFGERR expected: CFGLED <r> <g> <b>");
       return;
     }
-    rgbLed.fill(rgbLed.Color(r & 0xFF, g & 0xFF, b & 0xFF));
-    rgbLed.show();
+    if (rgbLed == nullptr) {
+      // Say so rather than accepting silently: on this board the command has
+      // nothing to drive, and a bare CFGOK would look like the LED is broken.
+      Serial.printf("CFGERR no addressable LED on %s\n", bcfg->name);
+      return;
+    }
+    rgbLed->fill(rgbLed->Color(r & 0xFF, g & 0xFF, b & 0xFF));
+    rgbLed->show();
     ledOverrideUntil = millis() + 10000;
     Serial.printf("CFGOK led r=%d g=%d b=%d for 10s\n", r & 0xFF, g & 0xFF, b & 0xFF);
   } else if (strcmp(line, "CFGSHOW") == 0) {
@@ -600,10 +619,12 @@ static void processConfigLine(char *line) {
                           (const unsigned char *)cfgName.c_str(), cfgName.length());
     name64[name64Len] = 0;
     Serial.printf(
-        "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d bl=%s ssid=%s\n",
+        "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d bl=%s "
+        "board=%s ssid=%s\n",
         (const char *)b64, (const char *)name64, WiFi.status() == WL_CONNECTED,
         WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), panelFlip180,
-        blIsHigh() ? "high" : "low", cfgSsid.c_str());
+        blIsHigh() ? "high" : "low", board::variantToken(boardVariant),
+        cfgSsid.c_str());
   }
   // Anything else on serial is ignored (a monitor typing away is harmless).
 }
@@ -760,6 +781,9 @@ static void drawIdleScreen() {
 //   -55..-90    gradient   green -> yellow -> orange -> red
 //   down / < -90  red
 static void updateSignalLed() {
+  if (rgbLed == nullptr) {
+    return;  // Touch board: no addressable LED to report signal on
+  }
   if (millis() < ledOverrideUntil) {
     return;  // a CFGLED test color is being shown
   }
@@ -781,8 +805,8 @@ static void updateSignalLed() {
     r = (uint8_t)(255 * (1.0f - t));
     g = (uint8_t)(255 * t);
   }
-  rgbLed.fill(rgbLed.Color(r, g, 0));
-  rgbLed.show();
+  rgbLed->fill(rgbLed->Color(r, g, 0));
+  rgbLed->show();
 }
 
 // Poll the BOOT button: short press toggles backlight, long press (fires
@@ -792,7 +816,7 @@ static void handleButton() {
   static bool longFired = false;
   static uint32_t downAt = 0;
 
-  bool down = digitalRead(PIN_BOOT) == LOW;
+  bool down = digitalRead(bcfg->pinBootButton) == LOW;
   uint32_t now = millis();
 
   if (down && !wasDown) {
@@ -889,10 +913,17 @@ void setup() {
   // orientation and brightness must be known for the very first fill, and
   // the device name before WiFi latches its DHCP hostname.
   bool ssidFromNvs = false;
+  uint8_t boardOverride = 0;
   {
     Preferences prefs;
     prefs.begin("espdisp", true /* read-only */);
     ssidFromNvs = prefs.isKey("ssid");
+    // Operator override from CFGBOARD, 0 = auto-detect. Only an explicit
+    // override is persisted; the auto-detected value deliberately is not. A
+    // cached auto-detection would be sticky, and the one misdetection with
+    // electrical consequences (a Touch board mistaken for a non-touch one)
+    // would then survive every subsequent boot instead of being re-tested.
+    boardOverride = prefs.getUChar("board", 0);
     cfgSsid = prefs.getString("ssid", WIFI_SSID);
     cfgPass = prefs.getString("pass", WIFI_PASSWORD);
     cfgName = prefs.getString("name", "");
@@ -920,12 +951,42 @@ void setup() {
     cfgName = defaultDeviceName();
   }
 
-  rgbLed.begin();
-  rgbLed.setBrightness(RGB_LED_BRIGHTNESS);
-  updateSignalLed();  // red until WiFi is up
+  // Which board is this? Everything below depends on the answer, and this MUST
+  // come before any pin is configured: the LED pin of one board is the BOOT
+  // button of the other, switched to ground, so driving it before we know would
+  // short a driven pad against a pressed button. The probe only touches the
+  // shared I2C pins, which are safe on both.
+  {
+    board::Variant forced = board::variantFromStored(boardOverride);
+    if (forced != board::Variant::Unknown) {
+      boardVariant = forced;
+      Serial.printf("board: forced to %s by CFGBOARD\n",
+                    board::variantToken(forced));
+    } else {
+      boardVariant = boarddetect::probe();
+    }
+    bcfg = &board::configFor(boardVariant);
+  }
+  Serial.printf("board: %s\n", bcfg->name);
+  Serial.printf("  driver=%s sclk=%d mosi=%d cs=%d dc=%d rst=%d bl=%d boot=%d led=%d\n",
+                bcfg->driver == board::PanelDriver::Jd9853 ? "JD9853" : "ST7789",
+                bcfg->pinSclk, bcfg->pinMosi, bcfg->pinCs, bcfg->pinDc,
+                bcfg->pinRst, bcfg->pinBl, bcfg->pinBootButton, bcfg->pinRgbLed);
 
-  pinMode(PIN_BOOT, INPUT_PULLUP);
-  pinMode(PIN_BL, OUTPUT);
+  // Only construct the LED driver on a board that has one - begin() drives the
+  // pin, and on the Touch board that pin is the BOOT button.
+  if (bcfg->hasRgbLed()) {
+    // NEO_RGB, not the usual NEO_GRB: this board's LED takes red first.
+    // (Diagnosed with CFGLED - pure red displayed as green under GRB.)
+    rgbLed = new Adafruit_NeoPixel(RGB_COUNT, bcfg->pinRgbLed,
+                                   NEO_RGB + NEO_KHZ800);
+    rgbLed->begin();
+    rgbLed->setBrightness(RGB_LED_BRIGHTNESS);
+    updateSignalLed();  // red until WiFi is up
+  }
+
+  pinMode(bcfg->pinBootButton, INPUT_PULLUP);
+  pinMode(bcfg->pinBl, OUTPUT);
   applyBacklight();
   if (!initDisplay()) {
     Serial.println("FATAL: display init failed");
@@ -1010,6 +1071,7 @@ void loop() {
   handleButton();
   handleSerialConfig();
   applyPendingControl();
+  updateIdentify();
   if (restartAt != 0 && (int32_t)(millis() - restartAt) >= 0) {
     Serial.flush();
     delay(50);
