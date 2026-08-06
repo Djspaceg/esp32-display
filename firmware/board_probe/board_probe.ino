@@ -1,24 +1,27 @@
-// Board variant probe for Waveshare ESP32-C6 1.47" LCD boards.
+// Board variant probe for the Waveshare ESP32-C6 1.47" LCD boards.
 //
-// Two candidate boards share this form factor but differ in LCD driver
-// and pin mapping:
-//   - ESP32-C6-LCD-1.47        : ST7789, no I2C peripherals onboard
-//   - ESP32-C6-Touch-LCD-1.47  : JD9853, AXS5106L touch + QMI8658A IMU
-//                                on shared I2C bus (SDA=GPIO18, SCL=GPIO19)
+//   ESP32-C6-LCD-1.47        ST7789, no I2C peripherals onboard
+//   ESP32-C6-Touch-LCD-1.47  JD9853, AXS5106L touch + QMI8658A IMU on the
+//                            shared I2C bus (SDA=GPIO18, SCL=GPIO19)
 //
-// Strategy: scan the I2C bus on GPIO18/19. If we find devices (expected
-// addresses per Waveshare FAQ: 0x51, 0x6B, 0x7E), it's the Touch variant
-// (JD9853). An empty bus strongly suggests the non-touch ST7789 variant.
+// display_stream now performs this detection itself at every boot, so this
+// sketch is no longer required to pick a firmware build - it is a diagnostic.
+// Reach for it when a board is behaving as though it were the other one, or to
+// see the raw I2C scan without the rest of the firmware running.
+//
+// It calls the same boarddetect::probe() the firmware does, on purpose: a probe
+// tool that implements its own detection can disagree with the firmware, which
+// is precisely the confusion it is supposed to resolve.
 
-#include <Wire.h>
+#include <Arduino.h>
 
-static const int PIN_SDA = 18;
-static const int PIN_SCL = 19;
-static const int PIN_TP_RST = 20;  // touch reset on the Touch variant
+#include <board_config.h>
+#include <board_detect.h>
 
 void setup() {
   Serial.begin(115200);
-  // Native USB CDC: wait for the host to open the port (up to ~8s).
+  Serial.setTxTimeoutMs(0);
+  // Native USB CDC: wait for the host to open the port.
   unsigned long start = millis();
   while (!Serial && millis() - start < 8000) {
     delay(50);
@@ -31,38 +34,26 @@ void setup() {
                 ESP.getChipModel(), ESP.getChipRevision(),
                 ESP.getFlashChipSize() / (1024 * 1024),
                 (unsigned long)ESP.getFreeHeap());
+  Serial.printf("Scanning I2C on SDA=GPIO%d SCL=GPIO%d ...\n",
+                board::PIN_PROBE_SDA, board::PIN_PROBE_SCL);
 
-  // Release touch controller from reset in case it holds the bus.
-  pinMode(PIN_TP_RST, OUTPUT);
-  digitalWrite(PIN_TP_RST, LOW);
-  delay(20);
-  digitalWrite(PIN_TP_RST, HIGH);
-  delay(100);
-
-  Wire.begin(PIN_SDA, PIN_SCL, 100000);
-
-  Serial.println("Scanning I2C on SDA=GPIO18 SCL=GPIO19 ...");
   int found = 0;
-  for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-    Wire.beginTransmission(addr);
-    uint8_t err = Wire.endTransmission();
-    if (err == 0) {
-      found++;
-      const char *guess = "";
-      if (addr == 0x51 || addr == 0x63) guess = " (AXS5106L touch?)";
-      if (addr == 0x6B || addr == 0x6A) guess = " (QMI8658A IMU?)";
-      if (addr == 0x7E) guess = " (per Waveshare FAQ)";
-      Serial.printf("  found device at 0x%02X%s\n", addr, guess);
-    }
-  }
+  board::Variant variant = boarddetect::probe(true, &found);
+  const board::Config &cfg = board::configFor(variant);
 
-  Serial.printf("I2C scan complete: %d device(s) found\n", found);
-  if (found > 0) {
-    Serial.println("VERDICT: Touch variant (ESP32-C6-Touch-LCD-1.47, JD9853)");
-    Serial.println("  LCD pins: SCLK=1 MOSI=2 CS=14 DC=15 RST=22 BL=23");
+  Serial.printf("VERDICT: %s\n", cfg.name);
+  Serial.printf("  token (for CFGBOARD): %s\n", board::variantToken(variant));
+  Serial.printf("  LCD pins: SCLK=%d MOSI=%d CS=%d DC=%d RST=%d BL=%d\n",
+                cfg.pinSclk, cfg.pinMosi, cfg.pinCs, cfg.pinDc, cfg.pinRst,
+                cfg.pinBl);
+  Serial.printf("  BOOT button: GPIO%d\n", cfg.pinBootButton);
+  if (cfg.hasRgbLed()) {
+    Serial.printf("  addressable RGB LED: GPIO%d\n", cfg.pinRgbLed);
   } else {
-    Serial.println("VERDICT: likely non-touch variant (ESP32-C6-LCD-1.47, ST7789)");
-    Serial.println("  LCD pins: SCLK=7 MOSI=6 CS=14 DC=15 RST=21 BL=22");
+    Serial.println("  addressable RGB LED: none on this board");
+  }
+  if (found == 0) {
+    Serial.println("  (an empty bus is what identifies the non-touch board)");
   }
 }
 

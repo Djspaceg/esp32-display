@@ -6,8 +6,13 @@ RGB565 pixels over WiFi, and the board pushes them to its ST7789 panel over
 80MHz SPI with DMA. No compression, no video codecs — at 172×320 the whole
 frame is 110KB, so the pipeline stays simple and the latency stays low.
 
-Hardware: [ESP32-C6-LCD-1.47](https://spotpear.com/shop/ESP32-C6-1.47-inch-LCD-Display-Screen-LVGL-SD-WIFI6-ST7789.html)
-(Waveshare design — ESP32-C6, WiFi 6, 1.47" 172×320 IPS panel, ST7789 driver).
+Hardware: either of the two Waveshare 1.47" ESP32-C6 boards — the
+[ESP32-C6-LCD-1.47](https://spotpear.com/shop/ESP32-C6-1.47-inch-LCD-Display-Screen-LVGL-SD-WIFI6-ST7789.html)
+(ST7789 panel) or the
+[ESP32-C6-Touch-LCD-1.47](https://www.waveshare.com/wiki/ESP32-C6-Touch-LCD-1.47)
+(JD9853 panel, capacitive touch, IMU). Both are ESP32-C6, WiFi 6, 8MB flash,
+1.47" 172×320 IPS. One firmware binary runs on both — see
+[Supported boards](#supported-boards).
 
 ## What it does
 
@@ -97,6 +102,60 @@ assignments persist with the known panel. No reflashing, and the recovery path
 works even when the stored credentials are wrong. SSIDs with spaces, emoji, and
 extended Unicode all work — everything crosses the wire base64-encoded.
 
+## Supported boards
+
+Two Waveshare boards share this form factor. They have the same MCU, the same
+8MB flash, and the same 172×320 panel resolution — but not the same panel
+controller or pin map:
+
+|                     | ESP32-C6-LCD-1.47 | ESP32-C6-Touch-LCD-1.47      |
+| ------------------- | ----------------- | ---------------------------- |
+| Panel controller    | ST7789            | JD9853                       |
+| SCLK / MOSI         | 7 / 6             | 1 / 2                        |
+| CS / DC             | 14 / 15           | 14 / 15                      |
+| RST / backlight     | 21 / 22           | 22 / 23                      |
+| BOOT button         | GPIO9             | GPIO8                        |
+| Addressable RGB LED | GPIO8             | none                         |
+| Extras              | —                 | AXS5106L touch, QMI8658A IMU |
+
+Because the resolution matches, nothing above the panel differs: the band
+protocol, the buffers, the Mac app, and the advertised capabilities are
+identical on both. Only the display half of the firmware is board-aware, so
+**one binary serves both boards** and picks its pins and panel driver at boot.
+
+Detection is an I2C scan of the shared bus on GPIO18/19. The Touch board's touch
+controller and IMU answer there (0x63 and 0x6B); the non-touch board's bus is
+silent. `firmware/libraries/espdisp_board/src/board_config.h` is the single
+source of truth for the table above, and it is unit tested on the host.
+
+An inconclusive probe resolves to the **Touch** board, which inverts this
+project's historical default on purpose. The two possible misdetections are not
+equally cheap:
+
+- A Touch board mistaken for a non-touch one drives GPIO8 as an LED output, and
+  GPIO8 is that board's BOOT button, switched to ground — a pressed button then
+  shorts a driven pad. It would also contend with the IMU and touch interrupt
+  lines on GPIO6 and GPIO21.
+- A non-touch board mistaken for a Touch one writes the panel on the wrong SPI
+  pins. The screen stays dark. Nothing is stressed, and USB still answers.
+
+A dark screen is diagnosable and recoverable; a shorted pad is not. If detection
+ever gets it wrong, `CFGBOARD st7789|jd9853|auto` over USB forces the answer.
+Only an explicit override is stored — an auto-detected verdict is deliberately
+not cached, so a single bad probe cannot become permanent.
+
+Features that depend on hardware the board does not have degrade rather than
+break. The Touch board has no addressable LED, so the WiFi-signal colour
+indicator is simply absent there and `CFGLED` reports an error instead of
+silently doing nothing. **Identify** works on both: it pulses the backlight,
+which is visible from across a room, and additionally turns the LED blue on
+boards that have one. Because identify keeps working everywhere, the capability
+bits the panel advertises are unchanged — the Mac app needs no modification and
+older senders keep working.
+
+Touch input and the IMU are not used by this project. They are only read as the
+signal that says which board this is.
+
 ## Performance
 
 The panel's SPI bus tops out around 41 fps for full-frame pushes, and the
@@ -174,10 +233,10 @@ Each packet: `[frame_id u16][band_index u16][dirty_count u16][band payload]`,
 little-endian, where bit 15 of `dirty_count` carries orientation. Bands are
 orientation-native so they align to whole rows:
 
-| Orientation | Band | Bands/frame | Packet size |
-| --- | --- | --- | --- |
-| Portrait 172×320 | 4 rows × 344B | 80 | 1382B |
-| Landscape 320×172 | 2 rows × 640B | 86 | 1286B |
+| Orientation       | Band          | Bands/frame | Packet size |
+| ----------------- | ------------- | ----------- | ----------- |
+| Portrait 172×320  | 4 rows × 344B | 80          | 1382B       |
+| Landscape 320×172 | 2 rows × 640B | 86          | 1286B       |
 
 The device replies with a compatible 1Hz heartbeat (`EHB1` +
 frame/drop/packet/heap counters) to whoever sent it packets last; the sender
@@ -194,7 +253,7 @@ The Mac gates every control on the capability bits the panel advertises, so a
 board running older firmware simply does not offer the newer controls rather
 than sending commands it will reject. That is also why the continuous
 brightness level arrived as a new capability bit instead of a protocol version
-bump: a bump would have made every un-reflashed panel refuse *all* controls.
+bump: a bump would have made every un-reflashed panel refuse _all_ controls.
 
 The device name is also sent as the DHCP hostname (option 12), so the router
 lists the board by name rather than `esp32c6-XXXXXX`, and — on routers that
@@ -218,23 +277,27 @@ Over USB serial (115200), the firmware also accepts configuration commands:
 `CFGWIFI <base64 ssid> <base64 password>` saves credentials to NVS and
 reboots, and `CFGWIFI <base64 ssid>` (password argument omitted) keeps the
 password currently in use; `CFGNAME <base64 name>` sets the device name;
-`CFGSHOW` reports the current network, name, IP, signal strength, and the
-saved orientation/brightness; `CFGFLIP 0|1` sets the 180° flip without the
-button; `CFGLED <r> <g> <b>` shows a literal LED color for 10s.
+`CFGSHOW` reports the current network, name, IP, signal strength, the saved
+orientation/brightness, and the detected board; `CFGFLIP 0|1` sets the 180° flip
+without the button; `CFGLED <r> <g> <b>` shows a literal LED color for 10s on
+boards that have an addressable LED and reports an error on those that do not;
+`CFGBOARD st7789|jd9853|auto` overrides board auto-detection and reboots.
 
 ## Repo layout
 
-| Path | What |
-| --- | --- |
-| `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls |
-| `firmware/display_test/` | Standalone panel bring-up test (colors, offsets, SPI timing benchmark) |
-| `firmware/board_probe/` | I2C-scan sketch that identifies which board variant you have |
-| `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
-| `firmware/test/` | Host-side unit tests for the protocol, control-queue, and panel-state logic (`run_tests.sh`) |
-| `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
-| `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
-| `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
-| `docs/` | Original project plan |
+| Path                                 | What                                                                                                      |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `firmware/display_stream/`           | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls                      |
+| `firmware/display_test/`             | Panel bring-up test on either board (colors, offsets, orientation, SPI timing benchmark)                  |
+| `firmware/board_probe/`              | I2C-scan diagnostic reporting which board variant you have                                                |
+| `firmware/libraries/espdisp_board/`  | Board variant table, runtime detection, and the panel bring-up shared by both sketches                    |
+| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance)                                 |
+| `mac/ESPDisplaySender/`              | Native manager app plus SwiftPM command-line workflows                                                    |
+| `firmware/test/`                     | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
+| `mac/ESPDisplaySender/Tests/`        | Swift tests for the sender's protocol and application logic (`swift test`)                                |
+| `tools/read_serial.py`               | Serial monitor with optional hard-reset (native USB-Serial/JTAG)                                          |
+| `tools/sweep.py`                     | Pacing parameter sweep, measuring displayed fps from device stats                                         |
+| `docs/`                              | Original project plan                                                                                     |
 
 ## Getting started
 
@@ -244,9 +307,16 @@ esp32 core with the espressif board manager URL):
 ```sh
 cd firmware/display_stream
 cp wifi_config.h.example wifi_config.h   # fill in your 2.4GHz network
-arduino-cli compile -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" .
+arduino-cli compile -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" --libraries ../libraries .
 arduino-cli upload  -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" -p /dev/cu.usbmodem* .
 ```
+
+`--libraries ../libraries` puts the in-repo libraries on the search path: the
+board table and shared panel bring-up, plus the vendored JD9853 esp_lcd driver
+(the Arduino core ships an ST7789 driver but no JD9853 one). The same flag
+applies to `display_test` and `board_probe`. It is a compile-only flag; `upload`
+reuses the cached build. The binary is board-independent, so the same build runs
+on either board.
 
 Mac app — the set-and-forget way:
 
@@ -307,6 +377,11 @@ reliable transfer, SHA-256 and signature verification, provisional boot health
 validation, and automatic rollback. Until that is implemented and tested, USB
 remains required for firmware installation and recovery.
 
+Worth knowing before that work starts: carrying both panel drivers in one binary
+puts the build at ~84% of the default 1.31MB app partition. A dual-partition OTA
+layout needs a custom partition table regardless, so this is a sizing input
+rather than a blocker — but the headroom on the current layout is thin.
+
 The management datagrams are unauthenticated and intended for a trusted local
 network. Pairing or authenticated control should accompany OTA before panels
 are exposed to untrusted LAN clients.
@@ -321,13 +396,13 @@ beside the panel's saved WiFi network, over USB.
 Dimming follows the Mac, never the picture. Unchanging content — a photo, a
 dashboard, a paused video — stays at full brightness indefinitely:
 
-| Condition | Panel |
-| --- | --- |
-| Streaming, even perfectly static content | Last frame, full brightness |
-| Mac's displays sleep, or screensaver | Backlight off (`ESLP`) |
-| Mac system sleep | Backlight off (`ESLP`) |
-| Mac wakes | Restored immediately (`EWAK`) |
-| Sender gone ~45s (quit, crashed, WiFi down) | Dimmed status card |
+| Condition                                   | Panel                         |
+| ------------------------------------------- | ----------------------------- |
+| Streaming, even perfectly static content    | Last frame, full brightness   |
+| Mac's displays sleep, or screensaver        | Backlight off (`ESLP`)        |
+| Mac system sleep                            | Backlight off (`ESLP`)        |
+| Mac wakes                                   | Restored immediately (`EWAK`) |
+| Sender gone ~45s (quit, crashed, WiFi down) | Dimmed status card            |
 
 The status card shows whatever lines you gave the panel under **When Idle**,
 followed by how long ago they arrived, then device name, IP, and WiFi strength
@@ -345,11 +420,13 @@ about that; showing the line alone would not be. Non-ASCII input is refused at
 both ends rather than substituted, because the panel's font is an ASCII bitmap
 and a row of blank glyphs looks like a bug.
 
-The RGB LED behind the display glows with live WiFi signal quality, updated
-every 2 seconds:
+On the ESP32-C6-LCD-1.47, the RGB LED behind the display glows with live WiFi
+signal quality, updated every 2 seconds. The ESP32-C6-Touch-LCD-1.47 has no
+addressable LED, so this indicator is absent there — use the status card or
+`CFGSHOW` for signal strength on that board.
 
-| Color | Meaning |
-| --- | --- |
-| Green | Strong signal (-55 dBm or better) |
+| Color           | Meaning                                             |
+| --------------- | --------------------------------------------------- |
+| Green           | Strong signal (-55 dBm or better)                   |
 | Yellow → orange | Fading signal (-55 to -90 dBm, continuous gradient) |
-| Red | Very weak signal, or not connected |
+| Red             | Very weak signal, or not connected                  |
