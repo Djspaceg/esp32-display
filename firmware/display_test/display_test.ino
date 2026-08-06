@@ -21,7 +21,9 @@
 
 #include <board_config.h>
 #include <board_detect.h>
+#include <board_touch.h>
 #include <panel_init.h>
+#include <touch_map.h>
 
 static const int16_t PANEL_W = 172;
 static const int16_t PANEL_H = 320;
@@ -74,6 +76,17 @@ static void push(int w, int h) {
   waitDma();
 }
 
+// Push a sub-rectangle from a caller-supplied buffer. Touch feedback uses this
+// rather than redrawing the whole frame: a full push is ~13ms, which would make
+// the marker visibly lag a moving finger.
+static void pushRect(int x0, int y0, int w, int h, const uint8_t *buf) {
+  dmaInFlight = dmaInFlight + 1;
+  if (esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + w, y0 + h, buf) != ESP_OK) {
+    dmaInFlight = dmaInFlight - 1;
+  }
+  waitDma();
+}
+
 static void fill(int w, int h, uint16_t color) {
   uint8_t hi = color >> 8, lo = color & 0xFF;
   size_t bytes = (size_t)w * h * 2;
@@ -122,6 +135,166 @@ static void drawCornerCard(int w, int h) {
       "  expect: %dx%d, 1px white border on all 4 edges, corners "
       "TL=white TR=red BL=green BR=blue, yellow bar down the middle\n",
       w, h);
+}
+
+// ---- Touch mode --------------------------------------------------------
+// Interactive check that touch_map.h agrees with what the panel is showing.
+// A marker is drawn wherever the mapped touch lands, so if the transform is
+// wrong the marker appears somewhere other than under your finger - and the
+// four corner colours tell you *how* it is wrong (mirrored, swapped, or both).
+//
+// The BOOT button cycles orientation, because the mapping has four cases and
+// three of them are only reachable once the panel has been rotated.
+static const int MARKER = 16;
+static uint8_t markerBuf[MARKER * MARKER * 2];
+static bool touchReady = false;
+static uint8_t orientationIndex = 0;  // bit0 = landscape, bit1 = flip180
+
+static bool orientLandscape() { return (orientationIndex & 1) != 0; }
+static bool orientFlip() { return (orientationIndex & 2) != 0; }
+
+static const char *orientName() {
+  switch (orientationIndex & 3) {
+    case 0:
+      return "portrait";
+    case 1:
+      return "landscape";
+    case 2:
+      return "portrait flipped 180";
+    default:
+      return "landscape flipped 180";
+  }
+}
+
+static void enterTouchOrientation() {
+  boardpanel::applyOrientation(panel, *cfg, orientLandscape(), orientFlip());
+  int w = touchmap::frameWidth(orientLandscape());
+  int h = touchmap::frameHeight(orientLandscape());
+  drawCornerCard(w, h);
+  Serial.printf("touch mode: %s (%dx%d) - press BOOT to rotate\n", orientName(),
+                w, h);
+}
+
+// ---- BOOT button diagnostics -------------------------------------------
+// Waveshare's pinout table for the Touch board says the BOOT button is GPIO8.
+// The non-touch board wires it to GPIO9, and the Touch board's table omits GPIO9
+// entirely, so "GPIO8" is an assumption rather than a measurement - and
+// display_stream trusts it for the short-press backlight toggle and long-press
+// flip. If it is wrong, those controls silently do nothing on this board.
+//
+// So watch both candidates and report which one actually moves. This only runs
+// in touch mode, i.e. only on the Touch board, so reading GPIO8 here can never
+// disturb the non-touch board's LED.
+static const int8_t BUTTON_PROBE_PINS[] = {8, 9};
+static const size_t BUTTON_PROBE_COUNT =
+    sizeof(BUTTON_PROBE_PINS) / sizeof(BUTTON_PROBE_PINS[0]);
+static bool buttonProbeLast[BUTTON_PROBE_COUNT];
+
+static void reportButtonPins(const char *why) {
+  Serial.printf("button [%s]:", why);
+  for (size_t i = 0; i < BUTTON_PROBE_COUNT; i++) {
+    Serial.printf(" GPIO%d=%s", BUTTON_PROBE_PINS[i],
+                  digitalRead(BUTTON_PROBE_PINS[i]) == LOW ? "LOW" : "HIGH");
+  }
+  Serial.printf("  (table says BOOT=GPIO%d)  orientation=%s\n",
+                cfg->pinBootButton, orientName());
+}
+
+static void setupTouchMode() {
+  touchReady = boardtouch::init(*cfg);
+  if (!touchReady) {
+    Serial.println("touch mode: unavailable on this board, idling instead");
+    return;
+  }
+  for (size_t i = 0; i < sizeof(markerBuf); i += 2) {
+    markerBuf[i] = 0xF8;  // magenta, RGB565 big-endian: stands out on the card
+    markerBuf[i + 1] = 0x1F;
+  }
+  for (size_t i = 0; i < BUTTON_PROBE_COUNT; i++) {
+    pinMode(BUTTON_PROBE_PINS[i], INPUT_PULLUP);
+    buttonProbeLast[i] = digitalRead(BUTTON_PROBE_PINS[i]) == LOW;
+  }
+  orientationIndex = 0;
+  enterTouchOrientation();
+  reportButtonPins("at rest");
+  Serial.println("touch the coloured corners; the marker should land under your"
+                 " finger");
+  Serial.println("send 'r' over serial to rotate, 'b' to re-read the buttons");
+}
+
+// Serial control, so rotating through the four orientations does not depend on
+// the button working - which is the very thing under suspicion.
+static void handleTouchSerial() {
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == 'r' || c == 'R') {
+      orientationIndex = (uint8_t)((orientationIndex + 1) & 3);
+      enterTouchOrientation();
+    } else if (c == 'b' || c == 'B') {
+      reportButtonPins("polled");
+    }
+  }
+}
+
+static void serviceTouchMode() {
+  handleTouchSerial();
+
+  // Watch every candidate button pin, report any edge, and rotate on a falling
+  // edge of whichever one turns out to be real.
+  for (size_t i = 0; i < BUTTON_PROBE_COUNT; i++) {
+    bool down = digitalRead(BUTTON_PROBE_PINS[i]) == LOW;
+    if (down == buttonProbeLast[i]) {
+      continue;
+    }
+    delay(30);  // debounce; this loop has nothing else to do
+    down = digitalRead(BUTTON_PROBE_PINS[i]) == LOW;
+    if (down == buttonProbeLast[i]) {
+      continue;  // bounce, not a real edge
+    }
+    buttonProbeLast[i] = down;
+    Serial.printf("button: GPIO%d -> %s\n", BUTTON_PROBE_PINS[i],
+                  down ? "LOW (pressed)" : "HIGH (released)");
+    if (down) {
+      orientationIndex = (uint8_t)((orientationIndex + 1) & 3);
+      enterTouchOrientation();
+    }
+  }
+
+  // Periodic heartbeat, so a log capture shows pin state even if nothing is
+  // being pressed or touched.
+  static uint32_t lastBeat = 0;
+  if (millis() - lastBeat > 5000) {
+    lastBeat = millis();
+    reportButtonPins("idle");
+  }
+
+  boardtouch::Sample s;
+  if (!boardtouch::poll(s)) {
+    return;
+  }
+  if (!s.pressed) {
+    Serial.println("touch: release");
+    return;
+  }
+
+  touchmap::Point p =
+      touchmap::map((int16_t)s.rawX, (int16_t)s.rawY, orientLandscape(),
+                    orientFlip());
+  int w = touchmap::frameWidth(orientLandscape());
+  int h = touchmap::frameHeight(orientLandscape());
+
+  // Keep the whole marker on screen so the pushed rect always matches the
+  // buffer size.
+  int x0 = p.x - MARKER / 2;
+  int y0 = p.y - MARKER / 2;
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x0 > w - MARKER) x0 = w - MARKER;
+  if (y0 > h - MARKER) y0 = h - MARKER;
+  pushRect(x0, y0, MARKER, MARKER, markerBuf);
+
+  Serial.printf("touch: raw=(%u,%u) -> mapped=(%d,%d) fingers=%u  [%s]\n",
+                s.rawX, s.rawY, p.x, p.y, s.points, orientName());
 }
 
 void setup() {
@@ -221,12 +394,17 @@ void setup() {
   Serial.println("  note: includes the CPU fill, so the true SPI ceiling is a"
                  " little higher");
 
-  Serial.println("resting on the portrait corner card");
-  drawCornerCard(PANEL_W, PANEL_H);
   Serial.println("DONE - compare the panel against the expectations above");
+
+  setupTouchMode();
 }
 
 void loop() {
+  if (touchReady) {
+    serviceTouchMode();
+    delay(2);  // the interrupt sets a flag; nothing here needs to spin
+    return;
+  }
   delay(10000);
   Serial.printf("(idle) board=%s heap=%lu\n", board::variantToken(variant),
                 (unsigned long)ESP.getFreeHeap());

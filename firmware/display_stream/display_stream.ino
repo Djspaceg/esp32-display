@@ -93,10 +93,10 @@ static esp_lcd_panel_handle_t panel = nullptr;
 // the board has one LED or several.
 //
 // Constructed lazily, after detection, and only when the board actually has an
-// LED. That is not tidiness: the pin the non-touch board wires to its LED
-// (GPIO8) is the Touch board's BOOT button, switched to ground. Adafruit_NeoPixel
-// drives the pin in begin(), so a static instance plus an unconditional begin()
-// would configure a pushed button as a driven output.
+// LED. Adafruit_NeoPixel drives its pin in begin(), and GPIO8's function on the
+// Touch board is undocumented - it is measurably not the BOOT button, but that
+// is all we know - so a static instance plus an unconditional begin() would
+// drive a pin whose other end is a mystery.
 static const int RGB_COUNT = 8;                // safe upper bound, extras ignored
 static const uint8_t RGB_LED_BRIGHTNESS = 28;  // subtle glow, not a lamp
 static uint32_t ledOverrideUntil = 0;          // CFGLED diagnostic hold
@@ -104,7 +104,8 @@ static Adafruit_NeoPixel *rgbLed = nullptr;
 
 // ---- BOOT button (ESP32-C6 boot strap; plain input after boot) ----------
 // Short press: toggle backlight high/low. Long press: flip display 180.
-// GPIO9 on the non-touch board, GPIO8 on the Touch board - see bcfg.
+// GPIO9 on both boards - see bcfg, and the note there about Waveshare's pinout
+// table claiming GPIO8 for the Touch variant.
 static const uint32_t LONG_PRESS_MS = 600;
 static const uint32_t DEBOUNCE_MS = 30;
 static const uint8_t BL_HIGH = 128;  // 50%, Waveshare's recommended ceiling
@@ -952,10 +953,10 @@ void setup() {
   }
 
   // Which board is this? Everything below depends on the answer, and this MUST
-  // come before any pin is configured: the LED pin of one board is the BOOT
-  // button of the other, switched to ground, so driving it before we know would
-  // short a driven pad against a pressed button. The probe only touches the
-  // shared I2C pins, which are safe on both.
+  // come before any pin is configured: two of the Touch board's panel pins are
+  // chip outputs on the other board's map (see board_config.h resolve()), so
+  // guessing wrong means driving against live drivers. The probe only touches the
+  // shared I2C pins and touch reset, which are safe on both.
   {
     board::Variant forced = board::variantFromStored(boardOverride);
     if (forced != board::Variant::Unknown) {
@@ -974,7 +975,7 @@ void setup() {
                 bcfg->pinRst, bcfg->pinBl, bcfg->pinBootButton, bcfg->pinRgbLed);
 
   // Only construct the LED driver on a board that has one - begin() drives the
-  // pin, and on the Touch board that pin is the BOOT button.
+  // pin, and GPIO8 has no known function on the Touch board.
   if (bcfg->hasRgbLed()) {
     // NEO_RGB, not the usual NEO_GRB: this board's LED takes red first.
     // (Diagnosed with CFGLED - pure red displayed as green under GRB.)

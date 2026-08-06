@@ -11,6 +11,7 @@
 #include "../display_stream/device_protocol.h"
 #include "../display_stream/panel_state.h"
 #include "../libraries/espdisp_board/src/board_config.h"
+#include "../libraries/espdisp_board/src/touch_map.h"
 
 using namespace bandproto;
 
@@ -555,17 +556,35 @@ int main() {
     CHECK(st.pinRst != jd.pinRst);
     CHECK(st.pinBl != jd.pinBl);
 
-    // The GPIO8 hazard as an assertion: one board's LED pin is the other's BOOT
-    // button, so the Touch board must claim no addressable LED at all.
+    // Only the non-touch board has an addressable LED, so nothing may drive
+    // GPIO8 on the Touch board - its function there is undocumented and it is
+    // measurably not the button.
     CHECK(st.hasRgbLed() && st.pinRgbLed == 8);
     CHECK(!jd.hasRgbLed() && jd.pinRgbLed == board::NO_PIN);
+
+    // The BOOT button is GPIO9 on BOTH boards. Waveshare's pinout table claims
+    // GPIO8 for the Touch board; that is wrong, and trusting it shipped a
+    // firmware whose button did nothing on that variant. Measured by holding
+    // both pins INPUT_PULLUP and watching which moves: GPIO9 every press, GPIO8
+    // never. This assertion exists so the table cannot quietly regress to the
+    // documented-but-false value.
     CHECK(st.pinBootButton == 9);
-    CHECK(jd.pinBootButton == 8);
-    CHECK(jd.pinBootButton == st.pinRgbLed);  // the collision, spelled out
+    CHECK(jd.pinBootButton == 9);
+    CHECK(jd.pinBootButton != 8);
 
     // No board may drive a LED on a pin it also reads as a button.
     CHECK(st.pinRgbLed != st.pinBootButton);
     CHECK(jd.pinRgbLed != jd.pinBootButton);
+
+    // Touch is gated to the board that has it, and its interrupt pin is the
+    // other board's panel reset - which is why it must never be enabled blind.
+    CHECK(!st.hasTouch() && st.pinTouchRst == board::NO_PIN &&
+          st.pinTouchInt == board::NO_PIN);
+    CHECK(jd.hasTouch() && jd.pinTouchRst == 20 && jd.pinTouchInt == 21);
+    CHECK(jd.pinTouchInt == st.pinRst);
+    // Detection runs before the variant is known, so its hardcoded touch-reset
+    // pin has to agree with the table it cannot yet read.
+    CHECK(board::PIN_PROBE_TP_RST == jd.pinTouchRst);
 
     // The old firmware's backlight pin is the new board's reset line: proof
     // that reusing the ST7789 table on a Touch board would PWM LCD_RST.
@@ -601,6 +620,92 @@ int main() {
     CHECK(board::variantFromName(board::variantToken(Variant::TouchJd9853)) ==
           Variant::TouchJd9853);
     CHECK(strcmp(board::variantToken(Variant::Unknown), "auto") == 0);
+  }
+
+  // --- touch coordinate mapping --------------------------------------------
+  // Touch has to go through the same orientation transform the pixels do, or
+  // taps land somewhere other than where they were aimed. These assert the
+  // mapping's internal consistency; which way round the panel's axes actually
+  // run is a hardware fact, checked with the touch mode of display_test.
+  {
+    using touchmap::Point;
+    const int16_t SHORT = touchmap::PANEL_SHORT;  // 172
+    const int16_t LONG = touchmap::PANEL_LONG;    // 320
+
+    CHECK(SHORT == 172 && LONG == 320);
+    CHECK(touchmap::frameWidth(false) == SHORT);
+    CHECK(touchmap::frameHeight(false) == LONG);
+    CHECK(touchmap::frameWidth(true) == LONG);
+    CHECK(touchmap::frameHeight(true) == SHORT);
+
+    // Step 1 in isolation: the controller's X runs opposite the panel's.
+    CHECK(touchmap::rawToGlass(0, 0).x == SHORT - 1);
+    CHECK(touchmap::rawToGlass(SHORT - 1, 0).x == 0);
+    CHECK(touchmap::rawToGlass(0, 17).y == 17);  // Y passes through untouched
+
+    // Portrait: every corner lands in the corresponding framebuffer corner.
+    // Raw (SHORT-1, 0) is the display's top-left once the X mirror is undone.
+    CHECK(touchmap::map(SHORT - 1, 0, false, false).x == 0);
+    CHECK(touchmap::map(SHORT - 1, 0, false, false).y == 0);
+    CHECK(touchmap::map(0, LONG - 1, false, false).x == SHORT - 1);
+    CHECK(touchmap::map(0, LONG - 1, false, false).y == LONG - 1);
+
+    // The 180 flip is a point reflection, so the same finger position must map
+    // to the opposite corner.
+    CHECK(touchmap::map(SHORT - 1, 0, false, true).x == SHORT - 1);
+    CHECK(touchmap::map(SHORT - 1, 0, false, true).y == LONG - 1);
+    CHECK(touchmap::map(0, LONG - 1, false, true).x == 0);
+    CHECK(touchmap::map(0, LONG - 1, false, true).y == 0);
+
+    // Landscape swaps the axes: the long panel axis becomes framebuffer X, so a
+    // touch at one end of it must land at a framebuffer X extreme, never beyond.
+    CHECK(touchmap::map(SHORT - 1, 0, true, false).x == 0);
+    CHECK(touchmap::map(SHORT - 1, LONG - 1, true, false).x == LONG - 1);
+
+    // Structural properties that must hold in every orientation, checked over
+    // the whole coordinate space rather than at hand-picked points. A transform
+    // that is wrong by one reflection still satisfies these, which is why the
+    // corner assertions above exist too - but an off-by-one or a swapped axis
+    // that overruns the framebuffer does not.
+    for (int16_t ry = 0; ry < LONG; ry += 7) {
+      for (int16_t rx = 0; rx < SHORT; rx += 5) {
+        for (int orientation = 0; orientation < 4; orientation++) {
+          const bool landscape = (orientation & 1) != 0;
+          const bool flip = (orientation & 2) != 0;
+          Point p = touchmap::map(rx, ry, landscape, flip);
+          // In range, always.
+          CHECK(p.x >= 0 && p.x < touchmap::frameWidth(landscape));
+          CHECK(p.y >= 0 && p.y < touchmap::frameHeight(landscape));
+          // Flipping is an involution: flipping twice is the identity, so the
+          // flipped point must be the unflipped one reflected through the centre.
+          Point q = touchmap::map(rx, ry, landscape, !flip);
+          CHECK(q.x == touchmap::frameWidth(landscape) - 1 - p.x);
+          CHECK(q.y == touchmap::frameHeight(landscape) - 1 - p.y);
+        }
+      }
+    }
+
+    // The mapping must be injective within an orientation, or two different
+    // finger positions would be indistinguishable after transform.
+    CHECK(touchmap::map(10, 20, false, false).x != touchmap::map(11, 20, false, false).x);
+    CHECK(touchmap::map(10, 20, false, false).y != touchmap::map(10, 21, false, false).y);
+    CHECK(touchmap::map(10, 20, true, false).y != touchmap::map(11, 20, true, false).y);
+    CHECK(touchmap::map(10, 20, true, false).x != touchmap::map(10, 21, true, false).x);
+
+    // Clamping: controllers report just outside the active area near the bezel,
+    // and an unclamped point would index past the framebuffer.
+    CHECK(touchmap::clampToFrame({-5, -5}, false).x == 0);
+    CHECK(touchmap::clampToFrame({-5, -5}, false).y == 0);
+    CHECK(touchmap::clampToFrame({9999, 9999}, false).x == SHORT - 1);
+    CHECK(touchmap::clampToFrame({9999, 9999}, false).y == LONG - 1);
+    CHECK(touchmap::clampToFrame({9999, 9999}, true).x == LONG - 1);
+    CHECK(touchmap::clampToFrame({9999, 9999}, true).y == SHORT - 1);
+    // A point already inside is left exactly alone.
+    CHECK(touchmap::clampToFrame({7, 9}, false).x == 7);
+    CHECK(touchmap::clampToFrame({7, 9}, false).y == 9);
+    // map() clamps, so even a wildly out-of-range report stays addressable.
+    CHECK(touchmap::map(9999, 9999, false, false).x >= 0);
+    CHECK(touchmap::map(9999, 9999, false, false).y <= LONG - 1);
   }
 
   printf("OK: %d checks passed\n", checks);

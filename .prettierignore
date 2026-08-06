@@ -1,0 +1,11 @@
+# Build output. Nothing in here is source, and SwiftPM/arduino-cli rewrite it.
+.build/
+mac/ESPDisplaySender/.build/
+**/build/
+
+# Vendored third-party source, kept byte-identical to upstream so the SHA-256
+# hashes recorded in firmware/libraries/esp_lcd_jd9853/README.md stay meaningful.
+# Prettier has no C parser today, but this makes the intent explicit if that
+# ever changes.
+firmware/libraries/esp_lcd_jd9853/src/
+firmware/libraries/esp_lcd_jd9853/LICENSE

@@ -46,8 +46,10 @@ enum class PanelDriver : uint8_t { St7789, Jd9853 };
 /// Touch variant has anything answering on it.
 static const int8_t PIN_PROBE_SDA = 18;
 static const int8_t PIN_PROBE_SCL = 19;
-/// Touch controller reset. Released before probing so a touch chip held in
-/// reset cannot make a Touch board look like a non-touch one.
+/// Touch controller reset, as used by *detection*, which necessarily runs before
+/// the variant is known and so cannot read it out of the table below. Released
+/// before probing so a touch chip held in reset cannot make a Touch board look
+/// like a non-touch one. Must equal CONFIG_TOUCH_JD9853.pinTouchRst.
 static const int8_t PIN_PROBE_TP_RST = 20;
 
 /// Everything that differs between the boards. The sketch reads this and holds
@@ -67,13 +69,28 @@ struct Config {
   int8_t pinBl;
 
   // BOOT button: short press toggles backlight, long press flips 180.
+  //
+  // GPIO9 on both boards. Waveshare's pinout table for the Touch board says
+  // GPIO8 and omits GPIO9 entirely; that is wrong. Measured on a real board by
+  // holding both pins INPUT_PULLUP and watching which one moves: every press
+  // pulls GPIO9 low, GPIO8 never changes and reads high at rest. Trusting the
+  // table shipped a firmware whose button silently did nothing on this variant.
   int8_t pinBootButton;
 
-  // Addressable WS2812-style LED, or NO_PIN. This is not cosmetic bookkeeping:
-  // on the Touch board GPIO8 - where the non-touch board's LED lives - is the
-  // BOOT button, wired to ground through the switch. Driving it as a LED output
-  // there means a pressed button shorts a driven-high pad.
+  // Addressable WS2812-style LED, or NO_PIN. Present only on the non-touch
+  // board; the Touch board has none, so nothing should ever drive GPIO8 there.
+  // Its function on the Touch board is undocumented and unmeasured - it reads
+  // high with a pull-up and is not the button - which is reason enough to leave
+  // it alone rather than assume it is spare.
   int8_t pinRgbLed;
+
+  // Capacitive touch controller (AXS5106L) reset and interrupt, or NO_PIN.
+  // Gated because pinTouchInt is GPIO21 on the Touch board while GPIO21 is
+  // LCD_RST on the non-touch one: enabling touch unconditionally would attach an
+  // interrupt to the other board's panel reset line, and pulse GPIO20 there for
+  // no reason.
+  int8_t pinTouchRst;
+  int8_t pinTouchInt;
 
   /// Gap on the 172px axis: the panel is 172 wide in a 240-wide controller RAM,
   /// centred, on both boards.
@@ -84,6 +101,9 @@ struct Config {
   bool invertColor;
 
   bool hasRgbLed() const { return pinRgbLed != NO_PIN; }
+  bool hasTouch() const {
+    return pinTouchRst != NO_PIN && pinTouchInt != NO_PIN;
+  }
 };
 
 /// ESP32-C6-LCD-1.47: ST7789, addressable LED, BOOT on GPIO9.
@@ -99,6 +119,8 @@ static const Config CONFIG_LCD_ST7789 = {
     /* bl   */ 22,
     /* boot */ 9,
     /* led  */ 8,
+    /* touchRst */ NO_PIN,  // no touch controller on this board
+    /* touchInt */ NO_PIN,
     /* colOffset   */ 34,
     /* invertColor */ true,
 };
@@ -118,27 +140,40 @@ static const Config CONFIG_TOUCH_JD9853 = {
     /* dc   */ 15,
     /* rst  */ 22,
     /* bl   */ 23,
-    /* boot */ 8,
+    // GPIO9, not the GPIO8 Waveshare's pinout table states. Measured: with both
+    // candidates held INPUT_PULLUP, pressing BOOT drives GPIO9 low every time
+    // and GPIO8 never moves. See the note above the struct.
+    /* boot */ 9,
     /* led  */ NO_PIN,
+    /* touchRst */ 20,  // AXS5106L, shares the I2C bus on GPIO18/19
+    /* touchInt */ 21,
     /* colOffset   */ 34,
     /* invertColor */ true,
 };
 
 /// Map a possibly-Unknown variant onto one that is safe to run.
 ///
-/// Unknown resolves to the Touch board on purpose. The two misdetections are
-/// not symmetric:
+/// Unknown resolves to the Touch board on purpose. Both misdetections leave the
+/// panel dark, because the SPI pins differ - but they are not equally clean
+/// electrically:
 ///
-///   Touch board treated as non-touch  -> GPIO8 driven as a LED output, but
-///       GPIO8 is that board's BOOT button, switched to ground. Pressing it
-///       shorts a driven pad. GPIO6/GPIO21 also become outputs contending with
-///       the IMU interrupt and touch interrupt lines.
-///   Non-touch board treated as Touch  -> the SPI pins are wrong, so the panel
-///       is simply never written. A dark screen, no electrical stress.
+///   Touch board treated as non-touch  -> SPI clock and data land on GPIO7 and
+///       GPIO6, and panel reset on GPIO21. On that board GPIO6 is the QMI8658A
+///       interrupt 2 and GPIO21 is the AXS5106L touch interrupt: both are chip
+///       *outputs*, so the ESP32 would be driving against two live drivers. It
+///       would also PWM GPIO22, which is that board's panel reset. GPIO8 would
+///       be driven as a LED output despite having no LED and no known function.
+///   Non-touch board treated as Touch  -> SPI lands on GPIO1/GPIO2 and reset on
+///       GPIO22, none of which is a known output on that board, and touch setup
+///       pulses GPIO20 and reads GPIO21. Pins of unknown function, but nothing
+///       confirmed to be driven from the other end.
 ///
-/// A dark screen is recoverable and diagnosable over USB; a shorted pad is not.
-/// So an inconclusive probe must land on Touch, even though that inverts the
-/// historical default of this firmware.
+/// Only one of those directions is known to fight two chip outputs, so an
+/// inconclusive probe lands on Touch. Note this inverts the historical default
+/// of this firmware, and that the original justification for it was stronger
+/// than the facts: it assumed Waveshare's claim that GPIO8 is the Touch board's
+/// BOOT button, which measurement disproved. The conclusion survives the
+/// correction; the reasoning had to be rewritten.
 inline Variant resolve(Variant variant) {
   return variant == Variant::Unknown ? Variant::TouchJd9853 : variant;
 }

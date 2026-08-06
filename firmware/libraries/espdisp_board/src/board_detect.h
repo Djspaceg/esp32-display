@@ -5,11 +5,10 @@
 // can be unit tested on the host. This file is only the hardware half: bring up
 // the bus, count what answers, hand the count to the rule.
 //
-// ORDERING IS SAFETY-CRITICAL. This must run before anything drives GPIO8 or
-// the panel pins. On the Touch board GPIO8 is the BOOT button, switched to
-// ground; the non-touch board drives an addressable LED there. Configuring that
-// pin before knowing which board this is can short a driven pad against a
-// pressed button.
+// ORDERING MATTERS. This must run before anything drives the panel pins or
+// GPIO8, because those differ per board and two of the Touch board's are chip
+// outputs (see board_config.h resolve()). The probe itself only drives the
+// shared I2C pins and the touch reset, which is why it is safe to run first.
 #pragma once
 
 #include <Arduino.h>
