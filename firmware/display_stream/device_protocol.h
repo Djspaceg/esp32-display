@@ -31,6 +31,10 @@ enum Capability : uint32_t {
   // Accepts ETXT, so the panel can show something chosen by the user while no
   // sender is driving it.
   CAP_IDLE_TEXT = 1u << 8,
+  // Emits ETCH, i.e. this panel has a touch screen and reports gestures. A
+  // sender should offer touch actions only when this is set, so a panel without
+  // touch does not show controls that can never fire.
+  CAP_TOUCH = 1u << 9,
 };
 
 enum class ControlOpcode : uint8_t {
@@ -149,6 +153,81 @@ inline size_t writeAck(uint8_t out[ACK_PACKET_BYTES], ControlOpcode opcode,
   out[10] = brightness;
   out[11] = 0;
   return ACK_PACKET_BYTES;
+}
+
+// ---- Touch events ("ETCH") ----------------------------------------------
+// Gestures the panel observed, reported to the sender so it can act on them.
+//
+// Semantic gestures, not raw coordinates streamed as pointer input. That is a
+// deliberate limit on what a panel can ask the Mac to do: these datagrams are
+// unauthenticated, so anything on the LAN can forge them, and the blast radius
+// has to stay inside a set of actions the user opted into. A "swipe left" a
+// sender maps to "cycle source" is recoverable; synthesised clicks at arbitrary
+// coordinates would be remote control of the Mac. Raw pointer injection should
+// wait for pairing.
+//
+// One datagram per completed gesture, never per report, so a drag cannot flood
+// the link that frame data shares.
+static const uint8_t TOUCH_VERSION = 1;
+static const size_t TOUCH_PACKET_BYTES = 14;
+
+enum class TouchGesture : uint8_t {
+  Tap = 1,
+  SwipeLeft = 2,
+  SwipeRight = 3,
+  SwipeUp = 4,
+  SwipeDown = 5,
+};
+
+// Bit 0 of the flags byte: the panel was in landscape when the gesture happened.
+// Coordinates are in the frame that was on screen, so a receiver needs to know
+// which frame that was to interpret them.
+static const uint8_t TOUCH_FLAG_LANDSCAPE = 0x01;
+
+struct TouchEvent {
+  TouchGesture gesture;
+  uint16_t sequence;
+  uint16_t x;
+  uint16_t y;
+  uint8_t flags;
+};
+
+inline bool validTouchGesture(uint8_t raw) {
+  return raw >= (uint8_t)TouchGesture::Tap &&
+         raw <= (uint8_t)TouchGesture::SwipeDown;
+}
+
+// ["ETCH"][version][gesture][sequence u16][x u16][y u16][flags][reserved]
+//
+// The sequence number is what lets a receiver ignore a duplicate. UDP can
+// deliver the same datagram twice, and a tap the sender maps to pause/resume
+// would otherwise toggle twice and land back where it started - a bug that
+// would look like the tap was ignored.
+inline size_t writeTouch(uint8_t out[TOUCH_PACKET_BYTES], TouchGesture gesture,
+                         uint16_t sequence, uint16_t x, uint16_t y,
+                         uint8_t flags) {
+  memcpy(out, "ETCH", 4);
+  out[4] = TOUCH_VERSION;
+  out[5] = (uint8_t)gesture;
+  writeU16LE(out + 6, sequence);
+  writeU16LE(out + 8, x);
+  writeU16LE(out + 10, y);
+  out[12] = flags;
+  out[13] = 0;
+  return TOUCH_PACKET_BYTES;
+}
+
+inline bool parseTouch(const uint8_t *data, size_t len, TouchEvent &out) {
+  if (len != TOUCH_PACKET_BYTES || memcmp(data, "ETCH", 4) != 0 ||
+      data[4] != TOUCH_VERSION || !validTouchGesture(data[5])) {
+    return false;
+  }
+  out.gesture = (TouchGesture)data[5];
+  out.sequence = readU16LE(data + 6);
+  out.x = readU16LE(data + 8);
+  out.y = readU16LE(data + 10);
+  out.flags = data[12];
+  return true;
 }
 
 // ---- Idle text ("ETXT") -------------------------------------------------

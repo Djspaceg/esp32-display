@@ -12,11 +12,18 @@ namespace panelstate {
 
 /// What the backlight PWM should be set to.
 ///
-/// Priority matters: sleep beats idle beats the user's level. The Mac's screens
-/// being asleep is the strongest signal there is nothing worth lighting, and the
-/// idle card is deliberately dim whatever brightness the user picked.
-inline uint8_t backlightLevel(bool sleeping, bool idle, uint8_t userLevel,
-                              uint8_t idleLevel) {
+/// Priority matters: a finger beats sleep beats idle beats the user's level.
+///
+/// The Mac's screens being asleep is the strongest signal there is nothing worth
+/// lighting, and the idle card is deliberately dim whatever brightness the user
+/// picked - but someone physically touching the panel outranks both, because the
+/// question they are asking is "is this thing on?" and the answer has to be
+/// visible. touchWake is time-bounded by the caller and never tells the Mac
+/// anything, so it lights the panel without contradicting the Mac's own idea of
+/// whether its displays are asleep.
+inline uint8_t backlightLevel(bool sleeping, bool idle, bool touchWake,
+                              uint8_t userLevel, uint8_t idleLevel) {
+  if (touchWake) return userLevel;
   if (sleeping) return 0;
   if (idle) return idleLevel;
   return userLevel;

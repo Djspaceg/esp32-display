@@ -38,7 +38,10 @@
 // way this firmware does. panel_init.h pulls in the esp_lcd and SPI headers.
 #include <board_config.h>
 #include <board_detect.h>
+#include <board_touch.h>
 #include <panel_init.h>
+#include <touch_gesture.h>
+#include <touch_map.h>
 
 #include "wifi_config.h"  // compile-time fallback WIFI_SSID / WIFI_PASSWORD (gitignored)
 
@@ -148,12 +151,25 @@ static bool displaySleeping = false;
 #include "control_queue.h"
 using namespace bandproto;
 
-static const uint32_t DEVICE_CAPABILITIES =
+// Capabilities every board has, whatever panel or peripherals it carries.
+static const uint32_t BASE_CAPABILITIES =
     deviceproto::CAP_BRIGHTNESS | deviceproto::CAP_BRIGHTNESS_LEVEL |
     deviceproto::CAP_FLIP |
     deviceproto::CAP_IDENTIFY | deviceproto::CAP_RESTART |
     deviceproto::CAP_SLEEP_SYNC | deviceproto::CAP_TELEMETRY |
     deviceproto::CAP_IDLE_TEXT;
+
+// Whether the touch controller came up. Not simply "is this the Touch board":
+// the chip has to actually answer, so a board with dead touch advertises no
+// touch rather than promising gestures that never arrive.
+static bool touchAvailable = false;
+
+// Advertised capabilities. Runtime rather than a constant because CAP_TOUCH
+// depends on the hardware, and the sender uses these bits to decide which
+// controls to offer - a panel without touch should not show touch actions.
+static uint32_t deviceCapabilities() {
+  return BASE_CAPABILITIES | (touchAvailable ? deviceproto::CAP_TOUCH : 0u);
+}
 
 // Lines the sender asked the panel to show on its status card, with when they
 // arrived so the card can say how old they are. Written by the UDP task and
@@ -351,9 +367,28 @@ static uint8_t currentDeviceFlags() {
                                  idleActive, WiFi.status() == WL_CONNECTED);
 }
 
+// ---- Touch (Touch board only) ------------------------------------------
+// A finger on a dimmed panel lights it for a bounded window, and that touch is
+// consumed rather than also firing whatever a tap is wired to - the same way a
+// phone's first tap wakes the screen instead of pressing what is under it.
+//
+// Deliberately local and deliberately silent: the Mac's sleep state is
+// authoritative, so waking never sends anything. It stops this panel from being
+// dark while somebody is looking at it, and nothing more.
+static const uint32_t TOUCH_WAKE_MS = 10000;
+static uint32_t touchWakeUntil = 0;
+static touchgesture::Tracker touchTracker;
+static uint16_t touchSequence = 0;
+// True while the current press has already been spent waking the panel.
+static bool touchConsumed = false;
+
+static bool touchWakeActive() {
+  return touchWakeUntil != 0 && (int32_t)(millis() - touchWakeUntil) < 0;
+}
+
 static uint8_t currentBrightness() {
-  return panelstate::backlightLevel(displaySleeping, idleActive, userBlLevel,
-                                    BL_IDLE);
+  return panelstate::backlightLevel(displaySleeping, idleActive,
+                                    touchWakeActive(), userBlLevel, BL_IDLE);
 }
 
 // Drive the backlight to whatever the current state calls for. Every place
@@ -393,7 +428,7 @@ static void sendDeviceInfo() {
   if (hbPort == 0) return;
   uint8_t packet[96];
   size_t len = deviceproto::writeInfo(
-      packet, sizeof(packet), currentDeviceFlags(), DEVICE_CAPABILITIES,
+      packet, sizeof(packet), currentDeviceFlags(), deviceCapabilities(),
       millis() / 1000, WiFi.status() == WL_CONNECTED ? (int16_t)WiFi.RSSI() : -127,
       currentBrightness(), deviceId, cfgName.c_str(), FW_VERSION);
   if (len > 0) {
@@ -736,10 +771,16 @@ static void drawIdleScreen() {
                (unsigned long)(ageSeconds / 3600));
     }
     lines[lineCount++] = lineAge;
+  } else {
+    // Nothing pushed, so draw the card the panel can build by itself. The
+    // sender expresses exactly these three lines as its default screensaver
+    // template, so a user who edits that template replaces them rather than
+    // adding to them - appending them unconditionally used to print the name,
+    // address, and signal twice for anyone whose template already had them.
+    lines[lineCount++] = lineName;
+    lines[lineCount++] = lineIp;
+    lines[lineCount++] = lineWifi;
   }
-  lines[lineCount++] = lineName;
-  lines[lineCount++] = lineIp;
-  lines[lineCount++] = lineWifi;
 
   size_t maxLen = 0;
   for (int i = 0; i < lineCount; i++) {
@@ -845,6 +886,103 @@ static void handleButton() {
   }
 }
 
+// Report a completed gesture to whoever is driving this panel.
+//
+// The internal gesture enum and the wire one are separate types: touch_gesture.h
+// lives in the shared library and device_protocol.h lives here, so the library
+// cannot see the wire format - and should not, because what the classifier can
+// recognise and what the protocol has agreed to carry are allowed to differ. The
+// translation is this switch, deliberately explicit so adding a gesture forces a
+// decision about whether it goes on the wire rather than silently renumbering it.
+//
+// The mapping is inline rather than a helper because the Arduino preprocessor
+// hoists function prototypes above the "device_protocol.h" include below, so a
+// function taking a deviceproto type as a parameter does not compile here.
+static void sendTouchEvent(touchgesture::Gesture gesture, int16_t x, int16_t y) {
+  deviceproto::TouchGesture wire;
+  switch (gesture) {
+    case touchgesture::Gesture::Tap:
+      wire = deviceproto::TouchGesture::Tap;
+      break;
+    case touchgesture::Gesture::SwipeLeft:
+      wire = deviceproto::TouchGesture::SwipeLeft;
+      break;
+    case touchgesture::Gesture::SwipeRight:
+      wire = deviceproto::TouchGesture::SwipeRight;
+      break;
+    case touchgesture::Gesture::SwipeUp:
+      wire = deviceproto::TouchGesture::SwipeUp;
+      break;
+    case touchgesture::Gesture::SwipeDown:
+      wire = deviceproto::TouchGesture::SwipeDown;
+      break;
+    default:
+      return;  // not a gesture this protocol carries
+  }
+  if (hbPort == 0) {
+    // No sender has ever spoken to this panel, so there is nowhere to report a
+    // gesture to. Log it: a user tapping a panel that no Mac is driving should
+    // be able to see that the touch registered and simply had no audience.
+    Serial.printf("touch: %s ignored, no sender\n",
+                  touchgesture::gestureName(gesture));
+    return;
+  }
+  uint8_t packet[deviceproto::TOUCH_PACKET_BYTES];
+  deviceproto::writeTouch(
+      packet, wire, ++touchSequence, (uint16_t)x, (uint16_t)y,
+      panelLandscape ? deviceproto::TOUCH_FLAG_LANDSCAPE : (uint8_t)0);
+  udp.writeTo(packet, sizeof(packet), IPAddress(hbIp), hbPort);
+  Serial.printf("touch: %s at (%d,%d) seq=%u -> sender\n",
+                touchgesture::gestureName(gesture), x, y, touchSequence);
+}
+
+// Poll the touch controller and act on whatever the finger turned out to mean.
+//
+// Two behaviours share one finger, and the order between them matters. While the
+// panel is dimmed - showing the idle card, or dark because the Mac's displays
+// slept - a touch lights it and is *consumed*, so waking a panel never also
+// toggles whatever the sender maps a tap to. Once the panel is lit, completed
+// gestures go to the sender and it decides what they mean.
+static void serviceTouch() {
+  if (!touchAvailable) {
+    return;
+  }
+
+  // Let an expired wake window hand the backlight back to the state machine.
+  if (touchWakeUntil != 0 && !touchWakeActive()) {
+    touchWakeUntil = 0;
+    applyBacklight();
+  }
+
+  boardtouch::Sample sample;
+  if (!boardtouch::poll(sample)) {
+    return;
+  }
+
+  // Through the same orientation transform the pixels went through, so a swipe
+  // means the direction the user actually swiped.
+  touchmap::Point p = touchmap::map((int16_t)sample.rawX, (int16_t)sample.rawY,
+                                    panelLandscape, panelFlip180);
+  touchgesture::Event event =
+      touchTracker.onReport(sample.pressed, p.x, p.y, millis());
+
+  if (event.pressStarted && (idleActive || displaySleeping)) {
+    touchConsumed = true;
+    touchWakeUntil = millis() + TOUCH_WAKE_MS;
+    applyBacklight();
+    Serial.printf("touch: wake for %lus\n", (unsigned long)(TOUCH_WAKE_MS / 1000));
+    return;
+  }
+  if (event.gesture == touchgesture::Gesture::None) {
+    return;
+  }
+  if (touchConsumed) {
+    touchConsumed = false;  // the press that woke the panel ends here
+    return;
+  }
+  sendTouchEvent(event.gesture, event.startX, event.startY);
+}
+
 // Fill the whole panel with one RGB565 color (used for status feedback).
 // Draws from staging (bufB) - bufA belongs to the network path.
 static void fillPanel(uint16_t rgb565) {
@@ -867,7 +1005,7 @@ static void fillPanel(uint16_t rgb565) {
 // value stale.
 static void addMdnsService() {
   char capsBuf[9], resBuf[16], protoBuf[4];
-  snprintf(capsBuf, sizeof(capsBuf), "%08lx", (unsigned long)DEVICE_CAPABILITIES);
+  snprintf(capsBuf, sizeof(capsBuf), "%08lx", (unsigned long)deviceCapabilities());
   snprintf(resBuf, sizeof(resBuf), "%ux%u", (unsigned)PANEL_W, (unsigned)PANEL_H);
   snprintf(protoBuf, sizeof(protoBuf), "%u",
            (unsigned)deviceproto::FRAME_PROTOCOL_VERSION);
@@ -997,6 +1135,10 @@ void setup() {
   // right way up, not just streamed frames.
   applyPanelConfig(false);
   fillPanel(0x2104);  // dark gray: display alive, waiting for WiFi
+
+  // Touch, before WiFi: the capability bits mDNS advertises depend on whether
+  // the controller answered, so this has to be settled before we announce.
+  touchAvailable = boardtouch::init(*bcfg);
   // The device name doubles as the DHCP hostname (option 12), so the router
   // lists this board by name instead of "esp32c6-XXXXXX". This MUST precede
   // WiFi.mode(): the core latches the hostname onto the STA netif inside
@@ -1073,6 +1215,7 @@ void loop() {
   handleSerialConfig();
   applyPendingControl();
   updateIdentify();
+  serviceTouch();
   if (restartAt != 0 && (int32_t)(millis() - restartAt) >= 0) {
     Serial.flush();
     delay(50);
