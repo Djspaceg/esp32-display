@@ -172,13 +172,14 @@ final class IdleTextManagerTests: XCTestCase {
         manager.setIdleText("café ☕\n\nsecond line", for: "studio-display")
 
         XCTAssertEqual(
-            manager.idleTextPreview(for: "studio-display"), ["caf", "second line"])
+            manager.screensaverPreview(for: "studio-display").lines,
+            ["caf", "second line"])
     }
 
     func testPreviewIsEmptyWithoutText() {
         let manager = makeManager(capabilities: .idleText)
 
-        XCTAssertEqual(manager.idleTextPreview(for: "studio-display"), [])
+        XCTAssertEqual(manager.screensaverPreview(for: "studio-display").lines, [])
     }
 
     func testUnknownPanelIsIgnored() {
@@ -188,7 +189,7 @@ final class IdleTextManagerTests: XCTestCase {
 
         XCTAssertEqual(manager.panels.count, 1)
         XCTAssertEqual(manager.panels.first?.idleText, "")
-        XCTAssertEqual(manager.idleTextPreview(for: "ghost"), [])
+        XCTAssertEqual(manager.screensaverPreview(for: "ghost").lines, [])
     }
 
     /// Storing it for firmware that cannot show it is still worth doing: the

@@ -46,7 +46,12 @@ struct ManagerView: View {
                         }
                     }
                 }
-                .navigationSplitViewColumnWidth(min: 230, ideal: 280, max: 340)
+                // The system sidebar style, rather than a plain list: it gives
+                // the inset rounded selection macOS users expect, the standard
+                // section header treatment, and the right row insets - all of
+                // which the default full-width square selection did not.
+                .listStyle(.sidebar)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
             } detail: {
                 if let panel = manager.selectedPanel {
                     PanelDetailView(panel: panel, manager: manager)
@@ -128,16 +133,22 @@ private struct PanelRow: View {
                     .lineLimit(1)
                 HStack(spacing: 5) {
                     Text(panel.statusText)
-                    if panel.isOnline {
+                    // Only a streaming session has a meaningful rate. Showing
+                    // one while nothing is being captured read as healthy when
+                    // it was not.
+                    if panel.isOnline && panel.captureStatus.isStreaming {
                         Text("•")
                         Text(String(format: "%.1f fps", panel.displayFPS))
+                    } else if panel.isOnline && !panel.paused {
+                        Text("•")
+                        Text("Not mirroring")
                     }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
-            if panel.lastError != nil {
+            if panel.lastError != nil || panel.captureStatus.needsAttention {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .accessibilityLabel("Has a problem")
@@ -160,6 +171,10 @@ private struct PanelDetailView: View {
     @State private var isEditingName = false
     @State private var selectedSSID = ""
     @State private var editedIdleText = ""
+    /// Collapsed by default: these counters matter when something is wrong, and
+    /// pushing everything above them off the screen the rest of the time is a
+    /// poor trade.
+    @State private var showDiagnostics = false
     @FocusState private var nameIsFocused: Bool
 
     private var normalizedName: String {
@@ -183,6 +198,10 @@ private struct PanelDetailView: View {
 
                 if let lastError = panel.lastError {
                     PanelNotice(text: lastError)
+                }
+
+                CompactGroup("Mirroring") {
+                    MirrorPreview(panel: panel, preview: manager.preview)
                 }
 
                 CompactGroup("Source") {
@@ -235,10 +254,15 @@ private struct PanelDetailView: View {
                         {
                             InfoRow("Brightness") {
                                 HStack(spacing: 8) {
+                                    // No `step:`. The range is 1...255, and a
+                                    // step made macOS draw a tick mark per
+                                    // step - 254 of them, merging into what
+                                    // looked like a stray rule under the
+                                    // slider. The binding already rounds to a
+                                    // whole level on the way out.
                                     Slider(
                                         value: brightnessLevel,
-                                        in: brightnessBounds,
-                                        step: 1)
+                                        in: brightnessBounds)
                                     .frame(maxWidth: 220)
                                     .disabled(!manager.canControl(
                                         panel.serviceName, capability: .brightnessLevel))
@@ -288,16 +312,10 @@ private struct PanelDetailView: View {
 
                 CompactGroup("Connection") {
                     CompactGrid {
-                        InfoRow("Address", panel.address ?? "Resolving…")
-                        InfoRow("WiFi signal", panel.signalDescription)
-                        InfoRow("Frame rate", String(format: "%.1f fps", panel.displayFPS))
-                        InfoRow("Last seen") {
-                            if let lastSeen = panel.lastSeen {
-                                Text(lastSeen, style: .relative)
-                            } else {
-                                Text("Never")
-                            }
+                        InfoRow("Address") {
+                            CopyableAddress(address: panel.address)
                         }
+                        InfoRow("WiFi signal", panel.signalDescription)
                         InfoRow("USB device") {
                             HStack(spacing: 6) {
                                 Picker("USB device", selection: usbPortSelection) {
@@ -309,7 +327,10 @@ private struct PanelDetailView: View {
                                     }
                                 }
                                 .labelsHidden()
-                                .frame(maxWidth: 260)
+                                // Sized to its widest option rather than
+                                // stretched to a fixed width, which left a
+                                // popup button padded out with dead space.
+                                .fixedSize()
                                 .controlSize(.small)
                                 .help(panel.usbPort ?? "Automatically match this display by its reported name")
 
@@ -336,7 +357,7 @@ private struct PanelDetailView: View {
                                     }
                                 }
                                 .labelsHidden()
-                                .frame(maxWidth: 230)
+                                .fixedSize()
                                 .controlSize(.small)
 
                                 Button("Apply") {
@@ -362,9 +383,9 @@ private struct PanelDetailView: View {
                 }
 
                 if panel.capabilities.contains(.idleText) {
-                    CompactGroup("When Idle") {
+                    CompactGroup("Screensaver") {
                         CompactGrid {
-                            InfoRow("Show") {
+                            InfoRow("Template") {
                                 VStack(alignment: .leading, spacing: 4) {
                                     TextEditor(text: $editedIdleText)
                                         .font(.body.monospaced())
@@ -372,7 +393,7 @@ private struct PanelDetailView: View {
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 4)
                                                 .stroke(.separator))
-                                        .accessibilityLabel("Idle text")
+                                        .accessibilityLabel("Screensaver template")
                                     HStack(spacing: 6) {
                                         Button("Save") {
                                             manager.setIdleText(
@@ -380,6 +401,22 @@ private struct PanelDetailView: View {
                                         }
                                         .controlSize(.small)
                                         .disabled(editedIdleText == panel.idleText)
+                                        Menu("Insert Token") {
+                                            ForEach(ScreensaverTemplate.tokens) { token in
+                                                Button("\(token.placeholder) — \(token.summary)") {
+                                                    insertToken(token)
+                                                }
+                                            }
+                                        }
+                                        .menuStyle(.borderlessButton)
+                                        .fixedSize()
+                                        .controlSize(.small)
+                                        Button("Use Default") {
+                                            editedIdleText = ScreensaverTemplate.standard
+                                        }
+                                        .controlSize(.small)
+                                        .disabled(editedIdleText == ScreensaverTemplate.standard)
+                                        .help("The card the panel draws on its own, as a template you can edit")
                                         Button("Clear") {
                                             editedIdleText = ""
                                             manager.setIdleText("", for: panel.serviceName)
@@ -391,25 +428,27 @@ private struct PanelDetailView: View {
                                 }
                             }
                             InfoRow("On the panel") {
-                                let preview = manager.idleTextPreview(for: panel.serviceName)
-                                if preview.isEmpty {
-                                    Text("Name, address, and signal strength only")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                } else {
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        ForEach(Array(preview.enumerated()), id: \.offset) {
-                                            _, line in
-                                            Text(line)
-                                                .font(.caption.monospaced())
-                                        }
-                                    }
-                                }
+                                ScreensaverPanelPreview(expansion: livePreview)
                             }
                             InfoRow("") {
-                                Text("Up to \(IdleText.maxLines) lines of \(IdleText.maxLineBytes) characters, shown with how long ago they were sent. The panel's font is plain ASCII, so anything else is dropped.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    if !livePreview.unknownTokens.isEmpty {
+                                        Text("Not a token: "
+                                            + livePreview.unknownTokens
+                                                .map { "{\($0)}" }
+                                                .joined(separator: ", "))
+                                            .font(.caption)
+                                            .foregroundStyle(.orange)
+                                    }
+                                    Text("Wrap a value in braces to substitute it, for example "
+                                        + "\"\(ScreensaverTemplate.tokens[0].placeholder)\". "
+                                        + "Write \"{{\" for a literal brace.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text("Up to \(IdleText.maxLines) lines of \(IdleText.maxLineBytes) characters, shown with how long ago they were sent. The panel's font is plain ASCII, so anything else is dropped.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
@@ -424,7 +463,7 @@ private struct PanelDetailView: View {
                     }
                 }
 
-                CompactGroup("Diagnostics") {
+                CollapsibleGroup("Diagnostics", isExpanded: $showDiagnostics) {
                     CompactGrid {
                         InfoRow("Frames displayed", panel.framesShown.formatted())
                         InfoRow("Frames dropped", panel.framesDropped.formatted())
@@ -604,10 +643,216 @@ private struct PanelDetailView: View {
             selectedSSID = manager.savedNetworkNames.first ?? ""
         }
     }
+
+    /// The template as it is being edited, expanded against this panel's live
+    /// values. Previewing the unsaved text is the point: the user is composing
+    /// against a 4x28 character budget and needs to see what survives it.
+    private var livePreview: ScreensaverTemplate.Expansion {
+        manager.screensaverPreview(
+            for: panel.serviceName, template: editedIdleText)
+    }
+
+    /// Append a token, on its own line when the template does not end on a
+    /// blank one, so inserting from the menu never silently joins two values
+    /// into one line.
+    private func insertToken(_ token: ScreensaverTemplate.Token) {
+        if editedIdleText.isEmpty || editedIdleText.hasSuffix("\n") {
+            editedIdleText += token.placeholder
+        } else {
+            editedIdleText += "\n" + token.placeholder
+        }
+    }
 }
 
-/// Why one panel is unusable, kept next to that panel rather than in the
-/// window-wide banner.
+/// The panel's own IP address, selectable and copyable.
+///
+/// An address you can read but not take anywhere is only half useful - it is
+/// wanted for an ssh, a ping, or a browser, all of which mean copying it.
+private struct CopyableAddress: View {
+    let address: String?
+    @State private var copied = false
+
+    var body: some View {
+        guard let address else {
+            return AnyView(Text("Resolving…").foregroundStyle(.secondary))
+        }
+        return AnyView(
+            HStack(spacing: 6) {
+                Text(address)
+                    .textSelection(.enabled)
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(address, forType: .string)
+                    copied = true
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 1_400_000_000)
+                        copied = false
+                    }
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(copied ? Color.green : Color.secondary)
+                .help("Copy \(address)")
+                .accessibilityLabel("Copy address")
+                if copied {
+                    Text("Copied")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            })
+    }
+}
+
+/// The screensaver template as the panel will render it: fixed-width lines on a
+/// dark card, at the panel's line budget.
+///
+/// Shown because the budget is tight - four lines of 28 characters - and a
+/// template that overflows it loses content silently on a device the user is
+/// usually not looking at while editing.
+private struct ScreensaverPanelPreview: View {
+    let expansion: ScreensaverTemplate.Expansion
+
+    var body: some View {
+        if expansion.lines.isEmpty {
+            Text("Nothing sent, so the panel draws its own card: "
+                + "name, address, and signal.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(Array(expansion.lines.enumerated()), id: \.offset) { _, line in
+                    Text(line)
+                        .font(.caption.monospaced())
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4).fill(.black.opacity(0.35)))
+        }
+    }
+}
+
+/// What the panel is being sent, right now, and whether anything is being sent
+/// at all.
+///
+/// This sits above every other control because it answers the question the
+/// window could not answer before: a broken mirror used to look exactly like a
+/// working one, since the "Online" badge and frame rate are derived from device
+/// heartbeats, which keep arriving whether or not a single pixel does.
+private struct MirrorPreview: View {
+    let panel: PanelSnapshot
+    @ObservedObject var preview: FramePreview
+
+    /// Panel geometry, so the placeholder has the same shape as a real frame.
+    private static let thumbnailHeight: CGFloat = 104
+
+    private var frame: PreviewFrame? {
+        // Never show one panel's frame against another's details.
+        guard preview.serviceName == panel.serviceName else { return nil }
+        return preview.frame
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            thumbnail
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: symbol)
+                        .foregroundStyle(tint)
+                        .accessibilityHidden(true)
+                    Text(panel.captureStatus.summary)
+                        .fontWeight(.medium)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                if panel.captureStatus.needsAttention {
+                    Text("Choose a source below to start mirroring again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Mirroring status: \(panel.captureStatus.summary). \(detail)")
+    }
+
+    /// The frame at its own aspect ratio, with no filler behind it.
+    ///
+    /// A fixed square box letterboxed a portrait frame with black bars, which
+    /// read as part of the picture - as though the panel itself were showing
+    /// black borders.
+    private var thumbnail: some View {
+        Group {
+            if let frame {
+                Image(decorative: frame.image, scale: 1)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: Self.thumbnailHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(.separator, lineWidth: 1))
+            } else {
+                // Only the placeholder needs a box, to stand in for the frame
+                // that is not arriving. Sized to the panel's portrait aspect so
+                // the row does not jump when a frame appears.
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(.quaternary.opacity(0.5))
+                    .aspectRatio(
+                        CGFloat(PixelConvert.width) / CGFloat(PixelConvert.height),
+                        contentMode: .fit)
+                    .frame(height: Self.thumbnailHeight)
+                    .overlay(
+                        Image(systemName: "display.slash")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.secondary))
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var symbol: String {
+        switch panel.captureStatus {
+        case .streaming: return "dot.radiowaves.up.forward"
+        case .waiting, .recovering: return "arrow.triangle.2.circlepath"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .suspended: return "pause.circle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch panel.captureStatus {
+        case .streaming: return .green
+        case .waiting, .recovering: return .orange
+        case .failed: return .orange
+        case .suspended: return .secondary
+        }
+    }
+
+    /// The numbers underneath. Frame age is included because it is the one
+    /// value that separates "mirroring has stopped" from "the source simply is
+    /// not changing" - ScreenCaptureKit sends nothing at all for static
+    /// content, so a still window legitimately produces no frames.
+    /// Frame totals are deliberately absent: they live in Diagnostics, and
+    /// repeating them here spent the row's attention on a number nobody reads
+    /// at a glance.
+    private var detail: String {
+        var parts: [String] = []
+        if panel.captureStatus.isStreaming {
+            parts.append(String(format: "%.1f fps", panel.displayFPS))
+        }
+        parts.append(panel.frameAgeDescription)
+        return parts.joined(separator: " · ")
+    }
+}
+
 private struct PanelNotice: View {
     let text: String
 
@@ -640,6 +885,40 @@ private struct CompactGroup<Content: View>: View {
             content
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
+        }
+    }
+}
+
+/// A `CompactGroup` that can be folded away, for detail worth keeping but not
+/// worth the vertical space it occupies on every visit.
+private struct CollapsibleGroup<Content: View>: View {
+    let title: String
+    @Binding var isExpanded: Bool
+    let content: Content
+
+    init(
+        _ title: String, isExpanded: Binding<Bool>,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self._isExpanded = isExpanded
+        self.content = content()
+    }
+
+    var body: some View {
+        GroupBox {
+            DisclosureGroup(isExpanded: $isExpanded) {
+                content
+                    .padding(.horizontal, 8)
+                    .padding(.top, 6)
+                    .padding(.bottom, 2)
+            } label: {
+                Text(title)
+                    .font(.callout)
+                    // The whole label is the hit target, not just the arrow.
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
         }
     }
 }
@@ -707,6 +986,8 @@ final class ManagerWindowController: NSObject, NSWindowDelegate {
         mainMenu.installIfNeeded()
         let window = makeWindowIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
+        // Frame previews are only produced while this window is up.
+        manager.setPreviewVisible(true)
         window.makeKeyAndOrderFront(nil)
         window.toolbar = nil
         window.titlebarAppearsTransparent = true
@@ -732,6 +1013,7 @@ final class ManagerWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        manager.setPreviewVisible(false)
         DispatchQueue.main.async {
             guard NSApp.windows.allSatisfy({ !$0.isVisible }) else { return }
             NSApp.setActivationPolicy(.accessory)

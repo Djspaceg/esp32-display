@@ -25,6 +25,14 @@ final class DeviceSession {
         /// answering. Distinct from `paused`, which is the user's choice.
         let parked: Bool
         let sourceDescription: String
+        /// What capture is doing, so a broken mirror is visible in the window
+        /// rather than only in stderr.
+        let captureStatus: CaptureStatus
+        /// When a frame was last captured and sent, or nil if none ever has
+        /// been. The UI reports the gap, which is the one number that
+        /// distinguishes "mirroring stopped" from "nothing is changing
+        /// on screen".
+        let lastFrameAt: Date?
         let updatedAt: Date
     }
 
@@ -38,14 +46,34 @@ final class DeviceSession {
         case window(String)
     }
 
+    /// What the supervisor knows about the window it is following, so a resize
+    /// can be absorbed in place instead of by rebuilding the stream.
+    private struct TrackedWindow {
+        var id: CGWindowID
+        var landscape: Bool
+        /// The application that owns it, used to find the replacement when a
+        /// resize or full-screen transition destroys and recreates the window.
+        var owner: String?
+    }
+
     let name: String
     private let sender: FrameSender
     private let source: Source
     private let picker: PickerSource?
     private let onStatus: ((Status) -> Void)?
+    private let onPreview: ((CGImage, Bool) -> Void)?
     private let stateLock = NSLock()
     private var pickedFilter: SCContentFilter?
     private var pickedGeneration: UInt64 = 0
+    private var _captureStatus: CaptureStatus = .waiting("Starting up…")
+    private var _previewEnabled = false
+    private weak var activeCapture: DisplayCapture?
+    /// Last frame time carried across capture restarts.
+    ///
+    /// Read from the live capture it would reset to nil every time a stream was
+    /// replaced, so the window would claim "No frames yet" for a moment during
+    /// each restart - the opposite of the reassurance this row is for.
+    private var _lastFrameAt: Date?
     private var _fps: Int
     /// Bumped when a setting that capture was started with changes, so the
     /// watchdog restarts the stream rather than leaving the old rate running.
@@ -85,13 +113,62 @@ final class DeviceSession {
     private var lastCount: UInt64 = 0
 
     init(name: String, sender: FrameSender, source: Source, picker: PickerSource?, fps: Int,
-         onStatus: ((Status) -> Void)? = nil) {
+         onStatus: ((Status) -> Void)? = nil,
+         onPreview: ((CGImage, Bool) -> Void)? = nil) {
         self.name = name
         self.sender = sender
         self.source = source
         self.picker = picker
         self._fps = fps
         self.onStatus = onStatus
+        self.onPreview = onPreview
+    }
+
+    /// What capture is doing right now.
+    var captureStatus: CaptureStatus {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _captureStatus
+    }
+
+    /// Record a capture state and publish it immediately.
+    ///
+    /// Published straight away rather than waiting for the next five-second
+    /// status tick: the whole point of these states is that the user is
+    /// watching the window wondering why nothing is happening.
+    private func setCaptureStatus(_ status: CaptureStatus) {
+        stateLock.lock()
+        let changed = _captureStatus != status
+        _captureStatus = status
+        stateLock.unlock()
+        guard changed else { return }
+        reportProgress(force: true)
+    }
+
+    /// Turn the live preview on or off for this session. Off costs nothing:
+    /// the capture layer skips the image conversion entirely.
+    func setPreviewEnabled(_ enabled: Bool) {
+        stateLock.lock()
+        _previewEnabled = enabled
+        let capture = activeCapture
+        stateLock.unlock()
+        capture?.setPreviewEnabled(enabled)
+    }
+
+    private var previewEnabled: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _previewEnabled
+    }
+
+    /// Remember the capture currently running, so a preview toggle arriving
+    /// between restarts reaches it.
+    private func adopt(_ capture: DisplayCapture?) {
+        stateLock.lock()
+        activeCapture = capture
+        let enabled = _previewEnabled
+        stateLock.unlock()
+        capture?.setPreviewEnabled(enabled)
     }
 
     /// Capture rate. ScreenCaptureKit takes this when the stream starts, so
@@ -143,6 +220,20 @@ final class DeviceSession {
         pickedGeneration &+= 1
         stateLock.unlock()
         forceKeyframe()
+    }
+
+    /// Replace the stored filter with a freshly resolved equivalent, without
+    /// bumping the generation.
+    ///
+    /// The generation means "the user chose something new", and bumping it here
+    /// would make the watchdog treat our own housekeeping as a source change
+    /// and restart capture in a loop.
+    private func rememberPickerFilter(_ filter: SCContentFilter) {
+        stateLock.lock()
+        // Only refresh an existing selection. If the user cleared it while we
+        // were resolving, do not resurrect it.
+        if pickedFilter != nil { pickedFilter = filter }
+        stateLock.unlock()
     }
 
     private func clearPickerFilter() {
@@ -211,15 +302,19 @@ final class DeviceSession {
         var parkRequested = false
 
         while true {
-            let capture = DisplayCapture { [sender] rgb565, landscape in
-                sender.submit(frame: rgb565, landscape: landscape)
-            }
+            let capture = DisplayCapture(
+                onPreview: { [weak self] image, landscape in
+                    self?.onPreview?(image, landscape)
+                },
+                onFrame: { [sender] rgb565, landscape in
+                    sender.submit(frame: rgb565, landscape: landscape)
+                })
+            adopt(capture)
             let baselineSourceGeneration = sourceGeneration
             let baselineSettingsGeneration = currentSettingsGeneration
             let fps = self.fps
             var displayShape: (CGDirectDisplayID, Int, Int, Bool)?
-            var trackedWindowID: UInt32?
-            var trackedWindowLandscape = false
+            var tracked: TrackedWindow?
 
             // ---- Source selection & capture start
             // A manager selection is a runtime override for every configured
@@ -228,11 +323,46 @@ final class DeviceSession {
             let pickerSelection = currentPickerSelection
 
             if let selection = pickerSelection {
+                // Re-resolve before starting. An SCContentFilter holds the
+                // window and display objects that existed when the user
+                // picked them, and a resize or full-screen transition can
+                // have macOS replace the window behind them. Starting a
+                // stream from those stale references is what left mirroring
+                // dead until the menu bar picker handed over a fresh filter.
+                let resolution = await DisplayCapture.resolveTarget(of: selection.filter)
+                var filter = selection.filter
+                switch resolution {
+                case .resolved(let target):
+                    filter = target.filter
+                    rememberPickerFilter(target.filter)
+                    if let windowID = target.windowID {
+                        tracked = TrackedWindow(
+                            id: windowID,
+                            landscape: target.size.width > target.size.height,
+                            owner: target.owner)
+                    }
+                case .contentGone:
+                    // Do not keep restarting against something that is gone.
+                    pickerFailures += 1
+                    setCaptureStatus(.failed(
+                        "The content being mirrored is no longer available. Choose "
+                            + "a source again, or switch to Automatic."))
+                    if pickerFailures >= 3 {
+                        clearPickerFilter()
+                        pickerFailures = 0
+                    }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                case .notResolvable:
+                    break  // e.g. an application filter: use it as-is
+                }
+
                 do {
-                    try await capture.start(contentFilter: selection.filter, fps: fps)
+                    try await capture.start(contentFilter: filter, fps: fps)
                     pickerFailures = 0
                     announced = false
-                    print("[\(name)] capturing \(picker!.describe(selection.filter)) "
+                    setCaptureStatus(.streaming)
+                    print("[\(name)] capturing \(picker!.describe(filter)) "
                         + "from picker selection at \(fps) fps")
                 } catch {
                     // A picked window that closed would wedge us here; after
@@ -240,6 +370,9 @@ final class DeviceSession {
                     pickerFailures += 1
                     FileHandle.standardError.write(
                         Data("[\(name)] picker source failed: \(error.localizedDescription)\n".utf8))
+                    setCaptureStatus(.failed(
+                        "The chosen source could not be captured: "
+                            + error.localizedDescription))
                     if pickerFailures >= 3 {
                         clearPickerFilter()
                         pickerFailures = 0
@@ -253,20 +386,28 @@ final class DeviceSession {
                         print("[\(name)] waiting for a window matching \"\(winName)\" ...")
                         announced = true
                     }
+                    setCaptureStatus(.waiting(
+                        "Waiting for a window matching \"\(winName)\"."))
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
                 }
-                trackedWindowID = window.windowID
-                trackedWindowLandscape = window.frame.width > window.frame.height
                 let app = window.owningApplication?.applicationName ?? "?"
+                tracked = TrackedWindow(
+                    id: window.windowID,
+                    landscape: window.frame.width > window.frame.height,
+                    owner: app)
                 do {
                     try await capture.start(window: window, fps: fps)
                     announced = false
+                    setCaptureStatus(.streaming)
                     print("[\(name)] capturing window \(app): \"\(window.title ?? "")\" "
                         + "at \(fps) fps")
                 } catch {
                     FileHandle.standardError.write(
                         Data("[\(name)] window capture failed: \(error.localizedDescription)\n".utf8))
+                    setCaptureStatus(.failed(
+                        "The window \"\(winName)\" could not be captured: "
+                            + error.localizedDescription))
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
                 }
@@ -280,6 +421,10 @@ final class DeviceSession {
                             + "(or a picker selection) ...")
                         announced = true
                     }
+                    setCaptureStatus(.waiting(
+                        displayName.isEmpty
+                            ? "No display to mirror yet. Choose a source."
+                            : "Waiting for the display \"\(displayName)\"."))
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
                 }
@@ -293,6 +438,7 @@ final class DeviceSession {
                 do {
                     try await capture.start(display: display, fps: fps)
                     announced = false
+                    setCaptureStatus(.streaming)
                     let dispName = DisplayCapture.name(for: display.displayID) ?? "?"
                     print("[\(name)] capturing \"\(dispName)\" "
                         + "(\(display.width)x\(display.height)) at \(fps) fps"
@@ -300,6 +446,9 @@ final class DeviceSession {
                 } catch {
                     FileHandle.standardError.write(
                         Data("[\(name)] capture start failed: \(error.localizedDescription)\n".utf8))
+                    setCaptureStatus(.failed(
+                        "The display could not be captured: "
+                            + error.localizedDescription))
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
                 }
@@ -326,7 +475,16 @@ final class DeviceSession {
                     break
                 }
                 if capture.stopped {
-                    print("[\(name)] capture stream died - restarting")
+                    let reason = capture.stopReason
+                    print("[\(name)] capture stream died - restarting"
+                        + (reason.map { " (\($0))" } ?? ""))
+                    // Say so while the restart is attempted. A restart that
+                    // works clears this within a couple of seconds; one that
+                    // does not leaves the reason on screen, which is the case
+                    // that used to be invisible.
+                    setCaptureStatus(.recovering(
+                        reason.map { "Mirroring stopped (\($0)). Reconnecting…" }
+                            ?? "Mirroring stopped. Reconnecting…"))
                     break
                 }
                 // Sleep/wake can kill the stream without firing the
@@ -338,6 +496,8 @@ final class DeviceSession {
                 // is harmless either way, just noisy.
                 if Date().timeIntervalSince(capture.lastSampleAt) > 120 {
                     print("[\(name)] no capture samples for 120s - restarting capture")
+                    setCaptureStatus(.recovering(
+                        "No frames from the source for two minutes. Reconnecting…"))
                     break
                 }
                 if let shape = displayShape {
@@ -351,16 +511,11 @@ final class DeviceSession {
                         break
                     }
                 }
-                if let wid = trackedWindowID, case .window(let winName) = source {
-                    let current = await DisplayCapture.findWindow(matching: winName)
-                    if current == nil || current!.windowID != wid {
-                        print("[\(name)] window changed or closed - restarting capture")
-                        break
-                    }
-                    if (current!.frame.width > current!.frame.height) != trackedWindowLandscape {
-                        print("[\(name)] window aspect flipped - restarting capture")
-                        break
-                    }
+                if var window = tracked {
+                    let healthy = await followWindow(
+                        &window, capture: capture, isPicked: pickerSelection != nil)
+                    tracked = window
+                    if !healthy { break }
                 }
                 // Device heartbeats stop when it rebooted onto a new address
                 // or dropped off WiFi; reconnecting re-resolves the service.
@@ -387,6 +542,75 @@ final class DeviceSession {
         }
     }
 
+    /// Keep a running stream pointed at the window it is following, absorbing
+    /// resizes in place.
+    ///
+    /// This is the fix for mirroring breaking whenever a window was resized.
+    /// Three things used to go wrong here, all of them ending in a stream
+    /// rebuild that a picker-selected source does not survive:
+    ///
+    ///  - the window was re-found *by name*, and `findWindow(matching:)`
+    ///    returns the largest match, so resizing one window of an app with
+    ///    several handed the session to a sibling window;
+    ///  - an aspect flip forced a full restart, because output geometry was
+    ///    fixed when the stream was created;
+    ///  - a window that macOS destroyed and recreated (which some resize and
+    ///    full-screen transitions do) counted as "closed", even though its
+    ///    replacement was right there.
+    ///
+    /// Now the window is re-found by ID, orientation changes are applied to the
+    /// live stream, and a recreated window is retargeted rather than chased
+    /// with a rebuild.
+    ///
+    /// - Returns: false when the stream genuinely has to be rebuilt.
+    private func followWindow(
+        _ tracked: inout TrackedWindow, capture: DisplayCapture, isPicked: Bool
+    ) async -> Bool {
+        var window = await DisplayCapture.findWindow(id: tracked.id)
+
+        if window == nil {
+            // The ID is gone. Before giving up, look for a replacement from
+            // the same application: that is the recreated-window case.
+            guard let owner = tracked.owner,
+                let replacement = await DisplayCapture.findWindow(matching: owner)
+            else {
+                print("[\(name)] tracked window closed - restarting capture")
+                setCaptureStatus(.recovering(
+                    "The window being mirrored has closed. Looking for a source…"))
+                return false
+            }
+            let fresh = SCContentFilter(desktopIndependentWindow: replacement)
+            guard await capture.retarget(to: fresh) else {
+                print("[\(name)] window was recreated - restarting capture")
+                return false
+            }
+            if isPicked { rememberPickerFilter(fresh) }
+            tracked.id = replacement.windowID
+            window = replacement
+            sender.forceKeyframe()
+            print("[\(name)] window was recreated - retargeted in place")
+        }
+
+        guard let window else { return false }
+
+        let nowLandscape = window.frame.width > window.frame.height
+        if nowLandscape != tracked.landscape {
+            guard await capture.reorient(landscape: nowLandscape) else {
+                print("[\(name)] window aspect flipped - restarting capture")
+                return false
+            }
+            tracked.landscape = nowLandscape
+            // The panel's buffer still holds the previous orientation, and the
+            // band diff would otherwise skip everything that happens to match.
+            sender.forceKeyframe()
+            print("[\(name)] window resized to "
+                + "\(Int(window.frame.width))x\(Int(window.frame.height)) - "
+                + "re-oriented in place")
+        }
+        setCaptureStatus(.streaming)
+        return true
+    }
+
     /// Hold capture and sending down until the device answers again.
     ///
     /// Waits on a reply counter rather than `heartbeatAge`, because a reconnect
@@ -398,6 +622,10 @@ final class DeviceSession {
         print("[\(name)] no reply for \(Int(Self.parkAfterSilence))s - capture stopped, "
             + "waiting for the display to come back")
         reportProgress(force: true)
+
+        setCaptureStatus(.suspended(
+            "The panel stopped answering, so mirroring is paused. It resumes by "
+                + "itself as soon as the panel is back."))
 
         var lastAttemptAt = Date()
         while !Self.hasDeviceReturned(
@@ -412,6 +640,7 @@ final class DeviceSession {
         }
 
         sender.setParked(false)
+        setCaptureStatus(.waiting("The panel answered again. Restarting mirroring…"))
         print("[\(name)] display answered again - resuming capture")
     }
 
@@ -461,6 +690,24 @@ final class DeviceSession {
             case .window(let window): sourceDescription = "Window: \(window)"
             }
         }
+        // The user's own pause outranks whatever capture is doing: it explains
+        // the absent frames completely, and reporting a stream state underneath
+        // it would read as a fault.
+        let (status, frameAt) = stateLock.withLock {
+            () -> (CaptureStatus, Date?) in
+            if let latest = activeCapture?.lastFrameAt,
+                latest > (_lastFrameAt ?? .distantPast)
+            {
+                _lastFrameAt = latest
+            }
+            return (_captureStatus, _lastFrameAt)
+        }
+        // The user's own pause outranks whatever capture is doing: it explains
+        // the absent frames completely, and reporting a stream state underneath
+        // it would read as a fault.
+        let reported = sender.paused
+            ? CaptureStatus.suspended("Paused. Frames are not being sent.")
+            : status
         onStatus?(Status(
             serviceName: name,
             displayFPS: fps,
@@ -475,6 +722,8 @@ final class DeviceSession {
             paused: sender.paused,
             parked: parked,
             sourceDescription: sourceDescription,
+            captureStatus: reported,
+            lastFrameAt: frameAt,
             updatedAt: now))
         // A parked session has nothing to report every five seconds; the park
         // and resume lines say all there is to say.
