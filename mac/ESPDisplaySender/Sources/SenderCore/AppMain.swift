@@ -438,6 +438,12 @@ public enum ESPDisplaySenderApp {
                     picker: picker, fps: streaming.fps,
                     onStatus: { status in
                         Task { @MainActor in panelManager.update(status) }
+                    },
+                    onPreview: { image, landscape in
+                        Task { @MainActor in
+                            panelManager.acceptPreview(
+                                image: image, landscape: landscape, from: name)
+                        }
                     })
                 registry.add(session)
                 Task { @MainActor in panelManager.register(session) }

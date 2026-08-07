@@ -10,23 +10,98 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let outputQueue = DispatchQueue(label: "espdisp.capture")
     private var rgbBuffer = [UInt8](repeating: 0, count: PixelConvert.width * PixelConvert.height * 2)
     private let onFrame: ([UInt8], Bool) -> Void
-    private var landscape = false
-    private var outW = PixelConvert.width
-    private var outH = PixelConvert.height
+    private let onPreview: ((CGImage, Bool) -> Void)?
 
-    private(set) var framesCaptured: UInt64 = 0
-    /// Set when the stream dies (display unplugged, reconfigured, etc.).
-    private(set) var stopped = false
+    /// Guards every field the capture queue and the supervisor both touch.
+    /// Orientation in particular is now written while frames are in flight,
+    /// because a resize re-configures the stream instead of replacing it.
+    private let stateLock = NSLock()
+    private var _landscape = false
+    private var _outW = PixelConvert.width
+    private var _outH = PixelConvert.height
+    private var _framesCaptured: UInt64 = 0
+    private var _stopped = false
+    private var _stopReason: String?
+    private var _lastSampleAt = Date()
+    private var _lastFrameAt: Date?
+    private var _previewEnabled = false
+    private var _configuredFPS = 30
+
+    /// Preview cadence. Frames go to the panel as fast as they arrive; the UI
+    /// only needs enough to look live, and each preview image costs a
+    /// 172x320 RGBA expansion plus a SwiftUI redraw.
+    private static let previewInterval: TimeInterval = 0.1
+    /// Touched only on the capture queue.
+    private var lastPreviewAt = Date.distantPast
+
+    var framesCaptured: UInt64 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _framesCaptured
+    }
+
+    /// Set when the stream dies (display unplugged, reconfigured, the user
+    /// stopping the share from the menu bar, etc.).
+    var stopped: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _stopped
+    }
+
+    /// Why the stream stopped, for the UI. Previously the delegate's error
+    /// went to stderr and only a bare flag survived, so a stream that died
+    /// and could not be restarted looked identical to an idle one.
+    var stopReason: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _stopReason
+    }
+
     /// Last time ANY sample arrived (including idle/incomplete status
     /// frames). A healthy SCStream emits these periodically even for a
     /// static screen, so a long silence means the stream is dead - some
     /// deaths (sleep/wake) never fire the delegate error.
-    private(set) var lastSampleAt = Date()
+    var lastSampleAt: Date {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _lastSampleAt
+    }
 
-    /// - Parameter onFrame: called on the capture queue with each converted
-    ///   RGB565BE frame and whether it is landscape (320x172).
-    init(onFrame: @escaping ([UInt8], Bool) -> Void) {
+    /// Last time a *usable* frame was converted and sent on, as opposed to any
+    /// sample arriving. This is the honest answer to "is the panel still being
+    /// fed", which `lastSampleAt` is not: SCK keeps emitting idle samples from
+    /// a stream that is delivering no pixels.
+    var lastFrameAt: Date? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _lastFrameAt
+    }
+
+    var landscape: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _landscape
+    }
+
+    /// Turn preview conversion on or off. Off by default so panels nobody is
+    /// looking at pay nothing.
+    func setPreviewEnabled(_ enabled: Bool) {
+        stateLock.lock()
+        _previewEnabled = enabled
+        stateLock.unlock()
+    }
+
+    /// - Parameters:
+    ///   - onPreview: called on the capture queue, at most every 100ms, with
+    ///     an image of the frame just sent. Only while preview is enabled.
+    ///   - onFrame: called on the capture queue with each converted
+    ///     RGB565BE frame and whether it is landscape (320x172).
+    init(
+        onPreview: ((CGImage, Bool) -> Void)? = nil,
+        onFrame: @escaping ([UInt8], Bool) -> Void
+    ) {
         self.onFrame = onFrame
+        self.onPreview = onPreview
     }
 
     /// Name of a display (as shown in System Settings / BetterDisplay) for a
@@ -127,6 +202,106 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Look a window up by ID in the current shareable content.
+    ///
+    /// Re-resolving a tracked window by ID rather than by name matters on
+    /// resize: `findWindow(matching:)` returns the *largest* match, so
+    /// resizing one window of an app that has several could hand the session
+    /// to a sibling window and restart capture on the wrong content.
+    static func findWindow(id windowID: CGWindowID) async -> SCWindow? {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(
+            true, onScreenWindowsOnly: false)
+        else { return nil }
+        return content.windows.first { $0.windowID == windowID }
+    }
+
+    /// What a content filter currently points at, resolved against live
+    /// shareable content rather than the objects captured when it was made.
+    struct FilterTarget {
+        /// A filter rebuilt from fresh objects, safe to start a stream with.
+        let filter: SCContentFilter
+        /// The window this filter follows, when it follows exactly one.
+        let windowID: CGWindowID?
+        /// Application owning that window, for finding its replacement if the
+        /// window itself is recreated.
+        let owner: String?
+        /// Current size of the content, for orientation decisions.
+        let size: CGSize
+    }
+
+    /// Outcome of re-resolving a filter. The three cases need different
+    /// responses, which a plain optional could not express: content that has
+    /// gone must not be retried, whereas a filter we simply cannot inspect
+    /// should still be used as-is.
+    enum FilterResolution {
+        /// Rebuilt successfully against live content.
+        case resolved(FilterTarget)
+        /// The window or display this filter names no longer exists.
+        case contentGone
+        /// Nothing here identifies a single window or display to look up, so
+        /// the caller should keep using the filter it has.
+        case notResolvable
+    }
+
+    /// Rebuild a content filter against the current shareable content.
+    ///
+    /// An `SCContentFilter` holds references to the window and display objects
+    /// that existed when the user picked them. Those references go stale - a
+    /// resize or full-screen transition can have macOS destroy and recreate
+    /// the window - and a stale filter starts a stream that never delivers a
+    /// frame. Re-resolving before every (re)start is what makes a picked
+    /// window survive being resized.
+    ///
+    /// Returns nil when the filter cannot be re-resolved, either because the
+    /// content is gone or because its style carries no identity we can look up
+    /// (the accessors that reveal a filter's contents need macOS 15.2). The
+    /// caller then keeps using the filter it already has.
+    static func resolveTarget(of filter: SCContentFilter) async -> FilterResolution {
+        guard #available(macOS 15.2, *) else { return .notResolvable }
+        switch filter.style {
+        case .window:
+            guard let stale = filter.includedWindows.first else { return .notResolvable }
+            let owner = stale.owningApplication?.applicationName
+            if let fresh = await findWindow(id: stale.windowID) {
+                return .resolved(FilterTarget(
+                    filter: SCContentFilter(desktopIndependentWindow: fresh),
+                    windowID: fresh.windowID,
+                    owner: owner,
+                    size: fresh.frame.size))
+            }
+            // The window ID is gone. A resize or full-screen transition can
+            // recreate a window under a new ID, so try the owning application
+            // before declaring the source lost.
+            if let owner, let replacement = await findWindow(matching: owner) {
+                return .resolved(FilterTarget(
+                    filter: SCContentFilter(desktopIndependentWindow: replacement),
+                    windowID: replacement.windowID,
+                    owner: owner,
+                    size: replacement.frame.size))
+            }
+            return .contentGone
+
+        case .display:
+            guard let stale = filter.includedDisplays.first else { return .notResolvable }
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(
+                    false, onScreenWindowsOnly: false),
+                let fresh = content.displays.first(where: {
+                    $0.displayID == stale.displayID
+                })
+            else { return .contentGone }
+            return .resolved(FilterTarget(
+                filter: SCContentFilter(display: fresh, excludingWindows: []),
+                windowID: nil,
+                owner: nil,
+                size: CGSize(width: fresh.width, height: fresh.height)))
+
+        default:
+            // Application filters name no single window or display to
+            // re-resolve, so the existing filter stays in use.
+            return .notResolvable
+        }
+    }
+
     /// Find the target display, robust to whatever macOS/BetterDisplay just
     /// did to it. Match order:
     ///   1. Known UUID among capturable displays (survives all reconfigs)
@@ -216,23 +391,95 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func start(filter: SCContentFilter, landscape: Bool, fps: Int) async throws {
-        self.landscape = landscape
-        outW = landscape ? PixelConvert.height : PixelConvert.width
-        outH = landscape ? PixelConvert.width : PixelConvert.height
+        let width = landscape ? PixelConvert.height : PixelConvert.width
+        let height = landscape ? PixelConvert.width : PixelConvert.height
+        stateLock.withLock {
+            _landscape = landscape
+            _outW = width
+            _outH = height
+            _configuredFPS = fps
+            _stopped = false
+            _stopReason = nil
+            _lastSampleAt = Date()
+        }
 
+        let stream = SCStream(
+            filter: filter,
+            configuration: Self.configuration(width: width, height: height, fps: fps),
+            delegate: self)
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
+        try await stream.startCapture()
+        self.stream = stream
+    }
+
+    private static func configuration(
+        width: Int, height: Int, fps: Int
+    ) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
-        config.width = outW
-        config.height = outH
+        config.width = width
+        config.height = height
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.queueDepth = 3
         config.showsCursor = true
         config.scalesToFit = true
+        return config
+    }
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
-        try await stream.startCapture()
-        self.stream = stream
+    /// Re-orient a running stream in place, without replacing it.
+    ///
+    /// A resize that flips the source between portrait and landscape used to
+    /// require a full restart, because output geometry was fixed when the
+    /// stream was created. Restarting is what actually broke mirroring: a
+    /// stream started from a picker selection cannot reliably be recreated
+    /// from that same filter, so the "fix" for a resize dropped the share
+    /// altogether. Reconfiguring keeps the existing stream, and with it the
+    /// system's sharing session.
+    ///
+    /// - Returns: true when the stream was reconfigured.
+    @discardableResult
+    func reorient(landscape wanted: Bool) async -> Bool {
+        guard let stream else { return false }
+        let current = stateLock.withLock {
+            (landscape: _landscape, fps: _configuredFPS)
+        }
+        guard current.landscape != wanted else { return false }
+
+        let width = wanted ? PixelConvert.height : PixelConvert.width
+        let height = wanted ? PixelConvert.width : PixelConvert.height
+        do {
+            try await stream.updateConfiguration(
+                Self.configuration(width: width, height: height, fps: current.fps))
+        } catch {
+            FileHandle.standardError.write(
+                Data("capture reorient failed: \(error.localizedDescription)\n".utf8))
+            return false
+        }
+        stateLock.withLock {
+            _landscape = wanted
+            _outW = width
+            _outH = height
+        }
+        return true
+    }
+
+    /// Point a running stream at freshly resolved content, without replacing
+    /// it. Used when a tracked window has been recreated (some resize and
+    /// full-screen transitions do that) so the stale references in the old
+    /// filter no longer refer to anything.
+    ///
+    /// - Returns: true when the filter was swapped in.
+    @discardableResult
+    func retarget(to filter: SCContentFilter) async -> Bool {
+        guard let stream else { return false }
+        do {
+            try await stream.updateContentFilter(filter)
+        } catch {
+            FileHandle.standardError.write(
+                Data("capture retarget failed: \(error.localizedDescription)\n".utf8))
+            return false
+        }
+        return true
     }
 
     /// Stop the capture stream, ignoring shutdown errors.
@@ -250,7 +497,14 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         of type: SCStreamOutputType
     ) {
         guard type == .screen else { return }
-        lastSampleAt = Date()
+        stateLock.lock()
+        _lastSampleAt = Date()
+        let width = _outW
+        let height = _outH
+        let isLandscape = _landscape
+        let wantsPreview = _previewEnabled
+        stateLock.unlock()
+
         guard sampleBuffer.isValid,
             let pixelBuffer = sampleBuffer.imageBuffer
         else { return }
@@ -266,16 +520,40 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
 
-        if PixelConvert.bgraToRGB565BE(pixelBuffer, width: outW, height: outH, into: &rgbBuffer) {
-            framesCaptured &+= 1
-            onFrame(rgbBuffer, landscape)
+        if PixelConvert.bgraToRGB565BE(pixelBuffer, width: width, height: height, into: &rgbBuffer) {
+            stateLock.lock()
+            _framesCaptured &+= 1
+            _lastFrameAt = Date()
+            stateLock.unlock()
+            onFrame(rgbBuffer, isLandscape)
+            emitPreviewIfDue(width: width, height: height, landscape: isLandscape,
+                             enabled: wantsPreview)
         }
     }
 
+    /// Hand the UI an image of the frame just sent, no more often than
+    /// `previewInterval`. Runs on the capture queue, so the throttle is what
+    /// keeps a 40 fps stream from driving 40 SwiftUI redraws a second.
+    private func emitPreviewIfDue(
+        width: Int, height: Int, landscape: Bool, enabled: Bool
+    ) {
+        guard enabled, let onPreview else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastPreviewAt) >= Self.previewInterval else { return }
+        lastPreviewAt = now
+        guard let image = PixelConvert.imageFromRGB565BE(
+            rgbBuffer, width: width, height: height)
+        else { return }
+        onPreview(image, landscape)
+    }
+
     /// SCStreamDelegate callback: mark the stream dead so the supervisor
-    /// loop restarts capture.
+    /// loop restarts capture, keeping the reason so the UI can show it.
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         FileHandle.standardError.write(Data("capture stopped: \(error)\n".utf8))
-        stopped = true
+        stateLock.lock()
+        _stopped = true
+        _stopReason = error.localizedDescription
+        stateLock.unlock()
     }
 }

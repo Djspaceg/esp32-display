@@ -51,9 +51,36 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// would otherwise only find in the log. Cleared as soon as the device
     /// reports in again.
     var lastError: String?
+    /// What the capture side is doing. Held separately from `lastError`, which
+    /// every device heartbeat clears - a capture problem outlives the
+    /// heartbeats, because the panel keeps answering perfectly well while
+    /// receiving nothing.
+    var captureStatus: CaptureStatus = .waiting("Starting up…")
+    /// When a frame was last captured and sent for this panel.
+    var lastFrameAt: Date?
 
     var capabilities: DeviceProtocol.Capabilities {
         DeviceProtocol.Capabilities(rawValue: capabilitiesRaw)
+    }
+
+    /// How long since a frame was last captured and sent, or nil if none ever
+    /// has been.
+    ///
+    /// Deliberately not treated as an error signal on its own:
+    /// ScreenCaptureKit delivers nothing at all while the source is static, so
+    /// a large age is normal for an unchanging window. `captureStatus` is the
+    /// authority on whether something is wrong; this is the supporting detail.
+    var frameAge: TimeInterval? {
+        lastFrameAt.map { Date().timeIntervalSince($0) }
+    }
+
+    /// The frame age as it reads in the preview row.
+    var frameAgeDescription: String {
+        guard let age = frameAge else { return "No frames yet" }
+        if age < 1 { return "Live" }
+        if age < 60 { return "Last frame \(Int(age))s ago" }
+        let minutes = Int(age / 60)
+        return "Last frame \(minutes)m ago"
     }
 
     var isOnline: Bool {
@@ -70,10 +97,32 @@ struct PanelSnapshot: Identifiable, Equatable {
 
     var signalDescription: String {
         guard let rssi else { return "—" }
-        if rssi >= -55 { return "Excellent (\(rssi) dBm)" }
-        if rssi >= -65 { return "Good (\(rssi) dBm)" }
-        if rssi >= -75 { return "Fair (\(rssi) dBm)" }
-        return "Weak (\(rssi) dBm)"
+        return "\(signalWord) (\(rssi) dBm)"
+    }
+
+    /// Signal strength as a single word, for the `{signal}` screensaver token
+    /// and as the basis of `signalDescription`, so the two cannot disagree.
+    var signalWord: String {
+        guard let rssi else { return "" }
+        if rssi >= -55 { return "Excellent" }
+        if rssi >= -65 { return "Good" }
+        if rssi >= -75 { return "Fair" }
+        return "Weak"
+    }
+
+    /// What this panel's screensaver tokens currently stand for.
+    ///
+    /// Unknown values are left empty rather than filled with a placeholder: an
+    /// empty token drops its line, which is better than a panel reading
+    /// "wifi —" across the room.
+    var screensaverValues: ScreensaverTemplate.Values {
+        ScreensaverTemplate.Values(
+            name: displayName,
+            address: address ?? "",
+            signal: signalWord,
+            rssi: rssi.map { "\($0) dBm" } ?? "",
+            version: firmwareVersion ?? "",
+            uptime: uptimeSeconds > 0 ? uptimeDescription : "")
     }
 
     var uptimeDescription: String {
@@ -155,15 +204,26 @@ final class PanelManager: ObservableObject {
     @Published private(set) var panels: [PanelSnapshot] = []
     @Published private(set) var savedNetworkNames: [String] = []
     @Published private(set) var usbSerialPorts: [String] = []
-    @Published var selectedServiceName: String?
+    @Published var selectedServiceName: String? {
+        didSet { updatePreviewFocus() }
+    }
     /// The outcome of the most recent user-initiated action, cleared when read.
     @Published private(set) var operationOutcome: OperationOutcome?
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []
     /// Streaming settings shared by every panel.
     @Published private(set) var settings = SenderSettings()
+    /// Live image of what the selected panel is being sent. Its own observable
+    /// object so ten frames a second redraw one small view instead of the
+    /// whole window.
+    let preview = FramePreview()
 
     private var sessions: [String: DeviceSession] = [:]
+    /// Which session is currently feeding `preview`, and whether anyone is
+    /// looking. Tracked separately from `selectedServiceName` so the session
+    /// being switched off can be told before the new one is switched on.
+    private var previewFocus: String?
+    private var previewVisible = false
     private var supersededServiceNames: Set<String> = []
     private weak var picker: PickerSource?
     private var pickerTarget: String?
@@ -242,6 +302,39 @@ final class PanelManager: ObservableObject {
         return panels.first { $0.serviceName == selectedServiceName }
     }
 
+    // MARK: live preview
+
+    /// Whether the manager window is on screen. Converting frames for a window
+    /// nobody can see would be pure waste, so the preview is switched off with
+    /// the window rather than left running for the life of the process.
+    func setPreviewVisible(_ visible: Bool) {
+        guard previewVisible != visible else { return }
+        previewVisible = visible
+        updatePreviewFocus()
+    }
+
+    /// Route preview frames from the selected panel's session only, and tell
+    /// every other session to stop producing them.
+    private func updatePreviewFocus() {
+        let target = previewVisible ? selectedServiceName : nil
+        guard target != previewFocus else { return }
+        if let previous = previewFocus {
+            sessions[previous]?.setPreviewEnabled(false)
+        }
+        previewFocus = target
+        preview.focus(on: target)
+        if let target {
+            sessions[target]?.setPreviewEnabled(true)
+        }
+    }
+
+    /// Accept a frame from a session. Frames from a panel that is no longer
+    /// selected are dropped by `FramePreview` itself, since a callback already
+    /// in flight can outlive a selection change.
+    func acceptPreview(image: CGImage, landscape: Bool, from serviceName: String) {
+        preview.accept(image: image, landscape: landscape, from: serviceName)
+    }
+
     func attachPicker(_ picker: PickerSource) {
         self.picker = picker
         picker.onSelection = { [weak self] filter in
@@ -310,6 +403,12 @@ final class PanelManager: ObservableObject {
         session.setFPS(settings.fps)
         session.applyPacing(
             spacingMicros: settings.spacingMicros, adaptive: settings.adaptivePacing)
+        // A session that appears while its panel is already selected has to be
+        // told to produce previews; `updatePreviewFocus` would see no change in
+        // focus and do nothing.
+        if session.name == previewFocus {
+            session.setPreviewEnabled(true)
+        }
         if !panels.contains(where: { $0.serviceName == session.name }) {
             panels.append(PanelSnapshot(serviceName: session.name, displayName: session.name,
                                         discovered: true, lastSeen: Date()))
@@ -319,10 +418,13 @@ final class PanelManager: ObservableObject {
 
     func retire(_ serviceName: String) {
         sessions[serviceName] = nil
+        if previewFocus == serviceName { preview.clearFrame() }
         guard !supersededServiceNames.contains(serviceName) else { return }
         updatePanel(serviceName) { panel in
             panel.discovered = false
             panel.displayFPS = 0
+            panel.captureStatus = .failed(
+                "No session is running for this display, so nothing is being sent.")
             panel.lastError = "Gave up trying to reach this display. It is retried "
                 + "automatically once it reappears on the network."
         }
@@ -377,6 +479,8 @@ final class PanelManager: ObservableObject {
             panel.spacingMicros = status.spacingMicros
             panel.paused = status.paused
             panel.sourceDescription = status.sourceDescription
+            panel.captureStatus = status.captureStatus
+            panel.lastFrameAt = status.lastFrameAt
             // A parked session is alive but deliberately not capturing, which
             // otherwise looks identical to a panel that is simply idle.
             panel.lastError = status.parked
@@ -743,10 +847,12 @@ final class PanelManager: ObservableObject {
             uniquingKeysWith: { first, _ in first })
     }
 
-    /// Set the lines the panel shows while nothing is driving it.
+    /// Set the screensaver template the panel shows while nothing is driving it.
     ///
-    /// Stored as the user typed it so the text field round-trips, and sanitized
-    /// only on the way to the device, whose font is a 5x7 ASCII bitmap.
+    /// Stored as the user typed it, tokens and all, so the editor round-trips and
+    /// the values are re-substituted with fresh ones every time the panel is
+    /// pushed to. Expansion and sanitizing happen on the way to the device,
+    /// whose font is a 5x7 ASCII bitmap.
     func setIdleText(_ text: String, for serviceName: String) {
         guard panels.contains(where: { $0.serviceName == serviceName }) else { return }
         updatePanel(serviceName) { $0.idleText = text }
@@ -754,12 +860,18 @@ final class PanelManager: ObservableObject {
         pushIdleText(to: serviceName)
     }
 
-    /// How the stored text will actually appear on the panel, so the UI can show
-    /// what was dropped rather than leaving the user to guess.
-    func idleTextPreview(for serviceName: String) -> [String] {
+    /// How a template will actually appear on the panel, so the UI can show what
+    /// was substituted and what was dropped rather than leaving the user to
+    /// guess. Pass `template` to preview unsaved edits; omit it for the saved one.
+    func screensaverPreview(
+        for serviceName: String, template: String? = nil
+    ) -> ScreensaverTemplate.Expansion {
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
-        else { return [] }
-        return IdleText.sanitize(panel.idleText)
+        else {
+            return ScreensaverTemplate.Expansion(lines: [], unknownTokens: [])
+        }
+        return ScreensaverTemplate.expand(
+            template ?? panel.idleText, values: panel.screensaverValues)
     }
 
     private func pushIdleText(to serviceName: String) {
@@ -767,7 +879,11 @@ final class PanelManager: ObservableObject {
               let panel = panels.first(where: { $0.serviceName == serviceName }),
               panel.capabilities.contains(.idleText)
         else { return }
-        session.sendIdleText(IdleText.sanitize(panel.idleText))
+        // An empty template sends an empty packet, which clears the card and
+        // lets the panel fall back to drawing its own.
+        session.sendIdleText(
+            ScreensaverTemplate.expand(
+                panel.idleText, values: panel.screensaverValues).lines)
     }
 
     private static func apply(
@@ -903,7 +1019,9 @@ extension PanelManager {
                     idle: false,
                     paused: false,
                     source: .display("Tiny Monitor"),
-                    sourceDescription: "Tiny Monitor"),
+                    sourceDescription: "Tiny Monitor",
+                    captureStatus: .streaming,
+                    lastFrameAt: now),
                 PanelSnapshot(
                     serviceName: "travel-display",
                     displayName: "travel-display",
@@ -918,7 +1036,10 @@ extension PanelManager {
                     brightness: 255,
                     sourceDescription: "Automatic",
                     lastError: "Gave up trying to reach this display. It is retried "
-                        + "automatically once it reappears on the network."),
+                        + "automatically once it reappears on the network.",
+                    captureStatus: .failed(
+                        "The content being mirrored is no longer available. Choose "
+                            + "a source again, or switch to Automatic.")),
             ],
             savedNetworkNames: ["Studio WiFi", "Phone Hotspot"],
             usbSerialPorts: [

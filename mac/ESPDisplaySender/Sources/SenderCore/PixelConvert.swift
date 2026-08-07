@@ -1,3 +1,4 @@
+import CoreGraphics
 import CoreVideo
 import Foundation
 
@@ -45,5 +46,61 @@ enum PixelConvert {
             }
         }
         return true
+    }
+
+    /// Expand a 5- or 6-bit channel to 8 bits by replicating its high bits,
+    /// so full-scale input maps to full-scale output (0x1F -> 0xFF, not 0xF8).
+    private static func expand5(_ v: UInt16) -> UInt8 {
+        UInt8((v << 3) | (v >> 2))
+    }
+
+    private static func expand6(_ v: UInt16) -> UInt8 {
+        UInt8((v << 2) | (v >> 4))
+    }
+
+    /// Build an image from the same RGB565BE bytes that go to the panel, for
+    /// the app's own preview of what it is sending.
+    ///
+    /// CoreGraphics has no 5-6-5 pixel format, so the channels are expanded to
+    /// 8 bits here rather than handed over as-is. At panel size (172x320, 55k
+    /// pixels) that is ~220 KB per image, which is why the caller throttles
+    /// this well below the capture rate.
+    static func imageFromRGB565BE(
+        _ pixels: [UInt8], width: Int, height: Int
+    ) -> CGImage? {
+        guard width > 0, height > 0, pixels.count >= width * height * 2 else {
+            return nil
+        }
+        var rgba = [UInt8](repeating: 0xFF, count: width * height * 4)
+        pixels.withUnsafeBufferPointer { src in
+            rgba.withUnsafeMutableBufferPointer { dst in
+                var si = 0
+                var di = 0
+                for _ in 0..<(width * height) {
+                    let value = (UInt16(src[si]) << 8) | UInt16(src[si + 1])
+                    dst[di] = expand5((value >> 11) & 0x1F)
+                    dst[di + 1] = expand6((value >> 5) & 0x3F)
+                    dst[di + 2] = expand5(value & 0x1F)
+                    dst[di + 3] = 0xFF
+                    si += 2
+                    di += 4
+                }
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else {
+            return nil
+        }
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent)
     }
 }
