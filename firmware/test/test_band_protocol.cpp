@@ -11,6 +11,7 @@
 #include "../display_stream/device_protocol.h"
 #include "../display_stream/panel_state.h"
 #include "../libraries/espdisp_board/src/board_config.h"
+#include "../libraries/espdisp_board/src/touch_gesture.h"
 #include "../libraries/espdisp_board/src/touch_map.h"
 
 using namespace bandproto;
@@ -347,15 +348,25 @@ int main() {
 
   // --- backlight priority: sleep beats idle beats the user's level
   {
-    CHECK(panelstate::backlightLevel(false, false, 128, 10) == 128);
-    CHECK(panelstate::backlightLevel(false, true, 128, 10) == 10);
-    CHECK(panelstate::backlightLevel(true, false, 128, 10) == 0);
+    CHECK(panelstate::backlightLevel(false, false, false, 128, 10) == 128);
+    CHECK(panelstate::backlightLevel(false, true, false, 128, 10) == 10);
+    CHECK(panelstate::backlightLevel(true, false, false, 128, 10) == 0);
     // Asleep wins even while idle: the Mac's screens being off is the
     // strongest signal there is nothing worth lighting.
-    CHECK(panelstate::backlightLevel(true, true, 128, 10) == 0);
+    CHECK(panelstate::backlightLevel(true, true, false, 128, 10) == 0);
     // The user's level is honoured exactly, not rounded to high/low.
-    CHECK(panelstate::backlightLevel(false, false, 1, 10) == 1);
-    CHECK(panelstate::backlightLevel(false, false, 255, 10) == 255);
+    CHECK(panelstate::backlightLevel(false, false, false, 1, 10) == 1);
+    CHECK(panelstate::backlightLevel(false, false, false, 255, 10) == 255);
+
+    // A finger outranks everything: someone touching a dark panel is asking
+    // whether it is alive, and the answer has to be visible. This is what lets
+    // tap-to-wake work from both the idle card and the Mac's display sleep,
+    // without the panel having to contradict the Mac about sleep state.
+    CHECK(panelstate::backlightLevel(false, true, true, 128, 10) == 128);
+    CHECK(panelstate::backlightLevel(true, false, true, 128, 10) == 128);
+    CHECK(panelstate::backlightLevel(true, true, true, 128, 10) == 128);
+    // ...and it wakes to the level the user chose, not to full blast.
+    CHECK(panelstate::backlightLevel(true, true, true, 40, 10) == 40);
   }
 
   // --- the high/low flag is derived, so it cannot disagree with the level
@@ -706,6 +717,188 @@ int main() {
     // map() clamps, so even a wildly out-of-range report stays addressable.
     CHECK(touchmap::map(9999, 9999, false, false).x >= 0);
     CHECK(touchmap::map(9999, 9999, false, false).y <= LONG - 1);
+  }
+
+  // --- touch gestures ------------------------------------------------------
+  // Gesture timing is close to impossible to check by hand on a device and
+  // trivial to check here, which is the whole reason the classifier takes a
+  // caller-supplied timestamp instead of calling millis() itself.
+  {
+    using touchgesture::Gesture;
+    using touchgesture::Tracker;
+
+    // A quick press that barely moves is a tap.
+    {
+      Tracker t;
+      auto down = t.onReport(true, 50, 60, 1000);
+      CHECK(down.pressStarted);
+      CHECK(down.gesture == Gesture::None);  // not known until release
+      CHECK(down.startX == 50 && down.startY == 60);
+      CHECK(t.pressActive());
+      auto up = t.onReport(false, 0, 0, 1100);
+      CHECK(up.gesture == Gesture::Tap);
+      CHECK(!up.pressStarted);
+      CHECK(up.startX == 50 && up.startY == 60);  // reports where it began
+      CHECK(!t.pressActive());
+    }
+
+    // Only the first report of a press sets pressStarted, or a caller reacting
+    // to touch-down would fire repeatedly while the finger sat still.
+    {
+      Tracker t;
+      CHECK(t.onReport(true, 10, 10, 0).pressStarted);
+      CHECK(!t.onReport(true, 11, 10, 20).pressStarted);
+      CHECK(!t.onReport(true, 12, 10, 40).pressStarted);
+    }
+
+    // Held too long to be a tap, but not far enough to be a swipe: None. A
+    // resting finger must not fire whatever a tap is wired to.
+    {
+      Tracker held;
+      held.onReport(true, 50, 60, 0);
+      CHECK(held.onReport(false, 0, 0, touchgesture::TAP_MAX_MS + 1).gesture ==
+            Gesture::None);
+      // Right at the boundary it is still a tap.
+      Tracker boundary;
+      boundary.onReport(true, 50, 60, 0);
+      CHECK(boundary.onReport(false, 0, 0, touchgesture::TAP_MAX_MS).gesture ==
+            Gesture::Tap);
+    }
+
+    // All four directions, in framebuffer terms, so they mean what the user saw.
+    {
+      const int16_t far = touchgesture::SWIPE_MIN_PX + 5;
+      struct {
+        int16_t dx, dy;
+        Gesture want;
+      } cases[] = {
+          {(int16_t)-far, 0, Gesture::SwipeLeft},
+          {far, 0, Gesture::SwipeRight},
+          {0, (int16_t)-far, Gesture::SwipeUp},
+          {0, far, Gesture::SwipeDown},
+      };
+      for (auto &c : cases) {
+        Tracker t;
+        t.onReport(true, 100, 100, 0);
+        t.onReport(true, (int16_t)(100 + c.dx), (int16_t)(100 + c.dy), 50);
+        CHECK(t.onReport(false, 0, 0, 100).gesture == c.want);
+      }
+    }
+
+    // The dominant axis decides, so a sloppy diagonal still resolves.
+    {
+      Tracker t;
+      t.onReport(true, 100, 100, 0);
+      t.onReport(true, (int16_t)(100 + touchgesture::SWIPE_MIN_PX + 10),
+                 (int16_t)(100 + touchgesture::SWIPE_MIN_PX - 5), 50);
+      CHECK(t.onReport(false, 0, 0, 100).gesture == Gesture::SwipeRight);
+    }
+
+    // Distance decides a swipe, not speed: a slow drag is still a swipe, or the
+    // gesture would depend on how fast the user happened to move.
+    {
+      Tracker t;
+      t.onReport(true, 100, 100, 0);
+      t.onReport(true, (int16_t)(100 + touchgesture::SWIPE_MIN_PX), 100, 3000);
+      CHECK(t.onReport(false, 0, 0, 4000).gesture == Gesture::SwipeRight);
+    }
+
+    // The dead band between "tap" and "swipe" resolves to nothing, rather than
+    // guessing between two actions on an ambiguous smudge.
+    {
+      Tracker t;
+      t.onReport(true, 100, 100, 0);
+      t.onReport(true, (int16_t)(100 + touchgesture::TAP_MAX_MOVE_PX + 1), 100,
+                 20);
+      CHECK(t.onReport(false, 0, 0, 40).gesture == Gesture::None);
+    }
+
+    // A release with no press is ignored, not classified.
+    {
+      Tracker t;
+      auto e = t.onReport(false, 0, 0, 500);
+      CHECK(e.gesture == Gesture::None);
+      CHECK(!e.pressStarted);
+    }
+
+    // A press left open by a dropped release report is abandoned, so the next
+    // real touch is a fresh press rather than a continuation of a stale one.
+    {
+      Tracker t;
+      t.onReport(true, 10, 10, 0);
+      auto later = t.onReport(true, 200, 200, touchgesture::PRESS_MAX_MS + 1);
+      CHECK(later.pressStarted);
+      CHECK(later.startX == 200 && later.startY == 200);
+    }
+
+    // reset() drops an in-flight press.
+    {
+      Tracker t;
+      t.onReport(true, 10, 10, 0);
+      CHECK(t.pressActive());
+      t.reset();
+      CHECK(!t.pressActive());
+      CHECK(t.onReport(false, 0, 0, 50).gesture == Gesture::None);
+    }
+
+    CHECK(strcmp(touchgesture::gestureName(Gesture::Tap), "tap") == 0);
+    CHECK(strcmp(touchgesture::gestureName(Gesture::SwipeLeft), "swipe-left") == 0);
+    CHECK(strcmp(touchgesture::gestureName(Gesture::None), "none") == 0);
+  }
+
+  // --- ETCH touch events on the wire ---------------------------------------
+  {
+    uint8_t packet[deviceproto::TOUCH_PACKET_BYTES] = {0};
+    CHECK(deviceproto::writeTouch(packet, deviceproto::TouchGesture::SwipeLeft,
+                                  0x1234, 300, 150,
+                                  deviceproto::TOUCH_FLAG_LANDSCAPE) == 14);
+    const uint8_t expected[14] = {0x45, 0x54, 0x43, 0x48, 0x01, 0x02, 0x34, 0x12,
+                                  0x2c, 0x01, 0x96, 0x00, 0x01, 0x00};
+    CHECK(memcmp(packet, expected, sizeof(expected)) == 0);
+
+    deviceproto::TouchEvent parsed;
+    CHECK(deviceproto::parseTouch(packet, sizeof(packet), parsed));
+    CHECK(parsed.gesture == deviceproto::TouchGesture::SwipeLeft);
+    CHECK(parsed.sequence == 0x1234);
+    CHECK(parsed.x == 300);
+    CHECK(parsed.y == 150);
+    CHECK((parsed.flags & deviceproto::TOUCH_FLAG_LANDSCAPE) != 0);
+
+    // Round-trip every gesture, so no value is unrepresentable on the wire.
+    for (uint8_t raw = (uint8_t)deviceproto::TouchGesture::Tap;
+         raw <= (uint8_t)deviceproto::TouchGesture::SwipeDown; raw++) {
+      uint8_t buf[deviceproto::TOUCH_PACKET_BYTES] = {0};
+      deviceproto::writeTouch(buf, (deviceproto::TouchGesture)raw, raw, 1, 2, 0);
+      deviceproto::TouchEvent got;
+      CHECK(deviceproto::parseTouch(buf, sizeof(buf), got));
+      CHECK((uint8_t)got.gesture == raw);
+      CHECK(got.sequence == raw);
+      CHECK(got.flags == 0);
+    }
+
+    // Malformed input is refused rather than half-accepted.
+    deviceproto::TouchEvent ignored;
+    CHECK(!deviceproto::parseTouch(packet, sizeof(packet) - 1, ignored));
+    uint8_t badMagic[deviceproto::TOUCH_PACKET_BYTES];
+    memcpy(badMagic, packet, sizeof(badMagic));
+    badMagic[0] = 'X';
+    CHECK(!deviceproto::parseTouch(badMagic, sizeof(badMagic), ignored));
+    uint8_t badVersion[deviceproto::TOUCH_PACKET_BYTES];
+    memcpy(badVersion, packet, sizeof(badVersion));
+    badVersion[4] = 99;
+    CHECK(!deviceproto::parseTouch(badVersion, sizeof(badVersion), ignored));
+    // Gesture 0 and anything past the last one are not gestures.
+    uint8_t badGesture[deviceproto::TOUCH_PACKET_BYTES];
+    memcpy(badGesture, packet, sizeof(badGesture));
+    badGesture[5] = 0;
+    CHECK(!deviceproto::parseTouch(badGesture, sizeof(badGesture), ignored));
+    badGesture[5] = (uint8_t)deviceproto::TouchGesture::SwipeDown + 1;
+    CHECK(!deviceproto::parseTouch(badGesture, sizeof(badGesture), ignored));
+
+    // CAP_TOUCH must not collide with an existing capability bit.
+    CHECK(deviceproto::CAP_TOUCH == 1u << 9);
+    CHECK((deviceproto::CAP_TOUCH & deviceproto::CAP_IDLE_TEXT) == 0);
+    CHECK((deviceproto::CAP_TOUCH & deviceproto::CAP_BRIGHTNESS_LEVEL) == 0);
   }
 
   printf("OK: %d checks passed\n", checks);
