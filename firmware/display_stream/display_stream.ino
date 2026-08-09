@@ -49,6 +49,20 @@
 // Included here rather than further down because the helpers below use them.
 #include "panel_state.h"
 
+// Up here for the same reason, and for one more: the Arduino build generates a
+// prototype for every function in this sketch and inserts them all near the top
+// of the file. Any function whose signature names a type from one of these
+// headers - toWireGesture takes a deviceproto::TouchGesture - gets a prototype
+// emitted above the point where the header used to be included, and the sketch
+// failed to compile with "'deviceproto' has not been declared".
+//
+// All three are header-only, self-contained, and unit tested standalone on the
+// host, so nothing in this file has to be declared before them.
+#include "band_protocol.h"
+#include "device_protocol.h"
+#include "control_queue.h"
+using namespace bandproto;
+
 // WiFi credentials live in NVS flash and are reconfigurable over the USB
 // serial port without reflashing (see handleSerialConfig). The compiled-in
 // wifi_config.h values are only the first-boot fallback.
@@ -145,11 +159,8 @@ static bool displaySleeping = false;
 // ---- Protocol (v2: dirty bands) -----------------------------------------
 // All wire-format constants and the reassembly/coalescing decision logic
 // live in band_protocol.h, which is hardware-free and unit tested on the
-// host (firmware/test/run_tests.sh).
-#include "band_protocol.h"
-#include "device_protocol.h"
-#include "control_queue.h"
-using namespace bandproto;
+// host (firmware/test/run_tests.sh). Included at the top of this file; see the
+// note there about generated prototypes.
 
 // Capabilities every board has, whatever panel or peripherals it carries.
 static const uint32_t BASE_CAPABILITIES =
@@ -312,9 +323,11 @@ static void onPacket(AsyncUDPPacket packet) {
     return;
   }
 
-  // Orientation flip invalidates everything in bufA (band geometry and
-  // pixel layout both change). The sender guarantees a full keyframe on
-  // flip, so dropping stale pending bands is safe.
+  // A landscape/portrait change invalidates everything in bufA (band geometry
+  // and pixel layout both change), so stale pending bands are dropped and the
+  // keyframe the sender guarantees on an orientation change rebuilds it. Not to
+  // be confused with the user's 180-degree flip, which leaves bufA valid and is
+  // repainted locally in loop() - see the madctlDirty block there.
   if (h.landscape != bufLandscape) {
     portENTER_CRITICAL(&drawMux);
     memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
@@ -1220,6 +1233,50 @@ void loop() {
     Serial.flush();
     delay(50);
     ESP.restart();
+  }
+
+  // Reapply a pending flip now, and repaint the whole screen from what is
+  // already cached instead of waiting for a frame to arrive.
+  //
+  // A flip changes MADCTL, which makes the panel re-scan the pixels already in
+  // its memory in the new direction. Every pixel on screen is therefore wrong
+  // the moment it takes effect - including the parts no incoming band will
+  // touch. Reapplying only on the next completed frame and then redrawing just
+  // that frame's dirty bands left the image healing a band at a time, and left a
+  // static screen upside-down until the sender's 5s full refresh.
+  //
+  // This is fixable locally because a 180-degree flip leaves bufA valid: band
+  // geometry and pixel layout are unchanged, only the scan direction moved. A
+  // landscape change is not, so one still mid-flight here (bufLandscape not yet
+  // agreeing with the completed frame) only reapplies the config and leaves the
+  // repaint to the keyframe the sender guarantees.
+  //
+  // The Mac-commanded flip never had this problem because DeviceSession.setFlip
+  // forces a keyframe. A BOOT-button flip is invisible to the sender, so nothing
+  // asked for one.
+  if (madctlDirty && dmaInFlight == 0) {
+    bool orientationSettled = (bufLandscape == pendingLandscape);
+    applyPanelConfig(bufLandscape);
+    const char *repainted;
+    if (idleActive) {
+      drawIdleScreen();  // composes the card over bufA and pushes all of it
+      repainted = "status card";
+    } else if (orientationSettled && statFramesShown != 0) {
+      // Mark every band and hand it to the existing draw path rather than
+      // duplicating the staging and DMA logic. Bits past bandCount are ignored:
+      // forEachRun bounds its walk by the count it is given.
+      portENTER_CRITICAL(&drawMux);
+      memset(pendingDrawBitmap, 0xFF, sizeof(pendingDrawBitmap));
+      portEXIT_CRITICAL(&drawMux);
+      framesCompleted = framesCompleted + 1;  // drawn below, same iteration
+      repainted = "cached frame";
+    } else {
+      // Either a landscape change is mid-flight (the sender's keyframe repaints
+      // it), or nothing but a boot fill has ever been on screen - and a uniform
+      // fill looks the same either way up, so there is nothing to correct.
+      repainted = "nothing to repaint";
+    }
+    Serial.printf("flip180=%d applied (%s)\n", panelFlip180, repainted);
   }
 
   static uint32_t lastCompleted = 0;
