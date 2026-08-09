@@ -156,6 +156,92 @@ final class DeviceProtocolTests: XCTestCase {
         badVersion[4] = 99
         XCTAssertNil(DeviceProtocol.parseAck(badVersion))
     }
+
+    // Byte-for-byte the vector firmware/test/test_band_protocol.cpp asserts
+    // writeTouch produces, copied by hand rather than shared: the point is that
+    // two independent implementations agree, which a shared fixture could not
+    // show.
+    func testParseTouchMatchesFirmwareVector() {
+        let packet = Data([
+            0x45, 0x54, 0x43, 0x48, 0x01, 0x02, 0x34, 0x12,
+            0x2C, 0x01, 0x96, 0x00, 0x01, 0x00,
+        ])
+        let touch = DeviceProtocol.parseTouch(packet)
+        XCTAssertEqual(touch?.gesture, .swipeLeft)
+        XCTAssertEqual(touch?.sequence, 0x1234)
+        XCTAssertEqual(touch?.x, 300)
+        XCTAssertEqual(touch?.y, 150)
+        XCTAssertTrue(touch?.landscape == true)
+    }
+
+    func testParseTouchAcceptsEveryGesture() {
+        for gesture in DeviceProtocol.TouchGesture.allCases {
+            var packet = Data("ETCH".utf8)
+            packet.append(contentsOf: [
+                DeviceProtocol.touchVersion, gesture.rawValue,
+                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ])
+            XCTAssertEqual(DeviceProtocol.parseTouch(packet)?.gesture, gesture)
+            XCTAssertTrue(DeviceProtocol.parseTouch(packet)?.landscape == false)
+        }
+    }
+
+    func testRejectsMalformedTouchPackets() {
+        func packet(magic: String = "ETCH", version: UInt8 = 1, gesture: UInt8 = 1,
+                    length: Int = 14) -> Data {
+            var data = Data(magic.utf8)
+            data.append(contentsOf: [version, gesture])
+            data.append(Data(repeating: 0, count: max(0, length - data.count)))
+            return data.prefix(length)
+        }
+
+        XCTAssertNotNil(DeviceProtocol.parseTouch(packet()))
+        XCTAssertNil(DeviceProtocol.parseTouch(packet(magic: "ETCX")))
+        XCTAssertNil(DeviceProtocol.parseTouch(packet(version: 99)))
+        // Gesture 0 and 6 sit either side of the defined range. An unknown
+        // gesture is refused rather than ignored: acting on a byte this parser
+        // does not understand is how a future firmware's new gesture would get
+        // silently mapped onto the wrong action.
+        XCTAssertNil(DeviceProtocol.parseTouch(packet(gesture: 0)))
+        XCTAssertNil(DeviceProtocol.parseTouch(packet(gesture: 6)))
+        XCTAssertNil(DeviceProtocol.parseTouch(packet(length: 13)))
+        XCTAssertNil(DeviceProtocol.parseTouch(packet(length: 15)))
+    }
+
+    // Inbound messages are told apart by trial-parsing in FrameSender, so no
+    // parser may claim another's packet. If one ever did, whichever ran first
+    // would silently swallow the other kind.
+    func testTouchPacketIsNotClaimedByOtherParsers() {
+        let touch = Data([
+            0x45, 0x54, 0x43, 0x48, 0x01, 0x02, 0x34, 0x12,
+            0x2C, 0x01, 0x96, 0x00, 0x01, 0x00,
+        ])
+        XCTAssertNotNil(DeviceProtocol.parseTouch(touch))
+        XCTAssertNil(DeviceProtocol.parseInfo(touch))
+        XCTAssertNil(DeviceProtocol.parseAck(touch))
+        XCTAssertNil(BandProtocol.parseHeartbeat(touch))
+    }
+
+    func testTouchParserRejectsOtherMessageKinds() {
+        var info = Data("EINF".utf8)
+        info.append(contentsOf: [
+            0x01, 0x02, 0x01, 0x13,
+            0x3F, 0x00, 0x00, 0x00,
+            0x04, 0x03, 0x02, 0x01,
+            0xCD, 0xFF, 0x80,
+            0x00, 0x00,
+            0x02, 0x00, 0x00, 0x12, 0x34, 0x56,
+        ])
+        XCTAssertNotNil(DeviceProtocol.parseInfo(info))
+        XCTAssertNil(DeviceProtocol.parseTouch(info))
+
+        let ack = Data([
+            0x45, 0x41, 0x43, 0x4B, 0x01, 0x02, 0x34, 0x12,
+            0x00, 0x03, 0x80, 0x00,
+        ])
+        XCTAssertNotNil(DeviceProtocol.parseAck(ack))
+        XCTAssertNil(DeviceProtocol.parseTouch(ack))
+    }
 }
 
 final class DeviceSourceConfigTests: XCTestCase {

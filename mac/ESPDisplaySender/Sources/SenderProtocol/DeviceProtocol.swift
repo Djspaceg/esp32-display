@@ -7,6 +7,7 @@ public enum DeviceProtocol {
     public static let infoVersion: UInt8 = 1
     public static let frameProtocolVersion: UInt8 = 2
     public static let controlProtocolVersion: UInt8 = 1
+    public static let touchVersion: UInt8 = 1
 
     public struct Capabilities: OptionSet, Equatable, Sendable {
         public let rawValue: UInt32
@@ -30,6 +31,11 @@ public enum DeviceProtocol {
         /// Accepts pushed idle text, so the panel can show something the user
         /// chose while no sender is driving it.
         public static let idleText = Capabilities(rawValue: 1 << 8)
+        /// Emits ETCH, i.e. this panel has a touch screen and reports gestures.
+        /// Advertised so a sender can offer touch settings only on a panel that
+        /// can actually produce them, rather than showing a control that could
+        /// never fire.
+        public static let touch = Capabilities(rawValue: 1 << 9)
     }
 
     public struct DeviceInfo: Equatable, Sendable {
@@ -164,6 +170,61 @@ public enum DeviceProtocol {
             flipped: flags & 0x02 != 0,
             sleeping: flags & 0x04 != 0,
             brightness: bytes[10])
+    }
+
+    /// A gesture the panel observed. Semantic, not raw coordinates: these
+    /// datagrams are unauthenticated, so the set of things a panel can ask for
+    /// has to stay small enough that a forged one is recoverable.
+    public enum TouchGesture: UInt8, CaseIterable, Sendable {
+        case tap = 1
+        case swipeLeft = 2
+        case swipeRight = 3
+        case swipeUp = 4
+        case swipeDown = 5
+    }
+
+    public struct TouchEvent: Equatable, Sendable {
+        public let gesture: TouchGesture
+        /// Increments per gesture on the device. Its only job is to let the
+        /// receiver drop a duplicate datagram; it carries no ordering meaning
+        /// because it wraps.
+        public let sequence: UInt16
+        /// Where the gesture happened, in the frame that was on screen at the
+        /// time — so `landscape` is needed to interpret it.
+        public let x: UInt16
+        public let y: UInt16
+        public let landscape: Bool
+
+        public init(
+            gesture: TouchGesture, sequence: UInt16, x: UInt16, y: UInt16,
+            landscape: Bool
+        ) {
+            self.gesture = gesture
+            self.sequence = sequence
+            self.x = x
+            self.y = y
+            self.landscape = landscape
+        }
+    }
+
+    public static let touchPacketBytes = 14
+    /// Bit 0 of the flags byte: the panel was in landscape for this gesture.
+    public static let touchFlagLandscape: UInt8 = 0x01
+
+    /// Parse the device's fixed-size ETCH touch event.
+    public static func parseTouch(_ data: Data) -> TouchEvent? {
+        let bytes = [UInt8](data)
+        guard bytes.count == touchPacketBytes,
+              Array(bytes[0..<4]) == Array("ETCH".utf8),
+              bytes[4] == touchVersion,
+              let gesture = TouchGesture(rawValue: bytes[5])
+        else { return nil }
+        return TouchEvent(
+            gesture: gesture,
+            sequence: UInt16(bytes[6]) | (UInt16(bytes[7]) << 8),
+            x: UInt16(bytes[8]) | (UInt16(bytes[9]) << 8),
+            y: UInt16(bytes[10]) | (UInt16(bytes[11]) << 8),
+            landscape: bytes[12] & touchFlagLandscape != 0)
     }
 
     private static func appendLE(_ value: UInt16, to data: inout Data) {

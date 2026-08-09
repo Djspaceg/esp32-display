@@ -1,4 +1,4 @@
-import AppKit
+import Combine
 import SenderProtocol
 import SwiftUI
 
@@ -7,63 +7,69 @@ extension Notification.Name {
     static let espDisplayShowSettings = Notification.Name("com.espdisplay.sender.showSettings")
 }
 
+// MARK: - Window
+
 struct ManagerView: View {
     @ObservedObject var manager: PanelManager
     @State private var showingSettings = false
 
     var body: some View {
-        VStack(spacing: 0) {
+        NavigationSplitView {
+            List(selection: $manager.selectedServiceName) {
+                Section("Displays") {
+                    ForEach(manager.panels) { panel in
+                        PanelRow(panel: panel)
+                            .tag(panel.serviceName)
+                            .contextMenu {
+                                Button("Identify") { manager.identify(panel.serviceName) }
+                                    .disabled(!manager.canControl(
+                                        panel.serviceName, capability: .identify))
+                                Button(panel.paused ? "Resume" : "Pause") {
+                                    manager.setPaused(!panel.paused, for: panel.serviceName)
+                                }
+                                Divider()
+                                Button("Forget Display", role: .destructive) {
+                                    manager.forget(panel.serviceName)
+                                }
+                                .disabled(!manager.canForget(panel.serviceName))
+                            }
+                    }
+                }
+            }
+            // The system sidebar style carries the Liquid Glass sidebar
+            // treatment and selection material; a plain list does not.
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
+        } detail: {
+            if let panel = manager.selectedPanel {
+                PanelDetailView(panel: panel, manager: manager)
+                    .id(panel.serviceName)
+            } else {
+                ContentUnavailableView(
+                    "No Display Selected", systemImage: "display",
+                    description: Text("Discovered and previously known panels appear in the sidebar."))
+            }
+        }
+        // Standing problems float over the content on glass rather than pushing
+        // the whole window down, which is what the old full-width bar did.
+        .safeAreaInset(edge: .top, spacing: 0) {
             if !manager.issues.isEmpty {
-                VStack(spacing: 0) {
+                VStack(spacing: 8) {
                     ForEach(manager.issues) { issue in
                         IssueBanner(issue: issue) {
                             manager.dismissIssue(issue.issue)
                         }
-                        Divider()
                     }
                 }
-                .background(.quaternary.opacity(0.4))
-            }
-            NavigationSplitView {
-                List(selection: $manager.selectedServiceName) {
-                    Section("Displays") {
-                        ForEach(manager.panels) { panel in
-                            PanelRow(panel: panel)
-                                .tag(panel.serviceName)
-                                .contextMenu {
-                                    Button("Identify") { manager.identify(panel.serviceName) }
-                                        .disabled(!manager.canControl(
-                                            panel.serviceName, capability: .identify))
-                                    Button(panel.paused ? "Resume" : "Pause") {
-                                        manager.setPaused(!panel.paused, for: panel.serviceName)
-                                    }
-                                    Divider()
-                                    Button("Forget Display", role: .destructive) {
-                                        manager.forget(panel.serviceName)
-                                    }
-                                    .disabled(!manager.canForget(panel.serviceName))
-                                }
-                        }
-                    }
-                }
-                // The system sidebar style, rather than a plain list: it gives
-                // the inset rounded selection macOS users expect, the standard
-                // section header treatment, and the right row insets - all of
-                // which the default full-width square selection did not.
-                .listStyle(.sidebar)
-                .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
-            } detail: {
-                if let panel = manager.selectedPanel {
-                    PanelDetailView(panel: panel, manager: manager)
-                        .id(panel.serviceName)
-                } else {
-                    ContentUnavailableView(
-                        "No Display Selected", systemImage: "display",
-                        description: Text("Discovered and previously known panels appear in the sidebar."))
-                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
             }
         }
-        .frame(minWidth: 820, minHeight: 560)
+        // No minimum frame here. A SwiftUI minimum on the hosted root is
+        // reported up as the hosting controller's own minimum *plus* the
+        // titlebar inset - measured, a 580pt minimum became a 620pt window
+        // floor - which then fights the window's own contentMinSize. The window
+        // owns the minimum; see ManagerWindowController.
         .sheet(isPresented: $showingSettings) {
             SettingsSheet(manager: manager)
         }
@@ -86,14 +92,14 @@ struct ManagerView: View {
     }
 }
 
-/// A standing problem the app cannot fix by itself. Shown above everything
+/// A standing problem the app cannot fix by itself. Floats above the content
 /// because it usually explains why the rest of the window looks wrong.
 private struct IssueBanner: View {
     let issue: ReportedIssue
     let onDismiss: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .accessibilityHidden(true)
@@ -115,7 +121,8 @@ private struct IssueBanner: View {
             .accessibilityLabel("Dismiss: \(issue.title)")
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.vertical, 10)
+        .glassCard(tint: .orange)
     }
 }
 
@@ -163,9 +170,12 @@ private struct PanelRow: View {
     }
 }
 
+// MARK: - Detail
+
 private struct PanelDetailView: View {
     let panel: PanelSnapshot
     @ObservedObject var manager: PanelManager
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var confirmRestart = false
     @State private var editedName = ""
     @State private var isEditingName = false
@@ -192,307 +202,58 @@ private struct PanelDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                header
-
-                if let lastError = panel.lastError {
-                    PanelNotice(text: lastError)
+        Form {
+            heroSection
+            sourceSection
+            displaySection
+            connectionSection
+            if panel.capabilities.contains(.idleText) {
+                screensaverSection
+            }
+            firmwareSection
+            diagnosticsSection
+            dangerSection
+        }
+        .formStyle(.grouped)
+        // A third for the label, the rest for the value. Grouped rows otherwise
+        // push content to the trailing edge, which left the screensaver editor
+        // and the label naming it at opposite ends of the window.
+        .labeledContentStyle(.labelColumn)
+        .background(paneBackground)
+        // Identity moves into the merged titlebar, so the hero no longer
+        // repeats the name and the window spends less height on chrome.
+        //
+        // Only the subtitle is set here. `navigationTitle` does not reach
+        // `NSWindow.title` when the view is hosted in a hand-built window
+        // rather than a SwiftUI scene - measured, the window kept its own title
+        // - so the title is driven from ManagerWindowController instead. One
+        // owner per property, or they overwrite each other.
+        .navigationSubtitle(panel.statusText)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Rename", systemImage: "pencil") {
+                    beginNameEdit()
                 }
-
-                CompactGroup("Mirroring") {
-                    MirrorPreview(panel: panel, preview: manager.preview)
-                }
-
-                CompactGroup("Source") {
-                    CompactGrid {
-                        InfoRow("Saved choice", panel.source.label)
-                        InfoRow("Currently showing", panel.sourceDescription)
-                        InfoRow("Selection") {
-                            HStack(spacing: 6) {
-                                Menu("Choose Source…") {
-                                    Button("Display…") {
-                                        manager.chooseSource(
-                                            for: panel.serviceName, style: .display)
-                                    }
-                                    Button("Window…") {
-                                        manager.chooseSource(
-                                            for: panel.serviceName, style: .window)
-                                    }
-                                    Button("Application…") {
-                                        manager.chooseSource(
-                                            for: panel.serviceName, style: .application)
-                                    }
-                                }
-                                .menuStyle(.borderlessButton)
-                                .fixedSize()
-                                .controlSize(.small)
-                                .disabled(!panel.isOnline)
-                                .help("Pick what this panel shows. Opens the "
-                                    + "macOS picker directly in the chosen mode.")
-                                Button("Use Automatic") {
-                                    manager.useAutomaticSource(for: panel.serviceName)
-                                }
-                                .controlSize(.small)
-                                .disabled(panel.source == .automatic)
-                                .help("Go back to tracking the configured display")
-                            }
-                        }
-                        InfoRow("") {
-                            Text("Uses the macOS ScreenCaptureKit picker for displays, windows, and applications. The choice is remembered and reapplied when the sender restarts.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                CompactGroup("Display") {
-                    CompactGrid {
-                        if manager.canControl(
-                            panel.serviceName, capability: .brightnessLevel)
-                            || panel.capabilities.contains(.brightnessLevel)
-                        {
-                            InfoRow("Brightness") {
-                                HStack(spacing: 8) {
-                                    // No `step:`. The range is 1...255, and a
-                                    // step made macOS draw a tick mark per
-                                    // step - 254 of them, merging into what
-                                    // looked like a stray rule under the
-                                    // slider. The binding already rounds to a
-                                    // whole level on the way out.
-                                    Slider(
-                                        value: brightnessLevel,
-                                        in: brightnessBounds)
-                                    .frame(maxWidth: 220)
-                                    .disabled(!manager.canControl(
-                                        panel.serviceName, capability: .brightnessLevel))
-                                    .help(controlHelp(
-                                        .brightnessLevel, "Set the panel backlight"))
-                                    .accessibilityLabel("Brightness level")
-                                    Text("\(brightnessPercent)%")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .monospacedDigit()
-                                        .frame(width: 34, alignment: .trailing)
-                                }
-                            }
-                        } else {
-                            InfoRow("Brightness") {
-                                Toggle("High", isOn: Binding(
-                                    get: { panel.brightnessHigh },
-                                    set: { manager.setBrightness(high: $0, for: panel.serviceName) }))
-                                    .toggleStyle(.switch)
-                                    .controlSize(.small)
-                                    .disabled(!manager.canControl(
-                                        panel.serviceName, capability: .brightness))
-                                    .help(controlHelp(.brightness, "Set the panel backlight"))
-                            }
-                        }
-                        InfoRow("Orientation") {
-                            Toggle("Rotate 180°", isOn: Binding(
-                                get: { panel.flipped },
-                                set: { manager.setFlip($0, for: panel.serviceName) }))
-                                .toggleStyle(.switch)
-                                .controlSize(.small)
-                                .disabled(!manager.canControl(
-                                    panel.serviceName, capability: .flip))
-                                .help(controlHelp(.flip, "Rotate the image on the panel"))
-                        }
-                        if panel.controlProtocolVersion
-                            != Int(DeviceProtocol.controlProtocolVersion)
-                        {
-                            InfoRow("Controls") {
-                                Text("Flash the current firmware to enable remote controls.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-
-                CompactGroup("Connection") {
-                    CompactGrid {
-                        InfoRow("Address") {
-                            CopyableAddress(address: panel.address)
-                        }
-                        InfoRow("WiFi signal", panel.signalDescription)
-                        InfoRow("USB device") {
-                            HStack(spacing: 6) {
-                                Picker("USB device", selection: usbPortSelection) {
-                                    Text("Automatic (match by name)").tag("")
-                                    ForEach(manager.usbPortOptions(
-                                        for: panel.serviceName), id: \.self)
-                                    { port in
-                                        Text((port as NSString).lastPathComponent).tag(port)
-                                    }
-                                }
-                                .labelsHidden()
-                                // Sized to its widest option rather than
-                                // stretched to a fixed width, which left a
-                                // popup button padded out with dead space.
-                                .fixedSize()
-                                .controlSize(.small)
-                                .help(panel.usbPort ?? "Automatically match this display by its reported name")
-
-                                Button {
-                                    manager.refreshUSBPorts()
-                                } label: {
-                                    Image(systemName: "arrow.clockwise")
-                                }
-                                .controlSize(.small)
-                                .help("Refresh connected USB serial devices")
-                            }
-                        }
-                        InfoRow("") {
-                            Text("Automatic verifies the reported display name. A manual assignment is saved with this display.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        InfoRow("Saved WiFi") {
-                            HStack(spacing: 6) {
-                                Picker("Saved WiFi", selection: $selectedSSID) {
-                                    Text("Select a network…").tag("")
-                                    ForEach(manager.savedNetworkNames, id: \.self) { ssid in
-                                        Text(ssid).tag(ssid)
-                                    }
-                                }
-                                .labelsHidden()
-                                .fixedSize()
-                                .controlSize(.small)
-
-                                Button("Apply") {
-                                    manager.applySavedNetwork(
-                                        selectedSSID, to: panel.serviceName)
-                                }
-                                .controlSize(.small)
-                                .disabled(selectedSSID.isEmpty)
-
-                                Button(manager.savedNetworkNames.isEmpty ? "Add…" : "Edit…") {
-                                    manager.configureUSB(
-                                        preferredSSID: selectedSSID.isEmpty ? nil : selectedSSID)
-                                }
-                                .controlSize(.small)
-                            }
-                        }
-                        InfoRow("") {
-                            Text("Credentials are stored in your login Keychain and applied over USB.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                if panel.capabilities.contains(.idleText) {
-                    CompactGroup("Screensaver") {
-                        CompactGrid {
-                            InfoRow("Template") {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    TextEditor(text: $editedIdleText)
-                                        .font(.body.monospaced())
-                                        .frame(height: 68)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 4)
-                                                .stroke(.separator))
-                                        .accessibilityLabel("Screensaver template")
-                                    HStack(spacing: 6) {
-                                        Button("Save") {
-                                            manager.setIdleText(
-                                                editedIdleText, for: panel.serviceName)
-                                        }
-                                        .controlSize(.small)
-                                        .disabled(editedIdleText == panel.idleText)
-                                        Menu("Insert Token") {
-                                            ForEach(ScreensaverTemplate.tokens) { token in
-                                                Button("\(token.placeholder) — \(token.summary)") {
-                                                    insertToken(token)
-                                                }
-                                            }
-                                        }
-                                        .menuStyle(.borderlessButton)
-                                        .fixedSize()
-                                        .controlSize(.small)
-                                        Button("Use Default") {
-                                            editedIdleText = ScreensaverTemplate.standard
-                                        }
-                                        .controlSize(.small)
-                                        .disabled(editedIdleText == ScreensaverTemplate.standard)
-                                        .help("The card the panel draws on its own, as a template you can edit")
-                                        Button("Clear") {
-                                            editedIdleText = ""
-                                            manager.setIdleText("", for: panel.serviceName)
-                                        }
-                                        .controlSize(.small)
-                                        .disabled(panel.idleText.isEmpty
-                                            && editedIdleText.isEmpty)
-                                    }
-                                }
-                            }
-                            InfoRow("On the panel") {
-                                ScreensaverPanelPreview(expansion: livePreview)
-                            }
-                            InfoRow("") {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    if !livePreview.unknownTokens.isEmpty {
-                                        Text("Not a token: "
-                                            + livePreview.unknownTokens
-                                                .map { "{\($0)}" }
-                                                .joined(separator: ", "))
-                                            .font(.caption)
-                                            .foregroundStyle(.orange)
-                                    }
-                                    Text("Wrap a value in braces to substitute it, for example "
-                                        + "\"\(ScreensaverTemplate.tokens[0].placeholder)\". "
-                                        + "Write \"{{\" for a literal brace.")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Text("Up to \(IdleText.maxLines) lines of \(IdleText.maxLineBytes) characters, shown with how long ago they were sent. The panel's font is plain ASCII, so anything else is dropped.")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                CompactGroup("Firmware") {
-                    CompactGrid {
-                        InfoRow("Version", panel.firmwareVersion ?? "Legacy firmware")
-                        InfoRow("Frame protocol", panel.frameProtocolVersion.map(String.init) ?? "2")
-                        InfoRow("Control protocol", panel.controlProtocolVersion.map(String.init) ?? "Not available")
-                        InfoRow("Uptime", panel.uptimeDescription)
-                    }
-                }
-
-                CollapsibleGroup("Diagnostics", isExpanded: $showDiagnostics) {
-                    CompactGrid {
-                        InfoRow("Frames displayed", panel.framesShown.formatted())
-                        InfoRow("Frames dropped", panel.framesDropped.formatted())
-                        InfoRow("Sender errors", panel.sendErrors.formatted())
-                        InfoRow("Changed bands", String(format: "%.0f%%", panel.diffPercent))
-                        InfoRow("Free heap", ByteCountFormatter.string(
-                            fromByteCount: Int64(panel.freeHeap), countStyle: .memory))
-                        InfoRow("Packet pacing", "\(panel.spacingMicros) µs")
-                        if let hardwareID = panel.hardwareID {
-                            InfoRow("Hardware ID", hardwareID)
-                        }
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    Spacer()
-                    Button("Restart Display…", role: .destructive) {
-                        confirmRestart = true
-                    }
-                    .disabled(!manager.canControl(panel.serviceName, capability: .restart))
-                    .help(controlHelp(.restart, "Reboot the panel"))
-                    Button("Forget Display", role: .destructive) {
-                        manager.forget(panel.serviceName)
-                    }
-                    .disabled(!manager.canForget(panel.serviceName))
-                    .help("A display can be forgotten after its active session retires")
+                .help("Rename this display")
+                .popover(isPresented: $isEditingName, arrowEdge: .bottom) {
+                    renamePopover
                 }
             }
-            .padding(14)
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+            ToolbarItem(placement: .primaryAction) {
+                Button(panel.paused ? "Resume" : "Pause") {
+                    manager.setPaused(!panel.paused, for: panel.serviceName)
+                }
+                .disabled(!panel.isOnline)
+                .help(panel.paused ? "Resume sending frames" : "Stop sending frames")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button("Identify", systemImage: "light.beacon.max") {
+                    manager.identify(panel.serviceName)
+                }
+                .disabled(!manager.canControl(panel.serviceName, capability: .identify))
+                .help(controlHelp(.identify, "Flash this panel so you can spot it"))
+            }
         }
         .onAppear {
             editedName = panel.displayName
@@ -520,64 +281,404 @@ private struct PanelDetailView: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: "display")
-                .font(.system(size: 30))
-                .foregroundStyle(panel.isOnline ? Color.accentColor : Color.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    if isEditingName {
-                        TextField("Device name", text: $editedName)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.title2.bold())
-                            .focused($nameIsFocused)
-                            .onSubmit(saveName)
-                            .frame(maxWidth: 320)
-                            .onExitCommand(perform: cancelNameEdit)
-                        Button(action: saveName) {
-                            Image(systemName: "checkmark.circle.fill")
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Color.accentColor)
-                        .disabled(!nameHasChanges)
-                        .help("Save this name to the USB-connected display")
-                        Button(action: cancelNameEdit) {
-                            Image(systemName: "xmark.circle.fill")
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .help("Cancel renaming")
-                    } else {
-                        Button(action: beginNameEdit) {
-                            HStack(spacing: 5) {
-                                Text(panel.displayName)
-                                    .font(.title2.bold())
-                                Image(systemName: "pencil")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .help("Click to rename this display")
-                    }
-                }
-                Text(panel.statusText)
-                    .font(.subheadline)
-                    .foregroundStyle(panel.isOnline ? Color.green : Color.secondary)
-            }
-            Spacer(minLength: 12)
-            Button(panel.paused ? "Resume" : "Pause") {
-                manager.setPaused(!panel.paused, for: panel.serviceName)
-            }
-            .controlSize(.small)
-            .disabled(!panel.isOnline)
-            Button("Identify") { manager.identify(panel.serviceName) }
-                .controlSize(.small)
-                .disabled(!manager.canControl(panel.serviceName, capability: .identify))
-                .help(controlHelp(.identify, "Flash this panel so you can spot it"))
+    /// The panel's own picture, blurred past recognition, as the material the
+    /// glass above it refracts.
+    ///
+    /// Using the mirrored content as the backdrop is the point of the new design
+    /// language: the surface reacts to what the app is actually doing. It is
+    /// blurred hard and dimmed because this pane is full of small telemetry
+    /// text, and dropped entirely under Reduce Transparency.
+    @ViewBuilder
+    private var paneBackground: some View {
+        if let frame = currentFrame, !reduceTransparency {
+            Image(decorative: frame.image, scale: 1)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .blur(radius: 70, opaque: true)
+                .opacity(0.28)
+                .backgroundExtensionEffect()
+                .ignoresSafeArea()
+                .accessibilityHidden(true)
         }
     }
+
+    private var currentFrame: PreviewFrame? {
+        guard manager.preview.serviceName == panel.serviceName else { return nil }
+        return manager.preview.frame
+    }
+
+    // MARK: sections
+
+    /// The hero scrolls with everything else rather than being pinned above the
+    /// form.
+    ///
+    /// It was pinned, via `safeAreaInset`, so the glass would have moving
+    /// content to refract. That turned out to propagate an intrinsic minimum
+    /// height all the way up through NSHostingController: measured, a window
+    /// asked to shrink to 380pt refused to go below 465. Once the form needed
+    /// more room than the window would give, SwiftUI held its minimum size and
+    /// AppKit anchored it bottom-left, so the content ran off the *top* of the
+    /// window where nothing could scroll it back.
+    ///
+    /// The row background is cleared because the card brings its own glass, and
+    /// glass does not stack.
+    private var heroSection: some View {
+        Section {
+            MirrorHero(panel: panel, preview: manager.preview)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
+        }
+    }
+
+    private var sourceSection: some View {
+        Section {
+            LabeledContent("Source") {
+                HStack(spacing: 8) {
+                    // Bound to what the panel *is* set to, not to the last thing
+                    // clicked: backing out of the macOS picker leaves the source
+                    // alone, so the dropdown returns to its previous value.
+                    Picker("Source", selection: sourceKind) {
+                        ForEach(PanelSourceKind.allCases) { kind in
+                            Text(kind.label).tag(kind)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    // Only windows and applications need the macOS picker:
+                    // they are too many and too short-lived to list, and
+                    // choosing the kind already selected fires nothing, so
+                    // re-picking one needs its own control.
+                    if panel.source.kind == .window {
+                        Button("Choose…") {
+                            manager.chooseSource(for: panel.serviceName, style: .window)
+                        }
+                        .help("Pick a different window")
+                    }
+                }
+            }
+            // Displays are listed inline, so switching monitors is one click.
+            if panel.source.kind == .display {
+                LabeledContent("Display") {
+                    Picker("Display", selection: displaySelection) {
+                        ForEach(manager.displayOptions(for: panel.serviceName), id: \.self)
+                        { name in
+                            Text(name).tag(name)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("Which screen this panel mirrors")
+                }
+            }
+            LabeledContent("Currently showing", value: panel.sourceDescription)
+            // Only meaningful for a region, so it is not shown otherwise.
+            if panel.source.kind == .region {
+                regionControls
+            }
+        } header: {
+            Text("Source")
+        } footer: {
+            Text("A region streams a rectangle of one screen, locked to the panel's "
+                + "\(PixelConvert.width):\(PixelConvert.height) shape — 1× sends one "
+                + "screen point per panel pixel, higher multiples frame more and "
+                + "scale it down. Choosing a display, window, or application "
+                + "instead uses the macOS picker. Either choice is remembered and "
+                + "reapplied when the sender restarts.")
+        }
+    }
+
+    /// The marquee controls, shown only while Region is the chosen source.
+    private var regionControls: some View {
+        LabeledContent("Rectangle") {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    // Not gated on the panel being online: choosing what to send
+                    // is a decision about this Mac's screen, and the preview
+                    // shows the answer with the panel switched off.
+                    Button(manager.isChoosingRegion ? "Done" : "Adjust…") {
+                        if manager.isChoosingRegion {
+                            manager.finishChoosingRegion()
+                        } else {
+                            manager.chooseRegion(for: panel.serviceName)
+                        }
+                    }
+                    .help("Drag an aspect-locked rectangle over your screen to "
+                        + "choose what this panel shows")
+                    Button("Rotate") {
+                        manager.rotateRegion(for: panel.serviceName)
+                    }
+                    .disabled(panel.source.region == nil)
+                    .help("Turn the rectangle on its side")
+                    if let region = panel.source.region {
+                        Text(region.sizeDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+                HStack(spacing: 6) {
+                    ForEach(RegionSpec.scalePresets, id: \.self) { scale in
+                        Button("\(scale)×") {
+                            manager.setRegionScale(scale, for: panel.serviceName)
+                        }
+                        .disabled(panel.source.region == nil)
+                        .help(scaleHelp(scale))
+                    }
+                }
+            }
+        }
+    }
+
+    /// The dropdown's value: derived from the stored source, so a cancelled
+    /// chooser cannot leave it showing something that was never applied.
+    private var sourceKind: Binding<PanelSourceKind> {
+        Binding(
+            get: { panel.source.kind },
+            set: { manager.selectSourceKind($0, for: panel.serviceName) })
+    }
+
+    /// Which display a display source is pointed at.
+    private var displaySelection: Binding<String> {
+        Binding(
+            get: {
+                if case .display(let name) = panel.source { return name }
+                return ""
+            },
+            set: { manager.selectDisplay($0, for: panel.serviceName) })
+    }
+
+    /// What a preset button will frame, so the numbers are not a mystery.
+    private func scaleHelp(_ scale: Int) -> String {
+        let landscape = panel.source.region?.isLandscape ?? false
+        let size = RegionSpec.panelSize(scale: scale, landscape: landscape)
+        return "Frame \(Int(size.width))x\(Int(size.height)) points"
+            + (scale == 1 ? " — one point per panel pixel" : "")
+    }
+
+    private var displaySection: some View {
+        Section("Display") {
+            if manager.canControl(panel.serviceName, capability: .brightnessLevel)
+                || panel.capabilities.contains(.brightnessLevel)
+            {
+                LabeledContent("Brightness") {
+                    HStack(spacing: 10) {
+                        // No `step:`. The range is 1...255, and a step made
+                        // macOS draw a tick mark per step - 254 of them,
+                        // merging into what looked like a stray rule under the
+                        // slider. The binding already rounds on the way out.
+                        //
+                        // Left to fill the value column rather than capped at a
+                        // width, which made a short slider float in the middle
+                        // of an otherwise empty row.
+                        Slider(value: brightnessLevel, in: brightnessBounds)
+                            .disabled(!manager.canControl(
+                                panel.serviceName, capability: .brightnessLevel))
+                            .help(controlHelp(
+                                .brightnessLevel, "Set the panel backlight"))
+                            .accessibilityLabel("Brightness level")
+                        Text("\(brightnessPercent)%")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .frame(width: 38, alignment: .trailing)
+                    }
+                }
+            } else {
+                LabeledContent("Brightness") {
+                    Toggle("High", isOn: Binding(
+                        get: { panel.brightnessHigh },
+                        set: { manager.setBrightness(high: $0, for: panel.serviceName) }))
+                        .toggleStyle(.switch)
+                        // A switch Toggle stretches to fill, stranding its
+                        // switch at the far edge of the row from the words
+                        // naming it. fixedSize keeps the pair together.
+                        .fixedSize()
+                        .disabled(!manager.canControl(
+                            panel.serviceName, capability: .brightness))
+                        .help(controlHelp(.brightness, "Set the panel backlight"))
+                }
+            }
+            LabeledContent("Orientation") {
+                Toggle("Rotate 180°", isOn: Binding(
+                    get: { panel.flipped },
+                    set: { manager.setFlip($0, for: panel.serviceName) }))
+                    .toggleStyle(.switch)
+                    .fixedSize()
+                    .disabled(!manager.canControl(panel.serviceName, capability: .flip))
+                    .help(controlHelp(.flip, "Rotate the image on the panel"))
+            }
+            if panel.controlProtocolVersion != Int(DeviceProtocol.controlProtocolVersion) {
+                Text("Flash the current firmware to enable remote controls.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var connectionSection: some View {
+        Section {
+            LabeledContent("Address") {
+                CopyableAddress(address: panel.address)
+            }
+            LabeledContent("WiFi signal", value: panel.signalDescription)
+            LabeledContent("USB device") {
+                HStack(spacing: 8) {
+                    Picker("USB device", selection: usbPortSelection) {
+                        Text("Automatic (match by name)").tag("")
+                        ForEach(manager.usbPortOptions(for: panel.serviceName), id: \.self)
+                        { port in
+                            Text((port as NSString).lastPathComponent).tag(port)
+                        }
+                    }
+                    .labelsHidden()
+                    // Sized to its widest option rather than stretched to a
+                    // fixed width, which left a popup padded with dead space.
+                    .fixedSize()
+                    .help(panel.usbPort ?? "Automatically match this display by its reported name")
+
+                    Button {
+                        manager.refreshUSBPorts()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("Refresh connected USB serial devices")
+                }
+            }
+            LabeledContent("Saved WiFi") {
+                HStack(spacing: 8) {
+                    Picker("Saved WiFi", selection: $selectedSSID) {
+                        Text("Select a network…").tag("")
+                        ForEach(manager.savedNetworkNames, id: \.self) { ssid in
+                            Text(ssid).tag(ssid)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+
+                    Button("Apply") {
+                        manager.applySavedNetwork(selectedSSID, to: panel.serviceName)
+                    }
+                    .disabled(selectedSSID.isEmpty)
+
+                    Button(manager.savedNetworkNames.isEmpty ? "Add…" : "Edit…") {
+                        manager.configureUSB(
+                            preferredSSID: selectedSSID.isEmpty ? nil : selectedSSID)
+                    }
+                }
+            }
+        } header: {
+            Text("Connection")
+        } footer: {
+            Text("Automatic verifies the reported display name; a manual assignment is saved with this display. WiFi credentials are stored in your login Keychain and applied over USB.")
+        }
+    }
+
+    private var screensaverSection: some View {
+        Section {
+            LabeledContent("Template") {
+                VStack(alignment: .leading, spacing: 6) {
+                    TextEditor(text: $editedIdleText)
+                        .font(.body.monospaced())
+                        .frame(height: 72)
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        .glassCard(cornerRadius: 8)
+                        .accessibilityLabel("Screensaver template")
+                    HStack(spacing: 8) {
+                        Button("Save") {
+                            manager.setIdleText(editedIdleText, for: panel.serviceName)
+                        }
+                        .disabled(editedIdleText == panel.idleText)
+                        Menu("Insert Token") {
+                            ForEach(ScreensaverTemplate.tokens) { token in
+                                Button("\(token.placeholder) — \(token.summary)") {
+                                    insertToken(token)
+                                }
+                            }
+                        }
+                        .fixedSize()
+                        Button("Use Default") {
+                            editedIdleText = ScreensaverTemplate.standard
+                        }
+                        .disabled(editedIdleText == ScreensaverTemplate.standard)
+                        .help("The card the panel draws on its own, as a template you can edit")
+                        Button("Clear") {
+                            editedIdleText = ""
+                            manager.setIdleText("", for: panel.serviceName)
+                        }
+                        .disabled(panel.idleText.isEmpty && editedIdleText.isEmpty)
+                    }
+                }
+            }
+            LabeledContent("On the panel") {
+                ScreensaverPanelPreview(expansion: livePreview)
+            }
+            if !livePreview.unknownTokens.isEmpty {
+                Label(
+                    "Not a token: "
+                        + livePreview.unknownTokens.map { "{\($0)}" }
+                            .joined(separator: ", "),
+                    systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Screensaver")
+        } footer: {
+            Text("Wrap a value in braces to substitute it, for example "
+                + "\"\(ScreensaverTemplate.tokens[0].placeholder)\". Write \"{{\" for a "
+                + "literal brace. Up to \(IdleText.maxLines) lines of "
+                + "\(IdleText.maxLineBytes) characters, shown with how long ago they were "
+                + "sent. The panel's font is plain ASCII, so anything else is dropped.")
+        }
+    }
+
+    private var firmwareSection: some View {
+        Section("Firmware") {
+            LabeledContent("Version", value: panel.firmwareVersion ?? "Legacy firmware")
+            LabeledContent(
+                "Frame protocol",
+                value: panel.frameProtocolVersion.map(String.init) ?? "2")
+            LabeledContent(
+                "Control protocol",
+                value: panel.controlProtocolVersion.map(String.init) ?? "Not available")
+            LabeledContent("Uptime", value: panel.uptimeDescription)
+        }
+    }
+
+    private var diagnosticsSection: some View {
+        Section {
+            DisclosureGroup("Diagnostics", isExpanded: $showDiagnostics) {
+                LabeledContent("Frames displayed", value: panel.framesShown.formatted())
+                LabeledContent("Frames dropped", value: panel.framesDropped.formatted())
+                LabeledContent("Sender errors", value: panel.sendErrors.formatted())
+                LabeledContent(
+                    "Changed bands", value: String(format: "%.0f%%", panel.diffPercent))
+                LabeledContent("Free heap", value: ByteCountFormatter.string(
+                    fromByteCount: Int64(panel.freeHeap), countStyle: .memory))
+                LabeledContent("Packet pacing", value: "\(panel.spacingMicros) µs")
+                if let hardwareID = panel.hardwareID {
+                    LabeledContent("Hardware ID", value: hardwareID)
+                }
+            }
+        }
+    }
+
+    private var dangerSection: some View {
+        Section {
+            Button("Restart Display…", role: .destructive) {
+                confirmRestart = true
+            }
+            .disabled(!manager.canControl(panel.serviceName, capability: .restart))
+            .help(controlHelp(.restart, "Reboot the panel"))
+            Button("Forget Display", role: .destructive) {
+                manager.forget(panel.serviceName)
+            }
+            .disabled(!manager.canForget(panel.serviceName))
+            .help("A display can be forgotten after its active session retires")
+        }
+    }
+
+    // MARK: helpers
 
     /// Tooltip for a control: why it is unavailable, or what it does. The reason
     /// comes from the same check that disables the control, so a greyed-out
@@ -644,12 +745,43 @@ private struct PanelDetailView: View {
         }
     }
 
+    /// Renaming, from the toolbar rather than from an editable heading.
+    ///
+    /// The name now lives in the titlebar, and a titlebar is not somewhere to
+    /// put a text field that triggers a USB write and a device restart. A
+    /// popover keeps the commit explicit.
+    private var renamePopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Rename Display")
+                .font(.headline)
+            TextField("Device name", text: $editedName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 260)
+                .focused($nameIsFocused)
+                .onSubmit(saveName)
+                .onExitCommand(perform: cancelNameEdit)
+            Text("Written over USB to the connected display, which then restarts and "
+                + "reconnects on its own.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 260, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Cancel", role: .cancel) { cancelNameEdit() }
+                Button("Save") { saveName() }
+                    .buttonStyle(.glassProminent)
+                    .disabled(!nameHasChanges)
+            }
+        }
+        .padding(14)
+    }
+
     /// The template as it is being edited, expanded against this panel's live
     /// values. Previewing the unsaved text is the point: the user is composing
     /// against a 4x28 character budget and needs to see what survives it.
     private var livePreview: ScreensaverTemplate.Expansion {
-        manager.screensaverPreview(
-            for: panel.serviceName, template: editedIdleText)
+        manager.screensaverPreview(for: panel.serviceName, template: editedIdleText)
     }
 
     /// Append a token, on its own line when the template does not end on a
@@ -664,6 +796,148 @@ private struct PanelDetailView: View {
     }
 }
 
+// MARK: - Hero
+
+/// What one panel is showing, and whether it is still being fed.
+///
+/// Deliberately narrow in scope: the name and connection state now live in the
+/// merged titlebar, so this is only the picture, the capture state, and the two
+/// numbers that qualify it. Repeating the name here as a heading cost a whole
+/// line of window height to say what the titlebar already said.
+private struct MirrorHero: View {
+    let panel: PanelSnapshot
+    @ObservedObject var preview: FramePreview
+
+    @Namespace private var glassNamespace
+
+    /// Panel geometry, so the placeholder is the same shape as a real frame.
+    private static let thumbnailHeight: CGFloat = 96
+
+    private var frame: PreviewFrame? {
+        // Never show one panel's frame against another's details.
+        guard preview.serviceName == panel.serviceName else { return nil }
+        return preview.frame
+    }
+
+    var body: some View {
+        GlassEffectContainer(spacing: 14) {
+            // The same one third / two thirds split the rows below use, so the
+            // picture sits in the label column and its state in the value
+            // column. Centred rather than baseline-aligned: an image's text
+            // baseline is just its bottom edge, which would hang the status
+            // pill off the foot of the thumbnail.
+            LabelColumnLayout(alignment: .center) {
+                thumbnail
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                VStack(alignment: .leading, spacing: 7) {
+                    statusPill
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                    if let lastError = panel.lastError {
+                        Text(lastError)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(12)
+            .glassCard(cornerRadius: 16)
+        }
+    }
+
+    /// State as its own small glass capsule, so "is this working" reads at a
+    /// glance from across the room rather than as one more line of body text.
+    private var statusPill: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .foregroundStyle(tint)
+                .accessibilityHidden(true)
+            Text(panel.captureStatus.summary)
+                .font(.callout)
+                .fontWeight(.medium)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .glassCard(cornerRadius: 11, tint: pillTint)
+        .glassEffectID("status", in: glassNamespace)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Mirroring status: \(panel.captureStatus.summary)")
+    }
+
+    /// The frame at its own aspect ratio, with no filler behind it. A fixed
+    /// square box letterboxed a portrait frame with black bars, which read as
+    /// though the panel itself were showing black borders.
+    private var thumbnail: some View {
+        Group {
+            if let frame {
+                Image(decorative: frame.image, scale: 1)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: Self.thumbnailHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(.white.opacity(0.18), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.3), radius: 6, y: 2)
+            } else {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(.quaternary.opacity(0.5))
+                    .aspectRatio(
+                        CGFloat(PixelConvert.width) / CGFloat(PixelConvert.height),
+                        contentMode: .fit)
+                    .frame(height: Self.thumbnailHeight)
+                    .overlay(
+                        Image(systemName: "display.slash")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.secondary))
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var symbol: String {
+        switch panel.captureStatus {
+        case .streaming: return "dot.radiowaves.up.forward"
+        case .waiting, .recovering: return "arrow.triangle.2.circlepath"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .suspended: return "pause.circle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch panel.captureStatus {
+        case .streaming: return .green
+        case .waiting, .recovering, .failed: return .orange
+        case .suspended: return .secondary
+        }
+    }
+
+    /// Only a real problem tints the glass. Tinting it for every transient
+    /// reconnect would make the colour meaningless.
+    private var pillTint: Color? {
+        panel.captureStatus.needsAttention ? .orange : nil
+    }
+
+    /// Frame totals are deliberately absent: they live in Diagnostics, and
+    /// repeating them here spent the hero's attention on a number nobody reads
+    /// at a glance.
+    private var detail: String {
+        var parts: [String] = []
+        if panel.captureStatus.isStreaming {
+            parts.append(String(format: "%.1f fps", panel.displayFPS))
+        }
+        parts.append(panel.frameAgeDescription)
+        return parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - Small pieces
+
 /// The panel's own IP address, selectable and copyable.
 ///
 /// An address you can read but not take anywhere is only half useful - it is
@@ -673,10 +947,7 @@ private struct CopyableAddress: View {
     @State private var copied = false
 
     var body: some View {
-        guard let address else {
-            return AnyView(Text("Resolving…").foregroundStyle(.secondary))
-        }
-        return AnyView(
+        if let address {
             HStack(spacing: 6) {
                 Text(address)
                     .textSelection(.enabled)
@@ -700,16 +971,18 @@ private struct CopyableAddress: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-            })
+            }
+        } else {
+            Text("Resolving…").foregroundStyle(.secondary)
+        }
     }
 }
 
 /// The screensaver template as the panel will render it: fixed-width lines on a
 /// dark card, at the panel's line budget.
 ///
-/// Shown because the budget is tight - four lines of 28 characters - and a
-/// template that overflows it loses content silently on a device the user is
-/// usually not looking at while editing.
+/// Deliberately *not* glass. This stands in for a physical panel showing opaque
+/// pixels, and making it translucent would misrepresent what the device does.
 private struct ScreensaverPanelPreview: View {
     let expansion: ScreensaverTemplate.Expansion
 
@@ -725,257 +998,26 @@ private struct ScreensaverPanelPreview: View {
                 ForEach(Array(expansion.lines.enumerated()), id: \.offset) { _, line in
                     Text(line)
                         .font(.caption.monospaced())
+                        .foregroundStyle(.white)
                 }
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
             .background(
-                RoundedRectangle(cornerRadius: 4).fill(.black.opacity(0.35)))
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(.black.opacity(0.85)))
         }
     }
 }
 
-/// What the panel is being sent, right now, and whether anything is being sent
-/// at all.
-///
-/// This sits above every other control because it answers the question the
-/// window could not answer before: a broken mirror used to look exactly like a
-/// working one, since the "Online" badge and frame rate are derived from device
-/// heartbeats, which keep arriving whether or not a single pixel does.
-private struct MirrorPreview: View {
-    let panel: PanelSnapshot
-    @ObservedObject var preview: FramePreview
-
-    /// Panel geometry, so the placeholder has the same shape as a real frame.
-    private static let thumbnailHeight: CGFloat = 104
-
-    private var frame: PreviewFrame? {
-        // Never show one panel's frame against another's details.
-        guard preview.serviceName == panel.serviceName else { return nil }
-        return preview.frame
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            thumbnail
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Image(systemName: symbol)
-                        .foregroundStyle(tint)
-                        .accessibilityHidden(true)
-                    Text(panel.captureStatus.summary)
-                        .fontWeight(.medium)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                if panel.captureStatus.needsAttention {
-                    Text("Choose a source below to start mirroring again.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Mirroring status: \(panel.captureStatus.summary). \(detail)")
-    }
-
-    /// The frame at its own aspect ratio, with no filler behind it.
-    ///
-    /// A fixed square box letterboxed a portrait frame with black bars, which
-    /// read as part of the picture - as though the panel itself were showing
-    /// black borders.
-    private var thumbnail: some View {
-        Group {
-            if let frame {
-                Image(decorative: frame.image, scale: 1)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(height: Self.thumbnailHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .strokeBorder(.separator, lineWidth: 1))
-            } else {
-                // Only the placeholder needs a box, to stand in for the frame
-                // that is not arriving. Sized to the panel's portrait aspect so
-                // the row does not jump when a frame appears.
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(.quaternary.opacity(0.5))
-                    .aspectRatio(
-                        CGFloat(PixelConvert.width) / CGFloat(PixelConvert.height),
-                        contentMode: .fit)
-                    .frame(height: Self.thumbnailHeight)
-                    .overlay(
-                        Image(systemName: "display.slash")
-                            .font(.system(size: 20))
-                            .foregroundStyle(.secondary))
-            }
-        }
-        .accessibilityHidden(true)
-    }
-
-    private var symbol: String {
-        switch panel.captureStatus {
-        case .streaming: return "dot.radiowaves.up.forward"
-        case .waiting, .recovering: return "arrow.triangle.2.circlepath"
-        case .failed: return "exclamationmark.triangle.fill"
-        case .suspended: return "pause.circle.fill"
-        }
-    }
-
-    private var tint: Color {
-        switch panel.captureStatus {
-        case .streaming: return .green
-        case .waiting, .recovering: return .orange
-        case .failed: return .orange
-        case .suspended: return .secondary
-        }
-    }
-
-    /// The numbers underneath. Frame age is included because it is the one
-    /// value that separates "mirroring has stopped" from "the source simply is
-    /// not changing" - ScreenCaptureKit sends nothing at all for static
-    /// content, so a still window legitimately produces no frames.
-    /// Frame totals are deliberately absent: they live in Diagnostics, and
-    /// repeating them here spent the row's attention on a number nobody reads
-    /// at a glance.
-    private var detail: String {
-        var parts: [String] = []
-        if panel.captureStatus.isStreaming {
-            parts.append(String(format: "%.1f fps", panel.displayFPS))
-        }
-        parts.append(panel.frameAgeDescription)
-        return parts.joined(separator: " · ")
-    }
-}
-
-private struct PanelNotice: View {
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            Text(text)
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 6).fill(.orange.opacity(0.12)))
-    }
-}
-
-private struct CompactGroup<Content: View>: View {
-    let title: String
-    let content: Content
-
-    init(_ title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        GroupBox(title) {
-            content
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-        }
-    }
-}
-
-/// A `CompactGroup` that can be folded away, for detail worth keeping but not
-/// worth the vertical space it occupies on every visit.
-private struct CollapsibleGroup<Content: View>: View {
-    let title: String
-    @Binding var isExpanded: Bool
-    let content: Content
-
-    init(
-        _ title: String, isExpanded: Binding<Bool>,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.title = title
-        self._isExpanded = isExpanded
-        self.content = content()
-    }
-
-    var body: some View {
-        GroupBox {
-            DisclosureGroup(isExpanded: $isExpanded) {
-                content
-                    .padding(.horizontal, 8)
-                    .padding(.top, 6)
-                    .padding(.bottom, 2)
-            } label: {
-                Text(title)
-                    .font(.callout)
-                    // The whole label is the hit target, not just the arrow.
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-            }
-        }
-    }
-}
-
-private struct CompactGrid<Content: View>: View {
-    let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        Grid(horizontalSpacing: 12, verticalSpacing: 6) {
-            GridRow {
-                Color.clear.frame(maxWidth: .infinity, minHeight: 0, maxHeight: 0)
-                Color.clear.frame(maxWidth: .infinity, minHeight: 0, maxHeight: 0)
-                Color.clear.frame(maxWidth: .infinity, minHeight: 0, maxHeight: 0)
-            }
-            .accessibilityHidden(true)
-            content
-        }
-    }
-}
-
-private struct InfoRow<Content: View>: View {
-    let label: String
-    let content: Content
-
-    init(_ label: String, @ViewBuilder content: () -> Content) {
-        self.label = label
-        self.content = content()
-    }
-
-    init(_ label: String, _ value: String) where Content == Text {
-        self.label = label
-        self.content = Text(value)
-    }
-
-    var body: some View {
-        GridRow(alignment: .firstTextBaseline) {
-            Text(label)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .gridColumnAlignment(.trailing)
-            content
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .gridCellColumns(2)
-                .gridColumnAlignment(.leading)
-        }
-    }
-}
+// MARK: - Hosting
 
 @MainActor
 final class ManagerWindowController: NSObject, NSWindowDelegate {
     private let manager: PanelManager
     private let mainMenu = MainMenuController()
     private var window: NSWindow?
+    private var titleObserver: AnyCancellable?
 
     init(manager: PanelManager) {
         self.manager = manager
@@ -989,9 +1031,25 @@ final class ManagerWindowController: NSObject, NSWindowDelegate {
         // Frame previews are only produced while this window is up.
         manager.setPreviewVisible(true)
         window.makeKeyAndOrderFront(nil)
-        window.toolbar = nil
-        window.titlebarAppearsTransparent = true
-        window.titlebarSeparatorStyle = .none
+    }
+
+    /// Keep the merged titlebar showing the selected panel's name.
+    ///
+    /// Done here rather than with `navigationTitle` because that modifier does
+    /// not reach `NSWindow.title` for a view hosted in a hand-built window, so
+    /// the titlebar would have shown the app's name forever. `objectWillChange`
+    /// fires before the change lands, hence the hop to the next main-actor turn.
+    private func observeTitle() {
+        titleObserver = manager.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor in self?.syncTitle() }
+        }
+        syncTitle()
+    }
+
+    private func syncTitle() {
+        guard let window else { return }
+        let title = manager.selectedPanel?.displayName ?? "ESPDisplaySender"
+        if window.title != title { window.title = title }
     }
 
     private func makeWindowIfNeeded() -> NSWindow {
@@ -999,16 +1057,33 @@ final class ManagerWindowController: NSObject, NSWindowDelegate {
         let controller = NSHostingController(rootView: ManagerView(manager: manager))
         let window = NSWindow(contentViewController: controller)
         window.title = "ESPDisplaySender"
-        window.setContentSize(NSSize(width: 980, height: 680))
-        window.minSize = NSSize(width: 820, height: 560)
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.titleVisibility = .hidden
+        window.setContentSize(NSSize(width: 1000, height: 700))
+        // contentMinSize rather than minSize: with fullSizeContentView the
+        // content view is the whole window, so constraining the frame and
+        // constraining the content are off by the titlebar height.
+        window.contentMinSize = NSSize(width: 760, height: 420)
+        // fullSizeContentView lets the sidebar's glass run the whole height of
+        // the window and up behind the titlebar, which is what makes the
+        // sidebar and the title area read as one surface rather than two.
+        window.styleMask = [
+            .titled, .closable, .miniaturizable, .resizable, .fullSizeContentView,
+        ]
+        // Unified compact: the title sits inline with the toolbar buttons on
+        // reduced margins, so identity and actions share one shallow band
+        // instead of stacking a title row above a toolbar row.
+        window.toolbarStyle = .unifiedCompact
+        // The title is wanted now - it carries the selected panel's name and
+        // status, which the hero used to repeat.
+        window.titleVisibility = .visible
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
+        // The toolbar itself is left alone. It used to be cleared on every
+        // show(), which threw away the SwiftUI toolbar and its glass controls.
         window.center()
         window.setFrameAutosaveName("ESPDisplaySender.Manager")
         window.delegate = self
         self.window = window
+        observeTitle()
         return window
     }
 
@@ -1065,6 +1140,6 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
 #if DEBUG
 #Preview("Display Manager") {
     ManagerView(manager: PanelManager.preview)
-        .frame(width: 980, height: 680)
+        .frame(width: 1000, height: 700)
 }
 #endif

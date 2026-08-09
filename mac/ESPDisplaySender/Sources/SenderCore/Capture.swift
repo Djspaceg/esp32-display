@@ -26,6 +26,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var _lastFrameAt: Date?
     private var _previewEnabled = false
     private var _configuredFPS = 30
+    /// The sub-rectangle being captured, or nil for the whole source.
+    private var _sourceRect: CGRect?
 
     /// Preview cadence. Frames go to the panel as fast as they arrive; the UI
     /// only needs enough to look live, and each preview image costs a
@@ -142,6 +144,23 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Capturable displays paired with the names the UI shows.
+    ///
+    /// Unlike `listDisplays` this hands back the `SCDisplay` itself, so a caller
+    /// that needs to build a filter does not have to fetch the shareable content
+    /// a second time and hope the set did not change in between. Names come from
+    /// `currentName`, without pumping the run loop: callers here are reacting to
+    /// user input, not to a display reconfiguration, so NSScreen is already
+    /// current and re-entering the run loop would only risk reentrancy.
+    static func capturableDisplays() async -> [(display: SCDisplay, name: String)] {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: false)
+        else { return [] }
+        return content.displays.map {
+            (display: $0, name: currentName(for: $0.displayID) ?? "(unnamed)")
+        }
+    }
+
     /// Stable identity for a display: the CoreGraphics UUID survives
     /// displayID reassignment, rotation, resolution changes, and mirroring -
     /// unlike displayID (reissued) and NSScreen names (mirrored displays
@@ -202,6 +221,63 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// A capturable display matching a name, with its size in **points**.
+    ///
+    /// Deliberately not `resolve(named:knownUUID:)`. That one carries mirror
+    /// traversal and a 172:320 aspect-ratio guess, both aimed at finding a
+    /// virtual panel display; for a region the user has literally drawn on a
+    /// screen, a plain name match is what is wanted, and guessing at a different
+    /// display would silently capture the wrong rectangle.
+    ///
+    /// The size comes from `NSScreen`, not from `SCDisplay`, because
+    /// `sourceRect` is specified in points in the display's logical coordinate
+    /// system and NSScreen is the authority on that.
+    @MainActor
+    static func findDisplay(named name: String) async -> (display: SCDisplay, points: CGSize)? {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: false)
+        else { return nil }
+        for display in content.displays {
+            guard let screenName = currentName(for: display.displayID),
+                screenName == name
+            else { continue }
+            let points = screen(for: display.displayID)?.frame.size
+                ?? CGSize(width: display.width, height: display.height)
+            return (display, points)
+        }
+        return nil
+    }
+
+    /// The `NSScreen` backing a display ID, for its point geometry.
+    static func screen(for displayID: CGDirectDisplayID) -> NSScreen? {
+        NSScreen.screens.first { screen in
+            (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+                as? CGDirectDisplayID) == displayID
+        }
+    }
+
+    /// The `NSScreen` whose name matches, for turning a stored region back into
+    /// window coordinates.
+    static func screen(named name: String) -> NSScreen? {
+        NSScreen.screens.first { screen in
+            guard let id = screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+            else { return false }
+            return currentName(for: id) == name
+        }
+    }
+
+    /// The screen the user is most likely to want to frame: the one with the
+    /// keyboard focus, falling back to the first attached.
+    static func preferredScreen() -> (name: String, size: CGSize)? {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first,
+            let id = screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
+            let name = currentName(for: id)
+        else { return nil }
+        return (name, screen.frame.size)
+    }
+
     /// Look a window up by ID in the current shareable content.
     ///
     /// Re-resolving a tracked window by ID rather than by name matters on
@@ -252,12 +328,10 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// frame. Re-resolving before every (re)start is what makes a picked
     /// window survive being resized.
     ///
-    /// Returns nil when the filter cannot be re-resolved, either because the
-    /// content is gone or because its style carries no identity we can look up
-    /// (the accessors that reveal a filter's contents need macOS 15.2). The
-    /// caller then keeps using the filter it already has.
+    /// Returns `.contentGone` when the window or display it named has gone, and
+    /// `.notResolvable` when its style carries no single identity to look up, in
+    /// which case the caller keeps using the filter it already has.
     static func resolveTarget(of filter: SCContentFilter) async -> FilterResolution {
-        guard #available(macOS 15.2, *) else { return .notResolvable }
         switch filter.style {
         case .window:
             guard let stale = filter.includedWindows.first else { return .notResolvable }
@@ -381,6 +455,19 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             landscape: window.frame.width > window.frame.height, fps: fps)
     }
 
+    /// Start capturing a rectangle of a display rather than the whole thing.
+    ///
+    /// `sourceRect` is in points relative to the display's top-left corner,
+    /// which is what ScreenCaptureKit asks for. Orientation follows the
+    /// rectangle, so a portrait marquee streams portrait.
+    func start(display: SCDisplay, sourceRect: CGRect, fps: Int) async throws {
+        try await start(
+            filter: SCContentFilter(display: display, excludingWindows: []),
+            landscape: sourceRect.width > sourceRect.height,
+            fps: fps,
+            sourceRect: sourceRect)
+    }
+
     /// Start capturing whatever the user chose in macOS's content picker.
     /// Orientation comes from the filter's content rect, so a picked portrait
     /// window streams portrait and a landscape display streams landscape.
@@ -390,7 +477,9 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             filter: contentFilter, landscape: rect.width > rect.height, fps: fps)
     }
 
-    private func start(filter: SCContentFilter, landscape: Bool, fps: Int) async throws {
+    private func start(
+        filter: SCContentFilter, landscape: Bool, fps: Int, sourceRect: CGRect? = nil
+    ) async throws {
         let width = landscape ? PixelConvert.height : PixelConvert.width
         let height = landscape ? PixelConvert.width : PixelConvert.height
         stateLock.withLock {
@@ -398,6 +487,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             _outW = width
             _outH = height
             _configuredFPS = fps
+            _sourceRect = sourceRect
             _stopped = false
             _stopReason = nil
             _lastSampleAt = Date()
@@ -405,7 +495,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let stream = SCStream(
             filter: filter,
-            configuration: Self.configuration(width: width, height: height, fps: fps),
+            configuration: Self.configuration(
+                width: width, height: height, fps: fps, sourceRect: sourceRect),
             delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
         try await stream.startCapture()
@@ -413,7 +504,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private static func configuration(
-        width: Int, height: Int, fps: Int
+        width: Int, height: Int, fps: Int, sourceRect: CGRect? = nil
     ) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.width = width
@@ -423,7 +514,49 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.queueDepth = 3
         config.showsCursor = true
         config.scalesToFit = true
+        // Left unset for a whole-display or window capture: the header is
+        // explicit that an unset sourceRect streams the entire display or
+        // window, and a zero rect is not the same thing.
+        if let sourceRect { config.sourceRect = sourceRect }
         return config
+    }
+
+    /// Point a running stream at a different rectangle of the same display.
+    ///
+    /// Reconfigures rather than restarts, because the marquee sends one of these
+    /// for every step of a drag and rebuilding the stream that often would make
+    /// the panel flicker and reset its band diff. Orientation is recomputed too,
+    /// so dragging a portrait marquee out into a landscape one is handled in the
+    /// same call.
+    ///
+    /// - Returns: true when the stream was reconfigured.
+    @discardableResult
+    func updateRegion(_ rect: CGRect) async -> Bool {
+        guard let stream else { return false }
+        let current = stateLock.withLock {
+            (rect: _sourceRect, fps: _configuredFPS)
+        }
+        guard current.rect != rect else { return false }
+
+        let landscape = rect.width > rect.height
+        let width = landscape ? PixelConvert.height : PixelConvert.width
+        let height = landscape ? PixelConvert.width : PixelConvert.height
+        do {
+            try await stream.updateConfiguration(
+                Self.configuration(
+                    width: width, height: height, fps: current.fps, sourceRect: rect))
+        } catch {
+            FileHandle.standardError.write(
+                Data("capture region update failed: \(error.localizedDescription)\n".utf8))
+            return false
+        }
+        stateLock.withLock {
+            _landscape = landscape
+            _outW = width
+            _outH = height
+            _sourceRect = rect
+        }
+        return true
     }
 
     /// Re-orient a running stream in place, without replacing it.

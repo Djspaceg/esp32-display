@@ -211,7 +211,10 @@ public enum ESPDisplaySenderApp {
                 if opts.pacingExplicit { partial.adaptivePacing = opts.adaptivePacing }
                 overrides = partial
             }
-            let manager = PanelManager(settings: overrides)
+            // The display name is handed over so the window can preview an
+            // Automatic source the same way a session would resolve it.
+            let manager = PanelManager(
+                settings: overrides, defaultDisplayName: opts.displayName)
             let window = ManagerWindowController(manager: manager)
             let delegate = ESPDisplayApplicationDelegate(
                 managerWindow: window,

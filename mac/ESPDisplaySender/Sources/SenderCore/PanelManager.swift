@@ -204,6 +204,12 @@ final class PanelManager: ObservableObject {
     @Published private(set) var panels: [PanelSnapshot] = []
     @Published private(set) var savedNetworkNames: [String] = []
     @Published private(set) var usbSerialPorts: [String] = []
+    /// Displays the user can pick from, by name.
+    ///
+    /// Listed in the window rather than reached through the macOS picker, so
+    /// switching from one monitor to another is a single click instead of a trip
+    /// through system UI to choose from a list this app can show itself.
+    @Published private(set) var displayNames: [String] = []
     @Published var selectedServiceName: String? {
         didSet { updatePreviewFocus() }
     }
@@ -224,6 +230,18 @@ final class PanelManager: ObservableObject {
     /// being switched off can be told before the new one is switched on.
     private var previewFocus: String?
     private var previewVisible = false
+    /// The marquee, and which panel it is currently drawing a region for.
+    private let regionSelector = RegionSelector()
+    private var regionTarget: String?
+    /// What the panel was showing before the marquee opened, so Escape can put it
+    /// back.
+    private var sourceBeforeRegion: PanelSource?
+    /// Fills the preview for a panel that has no session of its own, so a source
+    /// can be chosen and judged with the hardware switched off.
+    private let previewDriver = PreviewDriver()
+    /// The display an Automatic source tracks, as a session would resolve it.
+    private let defaultDisplayName: String
+    private var screenChangeObserver: NSObjectProtocol?
     private var supersededServiceNames: Set<String> = []
     private weak var picker: PickerSource?
     private var pickerTarget: String?
@@ -239,12 +257,19 @@ final class PanelManager: ObservableObject {
     /// the device's own reports while a drag is in flight; see
     /// `ignoreReportedBrightness`.
     private var commandedBrightness: [String: (level: Int, at: Date)] = [:]
+
+    /// Last gesture sequence number seen from each panel, so a redelivered UDP
+    /// datagram is not acted on twice. Compared for inequality rather than
+    /// ordering: the counter wraps at 16 bits and restarts at a random value
+    /// when the device reboots, so "newer" is not something it can express.
+    private var lastTouchSequence: [String: UInt16] = [:]
     /// How long to keep preferring the commanded level over the device's
     /// reports. Long enough to cover a coalesced drag plus a round trip, short
     /// enough that a lost command self-corrects while the user is still there.
     private static let brightnessEchoGrace: TimeInterval = 1.5
 
-    init(settings: SenderSettings? = nil) {
+    init(settings: SenderSettings? = nil, defaultDisplayName: String = "") {
+        self.defaultDisplayName = defaultDisplayName
         let url = PanelStore.defaultURL
         persistenceURL = url
         settingsURL = SettingsStore.defaultURL
@@ -275,6 +300,38 @@ final class PanelManager: ObservableObject {
                 self?.objectWillChange.send()
             }
         }
+        // Dragging the marquee streams straight through to whichever panel it
+        // was opened for.
+        regionSelector.onChange = { [weak self] region in
+            guard let self, let target = self.regionTarget else { return }
+            self.apply(region, to: target)
+        }
+        regionSelector.onConfirm = { [weak self] in
+            self?.finishChoosingRegion()
+        }
+        regionSelector.onCancel = { [weak self] in
+            self?.cancelChoosingRegion()
+        }
+        previewDriver.onPreview = { [weak self] image, landscape, serviceName in
+            self?.preview.accept(
+                image: image, landscape: landscape, from: serviceName)
+        }
+        refreshDisplays()
+        // Polled nowhere: querying shareable content is not free, and macOS says
+        // when the screen layout changes.
+        screenChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshDisplays() }
+        }
+        previewDriver.onUnavailable = { [weak self] serviceName, reason in
+            guard let self else { return }
+            self.preview.clearFrame()
+            self.updatePanel(serviceName) { panel in
+                panel.captureStatus = .waiting("Nothing to preview. \(reason)")
+            }
+        }
     }
 
 #if DEBUG
@@ -284,6 +341,7 @@ final class PanelManager: ObservableObject {
         savedNetworkNames: [String],
         usbSerialPorts: [String]
     ) {
+        defaultDisplayName = ""
         persistenceURL = nil
         settingsURL = nil
         panels = previewPanels
@@ -302,6 +360,177 @@ final class PanelManager: ObservableObject {
         return panels.first { $0.serviceName == selectedServiceName }
     }
 
+    // MARK: displays
+
+    /// Re-read the attached displays.
+    func refreshDisplays() {
+        Task { @MainActor in
+            // Displays shaped like the panel are skipped for the same reason the
+            // swipe ring skips them: they are this app's own output, so pointing
+            // a panel at one is a mirror of itself or a feedback loop.
+            let names = await DisplayCapture.capturableDisplays()
+                .filter { !Self.isPanelShaped($0.display.width, $0.display.height) }
+                .map(\.name)
+            if names != displayNames { displayNames = names }
+        }
+    }
+
+    /// Displays to offer for a panel, including one it is set to but which is no
+    /// longer attached - dropping it would silently retarget the panel just
+    /// because a monitor was unplugged.
+    func displayOptions(for serviceName: String) -> [String] {
+        guard case .display(let current) = panels.first(
+            where: { $0.serviceName == serviceName })?.source,
+            !current.isEmpty, !displayNames.contains(current)
+        else { return displayNames }
+        return displayNames + [current]
+    }
+
+    /// Point a panel at a named display.
+    func selectDisplay(_ name: String, for serviceName: String) {
+        guard !name.isEmpty else { return }
+        let source = PanelSource.display(name)
+        updatePanel(serviceName) { panel in
+            panel.source = source
+            panel.sourceDescription = source.label
+        }
+        // A live session is handed a filter directly; one that starts later reads
+        // the stored source instead.
+        if let session = sessions[serviceName] {
+            Task { @MainActor in
+                guard let chosen = await DisplayCapture.capturableDisplays()
+                    .first(where: { $0.name == name })
+                else { return }
+                session.usePickerFilter(
+                    SCContentFilter(display: chosen.display, excludingWindows: []))
+            }
+        }
+        refreshPreviewDriver()
+        persistIfNeeded(force: true)
+    }
+
+    // MARK: capture region
+
+    /// Whether the marquee is on screen, so the button can read "Done".
+    var isChoosingRegion: Bool { regionSelector.isVisible }
+
+    /// Put the marquee on screen for this panel and make its region the live
+    /// source straight away.
+    ///
+    /// Applied immediately rather than on a confirm step, because the panel and
+    /// the in-window preview are the feedback: you drag the rectangle and watch
+    /// what arrives, which is only useful if it is already streaming.
+    func chooseRegion(for serviceName: String) {
+        selectedServiceName = serviceName
+        regionTarget = serviceName
+
+        let panel = panels.first { $0.serviceName == serviceName }
+        // Remembered whole, not just the rectangle: Escape has to be able to put
+        // back a source that was not a region at all.
+        sourceBeforeRegion = panel?.source
+        let existing = panel?.source.region
+        guard let region = existing ?? Self.startingRegion() else {
+            operationOutcome = .failure(
+                "No display available",
+                "macOS reported no screen to draw a region on.")
+            return
+        }
+        apply(region, to: serviceName)
+        regionSelector.show(region)
+    }
+
+    /// Take the marquee away. The region stays in force as the panel's source.
+    func finishChoosingRegion() {
+        regionSelector.hide()
+        regionTarget = nil
+        sourceBeforeRegion = nil
+        persistIfNeeded(force: true)
+    }
+
+    /// Abandon the rectangle and put back whatever the panel was showing before.
+    func cancelChoosingRegion() {
+        defer { finishChoosingRegion() }
+        guard let target = regionTarget, let previous = sourceBeforeRegion,
+            previous != panels.first(where: { $0.serviceName == target })?.source
+        else { return }
+
+        switch previous {
+        case .region(let region):
+            apply(region, to: target)
+        case .automatic:
+            useAutomaticSource(for: target)
+        case .display(let name):
+            selectDisplay(name, for: target)
+        case .window:
+            // The window itself cannot be re-resolved without a picker
+            // selection, but the stored intent is what a session reads, so
+            // restoring it is enough.
+            updatePanel(target) { panel in
+                panel.source = previous
+                panel.sourceDescription = previous.label
+            }
+            sessions[target]?.clearRegion()
+            refreshPreviewDriver()
+        }
+    }
+
+    /// Resize the region to a preset multiple of the panel, keeping its centre.
+    func setRegionScale(_ scale: Int, for serviceName: String) {
+        transformRegion(for: serviceName) { region, size in
+            region.scaled(to: scale, in: size)
+        }
+    }
+
+    /// Turn the region on its side, for a panel mounted the other way up.
+    func rotateRegion(for serviceName: String) {
+        transformRegion(for: serviceName) { region, size in
+            region.rotated(in: size)
+        }
+    }
+
+    private func transformRegion(
+        for serviceName: String,
+        _ transform: (RegionSpec, CGSize) -> RegionSpec
+    ) {
+        guard let region = panels.first(
+            where: { $0.serviceName == serviceName })?.source.region,
+            let screen = DisplayCapture.screen(named: region.display)
+        else { return }
+        let updated = transform(region, screen.frame.size)
+        apply(updated, to: serviceName)
+        // Only nudge the marquee if it is the thing being looked at; moving a
+        // hidden window would be wasted work.
+        if regionSelector.isVisible, regionTarget == serviceName {
+            regionSelector.apply(updated)
+        }
+    }
+
+    /// Record a region and push it to the session.
+    private func apply(_ region: RegionSpec, to serviceName: String) {
+        let source = PanelSource.region(region)
+        updatePanel(serviceName) { panel in
+            panel.source = source
+            panel.sourceDescription = source.label
+        }
+        sessions[serviceName]?.useRegion(region)
+        // With no session, this is what makes the marquee visible in the preview
+        // as it is dragged. PreviewDriver reconfigures rather than restarts for a
+        // region change, so a drag stays smooth.
+        refreshPreviewDriver()
+        // Not forced: a drag produces these continuously, and the throttle keeps
+        // it from writing the records file on every frame of the drag. The final
+        // position is flushed by finishChoosingRegion.
+        persistIfNeeded()
+    }
+
+    /// A sensible first rectangle: 2x the panel, centred on the focused screen.
+    /// 2x rather than 1x so it is big enough to see and grab.
+    private static func startingRegion() -> RegionSpec? {
+        guard let screen = DisplayCapture.preferredScreen() else { return nil }
+        return RegionSpec.centered(
+            on: screen.name, scale: 2, landscape: false, in: screen.size)
+    }
+
     // MARK: live preview
 
     /// Whether the manager window is on screen. Converting frames for a window
@@ -317,7 +546,10 @@ final class PanelManager: ObservableObject {
     /// every other session to stop producing them.
     private func updatePreviewFocus() {
         let target = previewVisible ? selectedServiceName : nil
-        guard target != previewFocus else { return }
+        guard target != previewFocus else {
+            refreshPreviewDriver()
+            return
+        }
         if let previous = previewFocus {
             sessions[previous]?.setPreviewEnabled(false)
         }
@@ -325,6 +557,40 @@ final class PanelManager: ObservableObject {
         preview.focus(on: target)
         if let target {
             sessions[target]?.setPreviewEnabled(true)
+        }
+        refreshPreviewDriver()
+    }
+
+    /// Start, stop, or re-aim the session-less preview.
+    ///
+    /// It runs only when the window is up, a panel is selected, and that panel
+    /// has no session - a session produces its own previews from the frames it is
+    /// really sending, which is always the better picture.
+    private func refreshPreviewDriver() {
+        guard previewVisible,
+            let name = selectedServiceName,
+            sessions[name] == nil,
+            let panel = panels.first(where: { $0.serviceName == name })
+        else {
+            previewDriver.stop()
+            return
+        }
+        // Capped well below the streaming rate: nothing is being sent, so this
+        // only has to look alive.
+        previewDriver.run(
+            serviceName: name,
+            source: panel.source,
+            defaultDisplay: defaultDisplayName,
+            fps: min(settings.fps, 15))
+
+        // Say what the picture is. Without this the hero shows a live image
+        // directly above "nothing is being sent", which reads as a contradiction
+        // rather than as a viewfinder. Corrected by `onUnavailable` if the source
+        // turns out not to be capturable.
+        updatePanel(name) { panel in
+            panel.captureStatus = .suspended(
+                "Previewing on this Mac. The display is offline, so nothing "
+                    + "is being sent to it yet.")
         }
     }
 
@@ -409,6 +675,8 @@ final class PanelManager: ObservableObject {
         if session.name == previewFocus {
             session.setPreviewEnabled(true)
         }
+        // A real session supersedes the stand-in preview.
+        refreshPreviewDriver()
         if !panels.contains(where: { $0.serviceName == session.name }) {
             panels.append(PanelSnapshot(serviceName: session.name, displayName: session.name,
                                         discovered: true, lastSeen: Date()))
@@ -419,6 +687,8 @@ final class PanelManager: ObservableObject {
     func retire(_ serviceName: String) {
         sessions[serviceName] = nil
         if previewFocus == serviceName { preview.clearFrame() }
+        // No session left to preview from, so the stand-in takes over.
+        defer { refreshPreviewDriver() }
         guard !supersededServiceNames.contains(serviceName) else { return }
         updatePanel(serviceName) { panel in
             panel.discovered = false
@@ -546,8 +816,99 @@ final class PanelManager: ObservableObject {
                     "The display rejected the \(acknowledgement.opcode) "
                         + "command (status \(acknowledgement.status)).")
             }
+        case .touch(let touch):
+            // Deliberately does not set `lastHeartbeatAt`: a finger is not
+            // evidence that frames are arriving, and letting it stand in for a
+            // heartbeat would keep a panel reading "Online" after its stream
+            // had stopped.
+            updatePanel(serviceName) { $0.lastSeen = now }
+            handleTouch(touch, for: serviceName)
         }
         persistIfNeeded(force: reconciledIdentity)
+    }
+
+    /// Act on a gesture the panel reported.
+    ///
+    /// Duplicates are dropped first. UDP can deliver the same datagram twice,
+    /// and both actions here are toggles or steps, so a duplicate would either
+    /// undo itself (pause, then resume — indistinguishable from the tap being
+    /// ignored) or skip two sources at once.
+    private func handleTouch(
+        _ touch: DeviceProtocol.TouchEvent, for serviceName: String
+    ) {
+        guard lastTouchSequence[serviceName] != touch.sequence else { return }
+        lastTouchSequence[serviceName] = touch.sequence
+
+        guard let action = TouchAction.for(touch.gesture) else { return }
+        // Logged because a gesture is otherwise untraceable: if the mapping or
+        // the packet is wrong, the only symptom is that nothing happens, which
+        // is indistinguishable from the panel never having sent anything.
+        print("[\(serviceName)] touch \(touch.gesture) -> \(action)")
+        switch action {
+        case .togglePause:
+            guard let panel = panels.first(where: { $0.serviceName == serviceName })
+            else { return }
+            setPaused(!panel.paused, for: serviceName)
+        case .cycleSource(let forward):
+            Task { @MainActor [weak self] in
+                await self?.cycleSource(forward: forward, for: serviceName)
+            }
+        }
+    }
+
+    /// Advance this panel to the next display in the source ring.
+    ///
+    /// Mirrors what a picker selection does — the running session gets a filter,
+    /// the snapshot records the intent, and the choice is persisted — because a
+    /// source chosen by swiping should survive a restart exactly as one chosen
+    /// through system UI does.
+    private func cycleSource(forward: Bool, for serviceName: String) async {
+        guard let session = sessions[serviceName],
+              let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return }
+
+        // Skip anything shaped like the panel itself. Those are this app's own
+        // virtual displays, and pointing a panel at one is either a mirror of
+        // what it already shows or a feedback loop.
+        let candidates = await DisplayCapture.capturableDisplays().filter {
+            !Self.isPanelShaped($0.display.width, $0.display.height)
+        }
+        let ring = PanelSource.ring(displayNames: candidates.map(\.name))
+        guard let next = PanelSource.next(
+            after: panel.source, in: ring, forward: forward),
+            next != panel.source
+        else { return }
+
+        switch next {
+        case .automatic:
+            useAutomaticSource(for: serviceName)
+        case .display(let name):
+            guard let chosen = candidates.first(where: { $0.name == name })
+            else { return }
+            session.usePickerFilter(
+                SCContentFilter(display: chosen.display, excludingWindows: []))
+            updatePanel(serviceName) { panel in
+                panel.source = next
+                panel.sourceDescription = next.label
+            }
+            persistIfNeeded(force: true)
+        case .window, .region:
+            // Neither is in the ring, so both are unreachable here: a window
+            // needs a picker selection to resolve, and a region has to be drawn.
+            return
+        }
+    }
+
+    /// Whether a display has the panel's own 172:320 aspect, in either
+    /// orientation. Same tolerances as `DisplayCapture.resolve`'s fallback.
+    ///
+    /// `nonisolated` because it reads nothing but its arguments; inheriting the
+    /// manager's actor would make a pure arithmetic check await the main queue.
+    nonisolated static func isPanelShaped(_ width: Int, _ height: Int) -> Bool {
+        guard width > 0, height > 0 else { return false }
+        let target = Double(PixelConvert.width) / Double(PixelConvert.height)
+        let aspect = Double(width) / Double(height)
+        return abs(aspect - target) < 0.01 || abs(aspect - 1.0 / target) < 0.035
     }
 
     /// Open the system content picker for a panel.
@@ -555,10 +916,48 @@ final class PanelManager: ObservableObject {
     /// `style` opens the picker directly in display, window, or application
     /// mode, so the user lands where they meant to go instead of hunting for
     /// the right tab.
+    /// Switch a panel to a kind of source, opening whatever chooser that kind
+    /// needs.
+    ///
+    /// Backing out of a chooser leaves the stored source untouched, which is what
+    /// lets the dropdown show a resting value: it reads the source back, so an
+    /// abandoned choice simply never appears.
+    func selectSourceKind(_ kind: PanelSourceKind, for serviceName: String) {
+        switch kind {
+        case .automatic:
+            useAutomaticSource(for: serviceName)
+        case .display:
+            // Resolved here rather than by opening the macOS picker: displays are
+            // a short, knowable list, so the window offers them directly and the
+            // second dropdown switches between them.
+            refreshDisplays()
+            let preferred = DisplayCapture.preferredScreen()?.name
+            let chosen = [preferred, displayNames.first]
+                .compactMap { $0 }
+                .first { !$0.isEmpty }
+            guard let chosen else {
+                operationOutcome = .failure(
+                    "No display available",
+                    "macOS reported no capturable display to send.")
+                return
+            }
+            selectDisplay(chosen, for: serviceName)
+        case .window:
+            chooseSource(for: serviceName, style: .window)
+        case .region:
+            chooseRegion(for: serviceName)
+        }
+    }
+
+    /// Deliberately not gated on a live session. What a panel should show is a
+    /// decision about this Mac's screen, and it is recorded and previewed here
+    /// whether or not the panel is switched on; a session applies it when one
+    /// turns up. Requiring a session meant the choice could only be made with
+    /// the hardware already running.
     func chooseSource(
         for serviceName: String, style: SCShareableContentStyle? = nil
     ) {
-        guard sessions[serviceName] != nil, let picker else { return }
+        guard let picker else { return }
         pickerTarget = serviceName
         selectedServiceName = serviceName
         picker.present(style: style)
@@ -612,6 +1011,7 @@ final class PanelManager: ObservableObject {
         case .flip: return "rotation"
         case .identify: return "identify"
         case .restart: return "remote restart"
+        case .touch: return "touch gestures"
         default: return "this control"
         }
     }
@@ -808,11 +1208,14 @@ final class PanelManager: ObservableObject {
     }
 
     private func applyPickerSelection(_ filter: SCContentFilter) {
-        let target = pickerTarget ?? selectedServiceName
-            ?? panels.first(where: { $0.isOnline })?.serviceName
+        let target = pickerTarget ?? selectedServiceName ?? panels.first?.serviceName
         pickerTarget = nil
-        guard let target, let session = sessions[target] else { return }
-        session.usePickerFilter(filter)
+        guard let target else { return }
+        // Applied to a session only if there is one. A pick made while the panel
+        // is switched off used to be thrown away here; now it is recorded and
+        // previewed, and a session picks it up from the stored source when the
+        // panel comes back.
+        sessions[target]?.usePickerFilter(filter)
         // Record what was picked, not just how it reads: the filter itself
         // cannot be stored, but the display or application it names can be
         // resolved again on the next launch.
@@ -826,6 +1229,7 @@ final class PanelManager: ObservableObject {
             if let identified { panel.source = identified }
             panel.sourceDescription = picker?.describe(filter) ?? "Selected content"
         }
+        refreshPreviewDriver()
         persistIfNeeded(force: true)
     }
 
@@ -836,6 +1240,8 @@ final class PanelManager: ObservableObject {
             panel.sourceDescription = "Automatic"
         }
         picker?.clearSelection()
+        sessions[serviceName]?.clearRegion()
+        refreshPreviewDriver()
         persistIfNeeded(force: true)
     }
 
