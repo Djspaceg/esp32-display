@@ -25,6 +25,7 @@ final class FrameSender {
         case heartbeat(DeviceStats)
         case info(DeviceProtocol.DeviceInfo)
         case acknowledgement(DeviceProtocol.ControlAck)
+        case touch(DeviceProtocol.TouchEvent)
     }
 
     private let host: String
@@ -428,6 +429,15 @@ final class FrameSender {
                 FileHandle.standardError.write(Data(message.utf8))
             }
             onDeviceEvent?(.acknowledgement(acknowledgement))
+            return
+        }
+        if let touch = DeviceProtocol.parseTouch(data) {
+            // Counts as a reply — the panel only sends this unprompted, so it
+            // is proof the link works — but deliberately not as a heartbeat.
+            // Heartbeat age drives the reconnect watchdog and the pacing
+            // hill-climb, and a finger is not evidence that frames are landing.
+            lock.withLock { _deviceReplies &+= 1 }
+            onDeviceEvent?(.touch(touch))
             return
         }
         guard let stats = BandProtocol.parseHeartbeat(data) else { return }

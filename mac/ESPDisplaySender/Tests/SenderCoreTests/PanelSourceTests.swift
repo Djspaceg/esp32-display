@@ -209,3 +209,49 @@ final class PersistedSourceLookupTests: XCTestCase {
         XCTAssertEqual(manager.panels.first?.sourceDescription, "Automatic")
     }
 }
+
+/// The source dropdown's resting value.
+///
+/// The dropdown shows what a panel *is* set to rather than the last thing
+/// clicked, so its value is derived from the stored source. Anything that cannot
+/// round-trip through `PanelSource` therefore cannot be a resting state.
+final class PanelSourceKindTests: XCTestCase {
+
+    private var region: RegionSpec {
+        RegionSpec(display: "Studio Display", x: 0, y: 0, width: 172, height: 320)
+    }
+
+    func testKindIsDerivedFromTheStoredSource() {
+        XCTAssertEqual(PanelSource.automatic.kind, .automatic)
+        XCTAssertEqual(PanelSource.display("Studio Display").kind, .display)
+        XCTAssertEqual(PanelSource.window("Music").kind, .window)
+        XCTAssertEqual(PanelSource.region(region).kind, .region)
+    }
+
+    /// An application pick is stored as a window source - `PanelSource.from`
+    /// records the application's name and `findWindow` matches it - so after a
+    /// restart it resolves to a single window. There is deliberately no separate
+    /// application kind to rest on.
+    func testApplicationPicksRestOnTheWindowKind() {
+        XCTAssertEqual(PanelSource.window("Safari").kind, .window)
+    }
+
+    func testEveryOfferedKindIsLabelled() {
+        for kind in PanelSourceKind.allCases {
+            XCTAssertFalse(kind.label.isEmpty, "\(kind) has no label")
+        }
+    }
+
+    /// Every kind the dropdown offers must be reachable from some source, or the
+    /// control could be set to a value it can never show back.
+    func testEveryKindIsReachable() {
+        let reachable: Set<PanelSourceKind> = [
+            PanelSource.automatic.kind,
+            PanelSource.display("d").kind,
+            PanelSource.window("w").kind,
+            PanelSource.region(region).kind,
+        ]
+
+        XCTAssertEqual(reachable, Set(PanelSourceKind.allCases))
+    }
+}

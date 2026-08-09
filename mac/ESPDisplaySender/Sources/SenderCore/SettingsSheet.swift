@@ -12,85 +12,83 @@ struct SettingsSheet: View {
     @State private var draft = SenderSettings()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Streaming")
-                .font(.headline)
-
-            Grid(horizontalSpacing: 12, verticalSpacing: 12) {
-                GridRow(alignment: .firstTextBaseline) {
-                    Text("Frame rate")
-                        .gridColumnAlignment(.trailing)
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 8) {
-                            Slider(
-                                value: Binding(
-                                    get: { Double(draft.fps) },
-                                    set: { draft.fps = Int($0.rounded()) }),
-                                in: Double(SenderSettings.fpsRange.lowerBound)
-                                    ... Double(SenderSettings.fpsRange.upperBound),
-                                step: 1)
-                            .frame(width: 200)
-                            .accessibilityLabel("Frame rate")
-                            Text("\(draft.fps) fps")
-                                .monospacedDigit()
-                                .frame(width: 56, alignment: .leading)
-                        }
-                        Text("The panel's SPI bus and WiFi link set the real ceiling, not the Mac. Changing this restarts capture.")
-                            .font(.caption)
+        Form {
+            Section {
+                LabeledContent("Frame rate") {
+                    HStack(spacing: 10) {
+                        // No `step:` on any slider here. macOS draws a tick per
+                        // step, and these ranges are wide enough (55 frame
+                        // rates, 238 pacing values) that the ticks merge into a
+                        // solid rule under the control. The bindings round.
+                        Slider(
+                            value: Binding(
+                                get: { Double(draft.fps) },
+                                set: { draft.fps = Int($0.rounded()) }),
+                            in: Double(SenderSettings.fpsRange.lowerBound)
+                                ... Double(SenderSettings.fpsRange.upperBound))
+                        .frame(maxWidth: 240)
+                        .accessibilityLabel("Frame rate")
+                        Text("\(draft.fps) fps")
+                            .monospacedDigit()
                             .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(width: 58, alignment: .trailing)
                     }
                 }
-
-                GridRow(alignment: .firstTextBaseline) {
-                    Text("Packet pacing")
-                        .gridColumnAlignment(.trailing)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Tune automatically", isOn: $draft.adaptivePacing)
-                            .toggleStyle(.checkbox)
-                        HStack(spacing: 8) {
-                            Slider(
-                                value: Binding(
-                                    get: { Double(draft.spacingMicros) },
-                                    set: { draft.spacingMicros = UInt32($0.rounded()) }),
-                                in: Double(SenderSettings.spacingRange.lowerBound)
-                                    ... Double(SenderSettings.spacingRange.upperBound),
-                                step: 10)
-                            .frame(width: 200)
-                            .disabled(draft.adaptivePacing)
-                            .accessibilityLabel("Packet pacing")
-                            Text("\(draft.spacingMicros) µs")
-                                .monospacedDigit()
-                                .frame(width: 56, alignment: .leading)
-                        }
-                        Text("Sleep between packet chunks. Longer means fewer frames dropped by the panel and a lower peak rate. Automatic tuning follows the panel's reported drop rate.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-
-                GridRow(alignment: .firstTextBaseline) {
-                    Text("Identify for")
-                        .gridColumnAlignment(.trailing)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Stepper(
-                            value: $draft.identifySeconds,
-                            in: SenderSettings.identifyRange
-                        ) {
-                            Text("\(draft.identifySeconds) seconds")
-                                .monospacedDigit()
-                        }
-                        .frame(width: 160)
-                        .accessibilityLabel("Identify duration in seconds")
-                        Text("How long Identify lights the panel's LED.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+            } header: {
+                Text("Streaming")
+            } footer: {
+                Text("The panel's SPI bus and WiFi link set the real ceiling, not the Mac. Changing this restarts capture.")
             }
 
-            HStack {
+            Section {
+                Toggle("Tune automatically", isOn: $draft.adaptivePacing)
+                LabeledContent("Packet pacing") {
+                    HStack(spacing: 10) {
+                        Slider(
+                            value: Binding(
+                                get: { Double(draft.spacingMicros) },
+                                set: { draft.spacingMicros = UInt32($0.rounded()) }),
+                            in: Double(SenderSettings.spacingRange.lowerBound)
+                                ... Double(SenderSettings.spacingRange.upperBound))
+                        .frame(maxWidth: 240)
+                        .disabled(draft.adaptivePacing)
+                        .accessibilityLabel("Packet pacing")
+                        Text("\(draft.spacingMicros) µs")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 58, alignment: .trailing)
+                    }
+                }
+            } header: {
+                Text("Pacing")
+            } footer: {
+                Text("Sleep between packet chunks. Longer means fewer frames dropped by the panel and a lower peak rate. Automatic tuning follows the panel's reported drop rate.")
+            }
+
+            Section {
+                LabeledContent("Identify for") {
+                    Stepper(
+                        value: $draft.identifySeconds,
+                        in: SenderSettings.identifyRange
+                    ) {
+                        Text("\(draft.identifySeconds) seconds")
+                            .monospacedDigit()
+                    }
+                    .fixedSize()
+                    .accessibilityLabel("Identify duration in seconds")
+                }
+            } header: {
+                Text("Identify")
+            } footer: {
+                Text("How long Identify lights the panel's LED.")
+            }
+        }
+        .formStyle(.grouped)
+        .labeledContentStyle(.labelColumn)
+        // A floating glass action bar rather than a row bolted to the bottom of
+        // the form, so the content scrolls under it.
+        .safeAreaInset(edge: .bottom) {
+            HStack(spacing: 10) {
                 Button("Restore Defaults") { draft = SenderSettings() }
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
@@ -99,11 +97,15 @@ struct SettingsSheet: View {
                     manager.updateSettings(draft)
                     dismiss()
                 }
+                .buttonStyle(.glassProminent)
                 .keyboardShortcut(.defaultAction)
             }
+            .padding(12)
+            .glassCard(cornerRadius: 16)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 14)
         }
-        .padding(20)
-        .frame(width: 520)
+        .frame(width: 560, height: 520)
         .onAppear { draft = manager.settings }
     }
 }

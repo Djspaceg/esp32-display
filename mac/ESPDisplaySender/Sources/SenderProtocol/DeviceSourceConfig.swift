@@ -10,15 +10,23 @@ import Foundation
 ///
 /// Devices without an entry use automatic source selection (the macOS
 /// content picker if the user picked something, else default display
-/// tracking). If both keys are present, window wins - it's the more
-/// specific intent.
+/// tracking). When more than one key is present the most specific intent wins:
+/// region, then window, then display.
+///
+/// Every field is optional, so a file written before any given field existed
+/// still decodes, and a nil field is omitted on the way back out.
 public struct SourceSpec: Codable, Equatable {
     public var display: String?
     public var window: String?
+    /// A rectangle of one display, drawn with the region selector.
+    public var region: RegionSpec?
 
-    public init(display: String? = nil, window: String? = nil) {
+    public init(
+        display: String? = nil, window: String? = nil, region: RegionSpec? = nil
+    ) {
         self.display = display
         self.window = window
+        self.region = region
     }
 }
 

@@ -4,7 +4,13 @@ import PackageDescription
 let package = Package(
     name: "ESPDisplaySender",
     platforms: [
-        .macOS(.v14)
+        // macOS 26 is the floor because the window is built out of Liquid Glass
+        // components - glassEffect, GlassEffectContainer, ToolbarSpacer, the
+        // glass button styles - none of which exist before it. Written as a
+        // version string rather than `.macOS(.v26)` so swift-tools-version can
+        // stay at 5.9: bumping it to 6.x would also switch the package into the
+        // Swift 6 language mode, which is a separate migration.
+        .macOS("26.0")
     ],
     products: [
         .library(name: "SenderProtocol", targets: ["SenderProtocol"]),

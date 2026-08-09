@@ -44,6 +44,8 @@ final class DeviceSession {
         case auto(defaultDisplay: String)
         case display(String)
         case window(String)
+        /// A rectangle of one named display, drawn with the region selector.
+        case region(RegionSpec)
     }
 
     /// What the supervisor knows about the window it is following, so a resize
@@ -68,6 +70,12 @@ final class DeviceSession {
     private var _captureStatus: CaptureStatus = .waiting("Starting up…")
     private var _previewEnabled = false
     private weak var activeCapture: DisplayCapture?
+    /// The rectangle the user wants captured, and the one the running stream has
+    /// actually been given, so the drain loop knows when it has caught up.
+    private var _region: RegionSpec?
+    private var _appliedRegion: RegionSpec?
+    private var _regionOverride: RegionSpec?
+    private var regionUpdateInFlight = false
     /// Last frame time carried across capture restarts.
     ///
     /// Read from the live capture it would reset to nil every time a stream was
@@ -217,8 +225,18 @@ final class DeviceSession {
     func usePickerFilter(_ filter: SCContentFilter) {
         stateLock.lock()
         pickedFilter = filter
+        // Mutually exclusive with a drawn region; see useRegion.
+        _regionOverride = nil
+        _region = nil
+        _appliedRegion = nil
         pickedGeneration &+= 1
         stateLock.unlock()
+        forceKeyframe()
+    }
+
+    /// Drop a runtime region and fall back to the configured source.
+    func clearRegion() {
+        clearRegionOverride()
         forceKeyframe()
     }
 
@@ -261,6 +279,99 @@ final class DeviceSession {
         case .auto(let d): return d
         case .display(let d): return d
         case .window: return ""
+        case .region(let spec): return spec.display
+        }
+    }
+
+    // MARK: capture region
+
+    /// Move or resize the rectangle being captured, live.
+    ///
+    /// Called for every step of a marquee drag, so it must not restart the
+    /// stream: it reconfigures the running one. Updates are coalesced
+    /// newest-wins, the same way frames are, because a drag produces them far
+    /// faster than `updateConfiguration` completes and applying every
+    /// intermediate rectangle in order would lag behind the pointer.
+    func useRegion(_ spec: RegionSpec) {
+        var capture: DisplayCapture?
+        let switchingSource: Bool = stateLock.withLock {
+            let switching = _regionOverride == nil
+            _region = spec
+            _regionOverride = spec
+            if switching {
+                // A region and a picker selection are alternative answers to
+                // "what should this panel show", so taking one drops the other.
+                // The generation bump is what makes the watchdog tear down the
+                // old stream and come back through the region branch.
+                pickedFilter = nil
+                pickedGeneration &+= 1
+                return true
+            }
+            guard !regionUpdateInFlight, let running = activeCapture else { return false }
+            regionUpdateInFlight = true
+            capture = running
+            return false
+        }
+        // The first region replaces the source outright, so let the run loop
+        // restart capture rather than reconfiguring a stream of the wrong kind.
+        if switchingSource { return }
+        // No capture yet, or one already draining: the value is stored either
+        // way and gets picked up by the drain loop or the next capture start.
+        guard let capture else { return }
+        Task { [weak self] in await self?.drainRegionUpdates(capture) }
+    }
+
+    /// The region chosen at runtime, which outranks both the picker and the
+    /// configured source.
+    private var currentRegionOverride: RegionSpec? {
+        stateLock.withLock { _regionOverride }
+    }
+
+    private func clearRegionOverride() {
+        stateLock.withLock {
+            guard _regionOverride != nil else { return }
+            _regionOverride = nil
+            _region = nil
+            _appliedRegion = nil
+            pickedGeneration &+= 1
+        }
+    }
+
+    private func drainRegionUpdates(_ capture: DisplayCapture) async {
+        while true {
+            let target: RegionSpec? = stateLock.withLock {
+                guard let want = _region, want != _appliedRegion else {
+                    regionUpdateInFlight = false
+                    return nil
+                }
+                return want
+            }
+            guard let target else { return }
+            let applied = await capture.updateRegion(target.rect)
+            let keepGoing = stateLock.withLock { () -> Bool in
+                if applied {
+                    _appliedRegion = target
+                    return true
+                }
+                // A failed reconfigure means the stream is going away; the
+                // watchdog will rebuild it with the stored region.
+                regionUpdateInFlight = false
+                return false
+            }
+            if !keepGoing { return }
+        }
+    }
+
+    /// The region capture should use: the live one if the user has been
+    /// dragging, otherwise whatever was stored with the source.
+    private func effectiveRegion(_ stored: RegionSpec) -> RegionSpec {
+        stateLock.withLock { _region ?? stored }
+    }
+
+    private func noteRegionApplied(_ spec: RegionSpec) {
+        stateLock.withLock {
+            _region = spec
+            _appliedRegion = spec
         }
     }
 
@@ -321,8 +432,41 @@ final class DeviceSession {
             // source type. Clearing a failed picker selection falls back to
             // the original automatic/display/window source.
             let pickerSelection = currentPickerSelection
+            // A region drawn at runtime outranks both, and taking one clears the
+            // other, so at most one of these is ever set.
+            let regionSelection = currentRegionOverride
 
-            if let selection = pickerSelection {
+            if let drawn = regionSelection {
+                guard let found = await DisplayCapture.findDisplay(named: drawn.display)
+                else {
+                    setCaptureStatus(.waiting(
+                        "Waiting for the display \"\(drawn.display)\", where this "
+                            + "region was drawn."))
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                }
+                let region = drawn.clamped(to: found.points)
+                let display = found.display
+                displayShape = (display.displayID, display.width, display.height, false)
+                do {
+                    try await capture.start(
+                        display: display, sourceRect: region.rect, fps: fps)
+                    noteRegionApplied(region)
+                    announced = false
+                    setCaptureStatus(.streaming)
+                    print("[\(name)] capturing \(region.sizeDescription) at "
+                        + "(\(Int(region.x)),\(Int(region.y))) of "
+                        + "\"\(drawn.display)\" at \(fps) fps")
+                } catch {
+                    FileHandle.standardError.write(
+                        Data("[\(name)] region capture failed: \(error.localizedDescription)\n".utf8))
+                    setCaptureStatus(.failed(
+                        "That region could not be captured: "
+                            + error.localizedDescription))
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                }
+            } else if let selection = pickerSelection {
                 // Re-resolve before starting. An SCContentFilter holds the
                 // window and display objects that existed when the user
                 // picked them, and a resize or full-screen transition can
@@ -377,6 +521,44 @@ final class DeviceSession {
                         clearPickerFilter()
                         pickerFailures = 0
                     }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                }
+            } else if case .region(let stored) = source {
+                guard let found = await DisplayCapture.findDisplay(named: stored.display)
+                else {
+                    if !announced {
+                        print("[\(name)] waiting for display \"\(stored.display)\" "
+                            + "to draw its region on ...")
+                        announced = true
+                    }
+                    setCaptureStatus(.waiting(
+                        "Waiting for the display \"\(stored.display)\", where this "
+                            + "region was drawn."))
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                }
+                // Clamped every time: a region outlives the display geometry it
+                // was drawn against, and ScreenCaptureKit yields nothing useful
+                // for a rectangle that falls outside the display.
+                let region = effectiveRegion(stored).clamped(to: found.points)
+                let display = found.display
+                displayShape = (display.displayID, display.width, display.height, false)
+                do {
+                    try await capture.start(
+                        display: display, sourceRect: region.rect, fps: fps)
+                    noteRegionApplied(region)
+                    announced = false
+                    setCaptureStatus(.streaming)
+                    print("[\(name)] capturing \(region.sizeDescription) at "
+                        + "(\(Int(region.x)),\(Int(region.y))) of \"\(stored.display)\" "
+                        + "at \(fps) fps")
+                } catch {
+                    FileHandle.standardError.write(
+                        Data("[\(name)] region capture failed: \(error.localizedDescription)\n".utf8))
+                    setCaptureStatus(.failed(
+                        "That region could not be captured: "
+                            + error.localizedDescription))
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
                 }
@@ -680,7 +862,9 @@ final class DeviceSession {
         let diffPct = sender.bandsConsidered > 0
             ? Double(sender.bandsSent) * 100 / Double(sender.bandsConsidered) : 0
         let sourceDescription: String
-        if let selection = currentPickerSelection, let picker {
+        if let drawn = currentRegionOverride {
+            sourceDescription = "\(drawn.sizeDescription) region of \(drawn.display)"
+        } else if let selection = currentPickerSelection, let picker {
             sourceDescription = picker.describe(selection.filter)
         } else {
             switch source {
@@ -688,6 +872,10 @@ final class DeviceSession {
                 sourceDescription = display.isEmpty ? "Automatic" : "Automatic: \(display)"
             case .display(let display): sourceDescription = "Display: \(display)"
             case .window(let window): sourceDescription = "Window: \(window)"
+            case .region(let stored):
+                let region = effectiveRegion(stored)
+                sourceDescription = "\(region.sizeDescription) region of "
+                    + "\(region.display)"
             }
         }
         // The user's own pause outranks whatever capture is doing: it explains
