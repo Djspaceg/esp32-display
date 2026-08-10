@@ -23,6 +23,30 @@ final class RegionPresetTests: XCTestCase {
             CGSize(width: 640, height: 344))
     }
 
+    func testGeometryAwarePanelSizeMatchesDefaultFor172x320() {
+        let geo = PanelGeometry.panel172x320
+        for scale in RegionSpec.scalePresets {
+            for landscape in [false, true] {
+                XCTAssertEqual(
+                    RegionSpec.panelSize(geometry: geo, scale: scale, landscape: landscape),
+                    RegionSpec.panelSize(scale: scale, landscape: landscape))
+            }
+        }
+    }
+
+    func testGeometryAwarePanelSizeSquarePanel() {
+        let geo = PanelGeometry(width: 466, height: 466)
+        // Square panels: landscape and portrait produce the same size.
+        let portrait = RegionSpec.panelSize(geometry: geo, scale: 1, landscape: false)
+        let landscape = RegionSpec.panelSize(geometry: geo, scale: 1, landscape: true)
+        XCTAssertEqual(portrait, CGSize(width: 466, height: 466))
+        XCTAssertEqual(landscape, CGSize(width: 466, height: 466))
+
+        // Scale 2
+        let scaled = RegionSpec.panelSize(geometry: geo, scale: 2, landscape: false)
+        XCTAssertEqual(scaled, CGSize(width: 932, height: 932))
+    }
+
     func testCenteredRegionIsCentered() {
         let region = RegionSpec.centered(
             on: "S", scale: 1, landscape: false, in: displaySize)

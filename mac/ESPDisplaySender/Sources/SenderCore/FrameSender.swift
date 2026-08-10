@@ -19,6 +19,10 @@ import SenderProtocol
 final class FrameSender {
     static let frameBytes = BandProtocol.frameBytes  // 110_080
 
+    /// Panel geometry for this sender. Defaults to the 172x320 panel; sessions
+    /// driving other resolutions pass the device's advertised geometry.
+    let geometry: PanelGeometry
+
     typealias DeviceStats = BandProtocol.DeviceStats
 
     enum DeviceEvent {
@@ -245,10 +249,12 @@ final class FrameSender {
 
     init(host: String, port: UInt16, spacingMicros: UInt32 = 200,
          adaptivePacing: Bool = true,
+         geometry: PanelGeometry = .panel172x320,
          onDeviceEvent: ((DeviceEvent) -> Void)? = nil) {
         self.host = host
         self.port = port
         self.serviceEndpoint = nil
+        self.geometry = geometry
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
         self._adaptivePacing = adaptivePacing
@@ -257,10 +263,12 @@ final class FrameSender {
 
     init(endpoint: NWEndpoint, spacingMicros: UInt32 = 200,
          adaptivePacing: Bool = true,
+         geometry: PanelGeometry = .panel172x320,
          onDeviceEvent: ((DeviceEvent) -> Void)? = nil) {
         self.host = "\(endpoint)"
         self.port = 0
         self.serviceEndpoint = endpoint
+        self.geometry = geometry
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
         self._adaptivePacing = adaptivePacing
@@ -780,12 +788,13 @@ final class FrameSender {
 
     /// Send one frame, transmitting only the bands that changed since the
     /// previous frame (dirty-rectangle diffing at row-band granularity).
-    /// `pixels` must be exactly 110,080 bytes of big-endian RGB565. Packet:
+    /// `pixels` must be exactly `geometry.frameBytes` bytes of big-endian
+    /// RGB565. Packet:
     /// [frame_id][band_index][dirty_count, bit15 = landscape][band payload].
     func send(frame pixels: [UInt8], landscape: Bool = false) {
-        precondition(pixels.count == Self.frameBytes, "bad frame size \(pixels.count)")
+        precondition(pixels.count == geometry.frameBytes, "bad frame size \(pixels.count)")
         guard let conn = connection else { return }
-        let (bands, bandBytes) = BandProtocol.bandGeometry(landscape: landscape)
+        let bands = geometry.bandCount(landscape: landscape)
 
         var dirty: [Int]
         let keyframeDue = Date().timeIntervalSince(lastKeyframeAt) > keyframeInterval
@@ -794,7 +803,7 @@ final class FrameSender {
             lastKeyframeAt = Date()
         } else {
             dirty = BandProtocol.dirtyBands(new: pixels, previous: prevFrame!,
-                                            landscape: landscape)
+                                            geometry: geometry, landscape: landscape)
         }
         prevFrame = pixels
         prevLandscape = landscape
@@ -808,8 +817,9 @@ final class FrameSender {
         for band in dirty {
             var packet = BandProtocol.packetHeader(
                 frameId: id, band: band, dirtyCount: dirty.count, landscape: landscape)
-            let start = band * bandBytes
-            packet.append(contentsOf: pixels[start..<(start + bandBytes)])
+            let start = geometry.bandOffset(index: band, landscape: landscape)
+            let len = geometry.bandPayloadBytes(index: band, landscape: landscape)
+            packet.append(contentsOf: pixels[start..<(start + len)])
 
             conn.send(
                 content: packet,
