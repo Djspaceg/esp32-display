@@ -25,6 +25,10 @@ final class DeviceSession {
         /// answering. Distinct from `paused`, which is the user's choice.
         let parked: Bool
         let sourceDescription: String
+        /// Orientation of the last frame sent, i.e. what the panel has on screen.
+        /// Carried so the settings window can describe gestures against the axis
+        /// the panel is actually using.
+        let landscape: Bool
         /// What capture is doing, so a broken mirror is visible in the window
         /// rather than only in stderr.
         let captureStatus: CaptureStatus
@@ -910,6 +914,7 @@ final class DeviceSession {
             paused: sender.paused,
             parked: parked,
             sourceDescription: sourceDescription,
+            landscape: sender.currentLandscape,
             captureStatus: reported,
             lastFrameAt: frameAt,
             updatedAt: now))

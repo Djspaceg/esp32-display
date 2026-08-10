@@ -132,6 +132,7 @@ final class ParkedPanelPresentationTests: XCTestCase {
             paused: false,
             parked: parked,
             sourceDescription: "Tiny Monitor",
+            landscape: false,
             captureStatus: parked
                 ? .suspended("The panel stopped answering.")
                 : .streaming,

@@ -1,12 +1,14 @@
 # ESP32-C6 Wireless macOS Extended Display — Project Plan
 
 ## Goal
+
 Turn the ESP32-C6 1.47" LCD board (172×320 ST7789 panel) into a small wireless
 second display for macOS, prioritizing frame rate and pixel fidelity over
 generality. Not a full Sidecar/AirPlay-style display — a custom capture →
 stream → render pipeline for a single fixed-size panel.
 
 ## Hardware
+
 - Board: ESP32-C6, 1.47" ST7789 LCD (172×320), soldered on-board (no external
   wiring needed — SPI/backlight/reset are internal to the board).
 - No PSRAM on this chip — rules out anything memory-heavy (e.g. Doom); fine
@@ -16,6 +18,7 @@ stream → render pipeline for a single fixed-size panel.
   fidelity than this.
 
 ## Key architectural decisions (from design discussion)
+
 1. **No JPEG / no compression.** Raw RGB565 frames only. At 172×320 a full
    frame is ~110KB; even at 50fps that's ~5.5MB/s, well within local WiFi6
    throughput. JPEG's decode cost on the ESP32's single RISC-V core is the
@@ -52,6 +55,7 @@ stream → render pipeline for a single fixed-size panel.
 ```
 
 ## Protocol spec (for implementation)
+
 - Transport: UDP, ESP32 as receiver.
 - Frame payload: raw RGB565, 172×320×2 = 110,080 bytes. Will need
   packetizing/chunking since this exceeds typical UDP-safe payload sizes
@@ -66,6 +70,7 @@ stream → render pipeline for a single fixed-size panel.
 ## Components to build
 
 ### 1. ESP32 firmware (Arduino, C++)
+
 - WiFi connect + mDNS advertise.
 - UDP listener, chunk reassembly into double buffer.
 - `Arduino_GFX` (or `TFT_eSPI`) driver for ST7789, SPI clock pushed to
@@ -73,6 +78,7 @@ stream → render pipeline for a single fixed-size panel.
 - Buffer swap logic once a full frame is reassembled.
 
 ### 2. macOS capture tool (Swift, command-line)
+
 - Requires BetterDisplay installed and a 172×320 virtual display created
   and named/identified.
 - `ScreenCaptureKit` (macOS 13+) targeting that specific `SCDisplay`.
@@ -82,6 +88,7 @@ stream → render pipeline for a single fixed-size panel.
   ~40-50fps SPI ceiling — no need to over-engineer beyond that.
 
 ## What to render on the virtual display (content ideas from earlier discussion)
+
 - System stats dashboard (CPU/network/build status) — reuses well with
   raw RGB565 + UDP since it's mostly static content with periodic updates.
 - Could later share code/patterns with the existing Arduino RC controller
@@ -89,6 +96,7 @@ stream → render pipeline for a single fixed-size panel.
   different transport).
 
 ## Stretch goals (not required for v1, but natural next steps)
+
 - **Dirty-rectangle diffing**: only send the region of the frame that
   changed since the last frame (like VNC/RFB), instead of full frames every
   time. Biggest possible efficiency win for mostly-static UI content —
@@ -96,6 +104,16 @@ stream → render pipeline for a single fixed-size panel.
 - Adaptive frame rate: send less often when nothing changed.
 
 ## Open questions to verify before/during implementation
+steps)
+
+- **Dirty-rectangle diffing**: only send the region of the frame that
+  changed since the last frame (like VNC/RFB), instead of full frames every
+  time. Biggest possible efficiency win for mostly-static UI content —
+  worth doing once the raw pipeline works end-to-end.
+- Adaptive frame rate: send less often when nothing changed.
+
+## Open questions to verify before/during implementation
+
 - Confirm this board's actual max stable SPI clock (check seller's
   GitHub/wiki link from the listing) — 80MHz is a target, not guaranteed.
 - Confirm exact ST7789 pin mapping for this specific board revision if not

@@ -36,6 +36,13 @@ public enum DeviceProtocol {
         /// can actually produce them, rather than showing a control that could
         /// never fire.
         public static let touch = Capabilities(rawValue: 1 << 9)
+        /// Classifies a held press as `longPress` rather than as nothing.
+        /// Advertised apart from `touch` for the same reason `brightnessLevel`
+        /// is advertised apart from `brightness`: a gesture preset bound to a
+        /// long press would otherwise silently do nothing on a panel running
+        /// firmware that never emits one, which is indistinguishable from the
+        /// panel ignoring the finger.
+        public static let touchLongPress = Capabilities(rawValue: 1 << 10)
     }
 
     public struct DeviceInfo: Equatable, Sendable {
@@ -181,6 +188,12 @@ public enum DeviceProtocol {
         case swipeRight = 3
         case swipeUp = 4
         case swipeDown = 5
+        /// A press held past the long-press threshold, reported while the finger
+        /// is still down. Only emitted by firmware advertising
+        /// `Capabilities.touchLongPress`; older firmware classifies a hold as
+        /// nothing, and `parseTouch` rejects the value it never sends, so both
+        /// directions fail closed with no version bump.
+        case longPress = 6
     }
 
     public struct TouchEvent: Equatable, Sendable {

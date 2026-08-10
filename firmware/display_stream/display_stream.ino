@@ -179,7 +179,14 @@ static bool touchAvailable = false;
 // depends on the hardware, and the sender uses these bits to decide which
 // controls to offer - a panel without touch should not show touch actions.
 static uint32_t deviceCapabilities() {
-  return BASE_CAPABILITIES | (touchAvailable ? deviceproto::CAP_TOUCH : 0u);
+  // Long press rides with touch rather than being its own condition: the same
+  // classifier produces both, so a panel whose controller answered can report
+  // holds. It is a separate bit so a sender can tell this firmware from an
+  // older build whose holds classified as nothing.
+  return BASE_CAPABILITIES
+         | (touchAvailable ? (deviceproto::CAP_TOUCH
+                              | deviceproto::CAP_TOUCH_LONGPRESS)
+                           : 0u);
 }
 
 // Lines the sender asked the panel to show on its status card, with when they
@@ -929,6 +936,9 @@ static void sendTouchEvent(touchgesture::Gesture gesture, int16_t x, int16_t y) 
     case touchgesture::Gesture::SwipeDown:
       wire = deviceproto::TouchGesture::SwipeDown;
       break;
+    case touchgesture::Gesture::LongPress:
+      wire = deviceproto::TouchGesture::LongPress;
+      break;
     default:
       return;  // not a gesture this protocol carries
   }
@@ -967,6 +977,16 @@ static void serviceTouch() {
     applyBacklight();
   }
 
+  // Ticked before the poll, and regardless of whether one arrives: a long press
+  // completes while the finger is still down, and a finger holding still produces
+  // no controller interrupts to carry it. Polling first would mean the hold could
+  // only be noticed when the user moved or lifted, which is exactly what a hold
+  // is not.
+  touchgesture::Event held = touchTracker.tick(millis());
+  if (held.gesture != touchgesture::Gesture::None && !touchConsumed) {
+    sendTouchEvent(held.gesture, held.startX, held.startY);
+  }
+
   boardtouch::Sample sample;
   if (!boardtouch::poll(sample)) {
     return;
@@ -986,11 +1006,20 @@ static void serviceTouch() {
     Serial.printf("touch: wake for %lus\n", (unsigned long)(TOUCH_WAKE_MS / 1000));
     return;
   }
-  if (event.gesture == touchgesture::Gesture::None) {
-    return;
+
+  // The press that woke the panel is swallowed whole, so lighting a dark panel
+  // never also fires whatever the gesture is bound to.
+  //
+  // Cleared when that press *ends*, whatever it classified as. Clearing it only
+  // on a recognised gesture was a latent bug: a deliberate hold classifies as
+  // nothing, so a waking press held for a moment left the flag set and ate the
+  // next real gesture. Long press makes that path far more likely, since holding
+  // is now something users are told to do.
+  const bool consumed = touchConsumed;
+  if (consumed && !touchTracker.pressActive()) {
+    touchConsumed = false;
   }
-  if (touchConsumed) {
-    touchConsumed = false;  // the press that woke the panel ends here
+  if (event.gesture == touchgesture::Gesture::None || consumed) {
     return;
   }
   sendTouchEvent(event.gesture, event.startX, event.startY);

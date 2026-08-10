@@ -198,12 +198,17 @@ final class DeviceProtocolTests: XCTestCase {
         XCTAssertNotNil(DeviceProtocol.parseTouch(packet()))
         XCTAssertNil(DeviceProtocol.parseTouch(packet(magic: "ETCX")))
         XCTAssertNil(DeviceProtocol.parseTouch(packet(version: 99)))
-        // Gesture 0 and 6 sit either side of the defined range. An unknown
-        // gesture is refused rather than ignored: acting on a byte this parser
-        // does not understand is how a future firmware's new gesture would get
-        // silently mapped onto the wrong action.
+        // Gesture 0 and 7 sit either side of the defined range, which now runs to
+        // 6 (long press). An unknown gesture is refused rather than ignored:
+        // acting on a byte this parser does not understand is how a future
+        // firmware's new gesture would get silently mapped onto the wrong action.
+        //
+        // That refusal is also what makes adding a gesture safe in both
+        // directions without a version bump — an older sender drops the datagram
+        // it cannot name, rather than guessing.
         XCTAssertNil(DeviceProtocol.parseTouch(packet(gesture: 0)))
-        XCTAssertNil(DeviceProtocol.parseTouch(packet(gesture: 6)))
+        XCTAssertNotNil(DeviceProtocol.parseTouch(packet(gesture: 6)))
+        XCTAssertNil(DeviceProtocol.parseTouch(packet(gesture: 7)))
         XCTAssertNil(DeviceProtocol.parseTouch(packet(length: 13)))
         XCTAssertNil(DeviceProtocol.parseTouch(packet(length: 15)))
     }

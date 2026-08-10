@@ -20,12 +20,11 @@
 
 namespace touchgesture {
 
-/// What a completed press turned out to be.
+/// What a press turned out to be.
 ///
-/// There is deliberately no LongPress. Nothing currently acts on one, and an
-/// unused gesture is a guess about a future caller. Long holds are classified as
-/// None rather than as taps, though, because otherwise resting a finger on the
-/// panel would fire whatever a tap is wired to.
+/// LongPress is the one gesture that does not wait for the finger to lift: it
+/// fires the moment the hold threshold passes, which is what a hold is supposed
+/// to feel like. Everything else is only knowable on release.
 enum class Gesture : uint8_t {
   None = 0,
   Tap = 1,
@@ -33,6 +32,7 @@ enum class Gesture : uint8_t {
   SwipeRight = 3,
   SwipeUp = 4,
   SwipeDown = 5,
+  LongPress = 6,
 };
 
 /// Movement, in framebuffer pixels, that makes a press a swipe rather than a
@@ -47,6 +47,13 @@ static const int16_t TAP_MAX_MOVE_PX = 12;
 
 /// Longest press still considered a tap. A deliberate hold is not a tap.
 static const uint32_t TAP_MAX_MS = 400;
+
+/// How long a stationary press is held before it counts as a long press.
+///
+/// Comfortably above TAP_MAX_MS so the two can never be the same press: between
+/// 400ms and this the press is still nothing, which leaves room for a finger that
+/// lingers without the panel deciding it meant something.
+static const uint32_t LONG_PRESS_MS = 600;
 
 /// A press held longer than this is abandoned. The controller signals lift with
 /// a zero-touch report, so a release is normally observed - but a dropped report
@@ -72,9 +79,44 @@ struct Event {
 /// available from the controller but this project has no use for it.
 class Tracker {
  public:
-  void reset() { active_ = false; }
+  void reset() {
+    active_ = false;
+    fired_ = false;
+  }
 
   bool pressActive() const { return active_; }
+
+  /// Give the tracker a chance to report a gesture that completes while the
+  /// finger is still down. Call it every loop, whether or not a report arrived.
+  ///
+  /// This exists because reports only arrive on controller interrupts: a finger
+  /// held perfectly still generates none at all, so a long press waiting for the
+  /// next report would fire late, or never. Firing from a tick instead is what
+  /// makes a hold feel like a hold - it happens while you are still holding,
+  /// rather than when you give up and lift.
+  Event tick(uint32_t nowMs) {
+    Event event;
+    if (!active_ || fired_) {
+      return event;
+    }
+    if ((uint32_t)(nowMs - startMs_) < LONG_PRESS_MS) {
+      return event;
+    }
+    // A finger that has wandered is on its way to being a swipe, not a hold.
+    // Tap slop is the same allowance a tap gets, so "stationary" means one thing
+    // throughout the classifier.
+    const int16_t dx = (int16_t)(lastX_ - startX_);
+    const int16_t dy = (int16_t)(lastY_ - startY_);
+    if (dx > TAP_MAX_MOVE_PX || dx < -TAP_MAX_MOVE_PX ||
+        dy > TAP_MAX_MOVE_PX || dy < -TAP_MAX_MOVE_PX) {
+      return event;
+    }
+    fired_ = true;
+    event.gesture = Gesture::LongPress;
+    event.startX = startX_;
+    event.startY = startY_;
+    return event;
+  }
 
   /// Feed one report. `pressed` false means the controller said the finger
   /// lifted; x and y are ignored in that case.
@@ -85,11 +127,13 @@ class Tracker {
     // report would otherwise fold the next real press into it.
     if (active_ && (uint32_t)(nowMs - startMs_) > PRESS_MAX_MS) {
       active_ = false;
+      fired_ = false;
     }
 
     if (pressed) {
       if (!active_) {
         active_ = true;
+        fired_ = false;
         startMs_ = nowMs;
         startX_ = x;
         startY_ = y;
@@ -108,6 +152,13 @@ class Tracker {
     active_ = false;
     event.startX = startX_;
     event.startY = startY_;
+    // A press that already reported a long press is spent. The finger lifting is
+    // not a second gesture, and classifying it would send a tap or a swipe after
+    // the hold had already been acted on.
+    if (fired_) {
+      fired_ = false;
+      return event;
+    }
     event.gesture = classify(nowMs);
     return event;
   }
@@ -138,6 +189,9 @@ class Tracker {
   }
 
   bool active_ = false;
+  /// Whether this press has already reported a long press, so it reports once and
+  /// its release reports nothing.
+  bool fired_ = false;
   uint32_t startMs_ = 0;
   int16_t startX_ = 0;
   int16_t startY_ = 0;
@@ -158,6 +212,8 @@ inline const char *gestureName(Gesture g) {
       return "swipe-up";
     case Gesture::SwipeDown:
       return "swipe-down";
+    case Gesture::LongPress:
+      return "long-press";
     default:
       return "none";
   }
