@@ -1,21 +1,25 @@
-// display_stream: UDP RGB565 frame receiver for Waveshare ESP32-C6-LCD-1.47.
+// display_stream: UDP RGB565 frame receiver for the supported Waveshare
+// ESP32 display boards (see board_config.h for the table).
 //
 // Pipeline (per docs/esp32-wireless-display-plan.md):
-//   Mac sends raw RGB565 frames (172x320, big-endian / panel byte order)
-//   chunked over UDP. Each packet: [frame_id u16 LE][chunk_index u16 LE]
-//   [chunk_count u16 LE][payload]. Chunks reassemble into the back buffer
-//   of a double buffer; completed frames are pushed to the ST7789 with
-//   esp_lcd's interrupt-driven SPI DMA at 80MHz.
+//   Mac sends raw RGB565 frames (big-endian / panel byte order) chunked
+//   over UDP. Each packet: [frame_id u16 LE][band_index u16 LE]
+//   [dirty_count u16 LE][payload]. Bands reassemble into the back buffer
+//   of a double buffer; completed frames are pushed to the panel with
+//   esp_lcd's interrupt-driven SPI/QSPI DMA.
 //
 // Why esp_lcd instead of Arduino_GFX for the push: Arduino_GFX's SPI paths
-// busy-wait the CPU for the whole ~14-24ms frame transfer. On the C6's
-// single core that starves the WiFi/lwIP task and drops most UDP chunks
-// (measured: throughput plateaued ~20fps with heavy loss). esp_lcd queues
-// the transfer and returns; the CPU services WiFi while the SPI peripheral
-// streams the frame, and an ISR callback tells us when the buffer is free.
+// busy-wait the CPU for the whole frame transfer. On the C6's single core
+// that starves the WiFi/lwIP task and drops most UDP chunks (measured:
+// throughput plateaued ~20fps with heavy loss). esp_lcd queues the transfer
+// and returns; the CPU services WiFi while the SPI peripheral streams the
+// frame, and an ISR callback tells us when the buffer is free.
 //
-// Chunk payload is 1376 bytes = 4 rows (4 * 172 * 2): exactly 80 chunks per
-// frame, every packet 1382B, under conservative MTU.
+// Frame geometry is a per-binary compile-time fact derived from the board
+// table (bandproto::Geometry): bands are whole-row groups sized to the
+// packet budget. On the 172x320 C6 panels that is 80 bands of 4 rows
+// portrait / 86 of 2 landscape - byte-identical to the original hardcoded
+// protocol; on the 466x466 S3 AMOLED it is 466 one-row bands.
 //
 // Buffer ownership (single writer per buffer at all times):
 //   backBuf  - being filled by the UDP callback (lwIP task)
@@ -74,7 +78,7 @@ static String cfgPass;
 // resolving a hardcoded hostname. Default is unique per board
 // (espdisplay-XXXX from the MAC); changeable via CFGNAME over USB.
 static String cfgName;
-static const char *FW_VERSION = "1.1.0";
+static const char *FW_VERSION = "1.2.0";
 static uint8_t deviceId[6] = {0};
 
 // Reads the MAC straight from eFuse rather than via WiFi.macAddress(),
@@ -87,19 +91,27 @@ static String defaultDeviceName() {
 }
 
 // ---- Board identity ---------------------------------------------------
-// One binary serves both Waveshare 1.47" ESP32-C6 boards. The panel controller
-// and pin map differ; the 172x320 resolution does not, which is why nothing
-// above the panel (protocol, buffers, the Mac) is board-aware. Detected at boot
-// and cached in NVS; overridable with CFGBOARD over USB.
-static board::Variant boardVariant = board::Variant::Unknown;
-static const board::Config *bcfg = &board::configFor(board::Variant::Unknown);
+// On the C6, one binary serves both Waveshare 1.47" boards: the panel
+// controller and pin map differ, the 172x320 resolution does not. Detected at
+// boot, cached only when explicitly forced with CFGBOARD over USB. On the S3
+// the variant is a compile-time fact (COMPILED_VARIANT) and none of the probe
+// machinery runs.
+static board::Variant boardVariant = board::COMPILED_VARIANT;
+static const board::Config *bcfg = &board::configFor(board::COMPILED_VARIANT);
 
-// ---- Display ----------------------------------------------------------
-// Pins, panel driver, centring gap and inversion all come from bcfg. The only
-// panel facts shared by both boards are the resolution and the SPI clock.
-static const int16_t PANEL_W = 172;
-static const int16_t PANEL_H = 320;
-static const uint32_t SPI_HZ = 80000000;
+// ---- Display geometry --------------------------------------------------
+// A per-binary compile-time fact, NOT a per-boot one: buffers, band layout,
+// and the mDNS advertisement are all sized from it. Reading it from
+// COMPILED_VARIANT is correct on every target because the C6 boards (the
+// only case where detection can change the variant at runtime) share their
+// resolution; setup() enforces that invariant against a stale CFGBOARD
+// override. Pins, panel driver, pixel clock, gap and inversion stay runtime
+// facts read from bcfg.
+static const bandproto::Geometry PANEL_GEOMETRY = {
+    board::configFor(board::COMPILED_VARIANT).panelW,
+    board::configFor(board::COMPILED_VARIANT).panelH};
+static const int16_t PANEL_W = (int16_t)PANEL_GEOMETRY.width;
+static const int16_t PANEL_H = (int16_t)PANEL_GEOMETRY.height;
 
 static esp_lcd_panel_handle_t panel = nullptr;
 
@@ -196,16 +208,28 @@ static deviceproto::IdleTextMessage idleText;
 static uint32_t idleTextAt = 0;
 
 static const uint16_t UDP_PORT = 5568;
-static const size_t FRAME_BYTES = (size_t)PANEL_W * PANEL_H * 2;  // 110080
+static const size_t FRAME_BYTES = PANEL_GEOMETRY.frameBytes();
 
 // ---- Buffers -----------------------------------------------------------
 // bufA: persistent assembled frame, written by the UDP callback per band.
 // bufB: DMA staging - dirty strips are memcpy'd here before queueing, so
 //       SPI DMA never reads memory the network path is writing.
+//
+// Where they live is a per-chip fact. The C6's 110KB frames fit internal
+// DMA-capable SRAM (and the C6 has no PSRAM anyway). A 466x466 frame is
+// 434KB - two of them cannot fit the S3's 512KB SRAM, so they go to the
+// stacked PSRAM, which the S3's GDMA can read. UNVERIFIED on hardware:
+// sustained QSPI-from-PSRAM throughput and any alignment constraints need
+// measuring on a real 1.75C before this is trusted.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+static const uint32_t FRAME_BUF_CAPS = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+#else
+static const uint32_t FRAME_BUF_CAPS = MALLOC_CAP_DMA;
+#endif
 static uint8_t *bufA = nullptr;
 static uint8_t *bufB = nullptr;
 
-static Reassembler reassembler;                  // tested logic: band_protocol.h
+static Reassembler reassembler(PANEL_GEOMETRY);  // tested logic: band_protocol.h
 static bool bufLandscape = false;                // orientation of bufA's content
 
 // Bands applied to bufA but not yet drawn. Accumulates across frames so
@@ -309,7 +333,14 @@ static void onPacket(AsyncUDPPacket packet) {
     return;
   }
   bandproto::Header h = parseHeader(data);
-  if (len != HEADER_BYTES + bandBytes(h.landscape)) {
+  // Band payloads are per-index now that a last band may be short, so the
+  // index has to be range-checked before it can size the length check. An
+  // out-of-range index is the reassembler's Reject case arriving early.
+  if (h.bandIndex >= PANEL_GEOMETRY.bandCount(h.landscape)) {
+    return;  // geometry mismatch - sender misconfigured
+  }
+  if (len != HEADER_BYTES +
+                 PANEL_GEOMETRY.bandPayloadBytes(h.bandIndex, h.landscape)) {
     statBadLen = statBadLen + 1;
     return;
   }
@@ -342,8 +373,9 @@ static void onPacket(AsyncUDPPacket packet) {
     bufLandscape = h.landscape;
   }
 
-  memcpy(bufA + (size_t)h.bandIndex * bandBytes(h.landscape),
-         data + HEADER_BYTES, bandBytes(h.landscape));
+  memcpy(bufA + PANEL_GEOMETRY.bandOffset(h.bandIndex, h.landscape),
+         data + HEADER_BYTES,
+         PANEL_GEOMETRY.bandPayloadBytes(h.bandIndex, h.landscape));
   portENTER_CRITICAL(&drawMux);
   pendingDrawBitmap[h.bandIndex >> 3] |= 1 << (h.bandIndex & 7);
   portEXIT_CRITICAL(&drawMux);
@@ -358,7 +390,7 @@ static void onPacket(AsyncUDPPacket packet) {
 // boardpanel::init so display_test exercises the identical path - a bring-up
 // test that constructs the panel its own way can pass while this is broken.
 static bool initDisplay() {
-  return boardpanel::init(*bcfg, SPI2_HOST, SPI_HZ, FRAME_BYTES,
+  return boardpanel::init(*bcfg, SPI2_HOST, bcfg->pclkHz, FRAME_BYTES,
                           onColorTransDone, nullptr, nullptr, &panel);
 }
 
@@ -411,10 +443,23 @@ static uint8_t currentBrightness() {
                                     touchWakeActive(), userBlLevel, BL_IDLE);
 }
 
-// Drive the backlight to whatever the current state calls for. Every place
+// Push a raw level to whichever brightness sink this board has: PWM duty on
+// the backlight pin, or the panel's own 0x51 command on the AMOLED (which
+// has no backlight - each pixel emits, and level 0 means a black panel, not
+// a powered-down one). Safe to call before the panel exists: the panel path
+// does nothing until initDisplay() has run.
+static void driveBrightness(uint8_t level) {
+  if (bcfg->hasBacklightPin()) {
+    analogWrite(bcfg->pinBl, level);
+  } else if (panel != nullptr) {
+    boardpanel::setPanelBrightness(panel, *bcfg, level);
+  }
+}
+
+// Drive the brightness to whatever the current state calls for. Every place
 // that used to repeat the sleep/idle/high/low ternary now goes through here,
-// so the pin can no longer disagree with what is reported over the network.
-static void applyBacklight() { analogWrite(bcfg->pinBl, currentBrightness()); }
+// so the sink can no longer disagree with what is reported over the network.
+static void applyBacklight() { driveBrightness(currentBrightness()); }
 
 // ---- Identify ----------------------------------------------------------
 // "Which panel is this?" must work on both boards, and only one of them has an
@@ -441,7 +486,7 @@ static void updateIdentify() {
   if (now - identifyPhaseAt < IDENTIFY_BLINK_MS) return;
   identifyPhaseAt = now;
   identifyPhaseHigh = !identifyPhaseHigh;
-  analogWrite(bcfg->pinBl, identifyPhaseHigh ? 255 : BL_LOW);
+  driveBrightness(identifyPhaseHigh ? 255 : BL_LOW);
 }
 
 static void sendDeviceInfo() {
@@ -633,8 +678,29 @@ static void processConfigLine(char *line) {
     board::Variant want = board::variantFromName(token);
     bool isAuto = strcmp(token, "auto") == 0;
     if (want == board::Variant::Unknown && !isAuto) {
-      Serial.println("CFGERR expected: CFGBOARD st7789|jd9853|auto");
+      Serial.println("CFGERR expected: CFGBOARD st7789|jd9853|co5300|auto");
       return;
+    }
+    if (board::COMPILED_VARIANT != board::Variant::Unknown) {
+      // Single-board chips have nothing to override: the variant is a
+      // compile-time fact there, and persisting a wrong answer would only
+      // manufacture a broken boot.
+      Serial.printf("CFGERR board is fixed at compile time on this chip (%s)\n",
+                    board::variantToken(board::COMPILED_VARIANT));
+      return;
+    }
+    if (want != board::Variant::Unknown) {
+      const board::Config &wantCfg = board::configFor(want);
+      if (wantCfg.panelW != PANEL_GEOMETRY.width ||
+          wantCfg.panelH != PANEL_GEOMETRY.height) {
+        // Buffers, band layout, and the mDNS advertisement in this binary are
+        // sized for the compiled resolution; forcing a board with different
+        // glass cannot work, so refuse rather than persist a broken boot.
+        Serial.printf("CFGERR %s is %ux%u; this binary is built for %ux%u\n",
+                      board::variantToken(want), wantCfg.panelW, wantCfg.panelH,
+                      PANEL_GEOMETRY.width, PANEL_GEOMETRY.height);
+        return;
+      }
     }
     Preferences prefs;
     prefs.begin("espdisp", false);
@@ -807,10 +873,20 @@ static void drawIdleScreen() {
     size_t n = strlen(lines[i]);
     if (n > maxLen) maxLen = n;
   }
+  // On round glass the corners of the framebuffer are not on the panel, so
+  // the card keeps to the inscribed square: an extra inset of
+  // r*(1 - 1/sqrt(2)) per edge, ~14.6% of the diameter. Rectangular panels
+  // keep the original 4px margin exactly.
+  int margin = 4;
+  if (bcfg->roundDisplay) {
+    int d = w < hgt ? w : hgt;
+    margin += (int)(0.1465f * (float)d);
+  }
   // Prefer the larger text, but drop a size rather than run off the panel:
   // pushed lines can be far longer than the three status lines ever are.
   int scale = 2;
-  if ((int)maxLen * 6 * scale > w - 8 || lineCount * 9 * scale > hgt - 8) {
+  if ((int)maxLen * 6 * scale > w - 2 * margin ||
+      lineCount * 9 * scale > hgt - 2 * margin) {
     scale = 1;
   }
   const int lineH = 9 * scale;  // 7px glyph + spacing
@@ -818,10 +894,12 @@ static void drawIdleScreen() {
   int blockH = lineCount * lineH;
 
   // Pseudo-random position within margins; esp_random is hardware RNG.
-  int maxX = w - blockW - 4;
-  int maxY = hgt - blockH - 4;
-  int x = 4 + (maxX > 4 ? (int)(esp_random() % (uint32_t)(maxX - 3)) : 0);
-  int y = 4 + (maxY > 4 ? (int)(esp_random() % (uint32_t)(maxY - 3)) : 0);
+  int maxX = w - blockW - margin;
+  int maxY = hgt - blockH - margin;
+  int x = margin +
+          (maxX > margin ? (int)(esp_random() % (uint32_t)(maxX - margin + 1)) : 0);
+  int y = margin +
+          (maxY > margin ? (int)(esp_random() % (uint32_t)(maxY - margin + 1)) : 0);
 
   memcpy(bufB, bufA, FRAME_BYTES);  // bufA stays pristine for the overlay
   for (int i = 0; i < lineCount; i++) {
@@ -1080,8 +1158,8 @@ void setup() {
                 deviceproto::CONTROL_PROTOCOL_VERSION);
   esp_read_mac(deviceId, ESP_MAC_WIFI_STA);
 
-  bufA = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_DMA);
-  bufB = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_DMA);
+  bufA = (uint8_t *)heap_caps_malloc(FRAME_BYTES, FRAME_BUF_CAPS);
+  bufB = (uint8_t *)heap_caps_malloc(FRAME_BYTES, FRAME_BUF_CAPS);
   if (!bufA || !bufB) {
     Serial.println("FATAL: frame buffer alloc failed");
     while (true) delay(1000);
@@ -1133,11 +1211,16 @@ void setup() {
   }
 
   // Which board is this? Everything below depends on the answer, and this MUST
-  // come before any pin is configured: two of the Touch board's panel pins are
-  // chip outputs on the other board's map (see board_config.h resolve()), so
-  // guessing wrong means driving against live drivers. The probe only touches the
-  // shared I2C pins and touch reset, which are safe on both.
-  {
+  // come before any pin is configured: two of the C6 Touch board's panel pins
+  // are chip outputs on the other C6 board's map (see board_config.h
+  // resolve()), so guessing wrong means driving against live drivers. The probe
+  // only touches the shared I2C pins and touch reset, which are safe on both.
+  // Chips with exactly one supported board never probe at all.
+  if (board::COMPILED_VARIANT != board::Variant::Unknown) {
+    boardVariant = board::COMPILED_VARIANT;
+    Serial.printf("board: fixed at compile time: %s\n",
+                  board::variantToken(boardVariant));
+  } else {
     board::Variant forced = board::variantFromStored(boardOverride);
     if (forced != board::Variant::Unknown) {
       boardVariant = forced;
@@ -1146,13 +1229,32 @@ void setup() {
     } else {
       boardVariant = boarddetect::probe();
     }
+  }
+  bcfg = &board::configFor(boardVariant);
+  // A stored override written by an older firmware can name a board whose
+  // glass this binary was not sized for. The geometry is compiled in
+  // (buffers, band layout, mDNS), so refuse the override and re-probe rather
+  // than boot a 172x320 pipeline against a 466x466 table.
+  if (bcfg->panelW != PANEL_GEOMETRY.width ||
+      bcfg->panelH != PANEL_GEOMETRY.height) {
+    Serial.printf("board: ERROR %s is %ux%u but this binary is %ux%u - "
+                  "ignoring override, re-probing\n",
+                  board::variantToken(boardVariant), bcfg->panelW, bcfg->panelH,
+                  PANEL_GEOMETRY.width, PANEL_GEOMETRY.height);
+    boardVariant = boarddetect::probe();
     bcfg = &board::configFor(boardVariant);
   }
   Serial.printf("board: %s\n", bcfg->name);
-  Serial.printf("  driver=%s sclk=%d mosi=%d cs=%d dc=%d rst=%d bl=%d boot=%d led=%d\n",
-                bcfg->driver == board::PanelDriver::Jd9853 ? "JD9853" : "ST7789",
-                bcfg->pinSclk, bcfg->pinMosi, bcfg->pinCs, bcfg->pinDc,
-                bcfg->pinRst, bcfg->pinBl, bcfg->pinBootButton, bcfg->pinRgbLed);
+  Serial.printf("  driver=%s bus=%s %ux%u pclk=%luMHz\n",
+                bcfg->driver == board::PanelDriver::Co5300   ? "CO5300"
+                : bcfg->driver == board::PanelDriver::Jd9853 ? "JD9853"
+                                                             : "ST7789",
+                bcfg->isQspi() ? "qspi" : "spi", bcfg->panelW, bcfg->panelH,
+                (unsigned long)(bcfg->pclkHz / 1000000));
+  Serial.printf("  sclk=%d d0/mosi=%d d1=%d d2=%d d3=%d cs=%d dc=%d rst=%d bl=%d boot=%d led=%d\n",
+                bcfg->pinSclk, bcfg->pinMosi, bcfg->pinData1, bcfg->pinData2,
+                bcfg->pinData3, bcfg->pinCs, bcfg->pinDc, bcfg->pinRst,
+                bcfg->pinBl, bcfg->pinBootButton, bcfg->pinRgbLed);
 
   // Only construct the LED driver on a board that has one - begin() drives the
   // pin, and GPIO8 has no known function on the Touch board.
@@ -1167,8 +1269,12 @@ void setup() {
   }
 
   pinMode(bcfg->pinBootButton, INPUT_PULLUP);
-  pinMode(bcfg->pinBl, OUTPUT);
-  applyBacklight();
+  if (bcfg->hasBacklightPin()) {
+    // A PWM backlight exists independently of the panel, so light it early -
+    // the boot status fills are pointless over a dark backlight.
+    pinMode(bcfg->pinBl, OUTPUT);
+    applyBacklight();
+  }
   if (!initDisplay()) {
     Serial.println("FATAL: display init failed");
     while (true) delay(1000);
@@ -1176,6 +1282,10 @@ void setup() {
   // Apply the saved flip up front so even the boot status fills land the
   // right way up, not just streamed frames.
   applyPanelConfig(false);
+  // Panel-command brightness (the AMOLED) needs the panel up before it can
+  // apply; its init table ends at full brightness, so this restores the
+  // user's saved level. A harmless repeat on PWM boards.
+  applyBacklight();
   fillPanel(0x2104);  // dark gray: display alive, waiting for WiFi
 
   // Touch, before WiFi: the capability bits mDNS advertises depend on whether
@@ -1325,18 +1435,26 @@ void loop() {
       applyPanelConfig(landscape);
     }
 
-    int drawWidth = landscape ? PANEL_H : PANEL_W;
-    size_t bandLen = bandBytes(landscape);
-    int bandRows = rowsPerBand(landscape);
+    int drawWidth = PANEL_GEOMETRY.frameWidth(landscape);
+    const int frameRows = PANEL_GEOMETRY.frameHeight(landscape);
+    const int bandRows = PANEL_GEOMETRY.rowsPerBand(landscape);
+    const uint16_t totalBands = PANEL_GEOMETRY.bandCount(landscape);
 
     // Coalesce runs of contiguous dirty bands into single DMA transfers.
     // Contiguous bands are contiguous in memory, so a run needs just one
     // memcpy to staging and one draw_bitmap. Staging (bufB) keeps DMA reads
-    // off the buffer the network task writes.
+    // off the buffer the network task writes. The last band may be short
+    // (bandOffset of the end marker would overshoot the frame), so a run
+    // that reaches the end sizes itself against the frame instead.
     bool drewAny = false;
-    forEachRun(bands, bandCount(landscape), [&](int runStart, int runEnd) {
-      size_t off = (size_t)runStart * bandLen;
-      size_t bytes = (size_t)(runEnd - runStart) * bandLen;
+    forEachRun(bands, totalBands, [&](int runStart, int runEnd) {
+      size_t off = PANEL_GEOMETRY.bandOffset((uint16_t)runStart, landscape);
+      size_t bytes =
+          (runEnd >= (int)totalBands)
+              ? FRAME_BYTES - off
+              : PANEL_GEOMETRY.bandOffset((uint16_t)runEnd, landscape) - off;
+      int yEnd = runEnd * bandRows;
+      if (yEnd > frameRows) yEnd = frameRows;
       memcpy(bufB + off, bufA + off, bytes);
       dmaInFlight = dmaInFlight + 1;
       dmaQueuedAt = millis();
@@ -1344,8 +1462,7 @@ void loop() {
       // is full. A failed queue never fires the completion callback, so
       // roll the counter back to avoid a permanent wedge.
       esp_err_t err = esp_lcd_panel_draw_bitmap(
-          panel, 0, runStart * bandRows, drawWidth, runEnd * bandRows,
-          bufB + off);
+          panel, 0, runStart * bandRows, drawWidth, yEnd, bufB + off);
       if (err != ESP_OK) {
         statDrawErrors = statDrawErrors + 1;
         dmaInFlight = dmaInFlight - 1;
@@ -1483,7 +1600,9 @@ void loop() {
     lastPacketsVal = statPackets;
     // With dirty bands, low steady packet flow is normal for static
     // content; require sustained volume before judging the link rotten.
-    bool starving = packetsDelta > 2 * MAX_BANDS &&
+    // The threshold is two keyframes' worth of bands for this panel's
+    // geometry, whatever that geometry is.
+    bool starving = packetsDelta > 2u * PANEL_GEOMETRY.maxBandCount() &&
                     millis() - lastShownChangeAt > 20000;
     if (starving && healStage == 0) {
       Serial.printf("link heal: reconnecting WiFi (rssi=%d)\n", (int)WiFi.RSSI());

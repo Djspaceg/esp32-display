@@ -73,6 +73,22 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     if (verbose) Serial.printf("touch: not present on %s\n", cfg.name);
     return false;
   }
+  if (cfg.touch != board::TouchController::Axs5106l) {
+    // Only the AXS5106L protocol is implemented here; the 1.75C's CST9217
+    // speaks a different register map and needs its own reader. Returning
+    // false keeps CAP_TOUCH honest (no advertised gestures that never come).
+    //
+    // This early return is also a hard safety requirement, not just a
+    // feature gap: on the 1.75C the touch reset line IS the panel reset
+    // (GPIO2, shared), and the pulse below would hard-reset a CO5300 that
+    // initDisplay() just brought up, leaving the panel dark or showing
+    // garbage. Any future CST9217 reader must skip the reset pulse whenever
+    // cfg.pinTouchRst == cfg.pinRst.
+    if (verbose) {
+      Serial.printf("touch: controller on %s not yet supported\n", cfg.name);
+    }
+    return false;
+  }
 
   Wire.setClock(I2C_HZ);
 
