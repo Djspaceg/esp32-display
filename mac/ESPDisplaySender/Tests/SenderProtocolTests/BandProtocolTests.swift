@@ -94,6 +94,139 @@ final class BandProtocolTests: XCTestCase {
     }
 }
 
+// MARK: - PanelGeometry tests
+
+final class PanelGeometryTests: XCTestCase {
+
+    // The parametric formula must reproduce the legacy hardcoded values
+    // for the original 172x320 panel exactly.
+    func testPanel172x320MatchesLegacyGeometry() {
+        let geo = PanelGeometry.panel172x320
+
+        // Portrait
+        let legacyP = BandProtocol.bandGeometry(landscape: false)
+        let paramP = BandProtocol.bandGeometry(for: geo, landscape: false)
+        XCTAssertEqual(paramP.bands, legacyP.bands)
+        XCTAssertEqual(paramP.bandBytes, legacyP.bandBytes)
+        XCTAssertEqual(geo.bandCount(landscape: false), 80)
+        XCTAssertEqual(geo.rowsPerBand(landscape: false), 4)
+        XCTAssertEqual(geo.bandPayloadBytes(index: 0, landscape: false), 1376)
+
+        // Landscape
+        let legacyL = BandProtocol.bandGeometry(landscape: true)
+        let paramL = BandProtocol.bandGeometry(for: geo, landscape: true)
+        XCTAssertEqual(paramL.bands, legacyL.bands)
+        XCTAssertEqual(paramL.bandBytes, legacyL.bandBytes)
+        XCTAssertEqual(geo.bandCount(landscape: true), 86)
+        XCTAssertEqual(geo.rowsPerBand(landscape: true), 2)
+        XCTAssertEqual(geo.bandPayloadBytes(index: 0, landscape: true), 1280)
+
+        // frameBytes
+        XCTAssertEqual(geo.frameBytes, BandProtocol.frameBytes)
+        XCTAssertEqual(geo.frameBytes, 110_080)
+    }
+
+    // 466x466 square panel (ESP32-S3-Touch-AMOLED-1.75C).
+    // rowBytes = 466*2 = 932; fit = (1400-6)/932 = 1; bands = 466; all uniform.
+    func testPanel466x466Geometry() {
+        let geo = PanelGeometry(width: 466, height: 466)
+
+        XCTAssertEqual(geo.frameBytes, 466 * 466 * 2)  // 434_312
+        XCTAssertEqual(geo.rowsPerBand(landscape: false), 1)
+        XCTAssertEqual(geo.bandCount(landscape: false), 466)
+        XCTAssertEqual(geo.bandPayloadBytes(index: 0, landscape: false), 932)
+        // All bands uniform
+        XCTAssertEqual(geo.bandPayloadBytes(index: 465, landscape: false), 932)
+        // Square: landscape and portrait are identical
+        XCTAssertEqual(geo.bandCount(landscape: true), 466)
+        XCTAssertEqual(geo.bandPayloadBytes(index: 0, landscape: true), 932)
+        XCTAssertEqual(geo.rowsPerBand(landscape: true), 1)
+        // MTU safe
+        XCTAssertLessThanOrEqual(PanelGeometry.headerBytes + 932, PanelGeometry.maxPacketBytes)
+    }
+
+    // 412x412 panel.
+    // rowBytes = 412*2 = 824; fit = (1400-6)/824 = 1; bands = 412.
+    func testPanel412x412Geometry() {
+        let geo = PanelGeometry(width: 412, height: 412)
+
+        XCTAssertEqual(geo.frameBytes, 412 * 412 * 2)
+        XCTAssertEqual(geo.rowsPerBand(landscape: false), 1)
+        XCTAssertEqual(geo.bandCount(landscape: false), 412)
+        XCTAssertEqual(geo.bandPayloadBytes(index: 0, landscape: false), 824)
+        XCTAssertEqual(geo.bandPayloadBytes(index: 411, landscape: false), 824)
+        XCTAssertLessThanOrEqual(PanelGeometry.headerBytes + 824, PanelGeometry.maxPacketBytes)
+    }
+
+    // 480x480 panel.
+    // rowBytes = 480*2 = 960; fit = (1400-6)/960 = 1; bands = 480.
+    func testPanel480x480Geometry() {
+        let geo = PanelGeometry(width: 480, height: 480)
+
+        XCTAssertEqual(geo.frameBytes, 480 * 480 * 2)
+        XCTAssertEqual(geo.rowsPerBand(landscape: false), 1)
+        XCTAssertEqual(geo.bandCount(landscape: false), 480)
+        XCTAssertEqual(geo.bandPayloadBytes(index: 0, landscape: false), 960)
+        XCTAssertEqual(geo.bandPayloadBytes(index: 479, landscape: false), 960)
+        XCTAssertLessThanOrEqual(PanelGeometry.headerBytes + 960, PanelGeometry.maxPacketBytes)
+    }
+
+    // bandOffset must tile the frame without gaps or overlaps.
+    func testBandOffsetsAndPayloadsTileTheFrame() {
+        let panels = [
+            PanelGeometry.panel172x320,
+            PanelGeometry(width: 466, height: 466),
+            PanelGeometry(width: 412, height: 412),
+            PanelGeometry(width: 480, height: 480),
+        ]
+        for geo in panels {
+            for landscape in [false, true] {
+                let bands = geo.bandCount(landscape: landscape)
+                var covered = 0
+                for i in 0..<bands {
+                    XCTAssertEqual(geo.bandOffset(index: i, landscape: landscape), covered,
+                                   "\(geo.width)x\(geo.height) landscape=\(landscape) band \(i)")
+                    covered += geo.bandPayloadBytes(index: i, landscape: landscape)
+                }
+                XCTAssertEqual(covered, geo.frameBytes,
+                               "\(geo.width)x\(geo.height) landscape=\(landscape) total mismatch")
+            }
+        }
+    }
+
+    // Geometry-aware dirtyBands: identical frames produce no dirty bands.
+    func testGeometryDirtyBandsCleanOnIdentical() {
+        let geo = PanelGeometry(width: 466, height: 466)
+        let frame = [UInt8](repeating: 0xCD, count: geo.frameBytes)
+        XCTAssertEqual(
+            BandProtocol.dirtyBands(new: frame, previous: frame, geometry: geo, landscape: false), [])
+    }
+
+    // Geometry-aware dirtyBands: detect a change in the last band.
+    func testGeometryDirtyBandsDetectsLastBand() {
+        let geo = PanelGeometry(width: 466, height: 466)
+        let prev = [UInt8](repeating: 0, count: geo.frameBytes)
+        var new = prev
+        new[geo.frameBytes - 1] = 1  // last byte of last band
+        let dirty = BandProtocol.dirtyBands(new: new, previous: prev, geometry: geo, landscape: false)
+        XCTAssertEqual(dirty, [465])
+    }
+
+    // Geometry-aware dirtyBands on 172x320 produces same results as legacy.
+    func testGeometryDirtyBandsMatchesLegacyFor172x320() {
+        let geo = PanelGeometry.panel172x320
+        let prev = [UInt8](repeating: 0, count: geo.frameBytes)
+        var new = prev
+        let (_, bandBytes) = BandProtocol.bandGeometry(landscape: false)
+        new[10 * bandBytes] = 0xFF
+        new[10 * bandBytes + 1] = 0xAB
+
+        let legacy = BandProtocol.dirtyBands(new: new, previous: prev, landscape: false)
+        let parametric = BandProtocol.dirtyBands(new: new, previous: prev, geometry: geo, landscape: false)
+        XCTAssertEqual(legacy, parametric)
+    }
+}
+
 final class DeviceProtocolTests: XCTestCase {
     func testControlPacketMatchesFirmwareVector() {
         let packet = DeviceProtocol.controlPacket(

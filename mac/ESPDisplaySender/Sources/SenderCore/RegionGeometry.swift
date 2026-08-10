@@ -24,6 +24,23 @@ extension RegionSpec {
             : CGSize(width: short, height: long)
     }
 
+    /// Panel size derived from an explicit geometry rather than the compiled-in
+    /// 172x320 default. Used when driving panels of different resolutions.
+    ///
+    /// Square panels (width == height) return the same size regardless of
+    /// `landscape`, which is correct: isLandscape (width > height on the
+    /// region) will always be false for a square.
+    static func panelSize(geometry: PanelGeometry, scale: Int, landscape: Bool) -> CGSize {
+        let short = Double(geometry.width * scale)
+        let long = Double(geometry.height * scale)
+        if geometry.width == geometry.height {
+            return CGSize(width: short, height: long)
+        }
+        return landscape
+            ? CGSize(width: long, height: short)
+            : CGSize(width: short, height: long)
+    }
+
     /// A panel-shaped region at `scale`, centred on a display of `displaySize`.
     ///
     /// Centred because the selector has to appear somewhere the user will

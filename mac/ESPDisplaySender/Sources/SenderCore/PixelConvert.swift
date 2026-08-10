@@ -5,6 +5,9 @@ import Foundation
 /// Converts captured BGRA8888 pixel buffers to big-endian RGB565 (the ST7789
 /// panel byte order, so the ESP32 can bulk-DMA the payload untouched).
 enum PixelConvert {
+    /// Default panel dimensions (172x320 T-Display S3). Sessions driving
+    /// panels of different resolutions pass explicit width/height to the
+    /// conversion functions below; these statics are the fallback.
     static let width = 172
     static let height = 320
 
