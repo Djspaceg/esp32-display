@@ -331,12 +331,27 @@ arduino-cli compile -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" --librar
 arduino-cli upload  -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" -p /dev/cu.usbmodem* .
 ```
 
+For the **ESP32-S3-Touch-AMOLED-1.75C** (466x466 QSPI AMOLED):
+
+```sh
+cd firmware/display_stream
+cp wifi_config.h.example wifi_config.h   # fill in your 2.4GHz network
+arduino-cli compile -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" --libraries ../libraries .
+arduino-cli upload  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" -p /dev/cu.usbmodem* .
+```
+
+The S3 board has 16MB flash and 8MB octal PSRAM (stacked on the ESP32-S3R8
+module). `PSRAM=opi` enables the octal PSRAM interface, which is required
+because the 466x466 frame buffers (~434KB each) do not fit internal SRAM and
+are allocated from PSRAM instead.
+
 `--libraries ../libraries` puts the in-repo libraries on the search path: the
-board table and shared panel bring-up, plus the vendored JD9853 esp_lcd driver
-(the Arduino core ships an ST7789 driver but no JD9853 one). The same flag
-applies to `display_test` and `board_probe`. It is a compile-only flag; `upload`
-reuses the cached build. The binary is board-independent, so the same build runs
-on either board.
+board table and shared panel bring-up, plus the vendored JD9853 and CO5300
+esp_lcd drivers (the Arduino core ships an ST7789 driver but neither of
+these). The same flag applies to `display_test` and `board_probe`. It is a
+compile-only flag; `upload` reuses the cached build. The C6 binary is
+board-independent (one build runs on either 1.47" board); the S3 binary
+serves only its own panel.
 
 Mac app — the set-and-forget way:
 
