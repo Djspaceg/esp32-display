@@ -841,9 +841,100 @@ int main() {
       CHECK(t.onReport(false, 0, 0, 50).gesture == Gesture::None);
     }
 
+    // --- Long press --------------------------------------------------------
+    //
+    // The one gesture that fires while the finger is still down, which is why it
+    // comes from tick() rather than from a release. Reports arrive only on
+    // controller interrupts, so a still finger produces none and the tick is the
+    // only thing that can notice the threshold passing.
+
+    // Held past the threshold and barely moved: fires from the tick, with the
+    // finger still down.
+    {
+      Tracker t;
+      t.onReport(true, 80, 90, 0);
+      CHECK(t.tick(touchgesture::LONG_PRESS_MS - 1).gesture == Gesture::None);
+      auto held = t.tick(touchgesture::LONG_PRESS_MS);
+      CHECK(held.gesture == Gesture::LongPress);
+      CHECK(held.startX == 80 && held.startY == 90);
+      CHECK(t.pressActive());  // still down: this is not a release
+    }
+
+    // Fires once. Ticking every loop would otherwise repeat it forever, and a
+    // gesture bound to it would run tens of times per hold.
+    {
+      Tracker t;
+      t.onReport(true, 80, 90, 0);
+      CHECK(t.tick(touchgesture::LONG_PRESS_MS).gesture == Gesture::LongPress);
+      CHECK(t.tick(touchgesture::LONG_PRESS_MS + 1).gesture == Gesture::None);
+      CHECK(t.tick(touchgesture::LONG_PRESS_MS + 5000).gesture == Gesture::None);
+    }
+
+    // The release after a long press reports nothing: the press is spent, and
+    // classifying it as well would send a second gesture for one finger.
+    {
+      Tracker t;
+      t.onReport(true, 80, 90, 0);
+      CHECK(t.tick(touchgesture::LONG_PRESS_MS).gesture == Gesture::LongPress);
+      CHECK(t.onReport(false, 0, 0, touchgesture::LONG_PRESS_MS + 100).gesture ==
+            Gesture::None);
+    }
+
+    // A finger that wandered beyond tap slop is on its way to a swipe, so it is
+    // not a hold however long it rests there. Without this, dragging slowly
+    // would fire a long press mid-swipe and then the swipe would be swallowed.
+    {
+      Tracker t;
+      t.onReport(true, 100, 100, 0);
+      t.onReport(true, (int16_t)(100 + touchgesture::TAP_MAX_MOVE_PX + 1), 100, 10);
+      CHECK(t.tick(touchgesture::LONG_PRESS_MS + 100).gesture == Gesture::None);
+      // And the swipe it becomes still arrives.
+      t.onReport(true, (int16_t)(100 + touchgesture::SWIPE_MIN_PX), 100, 200);
+      CHECK(t.onReport(false, 0, 0, 300).gesture == Gesture::SwipeRight);
+    }
+
+    // Ticking with no press does nothing, so the tick is safe to call every loop.
+    {
+      Tracker t;
+      CHECK(t.tick(999999).gesture == Gesture::None);
+    }
+
+    // A tap is still a tap: the thresholds do not overlap, so a quick press
+    // cannot be caught by the hold path on its way past.
+    {
+      Tracker t;
+      t.onReport(true, 50, 50, 0);
+      CHECK(t.tick(touchgesture::TAP_MAX_MS).gesture == Gesture::None);
+      CHECK(t.onReport(false, 0, 0, touchgesture::TAP_MAX_MS).gesture ==
+            Gesture::Tap);
+    }
+    CHECK(touchgesture::LONG_PRESS_MS > touchgesture::TAP_MAX_MS);
+
+    // An abandoned press does not leave the fired flag set, or the first hold
+    // after one would be swallowed.
+    {
+      Tracker t;
+      t.onReport(true, 10, 10, 0);
+      t.tick(touchgesture::LONG_PRESS_MS);
+      t.onReport(true, 10, 10, touchgesture::PRESS_MAX_MS + 1);  // fresh press
+      CHECK(t.tick(touchgesture::PRESS_MAX_MS + 1 + touchgesture::LONG_PRESS_MS)
+                .gesture == Gesture::LongPress);
+    }
+
+    // reset() clears it too, so a re-init mid-hold cannot strand the flag.
+    {
+      Tracker t;
+      t.onReport(true, 10, 10, 0);
+      t.tick(touchgesture::LONG_PRESS_MS);
+      t.reset();
+      t.onReport(true, 10, 10, 0);
+      CHECK(t.tick(touchgesture::LONG_PRESS_MS).gesture == Gesture::LongPress);
+    }
+
     CHECK(strcmp(touchgesture::gestureName(Gesture::Tap), "tap") == 0);
     CHECK(strcmp(touchgesture::gestureName(Gesture::SwipeLeft), "swipe-left") == 0);
     CHECK(strcmp(touchgesture::gestureName(Gesture::None), "none") == 0);
+    CHECK(strcmp(touchgesture::gestureName(Gesture::LongPress), "long-press") == 0);
   }
 
   // --- ETCH touch events on the wire ---------------------------------------
@@ -866,7 +957,7 @@ int main() {
 
     // Round-trip every gesture, so no value is unrepresentable on the wire.
     for (uint8_t raw = (uint8_t)deviceproto::TouchGesture::Tap;
-         raw <= (uint8_t)deviceproto::TouchGesture::SwipeDown; raw++) {
+         raw <= (uint8_t)deviceproto::TouchGesture::LongPress; raw++) {
       uint8_t buf[deviceproto::TOUCH_PACKET_BYTES] = {0};
       deviceproto::writeTouch(buf, (deviceproto::TouchGesture)raw, raw, 1, 2, 0);
       deviceproto::TouchEvent got;
@@ -892,7 +983,7 @@ int main() {
     memcpy(badGesture, packet, sizeof(badGesture));
     badGesture[5] = 0;
     CHECK(!deviceproto::parseTouch(badGesture, sizeof(badGesture), ignored));
-    badGesture[5] = (uint8_t)deviceproto::TouchGesture::SwipeDown + 1;
+    badGesture[5] = (uint8_t)deviceproto::TouchGesture::LongPress + 1;
     CHECK(!deviceproto::parseTouch(badGesture, sizeof(badGesture), ignored));
 
     // CAP_TOUCH must not collide with an existing capability bit.

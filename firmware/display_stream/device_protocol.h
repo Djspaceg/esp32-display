@@ -35,6 +35,11 @@ enum Capability : uint32_t {
   // sender should offer touch actions only when this is set, so a panel without
   // touch does not show controls that can never fire.
   CAP_TOUCH = 1u << 9,
+  // Classifies a held press as LongPress rather than as nothing. Advertised
+  // apart from CAP_TOUCH, like CAP_BRIGHTNESS_LEVEL is from CAP_BRIGHTNESS, so a
+  // sender can tell a panel that reports holds from one that only reports taps
+  // and swipes - a gesture bound to a hold would otherwise appear to be ignored.
+  CAP_TOUCH_LONGPRESS = 1u << 10,
 };
 
 enum class ControlOpcode : uint8_t {
@@ -177,6 +182,11 @@ enum class TouchGesture : uint8_t {
   SwipeRight = 3,
   SwipeUp = 4,
   SwipeDown = 5,
+  // Reported while the finger is still down, unlike every other gesture here.
+  // Only sent by firmware advertising CAP_TOUCH_LONGPRESS; a sender that predates
+  // it refuses the unknown value and drops the datagram, so no version bump is
+  // needed in either direction.
+  LongPress = 6,
 };
 
 // Bit 0 of the flags byte: the panel was in landscape when the gesture happened.
@@ -194,7 +204,7 @@ struct TouchEvent {
 
 inline bool validTouchGesture(uint8_t raw) {
   return raw >= (uint8_t)TouchGesture::Tap &&
-         raw <= (uint8_t)TouchGesture::SwipeDown;
+         raw <= (uint8_t)TouchGesture::LongPress;
 }
 
 // ["ETCH"][version][gesture][sequence u16][x u16][y u16][flags][reserved]

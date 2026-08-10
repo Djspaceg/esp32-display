@@ -38,6 +38,7 @@ final class CaptureStatusReportingTests: XCTestCase {
             paused: paused,
             parked: parked,
             sourceDescription: "A window (900x600)",
+            landscape: false,
             captureStatus: capture,
             lastFrameAt: lastFrameAt,
             updatedAt: Date())

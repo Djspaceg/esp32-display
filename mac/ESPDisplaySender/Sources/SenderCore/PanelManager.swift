@@ -47,6 +47,13 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// Lines to show on the panel's own status card while no sender is driving
     /// it. Persisted, and pushed to the device whenever it reports in.
     var idleText = ""
+    /// Which gesture bindings this panel uses. Persisted, so a preset chosen once
+    /// still applies after a restart.
+    var gesturePreset: GesturePreset = .standard
+    /// Orientation of the last frame sent to this panel. Reported by the session,
+    /// and needed to read a swipe: which axis is the panel's long one depends on
+    /// it, and so does what the settings window says a gesture will do.
+    var landscape = false
     /// Why this panel is not usable, when the reason is something the user
     /// would otherwise only find in the log. Cleared as soon as the device
     /// reports in again.
@@ -263,6 +270,10 @@ final class PanelManager: ObservableObject {
     /// ordering: the counter wraps at 16 bits and restarts at a random value
     /// when the device reboots, so "newer" is not something it can express.
     private var lastTouchSequence: [String: UInt16] = [:]
+    /// Where each panel is in the window cycle. Deliberately not persisted:
+    /// window IDs are reissued, so a stored one would point at whatever window
+    /// inherited the number rather than at the one the user was looking at.
+    private var lastCycledWindow: [String: CGWindowID] = [:]
     /// How long to keep preferring the commanded level over the device's
     /// reports. Long enough to cover a coalesced drag plus a round trip, short
     /// enough that a lost command self-corrects while the user is still there.
@@ -749,6 +760,7 @@ final class PanelManager: ObservableObject {
             panel.spacingMicros = status.spacingMicros
             panel.paused = status.paused
             panel.sourceDescription = status.sourceDescription
+            panel.landscape = status.landscape
             panel.captureStatus = status.captureStatus
             panel.lastFrameAt = status.lastFrameAt
             // A parked session is alive but deliberately not capturing, which
@@ -829,30 +841,130 @@ final class PanelManager: ObservableObject {
 
     /// Act on a gesture the panel reported.
     ///
-    /// Duplicates are dropped first. UDP can deliver the same datagram twice,
-    /// and both actions here are toggles or steps, so a duplicate would either
-    /// undo itself (pause, then resume — indistinguishable from the tap being
-    /// ignored) or skip two sources at once.
+    /// Duplicates are dropped first. UDP can deliver the same datagram twice, and
+    /// every action here is a toggle or a step, so a duplicate would either undo
+    /// itself (pause, then resume — indistinguishable from the tap being ignored)
+    /// or move two places at once. Under the multimedia preset a duplicate would
+    /// also double a volume step or skip two tracks.
+    ///
+    /// Which action a gesture means depends on the panel's chosen preset, so this
+    /// reads the panel first and asks `TouchAction` rather than mapping directly.
     private func handleTouch(
         _ touch: DeviceProtocol.TouchEvent, for serviceName: String
     ) {
         guard lastTouchSequence[serviceName] != touch.sequence else { return }
         lastTouchSequence[serviceName] = touch.sequence
 
-        guard let action = TouchAction.for(touch.gesture) else { return }
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return }
+
+        // The orientation comes from the gesture itself rather than from this
+        // panel's last known state, so a swipe is read against the frame that was
+        // actually on screen when the finger moved - not the one that has since
+        // replaced it.
+        guard let action = TouchAction.action(
+            for: touch.gesture, preset: panel.gesturePreset,
+            landscape: touch.landscape)
+        else {
+            // Logged, because an unbound gesture and a broken one look identical
+            // from the outside: in both cases nothing happens.
+            print("[\(serviceName)] touch \(touch.gesture) -> unbound in "
+                + "\(panel.gesturePreset.rawValue)")
+            return
+        }
         // Logged because a gesture is otherwise untraceable: if the mapping or
         // the packet is wrong, the only symptom is that nothing happens, which
         // is indistinguishable from the panel never having sent anything.
         print("[\(serviceName)] touch \(touch.gesture) -> \(action)")
         switch action {
         case .togglePause:
-            guard let panel = panels.first(where: { $0.serviceName == serviceName })
-            else { return }
             setPaused(!panel.paused, for: serviceName)
         case .cycleSource(let forward):
             Task { @MainActor [weak self] in
                 await self?.cycleSource(forward: forward, for: serviceName)
             }
+        case .mediaPlayPause:
+            sendMediaKey(.playPause, for: serviceName)
+        case .volume(let up):
+            sendMediaKey(up ? .volumeUp : .volumeDown, for: serviceName)
+        case .track(let next):
+            sendMediaKey(next ? .nextTrack : .previousTrack, for: serviceName)
+        case .cycleWindow(let forward):
+            Task { @MainActor [weak self] in
+                await self?.cycleWindow(forward: forward, for: serviceName)
+            }
+        case .showFullDisplay:
+            useAutomaticSource(for: serviceName)
+        }
+    }
+
+    /// Post a media key for a gesture, surfacing a refusal.
+    ///
+    /// Reported rather than dropped because the likely refusal is a missing
+    /// Accessibility grant, and macOS does not error on a posted event it decides
+    /// to discard - so the only symptom would be a panel that appears to have
+    /// stopped noticing fingers.
+    private func sendMediaKey(_ key: MediaControl.Key, for serviceName: String) {
+        guard let failure = MediaControl.send(key) else { return }
+        let name = panels.first { $0.serviceName == serviceName }?.displayName
+            ?? serviceName
+        operationOutcome = .failure("\(name) could not control playback", failure)
+    }
+
+    /// Step this panel through the windows currently on screen.
+    ///
+    /// The cursor is a window ID held in memory, not read back from the stored
+    /// source. The stored form is `.window(applicationName)`, which cannot tell
+    /// two windows of the same app apart, so cycling live is precise while a
+    /// restart resolves to that app's largest window. Persisting the ID instead
+    /// would be worse: window IDs are reissued, so a stored one points at
+    /// whatever inherited the number.
+    private func cycleWindow(forward: Bool, for serviceName: String) async {
+        guard let session = sessions[serviceName] else { return }
+        let windows = await DisplayCapture.cyclableWindows()
+        guard !windows.isEmpty else {
+            operationOutcome = .failure(
+                "No windows to show",
+                "No on-screen window is large enough to mirror.")
+            return
+        }
+
+        let current = lastCycledWindow[serviceName].flatMap { id in
+            windows.firstIndex { $0.window.windowID == id }
+        }
+        let step = forward ? 1 : -1
+        // Without a cursor this is the first cycle since launch, or the window
+        // being followed has closed. Entering at the near end in the direction of
+        // travel means the first swipe moves one step rather than jumping to an
+        // arbitrary point in the list.
+        let index = current.map { ($0 + step + windows.count) % windows.count }
+            ?? (forward ? 0 : windows.count - 1)
+        let chosen = windows[index]
+        lastCycledWindow[serviceName] = chosen.window.windowID
+
+        session.usePickerFilter(
+            SCContentFilter(desktopIndependentWindow: chosen.window))
+        let app = chosen.window.owningApplication?.applicationName ?? chosen.label
+        updatePanel(serviceName) { panel in
+            panel.source = .window(app)
+            panel.sourceDescription = chosen.label
+        }
+        refreshPreviewDriver()
+        persistIfNeeded(force: true)
+    }
+
+    /// Choose which gesture bindings a panel uses.
+    ///
+    /// The Accessibility prompt is raised here rather than at the first gesture,
+    /// so the permission is dealt with while the user is looking at the setting
+    /// that needs it instead of discovering it later by swiping and getting
+    /// nothing.
+    func setGesturePreset(_ preset: GesturePreset, for serviceName: String) {
+        guard panels.contains(where: { $0.serviceName == serviceName }) else { return }
+        updatePanel(serviceName) { $0.gesturePreset = preset }
+        persistIfNeeded(force: true)
+        if preset == .multimedia, !MediaControl.isAuthorized {
+            MediaControl.requestAuthorization()
         }
     }
 

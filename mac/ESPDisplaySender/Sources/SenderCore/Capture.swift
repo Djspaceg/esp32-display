@@ -199,6 +199,42 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             }
     }
 
+    /// Windows a gesture can step through, with the `SCWindow` itself so the
+    /// caller can build a filter without fetching the content a second time.
+    ///
+    /// On-screen only: cycling onto a minimised or hidden window would send the
+    /// panel something the user cannot see, which reads as the gesture having
+    /// broken the stream.
+    ///
+    /// Sorted by application, then by window ID. That ordering matters more than
+    /// it looks: ScreenCaptureKit returns windows in z-order, which changes the
+    /// moment the user clicks something, so cycling would appear to jump around
+    /// and revisit windows. Sorting by an identity that does not move keeps one
+    /// swipe equal to one step, and keeps an app's windows adjacent.
+    static func cyclableWindows() async -> [(window: SCWindow, label: String)] {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(
+            true, onScreenWindowsOnly: true)
+        else { return [] }
+        return content.windows
+            .filter {
+                $0.windowLayer == 0 && $0.frame.width >= 100 && $0.frame.height >= 100
+            }
+            .sorted { a, b in
+                let appA = a.owningApplication?.applicationName ?? ""
+                let appB = b.owningApplication?.applicationName ?? ""
+                guard appA == appB else {
+                    return appA.localizedCaseInsensitiveCompare(appB)
+                        == .orderedAscending
+                }
+                return a.windowID < b.windowID
+            }
+            .map { window in
+                let app = window.owningApplication?.applicationName ?? "Window"
+                let title = window.title ?? ""
+                return (window: window, label: title.isEmpty ? app : "\(app): \(title)")
+            }
+    }
+
     /// Find a normal application window whose app name or title contains
     /// `matching` (case-insensitive). Largest match wins, preferring
     /// on-screen windows.

@@ -39,6 +39,13 @@ final class FrameSender {
     /// refreshed periodically (touched only on sendQueue).
     private var lastSentFrame: [UInt8]?
     private var lastSentLandscape = false
+    /// Orientation of the most recent frame sent, readable from any thread.
+    ///
+    /// This is the frame the panel currently has on screen, and so the frame its
+    /// touch controller maps a finger into. That makes it the orientation a
+    /// gesture binding has to be read against: which axis is the panel's long one
+    /// depends on it.
+    private var _currentLandscape = false
     private var lastSendAt = Date.distantPast
     /// How often an unchanging screen gets a full repaint. Cheap (80 packets)
     /// and bounds how long a UDP-lost band can stay visible.
@@ -143,6 +150,13 @@ final class FrameSender {
         lock.lock()
         defer { lock.unlock() }
         return _spacingMicros
+    }
+
+    /// Orientation of the last frame sent, i.e. what the panel is showing now.
+    var currentLandscape: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _currentLandscape
     }
 
     /// Seconds since the last device heartbeat; nil if none received yet.
@@ -815,6 +829,12 @@ final class FrameSender {
         framesSent &+= 1
         lastSentFrame = pixels
         lastSentLandscape = landscape
+        // Mirrored under the lock for cross-thread readers. `lastSentLandscape`
+        // itself stays sendQueue-only so the existing serialization reasoning
+        // around it does not have to change.
+        lock.lock()
+        _currentLandscape = landscape
+        lock.unlock()
         lastSendAt = Date()
     }
 

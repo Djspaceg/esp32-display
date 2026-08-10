@@ -29,6 +29,11 @@ struct PersistedPanel: Codable, Equatable {
     var source: SourceSpec?
     /// Lines the panel shows on its own status card while nothing is driving it.
     var idleText: String?
+    /// Which gesture bindings the user chose, absent for the default. Absent
+    /// rather than always written for the same reason `source` is: a record that
+    /// only says "the default" is noise, and an older file that predates presets
+    /// should load as the default rather than fail to decode.
+    var gesturePreset: GesturePreset?
 
     init(snapshot: PanelSnapshot) {
         serviceName = snapshot.serviceName
@@ -39,6 +44,8 @@ struct PersistedPanel: Codable, Equatable {
         lastSeen = snapshot.lastSeen
         source = snapshot.source.spec
         idleText = snapshot.idleText.isEmpty ? nil : snapshot.idleText
+        gesturePreset = snapshot.gesturePreset == .standard
+            ? nil : snapshot.gesturePreset
     }
 
     /// Rebuild a runtime snapshot. Everything not persisted starts at its
@@ -54,6 +61,7 @@ struct PersistedPanel: Codable, Equatable {
             lastSeen: lastSeen)
         panel.source = PanelSource(source)
         panel.idleText = idleText ?? ""
+        panel.gesturePreset = gesturePreset ?? .standard
         return panel
     }
 }

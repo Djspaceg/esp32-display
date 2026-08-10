@@ -207,6 +207,11 @@ private struct PanelDetailView: View {
             sourceSection
             displaySection
             connectionSection
+            // Gated on the panel actually having a touch screen, so a panel that
+            // cannot produce a gesture does not offer to bind one.
+            if panel.capabilities.contains(.touch) {
+                gestureSection
+            }
             if panel.capabilities.contains(.idleText) {
                 screensaverSection
             }
@@ -429,6 +434,14 @@ private struct PanelDetailView: View {
         }
     }
 
+    /// The gesture preset, read back from the panel so the dropdown shows what is
+    /// in force rather than the last thing clicked.
+    private var gesturePreset: Binding<GesturePreset> {
+        Binding(
+            get: { panel.gesturePreset },
+            set: { manager.setGesturePreset($0, for: panel.serviceName) })
+    }
+
     /// The dropdown's value: derived from the stored source, so a cancelled
     /// chooser cannot leave it showing something that was never applied.
     private var sourceKind: Binding<PanelSourceKind> {
@@ -569,6 +582,81 @@ private struct PanelDetailView: View {
             Text("Connection")
         } footer: {
             Text("Automatic verifies the reported display name; a manual assignment is saved with this display. WiFi credentials are stored in your login Keychain and applied over USB.")
+        }
+    }
+
+    /// The gesture preset and, below it, what each gesture will actually do.
+    ///
+    /// The readout is not written out here. It is generated from the same
+    /// resolver that dispatches a real gesture, so it describes the behaviour
+    /// rather than restating it — a binding that changed without the help
+    /// following is not expressible.
+    private var gestureSection: some View {
+        Section {
+            LabeledContent("Preset") {
+                Picker("Preset", selection: gesturePreset) {
+                    ForEach(GesturePreset.allCases) { preset in
+                        Text(preset.label).tag(preset)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .help(panel.gesturePreset.summary)
+            }
+            LabeledContent("Gestures") {
+                gestureHelp
+            }
+        } header: {
+            Text("Touch")
+        } footer: {
+            Text(panel.gesturePreset.summary
+                + " Directions follow what is on the panel, so they stay correct "
+                + "when it is rotated or flipped — the list above is for how it is "
+                + "facing now. A gesture not listed does nothing under this preset.")
+        }
+    }
+
+    /// One row per bound gesture, plus whatever stands between the preset and
+    /// working: firmware too old to report a long press, or a permission macOS
+    /// has not granted yet.
+    private var gestureHelp: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                ForEach(GestureHelpRow.rows(
+                    for: panel.gesturePreset, landscape: panel.landscape)
+                ) { row in
+                    GridRow {
+                        Text(row.gesture).font(.callout.weight(.medium))
+                        Text(row.effect)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            // Both of these are the difference between a preset that works and a
+            // gesture that silently does nothing, which is the one outcome a
+            // touch binding cannot afford.
+            if panel.gesturePreset.usesLongPress,
+                !panel.capabilities.contains(.touchLongPress)
+            {
+                Label(
+                    "Press and hold needs newer firmware on this panel. The other "
+                        + "gestures work now.",
+                    systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if panel.gesturePreset == .multimedia, !MediaControl.isAuthorized {
+                HStack(spacing: 8) {
+                    Label(
+                        "Playback control needs Accessibility permission.",
+                        systemImage: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Allow…") { MediaControl.requestAuthorization() }
+                        .controlSize(.small)
+                }
+            }
         }
     }
 
