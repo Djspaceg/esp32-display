@@ -39,11 +39,87 @@ static Header hdr(uint16_t frame, uint16_t band, uint16_t dirty,
 int main() {
   bool dropped;
 
-  // --- geometry: bands tile the 110,080-byte frame exactly, both ways
-  CHECK(BANDS_PORTRAIT * BAND_BYTES_PORTRAIT == 110080);
-  CHECK(BANDS_LANDSCAPE * BAND_BYTES_LANDSCAPE == 110080);
-  CHECK(HEADER_BYTES + BAND_BYTES_PORTRAIT <= 1400);  // MTU-safe
-  CHECK(HEADER_BYTES + BAND_BYTES_LANDSCAPE <= 1400);
+  const Geometry G172 = GEOMETRY_172X320;
+
+  // Every band starts where the previous one ended, every packet fits the
+  // budget, and the bands cover the frame exactly - the invariants that make
+  // "band index" and "buffer offset" interchangeable at both ends.
+  auto tilesExactly = [](const Geometry &g, bool landscape) {
+    size_t total = 0;
+    for (uint16_t b = 0; b < g.bandCount(landscape); b++) {
+      if (g.bandOffset(b, landscape) != total) return false;
+      if (HEADER_BYTES + g.bandPayloadBytes(b, landscape) > MAX_PACKET_BYTES) {
+        return false;
+      }
+      total += g.bandPayloadBytes(b, landscape);
+    }
+    return total == g.frameBytes();
+  };
+
+  // --- geometry: the layout derived for 172x320 is byte-identical to the
+  //     historical hardcoded wire format, so shipped panels are unaffected
+  CHECK(G172.valid());
+  CHECK(G172.frameBytes() == 110080);
+  CHECK(G172.bandCount(false) == 80);           // 80 bands...
+  CHECK(G172.rowsPerBand(false) == 4);          // ...of 4 rows...
+  CHECK(G172.bandPayloadBytes(0, false) == 1376);  // ...x 344B
+  CHECK(G172.bandRows(79, false) == 4);  // divides evenly: no short band
+  CHECK(G172.bandCount(true) == 86);
+  CHECK(G172.rowsPerBand(true) == 2);
+  CHECK(G172.bandPayloadBytes(0, true) == 1280);
+  CHECK(G172.bandRows(85, true) == 2);
+  CHECK(G172.maxBandCount() == 86);
+  CHECK(tilesExactly(G172, false));
+  CHECK(tilesExactly(G172, true));
+
+  // --- geometry: the square AMOLED family (412x412, 466x466, 480x480) runs
+  //     one-row bands and is orientation-symmetric
+  {
+    const Geometry sizes[] = {{412, 412}, {466, 466}, {480, 480}};
+    for (const Geometry &g : sizes) {
+      CHECK(g.valid());
+      CHECK(g.rowsPerBand(false) == 1);
+      CHECK(g.bandCount(false) == g.height);
+      // Square: the landscape bit changes nothing on the wire.
+      CHECK(g.bandCount(true) == g.bandCount(false));
+      CHECK(g.rowBytes(true) == g.rowBytes(false));
+      CHECK(g.maxBandCount() == g.height);
+      CHECK(tilesExactly(g, false));
+      CHECK(tilesExactly(g, true));
+    }
+    const Geometry g466 = {466, 466};
+    CHECK(g466.bandPayloadBytes(0, false) == 932);
+    CHECK(g466.frameBytes() == 434312);
+    CHECK(g466.bandOffset(465, false) == 433380);
+  }
+
+  // --- geometry: a height that does not divide evenly gets a short last band
+  {
+    const Geometry g = {172, 322};  // synthetic: 4-row bands, 2-row remainder
+    CHECK(g.valid());
+    CHECK(g.bandCount(false) == 81);
+    CHECK(g.bandRows(79, false) == 4);
+    CHECK(g.bandRows(80, false) == 2);
+    CHECK(g.bandPayloadBytes(80, false) == 688);
+    CHECK(tilesExactly(g, false));
+    CHECK(tilesExactly(g, true));
+  }
+
+  // --- geometry: what the protocol cannot carry is refused up front
+  {
+    CHECK(!(Geometry{0, 0}).valid());
+    CHECK(!(Geometry{0, 320}).valid());
+    CHECK(!(Geometry{172, 0}).valid());
+    CHECK(!(Geometry{800, 800}).valid());  // a row exceeds the packet budget
+    CHECK(!(Geometry{698, 100}).valid());  // 1396B row, 2 over the budget
+    CHECK((Geometry{697, 100}).valid());   // 1394B row fits exactly
+    CHECK(!(Geometry{400, 520}).valid());  // 520 one-row bands > MAX_BANDS
+
+    // A reassembler handed an impossible geometry refuses every chunk
+    // rather than indexing a bitmap it does not have.
+    Reassembler r(Geometry{800, 800});
+    CHECK(r.onChunk(hdr(1, 0, 1), dropped) == ChunkAction::Reject);
+  }
 
   // --- parseHeader: little-endian fields, orientation in bit 15
   {
@@ -59,29 +135,46 @@ int main() {
 
   // --- geometry rejection
   {
-    Reassembler r;
+    Reassembler r(G172);
     CHECK(r.onChunk(hdr(1, 0, 0), dropped) == ChunkAction::Reject);
     CHECK(r.onChunk(hdr(1, 80, 80, false), dropped) == ChunkAction::Reject);
     CHECK(r.onChunk(hdr(1, 0, 81, false), dropped) == ChunkAction::Reject);
     // band 85 is valid in landscape (86 bands) but not portrait
     CHECK(r.onChunk(hdr(1, 85, 86, true), dropped) == ChunkAction::Apply);
-    Reassembler r2;
+    Reassembler r2(G172);
     CHECK(r2.onChunk(hdr(1, 85, 86, false), dropped) == ChunkAction::Reject);
   }
 
   // --- full keyframe completes on the last band
   {
-    Reassembler r;
-    for (int b = 0; b < BANDS_PORTRAIT - 1; b++) {
-      CHECK(r.onChunk(hdr(7, b, BANDS_PORTRAIT), dropped) == ChunkAction::Apply);
+    Reassembler r(G172);
+    const uint16_t bands = G172.bandCount(false);
+    for (int b = 0; b < bands - 1; b++) {
+      CHECK(r.onChunk(hdr(7, b, bands), dropped) == ChunkAction::Apply);
     }
-    CHECK(r.onChunk(hdr(7, BANDS_PORTRAIT - 1, BANDS_PORTRAIT), dropped) ==
+    CHECK(r.onChunk(hdr(7, bands - 1, bands), dropped) ==
           ChunkAction::ApplyComplete);
+  }
+
+  // --- a 466-band AMOLED keyframe completes the same way
+  {
+    const Geometry g466 = {466, 466};
+    Reassembler r(g466);
+    const uint16_t bands = g466.bandCount(false);
+    CHECK(bands == 466);
+    for (int b = 0; b < bands - 1; b++) {
+      CHECK(r.onChunk(hdr(21, b, bands), dropped) == ChunkAction::Apply);
+    }
+    CHECK(r.onChunk(hdr(21, bands - 1, bands), dropped) ==
+          ChunkAction::ApplyComplete);
+    // Band 466 does not exist on this panel, in either orientation.
+    CHECK(r.onChunk(hdr(22, 466, 466, false), dropped) == ChunkAction::Reject);
+    CHECK(r.onChunk(hdr(22, 466, 466, true), dropped) == ChunkAction::Reject);
   }
 
   // --- dirty subset: completes after dirtyCount bands, any indices
   {
-    Reassembler r;
+    Reassembler r(G172);
     CHECK(r.onChunk(hdr(9, 5, 3), dropped) == ChunkAction::Apply);
     CHECK(r.onChunk(hdr(9, 42, 3), dropped) == ChunkAction::Apply);
     CHECK(r.onChunk(hdr(9, 6, 3), dropped) == ChunkAction::ApplyComplete);
@@ -90,7 +183,7 @@ int main() {
 
   // --- duplicates never complete a frame early (the "frames with holes" bug)
   {
-    Reassembler r;
+    Reassembler r(G172);
     CHECK(r.onChunk(hdr(3, 5, 2), dropped) == ChunkAction::Apply);
     CHECK(r.onChunk(hdr(3, 5, 2), dropped) == ChunkAction::Duplicate);
     CHECK(r.onChunk(hdr(3, 5, 2), dropped) == ChunkAction::Duplicate);
@@ -100,7 +193,7 @@ int main() {
   // --- late chunks of older frames are ignored, current frame unharmed
   //     (the reassembly-thrash bug: one stale chunk used to kill two frames)
   {
-    Reassembler r;
+    Reassembler r(G172);
     CHECK(r.onChunk(hdr(100, 0, 2), dropped) == ChunkAction::Apply);
     CHECK(r.onChunk(hdr(99, 1, 2), dropped) == ChunkAction::IgnoreStale);
     CHECK(r.onChunk(hdr(98, 1, 80), dropped) == ChunkAction::IgnoreStale);
@@ -109,7 +202,7 @@ int main() {
 
   // --- a newer frame abandons a partial one and reports the drop
   {
-    Reassembler r;
+    Reassembler r(G172);
     CHECK(r.onChunk(hdr(10, 0, 3), dropped) == ChunkAction::Apply);
     CHECK(r.onChunk(hdr(11, 0, 2), dropped) == ChunkAction::Apply);
     CHECK(dropped);
@@ -119,7 +212,7 @@ int main() {
 
   // --- frame id wraparound: 0 is newer than 65535
   {
-    Reassembler r;
+    Reassembler r(G172);
     CHECK(r.onChunk(hdr(65535, 0, 2), dropped) == ChunkAction::Apply);
     CHECK(r.onChunk(hdr(0, 0, 2), dropped) == ChunkAction::Apply);
     CHECK(dropped);  // partial 65535 abandoned
@@ -129,21 +222,25 @@ int main() {
   // --- sender restart: persistent "stale" ids force a resync
   //     (ids reset to 0; without this the device rejects for up to 32k frames)
   {
-    Reassembler r;
+    Reassembler r(G172);
     CHECK(r.onChunk(hdr(30000, 0, 2), dropped) == ChunkAction::Apply);
+    // The resync threshold is two frames' worth of chunks for THIS panel's
+    // geometry: 172 on 172x320, exactly what the hardcoded protocol used.
+    const int resync = 2 * G172.maxBandCount();
+    CHECK(resync == 172);
     int ignored = 0;
     ChunkAction last = ChunkAction::Reject;
-    for (int i = 0; i < 2 * MAX_BANDS + 1; i++) {
+    for (int i = 0; i < resync + 1; i++) {
       last = r.onChunk(hdr(2, i % 40, 80), dropped);
       if (last == ChunkAction::IgnoreStale) ignored++;
     }
-    CHECK(ignored == 2 * MAX_BANDS - 1);
+    CHECK(ignored == resync - 1);
     CHECK(last == ChunkAction::Apply);  // resynced onto frame 2
   }
 
   // --- orientation adopted per frame
   {
-    Reassembler r;
+    Reassembler r(G172);
     CHECK(r.onChunk(hdr(1, 0, 1, true), dropped) == ChunkAction::ApplyComplete);
     CHECK(r.landscape() == true);
     CHECK(r.onChunk(hdr(2, 0, 1, false), dropped) == ChunkAction::ApplyComplete);
@@ -630,7 +727,94 @@ int main() {
           Variant::LcdSt7789);
     CHECK(board::variantFromName(board::variantToken(Variant::TouchJd9853)) ==
           Variant::TouchJd9853);
+    CHECK(board::variantFromName(board::variantToken(Variant::AmoledCo5300)) ==
+          Variant::AmoledCo5300);
     CHECK(strcmp(board::variantToken(Variant::Unknown), "auto") == 0);
+
+    // Host tests compile without an IDF target, which is the C6 path: the
+    // variant is Unknown until the boot probe says otherwise.
+    CHECK(board::COMPILED_VARIANT == Variant::Unknown);
+
+    // The C6 boards on the new per-board fields: single-lane SPI with a D/C
+    // line and a PWM backlight, 172x320, 80MHz - the pre-AMOLED world exactly.
+    for (const board::Config *c : {&st, &jd}) {
+      CHECK(c->bus == board::PanelBus::Spi);
+      CHECK(!c->isQspi());
+      CHECK(c->panelW == 172 && c->panelH == 320);
+      CHECK(c->pclkHz == 80 * 1000 * 1000);
+      CHECK(c->pinData1 == board::NO_PIN && c->pinData2 == board::NO_PIN &&
+            c->pinData3 == board::NO_PIN);
+      CHECK(c->pinDc != board::NO_PIN);
+      CHECK(c->hasBacklightPin());
+    }
+    CHECK(st.touch == board::TouchController::None);
+    CHECK(st.pinTouchSda == board::NO_PIN && st.pinTouchScl == board::NO_PIN);
+    CHECK(jd.touch == board::TouchController::Axs5106l);
+    // Touch rides the shared detection bus on the C6 Touch board.
+    CHECK(jd.pinTouchSda == board::PIN_PROBE_SDA);
+    CHECK(jd.pinTouchScl == board::PIN_PROBE_SCL);
+  }
+
+  // --- the S3 AMOLED board entry -------------------------------------------
+  {
+    using board::Variant;
+    const board::Config &am = board::configFor(Variant::AmoledCo5300);
+
+    CHECK(am.variant == Variant::AmoledCo5300);
+    CHECK(am.driver == board::PanelDriver::Co5300);
+    CHECK(am.bus == board::PanelBus::Qspi);
+    CHECK(am.isQspi());
+
+    // Waveshare's pin_config.h for the 1.75C, asserted pin by pin so a
+    // copy-paste between rows cannot pass silently.
+    CHECK(am.pinSclk == 38);
+    CHECK(am.pinMosi == 4);  // SDIO0
+    CHECK(am.pinData1 == 5 && am.pinData2 == 6 && am.pinData3 == 7);
+    CHECK(am.pinCs == 12);
+    CHECK(am.pinRst == 2);
+
+    // QSPI has no D/C line and an AMOLED has no backlight: both absences are
+    // what panel_init keys its bring-up and brightness paths on.
+    CHECK(am.pinDc == board::NO_PIN);
+    CHECK(!am.hasBacklightPin());
+
+    CHECK(am.panelW == 466 && am.panelH == 466);
+    CHECK(am.pclkHz == 40 * 1000 * 1000);
+    CHECK(am.colOffset == 6);
+    CHECK(!am.invertColor);
+    CHECK(!am.hasRgbLed());
+
+    // Round glass: the idle card must keep inside the inscribed square. The
+    // C6 panels are rectangular and keep their full-frame placement.
+    CHECK(am.roundDisplay);
+    CHECK(!board::configFor(Variant::LcdSt7789).roundDisplay);
+    CHECK(!board::configFor(Variant::TouchJd9853).roundDisplay);
+
+    // CST9217 on its own I2C bus; reset shared with the panel, so touch
+    // bring-up must never pulse it independently.
+    CHECK(am.touch == board::TouchController::Cst9217);
+    CHECK(am.hasTouch());
+    CHECK(am.pinTouchSda == 15 && am.pinTouchScl == 14);
+    CHECK(am.pinTouchInt == 11);
+    CHECK(am.pinTouchRst == am.pinRst);
+
+    // The panel dimensions in the table produce a carryable band geometry -
+    // the link between the board table and the wire format.
+    const Geometry g = {am.panelW, am.panelH};
+    CHECK(g.valid());
+    CHECK(g.bandCount(false) == 466);
+    CHECK(g.maxBandCount() <= MAX_BANDS);
+
+    // Round-trips for the new variant: NVS byte, CFGBOARD token.
+    CHECK(board::variantFromStored((uint8_t)Variant::AmoledCo5300) ==
+          Variant::AmoledCo5300);
+    CHECK(board::variantFromName("co5300") == Variant::AmoledCo5300);
+    CHECK(strcmp(board::variantToken(Variant::AmoledCo5300), "co5300") == 0);
+
+    // resolve() never lands on the S3 board from Unknown: an inconclusive C6
+    // probe must fall back to a C6 board, and the S3 build never probes.
+    CHECK(board::resolve(Variant::Unknown) != Variant::AmoledCo5300);
+    CHECK(board::resolve(Variant::AmoledCo5300) == Variant::AmoledCo5300);
   }
 
   // --- touch coordinate mapping --------------------------------------------

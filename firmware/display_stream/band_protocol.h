@@ -7,6 +7,17 @@
 // where bit 15 of dirty_count carries orientation (1 = landscape) and
 // dirty_count is the number of bands in THIS frame. Bands are
 // orientation-native so they align to whole rows.
+//
+// Band geometry is derived from panel dimensions rather than hardcoded, so
+// one protocol serves panels of different resolutions (the 172x320 1.47"
+// LCDs, the 466x466 AMOLEDs, and whatever comes next). Both ends run the
+// same arithmetic: rows per band is however many whole rows fit the packet
+// budget, and the last band may be short when the height does not divide
+// evenly. For the original 172x320 panels the derived layout is byte
+// identical to the historical hardcoded one (80 bands x 4 rows x 344B
+// portrait, 86 x 2 x 640B landscape), which the host tests pin down so the
+// generalization cannot silently change the wire format for shipped panels.
+// The Mac mirrors this arithmetic in BandProtocol.swift.
 #pragma once
 
 #include <stddef.h>
@@ -15,25 +26,95 @@
 
 namespace bandproto {
 
-static const uint16_t BANDS_PORTRAIT = 80;   // 4 rows x 344B = 1376B
-static const uint16_t BANDS_LANDSCAPE = 86;  // 2 rows x 640B = 1280B
-static const size_t BAND_BYTES_PORTRAIT = 1376;
-static const size_t BAND_BYTES_LANDSCAPE = 1280;
-static const int ROWS_PER_BAND_PORTRAIT = 4;
-static const int ROWS_PER_BAND_LANDSCAPE = 2;
-static const uint16_t MAX_BANDS = 86;
-static const size_t BITMAP_BYTES = (MAX_BANDS + 7) / 8;
 static const size_t HEADER_BYTES = 6;
 
-inline uint16_t bandCount(bool landscape) {
-  return landscape ? BANDS_LANDSCAPE : BANDS_PORTRAIT;
-}
-inline size_t bandBytes(bool landscape) {
-  return landscape ? BAND_BYTES_LANDSCAPE : BAND_BYTES_PORTRAIT;
-}
-inline int rowsPerBand(bool landscape) {
-  return landscape ? ROWS_PER_BAND_LANDSCAPE : ROWS_PER_BAND_PORTRAIT;
-}
+/// Whole-packet budget, header included. Conservatively below the practical
+/// WiFi UDP MTU. Both ends must agree on it because rows-per-band is derived
+/// from it; changing it changes the wire format for every panel at once.
+static const size_t MAX_PACKET_BYTES = 1400;
+
+/// Ceiling on bands any supported geometry may produce, sizing the
+/// reassembler bitmap. Panels wider than 348px take one-row bands, so band
+/// count equals panel height there: 466x466 -> 466 bands, 480x480 -> 480.
+/// 512 covers the roadmap and costs 64 bytes of bitmap.
+static const uint16_t MAX_BANDS = 512;
+static const size_t BITMAP_BYTES = (MAX_BANDS + 7) / 8;
+
+/// A panel's native (portrait) pixel dimensions, plus the band layout that
+/// follows from them. Pure arithmetic, cheap to pass by value.
+///
+/// Callers must only index bands below bandCount(); bandRows/bandPayloadBytes
+/// do not range-check their index.
+struct Geometry {
+  uint16_t width;   // native (portrait) frame width, px
+  uint16_t height;  // native frame height, px
+
+  uint16_t frameWidth(bool landscape) const {
+    return landscape ? height : width;
+  }
+  uint16_t frameHeight(bool landscape) const {
+    return landscape ? width : height;
+  }
+  size_t rowBytes(bool landscape) const {
+    return (size_t)frameWidth(landscape) * 2;  // RGB565
+  }
+  size_t frameBytes() const { return (size_t)width * (size_t)height * 2; }
+
+  /// Whole rows per band: as many as fit the packet budget, at least one.
+  int rowsPerBand(bool landscape) const {
+    size_t fit = (MAX_PACKET_BYTES - HEADER_BYTES) / rowBytes(landscape);
+    return fit < 1 ? 1 : (int)fit;
+  }
+
+  uint16_t bandCount(bool landscape) const {
+    int rpb = rowsPerBand(landscape);
+    return (uint16_t)(((int)frameHeight(landscape) + rpb - 1) / rpb);
+  }
+
+  /// Rows in one band: rowsPerBand everywhere except a final short band when
+  /// the height does not divide evenly.
+  int bandRows(uint16_t index, bool landscape) const {
+    int rpb = rowsPerBand(landscape);
+    uint16_t bands = bandCount(landscape);
+    if ((uint16_t)(index + 1) < bands) return rpb;
+    return (int)frameHeight(landscape) - (int)(bands - 1) * rpb;
+  }
+
+  size_t bandPayloadBytes(uint16_t index, bool landscape) const {
+    return (size_t)bandRows(index, landscape) * rowBytes(landscape);
+  }
+
+  /// Byte offset of a band within the frame buffer. Bands are whole-row
+  /// groups, so this is also a row-aligned pixel offset.
+  size_t bandOffset(uint16_t index, bool landscape) const {
+    return (size_t)index * (size_t)rowsPerBand(landscape) *
+           rowBytes(landscape);
+  }
+
+  /// Largest band count across orientations. Per-band storage and the
+  /// sender-restart resync threshold must cover whichever orientation
+  /// produces more bands. Square panels produce the same count both ways.
+  uint16_t maxBandCount() const {
+    uint16_t p = bandCount(false);
+    uint16_t l = bandCount(true);
+    return p > l ? p : l;
+  }
+
+  /// Whether the protocol can carry this geometry at all: nonzero, every row
+  /// fits a packet (width and height at most 697px), and the bitmap can track
+  /// every band in either orientation.
+  bool valid() const {
+    if (width == 0 || height == 0) return false;
+    if (rowBytes(false) > MAX_PACKET_BYTES - HEADER_BYTES) return false;
+    if (rowBytes(true) > MAX_PACKET_BYTES - HEADER_BYTES) return false;
+    return bandCount(false) <= MAX_BANDS && bandCount(true) <= MAX_BANDS;
+  }
+};
+
+/// The original 1.47" panels (ESP32-C6-LCD-1.47 and -Touch-LCD-1.47). Named
+/// here because the host tests pin its derived layout to the historic wire
+/// format; the sketches take their geometry from the board table.
+static const Geometry GEOMETRY_172X320 = {172, 320};
 
 struct Header {
   uint16_t frameId;
@@ -66,15 +147,26 @@ enum class ChunkAction : uint8_t {
 //   them used to thrash reassembly and kill both frames).
 // - A persistent stream of "stale" ids means the sender restarted (ids
 //   reset to 0): force-resync instead of rejecting for up to 32k frames.
+//   "Persistent" is two frames' worth of chunks for THIS panel's geometry,
+//   so the timeout scales with resolution instead of stretching on big
+//   panels or hair-triggering on small ones.
 // - Duplicate bands (802.11 retry artifacts) must not double-count toward
 //   completion.
 class Reassembler {
  public:
+  explicit Reassembler(Geometry geometry)
+      : geo(geometry),
+        geoValid(geometry.valid()),
+        resyncAfter((uint16_t)(2 * geometry.maxBandCount())) {}
+
   // droppedFrame is set when adopting a new frame abandoned a partial one
   // (its bands stay pending for drawing - per-band recency).
   ChunkAction onChunk(const Header &h, bool &droppedFrame) {
     droppedFrame = false;
-    uint16_t totalBands = bandCount(h.landscape);
+    if (!geoValid) {
+      return ChunkAction::Reject;
+    }
+    uint16_t totalBands = geo.bandCount(h.landscape);
     if (h.dirtyCount == 0 || h.dirtyCount > totalBands ||
         h.bandIndex >= totalBands) {
       return ChunkAction::Reject;
@@ -85,7 +177,7 @@ class Reassembler {
     } else if (h.frameId != frameId) {
       int16_t diff = (int16_t)(h.frameId - frameId);
       if (diff <= 0) {
-        if (++staleStreak < 2 * MAX_BANDS) {
+        if (++staleStreak < resyncAfter) {
           return ChunkAction::IgnoreStale;
         }
         // Sender restart: fall through and adopt.
@@ -112,6 +204,7 @@ class Reassembler {
   }
 
   bool landscape() const { return frameLandscape; }
+  const Geometry &geometry() const { return geo; }
 
  private:
   void adopt(const Header &h) {
@@ -123,6 +216,9 @@ class Reassembler {
     memset(bitmap, 0, sizeof(bitmap));
   }
 
+  const Geometry geo;
+  const bool geoValid;
+  const uint16_t resyncAfter;
   uint16_t frameId = 0;
   uint16_t bandsSeen = 0;
   uint16_t bandsExpected = 0;
