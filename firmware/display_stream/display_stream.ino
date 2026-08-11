@@ -62,11 +62,12 @@
 // emitted above the point where the header used to be included, and the sketch
 // failed to compile with "'deviceproto' has not been declared".
 //
-// All three are header-only, self-contained, and unit tested standalone on the
+// All of them are header-only, self-contained, and unit tested standalone on the
 // host, so nothing in this file has to be declared before them.
 #include "band_protocol.h"
 #include "device_protocol.h"
 #include "control_queue.h"
+#include "ota_policy.h"
 using namespace bandproto;
 
 // WiFi credentials live in NVS flash and are reconfigurable over the USB
@@ -208,6 +209,13 @@ static bool batteryAvailable = false;
 static const uint16_t OTA_PORT = 3232;  // ArduinoOTA's own default port
 static bool otaConfigured = false;      // a password is stored in NVS
 static bool otaActive = false;          // begin() has run, handle() is live
+
+// The two flags collapsed into the one thing anybody is told, so the capability
+// bit and CFGSHOW's ota= cannot drift apart. The rules live in ota_policy.h
+// where they are tested on the host.
+static inline otapolicy::Status currentOtaStatus() {
+  return otapolicy::status(otaActive, otaConfigured);
+}
 // Set for the duration of a write. The whole transfer happens inside one
 // ArduinoOTA.handle() call, so the loop does not normally iterate while this is
 // set; it exists so that if it ever does, nothing repaints over the progress
@@ -236,9 +244,12 @@ static uint32_t deviceCapabilities() {
                            : 0u)
          | (batteryAvailable ? deviceproto::CAP_BATTERY : 0u)
          // Only when OTA actually came up, not merely because this build
-         // contains the code: a panel with no OTA password advertises no OTA,
-         // so nothing offers an update path that would be refused.
-         | (otaActive ? deviceproto::CAP_OTA : 0u);
+         // contains the code and not merely because a password is stored: a
+         // panel that is not listening advertises no OTA, so nothing offers an
+         // update path that would time out. advertisesCapability owns that rule.
+         | (otapolicy::advertisesCapability(currentOtaStatus())
+                ? deviceproto::CAP_OTA
+                : 0u);
 }
 
 // Lines the sender asked the panel to show on its status card, with when they
@@ -836,16 +847,19 @@ static void processConfigLine(char *line) {
     //   CFGOTAPW <b64 password>  enable OTA with this password
     //   CFGOTAPW clear           forget it, which turns OTA off again
     // Base64 for exactly the reason CFGWIFI uses it - a password may contain
-    // any character a shell or a space-delimited line would eat. "clear" is
-    // unambiguous as a literal token because five characters can never be
-    // valid base64, so no real payload can collide with it.
+    // any character a shell or a space-delimited line would eat. "clear" cannot
+    // collide with a real payload because it is recognised as a literal BEFORE
+    // any decode is attempted, which is a property of the order below rather
+    // than of the string (see otapolicy::classifyArgument, which owns and
+    // documents that; an earlier comment here claimed five characters can never
+    // be valid base64, which is a claim about decoders and not one to rely on).
     //
     // Both forms restart. OTA is brought up during setup and its bit is baked
     // into the mDNS caps TXT record there, so a reboot is the honest way to make
     // the panel's advertisement agree with its state.
     const char *arg = line + 9;
     Preferences prefs;
-    if (strcmp(arg, "clear") == 0) {
+    if (otapolicy::classifyArgument(arg) == otapolicy::Argument::Clear) {
       prefs.begin("espdisp", false);
       prefs.remove("otapw");
       prefs.end();
@@ -855,22 +869,36 @@ static void processConfigLine(char *line) {
       ESP.restart();
       return;
     }
-    unsigned char pw[65];
+    // Sized so the decode cannot fail for want of room, which keeps "not
+    // base64" and "too long" distinguishable: the config line is 256 bytes
+    // including its terminator, so the argument is at most 246 characters and
+    // decodes to at most 185 bytes. The length policy is then applied to the
+    // result rather than being an accident of this buffer's size.
+    unsigned char pw[193];
     size_t pwLen = 0;
-    if (mbedtls_base64_decode(pw, sizeof(pw) - 1, &pwLen,
-                              (const unsigned char *)arg, strlen(arg)) != 0) {
-      Serial.println("CFGERR bad base64 password (max 64 bytes)");
-      return;
+    const bool decoded = mbedtls_base64_decode(pw, sizeof(pw) - 1, &pwLen,
+                                               (const unsigned char *)arg,
+                                               strlen(arg)) == 0;
+    switch (otapolicy::verifyPassword(decoded, pwLen)) {
+      case otapolicy::Verdict::NotBase64:
+        Serial.println("CFGERR bad base64 password");
+        return;
+      case otapolicy::Verdict::TooShort:
+        // Refused rather than accepted: this one password is the only thing
+        // between the LAN and a firmware write, espota can be retried as fast
+        // as the panel will answer, and a weak one is worse than no OTA at all.
+        Serial.printf("CFGERR ota password must be at least %u bytes "
+                      "(or: CFGOTAPW clear)\n",
+                      (unsigned)otapolicy::PASSWORD_MIN_BYTES);
+        return;
+      case otapolicy::Verdict::TooLong:
+        Serial.printf("CFGERR ota password must be at most %u bytes\n",
+                      (unsigned)otapolicy::PASSWORD_MAX_BYTES);
+        return;
+      case otapolicy::Verdict::Accept:
+        break;
     }
     pw[pwLen] = 0;
-    if (pwLen < 8) {
-      // Refused rather than accepted: this one password is the only thing
-      // between the LAN and a firmware write, espota can be retried as fast as
-      // the panel will answer, and a weak one here is worse than no OTA at all.
-      Serial.println("CFGERR ota password must be at least 8 bytes "
-                     "(or: CFGOTAPW clear)");
-      return;
-    }
     prefs.begin("espdisp", false);
     prefs.putString("otapw", (const char *)pw);
     prefs.end();
@@ -894,7 +922,8 @@ static void processConfigLine(char *line) {
     // ota= is three-valued on purpose: "off" (no password stored), "pending" (a
     // password is stored but the radio was not ready when setup ran, so nothing
     // is listening yet), "on" (listening). Reporting only on/off would make a
-    // panel that simply booted without WiFi look misconfigured.
+    // panel that simply booted without WiFi look misconfigured. The mapping is
+    // otapolicy::statusToken, tested on the host.
     Serial.printf(
         "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d bl=%s "
         "board=%s bat=%d ota=%s ssid=%s\n",
@@ -902,8 +931,7 @@ static void processConfigLine(char *line) {
         WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), panelFlip180,
         blIsHigh() ? "high" : "low", board::variantToken(boardVariant),
         batteryPercentOrUnknown(),
-        otaActive ? "on" : (otaConfigured ? "pending" : "off"),
-        cfgSsid.c_str());
+        otapolicy::statusToken(currentOtaStatus()), cfgSsid.c_str());
   }
   // Anything else on serial is ignored (a monitor typing away is harmless).
 }
