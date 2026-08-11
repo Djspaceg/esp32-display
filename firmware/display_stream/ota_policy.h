@@ -161,6 +161,57 @@ inline const char *statusToken(Status status) {
   return "off";
 }
 
+/// The panel dim state an update borrowed, and the rule for giving it back.
+///
+/// onStart clears displaySleeping/idleActive so an update is visible even if the
+/// Mac's displays are asleep, and a FAILED push has to put them back - this
+/// firmware keeps running, so the panel still owes its state to the sender's last
+/// instruction. (A successful push reboots and the sender re-establishes both.)
+///
+/// WHY THIS IS A TYPE AND NOT TWO BOOLS. The restore is only correct if the save
+/// happened on the same push, and it is easy to believe that it did: onError
+/// looks like the other half of onStart. It is not. The core reaches
+/// _error_callback from paths that never reach _start_callback -
+/// _error_callback(OTA_AUTH_ERROR) straight out of the OTA_WAITAUTH state
+/// (ArduinoOTA.cpp:314) and _error_callback(OTA_BEGIN_ERROR) twice inside
+/// _runUpdate (333, 348), all before _start_callback() at line 357. Restoring
+/// unconditionally therefore replayed values from boot or from some earlier push
+/// and then re-applied the backlight, which lit a panel the Mac had put to sleep.
+/// A wrong password is enough to reach it, so anything on the LAN could wake a
+/// sleeping panel with two datagrams and no secret, and nothing would put it back
+/// (the sender only sends ESLP on the edge). That is worse than the state the
+/// restore was added to fix, and it was reachable without authenticating.
+///
+/// So the values are unreadable except through take(), which answers false when
+/// there is nothing owed. The bug is not merely fixed, it is unrepresentable: a
+/// caller cannot restore state that was never saved.
+///
+/// take() also consumes, so a second call restores nothing. The core sends one
+/// error per push, but "put it back once" is the property wanted, not "put it
+/// back as many times as asked".
+struct SavedPanelState {
+  bool sleeping = false;
+  bool idle = false;
+  bool held = false;
+
+  /// Record the state an update is about to clear.
+  void save(bool sleepingNow, bool idleNow) {
+    sleeping = sleepingNow;
+    idle = idleNow;
+    held = true;
+  }
+
+  /// Give it back, once. Returns false and touches nothing if none was saved,
+  /// which is the case the caller must not mistake for "restore false/false".
+  bool take(bool &sleepingOut, bool &idleOut) {
+    if (!held) return false;
+    held = false;
+    sleepingOut = sleeping;
+    idleOut = idle;
+    return true;
+  }
+};
+
 /// Whether the advertised capability set should carry CAP_OTA.
 ///
 /// Keyed to On alone, deliberately. A Pending panel must NOT advertise OTA: the

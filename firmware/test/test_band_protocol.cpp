@@ -1633,6 +1633,87 @@ int main() {
     CHECK(advertised(false, false) == base);
     CHECK((advertised(false, false) & deviceproto::CAP_OTA) == 0);
   }
+  // --- the panel state an update borrows, and the unauthenticated wake that
+  //     putting it back without checking used to allow
+  {
+    // THE CASE THIS TYPE EXISTS FOR. A panel the Mac has put to sleep, and an
+    // error callback with no matching onStart - which is every wrong-password
+    // push, since the core answers those out of OTA_WAITAUTH long before
+    // _start_callback. take() must refuse and leave the panel alone. Restoring
+    // unconditionally wrote false/false and re-applied the backlight, so
+    // anything on the LAN could wake a sleeping panel without the password.
+    {
+      otapolicy::SavedPanelState fresh;
+      bool sleeping = true, idle = true;
+      CHECK(!fresh.take(sleeping, idle));
+      CHECK(sleeping);  // still asleep
+      CHECK(idle);
+    }
+    // The same with the panel awake: nothing owed means nothing written, in
+    // either direction. A restore that happened to agree would not be a pass.
+    {
+      otapolicy::SavedPanelState fresh;
+      bool sleeping = false, idle = false;
+      CHECK(!fresh.take(sleeping, idle));
+      CHECK(!sleeping);
+      CHECK(!idle);
+    }
+    // The path that does owe something: onStart saved, so a failure puts it back.
+    {
+      otapolicy::SavedPanelState saved;
+      bool sleeping = true, idle = true;
+      saved.save(sleeping, idle);
+      // onStart then clears both, so the update is visible whatever state the
+      // panel was in.
+      sleeping = false;
+      idle = false;
+      CHECK(saved.take(sleeping, idle));
+      CHECK(sleeping);
+      CHECK(idle);
+    }
+    // Every combination round-trips, so neither field can be dropped or swapped.
+    for (int bits = 0; bits < 4; bits++) {
+      const bool wasSleeping = (bits & 1) != 0;
+      const bool wasIdle = (bits & 2) != 0;
+      otapolicy::SavedPanelState saved;
+      saved.save(wasSleeping, wasIdle);
+      bool sleeping = !wasSleeping, idle = !wasIdle;
+      CHECK(saved.take(sleeping, idle));
+      CHECK(sleeping == wasSleeping);
+      CHECK(idle == wasIdle);
+      // Consumed: a second error for the same push restores nothing and leaves
+      // the caller's values where they are.
+      bool againSleeping = sleeping, againIdle = idle;
+      CHECK(!saved.take(againSleeping, againIdle));
+      CHECK(againSleeping == sleeping);
+      CHECK(againIdle == idle);
+    }
+    // A second push saves over the first rather than stacking, so what comes
+    // back is the state the panel was in when THIS update started.
+    {
+      otapolicy::SavedPanelState saved;
+      saved.save(true, true);
+      saved.save(false, true);
+      bool sleeping = true, idle = false;
+      CHECK(saved.take(sleeping, idle));
+      CHECK(!sleeping);
+      CHECK(idle);
+    }
+    // And a save after a take is honoured: a panel that failed one push still
+    // gets its state back after the next one.
+    {
+      otapolicy::SavedPanelState saved;
+      bool sleeping = true, idle = false;
+      saved.save(sleeping, idle);
+      CHECK(saved.take(sleeping, idle));
+      CHECK(!saved.take(sleeping, idle));
+      saved.save(false, true);
+      bool nextSleeping = true, nextIdle = false;
+      CHECK(saved.take(nextSleeping, nextIdle));
+      CHECK(!nextSleeping);
+      CHECK(nextIdle);
+    }
+  }
 
   printf("OK: %d checks passed\n", checks);
   return 0;
