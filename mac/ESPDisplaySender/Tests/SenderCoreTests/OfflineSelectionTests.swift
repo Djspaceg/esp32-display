@@ -58,7 +58,15 @@ final class OfflineSourceSelectionTests: XCTestCase {
 
         manager.setRegionScale(3, for: "teeny")
 
-        XCTAssertEqual(manager.panels.first?.source.region?.matchingScale, 3)
+        // Read back against the panel's own geometry, which is what the UI does.
+        // An offline panel has never advertised one, so this is also the assertion
+        // that the nil fallback keeps the presets working for a panel that has
+        // said nothing - the case region mode is most often used in, since framing
+        // works with the panel switched off.
+        let panel = manager.panels.first
+        XCTAssertNil(panel?.geometry, "an offline panel has advertised nothing")
+        XCTAssertEqual(
+            panel?.source.region?.matchingScale(geometry: panel?.geometry), 3)
     }
 
     func testRotateWorksWhileOffline() throws {

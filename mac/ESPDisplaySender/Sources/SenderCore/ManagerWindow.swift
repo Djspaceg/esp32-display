@@ -470,7 +470,8 @@ private struct PanelDetailView: View {
     /// What a preset button will frame, so the numbers are not a mystery.
     private func scaleHelp(_ scale: Int) -> String {
         let landscape = panel.source.region?.isLandscape ?? false
-        let size = RegionSpec.panelSize(scale: scale, landscape: landscape)
+        let size = RegionSpec.panelSize(
+            geometry: panel.geometry, scale: scale, landscape: landscape)
         return "Frame \(Int(size.width))x\(Int(size.height)) points"
             + (scale == 1 ? " — one point per panel pixel" : "")
     }

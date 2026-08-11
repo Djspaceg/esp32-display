@@ -11,11 +11,16 @@ extension RegionSpec {
     /// down, trading sharpness for coverage.
     static let scalePresets = [1, 2, 3]
 
-    /// The panel's own geometry at a multiplier, in points.
+    /// The compiled-in panel size at a multiplier, in points.
     ///
-    /// Taken from `PixelConvert` rather than from the device, because the frame
-    /// protocol fixes the panel at 172x320 - the firmware and this app share
-    /// that constant, and the device does not report its dimensions at all.
+    /// `PixelConvert.width`/`height` is 172x320, the size the firmware and this
+    /// app have always shared. It is the FALLBACK now rather than the truth: a
+    /// panel advertises `res=WxH` in its mDNS TXT records and
+    /// `panelSize(geometry:scale:landscape:)` is what the UI calls. This overload
+    /// is what "the panel did not say" resolves to, which is the honest answer for
+    /// firmware older than the record, for a `res` that
+    /// `PanelGeometry.isStreamable` refused, and for a hand-specified `--host`
+    /// where there is no discovery at all.
     static func panelSize(scale: Int, landscape: Bool) -> CGSize {
         let short = Double(PixelConvert.width * scale)
         let long = Double(PixelConvert.height * scale)
@@ -24,13 +29,23 @@ extension RegionSpec {
             : CGSize(width: short, height: long)
     }
 
-    /// Panel size derived from an explicit geometry rather than the compiled-in
-    /// 172x320 default. Used when driving panels of different resolutions.
+    /// The panel's own geometry at a multiplier, in points.
+    ///
+    /// A nil geometry is a real answer - the panel has not said, or said something
+    /// implausible - and falls back to the compiled-in size rather than guessing.
+    /// Optional rather than two call sites at every caller, because every caller
+    /// has the same fallback and spelling it out five times invites one of them to
+    /// differ.
     ///
     /// Square panels (width == height) return the same size regardless of
     /// `landscape`, which is correct: isLandscape (width > height on the
     /// region) will always be false for a square.
-    static func panelSize(geometry: PanelGeometry, scale: Int, landscape: Bool) -> CGSize {
+    static func panelSize(
+        geometry: PanelGeometry?, scale: Int, landscape: Bool
+    ) -> CGSize {
+        guard let geometry else {
+            return panelSize(scale: scale, landscape: landscape)
+        }
         let short = Double(geometry.width * scale)
         let long = Double(geometry.height * scale)
         if geometry.width == geometry.height {
@@ -47,9 +62,10 @@ extension RegionSpec {
     /// actually see it; a rectangle placed at the origin lands under the menu
     /// bar in the corner of the screen.
     static func centered(
-        on display: String, scale: Int, landscape: Bool, in displaySize: CGSize
+        on display: String, geometry: PanelGeometry?, scale: Int, landscape: Bool,
+        in displaySize: CGSize
     ) -> RegionSpec {
-        let size = panelSize(scale: scale, landscape: landscape)
+        let size = panelSize(geometry: geometry, scale: scale, landscape: landscape)
         let spec = RegionSpec(
             display: display,
             x: (displaySize.width - size.width) / 2,
@@ -63,8 +79,11 @@ extension RegionSpec {
     ///
     /// Keeping the centre is what makes the preset buttons feel like a zoom
     /// rather than a jump: whatever the user had framed stays framed.
-    func scaled(to scale: Int, in displaySize: CGSize) -> RegionSpec {
-        let size = Self.panelSize(scale: scale, landscape: isLandscape)
+    func scaled(
+        to scale: Int, geometry: PanelGeometry?, in displaySize: CGSize
+    ) -> RegionSpec {
+        let size = Self.panelSize(
+            geometry: geometry, scale: scale, landscape: isLandscape)
         let centerX = x + width / 2
         let centerY = y + height / 2
         let resized = RegionSpec(
@@ -92,9 +111,10 @@ extension RegionSpec {
     /// Which preset this region currently matches, if any, so the UI can show
     /// the active one. Compared with a tolerance because a drag lands on
     /// fractional points.
-    var matchingScale: Int? {
+    func matchingScale(geometry: PanelGeometry?) -> Int? {
         Self.scalePresets.first { scale in
-            let size = Self.panelSize(scale: scale, landscape: isLandscape)
+            let size = Self.panelSize(
+                geometry: geometry, scale: scale, landscape: isLandscape)
             return abs(size.width - width) < 1 && abs(size.height - height) < 1
         }
     }

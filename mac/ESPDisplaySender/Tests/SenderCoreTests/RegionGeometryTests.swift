@@ -49,10 +49,56 @@ final class RegionPresetTests: XCTestCase {
 
     func testCenteredRegionIsCentered() {
         let region = RegionSpec.centered(
-            on: "S", scale: 1, landscape: false, in: displaySize)
+            on: "S", geometry: nil, scale: 1, landscape: false, in: displaySize)
 
         XCTAssertEqual(region.x + region.width / 2, 960, accuracy: 0.001)
         XCTAssertEqual(region.y + region.height / 2, 540, accuracy: 0.001)
+    }
+
+    /// THE FINDING: `panelSize(geometry:...)` existed, was tested, and had no
+    /// production caller, so every region the UI made was 172:320 whatever the
+    /// panel advertised. A 466x466 panel got a 172:320 source rect stretched into
+    /// a square output, about 1.86x horizontally.
+    ///
+    /// These four assert the shape the UI actually produces for a square panel,
+    /// through the same entry points ManagerWindow and PanelManager call.
+    func testTheRegionPathFollowsTheAdvertisedGeometry() {
+        let square = PanelGeometry(width: 466, height: 466)
+
+        let centered = RegionSpec.centered(
+            on: "S", geometry: square, scale: 1, landscape: false, in: displaySize)
+        XCTAssertEqual(centered.width, 466, accuracy: 0.001)
+        XCTAssertEqual(centered.height, 466, accuracy: 0.001)
+
+        let scaled = RegionSpec(display: "S", x: 0, y: 0, width: 466, height: 466)
+            .scaled(to: 2, geometry: square, in: displaySize)
+        XCTAssertEqual(scaled.width, 932, accuracy: 0.001)
+        XCTAssertEqual(scaled.height, 932, accuracy: 0.001)
+
+        XCTAssertEqual(scaled.matchingScale(geometry: square), 2)
+        // And the same rectangle is NOT a preset for the default panel, which is
+        // what says the geometry is being consulted rather than ignored.
+        XCTAssertNil(scaled.matchingScale(geometry: nil))
+    }
+
+    /// A panel that never said keeps exactly what it had. This is the case that
+    /// covers old firmware, an unstreamable `res`, and `--host` with no discovery,
+    /// so it is asserted rather than assumed to fall out of the optional.
+    func testAPanelThatDidNotSayKeepsTheCompiledInSize() {
+        for scale in RegionSpec.scalePresets {
+            for landscape in [false, true] {
+                XCTAssertEqual(
+                    RegionSpec.panelSize(
+                        geometry: nil, scale: scale, landscape: landscape),
+                    RegionSpec.panelSize(scale: scale, landscape: landscape))
+            }
+        }
+        XCTAssertEqual(
+            RegionSpec.centered(
+                on: "S", geometry: nil, scale: 1, landscape: false, in: displaySize),
+            RegionSpec.centered(
+                on: "S", geometry: .panel172x320, scale: 1, landscape: false,
+                in: displaySize))
     }
 
     /// Presets behave like a zoom, not a jump: whatever was framed stays framed.
@@ -61,7 +107,7 @@ final class RegionPresetTests: XCTestCase {
         let centreX = region.x + region.width / 2
         let centreY = region.y + region.height / 2
 
-        let scaled = region.scaled(to: 2, in: displaySize)
+        let scaled = region.scaled(to: 2, geometry: nil, in: displaySize)
 
         XCTAssertEqual(scaled.x + scaled.width / 2, centreX, accuracy: 0.001)
         XCTAssertEqual(scaled.y + scaled.height / 2, centreY, accuracy: 0.001)
@@ -133,13 +179,13 @@ final class RegionPresetTests: XCTestCase {
 
     func testMatchingScaleIdentifiesThePreset() {
         let oneX = RegionSpec.centered(
-            on: "S", scale: 1, landscape: false, in: displaySize)
+            on: "S", geometry: nil, scale: 1, landscape: false, in: displaySize)
         let threeX = RegionSpec.centered(
-            on: "S", scale: 3, landscape: false, in: displaySize)
+            on: "S", geometry: nil, scale: 3, landscape: false, in: displaySize)
         let odd = RegionSpec(display: "S", x: 0, y: 0, width: 200, height: 400)
 
-        XCTAssertEqual(oneX.matchingScale, 1)
-        XCTAssertEqual(threeX.matchingScale, 3)
-        XCTAssertNil(odd.matchingScale)
+        XCTAssertEqual(oneX.matchingScale(geometry: nil), 1)
+        XCTAssertEqual(threeX.matchingScale(geometry: nil), 3)
+        XCTAssertNil(odd.matchingScale(geometry: nil))
     }
 }

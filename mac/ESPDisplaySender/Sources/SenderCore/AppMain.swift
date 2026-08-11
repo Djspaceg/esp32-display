@@ -496,6 +496,34 @@ public enum ESPDisplaySenderApp {
                 print("discovering devices (_espdisp._udp) - sessions start as panels appear")
                 let browser = DeviceBrowser { devices in
                     Task { @MainActor in panelManager.noteDiscovery(devices) }
+                    // A SESSION'S GEOMETRY IS LATCHED FROM THE FIRST BROWSE
+                    // RESULT, and that is a known limitation rather than an
+                    // oversight. `shouldSkip` is true as soon as a session exists,
+                    // so if the first callback for a panel arrives without its TXT
+                    // record the sender is built at 172x320 and stays there for the
+                    // life of the session, while `noteDiscovery` corrects the
+                    // panel row on the next callback.
+                    //
+                    // NOT FIXED HERE, and the reason is what fixing it would take.
+                    // Rebuilding the session needs the running one stopped first,
+                    // and `DeviceSession` has no teardown at all - it runs until
+                    // `run()` gives up. Relaunching without stopping leaves two
+                    // senders streaming to one panel, which is worse than a wrong
+                    // geometry, so this is a new capability in the streaming core
+                    // rather than a correction, and there is no board attached to
+                    // verify it against.
+                    //
+                    // Whether Network.framework can even deliver a
+                    // `bonjourWithTXTRecord` result before the TXT query resolves
+                    // is UNVERIFIED. `PanelManager.noteDiscovery` guards against it
+                    // because the cost there is one field; here the cost of being
+                    // wrong is a duplicate stream.
+                    //
+                    // What does self-correct: the panel's row, its chip, its
+                    // advertised resolution, the region presets and the firmware
+                    // update sheet all read the snapshot, which takes a late `res`.
+                    // Retiring the panel (or restarting the app) rebuilds the
+                    // session with it.
                     for device in devices where !registry.shouldSkip(device.name) {
                         print("discovered device \"\(device.name)\"")
                         launchSession(
