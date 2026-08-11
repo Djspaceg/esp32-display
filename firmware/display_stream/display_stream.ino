@@ -222,10 +222,12 @@ static inline otapolicy::Status currentOtaStatus() {
 // screen and no DMA is queued underneath the flash writes.
 static volatile bool otaInProgress = false;
 static uint8_t otaShownPercent = 0;
-// The dimmed states onStart clears so an update is visible, kept so onError can
+// The dimmed states onStart clears so an update is visible, held so onError can
 // put them back. A successful push reboots, so only the failure path needs them.
-static bool otaWasSleeping = false;
-static bool otaWasIdle = false;
+// See otapolicy::SavedPanelState for why this is a type rather than two bools:
+// onError is reachable without onStart, and restoring in that case woke a
+// sleeping panel for anything on the LAN that got the password wrong.
+static otapolicy::SavedPanelState otaSavedPanel;
 
 // Last successful PMU reading, so the 5s status line and CFGSHOW can report a
 // battery without doing I2C traffic of their own. Only meaningful once
@@ -1534,8 +1536,7 @@ static bool startOtaIfConfigured() {
     // board reboots and the sender re-establishes both, but a failure leaves this
     // firmware running and the panel should go back to the state the Mac put it
     // in rather than sitting lit until the 45s idle timer notices.
-    otaWasSleeping = displaySleeping;
-    otaWasIdle = idleActive;
+    otaSavedPanel.save(displaySleeping, idleActive);
     displaySleeping = false;
     idleActive = false;
     applyBacklight();
@@ -1589,19 +1590,19 @@ static bool startOtaIfConfigured() {
     // next completed frame overwrites it, and a rejected image never touched the
     // running slot - the panel is still on the firmware it booted.
     drawOtaScreen(what, -1);
-    // Then put back what onStart cleared. This firmware keeps running after a
-    // failed push, so the panel owes its state to the sender's last instruction,
-    // not to the update: without this a push that arrived during a Mac-sleep
-    // window left the panel lit until the 45s idle timer noticed, because nothing
-    // was going to tell it to sleep a second time.
+    // Then put back what onStart cleared, if onStart ran on this push at all -
+    // take() answers false when it did not, and this callback is reachable
+    // without it (a wrong password never gets that far; see SavedPanelState).
+    // Restoring unconditionally lit a panel the Mac had put to sleep, for
+    // anything on the LAN willing to guess the password wrong.
     //
     // Deliberately after the draw, not before it. If the panel really was asleep
     // the reason then goes dark almost immediately, which is the right way round
     // - obeying the sender beats leaving a message nobody is there to read, and
     // the reason is on the serial line either way.
-    displaySleeping = otaWasSleeping;
-    idleActive = otaWasIdle;
-    applyBacklight();
+    if (otaSavedPanel.take(displaySleeping, idleActive)) {
+      applyBacklight();
+    }
   });
 
   // begin() returns void in core 3.3.11 (verified in ArduinoOTA.cpp: on a failed
