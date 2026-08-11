@@ -1520,13 +1520,24 @@ static bool startOtaIfConfigured() {
   ArduinoOTA.setMdnsEnabled(false);  // addMdnsService() owns every registration
 
   ArduinoOTA.onStart([]() {
-    // Fed here as well as from onProgress, and this is the one that was missing.
-    // Everything from the top of loop() to the FIRST progress callback is charged
-    // against one watchdog reset: Update.begin() erases the whole destination app
-    // slot (0x140000) before any data arrives, and then the drawing below can
-    // spend up to ~700ms in waitForDmaIdle plus a full-frame push. Nothing has
-    // measured that erase against the 10s timeout - UNVERIFIED, no hardware - so
-    // rather than assume it fits, feed the watchdog on both sides of it.
+    // Fed here so the drawing below gets its own watchdog interval instead of
+    // sharing the one that started at the top of loop(). The draw is bounded at
+    // ~700ms by construction - waitForDmaIdle(200) on the way into drawOtaScreen
+    // and waitForDmaIdle(500) on the way out, plus a full-frame push - which is a
+    // sum of two limits this file sets, not a measurement. Against a 10s timeout
+    // it plainly fits; this costs one line and removes the need to care.
+    //
+    // An earlier version of this comment said Update.begin() erases the whole
+    // 0x140000 app slot before any data arrives, and that this reset covers that
+    // erase. Both halves are wrong, read out of the core rather than assumed:
+    // UpdateClass::begin() (Updater.cpp:184) resets state, picks the partition
+    // with esp_ota_get_next_update_partition, and allocates a sector buffer - it
+    // erases nothing. The erase is per-64KB block inside _writeBuffer()
+    // (Updater.cpp:665) as data arrives, so it falls between two progress
+    // callbacks, each of which already feeds the watchdog. And _runUpdate calls
+    // _updater->begin() at ArduinoOTA.cpp:343, before _start_callback() at 357,
+    // so a reset here could not have covered it even if it did erase - a panic
+    // would have happened inside begin(), upstream of this callback.
     esp_task_wdt_reset();
     otaInProgress = true;
     otaShownPercent = 0;
@@ -1542,6 +1553,12 @@ static bool startOtaIfConfigured() {
     applyBacklight();
     Serial.println("ota: update starting");
     drawOtaScreen("updating", 0);
+    // Belt and braces. _runUpdate calls _progress_callback(0, _size) immediately
+    // after _start_callback() returns (ArduinoOTA.cpp:359), and onProgress resets
+    // the watchdog as its first statement, ahead of its own early return - so
+    // this interval is already ended microseconds from now and this line changes
+    // nothing today. It is here so the draw above stays covered if a future core
+    // stops making that opening progress call.
     esp_task_wdt_reset();
   });
 
