@@ -332,6 +332,18 @@ below: that one belongs to the separate `_arduino._tcp` service and is published
 by the core's own code. They spell the chip the same way on purpose; they do not
 come from the same place.
 
+The Mac app reads these records during discovery, which it did not always do —
+it kept the service name and the endpoint and dropped the rest, so every panel
+was streamed as though it were a 172×320 one. It now streams each panel at the
+resolution that panel advertises, and falls back to 172×320 when `res` is
+missing or is a size the band protocol cannot carry (a row has to fit one
+packet, and the band count has to stay within the firmware's reassembly
+bitmap). `chip` is kept against the panel so a firmware bundle's images can be
+matched to it. Reading TXT records at all requires browsing with
+`bonjourWithTXTRecord`: Network.framework does not query for them by default,
+so with a plain Bonjour browse every result's metadata is empty however much
+the panel advertises.
+
 Over USB serial (115200), the firmware also accepts configuration commands:
 `CFGWIFI <base64 ssid> <base64 password>` saves credentials to NVS and
 reboots, and `CFGWIFI <base64 ssid>` (password argument omitted) keeps the

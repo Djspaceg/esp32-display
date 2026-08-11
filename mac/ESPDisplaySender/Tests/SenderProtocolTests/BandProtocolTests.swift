@@ -225,6 +225,97 @@ final class PanelGeometryTests: XCTestCase {
         let parametric = BandProtocol.dirtyBands(new: new, previous: prev, geometry: geo, landscape: false)
         XCTAssertEqual(legacy, parametric)
     }
+
+    // MARK: - isStreamable
+
+    // A geometry can now arrive from an mDNS TXT record rather than from a
+    // constant in the source, so what this protocol can actually carry has to be
+    // a question with an answer. Every bound below is derived from a number both
+    // ends already agree on, not chosen for looking reasonable.
+    func testIsStreamableAcceptsEveryPanelThatExists() {
+        XCTAssertTrue(PanelGeometry.panel172x320.isStreamable)
+        XCTAssertTrue(PanelGeometry(width: 466, height: 466).isStreamable)
+        // The firmware's own roadmap example, band_protocol.h:32.
+        XCTAssertTrue(PanelGeometry(width: 480, height: 480).isStreamable)
+        // Rotating a panel must not change the answer, since either axis becomes
+        // the row.
+        XCTAssertTrue(PanelGeometry(width: 320, height: 172).isStreamable)
+    }
+
+    func testIsStreamableRefusesAZeroDimension() {
+        // First check, and not for tidiness: rowBytes is width * 2 and
+        // rowsPerBand divides by it, so a zero-width geometry divides by zero.
+        // Reaching any other check first would crash instead of returning false.
+        XCTAssertFalse(PanelGeometry(width: 0, height: 320).isStreamable)
+        XCTAssertFalse(PanelGeometry(width: 172, height: 0).isStreamable)
+        XCTAssertFalse(PanelGeometry(width: 0, height: 0).isStreamable)
+        XCTAssertFalse(PanelGeometry(width: -172, height: 320).isStreamable)
+    }
+
+    func testIsStreamableRefusesARowWiderThanAPacket() {
+        // A band is whole rows, so a row over the payload budget leaves a band
+        // over budget even at one row per band: the sender would emit datagrams
+        // bigger than the size both ends agreed on.
+        let budget = PanelGeometry.maxPacketBytes - PanelGeometry.headerBytes
+        XCTAssertEqual(budget, 1394)
+        XCTAssertEqual(budget / 2, 697, "697 pixels is the widest row that fits")
+
+        let widest = PanelGeometry(width: 697, height: 320)
+        XCTAssertEqual(widest.rowBytes(landscape: false), 1394)
+        XCTAssertTrue(widest.isStreamable)
+        let tooWide = PanelGeometry(width: 698, height: 320)
+        XCTAssertEqual(tooWide.rowBytes(landscape: false), 1396)
+        XCTAssertFalse(tooWide.isStreamable)
+        // And checked in landscape too, where the height becomes the row.
+        XCTAssertFalse(PanelGeometry(width: 320, height: 698).isStreamable)
+    }
+
+    func testIsStreamableRefusesMoreBandsThanTheReceiverCanReassemble() {
+        // bandproto::MAX_BANDS sizes the firmware's reassembly bitmap, so a
+        // frame needing more bands than that cannot be put back together at the
+        // far end at all.
+        XCTAssertEqual(PanelGeometry.maxBands, 512)
+        let atTheLimit = PanelGeometry(width: 512, height: 512)
+        XCTAssertEqual(atTheLimit.bandCount(landscape: false), 512)
+        XCTAssertTrue(atTheLimit.isStreamable)
+        let overIt = PanelGeometry(width: 513, height: 513)
+        XCTAssertEqual(overIt.bandCount(landscape: false), 513)
+        XCTAssertFalse(overIt.isStreamable)
+        // A panel narrow enough to pack several rows per band stays well inside
+        // the limit, which is why this is a band count rather than a pixel count.
+        let narrow = PanelGeometry(width: 172, height: 512)
+        XCTAssertEqual(narrow.rowsPerBand(landscape: false), 4)
+        XCTAssertEqual(narrow.bandCount(landscape: false), 128)
+        XCTAssertTrue(narrow.isStreamable)
+
+        // And a geometry that is within the limit in one orientation and not the
+        // other, which is what makes checking both orientations load-bearing
+        // rather than symmetry for its own sake.
+        let portraitOverflows = PanelGeometry(width: 400, height: 600)
+        XCTAssertEqual(portraitOverflows.bandCount(landscape: false), 600)
+        XCTAssertEqual(portraitOverflows.bandCount(landscape: true), 400)
+        XCTAssertFalse(portraitOverflows.isStreamable)
+    }
+
+    func testIsStreamableBoundsTheFrameAllocation() {
+        // No separate cap on frameBytes, because the two bounds above already put
+        // one there. Searched rather than asserted: the largest frame any
+        // streamable geometry can ask for is what matters, and it is not obvious
+        // by inspection which shape produces it.
+        var largest = (bytes: 0, width: 0, height: 0)
+        for width in 1...800 {
+            for height in 1...800 {
+                let geometry = PanelGeometry(width: width, height: height)
+                guard geometry.isStreamable, geometry.frameBytes > largest.bytes else {
+                    continue
+                }
+                largest = (geometry.frameBytes, width, height)
+            }
+        }
+        XCTAssertEqual(largest.bytes, 512 * 512 * 2, "the biggest streamable frame")
+        XCTAssertEqual([largest.width, largest.height], [512, 512])
+        XCTAssertLessThan(largest.bytes, 1_048_576, "still under a megabyte")
+    }
 }
 
 final class DeviceProtocolTests: XCTestCase {

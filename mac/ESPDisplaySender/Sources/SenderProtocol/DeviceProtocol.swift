@@ -10,7 +10,7 @@ public enum DeviceProtocol {
     public static let touchVersion: UInt8 = 1
     public static let batteryVersion: UInt8 = 1
 
-    public struct Capabilities: OptionSet, Equatable, Sendable {
+    public struct Capabilities: OptionSet, Hashable, Sendable {
         public let rawValue: UInt32
 
         public init(rawValue: UInt32) {

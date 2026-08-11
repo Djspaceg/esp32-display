@@ -2,13 +2,23 @@ import AppKit
 import CoreMedia
 import Foundation
 import ScreenCaptureKit
+import SenderProtocol
 
-/// ScreenCaptureKit capture of one display, scaled by SCK to 172x320 BGRA,
-/// converted to RGB565BE and handed to a callback.
+/// ScreenCaptureKit capture of one display, scaled by SCK to the panel's own
+/// pixel size in BGRA, converted to RGB565BE and handed to a callback.
 final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private let outputQueue = DispatchQueue(label: "espdisp.capture")
-    private var rgbBuffer = [UInt8](repeating: 0, count: PixelConvert.width * PixelConvert.height * 2)
+    /// The panel this capture is feeding. Every output size below comes from it.
+    ///
+    /// Has to match the geometry of the `FrameSender` the frames go to:
+    /// `send(frame:)` preconditions on `geometry.frameBytes`, so a capture
+    /// scaled to a different panel's size would not send a squashed picture, it
+    /// would trap. `DeviceSession` passes its sender's geometry for that reason,
+    /// and the default here is the same 172x320 default the sender has, so the
+    /// two cannot drift apart by omission.
+    private let geometry: PanelGeometry
+    private var rgbBuffer: [UInt8]
     private let onFrame: ([UInt8], Bool) -> Void
     private let onPreview: ((CGImage, Bool) -> Void)?
 
@@ -17,8 +27,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// because a resize re-configures the stream instead of replacing it.
     private let stateLock = NSLock()
     private var _landscape = false
-    private var _outW = PixelConvert.width
-    private var _outH = PixelConvert.height
+    private var _outW: Int
+    private var _outH: Int
     private var _framesCaptured: UInt64 = 0
     private var _stopped = false
     private var _stopReason: String?
@@ -96,12 +106,19 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// - Parameters:
     ///   - onPreview: called on the capture queue, at most every 100ms, with
     ///     an image of the frame just sent. Only while preview is enabled.
+    ///   - geometry: the panel's native pixel size. Must be the geometry of the
+    ///     sender these frames are handed to.
     ///   - onFrame: called on the capture queue with each converted
-    ///     RGB565BE frame and whether it is landscape (320x172).
+    ///     RGB565BE frame and whether it is landscape (the axes swapped).
     init(
+        geometry: PanelGeometry = .panel172x320,
         onPreview: ((CGImage, Bool) -> Void)? = nil,
         onFrame: @escaping ([UInt8], Bool) -> Void
     ) {
+        self.geometry = geometry
+        self.rgbBuffer = [UInt8](repeating: 0, count: geometry.frameBytes)
+        self._outW = geometry.width
+        self._outH = geometry.height
         self.onFrame = onFrame
         self.onPreview = onPreview
     }
@@ -464,6 +481,14 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
 
+        // Deliberately still the 172x320 aspect rather than the panel's own.
+        // This is a last-resort guess at WHICH Mac display the user meant, on a
+        // static method with no panel in scope, and its whole basis is that
+        // somebody made a virtual display shaped like the original panel. A
+        // square panel would make this match any square display, which is a
+        // worse guess than not matching - and every path that knows the panel
+        // (an explicit display, a window, the picker) reaches capture without
+        // coming through here.
         let target = Double(PixelConvert.width) / Double(PixelConvert.height)  // 0.5375
         if let d = displays.first(where: { d in
             guard d.width > 0, d.height > 0 else { return false }
@@ -516,8 +541,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private func start(
         filter: SCContentFilter, landscape: Bool, fps: Int, sourceRect: CGRect? = nil
     ) async throws {
-        let width = landscape ? PixelConvert.height : PixelConvert.width
-        let height = landscape ? PixelConvert.width : PixelConvert.height
+        let width = geometry.frameWidth(landscape: landscape)
+        let height = geometry.frameHeight(landscape: landscape)
         stateLock.withLock {
             _landscape = landscape
             _outW = width
@@ -575,8 +600,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard current.rect != rect else { return false }
 
         let landscape = rect.width > rect.height
-        let width = landscape ? PixelConvert.height : PixelConvert.width
-        let height = landscape ? PixelConvert.width : PixelConvert.height
+        let width = geometry.frameWidth(landscape: landscape)
+        let height = geometry.frameHeight(landscape: landscape)
         do {
             try await stream.updateConfiguration(
                 Self.configuration(
@@ -614,8 +639,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         guard current.landscape != wanted else { return false }
 
-        let width = wanted ? PixelConvert.height : PixelConvert.width
-        let height = wanted ? PixelConvert.width : PixelConvert.height
+        let width = geometry.frameWidth(landscape: wanted)
+        let height = geometry.frameHeight(landscape: wanted)
         do {
             try await stream.updateConfiguration(
                 Self.configuration(width: width, height: height, fps: current.fps))
