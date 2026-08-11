@@ -331,6 +331,63 @@ final class FirmwarePusherTests: XCTestCase {
         }
     }
 
+    // MARK: - who is allowed to take the image
+
+    /// The panel's own address, in the spellings it can arrive in.
+    ///
+    /// The IPv4-mapped case is the one that matters most, because getting it wrong
+    /// does not weaken anything - it stops every push. A listener on `.any` is
+    /// dual-stack, so an IPv4 panel can be reported as `::ffff:192.168.1.120`
+    /// while the invitation went to `192.168.1.120`, and a string comparison turns
+    /// the panel itself away.
+    func testTheRightPanelIsRecognisedInEverySpelling() {
+        XCTAssertTrue(FirmwarePusher.sameHost(.ipv4(.loopback), as: "127.0.0.1"))
+        XCTAssertTrue(
+            FirmwarePusher.sameHost(
+                .init("192.168.1.120"), as: "192.168.1.120"))
+        XCTAssertTrue(
+            FirmwarePusher.sameHost(
+                .init("::ffff:192.168.1.120"), as: "192.168.1.120"),
+            "an IPv4-mapped peer is the same panel")
+        XCTAssertTrue(
+            FirmwarePusher.sameHost(.init("fe80::1%en0"), as: "fe80::1"),
+            "a zone id is not a different host")
+        XCTAssertTrue(
+            FirmwarePusher.sameHost(
+                .init("fd00:0:0:0:0:0:0:1"), as: "fd00::1"),
+            "elided and unelided are the same address")
+    }
+
+    /// A different address is refused. This is the finding: without it the first
+    /// connection to the listener won, whoever it was, and the panel's own
+    /// connection was then dropped as a stray.
+    func testAnotherHostIsRefused() {
+        XCTAssertFalse(
+            FirmwarePusher.sameHost(.init("192.168.1.121"), as: "192.168.1.120"))
+        XCTAssertFalse(
+            FirmwarePusher.sameHost(.ipv4(.loopback), as: "192.168.1.120"))
+        XCTAssertFalse(
+            FirmwarePusher.sameHost(.init("fe80::2"), as: "fe80::1"))
+    }
+
+    /// Fails OPEN, on purpose, and that decision is pinned rather than left to be
+    /// discovered: this is hardening on a path no board can be attached to, so a
+    /// peer it cannot interpret is accepted. Refusing the unparseable would turn a
+    /// low-severity gap into a push that never starts.
+    func testAnUnreadablePeerIsAccepted() {
+        XCTAssertTrue(
+            FirmwarePusher.sameHost(.init("panel.local"), as: "panel.local"),
+            "a name matching by name is fine")
+        XCTAssertTrue(
+            FirmwarePusher.sameHost(.init("panel.LOCAL"), as: "panel.local"),
+            "and case in a hostname is not a difference")
+        // A name against a numeric target cannot be resolved from here, so it is
+        // refused only because the two strings differ - the fail-open rule covers
+        // endpoint SHAPES it cannot read, not hosts it can read and tell apart.
+        XCTAssertFalse(
+            FirmwarePusher.sameHost(.init("panel.local"), as: "192.168.1.120"))
+    }
+
     /// Not firmware, and it does not need to be: what is being checked is that
     /// the bytes that go in are the bytes that come out. Deliberately not
     /// uniform, so a chunk sent twice or in the wrong order would show up.
