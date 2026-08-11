@@ -30,8 +30,10 @@ import SenderProtocol
 /// EspotaProtocolTests); what is not is a transfer to real hardware.
 final class FirmwarePusher {
     /// Where a push has got to. Reported often enough to drive a progress bar and
-    /// no more often than that: `sending` fires once per 1024-byte chunk, which
-    /// for a 1.1MB image is about eleven hundred times.
+    /// no more often than that: `sending` is throttled to one report per
+    /// `progressByteInterval`, plus one at zero and one for the final chunk, so a
+    /// 1.1MB image produces about twenty rather than the eleven hundred a report
+    /// per chunk would.
     enum Progress: Equatable {
         /// Listener is up; the invitation is going out.
         case inviting(attempt: Int, of: Int)
@@ -59,6 +61,15 @@ final class FirmwarePusher {
         case panelNeverConnected(seconds: Int)
         case transferFailed(bytesSent: Int, of: Int, reason: String)
         case unexpectedReply(String)
+        /// Every byte arrived and the panel then refused the image. `Update.end()`
+        /// failed, which is where the MD5 and the image header's chip id are
+        /// checked, so this is where a wrong-chip push lands. Carries the panel's
+        /// own error string.
+        case panelRefusedImage(deviceText: String)
+        /// The panel answered with something that is neither `OK` nor a byte
+        /// count, and did not close the connection either. espota's "this may
+        /// still be successful": not claimed as a failure, not claimed as a win.
+        case unconfirmedResult(deviceText: String)
         /// A read that ran out of time, naming what it was waiting for. Its own
         /// case because a silence and a surprise are different things and a
         /// timeout reported as "the panel sent something unexpected: nothing at
@@ -106,6 +117,17 @@ final class FirmwarePusher {
             case .unexpectedReply(let text):
                 return "The panel sent something unexpected during the transfer: "
                     + "\(Self.quote(text, whenEmpty: "nothing at all"))"
+            case .panelRefusedImage(let text):
+                return "The panel received the whole image and then refused it: "
+                    + "\(Self.quote(text, whenEmpty: "it did not say why")). It is "
+                    + "still running the firmware it booted, so nothing was lost. "
+                    + "An image built for a different chip is refused this way, "
+                    + "and so is one that arrived corrupted."
+            case .unconfirmedResult(let text):
+                return "Every byte was sent, and the panel answered "
+                    + "\(Self.quote(text, whenEmpty: "nothing")) rather than "
+                    + "confirming the update. It may still have worked - check its "
+                    + "version once it comes back."
             case .replyTimedOut(let waitingFor):
                 return "The panel stopped answering while \(waitingFor)."
             case .noResultAfterUpload:
@@ -136,6 +158,24 @@ final class FirmwarePusher {
     /// takes the panel a while, so this is deliberately long.
     static let resultAttempts = 10
     static let resultTimeout: Double = 30
+    /// How much of the panel's reply to take in one read.
+    ///
+    /// NOT espota's number, and this is the one place a bigger buffer is worth the
+    /// divergence: espota reads 10 bytes per chunk and 32 in the tail, which is
+    /// why a coalesced count-plus-verdict reaches it truncated too. Sized to hold
+    /// a four-digit count, the longest string `_err2str` can print (`Could Not
+    /// Activate The Firmware`, 31 characters) and the CRLF `println` adds, so the
+    /// panel's reason arrives whole. Framing does not depend on it - replies are
+    /// accumulated - so this only decides how many reads the same bytes take.
+    static let replyBytes = 64
+    /// How much has to be sent before progress is reported again.
+    ///
+    /// One report per chunk is about 1,140 main-actor hops for a C6 image, each
+    /// invalidating a SwiftUI Form, to advance a bar by under a tenth of a
+    /// percent. 64 KiB gives about eighteen updates for the same image, which is
+    /// more than a progress bar can show anyway. The final chunk always reports
+    /// regardless, so this changes the resolution and not the endpoints.
+    static let progressByteInterval = 64 * 1024
 
     private let queue = DispatchQueue(label: "espdisp.ota")
     /// Which port the invitation goes to. Always 3232 in the app; a parameter so
@@ -343,8 +383,21 @@ final class FirmwarePusher {
     ) async throws {
         let total = image.count
         var sent = 0
+        var reported = 0
         progress(.sending(bytesSent: 0, of: total))
         var index = image.startIndex
+        // WHAT THE PANEL HAS SAID AND THIS SIDE HAS NOT YET ACCOUNTED FOR.
+        //
+        // The per-write counts and the final verdict are separate `client.print`
+        // calls on one TCP stream, and the last chunk's count is written
+        // immediately before `Update.end()` decides, so a single read here
+        // legitimately returns `552MD5 Check Failed`. Classifying one read in
+        // isolation - which is what this did - reported that as
+        // `unexpectedReply("552MD5 Che")`: a real failure, but truncated to the
+        // read size, blamed on the transfer, and stripped of the panel's reason.
+        // Accumulating means the verdict survives however it is framed.
+        var tail = ""
+        var panelHungUp = false
         while index < image.endIndex {
             let end = min(index + EspotaProtocol.chunkBytes, image.endIndex)
             let chunk = Data(image[index..<end])
@@ -356,70 +409,142 @@ final class FirmwarePusher {
             }
             sent += chunk.count
             index = end
-            progress(.sending(bytesSent: sent, of: total))
+            // Throttled, because one report per 1024-byte chunk is about 1,140
+            // main-actor hops and Form invalidations for a C6 image, all to move a
+            // progress bar by a tenth of a percent. The last chunk always reports,
+            // so the bar still finishes at 100% rather than near it.
+            if sent == total || sent - reported >= Self.progressByteInterval {
+                reported = sent
+                progress(.sending(bytesSent: sent, of: total))
+            }
 
-            let raw: Data
+            let reply: Reply
             do {
-                raw = try await receive(
-                    on: connection, maximum: 10, timeout: Self.chunkTimeout)
+                reply = try await receive(
+                    on: connection, maximum: Self.replyBytes,
+                    timeout: Self.chunkTimeout)
             } catch {
                 throw Failure.transferFailed(
                     bytesSent: sent, of: total, reason: error.localizedDescription)
             }
-            switch EspotaProtocol.classifyChunkReply(
-                String(decoding: raw, as: UTF8.self))
-            {
+            if reply.data.isEmpty, reply.isClosed {
+                // A panel that hit `Receive Failed`, aborted the update and hung
+                // up. Named as the hang-up it is: reported as an empty reply it
+                // read as "the panel sent something unexpected: nothing at all",
+                // which describes neither what happened nor what to do.
+                throw Failure.transferFailed(
+                    bytesSent: sent, of: total,
+                    reason: "the panel closed the connection")
+            }
+            tail += reply.text
+            panelHungUp = reply.isClosed
+            switch EspotaProtocol.classifyResultTail(tail) {
             case .finished:
-                // The panel has written everything and said so. This can arrive
-                // on the last chunk's reply (coalesced with its byte count), in
-                // which case there is nothing left to wait for.
+                // The panel has written everything and said so. Coalesced with
+                // the last chunk's count is the ordinary way this arrives.
                 return
-            case .wrote:
-                // The count is the panel's own tally. It is deliberately not
-                // compared against what was sent: `Update.write` can legitimately
-                // write less than it was handed (ArduinoOTA.cpp:415 warns and
-                // carries on), and the image MD5 the panel checks at the end is
-                // what actually decides whether the transfer was faithful.
-                continue
-            case .unexpected(let text):
-                throw Failure.unexpectedReply(text)
+            case .waiting:
+                // Nothing but counts, which are the panel's own tally and
+                // deliberately not compared against what was sent: `Update.write`
+                // may legitimately write less than it was handed
+                // (ArduinoOTA.cpp:415 warns and carries on), and the image MD5 is
+                // what decides whether the transfer was faithful. Consumed, so
+                // the next reply starts from a clean tail.
+                tail = ""
+            case .refused(let text):
+                // Mid-transfer the panel writes nothing but counts, so text here
+                // is genuinely a surprise rather than a verdict arriving early.
+                guard index >= image.endIndex else {
+                    throw Failure.unexpectedReply(text)
+                }
+                // On the last chunk this is either the verdict or the leading
+                // byte of a split `OK`. Not decided here: the loop ends and the
+                // tail path has the budget and the accumulated text to tell them
+                // apart.
             }
         }
 
         progress(.finishing)
-        try await awaitResult(over: connection)
+        try await awaitResult(
+            over: connection, tail: tail, panelHungUp: panelHungUp)
     }
 
     /// Wait for the `OK` the panel sends only after `Update.end()` succeeds.
     ///
-    /// WHICH OUTCOMES HERE ARE GENUINELY AMBIGUOUS. A successful push reboots the
-    /// panel roughly a tenth of a second after that `OK` goes out
-    /// (ArduinoOTA.cpp:436-444), so a lost or truncated final reply is not proof
-    /// of failure - the update may well have worked and the panel may already be
-    /// gone. `espota` resolves this by treating ANY response after a complete
-    /// upload as success, which is a fair reading and is what is done here for a
-    /// non-`OK` answer. Total silence is reported as an unconfirmed result rather
-    /// than as a failure, with a message that says what to check, because
-    /// claiming either outcome would be a guess.
-    private func awaitResult(over connection: NWConnection) async throws {
-        for _ in 1...Self.resultAttempts {
-            let raw: Data
-            do {
-                raw = try await receive(
-                    on: connection, maximum: 32, timeout: Self.resultTimeout)
-            } catch {
-                continue
+    /// THIS USED TO REPORT A REFUSED IMAGE AS A SUCCESSFUL UPDATE, which is worth
+    /// recording because the reasoning that got it wrong was superficially sound.
+    /// It returned on the first non-empty reply, on the grounds that `espota`
+    /// "treats any response after a complete upload as success". espota does end
+    /// up returning 0 that way, but only after exhausting all ten attempts
+    /// looking for `OK` and printing the device's own words as a warning
+    /// (espota.py:429-457) - and a non-`OK` reply here is not noise, it is the
+    /// panel's verdict. `Update.end()` validates the image MD5 and the header's
+    /// chip id, so the wrong-chip case this feature deliberately leaves to the
+    /// panel lands on `printError` (ArduinoOTA.cpp:447), and the user was being
+    /// told their panel "has the new firmware and is restarting onto it" while it
+    /// carried on running what it booted.
+    ///
+    /// WHAT IS GENUINELY AMBIGUOUS, and still reported as such: a successful push
+    /// reboots the panel about a tenth of a second after the `OK`
+    /// (ArduinoOTA.cpp:436-444), so silence is not proof of failure. Three
+    /// endings, and the difference between them is which one the user is told:
+    ///
+    ///   - `OK` anywhere in the tail: it worked.
+    ///   - the panel wrote something else and hung up: it refused the image, and
+    ///     its own words say why.
+    ///   - nothing but per-write counts, or nothing at all: unconfirmed, with a
+    ///     message that says to check the version when it comes back.
+    private func awaitResult(
+        over connection: NWConnection, tail initialTail: String,
+        panelHungUp initiallyHungUp: Bool
+    ) async throws {
+        // Carries on from whatever the transfer loop had already read: see
+        // `classifyResultTail` for the stale-count and split-`OK` cases that make
+        // accumulating necessary rather than tidy.
+        var tail = initialTail
+        var panelHungUp = initiallyHungUp
+        if case .finished = EspotaProtocol.classifyResultTail(tail) { return }
+        // Nothing more is coming from a panel that has already gone, so when the
+        // transfer loop saw the close the attempts are skipped rather than spent.
+        attempts: if !panelHungUp {
+            for _ in 1...Self.resultAttempts {
+                let reply: Reply
+                do {
+                    reply = try await receive(
+                        on: connection, maximum: Self.replyBytes,
+                        timeout: Self.resultTimeout)
+                } catch {
+                    // A timeout is not an answer. espota keeps trying too, and the
+                    // budget is deliberately long because the panel is writing the
+                    // last of the flash and computing the image MD5.
+                    continue
+                }
+                tail += reply.text
+                if case .finished = EspotaProtocol.classifyResultTail(tail) { return }
+                if reply.isClosed {
+                    // `printError` is followed by `client.stop()`, and so is the
+                    // `OK` path, so a close means the panel has said everything it
+                    // is going to. Waiting out the remaining attempts - up to five
+                    // more minutes - would tell nobody anything.
+                    panelHungUp = true
+                    break attempts
+                }
             }
-            let text = String(decoding: raw, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if case .finished = EspotaProtocol.classifyChunkReply(text) { return }
-            // Something arrived, so the panel was alive and had received the
-            // whole image. espota calls that good enough; so does this, rather
-            // than reporting a failure that would send the user to reflash a
-            // panel that is already running the new firmware.
-            if !text.isEmpty { return }
         }
-        throw Failure.noResultAfterUpload
+        switch EspotaProtocol.classifyResultTail(tail) {
+        case .finished:
+            return
+        case .refused(let text):
+            // The distinction is whether the panel finished speaking. A verdict
+            // followed by a hang-up is definite; the same text with the stream
+            // still open is espota's "this may still be successful", and saying
+            // so beats picking one.
+            throw panelHungUp
+                ? Failure.panelRefusedImage(deviceText: text)
+                : Failure.unconfirmedResult(deviceText: text)
+        case .waiting:
+            throw Failure.noResultAfterUpload
+        }
     }
 
     // MARK: - socket plumbing
@@ -472,6 +597,21 @@ final class FirmwarePusher {
         }
     }
 
+    /// One read from the TCP stream, and whether that stream is now over.
+    ///
+    /// `isClosed` is carried rather than collapsed into an empty `Data` because
+    /// the two mean opposite things and only the caller knows which it is looking
+    /// at. Mid-transfer a close is a panel that gave up and hung up; in the tail
+    /// it is either the `client.stop()` that follows a verdict or the reboot that
+    /// follows a lost `OK`. Reported as one value, all three read as "the panel
+    /// sent nothing at all", which is a sentence about the wrong problem.
+    private struct Reply {
+        let data: Data
+        let isClosed: Bool
+
+        var text: String { String(decoding: data, as: UTF8.self) }
+    }
+
     /// Whatever has arrived on the TCP stream, up to `maximum` bytes.
     ///
     /// `minimumIncompleteLength: 1` because the panel's replies are short and
@@ -479,9 +619,9 @@ final class FirmwarePusher {
     /// would wait forever.
     private func receive(
         on connection: NWConnection, maximum: Int, timeout: Double
-    ) async throws -> Data {
+    ) async throws -> Reply {
         try await withCheckedThrowingContinuation { continuation in
-            let resumer = Resumer<Data>(continuation)
+            let resumer = Resumer<Reply>(continuation)
             queue.asyncAfter(deadline: .now() + timeout) {
                 resumer.finish(.failure(Failure.replyTimedOut(
                     waitingFor: "acknowledging the data it had been sent")))
@@ -491,14 +631,12 @@ final class FirmwarePusher {
             ) { data, _, isComplete, error in
                 if let error {
                     resumer.finish(.failure(error))
-                } else if let data, !data.isEmpty {
-                    resumer.finish(.success(data))
-                } else if isComplete {
-                    // The panel closed the stream. On the result path that is
-                    // what a reboot looks like; the caller decides what it means.
-                    resumer.finish(.success(Data()))
                 } else {
-                    resumer.finish(.success(Data()))
+                    // Data and a close can arrive together, and the last thing
+                    // the panel says before `client.stop()` is exactly that case,
+                    // so both fields are always reported rather than one winning.
+                    resumer.finish(.success(Reply(
+                        data: data ?? Data(), isClosed: isComplete)))
                 }
             }
         }
