@@ -347,23 +347,43 @@ public struct FirmwareBundle: Equatable, Sendable {
         return text
     }
 
-    /// A JSON number read as an integer, with `true`/`false` excluded.
+    /// A JSON number read as an integer, with `true`/`false` and any number
+    /// written as a float excluded.
     ///
-    /// The exclusion is load-bearing rather than pedantic: `JSONSerialization`
-    /// hands back an `NSNumber` for a JSON boolean too, and `NSNumber(true) as?
-    /// Int` is 1, so a manifest with `"offset": true` would otherwise be read as
-    /// offset 1 and then refused for not being contiguous - a message pointing at
-    /// the wrong problem. `espdisp.py` excludes bool here for the same reason.
+    /// The BOOLEAN exclusion is load-bearing rather than pedantic:
+    /// `JSONSerialization` hands back an `NSNumber` for a JSON boolean too, and
+    /// `NSNumber(true) as? Int` is 1, so a manifest with `"offset": true` would
+    /// otherwise be read as offset 1 and then refused for not being contiguous - a
+    /// message pointing at the wrong problem. `espdisp.py` excludes bool here for
+    /// the same reason.
+    ///
+    /// THE FLOAT EXCLUSION IS WHY THIS IS NOT JUST `as? Int`. That bridges an
+    /// integral `NSNumber(double:)` straight through, so the app accepted
+    /// `"offset": 372.0` and `"offset": 1e3` while `espdisp.py`'s
+    /// `isinstance(offset, int)` refuses both - `json.loads` makes them floats.
+    /// A file this reader takes and the CLI's own `bundle-info` rejects is exactly
+    /// the asymmetry the sha256 spelling is strict about avoiding, and it ran the
+    /// wrong way round. `CFNumberIsFloatType` is the check that lines up with
+    /// Python's, because it asks how the number was WRITTEN rather than what it
+    /// happens to equal.
+    ///
+    /// No file in existence hits it: the only writer is `json.dumps` over Python
+    /// ints. That is an argument for fixing it while it costs nothing, not for
+    /// leaving it.
     private static func integer(_ value: Any?, key: String, where owner: String) throws -> Int {
+        func wrongType() -> FirmwareBundleError {
+            FirmwareBundleError.fieldHasWrongType(
+                where: owner, key: key, wanted: "a whole number")
+        }
         if let value, CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() {
-            throw FirmwareBundleError.fieldHasWrongType(
-                where: owner, key: key, wanted: "a number")
+            throw wrongType()
         }
-        guard let number = value as? Int else {
-            throw FirmwareBundleError.fieldHasWrongType(
-                where: owner, key: key, wanted: "a number")
-        }
-        return number
+        guard let number = value as? NSNumber else { throw wrongType() }
+        // Checked before the value is read: a float type is refused whatever it
+        // equals, so 372.0 goes the same way as 372.5 and for the same reason.
+        if CFNumberIsFloatType(number as CFNumber) { throw wrongType() }
+        guard let exact = Int(exactly: number.int64Value) else { throw wrongType() }
+        return exact
     }
 
     /// Bytes as something safe to put in a message: a control character or an
