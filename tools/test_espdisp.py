@@ -18,7 +18,9 @@
 # need hardware to exercise.
 import io
 import os
+import shutil
 import sys
+import tempfile
 import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -449,11 +451,17 @@ def test_espota_command():
     check_equal(espdisp.OTA_PORT, 3232, "ArduinoOTA's default port")
 
 
-def test_app_image_picks_the_app_not_the_flash_image(tmp="/tmp/espdisp-test-images"):
+def test_app_image_picks_the_app_not_the_flash_image():
+    # mkdtemp rather than a fixed /tmp path, which is what cmd_ota already does
+    # for the directory it exports into. The fixture matters here: this test adds
+    # a second candidate image partway through to check the ambiguous case, so a
+    # directory surviving from a previous run - two concurrent runs, a SIGKILL, or
+    # a path another user on the machine already owns - poisons the FIRST check
+    # rather than failing visibly at the end.
+    tmp = tempfile.mkdtemp(prefix="espdisp-test-images-")
     # The export directory also holds <sketch>.ino.merged.bin - the whole-flash
     # image with the bootloader and partition table in it, right for esptool over
     # USB and 8MB of wrong for an app slot.
-    os.makedirs(tmp, exist_ok=True)
     for name in ("display_stream.ino.bin", "display_stream.ino.merged.bin",
                  "display_stream.ino.elf", "display_stream.ino.map"):
         with open(os.path.join(tmp, name), "w") as fh:
@@ -475,10 +483,9 @@ def test_app_image_picks_the_app_not_the_flash_image(tmp="/tmp/espdisp-test-imag
             lambda: espdisp.app_image(tmp), "expected exactly one",
             "two candidate images are refused rather than picked between")
     finally:
-        for root, _, files in os.walk(tmp, topdown=False):
-            for name in files:
-                os.unlink(os.path.join(root, name))
-            os.rmdir(root)
+        # rmtree rather than the hand-rolled walk this used to do: with mkdtemp the
+        # directory is ours alone, so there is nothing to be careful about.
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main():
