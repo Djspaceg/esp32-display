@@ -219,7 +219,7 @@ final class FirmwarePusher {
         // found it, on loopback, with no panel.
         listener.newConnectionHandler = { [queue] connection in
             connection.start(queue: queue)
-            inbound.accept(connection)
+            inbound.accept(connection, from: address)
         }
         let hostPort = try await assignedPort(of: listener)
 
@@ -547,6 +547,65 @@ final class FirmwarePusher {
         }
     }
 
+    // MARK: - who connected back
+
+    /// Whether an inbound connection came from the panel this push is for.
+    ///
+    /// DELIBERATELY FAILS OPEN. An endpoint shape this cannot interpret is
+    /// accepted, not refused, and that asymmetry is the point: this is hardening
+    /// on a path that cannot be verified from here without a panel, and the cost
+    /// of a false negative is a push that never starts on somebody's desk. Only a
+    /// peer positively identified as a DIFFERENT address is turned away.
+    ///
+    /// The image is not a secret and espota's listener is open to anyone, so this
+    /// is not an authorisation boundary. What it buys is that a stray connection
+    /// on the LAN cannot take the transfer slot from the panel and turn a push
+    /// into a hang.
+    static func connection(_ connection: NWConnection, isFrom address: String) -> Bool {
+        guard case .hostPort(let host, _) = connection.endpoint else { return true }
+        return sameHost(host, as: address)
+    }
+
+    /// Compare a connection's host against the address the invitation went to.
+    ///
+    /// Compared as parsed addresses rather than as strings, because the same host
+    /// has several spellings and any of them can turn up here: a zone id on a
+    /// link-local address (`fe80::1%en0`), the elided and unelided forms of an
+    /// IPv6 address, and an IPv4-mapped IPv6 peer (`::ffff:192.168.1.120`) from a
+    /// listener bound to `.any`. That last one is the one that would have bitten:
+    /// a string comparison rejects the panel that is right there.
+    static func sameHost(_ host: NWEndpoint.Host, as address: String) -> Bool {
+        let peerText: String
+        switch host {
+        case .ipv4(let value): peerText = "\(value)"
+        case .ipv6(let value): peerText = "\(value)"
+        case .name(let value, _): peerText = value
+        @unknown default: return true
+        }
+        guard let peer = ipAddress(peerText), let target = ipAddress(address) else {
+            // A name on either side, or something unparseable. Compare what there
+            // is and, per the fail-open rule, only refuse a definite difference.
+            return bareHost(peerText).caseInsensitiveCompare(bareHost(address))
+                == .orderedSame
+        }
+        return peer.rawValue == target.rawValue
+    }
+
+    /// The host with any interface zone id removed. `IPv6Address` accepts a zone
+    /// but two spellings of the same address must not differ by one.
+    private static func bareHost(_ text: String) -> String {
+        text.split(separator: "%").first.map(String.init) ?? text
+    }
+
+    /// An address, with an IPv4-mapped IPv6 address reduced to its IPv4 form so
+    /// the two families compare equal when they name the same host.
+    private static func ipAddress(_ text: String) -> IPAddress? {
+        let bare = bareHost(text)
+        if let value = IPv4Address(bare) { return value }
+        if let value = IPv6Address(bare) { return value.asIPv4 ?? value }
+        return nil
+    }
+
     // MARK: - socket plumbing
 
     private func udpConnection(to address: String) -> NWConnection {
@@ -653,7 +712,24 @@ private final class InboundConnection: @unchecked Sendable {
     private var connection: NWConnection?
     private var waiter: Resumer<NWConnection>?
 
-    func accept(_ connection: NWConnection) {
+    /// Take this connection if it came from the panel being pushed to.
+    ///
+    /// THE LISTENER IS OPEN ON EVERY INTERFACE, because the panel dials back and
+    /// this side cannot know which route it will arrive by. Without this check the
+    /// first connection to arrive won that race, whoever it was: anything on the
+    /// LAN could take the firmware image, and the panel's own connection was then
+    /// cancelled as a stray so the push failed or hung. The image is not a secret
+    /// and espota is equally open, but espota is a command line typed by someone
+    /// who knows what it does and this is a button in a shipped app.
+    ///
+    /// A mismatch is cancelled and the wait continues, so a stray does not consume
+    /// the one slot. The address is the same one the invitation went to, which is
+    /// the live session's resolved address rather than the persisted one.
+    func accept(_ connection: NWConnection, from address: String) {
+        guard FirmwarePusher.connection(connection, isFrom: address) else {
+            connection.cancel()
+            return
+        }
         lock.lock()
         // Only the first connection is used, and a later one is dropped rather
         // than left open: there is exactly one transfer to do, and anything else

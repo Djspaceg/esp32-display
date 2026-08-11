@@ -337,6 +337,13 @@ struct FirmwareUpdateSheet: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                if isWaitingForResult {
+                    Text("This can take a while on a large image. You can close "
+                        + "this window; the result appears as an alert either way.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -344,13 +351,25 @@ struct FirmwareUpdateSheet: View {
     private var actionBar: some View {
         HStack(spacing: 10) {
             Spacer()
-            Button("Cancel", role: .cancel) { dismiss() }
+            Button(dismissTitle, role: .cancel) { dismiss() }
                 .keyboardShortcut(.cancelAction)
                 // Cancelling mid-transfer is not offered, because there is
                 // nothing honest to do with a half-written flash partition from
                 // this side: the panel decides, and it decides by failing the
                 // image's MD5 and carrying on with what it booted.
-                .disabled(isPushing)
+                //
+                // Once every byte is out that argument stops applying and the
+                // button comes back as Close, because there is nothing left to
+                // interrupt. The tail is ten thirty-second attempts, so a panel
+                // that is connected but silent used to hold the sheet for five
+                // minutes with no way out but quitting the app. Closing does not
+                // abandon the push: the Task outlives the sheet and the outcome
+                // still arrives as an alert.
+                .disabled(isPushing && !isWaitingForResult)
+                .help(isWaitingForResult
+                    ? "Close this window and let the update finish. The result "
+                        + "appears as an alert."
+                    : "")
             Button(pushButtonTitle) { beginConfirmation() }
                 .buttonStyle(.glassProminent)
                 .keyboardShortcut(.defaultAction)
@@ -393,6 +412,20 @@ struct FirmwareUpdateSheet: View {
     private var pushButtonTitle: String {
         guard let bundle else { return "Update Firmware" }
         return "\(plan(bundle).verb) Firmware"
+    }
+
+    /// Every byte is out and the panel is deciding. Nothing this side can still
+    /// interrupt, which is what makes leaving safe.
+    private var isWaitingForResult: Bool {
+        if case .finishing = progress { return true }
+        return false
+    }
+
+    /// "Cancel" before a push and "Close" during one, because during one it does
+    /// not cancel anything and a button that lies about that is worse than a
+    /// disabled button.
+    private var dismissTitle: String {
+        isPushing ? "Close" : "Cancel"
     }
 
     private var canBeginPush: Bool {
