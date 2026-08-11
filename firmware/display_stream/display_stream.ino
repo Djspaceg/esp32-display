@@ -68,6 +68,7 @@
 #include "device_protocol.h"
 #include "control_queue.h"
 #include "ota_policy.h"
+#include "chip_identity.h"
 using namespace bandproto;
 
 // WiFi credentials live in NVS flash and are reconfigurable over the USB
@@ -1463,7 +1464,15 @@ static void addMdnsService() {
   // Bind as const char *: ESPmDNS overloads addServiceTxt on char *,
   // const char *, and String, and a mutable buffer makes all three viable
   // under the -fpermissive the Arduino build uses, which is ambiguous.
+  //
+  // chip is already a const char * from chip_identity.h, and is bound here with
+  // the others so the whole record set reads as one list. It says which of a
+  // firmware bundle's images belongs to this panel; see chip_identity.h for why
+  // that is advertised instead of inferred from res. UNVERIFIED that a browser
+  // sees it - no board is attached, so this rests on it being the same call the
+  // records beside it go through, not on an observation.
   const char *caps = capsBuf, *res = resBuf, *proto = protoBuf;
+  const char *chip = chipidentity::chipToken();
   MDNS.setInstanceName(cfgName);
   MDNS.addService("espdisp", "udp", UDP_PORT);
   MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
@@ -1471,6 +1480,7 @@ static void addMdnsService() {
   MDNS.addServiceTxt("espdisp", "udp", "fw", FW_VERSION);
   MDNS.addServiceTxt("espdisp", "udp", "proto", proto);
   MDNS.addServiceTxt("espdisp", "udp", "caps", caps);
+  MDNS.addServiceTxt("espdisp", "udp", "chip", chip);
   if (otaActive) {
     // _arduino._tcp is what espota/arduino-cli browse for. It is registered from
     // here rather than by ArduinoOTA itself (which is why setupOta calls
