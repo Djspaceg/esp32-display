@@ -294,9 +294,14 @@ def resolve_board(explicit: Optional[str], port: Optional[PortInfo]) -> Board:
     """Pick a board, or refuse.
 
     Never guesses. Both boards are native USB CDC at VID 0x303A PID 0x1001, so
-    neither the port name nor the VID/PID distinguishes a C6 from the S3 -
-    flashing the wrong binary leaves a board that looks bricked, which makes a
-    refusal strictly better than a default.
+    neither the port name nor the VID/PID distinguishes a C6 from the S3, and a
+    tool that picked one would be picking for the user with nothing to go on.
+
+    A wrong guess is not fatal to a board - the core's upload recipe passes
+    `--chip {build.mcu}` to esptool (platform.txt line 346) and esptool refuses a
+    chip that is not the one it was told to expect. What a refusal here buys is
+    the difference between that and a message that names the fix, before a
+    multi-minute compile rather than after it.
     """
     if explicit:
         board = BOARDS[explicit]
@@ -638,7 +643,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         choices=sorted(BOARDS),
         help="which target to build; required because there is no chip to probe "
-        "over the network and pushing an S3 image to a C6 bricks it",
+        "over the network. A wrong-target push is refused by the panel's own "
+        "image validation, not fatal to it, but it wastes a compile",
     )
     p_ota.add_argument("--password", help="OTA password (prefer $%s)" % OTA_PASSWORD_ENV)
     p_ota.add_argument(

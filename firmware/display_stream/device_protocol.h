@@ -370,6 +370,14 @@ inline bool parseBattery(const uint8_t *data, size_t len, BatteryStatus &out) {
   // a charge current - without a new packet type, and refusing a non-zero
   // reserved byte would make that impossible without the version bump this
   // whole design exists to avoid.
+  //
+  // THE CONSTRAINT THAT BUYS: any field put in bytes 10-11 later must define 0
+  // as "absent". Every firmware built before that field writes zeros there, and
+  // because nothing checks them a receiver cannot tell those zeros from a real
+  // reading - so a field where 0 is a meaningful value (a temperature in Celsius,
+  // say) would be silently misread on every older panel. Something that cannot
+  // treat 0 as absent needs a version bump, which is the cost of leaving these
+  // bytes open rather than a reason not to.
   return true;
 }
 

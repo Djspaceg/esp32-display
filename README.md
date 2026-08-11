@@ -336,20 +336,20 @@ accepted right now", not "this build has OTA code in it".
 
 ## Repo layout
 
-| Path | What |
-| --- | --- |
-| `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls |
-| `firmware/display_test/` | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping |
-| `firmware/board_probe/` | I2C-scan diagnostic reporting which board variant you have |
-| `firmware/libraries/espdisp_board/` | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform, AXP2101 battery reader |
-| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance) |
-| `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
-| `firmware/test/` | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
-| `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
-| `tools/espdisp.py` | Compile, flash over USB, push over WiFi, and configure from one command: holds the board table, finds the port, refuses to guess the chip |
-| `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
-| `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
-| `docs/` | Original project plan |
+| Path                                 | What                                                                                                                                      |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `firmware/display_stream/`           | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls                                                      |
+| `firmware/display_test/`             | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping                             |
+| `firmware/board_probe/`              | I2C-scan diagnostic reporting which board variant you have                                                                                |
+| `firmware/libraries/espdisp_board/`  | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform, AXP2101 battery reader           |
+| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance)                                                                 |
+| `mac/ESPDisplaySender/`              | Native manager app plus SwiftPM command-line workflows                                                                                    |
+| `firmware/test/`                     | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`)                                 |
+| `mac/ESPDisplaySender/Tests/`        | Swift tests for the sender's protocol and application logic (`swift test`)                                                                |
+| `tools/espdisp.py`                   | Compile, flash over USB, push over WiFi, and configure from one command: holds the board table, finds the port, refuses to guess the chip |
+| `tools/read_serial.py`               | Serial monitor with optional hard-reset (native USB-Serial/JTAG)                                                                          |
+| `tools/sweep.py`                     | Pacing parameter sweep, measuring displayed fps from device stats                                                                         |
+| `docs/`                              | Original project plan                                                                                                                     |
 
 ## Getting started
 
@@ -401,12 +401,18 @@ tools/espdisp.py config CFGSHOW        # send one CFG* line, print the reply
 end, so app-partition headroom is visible without hunting through scrollback.
 
 `flash` refuses rather than guesses when it cannot tell which chip is attached.
-Both boards are native USB CDC at VID 0x303A PID 0x1001, so neither the port
-name nor the VID/PID distinguishes a C6 from the S3, and an S3 binary on a C6
-leaves a board that looks bricked. It asks arduino-cli first, then the esptool
-bundled with the core, and if neither answers it stops and tells you to pass
-`--board c6|s3`. More than one candidate port is likewise a refusal, not a
+Both boards are native USB CDC at VID 0x303A PID 0x1001, so neither the port name
+nor the VID/PID distinguishes a C6 from the S3. It asks arduino-cli first, then
+the esptool bundled with the core, and if neither answers it stops and tells you
+to pass `--board c6|s3`. More than one candidate port is likewise a refusal, not a
 coin flip: pass `--port`.
+
+That refusal buys a clear message rather than a rescue: the core's upload recipe
+passes `--chip {build.mcu}` to esptool (`platform.txt` line 346), and esptool
+refuses to talk to a chip that is not the one it was told to expect. So a
+wrong-target USB flash ends in a refusal from one tool or the other — the point of
+stopping early is that you find out before a full compile and with a message that
+names the fix.
 
 The script is standard-library Python 3 only: unlike the other `tools/` scripts
 it does not need pyserial. The explicit `arduino-cli` commands above remain the
@@ -428,11 +434,21 @@ export ESPDISP_OTA_PASSWORD='a-real-password'
 tools/espdisp.py ota panel.local --board c6
 ```
 
-`--board` is required here. Over the network there is no chip to probe, and an S3
-image pushed to a C6 is a brick you have to walk over to, so the tool asks rather
-than assumes. The password comes from `--password`, else `$ESPDISP_OTA_PASSWORD`,
-else a prompt; it is never echoed, though the core's `espota.py` takes it as an
-argument, so it is briefly visible in `ps` on a shared machine.
+`--board` is required here: over the network there is no chip to probe, so the
+tool asks rather than assumes.
+
+A wrong-target push is refused by the panel, not fatal to it: the ESP image header
+carries a `chip_id` (0x0D for the C6, 0x09 for the S3)
+and `esp_ota_set_boot_partition` validates it through `esp_image_verify` before the
+boot slot moves, so the image lands in the inactive slot, fails validation, and the
+panel carries on running the firmware it booted with `bad image` on the glass. The
+cost of getting `--board` wrong is a wasted compile and transfer. This chain was
+read out of `Updater.cpp`, `esp_ota_ops.c` and `bootloader_common_loader.c`;
+**UNVERIFIED** by an actual mismatched push, since no board is attached.
+
+The password comes from `--password`, else `$ESPDISP_OTA_PASSWORD`, else a prompt;
+it is never echoed, though the core's `espota.py` takes it as an argument, so it is
+briefly visible in `ps` on a shared machine.
 
 The panel shows a progress bar on the glass while it writes, then reboots itself
 onto the new firmware. `CFGOTAPW clear` disables OTA again.
@@ -516,8 +532,14 @@ What this implementation provides:
 - An integrity check on the image. The pusher sends its MD5 and the `Update`
   library refuses to switch the boot slot unless what landed matches, so a
   truncated or mangled transfer never becomes the firmware that boots.
-- Writes to the _inactive_ app slot. A failed or rejected push leaves the panel
-  running exactly the firmware it booted; the failure reason appears on the glass.
+- A target check on the image, from the bootloader rather than from this project.
+  `Update.end()` calls `esp_ota_set_boot_partition`, which runs `esp_image_verify`
+  first, and that compares the image header's `chip_id` against the running chip
+  (`bootloader_common_check_chip_validity`). An S3 image pushed to a C6 is
+  therefore refused at exactly the same point a corrupt one is.
+- Writes to the _inactive_ app slot. A failed or rejected push — bad password,
+  lost transfer, wrong chip, failed MD5 — leaves the panel running exactly the
+  firmware it booted; the failure reason appears on the glass.
 
 What remains open, and would each be a real piece of work:
 
@@ -531,11 +553,13 @@ What remains open, and would each be a real piece of work:
   panel decides it is healthy. Without it, firmware that transfers correctly but
   then crashes on boot leaves the task watchdog rebooting it, and USB is the fix.
 
-**UNVERIFIED:** no push has been performed on hardware. Every fact above about
-the protocol, the password handling, and the integrity check was read out of the
-core's `ArduinoOTA.cpp`, `Update`, and `espota.py`; what has actually been
-exercised here is that both targets compile, that the pusher builds the right
-command line, and that it fails cleanly against a host that does not answer.
+**UNVERIFIED:** no push has been performed on hardware, successful or otherwise.
+Every fact above about the protocol, the password handling, and the integrity and
+target checks was read out of the core's `ArduinoOTA.cpp`, `Updater.cpp` and
+`espota.py`, and out of ESP-IDF's `esp_ota_ops.c`, `esp_image_format.c` and
+`bootloader_common_loader.c`; what has actually been exercised here is that both
+targets compile, that the pusher builds the right command line, and that it fails
+cleanly against a host that does not answer.
 
 Sizing, which is the real constraint on the C6: the OTA code costs ~45KB, taking
 that build from 85% to **89% of the 1.31MB app slot (1167976 bytes, 142744
