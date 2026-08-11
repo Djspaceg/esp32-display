@@ -750,6 +750,12 @@ int main() {
     CHECK(st.touch == board::TouchController::None);
     CHECK(st.pinTouchSda == board::NO_PIN && st.pinTouchScl == board::NO_PIN);
     CHECK(jd.touch == board::TouchController::Axs5106l);
+    // Neither C6 board has a PMU: they run off USB with no cell and no gauge,
+    // so neither may advertise a battery.
+    for (const board::Config *c : {&st, &jd}) {
+      CHECK(c->power == board::PowerController::None);
+      CHECK(!c->hasBattery());
+    }
     // Touch rides the shared detection bus on the C6 Touch board.
     CHECK(jd.pinTouchSda == board::PIN_PROBE_SDA);
     CHECK(jd.pinTouchScl == board::PIN_PROBE_SCL);
@@ -797,6 +803,15 @@ int main() {
     CHECK(am.pinTouchSda == 15 && am.pinTouchScl == 14);
     CHECK(am.pinTouchInt == 11);
     CHECK(am.pinTouchRst == am.pinRst);
+
+    // AXP2101 PMU: the only board here with a battery. It has no pins of its
+    // own - it shares the touch I2C bus, which is why hasBattery() tests those
+    // pins too, and why the reader must not go looking for a PMU reset line.
+    CHECK(am.power == board::PowerController::Axp2101);
+    CHECK(am.hasBattery());
+    CHECK(am.pinTouchSda != board::NO_PIN && am.pinTouchScl != board::NO_PIN);
+    CHECK(!board::configFor(Variant::LcdSt7789).hasBattery());
+    CHECK(!board::configFor(Variant::TouchJd9853).hasBattery());
 
     // The panel dimensions in the table produce a carryable band geometry -
     // the link between the board table and the wire format.
@@ -1174,6 +1189,114 @@ int main() {
     CHECK(deviceproto::CAP_TOUCH == 1u << 9);
     CHECK((deviceproto::CAP_TOUCH & deviceproto::CAP_IDLE_TEXT) == 0);
     CHECK((deviceproto::CAP_TOUCH & deviceproto::CAP_BRIGHTNESS_LEVEL) == 0);
+  }
+
+  // --- EBAT battery reports on the wire ------------------------------------
+  {
+    uint8_t packet[deviceproto::BATTERY_PACKET_BYTES] = {0};
+    const uint8_t flags = deviceproto::BATTERY_FLAG_PRESENT |
+                          deviceproto::BATTERY_FLAG_EXTERNAL_POWER;
+    CHECK(deviceproto::writeBattery(packet, flags, 87,
+                                    deviceproto::ChargeState::Charging,
+                                    4012) == 12);
+    // 4012mV is 0x0FAC, little-endian, and the last two bytes are reserved.
+    const uint8_t expected[12] = {0x45, 0x42, 0x41, 0x54, 0x01, 0x03,
+                                  0x57, 0x01, 0xac, 0x0f, 0x00, 0x00};
+    CHECK(memcmp(packet, expected, sizeof(expected)) == 0);
+
+    deviceproto::BatteryStatus parsed;
+    CHECK(deviceproto::parseBattery(packet, sizeof(packet), parsed));
+    CHECK(parsed.present);
+    CHECK(parsed.externalPower);
+    CHECK(parsed.percent == 87);
+    CHECK(parsed.state == deviceproto::ChargeState::Charging);
+    CHECK(parsed.millivolts == 4012);
+
+    // No battery attached, gauge with no opinion: the 0xFF sentinel survives
+    // the round trip rather than arriving as a plausible level.
+    uint8_t unknown[deviceproto::BATTERY_PACKET_BYTES] = {0};
+    CHECK(deviceproto::writeBattery(unknown, 0,
+                                    deviceproto::BATTERY_PERCENT_UNKNOWN,
+                                    deviceproto::ChargeState::Unknown, 0) == 12);
+    const uint8_t expectedUnknown[12] = {0x45, 0x42, 0x41, 0x54, 0x01, 0x00,
+                                         0xff, 0x00, 0x00, 0x00, 0x00, 0x00};
+    CHECK(memcmp(unknown, expectedUnknown, sizeof(expectedUnknown)) == 0);
+    CHECK(deviceproto::parseBattery(unknown, sizeof(unknown), parsed));
+    CHECK(!parsed.present);
+    CHECK(!parsed.externalPower);
+    CHECK(parsed.percent == deviceproto::BATTERY_PERCENT_UNKNOWN);
+    CHECK(parsed.state == deviceproto::ChargeState::Unknown);
+    CHECK(parsed.millivolts == 0);
+
+    // Every charge state is representable, so none of them has to be faked.
+    for (uint8_t raw = (uint8_t)deviceproto::ChargeState::Unknown;
+         raw <= (uint8_t)deviceproto::ChargeState::Standby; raw++) {
+      uint8_t buf[deviceproto::BATTERY_PACKET_BYTES] = {0};
+      deviceproto::writeBattery(buf, deviceproto::BATTERY_FLAG_PRESENT, raw,
+                                (deviceproto::ChargeState)raw, 3700);
+      deviceproto::BatteryStatus got;
+      CHECK(deviceproto::parseBattery(buf, sizeof(buf), got));
+      CHECK((uint8_t)got.state == raw);
+      CHECK(got.percent == raw);
+      CHECK(got.millivolts == 3700);
+      CHECK(got.present);
+      CHECK(!got.externalPower);
+    }
+
+    // Percent boundaries: 100 is full, 101 is not a percentage.
+    deviceproto::BatteryStatus ignored;
+    uint8_t percent[deviceproto::BATTERY_PACKET_BYTES];
+    memcpy(percent, packet, sizeof(percent));
+    percent[6] = 100;
+    CHECK(deviceproto::parseBattery(percent, sizeof(percent), ignored));
+    percent[6] = 101;
+    CHECK(!deviceproto::parseBattery(percent, sizeof(percent), ignored));
+    percent[6] = 254;
+    CHECK(!deviceproto::parseBattery(percent, sizeof(percent), ignored));
+
+    // Malformed input is refused rather than half-accepted.
+    uint8_t badMagic[deviceproto::BATTERY_PACKET_BYTES];
+    memcpy(badMagic, packet, sizeof(badMagic));
+    badMagic[0] = 'X';
+    CHECK(!deviceproto::parseBattery(badMagic, sizeof(badMagic), ignored));
+    uint8_t badVersion[deviceproto::BATTERY_PACKET_BYTES];
+    memcpy(badVersion, packet, sizeof(badVersion));
+    badVersion[4] = 99;
+    CHECK(!deviceproto::parseBattery(badVersion, sizeof(badVersion), ignored));
+    // State 4 does not exist; an unknown state is refused rather than guessed.
+    uint8_t badState[deviceproto::BATTERY_PACKET_BYTES];
+    memcpy(badState, packet, sizeof(badState));
+    badState[7] = (uint8_t)deviceproto::ChargeState::Standby + 1;
+    CHECK(!deviceproto::parseBattery(badState, sizeof(badState), ignored));
+    // Short, and one byte too long - the fixed length is the trailing-byte test.
+    CHECK(!deviceproto::parseBattery(packet, sizeof(packet) - 1, ignored));
+    uint8_t trailing[deviceproto::BATTERY_PACKET_BYTES + 1] = {0};
+    memcpy(trailing, packet, sizeof(packet));
+    CHECK(!deviceproto::parseBattery(trailing, sizeof(trailing), ignored));
+
+    // The reserved bytes are ignored on purpose, so a later firmware can put
+    // something there without this parser refusing every packet.
+    uint8_t reserved[deviceproto::BATTERY_PACKET_BYTES];
+    memcpy(reserved, packet, sizeof(reserved));
+    reserved[10] = 0x5A;
+    reserved[11] = 0xA5;
+    CHECK(deviceproto::parseBattery(reserved, sizeof(reserved), ignored));
+    CHECK(ignored.percent == 87);
+
+    // No other parser may claim an EBAT packet: the sender tells inbound
+    // datagrams apart by trial-parsing, so whichever ran first would swallow it.
+    deviceproto::ControlCommand notAControl;
+    deviceproto::TouchEvent notATouch;
+    deviceproto::IdleTextMessage notIdleText;
+    CHECK(!deviceproto::parseControl(packet, sizeof(packet), notAControl));
+    CHECK(!deviceproto::parseTouch(packet, sizeof(packet), notATouch));
+    CHECK(!deviceproto::parseIdleText(packet, sizeof(packet), notIdleText));
+
+    // CAP_BATTERY must not collide with an existing capability bit.
+    CHECK(deviceproto::CAP_BATTERY == 1u << 11);
+    CHECK((deviceproto::CAP_BATTERY & deviceproto::CAP_TOUCH) == 0);
+    CHECK((deviceproto::CAP_BATTERY & deviceproto::CAP_TOUCH_LONGPRESS) == 0);
+    CHECK((deviceproto::CAP_BATTERY & deviceproto::CAP_TELEMETRY) == 0);
   }
 
   printf("OK: %d checks passed\n", checks);

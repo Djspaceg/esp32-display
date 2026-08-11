@@ -61,6 +61,14 @@ enum class PanelBus : uint8_t { Spi, Qspi };
 /// which register protocol to speak. The pins alone cannot tell these apart.
 enum class TouchController : uint8_t { None, Axs5106l, Cst9217 };
 
+/// Which power-management IC the board carries, so the sketch knows whether a
+/// battery reading is even possible and which register protocol to speak.
+///
+/// Only the 1.75C has one. The two C6 boards run straight off USB with no cell
+/// and no gauge, which is why battery reporting is a per-board capability here
+/// rather than a firmware-wide one.
+enum class PowerController : uint8_t { None, Axp2101 };
+
 /// The variant this binary serves, when the compile target admits exactly one.
 /// The C6 binary serves two boards, so there it is Unknown and the boot-time
 /// I2C probe decides. The S3 binary serves only the AMOLED board; probing
@@ -158,6 +166,13 @@ struct Config {
   int8_t pinTouchRst;
   int8_t pinTouchInt;
 
+  /// Power-management IC, or None. No pins of its own: on the one board that
+  /// has a PMU it shares the touch I2C bus (pinTouchSda/pinTouchScl), which is
+  /// what Waveshare's own pin_config.h and their AXP2101 example do. Recorded
+  /// here rather than inferred from the variant so the reader can be gated on
+  /// a fact in the table like every other per-board fact.
+  PowerController power;
+
   /// Gap on the X axis inside the controller's RAM. The 1.47" panels are 172
   /// wide in a 240-wide controller, centred: 34. The 1.75C's CO5300 maps the
   /// 466px glass starting at column 6 (the offset Waveshare's own demo passes).
@@ -177,6 +192,14 @@ struct Config {
   bool hasTouch() const {
     return touch != TouchController::None && pinTouchRst != NO_PIN &&
            pinTouchInt != NO_PIN;
+  }
+  /// Whether a battery reading is possible at all on this board. The bus pins
+  /// are part of the test because the PMU is read over the touch I2C bus: a
+  /// controller with nowhere to talk cannot be read, and claiming otherwise
+  /// would make the firmware advertise a battery it can never sample.
+  bool hasBattery() const {
+    return power != PowerController::None && pinTouchSda != NO_PIN &&
+           pinTouchScl != NO_PIN;
   }
   bool isQspi() const { return bus == PanelBus::Qspi; }
   /// Brightness sink: PWM duty on this pin, or panel command 0x51 when absent.
@@ -208,6 +231,7 @@ static const Config CONFIG_LCD_ST7789 = {
     /* touchScl */ NO_PIN,
     /* touchRst */ NO_PIN,
     /* touchInt */ NO_PIN,
+    PowerController::None,  // USB powered, no cell and no gauge
     /* colOffset   */ 34,
     /* invertColor */ true,
     /* roundDisplay */ false,
@@ -245,6 +269,7 @@ static const Config CONFIG_TOUCH_JD9853 = {
     /* touchScl */ 19,
     /* touchRst */ 20,
     /* touchInt */ 21,
+    PowerController::None,  // USB powered, no cell and no gauge
     /* colOffset   */ 34,
     /* invertColor */ true,
     /* roundDisplay */ false,
@@ -284,6 +309,9 @@ static const Config CONFIG_AMOLED_CO5300 = {
     /* touchScl */ 14,
     /* touchRst */ 2,  // shared with panel reset - never pulse independently
     /* touchInt */ 11,
+    // AXP2101 PMU at 0x34 on the touch bus above (GPIO15/14). The only board
+    // here with a battery, so the only one that reports one.
+    PowerController::Axp2101,
     /* colOffset   */ 6,
     /* invertColor */ false,
     /* roundDisplay */ true,

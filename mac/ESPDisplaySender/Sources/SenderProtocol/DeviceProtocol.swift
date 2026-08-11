@@ -8,6 +8,7 @@ public enum DeviceProtocol {
     public static let frameProtocolVersion: UInt8 = 2
     public static let controlProtocolVersion: UInt8 = 1
     public static let touchVersion: UInt8 = 1
+    public static let batteryVersion: UInt8 = 1
 
     public struct Capabilities: OptionSet, Equatable, Sendable {
         public let rawValue: UInt32
@@ -43,6 +44,12 @@ public enum DeviceProtocol {
         /// firmware that never emits one, which is indistinguishable from the
         /// panel ignoring the finger.
         public static let touchLongPress = Capabilities(rawValue: 1 << 10)
+        /// Emits EBAT, i.e. this board has a power-management IC with a battery
+        /// gauge. Advertised because it is a per-board fact rather than a
+        /// firmware one — only the 1.75C carries a PMU — so a sender must not
+        /// show a battery row for a panel that will never report one. An empty
+        /// or 0% reading would look like a flat battery rather than no battery.
+        public static let battery = Capabilities(rawValue: 1 << 11)
     }
 
     public struct DeviceInfo: Equatable, Sendable {
@@ -238,6 +245,72 @@ public enum DeviceProtocol {
             x: UInt16(bytes[8]) | (UInt16(bytes[9]) << 8),
             y: UInt16(bytes[10]) | (UInt16(bytes[11]) << 8),
             landscape: bytes[12] & touchFlagLandscape != 0)
+    }
+
+    /// What the panel's power-management IC is doing with its battery. One enum
+    /// rather than independent charging/discharging flags, so the wire format
+    /// cannot express a contradictory state a receiver would have to arbitrate.
+    public enum ChargeState: UInt8, CaseIterable, Sendable {
+        case unknown = 0
+        case charging = 1
+        case discharging = 2
+        case standby = 3
+    }
+
+    /// A battery reading from a panel advertising `Capabilities.battery`.
+    ///
+    /// Unknowns are `nil` rather than sentinel numbers: the wire uses 0xFF for
+    /// an unsettled gauge and 0 for an unread voltage, and both would read as
+    /// real, alarming values if they reached the UI as numbers.
+    public struct BatteryStatus: Equatable, Sendable {
+        public let present: Bool
+        public let externalPower: Bool
+        public let percent: UInt8?
+        public let state: ChargeState
+        public let millivolts: UInt16?
+
+        public init(
+            present: Bool, externalPower: Bool, percent: UInt8?,
+            state: ChargeState, millivolts: UInt16?
+        ) {
+            self.present = present
+            self.externalPower = externalPower
+            self.percent = percent
+            self.state = state
+            self.millivolts = millivolts
+        }
+    }
+
+    public static let batteryPacketBytes = 12
+    /// Bit 0 of the flags byte: a battery is physically attached.
+    public static let batteryFlagPresent: UInt8 = 0x01
+    /// Bit 1: external (VBUS) power is present.
+    public static let batteryFlagExternalPower: UInt8 = 0x02
+    /// Percent value meaning the gauge has no opinion yet.
+    public static let batteryPercentUnknown: UInt8 = 0xFF
+
+    /// Parse the device's fixed-size EBAT battery report.
+    ///
+    /// Validation mirrors the firmware's parser: version, a percent that is
+    /// either 0-100 or the unknown sentinel, and a charge state this build can
+    /// name. The two reserved bytes are deliberately not checked, so a later
+    /// firmware can carry one more small field there without this parser
+    /// rejecting every packet.
+    public static func parseBattery(_ data: Data) -> BatteryStatus? {
+        let bytes = [UInt8](data)
+        guard bytes.count == batteryPacketBytes,
+              Array(bytes[0..<4]) == Array("EBAT".utf8),
+              bytes[4] == batteryVersion,
+              bytes[6] <= 100 || bytes[6] == batteryPercentUnknown,
+              let state = ChargeState(rawValue: bytes[7])
+        else { return nil }
+        let millivolts = UInt16(bytes[8]) | (UInt16(bytes[9]) << 8)
+        return BatteryStatus(
+            present: bytes[5] & batteryFlagPresent != 0,
+            externalPower: bytes[5] & batteryFlagExternalPower != 0,
+            percent: bytes[6] == batteryPercentUnknown ? nil : bytes[6],
+            state: state,
+            millivolts: millivolts == 0 ? nil : millivolts)
     }
 
     private static func appendLE(_ value: UInt16, to data: inout Data) {

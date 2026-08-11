@@ -730,6 +730,12 @@ private struct PanelDetailView: View {
                 "Control protocol",
                 value: panel.controlProtocolVersion.map(String.init) ?? "Not available")
             LabeledContent("Uptime", value: panel.uptimeDescription)
+            // Only for a panel that advertises a battery. A C6 has no PMU and
+            // will never report one, so an unconditional row would read as a
+            // flat or missing battery instead of hardware that does not exist.
+            if panel.capabilities.contains(.battery) {
+                LabeledContent("Battery", value: panel.batteryDescription)
+            }
         }
     }
 

@@ -32,6 +32,10 @@ struct PanelSnapshot: Identifiable, Equatable {
     var controlProtocolVersion: Int?
     var capabilitiesRaw: UInt32 = 0
     var uptimeSeconds: UInt32 = 0
+    /// Last battery report, on a panel that sends them. Only the 1.75C has a
+    /// PMU, so this stays nil forever on the C6 boards - which is why the UI
+    /// gates the row on the advertised capability rather than on this being nil.
+    var battery: DeviceProtocol.BatteryStatus?
     var brightness: Int = 0
     var brightnessHigh = true
     var flipped = false
@@ -130,6 +134,26 @@ struct PanelSnapshot: Identifiable, Equatable {
             rssi: rssi.map { "\($0) dBm" } ?? "",
             version: firmwareVersion ?? "",
             uptime: uptimeSeconds > 0 ? uptimeDescription : "")
+    }
+
+    /// The battery as one phrase for the manager.
+    ///
+    /// A panel advertising the capability but not having reported yet says so,
+    /// rather than showing 0% - an unknown battery and a flat one must never
+    /// read the same. "No battery" is a real answer too: the PMU reports whether
+    /// a cell is attached, and a 1.75C running on USB alone genuinely has none.
+    var batteryDescription: String {
+        guard let battery else { return "Waiting for a reading" }
+        guard battery.present else {
+            return battery.externalPower ? "No battery (USB power)" : "No battery"
+        }
+        let level = battery.percent.map { "\($0)%" } ?? "Level unknown"
+        switch battery.state {
+        case .charging: return "\(level), charging"
+        case .discharging: return "\(level), on battery"
+        case .standby: return battery.externalPower ? "\(level), USB power" : level
+        case .unknown: return level
+        }
     }
 
     var uptimeDescription: String {
@@ -835,6 +859,15 @@ final class PanelManager: ObservableObject {
             // had stopped.
             updatePanel(serviceName) { $0.lastSeen = now }
             handleTouch(touch, for: serviceName)
+        case .battery(let battery):
+            // Not `lastHeartbeatAt`, for the same reason as touch and one more:
+            // this arrives on its own slow timer whether or not frames are
+            // getting through, so treating it as a heartbeat would keep a dead
+            // panel reading "Online" forever.
+            updatePanel(serviceName) { panel in
+                panel.lastSeen = now
+                panel.battery = battery
+            }
         }
         persistIfNeeded(force: reconciledIdentity)
     }
