@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../display_stream/band_protocol.h"
+#include "../display_stream/chip_identity.h"
 #include "../display_stream/control_queue.h"
 #include "../display_stream/device_protocol.h"
 #include "../display_stream/ota_policy.h"
@@ -1764,6 +1765,131 @@ int main() {
       CHECK(flipped == !wasSleeping);
       CHECK(flippedIdle == !wasIdle);
     }
+  }
+
+  // --- chip identity: which image out of a firmware bundle belongs to this
+  // panel. The token goes out as the `chip=` TXT record, and the app refuses a
+  // definite mismatch on it, so the wrong string here means the wrong image
+  // offered for a panel.
+  //
+  // Every literal below is written out by hand from tools/espdisp.py BOARDS
+  // (chip="esp32c6", chip="esp32s3") rather than taken from the header, for the
+  // same reason firmware/test and Tests/SenderProtocolTests assert the same band
+  // bytes independently: the CLI and the Swift app cannot be recompiled from
+  // here, so a token that drifts has to fail a test rather than silently agree
+  // with itself.
+  //
+  // WHAT THIS PROVES AND WHAT IT CANNOT. The ladder takes its inputs as
+  // arguments, so all four of its rungs are reachable here. The #if wiring that
+  // feeds it cannot be: a translation unit has one preprocessor state, and on
+  // the host it is the state of a build with no ESP macros at all. That half is
+  // checked where it is real instead - chip_identity.h static_asserts that
+  // CONFIG_IDF_TARGET and the fallback token agree, and that the token is not
+  // "unknown", both of which are compiled for the C6 and the S3 on every build.
+  {
+    // The host is a build that cannot name its chip, and that is the branch
+    // being exercised: the answer is the defined "unknown" token, not an empty
+    // string and not a crash. A reader treats this as "I could not tell".
+    CHECK(chipidentity::chipToken() != nullptr);
+    CHECK(strcmp(chipidentity::chipToken(), "unknown") == 0);
+    // The host's preprocessor state, stated rather than left implied: it is what
+    // makes "unknown" the right expectation above, and it is the reason the
+    // other branches of the wiring are checked by the firmware compile instead
+    // of here. If a stray sdkconfig.h ever landed on the host include path these
+    // fail first, which is a much clearer report than the token assertion above.
+    CHECK(chipidentity::buildIdfTarget() == nullptr);
+    CHECK(!chipidentity::buildTargetsEsp32C6());
+    CHECK(!chipidentity::buildTargetsEsp32S3());
+
+    // The IDF's own string, which is what a real build supplies. Verified on
+    // disk for core 3.3.11: CONFIG_IDF_TARGET is "esp32c6" at
+    // esp32c6-libs/3.3.11/qio_qspi/include/sdkconfig.h:429 and "esp32s3" at
+    // esp32s3-libs/3.3.11/*/include/sdkconfig.h:394.
+    CHECK(strcmp(chipidentity::selectToken("esp32c6", false, false),
+                 "esp32c6") == 0);
+    CHECK(strcmp(chipidentity::selectToken("esp32s3", false, false),
+                 "esp32s3") == 0);
+    // Passed straight through, so a chip this file has never heard of is
+    // advertised accurately rather than as "unknown". An app comparing tokens
+    // then correctly finds no matching image instead of offering one.
+    CHECK(strcmp(chipidentity::selectToken("esp32p4", false, false),
+                 "esp32p4") == 0);
+
+    // The fallback rungs, for a build where the string is missing but the
+    // per-chip flag is not. Asserted in both directions: a C6 build must not
+    // answer with the S3 token, which is the mistake that would put an S3 image
+    // on a C6 panel.
+    CHECK(strcmp(chipidentity::selectToken(nullptr, true, false), "esp32c6") ==
+          0);
+    CHECK(strcmp(chipidentity::selectToken(nullptr, true, false), "esp32s3") !=
+          0);
+    CHECK(strcmp(chipidentity::selectToken(nullptr, false, true), "esp32s3") ==
+          0);
+    CHECK(strcmp(chipidentity::selectToken(nullptr, false, true), "esp32c6") !=
+          0);
+    // Neither flag: the last rung, and the only input that may answer "unknown".
+    CHECK(strcmp(chipidentity::selectToken(nullptr, false, false), "unknown") ==
+          0);
+
+    // The IDF's string outranks the flags, so the answer stays the IDF's even if
+    // a future core defines a flag this file misreads. Fed a deliberately
+    // contradictory pair, which a real build never produces - chip_identity.h
+    // static_asserts that it cannot - to pin which side wins.
+    CHECK(strcmp(chipidentity::selectToken("esp32s3", true, false),
+                 "esp32s3") == 0);
+    CHECK(strcmp(chipidentity::selectToken("esp32c6", false, true),
+                 "esp32c6") == 0);
+
+    // An empty string counts as absent rather than as a chip named "". Left as
+    // a token it would read to the app as a definite mismatch with every image
+    // in a bundle, i.e. as knowledge, when it is the opposite.
+    CHECK(strcmp(chipidentity::selectToken("", false, false), "unknown") == 0);
+    CHECK(strcmp(chipidentity::selectToken("", true, false), "esp32c6") == 0);
+    CHECK(strcmp(chipidentity::selectToken("", false, true), "esp32s3") == 0);
+
+    // Both flags at once cannot happen either, but it must still produce one
+    // token rather than falling through to "unknown" - the rungs are ordered,
+    // not exclusive.
+    CHECK(strcmp(chipidentity::selectToken(nullptr, true, true), "esp32c6") ==
+          0);
+
+    // The three answers are distinct, so a swapped pair of rungs cannot pass by
+    // two tokens happening to be equal.
+    CHECK(strcmp(chipidentity::selectToken(nullptr, true, false),
+                 chipidentity::selectToken(nullptr, false, true)) != 0);
+    CHECK(strcmp(chipidentity::selectToken(nullptr, true, false),
+                 chipidentity::selectToken(nullptr, false, false)) != 0);
+    CHECK(strcmp(chipidentity::selectToken(nullptr, false, true),
+                 chipidentity::selectToken(nullptr, false, false)) != 0);
+
+    // And the header's own tokens are the strings the CLI writes into a bundle
+    // manifest. This is the assertion that fails if someone renames a token to
+    // something tidier - "c6", say - which would compile, advertise, and match
+    // nothing.
+    CHECK(strcmp(chipidentity::TOKEN_ESP32C6, "esp32c6") == 0);
+    CHECK(strcmp(chipidentity::TOKEN_ESP32S3, "esp32s3") == 0);
+    CHECK(strcmp(chipidentity::TOKEN_UNKNOWN, "unknown") == 0);
+
+    // sameToken is what the compile-time cross-checks are built out of, so it
+    // gets its own coverage: a false positive there would silently disarm them.
+    CHECK(chipidentity::sameToken("esp32c6", "esp32c6"));
+    CHECK(!chipidentity::sameToken("esp32c6", "esp32s3"));
+    CHECK(!chipidentity::sameToken("esp32c6", "esp32c"));   // prefix, shorter
+    CHECK(!chipidentity::sameToken("esp32c", "esp32c6"));   // prefix, longer
+    CHECK(!chipidentity::sameToken("esp32c6", ""));
+    CHECK(chipidentity::sameToken("", ""));
+    CHECK(chipidentity::sameToken(nullptr, nullptr));
+    CHECK(!chipidentity::sameToken(nullptr, "esp32c6"));
+    CHECK(!chipidentity::sameToken("esp32c6", nullptr));
+    // Constant-evaluable, which is the property the static_asserts need and the
+    // one a later edit could take away without any warning.
+    static_assert(chipidentity::sameToken("esp32c6",
+                                          chipidentity::TOKEN_ESP32C6),
+                  "sameToken must be usable in a constant expression");
+    static_assert(chipidentity::sameToken(
+                      chipidentity::selectToken(nullptr, false, true),
+                      "esp32s3"),
+                  "selectToken must be usable in a constant expression");
   }
 
   printf("OK: %d checks passed\n", checks);

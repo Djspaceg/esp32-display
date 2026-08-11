@@ -317,6 +317,21 @@ so the Mac browses for panels instead of resolving a fixed hostname, and
 connects to the Bonjour endpoint directly (which re-resolves itself on every
 reconnect — address changes need no bookkeeping).
 
+The TXT records carry `name`, `res=WxH`, `fw` (the firmware version), `proto`
+(the frame protocol version), `caps` (the capability bits as eight hex digits),
+and `chip` — the chip this binary was built for, `esp32c6` or `esp32s3`, taken
+from the IDF's own `CONFIG_IDF_TARGET`. `chip` is what tells a reader which
+image out of a firmware bundle belongs to this panel. It is advertised rather
+than worked out from `res`, because 172x320 meaning a C6 and 466x466 meaning an
+S3 is a coincidence of the boards that exist today, and the firmware is
+resolution-parametric precisely so that coincidence can end. A build that cannot
+name its chip says `chip=unknown`, which means "could not tell" and not "some
+other chip" — a reader treats it as missing information rather than as a
+mismatch. This is a different record from the `board=` one discussed under OTA
+below: that one belongs to the separate `_arduino._tcp` service and is published
+by the core's own code. They spell the chip the same way on purpose; they do not
+come from the same place.
+
 Over USB serial (115200), the firmware also accepts configuration commands:
 `CFGWIFI <base64 ssid> <base64 password>` saves credentials to NVS and
 reboots, and `CFGWIFI <base64 ssid>` (password argument omitted) keeps the
