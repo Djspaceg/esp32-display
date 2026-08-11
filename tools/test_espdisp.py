@@ -292,6 +292,41 @@ def test_classify_ota_target():
             "board=%r cannot be placed" % advertised)
 
 
+def test_discovery_command():
+    """The invocation that produces the payload every other check is fed by hand.
+
+    Worth asserting precisely because getting it wrong is silent: run_capture
+    turns an OSError into a non-zero result, a non-zero result becomes [], and []
+    means "could not confirm", which prints a note and pushes. A typo here would
+    not raise, it would quietly turn the guard off.
+    """
+    with unittest.mock.patch.object(espdisp, "arduino_cli", return_value="/bin/acli"):
+        cmd = espdisp.discovery_command(5)
+
+    check_equal(cmd[0], "/bin/acli", "the arduino-cli this tool resolved")
+    check_equal(
+        cmd[1:],
+        ["board", "list", "--discovery-timeout", "5s", "--json"],
+        "discovery argument shape")
+    # The duration needs its unit or arduino-cli rejects it, and --json is what
+    # makes the output parseable at all: both are easy to lose in an edit.
+    check("5s" in cmd, "the timeout carries its unit")
+    check("--json" in cmd, "output stays machine-readable")
+
+    # Whole seconds, with a floor of one. A fractional flag value has to become an
+    # integer somewhere, and "0s" would be a browse that cannot find anything -
+    # indistinguishable from the guard being skipped, but without saying so.
+    check_equal(espdisp.discovery_seconds(5.0), 5, "the common case")
+    check_equal(espdisp.discovery_seconds(0.4), 1, "a fraction still browses")
+    check_equal(espdisp.discovery_seconds(0.0), 1, "never 0s")
+    check_equal(espdisp.discovery_seconds(-3.0), 1, "nor negative")
+    check_equal(espdisp.discovery_seconds(2.6), 3, "rounded, not truncated")
+    with unittest.mock.patch.object(espdisp, "arduino_cli", return_value="/bin/acli"):
+        check_equal(
+            espdisp.discovery_command(espdisp.discovery_seconds(0.4))[4], "1s",
+            "and the floor reaches the command line")
+
+
 def test_verify_ota_target():
     c6 = espdisp.BOARDS["c6"]
     ports = espdisp.parse_network_ports(DISCOVERY_JSON)
@@ -450,6 +485,7 @@ def main():
     test_board_table()
     test_resolve_board()
     test_network_discovery()
+    test_discovery_command()
     test_classify_ota_target()
     test_verify_ota_target()
     test_password_policy()

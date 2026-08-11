@@ -607,24 +607,49 @@ def cfgotapw_line(password: str) -> str:
     return "CFGOTAPW " + base64.b64encode(password.encode("utf-8")).decode("ascii")
 
 
+def discovery_seconds(timeout: float) -> int:
+    """Whole seconds to browse for, at least one.
+
+    arduino-cli wants a duration string, so a fractional --discovery-timeout has
+    to become an integer somewhere. Rounding to a 1s floor rather than truncating
+    keeps `--discovery-timeout 0.4` a real (if brief) browse instead of a `0s`
+    that finds nothing and reads as a silent skip. 0 exactly never arrives here:
+    cmd_ota treats it as "do not check" and does not call this path at all.
+    """
+    return max(1, int(round(timeout)))
+
+
+def discovery_command(seconds: int) -> List[str]:
+    """Build the `arduino-cli board list` invocation used to find panels.
+
+    Pure, for the same reason espota_command is: this is the one part of the
+    target check with no other way to be tested. Everything downstream of it -
+    parse_network_ports, network_port_for_host, classify_ota_target - is covered
+    against a captured payload, but the command that produces that payload is
+    stubbed out in those tests. And the failure is quiet by design: run_capture
+    turns OSError and TimeoutExpired into a non-zero result, a non-zero result
+    becomes [], and [] prints a note and pushes anyway. So a typo in this argv
+    would not surface as an error, it would surface as a guard that stopped
+    guarding. Asserting the argv is what catches that.
+    """
+    return [
+        arduino_cli(),
+        "board",
+        "list",
+        "--discovery-timeout",
+        "%ds" % seconds,
+        "--json",
+    ]
+
+
 def discovered_network_ports(timeout: float) -> List[NetworkPort]:
     """Ask arduino-cli to browse for OTA-capable panels on the LAN.
 
     Failure is not an error here: the caller treats an empty list as "could not
     confirm", so a machine with mDNS blocked still gets to push.
     """
-    seconds = max(1, int(round(timeout)))
-    proc = run_capture(
-        [
-            arduino_cli(),
-            "board",
-            "list",
-            "--discovery-timeout",
-            "%ds" % seconds,
-            "--json",
-        ],
-        timeout=seconds + 30.0,
-    )
+    seconds = discovery_seconds(timeout)
+    proc = run_capture(discovery_command(seconds), timeout=seconds + 30.0)
     if proc.returncode != 0:
         return []
     try:
@@ -898,7 +923,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="seconds to browse mDNS for the panel to cross-check --board "
-        "(default 5; 0 skips the check, which is not a way past a real mismatch)",
+        "(default 5; 0 skips the check entirely, leaving the panel itself as the "
+        "only thing that will refuse a wrong-chip image)",
     )
     p_ota.set_defaults(func=cmd_ota)
 
