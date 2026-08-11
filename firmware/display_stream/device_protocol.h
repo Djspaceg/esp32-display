@@ -20,6 +20,10 @@ enum Capability : uint32_t {
   CAP_FLIP = 1u << 1,
   CAP_IDENTIFY = 1u << 2,
   CAP_RESTART = 1u << 3,
+  // Accepts a firmware push over WiFi (ArduinoOTA on the LAN, password
+  // required). Runtime rather than per-board: a panel with no OTA password does
+  // not listen and does not set this, so the bit means "an update can be pushed
+  // to this panel now", not "this build was compiled with OTA in it".
   CAP_OTA = 1u << 4,
   CAP_SLEEP_SYNC = 1u << 5,
   CAP_TELEMETRY = 1u << 6,

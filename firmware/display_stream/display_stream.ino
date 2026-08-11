@@ -29,6 +29,7 @@
 // it keeps overwriting its current back buffer (recency over completeness).
 
 #include <Adafruit_NeoPixel.h>
+#include <ArduinoOTA.h>
 #include <AsyncUDP.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
@@ -193,6 +194,27 @@ static bool touchAvailable = false;
 // silent must advertise no battery rather than promise readings that never come.
 static bool batteryAvailable = false;
 
+// ---- OTA (ArduinoOTA over WiFi, LAN only) -------------------------------
+// Fails closed, deliberately: an unpassworded ArduinoOTA is an unauthenticated
+// remote-code-execution path for anything that can reach this panel. There is no
+// default password and none is generated - with nothing stored, OTA does not
+// start and CAP_OTA is not advertised, which is the state every panel already
+// ships in. Set one with CFGOTAPW over USB.
+//
+// The plaintext is deliberately NOT kept in a global. It is read from NVS into a
+// local inside startOtaIfConfigured() and handed to ArduinoOTA, which stores only
+// SHA256(password) (verified in the core's ArduinoOTA.cpp setPassword). The two
+// flags below are all that stays resident.
+static const uint16_t OTA_PORT = 3232;  // ArduinoOTA's own default port
+static bool otaConfigured = false;      // a password is stored in NVS
+static bool otaActive = false;          // begin() has run, handle() is live
+// Set for the duration of a write. The whole transfer happens inside one
+// ArduinoOTA.handle() call, so the loop does not normally iterate while this is
+// set; it exists so that if it ever does, nothing repaints over the progress
+// screen and no DMA is queued underneath the flash writes.
+static volatile bool otaInProgress = false;
+static uint8_t otaShownPercent = 0;
+
 // Last successful PMU reading, so the 5s status line and CFGSHOW can report a
 // battery without doing I2C traffic of their own. Only meaningful once
 // batteryReadingValid is set; a failed sample leaves the previous one standing
@@ -212,7 +234,11 @@ static uint32_t deviceCapabilities() {
          | (touchAvailable ? (deviceproto::CAP_TOUCH
                               | deviceproto::CAP_TOUCH_LONGPRESS)
                            : 0u)
-         | (batteryAvailable ? deviceproto::CAP_BATTERY : 0u);
+         | (batteryAvailable ? deviceproto::CAP_BATTERY : 0u)
+         // Only when OTA actually came up, not merely because this build
+         // contains the code: a panel with no OTA password advertises no OTA,
+         // so nothing offers an update path that would be refused.
+         | (otaActive ? deviceproto::CAP_OTA : 0u);
 }
 
 // Lines the sender asked the panel to show on its status card, with when they
@@ -646,6 +672,7 @@ static void applyPendingControl() {
 // without reflashing:
 //   CFGWIFI <base64 ssid> <base64 password>\n  -> save to NVS, reply
 //     CFGOK, reboot onto the new network (empty password = open network)
+//   CFGOTAPW <base64 password> | CFGOTAPW clear\n  -> enable/disable OTA
 //   CFGSHOW\n  -> CFGINFO ssid=... ip=... rssi=...
 // Base64 avoids every quoting hazard SSIDs and passwords can contain.
 static void processConfigLine(char *line) {
@@ -804,6 +831,55 @@ static void processConfigLine(char *line) {
     rgbLed->show();
     ledOverrideUntil = millis() + 10000;
     Serial.printf("CFGOK led r=%d g=%d b=%d for 10s\n", r & 0xFF, g & 0xFF, b & 0xFF);
+  } else if (strncmp(line, "CFGOTAPW ", 9) == 0) {
+    // Set or clear the OTA password:
+    //   CFGOTAPW <b64 password>  enable OTA with this password
+    //   CFGOTAPW clear           forget it, which turns OTA off again
+    // Base64 for exactly the reason CFGWIFI uses it - a password may contain
+    // any character a shell or a space-delimited line would eat. "clear" is
+    // unambiguous as a literal token because five characters can never be
+    // valid base64, so no real payload can collide with it.
+    //
+    // Both forms restart. OTA is brought up during setup and its bit is baked
+    // into the mDNS caps TXT record there, so a reboot is the honest way to make
+    // the panel's advertisement agree with its state.
+    const char *arg = line + 9;
+    Preferences prefs;
+    if (strcmp(arg, "clear") == 0) {
+      prefs.begin("espdisp", false);
+      prefs.remove("otapw");
+      prefs.end();
+      Serial.println("CFGOK ota password cleared (OTA off), restarting");
+      Serial.flush();
+      delay(200);
+      ESP.restart();
+      return;
+    }
+    unsigned char pw[65];
+    size_t pwLen = 0;
+    if (mbedtls_base64_decode(pw, sizeof(pw) - 1, &pwLen,
+                              (const unsigned char *)arg, strlen(arg)) != 0) {
+      Serial.println("CFGERR bad base64 password (max 64 bytes)");
+      return;
+    }
+    pw[pwLen] = 0;
+    if (pwLen < 8) {
+      // Refused rather than accepted: this one password is the only thing
+      // between the LAN and a firmware write, espota can be retried as fast as
+      // the panel will answer, and a weak one here is worse than no OTA at all.
+      Serial.println("CFGERR ota password must be at least 8 bytes "
+                     "(or: CFGOTAPW clear)");
+      return;
+    }
+    prefs.begin("espdisp", false);
+    prefs.putString("otapw", (const char *)pw);
+    prefs.end();
+    // The length, never the password - not even a prefix of it.
+    Serial.printf("CFGOK ota password set (%u bytes), restarting\n",
+                  (unsigned)pwLen);
+    Serial.flush();
+    delay(200);
+    ESP.restart();
   } else if (strcmp(line, "CFGSHOW") == 0) {
     // ssid64 first: base64 keeps SSIDs with spaces parseable in a
     // space-delimited line. Plain ssid goes last, for humans on a monitor.
@@ -815,13 +891,19 @@ static void processConfigLine(char *line) {
     mbedtls_base64_encode(name64, sizeof(name64) - 1, &name64Len,
                           (const unsigned char *)cfgName.c_str(), cfgName.length());
     name64[name64Len] = 0;
+    // ota= is three-valued on purpose: "off" (no password stored), "pending" (a
+    // password is stored but the radio was not ready when setup ran, so nothing
+    // is listening yet), "on" (listening). Reporting only on/off would make a
+    // panel that simply booted without WiFi look misconfigured.
     Serial.printf(
         "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d bl=%s "
-        "board=%s bat=%d ssid=%s\n",
+        "board=%s bat=%d ota=%s ssid=%s\n",
         (const char *)b64, (const char *)name64, WiFi.status() == WL_CONNECTED,
         WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), panelFlip180,
         blIsHigh() ? "high" : "low", board::variantToken(boardVariant),
-        batteryPercentOrUnknown(), cfgSsid.c_str());
+        batteryPercentOrUnknown(),
+        otaActive ? "on" : (otaConfigured ? "pending" : "off"),
+        cfgSsid.c_str());
   }
   // Anything else on serial is ignored (a monitor typing away is harmless).
 }
@@ -988,6 +1070,117 @@ static void drawIdleScreen() {
     dmaInFlight = dmaInFlight - 1;
   }
   lastIdleDrawAt = millis();
+}
+
+// Wait for queued strip DMA to finish, bounded.
+//
+// Two callers, and the second is the reason this exists. Reusing bufB needs the
+// previous transfer done (fillPanel achieves that with a flat delay(30)); an OTA
+// write needs it for a sharper reason: on the S3 the frame buffers live in PSRAM,
+// which shares its SPI controller with the flash the update is writing, and the
+// cache goes down for the duration of an erase. A transfer still in flight when
+// that happens is a hazard, so the progress screen drains before handing control
+// back to the updater. UNVERIFIED on hardware (no board attached while this was
+// written): written to be safe rather than measured.
+static void waitForDmaIdle(uint32_t maxMs) {
+  uint32_t start = millis();
+  while (dmaInFlight != 0 && millis() - start < maxMs) {
+    delay(2);
+  }
+  if (dmaInFlight != 0) {
+    // The same reclaim the loop's DMA-stall failsafe does: a lost completion
+    // callback must not wedge the panel forever.
+    statDrawErrors = statDrawErrors + 1;
+    dmaInFlight = 0;
+  }
+}
+
+// Show OTA progress on the glass.
+//
+// An update takes tens of seconds during which nothing else is drawn, and a panel
+// that simply freezes mid-picture looks broken rather than busy - so it says what
+// is happening on the device, not only in the terminal doing the pushing.
+//
+// Composed in staging (bufB) like fillPanel does: bufA holds the last streamed
+// frame and belongs to the network path, which keeps writing into it throughout.
+// percent < 0 draws no bar, for the states where there is no meaningful figure.
+static void drawOtaScreen(const char *headline, int percent) {
+  if (bufB == nullptr || panel == nullptr) {
+    return;
+  }
+  waitForDmaIdle(200);  // bufB may still be feeding the previous transfer
+
+  const int w = PANEL_GEOMETRY.frameWidth(panelLandscape);
+  const int hgt = PANEL_GEOMETRY.frameHeight(panelLandscape);
+  // Round glass hides the framebuffer corners, so keep to the inscribed square
+  // exactly as drawIdleScreen does.
+  int margin = 4;
+  if (bcfg->roundDisplay) {
+    int d = w < hgt ? w : hgt;
+    margin += (int)(0.1465f * (float)d);
+  }
+
+  // Deep blue: unmistakable next to the boot fills (gray waiting for WiFi, teal
+  // ready, dark red no WiFi), so the state is readable across a room.
+  const uint16_t bg = 0x0008;
+  const uint8_t bgHi = bg >> 8, bgLo = bg & 0xFF;
+  for (size_t i = 0; i < FRAME_BYTES; i += 2) {
+    bufB[i] = bgHi;
+    bufB[i + 1] = bgLo;
+  }
+
+  char pctText[8];
+  pctText[0] = 0;
+  if (percent >= 0) {
+    snprintf(pctText, sizeof(pctText), "%d%%", percent);
+  }
+
+  size_t widest = strlen(headline);
+  if (strlen(pctText) > widest) widest = strlen(pctText);
+  int scale = 2;
+  if ((int)widest * 6 * scale > w - 2 * margin) {
+    scale = 1;
+  }
+  const int lineH = 9 * scale;
+  const int barH = 6 * scale;
+  const int blockH = lineH * 2 + barH + 3 * scale;
+  int y = (hgt - blockH) / 2;
+  if (y < margin) y = margin;
+
+  drawOutlinedText(bufB, w, hgt, (w - (int)strlen(headline) * 6 * scale) / 2, y,
+                   headline, scale);
+  if (pctText[0] != 0) {
+    drawOutlinedText(bufB, w, hgt,
+                     (w - (int)strlen(pctText) * 6 * scale) / 2, y + lineH,
+                     pctText, scale);
+
+    // Progress bar: outlined box, filled left to right. Drawn by hand because
+    // the font toolkit has no rectangle primitive and one bar does not justify
+    // adding one.
+    const int barW = w - 2 * margin;
+    const int barX = margin;
+    const int barY = y + lineH * 2 + 3 * scale;
+    const int filledTo = (barW * percent) / 100;
+    for (int px = 0; px < barW; px++) {
+      for (int py = 0; py < barH; py++) {
+        int sx = barX + px, sy = barY + py;
+        if (sx < 0 || sy < 0 || sx >= w || sy >= hgt) continue;
+        bool edge = (px == 0 || px == barW - 1 || py == 0 || py == barH - 1);
+        uint16_t color = (edge || px < filledTo) ? 0xFFFF : bg;
+        size_t off = ((size_t)sy * (size_t)w + (size_t)sx) * 2;
+        bufB[off] = color >> 8;
+        bufB[off + 1] = color & 0xFF;
+      }
+    }
+  }
+
+  dmaInFlight = dmaInFlight + 1;
+  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, w, hgt, bufB) != ESP_OK) {
+    statDrawErrors = statDrawErrors + 1;
+    dmaInFlight = dmaInFlight - 1;
+  }
+  // Drain before returning: the caller is about to resume writing flash.
+  waitForDmaIdle(500);
 }
 
 // WiFi signal quality on the RGB LED(s): green is strong, fading through
@@ -1215,6 +1408,126 @@ static void addMdnsService() {
   MDNS.addServiceTxt("espdisp", "udp", "fw", FW_VERSION);
   MDNS.addServiceTxt("espdisp", "udp", "proto", proto);
   MDNS.addServiceTxt("espdisp", "udp", "caps", caps);
+  if (otaActive) {
+    // _arduino._tcp is what espota/arduino-cli browse for. It is registered from
+    // here rather than by ArduinoOTA itself (which is why setupOta calls
+    // setMdnsEnabled(false)) for two reasons, both read out of the core's
+    // ArduinoOTA.cpp: its begin() would call MDNS.begin() a second time, and its
+    // end() calls MDNS.end(), i.e. mdns_free(), which would take _espdisp._udp
+    // down with it. Registering here also means the WiFi-heal path gets OTA back
+    // for free - that path tears mDNS down and calls this function again, so
+    // without this line OTA would silently stop being discoverable after the
+    // first heal.
+    MDNS.enableArduino(OTA_PORT, true /* auth required */);
+  }
+}
+
+// Bring OTA up, if it is configured and the radio is ready.
+//
+// Returns true only on the transition to active, so the caller knows the mDNS
+// caps TXT record needs re-announcing.
+//
+// Fails closed at every step: no stored password means no listener and no
+// CAP_OTA. The password is read into a local and handed straight to ArduinoOTA,
+// which keeps only SHA256(password) - so the plaintext exists in RAM for the
+// length of this call and not for the uptime of the panel.
+static bool startOtaIfConfigured() {
+  if (otaActive || !otaConfigured) {
+    return false;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;  // nothing to bind a socket to yet; retried from the loop
+  }
+
+  String otaPassword;
+  {
+    Preferences prefs;
+    prefs.begin("espdisp", true /* read-only */);
+    otaPassword = prefs.getString("otapw", "");
+    prefs.end();
+  }
+  if (otaPassword.isEmpty()) {
+    otaConfigured = false;  // cleared behind our back; stop retrying
+    return false;
+  }
+
+  ArduinoOTA.setHostname(cfgName.c_str());  // <name>.local, not esp32-<mac>
+  ArduinoOTA.setPassword(otaPassword.c_str());
+  ArduinoOTA.setPort(OTA_PORT);
+  ArduinoOTA.setMdnsEnabled(false);  // addMdnsService() owns every registration
+
+  ArduinoOTA.onStart([]() {
+    otaInProgress = true;
+    otaShownPercent = 0;
+    // Make the update visible whatever state the panel was in: a push that
+    // arrives while the Mac's displays are asleep would otherwise happen behind
+    // a dark screen.
+    displaySleeping = false;
+    idleActive = false;
+    applyBacklight();
+    Serial.println("ota: update starting");
+    drawOtaScreen("updating", 0);
+  });
+
+  ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
+    // The whole transfer runs inside ArduinoOTA.handle(), which does not return
+    // to the top of loop() until it is finished - so the 10s task watchdog is
+    // fed from here or a legitimate update panics the board partway through.
+    esp_task_wdt_reset();
+    if (total == 0) {
+      return;
+    }
+    uint8_t percent = (uint8_t)((uint64_t)done * 100u / total);
+    // Repaint in 5% steps. This callback fires once per 1460-byte chunk (~770
+    // times for a 1.1MB image) and a full-frame push costs tens of milliseconds,
+    // so redrawing on every call would slow the update down for no extra
+    // information.
+    if (percent < otaShownPercent + 5 && percent != 100) {
+      return;
+    }
+    otaShownPercent = percent;
+    Serial.printf("ota: %u%%\n", (unsigned)percent);
+    drawOtaScreen("updating", (int)percent);
+  });
+
+  ArduinoOTA.onEnd([]() {
+    // ArduinoOTA reboots ~100ms after this returns (setRebootOnSuccess is left
+    // at its default), so this is the last thing the old firmware draws.
+    Serial.println("ota: complete, rebooting");
+    drawOtaScreen("rebooting", 100);
+    otaInProgress = false;
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    otaInProgress = false;
+    const char *what = "failed";
+    switch (error) {
+      case OTA_AUTH_ERROR: what = "bad password"; break;
+      case OTA_BEGIN_ERROR: what = "no free slot"; break;
+      case OTA_CONNECT_ERROR: what = "connect lost"; break;
+      case OTA_RECEIVE_ERROR: what = "transfer lost"; break;
+      case OTA_END_ERROR: what = "bad image"; break;
+    }
+    Serial.printf("ota: %s (error %d)\n", what, (int)error);
+    // Leave the reason on the glass rather than snapping back to the stream: a
+    // failed push is exactly when someone is standing in front of the panel. The
+    // next completed frame overwrites it, and a rejected image never touched the
+    // running slot - the panel is still on the firmware it booted.
+    drawOtaScreen(what, -1);
+  });
+
+  // begin() returns void in core 3.3.11 (verified in ArduinoOTA.cpp: on a failed
+  // UDP bind it logs "udp bind failed" and returns with itself uninitialised),
+  // and there is no accessor for that state. So the preconditions above - a
+  // stored password and an associated radio - are the whole of what can be
+  // checked before advertising CAP_OTA. UNVERIFIED without hardware: that the
+  // bind succeeds in practice. If it ever does not, handle() is a no-op and a
+  // push simply times out; nothing else misbehaves.
+  ArduinoOTA.begin();
+  otaActive = true;
+  Serial.printf("ota: listening on %s.local:%u (password required)\n",
+                cfgName.c_str(), (unsigned)OTA_PORT);
+  return true;
 }
 
 void setup() {
@@ -1271,6 +1584,10 @@ void setup() {
     userBlLevel = prefs.getUChar(
         "bllevel", prefs.getBool("blhigh", true) ? BL_HIGH : BL_LOW);
     if (userBlLevel == 0) userBlLevel = BL_HIGH;
+    // Only whether a password exists, never the password: it is read again, into
+    // a local, at the point ArduinoOTA needs it. An empty stored value counts as
+    // absent so a blank string can never enable an unpassworded OTA.
+    otaConfigured = !prefs.getString("otapw", "").isEmpty();
     prefs.end();
   }
   // Report the actual source, not a value comparison: stored credentials
@@ -1400,9 +1717,22 @@ void setup() {
                   WiFi.localIP().toString().c_str(), WiFi.getHostname());
   }
 
+  // OTA before the announce, not after, even though ArduinoOTA is the later
+  // arrival here: addMdnsService() bakes deviceCapabilities() into the caps TXT
+  // record and registers _arduino._tcp, so both would be wrong if OTA came up
+  // afterwards. Nothing in ArduinoOTA forces the opposite order - with
+  // setMdnsEnabled(false) its begin() only binds a UDP socket, which needs the
+  // radio (checked inside) and not mDNS.
+  if (otaConfigured) {
+    startOtaIfConfigured();
+  } else {
+    Serial.println("ota: disabled (no password set; enable with CFGOTAPW)");
+  }
+
   if (MDNS.begin(cfgName.c_str())) {
     addMdnsService();
-    Serial.printf("mDNS: %s.local, service _espdisp._udp\n", cfgName.c_str());
+    Serial.printf("mDNS: %s.local, service _espdisp._udp%s\n", cfgName.c_str(),
+                  otaActive ? " + _arduino._tcp" : "");
   } else {
     Serial.println("WARN: mDNS failed to start");
   }
@@ -1443,6 +1773,21 @@ void setup() {
 
 void loop() {
   esp_task_wdt_reset();
+
+  if (otaActive) {
+    // An entire update happens inside this one call: handle() runs the transfer
+    // to completion, feeding the watchdog from the progress callback, and either
+    // reboots (success) or clears otaInProgress (failure) before returning. The
+    // guard below is therefore belt and braces - if a future core version ever
+    // returns between chunks, nothing beneath it may run: no frame may be drawn
+    // over the progress screen, and no DMA may be queued while flash is being
+    // written.
+    ArduinoOTA.handle();
+    if (otaInProgress) {
+      return;
+    }
+  }
+
   handleButton();
   handleSerialConfig();
   applyPendingControl();
@@ -1622,6 +1967,13 @@ void loop() {
   static uint32_t wifiDownSince = 0;
   if (WiFi.status() == WL_CONNECTED) {
     wifiDownSince = 0;
+    // Deferred OTA start. setup()'s WiFi wait is bounded and falls through on
+    // timeout, so a panel that associated a moment later would otherwise have no
+    // OTA until its next reboot. Cheap to leave here: the call is a flag test
+    // once OTA is up, or once it is known to be unconfigured.
+    if (startOtaIfConfigured()) {
+      addMdnsService();  // caps TXT and _arduino._tcp were announced without OTA
+    }
   } else if (wifiDownSince == 0) {
     wifiDownSince = millis();
   } else if (millis() - wifiDownSince > 60000) {
@@ -1700,7 +2052,11 @@ void loop() {
   }
 
   // After a heal reconnect completes, re-announce mDNS so the Mac's
-  // re-resolution finds us.
+  // re-resolution finds us. MDNS.end() below is mdns_free(): it drops every
+  // registration, OTA's _arduino._tcp included, which is why addMdnsService()
+  // owns that registration rather than ArduinoOTA - re-announcing here restores
+  // OTA discovery with it. ArduinoOTA's own UDP socket is untouched by any of
+  // this, so the listener never stops; only its advertisement would have.
   static bool mdnsRestartPending = false;
   static uint8_t lastHealStage = 0;
   if (healStage == 1 && lastHealStage == 0) {

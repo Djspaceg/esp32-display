@@ -4,6 +4,11 @@
 # Local WiFi credentials
 firmware/display_stream/wifi_config.h
 
+# arduino-cli build output. Compiling with --output-dir makes arduino-cli use
+# <sketch>/build/<fqbn>/ as its working directory, and `tools/espdisp.py ota`
+# compiles that way to get at the application image it pushes.
+firmware/*/build/
+
 # Xcode
 #
 # gitignore contributors: remember to update Global/Xcode.gitignore, Objective-C.gitignore & Swift.gitignore

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Build, flash, and configure the esp32-display firmware without hand-typing FQBNs."""
+"""Build, flash, update, and configure the esp32-display firmware without hand-typing FQBNs."""
 import argparse
 import fnmatch
+import getpass
 import glob
 import json
 import os
@@ -10,6 +11,7 @@ import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 from typing import List, NamedTuple, Optional
@@ -51,6 +53,11 @@ PORT_GLOB = "/dev/cu.usbmodem*"
 BAUD = 115200
 CFG_PREFIXES = ("CFGOK", "CFGERR", "CFGINFO")
 
+# OTA. 3232 is ArduinoOTA's default and what the firmware binds.
+OTA_PORT = 3232
+OTA_PASSWORD_ENV = "ESPDISP_OTA_PASSWORD"
+OTA_PASSWORD_MIN = 8  # matches the firmware's CFGOTAPW floor
+
 
 class Fail(Exception):
     """A condition the user can act on: reported as one line, never a traceback."""
@@ -70,13 +77,20 @@ def arduino_cli() -> str:
     return path
 
 
-def run_streaming(cmd: List[str], cwd: Optional[str] = None) -> List[str]:
+def run_streaming(
+    cmd: List[str], cwd: Optional[str] = None, redact: Optional[str] = None
+) -> List[str]:
     """Run cmd, echo its output live, and return the lines for later inspection.
 
     Live echo matters because an arduino-cli compile takes minutes; a silent
     tool looks hung.
+
+    `redact` is replaced with *** in the echoed command line. Used for the OTA
+    password: espota.py accepts it only as an argument, so it cannot be kept out
+    of argv, but it can be kept out of the terminal and out of any log of one.
     """
-    print("$ " + " ".join(cmd), flush=True)
+    shown = [arg.replace(redact, "***") for arg in cmd] if redact else cmd
+    print("$ " + " ".join(shown), flush=True)
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -212,6 +226,38 @@ def esptool_path() -> Optional[str]:
     # version sort, but any bundled esptool can report a chip id, so picking
     # the wrong one of several is harmless.
     return sorted(found)[-1]
+
+
+def core_data_dir() -> str:
+    proc = run_capture([arduino_cli(), "config", "get", "directories.data"], timeout=30.0)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def espota_path() -> str:
+    """Locate espota.py, the OTA pusher the esp32 core ships.
+
+    This is the same program the core's own upload recipe runs (platform.txt:
+    `tools.esp_ota.upload.pattern`), and it is pure stdlib - socket, hashlib,
+    argparse - so it adds no dependency. It is invoked directly rather than
+    through `arduino-cli upload -l network` because arduino-cli 1.5.1 refuses an
+    address it has not discovered itself (measured: `-p 192.0.2.1 -l network`
+    fails with "Error getting port metadata: port not found"), which would make
+    pushing to a known IP or a .local name impossible.
+    """
+    data_dir = core_data_dir()
+    if not data_dir:
+        raise Fail("could not read `arduino-cli config get directories.data`")
+    pattern = os.path.join(
+        data_dir, "packages", "esp32", "hardware", "esp32", "*", "tools", "espota.py"
+    )
+    found = sorted(glob.glob(pattern))
+    if not found:
+        raise Fail(
+            "espota.py not found under %s.\n"
+            "  Install the esp32 core: arduino-cli core install esp32:esp32" % pattern
+        )
+    # Newest core directory wins, same lexicographic caveat as esptool_path().
+    return found[-1]
 
 
 def probe_chip(address: str) -> Optional[str]:
@@ -367,21 +413,95 @@ def report_sizes(lines: List[str]) -> None:
         print(line)
 
 
-def compile_board(board: Board) -> List[str]:
+def compile_board(board: Board, output_dir: Optional[str] = None) -> List[str]:
     if not os.path.isdir(SKETCH_DIR):
         raise Fail("sketch directory not found: %s" % SKETCH_DIR)
-    return run_streaming(
-        [
-            arduino_cli(),
-            "compile",
-            "-b",
-            board.fqbn,
-            "--libraries",
-            LIBRARIES_DIR,
-            ".",
-        ],
-        cwd=SKETCH_DIR,
-    )
+    cmd = [arduino_cli(), "compile", "-b", board.fqbn, "--libraries", LIBRARIES_DIR]
+    if output_dir:
+        # Only the OTA path needs the binaries copied out; USB upload re-derives
+        # the same build directory from the sketch path.
+        cmd += ["--output-dir", output_dir]
+    return run_streaming(cmd + ["."], cwd=SKETCH_DIR)
+
+
+def app_image(output_dir: str) -> str:
+    """Pick the application image out of a --output-dir export.
+
+    Deliberately narrow. That directory also holds <sketch>.ino.merged.bin, a
+    whole-flash image with the bootloader and partition table in it - correct for
+    esptool over USB, wrong for OTA, and 8MB of wrong at that. Only the bare
+    <sketch>.ino.bin goes into an app slot.
+    """
+    candidates = [
+        p
+        for p in sorted(glob.glob(os.path.join(output_dir, "*.ino.bin")))
+        if not p.endswith(".merged.bin")
+    ]
+    if len(candidates) != 1:
+        raise Fail(
+            "expected exactly one application image in %s, found %d"
+            % (output_dir, len(candidates))
+        )
+    return candidates[0]
+
+
+def ota_password(explicit: Optional[str]) -> str:
+    """Resolve the OTA password without ever printing it.
+
+    Three sources, in order: --password, the ESPDISP_OTA_PASSWORD environment
+    variable, then an interactive prompt. Never a default and never a file in the
+    repo - the panel's whole defence against a firmware push from anything else on
+    the LAN is this one secret.
+    """
+    password = explicit or os.environ.get(OTA_PASSWORD_ENV) or ""
+    if not password and sys.stdin.isatty():
+        password = getpass.getpass("OTA password for the panel: ")
+    if not password:
+        raise Fail(
+            "no OTA password.\n"
+            "  Pass --password, set %s, or run this from a terminal to be asked.\n"
+            "  The panel's password is the one set with `CFGOTAPW <base64>` over USB."
+            % OTA_PASSWORD_ENV
+        )
+    if len(password) < OTA_PASSWORD_MIN:
+        # Refused here rather than after a multi-minute compile and a failed
+        # handshake: the firmware will not store a password shorter than this.
+        raise Fail(
+            "OTA password is %d characters; the panel requires at least %d "
+            "(see CFGOTAPW)" % (len(password), OTA_PASSWORD_MIN)
+        )
+    return password
+
+
+def espota_command(
+    tool: str, host: str, port: int, password: str, image: str, timeout: int
+) -> List[str]:
+    """Build the espota.py invocation.
+
+    Kept as a pure function so the command line can be checked without a panel to
+    push to. Mirrors the core's own recipe (platform.txt line 384: `-i <address>
+    -p <port> --auth=<password> -f <image>`), with -r for a progress bar and -t
+    for how long to wait on the invitation.
+
+    sys.executable rather than a bare `python3`: espota.py is stdlib-only, so the
+    interpreter already running this script will do, and that is one fewer thing
+    that has to be on PATH.
+    """
+    return [
+        sys.executable,
+        tool,
+        "-r",
+        "-i",
+        host,
+        "-p",
+        str(port),
+        "-a",
+        password,
+        "-f",
+        image,
+        "-t",
+        str(timeout),
+    ]
 
 
 def cmd_compile(args) -> int:
@@ -402,6 +522,34 @@ def cmd_flash(args) -> int:
         cwd=SKETCH_DIR,
     )
     report_sizes(lines)
+    return 0
+
+
+def cmd_ota(args) -> int:
+    # Password first: it is the one thing that can fail instantly, and finding out
+    # after a multi-minute compile would be irritating.
+    password = ota_password(args.password)
+    tool = espota_path()
+    board = BOARDS[args.board]
+    print("Target: %s (%s) over the air at %s" % (board.key, board.fqbn, args.host))
+
+    out_dir = tempfile.mkdtemp(prefix="espdisp-ota-")
+    try:
+        lines = compile_board(board, output_dir=out_dir)
+        image = app_image(out_dir)
+        print(
+            "\nPushing %s (%d bytes) to %s:%d"
+            % (os.path.basename(image), os.path.getsize(image), args.host, args.ota_port),
+            flush=True,
+        )
+        run_streaming(
+            espota_command(tool, args.host, args.ota_port, password, image, args.timeout),
+            redact=password,
+        )
+        report_sizes(lines)
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print("\nThe panel reboots itself onto the new firmware.")
     return 0
 
 
@@ -455,8 +603,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="boards:\n" + board_help(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    # New subcommands (an `ota` push belongs here) plug in as another
-    # add_parser block plus one entry in the board table if they need one.
+    # New subcommands plug in as another add_parser block plus one entry in the
+    # board table if they need one.
     subs = parser.add_subparsers(dest="command", metavar="<command>")
 
     p_compile = subs.add_parser("compile", help="build the firmware for one board")
@@ -471,6 +619,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_flash.add_argument("--port", help="serial device (default: the one %s match)" % PORT_GLOB)
     p_flash.set_defaults(func=cmd_flash)
+
+    p_ota = subs.add_parser(
+        "ota",
+        help="build then push over WiFi to a panel with OTA enabled",
+        description="Push firmware over the air. The panel must have an OTA "
+        "password set (`config CFGOTAPW <base64 password>` over USB, once) - "
+        "without one it does not listen at all. USB flashing stays the recovery "
+        "route and always works.",
+        epilog="The password comes from --password, else $%s, else a prompt.\n"
+        "It is never echoed, but espota.py takes it as an argument, so on a\n"
+        "shared machine it is briefly visible in `ps`." % OTA_PASSWORD_ENV,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_ota.add_argument("host", help="panel address: an IP, or its mDNS name (panel.local)")
+    p_ota.add_argument(
+        "--board",
+        required=True,
+        choices=sorted(BOARDS),
+        help="which target to build; required because there is no chip to probe "
+        "over the network and pushing an S3 image to a C6 bricks it",
+    )
+    p_ota.add_argument("--password", help="OTA password (prefer $%s)" % OTA_PASSWORD_ENV)
+    p_ota.add_argument(
+        "--ota-port", type=int, default=OTA_PORT, help="panel OTA port (default %d)" % OTA_PORT
+    )
+    p_ota.add_argument(
+        "--timeout",
+        type=int,
+        default=10,
+        help="seconds to wait for each invitation attempt (default 10, 10 attempts)",
+    )
+    p_ota.set_defaults(func=cmd_ota)
 
     p_list = subs.add_parser("list", help="show the ports and chips this tool can see")
     p_list.add_argument(
