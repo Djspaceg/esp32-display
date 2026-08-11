@@ -3,12 +3,14 @@
 //   firmware/test/run_tests.sh
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <utility>
 #include <vector>
 
 #include "../display_stream/band_protocol.h"
 #include "../display_stream/control_queue.h"
 #include "../display_stream/device_protocol.h"
+#include "../display_stream/ota_policy.h"
 #include "../display_stream/panel_state.h"
 #include "../libraries/espdisp_board/src/board_config.h"
 #include "../libraries/espdisp_board/src/touch_gesture.h"
@@ -1341,6 +1343,151 @@ int main() {
     CHECK(packet[9] == 0x01);
     CHECK(packet[10] == 0x00);
     CHECK(packet[11] == 0x00);
+  }
+
+  // --- CFGOTAPW argument: the off switch must never be read as a password
+  {
+    CHECK(otapolicy::classifyArgument("clear") == otapolicy::Argument::Clear);
+
+    // Exact match only. Every one of these is a password payload, not the off
+    // switch, because a panel that turned OTA off when the user fat-fingered
+    // the case would be worse than one that refused the line.
+    CHECK(otapolicy::classifyArgument("Clear") == otapolicy::Argument::Payload);
+    CHECK(otapolicy::classifyArgument("CLEAR") == otapolicy::Argument::Payload);
+    CHECK(otapolicy::classifyArgument("clear ") == otapolicy::Argument::Payload);
+    CHECK(otapolicy::classifyArgument(" clear") == otapolicy::Argument::Payload);
+    CHECK(otapolicy::classifyArgument("clearclear") ==
+          otapolicy::Argument::Payload);
+    CHECK(otapolicy::classifyArgument("clea") == otapolicy::Argument::Payload);
+    CHECK(otapolicy::classifyArgument("") == otapolicy::Argument::Payload);
+
+    // A realistic base64 password is a payload, including one that happens to
+    // contain the token.
+    CHECK(otapolicy::classifyArgument("cGFzc3dvcmQxMjM=") ==
+          otapolicy::Argument::Payload);
+    CHECK(otapolicy::classifyArgument("Y2xlYXI=") ==
+          otapolicy::Argument::Payload);
+
+    // Nothing to classify is not the off switch either: clearing a password is
+    // destructive enough that it should need to be asked for.
+    CHECK(otapolicy::classifyArgument(nullptr) == otapolicy::Argument::Payload);
+
+    // The sketch used to justify the token by claiming five characters can
+    // never be valid base64. That is a claim about decoders, not about the
+    // string: every character of "clear" is in the base64 alphabet, so a
+    // decoder lenient about padding could well decode it. Pinned here so the
+    // reasoning cannot quietly come back.
+    auto inBase64Alphabet = [](char c) {
+      return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+             (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+    };
+    for (const char *c = otapolicy::CLEAR_TOKEN; *c; c++) {
+      CHECK(inBase64Alphabet(*c));
+    }
+
+    // What saves it is the ordering - the literal is decided before any decode.
+    // And even if that ever broke, five base64 characters carry at most 30 bits,
+    // so no reading of them reaches the floor; the token would be refused as a
+    // password rather than accepted as one.
+    CHECK(otapolicy::verifyPassword(true, 3) == otapolicy::Verdict::TooShort);
+    CHECK(otapolicy::verifyPassword(true, 4) == otapolicy::Verdict::TooShort);
+  }
+
+  // --- the 8-byte floor, which is the only thing between the LAN and a
+  //     firmware write, and the ceiling above it
+  {
+    CHECK(otapolicy::PASSWORD_MIN_BYTES == 8);
+    CHECK(otapolicy::PASSWORD_MAX_BYTES == 64);
+
+    // A failed decode is refused as such, whatever length came back with it. A
+    // decoder may or may not write an out-length when it returns an error, so
+    // the verdict deliberately does not depend on that: no accompanying length
+    // can talk a failure into an accept.
+    CHECK(otapolicy::verifyPassword(false, 0) == otapolicy::Verdict::NotBase64);
+    CHECK(otapolicy::verifyPassword(false, 8) == otapolicy::Verdict::NotBase64);
+    CHECK(otapolicy::verifyPassword(false, 32) == otapolicy::Verdict::NotBase64);
+
+    // The boundary, both sides of it. 7 bytes is refused, 8 is accepted.
+    CHECK(otapolicy::verifyPassword(true, 0) == otapolicy::Verdict::TooShort);
+    CHECK(otapolicy::verifyPassword(true, 1) == otapolicy::Verdict::TooShort);
+    CHECK(otapolicy::verifyPassword(true, 7) == otapolicy::Verdict::TooShort);
+    CHECK(otapolicy::verifyPassword(true, 8) == otapolicy::Verdict::Accept);
+    CHECK(otapolicy::verifyPassword(true, 9) == otapolicy::Verdict::Accept);
+
+    // And the other boundary: 64 accepted, 65 refused.
+    CHECK(otapolicy::verifyPassword(true, 63) == otapolicy::Verdict::Accept);
+    CHECK(otapolicy::verifyPassword(true, 64) == otapolicy::Verdict::Accept);
+    CHECK(otapolicy::verifyPassword(true, 65) == otapolicy::Verdict::TooLong);
+    CHECK(otapolicy::verifyPassword(true, 185) == otapolicy::Verdict::TooLong);
+
+    // Swept rather than sampled, so the accept window is exactly the closed
+    // interval and there is no gap either side of it.
+    for (size_t len = 0; len <= 128; len++) {
+      const otapolicy::Verdict verdict = otapolicy::verifyPassword(true, len);
+      const bool shouldAccept = len >= otapolicy::PASSWORD_MIN_BYTES &&
+                                len <= otapolicy::PASSWORD_MAX_BYTES;
+      CHECK((verdict == otapolicy::Verdict::Accept) == shouldAccept);
+      if (!shouldAccept) {
+        CHECK(verdict == (len < otapolicy::PASSWORD_MIN_BYTES
+                              ? otapolicy::Verdict::TooShort
+                              : otapolicy::Verdict::TooLong));
+      }
+      // A refusal is never silently downgraded by length.
+      CHECK(otapolicy::verifyPassword(false, len) ==
+            otapolicy::Verdict::NotBase64);
+    }
+  }
+
+  // --- the three-valued OTA status, and the capability bit that follows it
+  {
+    CHECK(otapolicy::status(false, false) == otapolicy::Status::Off);
+    CHECK(otapolicy::status(false, true) == otapolicy::Status::Pending);
+    CHECK(otapolicy::status(true, true) == otapolicy::Status::On);
+    // Listening outranks the bookkeeping: the sketch cannot start OTA without a
+    // stored password, but if that implication ever broke, the state that
+    // matters is that something is accepting firmware.
+    CHECK(otapolicy::status(true, false) == otapolicy::Status::On);
+
+    CHECK(strcmp(otapolicy::statusToken(otapolicy::Status::Off), "off") == 0);
+    CHECK(strcmp(otapolicy::statusToken(otapolicy::Status::Pending),
+                 "pending") == 0);
+    CHECK(strcmp(otapolicy::statusToken(otapolicy::Status::On), "on") == 0);
+
+    // "pending" is the whole point of three values: a panel with a password
+    // whose radio was not up when it booted is configured and waiting, and
+    // reporting that as "off" would look like the password never took.
+    CHECK(strcmp(otapolicy::statusToken(otapolicy::status(false, true)),
+                 "pending") == 0);
+    CHECK(strcmp(otapolicy::statusToken(otapolicy::status(false, false)),
+                 "off") == 0);
+
+    // But it must NOT advertise: the bit tells a sender it may push, and a
+    // pending panel has nothing listening to accept the push.
+    CHECK(otapolicy::advertisesCapability(otapolicy::Status::On));
+    CHECK(!otapolicy::advertisesCapability(otapolicy::Status::Pending));
+    CHECK(!otapolicy::advertisesCapability(otapolicy::Status::Off));
+
+    // Composed the way deviceCapabilities() does it, so the bit pinned above is
+    // tied to the decision that actually sets it rather than standing alone.
+    const uint32_t base = deviceproto::CAP_BRIGHTNESS |
+                          deviceproto::CAP_BRIGHTNESS_LEVEL |
+                          deviceproto::CAP_FLIP | deviceproto::CAP_IDENTIFY |
+                          deviceproto::CAP_RESTART |
+                          deviceproto::CAP_SLEEP_SYNC |
+                          deviceproto::CAP_TELEMETRY |
+                          deviceproto::CAP_IDLE_TEXT;
+    auto advertised = [&](bool active, bool configured) {
+      const otapolicy::Status status = otapolicy::status(active, configured);
+      return base | (otapolicy::advertisesCapability(status)
+                         ? deviceproto::CAP_OTA
+                         : 0u);
+    };
+    CHECK(advertised(true, true) == (base | deviceproto::CAP_OTA));
+    CHECK(advertised(true, true) == 0x1FFu);
+    CHECK(advertised(false, true) == base);
+    CHECK((advertised(false, true) & deviceproto::CAP_OTA) == 0);
+    CHECK(advertised(false, false) == base);
+    CHECK((advertised(false, false) & deviceproto::CAP_OTA) == 0);
   }
 
   printf("OK: %d checks passed\n", checks);
