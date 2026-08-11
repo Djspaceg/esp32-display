@@ -336,20 +336,21 @@ accepted right now", not "this build has OTA code in it".
 
 ## Repo layout
 
-| Path                                 | What                                                                                                                                      |
-| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `firmware/display_stream/`           | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls                                                      |
-| `firmware/display_test/`             | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping                             |
-| `firmware/board_probe/`              | I2C-scan diagnostic reporting which board variant you have                                                                                |
-| `firmware/libraries/espdisp_board/`  | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform, AXP2101 battery reader           |
-| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance)                                                                 |
-| `mac/ESPDisplaySender/`              | Native manager app plus SwiftPM command-line workflows                                                                                    |
-| `firmware/test/`                     | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`)                                 |
-| `mac/ESPDisplaySender/Tests/`        | Swift tests for the sender's protocol and application logic (`swift test`)                                                                |
-| `tools/espdisp.py`                   | Compile, flash over USB, push over WiFi, and configure from one command: holds the board table, finds the port, refuses to guess the chip |
-| `tools/read_serial.py`               | Serial monitor with optional hard-reset (native USB-Serial/JTAG)                                                                          |
-| `tools/sweep.py`                     | Pacing parameter sweep, measuring displayed fps from device stats                                                                         |
-| `docs/`                              | Original project plan                                                                                                                     |
+| Path | What |
+| --- | --- |
+| `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls |
+| `firmware/display_test/` | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping |
+| `firmware/board_probe/` | I2C-scan diagnostic reporting which board variant you have |
+| `firmware/libraries/espdisp_board/` | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform, AXP2101 battery reader |
+| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance) |
+| `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
+| `firmware/test/` | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
+| `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
+| `tools/espdisp.py` | Compile, flash over USB, push over WiFi, and configure from one command: holds the board table, finds the port, refuses to guess the chip |
+| `tools/test_espdisp.py` | Tests for the CLI's decisions: chip and OTA-target refusals, password bounds, encodings (stdlib only, no framework) |
+| `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
+| `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
+| `docs/` | Original project plan |
 
 ## Getting started
 
@@ -393,9 +394,15 @@ tools/espdisp.py list                  # ports it can see, and the chip on each
 tools/espdisp.py compile --board c6    # or --board s3
 tools/espdisp.py flash                 # detect the chip, build, upload
 tools/espdisp.py flash --board s3      # skip detection and build that target
+tools/espdisp.py set-password          # store an OTA password (prompts for it)
 tools/espdisp.py ota panel.local --board c6   # build, then push over WiFi
 tools/espdisp.py config CFGSHOW        # send one CFG* line, print the reply
 ```
+
+`tools/test_espdisp.py` covers what the tool decides — the chip and target
+refusals, the password bounds, the base64 encoding, the espota command line — and
+prints `OK: N checks passed` like `firmware/test/run_tests.sh`. Standard library
+only, no test framework, run it by path.
 
 `compile`, `flash`, and `ota` echo the `Sketch uses N bytes (P%)` line at the
 end, so app-partition headroom is visible without hunting through scrollback.
@@ -423,8 +430,24 @@ fallback if it ever misbehaves, and they document what it does.
 Once per panel, over USB, give it an OTA password. Nothing listens until you do:
 
 ```sh
+tools/espdisp.py set-password          # prompts, does not echo, and encodes for you
+```
+
+The panel takes the password base64-encoded (so it can contain any character a
+space-delimited line would eat) while the pusher takes it as characters, and
+`set-password` owns that conversion because doing it by hand has a trap in it: the
+obvious `echo 'pw' | base64` appends a newline and stores a password one byte
+longer than the one you typed, which then fails every push with an auth error and
+no hint why. The equivalent by hand, if you want it, needs `printf`:
+
+```sh
 tools/espdisp.py config CFGOTAPW $(printf %s 'a-real-password' | base64)
 ```
+
+The panel refuses a password below 8 bytes or above 64, and refuses one containing
+a `0x00` byte — that last one would be stored truncated, so the length check would
+stop describing the secret. `set-password` applies the same bounds locally, so a
+password the panel would reject is refused before the round trip.
 
 The panel reboots, advertises `_arduino._tcp` alongside `_espdisp._udp`, and from
 then on takes pushes over the LAN:
@@ -434,11 +457,18 @@ export ESPDISP_OTA_PASSWORD='a-real-password'
 tools/espdisp.py ota panel.local --board c6
 ```
 
-`--board` is required here: over the network there is no chip to probe, so the
-tool asks rather than assumes.
+`--board` is required here: over the network there is no chip to probe, so the tool
+asks rather than assumes. It then checks the answer where it can. `arduino-cli`
+already runs an mDNS discovery that browses `_arduino._tcp` — the service the panel
+registers and `espota` pushes to — and the panel publishes `board=esp32c6` or
+`board=esp32s3` in its TXT record, so a `--board` that contradicts the panel is
+refused before the compile starts. A panel discovery cannot find is a note rather
+than a refusal: mDNS not answering says nothing about the chip, and pushing to a
+panel on another subnet has to keep working. `--discovery-timeout 0` skips the
+check; it is not a way past a real mismatch.
 
-A wrong-target push is refused by the panel, not fatal to it: the ESP image header
-carries a `chip_id` (0x0D for the C6, 0x09 for the S3)
+A wrong-target push that does get through is refused by the panel, not fatal to it:
+the ESP image header carries a `chip_id` (0x0D for the C6, 0x09 for the S3)
 and `esp_ota_set_boot_partition` validates it through `esp_image_verify` before the
 boot slot moves, so the image lands in the inactive slot, fails validation, and the
 panel carries on running the firmware it booted with `bad image` on the glass. The
@@ -451,7 +481,7 @@ it is never echoed, though the core's `espota.py` takes it as an argument, so it
 briefly visible in `ps` on a shared machine.
 
 The panel shows a progress bar on the glass while it writes, then reboots itself
-onto the new firmware. `CFGOTAPW clear` disables OTA again.
+onto the new firmware. `tools/espdisp.py set-password --clear` disables OTA again.
 
 **USB stays the recovery route**, and always works: OTA cannot replace the
 bootloader or the partition table, and a panel that will not join WiFi cannot be

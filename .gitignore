@@ -9,6 +9,11 @@ firmware/display_stream/wifi_config.h
 # compiles that way to get at the application image it pushes.
 firmware/*/build/
 
+# tools/test_espdisp.py imports espdisp.py, so running the tests leaves bytecode
+# behind. Ignored rather than deleted each time now that a committed test creates
+# it as a matter of course.
+tools/__pycache__/
+
 # Xcode
 #
 # gitignore contributors: remember to update Global/Xcode.gitignore, Objective-C.gitignore & Swift.gitignore
