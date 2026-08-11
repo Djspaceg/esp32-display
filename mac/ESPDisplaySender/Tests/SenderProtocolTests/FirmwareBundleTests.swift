@@ -358,7 +358,7 @@ final class FirmwareBundleTests: XCTestCase {
                 images[0]["offset"] = true
                 manifest["images"] = images
             }
-        expect(.fieldHasWrongType(where: "image 0", key: "offset", wanted: "a number"),
+        expect(.fieldHasWrongType(where: "image 0", key: "offset", wanted: "a whole number"),
                reading: booleanOffset)
 
         let stringVersion = Self.bundleBytes(
@@ -368,6 +368,58 @@ final class FirmwareBundleTests: XCTestCase {
         expect(.fieldHasWrongType(where: "the manifest", key: "firmware_version",
                                  wanted: "a string"),
                reading: stringVersion)
+    }
+
+    /// A number written as a float is refused even when it equals an integer,
+    /// because `espdisp.py` refuses it: `json.loads("372.0")` is a float and
+    /// `isinstance(offset, int)` says no.
+    ///
+    /// The asymmetry this closes ran the wrong way for the discipline the rest of
+    /// the format keeps. `value as? Int` bridges an integral `NSNumber(double:)`
+    /// straight through, so the app took files the CLI's own `bundle-info`
+    /// rejects - the exact failure the strict sha256 spelling exists to avoid,
+    /// one field over. No writer produces these today; that is why it was cheap
+    /// to fix rather than a reason to leave it.
+    ///
+    /// THE MANIFEST IS PATCHED AS TEXT, and it has to be. Going through the
+    /// dictionary loses the very thing under test: `JSONSerialization` writes an
+    /// `NSNumber` holding 372.0 back out as `372`, so the file that reached the
+    /// reader was an ordinary one and the first version of this test passed
+    /// against unfixed code. What decides the type is the SPELLING in the bytes,
+    /// so the bytes are what this builds.
+    func testRefusesAnOffsetWrittenAsAFloat() {
+        for spelling in ["372.0", "1e3", "372.5"] {
+            let settled = Self.settle(Self.manifest(images: [Self.c6Spec]))
+            let text = String(decoding: Self.json(settled), as: UTF8.self)
+            let patched = text.replacingOccurrences(
+                of: #""offset":\d+"#, with: "\"offset\":\(spelling)",
+                options: .regularExpression)
+            XCTAssertNotEqual(
+                patched, text, "the offset spelling has to actually change")
+
+            // The longer spelling also makes the offsets wrong, which does not
+            // matter and is why the exact error is asserted: a field's type is
+            // checked as it is read, so the refusal has to be about the type
+            // rather than the contiguity that would otherwise catch it next.
+            expect(.fieldHasWrongType(where: "image 0", key: "offset",
+                                     wanted: "a whole number"),
+                   reading: Self.bundleBytes(
+                       manifestText: patched, payloads: [Self.c6Payload]),
+                   "offset written as \(spelling)")
+        }
+    }
+
+    /// An integer spelled as an integer still reads, which is what keeps the float
+    /// refusal from being a refusal of everything. Built through the same
+    /// text path, so it is the patching that differs between the two tests and not
+    /// the assembly.
+    func testAcceptsAnOffsetWrittenAsAnInteger() throws {
+        let settled = Self.settle(Self.manifest(images: [Self.c6Spec]))
+        let text = String(decoding: Self.json(settled), as: UTF8.self)
+        XCTAssertTrue(text.contains("\"offset\":"), "the fixture carries the field")
+        let bundle = try FirmwareBundle.read(
+            Self.bundleBytes(manifestText: text, payloads: [Self.c6Payload]))
+        XCTAssertEqual(bundle.images.count, 1)
     }
 
     func testRefusesANonsensicalExtent() {
@@ -706,6 +758,18 @@ final class FirmwareBundleTests: XCTestCase {
         mutate(&manifest)
         if solveOffsets { manifest = settle(manifest) }
         let encoded = json(manifest)
+        return FirmwareBundle.magic + lengthLine(encoded.count) + encoded
+            + payloads.reduce(Data(), +)
+    }
+
+    /// Assemble a file from manifest TEXT rather than a dictionary.
+    ///
+    /// For the cases where the exact spelling of a JSON value is the subject, and
+    /// a round trip through `JSONSerialization` would normalise it away. The
+    /// length line is computed from the text given, so the header stays honest
+    /// about a manifest this deliberately made wrong somewhere else.
+    private static func bundleBytes(manifestText: String, payloads: [Data]) -> Data {
+        let encoded = Data(manifestText.utf8)
         return FirmwareBundle.magic + lengthLine(encoded.count) + encoded
             + payloads.reduce(Data(), +)
     }
