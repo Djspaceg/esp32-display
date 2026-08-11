@@ -280,6 +280,33 @@ static const uint8_t BATTERY_FLAG_EXTERNAL_POWER = 0x02;
 // real and alarming reading, and the reason percent is not simply clamped.
 static const uint8_t BATTERY_PERCENT_UNKNOWN = 0xFF;
 
+// How long a reading may be reported as current, on either side.
+//
+// A reading needs an expiry because a failed sample deliberately leaves the
+// previous one standing - reporting zeros would be worse - but "the last thing
+// the PMU said" and "what the battery is doing" stop being the same claim
+// eventually. Without a ceiling, a PMU that answers once at boot and then dies
+// keeps its percentage on the serial line, in CFGSHOW and in the sender's UI
+// forever, and those are the three places whose whole purpose is to tell the
+// truth about the cell.
+//
+// 45s is four missed samples at the firmware's 10s poll, chosen so a single
+// transient I2C failure or one dropped datagram never flips a display to
+// unknown, while a PMU that has actually stopped answering is reported as
+// unknown inside a minute. Both sides use this number: the firmware ages out its
+// cached reading, and the sender ages out the last EBAT it received (mirrored as
+// DeviceProtocol.batteryMaxAge, asserted equal in both test suites).
+static const uint32_t BATTERY_MAX_AGE_MS = 45000;
+
+// Whether a reading sampled at `sampledAtMs` is still current at `nowMs`.
+//
+// Unsigned subtraction, so a millis() rollover after ~49 days produces a correct
+// small difference rather than a huge one - the wrong answer there would be to
+// declare a fresh reading stale forever.
+inline bool batteryReadingCurrent(uint32_t nowMs, uint32_t sampledAtMs) {
+  return (uint32_t)(nowMs - sampledAtMs) <= BATTERY_MAX_AGE_MS;
+}
+
 // One enum rather than separate charging/discharging flag bits, so the packet
 // cannot express a contradictory state: "charging and discharging at once" is
 // not representable here, whereas two independent bits would make it a case

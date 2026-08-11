@@ -231,8 +231,14 @@ static bool otaWasIdle = false;
 // battery without doing I2C traffic of their own. Only meaningful once
 // batteryReadingValid is set; a failed sample leaves the previous one standing
 // rather than reporting a zeroed battery as fact.
+//
+// It does not stand forever, though. lastBatteryAt ages it out after
+// deviceproto::BATTERY_MAX_AGE_MS, so a PMU that answers at boot and then goes
+// silent stops being quoted as if it were still talking. batteryReadingCurrent()
+// is the one test both the serial line and CFGSHOW go through.
 static boardpower::Reading lastBattery = {};
 static bool batteryReadingValid = false;
+static uint32_t lastBatteryAt = 0;
 
 // Advertised capabilities. Runtime rather than a constant because CAP_TOUCH
 // depends on the hardware, and the sender uses these bits to decide which
@@ -566,6 +572,7 @@ static void sendBatteryStatus() {
   if (!boardpower::read(reading)) return;
   lastBattery = reading;
   batteryReadingValid = true;
+  lastBatteryAt = millis();
   if (hbPort == 0) return;
 
   uint8_t flags = 0;
@@ -608,11 +615,20 @@ static const char *batteryChargeWord(boardpower::Charge charge) {
   }
 }
 
-// Battery percentage for CFGSHOW, or -1 when there is no PMU, no cell, or no
-// settled gauge reading. Negative rather than 0 so "we do not know" can never
-// be read as "empty".
+// Whether the cached reading is recent enough to quote. False before the first
+// sample and again once one stops arriving - a PMU that answered at boot and then
+// died must not keep its percentage on the serial line and in CFGSHOW, which are
+// the only ways to read a battery on a panel no sender has found.
+static bool batteryReadingCurrent() {
+  return batteryAvailable && batteryReadingValid &&
+         deviceproto::batteryReadingCurrent(millis(), lastBatteryAt);
+}
+
+// Battery percentage for CFGSHOW, or -1 when there is no PMU, no cell, no
+// settled gauge reading, or nothing recent enough to report. Negative rather
+// than 0 so "we do not know" can never be read as "empty".
 static int batteryPercentOrUnknown() {
-  if (!batteryAvailable || !batteryReadingValid) return -1;
+  if (!batteryReadingCurrent()) return -1;
   if (!lastBattery.present || !lastBattery.percentKnown) return -1;
   return (int)lastBattery.percent;
 }
@@ -2200,12 +2216,18 @@ void loop() {
                   (unsigned long)ESP.getFreeHeap(), (int)WiFi.RSSI());
     // Its own line, and only on a board with a PMU: the C6 boards would
     // otherwise print a battery field that can never say anything.
-    if (batteryAvailable && batteryReadingValid) {
+    if (batteryReadingCurrent()) {
       Serial.printf("battery: %d%% %s %umV present=%d vbus=%d\n",
                     batteryPercentOrUnknown(),
                     batteryChargeWord(lastBattery.charge),
                     (unsigned)lastBattery.millivolts, lastBattery.present,
                     lastBattery.externalPower);
+    } else if (batteryAvailable && batteryReadingValid) {
+      // The PMU answered once and has stopped. Said out loud rather than
+      // silently repeating the last percentage, because this line is where a
+      // dead PMU is diagnosed.
+      Serial.printf("battery: no reading for %us (PMU stopped answering?)\n",
+                    (unsigned)((millis() - lastBatteryAt) / 1000));
     }
   }
 }

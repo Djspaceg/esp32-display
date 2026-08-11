@@ -288,6 +288,19 @@ public enum DeviceProtocol {
     public static let batteryFlagExternalPower: UInt8 = 0x02
     /// Percent value meaning the gauge has no opinion yet.
     public static let batteryPercentUnknown: UInt8 = 0xFF
+    /// How long a received reading may be shown as current.
+    ///
+    /// EBAT arrives unprompted on the panel's own 10s timer, and only when a
+    /// sample succeeded — so a panel whose PMU dies simply stops sending, and
+    /// without an expiry the last percentage would stand for as long as the app
+    /// ran. Nothing else clears it: the panel keeps heartbeating perfectly well
+    /// while saying nothing about its battery.
+    ///
+    /// 45s is four missed samples, matching the firmware's
+    /// `deviceproto::BATTERY_MAX_AGE_MS` so both sides call the same reading
+    /// stale at the same moment. One dropped datagram therefore never blanks the
+    /// row, and a PMU that has stopped is reported inside a minute.
+    public static let batteryMaxAge: TimeInterval = 45
 
     /// Parse the device's fixed-size EBAT battery report.
     ///
