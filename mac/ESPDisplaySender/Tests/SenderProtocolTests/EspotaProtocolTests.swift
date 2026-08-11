@@ -374,6 +374,87 @@ final class EspotaProtocolTests: XCTestCase {
             .unexpected("\u{0661}\u{0660}\u{0662}\u{0664}"))
     }
 
+    // MARK: - step 8: the verdict
+
+    /// `OK` anywhere in the tail is the only success signal the panel has.
+    func testResultTailWithOKIsFinished() {
+        XCTAssertEqual(EspotaProtocol.classifyResultTail("OK"), .finished)
+        XCTAssertEqual(EspotaProtocol.classifyResultTail("1024OK"), .finished)
+        // Accumulated across reads, which is the point of taking a tail: `OK` is
+        // two bytes in one `client.print` but nothing promises one read sees both.
+        XCTAssertEqual(EspotaProtocol.classifyResultTail("O" + "K"), .finished)
+        XCTAssertEqual(EspotaProtocol.classifyResultTail("552\r\n1024OK"), .finished)
+    }
+
+    /// Nothing but per-write counts means the panel has not decided yet. This is
+    /// the case that keeps the fix for a refused image from failing a good push:
+    /// the panel re-prints the previous count when the host is slow between
+    /// chunks, which puts a stale number where the verdict is expected.
+    func testResultTailOfOnlyCountsIsStillWaiting() {
+        XCTAssertEqual(EspotaProtocol.classifyResultTail(""), .waiting)
+        XCTAssertEqual(EspotaProtocol.classifyResultTail("1024"), .waiting)
+        XCTAssertEqual(EspotaProtocol.classifyResultTail("1024 1024"), .waiting)
+        XCTAssertEqual(EspotaProtocol.classifyResultTail("552\r\n552\r\n"), .waiting)
+        XCTAssertEqual(EspotaProtocol.classifyResultTail("  \n"), .waiting)
+    }
+
+    /// Anything else is `printError`, which is the panel's other and only ending.
+    ///
+    /// The literals are `_err2str`'s own strings (Updater.cpp:21-58), written out
+    /// here by hand rather than referenced, because the point is that this app
+    /// recognises what THAT file produces. `Could Not Activate The Firmware` is
+    /// the one a wrong-chip image earns: `esp_ota_set_boot_partition` validates
+    /// the image header before the boot slot moves.
+    func testResultTailOfAnythingElseIsARefusalQuotingThePanel() {
+        XCTAssertEqual(
+            EspotaProtocol.classifyResultTail("MD5 Check Failed\r\n"),
+            .refused("MD5 Check Failed"))
+        XCTAssertEqual(
+            EspotaProtocol.classifyResultTail("Could Not Activate The Firmware\r\n"),
+            .refused("Could Not Activate The Firmware"))
+        XCTAssertEqual(
+            EspotaProtocol.classifyResultTail("Bad Size Given\r\n"),
+            .refused("Bad Size Given"))
+        // Not one of the core's strings, and it does not need to be: the panel
+        // writes an error string or `OK` and nothing else, so by elimination
+        // anything unrecognised is still a refusal rather than progress.
+        XCTAssertEqual(EspotaProtocol.classifyResultTail("nonsense"), .refused("nonsense"))
+    }
+
+    /// A count and then a verdict in one tail: the count is dropped and the
+    /// verdict survives. Both halves matter - keeping the count would garble the
+    /// message, and stopping at the count would miss the refusal.
+    func testResultTailKeepsTheVerdictBehindAStaleCount() {
+        XCTAssertEqual(
+            EspotaProtocol.classifyResultTail("552MD5 Check Failed\r\n"),
+            .refused("MD5 Check Failed"))
+        XCTAssertEqual(
+            EspotaProtocol.classifyResultTail("552\r\nAborted\r\n"),
+            .refused("Aborted"))
+    }
+
+    /// No string in `_err2str` starts with a digit, which is what makes dropping
+    /// leading digits safe. Asserted rather than assumed, because the day one
+    /// does, this is the check that says so.
+    func testNoCoreErrorStringBeginsWithADigit() {
+        let errorStrings = [
+            "No Error", "Flash Write Failed", "Flash Erase Failed",
+            "Flash Read Failed", "Not Enough Space", "Bad Size Given",
+            "Stream Read Timeout", "MD5 Check Failed", "Wrong Magic Byte",
+            "Could Not Activate The Firmware", "Partition Could Not be Found",
+            "Bad Argument", "Aborted", "Decryption error",
+            "Signature Verification Failed", "UNKNOWN",
+        ]
+        for text in errorStrings {
+            XCTAssertEqual(
+                EspotaProtocol.classifyResultTail("\(text)\r\n"), .refused(text),
+                "\(text) has to survive the count-stripping intact")
+            // And none of them contains `OK`, which is what keeps a refusal from
+            // reading as the success signal. `UNKNOWN` is the near miss.
+            XCTAssertFalse(text.contains("OK"), text)
+        }
+    }
+
     // MARK: - hashes
 
     /// The image MD5 the invitation carries, from an independent oracle:

@@ -313,6 +313,71 @@ public enum EspotaProtocol {
         return .unexpected(text)
     }
 
+    // MARK: - step 8: what the panel decided
+
+    /// What everything read since the last chunk adds up to.
+    ///
+    /// THE PANEL HAS EXACTLY TWO ENDINGS, and this is the type that keeps them
+    /// apart. `ArduinoOTA.cpp:433-453`:
+    ///
+    /// ```cpp
+    /// if (_updater->end()) {
+    ///   client.print("OK");            // the only success signal
+    ///   ...
+    /// } else {
+    ///   _updater->printError(client);  // an error string, then client.stop()
+    /// }
+    /// ```
+    ///
+    /// `Update.end()` is where the image is checked - the MD5 from the invitation,
+    /// and the header's `chip_id` by way of `esp_ota_set_boot_partition` - so the
+    /// wrong-chip push this app deliberately lets the panel catch arrives here as
+    /// `printError`, NOT as silence. Reading it as success is the bug this type
+    /// exists to prevent.
+    ///
+    /// `printError` is `out.println(_err2str(_error))` (Updater.cpp:930), so what
+    /// comes back is one of a fixed set of plain English strings - `MD5 Check
+    /// Failed`, `Could Not Activate The Firmware`, `Bad Size Given` and so on
+    /// (Updater.cpp:21-58) - with a CRLF. There is no `ERROR[n]:` prefix to match
+    /// on; that is the ESP8266 core's spelling, not this one's. So a refusal is
+    /// recognised by elimination rather than by a marker, which is sound because
+    /// those two branches are the only things the panel writes at this point.
+    public enum ResultReply: Equatable, Sendable {
+        /// `OK` has arrived. The update took, and the panel is about to reboot.
+        case finished
+        /// Nothing yet but per-write byte counts. Keep waiting.
+        case waiting
+        /// The panel wrote an error string: it received the image and refused it.
+        /// Carries the panel's own words, trimmed.
+        case refused(String)
+    }
+
+    /// Classify everything accumulated on the TCP stream since the last chunk.
+    ///
+    /// TAKES THE WHOLE TAIL, NOT ONE READ, for two reasons that both bite:
+    ///
+    ///   - The panel's read loop uses `_ota_timeout` (1000 ms, ArduinoOTA.cpp:32)
+    ///     and re-prints the previous `written` count up to three times if the
+    ///     host is slow between chunks. Against a strictly alternating reader
+    ///     those extra counts shift the phase, so the first thing read after the
+    ///     last chunk can be a stale decimal count. Leading counts are therefore
+    ///     dropped rather than treated as an answer - `.waiting` - which is what
+    ///     stops this fix from turning a good push into a reported failure.
+    ///   - `OK` is two bytes in one `client.print`, but nothing guarantees one
+    ///     read sees both. Accumulating means a split `O` + `K` still comes out
+    ///     as `.finished` instead of being mistaken for an error string.
+    ///
+    /// Whitespace is dropped along with the digits because `println` terminates
+    /// the error string with CRLF and the counts have no terminator at all, so a
+    /// tail of `"1024\r\n1024"` is still nothing but counts. No string in
+    /// `_err2str` begins with a digit, so no real refusal can be eaten by this.
+    public static func classifyResultTail(_ raw: String) -> ResultReply {
+        if raw.contains("OK") { return .finished }
+        let afterCounts = raw.drop { $0.isASCII && ($0.isNumber || $0.isWhitespace) }
+        let text = afterCounts.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? .waiting : .refused(text)
+    }
+
     // MARK: - hashes
 
     /// Lowercase hex SHA256 of a string's UTF-8 bytes.
