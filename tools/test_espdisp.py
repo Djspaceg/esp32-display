@@ -318,6 +318,12 @@ def test_discovery_command():
     # Whole seconds, with a floor of one. A fractional flag value has to become an
     # integer somewhere, and "0s" would be a browse that cannot find anything -
     # indistinguishable from the guard being skipped, but without saying so.
+    #
+    # The 0 and negative cases pin the floor of a pure function, NOT a path the
+    # CLI can reach: cmd_ota gates on `> 0`, so anything at or below zero skips
+    # the check and never calls this. Kept because the floor is the function's
+    # own contract - a caller that does not come through cmd_ota must not get a
+    # `0s` browse either.
     check_equal(espdisp.discovery_seconds(5.0), 5, "the common case")
     check_equal(espdisp.discovery_seconds(0.4), 1, "a fraction still browses")
     check_equal(espdisp.discovery_seconds(0.0), 1, "never 0s")

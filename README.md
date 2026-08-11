@@ -465,8 +465,9 @@ registers and `espota` pushes to — and the panel publishes `board=esp32c6` or
 refused before the compile starts. A panel discovery cannot find is a note rather
 than a refusal: mDNS not answering says nothing about the chip, and pushing to a
 panel on another subnet has to keep working. `--discovery-timeout 0` skips the
-check outright: it is the override for this guard, and past it the panel itself is
-the only thing left that will refuse a wrong-chip image.
+check outright, and so does any negative value, since the check runs only for a
+positive timeout: that is the override for this guard, and past it the panel
+itself is the only thing left that will refuse a wrong-chip image.
 
 A wrong-target push that does get through is refused by the panel, not fatal to it:
 the ESP image header carries a `chip_id` (0x0D for the C6, 0x09 for the S3)
