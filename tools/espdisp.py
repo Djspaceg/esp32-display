@@ -613,8 +613,13 @@ def discovery_seconds(timeout: float) -> int:
     arduino-cli wants a duration string, so a fractional --discovery-timeout has
     to become an integer somewhere. Rounding to a 1s floor rather than truncating
     keeps `--discovery-timeout 0.4` a real (if brief) browse instead of a `0s`
-    that finds nothing and reads as a silent skip. 0 exactly never arrives here:
-    cmd_ota treats it as "do not check" and does not call this path at all.
+    that finds nothing and reads as a silent skip.
+
+    Nothing at or below 0 arrives here from the CLI: cmd_ota gates on `> 0`, so 0
+    and every negative alike mean "do not check" and this path is not called. The
+    floor is still defined over the whole domain, because it is the floor of a
+    pure function rather than a restatement of that gate - a caller reaching this
+    directly should get a browse, not a `0s` that cannot find anything.
     """
     return max(1, int(round(timeout)))
 
@@ -923,8 +928,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="seconds to browse mDNS for the panel to cross-check --board "
-        "(default 5; 0 skips the check entirely, leaving the panel itself as the "
-        "only thing that will refuse a wrong-chip image)",
+        "(default 5; 0 or less skips the check entirely, leaving the panel itself "
+        "as the only thing that will refuse a wrong-chip image)",
     )
     p_ota.set_defaults(func=cmd_ota)
 
