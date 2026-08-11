@@ -1301,6 +1301,50 @@ int main() {
     CHECK((deviceproto::CAP_BATTERY & deviceproto::CAP_TELEMETRY) == 0);
   }
 
+  // --- a reading has an age ceiling, on both sides ---------------------------
+  //
+  // A failed sample deliberately leaves the previous reading standing, which
+  // beats reporting zeros, but nothing aged it out: a PMU that answered once at
+  // boot and then died kept its percentage on the 5s serial line, in CFGSHOW's
+  // bat= and in the sender's row indefinitely. Those are the three places whose
+  // whole purpose is to tell the truth about the cell.
+  {
+    // Four missed samples at the 10s poll. The Swift side spells the same number
+    // out by hand (DeviceProtocol.batteryMaxAge = 45 seconds) so both sides call
+    // a reading stale at the same moment; a panel and a manager disagreeing about
+    // that would be worse than either rule alone.
+    CHECK(deviceproto::BATTERY_MAX_AGE_MS == 45000);
+
+    // Fresh, and the boundary either side of it. Inclusive at the ceiling, so a
+    // single transient I2C failure or one dropped datagram cannot blank a row.
+    CHECK(deviceproto::batteryReadingCurrent(1000, 1000));
+    CHECK(deviceproto::batteryReadingCurrent(1000 + 44999, 1000));
+    CHECK(deviceproto::batteryReadingCurrent(1000 + 45000, 1000));
+    CHECK(!deviceproto::batteryReadingCurrent(1000 + 45001, 1000));
+    CHECK(!deviceproto::batteryReadingCurrent(1000 + 3600000, 1000));
+
+    // Swept across the boundary rather than sampled at it.
+    for (uint32_t age = 0; age <= 90000; age += 250) {
+      CHECK(deviceproto::batteryReadingCurrent(500000 + age, 500000) ==
+            (age <= deviceproto::BATTERY_MAX_AGE_MS));
+    }
+
+    // millis() wraps after ~49 days. Unsigned arithmetic gives the right small
+    // difference across the wrap; the wrong answer would be to declare a reading
+    // taken seconds ago stale for the next 49 days.
+    const uint32_t justBeforeWrap = 0xFFFFFF00u;
+    CHECK(deviceproto::batteryReadingCurrent(justBeforeWrap + 1000,
+                                             justBeforeWrap));
+    CHECK(deviceproto::batteryReadingCurrent(0x00000100u, justBeforeWrap));
+    CHECK(!deviceproto::batteryReadingCurrent(0x0000C000u, justBeforeWrap));
+
+    // A reading taken at time zero is not treated as ancient by a panel that has
+    // only just booted: the first sample lands within the first seconds of
+    // uptime, and it must be reportable.
+    CHECK(deviceproto::batteryReadingCurrent(0, 0));
+    CHECK(deviceproto::batteryReadingCurrent(10000, 0));
+  }
+
   {
     // CAP_OTA was reserved when this protocol was written and is only now in
     // use. Its value is pinned here because the Swift side spells the same

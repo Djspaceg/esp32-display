@@ -36,6 +36,10 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// PMU, so this stays nil forever on the C6 boards - which is why the UI
     /// gates the row on the advertised capability rather than on this being nil.
     var battery: DeviceProtocol.BatteryStatus?
+    /// When that report arrived, so it can be aged out. A panel whose PMU dies
+    /// keeps heartbeating and simply stops sending EBAT, so without this the last
+    /// percentage would stand for as long as the app ran.
+    var batteryAt: Date?
     var brightness: Int = 0
     var brightnessHigh = true
     var flipped = false
@@ -137,13 +141,30 @@ struct PanelSnapshot: Identifiable, Equatable {
     }
 
     /// The battery as one phrase for the manager.
+    var batteryDescription: String { batteryDescription(asOf: Date()) }
+
+    /// The battery as one phrase, as of a given moment.
     ///
-    /// A panel advertising the capability but not having reported yet says so,
-    /// rather than showing 0% - an unknown battery and a flat one must never
-    /// read the same. "No battery" is a real answer too: the PMU reports whether
-    /// a cell is attached, and a 1.75C running on USB alone genuinely has none.
-    var batteryDescription: String {
+    /// Four states, all of them different answers a user needs to tell apart. A
+    /// panel advertising the capability but not having reported yet says so,
+    /// rather than showing 0% - an unknown battery and a flat one must never read
+    /// the same. "No battery" is a real answer too: the PMU reports whether a
+    /// cell is attached, and a 1.75C running on USB alone genuinely has none.
+    ///
+    /// And a reading expires. EBAT arrives on the panel's own 10s timer and only
+    /// when a sample succeeded, so a PMU that stops answering produces silence,
+    /// not a correction - the panel goes on heartbeating and the row would
+    /// otherwise show its last percentage indefinitely. Past
+    /// `DeviceProtocol.batteryMaxAge` the row says the reading stopped instead of
+    /// quoting it, which is the honest thing for a field whose only job is to
+    /// tell the truth about the cell. The age is taken from `now` rather than
+    /// read here so this is testable without waiting.
+    func batteryDescription(asOf now: Date) -> String {
         guard let battery else { return "Waiting for a reading" }
+        if let at = batteryAt,
+           now.timeIntervalSince(at) > DeviceProtocol.batteryMaxAge {
+            return "No recent reading"
+        }
         guard battery.present else {
             return battery.externalPower ? "No battery (USB power)" : "No battery"
         }
@@ -867,6 +888,10 @@ final class PanelManager: ObservableObject {
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
                 panel.battery = battery
+                // Stamped so the row can age it out. The panel stops sending
+                // rather than reporting a failure, so this timestamp is the only
+                // evidence a reading has gone quiet.
+                panel.batteryAt = now
             }
         }
         persistIfNeeded(force: reconciledIdentity)
