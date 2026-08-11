@@ -177,6 +177,10 @@ private struct PanelDetailView: View {
     @ObservedObject var manager: PanelManager
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var confirmRestart = false
+    /// The panel the firmware update sheet is open for, or nil when it is closed.
+    /// Held as the gathered target rather than a bool so the sheet cannot be
+    /// opened for a panel whose address or hardware ID is not known yet.
+    @State private var updateTarget: PanelManager.FirmwareUpdateTarget?
     @State private var editedName = ""
     @State private var isEditingName = false
     @State private var selectedSSID = ""
@@ -283,6 +287,9 @@ private struct PanelDetailView: View {
             }
         } message: {
             Text("Streaming will reconnect automatically after the panel rejoins WiFi.")
+        }
+        .sheet(item: $updateTarget) { target in
+            FirmwareUpdateSheet(manager: manager, target: target)
         }
     }
 
@@ -759,6 +766,14 @@ private struct PanelDetailView: View {
 
     private var dangerSection: some View {
         Section {
+            // Not marked destructive: it opens a sheet rather than doing
+            // anything, and the sheet has its own confirmation naming the
+            // direction - update, reinstall or downgrade.
+            Button("Update Firmware…") {
+                updateTarget = manager.beginFirmwareUpdate(panel.serviceName)
+            }
+            .disabled(!manager.canControl(panel.serviceName, capability: .ota))
+            .help(controlHelp(.ota, "Push a firmware bundle to this panel"))
             Button("Restart Display…", role: .destructive) {
                 confirmRestart = true
             }
