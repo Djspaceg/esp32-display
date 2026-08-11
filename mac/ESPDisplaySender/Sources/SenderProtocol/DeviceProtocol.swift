@@ -309,6 +309,13 @@ public enum DeviceProtocol {
     /// name. The two reserved bytes are deliberately not checked, so a later
     /// firmware can carry one more small field there without this parser
     /// rejecting every packet.
+    ///
+    /// What that costs: a field placed in bytes 10-11 later must define 0 as
+    /// "absent". Every firmware built before it writes zeros there, and since
+    /// nothing checks them this parser cannot tell those zeros from a real
+    /// reading — so a field where 0 means something (a temperature, a current at
+    /// rest) would be silently misread on every panel running older firmware.
+    /// Anything that needs 0 to be meaningful needs a version bump instead.
     public static func parseBattery(_ data: Data) -> BatteryStatus? {
         let bytes = [UInt8](data)
         guard bytes.count == batteryPacketBytes,

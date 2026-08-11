@@ -21,11 +21,18 @@
 // XPowersAXP2101.tpp (github.com/lewisxhe/XPowersLib), cross-checked against
 // Waveshare's 03_LVGL_AXP2101_ADC_Data example for this board.
 //
+// SHARING THE BUS WITH TOUCH is safe by construction, not by luck: both
+// serviceTouch() and sendBatteryStatus() are called from the loop task, and
+// there is no ISR and no second task on this bus, so PMU and touch traffic
+// interleave and never overlap. The clock matches boardtouch::I2C_HZ so
+// whichever comes up first leaves the bus at a speed the other expects.
+//
 // UNVERIFIED - NO HARDWARE. Nothing here has been run against a real AXP2101.
 // That the fuel gauge reports a sane percentage, that VBUS detection tracks the
-// USB cable, and that the shared I2C bus tolerates touch and PMU traffic
-// together are all assumptions taken from the vendor library and Waveshare's
-// example, not measurements. Treat a surprising reading as a bug here first.
+// USB cable, and that enabling the two ADC bits is sufficient to make the voltage
+// register non-zero are all assumptions taken from the vendor library and
+// Waveshare's example, not measurements. Treat a surprising reading as a bug
+// here first.
 #pragma once
 
 #include <Arduino.h>
@@ -81,6 +88,17 @@ struct Reading {
 
 static bool enabled = false;
 
+/// Read one register.
+///
+/// The address write ends with a STOP (Wire.endTransmission() with its default
+/// argument) rather than holding the bus with a repeated start. A repeated start
+/// is the more common convention for parts like this, so the shape was checked
+/// against the vendor rather than assumed: XPowersLib's own Arduino path does
+/// exactly this - beginTransmission, write(reg), endTransmission(), requestFrom -
+/// in XPowersCommon.hpp's readRegister(reg, buf, length)
+/// (github.com/lewisxhe/XPowersLib). So the part is driven the way the library
+/// this register map came from drives it, and a STOP between the two phases is
+/// not the thing to suspect when a reading looks wrong.
 inline bool readRegister(uint8_t reg, uint8_t &value) {
   Wire.beginTransmission(I2C_ADDR);
   Wire.write(reg);
