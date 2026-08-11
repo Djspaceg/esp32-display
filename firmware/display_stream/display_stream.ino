@@ -847,7 +847,10 @@ static void processConfigLine(char *line) {
     //   CFGOTAPW <b64 password>  enable OTA with this password
     //   CFGOTAPW clear           forget it, which turns OTA off again
     // Base64 for exactly the reason CFGWIFI uses it - a password may contain
-    // any character a shell or a space-delimited line would eat. "clear" cannot
+    // any character a shell or a space-delimited line would eat. One byte is
+    // still refused, and it is refused rather than mangled: a 0x00 anywhere in
+    // the decoded password is rejected below, because NVS, ArduinoOTA and espota
+    // all handle it as a C string. "clear" cannot
     // collide with a real payload because it is recognised as a literal BEFORE
     // any decode is attempted, which is a property of the order below rather
     // than of the string (see otapolicy::classifyArgument, which owns and
@@ -879,9 +882,19 @@ static void processConfigLine(char *line) {
     const bool decoded = mbedtls_base64_decode(pw, sizeof(pw) - 1, &pwLen,
                                                (const unsigned char *)arg,
                                                strlen(arg)) == 0;
-    switch (otapolicy::verifyPassword(decoded, pwLen)) {
+    switch (otapolicy::verifyPassword(decoded, pw, pwLen)) {
       case otapolicy::Verdict::NotBase64:
         Serial.println("CFGERR bad base64 password");
+        return;
+      case otapolicy::Verdict::EmbeddedNul:
+        // Refused rather than stored: putString below would cut the password at
+        // that byte, ArduinoOTA's setPassword would hash the same short prefix,
+        // and espota cannot pass a 0x00 in argv anyway - so this password can
+        // never work end to end, and accepting it would leave the panel
+        // listening with a secret shorter than the floor above promises.
+        // otapolicy::verifyPassword documents the full chain.
+        Serial.println("CFGERR ota password must not contain a 0x00 byte "
+                       "(it would be stored truncated; try another)");
         return;
       case otapolicy::Verdict::TooShort:
         // Refused rather than accepted: this one password is the only thing

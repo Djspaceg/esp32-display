@@ -63,23 +63,60 @@ enum class Verdict : uint8_t {
   Accept,
   // The argument was not decodable base64 at all.
   NotBase64,
+  // Decoded to bytes that cannot survive being stored or used, because every
+  // layer underneath handles the password as a C string. See verifyPassword.
+  EmbeddedNul,
   // Decoded, but below PASSWORD_MIN_BYTES.
   TooShort,
   // Decoded, but above PASSWORD_MAX_BYTES.
   TooLong,
 };
 
-/// Judge a decoded password by its length.
+/// Judge a decoded password: it must be storable, then long enough.
 ///
-/// `decoded` is whether the base64 decode succeeded; `decodedBytes` is how many
-/// bytes it produced. Splitting it this way keeps mbedtls out of this header
-/// while still putting the bounds check where it can be tested.
+/// `decoded` is whether the base64 decode succeeded; `bytes`/`decodedBytes` are
+/// what it produced. Taking the outcome and the bytes as inputs keeps mbedtls out
+/// of this header while putting every judgement about the result where it can be
+/// tested - which is the point, because the length policy used to be checked here
+/// and then applied to something else entirely.
+///
+/// WHY A 0x00 BYTE IS REFUSED, and why here: every layer below this one handles
+/// the password as a NUL-terminated C string, so a decoded password containing a
+/// 0x00 is silently cut short at that byte and the length judged here stops
+/// describing the secret in use.
+///   - Preferences::putString(const char *) calls nvs_set_str, which stores up to
+///     the terminator (core Preferences.cpp), so a 16-byte password whose fourth
+///     byte is zero is stored as 3 bytes.
+///   - ArduinoOTA::setPassword(const char *) hashes with SHA256Builder::add(const
+///     char *), so the same truncation happens again in the hash.
+///   - espota.py takes the password as an argv string, which cannot carry a 0x00
+///     at all - so the pusher could not send the full password even if the panel
+///     had stored it.
+/// A password with an embedded 0x00 therefore cannot work end to end no matter
+/// where it is fixed up, and the failure is silent: the panel would advertise
+/// CAP_OTA and listen with a secret shorter than the floor promises. This is not
+/// exotic input - `CFGOTAPW $(head -c 16 /dev/urandom | base64)` is the natural
+/// way to make a strong password, and 16 random bytes contain a zero about 6% of
+/// the time. Refusing tells the user to try again, which costs one command; the
+/// alternative is a weakened panel and no way to notice.
+///
+/// Checked before the bounds so the answer names the disqualifying property
+/// rather than a length that was never going to be the stored length anyway. The
+/// accepted set is otherwise unchanged: exactly 8..64 bytes, none of them zero.
 ///
 /// An empty payload lands in TooShort rather than getting its own verdict: a
 /// bare `CFGOTAPW` never reaches here (the command needs its trailing space),
 /// and "too short" is the truthful answer for zero bytes anyway.
-inline Verdict verifyPassword(bool decoded, size_t decodedBytes) {
+inline Verdict verifyPassword(bool decoded, const unsigned char *bytes,
+                              size_t decodedBytes) {
   if (!decoded) return Verdict::NotBase64;
+  // No bytes to inspect but a length claiming otherwise is not something to
+  // guess about; treat it as a decode that cannot be trusted.
+  if (bytes == nullptr && decodedBytes > 0) return Verdict::NotBase64;
+  // Guarded rather than relying on memchr(nullptr, 0, 0) being harmless.
+  if (decodedBytes > 0 && memchr(bytes, 0, decodedBytes) != nullptr) {
+    return Verdict::EmbeddedNul;
+  }
   if (decodedBytes < PASSWORD_MIN_BYTES) return Verdict::TooShort;
   if (decodedBytes > PASSWORD_MAX_BYTES) return Verdict::TooLong;
   return Verdict::Accept;

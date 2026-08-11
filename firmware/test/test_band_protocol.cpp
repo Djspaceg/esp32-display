@@ -1389,8 +1389,81 @@ int main() {
     // And even if that ever broke, five base64 characters carry at most 30 bits,
     // so no reading of them reaches the floor; the token would be refused as a
     // password rather than accepted as one.
-    CHECK(otapolicy::verifyPassword(true, 3) == otapolicy::Verdict::TooShort);
-    CHECK(otapolicy::verifyPassword(true, 4) == otapolicy::Verdict::TooShort);
+    const unsigned char five[] = {'c', 'l', 'e', 'a', 'r'};
+    CHECK(otapolicy::verifyPassword(true, five, 3) ==
+          otapolicy::Verdict::TooShort);
+    CHECK(otapolicy::verifyPassword(true, five, 4) ==
+          otapolicy::Verdict::TooShort);
+  }
+
+  // --- a decoded password with a 0x00 in it must be refused, not stored
+  //
+  // The floor below is judged on the decoded bytes, but everything underneath
+  // stores and uses the password as a C string: Preferences::putString ->
+  // nvs_set_str keeps up to the terminator, ArduinoOTA::setPassword hashes a
+  // const char *, and espota passes it in argv. So an accepted password with an
+  // embedded 0x00 would be stored truncated and the floor would stop describing
+  // the secret the panel listens with. Refusing it is the only outcome that
+  // keeps the floor's promise.
+  {
+    // A full-length password whose fourth byte is zero: exactly what
+    // `CFGOTAPW $(head -c 16 /dev/urandom | base64)` produces about 6% of the
+    // time, and the case the floor alone does not catch - 16 bytes is
+    // comfortably inside the accept window, so only the NUL check refuses it.
+    const unsigned char withNul[16] = {'s', 'e', 'c', 0,   'r', 'e', 't', '!',
+                                       'p', 'a', 's', 's', 'w', 'o', 'r', 'd'};
+    CHECK(otapolicy::verifyPassword(true, withNul, sizeof(withNul)) ==
+          otapolicy::Verdict::EmbeddedNul);
+    // What would have been stored instead, had it been accepted: 3 bytes, which
+    // the floor exists to forbid. Asserted so the reason the refusal matters is
+    // pinned next to the refusal itself.
+    CHECK(strlen((const char *)withNul) == 3);
+    CHECK(otapolicy::verifyPassword(true, withNul,
+                                    strlen((const char *)withNul)) ==
+          otapolicy::Verdict::TooShort);
+
+    // Every position matters, not just the middle: leading, trailing, and each
+    // interior byte. A trailing 0x00 truncates to a 15-byte password, which the
+    // floor would happily accept while the user believes they set 16 bytes.
+    for (size_t at = 0; at < sizeof(withNul); at++) {
+      unsigned char probe[sizeof(withNul)];
+      memcpy(probe, "0123456789abcdef", sizeof(probe));
+      probe[at] = 0;
+      CHECK(otapolicy::verifyPassword(true, probe, sizeof(probe)) ==
+            otapolicy::Verdict::EmbeddedNul);
+    }
+
+    // The ordinary path is untouched: no zero byte, still judged on length
+    // alone, and the accepted set is still exactly the closed interval.
+    const unsigned char clean[64] = {
+        'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+        'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+        'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+        'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/'};
+    CHECK(otapolicy::verifyPassword(true, clean, 7) ==
+          otapolicy::Verdict::TooShort);
+    CHECK(otapolicy::verifyPassword(true, clean, 8) ==
+          otapolicy::Verdict::Accept);
+    CHECK(otapolicy::verifyPassword(true, clean, 64) ==
+          otapolicy::Verdict::Accept);
+
+    // High bytes are not the problem and must not be treated as one - the whole
+    // reason the argument is base64 is that a password may be arbitrary bytes.
+    const unsigned char highBytes[8] = {0x80, 0xFF, 0x01, 0x7F,
+                                        0xC3, 0xA9, 0x20, 0x0A};
+    CHECK(otapolicy::verifyPassword(true, highBytes, sizeof(highBytes)) ==
+          otapolicy::Verdict::Accept);
+
+    // A failed decode still outranks everything, whatever the buffer holds.
+    CHECK(otapolicy::verifyPassword(false, withNul, sizeof(withNul)) ==
+          otapolicy::Verdict::NotBase64);
+    // And no bytes to inspect while claiming a length is not talked into an
+    // accept: it is a decode this cannot vouch for.
+    CHECK(otapolicy::verifyPassword(true, nullptr, 16) ==
+          otapolicy::Verdict::NotBase64);
+    CHECK(otapolicy::verifyPassword(true, nullptr, 0) ==
+          otapolicy::Verdict::TooShort);
   }
 
   // --- the 8-byte floor, which is the only thing between the LAN and a
@@ -1399,31 +1472,49 @@ int main() {
     CHECK(otapolicy::PASSWORD_MIN_BYTES == 8);
     CHECK(otapolicy::PASSWORD_MAX_BYTES == 64);
 
+    // 200 non-zero bytes, so the length under test is the only thing varying.
+    unsigned char buf[200];
+    for (size_t i = 0; i < sizeof(buf); i++) {
+      buf[i] = (unsigned char)(1 + (i % 255));
+      CHECK(buf[i] != 0);
+    }
+
     // A failed decode is refused as such, whatever length came back with it. A
     // decoder may or may not write an out-length when it returns an error, so
     // the verdict deliberately does not depend on that: no accompanying length
     // can talk a failure into an accept.
-    CHECK(otapolicy::verifyPassword(false, 0) == otapolicy::Verdict::NotBase64);
-    CHECK(otapolicy::verifyPassword(false, 8) == otapolicy::Verdict::NotBase64);
-    CHECK(otapolicy::verifyPassword(false, 32) == otapolicy::Verdict::NotBase64);
+    CHECK(otapolicy::verifyPassword(false, buf, 0) ==
+          otapolicy::Verdict::NotBase64);
+    CHECK(otapolicy::verifyPassword(false, buf, 8) ==
+          otapolicy::Verdict::NotBase64);
+    CHECK(otapolicy::verifyPassword(false, buf, 32) ==
+          otapolicy::Verdict::NotBase64);
 
     // The boundary, both sides of it. 7 bytes is refused, 8 is accepted.
-    CHECK(otapolicy::verifyPassword(true, 0) == otapolicy::Verdict::TooShort);
-    CHECK(otapolicy::verifyPassword(true, 1) == otapolicy::Verdict::TooShort);
-    CHECK(otapolicy::verifyPassword(true, 7) == otapolicy::Verdict::TooShort);
-    CHECK(otapolicy::verifyPassword(true, 8) == otapolicy::Verdict::Accept);
-    CHECK(otapolicy::verifyPassword(true, 9) == otapolicy::Verdict::Accept);
+    CHECK(otapolicy::verifyPassword(true, buf, 0) ==
+          otapolicy::Verdict::TooShort);
+    CHECK(otapolicy::verifyPassword(true, buf, 1) ==
+          otapolicy::Verdict::TooShort);
+    CHECK(otapolicy::verifyPassword(true, buf, 7) ==
+          otapolicy::Verdict::TooShort);
+    CHECK(otapolicy::verifyPassword(true, buf, 8) == otapolicy::Verdict::Accept);
+    CHECK(otapolicy::verifyPassword(true, buf, 9) == otapolicy::Verdict::Accept);
 
     // And the other boundary: 64 accepted, 65 refused.
-    CHECK(otapolicy::verifyPassword(true, 63) == otapolicy::Verdict::Accept);
-    CHECK(otapolicy::verifyPassword(true, 64) == otapolicy::Verdict::Accept);
-    CHECK(otapolicy::verifyPassword(true, 65) == otapolicy::Verdict::TooLong);
-    CHECK(otapolicy::verifyPassword(true, 185) == otapolicy::Verdict::TooLong);
+    CHECK(otapolicy::verifyPassword(true, buf, 63) ==
+          otapolicy::Verdict::Accept);
+    CHECK(otapolicy::verifyPassword(true, buf, 64) ==
+          otapolicy::Verdict::Accept);
+    CHECK(otapolicy::verifyPassword(true, buf, 65) ==
+          otapolicy::Verdict::TooLong);
+    CHECK(otapolicy::verifyPassword(true, buf, 185) ==
+          otapolicy::Verdict::TooLong);
 
     // Swept rather than sampled, so the accept window is exactly the closed
     // interval and there is no gap either side of it.
     for (size_t len = 0; len <= 128; len++) {
-      const otapolicy::Verdict verdict = otapolicy::verifyPassword(true, len);
+      const otapolicy::Verdict verdict =
+          otapolicy::verifyPassword(true, buf, len);
       const bool shouldAccept = len >= otapolicy::PASSWORD_MIN_BYTES &&
                                 len <= otapolicy::PASSWORD_MAX_BYTES;
       CHECK((verdict == otapolicy::Verdict::Accept) == shouldAccept);
@@ -1433,8 +1524,17 @@ int main() {
                               : otapolicy::Verdict::TooLong));
       }
       // A refusal is never silently downgraded by length.
-      CHECK(otapolicy::verifyPassword(false, len) ==
+      CHECK(otapolicy::verifyPassword(false, buf, len) ==
             otapolicy::Verdict::NotBase64);
+      // Nor is the storability check: one zero byte anywhere in the same window
+      // is refused at every length that would otherwise be accepted.
+      if (len > 0) {
+        unsigned char probe[128];
+        memcpy(probe, buf, len);
+        probe[len - 1] = 0;
+        CHECK(otapolicy::verifyPassword(true, probe, len) ==
+              otapolicy::Verdict::EmbeddedNul);
+      }
     }
   }
 
