@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build, flash, update, and configure the esp32-display firmware without hand-typing FQBNs."""
 import argparse
+import base64
 import fnmatch
 import getpass
 import glob
@@ -56,7 +57,10 @@ CFG_PREFIXES = ("CFGOK", "CFGERR", "CFGINFO")
 # OTA. 3232 is ArduinoOTA's default and what the firmware binds.
 OTA_PORT = 3232
 OTA_PASSWORD_ENV = "ESPDISP_OTA_PASSWORD"
-OTA_PASSWORD_MIN = 8  # matches the firmware's CFGOTAPW floor
+# Both match otapolicy::PASSWORD_MIN_BYTES / PASSWORD_MAX_BYTES in the firmware,
+# and are counted in bytes for the same reason it does.
+OTA_PASSWORD_MIN = 8
+OTA_PASSWORD_MAX = 64
 
 
 class Fail(Exception):
@@ -162,6 +166,82 @@ def detected_ports() -> List[PortInfo]:
                 keys.append(key)
         out.append(PortInfo(address, keys, port.get("label") or address))
     return sorted(out, key=lambda p: p.address)
+
+
+class NetworkPort(NamedTuple):
+    address: str  # IPv4 the responder answered with
+    hostname: str  # SRV target, e.g. "panel.local."
+    board: str  # the "board" TXT record, e.g. "esp32c6"
+
+
+def parse_network_ports(payload: dict) -> List[NetworkPort]:
+    """Pull the OTA-capable panels out of `arduino-cli board list --json`.
+
+    arduino-cli runs a bundled mdns-discovery that browses `_arduino._tcp` - the
+    same service the firmware registers and espota pushes to - and turns each TXT
+    record into a port property, `board` included (arduino/mdns-discovery
+    main.go, toDiscoveryPort). So the chip a panel is running is already
+    discoverable without this tool implementing any mDNS itself.
+
+    Split from the request so the parse can be tested against captured JSON: no
+    panel is attached here, so this is the only way any of it is exercised.
+    """
+    out = []
+    for entry in payload.get("detected_ports") or []:
+        port = entry.get("port") or {}
+        if (port.get("protocol") or "") != "network":
+            continue
+        props = port.get("properties") or {}
+        board = (props.get("board") or "").strip().lower()
+        hostname = (props.get("hostname") or "").strip().rstrip(".")
+        address = (port.get("address") or "").strip()
+        if not address and not hostname:
+            continue
+        out.append(NetworkPort(address, hostname, board))
+    return out
+
+
+def network_port_for_host(ports: List[NetworkPort], host: str) -> Optional[NetworkPort]:
+    """Find the discovered panel the user means by `host`.
+
+    Matches an IP against the address, and a name against the SRV hostname or its
+    first label, because `ota panel.local`, `ota panel` and `ota 192.168.1.42` all
+    name the same panel. Returns None rather than a guess when nothing matches -
+    an unrecognised host is "could not confirm", never "wrong board".
+    """
+    wanted = host.strip().rstrip(".").lower()
+    if not wanted:
+        return None
+    for port in ports:
+        hostname = port.hostname.lower()
+        if wanted in (port.address.lower(), hostname, hostname.split(".")[0]):
+            return port
+    return None
+
+
+# What comparing --board against a discovered `board=` TXT record can conclude.
+TARGET_OK = "ok"  # they agree
+TARGET_WRONG = "wrong"  # it advertises the other board this tool knows
+TARGET_UNKNOWN = "unknown"  # nothing to compare, or a board this tool cannot place
+
+
+def classify_ota_target(board: Board, advertised: str) -> str:
+    """Decide whether an advertised board contradicts the chosen target.
+
+    Deliberately three-valued, and only TARGET_WRONG refuses. An empty or
+    unrecognised `board=` means this tool cannot place the panel - a newer variant,
+    a different project answering on the same service - and refusing on that would
+    turn "I do not know" into "you are wrong". The USB path has the same shape: it
+    only refuses when arduino-cli names a single, different board.
+    """
+    token = (advertised or "").strip().lower()
+    if not token:
+        return TARGET_UNKNOWN
+    if token == board.chip:
+        return TARGET_OK
+    if any(token == other.chip for other in BOARDS.values()):
+        return TARGET_WRONG
+    return TARGET_UNKNOWN
 
 
 def board_key_for_fqbn(fqbn: str) -> Optional[str]:
@@ -311,8 +391,22 @@ def resolve_board(explicit: Optional[str], port: Optional[PortInfo]) -> Board:
         if port and len(port.board_keys) == 1 and port.board_keys[0] != board.key:
             raise Fail(
                 "--board %s contradicts %s, which arduino-cli reports as %s.\n"
-                "  Re-run with --board %s, or with --port pointing at the other board."
-                % (board.key, port.address, port.board_keys[0], port.board_keys[0])
+                "  Re-run with --board %s, or with --port pointing at the other board.\n"
+                "  There is no flag to override this. If arduino-cli is the one that\n"
+                "  is wrong, the explicit commands in README.md \"Getting started\"\n"
+                "  do the same job with nothing in the way:\n"
+                "    arduino-cli compile -b %s --libraries %s .\n"
+                "    arduino-cli upload -b %s -p %s ."
+                % (
+                    board.key,
+                    port.address,
+                    port.board_keys[0],
+                    port.board_keys[0],
+                    board.fqbn,
+                    LIBRARIES_DIR,
+                    board.fqbn,
+                    port.address,
+                )
             )
         return board
 
@@ -450,7 +544,33 @@ def app_image(output_dir: str) -> str:
     return candidates[0]
 
 
-def ota_password(explicit: Optional[str]) -> str:
+def check_password_policy(password: str) -> None:
+    """Apply the firmware's own bounds to a password, in bytes.
+
+    Mirrors otapolicy::verifyPassword: 8..64 BYTES of the decoded password, not
+    characters, which is the same distinction the firmware draws - a 6-character
+    passphrase of emoji is 24 bytes and fine, a 70-character ASCII one is refused.
+    Applied here so `set-password` and `ota` fail immediately instead of after a
+    round trip or a multi-minute compile.
+
+    The firmware also refuses a 0x00 byte in the password. Not checked here: argv
+    and the environment cannot carry one, so there is no way to reach this function
+    with such a password and a check would be unreachable code.
+    """
+    length = len(password.encode("utf-8"))
+    if length < OTA_PASSWORD_MIN:
+        raise Fail(
+            "OTA password is %d bytes; the panel requires at least %d (see "
+            "CFGOTAPW)" % (length, OTA_PASSWORD_MIN)
+        )
+    if length > OTA_PASSWORD_MAX:
+        raise Fail(
+            "OTA password is %d bytes; the panel stores at most %d (see CFGOTAPW)"
+            % (length, OTA_PASSWORD_MAX)
+        )
+
+
+def ota_password(explicit: Optional[str], prompt: str = "OTA password for the panel: ") -> str:
     """Resolve the OTA password without ever printing it.
 
     Three sources, in order: --password, the ESPDISP_OTA_PASSWORD environment
@@ -460,22 +580,112 @@ def ota_password(explicit: Optional[str]) -> str:
     """
     password = explicit or os.environ.get(OTA_PASSWORD_ENV) or ""
     if not password and sys.stdin.isatty():
-        password = getpass.getpass("OTA password for the panel: ")
+        password = getpass.getpass(prompt)
     if not password:
         raise Fail(
             "no OTA password.\n"
             "  Pass --password, set %s, or run this from a terminal to be asked.\n"
-            "  The panel's password is the one set with `CFGOTAPW <base64>` over USB."
-            % OTA_PASSWORD_ENV
+            "  Set the panel's password with `%s set-password`."
+            % (OTA_PASSWORD_ENV, os.path.basename(sys.argv[0]))
         )
-    if len(password) < OTA_PASSWORD_MIN:
-        # Refused here rather than after a multi-minute compile and a failed
-        # handshake: the firmware will not store a password shorter than this.
-        raise Fail(
-            "OTA password is %d characters; the panel requires at least %d "
-            "(see CFGOTAPW)" % (len(password), OTA_PASSWORD_MIN)
-        )
+    check_password_policy(password)
     return password
+
+
+def cfgotapw_line(password: str) -> str:
+    """The CFGOTAPW line that stores `password`, base64 encoding and all.
+
+    This function exists because the encoding is a trap worth owning. The panel
+    takes base64 (a password may contain any character a space-delimited line
+    would eat) while espota takes the same password as characters, so the user had
+    to produce both by hand - and the obvious `echo 'pw' | base64` appends a
+    newline, which stores a password one byte longer than the one typed and then
+    fails every push with OTA_AUTH_ERROR and no hint why. `printf %s` is correct
+    and easy to forget. Encoding from the same string the push will use removes
+    the mismatch instead of documenting it.
+    """
+    return "CFGOTAPW " + base64.b64encode(password.encode("utf-8")).decode("ascii")
+
+
+def discovered_network_ports(timeout: float) -> List[NetworkPort]:
+    """Ask arduino-cli to browse for OTA-capable panels on the LAN.
+
+    Failure is not an error here: the caller treats an empty list as "could not
+    confirm", so a machine with mDNS blocked still gets to push.
+    """
+    seconds = max(1, int(round(timeout)))
+    proc = run_capture(
+        [
+            arduino_cli(),
+            "board",
+            "list",
+            "--discovery-timeout",
+            "%ds" % seconds,
+            "--json",
+        ],
+        timeout=seconds + 30.0,
+    )
+    if proc.returncode != 0:
+        return []
+    try:
+        return parse_network_ports(json.loads(proc.stdout or "{}"))
+    except json.JSONDecodeError:
+        return []
+
+
+def verify_ota_target(board: Board, host: str, timeout: float) -> None:
+    """Cross-check --board against what the panel says it is, if it can be found.
+
+    The USB path gets this guard for free twice over - arduino-cli's own board
+    matching, then esptool's --chip refusal. Over the network there was nothing:
+    --board was required and then believed. But the panel publishes `board=` in the
+    `_arduino._tcp` TXT record espota already browses for, so the answer is
+    available for the cost of one discovery pass.
+
+    Refuses only a definite contradiction. A panel discovery cannot find, or one
+    advertising a board this tool does not know, prints a note and continues -
+    mDNS not answering is not evidence about the chip, and refusing on silence
+    would break pushing to a panel on another subnet, which works today.
+
+    UNVERIFIED: no panel has been discovered by this code. The parse is tested
+    against captured JSON, but that arduino-cli reports these properties for this
+    firmware's TXT records is read from mdns-discovery's source, not measured.
+    """
+    print("Checking what %s says it is..." % host, flush=True)
+    found = network_port_for_host(discovered_network_ports(timeout), host)
+    if found is None:
+        print(
+            "  Not found by mDNS discovery, so --board %s is taken on trust.\n"
+            "  A wrong target is refused by the panel rather than breaking it, but\n"
+            "  it costs a compile and a transfer." % board.key
+        )
+        return
+
+    verdict = classify_ota_target(board, found.board)
+    if verdict == TARGET_WRONG:
+        other = board_key_for_chip(found.board) or found.board
+        raise Fail(
+            "%s advertises board=%s, but --board %s builds for %s.\n"
+            "  Pushing this image would waste a compile and a transfer: the panel\n"
+            "  validates the image header's chip id and would refuse it.\n"
+            "  Re-run with --board %s." % (host, found.board, board.key, board.chip, other)
+        )
+    if verdict == TARGET_OK:
+        print("  Confirmed: %s advertises board=%s." % (host, found.board))
+    else:
+        print(
+            "  Found %s, but it advertises board=%r, which this tool cannot place.\n"
+            "  Continuing with --board %s." % (host, found.board, board.key)
+        )
+
+
+def board_key_for_chip(chip: str) -> Optional[str]:
+    """Map an esptool/variant chip id (esp32c6) onto a board key (c6)."""
+    token = (chip or "").strip().lower()
+    for board in BOARDS.values():
+        if board.chip == token:
+            return board.key
+    return None
 
 
 def espota_command(
@@ -537,6 +747,9 @@ def cmd_ota(args) -> int:
     tool = espota_path()
     board = BOARDS[args.board]
     print("Target: %s (%s) over the air at %s" % (board.key, board.fqbn, args.host))
+    # Before the compile, so a wrong --board costs seconds instead of minutes.
+    if args.discovery_timeout > 0:
+        verify_ota_target(board, args.host, args.discovery_timeout)
 
     out_dir = tempfile.mkdtemp(prefix="espdisp-ota-")
     try:
@@ -556,6 +769,30 @@ def cmd_ota(args) -> int:
         shutil.rmtree(out_dir, ignore_errors=True)
     print("\nThe panel reboots itself onto the new firmware.")
     return 0
+
+
+def cmd_set_password(args) -> int:
+    # Password first, port second: a password the panel would refuse can be caught
+    # instantly, and finding that out after the port hunt (or after typing it into
+    # a prompt twice) is the wrong order. Same reasoning as cmd_ota.
+    if args.clear:
+        line = "CFGOTAPW clear"
+        shown = "-> CFGOTAPW clear (this turns OTA off)"
+    else:
+        password = ota_password(args.password, prompt="New OTA password for the panel: ")
+        line = cfgotapw_line(password)
+        # The command, never the argument: the base64 is the password.
+        shown = "-> CFGOTAPW <base64 password, %d bytes>" % len(
+            password.encode("utf-8"))
+    port = resolve_port(args.port)
+    print(shown, flush=True)
+    reply = send_config_line(port.address, line, args.timeout)
+    print(reply)
+    if reply.startswith("CFGOK"):
+        print("\nThe panel reboots. Use the same password with `ota`:")
+        print("  export %s='<the password>'" % OTA_PASSWORD_ENV)
+        return 0
+    return 1
 
 
 def cmd_list(args) -> int:
@@ -656,7 +893,35 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="seconds to wait for each invitation attempt (default 10, 10 attempts)",
     )
+    p_ota.add_argument(
+        "--discovery-timeout",
+        type=float,
+        default=5.0,
+        help="seconds to browse mDNS for the panel to cross-check --board "
+        "(default 5; 0 skips the check, which is not a way past a real mismatch)",
+    )
     p_ota.set_defaults(func=cmd_ota)
+
+    p_pw = subs.add_parser(
+        "set-password",
+        help="set or clear the panel's OTA password over USB",
+        description="Store the OTA password on a panel over USB, base64 encoding "
+        "it on the way. Nothing listens for a push until this is done, and "
+        "`--clear` turns OTA off again. The encoding is the point: the panel takes "
+        "base64 while the pusher takes the password as characters, and the obvious "
+        "`echo pw | base64` silently appends a newline, storing a password that "
+        "then fails every push with an auth error.",
+        epilog="The password comes from --password, else $%s, else a prompt.\n"
+        "It is never printed, and neither is its base64." % OTA_PASSWORD_ENV,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_pw.add_argument("--password", help="the new password (prefer the prompt)")
+    p_pw.add_argument(
+        "--clear", action="store_true", help="forget the password, turning OTA off"
+    )
+    p_pw.add_argument("--port", help="serial device (default: autodetected)")
+    p_pw.add_argument("--timeout", type=float, default=6.0, help="reply timeout (s)")
+    p_pw.set_defaults(func=cmd_set_password)
 
     p_list = subs.add_parser("list", help="show the ports and chips this tool can see")
     p_list.add_argument(
