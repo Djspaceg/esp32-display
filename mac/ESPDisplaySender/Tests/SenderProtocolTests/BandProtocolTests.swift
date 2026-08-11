@@ -497,6 +497,42 @@ final class DeviceProtocolTests: XCTestCase {
             DeviceProtocol.Capabilities.battery
                 .isDisjoint(with: [.touch, .touchLongPress, .telemetry]))
     }
+
+    // CAP_OTA was reserved from the start and unused until the firmware learned
+    // to accept a push over WiFi. It is a runtime bit - a panel with no OTA
+    // password does not set it - so what matters here is that this side reads it
+    // out of the same place the firmware writes it.
+    func testOtaCapabilityBit() {
+        XCTAssertEqual(DeviceProtocol.Capabilities.ota.rawValue, 1 << 4)
+        XCTAssertTrue(
+            DeviceProtocol.Capabilities.ota
+                .isDisjoint(with: [.restart, .sleepSync, .battery]))
+    }
+
+    // The exact capability bytes an OTA-capable panel sends: 0x000001FF is
+    // everything every board always has, plus OTA. Typed out by hand here and in
+    // firmware/test/test_band_protocol.cpp, deliberately not shared.
+    func testParseDeviceInfoWithOtaCapability() {
+        var packet = Data("EINF".utf8)
+        packet.append(contentsOf: [
+            0x01, 0x02, 0x01, 0x13,             // versions + flags
+            0xFF, 0x01, 0x00, 0x00,             // capabilities incl. OTA
+            0x04, 0x03, 0x02, 0x01,             // uptime
+            0xCD, 0xFF, 0x80,                    // RSSI -51, brightness 128
+            0x05, 0x05,                          // string lengths
+            0x02, 0x00, 0x00, 0x12, 0x34, 0x56, // device ID
+        ])
+        packet.append(contentsOf: "panel".utf8)
+        packet.append(contentsOf: "1.2.3".utf8)
+
+        let info = DeviceProtocol.parseInfo(packet)
+        XCTAssertEqual(info?.capabilities.rawValue, 0x1FF)
+        XCTAssertTrue(info?.capabilities.contains(.ota) == true)
+        // Still runtime-gated on the panel: the same packet with the bit clear
+        // must not read as OTA-capable.
+        XCTAssertFalse(
+            DeviceProtocol.Capabilities(rawValue: 0x1EF).contains(.ota))
+    }
 }
 
 final class DeviceSourceConfigTests: XCTestCase {

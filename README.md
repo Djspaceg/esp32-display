@@ -322,10 +322,17 @@ Over USB serial (115200), the firmware also accepts configuration commands:
 reboots, and `CFGWIFI <base64 ssid>` (password argument omitted) keeps the
 password currently in use; `CFGNAME <base64 name>` sets the device name;
 `CFGSHOW` reports the current network, name, IP, signal strength, the saved
-orientation/brightness, and the detected board; `CFGFLIP 0|1` sets the 180° flip
-without the button; `CFGLED <r> <g> <b>` shows a literal LED color for 10s on
-boards that have an addressable LED and reports an error on those that do not;
-`CFGBOARD st7789|jd9853|auto` overrides board auto-detection and reboots.
+orientation/brightness, the detected board, the battery, and whether OTA is
+enabled; `CFGFLIP 0|1` sets the 180° flip without the button; `CFGLED <r> <g>
+<b>` shows a literal LED color for 10s on boards that have an addressable LED
+and reports an error on those that do not; `CFGBOARD st7789|jd9853|auto`
+overrides board auto-detection and reboots; `CFGOTAPW <base64 password>` sets
+the OTA password (and `CFGOTAPW clear` removes it, turning OTA off again).
+
+A panel that has an OTA password advertises `CAP_OTA` and a second mDNS service,
+`_arduino._tcp`, which is what the OTA pusher browses for. Without a password it
+advertises neither and does not listen — the bit means "a firmware push would be
+accepted right now", not "this build has OTA code in it".
 
 ## Repo layout
 
@@ -339,7 +346,7 @@ boards that have an addressable LED and reports an error on those that do not;
 | `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
 | `firmware/test/` | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
 | `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
-| `tools/espdisp.py` | Compile, flash, and configure from one command: holds the board table, finds the port, refuses to guess the chip |
+| `tools/espdisp.py` | Compile, flash over USB, push over WiFi, and configure from one command: holds the board table, finds the port, refuses to guess the chip |
 | `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
 | `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
 | `docs/` | Original project plan |
@@ -386,11 +393,12 @@ tools/espdisp.py list                  # ports it can see, and the chip on each
 tools/espdisp.py compile --board c6    # or --board s3
 tools/espdisp.py flash                 # detect the chip, build, upload
 tools/espdisp.py flash --board s3      # skip detection and build that target
+tools/espdisp.py ota panel.local --board c6   # build, then push over WiFi
 tools/espdisp.py config CFGSHOW        # send one CFG* line, print the reply
 ```
 
-`compile` and `flash` echo the `Sketch uses N bytes (P%)` line at the end, so
-app-partition headroom is visible without hunting through scrollback.
+`compile`, `flash`, and `ota` echo the `Sketch uses N bytes (P%)` line at the
+end, so app-partition headroom is visible without hunting through scrollback.
 
 `flash` refuses rather than guesses when it cannot tell which chip is attached.
 Both boards are native USB CDC at VID 0x303A PID 0x1001, so neither the port
@@ -403,6 +411,35 @@ coin flip: pass `--port`.
 The script is standard-library Python 3 only: unlike the other `tools/` scripts
 it does not need pyserial. The explicit `arduino-cli` commands above remain the
 fallback if it ever misbehaves, and they document what it does.
+
+### Updating over WiFi
+
+Once per panel, over USB, give it an OTA password. Nothing listens until you do:
+
+```sh
+tools/espdisp.py config CFGOTAPW $(printf %s 'a-real-password' | base64)
+```
+
+The panel reboots, advertises `_arduino._tcp` alongside `_espdisp._udp`, and from
+then on takes pushes over the LAN:
+
+```sh
+export ESPDISP_OTA_PASSWORD='a-real-password'
+tools/espdisp.py ota panel.local --board c6
+```
+
+`--board` is required here. Over the network there is no chip to probe, and an S3
+image pushed to a C6 is a brick you have to walk over to, so the tool asks rather
+than assumes. The password comes from `--password`, else `$ESPDISP_OTA_PASSWORD`,
+else a prompt; it is never echoed, though the core's `espota.py` takes it as an
+argument, so it is briefly visible in `ps` on a shared machine.
+
+The panel shows a progress bar on the glass while it writes, then reboots itself
+onto the new firmware. `CFGOTAPW clear` disables OTA again.
+
+**USB stays the recovery route**, and always works: OTA cannot replace the
+bootloader or the partition table, and a panel that will not join WiFi cannot be
+reached over WiFi. `tools/espdisp.py flash` is the way back from anything.
 
 Mac app — the set-and-forget way:
 
@@ -456,21 +493,65 @@ name (default `Tiny Monitor`), learns its UUID, and tracks it from then on.
 
 ### Firmware update status
 
-Firmware 1.1 reports version and capability metadata, but it deliberately does
-not advertise OTA support yet, so the manager does not offer a nonfunctional
-update action. The remaining OTA stage needs an 8MB dual-partition layout,
-reliable transfer, SHA-256 and signature verification, provisional boot health
-validation, and automatic rollback. Until that is implemented and tested, USB
-remains required for firmware installation and recovery.
+The firmware accepts a WiFi push (see [Updating over WiFi](#updating-over-wifi)),
+on the LAN, with a password. This section is about what that does and does not
+guarantee, because "it has OTA" covers a wide range.
 
-Worth knowing before that work starts: carrying both panel drivers in one binary
-puts the build at ~84% of the default 1.31MB app partition. A dual-partition OTA
-layout needs a custom partition table regardless, so this is a sizing input
-rather than a blocker — but the headroom on the current layout is thin.
+**No partition table change was needed.** An earlier version of this section said
+OTA required a custom 8MB dual-partition layout. That was wrong:
+`tools/partitions/default.csv` in the esp32 core — which both targets already use
+— has `otadata` at 0xe000 plus two 0x140000 app slots at 0x10000 and 0x150000.
+The firmware has always been installed into an OTA-capable layout; nothing had to
+move, and NVS (`0x9000`, `0x5000`) is untouched, so saved WiFi credentials, name,
+orientation, and brightness all survive an update.
 
-The management datagrams are unauthenticated and intended for a trusted local
-network. Pairing or authenticated control should accompany OTA before panels
-are exposed to untrusted LAN clients.
+What this implementation provides:
+
+- Transfer over the LAN, no cloud and no infrastructure, using `ArduinoOTA` on
+  the panel and the core's `espota.py` on the Mac.
+- Authentication. A challenge/response over PBKDF2-HMAC-SHA256; the panel stores
+  only `SHA256(password)`, never the password. With no password set it does not
+  listen and does not advertise `CAP_OTA`, so a panel is never remotely writable
+  by accident — which is the state every panel ships in.
+- An integrity check on the image. The pusher sends its MD5 and the `Update`
+  library refuses to switch the boot slot unless what landed matches, so a
+  truncated or mangled transfer never becomes the firmware that boots.
+- Writes to the _inactive_ app slot. A failed or rejected push leaves the panel
+  running exactly the firmware it booted; the failure reason appears on the glass.
+
+What remains open, and would each be a real piece of work:
+
+- **Image signing.** The core supports signature verification behind
+  `UPDATE_SIGN` (`ArduinoOTA.setSignature()`), which needs a key pair and a
+  signing step in the build. Not enabled: today the password is the only thing
+  establishing that a push is legitimate.
+- **Boot health validation and automatic rollback.** ESP-IDF can mark a new app
+  provisional and roll back if it does not confirm itself, but that needs the
+  rollback bootloader option and an explicit `esp_ota_mark_app_valid` once the
+  panel decides it is healthy. Without it, firmware that transfers correctly but
+  then crashes on boot leaves the task watchdog rebooting it, and USB is the fix.
+
+**UNVERIFIED:** no push has been performed on hardware. Every fact above about
+the protocol, the password handling, and the integrity check was read out of the
+core's `ArduinoOTA.cpp`, `Update`, and `espota.py`; what has actually been
+exercised here is that both targets compile, that the pusher builds the right
+command line, and that it fails cleanly against a host that does not answer.
+
+Sizing, which is the real constraint on the C6: the OTA code costs ~45KB, taking
+that build from 85% to **89% of the 1.31MB app slot (1167976 bytes, 142744
+free)**. The S3 sits at 80%. That still fits with room, and both slots are the
+same size so an update is no tighter than an install — but the headroom is
+finite, and carrying both panel drivers plus the PMU reader in one binary is what
+spends it. The escape hatch, if a later feature stops fitting, is
+`PartitionScheme=min_spiffs` on the FQBN: 1.9MB app slots, still two of them,
+with NVS in the same place so settings survive. It would have to be applied
+everywhere the FQBN appears (here, and `tools/espdisp.py`), and it needs one USB
+flash to take effect because OTA cannot rewrite the partition table.
+
+The management datagrams remain unauthenticated and intended for a trusted local
+network — a forged `ECTL` can still dim a panel or reboot it. OTA is the one path
+that now requires a secret, because it is the one where the consequence is
+someone else's code running on the board.
 
 ## Status lights
 

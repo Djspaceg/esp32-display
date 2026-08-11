@@ -1299,6 +1299,50 @@ int main() {
     CHECK((deviceproto::CAP_BATTERY & deviceproto::CAP_TELEMETRY) == 0);
   }
 
+  {
+    // CAP_OTA was reserved when this protocol was written and is only now in
+    // use. Its value is pinned here because the Swift side spells the same
+    // number out by hand (DeviceProtocol.Capabilities.ota), and a panel that
+    // shifted the bit would silently advertise something else entirely.
+    CHECK(deviceproto::CAP_OTA == 1u << 4);
+    CHECK((deviceproto::CAP_OTA & deviceproto::CAP_RESTART) == 0);
+    CHECK((deviceproto::CAP_OTA & deviceproto::CAP_SLEEP_SYNC) == 0);
+    CHECK((deviceproto::CAP_OTA & deviceproto::CAP_BATTERY) == 0);
+
+    // It is a runtime capability, not one every panel has: a panel with no OTA
+    // password does not listen, so the bit must be absent from any set of
+    // always-present capabilities. Written as the same composition the firmware
+    // uses for BASE_CAPABILITIES so the two cannot quietly disagree.
+    const uint32_t base = deviceproto::CAP_BRIGHTNESS |
+                          deviceproto::CAP_BRIGHTNESS_LEVEL |
+                          deviceproto::CAP_FLIP | deviceproto::CAP_IDENTIFY |
+                          deviceproto::CAP_RESTART |
+                          deviceproto::CAP_SLEEP_SYNC |
+                          deviceproto::CAP_TELEMETRY |
+                          deviceproto::CAP_IDLE_TEXT;
+    CHECK((base & deviceproto::CAP_OTA) == 0);
+    CHECK((base & deviceproto::CAP_TOUCH) == 0);
+    CHECK((base & deviceproto::CAP_BATTERY) == 0);
+
+    // And the exact bytes an OTA-capable panel puts on the wire. The capability
+    // field is a u32 LE at offset 8, so a panel advertising everything a board
+    // always has plus OTA sends 0x000001FF there. Spelled out as bytes for the
+    // same reason the rest of this file does: the Swift side reads them back
+    // from an independent implementation.
+    CHECK(base == 0x1EFu);
+    uint8_t packet[deviceproto::INFO_PREFIX_BYTES + 8];
+    const uint8_t id[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+    const size_t written =
+        deviceproto::writeInfo(packet, sizeof(packet), 0,
+                               base | deviceproto::CAP_OTA, 1234, -55, 128, id,
+                               "p", "1.2.0");
+    CHECK(written == deviceproto::INFO_PREFIX_BYTES + 6);
+    CHECK(packet[8] == 0xFF);
+    CHECK(packet[9] == 0x01);
+    CHECK(packet[10] == 0x00);
+    CHECK(packet[11] == 0x00);
+  }
+
   printf("OK: %d checks passed\n", checks);
   return 0;
 }
