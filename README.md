@@ -305,19 +305,20 @@ boards that have an addressable LED and reports an error on those that do not;
 
 ## Repo layout
 
-| Path                                 | What                                                                                                          |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `firmware/display_stream/`           | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls                          |
-| `firmware/display_test/`             | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping |
-| `firmware/board_probe/`              | I2C-scan diagnostic reporting which board variant you have                                                    |
-| `firmware/libraries/espdisp_board/`  | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform       |
-| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance)                                     |
-| `mac/ESPDisplaySender/`              | Native manager app plus SwiftPM command-line workflows                                                        |
-| `firmware/test/`                     | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`)     |
-| `mac/ESPDisplaySender/Tests/`        | Swift tests for the sender's protocol and application logic (`swift test`)                                    |
-| `tools/read_serial.py`               | Serial monitor with optional hard-reset (native USB-Serial/JTAG)                                              |
-| `tools/sweep.py`                     | Pacing parameter sweep, measuring displayed fps from device stats                                             |
-| `docs/`                              | Original project plan                                                                                         |
+| Path | What |
+| --- | --- |
+| `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls |
+| `firmware/display_test/` | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping |
+| `firmware/board_probe/` | I2C-scan diagnostic reporting which board variant you have |
+| `firmware/libraries/espdisp_board/` | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform |
+| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance) |
+| `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
+| `firmware/test/` | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
+| `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
+| `tools/espdisp.py` | Compile, flash, and configure from one command: holds the board table, finds the port, refuses to guess the chip |
+| `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
+| `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
+| `docs/` | Original project plan |
 
 ## Getting started
 
@@ -352,6 +353,32 @@ these). The same flag applies to `display_test` and `board_probe`. It is a
 compile-only flag; `upload` reuses the cached build. The C6 binary is
 board-independent (one build runs on either 1.47" board); the S3 binary
 serves only its own panel.
+
+`tools/espdisp.py` runs exactly those commands for you, so the two FQBNs, the
+`--libraries` flag, and the port glob stay out of your shell history:
+
+```sh
+tools/espdisp.py list                  # ports it can see, and the chip on each
+tools/espdisp.py compile --board c6    # or --board s3
+tools/espdisp.py flash                 # detect the chip, build, upload
+tools/espdisp.py flash --board s3      # skip detection and build that target
+tools/espdisp.py config CFGSHOW        # send one CFG* line, print the reply
+```
+
+`compile` and `flash` echo the `Sketch uses N bytes (P%)` line at the end, so
+app-partition headroom is visible without hunting through scrollback.
+
+`flash` refuses rather than guesses when it cannot tell which chip is attached.
+Both boards are native USB CDC at VID 0x303A PID 0x1001, so neither the port
+name nor the VID/PID distinguishes a C6 from the S3, and an S3 binary on a C6
+leaves a board that looks bricked. It asks arduino-cli first, then the esptool
+bundled with the core, and if neither answers it stops and tells you to pass
+`--board c6|s3`. More than one candidate port is likewise a refusal, not a
+coin flip: pass `--port`.
+
+The script is standard-library Python 3 only: unlike the other `tools/` scripts
+it does not need pyserial. The explicit `arduino-cli` commands above remain the
+fallback if it ever misbehaves, and they document what it does.
 
 Mac app — the set-and-forget way:
 
