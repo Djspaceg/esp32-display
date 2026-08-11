@@ -186,9 +186,30 @@ inline const char *statusToken(Status status) {
 /// there is nothing owed. The bug is not merely fixed, it is unrepresentable: a
 /// caller cannot restore state that was never saved.
 ///
-/// take() also consumes, so a second call restores nothing. The core sends one
-/// error per push, but "put it back once" is the property wanted, not "put it
-/// back as many times as asked".
+/// take() also consumes, so a second call restores nothing - and that is
+/// exercised today rather than being a nicety. The connect-failure path fires TWO
+/// error callbacks: _runUpdate reports OTA_CONNECT_ERROR (ArduinoOTA.cpp:366) and
+/// then sets _state = OTA_IDLE at 368 WITHOUT returning, so it falls into the
+/// transfer loop, skips it because !client.connected(), and reaches
+/// _updater->end() at 435 - which fails, nothing having been written, and reports
+/// OTA_END_ERROR at 449. So the panel draws "connect lost", take() restores and
+/// the backlight is re-applied, and then the second callback draws "bad image"
+/// over it while take() correctly declines to restore again. Without consuming,
+/// that second callback would re-apply a restore whose values had already been
+/// handed back.
+///
+/// One visible consequence worth knowing before someone chases it: a connect
+/// failure ends up reading `bad image` on the glass, because the second callback
+/// repaints over the first. That is the core's ordering, not this file's, and it
+/// predates this type.
+///
+/// discard() is the success half. onEnd is not an error path and owes the panel
+/// nothing - the board reboots and the sender re-establishes both flags - but
+/// leaving `held` set after a successful transfer would make "no saved state
+/// crosses a push" depend on that reboot happening, which is to say on
+/// _rebootOnSuccess still being true. That is a core default this sketch does not
+/// set, and a comment is a poor place to keep an invariant. Consuming in onEnd
+/// makes it hold from this side instead.
 struct SavedPanelState {
   bool sleeping = false;
   bool idle = false;
@@ -210,6 +231,11 @@ struct SavedPanelState {
     idleOut = idle;
     return true;
   }
+
+  /// Forget what was saved without restoring it, for the path that does not owe
+  /// it back. Idempotent, and does not stop a later save() - a panel that
+  /// completed one push still gets its state back if the next one fails.
+  void discard() { held = false; }
 };
 
 /// Whether the advertised capability set should carry CAP_OTA.

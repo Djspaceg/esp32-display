@@ -1589,6 +1589,13 @@ static bool startOtaIfConfigured() {
     Serial.println("ota: complete, rebooting");
     drawOtaScreen("rebooting", 100);
     otaInProgress = false;
+    // Success owes the panel nothing back - the reboot re-establishes both flags
+    // from the sender - but drop the saved state here rather than letting the
+    // reboot be what clears it. Otherwise "nothing saved crosses a push" rests on
+    // _rebootOnSuccess still being true, which is a core default this sketch never
+    // sets and which only the comment above records. One call makes the invariant
+    // hold from this side instead of depending on that.
+    otaSavedPanel.discard();
   });
 
   ArduinoOTA.onError([](ota_error_t error) {
