@@ -608,6 +608,58 @@ with only a C6 image has nothing to offer an S3 panel. Bundles are gitignored
 (`*.espdispfw`), and the write is atomic, so an interrupted build leaves either the
 previous file or no file rather than a half-written one.
 
+### Updating a panel from the app
+
+Select the panel in the manager window and choose **Update Firmware…** at the
+bottom of the detail pane. Pick a `.espdispfw` file, check what the sheet says it
+would do, type the OTA password, and confirm. No `arduino-cli` and no Python are
+involved: the app speaks the `espota` protocol itself.
+
+The file is one written by `tools/espdisp.py bundle` (see
+[Firmware bundles](#firmware-bundles)), and it does not have to have been built on
+the Mac doing the pushing — that is the point of it being one portable file. The
+sheet reads the manifest and shows the version, when it was built, the commit it
+came from and whether that tree was dirty, and the size of the image for this
+panel's chip.
+
+Then it says what pushing it would do, and the awkward answers are separate
+answers rather than one refusal. The bundle can be newer (an update), the same
+version (a reinstall, which is a reasonable way to recover a panel that is
+misbehaving), or **older** — a downgrade, which is offered because going back after
+a bad release is a real thing to want, but never labelled as an update. If either
+version is not a dotted number the sheet says which way round they go cannot be
+worked out rather than guessing. If the panel named a chip this bundle has no image
+for, that is the one case that is simply the wrong file and it is refused. If the
+panel did not name its chip at all — firmware older than the `chip` TXT record, or
+a build that could not name its own — the push is still offered, with the image
+chosen by hand and a warning saying so, for the same reason `--board` has an
+override on the command line: not knowing is not the same as being wrong, and the
+panel validates the image header's `chip_id` before it moves the boot slot, so the
+wrong choice costs a transfer rather than the panel.
+
+The password is the one set with `tools/espdisp.py set-password`. **Update
+Firmware…** is greyed out until a panel advertises that OTA is listening, and the
+tooltip says so and names that command. Ticking _Remember this password_ keeps it
+in this Mac's Keychain, filed under the panel's hardware ID rather than its name so
+renaming a panel does not lose it; unticking it forgets it. It is never written to
+the app's settings file or its saved-panel records.
+
+One thing to expect the first time: the panel connects **back** to the app to
+collect the image, rather than the app sending it. That is how `espota` works — the
+invitation on port 3232 carries a port for the Mac to be dialled back on — so the
+app opens a short-lived listening port for the transfer. macOS may therefore put up
+a firewall prompt for incoming connections; if the push sits at "waiting for the
+panel to connect back", that is the thing to check. **UNVERIFIED**: no ESP32 board
+is attached to the machine this was written on, so no panel has ever dialled back
+and no prompt has been observed either way. For the same reason, no push has been
+performed against real hardware — what is tested is the protocol arithmetic against
+python3's `hashlib` and the whole exchange against a fake panel over loopback.
+
+**USB stays the recovery route.** Everything in
+[Updating over WiFi](#updating-over-wifi) about that applies here too: OTA cannot
+replace the bootloader or the partition table, a panel that will not join WiFi
+cannot be reached over WiFi, and `tools/espdisp.py flash` is the way back.
+
 ### Firmware update status
 
 The firmware accepts a WiFi push (see [Updating over WiFi](#updating-over-wifi)),

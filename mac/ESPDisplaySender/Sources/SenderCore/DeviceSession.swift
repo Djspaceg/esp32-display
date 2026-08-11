@@ -63,6 +63,15 @@ final class DeviceSession {
     }
 
     let name: String
+    /// The panel's IP as this session's socket resolved it, or nil before the
+    /// connection is ready.
+    ///
+    /// Exposed for the firmware push, which sends its invitation straight to the
+    /// panel rather than through this session: an update needs an address, and
+    /// this is the one the panel's own datagrams are arriving from. Reading it
+    /// here rather than adding a second discovery path is the point - a
+    /// mDNS lookup done again at push time could resolve to something else.
+    var resolvedAddress: String? { sender.resolvedAddress }
     private let sender: FrameSender
     private let source: Source
     private let picker: PickerSource?

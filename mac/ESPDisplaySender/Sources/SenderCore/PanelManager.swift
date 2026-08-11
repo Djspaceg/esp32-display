@@ -309,6 +309,10 @@ final class PanelManager: ObservableObject {
     private var pickerTarget: String?
     private var refreshTimer: Timer?
     private var lastPersistedAt = Date.distantPast
+    /// Where per-panel OTA passwords are kept. Injected rather than reached for
+    /// directly so that previews and tests, which run unsigned, cannot touch the
+    /// login keychain - see `OTAPasswordStoring`.
+    let otaPasswords: OTAPasswordStoring
     /// Where the durable records live, or nil to disable persistence entirely.
     /// Previews and tests run without a file so they cannot overwrite the
     /// records belonging to the installed app.
@@ -334,8 +338,13 @@ final class PanelManager: ObservableObject {
     /// enough that a lost command self-corrects while the user is still there.
     private static let brightnessEchoGrace: TimeInterval = 1.5
 
-    init(settings: SenderSettings? = nil, defaultDisplayName: String = "") {
+    init(
+        settings: SenderSettings? = nil,
+        defaultDisplayName: String = "",
+        otaPasswords: OTAPasswordStoring = KeychainOTAPasswordStore()
+    ) {
         self.defaultDisplayName = defaultDisplayName
+        self.otaPasswords = otaPasswords
         let url = PanelStore.defaultURL
         persistenceURL = url
         settingsURL = SettingsStore.defaultURL
@@ -405,9 +414,13 @@ final class PanelManager: ObservableObject {
     init(
         previewPanels: [PanelSnapshot],
         savedNetworkNames: [String],
-        usbSerialPorts: [String]
+        usbSerialPorts: [String],
+        otaPasswords: OTAPasswordStoring = InMemoryOTAPasswordStore()
     ) {
         defaultDisplayName = ""
+        // In memory by default, never the keychain: this initialiser is what the
+        // SwiftUI previews and the tests use, and both run unsigned.
+        self.otaPasswords = otaPasswords
         persistenceURL = nil
         settingsURL = nil
         panels = previewPanels
@@ -1185,12 +1198,20 @@ final class PanelManager: ObservableObject {
         guard panel.isOnline else {
             return "This display is offline."
         }
+        // Firmware updates do not travel over the control protocol - espota is
+        // its own exchange on port 3232 - so it may look as though this rung
+        // should not apply to `.ota`. It does, and deliberately: what the
+        // capability BITS mean is only defined within a control-protocol
+        // generation, so on firmware from another lineage bit 4 is not
+        // necessarily OTA at all, and pushing two megabytes at a panel because a
+        // bit happened to be set is worse than sending someone to USB.
         guard panel.controlProtocolVersion
             == Int(DeviceProtocol.controlProtocolVersion)
         else {
             return "Flash the current firmware to enable remote controls."
         }
         guard panel.capabilities.contains(capability) else {
+            if capability == .ota { return Self.otaUnavailableReason }
             return "This display does not report support for "
                 + "\(Self.describe(capability))."
         }
@@ -1210,10 +1231,33 @@ final class PanelManager: ObservableObject {
         case .flip: return "rotation"
         case .identify: return "identify"
         case .restart: return "remote restart"
+        case .ota: return "firmware updates"
         case .touch: return "touch gestures"
         default: return "this control"
         }
     }
+
+    /// Why a panel that is otherwise reachable does not offer firmware updates.
+    ///
+    /// Its own message because the generic one - "this display does not report
+    /// support for firmware updates" - is true and useless: OTA is off on every
+    /// panel until someone sets a password over USB, so the answer is always the
+    /// same and it is a thing the user can go and do.
+    ///
+    /// ONE MESSAGE FOR TWO CAUSES, and they are worth naming together. The bit is
+    /// advertised only while the panel is actually listening
+    /// (`otapolicy::advertisesCapability` keys on `Status::On` alone), so it is
+    /// absent both when no password is stored and when a password is stored but
+    /// OTA could not start - the WiFi radio was not up when setup ran. From out
+    /// here those are indistinguishable, and the panel's own `CFGSHOW` is where
+    /// the difference is visible, so the message says what to check rather than
+    /// asserting which one it is.
+    private static let otaUnavailableReason =
+        "Firmware updates are off until this panel has an OTA password. Set one "
+        + "over USB with tools/espdisp.py set-password, then let the panel rejoin "
+        + "WiFi. A panel that has a password but could not start listening does "
+        + "not advertise updates either - tools/espdisp.py config CFGSHOW says "
+        + "which."
 
     /// Run a control action, refusing with an accurate reason if the display
     /// cannot honour it. The UI disables these controls using the same check,
@@ -1292,6 +1336,151 @@ final class PanelManager: ObservableObject {
 
     func restart(_ serviceName: String) {
         control(serviceName, capability: .restart) { $0.restartDevice() }
+    }
+
+    // MARK: firmware updates
+
+    /// Everything a push needs about one panel, gathered once so the update sheet
+    /// cannot half-know a panel.
+    struct FirmwareUpdateTarget: Equatable, Identifiable {
+        /// One update sheet per panel, keyed the way the rest of the UI is.
+        var id: String { serviceName }
+
+        let serviceName: String
+        let displayName: String
+        /// The 6-byte EINF device ID, hex. The key the OTA password is stored
+        /// under, because it survives a rename.
+        let hardwareID: String
+        /// The panel's IP, as the live streaming session resolved it.
+        let address: String
+        /// The `chip` TXT record: `esp32c6`, `esp32s3`, `unknown`, or nil from
+        /// firmware older than the record. Passed to the bundle as-is; nil and
+        /// `unknown` both mean "cannot choose an image on this evidence".
+        let chip: String?
+        /// The version from EINF, which is what the panel is running now.
+        let firmwareVersion: String
+    }
+
+    /// Whether a panel can be updated right now, and if not, why not in words.
+    enum FirmwareUpdateReadiness: Equatable {
+        case ready(FirmwareUpdateTarget)
+        case notReady(String)
+    }
+
+    /// What the Update Firmware button does: hand back a target to open the sheet
+    /// with, or report why not.
+    ///
+    /// The button is disabled on `canControl(.ota)`, which covers the capability
+    /// and the session, but not the two things that can still be missing at the
+    /// moment of the click - a hardware ID and a resolved address. Reporting those
+    /// through the same outcome alert as every other refusal beats opening a sheet
+    /// that cannot do anything.
+    func beginFirmwareUpdate(_ serviceName: String) -> FirmwareUpdateTarget? {
+        switch firmwareUpdateReadiness(serviceName) {
+        case .ready(let target):
+            return target
+        case .notReady(let reason):
+            // Titled through `describe` like every other refusal, which is what
+            // makes the `.ota` case in it load-bearing: without one this would
+            // read "This control unavailable".
+            operationOutcome = .failure(
+                "\(Self.describe(.ota).capitalizedFirst) unavailable", reason)
+            return nil
+        }
+    }
+
+    /// Gather what a push needs, or say what is missing.
+    ///
+    /// The address comes from the LIVE SESSION rather than from `panel.address`.
+    /// They are usually the same value, but `panel.address` is persisted and so
+    /// can be a leftover from a previous run - and pushing two megabytes of
+    /// firmware at whatever now holds that IP is a worse failure than declining to
+    /// start. `FrameSender` learns the real one from `conn.currentPath` the moment
+    /// the socket is ready, which is the same address the panel's own datagrams
+    /// arrive from.
+    func firmwareUpdateReadiness(_ serviceName: String) -> FirmwareUpdateReadiness {
+        if let reason = controlUnavailableReason(serviceName, capability: .ota) {
+            return .notReady(reason)
+        }
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
+            return .notReady("This display is not known yet.")
+        }
+        guard let hardwareID = panel.hardwareID else {
+            return .notReady(
+                "This panel has not reported its hardware ID yet, so there is "
+                    + "nowhere to keep its OTA password.")
+        }
+        guard let version = panel.firmwareVersion else {
+            return .notReady(
+                "This panel has not reported its firmware version yet, so there "
+                    + "is nothing to compare a bundle against.")
+        }
+        guard let address = sessions[serviceName]?.resolvedAddress else {
+            return .notReady(
+                "This panel's address has not been resolved yet. An update is "
+                    + "sent to the panel directly, so it cannot start until the "
+                    + "streaming session has an address to send it to.")
+        }
+        return .ready(FirmwareUpdateTarget(
+            serviceName: serviceName,
+            displayName: panel.displayName,
+            hardwareID: hardwareID,
+            address: address,
+            chip: panel.chip,
+            firmwareVersion: version))
+    }
+
+    /// The remembered password for a panel, or nil.
+    func rememberedOTAPassword(for hardwareID: String) -> String? {
+        otaPasswords.password(forHardwareID: hardwareID)
+    }
+
+    /// Remember or forget a password. Returns a message if the store refused,
+    /// which the caller shows alongside the push's own outcome - a keychain that
+    /// would not save is worth saying, but it is not a reason to abandon a push
+    /// that is otherwise ready to go.
+    func setRememberedOTAPassword(
+        _ password: String?, for hardwareID: String
+    ) -> String? {
+        do {
+            if let password, !password.isEmpty {
+                try otaPasswords.store(password, forHardwareID: hardwareID)
+            } else {
+                try otaPasswords.remove(forHardwareID: hardwareID)
+            }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Push an image to a panel and report the outcome the same way every other
+    /// device action does.
+    ///
+    /// Returns whether it succeeded, so the sheet can stay open on a failure with
+    /// the password still typed in rather than making the user start again.
+    func pushFirmware(
+        image: Data,
+        filename: String,
+        to target: FirmwareUpdateTarget,
+        password: String,
+        progress: @escaping @Sendable (FirmwarePusher.Progress) -> Void
+    ) async -> Bool {
+        let pusher = FirmwarePusher()
+        do {
+            try await pusher.push(
+                image: image, filename: filename, to: target.address,
+                password: password, progress: progress)
+            operationOutcome = .success(
+                "Update sent",
+                "\(target.displayName) has the new firmware and is restarting "
+                    + "onto it. Streaming reconnects by itself; the version in "
+                    + "the Firmware section updates when it reports in.")
+            return true
+        } catch {
+            operationOutcome = .failure("Update failed", error.localizedDescription)
+            return false
+        }
     }
 
     func rename(_ newName: String, for serviceName: String) {

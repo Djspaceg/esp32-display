@@ -164,6 +164,69 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertFalse(manager.canControl("studio-display", capability: .brightness))
     }
 
+    // MARK: firmware updates
+
+    /// OTA gets its own refusal because the generic one is true and useless:
+    /// updates are off on every panel until someone sets a password over USB, so
+    /// the message has to name the command that does it.
+    ///
+    /// One message for two causes, and it says so. The capability bit is
+    /// advertised only while the panel is actually listening
+    /// (`otapolicy::advertisesCapability` keys on `Status::On` alone), so its
+    /// absence means either no password or a password that never got to listen,
+    /// and from out here those look identical.
+    func testFirmwareUpdateRefusalNamesSetPassword() throws {
+        let manager = makeManager()
+        manager.register(makeSession(name: "studio-display"))
+        manager.update(
+            .info(try makeInfo(
+                name: "studio-display",
+                deviceID: [2, 0, 0, 0x12, 0x34, 0x56],
+                capabilities: allControls)),
+            for: "studio-display")
+
+        XCTAssertFalse(manager.canControl("studio-display", capability: .ota))
+        let reason = try XCTUnwrap(
+            manager.controlUnavailableReason("studio-display", capability: .ota))
+        XCTAssertTrue(
+            reason.contains("tools/espdisp.py set-password"),
+            "the reason has to name the command that turns OTA on; got: \(reason)")
+        XCTAssertTrue(reason.contains("could not start listening"), "got: \(reason)")
+        XCTAssertTrue(reason.contains("CFGSHOW"), "got: \(reason)")
+    }
+
+    /// The generic wording is still what every other capability gets, so the OTA
+    /// case is a special case and not a rewrite of the ladder. Same panel, same
+    /// rung, different capability.
+    func testOtherCapabilitiesKeepTheGenericRefusal() throws {
+        let manager = makeManager()
+        manager.register(makeSession(name: "studio-display"))
+        manager.update(
+            .info(try makeInfo(
+                name: "studio-display",
+                deviceID: [2, 0, 0, 0x12, 0x34, 0x56],
+                capabilities: DeviceProtocol.Capabilities.ota.union(.brightness))),
+            for: "studio-display")
+
+        XCTAssertTrue(manager.canControl("studio-display", capability: .ota))
+        let reason = try XCTUnwrap(
+            manager.controlUnavailableReason("studio-display", capability: .restart))
+        XCTAssertEqual(
+            reason, "This display does not report support for remote restart.")
+        XCTAssertFalse(reason.contains("set-password"))
+    }
+
+    /// The refusal title is composed from `describe(_:)` like every other one, so
+    /// without a `.ota` case in it this would read "This control unavailable".
+    func testFirmwareUpdateRefusalIsTitledByName() {
+        let manager = makeManager([controllablePanel(capabilities: allControls)])
+        manager.register(makeSession(name: "studio-display"))
+
+        XCTAssertNil(manager.beginFirmwareUpdate("studio-display"))
+        XCTAssertEqual(
+            manager.operationOutcome?.title, "Firmware updates unavailable")
+    }
+
     // MARK: identity reconciliation
 
     /// A USB rename changes the Bonjour name, so the same board reappears as a
