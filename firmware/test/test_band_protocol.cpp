@@ -1713,6 +1713,57 @@ int main() {
       CHECK(!nextSleeping);
       CHECK(nextIdle);
     }
+    // THE SUCCESS HALF. onEnd owes the panel nothing - the board reboots and the
+    // sender re-establishes both flags - so it discards instead of restoring, and
+    // afterwards the state is indistinguishable from one that was never saved.
+    // Without this the invariant "nothing saved crosses a push" would rest on
+    // ESP.restart() happening, i.e. on _rebootOnSuccess still being true, which
+    // nothing but a comment records.
+    {
+      otapolicy::SavedPanelState saved;
+      saved.save(true, true);
+      saved.discard();
+      bool sleeping = false, idle = false;
+      CHECK(!saved.take(sleeping, idle));
+      CHECK(!sleeping);  // untouched, exactly as for a fresh instance
+      CHECK(!idle);
+    }
+    // Idempotent, harmless with nothing held, and not a one-way door: a panel
+    // whose push completed still gets its state back if a later one fails.
+    {
+      otapolicy::SavedPanelState saved;
+      saved.discard();  // nothing held; not an error
+      saved.save(true, false);
+      saved.discard();
+      saved.discard();
+      bool sleeping = false, idle = true;
+      CHECK(!saved.take(sleeping, idle));
+      CHECK(!sleeping);
+      CHECK(idle);
+      saved.save(true, false);
+      bool nextSleeping = false, nextIdle = true;
+      CHECK(saved.take(nextSleeping, nextIdle));
+      CHECK(nextSleeping);
+      CHECK(!nextIdle);
+    }
+    // discard() and take() agree about what "nothing owed" means, from every
+    // saved combination and against a panel in either state - so a pass cannot
+    // come from the discarded values happening to match what the caller holds.
+    for (int bits = 0; bits < 4; bits++) {
+      const bool wasSleeping = (bits & 1) != 0;
+      const bool wasIdle = (bits & 2) != 0;
+      otapolicy::SavedPanelState discarded;
+      discarded.save(wasSleeping, wasIdle);
+      discarded.discard();
+      bool sleeping = wasSleeping, idle = wasIdle;
+      CHECK(!discarded.take(sleeping, idle));
+      CHECK(sleeping == wasSleeping);
+      CHECK(idle == wasIdle);
+      bool flipped = !wasSleeping, flippedIdle = !wasIdle;
+      CHECK(!discarded.take(flipped, flippedIdle));
+      CHECK(flipped == !wasSleeping);
+      CHECK(flippedIdle == !wasIdle);
+    }
   }
 
   printf("OK: %d checks passed\n", checks);
