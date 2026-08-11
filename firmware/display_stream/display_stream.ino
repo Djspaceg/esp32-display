@@ -222,6 +222,10 @@ static inline otapolicy::Status currentOtaStatus() {
 // screen and no DMA is queued underneath the flash writes.
 static volatile bool otaInProgress = false;
 static uint8_t otaShownPercent = 0;
+// The dimmed states onStart clears so an update is visible, kept so onError can
+// put them back. A successful push reboots, so only the failure path needs them.
+static bool otaWasSleeping = false;
+static bool otaWasIdle = false;
 
 // Last successful PMU reading, so the 5s status line and CFGSHOW can report a
 // battery without doing I2C traffic of their own. Only meaningful once
@@ -1498,16 +1502,30 @@ static bool startOtaIfConfigured() {
   ArduinoOTA.setMdnsEnabled(false);  // addMdnsService() owns every registration
 
   ArduinoOTA.onStart([]() {
+    // Fed here as well as from onProgress, and this is the one that was missing.
+    // Everything from the top of loop() to the FIRST progress callback is charged
+    // against one watchdog reset: Update.begin() erases the whole destination app
+    // slot (0x140000) before any data arrives, and then the drawing below can
+    // spend up to ~700ms in waitForDmaIdle plus a full-frame push. Nothing has
+    // measured that erase against the 10s timeout - UNVERIFIED, no hardware - so
+    // rather than assume it fits, feed the watchdog on both sides of it.
+    esp_task_wdt_reset();
     otaInProgress = true;
     otaShownPercent = 0;
     // Make the update visible whatever state the panel was in: a push that
     // arrives while the Mac's displays are asleep would otherwise happen behind
-    // a dark screen.
+    // a dark screen. Saved so a FAILED push can put it back - on success the
+    // board reboots and the sender re-establishes both, but a failure leaves this
+    // firmware running and the panel should go back to the state the Mac put it
+    // in rather than sitting lit until the 45s idle timer notices.
+    otaWasSleeping = displaySleeping;
+    otaWasIdle = idleActive;
     displaySleeping = false;
     idleActive = false;
     applyBacklight();
     Serial.println("ota: update starting");
     drawOtaScreen("updating", 0);
+    esp_task_wdt_reset();
   });
 
   ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
@@ -1555,6 +1573,19 @@ static bool startOtaIfConfigured() {
     // next completed frame overwrites it, and a rejected image never touched the
     // running slot - the panel is still on the firmware it booted.
     drawOtaScreen(what, -1);
+    // Then put back what onStart cleared. This firmware keeps running after a
+    // failed push, so the panel owes its state to the sender's last instruction,
+    // not to the update: without this a push that arrived during a Mac-sleep
+    // window left the panel lit until the 45s idle timer noticed, because nothing
+    // was going to tell it to sleep a second time.
+    //
+    // Deliberately after the draw, not before it. If the panel really was asleep
+    // the reason then goes dark almost immediately, which is the right way round
+    // - obeying the sender beats leaving a message nobody is there to read, and
+    // the reason is on the serial line either way.
+    displaySleeping = otaWasSleeping;
+    idleActive = otaWasIdle;
+    applyBacklight();
   });
 
   // begin() returns void in core 3.3.11 (verified in ArduinoOTA.cpp: on a failed
