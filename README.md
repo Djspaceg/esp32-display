@@ -176,6 +176,19 @@ same orientation and flip the pixels went through, and `firmware/display_test`
 has an interactive mode that draws a marker where you touch so the transform can
 be checked against a finger. The streaming firmware does not use touch yet.
 
+**Battery reporting is 1.75C-only.** Of the supported boards, only the
+ESP32-S3-Touch-AMOLED-1.75C has a power-management IC — an AXP2101 sharing the
+touch I2C bus — so it is the only one with a battery to report. The two C6 boards
+run straight off USB with no cell and no gauge, which makes this a per-board
+capability rather than a firmware-wide one: the board table records the
+controller, the firmware advertises `CAP_BATTERY` only after the chip actually
+answers, and the Mac shows a battery row only for a panel advertising the bit. A
+C6 shows no row rather than an empty or 0% one, and a 1.75C with a dead PMU is
+treated the same way. The reader is a minimal five-register one in
+`firmware/libraries/espdisp_board/src/board_power.h` rather than a vendored
+XPowersLib; that file explains why, and marks what is still unverified for want
+of hardware.
+
 ## Performance
 
 The panel's SPI bus tops out around 41 fps for full-frame pushes, and the
@@ -269,6 +282,17 @@ RSSI, brightness, orientation, and sleep state. Fixed-size `ECTL` commands and
 legacy heartbeat formats. `ETXT` pushes up to four short ASCII lines for the
 panel to show while idle.
 
+`EBAT` reports the battery every 10 seconds, on the boards that have one: a
+fixed 12-byte packet carrying whether a cell is attached, whether external USB
+power is present, a 0–100 percentage (`0xFF` when the gauge has no opinion yet),
+a charge state, and the cell voltage in millivolts. Charge state is one enum
+rather than separate charging and discharging bits, so the packet cannot express
+a contradictory state. It is its own packet rather than extra `EINF` fields
+because a sender length-checks `EINF` exactly: appending fields there would make
+an already-shipped sender reject _every_ `EINF` and lose the telemetry it
+already had, while an unrecognised packet type is simply dropped. Advertised as
+`CAP_BATTERY`, and only the ESP32-S3-Touch-AMOLED-1.75C ever sets it.
+
 The Mac gates every control on the capability bits the panel advertises, so a
 board running older firmware simply does not offer the newer controls rather
 than sending commands it will reject. That is also why the continuous
@@ -310,7 +334,7 @@ boards that have an addressable LED and reports an error on those that do not;
 | `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls |
 | `firmware/display_test/` | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping |
 | `firmware/board_probe/` | I2C-scan diagnostic reporting which board variant you have |
-| `firmware/libraries/espdisp_board/` | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform |
+| `firmware/libraries/espdisp_board/` | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform, AXP2101 battery reader |
 | `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance) |
 | `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
 | `firmware/test/` | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |

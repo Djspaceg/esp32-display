@@ -42,6 +42,7 @@
 // way this firmware does. panel_init.h pulls in the esp_lcd and SPI headers.
 #include <board_config.h>
 #include <board_detect.h>
+#include <board_power.h>
 #include <board_touch.h>
 #include <panel_init.h>
 #include <touch_gesture.h>
@@ -187,6 +188,18 @@ static const uint32_t BASE_CAPABILITIES =
 // touch rather than promising gestures that never arrive.
 static bool touchAvailable = false;
 
+// Whether the power-management IC came up, on the same "the chip has to answer"
+// rule as touchAvailable: only the 1.75C has a PMU, and a 1.75C whose PMU is
+// silent must advertise no battery rather than promise readings that never come.
+static bool batteryAvailable = false;
+
+// Last successful PMU reading, so the 5s status line and CFGSHOW can report a
+// battery without doing I2C traffic of their own. Only meaningful once
+// batteryReadingValid is set; a failed sample leaves the previous one standing
+// rather than reporting a zeroed battery as fact.
+static boardpower::Reading lastBattery = {};
+static bool batteryReadingValid = false;
+
 // Advertised capabilities. Runtime rather than a constant because CAP_TOUCH
 // depends on the hardware, and the sender uses these bits to decide which
 // controls to offer - a panel without touch should not show touch actions.
@@ -198,7 +211,8 @@ static uint32_t deviceCapabilities() {
   return BASE_CAPABILITIES
          | (touchAvailable ? (deviceproto::CAP_TOUCH
                               | deviceproto::CAP_TOUCH_LONGPRESS)
-                           : 0u);
+                           : 0u)
+         | (batteryAvailable ? deviceproto::CAP_BATTERY : 0u);
 }
 
 // Lines the sender asked the panel to show on its status card, with when they
@@ -501,6 +515,67 @@ static void sendDeviceInfo() {
   }
 }
 
+// Sample the PMU and report it. Its own packet rather than fields on EINF: an
+// already-shipped sender length-checks EINF exactly and would reject every one
+// of them, whereas an unknown packet type is simply dropped (see the EBAT
+// comment in device_protocol.h).
+static void sendBatteryStatus() {
+  if (!batteryAvailable) return;
+  boardpower::Reading reading;
+  if (!boardpower::read(reading)) return;
+  lastBattery = reading;
+  batteryReadingValid = true;
+  if (hbPort == 0) return;
+
+  uint8_t flags = 0;
+  if (reading.present) flags |= deviceproto::BATTERY_FLAG_PRESENT;
+  if (reading.externalPower) flags |= deviceproto::BATTERY_FLAG_EXTERNAL_POWER;
+  deviceproto::ChargeState state = deviceproto::ChargeState::Unknown;
+  switch (reading.charge) {
+    case boardpower::Charge::Charging:
+      state = deviceproto::ChargeState::Charging;
+      break;
+    case boardpower::Charge::Discharging:
+      state = deviceproto::ChargeState::Discharging;
+      break;
+    case boardpower::Charge::Standby:
+      state = deviceproto::ChargeState::Standby;
+      break;
+    case boardpower::Charge::Unknown:
+      break;
+  }
+
+  uint8_t packet[deviceproto::BATTERY_PACKET_BYTES];
+  deviceproto::writeBattery(
+      packet, flags,
+      reading.percentKnown ? reading.percent : deviceproto::BATTERY_PERCENT_UNKNOWN,
+      state, reading.millivolts);
+  udp.writeTo(packet, sizeof(packet), IPAddress(hbIp), hbPort);
+}
+
+// Charge state as one word, for the serial status line.
+static const char *batteryChargeWord(boardpower::Charge charge) {
+  switch (charge) {
+    case boardpower::Charge::Charging:
+      return "charging";
+    case boardpower::Charge::Discharging:
+      return "discharging";
+    case boardpower::Charge::Standby:
+      return "standby";
+    default:
+      return "unknown";
+  }
+}
+
+// Battery percentage for CFGSHOW, or -1 when there is no PMU, no cell, or no
+// settled gauge reading. Negative rather than 0 so "we do not know" can never
+// be read as "empty".
+static int batteryPercentOrUnknown() {
+  if (!batteryAvailable || !batteryReadingValid) return -1;
+  if (!lastBattery.present || !lastBattery.percentKnown) return -1;
+  return (int)lastBattery.percent;
+}
+
 static void sendControlAck(const deviceproto::ControlCommand &command,
                            uint8_t status = 0) {
   if (hbPort == 0) return;
@@ -742,11 +817,11 @@ static void processConfigLine(char *line) {
     name64[name64Len] = 0;
     Serial.printf(
         "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d bl=%s "
-        "board=%s ssid=%s\n",
+        "board=%s bat=%d ssid=%s\n",
         (const char *)b64, (const char *)name64, WiFi.status() == WL_CONNECTED,
         WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), panelFlip180,
         blIsHigh() ? "high" : "low", board::variantToken(boardVariant),
-        cfgSsid.c_str());
+        batteryPercentOrUnknown(), cfgSsid.c_str());
   }
   // Anything else on serial is ignored (a monitor typing away is harmless).
 }
@@ -1291,6 +1366,11 @@ void setup() {
   // Touch, before WiFi: the capability bits mDNS advertises depend on whether
   // the controller answered, so this has to be settled before we announce.
   touchAvailable = boardtouch::init(*bcfg);
+  // The PMU, for the same reason and so before the announce: CAP_BATTERY
+  // depends on the chip having answered, and addMdnsService() bakes
+  // deviceCapabilities() into its TXT record. Returns false on the C6 boards,
+  // which have no PMU, and never touches the bus there.
+  batteryAvailable = boardpower::init(*bcfg);
   // The device name doubles as the DHCP hostname (option 12), so the router
   // lists this board by name instead of "esp32c6-XXXXXX". This MUST precede
   // WiFi.mode(): the core latches the hostname onto the STA netif inside
@@ -1662,6 +1742,20 @@ void loop() {
     sendDeviceInfo();
   }
 
+  // Battery, well slower than EINF's 2s. A cell does not move perceptibly in
+  // ten seconds, and each sample is five I2C reads on the loop that also
+  // services DMA and WiFi - so the cheapest cadence that still feels live wins.
+  // Unlike the two timers above this is not gated on hbPort: the sample also
+  // feeds the serial status line and CFGSHOW, which are the only way to read a
+  // battery on a panel no sender has found yet. sendBatteryStatus() does the
+  // hbPort check itself before it puts anything on the wire, and returns
+  // immediately on a board with no PMU.
+  static uint32_t lastBatteryPoll = 0;
+  if (millis() - lastBatteryPoll >= 10000) {
+    lastBatteryPoll = millis();
+    sendBatteryStatus();
+  }
+
   static uint32_t lastLedUpdate = 0;
   if (millis() - lastLedUpdate >= 2000) {
     lastLedUpdate = millis();
@@ -1676,5 +1770,14 @@ void loop() {
                   (unsigned long)statFramesSkipped, (unsigned long)statPackets,
                   (unsigned long)statBadLen, (unsigned long)statDrawErrors,
                   (unsigned long)ESP.getFreeHeap(), (int)WiFi.RSSI());
+    // Its own line, and only on a board with a PMU: the C6 boards would
+    // otherwise print a battery field that can never say anything.
+    if (batteryAvailable && batteryReadingValid) {
+      Serial.printf("battery: %d%% %s %umV present=%d vbus=%d\n",
+                    batteryPercentOrUnknown(),
+                    batteryChargeWord(lastBattery.charge),
+                    (unsigned)lastBattery.millivolts, lastBattery.present,
+                    lastBattery.externalPower);
+    }
   }
 }

@@ -40,6 +40,11 @@ enum Capability : uint32_t {
   // sender can tell a panel that reports holds from one that only reports taps
   // and swipes - a gesture bound to a hold would otherwise appear to be ignored.
   CAP_TOUCH_LONGPRESS = 1u << 10,
+  // Emits EBAT, i.e. this board has a power-management IC with a battery gauge
+  // and reports its charge. Advertised because it is a per-board fact, not a
+  // firmware one: only the 1.75C carries a PMU, so a sender must not show a
+  // battery row for a panel that will never send a reading.
+  CAP_BATTERY = 1u << 11,
 };
 
 enum class ControlOpcode : uint8_t {
@@ -237,6 +242,103 @@ inline bool parseTouch(const uint8_t *data, size_t len, TouchEvent &out) {
   out.x = readU16LE(data + 8);
   out.y = readU16LE(data + 10);
   out.flags = data[12];
+  return true;
+}
+
+// ---- Battery ("EBAT") ---------------------------------------------------
+// What the board's power-management IC says about its battery, sent
+// unprompted on a slow timer by firmware advertising CAP_BATTERY.
+//
+// WHY NOT EXTRA FIELDS ON EINF: EINF already carries uptime, RSSI and
+// brightness, so battery looks like it belongs there. It cannot go there.
+// A sender's EINF parser gates on the version byte and then requires the
+// packet length to equal the fixed prefix plus the two string lengths
+// EXACTLY, so appending fields after the strings - or bumping INFO_VERSION -
+// makes an already-shipped sender reject every EINF outright. Telemetry that
+// exists today would vanish rather than degrade. A sender's inbound path, by
+// contrast, is a chain of parse attempts that silently drops anything it
+// cannot name, so a NEW packet type is invisible and harmless to a sender
+// that predates it. That is the same reasoning that produced ETCH and ETXT,
+// and it is why a new capability bit is preferred here over a version bump.
+//
+// Fixed 12 bytes, matching the ECTL/EACK convention, because everything worth
+// reporting fits: presence, external power, percent, charge state, millivolts.
+static const uint8_t BATTERY_VERSION = 1;
+static const size_t BATTERY_PACKET_BYTES = 12;
+
+// Bit 0: a battery is physically attached. Bit 1: external (VBUS) power is
+// present, so the panel keeps running whatever the cell does.
+static const uint8_t BATTERY_FLAG_PRESENT = 0x01;
+static const uint8_t BATTERY_FLAG_EXTERNAL_POWER = 0x02;
+
+// Percent when the gauge has no opinion - no battery attached, or the PMU
+// answered but the fuel gauge has not settled. Distinct from 0, which is a
+// real and alarming reading, and the reason percent is not simply clamped.
+static const uint8_t BATTERY_PERCENT_UNKNOWN = 0xFF;
+
+// One enum rather than separate charging/discharging flag bits, so the packet
+// cannot express a contradictory state: "charging and discharging at once" is
+// not representable here, whereas two independent bits would make it a case
+// every receiver had to decide what to do about.
+enum class ChargeState : uint8_t {
+  Unknown = 0,
+  Charging = 1,
+  Discharging = 2,
+  Standby = 3,
+};
+
+struct BatteryStatus {
+  bool present;
+  bool externalPower;
+  uint8_t percent;      ///< 0-100, or BATTERY_PERCENT_UNKNOWN
+  ChargeState state;
+  uint16_t millivolts;  ///< 0 means the voltage reading is unknown
+};
+
+inline bool validBatteryPercent(uint8_t raw) {
+  return raw <= 100 || raw == BATTERY_PERCENT_UNKNOWN;
+}
+
+inline bool validChargeState(uint8_t raw) {
+  return raw <= (uint8_t)ChargeState::Standby;
+}
+
+// ["EBAT"][version][flags][percent][state][millivolts u16][reserved x2]
+inline size_t writeBattery(uint8_t out[BATTERY_PACKET_BYTES], uint8_t flags,
+                           uint8_t percent, ChargeState state,
+                           uint16_t millivolts) {
+  memcpy(out, "EBAT", 4);
+  out[4] = BATTERY_VERSION;
+  out[5] = flags;
+  out[6] = percent;
+  out[7] = (uint8_t)state;
+  writeU16LE(out + 8, millivolts);
+  out[10] = 0;
+  out[11] = 0;
+  return BATTERY_PACKET_BYTES;
+}
+
+inline bool parseBattery(const uint8_t *data, size_t len, BatteryStatus &out) {
+  // The exact-length test is what refuses a trailing byte here. parseIdleText
+  // has to check for trailing bytes separately because its packet is
+  // variable-length; this one is fixed, so "13 bytes arrived" and "the sender
+  // and this parser disagree about the layout" are the same condition, and
+  // both are worth refusing rather than half-accepting.
+  if (len != BATTERY_PACKET_BYTES || memcmp(data, "EBAT", 4) != 0 ||
+      data[4] != BATTERY_VERSION || !validBatteryPercent(data[6]) ||
+      !validChargeState(data[7])) {
+    return false;
+  }
+  out.present = (data[5] & BATTERY_FLAG_PRESENT) != 0;
+  out.externalPower = (data[5] & BATTERY_FLAG_EXTERNAL_POWER) != 0;
+  out.percent = data[6];
+  out.state = (ChargeState)data[7];
+  out.millivolts = readU16LE(data + 8);
+  // The two reserved bytes are deliberately not required to be zero. They
+  // exist so a later firmware can carry one more small field - a temperature,
+  // a charge current - without a new packet type, and refusing a non-zero
+  // reserved byte would make that impossible without the version bump this
+  // whole design exists to avoid.
   return true;
 }
 

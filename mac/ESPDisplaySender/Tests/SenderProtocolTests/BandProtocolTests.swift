@@ -380,6 +380,123 @@ final class DeviceProtocolTests: XCTestCase {
         XCTAssertNotNil(DeviceProtocol.parseAck(ack))
         XCTAssertNil(DeviceProtocol.parseTouch(ack))
     }
+
+    // Byte-for-byte the vector firmware/test/test_band_protocol.cpp asserts
+    // writeBattery produces, copied by hand for the same reason the touch vector
+    // is: two independent implementations agreeing is the whole point, and a
+    // shared fixture would only show that one implementation agrees with itself.
+    func testParseBatteryMatchesFirmwareVector() {
+        let packet = Data([
+            0x45, 0x42, 0x41, 0x54, 0x01, 0x03,
+            0x57, 0x01, 0xAC, 0x0F, 0x00, 0x00,
+        ])
+        let battery = DeviceProtocol.parseBattery(packet)
+        XCTAssertTrue(battery?.present == true)
+        XCTAssertTrue(battery?.externalPower == true)
+        XCTAssertEqual(battery?.percent, 87)
+        XCTAssertEqual(battery?.state, .charging)
+        XCTAssertEqual(battery?.millivolts, 4012)
+    }
+
+    // The unknown sentinels arrive as nil rather than as numbers: 0xFF percent
+    // would read as a full battery and 0mV as a dead one.
+    func testParseBatteryUnknownValuesBecomeNil() {
+        let packet = Data([
+            0x45, 0x42, 0x41, 0x54, 0x01, 0x00,
+            0xFF, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ])
+        let battery = DeviceProtocol.parseBattery(packet)
+        XCTAssertNotNil(battery)
+        XCTAssertTrue(battery?.present == false)
+        XCTAssertTrue(battery?.externalPower == false)
+        XCTAssertNil(battery?.percent)
+        XCTAssertNil(battery?.millivolts)
+        XCTAssertEqual(battery?.state, .unknown)
+    }
+
+    func testParseBatteryAcceptsEveryChargeState() {
+        for state in DeviceProtocol.ChargeState.allCases {
+            var packet = Data("EBAT".utf8)
+            packet.append(contentsOf: [
+                DeviceProtocol.batteryVersion, DeviceProtocol.batteryFlagPresent,
+                state.rawValue, state.rawValue, 0x74, 0x0E, 0x00, 0x00,
+            ])
+            let battery = DeviceProtocol.parseBattery(packet)
+            XCTAssertEqual(battery?.state, state)
+            XCTAssertEqual(battery?.percent, state.rawValue)
+            XCTAssertEqual(battery?.millivolts, 3700)
+            XCTAssertTrue(battery?.present == true)
+            XCTAssertTrue(battery?.externalPower == false)
+        }
+    }
+
+    func testRejectsMalformedBatteryPackets() {
+        func packet(magic: String = "EBAT", version: UInt8 = 1, flags: UInt8 = 0x03,
+                    percent: UInt8 = 87, state: UInt8 = 1, reserved: UInt8 = 0,
+                    length: Int = 12) -> Data {
+            var data = Data(magic.utf8)
+            data.append(contentsOf: [version, flags, percent, state, 0xAC, 0x0F,
+                                     reserved, reserved])
+            data.append(Data(repeating: 0, count: max(0, length - data.count)))
+            return data.prefix(length)
+        }
+
+        XCTAssertNotNil(DeviceProtocol.parseBattery(packet()))
+        XCTAssertNil(DeviceProtocol.parseBattery(packet(magic: "EBAX")))
+        XCTAssertNil(DeviceProtocol.parseBattery(packet(version: 99)))
+        // 100 is full; 101 and up are not percentages at all. Only 0xFF has a
+        // meaning above 100, and it means "no reading", not "very full".
+        XCTAssertNotNil(DeviceProtocol.parseBattery(packet(percent: 100)))
+        XCTAssertNil(DeviceProtocol.parseBattery(packet(percent: 101)))
+        XCTAssertNil(DeviceProtocol.parseBattery(packet(percent: 254)))
+        XCTAssertNotNil(DeviceProtocol.parseBattery(packet(percent: 0xFF)))
+        // State 4 does not exist. Refused rather than treated as unknown, so a
+        // future firmware's new state cannot be silently misread as a current one.
+        XCTAssertNil(DeviceProtocol.parseBattery(packet(state: 4)))
+        // Fixed length, so a short or over-long packet is the trailing-byte test.
+        XCTAssertNil(DeviceProtocol.parseBattery(packet(length: 11)))
+        XCTAssertNil(DeviceProtocol.parseBattery(packet(length: 13)))
+        // The reserved bytes are ignored on purpose: a later firmware must be
+        // able to use them without this parser rejecting every packet.
+        XCTAssertNotNil(DeviceProtocol.parseBattery(packet(reserved: 0x5A)))
+    }
+
+    func testBatteryPacketIsNotClaimedByOtherParsers() {
+        let battery = Data([
+            0x45, 0x42, 0x41, 0x54, 0x01, 0x03,
+            0x57, 0x01, 0xAC, 0x0F, 0x00, 0x00,
+        ])
+        XCTAssertNotNil(DeviceProtocol.parseBattery(battery))
+        XCTAssertNil(DeviceProtocol.parseInfo(battery))
+        XCTAssertNil(DeviceProtocol.parseAck(battery))
+        XCTAssertNil(DeviceProtocol.parseTouch(battery))
+        XCTAssertNil(BandProtocol.parseHeartbeat(battery))
+    }
+
+    func testBatteryParserRejectsOtherMessageKinds() {
+        // EACK is the other 12-byte device packet, so it is the one this parser
+        // could plausibly steal.
+        let ack = Data([
+            0x45, 0x41, 0x43, 0x4B, 0x01, 0x02, 0x34, 0x12,
+            0x00, 0x03, 0x80, 0x00,
+        ])
+        XCTAssertNotNil(DeviceProtocol.parseAck(ack))
+        XCTAssertNil(DeviceProtocol.parseBattery(ack))
+
+        let control = DeviceProtocol.controlPacket(
+            opcode: .brightness, sequence: 1, value: 1)
+        XCTAssertEqual(control.count, 12)
+        XCTAssertNil(DeviceProtocol.parseBattery(control))
+    }
+
+    // The capability bit is what gates the manager's battery row, so it has to
+    // sit where the firmware puts it and must not overlap a neighbour.
+    func testBatteryCapabilityBit() {
+        XCTAssertEqual(DeviceProtocol.Capabilities.battery.rawValue, 1 << 11)
+        XCTAssertTrue(
+            DeviceProtocol.Capabilities.battery
+                .isDisjoint(with: [.touch, .touchLongPress, .telemetry]))
+    }
 }
 
 final class DeviceSourceConfigTests: XCTestCase {

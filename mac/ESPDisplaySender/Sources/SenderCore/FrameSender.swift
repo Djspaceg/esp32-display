@@ -30,6 +30,7 @@ final class FrameSender {
         case info(DeviceProtocol.DeviceInfo)
         case acknowledgement(DeviceProtocol.ControlAck)
         case touch(DeviceProtocol.TouchEvent)
+        case battery(DeviceProtocol.BatteryStatus)
     }
 
     private let host: String
@@ -460,6 +461,18 @@ final class FrameSender {
             // hill-climb, and a finger is not evidence that frames are landing.
             lock.withLock { _deviceReplies &+= 1 }
             onDeviceEvent?(.touch(touch))
+            return
+        }
+        if let battery = DeviceProtocol.parseBattery(data) {
+            // Same split as touch, for a stronger reason. It is a reply: the
+            // panel sends it unprompted, so it proves the link works. It is not
+            // a heartbeat: heartbeat age drives the reconnect watchdog and the
+            // pacing hill-climb, and a battery reading says nothing about
+            // whether frames are landing. It arrives on a 10s timer regardless
+            // of the stream, so letting it stand in for a heartbeat would keep
+            // a panel reading "Online" indefinitely after its stream died.
+            lock.withLock { _deviceReplies &+= 1 }
+            onDeviceEvent?(.battery(battery))
             return
         }
         guard let stats = BandProtocol.parseHeartbeat(data) else { return }
