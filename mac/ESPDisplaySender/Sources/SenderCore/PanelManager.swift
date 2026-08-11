@@ -38,6 +38,15 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// remembered from a previous run would risk pushing an image chosen from
     /// stale information. A panel has to be discovered to be pushed to anyway.
     var chip: String?
+    /// What this panel says its screen is, from its `res` TXT record, or nil when
+    /// it did not say or said something `PanelGeometry.isStreamable` refused.
+    ///
+    /// nil is a real answer and the region path treats it as one: it means fall
+    /// back to the compiled-in 172x320 rather than guess. Discovery-scoped and not
+    /// persisted, for the same reason as `chip` - the region rectangle IS
+    /// persisted, so a geometry remembered from a previous run could reshape a
+    /// user's framing before the panel that justified it had said anything.
+    var geometry: PanelGeometry?
     var frameProtocolVersion: Int?
     var controlProtocolVersion: Int?
     var capabilitiesRaw: UInt32 = 0
@@ -508,7 +517,8 @@ final class PanelManager: ObservableObject {
         // back a source that was not a region at all.
         sourceBeforeRegion = panel?.source
         let existing = panel?.source.region
-        guard let region = existing ?? Self.startingRegion() else {
+        guard let region = existing
+            ?? Self.startingRegion(geometry: panel?.geometry) else {
             operationOutcome = .failure(
                 "No display available",
                 "macOS reported no screen to draw a region on.")
@@ -555,27 +565,39 @@ final class PanelManager: ObservableObject {
 
     /// Resize the region to a preset multiple of the panel, keeping its centre.
     func setRegionScale(_ scale: Int, for serviceName: String) {
-        transformRegion(for: serviceName) { region, size in
-            region.scaled(to: scale, in: size)
+        transformRegion(for: serviceName) { region, geometry, size in
+            region.scaled(to: scale, geometry: geometry, in: size)
         }
     }
 
     /// Turn the region on its side, for a panel mounted the other way up.
     func rotateRegion(for serviceName: String) {
-        transformRegion(for: serviceName) { region, size in
+        transformRegion(for: serviceName) { region, _, size in
+            // Rotation swaps the rectangle's own sides, so it needs no geometry:
+            // whatever shape the region is, on its side is on its side.
             region.rotated(in: size)
         }
     }
 
+    /// The panel's advertised geometry, or nil if it has not said.
+    ///
+    /// Reads the snapshot rather than the session, so it answers for a panel that
+    /// is being framed while offline - which is the case region mode exists to
+    /// support, since the preview works with the panel switched off.
+    private func geometry(of serviceName: String) -> PanelGeometry? {
+        panels.first { $0.serviceName == serviceName }?.geometry
+    }
+
     private func transformRegion(
         for serviceName: String,
-        _ transform: (RegionSpec, CGSize) -> RegionSpec
+        _ transform: (RegionSpec, PanelGeometry?, CGSize) -> RegionSpec
     ) {
         guard let region = panels.first(
             where: { $0.serviceName == serviceName })?.source.region,
             let screen = DisplayCapture.screen(named: region.display)
         else { return }
-        let updated = transform(region, screen.frame.size)
+        let updated = transform(
+            region, geometry(of: serviceName), screen.frame.size)
         apply(updated, to: serviceName)
         // Only nudge the marquee if it is the thing being looked at; moving a
         // hidden window would be wasted work.
@@ -604,10 +626,11 @@ final class PanelManager: ObservableObject {
 
     /// A sensible first rectangle: 2x the panel, centred on the focused screen.
     /// 2x rather than 1x so it is big enough to see and grab.
-    private static func startingRegion() -> RegionSpec? {
+    private static func startingRegion(geometry: PanelGeometry?) -> RegionSpec? {
         guard let screen = DisplayCapture.preferredScreen() else { return nil }
         return RegionSpec.centered(
-            on: screen.name, scale: 2, landscape: false, in: screen.size)
+            on: screen.name, geometry: geometry, scale: 2, landscape: false,
+            in: screen.size)
     }
 
     // MARK: live preview
@@ -705,7 +728,8 @@ final class PanelManager: ObservableObject {
         {
             panels.append(PanelSnapshot(serviceName: device.name, displayName: device.name,
                                         discovered: true, lastSeen: Date(),
-                                        chip: device.metadata.chip))
+                                        chip: device.metadata.chip,
+                                        geometry: device.metadata.geometry))
         }
         // Recorded after the append loop so it reaches panels that already
         // existed - a panel restored from disk, or one whose first browse result
@@ -724,6 +748,14 @@ final class PanelManager: ObservableObject {
             guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
             else { continue }
             panels[index].chip = device.metadata.chip
+        }
+        // The resolution takes the same treatment and for the same reason: a
+        // second browse result without metadata must not erase a `res` that has
+        // already arrived. A panel does not stop knowing its own screen size.
+        for device in devices where device.metadata.geometry != nil {
+            guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
+            else { continue }
+            panels[index].geometry = device.metadata.geometry
         }
         sortPanels()
         if selectedServiceName == nil {
@@ -1116,6 +1148,14 @@ final class PanelManager: ObservableObject {
     ///
     /// `nonisolated` because it reads nothing but its arguments; inheriting the
     /// manager's actor would make a pure arithmetic check await the main queue.
+    ///
+    /// STILL THE COMPILED-IN 172:320, DELIBERATELY, and for the same reason
+    /// `DisplayCapture.resolve(named:)` keeps it: this filters the list of Mac
+    /// displays a panel could be pointed at, with no panel in scope to ask. A
+    /// square panel's ratio is 1:1, so believing an advertised geometry here would
+    /// exclude every square Mac display from the list rather than excluding the
+    /// panel it was meant to catch. The point is to skip a display that IS a
+    /// panel, and the only panels this can see are shaped like the constant.
     nonisolated static func isPanelShaped(_ width: Int, _ height: Int) -> Bool {
         guard width > 0, height > 0 else { return false }
         let target = Double(PixelConvert.width) / Double(PixelConvert.height)

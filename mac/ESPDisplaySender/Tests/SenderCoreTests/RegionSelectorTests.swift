@@ -112,7 +112,7 @@ final class MarqueeWindowTests: XCTestCase {
         let (name, screen) = try currentScreen()
         let selector = RegionSelector()
         let region = RegionSpec.centered(
-            on: name, scale: 2, landscape: false, in: screen.frame.size)
+            on: name, geometry: nil, scale: 2, landscape: false, in: screen.frame.size)
 
         selector.show(region)
         defer { selector.hide() }
@@ -174,7 +174,7 @@ final class MarqueeWindowTests: XCTestCase {
         let (name, screen) = try currentScreen()
         let selector = RegionSelector()
         let portrait = RegionSpec.centered(
-            on: name, scale: 1, landscape: false, in: screen.frame.size)
+            on: name, geometry: nil, scale: 1, landscape: false, in: screen.frame.size)
 
         selector.show(portrait)
         defer { selector.hide() }

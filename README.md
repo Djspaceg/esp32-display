@@ -338,8 +338,11 @@ was streamed as though it were a 172×320 one. It now streams each panel at the
 resolution that panel advertises, and falls back to 172×320 when `res` is
 missing or is a size the band protocol cannot carry (a row has to fit one
 packet, and the band count has to stay within the firmware's reassembly
-bitmap). `chip` is kept against the panel so a firmware bundle's images can be
-matched to it. Reading TXT records at all requires browsing with
+bitmap). That includes region mode: the rectangle the presets frame, and the
+size the 1×/2×/3× buttons describe, come from the panel's advertised geometry,
+so a square panel is framed square rather than being handed a 172:320 crop
+stretched to fit. `chip` is kept against the panel so a firmware bundle's images
+can be matched to it. Reading TXT records at all requires browsing with
 `bonjourWithTXTRecord`: Network.framework does not query for them by default,
 so with a plain Bonjour browse every result's metadata is empty however much
 the panel advertises.

@@ -261,7 +261,14 @@ final class RegionSelector: NSObject {
         _ start: CGRect, handle: Handle, towards mouse: CGPoint, aspect: CGSize
     ) -> CGRect {
         let ratio = aspect.height / max(aspect.width, 1)
-        // One panel-worth is the floor; below 1x there is nothing to gain.
+        // A FIXED 172-point floor, which is one panel-worth on the original panel
+        // and less than that on a bigger one. Not threaded from the panel's
+        // advertised geometry, unlike the preset sizes: `aspect` here is the
+        // region's own current size rather than the panel's, so there is nothing
+        // in scope to derive it from, and the cost of a floor that is too low is
+        // that a user can frame fewer points than the panel has pixels and get an
+        // upscale. That is a thing someone may want, so it does not justify
+        // plumbing geometry through the selector to forbid.
         let minWidth = Double(min(PixelConvert.width, PixelConvert.height))
 
         switch handle {
