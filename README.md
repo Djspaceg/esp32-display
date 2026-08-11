@@ -346,8 +346,8 @@ accepted right now", not "this build has OTA code in it".
 | `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
 | `firmware/test/` | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
 | `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
-| `tools/espdisp.py` | Compile, flash over USB, push over WiFi, and configure from one command: holds the board table, finds the port, refuses to guess the chip |
-| `tools/test_espdisp.py` | Tests for the CLI's decisions: chip and OTA-target refusals, password bounds, encodings (stdlib only, no framework) |
+| `tools/espdisp.py` | Compile, flash over USB, push over WiFi, bundle a build, and configure from one command: holds the board table, refuses to guess the chip |
+| `tools/test_espdisp.py` | Tests for the CLI's decisions: chip and OTA-target refusals, password bounds, encodings, the bundle format (stdlib only, no framework) |
 | `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
 | `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
 | `docs/` | Original project plan |
@@ -396,16 +396,20 @@ tools/espdisp.py flash                 # detect the chip, build, upload
 tools/espdisp.py flash --board s3      # skip detection and build that target
 tools/espdisp.py set-password          # store an OTA password (prompts for it)
 tools/espdisp.py ota panel.local --board c6   # build, then push over WiFi
+tools/espdisp.py bundle                # build both boards into one portable file
+tools/espdisp.py bundle-info FILE      # verify a bundle and print what is in it
 tools/espdisp.py config CFGSHOW        # send one CFG* line, print the reply
 ```
 
 `tools/test_espdisp.py` covers what the tool decides — the chip and target
-refusals, the password bounds, the base64 encoding, the espota command line — and
+refusals, the password bounds, the base64 encoding, the espota command line, the
+firmware bundle's byte layout and every way it can refuse a bundle — and
 prints `OK: N checks passed` like `firmware/test/run_tests.sh`. Standard library
 only, no test framework, run it by path.
 
-`compile`, `flash`, and `ota` echo the `Sketch uses N bytes (P%)` line at the
-end, so app-partition headroom is visible without hunting through scrollback.
+`compile`, `flash`, `ota`, and `bundle` echo the `Sketch uses N bytes (P%)` line
+at the end, so app-partition headroom is visible without hunting through
+scrollback.
 
 `flash` refuses rather than guesses when it cannot tell which chip is attached.
 Both boards are native USB CDC at VID 0x303A PID 0x1001, so neither the port name
@@ -538,6 +542,44 @@ capture.
 For the extended-desktop use case, create a virtual display in BetterDisplay
 sized to a multiple of 172×320 (for example, 688×1280). The sender finds it by
 name (default `Tiny Monitor`), learns its UUID, and tracks it from then on.
+
+### Firmware bundles
+
+`ota` pushes from the machine that compiled the firmware. A bundle is for the
+other case: build here, update from there.
+
+```sh
+tools/espdisp.py bundle                        # both boards -> ./espdisp-firmware-1.2.0.espdispfw
+tools/espdisp.py bundle --board c6 --output ~/fw.espdispfw
+tools/espdisp.py bundle-info ~/fw.espdispfw    # check a file before handing it over
+```
+
+`bundle` compiles each board and writes one self-contained `.espdispfw` file
+holding an application image per board plus a manifest. Nothing is pushed and no
+panel is contacted. The file is portable on purpose — it can be emailed, dropped in
+a share, or carried on a stick to a Mac that has never seen this repo and has no
+`arduino-cli`, where the app opens the file the user picks and pushes it itself.
+That is why it is one file rather than a directory of images.
+
+The manifest carries the firmware version, an ISO 8601 UTC build timestamp, the
+commit it was built from and whether that tree was dirty, the tool that wrote it,
+and for every image the board key, the chip token (`esp32c6` or `esp32s3`), the
+FQBN it was compiled with, its size, and its SHA-256. `bundle-info` prints all of
+that, and refuses the file if anything does not add up: bad magic, a manifest that
+does not parse, offsets that are not contiguous, an image running past the end of
+the file, the same chip listed twice, or a payload whose hash is not the one the
+manifest claims. Images are stored raw, so the hash `bundle-info` prints is the
+same number `shasum -a 256` gives for the `.ino.bin` the compile produced.
+
+The version is read out of the sketch (`FW_VERSION` in
+`firmware/display_stream/display_stream.ino`) rather than passed in as a flag, so
+the manifest cannot claim a version its images do not have — the app compares that
+number against what a panel reports to decide whether to offer an update.
+
+`--board` narrows the file to one image, and the summary says so plainly: a bundle
+with only a C6 image has nothing to offer an S3 panel. Bundles are gitignored
+(`*.espdispfw`), and the write is atomic, so an interrupted build leaves either the
+previous file or no file rather than a half-written one.
 
 ### Firmware update status
 

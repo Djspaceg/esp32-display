@@ -5,6 +5,7 @@ import base64
 import fnmatch
 import getpass
 import glob
+import hashlib
 import json
 import os
 import re
@@ -15,7 +16,7 @@ import sys
 import tempfile
 import termios
 import time
-from typing import List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 
 class Board(NamedTuple):
@@ -46,6 +47,7 @@ BOARDS = {
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKETCH_DIR = os.path.join(REPO_ROOT, "firmware", "display_stream")
+SKETCH_INO = os.path.join(SKETCH_DIR, "display_stream.ino")
 LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware", "libraries")
 
 # Both boards are native USB CDC, so they always enumerate here on macOS.
@@ -495,6 +497,449 @@ def send_config_line(address: str, line: str, timeout: float) -> str:
 
 
 # --------------------------------------------------------------------------
+# the firmware bundle: one file that travels
+#
+# `bundle` writes a single .espdispfw file holding the compiled application
+# images and a manifest describing them, and the Mac app opens one the user
+# picks - possibly on another machine, weeks later, with no copy of this repo in
+# sight. That is the whole reason for a file rather than a directory: it has to
+# survive being emailed, dropped in a share, or carried on a stick.
+#
+# LAYOUT, byte-exact. A reader on the other side of this format implements four
+# lines:
+#
+#   offset 0        "ESPDISPFW1\n"   11 bytes, magic and format generation
+#   offset 11       "%010d\n"        11 bytes, manifest length, zero-padded ASCII
+#   offset 22       manifest         UTF-8 JSON object, exactly that many bytes
+#   offset 22+len   payloads         the application images, raw, in manifest order
+#
+# The fixed 22-byte prefix is the point: a reader gets the manifest without
+# reading two megabytes, and the payloads stay byte-identical to arduino-cli's
+# <sketch>.ino.bin, so the sha256 in the manifest is the same number
+# `shasum -a 256` prints for the file the compile produced.
+#
+# WHY NOT zip, tar, or base64 inside JSON. Foundation has no zip reader on
+# macOS and the Compression framework only does raw deflate/zlib streams, so a
+# zip would leave the app hand-parsing a central directory; tar is the same
+# problem, another reader to write and test. base64 in JSON inflates 2.2MB to
+# roughly 3MB and forces the whole file through a JSON parser to reach one
+# image. Nothing here is compressed, because an ESP32 app image already is.
+# This container is about thirty lines on each side and leaves the images
+# checkable with ordinary tools.
+
+BUNDLE_MAGIC = b"ESPDISPFW1\n"
+BUNDLE_FORMAT = 1  # the `format` field inside the manifest, kept in step with the magic
+BUNDLE_LENGTH_DIGITS = 10
+BUNDLE_HEADER_BYTES = len(BUNDLE_MAGIC) + BUNDLE_LENGTH_DIGITS + 1  # 22
+BUNDLE_SUFFIX = ".espdispfw"
+BUNDLE_TOOL = "espdisp.py bundle"
+
+# Every key a reader may rely on. Listed rather than checked one at a time so a
+# refusal can name all of what is missing at once.
+MANIFEST_KEYS = (
+    "format",
+    "firmware_version",
+    "built_at",
+    "source_commit",
+    "source_dirty",
+    "tool",
+    "images",
+)
+IMAGE_KEYS = ("board", "chip", "fqbn", "filename", "offset", "bytes", "sha256")
+
+
+def encode_manifest(manifest: dict) -> bytes:
+    """The manifest's one canonical encoding.
+
+    Sorted and compact, so encoding the same manifest twice gives the same bytes.
+    bundle_manifest depends on that: the offsets it writes describe the file the
+    encoded manifest is part of, so it has to be able to encode, measure, and
+    encode again without the length wandering for reasons of its own.
+    """
+    return json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def bundle_length_line(length: int) -> bytes:
+    """The 11-byte length line: ten ASCII digits, zero padded, then a newline.
+
+    Fixed width is what puts the manifest at a constant offset. Ten digits allows
+    a 10GB manifest against an actual one of a few hundred bytes, so this cannot
+    be reached - but `%010d` does not truncate when a number outgrows the field,
+    it widens, which would move the manifest and turn every offset inside it into
+    a lie without anything noticing. So refuse instead: a manifest that does not
+    fit the field is not a bundle this format can describe, and saying so is
+    better than writing a file whose header disagrees with its body.
+    """
+    if length < 0 or length >= 10 ** BUNDLE_LENGTH_DIGITS:
+        raise Fail(
+            "manifest is %d bytes, which does not fit the %d-digit length field"
+            % (length, BUNDLE_LENGTH_DIGITS)
+        )
+    return ("%0*d\n" % (BUNDLE_LENGTH_DIGITS, length)).encode("ascii")
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+# The one spelling of FW_VERSION in the sketch (display_stream.ino:84). Loose
+# about whitespace and the position of the `*`, strict about everything that
+# makes it a definition, so a rename or a move breaks loudly here rather than
+# quietly producing a manifest with the wrong version in it.
+FW_VERSION_RE = re.compile(
+    r'^\s*static\s+const\s+char\s*\*\s*FW_VERSION\s*=\s*"([^"\n]*)"\s*;', re.MULTILINE
+)
+
+
+def fw_version_from_sketch(text: str) -> str:
+    """Read FW_VERSION out of the sketch source.
+
+    Read rather than passed in as a flag, because the sketch is the single source
+    of truth: FW_VERSION is what EINF reports to the app, what the mDNS `fw` TXT
+    record advertises, and what prints at boot. A --version flag would be a
+    second place for it to be wrong, and a bundle whose manifest disagrees with
+    the image it carries is worse than no manifest at all - the app compares the
+    two to decide whether to offer an update.
+
+    Refuses on zero or two matches instead of picking, the same stance
+    resolve_board takes: a tool that guessed here would put the wrong number in
+    front of the user at the one moment they are deciding whether to flash.
+    """
+    found = FW_VERSION_RE.findall(text)
+    if not found:
+        raise Fail(
+            "could not find FW_VERSION in the sketch.\n"
+            '  Expected a line like: static const char *FW_VERSION = "1.2.0";\n'
+            "  If it was renamed or moved, FW_VERSION_RE in this file has to follow it."
+        )
+    if len(found) > 1:
+        raise Fail(
+            "found %d FW_VERSION definitions in the sketch (%s); there must be exactly one"
+            % (len(found), ", ".join(repr(v) for v in found))
+        )
+    if not found[0].strip():
+        raise Fail("FW_VERSION in the sketch is empty; a bundle needs a version to compare")
+    return found[0]
+
+
+def sketch_fw_version(path: str = SKETCH_INO) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        raise Fail("cannot read %s: %s" % (path, exc.strerror or exc))
+    return fw_version_from_sketch(text)
+
+
+def utc_timestamp() -> str:
+    """ISO 8601 in UTC with a Z suffix, which is what the app's date parsing wants."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def git_provenance(repo_root: str = REPO_ROOT) -> Tuple[Optional[str], bool]:
+    """(commit, dirty) for the tree the images were built from, best effort.
+
+    Deliberately tolerant: an exported copy of this tool with no .git anywhere,
+    or a machine with no git installed, should still be able to write a bundle,
+    so anything short of a clean 40-hex answer means (None, False) and the
+    manifest says source_commit: null. run_capture already turns an OSError into
+    a non-zero result, so a missing git needs no special case here.
+
+    `git status --porcelain` counts untracked files as dirty on purpose: an
+    untracked source file under firmware/ is compiled into the image like any
+    other, so it belongs in an honest answer about what these bytes came from.
+    Ignored files - wifi_config.h, build directories - do not appear and do not
+    count.
+    """
+    head = run_capture(["git", "-C", repo_root, "rev-parse", "HEAD"], timeout=15.0)
+    if head.returncode != 0:
+        return None, False
+    commit = head.stdout.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return None, False
+    status = run_capture(["git", "-C", repo_root, "status", "--porcelain"], timeout=30.0)
+    if status.returncode != 0:
+        # The commit is known and the cleanliness is not. Claiming clean would be
+        # the wrong way to be wrong, but so would refusing to bundle at all, so
+        # this reports the commit and the safer of the two answers is the caller's
+        # problem: bundle-info prints exactly what the manifest says.
+        return commit, False
+    return commit, bool(status.stdout.strip())
+
+
+def bundle_manifest(
+    firmware_version: str,
+    images: List[dict],
+    built_at: str,
+    source_commit: Optional[str] = None,
+    source_dirty: bool = False,
+    tool: str = BUNDLE_TOOL,
+) -> dict:
+    """Build the manifest, filling in an absolute offset for every image.
+
+    `images` carries board, chip, fqbn, filename, bytes and sha256 per image; the
+    offsets are this function's job.
+
+    Offsets are absolute from the start of the FILE, not relative to the payload
+    area, so a reader is one slice with no arithmetic - and so it can also check
+    that the payloads run contiguously from 22 + len(manifest) in listed order,
+    which is what catches a truncated or hand-edited file.
+
+    Absolute offsets make the manifest describe its own length, so they are
+    solved rather than computed: assign, re-encode, and repeat until the encoded
+    length stops moving. Only a digit rollover in an offset can move it, and the
+    length only ever grows, so this settles in two passes.
+    """
+    if not images:
+        raise Fail("a bundle needs at least one image")
+    manifest = {
+        "format": BUNDLE_FORMAT,
+        "firmware_version": firmware_version,
+        "built_at": built_at,
+        "source_commit": source_commit,
+        "source_dirty": bool(source_dirty),
+        "tool": tool,
+        "images": [dict(image, offset=0) for image in images],
+    }
+    for _ in range(8):
+        length = len(encode_manifest(manifest))
+        cursor = BUNDLE_HEADER_BYTES + length
+        for image in manifest["images"]:
+            image["offset"] = cursor
+            cursor += image["bytes"]
+        if len(encode_manifest(manifest)) == length:
+            return manifest
+    raise Fail("could not settle the manifest offsets")  # unreachable: length only grows
+
+
+def pack_bundle(manifest: dict, payloads: Dict[str, bytes]) -> bytes:
+    """Serialise a manifest and its payloads into a bundle file's bytes.
+
+    Re-checks the manifest against the payloads it claims to describe - present,
+    right length, right hash, landing where the offsets say - because the writer
+    is the last side that can still fix a disagreement. Past here it is somebody
+    else's file and all they can do is refuse it.
+    """
+    images = manifest.get("images") or []
+    if not images:
+        raise Fail("a bundle needs at least one image")
+    raw = encode_manifest(manifest)
+    parts = [BUNDLE_MAGIC, bundle_length_line(len(raw)), raw]
+    cursor = BUNDLE_HEADER_BYTES + len(raw)
+    for image in images:
+        chip = image["chip"]
+        if chip not in payloads:
+            raise Fail("the manifest lists %s but no payload was given for it" % chip)
+        blob = payloads[chip]
+        if len(blob) != image["bytes"]:
+            raise Fail(
+                "%s payload is %d bytes, the manifest says %d"
+                % (chip, len(blob), image["bytes"])
+            )
+        digest = sha256_hex(blob)
+        if digest != image["sha256"]:
+            raise Fail(
+                "%s payload hashes to %s, the manifest says %s"
+                % (chip, digest[:16], str(image["sha256"])[:16])
+            )
+        if image["offset"] != cursor:
+            raise Fail(
+                "%s is listed at offset %d but lands at %d; the manifest offsets do "
+                "not describe this file" % (chip, image["offset"], cursor)
+            )
+        parts.append(blob)
+        cursor += len(blob)
+    return b"".join(parts)
+
+
+def unpack_bundle(data: bytes) -> Tuple[dict, Dict[str, bytes]]:
+    """Read a bundle, checking everything a reader can check.
+
+    Returns (manifest, {chip: image bytes}). Raises Fail, one specific line per
+    way a file can be wrong, because by the time this runs the file arrived from
+    somewhere else and "invalid bundle" tells the user nothing about whether to
+    re-download it, rebuild it, or go and find the person who sent it.
+
+    Everything here is checkable without the panel: the hashes catch a corrupt or
+    edited payload, and the contiguity check catches a truncation that happens to
+    leave a valid-looking manifest. What it cannot check is whether the image is
+    right for the panel - only the chip token in the manifest speaks to that, and
+    only the panel's own image validation settles it.
+    """
+    if len(data) < BUNDLE_HEADER_BYTES:
+        raise Fail(
+            "not a firmware bundle: %d bytes is shorter than the %d-byte header"
+            % (len(data), BUNDLE_HEADER_BYTES)
+        )
+    if not data.startswith(BUNDLE_MAGIC):
+        if data.startswith(b"ESPDISPFW"):
+            # A future generation. Say which one this tool reads, so an old tool
+            # meeting a new file gives an answer someone can act on.
+            raise Fail(
+                "unsupported bundle generation %r; this tool reads %r"
+                % (
+                    data[: len(BUNDLE_MAGIC)].decode("ascii", "replace").strip(),
+                    BUNDLE_MAGIC.decode("ascii").strip(),
+                )
+            )
+        raise Fail("not a firmware bundle: it does not start with the ESPDISPFW1 magic")
+
+    line = data[len(BUNDLE_MAGIC):BUNDLE_HEADER_BYTES]
+    if not line.endswith(b"\n") or not line[:-1].isdigit():
+        raise Fail(
+            "bundle length line is not %d digits and a newline: %r"
+            % (BUNDLE_LENGTH_DIGITS, line)
+        )
+    length = int(line[:-1])
+    end = BUNDLE_HEADER_BYTES + length
+    if end > len(data):
+        raise Fail(
+            "bundle claims a %d-byte manifest but only %d bytes follow the header; "
+            "the file is truncated" % (length, len(data) - BUNDLE_HEADER_BYTES)
+        )
+    try:
+        manifest = json.loads(data[BUNDLE_HEADER_BYTES:end].decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise Fail("bundle manifest is not valid UTF-8 JSON: %s" % exc)
+    if not isinstance(manifest, dict):
+        raise Fail(
+            "bundle manifest is a %s, not a JSON object" % type(manifest).__name__
+        )
+    missing = [key for key in MANIFEST_KEYS if key not in manifest]
+    if missing:
+        raise Fail("bundle manifest is missing %s" % ", ".join(missing))
+    if manifest["format"] != BUNDLE_FORMAT:
+        raise Fail(
+            "bundle manifest says format %r; this tool reads format %d"
+            % (manifest["format"], BUNDLE_FORMAT)
+        )
+    images = manifest["images"]
+    if not isinstance(images, list) or not images:
+        raise Fail("bundle manifest lists no images")
+
+    payloads = {}
+    cursor = end
+    for index, image in enumerate(images):
+        where = "image %d" % index
+        if not isinstance(image, dict):
+            raise Fail("%s is a %s, not a JSON object" % (where, type(image).__name__))
+        missing = [key for key in IMAGE_KEYS if key not in image]
+        if missing:
+            raise Fail("%s is missing %s" % (where, ", ".join(missing)))
+        chip = image["chip"]
+        offset, size = image["offset"], image["bytes"]
+        # bool is an int in Python and JSON true would sail through an isinstance
+        # check, so it is excluded explicitly rather than trusted.
+        if (
+            not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or offset < 0
+            or size <= 0
+        ):
+            raise Fail(
+                "%s (%s) has a nonsensical offset/bytes pair: %r/%r"
+                % (where, chip, offset, size)
+            )
+        if offset != cursor:
+            raise Fail(
+                "%s (%s) is listed at offset %d, but the payloads must run "
+                "contiguously from %d in listed order" % (where, chip, offset, cursor)
+            )
+        if offset + size > len(data):
+            raise Fail(
+                "%s (%s) runs to offset %d, past the end of a %d-byte file"
+                % (where, chip, offset + size, len(data))
+            )
+        if chip in payloads:
+            raise Fail(
+                "bundle lists %s twice; a reader could not tell which image to push"
+                % chip
+            )
+        blob = data[offset:offset + size]
+        digest = sha256_hex(blob)
+        if digest != image["sha256"]:
+            raise Fail(
+                "%s (%s) hash mismatch: the manifest says sha256 %s, the payload "
+                "hashes to %s. The file is damaged or was edited."
+                % (where, chip, str(image["sha256"])[:16], digest[:16])
+            )
+        payloads[chip] = blob
+        cursor += size
+    if cursor != len(data):
+        raise Fail(
+            "bundle has %d bytes trailing after the last image" % (len(data) - cursor)
+        )
+    return manifest, payloads
+
+
+def read_bundle(path: str) -> Tuple[dict, Dict[str, bytes]]:
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        raise Fail("cannot read %s: %s" % (path, exc.strerror or exc))
+    return unpack_bundle(data)
+
+
+def write_file_atomically(path: str, data: bytes) -> None:
+    """Write `path` in one step, through a sibling temp file and os.replace.
+
+    A bundle is a couple of megabytes, and the app reading one has no way to tell
+    a half-written file from a damaged one beyond the hashes refusing it. So an
+    interrupted run must leave either the previous file or no file, never a
+    partial one. The temp file is a sibling rather than in /tmp because os.replace
+    is only atomic within a filesystem.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(
+        dir=directory, prefix=os.path.basename(path) + ".", suffix=".partial"
+    )
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def describe_bundle(manifest: dict, full_hash: bool = False) -> List[str]:
+    """The manifest as lines a person reads. Shared by `bundle` and `bundle-info`."""
+    commit = manifest.get("source_commit")
+    if commit:
+        source = "%s%s" % (commit, " (dirty)" if manifest.get("source_dirty") else "")
+    else:
+        source = "unknown (not built from a git checkout)"
+    lines = [
+        "  version:  %s" % manifest.get("firmware_version"),
+        "  built at: %s" % manifest.get("built_at"),
+        "  source:   %s" % source,
+        "  tool:     %s (format %s)" % (manifest.get("tool"), manifest.get("format")),
+    ]
+    for image in manifest.get("images") or []:
+        digest = str(image.get("sha256", ""))
+        lines.append(
+            "  image:    %-3s %-8s %8d bytes  sha256 %s"
+            % (
+                image.get("board"),
+                image.get("chip"),
+                image.get("bytes", 0),
+                digest if full_hash else digest[:16] + "...",
+            )
+        )
+        if full_hash:
+            lines.append("            %s from %s" % (image.get("filename"), image.get("fqbn")))
+    return lines
+
+
+# --------------------------------------------------------------------------
 # subcommands
 
 
@@ -801,6 +1246,103 @@ def cmd_ota(args) -> int:
     return 0
 
 
+def cmd_bundle(args) -> int:
+    # Version first, before any compile: it is read from the sketch and can fail
+    # instantly, and finding out after two multi-minute builds would be
+    # irritating. Same ordering, and the same reason, as cmd_ota's password.
+    version = sketch_fw_version()
+    keys = list(dict.fromkeys(args.board or sorted(BOARDS)))  # dedupe, keep order
+    boards = [BOARDS[key] for key in keys]
+    path = args.output or os.path.join(
+        os.getcwd(), "espdisp-firmware-%s%s" % (version, BUNDLE_SUFFIX)
+    )
+    commit, dirty = git_provenance()
+    print("Firmware %s (FW_VERSION in %s)" % (version, os.path.relpath(SKETCH_INO, REPO_ROOT)))
+    print("Building: %s" % ", ".join(board.key for board in boards), flush=True)
+
+    entries: List[dict] = []
+    payloads: Dict[str, bytes] = {}
+    size_lines: List[str] = []
+    out_dirs: List[str] = []
+    try:
+        for board in boards:
+            out_dir = tempfile.mkdtemp(prefix="espdisp-bundle-%s-" % board.key)
+            out_dirs.append(out_dir)
+            size_lines += compile_board(board, output_dir=out_dir)
+            image = app_image(out_dir)
+            with open(image, "rb") as fh:
+                blob = fh.read()
+            entries.append(
+                {
+                    "board": board.key,
+                    "chip": board.chip,
+                    "fqbn": board.fqbn,
+                    "filename": os.path.basename(image),
+                    "bytes": len(blob),
+                    "sha256": sha256_hex(blob),
+                }
+            )
+            payloads[board.chip] = blob
+    finally:
+        # Same shape as cmd_ota: the export directories go whatever happens, so an
+        # interrupted build does not leave two megabytes per board in /tmp.
+        for out_dir in out_dirs:
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+    manifest = bundle_manifest(version, entries, utc_timestamp(), commit, dirty)
+    data = pack_bundle(manifest, payloads)
+    write_file_atomically(path, data)
+
+    report_sizes(size_lines)
+    print("\nWrote %s" % path)
+    print("  size:     %d bytes (%.1f MiB)" % (len(data), len(data) / (1024.0 * 1024.0)))
+    for line in describe_bundle(manifest):
+        print(line)
+
+    absent = [board for board in BOARDS.values() if board.chip not in payloads]
+    if absent:
+        print(
+            "\nThis bundle carries %d of %d images: nothing in it is for %s. The app\n"
+            "  will have nothing to offer such a panel - it can only push an image the\n"
+            "  file actually contains. Build without --board, or add %s, if\n"
+            "  those panels need this version too."
+            % (
+                len(payloads),
+                len(BOARDS),
+                " or ".join(board.chip for board in absent),
+                " ".join("--board %s" % board.key for board in absent),
+            )
+        )
+    print(
+        "\nHand this file to the Mac app (or to `%s bundle-info` first)."
+        % os.path.basename(sys.argv[0])
+    )
+    return 0
+
+
+def cmd_bundle_info(args) -> int:
+    manifest, payloads = read_bundle(args.path)
+    size = os.path.getsize(args.path)
+    print("%s" % args.path)
+    print("  size:     %d bytes (%.1f MiB)" % (size, size / (1024.0 * 1024.0)))
+    for line in describe_bundle(manifest, full_hash=True):
+        print(line)
+    # unpack_bundle already refused anything that did not add up, so reaching here
+    # is the verification result: say so, rather than leaving the user to infer it
+    # from the absence of an error.
+    print(
+        "\nVerified: %d image%s, contiguous, every sha256 matches."
+        % (len(payloads), "" if len(payloads) == 1 else "s")
+    )
+    known = [chip for chip in payloads if board_key_for_chip(chip)]
+    if len(known) < len(BOARDS):
+        print(
+            "Carries %s. A panel running anything else finds nothing to install here."
+            % ", ".join(sorted(payloads))
+        )
+    return 0
+
+
 def cmd_set_password(args) -> int:
     # Password first, port second: a password the panel would refuse can be caught
     # instantly, and finding that out after the port hunt (or after typing it into
@@ -932,6 +1474,46 @@ def build_parser() -> argparse.ArgumentParser:
         "as the only thing that will refuse a wrong-chip image)",
     )
     p_ota.set_defaults(func=cmd_ota)
+
+    p_bundle = subs.add_parser(
+        "bundle",
+        help="compile and pack the firmware into one portable %s file" % BUNDLE_SUFFIX,
+        description="Build the firmware and write it into a single file the Mac "
+        "app can open later - on this machine or on another one, with no copy of "
+        "this repo and no arduino-cli in sight. The file carries one application "
+        "image per board plus a manifest naming the firmware version, when it was "
+        "built, which commit it came from and the sha256 of every image. Nothing "
+        "is pushed: `bundle` only writes the file, and `ota` is still the way to "
+        "push from here.",
+        epilog="The version is read out of the sketch (FW_VERSION in\n"
+        "firmware/display_stream/display_stream.ino), never passed in, so the\n"
+        "manifest cannot disagree with the images beside it.\n"
+        "Inspect a file with `bundle-info`.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_bundle.add_argument(
+        "--board",
+        action="append",
+        choices=sorted(BOARDS),
+        help="build only this board; repeatable. Default is every board, because a "
+        "file with one image has nothing to offer a panel of the other chip",
+    )
+    p_bundle.add_argument(
+        "--output",
+        help="where to write the bundle (default ./espdisp-firmware-<version>%s)"
+        % BUNDLE_SUFFIX,
+    )
+    p_bundle.set_defaults(func=cmd_bundle)
+
+    p_bundle_info = subs.add_parser(
+        "bundle-info",
+        help="verify a %s file and print what is in it" % BUNDLE_SUFFIX,
+        description="Read a firmware bundle, check it (magic, manifest, offsets "
+        "and the sha256 of every image) and print what it holds. Run this before "
+        "handing a file to someone, and on a file someone handed you.",
+    )
+    p_bundle_info.add_argument("path", help="the %s file to inspect" % BUNDLE_SUFFIX)
+    p_bundle_info.set_defaults(func=cmd_bundle_info)
 
     p_pw = subs.add_parser(
         "set-password",

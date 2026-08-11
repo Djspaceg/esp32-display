@@ -14,6 +14,13 @@ firmware/*/build/
 # it as a matter of course.
 tools/__pycache__/
 
+# Firmware bundles written by `tools/espdisp.py bundle`. A couple of megabytes of
+# build output that the repo can reproduce from any commit, and the default
+# output path is the working directory, so it lands next to the sketch by
+# default. The .partial suffix is the sibling temp file the atomic write uses.
+*.espdispfw
+*.espdispfw.*.partial
+
 # Xcode
 #
 # gitignore contributors: remember to update Global/Xcode.gitignore, Objective-C.gitignore & Swift.gitignore
