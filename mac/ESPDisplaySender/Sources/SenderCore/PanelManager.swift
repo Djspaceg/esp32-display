@@ -28,6 +28,16 @@ struct PanelSnapshot: Identifiable, Equatable {
     var freeHeap: UInt32 = 0
     var spacingMicros: UInt32 = 0
     var firmwareVersion: String?
+    /// Which chip this panel is, from its `chip` mDNS TXT record: `esp32c6`,
+    /// `esp32s3`, or `unknown` from a build that could not name its own. nil
+    /// means the panel never sent the record, i.e. firmware older than it.
+    ///
+    /// Discovery-scoped and deliberately not persisted: it is a fact about the
+    /// hardware, but the only thing that will use it is matching a firmware
+    /// bundle's images against this panel, and doing that against a token
+    /// remembered from a previous run would risk pushing an image chosen from
+    /// stale information. A panel has to be discovered to be pushed to anyway.
+    var chip: String?
     var frameProtocolVersion: Int?
     var controlProtocolVersion: Int?
     var capabilitiesRaw: UInt32 = 0
@@ -681,7 +691,26 @@ final class PanelManager: ObservableObject {
                 && !panels.contains(where: { $0.serviceName == device.name })
         {
             panels.append(PanelSnapshot(serviceName: device.name, displayName: device.name,
-                                        discovered: true, lastSeen: Date()))
+                                        discovered: true, lastSeen: Date(),
+                                        chip: device.metadata.chip))
+        }
+        // Recorded after the append loop so it reaches panels that already
+        // existed - a panel restored from disk, or one whose first browse result
+        // arrived before its TXT query answered.
+        //
+        // Only written when the record is there. NWBrowser can report a service
+        // and then report it again with metadata attached, so overwriting with
+        // nil would let the second-best result erase a chip that had already
+        // arrived, and there is no such thing as a panel that stops knowing
+        // which chip it is.
+        //
+        // Indexed rather than routed through updatePanel, which creates a row
+        // for a name it does not find: a superseded service name must not come
+        // back as a second row for a panel that has already been renamed.
+        for device in devices where device.metadata.chip != nil {
+            guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
+            else { continue }
+            panels[index].chip = device.metadata.chip
         }
         sortPanels()
         if selectedServiceName == nil {

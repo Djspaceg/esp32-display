@@ -12,7 +12,7 @@ import Foundation
 ///
 /// The last band may be shorter than the others when height does not divide
 /// evenly (e.g. 466x466: every band is 1 row, all uniform).
-public struct PanelGeometry: Equatable, Sendable {
+public struct PanelGeometry: Hashable, Sendable {
     public let width: Int
     public let height: Int
 
@@ -51,6 +51,46 @@ public struct PanelGeometry: Equatable, Sendable {
 
     public func bandOffset(index: Int, landscape: Bool) -> Int {
         index * rowsPerBand(landscape: landscape) * rowBytes(landscape: landscape)
+    }
+
+    /// Ceiling on the bands any geometry may produce, mirroring the firmware's
+    /// `bandproto::MAX_BANDS` (firmware/display_stream/band_protocol.h:34),
+    /// which sizes the receiver's reassembly bitmap. A frame needing more bands
+    /// than this cannot be reassembled at the other end at all.
+    public static let maxBands = 512
+
+    /// Whether this geometry is one the band protocol can actually carry.
+    ///
+    /// Worth having because a geometry can now come from an mDNS TXT record
+    /// rather than from a constant in this file, and an implausible one must be
+    /// refused at the edge instead of propagating into band arithmetic and frame
+    /// allocation. Three separate reasons, none of them arbitrary:
+    ///
+    /// 1. Both dimensions must be positive. `rowBytes` is `width * 2`, and
+    ///    `rowsPerBand` divides by it, so a zero-width geometry is not merely
+    ///    silly - it divides by zero. This check is first for that reason.
+    /// 2. A row must fit one packet. Bands are whole rows, so a row wider than
+    ///    the payload budget (`maxPacketBytes - headerBytes` = 1394 bytes, i.e.
+    ///    697 pixels) makes `rowsPerBand` floor to 1 and leaves a band that is
+    ///    still over budget - the sender would emit datagrams larger than the
+    ///    size both ends agreed on. Checked in both orientations because either
+    ///    axis becomes the row when the panel rotates.
+    /// 3. Band count must stay within `maxBands`, in both orientations, for the
+    ///    reassembler's sake.
+    ///
+    /// No separate cap on `frameBytes` is needed: 2 and 3 together bound a frame
+    /// at well under a megabyte, so nothing here can ask for an absurd
+    /// allocation. Both real panels pass - 172x320 and 466x466 - and so does a
+    /// 480x480, which the firmware's own comment names as roadmap.
+    public var isStreamable: Bool {
+        guard width > 0, height > 0 else { return false }
+        let budget = Self.maxPacketBytes - Self.headerBytes
+        for landscape in [false, true] {
+            guard rowBytes(landscape: landscape) <= budget,
+                  bandCount(landscape: landscape) <= Self.maxBands
+            else { return false }
+        }
+        return true
     }
 
     /// The original 172x320 panel (T-Display S3).

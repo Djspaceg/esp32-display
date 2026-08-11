@@ -418,6 +418,10 @@ final class DeviceSession {
 
         while true {
             let capture = DisplayCapture(
+                // The sender's geometry, not a constant: the capture has to
+                // produce frames of exactly the size the sender will send, and
+                // the sender's came from the panel's `res` TXT record.
+                geometry: sender.geometry,
                 onPreview: { [weak self] image, landscape in
                     self?.onPreview?(image, landscape)
                 },

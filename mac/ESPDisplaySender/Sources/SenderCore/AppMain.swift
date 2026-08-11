@@ -295,6 +295,11 @@ public enum ESPDisplaySenderApp {
         // otherwise the first discovered _espdisp._udp service.
         func makeSingleSender() async -> FrameSender {
             if opts.hostExplicit {
+                // No discovery, so no TXT records, so no geometry to pass: an
+                // explicit --host keeps FrameSender's 172x320 default. Naming a
+                // host bypasses mDNS entirely, which is the point of the flag -
+                // it is how an unannounced or misbehaving panel is reached - so
+                // there is nowhere better for a resolution to come from here.
                 return FrameSender(host: opts.host, port: opts.port,
                                    spacingMicros: opts.spacingMicros,
                                    adaptivePacing: opts.adaptivePacing)
@@ -302,10 +307,12 @@ public enum ESPDisplaySenderApp {
             print("discovering devices (_espdisp._udp) ...")
             while true {
                 if let device = await discoverFirstDevice(timeoutSeconds: 8) {
-                    print("using device \"\(device.name)\"")
+                    print("using device \"\(device.name)\""
+                        + " (\(device.geometry.width)x\(device.geometry.height))")
                     return FrameSender(endpoint: device.endpoint,
                                        spacingMicros: opts.spacingMicros,
-                                       adaptivePacing: opts.adaptivePacing)
+                                       adaptivePacing: opts.adaptivePacing,
+                                       geometry: device.geometry)
                 }
                 print("no devices found yet - still browsing ...")
             }
@@ -324,14 +331,20 @@ public enum ESPDisplaySenderApp {
                 }
             }
             print("test pattern at \(opts.fps) fps" + (opts.landscape ? " (landscape)" : ""))
-            var frame = [UInt8](repeating: 0, count: FrameSender.frameBytes)
+            // Sized from the sender's own geometry rather than from the 172x320
+            // constant: send(frame:) preconditions on geometry.frameBytes, so a
+            // discovered panel of another resolution would trap here on the
+            // first frame.
+            let geometry = sender.geometry
+            var frame = [UInt8](repeating: 0, count: geometry.frameBytes)
             var tick = 0
             var lastReport = Date()
             var lastCount: UInt64 = 0
             let interval = 1.0 / Double(opts.fps)
             while true {
                 let t0 = Date()
-                TestPattern.frame(tick: tick, landscape: opts.landscape, into: &frame)
+                TestPattern.frame(
+                    tick: tick, landscape: opts.landscape, geometry: geometry, into: &frame)
                 sender.send(frame: frame, landscape: opts.landscape)
                 tick += 1
                 if Date().timeIntervalSince(lastReport) >= 5 {
@@ -462,6 +475,8 @@ public enum ESPDisplaySenderApp {
             }
 
             if opts.hostExplicit {
+                // As in makeSingleSender: an explicit host skips discovery, so
+                // there are no TXT records and the 172x320 default stands.
                 launchSession(
                     name: "device",
                     sender: FrameSender(
@@ -489,6 +504,19 @@ public enum ESPDisplaySenderApp {
                                 endpoint: device.endpoint,
                                 spacingMicros: streaming.spacingMicros,
                                 adaptivePacing: streaming.adaptivePacing,
+                                // The panel's own resolution, from its `res` TXT
+                                // record, or 172x320 when it did not say. This
+                                // is the whole point of parsing TXT: every panel
+                                // was streamed as a 172x320 one before, so a
+                                // 466x466 AMOLED was sent bands computed for a
+                                // frame a quarter of its size.
+                                //
+                                // UNVERIFIED that a real 466x466 panel now
+                                // streams at its native geometry: no board is
+                                // attached, so what is demonstrated here is the
+                                // plumbing - which geometry reaches which
+                                // sender - and not a picture on glass.
+                                geometry: device.geometry,
                                 onDeviceEvent: { event in
                                     Task { @MainActor in
                                         panelManager.update(event, for: device.name)

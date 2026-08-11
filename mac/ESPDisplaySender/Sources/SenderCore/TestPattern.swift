@@ -1,16 +1,25 @@
 import Foundation
+import SenderProtocol
 
 /// Animated RGB565BE test pattern: scrolling hue gradient with a moving
 /// white bar, so dropped/duplicated frames are visible on the panel.
-/// In landscape the frame is 320 wide by 172 tall and the bar moves along
-/// the short axis.
+/// In landscape the frame's axes swap and the bar moves along the short one.
 enum TestPattern {
     /// Render one animation frame for `tick` into `out` (RGB565BE,
-    /// preallocated to the full frame size). Orientation picks the
-    /// 172x320 or 320x172 layout.
-    static func frame(tick: Int, landscape: Bool = false, into out: inout [UInt8]) {
-        let w = landscape ? PixelConvert.height : PixelConvert.width
-        let h = landscape ? PixelConvert.width : PixelConvert.height
+    /// preallocated to `geometry.frameBytes`). Orientation picks the portrait or
+    /// landscape layout of whatever panel this is.
+    ///
+    /// `geometry` defaults to the original panel, so a caller that has no better
+    /// answer gets the historical 172x320 pattern. Callers that do - test mode
+    /// takes it from the sender - must pass it, because `out` is sized from the
+    /// same geometry and the two disagreeing would write past the end.
+    static func frame(
+        tick: Int, landscape: Bool = false,
+        geometry: PanelGeometry = .panel172x320,
+        into out: inout [UInt8]
+    ) {
+        let w = geometry.frameWidth(landscape: landscape)
+        let h = geometry.frameHeight(landscape: landscape)
         let barY = tick % h
         out.withUnsafeMutableBytes { raw in
             let dst = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
