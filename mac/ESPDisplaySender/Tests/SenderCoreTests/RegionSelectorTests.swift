@@ -552,3 +552,99 @@ final class MarqueePointerStyleTests: XCTestCase {
         }
     }
 }
+
+/// The overlay's scale-preset and rotate zones. These controls exist ONLY on
+/// the marquee - the manager window deliberately has no copy, because
+/// adjusting a rectangle that is not on screen is meaningless - so the overlay
+/// geometry is the one place they can be clickable, and it is pure.
+final class MarqueePresetZoneTests: XCTestCase {
+
+    private let roomy = CGRect(x: 0, y: 0, width: 466, height: 466)
+
+    func testPresetRowSitsAboveDoneAndCancel() throws {
+        let presets = try XCTUnwrap(
+            RegionSelector.presetZones(in: roomy, includeRotate: true))
+        let actions = try XCTUnwrap(RegionSelector.actionZones(in: roomy))
+        XCTAssertEqual(presets.count, RegionSpec.scalePresets.count + 1)
+        for entry in presets {
+            XCTAssertGreaterThan(entry.rect.minY, actions.done.maxY)
+            XCTAssertTrue(roomy.contains(entry.rect))
+        }
+    }
+
+    func testEveryPresetZoneIsClickableWhereItIsDrawn() throws {
+        // Same discipline as Done/Cancel: hit-testing reads the identical rects
+        // that drawing does, asserted through the public classifier.
+        let presets = try XCTUnwrap(
+            RegionSelector.presetZones(in: roomy, includeRotate: true))
+        for entry in presets {
+            let centre = CGPoint(x: entry.rect.midX, y: entry.rect.midY)
+            XCTAssertEqual(
+                RegionSelector.zone(at: centre, in: roomy, includeRotate: true),
+                entry.zone)
+            // A button is a button, never a resize handle.
+            XCTAssertEqual(
+                RegionSelector.pointerStyle(
+                    at: centre, in: roomy, includeRotate: true),
+                .arrow)
+        }
+    }
+
+    func testScaleZonesCarryTheirPresets() throws {
+        let presets = try XCTUnwrap(
+            RegionSelector.presetZones(in: roomy, includeRotate: true))
+        let scales = presets.compactMap { entry -> Int? in
+            if case .scale(let value) = entry.zone { return value }
+            return nil
+        }
+        XCTAssertEqual(scales, RegionSpec.scalePresets)
+        XCTAssertEqual(presets.last?.zone, .rotate)
+    }
+
+    func testRotateIsAbsentWhenExcluded() throws {
+        // A square region's rotation swaps two equal sides - a visible no-op -
+        // so the selector hides the button and the classifier must agree.
+        let presets = try XCTUnwrap(
+            RegionSelector.presetZones(in: roomy, includeRotate: false))
+        XCTAssertFalse(presets.contains { $0.zone == .rotate })
+        // The spot where rotate would be is interior again, not a dead zone.
+        let withRotate = try XCTUnwrap(
+            RegionSelector.presetZones(in: roomy, includeRotate: true))
+        let rotateRect = try XCTUnwrap(
+            withRotate.first { $0.zone == .rotate }?.rect)
+        let centre = CGPoint(x: rotateRect.midX, y: rotateRect.midY)
+        XCTAssertEqual(
+            RegionSelector.zone(at: centre, in: roomy, includeRotate: false),
+            .interior)
+    }
+
+    func testTooSmallARectangleShowsNoPresets() {
+        // The floor mirrors actionZones' own: a rectangle that cannot hold the
+        // row cleanly holds none of it, rather than clipping half a button.
+        let tiny = CGRect(x: 0, y: 0, width: 120, height: 80)
+        XCTAssertNil(RegionSelector.presetZones(in: tiny, includeRotate: true))
+        // And clicks there fall through to the ordinary zones.
+        XCTAssertNotEqual(
+            RegionSelector.zone(
+                at: CGPoint(x: 60, y: 40), in: tiny, includeRotate: true),
+            .rotate)
+    }
+
+    func testPresetsNeverOverlapDoneCancelOrEachOther() throws {
+        for bounds in [roomy, CGRect(x: 0, y: 0, width: 240, height: 300)] {
+            guard let presets = RegionSelector.presetZones(
+                in: bounds, includeRotate: true) else { continue }
+            let actions = try XCTUnwrap(RegionSelector.actionZones(in: bounds))
+            var rects = presets.map(\.rect)
+            rects.append(actions.done)
+            rects.append(actions.cancel)
+            for (i, a) in rects.enumerated() {
+                for b in rects.dropFirst(i + 1) {
+                    XCTAssertFalse(
+                        a.intersects(b),
+                        "\(a) overlaps \(b) in \(bounds)")
+                }
+            }
+        }
+    }
+}
