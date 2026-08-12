@@ -66,4 +66,24 @@ inline uint8_t deviceFlags(bool brightnessHigh, uint8_t rotation, bool sleeping,
   return flags;
 }
 
+/// The idle card's default status lines: name, address, wifi, and - only for a
+/// board with a PMU and a current reading - battery.
+///
+/// Extracted from drawIdleScreen() so the decision of which lines to show and
+/// in what order is host-testable; drawIdleScreen() itself cannot be, since it
+/// touches the framebuffer and WiFi. This only decides *whether* the battery
+/// line appears, not its text - the caller formats "batt 84%" or similar and
+/// passes the finished C string in, because formatting needs snprintf and a
+/// charge-state word this header does not have.
+///
+/// hasBattery is the board fact (bcfg->hasBattery()); readingCurrent is
+/// whether the last PMU sample has not aged out (batteryReadingCurrent()). A
+/// board with a PMU whose reading has gone stale shows no line rather than a
+/// frozen number - the same reasoning CFGSHOW and the serial report already
+/// apply to the reading itself, now applied to whether it appears on glass at
+/// all.
+inline bool shouldShowBatteryLine(bool hasBattery, bool readingCurrent) {
+  return hasBattery && readingCurrent;
+}
+
 }  // namespace panelstate
