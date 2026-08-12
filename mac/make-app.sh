@@ -65,6 +65,36 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# The firmware the app ships with, built before Xcode runs so the build phase in
+# the project has something to embed and the signature covers it.
+#
+# WHY THE APP CARRIES FIRMWARE: a .espdispfw can only come from `espdisp.py
+# bundle`, so an Add Display sheet that asks the user for one asks them to open a
+# terminal - and adding a brand-new board is meant to work without that. Building
+# it here uses the CLI on the machine of whoever packages the app, which is a
+# different thing from requiring it of whoever uses the app.
+#
+# Reused when it is already there, because compiling both boards takes minutes and
+# most rebuilds are not firmware changes. ESPDISP_REBUILD_FIRMWARE=1 forces a fresh
+# one; ESPDISP_SKIP_FIRMWARE=1 packages without any, and the app then asks for a
+# file. A failure here is a warning rather than the end of the build: an app with no
+# embedded firmware still works, and still updates panels over the air.
+FIRMWARE_DIR="$HERE/ESPDisplaySender/Resources"
+FIRMWARE="$FIRMWARE_DIR/espdisp-default.espdispfw"
+if [[ -n "${ESPDISP_SKIP_FIRMWARE:-}" ]]; then
+  echo "skipping the default firmware bundle (ESPDISP_SKIP_FIRMWARE is set)"
+elif [[ -f "$FIRMWARE" && -z "${ESPDISP_REBUILD_FIRMWARE:-}" ]]; then
+  echo "reusing $FIRMWARE ($(stat -f %z "$FIRMWARE") bytes)"
+  echo "  rebuild it with ESPDISP_REBUILD_FIRMWARE=1 $0"
+else
+  echo "building the default firmware bundle (compiles both boards, minutes)"
+  mkdir -p "$FIRMWARE_DIR"
+  if ! python3 "$HERE/../tools/espdisp.py" bundle --output "$FIRMWARE"; then
+    echo "warning: could not build a firmware bundle; the app will ask for one" >&2
+    rm -f -- "$FIRMWARE"
+  fi
+fi
+
 xcodebuild \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
