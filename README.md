@@ -585,21 +585,57 @@ tools/espdisp.py bundle-info ~/fw.espdispfw    # check a file before handing it 
 ```
 
 `bundle` compiles each board and writes one self-contained `.espdispfw` file
-holding an application image per board plus a manifest. Nothing is pushed and no
+holding everything a board needs plus a manifest. Nothing is pushed and no
 panel is contacted. The file is portable on purpose — it can be emailed, dropped in
 a share, or carried on a stick to a Mac that has never seen this repo and has no
 `arduino-cli`, where the app opens the file the user picks and pushes it itself.
 That is why it is one file rather than a directory of images.
 
+Per board it carries four payloads: the application image, which is what an
+over-the-air update needs because it lands in an app slot, and the three things a
+board that has never been flashed needs written to fixed flash addresses before
+that image will boot at all — the second-stage bootloader, the partition table, and
+`boot_app0.bin`, which initialises the OTA data so the bootloader starts the app
+rather than an empty slot. The first two come out of the compile; `boot_app0.bin`
+is the core's own copy, the same file `arduino-cli` writes when it uploads over USB.
+
+Each payload's flash address travels in the file rather than being a constant in
+whatever writes it. That matters because the address is per-chip data: `boards.txt`
+puts the bootloader at `0x0` for both boards here and at `0x1000` on a classic
+ESP32, so a hardcoded address would be wrong for some board later — and wrong
+silently, because the flash would accept the write and the chip would then fail to
+boot. The partition table travels beside the app for the same reason: it is the
+table that decides the app lives at `0x10000`, so the two cannot drift apart.
+
+The whole-flash `<sketch>.ino.merged.bin` is deliberately **not** carried. It is
+padded to the full flash size — 8 MB for the C6 and 16 MB for the S3 — so a
+two-board bundle would grow from about 2.2 MB to roughly 24 MB, almost all of it
+padding, where the individual parts cost about 31 KB per board. It also describes a
+whole-flash write, which would erase NVS, and NVS is where a panel's WiFi
+credentials and its name live.
+
 The manifest carries the firmware version, an ISO 8601 UTC build timestamp, the
 commit it was built from and whether that tree was dirty, the tool that wrote it,
 and for every image the board key, the chip token (`esp32c6` or `esp32s3`), the
-FQBN it was compiled with, its size, and its SHA-256. `bundle-info` prints all of
-that, and refuses the file if anything does not add up: bad magic, a manifest that
-does not parse, offsets that are not contiguous, an image running past the end of
-the file, the same chip listed twice, or a payload whose hash is not the one the
-manifest claims. Images are stored raw, so the hash `bundle-info` prints is the
-same number `shasum -a 256` gives for the `.ino.bin` the compile produced.
+FQBN it was compiled with, its size, its SHA-256, the flash address the application
+image is written to, and the same details for each of its flash parts.
+`bundle-info` prints all of that, including every part and the address it goes to,
+and refuses the file if anything does not add up: bad magic, a manifest that
+does not parse, offsets that are not contiguous, a payload running past the end of
+the file, the same chip listed twice, a bundle missing one of the three parts a new
+board needs, two payloads claiming one flash address, or a payload whose hash is not
+the one the manifest claims. Payloads are stored raw, so every hash `bundle-info`
+prints is the same number `shasum -a 256` gives for the file the compile produced.
+
+Files written before this — generation 1, magic `ESPDISPFW1` — carried the
+application images and nothing else. Both the CLI and the app still read one: it
+cannot bring up a blank board, and it is a perfectly good over-the-air payload that
+whoever holds it may have no way to rebuild. `bundle-info` says which of the two it
+is looking at and says plainly when a file cannot set up a new board. An **older**
+app meeting a generation-2 file refuses it and names the app as the side that is
+behind, which is the honest answer: the generation was bumped rather than extended
+because the checks that catch a truncated or concatenated file are exactly the
+checks an extra payload would have had to be smuggled past.
 
 The version is read out of the sketch (`FW_VERSION` in
 `firmware/display_stream/display_stream.ino`) rather than passed in as a flag, so
