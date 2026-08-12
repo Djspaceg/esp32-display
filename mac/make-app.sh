@@ -18,25 +18,34 @@ set -euo pipefail
 # Refuse to touch anything that is not an absolute path inside the directory it
 # belongs to. Called before every delete and before the install swap, so no
 # recursive operation here runs on a path that has not been checked.
+#
+# The local is NOT called `path`. In zsh `path` is tied to `PATH`, so `local
+# path=...` inside a function replaces the search path for the duration of the
+# call and every external command in it stops resolving - which is what used to
+# happen here: `discard_scratch` could not find `rm`, so neither scratch delete
+# ran and every build left a 400MB derived-data directory in TMPDIR.
 require_under() {
-  local path="$1" parent="$2" label="$3"
-  [[ -n "$path" ]] || { echo "error: empty $label path" >&2; exit 1; }
-  [[ "$path" == /* ]] || {
-    echo "error: $label path is not absolute: $path" >&2; exit 1; }
-  [[ "$path" != *..* ]] || {
-    echo "error: $label path contains '..': $path" >&2; exit 1; }
-  [[ "$path" == "$parent"/?* ]] || {
-    echo "error: $label path escapes $parent: $path" >&2; exit 1; }
+  local target="$1" parent="$2" label="$3"
+  [[ -n "$target" ]] || { echo "error: empty $label path" >&2; exit 1; }
+  [[ "$target" == /* ]] || {
+    echo "error: $label path is not absolute: $target" >&2; exit 1; }
+  [[ "$target" != *..* ]] || {
+    echo "error: $label path contains '..': $target" >&2; exit 1; }
+  [[ "$target" == "$parent"/?* ]] || {
+    echo "error: $label path escapes $parent: $target" >&2; exit 1; }
 }
 
 # Delete scratch this script created during this run, after checking it. Build
 # intermediates are hundreds of megabytes of disposable output, so they are
 # removed rather than moved to the Trash.
+#
+# Same reason as above for not calling the local `path`: this is the function that
+# runs `rm`, and with PATH clobbered it silently deleted nothing.
 discard_scratch() {
-  local path="$1" parent="$2" label="$3"
-  [[ -e "$path" ]] || return 0
-  require_under "$path" "$parent" "$label"
-  rm -rf -- "$path"
+  local target="$1" parent="$2" label="$3"
+  [[ -e "$target" ]] || return 0
+  require_under "$target" "$parent" "$label"
+  rm -rf -- "$target"
 }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
