@@ -121,13 +121,24 @@ struct AddDeviceSheet: View {
                         .foregroundStyle(detection.chip == nil ? .secondary : .primary)
                 }
             }
-            Picker("What to do", selection: $mode) {
-                ForEach(UsbOnboarding.Mode.allCases) { option in
-                    Text(option.label).tag(option)
+            // A MENU PICKER, in the same `LabeledContent` shape every other control
+            // in this window uses, because that is the one that renders correctly
+            // under this form's `.labelColumn` style. Two attempts at a radio group
+            // did not, and both were seen on the built app rather than guessed at:
+            // it drew "Flash firmware and set up WiFi" and "Set up WiFi only" on top
+            // of each other in the trailing column and truncated its own label to
+            // "What to", with the label on the right - and it did the same when
+            // given its own VStack with the label hidden.
+            LabeledContent("What to do") {
+                Picker("What to do", selection: $mode) {
+                    ForEach(UsbOnboarding.Mode.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
                 }
+                .labelsHidden()
+                .fixedSize()
+                .disabled(running)
             }
-            .pickerStyle(.radioGroup)
-            .disabled(running)
         } header: {
             Text("Device")
         } footer: {

@@ -20,68 +20,29 @@ struct ManagerView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $manager.selectedServiceName) {
-                Section {
-                    ForEach(manager.panels) { panel in
-                        PanelRow(panel: panel)
-                            .tag(panel.serviceName)
-                            .contextMenu {
-                                Button("Identify") { manager.identify(panel.serviceName) }
-                                    .disabled(!manager.canControl(
-                                        panel.serviceName, capability: .identify))
-                                Button(panel.paused ? "Resume" : "Pause") {
-                                    manager.setPaused(!panel.paused, for: panel.serviceName)
-                                }
-                                Divider()
-                                Button("Forget Display", role: .destructive) {
-                                    manager.forget(panel.serviceName)
-                                }
-                                .disabled(!manager.canForget(panel.serviceName))
-                            }
-                    }
-                } header: {
-                    // The + is on the section header rather than in a window
-                    // toolbar because it belongs to this list, and because it has to
-                    // be reachable when the list is EMPTY - which is the state a
-                    // first board is added from, and the state every other
-                    // configuration path in this app cannot be started in, since
-                    // they all begin by selecting a display.
-                    HStack(spacing: 4) {
-                        Text("Displays")
-                        Spacer(minLength: 4)
-                        Button {
-                            showingAddDevice = true
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                        .buttonStyle(.plain)
-                        .help("Add a display connected by USB")
-                        .accessibilityLabel("Add a display over USB")
-                    }
+            // THE SIDEBAR IS A VSTACK, NOT JUST A LIST, so the footer below can
+            // exist. Three placements for the + were tried against the built app
+            // before this one, and the first two did not render at all: a Button in
+            // the List's section header was dropped by the sidebar header style
+            // (the accessibility tree showed one AXHeading and no button), and a
+            // `.safeAreaInset(edge: .bottom)` on the List was swallowed by the
+            // sidebar's scroll area (a screenshot of the sidebar's bottom showed
+            // nothing). Plain layout outside the List is what works, and it is also
+            // where macOS puts this control - Finder's tags, Mail's mailboxes,
+            // System Settings' lists all have a + in the sidebar footer.
+            sidebarList
+                // The footer is an OVERLAY on the list, with the list's scrollable
+                // content inset to leave room for it, because an overlay is laid out
+                // in the same bounds and therefore actually appears. Three other
+                // placements were tried against the built app and did not render at
+                // all - see the note on `AddDisplayFooter`.
+                .contentMargins(.bottom, 34, for: .scrollContent)
+                .overlay(alignment: .bottom) {
+                    AddDisplayFooter { showingAddDevice = true }
                 }
-            }
-            // The system sidebar style carries the Liquid Glass sidebar
-            // treatment and selection material; a plain list does not.
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
         } detail: {
-            if let panel = manager.selectedPanel {
-                PanelDetailView(panel: panel, manager: manager)
-                    .id(panel.serviceName)
-            } else {
-                // The empty state is also the new-user state, so it offers the one
-                // action that works with nothing in the sidebar.
-                ContentUnavailableView {
-                    Label("No Display Selected", systemImage: "display")
-                } description: {
-                    Text("Discovered and previously known panels appear in the "
-                        + "sidebar. A board that has never joined a network is not "
-                        + "discovered yet - add it over its USB cable.")
-                } actions: {
-                    Button("Add a Display over USB…") { showingAddDevice = true }
-                        .buttonStyle(.glassProminent)
-                }
-            }
+            detailColumn
         }
         // Standing problems float over the content on glass rather than pushing
         // the whole window down, which is what the old full-width bar did.
@@ -130,6 +91,101 @@ struct ManagerView: View {
         } message: {
             Text(manager.operationOutcome?.message ?? "")
         }
+    }
+
+    private var sidebarList: some View {
+        List(selection: $manager.selectedServiceName) {
+                Section {
+                    ForEach(manager.panels) { panel in
+                        PanelRow(panel: panel)
+                            .tag(panel.serviceName)
+                            .contextMenu {
+                                Button("Identify") { manager.identify(panel.serviceName) }
+                                    .disabled(!manager.canControl(
+                                        panel.serviceName, capability: .identify))
+                                Button(panel.paused ? "Resume" : "Pause") {
+                                    manager.setPaused(!panel.paused, for: panel.serviceName)
+                                }
+                                Divider()
+                                Button("Forget Display", role: .destructive) {
+                                    manager.forget(panel.serviceName)
+                                }
+                                .disabled(!manager.canForget(panel.serviceName))
+                            }
+                    }
+                } header: {
+                    Text("Displays")
+                }
+            }
+            // The system sidebar style carries the Liquid Glass sidebar
+            // treatment and selection material; a plain list does not.
+            .listStyle(.sidebar)
+    }
+
+    @ViewBuilder
+    private var detailColumn: some View {
+            if let panel = manager.selectedPanel {
+                PanelDetailView(panel: panel, manager: manager)
+                    .id(panel.serviceName)
+            } else {
+                // The empty state is also the new-user state, so it offers the one
+                // action that works with nothing in the sidebar.
+                ContentUnavailableView {
+                    Label("No Display Selected", systemImage: "display")
+                } description: {
+                    Text("Discovered and previously known panels appear in the "
+                        + "sidebar. A board that has never joined a network is not "
+                        + "discovered yet - add it over its USB cable.")
+                } actions: {
+                    Button("Add a Display over USB…") { showingAddDevice = true }
+                        .buttonStyle(.glassProminent)
+                }
+            }
+    }
+}
+
+/// The sidebar's footer: where macOS puts the control that adds one of whatever
+/// the list holds.
+///
+/// A plain glyph button, left-aligned on a bar, which is the shape Finder's tags,
+/// Mail's mailboxes and System Settings' lists all use. It is drawn over the list
+/// rather than under it, so it is present when the list is EMPTY - the state a
+/// first board is added from, and the state every other configuration path in this
+/// app cannot start in, since they all begin by selecting a display.
+///
+/// GETTING THIS TO RENDER AT ALL TOOK FOUR ATTEMPTS, all verified against the built
+/// app rather than by reading the code, and the three that failed failed silently -
+/// the source looked right and the control was simply not there:
+///
+///   1. A Button in the List's `Section` header. The sidebar header style keeps the
+///      text and drops interactive subviews; the accessibility tree showed one
+///      `AXHeading` and no button.
+///   2. `.safeAreaInset(edge: .bottom)` on the List. Swallowed by the sidebar's
+///      scroll area; a screenshot of the sidebar's bottom showed nothing.
+///   3. A `VStack { List; Divider(); footer }` as the whole sidebar column. The
+///      List rendered and its two siblings did not appear at all, in the screenshot
+///      or in the accessibility tree.
+///   4. An overlay on the List, with `contentMargins` insetting the scrollable
+///      content so rows are not hidden behind it. This one renders.
+private struct AddDisplayFooter: View {
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: action) {
+                Image(systemName: "plus")
+                    .frame(width: 24, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help("Add a display connected to this Mac by USB")
+            .accessibilityLabel("Add a display over USB")
+            .accessibilityIdentifier("add-display-over-usb")
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.bar)
     }
 }
 
