@@ -71,9 +71,16 @@ final class MainMenuController: NSObject {
     }
 
     private func fileMenu() -> NSMenu {
-        // Nothing here opens or saves documents; the manager is a single
-        // window, so Close is the whole File menu.
+        // Nothing here opens or saves documents. Adding a display is the closest
+        // thing this app has to New, and it gets ⌘N because it is the one action
+        // that has to work when the sidebar is empty - and because the standalone
+        // `--configure` dialog was previously reachable from no menu at all.
         let menu = NSMenu(title: "File")
+        let add = menu.addItem(
+            withTitle: "Add Display over USB\u{2026}", action: #selector(addDevice(_:)),
+            keyEquivalent: "n")
+        add.target = self
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Close",
                      action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         return menu
@@ -142,5 +149,14 @@ final class MainMenuController: NSObject {
     /// reference to whichever window is showing.
     @objc private func openSettings(_ sender: Any?) {
         NotificationCenter.default.post(name: .espDisplayShowSettings, object: nil)
+    }
+
+    /// No "show the window first" step, and that is safe for the reason this menu
+    /// exists at all: it is installed when the manager window is first shown, and
+    /// closing that window puts the app back in accessory mode, where macOS hides
+    /// the menu bar. So a reachable File menu means a manager window is on screen to
+    /// present the sheet.
+    @objc private func addDevice(_ sender: Any?) {
+        NotificationCenter.default.post(name: .espDisplayAddDevice, object: nil)
     }
 }

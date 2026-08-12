@@ -1587,6 +1587,135 @@ final class PanelManager: ObservableObject {
         }
     }
 
+    // MARK: adding a display over USB
+
+    /// Everything one onboarding run needs, gathered by the sheet so this cannot
+    /// be called half-configured.
+    ///
+    /// The port is in here as a value rather than being looked up, and it is used
+    /// once: for the flash. Nothing persists it. The same physical board was seen
+    /// on this machine at /dev/cu.usbmodem1101 and then at /dev/cu.usbmodem101
+    /// after a reset, so a stored path stops being that board's path the first time
+    /// it restarts - which on this path is immediately, twice.
+    struct USBOnboardRequest {
+        var port: String
+        var mode: UsbOnboarding.Mode
+        /// nil in configure-only mode, where nothing is written.
+        var bundle: FirmwareBundle?
+        var chip: String?
+        var mac: String?
+        var tool: EsptoolCommand.Tool?
+        var ssid: String
+        var password: ConfigCommands.PasswordChange
+        /// Empty to leave the board's own name alone.
+        var name: String
+        /// Erase the whole chip first. Never on by default: it takes NVS with it,
+        /// which is where a board that has been set up before keeps its
+        /// credentials and its name.
+        var eraseAll: Bool
+    }
+
+    /// Write a board if asked to, hand it credentials, and let discovery do the
+    /// rest.
+    ///
+    /// NOTHING IS ADDED TO THE SIDEBAR HERE, and that is the design rather than an
+    /// omission. A panel becomes a row by being discovered, which is the same path
+    /// every other panel arrives through and the only one that proves the board
+    /// actually joined the network. Inventing a row from a successful serial write
+    /// would put an entry in the sidebar that might never come online, and the user
+    /// would have no way to tell that from a panel that had.
+    ///
+    /// Returns whether it got all the way, so the sheet can stay open on a failure
+    /// with everything still filled in.
+    func onboardUSBDevice(
+        _ request: USBOnboardRequest,
+        progress: @escaping @Sendable (UsbOnboarder.Progress) -> Void
+    ) async -> Bool {
+        let steps = UsbOnboarding.configurationSteps(
+            name: request.name, ssid: request.ssid, password: request.password)
+
+        if request.mode == .flashAndConfigure {
+            guard let bundle = request.bundle, let chip = request.chip,
+                  let tool = request.tool,
+                  let writes = bundle.flashPlan(forChip: chip)
+            else {
+                // The sheet's button is gated on `UsbOnboardingPlan.canStart`, so
+                // reaching here means the two disagree. Reported rather than
+                // asserted: an alert that says what is missing beats a crash in a
+                // shipped app.
+                operationOutcome = .failure(
+                    "Cannot write this board",
+                    "The firmware, the chip and the esptool to write with are not "
+                        + "all known, so nothing was sent.")
+                return false
+            }
+            do {
+                try await UsbOnboarder.flash(
+                    writes: writes, chip: chip, port: request.port, tool: tool,
+                    eraseAll: request.eraseAll, onProgress: progress)
+            } catch let failure as WifiConfigUI.ConfigFailure {
+                operationOutcome = .failure(failure)
+                return false
+            } catch {
+                operationOutcome = .failure(
+                    "Flashing failed", error.localizedDescription)
+                return false
+            }
+        }
+
+        let finalPort: String
+        switch await UsbOnboarder.sendConfiguration(
+            steps: steps, flashedPort: request.port, onProgress: progress)
+        {
+        case .success(let port):
+            finalPort = port
+        case .failure(let failure):
+            operationOutcome = .failure(failure)
+            return false
+        }
+
+        // Remembered only once the board has taken it, so a credential that was
+        // refused does not end up in the keychain looking like a working one. Same
+        // ordering WifiConfigUI.run uses.
+        var keychainNote = ""
+        switch request.password {
+        case .set(let password):
+            keychainNote = WifiCredentialStore.save(ssid: request.ssid, password: password)
+                ? " The credential is saved in your Keychain."
+                : " The board was configured, but Keychain storage failed."
+        case .openNetwork:
+            keychainNote = WifiCredentialStore.save(ssid: request.ssid, password: "")
+                ? " The open network is saved in your Keychain."
+                : " The board was configured, but Keychain storage failed."
+        case .keepCurrent:
+            break
+        }
+        refreshSavedNetworks()
+        refreshUSBPorts()
+
+        let wrote = request.mode == .flashAndConfigure
+            ? "\(request.bundle?.firmwareVersion ?? "the firmware") is on the board and it "
+            : "The board "
+        let named = request.name.isEmpty
+            ? ""
+            : " It is called \"\(WifiConfigUI.normalizedDeviceName(request.name))\"."
+        operationOutcome = .success(
+            request.mode == .flashAndConfigure ? "Board set up" : "WiFi saved",
+            wrote + "is joining \"\(request.ssid)\". It appears in the sidebar by "
+                + "itself once it announces itself on the network, which takes a "
+                + "few seconds." + named + keychainNote)
+        return true
+    }
+
+    /// The saved credential for a network, for the onboarding sheet.
+    ///
+    /// Keychain access stays in the manager rather than in the view, which is where
+    /// every other credential read in this app already lives.
+    func savedWifiCredential(for ssid: String) -> SavedWiFiCredential? {
+        guard !ssid.isEmpty else { return nil }
+        return WifiCredentialStore.credential(for: ssid)
+    }
+
     func usbPortOptions(for serviceName: String) -> [String] {
         guard let assigned = panels.first(where: { $0.serviceName == serviceName })?.usbPort,
               !assigned.isEmpty,
