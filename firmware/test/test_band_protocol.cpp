@@ -595,6 +595,15 @@ int main() {
           panelstate::deviceFlags(false, 3, false, false, false));
   }
 
+  // --- idle card battery line: shown only for a board with a PMU and a
+  //     reading that has not aged out
+  {
+    CHECK(!panelstate::shouldShowBatteryLine(false, false));
+    CHECK(!panelstate::shouldShowBatteryLine(false, true));  // no PMU: never
+    CHECK(!panelstate::shouldShowBatteryLine(true, false));  // stale reading
+    CHECK(panelstate::shouldShowBatteryLine(true, true));
+  }
+
   // --- the quarter-turn quadrant behind MADCTL and touch --------------------
   // panel_init.h cannot be host-tested (it needs the esp_lcd headers), so the
   // arithmetic it drives MADCTL with lives in panel_orientation.h and is

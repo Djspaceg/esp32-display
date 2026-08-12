@@ -1273,7 +1273,7 @@ static void drawIdleScreen() {
   pushedAt = idleTextAt;
   portEXIT_CRITICAL(&controlMux);
 
-  char lineIp[24], lineWifi[24], lineAge[32];
+  char lineIp[24], lineWifi[24], lineAge[32], lineBattery[24];
   const char *lineName = cfgName.c_str();
   snprintf(lineIp, sizeof(lineIp), "%s", WiFi.localIP().toString().c_str());
   if (WiFi.status() == WL_CONNECTED) {
@@ -1281,9 +1281,25 @@ static void drawIdleScreen() {
   } else {
     snprintf(lineWifi, sizeof(lineWifi), "wifi down");
   }
+  // Only for a board with a PMU and a reading that has not aged out - a C6
+  // never has one, and a stale reading is worse than none (see
+  // panelstate::shouldShowBatteryLine).
+  const bool showBattery =
+      panelstate::shouldShowBatteryLine(bcfg->hasBattery(), batteryReadingCurrent());
+  if (showBattery) {
+    if (lastBattery.externalPower && !lastBattery.present) {
+      snprintf(lineBattery, sizeof(lineBattery), "usb power");
+    } else if (lastBattery.percentKnown) {
+      snprintf(lineBattery, sizeof(lineBattery), "batt %u%%%s",
+                (unsigned)lastBattery.percent,
+                lastBattery.charge == boardpower::Charge::Charging ? " chg" : "");
+    } else {
+      snprintf(lineBattery, sizeof(lineBattery), "batt --");
+    }
+  }
 
-  // Room for the pushed lines, an age line, and the three status lines.
-  const char *lines[deviceproto::IDLE_TEXT_MAX_LINES + 4];
+  // Room for the pushed lines, an age line, and the four status lines.
+  const char *lines[deviceproto::IDLE_TEXT_MAX_LINES + 5];
   int lineCount = 0;
   if (pushed.lineCount > 0) {
     for (uint8_t i = 0; i < pushed.lineCount; i++) {
@@ -1309,9 +1325,12 @@ static void drawIdleScreen() {
     // template, so a user who edits that template replaces them rather than
     // adding to them - appending them unconditionally used to print the name,
     // address, and signal twice for anyone whose template already had them.
+    // Battery is appended rather than folded into the template, because only
+    // one board in the fleet has one to report.
     lines[lineCount++] = lineName;
     lines[lineCount++] = lineIp;
     lines[lineCount++] = lineWifi;
+    if (showBattery) lines[lineCount++] = lineBattery;
   }
 
   size_t maxLen = 0;
