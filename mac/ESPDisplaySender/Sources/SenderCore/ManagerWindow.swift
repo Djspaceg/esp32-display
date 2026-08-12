@@ -282,6 +282,10 @@ private struct PanelDetailView: View {
     @State private var isEditingName = false
     @State private var selectedSSID = ""
     @State private var editedIdleText = ""
+    @State private var isEditingOTAPassword = false
+    @State private var otaPassword = ""
+    @State private var otaRememberPassword = false
+    @State private var otaPasswordProblem: String?
     /// Collapsed by default: these counters matter when something is wrong, and
     /// pushing everything above them off the screen the rest of the time is a
     /// poor trade.
@@ -887,6 +891,17 @@ private struct PanelDetailView: View {
             LabeledContent(
                 "Control protocol",
                 value: panel.controlProtocolVersion.map(String.init) ?? "Not available")
+            LabeledContent("OTA password") {
+                Button("Set…") {
+                    beginOTAPasswordEdit()
+                }
+                .popover(isPresented: $isEditingOTAPassword, arrowEdge: .bottom) {
+                    otaPasswordPopover
+                }
+            }
+            .help("Enable or change wireless updates over USB. Off until a "
+                + "password is set; \"Update Firmware…\" below stays "
+                + "unavailable until then.")
         }
     }
 
@@ -1048,6 +1063,75 @@ private struct PanelDetailView: View {
                 Button("Save") { saveName() }
                     .buttonStyle(.glassProminent)
                     .disabled(!nameHasChanges)
+            }
+        }
+        .padding(14)
+    }
+
+    private func beginOTAPasswordEdit() {
+        otaPassword = manager.rememberedOTAPassword(for: panel.hardwareID ?? "") ?? ""
+        otaRememberPassword = !otaPassword.isEmpty
+        otaPasswordProblem = nil
+        isEditingOTAPassword = true
+    }
+
+    private func setOTAPassword() {
+        switch OTAPasswordPolicy.judge(otaPassword) {
+        case .accept:
+            otaPasswordProblem = nil
+            isEditingOTAPassword = false
+            manager.setOTAPassword(
+                otaPassword, remember: otaRememberPassword, for: panel.serviceName)
+        case let verdict:
+            otaPasswordProblem = OTAPasswordPolicy.explain(verdict)
+        }
+    }
+
+    private func clearOTAPassword() {
+        isEditingOTAPassword = false
+        otaPassword = ""
+        manager.clearOTAPassword(for: panel.serviceName)
+    }
+
+    /// Set or clear a panel's OTA password over USB.
+    ///
+    /// Modelled on `renamePopover`: a text field bolted onto a form row would
+    /// trigger a serial write and a restart on every keystroke's worth of
+    /// binding, so a popover keeps the commit explicit, same as renaming
+    /// does. Clear is offered here rather than only through
+    /// `tools/espdisp.py set-password`, which is the gap this popover exists
+    /// to close.
+    private var otaPasswordPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("OTA Password")
+                .font(.headline)
+            SecureField("Password (8-64 bytes)", text: $otaPassword)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 260)
+                .onSubmit(setOTAPassword)
+            Toggle("Remember this password", isOn: $otaRememberPassword)
+            if let otaPasswordProblem {
+                Text(otaPasswordProblem)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .frame(width: 260, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Written over USB. The display restarts and enables wireless "
+                    + "updates; streaming reconnects on its own.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 260, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                Button("Clear", role: .destructive) { clearOTAPassword() }
+                    .help("Turn OTA back off and forget the remembered password")
+                Spacer()
+                Button("Cancel", role: .cancel) { isEditingOTAPassword = false }
+                Button("Set") { setOTAPassword() }
+                    .buttonStyle(.glassProminent)
+                    .disabled(otaPassword.isEmpty)
             }
         }
         .padding(14)

@@ -1642,6 +1642,63 @@ final class PanelManager: ObservableObject {
         }
     }
 
+    /// Set a panel's OTA password over USB, validating it the same way the
+    /// panel will (`OTAPasswordPolicy.judge`), so a rejection is a message
+    /// from this Mac in under a second rather than a round trip through the
+    /// panel's own `CFGERR`.
+    ///
+    /// On success the password is remembered in Keychain when `remember` is
+    /// true, exactly as a password typed into the firmware update sheet
+    /// would be - this is the same secret, filed under the same hardware ID,
+    /// so a push right after setting it here does not ask for it again.
+    func setOTAPassword(_ password: String, remember: Bool, for serviceName: String) {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else { return }
+        let verdict = OTAPasswordPolicy.judge(password)
+        guard verdict.isAcceptable else {
+            operationOutcome = .failure(
+                "Invalid OTA password", OTAPasswordPolicy.explain(verdict) ?? "")
+            return
+        }
+        switch WifiConfigUI.setOTAPassword(
+            password, currentName: panel.displayName, preferredPort: panel.usbPort)
+        {
+        case .success:
+            var keychainNote = ""
+            if remember, let hardwareID = panel.hardwareID {
+                if let failure = setRememberedOTAPassword(password, for: hardwareID) {
+                    keychainNote = " The password was set, but Keychain storage failed: "
+                        + failure
+                }
+            }
+            operationOutcome = .success(
+                "OTA password set",
+                "The display is restarting with OTA enabled." + keychainNote)
+        case .failure(let failure):
+            operationOutcome = .failure(failure)
+        }
+    }
+
+    /// Clear a panel's OTA password over USB, turning OTA back off, and
+    /// forget any remembered copy - a cleared password left in Keychain
+    /// would silently offer itself the next time someone opens the update
+    /// sheet for a panel that no longer has OTA enabled at all.
+    func clearOTAPassword(for serviceName: String) {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else { return }
+        switch WifiConfigUI.clearOTAPassword(
+            currentName: panel.displayName, preferredPort: panel.usbPort)
+        {
+        case .success:
+            if let hardwareID = panel.hardwareID {
+                _ = setRememberedOTAPassword(nil, for: hardwareID)
+            }
+            operationOutcome = .success(
+                "OTA password cleared",
+                "The display is restarting with OTA disabled.")
+        case .failure(let failure):
+            operationOutcome = .failure(failure)
+        }
+    }
+
     func applySavedNetwork(_ ssid: String, to serviceName: String) {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else { return }
         guard !ssid.isEmpty else {

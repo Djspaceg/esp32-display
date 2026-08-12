@@ -366,6 +366,47 @@ enum WifiConfigUI {
         }
     }
 
+    /// Set a panel's OTA password over USB. The panel restarts on success -
+    /// see the `CFGOTAPW` handler in display_stream.ino - so the caller
+    /// should not expect an immediate second command to reach the same
+    /// session.
+    static func setOTAPassword(
+        _ password: String,
+        currentName: String,
+        preferredPort: String? = nil
+    ) -> Result<Void, ConfigFailure> {
+        let port: String
+        switch matchingPort(for: currentName, preferredPort: preferredPort) {
+        case .success(let resolved): port = resolved
+        case .failure(let failure): return .failure(failure)
+        }
+        switch sendCommand(ConfigCommands.setOTAPassword(password), port: port, timeout: 10) {
+        case .success:
+            return .success(())
+        case .failure(let reason):
+            return .failure(ConfigFailure(title: "Setting OTA password failed", message: reason))
+        }
+    }
+
+    /// Clear a panel's stored OTA password over USB, turning OTA back off.
+    /// The panel restarts on success, same as `setOTAPassword`.
+    static func clearOTAPassword(
+        currentName: String,
+        preferredPort: String? = nil
+    ) -> Result<Void, ConfigFailure> {
+        let port: String
+        switch matchingPort(for: currentName, preferredPort: preferredPort) {
+        case .success(let resolved): port = resolved
+        case .failure(let failure): return .failure(failure)
+        }
+        switch sendCommand(ConfigCommands.clearOTAPassword, port: port, timeout: 10) {
+        case .success:
+            return .success(())
+        case .failure(let reason):
+            return .failure(ConfigFailure(title: "Clearing OTA password failed", message: reason))
+        }
+    }
+
     private static func matchingPort(
         for currentName: String?,
         preferredPort: String? = nil
