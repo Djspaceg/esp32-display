@@ -35,6 +35,19 @@ public enum ConfigCommands {
         "CFGNAME \(Data(name.utf8).base64EncodedString())"
     }
 
+    /// `CFGOTAPW <b64 password>`: enable OTA with this password, replacing
+    /// any password already stored. Mirrors `otapolicy::CLEAR_TOKEN`'s sibling
+    /// path in display_stream.ino - the firmware classifies the literal
+    /// argument "clear" before attempting any base64 decode, so this builder
+    /// and `clearOTAPassword` are two distinct commands rather than one
+    /// taking an optional password, matching that split at the call site.
+    public static func setOTAPassword(_ password: String) -> String {
+        "CFGOTAPW \(Data(password.utf8).base64EncodedString())"
+    }
+
+    /// `CFGOTAPW clear`: forget the stored password, which turns OTA back off.
+    public static let clearOTAPassword = "CFGOTAPW clear"
+
     /// Decode a `key64=` field out of a CFGINFO reply line.
     public static func decodeField(_ key: String, from line: String) -> String? {
         guard let range = line.range(of: key) else { return nil }

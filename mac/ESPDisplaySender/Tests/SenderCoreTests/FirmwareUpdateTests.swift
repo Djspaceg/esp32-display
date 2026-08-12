@@ -199,6 +199,66 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertTrue(failure?.contains("Keychain") == true, "got: \(failure ?? "nil")")
     }
 
+    // MARK: - setting/clearing the password over USB
+    //
+    // The serial round trip itself needs hardware and is verified manually
+    // against a board; what is tested here is what happens on either side of
+    // it: an invalid password never reaches the serial layer at all, and a
+    // successful set/clear keeps the Keychain copy in sync with what was
+    // just sent. `WifiConfigUI.setOTAPassword`/`clearOTAPassword` fail with
+    // "No device found" in this environment (no USB device is attached to a
+    // test run), which is itself useful signal - it proves validation ran
+    // and failed the way an unreachable panel fails, not the way a rejected
+    // password fails.
+
+    /// An invalid password is refused before any serial command is built, so
+    /// a typo costs nothing and never restarts a panel that was never going
+    /// to accept it.
+    func testSetOTAPasswordRefusesAnInvalidPasswordBeforeAnySerialWrite() {
+        let manager = Self.manager(
+            [Self.panel(serviceName: "espdisplay", hardwareID: "020000123456")])
+        manager.register(Self.session(name: "espdisplay"))
+
+        manager.setOTAPassword("short", remember: true, for: "espdisplay")
+
+        XCTAssertEqual(manager.operationOutcome?.kind, .failure)
+        XCTAssertEqual(manager.operationOutcome?.title, "Invalid OTA password")
+        XCTAssertTrue(
+            manager.operationOutcome?.message.contains("at least 8 bytes") == true,
+            "got: \(manager.operationOutcome?.message ?? "nil")")
+        // Nothing was remembered for a password that was never sent.
+        XCTAssertNil(manager.rememberedOTAPassword(for: "020000123456"))
+    }
+
+    /// A valid password reaches the serial layer - which fails here for lack
+    /// of hardware, not for lack of validity - and the failure is reported
+    /// through the same outcome alert as every other USB action, not through
+    /// the "Invalid OTA password" title that a rejected password gets.
+    func testSetOTAPasswordWithAValidPasswordReachesTheSerialLayer() {
+        let manager = Self.manager(
+            [Self.panel(serviceName: "espdisplay", hardwareID: "020000123456")])
+        manager.register(Self.session(name: "espdisplay"))
+
+        manager.setOTAPassword("a-real-password", remember: true, for: "espdisplay")
+
+        XCTAssertEqual(manager.operationOutcome?.kind, .failure)
+        XCTAssertNotEqual(manager.operationOutcome?.title, "Invalid OTA password")
+        // No USB device answered, so nothing was actually set - and nothing
+        // should have been remembered for a password that never reached the
+        // panel.
+        XCTAssertNil(manager.rememberedOTAPassword(for: "020000123456"))
+    }
+
+    /// A panel not known to the manager is a no-op rather than a crash - the
+    /// same defensive stance `rename`/`applySavedNetwork` take for an
+    /// unrecognised service name.
+    func testSetAndClearOTAPasswordIgnoreAnUnknownPanel() {
+        let manager = Self.manager()
+        manager.setOTAPassword("a-real-password", remember: true, for: "ghost")
+        manager.clearOTAPassword(for: "ghost")
+        XCTAssertNil(manager.operationOutcome)
+    }
+
     // MARK: - readiness
     //
     // Which panels are offered an update at all, and the wording of the refusal,

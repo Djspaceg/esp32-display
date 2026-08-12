@@ -854,4 +854,28 @@ final class ConfigCommandsTests: XCTestCase {
     func testSetName() {
         XCTAssertEqual(ConfigCommands.setName("panel-2"), "CFGNAME cGFuZWwtMg==")
     }
+
+    // Set and clear are two distinct commands, matching the firmware's
+    // classifyArgument ordering: "clear" is recognised as the literal
+    // before any base64 decode is attempted, so a builder that only ever
+    // emitted `setOTAPassword` could not express turning OTA off.
+    func testSetOTAPasswordEncodesThePassword() {
+        let cmd = ConfigCommands.setOTAPassword("12345678")
+        XCTAssertEqual(cmd, "CFGOTAPW MTIzNDU2Nzg=")
+        let arg = String(cmd.split(separator: " ")[1])
+        XCTAssertEqual(
+            String(data: Data(base64Encoded: arg)!, encoding: .utf8), "12345678")
+    }
+
+    // A password containing a space is exactly the case base64 exists for -
+    // a space-delimited line must not be able to split it into two tokens.
+    func testSetOTAPasswordSurvivesASpace() {
+        let cmd = ConfigCommands.setOTAPassword("p ssword1")
+        XCTAssertEqual(cmd, "CFGOTAPW cCBzc3dvcmQx")
+        XCTAssertEqual(cmd.split(separator: " ").count, 2)
+    }
+
+    func testClearOTAPasswordIsTheLiteralToken() {
+        XCTAssertEqual(ConfigCommands.clearOTAPassword, "CFGOTAPW clear")
+    }
 }
