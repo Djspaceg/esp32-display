@@ -556,6 +556,21 @@ private struct PanelDetailView: View {
 
     private var displaySection: some View {
         Section("Display") {
+            // Unconditional, unlike the rotation controls below: every board
+            // has a backlight or panel-command brightness sink, so `.power`
+            // is advertised everywhere (see `Capabilities.power`).
+            LabeledContent("Power") {
+                Toggle("On", isOn: Binding(
+                    get: { !panel.manuallyOff },
+                    set: { manager.setPower($0, for: panel.serviceName) }))
+                    .toggleStyle(.switch)
+                    .fixedSize()
+                    .disabled(!manager.canControl(panel.serviceName, capability: .power))
+                    .help(controlHelp(
+                        .power,
+                        "Turn the panel's display off without unplugging it. "
+                            + "Persists across a reboot until turned back on."))
+            }
             if manager.canControl(panel.serviceName, capability: .brightnessLevel)
                 || panel.capabilities.contains(.brightnessLevel)
             {

@@ -725,6 +725,16 @@ final class FrameSender {
         sendManagementControl(.rotate, value: Int32(clamped))
     }
 
+    /// Turn the panel's display on or off. Independent of `sendDisplaySleep`/
+    /// `sendDisplayWake` (ESLP/EWAK), which follow this Mac's own screens and
+    /// clear on the next drawn frame - this is a standing instruction the
+    /// panel keeps until told otherwise, persisted across its reboots too.
+    /// Only valid for firmware advertising `power`, which every board does
+    /// (see `DeviceProtocol.Capabilities.power`).
+    func setPower(_ on: Bool) {
+        sendManagementControl(.power, value: on ? 1 : 0)
+    }
+
     func identify(seconds: Int = 8) {
         let bounded = min(
             max(seconds, DeviceProtocol.identifySecondsRange.lowerBound),

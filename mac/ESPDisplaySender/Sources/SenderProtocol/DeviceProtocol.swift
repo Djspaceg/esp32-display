@@ -68,6 +68,13 @@ public enum DeviceProtocol {
         /// packet loss. The UI keeps the flip toggle for panels without the
         /// bit, so nothing regresses.
         public static let rotate = Capabilities(rawValue: 1 << 13)
+        /// Accepts `power`, a standing on/off instruction independent of the
+        /// Mac's own sleep sync (`sleepSync`'s ESLP/EWAK) and persisted across
+        /// a reboot. Advertised unconditionally: unlike `battery` or `rotate`
+        /// this is not a hardware fact — every board here already has a
+        /// backlight or panel-command brightness sink, so every board can
+        /// honour it.
+        public static let power = Capabilities(rawValue: 1 << 14)
     }
 
     public struct DeviceInfo: Equatable, Sendable {
@@ -91,6 +98,11 @@ public enum DeviceProtocol {
         public let sleeping: Bool
         public let idle: Bool
         public let wifiConnected: Bool
+        /// The user's standing "display off" instruction (flags bit 7),
+        /// independent of `sleeping`/`idle` — those clear on the next drawn
+        /// frame, this persists until the user turns the panel back on. See
+        /// `Capabilities.power`.
+        public let manuallyOff: Bool
         public let deviceID: String
         public let name: String
         public let firmwareVersion: String
@@ -106,10 +118,17 @@ public enum DeviceProtocol {
         /// flip 1); only sent to firmware advertising `Capabilities.rotate`,
         /// which is why `flip` stays for everything older.
         case rotate = 6
+        /// Value 0 or 1: whether the display should be on. A standing
+        /// instruction, persisted, and independent of `flip`/`rotate` and the
+        /// idle timer — see `Capabilities.power`.
+        case power = 7
     }
 
     /// Range a `rotate` command may request: clockwise quarter turns.
     public static let rotationRange: ClosedRange<Int> = 0...3
+
+    /// Values a `power` command may request: 0 (off) or 1 (on).
+    public static let powerRange: ClosedRange<Int> = 0...1
 
     /// Range a `brightnessLevel` command may request. Zero is excluded: a black
     /// backlight is indistinguishable from a broken panel, and switching the
@@ -130,6 +149,8 @@ public enum DeviceProtocol {
         /// `DeviceInfo.rotation` for when it is meaningful.
         public let rotation: Int
         public let sleeping: Bool
+        /// See `DeviceInfo.manuallyOff`.
+        public let manuallyOff: Bool
         public let brightness: UInt8
 
         public var succeeded: Bool { status == 0 }
@@ -184,6 +205,7 @@ public enum DeviceProtocol {
             sleeping: flags & 0x04 != 0,
             idle: flags & 0x08 != 0,
             wifiConnected: flags & 0x10 != 0,
+            manuallyOff: flags & 0x80 != 0,
             deviceID: deviceID,
             name: name,
             firmwareVersion: firmware)
@@ -221,6 +243,7 @@ public enum DeviceProtocol {
             flipped: flags & 0x02 != 0,
             rotation: Int((flags >> 5) & 0x03),
             sleeping: flags & 0x04 != 0,
+            manuallyOff: flags & 0x80 != 0,
             brightness: bytes[10])
     }
 

@@ -12,17 +12,28 @@ namespace panelstate {
 
 /// What the backlight PWM should be set to.
 ///
-/// Priority matters: a finger beats sleep beats idle beats the user's level.
+/// Priority matters: a manual "off" beats a finger beats sleep beats idle
+/// beats the user's level.
 ///
-/// The Mac's screens being asleep is the strongest signal there is nothing worth
-/// lighting, and the idle card is deliberately dim whatever brightness the user
-/// picked - but someone physically touching the panel outranks both, because the
-/// question they are asking is "is this thing on?" and the answer has to be
-/// visible. touchWake is time-bounded by the caller and never tells the Mac
-/// anything, so it lights the panel without contradicting the Mac's own idea of
-/// whether its displays are asleep.
-inline uint8_t backlightLevel(bool sleeping, bool idle, bool touchWake,
-                              uint8_t userLevel, uint8_t idleLevel) {
+/// manuallyOff is the user's own standing instruction (ControlOpcode::Power),
+/// not a state the panel or the Mac arrives at on its own the way sleeping
+/// and idle do - and it is the one thing a finger must NOT override. Every
+/// other dimmed state exists to save the panel from showing something stale
+/// or wasteful, and a touch answering "is this thing on?" is exactly the
+/// right response to those; a touch answering the same question about a
+/// display the user explicitly turned off would just turn it back on
+/// without asking, which is not what "off" means.
+///
+/// Below that: the Mac's screens being asleep is the strongest remaining
+/// signal there is nothing worth lighting, and the idle card is deliberately
+/// dim whatever brightness the user picked - but someone physically touching
+/// the panel outranks both. touchWake is time-bounded by the caller and
+/// never tells the Mac anything, so it lights the panel without
+/// contradicting the Mac's own idea of whether its displays are asleep.
+inline uint8_t backlightLevel(bool manuallyOff, bool sleeping, bool idle,
+                              bool touchWake, uint8_t userLevel,
+                              uint8_t idleLevel) {
+  if (manuallyOff) return 0;
   if (touchWake) return userLevel;
   if (sleeping) return 0;
   if (idle) return idleLevel;
@@ -50,12 +61,20 @@ inline bool brightnessIsHigh(uint8_t userLevel, uint8_t lowLevel) {
 ///            already taken (brightness, flipped, sleeping, idle, wifi), and
 ///            an old sender masks the bits it knows, so these read as zero
 ///            noise to it.
+///   bit 7    the user's standing "display off" instruction
+///            (ControlOpcode::Power), independent of sleeping/idle - those
+///            are transient states the panel or the Mac arrives at and
+///            clears on the next drawn frame, while this one persists until
+///            the user turns it back on. A sender needs both: "sleeping"
+///            answers "is the Mac's own display state driving this dark
+///            right now", "manuallyOff" answers "did the user ask for this
+///            panel specifically to stay dark".
 ///
 /// Derived from one input rather than passed as two, so the pair cannot
 /// disagree - a flags byte claiming "flipped" with rotation bits saying 1
 /// is unrepresentable here.
 inline uint8_t deviceFlags(bool brightnessHigh, uint8_t rotation, bool sleeping,
-                           bool idle, bool wifiConnected) {
+                           bool idle, bool wifiConnected, bool manuallyOff) {
   uint8_t flags = 0;
   if (brightnessHigh) flags |= 0x01;
   if ((rotation & 3) == 2) flags |= 0x02;
@@ -63,6 +82,7 @@ inline uint8_t deviceFlags(bool brightnessHigh, uint8_t rotation, bool sleeping,
   if (idle) flags |= 0x08;
   if (wifiConnected) flags |= 0x10;
   flags |= (uint8_t)((rotation & 3) << 5);
+  if (manuallyOff) flags |= 0x80;
   return flags;
 }
 

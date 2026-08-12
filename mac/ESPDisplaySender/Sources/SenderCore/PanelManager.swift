@@ -69,6 +69,11 @@ struct PanelSnapshot: Identifiable, Equatable {
     var rotation = 0
     var sleeping = false
     var idle = false
+    /// The user's standing "display off" instruction, reported by the device
+    /// (EINF/EACK flags bit 7). Independent of `sleeping`/`idle`, which the
+    /// device clears on its own; this stays true until the user turns the
+    /// panel back on. See `DeviceProtocol.Capabilities.power`.
+    var manuallyOff = false
     var paused = false
     /// What the user chose this panel should show. Persisted, so a source picked
     /// once is still in effect after a restart.
@@ -965,6 +970,7 @@ final class PanelManager: ObservableObject {
                 panel.flipped = acknowledgement.flipped
                 panel.rotation = acknowledgement.rotation
                 panel.sleeping = acknowledgement.sleeping
+                panel.manuallyOff = acknowledgement.manuallyOff
             }
             if !acknowledgement.succeeded {
                 operationOutcome = .failure(
@@ -1299,6 +1305,7 @@ final class PanelManager: ObservableObject {
         case .restart: return "remote restart"
         case .ota: return "firmware updates"
         case .touch: return "touch gestures"
+        case .power: return "power control"
         default: return "this control"
         }
     }
@@ -1416,6 +1423,18 @@ final class PanelManager: ObservableObject {
                 panel.flipped = clamped == 2
             }
             session.setRotation(clamped)
+        }
+    }
+
+    /// Turn the panel's display on or off, as a standing instruction the panel
+    /// keeps until told otherwise - distinct from `sendDisplaySleep`/
+    /// `sendDisplayWake`, which follow this Mac's own screens and are cleared
+    /// by the next drawn frame. Every board advertises `.power` (see
+    /// `DeviceProtocol.Capabilities.power`), so this is never gated on chip.
+    func setPower(_ on: Bool, for serviceName: String) {
+        control(serviceName, capability: .power) { session in
+            updatePanel(serviceName) { $0.manuallyOff = !on }
+            session.setPower(on)
         }
     }
 
@@ -1922,6 +1941,7 @@ final class PanelManager: ObservableObject {
         panel.rotation = info.rotation
         panel.sleeping = info.sleeping
         panel.idle = info.idle
+        panel.manuallyOff = info.manuallyOff
     }
 
     /// Migrate a persisted record when the same hardware reappears under a

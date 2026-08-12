@@ -460,6 +460,76 @@ final class DeviceProtocolTests: XCTestCase {
                 .isDisjoint(with: [.flip, .compressedBands, .touch]))
     }
 
+    // Byte-for-byte what firmware/test/test_band_protocol.cpp asserts its
+    // parseControl accepts for a Power on: opcode 7, sequence 1, value 1.
+    // Written out by hand on each side, not shared, so a drift fails a test
+    // instead of agreeing with itself.
+    func testPowerControlPacketMatchesFirmwareVector() {
+        let packet = DeviceProtocol.controlPacket(
+            opcode: .power, sequence: 0x0001, value: 1)
+        XCTAssertEqual(
+            [UInt8](packet),
+            [0x45, 0x43, 0x54, 0x4C, 0x01, 0x07, 0x01, 0x00,
+             0x01, 0x00, 0x00, 0x00])
+    }
+
+    // The exact ack bytes the firmware suite pins for a confirmed Power off:
+    // opcode 7, sequence 2, status 0, flags 0x90 = wifi (0x10) + manuallyOff
+    // (0x80), brightness 0 because the backlight sink actually went dark.
+    func testParsePowerOffAckMatchesFirmwareVector() {
+        let packet = Data([
+            0x45, 0x41, 0x43, 0x4B, 0x01, 0x07, 0x02, 0x00,
+            0x00, 0x90, 0x00, 0x00,
+        ])
+        let ack = DeviceProtocol.parseAck(packet)
+        XCTAssertEqual(ack?.opcode, .power)
+        XCTAssertEqual(ack?.sequence, 2)
+        XCTAssertTrue(ack?.succeeded == true)
+        XCTAssertTrue(ack?.manuallyOff == true)
+        XCTAssertEqual(ack?.brightness, 0)
+    }
+
+    // manuallyOff decodes from EINF/EACK flags bit 7, independent of every
+    // other bit including rotation and the historical flipped flag - a
+    // manually-off panel that is also rotated reports both facts at once.
+    // Flag bytes written out by hand from the firmware's deviceFlags packing
+    // tests (panelstate::deviceFlags(true, 2, true, true, true, true) ==
+    // 0xDF).
+    func testParseInfoDecodesManuallyOffFromFlags() {
+        func info(flags: UInt8) -> DeviceProtocol.DeviceInfo? {
+            var packet = Data("EINF".utf8)
+            packet.append(contentsOf: [
+                0x01, 0x02, 0x01, flags,
+                0x00, 0x40, 0x00, 0x00,             // capabilities: power
+                0x04, 0x03, 0x02, 0x01,             // uptime
+                0xCD, 0xFF, 0x80,                    // RSSI -51, brightness 128
+                0x05, 0x05,                          // string lengths
+                0x02, 0x00, 0x00, 0x12, 0x34, 0x56, // device ID
+            ])
+            packet.append(contentsOf: "panel".utf8)
+            packet.append(contentsOf: "1.4.0".utf8)
+            return DeviceProtocol.parseInfo(packet)
+        }
+
+        XCTAssertTrue(info(flags: 0x80)?.manuallyOff == true)
+        XCTAssertTrue(info(flags: 0x00)?.manuallyOff == false)
+        // 0xDF: rotation 2, sleeping, idle, wifi, flipped, and manuallyOff
+        // all at once - none of those bits may suppress bit 7 or vice versa.
+        XCTAssertTrue(info(flags: 0xDF)?.manuallyOff == true)
+        XCTAssertEqual(info(flags: 0xDF)?.rotation, 2)
+        XCTAssertTrue(info(flags: 0xDF)?.flipped == true)
+        XCTAssertTrue(info(flags: 0xDF)?.capabilities.contains(.power) == true)
+    }
+
+    // The capability bit, spelled as a raw number so it can only agree with
+    // the firmware's CAP_POWER == 1u << 14 by actually being the same bit.
+    func testPowerCapabilityBit() {
+        XCTAssertEqual(DeviceProtocol.Capabilities.power.rawValue, 0x4000)
+        XCTAssertTrue(
+            DeviceProtocol.Capabilities.power
+                .isDisjoint(with: [.rotate, .compressedBands, .touch]))
+    }
+
     func testRejectsMalformedManagementPackets() {
         XCTAssertNil(DeviceProtocol.parseInfo(Data("EINF".utf8)))
         XCTAssertNil(DeviceProtocol.parseInfo(Data(repeating: 0, count: 27)))

@@ -91,6 +91,16 @@ board is mounted and forget it. (A full flash erase does reset them.) The
 manager's brightness slider covers the full range in between; the button's
 toggle is the two ends of it.
 
+A **Power** switch in the manager turns the panel's display off without
+unplugging it — a standing instruction, independent of the automatic dimming
+below, that persists across a reboot until switched back on. It is not the
+same as `ESLP`/`EWAK`: those follow this Mac's own display sleep and clear the
+moment a frame is drawn or the Mac wakes, while Power stays off until someone
+turns it back on, on this Mac or another one entirely. The same switch is
+reachable over USB with `CFGPOWER 0|1`, and it applies to every board — there
+is no hardware gating, since every panel here already has a backlight or an
+AMOLED panel-brightness command to turn dark.
+
 Square panels can be mounted at any quarter turn, not only upside down. A
 panel whose glass is square advertises quarter-turn rotation, and the
 manager's orientation control becomes a 0°/90°/180°/270° choice instead of the
@@ -364,12 +374,15 @@ Over USB serial (115200), the firmware also accepts configuration commands:
 reboots, and `CFGWIFI <base64 ssid>` (password argument omitted) keeps the
 password currently in use; `CFGNAME <base64 name>` sets the device name;
 `CFGSHOW` reports the current network, name, IP, signal strength, the saved
-orientation/brightness, the detected board, the battery, and whether OTA is
-enabled; `CFGFLIP 0|1` sets the 180° flip without the button; `CFGLED <r> <g>
-<b>` shows a literal LED color for 10s on boards that have an addressable LED
-and reports an error on those that do not; `CFGBOARD st7789|jd9853|auto`
-overrides board auto-detection and reboots; `CFGOTAPW <base64 password>` sets
-the OTA password (and `CFGOTAPW clear` removes it, turning OTA off again).
+orientation/brightness/power state, the detected board, the battery, and
+whether OTA is enabled; `CFGFLIP 0|1` sets the 180° flip without the button;
+`CFGROT 0|1|2|3` sets the quarter-turn rotation on square panels; `CFGPOWER
+0|1` turns the display off or on, saved and applied immediately — the same
+switch the manager's Power toggle uses; `CFGLED <r> <g> <b>` shows a literal
+LED color for 10s on boards that have an addressable LED and reports an error
+on those that do not; `CFGBOARD st7789|jd9853|auto` overrides board
+auto-detection and reboots; `CFGOTAPW <base64 password>` sets the OTA password
+(and `CFGOTAPW clear` removes it, turning OTA off again).
 
 A panel that has an OTA password advertises `CAP_OTA` and a second mDNS service,
 `_arduino._tcp`, which is what the OTA pusher browses for. Without a password it
