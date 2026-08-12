@@ -4,9 +4,13 @@ import SenderProtocol
 
 /// Sends raw RGB565 (big-endian) frames to the ESP32 over UDP, chunked to
 /// match the firmware protocol:
-///   packet = [frame_id u16 LE][chunk_index u16 LE][chunk_count u16 LE][1376B payload]
-/// The top bit of chunk_count carries orientation (1 = landscape 320x172).
-/// 1376 bytes = 4 rows of 172 RGB565 pixels; 80 chunks per frame.
+///   packet = [frame_id u16 LE][band_index u16 LE][band_count u16 LE][payload]
+/// The top bit of band_count carries orientation (1 = landscape); band
+/// geometry derives from the panel's advertised resolution (BandProtocol).
+/// To a panel advertising `compressedBands`, dirty bands go as packed
+/// packets instead - several RLE-compressed or raw band records per
+/// datagram (BandPacker) - because the panel's receive path tops out at a
+/// datagram rate, so fewer, denser datagrams is what raises the frame rate.
 ///
 /// Resilience:
 /// - Every 2s a 4-byte "EPNG" keepalive refreshes the firmware's reply
@@ -44,6 +48,11 @@ final class FrameSender {
     /// refreshed periodically (touched only on sendQueue).
     private var lastSentFrame: [UInt8]?
     private var lastSentLandscape = false
+    /// Whether the panel has advertised `compressedBands` over EINF, read on
+    /// the send path. Off until the first EINF arrives (a couple of seconds),
+    /// during which frames go in the classic one-raw-band-per-packet format -
+    /// which is also everything a panel that never advertises it ever gets.
+    private var _peerAcceptsPackedBands = false
     /// Orientation of the most recent frame sent, readable from any thread.
     ///
     /// This is the frame the panel currently has on screen, and so the frame its
@@ -52,8 +61,10 @@ final class FrameSender {
     /// depends on it.
     private var _currentLandscape = false
     private var lastSendAt = Date.distantPast
-    /// How often an unchanging screen gets a full repaint. Cheap (80 packets)
-    /// and bounds how long a UDP-lost band can stay visible.
+    /// How often an unchanging screen gets a full repaint. One keyframe -
+    /// geometry.bandCount packets uncompressed (80 on the 172x320, 466 on the
+    /// 466x466), far fewer packed - and bounds how long a UDP-lost band can
+    /// stay visible.
     private let refreshInterval: TimeInterval = 5
 
     private let lock = NSLock()
@@ -113,16 +124,43 @@ final class FrameSender {
     /// repaints everything after a device reboot.
     var keyframeInterval: TimeInterval = 2.0
 
-    /// Bounds for adaptive pacing (per-chunk usleep, microseconds). The max
-    /// must leave room to throttle below a *degraded* link's clean capacity:
-    /// measured on a marginal RSSI (-70dBm) link, ~900 pkt/s collapsed while
-    /// ~600 pkt/s was lossless. 2500us/chunk ~= 4fps ~= 320 pkt/s floor.
+    /// Widest range the pacing knob accepts anywhere (per-packet usleep,
+    /// microseconds). The settings slider offers exactly this, and an explicit
+    /// user value clamps to it; the CONTROLLER is bounded tighter, per panel,
+    /// by `spacingBounds(for:)` below.
     ///
     /// Static so the settings UI offers exactly the range the sender enforces,
     /// rather than a second copy of these numbers that could drift.
     static let spacingRange: ClosedRange<UInt32> = 120...2500
-    private var spacingMin: UInt32 { Self.spacingRange.lowerBound }
-    private var spacingMax: UInt32 { Self.spacingRange.upperBound }
+
+    /// Fastest packet rate the controller may offer. 120us between packets =
+    /// ~8300 pkt/s, the same cap the fixed 120us floor always was; the panel
+    /// accepts what its receive path can take and the climb settles there.
+    static let maxOfferedPacketsPerSecond: UInt32 = 1_000_000 / spacingRange.lowerBound
+
+    /// The frame rate the controller must never be able to sit below, counted
+    /// against the worst case of one packet per band (an uncompressed
+    /// keyframe). Packets per second is the invariant here - the panel's
+    /// ceiling is a datagram rate - so the spacing ceiling has to derive from
+    /// geometry.bandCount: the fixed 2500us ceiling meant a 5 fps floor on
+    /// the 80-band 172x320 but 0.86 fps on the 466-band 466x466, which is the
+    /// bug where the pacing hill-climb parked a panel at ~1 fps.
+    static let minWorstCaseFps: UInt32 = 5
+
+    /// Controller bounds for a panel: the offered-rate cap as the floor, and
+    /// a ceiling that keeps `minWorstCaseFps * bandCount` packets per second
+    /// flowing in the orientation with the most bands.
+    static func spacingBounds(for geometry: PanelGeometry) -> ClosedRange<UInt32> {
+        let bands = UInt32(max(geometry.bandCount(landscape: false),
+                               geometry.bandCount(landscape: true)))
+        let floor = spacingRange.lowerBound
+        let ceiling = max(floor, 1_000_000 / (minWorstCaseFps * bands))
+        return floor...ceiling
+    }
+
+    private let spacingBounds: ClosedRange<UInt32>
+    private var spacingMin: UInt32 { spacingBounds.lowerBound }
+    private var spacingMax: UInt32 { spacingBounds.upperBound }
 
     private var _adaptivePacing: Bool
 
@@ -256,6 +294,7 @@ final class FrameSender {
         self.port = port
         self.serviceEndpoint = nil
         self.geometry = geometry
+        self.spacingBounds = Self.spacingBounds(for: geometry)
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
         self._adaptivePacing = adaptivePacing
@@ -270,6 +309,7 @@ final class FrameSender {
         self.port = 0
         self.serviceEndpoint = endpoint
         self.geometry = geometry
+        self.spacingBounds = Self.spacingBounds(for: geometry)
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
         self._adaptivePacing = adaptivePacing
@@ -435,6 +475,7 @@ final class FrameSender {
         if let info = DeviceProtocol.parseInfo(data) {
             lock.lock()
             _deviceInfo = info
+            _peerAcceptsPackedBands = info.capabilities.contains(.compressedBands)
             _lastHeartbeatAt = Date()
             _deviceReplies &+= 1
             lock.unlock()
@@ -673,6 +714,17 @@ final class FrameSender {
         sendManagementControl(.flip, value: flipped ? 1 : 0)
     }
 
+    /// Set the mounting rotation in clockwise quarter turns. Only valid for
+    /// firmware advertising `rotate` — older firmware refuses the opcode
+    /// silently, which is why the caller gates on the capability and keeps
+    /// `setFlip` for everything else.
+    func setRotation(_ rotation: Int) {
+        let clamped = min(
+            max(rotation, DeviceProtocol.rotationRange.lowerBound),
+            DeviceProtocol.rotationRange.upperBound)
+        sendManagementControl(.rotate, value: Int32(clamped))
+    }
+
     func identify(seconds: Int = 8) {
         let bounded = min(
             max(seconds, DeviceProtocol.identifySecondsRange.lowerBound),
@@ -826,14 +878,36 @@ final class FrameSender {
         let id = frameId
         frameId &+= 1
         let spacing = spacingMicros
+        lock.lock()
+        let packBands = _peerAcceptsPackedBands
+        lock.unlock()
 
-        for band in dirty {
-            var packet = BandProtocol.packetHeader(
-                frameId: id, band: band, dirtyCount: dirty.count, landscape: landscape)
-            let start = geometry.bandOffset(index: band, landscape: landscape)
-            let len = geometry.bandPayloadBytes(index: band, landscape: landscape)
-            packet.append(contentsOf: pixels[start..<(start + len)])
+        let packets: [Data]
+        if packBands {
+            // Packed: several RLE-compressed or raw band records per
+            // datagram. The panel's receive path tops out at a datagram rate
+            // (measured on the 466x466 S3: ~1826/s accepted regardless of
+            // offered rate), so carrying more bands per datagram is the lever
+            // that raises the frame rate.
+            packets = BandPacker.packets(
+                frameId: id, dirty: dirty, pixels: pixels,
+                geometry: geometry, landscape: landscape)
+        } else {
+            // Classic format, byte-identical to what this sender always
+            // emitted: one raw band per packet. Everything a panel that never
+            // advertised `compressedBands` ever receives.
+            packets = dirty.map { band in
+                var packet = BandProtocol.packetHeader(
+                    frameId: id, band: band, dirtyCount: dirty.count,
+                    landscape: landscape)
+                let start = geometry.bandOffset(index: band, landscape: landscape)
+                let len = geometry.bandPayloadBytes(index: band, landscape: landscape)
+                packet.append(contentsOf: pixels[start..<(start + len)])
+                return packet
+            }
+        }
 
+        for packet in packets {
             conn.send(
                 content: packet,
                 completion: .contentProcessed { [weak self] error in
@@ -841,9 +915,9 @@ final class FrameSender {
                         self?.sendErrors &+= 1
                     }
                 })
-            // Pace every packet: the ESP32's WiFi/lwIP receive path drops
-            // heavily above ~3000 packets/s; unpaced bursts lose nearly
-            // everything.
+            // Pace every packet: the panel's receive path accepts a bounded
+            // datagram rate (~1826/s measured on the S3, less on a single-core
+            // C6) and unpaced bursts overflow it and lose nearly everything.
             if spacing > 0 {
                 usleep(spacing)
             }

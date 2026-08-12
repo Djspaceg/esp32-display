@@ -26,6 +26,8 @@
 #include <esp_lcd_co5300.h>
 #include <esp_lcd_jd9853.h>
 
+#include "panel_orientation.h"
+
 namespace boardpanel {
 
 /// Bring up the SPI/QSPI bus and the panel described by cfg.
@@ -157,35 +159,47 @@ inline bool setPanelBrightness(esp_lcd_panel_handle_t panel,
   return esp_lcd_panel_co5300_set_brightness(panel, percent) == ESP_OK;
 }
 
-/// Apply orientation and the user's 180-degree mounting flip.
+/// Apply orientation and the user's mounting rotation (clockwise quarter
+/// turns, 0-3; 2 is the old 180-degree flip).
 ///
 /// MADCTL affects how incoming pixel writes are addressed rather than scan-out,
 /// so a change here becomes visible with the next drawn frame, not immediately.
 ///
+/// The MADCTL matrix is the quarter-turn table in panel_orientation.h,
+/// composed as q = rotation + landscape. With rotation limited to {0, 2} that
+/// is byte-for-byte the historical four-state table:
+///
 ///   portrait   MADCTL 0       flipped  MX|MY
 ///   landscape  MV|MX          flipped  MV|MY
 ///
-/// On the 1.47" panels the centring gap sits on the 172px axis, which is
-/// symmetric within the 240-wide controller RAM, so mirroring does not move
-/// it. This mapping matches the rotation/gap matrix in Waveshare's own
-/// ESP-IDF example for the JD9853 board, and was verified (not assumed) to
-/// hold on the ST7789 too.
+/// which the host suite asserts, so shipped panels are unaffected. Rotations
+/// 1 and 3 only make sense on square glass (the sketch gates them there); on
+/// rectangular panels a quarter turn is what the sender-driven landscape
+/// mechanism already expresses.
+///
+/// The centring gap follows the axis swap: colOffset sits on the x axis for
+/// even quadrants and moves to the y axis for odd ones, exactly as it always
+/// did for landscape. On the 1.47" panels the gap axis is symmetric within
+/// the 240-wide controller RAM, so mirroring does not move it. This mapping
+/// matches the rotation/gap matrix in Waveshare's own ESP-IDF example for
+/// the JD9853 board, and was verified (not assumed) to hold on the ST7789
+/// too.
 ///
 /// On the square CO5300 the two orientations address the same buffer shape,
-/// so the landscape half of this matrix is inert there; the flip180 path is
+/// so the landscape half of this matrix is inert there; the rotation path is
 /// what matters. Whether its 6px gap survives MADCTL mirroring unmoved is
-/// NOT yet verified on hardware - if a flipped 1.75C shows a 6px fringe on
+/// NOT yet verified on hardware - if a rotated 1.75C shows a 6px fringe on
 /// one edge, the gap likely needs re-deriving per mirror state, and this is
 /// the place to do it.
 inline void applyOrientation(esp_lcd_panel_handle_t panel,
                              const board::Config &cfg, bool landscape,
-                             bool flip180) {
-  bool mx = landscape ? !flip180 : flip180;
-  bool my = flip180;
-  esp_lcd_panel_swap_xy(panel, landscape);
-  esp_lcd_panel_mirror(panel, mx, my);
-  esp_lcd_panel_set_gap(panel, landscape ? 0 : cfg.colOffset,
-                        landscape ? cfg.colOffset : 0);
+                             uint8_t rotation) {
+  const uint8_t q = panelorient::quadrant(rotation, landscape);
+  const bool swap = panelorient::swapXY(q);
+  esp_lcd_panel_swap_xy(panel, swap);
+  esp_lcd_panel_mirror(panel, panelorient::mirrorX(q), panelorient::mirrorY(q));
+  esp_lcd_panel_set_gap(panel, swap ? 0 : cfg.colOffset,
+                        swap ? cfg.colOffset : 0);
 }
 
 }  // namespace boardpanel

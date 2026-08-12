@@ -224,6 +224,13 @@ final class DeviceSession {
         sender.setFlip(flipped)
         sender.forceKeyframe()
     }
+    /// Like `setFlip`, the keyframe rides along: the panel repaints its cached
+    /// frame locally, but a full refresh from here converges even if that
+    /// cached frame was stale.
+    func setRotation(_ rotation: Int) {
+        sender.setRotation(rotation)
+        sender.forceKeyframe()
+    }
     func identify(seconds: Int = 8) { sender.identify(seconds: seconds) }
 
     /// Apply pacing settings. Self-tuning is switched off first so an explicit

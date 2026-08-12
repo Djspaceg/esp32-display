@@ -38,14 +38,31 @@ inline bool brightnessIsHigh(uint8_t userLevel, uint8_t lowLevel) {
 }
 
 /// Pack device state into the EINF/EACK flags byte.
-inline uint8_t deviceFlags(bool brightnessHigh, bool flipped, bool sleeping,
+///
+/// rotation is the user's mounting rotation in clockwise quarter turns, 0-3.
+/// It occupies two places at once, deliberately:
+///
+///   bit 1    the historical "flipped" flag, set exactly when rotation == 2.
+///            Old senders read this bit as "rotated 180" and must keep
+///            getting the truth: a quarter turn (1 or 3) is NOT a 180 flip,
+///            so the bit stays clear there rather than rounding to it.
+///   bits 5-6 the full rotation, for senders that know Rotate. Bits 0-4 were
+///            already taken (brightness, flipped, sleeping, idle, wifi), and
+///            an old sender masks the bits it knows, so these read as zero
+///            noise to it.
+///
+/// Derived from one input rather than passed as two, so the pair cannot
+/// disagree - a flags byte claiming "flipped" with rotation bits saying 1
+/// is unrepresentable here.
+inline uint8_t deviceFlags(bool brightnessHigh, uint8_t rotation, bool sleeping,
                            bool idle, bool wifiConnected) {
   uint8_t flags = 0;
   if (brightnessHigh) flags |= 0x01;
-  if (flipped) flags |= 0x02;
+  if ((rotation & 3) == 2) flags |= 0x02;
   if (sleeping) flags |= 0x04;
   if (idle) flags |= 0x08;
   if (wifiConnected) flags |= 0x10;
+  flags |= (uint8_t)((rotation & 3) << 5);
   return flags;
 }
 

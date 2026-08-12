@@ -62,6 +62,11 @@ struct PanelSnapshot: Identifiable, Equatable {
     var brightness: Int = 0
     var brightnessHigh = true
     var flipped = false
+    /// Mounting rotation in clockwise quarter turns, reported by the device
+    /// (EINF/EACK flags bits 5-6). Only meaningful on a panel advertising
+    /// `.rotate`; older firmware reports its 180 through `flipped` alone and
+    /// leaves this 0, which is why the UI keeps the flip toggle there.
+    var rotation = 0
     var sleeping = false
     var idle = false
     var paused = false
@@ -939,6 +944,7 @@ final class PanelManager: ObservableObject {
                 }
                 panel.brightnessHigh = acknowledgement.brightnessHigh
                 panel.flipped = acknowledgement.flipped
+                panel.rotation = acknowledgement.rotation
                 panel.sleeping = acknowledgement.sleeping
             }
             if !acknowledgement.succeeded {
@@ -1269,6 +1275,7 @@ final class PanelManager: ObservableObject {
         case .brightness: return "brightness control"
         case .brightnessLevel: return "brightness levels"
         case .flip: return "rotation"
+        case .rotate: return "quarter-turn rotation"
         case .identify: return "identify"
         case .restart: return "remote restart"
         case .ota: return "firmware updates"
@@ -1364,8 +1371,32 @@ final class PanelManager: ObservableObject {
 
     func setFlip(_ flipped: Bool, for serviceName: String) {
         control(serviceName, capability: .flip) { session in
-            updatePanel(serviceName) { $0.flipped = flipped }
+            updatePanel(serviceName) { panel in
+                panel.flipped = flipped
+                // The firmware treats flip as absolute (1 -> rotation 2,
+                // 0 -> upright), so mirror that locally too - the next
+                // acknowledgement confirms it either way.
+                panel.rotation = flipped ? 2 : 0
+            }
             session.setFlip(flipped)
+        }
+    }
+
+    /// Set the mounting rotation in clockwise quarter turns, on a panel whose
+    /// firmware accepts one. Gated on `.rotate`: older firmware refuses the
+    /// opcode silently, and rectangular panels never advertise it (their
+    /// 90-degree case is the landscape mechanism, not MADCTL). `setFlip`
+    /// stays alongside for those panels.
+    func setRotation(_ rotation: Int, for serviceName: String) {
+        control(serviceName, capability: .rotate) { session in
+            let clamped = min(
+                max(rotation, DeviceProtocol.rotationRange.lowerBound),
+                DeviceProtocol.rotationRange.upperBound)
+            updatePanel(serviceName) { panel in
+                panel.rotation = clamped
+                panel.flipped = clamped == 2
+            }
+            session.setRotation(clamped)
         }
     }
 
@@ -1869,6 +1900,7 @@ final class PanelManager: ObservableObject {
         }
         panel.brightnessHigh = info.brightnessHigh
         panel.flipped = info.flipped
+        panel.rotation = info.rotation
         panel.sleeping = info.sleeping
         panel.idle = info.idle
     }

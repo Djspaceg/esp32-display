@@ -151,7 +151,9 @@ static bool touchReady = false;
 static uint8_t orientationIndex = 0;  // bit0 = landscape, bit1 = flip180
 
 static bool orientLandscape() { return (orientationIndex & 1) != 0; }
-static bool orientFlip() { return (orientationIndex & 2) != 0; }
+// The user-rotation argument for the flipped states: 2 quarter turns (the
+// 180), matching how display_stream now expresses its flip.
+static uint8_t orientRotation() { return (orientationIndex & 2) != 0 ? 2 : 0; }
 
 static const char *orientName() {
   switch (orientationIndex & 3) {
@@ -167,7 +169,7 @@ static const char *orientName() {
 }
 
 static void enterTouchOrientation() {
-  boardpanel::applyOrientation(panel, *cfg, orientLandscape(), orientFlip());
+  boardpanel::applyOrientation(panel, *cfg, orientLandscape(), orientRotation());
   int w = touchmap::frameWidth(orientLandscape());
   int h = touchmap::frameHeight(orientLandscape());
   drawCornerCard(w, h);
@@ -279,7 +281,7 @@ static void serviceTouchMode() {
 
   touchmap::Point p =
       touchmap::map((int16_t)s.rawX, (int16_t)s.rawY, orientLandscape(),
-                    orientFlip());
+                    orientRotation());
   int w = touchmap::frameWidth(orientLandscape());
   int h = touchmap::frameHeight(orientLandscape());
 
@@ -337,7 +339,8 @@ void setup() {
     while (true) delay(1000);
   }
   Serial.printf("panel init OK at %lu Hz\n", (unsigned long)SPI_HZ);
-  boardpanel::applyOrientation(panel, *cfg, false /* portrait */, false);
+  boardpanel::applyOrientation(panel, *cfg, false /* portrait */,
+                               0 /* rotation */);
 
   // Full-screen primaries. This is the colour-order and inversion check: if
   // RGB element order were wrong, red and blue would swap; if inversion were
@@ -362,18 +365,19 @@ void setup() {
   delay(2500);
 
   Serial.println("portrait, flipped 180 (same card, upside down):");
-  boardpanel::applyOrientation(panel, *cfg, false, true /* flip180 */);
+  boardpanel::applyOrientation(panel, *cfg, false, 2 /* rotation: the 180 */);
   drawCornerCard(PANEL_W, PANEL_H);
   Serial.println("  expect: corners now TL=blue TR=green BL=red BR=white");
   delay(2500);
 
   Serial.println("landscape:");
-  boardpanel::applyOrientation(panel, *cfg, true /* landscape */, false);
+  boardpanel::applyOrientation(panel, *cfg, true /* landscape */,
+                               0 /* rotation */);
   drawCornerCard(PANEL_H, PANEL_W);
   delay(2500);
 
   // Back to portrait for the benchmark and the resting pattern.
-  boardpanel::applyOrientation(panel, *cfg, false, false);
+  boardpanel::applyOrientation(panel, *cfg, false, 0);
 
   // Full-frame push timing at this clock. This is the number the streaming
   // pipeline's fps ceiling comes from, so it is worth measuring per board

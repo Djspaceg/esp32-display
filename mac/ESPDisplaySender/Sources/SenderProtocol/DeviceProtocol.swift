@@ -50,6 +50,24 @@ public enum DeviceProtocol {
         /// show a battery row for a panel that will never report one. An empty
         /// or 0% reading would look like a flat battery rather than no battery.
         public static let battery = Capabilities(rawValue: 1 << 11)
+        /// Accepts packed band packets: several RLE-compressed or raw band
+        /// records per datagram (band_index bit 15; see `BandPacker`). The
+        /// panel's receive path tops out at a datagram rate, not a byte rate,
+        /// so fewer, denser packets is what raises the frame rate. The sender
+        /// only packs for a panel advertising this; every other pairing stays
+        /// byte-identical on the wire, which is why this is a capability bit
+        /// and not a protocol version bump.
+        public static let compressedBands = Capabilities(rawValue: 1 << 12)
+        /// Accepts `rotate`, i.e. any quarter turn rather than only the 180
+        /// flip. Only square panels advertise it: on rectangular glass a
+        /// physical 90-degree turn is what the sender-driven landscape
+        /// mechanism already expresses, and a MADCTL quarter turn would fight
+        /// it. A new opcode plus this bit rather than widened `flip` values,
+        /// because old firmware rejects a flip value above 1 SILENTLY — no
+        /// acknowledgement at all — and this sender could not tell that from
+        /// packet loss. The UI keeps the flip toggle for panels without the
+        /// bit, so nothing regresses.
+        public static let rotate = Capabilities(rawValue: 1 << 13)
     }
 
     public struct DeviceInfo: Equatable, Sendable {
@@ -62,6 +80,14 @@ public enum DeviceProtocol {
         public let brightness: UInt8
         public let brightnessHigh: Bool
         public let flipped: Bool
+        /// The panel's mounting rotation in clockwise quarter turns (0-3),
+        /// from flags bits 5-6. Only meaningful on firmware advertising
+        /// `Capabilities.rotate`: older firmware never sets those bits, so a
+        /// flipped old panel reads `flipped == true` with `rotation == 0`,
+        /// and `flipped` stays the authority there. On rotation-aware
+        /// firmware the two are packed from one value and cannot disagree
+        /// (`flipped` is exactly `rotation == 2`).
+        public let rotation: Int
         public let sleeping: Bool
         public let idle: Bool
         public let wifiConnected: Bool
@@ -76,7 +102,14 @@ public enum DeviceProtocol {
         case identify = 3
         case restart = 4
         case brightnessLevel = 5
+        /// Value 0-3: clockwise quarter turns. Supersedes `flip` (rotate 2 is
+        /// flip 1); only sent to firmware advertising `Capabilities.rotate`,
+        /// which is why `flip` stays for everything older.
+        case rotate = 6
     }
+
+    /// Range a `rotate` command may request: clockwise quarter turns.
+    public static let rotationRange: ClosedRange<Int> = 0...3
 
     /// Range a `brightnessLevel` command may request. Zero is excluded: a black
     /// backlight is indistinguishable from a broken panel, and switching the
@@ -93,6 +126,9 @@ public enum DeviceProtocol {
         public let status: UInt8
         public let brightnessHigh: Bool
         public let flipped: Bool
+        /// Clockwise quarter turns from flags bits 5-6; see
+        /// `DeviceInfo.rotation` for when it is meaningful.
+        public let rotation: Int
         public let sleeping: Bool
         public let brightness: UInt8
 
@@ -144,6 +180,7 @@ public enum DeviceProtocol {
             brightness: bytes[18],
             brightnessHigh: flags & 0x01 != 0,
             flipped: flags & 0x02 != 0,
+            rotation: Int((flags >> 5) & 0x03),
             sleeping: flags & 0x04 != 0,
             idle: flags & 0x08 != 0,
             wifiConnected: flags & 0x10 != 0,
@@ -182,6 +219,7 @@ public enum DeviceProtocol {
             status: bytes[8],
             brightnessHigh: flags & 0x01 != 0,
             flipped: flags & 0x02 != 0,
+            rotation: Int((flags >> 5) & 0x03),
             sleeping: flags & 0x04 != 0,
             brightness: bytes[10])
     }

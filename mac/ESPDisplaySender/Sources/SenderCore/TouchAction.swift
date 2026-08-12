@@ -121,6 +121,19 @@ enum TouchAction: Equatable, Sendable {
     /// axis; in landscape it is 320x172 and left and right do. The firmware has
     /// already folded the rotation and the 180 flip into the reported direction,
     /// so "up" here means up as the user sees it.
+    ///
+    /// QUARTER-TURN ROTATION CHANGES NOTHING HERE, verified against the
+    /// firmware's touch_map.h rather than assumed: the panel classifies
+    /// gestures on frame coordinates that went through the same quadrant
+    /// transform as the pixels (touchmap composes rotation + landscape exactly
+    /// as MADCTL does), so a swipe direction always means the direction the
+    /// user's finger moved across whatever image they were looking at — the
+    /// directions simply rotate with the panel. And the long/short axis split
+    /// this function makes is only a real distinction on rectangular panels,
+    /// which never rotate by a quarter (rotation 1/3 is gated to square glass,
+    /// where both axes are the same length and the split is nominal but
+    /// consistent on both ends). So no rotation parameter is needed, and
+    /// adding one would imply a dependency that does not exist.
     static func vector(
         of gesture: DeviceProtocol.TouchGesture, landscape: Bool
     ) -> SwipeVector? {

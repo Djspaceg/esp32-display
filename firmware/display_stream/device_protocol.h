@@ -49,6 +49,26 @@ enum Capability : uint32_t {
   // firmware one: only the 1.75C carries a PMU, so a sender must not show a
   // battery row for a panel that will never send a reading.
   CAP_BATTERY = 1u << 11,
+  // Accepts packed band packets (band_index bit 15): several RLE-compressed
+  // or raw band records per datagram, up to MAX_PACKED_PACKET_BYTES. The
+  // receive-path ceiling is packets per second, not bytes (measured on the
+  // 466x466 S3: ~1826 datagrams/s accepted however fast they are offered),
+  // so fewer, denser packets is what raises the frame rate. A capability bit
+  // rather than a version bump, per the reasoning at EBAT below: a sender
+  // only packs for a panel that advertised it, so every other pairing stays
+  // byte-identical on the wire.
+  CAP_COMPRESSED_BANDS = 1u << 12,
+  // Accepts Rotate, i.e. any quarter turn rather than only the 180 Flip.
+  // Advertised only by panels whose glass is square (panelW == panelH): on a
+  // rectangular panel a 90-degree mounting turn is what the sender-driven
+  // landscape mechanism already expresses, and accepting rotation 1/3 there
+  // would fight it. A NEW opcode plus this bit rather than widened Flip
+  // values, because old firmware's validControlValue rejects Flip > 1
+  // SILENTLY - parseControl returns false, no ack is sent, and a sender
+  // could not tell rejection from packet loss. An unknown opcode is refused
+  // the same way, but this bit is what stops a sender from ever sending one
+  // to firmware that predates it.
+  CAP_ROTATE = 1u << 13,
 };
 
 enum class ControlOpcode : uint8_t {
@@ -57,6 +77,12 @@ enum class ControlOpcode : uint8_t {
   Identify = 3,
   Restart = 4,
   BrightnessLevel = 5,
+  // Value 0-3: clockwise quarter turns. Supersedes Flip internally (Rotate 2
+  // == Flip 1); Flip stays valid in both directions so old senders keep
+  // working. Whether values 1 and 3 are honoured is a panel-shape fact the
+  // sketch owns (square glass only, NACKed there with a nonzero ack status);
+  // this file only knows the representable range.
+  Rotate = 6,
 };
 
 struct ControlCommand {
@@ -107,6 +133,12 @@ inline bool validControlValue(ControlOpcode opcode, int32_t value) {
       return value == 1;
     case ControlOpcode::BrightnessLevel:
       return value >= BRIGHTNESS_LEVEL_MIN && value <= BRIGHTNESS_LEVEL_MAX;
+    case ControlOpcode::Rotate:
+      // The full quarter-turn range. The panel-shape restriction (1 and 3
+      // only on square glass) deliberately does NOT live here: this header
+      // is board-blind, and the sketch is what knows the panel's shape. It
+      // NACKs rather than drops, so a sender can tell "refused" from "lost".
+      return value >= 0 && value <= 3;
   }
   return false;
 }
@@ -117,7 +149,7 @@ inline bool parseControl(const uint8_t *data, size_t len, ControlCommand &out) {
     return false;
   }
   if (data[5] < (uint8_t)ControlOpcode::Brightness ||
-      data[5] > (uint8_t)ControlOpcode::BrightnessLevel) {
+      data[5] > (uint8_t)ControlOpcode::Rotate) {
     return false;
   }
   out.opcode = (ControlOpcode)data[5];
