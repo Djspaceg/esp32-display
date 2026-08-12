@@ -342,6 +342,93 @@ def espota_path() -> str:
     return found[-1]
 
 
+def core_hardware_dir() -> str:
+    """The installed esp32 core's platform directory ({runtime.platform.path}).
+
+    Globbed, never pinned: 3.3.11 is what is installed here today and the core
+    upgrades itself. Newest directory wins, same lexicographic caveat as
+    esptool_path() - and unlike there it matters slightly more, because the files
+    read out of it (boot_app0.bin, boards.txt) belong to a specific core version.
+    Picking the newest is the same answer arduino-cli gives an unversioned FQBN.
+    """
+    data_dir = core_data_dir()
+    if not data_dir:
+        raise Fail("could not read `arduino-cli config get directories.data`")
+    pattern = os.path.join(data_dir, "packages", "esp32", "hardware", "esp32", "*")
+    found = sorted(p for p in glob.glob(pattern) if os.path.isdir(p))
+    if not found:
+        raise Fail(
+            "the esp32 core is not installed under %s.\n"
+            "  Install it: arduino-cli core install esp32:esp32" % pattern
+        )
+    return found[-1]
+
+
+def core_boot_app0() -> str:
+    """boot_app0.bin, the otadata initialiser, out of the installed core.
+
+    This one is NOT in an --output-dir export: arduino-cli exports what the
+    compile produced, and boot_app0 is a fixed 8192-byte file shipped with the
+    core ({runtime.platform.path}/tools/partitions/boot_app0.bin in the recipe at
+    platform.txt:346). It is what makes a freshly flashed board boot the app at
+    0x10000 rather than an empty ota slot, so a bundle that means to bring up a
+    blank board has to carry it.
+    """
+    path = os.path.join(core_hardware_dir(), "tools", "partitions", "boot_app0.bin")
+    if not os.path.isfile(path):
+        raise Fail("boot_app0.bin not found at %s" % path)
+    return path
+
+
+def bootloader_address_from_boards_txt(text: str, chip: str) -> Optional[int]:
+    """`<chip>.build.bootloader_addr` out of boards.txt, or None if absent.
+
+    Split out from the file reading so the parse is testable with no core
+    installed. Deliberately narrow: only the exact `<chip>.build.bootloader_addr`
+    key, so a menu override or a different board's key cannot answer for this one.
+    """
+    pattern = re.compile(
+        r"^%s\.build\.bootloader_addr\s*=\s*(0[xX][0-9a-fA-F]+|\d+)\s*$"
+        % re.escape(chip),
+        re.MULTILINE,
+    )
+    found = pattern.findall(text)
+    if not found:
+        return None
+    if len({value.lower() for value in found}) > 1:
+        # Two different answers for one chip. Refusing to pick is the same stance
+        # resolve_board and fw_version_from_sketch take, and this one would put an
+        # image at the wrong flash address.
+        raise Fail(
+            "boards.txt gives %s %d different bootloader addresses (%s)"
+            % (chip, len(set(found)), ", ".join(sorted(set(found))))
+        )
+    return int(found[0], 0)
+
+
+def core_bootloader_address(chip: str) -> int:
+    """Where this chip's second-stage bootloader goes, read out of the core.
+
+    Read rather than hardcoded because it is per-chip data: 0x0 for esp32c6 and
+    esp32s3, 0x1000 for the classic ESP32. A constant here would be wrong for
+    some board this repo does not support yet, and it would be wrong silently -
+    the flash would take the write and the chip would not boot.
+    """
+    path = os.path.join(core_hardware_dir(), "boards.txt")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        raise Fail("cannot read %s: %s" % (path, exc.strerror or exc))
+    address = bootloader_address_from_boards_txt(text, chip)
+    if address is None:
+        raise Fail(
+            "%s has no build.bootloader_addr in %s, so there is no way to say "
+            "where its bootloader goes" % (chip, path)
+        )
+    return address
+
+
 def probe_chip(address: str) -> Optional[str]:
     """Ask the bundled esptool which chip is on `address`.
 
@@ -500,7 +587,8 @@ def send_config_line(address: str, line: str, timeout: float) -> str:
 # the firmware bundle: one file that travels
 #
 # `bundle` writes a single .espdispfw file holding the compiled application
-# images and a manifest describing them, and the Mac app opens one the user
+# images, everything else a blank board needs written to flash, and a manifest
+# describing all of it, and the Mac app opens one the user
 # picks - possibly on another machine, weeks later, with no copy of this repo in
 # sight. That is the whole reason for a file rather than a directory: it has to
 # survive being emailed, dropped in a share, or carried on a stick.
@@ -508,15 +596,43 @@ def send_config_line(address: str, line: str, timeout: float) -> str:
 # LAYOUT, byte-exact. A reader on the other side of this format implements four
 # lines:
 #
-#   offset 0        "ESPDISPFW1\n"   11 bytes, magic and format generation
+#   offset 0        "ESPDISPFW2\n"   11 bytes, magic and format generation
 #   offset 11       "%010d\n"        11 bytes, manifest length, zero-padded ASCII
 #   offset 22       manifest         UTF-8 JSON object, exactly that many bytes
-#   offset 22+len   payloads         the application images, raw, in manifest order
+#   offset 22+len   payloads         raw, in manifest order: for each image its
+#                                    application image, then that image's flash
+#                                    parts in listed order
 #
 # The fixed 22-byte prefix is the point: a reader gets the manifest without
 # reading two megabytes, and the payloads stay byte-identical to arduino-cli's
 # <sketch>.ino.bin, so the sha256 in the manifest is the same number
 # `shasum -a 256` prints for the file the compile produced.
+#
+# WHAT GENERATION 2 ADDED, AND WHY IT IS A NEW GENERATION. A generation-1 bundle
+# carried one application image per chip. That is exactly right for OTA - the
+# image goes into an app slot and the running bootloader boots it - and it is not
+# enough for a board that has never been flashed, which needs the second-stage
+# bootloader, the partition table and boot_app0 written at their own flash
+# addresses before the app at 0x10000 will boot at all. Generation 2 carries
+# those three per image, with their addresses, so the file is a complete answer
+# to "bring this board up from nothing".
+#
+# Extending generation 1 in place was not available. The generation-1 reader
+# walks the payload area with `offset == cursor` per image and then requires
+# `cursor == len(data)`, so any extra payload trips either the contiguity check
+# or the trailing-bytes check. Making a file the shipped reader would accept
+# means relaxing one of the two checks whose whole job is catching a truncated or
+# concatenated file, on every reader, forever. Bumping the magic instead means an
+# old reader refuses a new file loudly and says which side is behind - the
+# message it already had for this case - and nothing that ever mattered is
+# weakened.
+#
+# GENERATION 1 IS STILL READ, in both directions of that asymmetry: unpack_bundle
+# and `bundle-info` accept one, and so does the app. A v1 file cannot flash a
+# blank board, but it is a perfectly good OTA payload, and the person holding one
+# cannot re-create it without this repo at the commit it was built from.
+#
+# WHAT IS DELIBERATELY NOT CARRIED: <sketch>.ino.merged.bin. See app_image().
 #
 # WHY NOT zip, tar, or base64 inside JSON. Foundation has no zip reader on
 # macOS and the Compression framework only does raw deflate/zlib streams, so a
@@ -527,8 +643,16 @@ def send_config_line(address: str, line: str, timeout: float) -> str:
 # This container is about thirty lines on each side and leaves the images
 # checkable with ordinary tools.
 
-BUNDLE_MAGIC = b"ESPDISPFW1\n"
-BUNDLE_FORMAT = 1  # the `format` field inside the manifest, kept in step with the magic
+BUNDLE_MAGIC = b"ESPDISPFW2\n"
+BUNDLE_FORMAT = 2  # the `format` field inside the manifest, kept in step with the magic
+BUNDLE_MAGIC_V1 = b"ESPDISPFW1\n"
+BUNDLE_FORMAT_V1 = 1
+# Which magic means which format. Read-only for generation 1: this tool writes
+# the newest generation and only ever writes one, so there is one BUNDLE_MAGIC.
+# Every magic is the same width, which is what keeps the manifest at offset 22
+# for every generation and lets one reader dispatch on the first line
+# (test_generation_one_layout_is_pinned_and_still_read pins that).
+BUNDLE_GENERATIONS = {BUNDLE_MAGIC_V1: BUNDLE_FORMAT_V1, BUNDLE_MAGIC: BUNDLE_FORMAT}
 BUNDLE_LENGTH_DIGITS = 10
 BUNDLE_HEADER_BYTES = len(BUNDLE_MAGIC) + BUNDLE_LENGTH_DIGITS + 1  # 22
 BUNDLE_SUFFIX = ".espdispfw"
@@ -545,7 +669,37 @@ MANIFEST_KEYS = (
     "tool",
     "images",
 )
+# Generation 1's image keys, which generation 2 keeps unchanged and adds to.
 IMAGE_KEYS = ("board", "chip", "fqbn", "filename", "offset", "bytes", "sha256")
+IMAGE_KEYS_V2 = IMAGE_KEYS + ("app_address", "flash_parts")
+FLASH_PART_KEYS = ("role", "address", "filename", "offset", "bytes", "sha256")
+
+# The three parts a board that has never been flashed needs, in the order they
+# are written. A generation-2 image must carry all three: the generation exists
+# to make "this file can bring up a blank board" true of every file that claims
+# it, and a reader that had to check role by role would be answering "maybe".
+# Extra roles are allowed - a future writer may add a filesystem image - which is
+# why this is a required subset rather than the whole vocabulary.
+FLASH_ROLE_BOOTLOADER = "bootloader"
+FLASH_ROLE_PARTITIONS = "partitions"
+FLASH_ROLE_BOOT_APP0 = "boot_app0"
+REQUIRED_FLASH_ROLES = (
+    FLASH_ROLE_BOOTLOADER,
+    FLASH_ROLE_PARTITIONS,
+    FLASH_ROLE_BOOT_APP0,
+)
+
+# Flash addresses, from the core's own upload recipe (platform.txt:346,
+# tools.esptool_py.upload.pattern_args). These three are the same for every
+# chip. THE BOOTLOADER ADDRESS IS NOT: boards.txt gives esp32c6 (:812) and
+# esp32s3 (:1183) a bootloader at 0x0 while the classic ESP32 uses 0x1000, so it
+# is read per chip out of the installed core (core_bootloader_address) and
+# carried in the manifest. A reader takes every address from the file for the
+# same reason: the day a board with a different map is added, old bundles still
+# describe themselves correctly.
+PARTITIONS_FLASH_ADDRESS = 0x8000
+BOOT_APP0_FLASH_ADDRESS = 0xE000
+APP_FLASH_ADDRESS = 0x10000
 
 
 def encode_manifest(manifest: dict) -> bytes:
@@ -675,23 +829,48 @@ def bundle_manifest(
     source_dirty: bool = False,
     tool: str = BUNDLE_TOOL,
 ) -> dict:
-    """Build the manifest, filling in an absolute offset for every image.
+    """Build the manifest, filling in an absolute offset for every payload.
 
-    `images` carries board, chip, fqbn, filename, bytes and sha256 per image; the
-    offsets are this function's job.
+    `images` carries board, chip, fqbn, filename, bytes, sha256, app_address and
+    flash_parts per image, and each flash part carries role, address, filename,
+    bytes and sha256; the offsets are this function's job.
 
     Offsets are absolute from the start of the FILE, not relative to the payload
     area, so a reader is one slice with no arithmetic - and so it can also check
     that the payloads run contiguously from 22 + len(manifest) in listed order,
-    which is what catches a truncated or hand-edited file.
+    which is what catches a truncated or hand-edited file. PAYLOAD ORDER is a flat
+    walk: each image's application image, then that image's flash parts in listed
+    order, then the next image. One rule, pinned literally on both sides of the
+    format.
 
     Absolute offsets make the manifest describe its own length, so they are
     solved rather than computed: assign, re-encode, and repeat until the encoded
-    length stops moving. Only a digit rollover in an offset can move it, and the
-    length only ever grows, so this settles in two passes.
+    length stops moving. Carrying flash parts adds offsets to solve but does not
+    change the argument for the iteration bound: an offset only ever moves the
+    length by gaining digits, the length therefore only grows, and each pass makes
+    every offset at least as large as the last, so the fixpoint is reached from
+    below. Eight passes is far more than the two it takes for a two-board bundle
+    (test_bundle_manifest_offsets drives payload sizes that force rollovers).
     """
     if not images:
         raise Fail("a bundle needs at least one image")
+    prepared = []
+    for image in images:
+        parts = image.get("flash_parts")
+        if not isinstance(parts, list):
+            # This tool writes generation 2 only, so an image with no flash parts
+            # is a caller bug rather than an older file. Reading generation 1 is
+            # unpack_bundle's business, not the writer's.
+            raise Fail(
+                "image for %r carries no flash_parts list; a generation-%d bundle "
+                "describes what a blank board needs" % (image.get("chip"), BUNDLE_FORMAT)
+            )
+        # The parts are copied, not shared: this function mutates offsets, and a
+        # caller's list surviving into the manifest would be mutated behind its
+        # back - and a second call would then start from the first call's offsets.
+        prepared.append(
+            dict(image, offset=0, flash_parts=[dict(part, offset=0) for part in parts])
+        )
     manifest = {
         "format": BUNDLE_FORMAT,
         "firmware_version": firmware_version,
@@ -699,7 +878,7 @@ def bundle_manifest(
         "source_commit": source_commit,
         "source_dirty": bool(source_dirty),
         "tool": tool,
-        "images": [dict(image, offset=0) for image in images],
+        "images": prepared,
     }
     for _ in range(8):
         length = len(encode_manifest(manifest))
@@ -707,82 +886,172 @@ def bundle_manifest(
         for image in manifest["images"]:
             image["offset"] = cursor
             cursor += image["bytes"]
+            for part in image["flash_parts"]:
+                part["offset"] = cursor
+                cursor += part["bytes"]
         if len(encode_manifest(manifest)) == length:
             return manifest
     raise Fail("could not settle the manifest offsets")  # unreachable: length only grows
 
 
-def pack_bundle(manifest: dict, payloads: Dict[str, bytes]) -> bytes:
+def missing_flash_roles(roles) -> List[str]:
+    """Which of the three a blank board needs are absent, in written order."""
+    present = set(roles)
+    return [role for role in REQUIRED_FLASH_ROLES if role not in present]
+
+
+def conflicting_flash_address(writes) -> Optional[Tuple[int, str, str]]:
+    """The first flash address two different payloads both claim, if any.
+
+    `writes` is (address, label) in write order. Two payloads at one address is a
+    contradiction rather than a preference - whichever went second would be the
+    only one that survived - so both sides of the format refuse it instead of
+    quietly writing the file and letting a board sort it out.
+    """
+    seen: Dict[int, str] = {}
+    for address, label in writes:
+        if address in seen:
+            return address, seen[address], label
+        seen[address] = label
+    return None
+
+
+def pack_bundle(
+    manifest: dict,
+    payloads: Dict[str, bytes],
+    flash_payloads: Optional[Dict[str, Dict[str, bytes]]] = None,
+) -> bytes:
     """Serialise a manifest and its payloads into a bundle file's bytes.
+
+    `payloads` is {chip: application image}; `flash_payloads` is
+    {chip: {role: bytes}} for the parts a blank board needs.
 
     Re-checks the manifest against the payloads it claims to describe - present,
     right length, right hash, landing where the offsets say - because the writer
     is the last side that can still fix a disagreement. Past here it is somebody
-    else's file and all they can do is refuse it.
+    else's file and all they can do is refuse it. Every check applies to the flash
+    parts too: they are written to absolute flash addresses on a board that
+    currently has no working firmware, which is the worst place for a payload that
+    is not what its manifest says.
     """
     images = manifest.get("images") or []
     if not images:
         raise Fail("a bundle needs at least one image")
+    flash_payloads = flash_payloads or {}
     raw = encode_manifest(manifest)
-    parts = [BUNDLE_MAGIC, bundle_length_line(len(raw)), raw]
+    out = [BUNDLE_MAGIC, bundle_length_line(len(raw)), raw]
     cursor = BUNDLE_HEADER_BYTES + len(raw)
-    for image in images:
-        chip = image["chip"]
-        if chip not in payloads:
-            raise Fail("the manifest lists %s but no payload was given for it" % chip)
-        blob = payloads[chip]
-        if len(blob) != image["bytes"]:
+
+    def place(entry: dict, blob: Optional[bytes], label: str) -> None:
+        """One payload, checked against its manifest entry and appended."""
+        nonlocal cursor
+        if blob is None:
+            raise Fail("the manifest lists %s but no payload was given for it" % label)
+        if len(blob) != entry["bytes"]:
             raise Fail(
                 "%s payload is %d bytes, the manifest says %d"
-                % (chip, len(blob), image["bytes"])
+                % (label, len(blob), entry["bytes"])
             )
         digest = sha256_hex(blob)
-        if digest != image["sha256"]:
+        if digest != entry["sha256"]:
             raise Fail(
                 "%s payload hashes to %s, the manifest says %s"
-                % (chip, digest[:16], str(image["sha256"])[:16])
+                % (label, digest[:16], str(entry["sha256"])[:16])
             )
-        if image["offset"] != cursor:
+        if entry["offset"] != cursor:
             raise Fail(
                 "%s is listed at offset %d but lands at %d; the manifest offsets do "
-                "not describe this file" % (chip, image["offset"], cursor)
+                "not describe this file" % (label, entry["offset"], cursor)
             )
-        parts.append(blob)
+        out.append(blob)
         cursor += len(blob)
-    return b"".join(parts)
+
+    for image in images:
+        chip = image["chip"]
+        place(image, payloads.get(chip), chip)
+        parts = image.get("flash_parts") or []
+        absent = missing_flash_roles(part.get("role") for part in parts)
+        if absent:
+            raise Fail(
+                "the %s image carries no %s; a generation-%d bundle has to describe "
+                "everything a blank board needs"
+                % (chip, ", ".join(absent), BUNDLE_FORMAT)
+            )
+        clash = conflicting_flash_address(
+            [(image["app_address"], "the app")]
+            + [(part["address"], part["role"]) for part in parts]
+        )
+        if clash:
+            raise Fail(
+                "the %s image writes both %s and %s to flash address 0x%x"
+                % (chip, clash[1], clash[2], clash[0])
+            )
+        for part in parts:
+            place(
+                part,
+                (flash_payloads.get(chip) or {}).get(part["role"]),
+                "%s %s" % (chip, part["role"]),
+            )
+    return b"".join(out)
 
 
-def unpack_bundle(data: bytes) -> Tuple[dict, Dict[str, bytes]]:
+def is_whole_number(value) -> bool:
+    """An int that is not a bool.
+
+    bool is an int in Python and JSON true would sail through an isinstance check,
+    so it is excluded explicitly rather than trusted: `"offset": true` would
+    otherwise read as offset 1 and be refused for not being contiguous, a message
+    pointing at the wrong problem. The Swift reader excludes it for the same
+    reason, and also excludes anything WRITTEN as a float, which json.loads
+    already does here (372.0 is a float and fails isinstance(int)).
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def unpack_bundle(
+    data: bytes,
+) -> Tuple[dict, Dict[str, bytes], Dict[str, Dict[str, bytes]]]:
     """Read a bundle, checking everything a reader can check.
 
-    Returns (manifest, {chip: image bytes}). Raises Fail, one specific line per
-    way a file can be wrong, because by the time this runs the file arrived from
-    somewhere else and "invalid bundle" tells the user nothing about whether to
-    re-download it, rebuild it, or go and find the person who sent it.
+    Returns (manifest, {chip: application image}, {chip: {role: flash part}}).
+    The third is empty for a generation-1 file, which carries no flash parts.
+    Raises Fail, one specific line per way a file can be wrong, because by the
+    time this runs the file arrived from somewhere else and "invalid bundle" tells
+    the user nothing about whether to re-download it, rebuild it, or go and find
+    the person who sent it.
 
     Everything here is checkable without the panel: the hashes catch a corrupt or
     edited payload, and the contiguity check catches a truncation that happens to
     leave a valid-looking manifest. What it cannot check is whether the image is
     right for the panel - only the chip token in the manifest speaks to that, and
     only the panel's own image validation settles it.
+
+    BOTH GENERATIONS ARE ACCEPTED. A generation-1 file carries application images
+    and nothing else: it cannot flash a blank board, and it is still a valid OTA
+    payload that the person holding it may not be able to rebuild. Refusing it
+    would break a feature that works over a file nobody can re-create.
     """
     if len(data) < BUNDLE_HEADER_BYTES:
         raise Fail(
             "not a firmware bundle: %d bytes is shorter than the %d-byte header"
             % (len(data), BUNDLE_HEADER_BYTES)
         )
-    if not data.startswith(BUNDLE_MAGIC):
+    generation = BUNDLE_GENERATIONS.get(bytes(data[: len(BUNDLE_MAGIC)]))
+    if generation is None:
         if data.startswith(b"ESPDISPFW"):
-            # A future generation. Say which one this tool reads, so an old tool
+            # A future generation. Say which ones this tool reads, so an old tool
             # meeting a new file gives an answer someone can act on.
             raise Fail(
-                "unsupported bundle generation %r; this tool reads %r"
+                "unsupported bundle generation %r; this tool reads %s"
                 % (
                     data[: len(BUNDLE_MAGIC)].decode("ascii", "replace").strip(),
-                    BUNDLE_MAGIC.decode("ascii").strip(),
+                    ", ".join(
+                        repr(magic.decode("ascii").strip())
+                        for magic in sorted(BUNDLE_GENERATIONS)
+                    ),
                 )
             )
-        raise Fail("not a firmware bundle: it does not start with the ESPDISPFW1 magic")
+        raise Fail("not a firmware bundle: it does not start with the ESPDISPFW2 magic")
 
     line = data[len(BUNDLE_MAGIC):BUNDLE_HEADER_BYTES]
     if not line.endswith(b"\n") or not line[:-1].isdigit():
@@ -808,73 +1077,146 @@ def unpack_bundle(data: bytes) -> Tuple[dict, Dict[str, bytes]]:
     missing = [key for key in MANIFEST_KEYS if key not in manifest]
     if missing:
         raise Fail("bundle manifest is missing %s" % ", ".join(missing))
-    if manifest["format"] != BUNDLE_FORMAT:
+    # The magic and the manifest's own `format` have to agree. They are two
+    # statements of the same fact, so a file where they differ is self-
+    # contradictory whichever one is right, and guessing which to believe would
+    # mean reading a generation-2 body as generation 1 or the reverse.
+    if manifest["format"] != generation:
         raise Fail(
-            "bundle manifest says format %r; this tool reads format %d"
-            % (manifest["format"], BUNDLE_FORMAT)
+            "bundle manifest says format %r but its %s magic means format %d; "
+            "this tool reads formats %s"
+            % (
+                manifest["format"],
+                BUNDLE_MAGIC_V1.decode("ascii").strip()
+                if generation == BUNDLE_FORMAT_V1
+                else BUNDLE_MAGIC.decode("ascii").strip(),
+                generation,
+                " and ".join(str(v) for v in sorted(BUNDLE_GENERATIONS.values())),
+            )
         )
     images = manifest["images"]
     if not isinstance(images, list) or not images:
         raise Fail("bundle manifest lists no images")
 
-    payloads = {}
+    payloads: Dict[str, bytes] = {}
+    flash_payloads: Dict[str, Dict[str, bytes]] = {}
     cursor = end
+
+    def take(entry: dict, label: str) -> bytes:
+        """One payload, framed by the manifest's own offsets and hash-checked.
+
+        Absolute offsets are what make this arithmetic rather than scanning, and
+        what make the contiguity check possible: a payload that does not start
+        exactly where the last one ended means the file has been truncated,
+        concatenated or edited, whatever its hashes say.
+        """
+        nonlocal cursor
+        offset, size = entry["offset"], entry["bytes"]
+        if not is_whole_number(offset) or not is_whole_number(size) or offset < 0 or size <= 0:
+            raise Fail(
+                "%s has a nonsensical offset/bytes pair: %r/%r" % (label, offset, size)
+            )
+        if offset != cursor:
+            raise Fail(
+                "%s is listed at offset %d, but the payloads must run "
+                "contiguously from %d in listed order" % (label, offset, cursor)
+            )
+        if offset + size > len(data):
+            raise Fail(
+                "%s runs to offset %d, past the end of a %d-byte file"
+                % (label, offset + size, len(data))
+            )
+        blob = data[offset:offset + size]
+        digest = sha256_hex(blob)
+        if digest != entry["sha256"]:
+            raise Fail(
+                "%s hash mismatch: the manifest says sha256 %s, the payload "
+                "hashes to %s. The file is damaged or was edited."
+                % (label, str(entry["sha256"])[:16], digest[:16])
+            )
+        cursor += size
+        return blob
+
+    image_keys = IMAGE_KEYS if generation == BUNDLE_FORMAT_V1 else IMAGE_KEYS_V2
     for index, image in enumerate(images):
         where = "image %d" % index
         if not isinstance(image, dict):
             raise Fail("%s is a %s, not a JSON object" % (where, type(image).__name__))
-        missing = [key for key in IMAGE_KEYS if key not in image]
+        missing = [key for key in image_keys if key not in image]
         if missing:
             raise Fail("%s is missing %s" % (where, ", ".join(missing)))
         chip = image["chip"]
-        offset, size = image["offset"], image["bytes"]
-        # bool is an int in Python and JSON true would sail through an isinstance
-        # check, so it is excluded explicitly rather than trusted.
-        if (
-            not isinstance(offset, int)
-            or isinstance(offset, bool)
-            or not isinstance(size, int)
-            or isinstance(size, bool)
-            or offset < 0
-            or size <= 0
-        ):
-            raise Fail(
-                "%s (%s) has a nonsensical offset/bytes pair: %r/%r"
-                % (where, chip, offset, size)
-            )
-        if offset != cursor:
-            raise Fail(
-                "%s (%s) is listed at offset %d, but the payloads must run "
-                "contiguously from %d in listed order" % (where, chip, offset, cursor)
-            )
-        if offset + size > len(data):
-            raise Fail(
-                "%s (%s) runs to offset %d, past the end of a %d-byte file"
-                % (where, chip, offset + size, len(data))
-            )
         if chip in payloads:
             raise Fail(
                 "bundle lists %s twice; a reader could not tell which image to push"
                 % chip
             )
-        blob = data[offset:offset + size]
-        digest = sha256_hex(blob)
-        if digest != image["sha256"]:
+        payloads[chip] = take(image, "%s (%s)" % (where, chip))
+        if generation == BUNDLE_FORMAT_V1:
+            continue
+
+        # -- generation 2: the parts a board with nothing on it needs.
+        address = image["app_address"]
+        if not is_whole_number(address) or address < 0:
             raise Fail(
-                "%s (%s) hash mismatch: the manifest says sha256 %s, the payload "
-                "hashes to %s. The file is damaged or was edited."
-                % (where, chip, str(image["sha256"])[:16], digest[:16])
+                "%s (%s) has a nonsensical app_address: %r" % (where, chip, address)
             )
-        payloads[chip] = blob
-        cursor += size
+        parts = image["flash_parts"]
+        if not isinstance(parts, list) or not parts:
+            raise Fail(
+                "%s (%s) lists no flash parts; a generation-%d bundle carries the "
+                "bootloader, partition table and boot_app0 a blank board needs"
+                % (where, chip, BUNDLE_FORMAT)
+            )
+        roles: Dict[str, bytes] = {}
+        writes = [(address, "the app")]
+        for part_index, part in enumerate(parts):
+            part_where = "%s (%s) flash part %d" % (where, chip, part_index)
+            if not isinstance(part, dict):
+                raise Fail(
+                    "%s is a %s, not a JSON object" % (part_where, type(part).__name__)
+                )
+            absent = [key for key in FLASH_PART_KEYS if key not in part]
+            if absent:
+                raise Fail("%s is missing %s" % (part_where, ", ".join(absent)))
+            role = part["role"]
+            if not isinstance(role, str) or not role.strip():
+                raise Fail("%s has no usable role: %r" % (part_where, role))
+            if role in roles:
+                raise Fail(
+                    "%s (%s) lists the %s part twice; a reader could not tell which "
+                    "one to write" % (where, chip, role)
+                )
+            part_address = part["address"]
+            if not is_whole_number(part_address) or part_address < 0:
+                raise Fail(
+                    "%s (%s) %s has a nonsensical flash address: %r"
+                    % (where, chip, role, part_address)
+                )
+            writes.append((part_address, role))
+            roles[role] = take(part, "%s (%s) %s" % (where, chip, role))
+        absent_roles = missing_flash_roles(roles)
+        if absent_roles:
+            raise Fail(
+                "%s (%s) carries no %s, so it cannot bring up a board that has "
+                "nothing on it" % (where, chip, ", ".join(absent_roles))
+            )
+        clash = conflicting_flash_address(writes)
+        if clash:
+            raise Fail(
+                "%s (%s) writes both %s and %s to flash address 0x%x"
+                % (where, chip, clash[1], clash[2], clash[0])
+            )
+        flash_payloads[chip] = roles
+
     if cursor != len(data):
         raise Fail(
-            "bundle has %d bytes trailing after the last image" % (len(data) - cursor)
+            "bundle has %d bytes trailing after the last payload" % (len(data) - cursor)
         )
-    return manifest, payloads
+    return manifest, payloads, flash_payloads
 
 
-def read_bundle(path: str) -> Tuple[dict, Dict[str, bytes]]:
+def read_bundle(path: str) -> Tuple[dict, Dict[str, bytes], Dict[str, Dict[str, bytes]]]:
     try:
         with open(path, "rb") as fh:
             data = fh.read()
@@ -910,6 +1252,13 @@ def write_file_atomically(path: str, data: bytes) -> None:
         raise
 
 
+def flash_address_hex(address) -> str:
+    """A flash address the way esptool and the datasheets spell one."""
+    if not is_whole_number(address):
+        return str(address)
+    return "0x%06x" % address
+
+
 def describe_bundle(manifest: dict, full_hash: bool = False) -> List[str]:
     """The manifest as lines a person reads. Shared by `bundle` and `bundle-info`."""
     commit = manifest.get("source_commit")
@@ -936,6 +1285,36 @@ def describe_bundle(manifest: dict, full_hash: bool = False) -> List[str]:
         )
         if full_hash:
             lines.append("            %s from %s" % (image.get("filename"), image.get("fqbn")))
+        # The flash parts, with the address each is written to, because that is
+        # the whole content of the answer to "can this file bring up a blank
+        # board" - and because a reader that hardcoded these addresses instead of
+        # reading them would be wrong for the first board with a different map.
+        parts = image.get("flash_parts")
+        if not isinstance(parts, list) or not parts:
+            lines.append(
+                "            app only (format %s): enough for an over-the-air "
+                "update, not for a board that has never been flashed"
+                % manifest.get("format")
+            )
+            continue
+        lines.append(
+            "            app        -> %s" % flash_address_hex(image.get("app_address"))
+        )
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            part_digest = str(part.get("sha256", ""))
+            lines.append(
+                "            %-10s -> %s %8d bytes  sha256 %s"
+                % (
+                    part.get("role"),
+                    flash_address_hex(part.get("address")),
+                    part.get("bytes", 0),
+                    part_digest if full_hash else part_digest[:16] + "...",
+                )
+            )
+            if full_hash:
+                lines.append("                          %s" % part.get("filename"))
     return lines
 
 
@@ -975,6 +1354,19 @@ def app_image(output_dir: str) -> str:
     whole-flash image with the bootloader and partition table in it - correct for
     esptool over USB, wrong for OTA, and 8MB of wrong at that. Only the bare
     <sketch>.ino.bin goes into an app slot.
+
+    A BUNDLE STILL DOES NOT CARRY merged.bin, now that it carries the flash parts
+    a blank board needs, and the measurements are why. platform.txt:183 pads it
+    with `--pad-to-size {build.flash_size}`, so the C6 export's merged.bin is
+    8388608 bytes (measured) and the S3's is 16777216 (the FQBN says FlashSize=16M;
+    UNVERIFIED, the C6 is the one that was measured). A two-board bundle would go
+    from the 2290544 bytes it is today to roughly 24MB, of which ~22MB is padding.
+    The individual parts cost 31984 bytes for the C6 (bootloader 20720, partitions
+    3072, boot_app0 8192) and 31232 for the S3 (bootloader 19968), all measured
+    from a real export. merged.bin also describes a whole-flash write, which would
+    erase NVS - and NVS is where the WiFi credentials and the panel's name live, so
+    flashing one board twice would wipe what the user configured after the first
+    time.
     """
     candidates = [
         p
@@ -987,6 +1379,75 @@ def app_image(output_dir: str) -> str:
             % (output_dir, len(candidates))
         )
     return candidates[0]
+
+
+def export_binary(output_dir: str, suffix: str) -> str:
+    """The one file in an export ending in `suffix`, or a refusal.
+
+    Verified against a real `arduino-cli compile --output-dir` export rather than
+    assumed: for this sketch it holds display_stream.ino.bin,
+    display_stream.ino.bootloader.bin, display_stream.ino.partitions.bin,
+    display_stream.ino.merged.bin, .elf and .map. Exactly one match is required
+    because two would mean the directory has two builds in it and picking either
+    would be picking at random.
+    """
+    candidates = sorted(glob.glob(os.path.join(output_dir, "*" + suffix)))
+    if len(candidates) != 1:
+        raise Fail(
+            "expected exactly one *%s in %s, found %d"
+            % (suffix, output_dir, len(candidates))
+        )
+    return candidates[0]
+
+
+def read_binary(path: str) -> bytes:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError as exc:
+        raise Fail("cannot read %s: %s" % (path, exc.strerror or exc))
+
+
+def collect_flash_parts(
+    board: Board, output_dir: str
+) -> Tuple[List[dict], Dict[str, bytes]]:
+    """The three extra payloads a blank board needs, with their flash addresses.
+
+    Two come out of the compile's export; boot_app0.bin comes out of the installed
+    core, because that is where the core's own upload recipe gets it
+    (platform.txt:346). Returns pre-offset manifest entries in write order and
+    {role: bytes} - bundle_manifest fills the offsets in.
+    """
+    sources = [
+        (
+            FLASH_ROLE_BOOTLOADER,
+            core_bootloader_address(board.chip),
+            export_binary(output_dir, ".ino.bootloader.bin"),
+        ),
+        (
+            FLASH_ROLE_PARTITIONS,
+            PARTITIONS_FLASH_ADDRESS,
+            export_binary(output_dir, ".ino.partitions.bin"),
+        ),
+        (FLASH_ROLE_BOOT_APP0, BOOT_APP0_FLASH_ADDRESS, core_boot_app0()),
+    ]
+    entries: List[dict] = []
+    payloads: Dict[str, bytes] = {}
+    for role, address, path in sources:
+        blob = read_binary(path)
+        if not blob:
+            raise Fail("%s is empty, so there is nothing to write at 0x%x" % (path, address))
+        entries.append(
+            {
+                "role": role,
+                "address": address,
+                "filename": os.path.basename(path),
+                "bytes": len(blob),
+                "sha256": sha256_hex(blob),
+            }
+        )
+        payloads[role] = blob
+    return entries, payloads
 
 
 def check_password_policy(password: str) -> None:
@@ -1262,6 +1723,7 @@ def cmd_bundle(args) -> int:
 
     entries: List[dict] = []
     payloads: Dict[str, bytes] = {}
+    flash_payloads: Dict[str, Dict[str, bytes]] = {}
     size_lines: List[str] = []
     out_dirs: List[str] = []
     try:
@@ -1270,8 +1732,8 @@ def cmd_bundle(args) -> int:
             out_dirs.append(out_dir)
             size_lines += compile_board(board, output_dir=out_dir)
             image = app_image(out_dir)
-            with open(image, "rb") as fh:
-                blob = fh.read()
+            blob = read_binary(image)
+            parts, part_payloads = collect_flash_parts(board, out_dir)
             entries.append(
                 {
                     "board": board.key,
@@ -1280,9 +1742,16 @@ def cmd_bundle(args) -> int:
                     "filename": os.path.basename(image),
                     "bytes": len(blob),
                     "sha256": sha256_hex(blob),
+                    # Where the app goes over USB. In the manifest rather than in
+                    # the reader for the same reason as the bootloader address:
+                    # 0x10000 is what this repo's partition table says, and the
+                    # table travels in the same file, so the two cannot drift.
+                    "app_address": APP_FLASH_ADDRESS,
+                    "flash_parts": parts,
                 }
             )
             payloads[board.chip] = blob
+            flash_payloads[board.chip] = part_payloads
     finally:
         # Same shape as cmd_ota: the export directories go whatever happens, so an
         # interrupted build does not leave two megabytes per board in /tmp.
@@ -1290,7 +1759,7 @@ def cmd_bundle(args) -> int:
             shutil.rmtree(out_dir, ignore_errors=True)
 
     manifest = bundle_manifest(version, entries, utc_timestamp(), commit, dirty)
-    data = pack_bundle(manifest, payloads)
+    data = pack_bundle(manifest, payloads, flash_payloads)
     write_file_atomically(path, data)
 
     report_sizes(size_lines)
@@ -1321,7 +1790,7 @@ def cmd_bundle(args) -> int:
 
 
 def cmd_bundle_info(args) -> int:
-    manifest, payloads = read_bundle(args.path)
+    manifest, payloads, flash_payloads = read_bundle(args.path)
     size = os.path.getsize(args.path)
     print("%s" % args.path)
     print("  size:     %d bytes (%.1f MiB)" % (size, size / (1024.0 * 1024.0)))
@@ -1330,10 +1799,31 @@ def cmd_bundle_info(args) -> int:
     # unpack_bundle already refused anything that did not add up, so reaching here
     # is the verification result: say so, rather than leaving the user to infer it
     # from the absence of an error.
+    extra = sum(len(roles) for roles in flash_payloads.values())
     print(
-        "\nVerified: %d image%s, contiguous, every sha256 matches."
-        % (len(payloads), "" if len(payloads) == 1 else "s")
+        "\nVerified: %d image%s%s, contiguous, every sha256 matches."
+        % (
+            len(payloads),
+            "" if len(payloads) == 1 else "s",
+            "" if not extra else " plus %d flash part%s" % (extra, "" if extra == 1 else "s"),
+        )
     )
+    # What the file can and cannot be used for, said rather than implied. A
+    # generation-1 bundle is not broken and this is not a warning about damage: it
+    # is the one thing about such a file a user cannot see from the listing.
+    if flash_payloads:
+        print(
+            "Can bring up a board that has never been flashed: carries the "
+            "bootloader, partition table and boot_app0 for %s."
+            % ", ".join(sorted(flash_payloads))
+        )
+    else:
+        print(
+            "Over-the-air updates only. This is a format %s bundle, so it carries no\n"
+            "  bootloader, partition table or boot_app0 and cannot bring up a board "
+            "that\n  has never been flashed. Rebuild it with `%s bundle` for that."
+            % (manifest.get("format"), os.path.basename(sys.argv[0]))
+        )
     known = [chip for chip in payloads if board_key_for_chip(chip)]
     if len(known) < len(BOARDS):
         print(
@@ -1480,9 +1970,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="compile and pack the firmware into one portable %s file" % BUNDLE_SUFFIX,
         description="Build the firmware and write it into a single file the Mac "
         "app can open later - on this machine or on another one, with no copy of "
-        "this repo and no arduino-cli in sight. The file carries one application "
-        "image per board plus a manifest naming the firmware version, when it was "
-        "built, which commit it came from and the sha256 of every image. Nothing "
+        "this repo and no arduino-cli in sight. The file carries, per board, the "
+        "application image plus the bootloader, partition table and boot_app0 a "
+        "board that has never been flashed needs, each with the flash address it "
+        "is written to, and a manifest naming the firmware version, when it was "
+        "built, which commit it came from and the sha256 of every payload. Nothing "
         "is pushed: `bundle` only writes the file, and `ota` is still the way to "
         "push from here.",
         epilog="The version is read out of the sketch (FW_VERSION in\n"
@@ -1509,8 +2001,9 @@ def build_parser() -> argparse.ArgumentParser:
         "bundle-info",
         help="verify a %s file and print what is in it" % BUNDLE_SUFFIX,
         description="Read a firmware bundle, check it (magic, manifest, offsets "
-        "and the sha256 of every image) and print what it holds. Run this before "
-        "handing a file to someone, and on a file someone handed you.",
+        "and the sha256 of every payload) and print what it holds, including "
+        "whether it can bring up a board that has never been flashed. Run this "
+        "before handing a file to someone, and on a file someone handed you.",
     )
     p_bundle_info.add_argument("path", help="the %s file to inspect" % BUNDLE_SUFFIX)
     p_bundle_info.set_defaults(func=cmd_bundle_info)
