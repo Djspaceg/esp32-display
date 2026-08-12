@@ -143,6 +143,13 @@ static Adafruit_NeoPixel *rgbLed = nullptr;
 // GPIO9 on both boards - see bcfg, and the note there about Waveshare's pinout
 // table claiming GPIO8 for the Touch variant.
 static const uint32_t LONG_PRESS_MS = 600;
+// A third tier, well past the long press, for the one action that should not
+// be reachable by an accidental long-hold: turning the panel off from a
+// button reachable from behind a mounted display. 3s is long enough that
+// nobody clears LONG_PRESS_MS's 600ms by accident and keeps holding without
+// meaning to - the long-press flip already fired and released the button in
+// any ordinary press.
+static const uint32_t EXTRA_LONG_PRESS_MS = 3000;
 static const uint32_t DEBOUNCE_MS = 30;
 static const uint8_t BL_HIGH = 128;  // 50%, Waveshare's recommended ceiling
 static const uint8_t BL_LOW = 24;    // ~10%
@@ -1564,10 +1571,24 @@ static void updateSignalLed() {
 }
 
 // Poll the BOOT button: short press toggles backlight, long press (fires
-// while still held) flips the display 180 degrees.
+// while still held) flips the display 180 degrees, and an extra-long press
+// (also fires while held, past the long-press point) toggles the manual
+// display off/on - the same standing instruction CFGPOWER and the network
+// Power opcode set, reachable without a Mac or a phone on the same WiFi.
+//
+// COMPOUNDS RATHER THAN REPLACES the long-press flip: holding past
+// EXTRA_LONG_PRESS_MS also toggles power, on top of whatever the long press
+// already did at LONG_PRESS_MS, because the long press fires immediately
+// while held rather than waiting to see how long the button is down for -
+// changing that would need release-time semantics for the rotation action,
+// a bigger change than adding a third tier justifies. A user who only wants
+// the power toggle and not the flip can press long enough for power and then
+// long-press once more to flip back; this is the same tradeoff the two-step
+// 180 toggle already makes.
 static void handleButton() {
   static bool wasDown = false;
   static bool longFired = false;
+  static bool extraLongFired = false;
   static uint32_t downAt = 0;
 
   bool down = digitalRead(bcfg->pinBootButton) == LOW;
@@ -1576,6 +1597,7 @@ static void handleButton() {
   if (down && !wasDown) {
     wasDown = true;
     longFired = false;
+    extraLongFired = false;
     downAt = now;
   } else if (down && wasDown && !longFired && now - downAt >= LONG_PRESS_MS) {
     longFired = true;
@@ -1587,6 +1609,16 @@ static void handleButton() {
     madctlDirty = true;
     saveDisplayPrefs();
     Serial.printf("button: long press -> rotation=%u (saved)\n", panelRotation);
+  } else if (down && wasDown && longFired && !extraLongFired &&
+            now - downAt >= EXTRA_LONG_PRESS_MS) {
+    extraLongFired = true;
+    // Mirrors the CFGPOWER serial command and ControlOpcode::Power exactly:
+    // same flag, same NVS key, same immediate backlight effect.
+    panelManuallyOff = !panelManuallyOff;
+    saveDisplayPrefs();
+    applyBacklight();
+    Serial.printf("button: extra-long press -> pwr=%s (saved)\n",
+                  panelManuallyOff ? "off" : "on");
   } else if (!down && wasDown) {
     wasDown = false;
     if (!longFired && now - downAt >= DEBOUNCE_MS) {
