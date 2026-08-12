@@ -1360,6 +1360,83 @@ int main() {
     CHECK(touchmap::map(-9999, -9999, false, 3).y >= 0);
   }
 
+  // --- touch coordinate mapping: CO5300/CST9217 (square, 466x466) ----------
+  // The 1.75C's calibration differs from the C6's default in both axis facts
+  // (rawXMirrored is false, not true - see touch_map.h's STATUS note) and in
+  // being square, which collapses several of the C6 sweep's distinctions:
+  // frameWidth/frameHeight no longer differ by orientation, and every
+  // quadrant has the same frame shape. What still has to hold is the same
+  // structural contract - in range, the rotate-by-2 involution, and the
+  // portrait-quarter-turn == landscape composition rule - now exercised
+  // against a Calibration explicitly, since this is the first calibration
+  // that is not the default.
+  {
+    using touchmap::Point;
+    const touchmap::Calibration cal = touchmap::CST9217_ON_CO5300;
+    const int16_t SIDE = cal.panelShort;
+    CHECK(SIDE == 466 && cal.panelLong == 466);
+    CHECK(!cal.rawXMirrored);
+    CHECK(cal.rotateClockwise);
+
+    // Square glass: landscape and portrait share one frame shape.
+    CHECK(touchmap::frameWidth(false, cal) == SIDE);
+    CHECK(touchmap::frameHeight(false, cal) == SIDE);
+    CHECK(touchmap::frameWidth(true, cal) == SIDE);
+    CHECK(touchmap::frameHeight(true, cal) == SIDE);
+
+    // Step 1 in isolation: unlike the C6, the raw X passes through unmirrored.
+    CHECK(touchmap::rawToGlass(0, 0, cal).x == 0);
+    CHECK(touchmap::rawToGlass(SIDE - 1, 0, cal).x == SIDE - 1);
+    CHECK(touchmap::rawToGlass(0, 17, cal).y == 17);
+
+    // Portrait upright: raw passes straight through to the frame.
+    CHECK(touchmap::map(10, 20, false, 0, cal).x == 10);
+    CHECK(touchmap::map(10, 20, false, 0, cal).y == 20);
+
+    // Rotation 2 (180) is a point reflection, exactly as on the C6.
+    CHECK(touchmap::map(10, 20, false, 2, cal).x == SIDE - 1 - 10);
+    CHECK(touchmap::map(10, 20, false, 2, cal).y == SIDE - 1 - 20);
+
+    // Structural properties that must hold in every orientation, with this
+    // Calibration threaded through instead of the default.
+    for (uint8_t orientation = 0; orientation < 8; orientation++) {
+      const bool landscape = (orientation & 1) != 0;
+      const uint8_t rotation = (uint8_t)(orientation >> 1);
+      const bool swapped = touchmap::swapsAxes(landscape, rotation);
+      for (int16_t rx = 0; rx < SIDE; rx += 37) {
+        for (int16_t ry = 0; ry < SIDE; ry += 41) {
+          Point p = touchmap::map(rx, ry, landscape, rotation, cal);
+          CHECK(p.x >= 0 && p.x < touchmap::frameWidth(swapped, cal));
+          CHECK(p.y >= 0 && p.y < touchmap::frameHeight(swapped, cal));
+
+          // Two more quarter turns is the reflection-through-centre
+          // involution, same as the C6.
+          Point q = touchmap::map(rx, ry, landscape,
+                                  (uint8_t)((rotation + 2) & 3), cal);
+          CHECK(q.x == touchmap::frameWidth(swapped, cal) - 1 - p.x);
+          CHECK(q.y == touchmap::frameHeight(swapped, cal) - 1 - p.y);
+
+          // A portrait quarter turn is the landscape transform - only the
+          // total quadrant matters.
+          Point viaLandscape = touchmap::map(rx, ry, true, rotation, cal);
+          Point viaRotation =
+              touchmap::map(rx, ry, false, (uint8_t)((rotation + 1) & 3), cal);
+          CHECK(viaLandscape.x == viaRotation.x);
+          CHECK(viaLandscape.y == viaRotation.y);
+        }
+      }
+    }
+
+    // Clamping still holds under this Calibration's dimensions.
+    CHECK(touchmap::clampToFrame({-5, -5}, false, cal).x == 0);
+    CHECK(touchmap::clampToFrame({9999, 9999}, false, cal).x == SIDE - 1);
+    CHECK(touchmap::clampToFrame({9999, 9999}, false, cal).y == SIDE - 1);
+
+    // Passing no Calibration at all must still mean the C6's - the default
+    // argument is what lets every existing call site ignore this parameter.
+    CHECK(touchmap::map(touchmap::PANEL_SHORT - 1, 0, false, 0).x == 0);
+  }
+
   // --- touch gestures ------------------------------------------------------
   // Gesture timing is close to impossible to check by hand on a device and
   // trivial to check here, which is the whole reason the classifier takes a

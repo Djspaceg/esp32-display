@@ -32,7 +32,12 @@
 namespace touchmap {
 
 /// Panel geometry, in its native portrait sense. The framebuffer is
-/// SHORT x LONG in portrait and LONG x SHORT in landscape.
+/// SHORT x LONG in portrait and LONG x SHORT in landscape. These are the
+/// ESP32-C6-Touch-LCD-1.47's dimensions, kept as the default so every
+/// existing call site (display_stream.ino, display_test.ino, and every CHECK
+/// in test_band_protocol.cpp) keeps compiling and behaving identically
+/// without passing a Calibration - only a board whose panel is not 172x320
+/// needs to supply one.
 static const int16_t PANEL_SHORT = 172;
 static const int16_t PANEL_LONG = 320;
 
@@ -41,51 +46,89 @@ struct Point {
   int16_t y;
 };
 
-inline int16_t frameWidth(bool landscape) {
-  return landscape ? PANEL_LONG : PANEL_SHORT;
+/// Everything about a board's touch controller that this transform needs and
+/// that is NOT shared across boards: the panel's native short/long sides, and
+/// the two axis facts (RAW_X_MIRRORED, ROTATE_CLOCKWISE below) that were
+/// measured against one specific controller wired to one specific panel.
+/// Those two bools are calibration data, not physics - a different touch
+/// chip on a different panel has no reason to share them, so a second board
+/// needs its own Calibration rather than a global override of these
+/// constants. The rotation/landscape composition itself (quadrant()) is true
+/// geometry and takes no calibration, which is why it stays a free function
+/// below rather than a Calibration method.
+struct Calibration {
+  int16_t panelShort;
+  int16_t panelLong;
+  bool rawXMirrored;
+  bool rotateClockwise;
+};
+
+/// The ESP32-C6-Touch-LCD-1.47's AXS5106L calibration, reproduced here as the
+/// default value of every function's Calibration parameter so a caller that
+/// never mentions calibration gets today's C6 behaviour exactly.
+static const Calibration AXS5106L_ON_C6 = {
+    PANEL_SHORT, PANEL_LONG,
+    /* rawXMirrored */ true, /* rotateClockwise */ true};
+
+/// The ESP32-S3-Touch-AMOLED-1.75C's CST9217 calibration. Panel is square
+/// (466x466), so PANEL_SHORT == PANEL_LONG here and the frame never actually
+/// swaps shape between portrait and landscape - only the touch AXIS mapping
+/// still matters, which is what rawXMirrored/rotateClockwise capture.
+///
+/// STATUS: the driver end to end is confirmed on hardware - CST9217 answers
+/// its chip ID (0x9217), and taps and swipes register with in-range
+/// coordinates and classify into the right gesture shapes. rawXMirrored is
+/// NOT independently confirmed the way AXS5106L_ON_C6's was (no measured
+/// raw-coordinate-vs-known-screen-position pair, because this panel is round
+/// and has no drawable corners to touch by feel); `false` here is the
+/// convention every reference implementation checked for this project
+/// (lewisxhe's SensorLib TouchDrvCST92xx, which Waveshare's own
+/// 10_Touch_CST9217 example uses, and ESPHome's independent cst9220
+/// component) reports raw coordinates in, with no mirroring step of their
+/// own. If a tap is later found to land mirrored on this board, flip this
+/// one bool - nothing else in this file needs to change.
+static const Calibration CST9217_ON_CO5300 = {
+    /* panelShort */ 466, /* panelLong */ 466,
+    /* rawXMirrored */ false, /* rotateClockwise */ true};
+
+inline int16_t frameWidth(bool landscape, Calibration cal = AXS5106L_ON_C6) {
+  return landscape ? cal.panelLong : cal.panelShort;
 }
-inline int16_t frameHeight(bool landscape) {
-  return landscape ? PANEL_SHORT : PANEL_LONG;
+inline int16_t frameHeight(bool landscape, Calibration cal = AXS5106L_ON_C6) {
+  return landscape ? cal.panelShort : cal.panelLong;
 }
 
 /// Whether the controller's X axis runs opposite to the display's X axis in
-/// portrait.
+/// portrait, and which way the image rotates when the panel goes landscape.
+/// Both are measured facts about ONE controller on ONE panel, carried on
+/// AXS5106L_ON_C6.rawXMirrored / .rotateClockwise above - see that struct's
+/// doc comment for why a second board gets its own Calibration rather than a
+/// shared override of these two.
 ///
-/// Set from evidence rather than derivation: Waveshare's own Arduino AXS5106L
-/// driver applies `x = width - 1 - x` in its rotation-0 case, while their
-/// esp_lcd display config for rotation 0 uses mirror_x = false. Same vendor,
-/// same board, both their own code - so the raw touch X is mirrored relative to
-/// the panel's X.
-///
-/// STATUS: confirmed on an ESP32-C6-Touch-LCD-1.47. Touching the white corner in
-/// portrait reported raw (150,10) and (154,13), which map to framebuffer (21,10)
-/// and (17,13) - inside the white square. Touching blue reported raw (19,312),
-/// mapping to (152,312), inside the blue square. Both require the X mirror; with
-/// it removed the two corners would swap.
-static const bool RAW_X_MIRRORED = true;
-
-/// Which way the image rotates when the panel goes landscape.
-///
-/// Our landscape MADCTL is MV|MX, but deriving the resulting touch axis mapping
-/// from MADCTL bits is exactly the kind of reasoning that produces a transform
-/// which is wrong by one reflection and looks right until you touch a corner.
-///
-/// STATUS: confirmed on hardware across all four orientations. In landscape,
-/// touching white reported raw (23,7) -> (7,23) and blue reported raw (143,311)
-/// -> (311,143); in landscape-flipped, white reported raw (144,313) -> (6,27) and
-/// blue raw (33,13) -> (306,138). Each lands inside the square of the colour that
-/// was touched, in a frame whose axes are swapped relative to portrait. The
-/// counter-clockwise alternative would put every one of those in the opposite
-/// corner along Y.
-static const bool ROTATE_CLOCKWISE = true;
+/// STATUS for AXS5106L_ON_C6, confirmed on an ESP32-C6-Touch-LCD-1.47:
+/// Waveshare's own Arduino AXS5106L driver applies `x = width - 1 - x` in its
+/// rotation-0 case, while their esp_lcd display config for rotation 0 uses
+/// mirror_x = false - same vendor, same board, both their own code, so the
+/// raw touch X is mirrored relative to the panel's X. Touching the white
+/// corner in portrait reported raw (150,10) and (154,13), which map to
+/// framebuffer (21,10) and (17,13) - inside the white square. Touching blue
+/// reported raw (19,312), mapping to (152,312), inside the blue square. Both
+/// require the X mirror; with it removed the two corners would swap. In
+/// landscape, touching white reported raw (23,7) -> (7,23) and blue reported
+/// raw (143,311) -> (311,143); in landscape-flipped, white reported raw
+/// (144,313) -> (6,27) and blue raw (33,13) -> (306,138). Each lands inside
+/// the square of the colour that was touched, in a frame whose axes are
+/// swapped relative to portrait. The counter-clockwise alternative would put
+/// every one of those in the opposite corner along Y.
 
 /// Step 1: raw controller coordinates to glass coordinates.
 ///
 /// Glass coordinates are "where your finger is on the physical panel, viewed in
 /// portrait-upright", independent of what the firmware is currently displaying.
-inline Point rawToGlass(int16_t rawX, int16_t rawY) {
+inline Point rawToGlass(int16_t rawX, int16_t rawY,
+                        Calibration cal = AXS5106L_ON_C6) {
   Point g;
-  g.x = RAW_X_MIRRORED ? (int16_t)(PANEL_SHORT - 1 - rawX) : rawX;
+  g.x = cal.rawXMirrored ? (int16_t)(cal.panelShort - 1 - rawX) : rawX;
   g.y = rawY;
   return g;
 }
@@ -94,7 +137,7 @@ inline Point rawToGlass(int16_t rawX, int16_t rawY) {
 /// i.e. the quadrant is odd. With rotation limited to {0, 2} - every
 /// rectangular panel, since only square glass accepts quarter turns - this is
 /// exactly the landscape flag, which is why callers that key buffer shape on
-/// `landscape` alone stay correct.
+/// `landscape` alone stay correct. Dimension-free, so it takes no Calibration.
 inline bool swapsAxes(bool landscape, uint8_t rotation) {
   return panelorient::swapXY(panelorient::quadrant(rotation, landscape));
 }
@@ -110,9 +153,10 @@ inline bool swapsAxes(bool landscape, uint8_t rotation) {
 /// point at quadrant q+2 is the point at quadrant q reflected through the
 /// frame's centre, asserted by the host suite across the whole coordinate
 /// space and from every rotation, not only from upright.
-inline Point glassToFrame(Point g, bool landscape, uint8_t rotation) {
+inline Point glassToFrame(Point g, bool landscape, uint8_t rotation,
+                          Calibration cal = AXS5106L_ON_C6) {
   uint8_t q = panelorient::quadrant(rotation, landscape);
-  if (!ROTATE_CLOCKWISE) {
+  if (!cal.rotateClockwise) {
     // A panel whose landscape MADCTL turns the image the other way would need
     // touch to turn with it. Negating the quadrant keeps the hardware
     // evidence above meaningful rather than folding it away silently.
@@ -122,14 +166,14 @@ inline Point glassToFrame(Point g, bool landscape, uint8_t rotation) {
   switch (q) {
     case 1:  // one clockwise quarter turn (the old landscape case)
       f.x = g.y;
-      f.y = (int16_t)(PANEL_SHORT - 1 - g.x);
+      f.y = (int16_t)(cal.panelShort - 1 - g.x);
       break;
     case 2:  // 180 (the old portrait-flipped case)
-      f.x = (int16_t)(PANEL_SHORT - 1 - g.x);
-      f.y = (int16_t)(PANEL_LONG - 1 - g.y);
+      f.x = (int16_t)(cal.panelShort - 1 - g.x);
+      f.y = (int16_t)(cal.panelLong - 1 - g.y);
       break;
     case 3:  // three clockwise = one counter-clockwise (landscape-flipped)
-      f.x = (int16_t)(PANEL_LONG - 1 - g.y);
+      f.x = (int16_t)(cal.panelLong - 1 - g.y);
       f.y = g.x;
       break;
     default:  // q == 0: portrait upright
@@ -145,9 +189,10 @@ inline Point glassToFrame(Point g, bool landscape, uint8_t rotation) {
 /// an out-of-range point would index past the framebuffer. Clamping rather than
 /// rejecting is deliberate: a tap 1px off the edge is still a tap on the edge,
 /// and silently dropping it feels like the panel ignored you.
-inline Point clampToFrame(Point p, bool landscape) {
-  const int16_t w = frameWidth(landscape);
-  const int16_t h = frameHeight(landscape);
+inline Point clampToFrame(Point p, bool landscape,
+                          Calibration cal = AXS5106L_ON_C6) {
+  const int16_t w = frameWidth(landscape, cal);
+  const int16_t h = frameHeight(landscape, cal);
   if (p.x < 0) p.x = 0;
   if (p.y < 0) p.y = 0;
   if (p.x > w - 1) p.x = (int16_t)(w - 1);
@@ -161,9 +206,11 @@ inline Point clampToFrame(Point p, bool landscape) {
 /// alone: an odd total quadrant (only reachable with rotation 1/3, i.e. on
 /// square glass where the two shapes coincide anyway) swaps which axis is
 /// long. On every rectangular panel the two agree - see swapsAxes.
-inline Point map(int16_t rawX, int16_t rawY, bool landscape, uint8_t rotation) {
-  return clampToFrame(glassToFrame(rawToGlass(rawX, rawY), landscape, rotation),
-                      swapsAxes(landscape, rotation));
+inline Point map(int16_t rawX, int16_t rawY, bool landscape, uint8_t rotation,
+                 Calibration cal = AXS5106L_ON_C6) {
+  return clampToFrame(
+      glassToFrame(rawToGlass(rawX, rawY, cal), landscape, rotation, cal),
+      swapsAxes(landscape, rotation), cal);
 }
 
 }  // namespace touchmap

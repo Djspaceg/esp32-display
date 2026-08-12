@@ -218,6 +218,14 @@ static const uint32_t BASE_CAPABILITIES =
 // touch rather than promising gestures that never arrive.
 static bool touchAvailable = false;
 
+// Which board's touch calibration to run raw coordinates through. Picked
+// once at boot from bcfg->touch (see setup()) rather than defaulted, because
+// touchmap::map's Calibration parameter defaults to the C6's AXS5106L
+// calibration - correct only for that one board - and every other board
+// must pass its own explicitly or inherit a mirroring/rotation convention
+// that was never measured on its hardware.
+static touchmap::Calibration touchCalibration = touchmap::AXS5106L_ON_C6;
+
 // Whether the power-management IC came up, on the same "the chip has to answer"
 // rule as touchAvailable: only the 1.75C has a PMU, and a 1.75C whose PMU is
 // silent must advertise no battery rather than promise readings that never come.
@@ -1788,9 +1796,14 @@ static void serviceTouch() {
   }
 
   // Through the same orientation transform the pixels went through, so a swipe
-  // means the direction the user actually swiped.
+  // means the direction the user actually swiped. Calibration is per board:
+  // the C6 Touch's AXS5106L and the 1.75C's CST9217 disagree on which raw
+  // axis is mirrored (see touch_map.h), so touchCalibration is picked once at
+  // boot from bcfg->touch rather than the AXS5106L default every call site
+  // used to take implicitly.
   touchmap::Point p = touchmap::map((int16_t)sample.rawX, (int16_t)sample.rawY,
-                                    panelLandscape, panelRotation);
+                                    panelLandscape, panelRotation,
+                                    touchCalibration);
   touchgesture::Event event =
       touchTracker.onReport(sample.pressed, p.x, p.y, millis());
 
@@ -2225,6 +2238,8 @@ void setup() {
 
   // Touch, before WiFi: the capability bits mDNS advertises depend on whether
   // the controller answered, so this has to be settled before we announce.
+  touchCalibration = bcfg->touch == board::TouchController::Cst9217
+      ? touchmap::CST9217_ON_CO5300 : touchmap::AXS5106L_ON_C6;
   touchAvailable = boardtouch::init(*bcfg);
   // The PMU, for the same reason and so before the announce: CAP_BATTERY
   // depends on the chip having answered, and addMdnsService() bakes
