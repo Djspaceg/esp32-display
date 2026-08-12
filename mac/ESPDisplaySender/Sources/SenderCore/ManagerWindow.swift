@@ -497,42 +497,32 @@ private struct PanelDetailView: View {
     }
 
     /// The marquee controls, shown only while Region is the chosen source.
+    ///
+    /// Only the button that summons the marquee lives here. The scale presets
+    /// and rotate moved onto the marquee overlay itself: adjusting a rectangle
+    /// you cannot see is meaningless, so controls that reshape it exist only
+    /// while it is on screen showing their effect (RegionSelector.presetZones).
     private var regionControls: some View {
         LabeledContent("Rectangle") {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    // Not gated on the panel being online: choosing what to send
-                    // is a decision about this Mac's screen, and the preview
-                    // shows the answer with the panel switched off.
-                    Button(manager.isChoosingRegion ? "Done" : "Adjust…") {
-                        if manager.isChoosingRegion {
-                            manager.finishChoosingRegion()
-                        } else {
-                            manager.chooseRegion(for: panel.serviceName)
-                        }
-                    }
-                    .help("Drag an aspect-locked rectangle over your screen to "
-                        + "choose what this panel shows")
-                    Button("Rotate") {
-                        manager.rotateRegion(for: panel.serviceName)
-                    }
-                    .disabled(panel.source.region == nil)
-                    .help("Turn the rectangle on its side")
-                    if let region = panel.source.region {
-                        Text(region.sizeDescription)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
+            HStack(spacing: 8) {
+                // Not gated on the panel being online: choosing what to send
+                // is a decision about this Mac's screen, and the preview
+                // shows the answer with the panel switched off.
+                Button(manager.isChoosingRegion ? "Done" : "Adjust…") {
+                    if manager.isChoosingRegion {
+                        manager.finishChoosingRegion()
+                    } else {
+                        manager.chooseRegion(for: panel.serviceName)
                     }
                 }
-                HStack(spacing: 6) {
-                    ForEach(RegionSpec.scalePresets, id: \.self) { scale in
-                        Button("\(scale)×") {
-                            manager.setRegionScale(scale, for: panel.serviceName)
-                        }
-                        .disabled(panel.source.region == nil)
-                        .help(scaleHelp(scale))
-                    }
+                .help("Drag an aspect-locked rectangle over your screen to "
+                    + "choose what this panel shows; its size presets and "
+                    + "rotation are on the rectangle itself")
+                if let region = panel.source.region {
+                    Text(region.sizeDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
             }
         }
@@ -562,15 +552,6 @@ private struct PanelDetailView: View {
                 return ""
             },
             set: { manager.selectDisplay($0, for: panel.serviceName) })
-    }
-
-    /// What a preset button will frame, so the numbers are not a mystery.
-    private func scaleHelp(_ scale: Int) -> String {
-        let landscape = panel.source.region?.isLandscape ?? false
-        let size = RegionSpec.panelSize(
-            geometry: panel.geometry, scale: scale, landscape: landscape)
-        return "Frame \(Int(size.width))x\(Int(size.height)) points"
-            + (scale == 1 ? " — one point per panel pixel" : "")
     }
 
     private var displaySection: some View {

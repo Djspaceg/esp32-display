@@ -394,12 +394,27 @@ final class PanelManager: ObservableObject {
         regionSelector.onChange = { [weak self] region in
             guard let self, let target = self.regionTarget else { return }
             self.apply(region, to: target)
+            // A hand-dragged size usually matches no preset; the highlight has
+            // to follow the rectangle or it lies within one drag.
+            self.regionSelector.activeScale = region.matchingScale(
+                geometry: self.geometry(of: target))
         }
         regionSelector.onConfirm = { [weak self] in
             self?.finishChoosingRegion()
         }
         regionSelector.onCancel = { [weak self] in
             self?.cancelChoosingRegion()
+        }
+        // The scale presets and rotate live on the marquee itself - adjusting a
+        // region that is not on screen is meaningless, so these fire only while
+        // it is visible, for the panel it was opened for.
+        regionSelector.onScale = { [weak self] scale in
+            guard let self, let target = self.regionTarget else { return }
+            self.setRegionScale(scale, for: target)
+        }
+        regionSelector.onRotate = { [weak self] in
+            guard let self, let target = self.regionTarget else { return }
+            self.rotateRegion(for: target)
         }
         previewDriver.onPreview = { [weak self] image, landscape, serviceName in
             self?.preview.accept(
@@ -530,6 +545,8 @@ final class PanelManager: ObservableObject {
             return
         }
         apply(region, to: serviceName)
+        regionSelector.activeScale = region.matchingScale(
+            geometry: panel?.geometry)
         regionSelector.show(region)
     }
 
@@ -607,6 +624,8 @@ final class PanelManager: ObservableObject {
         // Only nudge the marquee if it is the thing being looked at; moving a
         // hidden window would be wasted work.
         if regionSelector.isVisible, regionTarget == serviceName {
+            regionSelector.activeScale = updated.matchingScale(
+                geometry: geometry(of: serviceName))
             regionSelector.apply(updated)
         }
     }

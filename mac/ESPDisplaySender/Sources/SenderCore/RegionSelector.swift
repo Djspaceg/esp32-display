@@ -32,6 +32,17 @@ final class RegionSelector: NSObject {
     var onConfirm: (() -> Void)?
     /// Escape pressed: the caller should put back whatever was in force before.
     var onCancel: (() -> Void)?
+    /// A preset button on the marquee: resize to this multiple of the panel.
+    var onScale: ((Int) -> Void)?
+    /// The rotate button on the marquee: swap the rectangle's sides.
+    var onRotate: (() -> Void)?
+
+    /// Which preset the current region matches, highlighted on the overlay.
+    /// The manager sets it because matching needs the panel's geometry, which
+    /// the selector deliberately does not hold.
+    var activeScale: Int? {
+        didSet { view?.activeScale = activeScale }
+    }
 
     /// Readable so tests can assert configuration; only this class sets it.
     private(set) var window: NSWindow?
@@ -71,6 +82,10 @@ final class RegionSelector: NSObject {
         isApplying = false
         view?.aspect = CGSize(width: clamped.width, height: clamped.height)
         view?.sizeLabel = clamped.sizeDescription
+        // Rotating a square swaps two equal sides; hide the button rather than
+        // offer one that visibly does nothing.
+        view?.includeRotate = abs(clamped.width - clamped.height) > 0.5
+        view?.activeScale = activeScale
     }
 
     // MARK: coordinate spaces
@@ -120,6 +135,10 @@ final class RegionSelector: NSObject {
     enum Zone: Equatable {
         case done
         case cancel
+        /// Resize the rectangle to a preset multiple of the panel.
+        case scale(Int)
+        /// Swap the rectangle's sides.
+        case rotate
         case handle(Handle)
         /// Anywhere else: a drag here moves the rectangle.
         case interior
@@ -182,10 +201,17 @@ final class RegionSelector: NSObject {
 
     /// What the point at `p` means. Buttons win over handles, because a click on
     /// Done sitting near an edge must still be Done.
-    nonisolated static func zone(at p: CGPoint, in bounds: CGRect) -> Zone {
+    nonisolated static func zone(
+        at p: CGPoint, in bounds: CGRect, includeRotate: Bool = true
+    ) -> Zone {
         if let zones = actionZones(in: bounds) {
             if zones.done.contains(p) { return .done }
             if zones.cancel.contains(p) { return .cancel }
+        }
+        if let presets = presetZones(in: bounds, includeRotate: includeRotate) {
+            for entry in presets where entry.rect.contains(p) {
+                return entry.zone
+            }
         }
         for entry in zoneRects(in: bounds) where entry.rect.contains(p) {
             return entry.zone
@@ -206,10 +232,10 @@ final class RegionSelector: NSObject {
     }
 
     nonisolated static func pointerStyle(
-        at p: CGPoint, in bounds: CGRect
+        at p: CGPoint, in bounds: CGRect, includeRotate: Bool = true
     ) -> PointerStyle {
-        switch zone(at: p, in: bounds) {
-        case .done, .cancel: .arrow
+        switch zone(at: p, in: bounds, includeRotate: includeRotate) {
+        case .done, .cancel, .scale, .rotate: .arrow
         case .handle(let handle): .resize(cursorPosition(for: handle))
         case .interior: .move
         }
@@ -325,6 +351,49 @@ final class RegionSelector: NSObject {
         )
     }
 
+    /// The scale presets and rotate, in a row above Done/Cancel, or nil when the
+    /// rectangle cannot hold them. They live here rather than in the manager
+    /// window because adjusting a region you cannot see is meaningless - these
+    /// buttons only exist while the marquee is on screen showing their effect.
+    ///
+    /// `includeRotate` is false for a square rectangle: rotating one swaps two
+    /// equal sides, and a button that visibly does nothing reads as broken.
+    ///
+    /// Same shared-geometry discipline as actionZones: drawing and hit testing
+    /// take these rects from one place, so a button cannot be drawn where it is
+    /// not clickable.
+    nonisolated static func presetZones(
+        in bounds: CGRect, includeRotate: Bool
+    ) -> [(zone: Zone, rect: CGRect)]? {
+        guard let actions = actionZones(in: bounds) else { return nil }
+        let height: CGFloat = 22
+        let scaleWidth: CGFloat = 40
+        let rotateWidth: CGFloat = 64
+        let gap: CGFloat = 6
+        let scales = RegionSpec.scalePresets
+        var total = CGFloat(scales.count) * scaleWidth
+            + CGFloat(scales.count - 1) * gap
+        if includeRotate { total += gap + rotateWidth }
+        // The row sits above Done/Cancel; both rows plus the size label above
+        // must fit, or neither preset row nor a clipped half of it is shown.
+        let y = actions.done.maxY + gap
+        guard bounds.width >= total + 16, bounds.maxY - y >= height + 40 else {
+            return nil
+        }
+        var x = bounds.midX - total / 2
+        var out: [(zone: Zone, rect: CGRect)] = []
+        for scale in scales {
+            out.append((.scale(scale), CGRect(
+                x: x, y: y, width: scaleWidth, height: height)))
+            x += scaleWidth + gap
+        }
+        if includeRotate {
+            out.append((.rotate, CGRect(
+                x: x, y: y, width: rotateWidth, height: height)))
+        }
+        return out
+    }
+
     private func makeWindowIfNeeded() -> NSWindow {
         if let window { return window }
         let window = MarqueeWindow(
@@ -348,6 +417,8 @@ final class RegionSelector: NSObject {
         view.onDragTo = { [weak self] frame in self?.userMoved(to: frame) }
         view.onConfirm = { [weak self] in self?.onConfirm?() }
         view.onCancel = { [weak self] in self?.onCancel?() }
+        view.onScale = { [weak self] scale in self?.onScale?(scale) }
+        view.onRotate = { [weak self] in self?.onRotate?() }
         view.currentFrame = { [weak self] in self?.window?.frame ?? .zero }
         window.contentView = view
         self.view = view
@@ -419,11 +490,21 @@ private final class MarqueeView: NSView {
     var onDragTo: ((CGRect) -> Void)?
     var onConfirm: (() -> Void)?
     var onCancel: (() -> Void)?
+    var onScale: ((Int) -> Void)?
+    var onRotate: (() -> Void)?
     /// The window's current global frame, supplied by the selector.
     var currentFrame: (() -> CGRect)?
 
     var aspect: CGSize = CGSize(width: 172, height: 320)
     var sizeLabel: String = "" {
+        didSet { needsDisplay = true }
+    }
+    /// Preset the current size matches, drawn highlighted.
+    var activeScale: Int? {
+        didSet { needsDisplay = true }
+    }
+    /// False for a square rectangle, whose rotation would be a visible no-op.
+    var includeRotate: Bool = true {
         didSet { needsDisplay = true }
     }
 
@@ -447,13 +528,19 @@ private final class MarqueeView: NSView {
         dragStartMouse = NSEvent.mouseLocation
         dragStartFrame = currentFrame?() ?? .zero
 
-        switch RegionSelector.zone(at: local, in: bounds) {
+        switch RegionSelector.zone(at: local, in: bounds, includeRotate: includeRotate) {
         case .done:
             grab = nil
             onConfirm?()
         case .cancel:
             grab = nil
             onCancel?()
+        case .scale(let scale):
+            grab = nil
+            onScale?(scale)
+        case .rotate:
+            grab = nil
+            onRotate?()
         case .handle(let handle):
             grab = .resize(handle)
         case .interior:
@@ -515,7 +602,8 @@ private final class MarqueeView: NSView {
         // Not during a drag: the pointer regularly leaves the rectangle while
         // resizing, and the cursor should stay as the handle that is in hand.
         guard grab == nil else { return }
-        Self.cursor(for: RegionSelector.pointerStyle(at: point, in: bounds)).set()
+        Self.cursor(for: RegionSelector.pointerStyle(
+            at: point, in: bounds, includeRotate: includeRotate)).set()
     }
 
     private static func cursor(for style: RegionSelector.PointerStyle) -> NSCursor {
@@ -676,6 +764,23 @@ private final class MarqueeView: NSView {
         guard let zones = RegionSelector.actionZones(in: bounds) else { return }
         drawButton("Done  ⏎", in: zones.done, prominent: true)
         drawButton("Cancel  ⎋", in: zones.cancel, prominent: false)
+
+        // The scale presets and rotate, which exist only here: adjusting a
+        // region while it is not on screen is meaningless, so these have no
+        // twin in the manager window.
+        guard let presets = RegionSelector.presetZones(
+            in: bounds, includeRotate: includeRotate) else { return }
+        for entry in presets {
+            switch entry.zone {
+            case .scale(let scale):
+                drawButton("\(scale)×", in: entry.rect,
+                           prominent: scale == activeScale)
+            case .rotate:
+                drawButton("Rotate", in: entry.rect, prominent: false)
+            default:
+                break
+            }
+        }
     }
 
     private func drawButton(_ title: String, in rect: CGRect, prominent: Bool) {
