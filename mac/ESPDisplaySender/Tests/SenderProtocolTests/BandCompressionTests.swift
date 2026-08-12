@@ -119,18 +119,41 @@ final class BandCompressionTests: XCTestCase {
     func testDecoderRefusesMalformedInput() {
         // Truncated literal: control claims 2 pixels, one follows.
         XCTAssertNil(RLE565.decode([0x01, 0x11, 0x22], expectedBytes: 8))
+        // Its exact-fill sibling: all 4 payload bytes present succeeds. This
+        // pins the truncation guard to "fewer bytes than the chunk claims",
+        // not to some looser multiple of it.
+        XCTAssertEqual(
+            RLE565.decode([0x01, 0x11, 0x22, 0x33, 0x44], expectedBytes: 4),
+            [0x11, 0x22, 0x33, 0x44])
         // Truncated repeat: control with no pixel / half a pixel.
         XCTAssertNil(RLE565.decode([0x82], expectedBytes: 8))
         XCTAssertNil(RLE565.decode([0x82, 0x11], expectedBytes: 8))
-        // Overrun: a 4-pixel run into a 3-pixel band.
-        XCTAssertNil(RLE565.decode([0x82, 0x11, 0x22], expectedBytes: 6))
-        // A literal that would overrun.
-        XCTAssertNil(RLE565.decode([0x03, 1, 2, 3, 4, 5, 6, 7, 8],
-                                   expectedBytes: 6))
+
+        // Overrun, pinned at the exact boundary rather than some looser gap:
+        // this chunk is a run of 4 pixels (8 bytes), full stop. A canary
+        // window wider than the true boundary - e.g. testing only against a
+        // dstLen two bytes short - would still pass if the guard's `<=` were
+        // mutated to allow a one-byte overrun; testing exactly one byte
+        // short does not.
+        let runOverrun: [UInt8] = [0x82, 0x11, 0x22]
+        XCTAssertNil(RLE565.decode(runOverrun, expectedBytes: 7))  // 1 byte short of fitting
+        XCTAssertEqual(
+            RLE565.decode(runOverrun, expectedBytes: 8),  // exact fit succeeds
+            [0x11, 0x22, 0x11, 0x22, 0x11, 0x22, 0x11, 0x22])
+
+        // Same boundary pin for a literal chunk: 4 pixels, 8 bytes exactly.
+        let literalOverrun: [UInt8] = [0x03, 1, 2, 3, 4, 5, 6, 7, 8]
+        XCTAssertNil(RLE565.decode(literalOverrun, expectedBytes: 7))
+        XCTAssertEqual(
+            RLE565.decode(literalOverrun, expectedBytes: 8),
+            [1, 2, 3, 4, 5, 6, 7, 8])
+
         // Short: decodes cleanly but to fewer bytes than the band needs.
         XCTAssertNil(RLE565.decode([0x81, 0x11, 0x22], expectedBytes: 8))
-        // Empty input never fills a band.
+        XCTAssertNil(RLE565.decode([0x81, 0x11, 0x22], expectedBytes: 7))
+        // Empty input never fills a band, except the degenerate zero-size one.
         XCTAssertNil(RLE565.decode([], expectedBytes: 8))
+        XCTAssertEqual(RLE565.decode([], expectedBytes: 0), [])
         // And the exact-fill sibling of the "short" case succeeds.
         XCTAssertEqual(RLE565.decode([0x81, 0x11, 0x22], expectedBytes: 6),
                        [0x11, 0x22, 0x11, 0x22, 0x11, 0x22])
