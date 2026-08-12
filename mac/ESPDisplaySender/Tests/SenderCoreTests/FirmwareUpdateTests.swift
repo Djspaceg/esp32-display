@@ -547,25 +547,77 @@ final class FirmwareUpdateTests: XCTestCase {
             chipConfirmed: true)
     }
 
+    /// The update path answers the same way for a generation-1 bundle.
+    ///
+    /// The point of reading both generations, stated as a test rather than left as
+    /// a comment: a v1 file cannot bring up a blank board and is still a perfectly
+    /// good OTA payload, and the person holding one may have no way to rebuild it.
+    /// Nothing on this path asks about flash parts - it reads `payload(forChip:)`
+    /// and the version - so every verdict has to come out identical.
+    func testTheUpdatePathIsUnchangedByTheBundleGeneration() throws {
+        for chipConfirmed in [true, false] {
+            for (bundleVersion, panelVersion) in [
+                ("1.3.0", "1.2.0"), ("1.2.0", "1.2.0"), ("1.1.0", "1.2.0"),
+                ("1.3.0", "nightly"),
+            ] {
+                let new = try Self.bundle(version: bundleVersion, chips: ["esp32c6"])
+                let old = try Self.bundle(
+                    version: bundleVersion, chips: ["esp32c6"],
+                    generation: FirmwareBundle.formatV1)
+                XCTAssertEqual(old.format, 1)
+                XCTAssertEqual(new.format, 2)
+                XCTAssertEqual(
+                    old.payload(forChip: "esp32c6"), new.payload(forChip: "esp32c6"),
+                    "the OTA payload is the same bytes in both generations")
+                let fromOld = FirmwareUpdatePlan.make(
+                    old.availability(forChip: "esp32c6", panelVersion: panelVersion),
+                    chipConfirmed: chipConfirmed)
+                let fromNew = FirmwareUpdatePlan.make(
+                    new.availability(forChip: "esp32c6", panelVersion: panelVersion),
+                    chipConfirmed: chipConfirmed)
+                XCTAssertEqual(
+                    fromOld, fromNew,
+                    "\(bundleVersion) over \(panelVersion) must read the same either way")
+            }
+        }
+    }
+
     /// A valid bundle, assembled here rather than read from a fixture.
     ///
     /// Built through the real reader so the plan tests are working with a bundle
     /// that would actually be accepted from a file, and written by hand for the
     /// reason FirmwareBundleTests gives at length: a fixture agrees with whatever
     /// produced it.
-    private static func bundle(version: String, chips: [String]) throws -> FirmwareBundle {
+    ///
+    /// `generation` decides whether the file carries the parts a blank board needs.
+    /// The default is the current generation, so these tests run against what the
+    /// tool writes today; `testTheUpdatePathIsUnchangedByTheBundleGeneration` is
+    /// what pins that an older file still answers the same questions.
+    private static func bundle(
+        version: String, chips: [String], generation: Int = FirmwareBundle.format
+    ) throws -> FirmwareBundle {
         let payloads = chips.enumerated().map { index, chip in
             Data("image for \(chip) ".utf8) + Data(repeating: UInt8(index + 1), count: 8)
         }
+        // The three parts a board with nothing on it needs, at the addresses
+        // boards.txt and the core's upload recipe give them. Distinct per chip so a
+        // reader that mixed two boards up could not pass.
+        func parts(for chip: String) -> [(role: String, address: Int, payload: Data)] {
+            [
+                ("bootloader", 0x0, Data([0xE9]) + Data("\(chip) boot\n".utf8)),
+                ("partitions", 0x8000, Data([0xAA, 0x50]) + Data("\(chip)\n".utf8)),
+                ("boot_app0", 0xE000, Data("ota \(chip)\n".utf8)),
+            ]
+        }
         var manifest: [String: Any] = [
-            "format": 1,
+            "format": generation,
             "firmware_version": version,
             "built_at": "2026-01-02T03:04:05Z",
             "source_commit": String(repeating: "a", count: 40),
             "source_dirty": false,
             "tool": "espdisp.py bundle",
             "images": zip(chips, payloads).map { chip, payload in
-                [
+                var entry: [String: Any] = [
                     "board": String(chip.dropFirst("esp32".count)),
                     "chip": chip,
                     "fqbn": "esp32:esp32:\(chip)",
@@ -573,12 +625,27 @@ final class FirmwareUpdateTests: XCTestCase {
                     "offset": 0,
                     "bytes": payload.count,
                     "sha256": FirmwareBundle.sha256Hex(payload),
-                ] as [String: Any]
+                ]
+                if generation != FirmwareBundle.formatV1 {
+                    entry["app_address"] = 0x10000
+                    entry["flash_parts"] = parts(for: chip).map { part in
+                        [
+                            "role": part.role,
+                            "address": part.address,
+                            "filename": "\(part.role).bin",
+                            "offset": 0,
+                            "bytes": part.payload.count,
+                            "sha256": FirmwareBundle.sha256Hex(part.payload),
+                        ] as [String: Any]
+                    }
+                }
+                return entry
             },
         ]
         // The offsets are absolute from the start of the file, so the manifest
         // describes its own length: assign, re-encode, repeat until it stops
-        // moving. The same solve tools/espdisp.py does when it writes one.
+        // moving. The same solve tools/espdisp.py does when it writes one, over the
+        // same payload order - each image, then that image's flash parts.
         var encodedLength = -1
         var encoded = Data()
         while true {
@@ -591,12 +658,24 @@ final class FirmwareUpdateTests: XCTestCase {
             for index in images.indices {
                 images[index]["offset"] = cursor
                 cursor += images[index]["bytes"] as! Int
+                if var flashParts = images[index]["flash_parts"] as? [[String: Any]] {
+                    for partIndex in flashParts.indices {
+                        flashParts[partIndex]["offset"] = cursor
+                        cursor += flashParts[partIndex]["bytes"] as! Int
+                    }
+                    images[index]["flash_parts"] = flashParts
+                }
             }
             manifest["images"] = images
         }
         let lengthLine = Data(String(format: "%010d\n", encoded.count).utf8)
-        let file = FirmwareBundle.magic + lengthLine + encoded
-            + payloads.reduce(Data(), +)
+        let area = zip(chips, payloads).reduce(Data()) { area, pair in
+            guard generation != FirmwareBundle.formatV1 else { return area + pair.1 }
+            return parts(for: pair.0).reduce(area + pair.1) { $0 + $1.payload }
+        }
+        let file = (generation == FirmwareBundle.formatV1
+            ? FirmwareBundle.magicV1 : FirmwareBundle.magic)
+            + lengthLine + encoded + area
         return try FirmwareBundle.read(file)
     }
 }
