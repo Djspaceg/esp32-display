@@ -69,6 +69,15 @@ enum Capability : uint32_t {
   // the same way, but this bit is what stops a sender from ever sending one
   // to firmware that predates it.
   CAP_ROTATE = 1u << 13,
+  // Accepts Power, i.e. a user-requested display on/off that is independent
+  // of the Mac's own ESLP/EWAK sleep sync and persists across a reboot.
+  // ESLP/EWAK exist to follow the Mac's displays; this is the opposite kind
+  // of thing - a standing instruction the panel keeps until told otherwise,
+  // the way rotation and brightness level already are. Advertised on every
+  // board: unlike battery or rotate, a manual "off" is not a hardware fact,
+  // it is a capability any panel with a backlight or an AMOLED panel command
+  // can honour.
+  CAP_POWER = 1u << 14,
 };
 
 enum class ControlOpcode : uint8_t {
@@ -83,6 +92,11 @@ enum class ControlOpcode : uint8_t {
   // sketch owns (square glass only, NACKed there with a nonzero ack status);
   // this file only knows the representable range.
   Rotate = 6,
+  // Value 0 or 1: whether the display should be on. A standing instruction,
+  // persisted, and independent of ESLP/EWAK and the idle timer - see the
+  // CAP_POWER comment above for why this is a separate axis rather than
+  // riding the existing sleep sync.
+  Power = 7,
 };
 
 struct ControlCommand {
@@ -139,6 +153,8 @@ inline bool validControlValue(ControlOpcode opcode, int32_t value) {
       // is board-blind, and the sketch is what knows the panel's shape. It
       // NACKs rather than drops, so a sender can tell "refused" from "lost".
       return value >= 0 && value <= 3;
+    case ControlOpcode::Power:
+      return value == 0 || value == 1;
   }
   return false;
 }
@@ -149,7 +165,7 @@ inline bool parseControl(const uint8_t *data, size_t len, ControlCommand &out) {
     return false;
   }
   if (data[5] < (uint8_t)ControlOpcode::Brightness ||
-      data[5] > (uint8_t)ControlOpcode::Rotate) {
+      data[5] > (uint8_t)ControlOpcode::Power) {
     return false;
   }
   out.opcode = (ControlOpcode)data[5];

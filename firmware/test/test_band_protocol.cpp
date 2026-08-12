@@ -325,11 +325,12 @@ int main() {
     memset(level + 8, 0xff, 4);
     CHECK(!deviceproto::parseControl(level, sizeof(level), command));
 
-    // Opcode 7 does not exist yet; the range check has to still reject it.
-    // (Opcode 6 was the "future" value here until Rotate claimed it - its
-    // acceptance is asserted in the rotation block below.)
+    // Opcode 8 does not exist yet; the range check has to still reject it.
+    // (Opcodes 6 and 7 were the "future" value here in turn, until Rotate
+    // and then Power claimed them - their acceptance is asserted in the
+    // rotation and power blocks below.)
     uint8_t future[12] = {
-        0x45, 0x43, 0x54, 0x4c, 0x01, 0x07, 0x34, 0x12,
+        0x45, 0x43, 0x54, 0x4c, 0x01, 0x08, 0x34, 0x12,
         0x01, 0x00, 0x00, 0x00};
     CHECK(!deviceproto::parseControl(future, sizeof(future), command));
 
@@ -406,12 +407,59 @@ int main() {
     CHECK(deviceproto::writeAck(ack, deviceproto::ControlOpcode::Rotate,
                                 0x1234, 0,
                                 panelstate::deviceFlags(true, 3, false, false,
-                                                        true),
+                                                        true, false),
                                 128) == 12);
     const uint8_t expectedAck[12] = {
         0x45, 0x41, 0x43, 0x4b, 0x01, 0x06, 0x34, 0x12,
         0x00, 0x71, 0x80, 0x00};
     CHECK(memcmp(ack, expectedAck, sizeof(expectedAck)) == 0);
+  }
+
+  // --- Power: a standing on/off instruction, independent of ESLP/EWAK -----
+  {
+    uint8_t on[deviceproto::CONTROL_PACKET_BYTES] = {
+        0x45, 0x43, 0x54, 0x4c, deviceproto::CONTROL_PROTOCOL_VERSION,
+        (uint8_t)deviceproto::ControlOpcode::Power, 0x01, 0x00,
+        0x01, 0x00, 0x00, 0x00};
+    deviceproto::ControlCommand command;
+    CHECK(deviceproto::parseControl(on, sizeof(on), command));
+    CHECK(command.opcode == deviceproto::ControlOpcode::Power);
+    CHECK(command.value == 1);
+
+    uint8_t off[deviceproto::CONTROL_PACKET_BYTES] = {
+        0x45, 0x43, 0x54, 0x4c, deviceproto::CONTROL_PROTOCOL_VERSION,
+        (uint8_t)deviceproto::ControlOpcode::Power, 0x02, 0x00,
+        0x00, 0x00, 0x00, 0x00};
+    CHECK(deviceproto::parseControl(off, sizeof(off), command));
+    CHECK(command.value == 0);
+
+    // Only 0 and 1 are meaningful for a binary on/off - anything else is
+    // refused the same way an out-of-range Rotate value is, so a sender
+    // finds out rather than the panel guessing what a "2" would mean.
+    uint8_t bad[deviceproto::CONTROL_PACKET_BYTES];
+    memcpy(bad, on, sizeof(bad));
+    bad[8] = 2;
+    CHECK(!deviceproto::parseControl(bad, sizeof(bad), command));
+
+    // Pinned for the same reason CAP_ROTATE is above: the Swift side spells
+    // this number out by hand (DeviceProtocol.Capabilities.power).
+    CHECK(deviceproto::CAP_POWER == 1u << 14);
+    CHECK((deviceproto::CAP_POWER & deviceproto::CAP_ROTATE) == 0);
+    CHECK((deviceproto::CAP_POWER & deviceproto::CAP_COMPRESSED_BANDS) == 0);
+
+    // The ack for turning off: opcode 7, status 0, flags with bit 7 set and
+    // nothing else (upright, awake, not idle, wifi up), brightness 0 because
+    // the backlight sink actually went dark.
+    uint8_t offAck[deviceproto::ACK_PACKET_BYTES] = {0};
+    CHECK(deviceproto::writeAck(offAck, deviceproto::ControlOpcode::Power,
+                                0x0002, 0,
+                                panelstate::deviceFlags(false, 0, false, false,
+                                                        true, true),
+                                0) == 12);
+    const uint8_t expectedOffAck[12] = {
+        0x45, 0x41, 0x43, 0x4b, 0x01, 0x07, 0x02, 0x00,
+        0x00, 0x90, 0x00, 0x00};
+    CHECK(memcmp(offAck, expectedOffAck, sizeof(expectedOffAck)) == 0);
   }
 
   // --- idle text: what the panel shows when no sender is driving it
@@ -518,25 +566,41 @@ int main() {
 
   // --- backlight priority: sleep beats idle beats the user's level
   {
-    CHECK(panelstate::backlightLevel(false, false, false, 128, 10) == 128);
-    CHECK(panelstate::backlightLevel(false, true, false, 128, 10) == 10);
-    CHECK(panelstate::backlightLevel(true, false, false, 128, 10) == 0);
+    CHECK(panelstate::backlightLevel(false, false, false, false, 128, 10) == 128);
+    CHECK(panelstate::backlightLevel(false, false, true, false, 128, 10) == 10);
+    CHECK(panelstate::backlightLevel(false, true, false, false, 128, 10) == 0);
     // Asleep wins even while idle: the Mac's screens being off is the
     // strongest signal there is nothing worth lighting.
-    CHECK(panelstate::backlightLevel(true, true, false, 128, 10) == 0);
+    CHECK(panelstate::backlightLevel(false, true, true, false, 128, 10) == 0);
     // The user's level is honoured exactly, not rounded to high/low.
-    CHECK(panelstate::backlightLevel(false, false, false, 1, 10) == 1);
-    CHECK(panelstate::backlightLevel(false, false, false, 255, 10) == 255);
+    CHECK(panelstate::backlightLevel(false, false, false, false, 1, 10) == 1);
+    CHECK(panelstate::backlightLevel(false, false, false, false, 255, 10) == 255);
 
-    // A finger outranks everything: someone touching a dark panel is asking
-    // whether it is alive, and the answer has to be visible. This is what lets
-    // tap-to-wake work from both the idle card and the Mac's display sleep,
-    // without the panel having to contradict the Mac about sleep state.
-    CHECK(panelstate::backlightLevel(false, true, true, 128, 10) == 128);
-    CHECK(panelstate::backlightLevel(true, false, true, 128, 10) == 128);
-    CHECK(panelstate::backlightLevel(true, true, true, 128, 10) == 128);
+    // A finger outranks sleep and idle: someone touching a dark panel is
+    // asking whether it is alive, and the answer has to be visible. This is
+    // what lets tap-to-wake work from both the idle card and the Mac's
+    // display sleep, without the panel having to contradict the Mac about
+    // sleep state.
+    CHECK(panelstate::backlightLevel(false, false, true, true, 128, 10) == 128);
+    CHECK(panelstate::backlightLevel(false, true, false, true, 128, 10) == 128);
+    CHECK(panelstate::backlightLevel(false, true, true, true, 128, 10) == 128);
     // ...and it wakes to the level the user chose, not to full blast.
-    CHECK(panelstate::backlightLevel(true, true, true, 40, 10) == 40);
+    CHECK(panelstate::backlightLevel(false, true, true, true, 40, 10) == 40);
+
+    // manuallyOff beats every one of those, including the finger. A user
+    // who turned the panel off gave a standing instruction; a touch
+    // answering "is this on?" would just turn it back on without asking,
+    // which is not what "off" means. Swept against every other combination
+    // so no future reordering of the ternary can let one slip through.
+    CHECK(panelstate::backlightLevel(true, false, false, false, 128, 10) == 0);
+    CHECK(panelstate::backlightLevel(true, false, false, true, 128, 10) == 0);
+    CHECK(panelstate::backlightLevel(true, true, false, false, 128, 10) == 0);
+    CHECK(panelstate::backlightLevel(true, false, true, false, 128, 10) == 0);
+    CHECK(panelstate::backlightLevel(true, true, true, true, 128, 10) == 0);
+    for (int bits = 0; bits < 8; bits++) {
+      CHECK(panelstate::backlightLevel(true, (bits & 1) != 0, (bits & 2) != 0,
+                                       (bits & 4) != 0, 200, 5) == 0);
+    }
   }
 
   // --- the high/low flag is derived, so it cannot disagree with the level
@@ -553,14 +617,14 @@ int main() {
     // The historical five bits, with rotation expressed as 0 (upright) or 2
     // (the old flip). These values are byte-identical to what the pre-rotation
     // firmware sent, which is what keeps old senders reading the truth.
-    CHECK(panelstate::deviceFlags(false, 0, false, false, false) == 0x00);
-    CHECK(panelstate::deviceFlags(true, 0, false, false, false) == 0x01);
-    CHECK(panelstate::deviceFlags(false, 2, false, false, false) == 0x42);
-    CHECK(panelstate::deviceFlags(false, 0, true, false, false) == 0x04);
-    CHECK(panelstate::deviceFlags(false, 0, false, true, false) == 0x08);
-    CHECK(panelstate::deviceFlags(false, 0, false, false, true) == 0x10);
-    CHECK(panelstate::deviceFlags(true, 2, false, false, true) == 0x53);
-    CHECK(panelstate::deviceFlags(true, 2, true, true, true) == 0x5F);
+    CHECK(panelstate::deviceFlags(false, 0, false, false, false, false) == 0x00);
+    CHECK(panelstate::deviceFlags(true, 0, false, false, false, false) == 0x01);
+    CHECK(panelstate::deviceFlags(false, 2, false, false, false, false) == 0x42);
+    CHECK(panelstate::deviceFlags(false, 0, true, false, false, false) == 0x04);
+    CHECK(panelstate::deviceFlags(false, 0, false, true, false, false) == 0x08);
+    CHECK(panelstate::deviceFlags(false, 0, false, false, true, false) == 0x10);
+    CHECK(panelstate::deviceFlags(true, 2, false, false, true, false) == 0x53);
+    CHECK(panelstate::deviceFlags(true, 2, true, true, true, false) == 0x5F);
 
     // Rotation rides in bits 5-6, and bit 1 (the old flipped flag) is set
     // exactly when the rotation is the 180 - never for a quarter turn, which
@@ -568,7 +632,7 @@ int main() {
     // so the consistency rule is checked as a rule, not at samples.
     for (uint8_t rotation = 0; rotation < 4; rotation++) {
       const uint8_t flags =
-          panelstate::deviceFlags(false, rotation, false, false, false);
+          panelstate::deviceFlags(false, rotation, false, false, false, false);
       CHECK(((flags >> 5) & 0x03) == rotation);
       CHECK(((flags & 0x02) != 0) == (rotation == 2));
       // Nothing but bit 1 and bits 5-6 may move with rotation.
@@ -580,19 +644,38 @@ int main() {
       for (uint8_t rotation = 0; rotation < 4; rotation++) {
         const uint8_t flags = panelstate::deviceFlags(
             (bits & 1) != 0, rotation, (bits & 2) != 0, (bits & 4) != 0,
-            (bits & 8) != 0);
+            (bits & 8) != 0, false);
         CHECK(((flags >> 5) & 0x03) == rotation);
         CHECK(((flags & 0x02) != 0) == (rotation == 2));
       }
     }
     // Spot values for the new bits, spelled as bytes like the rest of this
     // file: rotation 1 is 0x20, rotation 3 is 0x60, and neither sets bit 1.
-    CHECK(panelstate::deviceFlags(false, 1, false, false, false) == 0x20);
-    CHECK(panelstate::deviceFlags(false, 3, false, false, false) == 0x60);
-    CHECK(panelstate::deviceFlags(true, 1, true, true, true) == 0x3D);
+    CHECK(panelstate::deviceFlags(false, 1, false, false, false, false) == 0x20);
+    CHECK(panelstate::deviceFlags(false, 3, false, false, false, false) == 0x60);
+    CHECK(panelstate::deviceFlags(true, 1, true, true, true, false) == 0x3D);
     // A rotation above 3 cannot leak into other bits.
-    CHECK(panelstate::deviceFlags(false, (uint8_t)7, false, false, false) ==
-          panelstate::deviceFlags(false, 3, false, false, false));
+    CHECK(panelstate::deviceFlags(false, (uint8_t)7, false, false, false, false) ==
+          panelstate::deviceFlags(false, 3, false, false, false, false));
+
+    // manuallyOff is bit 7, independent of every other bit including
+    // rotation and the historical flipped flag - a manually-off panel that
+    // is also rotated must report both facts at once.
+    CHECK(panelstate::deviceFlags(false, 0, false, false, false, true) == 0x80);
+    CHECK(panelstate::deviceFlags(true, 2, true, true, true, true) == 0xDF);
+    CHECK(panelstate::deviceFlags(false, 3, false, false, false, true) == 0xE0);
+    for (int bits = 0; bits < 16; bits++) {
+      for (uint8_t rotation = 0; rotation < 4; rotation++) {
+        const uint8_t withoutOff = panelstate::deviceFlags(
+            (bits & 1) != 0, rotation, (bits & 2) != 0, (bits & 4) != 0,
+            (bits & 8) != 0, false);
+        const uint8_t withOff = panelstate::deviceFlags(
+            (bits & 1) != 0, rotation, (bits & 2) != 0, (bits & 4) != 0,
+            (bits & 8) != 0, true);
+        // Setting manuallyOff must flip bit 7 and touch nothing else.
+        CHECK(withOff == (uint8_t)(withoutOff | 0x80));
+      }
+    }
   }
 
   // --- idle card battery line: shown only for a board with a PMU and a

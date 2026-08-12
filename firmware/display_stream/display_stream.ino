@@ -191,7 +191,11 @@ static const uint32_t BASE_CAPABILITIES =
     // The RLE decode is chip-independent and the C6 gains from packing too
     // (an 80-band keyframe becomes a handful of datagrams), so every board
     // advertises it.
-    deviceproto::CAP_COMPRESSED_BANDS;
+    deviceproto::CAP_COMPRESSED_BANDS |
+    // A manual on/off is not a hardware fact the way battery or rotate are -
+    // every board here has a backlight or panel-command brightness sink
+    // already, so every board can honour it.
+    deviceproto::CAP_POWER;
 
 // Whether the touch controller came up. Not simply "is this the Touch board":
 // the chip has to actually answer, so a board with dead touch advertises no
@@ -324,6 +328,15 @@ static bool panelLandscape = false;              // current panel MADCTL state
 // Rotate case in applyPendingControl and CFGROT); rectangular panels express
 // a physical quarter turn through the sender's landscape mechanism instead.
 static uint8_t panelRotation = 0;
+
+// User-requested "display off", independent of the Mac's own ESLP/EWAK sleep
+// sync and the idle timer. Both of those are transient states this firmware
+// arrives at and clears on the next drawn frame; this one is a standing
+// instruction like rotation or brightness level, persisted in NVS and held
+// until an explicit Power command turns it back on - see panelstate::
+// backlightLevel for why it outranks even a wake-touch, and the CAP_POWER
+// comment in device_protocol.h for why it is not simply riding ESLP/EWAK.
+static bool panelManuallyOff = false;
 static bool madctlDirty = false;                 // panel config needs reapplying
 
 // Stats.
@@ -639,6 +652,7 @@ static void saveDisplayPrefs() {
   // to older firmware also keeps the 180 the two encodings agree on.
   prefs.putUChar("rot", panelRotation);
   prefs.putUChar("bllevel", userBlLevel);
+  prefs.putBool("pwroff", panelManuallyOff);
   prefs.end();
 }
 
@@ -655,7 +669,8 @@ static void applyPanelConfig(bool landscape) {
 
 static uint8_t currentDeviceFlags() {
   return panelstate::deviceFlags(blIsHigh(), panelRotation, displaySleeping,
-                                 idleActive, WiFi.status() == WL_CONNECTED);
+                                 idleActive, WiFi.status() == WL_CONNECTED,
+                                 panelManuallyOff);
 }
 
 // ---- Touch (Touch board only) ------------------------------------------
@@ -678,8 +693,9 @@ static bool touchWakeActive() {
 }
 
 static uint8_t currentBrightness() {
-  return panelstate::backlightLevel(displaySleeping, idleActive,
-                                    touchWakeActive(), userBlLevel, BL_IDLE);
+  return panelstate::backlightLevel(panelManuallyOff, displaySleeping,
+                                    idleActive, touchWakeActive(), userBlLevel,
+                                    BL_IDLE);
 }
 
 // Push a raw level to whichever brightness sink this board has: PWM duty on
@@ -872,6 +888,13 @@ static void applyPendingControl() {
         saveDisplayPrefs();
         Serial.printf("network: rotation=%u (saved)\n", panelRotation);
         break;
+      case deviceproto::ControlOpcode::Power:
+        panelManuallyOff = command.value == 0;
+        saveDisplayPrefs();
+        applyBacklight();
+        Serial.printf("network: display %s (saved)\n",
+                      panelManuallyOff ? "off" : "on");
+        break;
       case deviceproto::ControlOpcode::Identify:
         // Backlight pulse on every board; LED too where there is one.
         identifyUntil = millis() + (uint32_t)command.value * 1000;
@@ -1026,6 +1049,20 @@ static void processConfigLine(char *line) {
     saveDisplayPrefs();
     Serial.printf("CFGOK rot=%u (saved; applies with next frame)\n",
                   panelRotation);
+  } else if (strncmp(line, "CFGPOWER ", 9) == 0) {
+    // Manual on/off without the network path: CFGPOWER 0|1. Mirrors the
+    // Power control opcode exactly (same flag, same NVS key, same priority
+    // over touch-wake) so a bench test over serial behaves identically to a
+    // toggle from the app. Persisted, so it survives a reboot too.
+    int want = atoi(line + 9);
+    if (want != 0 && want != 1) {
+      Serial.println("CFGERR expected: CFGPOWER 0|1");
+      return;
+    }
+    panelManuallyOff = want == 0;
+    saveDisplayPrefs();
+    applyBacklight();
+    Serial.printf("CFGOK pwr=%s (saved)\n", panelManuallyOff ? "off" : "on");
   } else if (strncmp(line, "CFGBOARD ", 9) == 0) {
     // Override board auto-detection: CFGBOARD st7789|jd9853|auto.
     // The escape hatch for a board whose I2C peripherals do not answer, and the
@@ -1186,11 +1223,12 @@ static void processConfigLine(char *line) {
     // keeps reading the truth; rot= carries the full quarter-turn value.
     Serial.printf(
         "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d "
-        "rot=%u bl=%s board=%s bat=%d ota=%s ssid=%s\n",
+        "rot=%u bl=%s pwr=%s board=%s bat=%d ota=%s ssid=%s\n",
         (const char *)b64, (const char *)name64, WiFi.status() == WL_CONNECTED,
         WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(),
         panelRotation == 2, panelRotation,
-        blIsHigh() ? "high" : "low", board::variantToken(boardVariant),
+        blIsHigh() ? "high" : "low", panelManuallyOff ? "off" : "on",
+        board::variantToken(boardVariant),
         batteryPercentOrUnknown(),
         otapolicy::statusToken(currentOtaStatus()), cfgSsid.c_str());
   }
@@ -1959,6 +1997,10 @@ void setup() {
     } else {
       panelRotation = prefs.getBool("flip", false) ? 2 : 0;
     }
+    // A panel a user turned off must stay off across a reboot - the whole
+    // point of a standing instruction is that it survives the events that
+    // would otherwise clear a transient one.
+    panelManuallyOff = prefs.getBool("pwroff", false);
     // Migrate the old high/low flag: devices flashed before continuous
     // brightness have "blhigh" and no "bllevel".
     userBlLevel = prefs.getUChar(

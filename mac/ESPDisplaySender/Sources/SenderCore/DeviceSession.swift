@@ -231,6 +231,10 @@ final class DeviceSession {
         sender.setRotation(rotation)
         sender.forceKeyframe()
     }
+    /// No keyframe here, unlike `setFlip`/`setRotation`: turning the panel
+    /// back on should show whatever is already current, not force a resend of
+    /// a frame that was never stale in the first place.
+    func setPower(_ on: Bool) { sender.setPower(on) }
     func identify(seconds: Int = 8) { sender.identify(seconds: seconds) }
 
     /// Apply pacing settings. Self-tuning is switched off first so an explicit
