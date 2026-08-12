@@ -5,6 +5,10 @@ import SwiftUI
 extension Notification.Name {
     static let espDisplayShowManager = Notification.Name("com.espdisplay.sender.showManager")
     static let espDisplayShowSettings = Notification.Name("com.espdisplay.sender.showSettings")
+    /// Posted by the File menu, handled by whichever manager window is showing -
+    /// the same indirection `espDisplayShowSettings` uses, and for the same reason:
+    /// the menu holds no reference to a view.
+    static let espDisplayAddDevice = Notification.Name("com.espdisplay.sender.addDevice")
 }
 
 // MARK: - Window
@@ -12,11 +16,12 @@ extension Notification.Name {
 struct ManagerView: View {
     @ObservedObject var manager: PanelManager
     @State private var showingSettings = false
+    @State private var showingAddDevice = false
 
     var body: some View {
         NavigationSplitView {
             List(selection: $manager.selectedServiceName) {
-                Section("Displays") {
+                Section {
                     ForEach(manager.panels) { panel in
                         PanelRow(panel: panel)
                             .tag(panel.serviceName)
@@ -34,6 +39,25 @@ struct ManagerView: View {
                                 .disabled(!manager.canForget(panel.serviceName))
                             }
                     }
+                } header: {
+                    // The + is on the section header rather than in a window
+                    // toolbar because it belongs to this list, and because it has to
+                    // be reachable when the list is EMPTY - which is the state a
+                    // first board is added from, and the state every other
+                    // configuration path in this app cannot be started in, since
+                    // they all begin by selecting a display.
+                    HStack(spacing: 4) {
+                        Text("Displays")
+                        Spacer(minLength: 4)
+                        Button {
+                            showingAddDevice = true
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Add a display connected by USB")
+                        .accessibilityLabel("Add a display over USB")
+                    }
                 }
             }
             // The system sidebar style carries the Liquid Glass sidebar
@@ -45,9 +69,18 @@ struct ManagerView: View {
                 PanelDetailView(panel: panel, manager: manager)
                     .id(panel.serviceName)
             } else {
-                ContentUnavailableView(
-                    "No Display Selected", systemImage: "display",
-                    description: Text("Discovered and previously known panels appear in the sidebar."))
+                // The empty state is also the new-user state, so it offers the one
+                // action that works with nothing in the sidebar.
+                ContentUnavailableView {
+                    Label("No Display Selected", systemImage: "display")
+                } description: {
+                    Text("Discovered and previously known panels appear in the "
+                        + "sidebar. A board that has never joined a network is not "
+                        + "discovered yet - add it over its USB cable.")
+                } actions: {
+                    Button("Add a Display over USB…") { showingAddDevice = true }
+                        .buttonStyle(.glassProminent)
+                }
             }
         }
         // Standing problems float over the content on glass rather than pushing
@@ -73,10 +106,18 @@ struct ManagerView: View {
         .sheet(isPresented: $showingSettings) {
             SettingsSheet(manager: manager)
         }
+        .sheet(isPresented: $showingAddDevice) {
+            AddDeviceSheet(manager: manager)
+        }
         .onReceive(
             NotificationCenter.default.publisher(for: .espDisplayShowSettings)
         ) { _ in
             showingSettings = true
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .espDisplayAddDevice)
+        ) { _ in
+            showingAddDevice = true
         }
         .alert(
             manager.operationOutcome?.title ?? "",
