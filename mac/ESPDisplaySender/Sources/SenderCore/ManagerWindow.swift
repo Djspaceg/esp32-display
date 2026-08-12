@@ -615,14 +615,41 @@ private struct PanelDetailView: View {
                         .help(controlHelp(.brightness, "Set the panel backlight"))
                 }
             }
-            LabeledContent("Orientation") {
-                Toggle("Rotate 180°", isOn: Binding(
-                    get: { panel.flipped },
-                    set: { manager.setFlip($0, for: panel.serviceName) }))
-                    .toggleStyle(.switch)
+            if manager.canControl(panel.serviceName, capability: .rotate)
+                || panel.capabilities.contains(.rotate)
+            {
+                // Square panels advertise quarter-turn rotation, so the
+                // orientation control becomes a four-way choice. Rectangular
+                // panels keep the 180 toggle below: their 90-degree case is
+                // the sender-side landscape mechanism, and their firmware
+                // never advertises `.rotate`.
+                LabeledContent("Orientation") {
+                    Picker("Orientation", selection: Binding(
+                        get: { panel.rotation },
+                        set: { manager.setRotation($0, for: panel.serviceName) })) {
+                        Text("0°").tag(0)
+                        Text("90°").tag(1)
+                        Text("180°").tag(2)
+                        Text("270°").tag(3)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                     .fixedSize()
-                    .disabled(!manager.canControl(panel.serviceName, capability: .flip))
-                    .help(controlHelp(.flip, "Rotate the image on the panel"))
+                    .disabled(!manager.canControl(panel.serviceName, capability: .rotate))
+                    .help(controlHelp(
+                        .rotate,
+                        "Turn the image clockwise to match how the panel is mounted"))
+                }
+            } else {
+                LabeledContent("Orientation") {
+                    Toggle("Rotate 180°", isOn: Binding(
+                        get: { panel.flipped },
+                        set: { manager.setFlip($0, for: panel.serviceName) }))
+                        .toggleStyle(.switch)
+                        .fixedSize()
+                        .disabled(!manager.canControl(panel.serviceName, capability: .flip))
+                        .help(controlHelp(.flip, "Rotate the image on the panel"))
+                }
             }
             if panel.controlProtocolVersion != Int(DeviceProtocol.controlProtocolVersion) {
                 Text("Flash the current firmware to enable remote controls.")

@@ -65,6 +65,7 @@
 // All of them are header-only, self-contained, and unit tested standalone on the
 // host, so nothing in this file has to be declared before them.
 #include "band_protocol.h"
+#include "band_compress.h"
 #include "device_protocol.h"
 #include "control_queue.h"
 #include "ota_policy.h"
@@ -82,7 +83,7 @@ static String cfgPass;
 // resolving a hardcoded hostname. Default is unique per board
 // (espdisplay-XXXX from the MAC); changeable via CFGNAME over USB.
 static String cfgName;
-static const char *FW_VERSION = "1.2.0";
+static const char *FW_VERSION = "1.3.0";
 static uint8_t deviceId[6] = {0};
 
 // Reads the MAC straight from eFuse rather than via WiFi.macAddress(),
@@ -136,7 +137,9 @@ static uint32_t ledOverrideUntil = 0;          // CFGLED diagnostic hold
 static Adafruit_NeoPixel *rgbLed = nullptr;
 
 // ---- BOOT button (ESP32-C6 boot strap; plain input after boot) ----------
-// Short press: toggle backlight high/low. Long press: flip display 180.
+// Short press: toggle backlight high/low. Long press: turn the display 180
+// (rotation += 2 - a physical button reachable from behind a mounted panel
+// stays a two-position toggle even where quarter turns exist).
 // GPIO9 on both boards - see bcfg, and the note there about Waveshare's pinout
 // table claiming GPIO8 for the Touch variant.
 static const uint32_t LONG_PRESS_MS = 600;
@@ -184,7 +187,11 @@ static const uint32_t BASE_CAPABILITIES =
     deviceproto::CAP_FLIP |
     deviceproto::CAP_IDENTIFY | deviceproto::CAP_RESTART |
     deviceproto::CAP_SLEEP_SYNC | deviceproto::CAP_TELEMETRY |
-    deviceproto::CAP_IDLE_TEXT;
+    deviceproto::CAP_IDLE_TEXT |
+    // The RLE decode is chip-independent and the C6 gains from packing too
+    // (an 80-band keyframe becomes a handful of datagrams), so every board
+    // advertises it.
+    deviceproto::CAP_COMPRESSED_BANDS;
 
 // Whether the touch controller came up. Not simply "is this the Touch board":
 // the chip has to actually answer, so a board with dead touch advertises no
@@ -256,6 +263,12 @@ static uint32_t deviceCapabilities() {
                               | deviceproto::CAP_TOUCH_LONGPRESS)
                            : 0u)
          | (batteryAvailable ? deviceproto::CAP_BATTERY : 0u)
+         // Quarter turns only where the glass is square. On a rectangular
+         // panel a 90-degree mounting turn is what the sender-driven
+         // landscape mechanism already expresses, and honouring rotation 1/3
+         // there would fight it - so the capability is withheld and the
+         // Rotate handler NACKs those values as defense in depth behind it.
+         | (bcfg->panelW == bcfg->panelH ? deviceproto::CAP_ROTATE : 0u)
          // Only when OTA actually came up, not merely because this build
          // contains the code and not merely because a password is stored: a
          // panel that is not listening advertises no OTA, so nothing offers an
@@ -305,7 +318,12 @@ static volatile uint32_t framesCompleted = 0;    // completion signal: UDP -> lo
 static volatile bool pendingLandscape = false;   // orientation for the pending draw
 
 static bool panelLandscape = false;              // current panel MADCTL state
-static bool panelFlip180 = false;                // user flip via BOOT long press
+// The user's mounting rotation, clockwise quarter turns 0-3. Supersedes the
+// old flip180 bool: rotation 2 IS the old flip, and the BOOT long press still
+// steps by 2. Values 1 and 3 are only accepted on square glass (see the
+// Rotate case in applyPendingControl and CFGROT); rectangular panels express
+// a physical quarter turn through the sender's landscape mechanism instead.
+static uint8_t panelRotation = 0;
 static bool madctlDirty = false;                 // panel config needs reapplying
 
 // Stats.
@@ -343,15 +361,95 @@ static bool IRAM_ATTR onColorTransDone(esp_lcd_panel_io_handle_t,
   return false;
 }
 
-static void onPacket(AsyncUDPPacket packet) {
-  const uint8_t *data = packet.data();
-  size_t len = packet.length();
+// Apply one band's payload to bufA and run the reassembly bookkeeping. The
+// shared body of both packet layouts: the classic one-raw-band packet and
+// each record of a packed packet. `countPacket` keeps the classic path's
+// stats semantics (duplicates count in packets=); the packed path counts its
+// datagram once, in its caller.
+//
+// A compressed payload is decoded straight into bufA at the band offset -
+// this is the network receive path, so there is no scratch copy. rle565::
+// decode is bounds-checked against exactly this band's length: whatever a
+// datagram claims, nothing is written outside the band (see band_compress.h;
+// a fault there would be a remote-triggered overflow). The decode runs after
+// the reassembler classifies the chunk, so a stale or duplicate band never
+// touches bufA; the cost is that a payload that then fails to decode leaves
+// its band marked seen over the previous frame's rows - a torn band on a
+// forged packet, healed by the next keyframe, and never memory-unsafe.
+static bool applyBandPayload(const bandproto::Header &h, bool compressed,
+                             const uint8_t *payload, size_t payloadLen,
+                             bool countPacket) {
+  if (h.bandIndex >= PANEL_GEOMETRY.bandCount(h.landscape)) {
+    return false;  // geometry mismatch - sender misconfigured
+  }
+  const size_t rawLen =
+      PANEL_GEOMETRY.bandPayloadBytes(h.bandIndex, h.landscape);
+  if (!compressed && payloadLen != rawLen) {
+    statBadLen = statBadLen + 1;
+    return false;
+  }
 
+  bool droppedFrame = false;
+  ChunkAction action = reassembler.onChunk(h, droppedFrame);
+  if (droppedFrame) {
+    // Incomplete frame abandoned - but its bands are already applied to
+    // bufA and marked in pendingDrawBitmap, so they still reach the panel
+    // with the next completed frame (per-band recency).
+    statFramesDropped = statFramesDropped + 1;
+  }
+  if (action == ChunkAction::Reject) {
+    return false;  // geometry mismatch - sender misconfigured
+  }
+  if (countPacket) {
+    statPackets = statPackets + 1;
+  }
+  if (action == ChunkAction::IgnoreStale || action == ChunkAction::Duplicate) {
+    return true;
+  }
+
+  // A landscape/portrait change invalidates everything in bufA (band geometry
+  // and pixel layout both change), so stale pending bands are dropped and the
+  // keyframe the sender guarantees on an orientation change rebuilds it. Not to
+  // be confused with the user's mounting rotation, which leaves bufA valid and
+  // is repainted locally in loop() - see the madctlDirty block there.
+  if (h.landscape != bufLandscape) {
+    portENTER_CRITICAL(&drawMux);
+    memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
+    portEXIT_CRITICAL(&drawMux);
+    bufLandscape = h.landscape;
+  }
+
+  uint8_t *dst = bufA + PANEL_GEOMETRY.bandOffset(h.bandIndex, h.landscape);
+  if (compressed) {
+    if (!rle565::decode(payload, payloadLen, dst, rawLen)) {
+      statBadLen = statBadLen + 1;
+      return false;
+    }
+  } else {
+    memcpy(dst, payload, rawLen);
+  }
+  portENTER_CRITICAL(&drawMux);
+  pendingDrawBitmap[h.bandIndex >> 3] |= 1 << (h.bandIndex & 7);
+  portEXIT_CRITICAL(&drawMux);
+
+  if (action == ChunkAction::ApplyComplete) {
+    pendingLandscape = h.landscape;
+    framesCompleted = framesCompleted + 1;  // loop draws the pending bands
+  }
+  return true;
+}
+
+// One inbound datagram, whatever transport delivered it: AsyncUDP's lwIP
+// callback on the C6, the dedicated receive task on the S3. `remoteIp` is in
+// the byte order the transport's reply path expects (IPAddress dword and
+// sockaddr s_addr share it on this little-endian core).
+static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
+                          uint16_t remotePort) {
   // Any packet from the sender refreshes the heartbeat reply endpoint and
   // proves the sender is alive - keepalives arrive even when the screen is
   // perfectly static, which is why liveness keys off this and not frames.
-  hbIp = (uint32_t)packet.remoteIP();
-  hbPort = packet.remotePort();
+  hbIp = remoteIp;
+  hbPort = remotePort;
   lastSenderPacketAt = millis();
 
   if (len == 4 && memcmp(data, "EPNG", 4) == 0) {
@@ -397,58 +495,130 @@ static void onPacket(AsyncUDPPacket packet) {
     return;
   }
   bandproto::Header h = parseHeader(data);
-  // Band payloads are per-index now that a last band may be short, so the
-  // index has to be range-checked before it can size the length check. An
-  // out-of-range index is the reassembler's Reject case arriving early.
-  if (h.bandIndex >= PANEL_GEOMETRY.bandCount(h.landscape)) {
-    return;  // geometry mismatch - sender misconfigured
-  }
-  if (len != HEADER_BYTES +
-                 PANEL_GEOMETRY.bandPayloadBytes(h.bandIndex, h.landscape)) {
+  if (h.reservedBitsSet) {
+    // band_index bits 14..10 are reserved-zero; a sender that sets one is
+    // speaking a layout this firmware does not, so refuse the whole packet.
     statBadLen = statBadLen + 1;
     return;
   }
-
-  bool droppedFrame = false;
-  ChunkAction action = reassembler.onChunk(h, droppedFrame);
-  if (droppedFrame) {
-    // Incomplete frame abandoned - but its bands are already applied to
-    // bufA and marked in pendingDrawBitmap, so they still reach the panel
-    // with the next completed frame (per-band recency).
-    statFramesDropped = statFramesDropped + 1;
-  }
-  if (action == ChunkAction::Reject) {
-    return;  // geometry mismatch - sender misconfigured
-  }
-  statPackets = statPackets + 1;
-  if (action == ChunkAction::IgnoreStale || action == ChunkAction::Duplicate) {
+  if (h.packed) {
+    // Packed packet: several band records in one datagram, each raw or
+    // RLE-compressed (only sent to us because we advertise
+    // CAP_COMPRESSED_BANDS). The walker validates each record's framing
+    // before applyBandPayload sees it; the header's band_index must name the
+    // first record's band, a cross-check that the two layouts agree.
+    bool first = true;
+    bool ok = bandproto::forEachPackedRecord(
+        data + HEADER_BYTES, len - HEADER_BYTES,
+        [&](uint16_t band, bool compressed, const uint8_t *payload,
+            size_t payloadLen) {
+          if (first) {
+            if (band != h.bandIndex) return false;
+            first = false;
+          }
+          bandproto::Header bandHeader = h;
+          bandHeader.bandIndex = band;
+          return applyBandPayload(bandHeader, compressed, payload, payloadLen,
+                                  false);
+        });
+    if (!ok) {
+      statBadLen = statBadLen + 1;
+      return;
+    }
+    // One datagram, one count: packets= is what the ingest probe and the
+    // link supervisor read, and both care about datagrams accepted, not
+    // bands carried.
+    statPackets = statPackets + 1;
     return;
   }
+  applyBandPayload(h, false, data + HEADER_BYTES, len - HEADER_BYTES, true);
+}
 
-  // A landscape/portrait change invalidates everything in bufA (band geometry
-  // and pixel layout both change), so stale pending bands are dropped and the
-  // keyframe the sender guarantees on an orientation change rebuilds it. Not to
-  // be confused with the user's 180-degree flip, which leaves bufA valid and is
-  // repainted locally in loop() - see the madctlDirty block there.
-  if (h.landscape != bufLandscape) {
-    portENTER_CRITICAL(&drawMux);
-    memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
-    portEXIT_CRITICAL(&drawMux);
-    bufLandscape = h.landscape;
-  }
+// ---- Inbound transport ---------------------------------------------------
+// The S3 gets a dedicated FreeRTOS receive task draining a raw lwIP socket on
+// the app core; the single-core C6 keeps AsyncUDP. Measured on the 466x466 S3
+// (tools/ingest_probe.py): the AsyncUDP path accepted ~1826 datagrams/s flat
+// from 8k to 12k offered - a software receive-path ceiling, not radio. Its
+// per-datagram cost is paid in the lwIP callback (pbuf handling plus an
+// AsyncUDPPacket allocation per datagram); recvfrom into one preallocated
+// buffer on the second core takes that work off the WiFi task entirely. The
+// before/after numbers live in the commit that introduced this.
+//
+// Replies (heartbeat, EINF, EACK, EBAT, ETCH) go out through sendToSender so
+// each transport answers on its own socket.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#include <lwip/sockets.h>
 
-  memcpy(bufA + PANEL_GEOMETRY.bandOffset(h.bandIndex, h.landscape),
-         data + HEADER_BYTES,
-         PANEL_GEOMETRY.bandPayloadBytes(h.bandIndex, h.landscape));
-  portENTER_CRITICAL(&drawMux);
-  pendingDrawBitmap[h.bandIndex >> 3] |= 1 << (h.bandIndex & 7);
-  portEXIT_CRITICAL(&drawMux);
+static int rxSock = -1;
 
-  if (action == ChunkAction::ApplyComplete) {
-    pendingLandscape = h.landscape;
-    framesCompleted = framesCompleted + 1;  // loop draws the pending bands
+// Priority above loopTask (1) so a queued datagram preempts drawing
+// bookkeeping, below the WiFi/lwIP tasks (18+) which feed it. Pinned to core
+// 1: lwIP runs on core 0, so parsing and the PSRAM band copy no longer
+// compete with the radio.
+static const UBaseType_t RX_TASK_PRIORITY = 9;
+static const uint32_t RX_TASK_STACK = 6144;
+
+static void udpReceiveTask(void *) {
+  // One reusable buffer, internal RAM. Sized over MAX_PACKED_PACKET_BYTES so
+  // an oversized datagram is read whole (and then refused by the length
+  // checks) rather than truncated into something that might parse.
+  static uint8_t rxBuf[2048];
+  while (true) {
+    struct sockaddr_in from;
+    socklen_t fromLen = sizeof(from);
+    int n = lwip_recvfrom(rxSock, rxBuf, sizeof(rxBuf), 0,
+                          (struct sockaddr *)&from, &fromLen);
+    if (n <= 0) {
+      vTaskDelay(1);  // transient socket error: don't spin the core
+      continue;
+    }
+    handleInbound(rxBuf, (size_t)n, from.sin_addr.s_addr,
+                  ntohs(from.sin_port));
   }
 }
+
+static bool startInboundTransport() {
+  rxSock = lwip_socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+  if (rxSock < 0) return false;
+  struct sockaddr_in addr = {};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(UDP_PORT);
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  if (lwip_bind(rxSock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    lwip_close(rxSock);
+    rxSock = -1;
+    return false;
+  }
+  return xTaskCreatePinnedToCore(udpReceiveTask, "udprx", RX_TASK_STACK,
+                                 nullptr, RX_TASK_PRIORITY, nullptr,
+                                 1) == pdPASS;
+}
+
+static void sendToSender(const uint8_t *data, size_t len) {
+  if (rxSock < 0 || hbPort == 0) return;
+  struct sockaddr_in to = {};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(hbPort);
+  to.sin_addr.s_addr = hbIp;  // stored exactly as recvfrom produced it
+  lwip_sendto(rxSock, data, len, 0, (struct sockaddr *)&to, sizeof(to));
+}
+#else
+static void onPacket(AsyncUDPPacket packet) {
+  handleInbound(packet.data(), packet.length(), (uint32_t)packet.remoteIP(),
+                packet.remotePort());
+}
+
+static bool startInboundTransport() {
+  if (!udp.listen(UDP_PORT)) return false;
+  udp.onPacket(onPacket);
+  return true;
+}
+
+static void sendToSender(const uint8_t *data, size_t len) {
+  if (hbPort == 0) return;
+  udp.writeTo(data, len, IPAddress(hbIp), hbPort);
+}
+#endif
 
 // Bring up SPI and the panel for whichever board this is. The body lives in
 // boardpanel::init so display_test exercises the identical path - a bring-up
@@ -463,23 +633,28 @@ static bool initDisplay() {
 static void saveDisplayPrefs() {
   Preferences prefs;
   prefs.begin("espdisp", false);
-  prefs.putBool("flip", panelFlip180);
+  // "rot" supersedes the old "flip" bool (flip true == rot 2). setup() still
+  // reads "flip" when no "rot" exists, so a panel upgraded in place keeps its
+  // mounting; the old key is left alone rather than deleted, so a downgrade
+  // to older firmware also keeps the 180 the two encodings agree on.
+  prefs.putUChar("rot", panelRotation);
   prefs.putUChar("bllevel", userBlLevel);
   prefs.end();
 }
 
-// Apply orientation + the user's 180 flip, then record what the panel now holds.
-// The MADCTL/gap arithmetic itself is in boardpanel::applyOrientation, shared
-// with display_test; it is identical on both boards (verified against
-// Waveshare's own example for the JD9853, not assumed from the ST7789).
+// Apply orientation + the user's mounting rotation, then record what the panel
+// now holds. The MADCTL/gap arithmetic itself is in
+// boardpanel::applyOrientation, shared with display_test; it is identical on
+// both boards (verified against Waveshare's own example for the JD9853, not
+// assumed from the ST7789).
 static void applyPanelConfig(bool landscape) {
-  boardpanel::applyOrientation(panel, *bcfg, landscape, panelFlip180);
+  boardpanel::applyOrientation(panel, *bcfg, landscape, panelRotation);
   panelLandscape = landscape;
   madctlDirty = false;
 }
 
 static uint8_t currentDeviceFlags() {
-  return panelstate::deviceFlags(blIsHigh(), panelFlip180, displaySleeping,
+  return panelstate::deviceFlags(blIsHigh(), panelRotation, displaySleeping,
                                  idleActive, WiFi.status() == WL_CONNECTED);
 }
 
@@ -561,7 +736,7 @@ static void sendDeviceInfo() {
       millis() / 1000, WiFi.status() == WL_CONNECTED ? (int16_t)WiFi.RSSI() : -127,
       currentBrightness(), deviceId, cfgName.c_str(), FW_VERSION);
   if (len > 0) {
-    udp.writeTo(packet, len, IPAddress(hbIp), hbPort);
+    sendToSender(packet, len);
   }
 }
 
@@ -601,7 +776,7 @@ static void sendBatteryStatus() {
       packet, flags,
       reading.percentKnown ? reading.percent : deviceproto::BATTERY_PERCENT_UNKNOWN,
       state, reading.millivolts);
-  udp.writeTo(packet, sizeof(packet), IPAddress(hbIp), hbPort);
+  sendToSender(packet, sizeof(packet));
 }
 
 // Charge state as one word, for the serial status line.
@@ -642,7 +817,7 @@ static void sendControlAck(const deviceproto::ControlCommand &command,
   uint8_t packet[deviceproto::ACK_PACKET_BYTES];
   deviceproto::writeAck(packet, command.opcode, command.sequence, status,
                         currentDeviceFlags(), currentBrightness());
-  udp.writeTo(packet, sizeof(packet), IPAddress(hbIp), hbPort);
+  sendToSender(packet, sizeof(packet));
 }
 
 static void applyPendingControl() {
@@ -656,6 +831,7 @@ static void applyPendingControl() {
   portEXIT_CRITICAL(&controlMux);
 
   if (hasCommand) {
+    uint8_t ackStatus = 0;
     switch (command.opcode) {
       case deviceproto::ControlOpcode::Brightness:
         userBlLevel = command.value != 0 ? BL_HIGH : BL_LOW;
@@ -670,10 +846,31 @@ static void applyPendingControl() {
         Serial.printf("network: backlight level %u (saved)\n", userBlLevel);
         break;
       case deviceproto::ControlOpcode::Flip:
-        panelFlip180 = command.value != 0;
+        // Kept for old senders. Flip 1 is rotation 2; Flip 0 is upright.
+        // Deliberately absolute rather than "toggle the 180 bit": a sender
+        // that says Flip 0 means "upright", and leaving a quarter turn
+        // standing would contradict it.
+        panelRotation = command.value != 0 ? 2 : 0;
         madctlDirty = true;
         saveDisplayPrefs();
-        Serial.printf("network: flip180=%d (saved)\n", panelFlip180);
+        Serial.printf("network: flip180=%d -> rotation=%u (saved)\n",
+                      command.value != 0, panelRotation);
+        break;
+      case deviceproto::ControlOpcode::Rotate:
+        if ((command.value & 1) != 0 && bcfg->panelW != bcfg->panelH) {
+          // Defense in depth behind the capability gate: CAP_ROTATE is not
+          // advertised on rectangular glass, so a well-behaved sender never
+          // sends 1 or 3 here - but one that does gets a NACK it can tell
+          // from packet loss, not silence.
+          ackStatus = 1;
+          Serial.printf("network: rotate %ld refused (panel not square)\n",
+                        (long)command.value);
+          break;
+        }
+        panelRotation = (uint8_t)(command.value & 3);
+        madctlDirty = true;
+        saveDisplayPrefs();
+        Serial.printf("network: rotation=%u (saved)\n", panelRotation);
         break;
       case deviceproto::ControlOpcode::Identify:
         // Backlight pulse on every board; LED too where there is one.
@@ -694,7 +891,7 @@ static void applyPendingControl() {
     portENTER_CRITICAL(&controlMux);
     controls.markApplied(command.sequence);
     portEXIT_CRITICAL(&controlMux);
-    sendControlAck(command);
+    sendControlAck(command, ackStatus);
     sendDeviceInfo();
   }
   if (hasDuplicateAck) {
@@ -796,14 +993,39 @@ static void processConfigLine(char *line) {
     delay(200);
     ESP.restart();
   } else if (strncmp(line, "CFGFLIP ", 8) == 0) {
-    // Set 180-degree flip without the button: CFGFLIP 0|1. Persisted, and
-    // applied on the next drawn frame.
+    // Set the 180-degree flip without the button: CFGFLIP 0|1. Kept beside
+    // CFGROT for old tooling and muscle memory; it maps onto the same stored
+    // rotation (1 -> rot 2, 0 -> rot 0). Persisted, and applied on the next
+    // drawn frame.
     int want = atoi(line + 8);
-    panelFlip180 = (want != 0);
+    panelRotation = want != 0 ? 2 : 0;
     madctlDirty = true;
     saveDisplayPrefs();
-    Serial.printf("CFGOK flip180=%d (saved; applies with next frame)\n",
-                  panelFlip180);
+    Serial.printf("CFGOK flip180=%d rot=%u (saved; applies with next frame)\n",
+                  want != 0, panelRotation);
+  } else if (strncmp(line, "CFGROT ", 7) == 0) {
+    // Set the mounting rotation in clockwise quarter turns: CFGROT 0|1|2|3.
+    // Quarter turns (1 and 3) are refused on rectangular glass for the same
+    // reason CAP_ROTATE is not advertised there: a physical 90-degree turn
+    // of those panels is what the sender's landscape mechanism expresses,
+    // and a MADCTL quarter turn would fight it. Persisted, and applied on
+    // the next drawn frame.
+    int want = atoi(line + 7);
+    if (want < 0 || want > 3) {
+      Serial.println("CFGERR expected: CFGROT 0|1|2|3");
+      return;
+    }
+    if ((want & 1) != 0 && bcfg->panelW != bcfg->panelH) {
+      Serial.printf("CFGERR rotation %d needs a square panel (%s is %ux%u); "
+                    "only 0 and 2 apply here\n",
+                    want, bcfg->name, bcfg->panelW, bcfg->panelH);
+      return;
+    }
+    panelRotation = (uint8_t)want;
+    madctlDirty = true;
+    saveDisplayPrefs();
+    Serial.printf("CFGOK rot=%u (saved; applies with next frame)\n",
+                  panelRotation);
   } else if (strncmp(line, "CFGBOARD ", 9) == 0) {
     // Override board auto-detection: CFGBOARD st7789|jd9853|auto.
     // The escape hatch for a board whose I2C peripherals do not answer, and the
@@ -960,11 +1182,14 @@ static void processConfigLine(char *line) {
     // is listening yet), "on" (listening). Reporting only on/off would make a
     // panel that simply booted without WiFi look misconfigured. The mapping is
     // otapolicy::statusToken, tested on the host.
+    // flip= stays (derived: rotation == 2) so anything parsing the old field
+    // keeps reading the truth; rot= carries the full quarter-turn value.
     Serial.printf(
-        "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d bl=%s "
-        "board=%s bat=%d ota=%s ssid=%s\n",
+        "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d "
+        "rot=%u bl=%s board=%s bat=%d ota=%s ssid=%s\n",
         (const char *)b64, (const char *)name64, WiFi.status() == WL_CONNECTED,
-        WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), panelFlip180,
+        WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(),
+        panelRotation == 2, panelRotation,
         blIsHigh() ? "high" : "low", board::variantToken(boardVariant),
         batteryPercentOrUnknown(),
         otapolicy::statusToken(currentOtaStatus()), cfgSsid.c_str());
@@ -1297,10 +1522,14 @@ static void handleButton() {
     downAt = now;
   } else if (down && wasDown && !longFired && now - downAt >= LONG_PRESS_MS) {
     longFired = true;
-    panelFlip180 = !panelFlip180;
+    // Still a 180 toggle, now expressed as rotation += 2 so it composes with
+    // a quarter turn instead of erasing one: a panel mounted at 90 and
+    // long-pressed lands at 270, not at 0. The physical button's semantics
+    // are unchanged - press it twice and you are back where you started.
+    panelRotation = (uint8_t)((panelRotation + 2) & 3);
     madctlDirty = true;
     saveDisplayPrefs();
-    Serial.printf("button: long press -> flip180=%d (saved)\n", panelFlip180);
+    Serial.printf("button: long press -> rotation=%u (saved)\n", panelRotation);
   } else if (!down && wasDown) {
     wasDown = false;
     if (!longFired && now - downAt >= DEBOUNCE_MS) {
@@ -1364,7 +1593,7 @@ static void sendTouchEvent(touchgesture::Gesture gesture, int16_t x, int16_t y) 
   deviceproto::writeTouch(
       packet, wire, ++touchSequence, (uint16_t)x, (uint16_t)y,
       panelLandscape ? deviceproto::TOUCH_FLAG_LANDSCAPE : (uint8_t)0);
-  udp.writeTo(packet, sizeof(packet), IPAddress(hbIp), hbPort);
+  sendToSender(packet, sizeof(packet));
   Serial.printf("touch: %s at (%d,%d) seq=%u -> sender\n",
                 touchgesture::gestureName(gesture), x, y, touchSequence);
 }
@@ -1405,7 +1634,7 @@ static void serviceTouch() {
   // Through the same orientation transform the pixels went through, so a swipe
   // means the direction the user actually swiped.
   touchmap::Point p = touchmap::map((int16_t)sample.rawX, (int16_t)sample.rawY,
-                                    panelLandscape, panelFlip180);
+                                    panelLandscape, panelRotation);
   touchgesture::Event event =
       touchTracker.onReport(sample.pressed, p.x, p.y, millis());
 
@@ -1701,7 +1930,16 @@ void setup() {
     // mounted, so they belong in flash - re-flipping after every reflash is
     // needless. NVS survives sketch uploads (only the app partition is
     // rewritten); a full flash erase does reset them.
-    panelFlip180 = prefs.getBool("flip", false);
+    //
+    // "rot" (quarter turns 0-3) supersedes the old "flip" bool. A panel
+    // flashed before rotation existed has only "flip", so that key is the
+    // fallback (flip true -> rot 2) - an upgraded panel keeps its mounting
+    // without anyone touching it. saveDisplayPrefs writes "rot" from then on.
+    if (prefs.isKey("rot")) {
+      panelRotation = (uint8_t)(prefs.getUChar("rot", 0) & 3);
+    } else {
+      panelRotation = prefs.getBool("flip", false) ? 2 : 0;
+    }
     // Migrate the old high/low flag: devices flashed before continuous
     // brightness have "blhigh" and no "bllevel".
     userBlLevel = prefs.getUChar(
@@ -1718,7 +1956,7 @@ void setup() {
   // sends you hunting for a config that is in fact saved.
   Serial.printf("WiFi credentials: \"%s\" (%s)\n", cfgSsid.c_str(),
                 ssidFromNvs ? "from NVS" : "compiled default");
-  Serial.printf("display prefs: flip180=%d backlight=%u (%s)\n", panelFlip180,
+  Serial.printf("display prefs: rotation=%u backlight=%u (%s)\n", panelRotation,
                 userBlLevel, blIsHigh() ? "high" : "low");
 
   if (cfgName.isEmpty()) {
@@ -1869,8 +2107,7 @@ void setup() {
     fillPanel(0x9000);  // dark red: no WiFi - fix with CFGWIFI over USB
   }
 
-  if (udp.listen(UDP_PORT)) {
-    udp.onPacket(onPacket);
+  if (startInboundTransport()) {
     Serial.printf("UDP listening on %u\n", UDP_PORT);
   } else {
     Serial.println("FATAL: UDP listen failed");
@@ -1922,25 +2159,28 @@ void loop() {
     ESP.restart();
   }
 
-  // Reapply a pending flip now, and repaint the whole screen from what is
+  // Reapply a pending rotation now, and repaint the whole screen from what is
   // already cached instead of waiting for a frame to arrive.
   //
-  // A flip changes MADCTL, which makes the panel re-scan the pixels already in
-  // its memory in the new direction. Every pixel on screen is therefore wrong
-  // the moment it takes effect - including the parts no incoming band will
-  // touch. Reapplying only on the next completed frame and then redrawing just
-  // that frame's dirty bands left the image healing a band at a time, and left a
-  // static screen upside-down until the sender's 5s full refresh.
+  // A rotation changes MADCTL, which makes the panel re-address the pixels
+  // already in its memory in the new direction. Every pixel on screen is
+  // therefore wrong the moment it takes effect - including the parts no
+  // incoming band will touch. Reapplying only on the next completed frame and
+  // then redrawing just that frame's dirty bands left the image healing a band
+  // at a time, and left a static screen upside-down until the sender's 5s full
+  // refresh.
   //
-  // This is fixable locally because a 180-degree flip leaves bufA valid: band
-  // geometry and pixel layout are unchanged, only the scan direction moved. A
-  // landscape change is not, so one still mid-flight here (bufLandscape not yet
-  // agreeing with the completed frame) only reapplies the config and leaves the
-  // repaint to the keyframe the sender guarantees.
+  // This is fixable locally because a user rotation leaves bufA valid: a 180
+  // changes only the scan direction, and a quarter turn is only reachable on
+  // square glass, where the band geometry is orientation-symmetric - either
+  // way the bands in bufA still tile the frame and the new MADCTL re-addresses
+  // them. A landscape change is not, so one still mid-flight here
+  // (bufLandscape not yet agreeing with the completed frame) only reapplies
+  // the config and leaves the repaint to the keyframe the sender guarantees.
   //
-  // The Mac-commanded flip never had this problem because DeviceSession.setFlip
-  // forces a keyframe. A BOOT-button flip is invisible to the sender, so nothing
-  // asked for one.
+  // The Mac-commanded rotation never had this problem because
+  // DeviceSession.setFlip/setRotation force a keyframe. A BOOT-button turn is
+  // invisible to the sender, so nothing asked for one.
   if (madctlDirty && dmaInFlight == 0) {
     bool orientationSettled = (bufLandscape == pendingLandscape);
     applyPanelConfig(bufLandscape);
@@ -1963,7 +2203,7 @@ void loop() {
       // fill looks the same either way up, so there is nothing to correct.
       repainted = "nothing to repaint";
     }
-    Serial.printf("flip180=%d applied (%s)\n", panelFlip180, repainted);
+    Serial.printf("rotation=%u applied (%s)\n", panelRotation, repainted);
   }
 
   static uint32_t lastCompleted = 0;
@@ -2210,7 +2450,7 @@ void loop() {
       pkt[6 + i * 4] = (vals[i] >> 16) & 0xFF;
       pkt[7 + i * 4] = (vals[i] >> 24) & 0xFF;
     }
-    udp.writeTo(pkt, sizeof(pkt), IPAddress(hbIp), hbPort);
+    sendToSender(pkt, sizeof(pkt));
   }
 
   // Versioned capabilities and live state for the manager window. EHB1

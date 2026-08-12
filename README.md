@@ -91,6 +91,18 @@ board is mounted and forget it. (A full flash erase does reset them.) The
 manager's brightness slider covers the full range in between; the button's
 toggle is the two ends of it.
 
+Square panels can be mounted at any quarter turn, not only upside down. A
+panel whose glass is square advertises quarter-turn rotation, and the
+manager's orientation control becomes a 0°/90°/180°/270° choice instead of the
+180° toggle; the same rotation is reachable over USB with `CFGROT 0|1|2|3`,
+and the BOOT long press still steps by 180° so it composes with a quarter turn
+rather than erasing it. Rectangular panels deliberately keep only the 180°
+flip — turning one of those 90° is what streaming it in landscape already
+expresses, so the panel refuses quarter turns there rather than fighting the
+sender about which way is up. Touch, where present, goes through the same
+transform as the pixels, so gestures keep meaning the direction your finger
+actually moved whichever way the panel is turned.
+
 WiFi credentials live in the board's flash, not in the firmware — change
 networks by plugging the board into the Mac over USB and choosing **Add…** or
 **Edit…** beside the selected panel's saved WiFi network. The WiFi-only dialog
@@ -366,21 +378,21 @@ accepted right now", not "this build has OTA code in it".
 
 ## Repo layout
 
-| Path | What |
-| --- | --- |
-| `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls |
-| `firmware/display_test/` | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping |
-| `firmware/board_probe/` | I2C-scan diagnostic reporting which board variant you have |
-| `firmware/libraries/espdisp_board/` | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform, AXP2101 battery reader |
-| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance) |
-| `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
-| `firmware/test/` | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
-| `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
-| `tools/espdisp.py` | Compile, flash over USB, push over WiFi, bundle a build, and configure from one command: holds the board table, refuses to guess the chip |
-| `tools/test_espdisp.py` | Tests for the CLI's decisions: chip and OTA-target refusals, password bounds, encodings, the bundle format (stdlib only, no framework) |
-| `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
-| `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
-| `docs/` | Original project plan |
+| Path                                 | What                                                                                                                                      |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `firmware/display_stream/`           | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls                                                      |
+| `firmware/display_test/`             | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping                             |
+| `firmware/board_probe/`              | I2C-scan diagnostic reporting which board variant you have                                                                                |
+| `firmware/libraries/espdisp_board/`  | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform, AXP2101 battery reader           |
+| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance)                                                                 |
+| `mac/ESPDisplaySender/`              | Native manager app plus SwiftPM command-line workflows                                                                                    |
+| `firmware/test/`                     | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`)                                 |
+| `mac/ESPDisplaySender/Tests/`        | Swift tests for the sender's protocol and application logic (`swift test`)                                                                |
+| `tools/espdisp.py`                   | Compile, flash over USB, push over WiFi, bundle a build, and configure from one command: holds the board table, refuses to guess the chip |
+| `tools/test_espdisp.py`              | Tests for the CLI's decisions: chip and OTA-target refusals, password bounds, encodings, the bundle format (stdlib only, no framework)    |
+| `tools/read_serial.py`               | Serial monitor with optional hard-reset (native USB-Serial/JTAG)                                                                          |
+| `tools/sweep.py`                     | Pacing parameter sweep, measuring displayed fps from device stats                                                                         |
+| `docs/`                              | Original project plan                                                                                                                     |
 
 ## Getting started
 

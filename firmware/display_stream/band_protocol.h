@@ -8,6 +8,14 @@
 // dirty_count is the number of bands in THIS frame. Bands are
 // orientation-native so they align to whole rows.
 //
+// band_index uses only its low 10 bits for the index (MAX_BANDS is 512).
+// Bit 15 set marks a PACKED packet - the payload is band records rather
+// than one raw band; see "Packed band packets" below - and bits 14..10 are
+// reserved and must be zero. A sender may only emit packed packets to a
+// receiver advertising CAP_COMPRESSED_BANDS; everything else on the wire is
+// byte-identical to the original format, which is what keeps old panels and
+// old senders interoperating with no version bump.
+//
 // Band geometry is derived from panel dimensions rather than hardcoded, so
 // one protocol serves panels of different resolutions (the 172x320 1.47"
 // LCDs, the 466x466 AMOLEDs, and whatever comes next). Both ends run the
@@ -116,21 +124,82 @@ struct Geometry {
 /// format; the sketches take their geometry from the board table.
 static const Geometry GEOMETRY_172X320 = {172, 320};
 
+// ---- Packed band packets -------------------------------------------------
+// With RLE compression a band is variable-length, so one datagram can carry
+// several. A packed packet (band_index bit 15 set) holds records for its
+// frame's bands, each record its own band index - dirty bands are usually
+// scattered, so consecutive-only packing would waste most of the win:
+//
+//   [frame_id u16][first_band | 0x8000 u16][dirty_count u16, bit15=landscape]
+//   then per record:
+//     [band u16 LE, bits 15..10 zero][len u16 LE, bit15 = compressed]
+//     [len & 0x7FFF payload bytes]
+//
+// A compressed record's payload is rle565 data that must decode to exactly
+// the band's raw size; a raw record's length must equal it. first_band must
+// equal the first record's band, a cheap cross-check on the two layouts
+// agreeing. The packed budget is larger than MAX_PACKET_BYTES: that constant
+// derives band geometry and cannot move without changing every panel's wire
+// format, whereas this one only bounds a datagram no old peer ever sees.
+// 1472 = the conservative 1500-byte Ethernet MTU minus IP+UDP headers.
+static const size_t MAX_PACKED_PACKET_BYTES = 1472;
+static const uint16_t BAND_INDEX_PACKED = 0x8000;
+static const uint16_t BAND_INDEX_RESERVED_MASK = 0x7C00;  // must be zero
+static const uint16_t BAND_INDEX_VALUE_MASK = 0x03FF;
+static const size_t RECORD_HEADER_BYTES = 4;
+static const uint16_t RECORD_COMPRESSED = 0x8000;
+static const uint16_t RECORD_LENGTH_MASK = 0x7FFF;
+
 struct Header {
   uint16_t frameId;
-  uint16_t bandIndex;
+  uint16_t bandIndex;   // low 10 bits only; flag/reserved bits stripped
   uint16_t dirtyCount;
   bool landscape;
+  bool packed;          // band_index bit 15: payload is band records
+  bool reservedBitsSet; // band_index bits 14..10 nonzero: reject the packet
 };
 
 inline Header parseHeader(const uint8_t *d) {
   Header h;
   h.frameId = (uint16_t)d[0] | ((uint16_t)d[1] << 8);
-  h.bandIndex = (uint16_t)d[2] | ((uint16_t)d[3] << 8);
+  uint16_t indexField = (uint16_t)d[2] | ((uint16_t)d[3] << 8);
+  h.packed = (indexField & BAND_INDEX_PACKED) != 0;
+  h.reservedBitsSet = (indexField & BAND_INDEX_RESERVED_MASK) != 0;
+  h.bandIndex = indexField & BAND_INDEX_VALUE_MASK;
   uint16_t countField = (uint16_t)d[4] | ((uint16_t)d[5] << 8);
   h.landscape = (countField & 0x8000) != 0;
   h.dirtyCount = countField & 0x7FFF;
   return h;
+}
+
+/// Walk the records of a packed payload (the bytes after the 6-byte packet
+/// header). Calls fn(bandIndex, compressed, payload, payloadLen) per record;
+/// fn returns false to reject the record, which aborts the walk.
+///
+/// Returns false when the payload is structurally invalid - empty, a record
+/// header that overruns, reserved band bits set, a record body past the end,
+/// trailing bytes shorter than a record header - or when fn rejected one.
+/// Structural checks happen per record BEFORE fn sees it, so a decoder
+/// behind fn is never handed a length that lies about the buffer.
+template <typename F>
+inline bool forEachPackedRecord(const uint8_t *payload, size_t len, F fn) {
+  if (len < RECORD_HEADER_BYTES) return false;
+  size_t at = 0;
+  while (at < len) {
+    if (at + RECORD_HEADER_BYTES > len) return false;
+    uint16_t bandField =
+        (uint16_t)payload[at] | ((uint16_t)payload[at + 1] << 8);
+    uint16_t lenField =
+        (uint16_t)payload[at + 2] | ((uint16_t)payload[at + 3] << 8);
+    if ((bandField & ~BAND_INDEX_VALUE_MASK) != 0) return false;
+    const bool compressed = (lenField & RECORD_COMPRESSED) != 0;
+    const size_t bodyLen = lenField & RECORD_LENGTH_MASK;
+    at += RECORD_HEADER_BYTES;
+    if (bodyLen == 0 || at + bodyLen > len) return false;
+    if (!fn(bandField, compressed, payload + at, bodyLen)) return false;
+    at += bodyLen;
+  }
+  return true;
 }
 
 enum class ChunkAction : uint8_t {

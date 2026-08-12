@@ -1,8 +1,9 @@
 // Mapping raw AXS5106L touch coordinates into framebuffer coordinates.
 //
-// The panel's orientation follows macOS at runtime and the user can flip it 180
-// for upside-down mounting, so a touch point only means something once it has
-// been through the same transform the pixels went through. This file is that
+// The panel's orientation follows macOS at runtime and the user can rotate it
+// in quarter turns for its mounting (180 on rectangular panels, any quarter on
+// square ones), so a touch point only means something once it has been through
+// the same transform the pixels went through. This file is that
 // transform, and it lives beside panel_init.h deliberately: if touch and pixels
 // disagree about which way is up, taps land in the wrong place, and the only way
 // to prevent that is for one piece of arithmetic to serve both.
@@ -11,15 +12,22 @@
 // band_protocol.h and panel_state.h. Nothing here touches I2C - see
 // board_touch.h for the reading half.
 //
-// The transform is deliberately three small steps rather than one matrix, so
+// The transform is deliberately two small steps rather than one matrix, so
 // each can be reasoned about (and corrected) on its own:
 //
 //   1. raw controller coords  ->  glass coords (portrait-upright)
-//   2. glass coords           ->  framebuffer coords for the orientation
-//   3. the 180 mounting flip
+//   2. glass coords           ->  framebuffer coords for the quadrant, i.e.
+//      the sender's landscape turn composed with the user's mounting
+//      rotation (clockwise quarter turns 0-3; 2 is the old 180 flip)
+//
+// The quadrant composition is panelorient::quadrant - the same arithmetic
+// panel_init.h drives MADCTL with, which is what keeps touch and pixels
+// agreeing about which way is up.
 #pragma once
 
 #include <stdint.h>
+
+#include "panel_orientation.h"
 
 namespace touchmap {
 
@@ -82,24 +90,51 @@ inline Point rawToGlass(int16_t rawX, int16_t rawY) {
   return g;
 }
 
-/// Steps 2 and 3: glass coordinates to framebuffer coordinates.
+/// Whether this orientation's framebuffer has swapped axes (landscape-shaped),
+/// i.e. the quadrant is odd. With rotation limited to {0, 2} - every
+/// rectangular panel, since only square glass accepts quarter turns - this is
+/// exactly the landscape flag, which is why callers that key buffer shape on
+/// `landscape` alone stay correct.
+inline bool swapsAxes(bool landscape, uint8_t rotation) {
+  return panelorient::swapXY(panelorient::quadrant(rotation, landscape));
+}
+
+/// Step 2: glass coordinates to framebuffer coordinates, through the same
+/// quadrant the pixels went through (rotation is the user's mounting turn,
+/// clockwise quarter turns 0-3; 2 is the old 180 flip).
 ///
-/// Landscape-flipped is expressed as landscape-then-180 rather than as its own
-/// case, so the four combinations cannot drift apart.
-inline Point glassToFrame(Point g, bool landscape, bool flip180) {
-  Point f;
-  if (!landscape) {
-    f = g;
-  } else if (ROTATE_CLOCKWISE) {
-    f.x = g.y;
-    f.y = (int16_t)(PANEL_SHORT - 1 - g.x);
-  } else {
-    f.x = (int16_t)(PANEL_LONG - 1 - g.y);
-    f.y = g.x;
+/// The four quadrant cases are one clockwise quarter turn apart, composed as
+/// panelorient::quadrant so a rotation of 2 is landscape-then-180 by
+/// construction rather than by a separate flip step that could drift. The 180
+/// involution the old flip step guaranteed still holds as arithmetic: the
+/// point at quadrant q+2 is the point at quadrant q reflected through the
+/// frame's centre, asserted by the host suite across the whole coordinate
+/// space and from every rotation, not only from upright.
+inline Point glassToFrame(Point g, bool landscape, uint8_t rotation) {
+  uint8_t q = panelorient::quadrant(rotation, landscape);
+  if (!ROTATE_CLOCKWISE) {
+    // A panel whose landscape MADCTL turns the image the other way would need
+    // touch to turn with it. Negating the quadrant keeps the hardware
+    // evidence above meaningful rather than folding it away silently.
+    q = (uint8_t)((4 - q) & 3);
   }
-  if (flip180) {
-    f.x = (int16_t)(frameWidth(landscape) - 1 - f.x);
-    f.y = (int16_t)(frameHeight(landscape) - 1 - f.y);
+  Point f;
+  switch (q) {
+    case 1:  // one clockwise quarter turn (the old landscape case)
+      f.x = g.y;
+      f.y = (int16_t)(PANEL_SHORT - 1 - g.x);
+      break;
+    case 2:  // 180 (the old portrait-flipped case)
+      f.x = (int16_t)(PANEL_SHORT - 1 - g.x);
+      f.y = (int16_t)(PANEL_LONG - 1 - g.y);
+      break;
+    case 3:  // three clockwise = one counter-clockwise (landscape-flipped)
+      f.x = (int16_t)(PANEL_LONG - 1 - g.y);
+      f.y = g.x;
+      break;
+    default:  // q == 0: portrait upright
+      f = g;
+      break;
   }
   return f;
 }
@@ -121,9 +156,14 @@ inline Point clampToFrame(Point p, bool landscape) {
 }
 
 /// Raw controller coordinates straight to a clamped framebuffer point.
-inline Point map(int16_t rawX, int16_t rawY, bool landscape, bool flip180) {
-  return clampToFrame(glassToFrame(rawToGlass(rawX, rawY), landscape, flip180),
-                      landscape);
+///
+/// The clamp is bounded by the quadrant's frame shape, not the landscape flag
+/// alone: an odd total quadrant (only reachable with rotation 1/3, i.e. on
+/// square glass where the two shapes coincide anyway) swaps which axis is
+/// long. On every rectangular panel the two agree - see swapsAxes.
+inline Point map(int16_t rawX, int16_t rawY, bool landscape, uint8_t rotation) {
+  return clampToFrame(glassToFrame(rawToGlass(rawX, rawY), landscape, rotation),
+                      swapsAxes(landscape, rotation));
 }
 
 }  // namespace touchmap

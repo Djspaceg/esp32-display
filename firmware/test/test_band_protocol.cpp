@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "../display_stream/band_compress.h"
 #include "../display_stream/band_protocol.h"
 #include "../display_stream/chip_identity.h"
 #include "../display_stream/control_queue.h"
@@ -14,6 +15,7 @@
 #include "../display_stream/ota_policy.h"
 #include "../display_stream/panel_state.h"
 #include "../libraries/espdisp_board/src/board_config.h"
+#include "../libraries/espdisp_board/src/panel_orientation.h"
 #include "../libraries/espdisp_board/src/touch_gesture.h"
 #include "../libraries/espdisp_board/src/touch_map.h"
 
@@ -323,9 +325,11 @@ int main() {
     memset(level + 8, 0xff, 4);
     CHECK(!deviceproto::parseControl(level, sizeof(level), command));
 
-    // Opcode 6 does not exist yet; the range check has to still reject it.
+    // Opcode 7 does not exist yet; the range check has to still reject it.
+    // (Opcode 6 was the "future" value here until Rotate claimed it - its
+    // acceptance is asserted in the rotation block below.)
     uint8_t future[12] = {
-        0x45, 0x43, 0x54, 0x4c, 0x01, 0x06, 0x34, 0x12,
+        0x45, 0x43, 0x54, 0x4c, 0x01, 0x07, 0x34, 0x12,
         0x01, 0x00, 0x00, 0x00};
     CHECK(!deviceproto::parseControl(future, sizeof(future), command));
 
@@ -342,6 +346,72 @@ int main() {
     // panel that accepts levels from one that only accepts high/low.
     CHECK(deviceproto::CAP_BRIGHTNESS_LEVEL == 0x80u);
     CHECK((deviceproto::CAP_BRIGHTNESS & deviceproto::CAP_BRIGHTNESS_LEVEL) == 0u);
+  }
+
+  // --- quarter-turn rotation: the Rotate opcode on the wire -----------------
+  {
+    deviceproto::ControlCommand command;
+    // Byte-for-byte: opcode 6, value 3, little-endian sequence. The Swift
+    // suite asserts the same bytes from its own hand-written encoder; neither
+    // side shares a fixture, so a drift fails a test instead of agreeing with
+    // itself.
+    uint8_t rotate[12] = {
+        0x45, 0x43, 0x54, 0x4c, 0x01, 0x06, 0x34, 0x12,
+        0x03, 0x00, 0x00, 0x00};
+    CHECK(deviceproto::parseControl(rotate, sizeof(rotate), command));
+    CHECK(command.opcode == deviceproto::ControlOpcode::Rotate);
+    CHECK(command.sequence == 0x1234);
+    CHECK(command.value == 3);
+
+    // The whole representable range, and the first value beyond it. The
+    // panel-shape rule (1 and 3 only on square glass) deliberately does NOT
+    // live in the parser - the sketch NACKs those so a sender can tell
+    // "refused" from "lost" - so the parser accepts all four everywhere.
+    for (int value : {0, 1, 2, 3}) {
+      rotate[8] = (uint8_t)value;
+      CHECK(deviceproto::parseControl(rotate, sizeof(rotate), command));
+      CHECK(command.opcode == deviceproto::ControlOpcode::Rotate);
+      CHECK(command.value == value);
+    }
+    rotate[8] = 4;
+    CHECK(!deviceproto::parseControl(rotate, sizeof(rotate), command));
+    // A negative value must not wrap into a plausible rotation.
+    memset(rotate + 8, 0xff, 4);
+    CHECK(!deviceproto::parseControl(rotate, sizeof(rotate), command));
+
+    // Flip keeps its old 0-or-1 contract: rotation is a NEW opcode rather
+    // than widened Flip values, because old firmware rejects Flip > 1
+    // silently (no ack, indistinguishable from packet loss). This build must
+    // reject those values too, or the two generations would disagree about
+    // what a Flip payload may hold.
+    uint8_t wideFlip[12] = {
+        0x45, 0x43, 0x54, 0x4c, 0x01, 0x02, 0x34, 0x12,
+        0x02, 0x00, 0x00, 0x00};
+    CHECK(!deviceproto::parseControl(wideFlip, sizeof(wideFlip), command));
+    wideFlip[8] = 3;
+    CHECK(!deviceproto::parseControl(wideFlip, sizeof(wideFlip), command));
+
+    // The capability bit, pinned because the Swift side spells the same
+    // number out by hand (DeviceProtocol.Capabilities.rotate).
+    CHECK(deviceproto::CAP_ROTATE == 1u << 13);
+    CHECK((deviceproto::CAP_ROTATE & deviceproto::CAP_COMPRESSED_BANDS) == 0);
+    CHECK((deviceproto::CAP_ROTATE & deviceproto::CAP_FLIP) == 0);
+    CHECK((deviceproto::CAP_ROTATE & deviceproto::CAP_TOUCH) == 0);
+
+    // And the exact ack bytes a panel confirming a Rotate puts on the wire:
+    // opcode 6, status 0, flags carrying rotation 3 in bits 5-6 (0x60), bit 1
+    // clear (a quarter turn is not the old 180 flip), brightness-high and
+    // wifi set - 0x71 in all.
+    uint8_t ack[deviceproto::ACK_PACKET_BYTES] = {0};
+    CHECK(deviceproto::writeAck(ack, deviceproto::ControlOpcode::Rotate,
+                                0x1234, 0,
+                                panelstate::deviceFlags(true, 3, false, false,
+                                                        true),
+                                128) == 12);
+    const uint8_t expectedAck[12] = {
+        0x45, 0x41, 0x43, 0x4b, 0x01, 0x06, 0x34, 0x12,
+        0x00, 0x71, 0x80, 0x00};
+    CHECK(memcmp(ack, expectedAck, sizeof(expectedAck)) == 0);
   }
 
   // --- idle text: what the panel shows when no sender is driving it
@@ -480,14 +550,113 @@ int main() {
 
   // --- flags byte packing, which the sender reads back as device state
   {
-    CHECK(panelstate::deviceFlags(false, false, false, false, false) == 0x00);
-    CHECK(panelstate::deviceFlags(true, false, false, false, false) == 0x01);
-    CHECK(panelstate::deviceFlags(false, true, false, false, false) == 0x02);
-    CHECK(panelstate::deviceFlags(false, false, true, false, false) == 0x04);
-    CHECK(panelstate::deviceFlags(false, false, false, true, false) == 0x08);
-    CHECK(panelstate::deviceFlags(false, false, false, false, true) == 0x10);
-    CHECK(panelstate::deviceFlags(true, true, false, false, true) == 0x13);
-    CHECK(panelstate::deviceFlags(true, true, true, true, true) == 0x1F);
+    // The historical five bits, with rotation expressed as 0 (upright) or 2
+    // (the old flip). These values are byte-identical to what the pre-rotation
+    // firmware sent, which is what keeps old senders reading the truth.
+    CHECK(panelstate::deviceFlags(false, 0, false, false, false) == 0x00);
+    CHECK(panelstate::deviceFlags(true, 0, false, false, false) == 0x01);
+    CHECK(panelstate::deviceFlags(false, 2, false, false, false) == 0x42);
+    CHECK(panelstate::deviceFlags(false, 0, true, false, false) == 0x04);
+    CHECK(panelstate::deviceFlags(false, 0, false, true, false) == 0x08);
+    CHECK(panelstate::deviceFlags(false, 0, false, false, true) == 0x10);
+    CHECK(panelstate::deviceFlags(true, 2, false, false, true) == 0x53);
+    CHECK(panelstate::deviceFlags(true, 2, true, true, true) == 0x5F);
+
+    // Rotation rides in bits 5-6, and bit 1 (the old flipped flag) is set
+    // exactly when the rotation is the 180 - never for a quarter turn, which
+    // an old sender must not be told is a flip. Swept across every rotation
+    // so the consistency rule is checked as a rule, not at samples.
+    for (uint8_t rotation = 0; rotation < 4; rotation++) {
+      const uint8_t flags =
+          panelstate::deviceFlags(false, rotation, false, false, false);
+      CHECK(((flags >> 5) & 0x03) == rotation);
+      CHECK(((flags & 0x02) != 0) == (rotation == 2));
+      // Nothing but bit 1 and bits 5-6 may move with rotation.
+      CHECK((flags & ~(uint8_t)0x62) == 0x00);
+    }
+    // The two encodings agree under every other flag combination too: bit 1
+    // and bits 5-6 must be consistent whatever else is set.
+    for (int bits = 0; bits < 16; bits++) {
+      for (uint8_t rotation = 0; rotation < 4; rotation++) {
+        const uint8_t flags = panelstate::deviceFlags(
+            (bits & 1) != 0, rotation, (bits & 2) != 0, (bits & 4) != 0,
+            (bits & 8) != 0);
+        CHECK(((flags >> 5) & 0x03) == rotation);
+        CHECK(((flags & 0x02) != 0) == (rotation == 2));
+      }
+    }
+    // Spot values for the new bits, spelled as bytes like the rest of this
+    // file: rotation 1 is 0x20, rotation 3 is 0x60, and neither sets bit 1.
+    CHECK(panelstate::deviceFlags(false, 1, false, false, false) == 0x20);
+    CHECK(panelstate::deviceFlags(false, 3, false, false, false) == 0x60);
+    CHECK(panelstate::deviceFlags(true, 1, true, true, true) == 0x3D);
+    // A rotation above 3 cannot leak into other bits.
+    CHECK(panelstate::deviceFlags(false, (uint8_t)7, false, false, false) ==
+          panelstate::deviceFlags(false, 3, false, false, false));
+  }
+
+  // --- the quarter-turn quadrant behind MADCTL and touch --------------------
+  // panel_init.h cannot be host-tested (it needs the esp_lcd headers), so the
+  // arithmetic it drives MADCTL with lives in panel_orientation.h and is
+  // pinned here instead. The table below is the historical applyOrientation
+  // matrix copied out BY HAND - portrait MADCTL 0, landscape MV|MX, flipped
+  // MX|MY, landscape-flipped MV|MY - so the generalisation to four rotations
+  // has to reproduce the shipped four states byte-for-byte or fail here.
+  {
+    using panelorient::mirrorX;
+    using panelorient::mirrorY;
+    using panelorient::quadrant;
+    using panelorient::swapXY;
+
+    struct Legacy {
+      bool landscape, flip180;      // the old inputs
+      bool swap, mx, my;            // what shipped firmware set MADCTL to
+    };
+    const Legacy legacy[] = {
+        {false, false, false, false, false},  // portrait: MADCTL 0
+        {true, false, true, true, false},     // landscape: MV|MX
+        {false, true, false, true, true},     // flipped: MX|MY
+        {true, true, true, false, true},      // landscape flipped: MV|MY
+    };
+    for (const Legacy &l : legacy) {
+      const uint8_t q = quadrant(l.flip180 ? 2 : 0, l.landscape);
+      CHECK(swapXY(q) == l.swap);
+      CHECK(mirrorX(q) == l.mx);
+      CHECK(mirrorY(q) == l.my);
+    }
+
+    // The composition rule itself: rotation and landscape add, modulo 4.
+    for (uint8_t rotation = 0; rotation < 4; rotation++) {
+      CHECK(quadrant(rotation, false) == rotation);
+      CHECK(quadrant(rotation, true) == ((rotation + 1) & 3));
+    }
+    // A rotation that was never masked upstream still lands in range.
+    CHECK(quadrant(6, false) == 2);
+    CHECK(quadrant(7, true) == 0);
+
+    // Each quadrant's MADCTL triple, spelled out so no two quadrants can
+    // collapse together: q odd swaps, mx on 1 and 2, my on 2 and 3.
+    CHECK(!swapXY(0) && !mirrorX(0) && !mirrorY(0));
+    CHECK(swapXY(1) && mirrorX(1) && !mirrorY(1));
+    CHECK(!swapXY(2) && mirrorX(2) && mirrorY(2));
+    CHECK(swapXY(3) && !mirrorX(3) && mirrorY(3));
+    // All four triples are distinct - a swapped pair of rows above would
+    // otherwise still pass the per-row checks.
+    for (uint8_t a = 0; a < 4; a++) {
+      for (uint8_t b = (uint8_t)(a + 1); b < 4; b++) {
+        CHECK(swapXY(a) != swapXY(b) || mirrorX(a) != mirrorX(b) ||
+              mirrorY(a) != mirrorY(b));
+      }
+    }
+    // Two more quarter turns are a point reflection: the mirror bits both
+    // toggle and the axis swap holds still. This is the arithmetic fact that
+    // makes "rotation 2 == the old flip" true by construction.
+    for (uint8_t q = 0; q < 4; q++) {
+      const uint8_t r = (uint8_t)((q + 2) & 3);
+      CHECK(swapXY(r) == swapXY(q));
+      CHECK(mirrorX(r) == !mirrorX(q));
+      CHECK(mirrorY(r) == !mirrorY(q));
+    }
   }
 
   // --- control admission: the sender repeats every command three times, so
@@ -858,52 +1027,112 @@ int main() {
 
     // Portrait: every corner lands in the corresponding framebuffer corner.
     // Raw (SHORT-1, 0) is the display's top-left once the X mirror is undone.
-    CHECK(touchmap::map(SHORT - 1, 0, false, false).x == 0);
-    CHECK(touchmap::map(SHORT - 1, 0, false, false).y == 0);
-    CHECK(touchmap::map(0, LONG - 1, false, false).x == SHORT - 1);
-    CHECK(touchmap::map(0, LONG - 1, false, false).y == LONG - 1);
+    CHECK(touchmap::map(SHORT - 1, 0, false, 0).x == 0);
+    CHECK(touchmap::map(SHORT - 1, 0, false, 0).y == 0);
+    CHECK(touchmap::map(0, LONG - 1, false, 0).x == SHORT - 1);
+    CHECK(touchmap::map(0, LONG - 1, false, 0).y == LONG - 1);
 
-    // The 180 flip is a point reflection, so the same finger position must map
-    // to the opposite corner.
-    CHECK(touchmap::map(SHORT - 1, 0, false, true).x == SHORT - 1);
-    CHECK(touchmap::map(SHORT - 1, 0, false, true).y == LONG - 1);
-    CHECK(touchmap::map(0, LONG - 1, false, true).x == 0);
-    CHECK(touchmap::map(0, LONG - 1, false, true).y == 0);
+    // Rotation 2 (the old 180 flip) is a point reflection, so the same finger
+    // position must map to the opposite corner.
+    CHECK(touchmap::map(SHORT - 1, 0, false, 2).x == SHORT - 1);
+    CHECK(touchmap::map(SHORT - 1, 0, false, 2).y == LONG - 1);
+    CHECK(touchmap::map(0, LONG - 1, false, 2).x == 0);
+    CHECK(touchmap::map(0, LONG - 1, false, 2).y == 0);
 
     // Landscape swaps the axes: the long panel axis becomes framebuffer X, so a
     // touch at one end of it must land at a framebuffer X extreme, never beyond.
-    CHECK(touchmap::map(SHORT - 1, 0, true, false).x == 0);
-    CHECK(touchmap::map(SHORT - 1, LONG - 1, true, false).x == LONG - 1);
+    CHECK(touchmap::map(SHORT - 1, 0, true, 0).x == 0);
+    CHECK(touchmap::map(SHORT - 1, LONG - 1, true, 0).x == LONG - 1);
+
+    // A quarter turn in portrait IS the landscape transform - the quadrant
+    // composes as rotation + landscape, so the display's portrait top-left
+    // corner must land exactly where landscape puts it (clockwise: the
+    // landscape frame's bottom-left).
+    CHECK(touchmap::map(SHORT - 1, 0, false, 1).x == 0);
+    CHECK(touchmap::map(SHORT - 1, 0, false, 1).y == SHORT - 1);
+    CHECK(touchmap::map(SHORT - 1, LONG - 1, false, 1).x == LONG - 1);
+    // ...and rotation 3 is its point reflection through the landscape frame.
+    CHECK(touchmap::map(SHORT - 1, 0, false, 3).x == LONG - 1);
+    CHECK(touchmap::map(SHORT - 1, 0, false, 3).y == 0);
+    CHECK(touchmap::map(0, LONG - 1, false, 3).x == 0);
+    CHECK(touchmap::map(0, LONG - 1, false, 3).y == SHORT - 1);
+
+    // Whether the frame is landscape-shaped follows the total quadrant, and
+    // collapses to the landscape flag whenever the rotation is 0 or 2 - which
+    // is every rectangular panel, quarter turns being square-only.
+    for (uint8_t rotation = 0; rotation < 4; rotation++) {
+      CHECK(touchmap::swapsAxes(false, rotation) == ((rotation & 1) != 0));
+      // Landscape adds one quarter turn, so it toggles the parity.
+      CHECK(touchmap::swapsAxes(true, rotation) == ((rotation & 1) == 0));
+    }
+    CHECK(touchmap::swapsAxes(false, 0) == false);
+    CHECK(touchmap::swapsAxes(false, 2) == false);
+    CHECK(touchmap::swapsAxes(true, 0) == true);
+    CHECK(touchmap::swapsAxes(true, 2) == true);
+    CHECK(touchmap::swapsAxes(false, 1) == true);
+    CHECK(touchmap::swapsAxes(false, 3) == true);
+    CHECK(touchmap::swapsAxes(true, 1) == false);
+    CHECK(touchmap::swapsAxes(true, 3) == false);
 
     // Structural properties that must hold in every orientation, checked over
-    // the whole coordinate space rather than at hand-picked points. A transform
-    // that is wrong by one reflection still satisfies these, which is why the
-    // corner assertions above exist too - but an off-by-one or a swapped axis
-    // that overruns the framebuffer does not.
+    // the whole coordinate space rather than at hand-picked points, and now
+    // over all four rotations in both landscape states rather than only the
+    // two the old flip could reach. A transform that is wrong by one
+    // reflection still satisfies these, which is why the corner assertions
+    // above exist too - but an off-by-one or a swapped axis that overruns the
+    // framebuffer does not.
     for (int16_t ry = 0; ry < LONG; ry += 7) {
       for (int16_t rx = 0; rx < SHORT; rx += 5) {
-        for (int orientation = 0; orientation < 4; orientation++) {
+        for (int orientation = 0; orientation < 8; orientation++) {
           const bool landscape = (orientation & 1) != 0;
-          const bool flip = (orientation & 2) != 0;
-          Point p = touchmap::map(rx, ry, landscape, flip);
-          // In range, always.
-          CHECK(p.x >= 0 && p.x < touchmap::frameWidth(landscape));
-          CHECK(p.y >= 0 && p.y < touchmap::frameHeight(landscape));
-          // Flipping is an involution: flipping twice is the identity, so the
-          // flipped point must be the unflipped one reflected through the centre.
-          Point q = touchmap::map(rx, ry, landscape, !flip);
-          CHECK(q.x == touchmap::frameWidth(landscape) - 1 - p.x);
-          CHECK(q.y == touchmap::frameHeight(landscape) - 1 - p.y);
+          const uint8_t rotation = (uint8_t)(orientation >> 1);
+          const bool swapped = touchmap::swapsAxes(landscape, rotation);
+          Point p = touchmap::map(rx, ry, landscape, rotation);
+          // In range, always - bounded by the quadrant's frame shape.
+          CHECK(p.x >= 0 && p.x < touchmap::frameWidth(swapped));
+          CHECK(p.y >= 0 && p.y < touchmap::frameHeight(swapped));
+          // Two more quarter turns are the old flip involution: the rotated
+          // point is the original reflected through the centre, whatever
+          // rotation it started from.
+          Point q = touchmap::map(rx, ry, landscape,
+                                  (uint8_t)((rotation + 2) & 3));
+          CHECK(q.x == touchmap::frameWidth(swapped) - 1 - p.x);
+          CHECK(q.y == touchmap::frameHeight(swapped) - 1 - p.y);
+          // The composition rule itself: a quarter turn in portrait is the
+          // landscape transform, i.e. only the TOTAL quadrant matters. This
+          // is the property that keeps touch agreeing with MADCTL, which is
+          // driven by the same quadrant().
+          Point viaLandscape =
+              touchmap::map(rx, ry, true, rotation);
+          Point viaRotation =
+              touchmap::map(rx, ry, false, (uint8_t)((rotation + 1) & 3));
+          CHECK(viaLandscape.x == viaRotation.x);
+          CHECK(viaLandscape.y == viaRotation.y);
         }
       }
     }
 
     // The mapping must be injective within an orientation, or two different
-    // finger positions would be indistinguishable after transform.
-    CHECK(touchmap::map(10, 20, false, false).x != touchmap::map(11, 20, false, false).x);
-    CHECK(touchmap::map(10, 20, false, false).y != touchmap::map(10, 21, false, false).y);
-    CHECK(touchmap::map(10, 20, true, false).y != touchmap::map(11, 20, true, false).y);
-    CHECK(touchmap::map(10, 20, true, false).x != touchmap::map(10, 21, true, false).x);
+    // finger positions would be indistinguishable after transform. Checked
+    // for each rotation, since a constant transform would pass the range
+    // checks above.
+    for (uint8_t rotation = 0; rotation < 4; rotation++) {
+      const bool swapped = touchmap::swapsAxes(false, rotation);
+      // A raw X step must move exactly one framebuffer axis; a raw Y step
+      // the other.
+      Point a = touchmap::map(10, 20, false, rotation);
+      Point bx = touchmap::map(11, 20, false, rotation);
+      Point by = touchmap::map(10, 21, false, rotation);
+      if (swapped) {
+        CHECK(a.y != bx.y && a.x == bx.x);
+        CHECK(a.x != by.x && a.y == by.y);
+      } else {
+        CHECK(a.x != bx.x && a.y == bx.y);
+        CHECK(a.y != by.y && a.x == by.x);
+      }
+    }
+    CHECK(touchmap::map(10, 20, true, 0).y != touchmap::map(11, 20, true, 0).y);
+    CHECK(touchmap::map(10, 20, true, 0).x != touchmap::map(10, 21, true, 0).x);
 
     // Clamping: controllers report just outside the active area near the bezel,
     // and an unclamped point would index past the framebuffer.
@@ -917,8 +1146,13 @@ int main() {
     CHECK(touchmap::clampToFrame({7, 9}, false).x == 7);
     CHECK(touchmap::clampToFrame({7, 9}, false).y == 9);
     // map() clamps, so even a wildly out-of-range report stays addressable.
-    CHECK(touchmap::map(9999, 9999, false, false).x >= 0);
-    CHECK(touchmap::map(9999, 9999, false, false).y <= LONG - 1);
+    CHECK(touchmap::map(9999, 9999, false, 0).x >= 0);
+    CHECK(touchmap::map(9999, 9999, false, 0).y <= LONG - 1);
+    // Including under a quarter turn, whose frame shape is the swapped one.
+    CHECK(touchmap::map(9999, 9999, false, 1).x <= LONG - 1);
+    CHECK(touchmap::map(9999, 9999, false, 1).y <= SHORT - 1);
+    CHECK(touchmap::map(-9999, -9999, false, 3).x >= 0);
+    CHECK(touchmap::map(-9999, -9999, false, 3).y >= 0);
   }
 
   // --- touch gestures ------------------------------------------------------
@@ -1890,6 +2124,255 @@ int main() {
                       chipidentity::selectToken(nullptr, false, true),
                       "esp32s3"),
                   "selectToken must be usable in a constant expression");
+  }
+
+  // --- rle565: the wire codec for compressed band records ------------------
+  // Byte-for-byte vectors written out by hand from the format comment in
+  // band_compress.h, deliberately NOT shared with the Swift suite - each side
+  // asserts the wire independently, so a codec change that breaks
+  // interoperability fails a test rather than updating a fixture.
+  {
+    // One repeat run: 4x the pixel 0x2104 (big-endian on the wire).
+    // control = 0x80 + (4 - 2) = 0x82.
+    const uint8_t raw[] = {0x21, 0x04, 0x21, 0x04, 0x21, 0x04, 0x21, 0x04};
+    uint8_t enc[16];
+    size_t n = rle565::encode(raw, sizeof(raw), enc, sizeof(enc));
+    CHECK(n == 3);
+    CHECK(enc[0] == 0x82 && enc[1] == 0x21 && enc[2] == 0x04);
+    uint8_t dec[8];
+    CHECK(rle565::decode(enc, n, dec, sizeof(dec)));
+    CHECK(memcmp(dec, raw, sizeof(raw)) == 0);
+  }
+  {
+    // Pure literal: three distinct pixels. control = count - 1 = 0x02.
+    const uint8_t raw[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+    uint8_t enc[16];
+    size_t n = rle565::encode(raw, sizeof(raw), enc, sizeof(enc));
+    CHECK(n == 7);
+    CHECK(enc[0] == 0x02);
+    CHECK(memcmp(enc + 1, raw, 6) == 0);
+    uint8_t dec[6];
+    CHECK(rle565::decode(enc, n, dec, sizeof(dec)));
+    CHECK(memcmp(dec, raw, sizeof(raw)) == 0);
+  }
+  {
+    // Mixed: literal [1122 3344], run 3x[5566], literal [7788].
+    const uint8_t raw[] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x55, 0x66,
+                           0x55, 0x66, 0x77, 0x88};
+    const uint8_t expect[] = {0x01, 0x11, 0x22, 0x33, 0x44,  // literal x2
+                              0x81, 0x55, 0x66,              // run x3
+                              0x00, 0x77, 0x88};             // literal x1
+    uint8_t enc[32];
+    size_t n = rle565::encode(raw, sizeof(raw), enc, sizeof(enc));
+    CHECK(n == sizeof(expect));
+    CHECK(memcmp(enc, expect, n) == 0);
+    uint8_t dec[12];
+    CHECK(rle565::decode(enc, n, dec, sizeof(dec)));
+    CHECK(memcmp(dec, raw, sizeof(raw)) == 0);
+  }
+  {
+    // Run-length limits: 129 identical pixels fit one control byte (0xFF); a
+    // 130th starts a second chunk. Literal limit is 128 (control 0x7F).
+    uint8_t raw[130 * 2];
+    for (size_t i = 0; i < sizeof(raw); i += 2) { raw[i] = 0x12; raw[i + 1] = 0x34; }
+    uint8_t enc[16];
+    CHECK(rle565::encode(raw, 129 * 2, enc, sizeof(enc)) == 3);
+    CHECK(enc[0] == 0xFF);
+    size_t n = rle565::encode(raw, 130 * 2, enc, sizeof(enc));
+    CHECK(n == 6);
+    CHECK(enc[0] == 0xFF);           // 129 pixels...
+    CHECK(enc[3] == 0x00);           // ...then a 1-pixel literal
+    uint8_t dec[130 * 2];
+    CHECK(rle565::decode(enc, n, dec, sizeof(dec)));
+    CHECK(memcmp(dec, raw, sizeof(dec)) == 0);
+  }
+  {
+    // Worst case (no two adjacent pixels equal) stays within maxEncodedBytes,
+    // and round-trips. 466px is the S3's row; 172px the C6's portrait row.
+    for (size_t pixels : {(size_t)172, (size_t)466, (size_t)697}) {
+      std::vector<uint8_t> raw(pixels * 2);
+      for (size_t i = 0; i < pixels; i++) {
+        raw[i * 2] = (uint8_t)(i >> 8);
+        raw[i * 2 + 1] = (uint8_t)(i & 0xFF);  // all distinct: worst case
+      }
+      std::vector<uint8_t> enc(rle565::maxEncodedBytes(raw.size()));
+      size_t n = rle565::encode(raw.data(), raw.size(), enc.data(), enc.size());
+      CHECK(n > 0);
+      CHECK(n <= rle565::maxEncodedBytes(raw.size()));
+      CHECK(n == raw.size() + (pixels + 127) / 128);  // exactly the bound
+      std::vector<uint8_t> dec(raw.size());
+      CHECK(rle565::decode(enc.data(), n, dec.data(), dec.size()));
+      CHECK(memcmp(dec.data(), raw.data(), raw.size()) == 0);
+    }
+    // A flat band (idle screen, letterbox bars) collapses to a few bytes.
+    std::vector<uint8_t> raw(466 * 2, 0x00);
+    uint8_t enc[16];
+    size_t n = rle565::encode(raw.data(), raw.size(), enc, sizeof(enc));
+    CHECK(n == 12);  // ceil(466/129) = 4 runs x 3 bytes
+  }
+  {
+    // Deterministic pseudo-random round-trips, spanning run/literal mixes.
+    uint32_t seed = 0x1234567;
+    for (int trial = 0; trial < 50; trial++) {
+      size_t pixels = 1 + (seed % 700);
+      std::vector<uint8_t> raw(pixels * 2);
+      for (size_t i = 0; i < pixels; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        // Small palette so runs actually occur.
+        uint16_t px = (uint16_t)((seed >> 16) % 5 * 0x1111);
+        raw[i * 2] = (uint8_t)(px >> 8);
+        raw[i * 2 + 1] = (uint8_t)px;
+      }
+      std::vector<uint8_t> enc(rle565::maxEncodedBytes(raw.size()));
+      size_t n = rle565::encode(raw.data(), raw.size(), enc.data(), enc.size());
+      CHECK(n > 0 && n <= rle565::maxEncodedBytes(raw.size()));
+      std::vector<uint8_t> dec(raw.size());
+      CHECK(rle565::decode(enc.data(), n, dec.data(), dec.size()));
+      CHECK(memcmp(dec.data(), raw.data(), raw.size()) == 0);
+    }
+  }
+  {
+    // Encoder refuses what it cannot represent: empty and odd-length input,
+    // and output that does not fit.
+    uint8_t buf[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t enc[16];
+    CHECK(rle565::encode(buf, 0, enc, sizeof(enc)) == 0);
+    CHECK(rle565::encode(buf, 3, enc, sizeof(enc)) == 0);
+    CHECK(rle565::encode(buf, 8, enc, 2) == 0);  // 4 literal pixels need 9B
+  }
+  {
+    // SECURITY: the decoder must refuse malformed input and never read or
+    // write outside the buffers it was given, because it writes into the
+    // frame buffer from an unauthenticated datagram. Source and destination
+    // are heap allocations of EXACTLY the claimed sizes: run_tests.sh builds
+    // with AddressSanitizer non-recovering, so one stray byte in either
+    // direction aborts the suite. A wider scratch buffer here would hide an
+    // off-by-one inside its slack - which is exactly how the first version of
+    // this test let a removed bounds check survive mutation testing.
+    auto refused = [](std::vector<uint8_t> src, size_t dstLen) {
+      std::vector<uint8_t> dst(dstLen, 0xA5);
+      return !rle565::decode(src.data(), src.size(), dst.data(), dstLen);
+    };
+    // Truncated literal: control claims 2 pixels, only 1 follows.
+    CHECK(refused({0x01, 0x11, 0x22}, 8));
+    // Truncated repeat: control with no pixel bytes / one pixel byte.
+    CHECK(refused({0x82}, 8));
+    CHECK(refused({0x82, 0x11}, 8));
+    // Overrun: a run of 4 pixels into a 3-pixel (6-byte) band.
+    CHECK(refused({0x82, 0x11, 0x22, 0x80, 0x33, 0x44}, 6));
+    // A literal of 4 pixels into the same 6-byte band.
+    CHECK(refused({0x03, 1, 2, 3, 4, 5, 6, 7, 8}, 6));
+    // Short: decodes cleanly but to fewer bytes than the band needs.
+    CHECK(refused({0x81, 0x11, 0x22}, 8));
+    // Empty input never fills a band.
+    CHECK(refused({}, 8));
+    // Exact fill succeeds - the "short" vector against its true size.
+    {
+      const uint8_t exact[] = {0x81, 0x11, 0x22};
+      std::vector<uint8_t> dst(6, 0xA5);
+      CHECK(rle565::decode(exact, sizeof(exact), dst.data(), dst.size()));
+      CHECK(dst[0] == 0x11 && dst[5] == 0x22);
+    }
+  }
+
+  // --- packed band packets: header flag bits and the record walker ---------
+  {
+    // Old-format headers are untouched by the new fields: bit 15 clear means
+    // not packed, and every index below MAX_BANDS has reserved bits clear.
+    const uint8_t classic[] = {0x07, 0x00, 0xFF, 0x01, 0xD2, 0x81};
+    Header h = parseHeader(classic);
+    CHECK(!h.packed);
+    CHECK(!h.reservedBitsSet);
+    CHECK(h.frameId == 7 && h.bandIndex == 511 && h.dirtyCount == 466);
+    CHECK(h.landscape);
+
+    // Packed flag: band_index 0x8005 = packed, first band 5.
+    const uint8_t packed[] = {0x07, 0x00, 0x05, 0x80, 0xD2, 0x01};
+    h = parseHeader(packed);
+    CHECK(h.packed);
+    CHECK(!h.reservedBitsSet);
+    CHECK(h.bandIndex == 5);
+    CHECK(!h.landscape);
+
+    // Reserved bits 14..10: any of them set flags the header for rejection.
+    const uint8_t reserved[] = {0x07, 0x00, 0x05, 0x84, 0xD2, 0x01};
+    h = parseHeader(reserved);
+    CHECK(h.packed);
+    CHECK(h.reservedBitsSet);
+    const uint8_t reservedLow[] = {0x07, 0x00, 0x05, 0x04, 0xD2, 0x01};
+    h = parseHeader(reservedLow);
+    CHECK(!h.packed);
+    CHECK(h.reservedBitsSet);
+  }
+  {
+    // Record walker: two records built by hand, byte for byte.
+    //   band 5, compressed, 3 bytes: run 4x 0x2104
+    //   band 9, raw, 4 bytes
+    const uint8_t payload[] = {
+        0x05, 0x00, 0x03, 0x80, 0x82, 0x21, 0x04,        // band 5 compressed
+        0x09, 0x00, 0x04, 0x00, 0xDE, 0xAD, 0xBE, 0xEF,  // band 9 raw
+    };
+    struct Seen { uint16_t band; bool compressed; size_t len; uint8_t first; };
+    std::vector<Seen> seen;
+    bool ok = forEachPackedRecord(
+        payload, sizeof(payload),
+        [&](uint16_t band, bool compressed, const uint8_t *p, size_t n) {
+          seen.push_back({band, compressed, n, p[0]});
+          return true;
+        });
+    CHECK(ok);
+    CHECK(seen.size() == 2);
+    CHECK(seen[0].band == 5 && seen[0].compressed && seen[0].len == 3 &&
+          seen[0].first == 0x82);
+    CHECK(seen[1].band == 9 && !seen[1].compressed && seen[1].len == 4 &&
+          seen[1].first == 0xDE);
+  }
+  {
+    // Walker structural refusals: empty payload, truncated record header,
+    // record body past the end, zero-length body, reserved band bits set,
+    // and a callback veto (which must abort the walk). Payloads are heap
+    // allocations of exactly the length passed, so under the sanitizer a
+    // walker that reads one byte past what it was given aborts the suite -
+    // the walker is the network path's parser.
+    auto accept = [](uint16_t, bool, const uint8_t *, size_t) { return true; };
+    auto walks = [&](std::vector<uint8_t> payload) {
+      return forEachPackedRecord(payload.data(), payload.size(), accept);
+    };
+    CHECK(walks({0x05, 0x00, 0x01, 0x00, 0xAA}));
+    CHECK(!walks({}));                                  // empty
+    CHECK(!walks({0x05, 0x00, 0x01}));                  // short header
+    CHECK(!walks({0x05, 0x00, 0x01, 0x00}));            // body missing
+    CHECK(!walks({0x05, 0x00, 0x00, 0x00}));            // zero-length body
+    CHECK(!walks({0x05, 0x80, 0x01, 0x00, 0xAA}));      // bit 15 in band
+    CHECK(!walks({0x05, 0x04, 0x01, 0x00, 0xAA}));      // bit 10 in band
+    // Trailing garbage shorter than a record header after a good record.
+    CHECK(!walks({0x05, 0x00, 0x01, 0x00, 0xAA, 0x01, 0x02}));
+    // Callback veto aborts: the second record is never visited.
+    int visits = 0;
+    const uint8_t two[] = {0x05, 0x00, 0x01, 0x00, 0xAA,
+                           0x06, 0x00, 0x01, 0x00, 0xBB};
+    CHECK(!forEachPackedRecord(
+        two, sizeof(two),
+        [&](uint16_t, bool, const uint8_t *, size_t) {
+          visits++;
+          return false;
+        }));
+    CHECK(visits == 1);
+  }
+  {
+    // The packed budget and record framing constants are wire facts the Swift
+    // side mirrors; pin them so neither end can drift alone.
+    CHECK(MAX_PACKED_PACKET_BYTES == 1472);
+    CHECK(RECORD_HEADER_BYTES == 4);
+    CHECK(BAND_INDEX_PACKED == 0x8000);
+    CHECK(BAND_INDEX_RESERVED_MASK == 0x7C00);
+    CHECK(BAND_INDEX_VALUE_MASK == 0x03FF);
+    CHECK(RECORD_COMPRESSED == 0x8000);
+    CHECK(RECORD_LENGTH_MASK == 0x7FFF);
+    // MAX_BANDS fits the 10-bit index field with the flag and reserved bits.
+    CHECK(MAX_BANDS - 1 <= BAND_INDEX_VALUE_MASK);
+    // The packed budget really holds a worst-case S3 row as one raw record.
+    CHECK(HEADER_BYTES + RECORD_HEADER_BYTES + 932 <= MAX_PACKED_PACKET_BYTES);
   }
 
   printf("OK: %d checks passed\n", checks);

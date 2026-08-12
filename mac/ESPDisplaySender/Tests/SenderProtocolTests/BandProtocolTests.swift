@@ -368,6 +368,96 @@ final class DeviceProtocolTests: XCTestCase {
         XCTAssertTrue(ack?.brightnessHigh == true)
         XCTAssertTrue(ack?.flipped == true)
         XCTAssertEqual(ack?.brightness, 128)
+        // Pre-rotation firmware never sets flags bits 5-6.
+        XCTAssertEqual(ack?.rotation, 0)
+    }
+
+    // Byte-for-byte what firmware/test/test_band_protocol.cpp asserts its
+    // parseControl accepts for a Rotate: opcode 6, value 3, written out by
+    // hand on each side rather than shared, so a drift in either encoder
+    // fails a test instead of agreeing with itself.
+    func testRotateControlPacketMatchesFirmwareVector() {
+        let packet = DeviceProtocol.controlPacket(
+            opcode: .rotate, sequence: 0x1234, value: 3)
+        XCTAssertEqual(
+            [UInt8](packet),
+            [0x45, 0x43, 0x54, 0x4C, 0x01, 0x06, 0x34, 0x12,
+             0x03, 0x00, 0x00, 0x00])
+    }
+
+    // The exact ack bytes the firmware suite pins for a confirmed Rotate:
+    // opcode 6, status 0, flags 0x71 = brightness-high + wifi + rotation 3 in
+    // bits 5-6, with bit 1 (the old flipped flag) clear because a quarter
+    // turn is not a 180.
+    func testParseRotateAckMatchesFirmwareVector() {
+        let packet = Data([
+            0x45, 0x41, 0x43, 0x4B, 0x01, 0x06, 0x34, 0x12,
+            0x00, 0x71, 0x80, 0x00,
+        ])
+        let ack = DeviceProtocol.parseAck(packet)
+        XCTAssertEqual(ack?.opcode, .rotate)
+        XCTAssertEqual(ack?.sequence, 0x1234)
+        XCTAssertTrue(ack?.succeeded == true)
+        XCTAssertEqual(ack?.rotation, 3)
+        XCTAssertTrue(ack?.flipped == false)
+        XCTAssertTrue(ack?.brightnessHigh == true)
+        XCTAssertEqual(ack?.brightness, 128)
+    }
+
+    // A refused Rotate (non-square panel sent 1 or 3, defense in depth behind
+    // the capability gate) carries a nonzero status - the property that makes
+    // a refusal distinguishable from packet loss, which is the whole reason
+    // Rotate is a new opcode instead of widened flip values.
+    func testRefusedRotateAckIsAFailure() {
+        let packet = Data([
+            0x45, 0x41, 0x43, 0x4B, 0x01, 0x06, 0x34, 0x12,
+            0x01, 0x11, 0x80, 0x00,
+        ])
+        let ack = DeviceProtocol.parseAck(packet)
+        XCTAssertEqual(ack?.opcode, .rotate)
+        XCTAssertTrue(ack?.succeeded == false)
+        XCTAssertEqual(ack?.rotation, 0)  // the panel stayed where it was
+    }
+
+    // Rotation rides in EINF flags bits 5-6, and bit 1 stays consistent with
+    // it: set exactly for the 180. Flag bytes written out by hand from the
+    // firmware's deviceFlags packing tests.
+    func testParseInfoDecodesRotationFromFlags() {
+        func info(flags: UInt8) -> DeviceProtocol.DeviceInfo? {
+            var packet = Data("EINF".utf8)
+            packet.append(contentsOf: [
+                0x01, 0x02, 0x01, flags,
+                0x00, 0x20, 0x00, 0x00,             // capabilities: rotate
+                0x04, 0x03, 0x02, 0x01,             // uptime
+                0xCD, 0xFF, 0x80,                    // RSSI -51, brightness 128
+                0x05, 0x05,                          // string lengths
+                0x02, 0x00, 0x00, 0x12, 0x34, 0x56, // device ID
+            ])
+            packet.append(contentsOf: "panel".utf8)
+            packet.append(contentsOf: "1.4.0".utf8)
+            return DeviceProtocol.parseInfo(packet)
+        }
+
+        // 0x20: rotation 1, not flipped. 0x53: rotation 2 with bit 1 set,
+        // brightness-high, wifi - the firmware's own 0x53 vector. 0x60:
+        // rotation 3, not flipped.
+        XCTAssertEqual(info(flags: 0x20)?.rotation, 1)
+        XCTAssertTrue(info(flags: 0x20)?.flipped == false)
+        XCTAssertEqual(info(flags: 0x53)?.rotation, 2)
+        XCTAssertTrue(info(flags: 0x53)?.flipped == true)
+        XCTAssertEqual(info(flags: 0x60)?.rotation, 3)
+        XCTAssertTrue(info(flags: 0x60)?.flipped == false)
+        XCTAssertEqual(info(flags: 0x00)?.rotation, 0)
+        XCTAssertTrue(info(flags: 0x20)?.capabilities.contains(.rotate) == true)
+    }
+
+    // The capability bit, spelled as a raw number so it can only agree with
+    // the firmware's CAP_ROTATE == 1u << 13 by actually being the same bit.
+    func testRotateCapabilityBit() {
+        XCTAssertEqual(DeviceProtocol.Capabilities.rotate.rawValue, 0x2000)
+        XCTAssertTrue(
+            DeviceProtocol.Capabilities.rotate
+                .isDisjoint(with: [.flip, .compressedBands, .touch]))
     }
 
     func testRejectsMalformedManagementPackets() {
