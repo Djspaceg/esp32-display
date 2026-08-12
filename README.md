@@ -647,6 +647,65 @@ with only a C6 image has nothing to offer an S3 panel. Bundles are gitignored
 (`*.espdispfw`), and the write is atomic, so an interrupted build leaves either the
 previous file or no file rather than a half-written one.
 
+**The app ships one.** `mac/make-app.sh` builds a bundle before it builds the app
+and puts it in the app's Resources, which is what lets **Add Display over USB…**
+work without a terminal — a `.espdispfw` can only come from `espdisp.py bundle`, so
+an app that asked for a file would be asking you to open one. It is reused if it is
+already there, since compiling both boards takes minutes:
+
+```sh
+mac/make-app.sh                                # reuse the bundle if present
+ESPDISP_REBUILD_FIRMWARE=1 mac/make-app.sh     # rebuild it from the sketch
+ESPDISP_SKIP_FIRMWARE=1 mac/make-app.sh        # ship without one
+```
+
+Two things follow from that, and neither is hidden: the `.app` grows by the
+bundle's size (2.3MB for both boards today), and the firmware inside it is fixed
+when the app is packaged. A board flashed from a six-month-old app gets six-month-old
+firmware and can be brought up to date over the air immediately afterwards. To
+refresh what the app carries, rebuild it with `ESPDISP_REBUILD_FIRMWARE=1`.
+
+### Adding a board over USB
+
+A board that has never been on your network cannot be discovered, so it cannot
+appear in the sidebar, so nothing that starts with "select a display" can reach it.
+The **+** at the top of the Displays list starts from the cable instead, and it is
+the one control in the window that works with an empty sidebar (⌘N, or the button on
+the empty detail pane, do the same thing).
+
+Pick the board's USB serial device and press **Flash and Add**. What happens then:
+
+1. The app asks the port whether it already speaks this firmware's config
+   protocol. A board that answers is offered **Set Up WiFi only** — it already
+   works, and what it is missing is credentials, so it is not re-flashed by
+   default. Flashing it is still one radio button away.
+2. For a blank board, the chip is read off it with esptool. You are never asked
+   whether it is a C6 or an S3.
+3. Everything a blank board needs is written in one esptool run — bootloader,
+   partition table, boot_app0 and the application image, at the addresses the
+   bundle carries. The partition table travels with the app deliberately: it is
+   the table that says where the app lives, so writing one without the other puts
+   an image where the old table thinks something else is.
+4. The WiFi credentials go down the same cable, and the board saves them and
+   restarts. A name is optional; if you give one it is sent first, so the last
+   restart is the one that joins the network.
+5. The board joins, announces `_espdisp._udp`, and arrives in the sidebar through
+   the same discovery every other panel arrives through. Nothing is added to the
+   list until it really is on the network.
+
+**This path needs the esp32 core installed** (`arduino-cli core install
+esp32:esp32`), because the app runs the esptool that comes with it rather than
+reimplementing the serial bootloader protocol. That is a real dependency the
+over-the-air path does not have, and the sheet says so by name when the tool is
+missing, along with `tools/espdisp.py flash` as the route that works meanwhile. The
+credentials are stored in your login Keychain, as they are everywhere else in the
+app, and the port you picked is used and forgotten: `/dev/cu.usbmodem*` names are
+not stable across a reset, so the app re-enumerates after each restart rather than
+remembering one.
+
+Erasing the whole chip first is offered and off by default. It takes NVS with it,
+which is where a board keeps its network and its name.
+
 ### Updating a panel from the app
 
 Select the panel in the manager window and choose **Update Firmware…** at the
