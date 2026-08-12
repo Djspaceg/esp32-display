@@ -564,6 +564,119 @@ int main() {
     CHECK(deviceproto::CAP_IDLE_TEXT == 0x100u);
   }
 
+  // --- idle text NVS round-trip: what survives a reboot ---------------------
+  // The panel only holds a pushed template in RAM; these are the functions
+  // that let it also land in flash, so the user's own screensaver card
+  // reappears after a power cycle instead of resetting to the built-in one.
+  {
+    auto makeMessage = [](const char *const *lines, uint8_t count) {
+      deviceproto::IdleTextMessage msg;
+      memset(&msg, 0, sizeof(msg));
+      msg.lineCount = count;
+      for (uint8_t i = 0; i < count; i++) {
+        strncpy(msg.lines[i], lines[i], deviceproto::IDLE_TEXT_MAX_LINE_BYTES);
+      }
+      return msg;
+    };
+
+    // Equality is what gates the NVS write: two messages the same in content
+    // must compare equal however they arrived.
+    {
+      const char *two[2] = {"Studio", "back at 14:30"};
+      const char *sameTwo[2] = {"Studio", "back at 14:30"};
+      const char *different[2] = {"Studio", "back at 14:31"};
+      const char *shorter[1] = {"Studio"};
+      auto a = makeMessage(two, 2);
+      auto b = makeMessage(sameTwo, 2);
+      auto c = makeMessage(different, 2);
+      auto d = makeMessage(shorter, 1);
+      CHECK(deviceproto::idleTextEqual(a, b));
+      CHECK(!deviceproto::idleTextEqual(a, c));
+      CHECK(!deviceproto::idleTextEqual(a, d));
+
+      // Two empty messages (the panel's own boot default) are equal, so a
+      // never-configured device does not get an NVS write for "no change."
+      deviceproto::IdleTextMessage empty1, empty2;
+      memset(&empty1, 0, sizeof(empty1));
+      memset(&empty2, 0, sizeof(empty2));
+      CHECK(deviceproto::idleTextEqual(empty1, empty2));
+    }
+
+    // Round trip through the storage encoding: what a real template
+    // actually looks like once flattened and rebuilt.
+    {
+      const char *two[2] = {"Studio", "back at 14:30"};
+      auto msg = makeMessage(two, 2);
+      char encoded[deviceproto::IDLE_TEXT_MAX_BYTES];
+      size_t n = deviceproto::encodeIdleTextForStorage(
+          msg, encoded, sizeof(encoded));
+      CHECK(n == 6 + 1 + 13);  // "Studio" + '\n' + "back at 14:30"
+      CHECK(strcmp(encoded, "Studio\nback at 14:30") == 0);
+
+      auto restored = deviceproto::decodeIdleTextFromStorage(encoded);
+      CHECK(deviceproto::idleTextEqual(msg, restored));
+    }
+
+    // The empty template - a cleared screensaver, or a device that has
+    // never been pushed one - round-trips to zero lines, not one blank line.
+    {
+      deviceproto::IdleTextMessage empty;
+      memset(&empty, 0, sizeof(empty));
+      char encoded[deviceproto::IDLE_TEXT_MAX_BYTES];
+      size_t n = deviceproto::encodeIdleTextForStorage(
+          empty, encoded, sizeof(encoded));
+      CHECK(n == 0);
+      CHECK(encoded[0] == '\0');
+
+      auto restored = deviceproto::decodeIdleTextFromStorage("");
+      CHECK(restored.lineCount == 0);
+      auto restoredFromNull = deviceproto::decodeIdleTextFromStorage(nullptr);
+      CHECK(restoredFromNull.lineCount == 0);
+    }
+
+    // A single line needs no separator at all.
+    {
+      const char *one[1] = {"hello"};
+      auto msg = makeMessage(one, 1);
+      char encoded[deviceproto::IDLE_TEXT_MAX_BYTES];
+      size_t n = deviceproto::encodeIdleTextForStorage(
+          msg, encoded, sizeof(encoded));
+      CHECK(n == 5);
+      CHECK(strcmp(encoded, "hello") == 0);
+      auto restored = deviceproto::decodeIdleTextFromStorage(encoded);
+      CHECK(restored.lineCount == 1);
+      CHECK(strcmp(restored.lines[0], "hello") == 0);
+    }
+
+    // A full-size push - four lines at the maximum line length - has to fit
+    // the buffer this header advertises as the ceiling, separators included.
+    {
+      const char *maxLine = "abcdefghijklmnopqrstuvwxyz01";
+      CHECK(strlen(maxLine) == deviceproto::IDLE_TEXT_MAX_LINE_BYTES);
+      const char *four[4] = {maxLine, maxLine, maxLine, maxLine};
+      auto msg = makeMessage(four, 4);
+      char encoded[deviceproto::IDLE_TEXT_MAX_BYTES];
+      size_t n = deviceproto::encodeIdleTextForStorage(
+          msg, encoded, sizeof(encoded));
+      CHECK(n > 0);
+      CHECK(n < deviceproto::IDLE_TEXT_MAX_BYTES);  // room for the '\0' too
+
+      auto restored = deviceproto::decodeIdleTextFromStorage(encoded);
+      CHECK(deviceproto::idleTextEqual(msg, restored));
+    }
+
+    // Too little room to encode is refused (0), not silently truncated -
+    // saveIdleTextPrefs() leaves NVS untouched rather than storing a
+    // template that would decode back into something shorter than the
+    // sender actually pushed.
+    {
+      const char *two[2] = {"Studio", "back at 14:30"};
+      auto msg = makeMessage(two, 2);
+      char tiny[4];
+      CHECK(deviceproto::encodeIdleTextForStorage(msg, tiny, sizeof(tiny)) == 0);
+    }
+  }
+
   // --- backlight priority: sleep beats idle beats the user's level
   {
     CHECK(panelstate::backlightLevel(false, false, false, false, 128, 10) == 128);

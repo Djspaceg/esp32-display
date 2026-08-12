@@ -454,6 +454,78 @@ struct IdleTextMessage {
 
 inline bool printableAscii(uint8_t byte) { return byte >= 0x20 && byte <= 0x7E; }
 
+// Whether two idle-text messages hold the same lines.
+//
+// What the NVS-persistence path checks before writing: `idleText` is
+// overwritten by every ETXT the sender pushes (its own 2-second EINF timer
+// keeps that arriving indefinitely, whether or not the content changed), and
+// a flash write on every one of those would wear the same NVS cells down
+// over weeks of uptime for no reason - only a genuine change is worth saving.
+inline bool idleTextEqual(const IdleTextMessage &a, const IdleTextMessage &b) {
+  if (a.lineCount != b.lineCount) return false;
+  for (uint8_t i = 0; i < a.lineCount; i++) {
+    if (strncmp(a.lines[i], b.lines[i], IDLE_TEXT_MAX_LINE_BYTES + 1) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Flatten an idle-text message into one NVS-friendly string, lines joined by
+// '\n'. Safe because the font this text is refused for anything but printable
+// ASCII (0x20-0x7E, see printableAscii/writeIdleText), so '\n' (0x0A) can
+// never appear inside a line and ambiguously double as a separator.
+//
+// Returns the number of bytes written (excluding the terminator), or 0 if
+// `capacity` was not enough - the caller then skips the write rather than
+// truncating a template silently.
+inline size_t encodeIdleTextForStorage(
+    const IdleTextMessage &msg, char *out, size_t capacity) {
+  size_t offset = 0;
+  for (uint8_t i = 0; i < msg.lineCount; i++) {
+    if (i > 0) {
+      if (offset + 1 >= capacity) return 0;
+      out[offset++] = '\n';
+    }
+    size_t n = strnlen(msg.lines[i], IDLE_TEXT_MAX_LINE_BYTES + 1);
+    if (offset + n >= capacity) return 0;
+    memcpy(out + offset, msg.lines[i], n);
+    offset += n;
+  }
+  out[offset] = '\0';
+  return offset;
+}
+
+// Rebuild an idle-text message from what `encodeIdleTextForStorage` wrote. An
+// empty string decodes to zero lines - the same "nothing pushed" state a
+// panel boots into today, so a never-configured device NVS key and an
+// explicitly cleared template read identically.
+inline IdleTextMessage decodeIdleTextFromStorage(const char *stored) {
+  IdleTextMessage out;
+  memset(&out, 0, sizeof(out));
+  if (stored == nullptr || stored[0] == '\0') return out;
+
+  uint8_t lineCount = 0;
+  size_t lineStart = 0;
+  size_t i = 0;
+  for (;; i++) {
+    const bool atSeparator = stored[i] == '\n';
+    const bool atEnd = stored[i] == '\0';
+    if (!atSeparator && !atEnd) continue;
+    if (lineCount < IDLE_TEXT_MAX_LINES) {
+      size_t n = i - lineStart;
+      if (n > IDLE_TEXT_MAX_LINE_BYTES) n = IDLE_TEXT_MAX_LINE_BYTES;
+      memcpy(out.lines[lineCount], stored + lineStart, n);
+      out.lines[lineCount][n] = '\0';
+      lineCount++;
+    }
+    lineStart = i + 1;
+    if (atEnd) break;
+  }
+  out.lineCount = lineCount;
+  return out;
+}
+
 // ["ETXT"][version][lineCount][reserved x2] then per line [length][bytes].
 inline size_t writeIdleText(uint8_t *out, size_t capacity,
                             const char *const *lines, size_t lineCount) {

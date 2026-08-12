@@ -893,6 +893,17 @@ about that; showing the line alone would not be. Non-ASCII input is refused at
 both ends rather than substituted, because the panel's font is an ASCII bitmap
 and a row of blank glyphs looks like a bug.
 
+The panel also saves the pushed template to its own flash, not just its RAM,
+so a device reboot shows the user's own card immediately rather than falling
+back to the built-in one until the Mac happens to reconnect and push again.
+The save is checked once a minute rather than on every push: a template
+built from live tokens like `{uptime}` or `{rssi}` produces different text on
+nearly every 2-second keepalive by design, so reacting to each push would
+still wear the same flash cells down for exactly the templates most likely to
+be in real use — a periodic check is what actually bounds it. The age line
+reads as time-since-boot after a restart rather than claiming a stale
+template just arrived, since there is no clock to say otherwise.
+
 On the ESP32-C6-LCD-1.47, the RGB LED behind the display glows with live WiFi
 signal quality, updated every 2 seconds. The ESP32-C6-Touch-LCD-1.47 has no
 addressable LED, so this indicator is absent there — use the status card or

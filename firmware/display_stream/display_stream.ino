@@ -142,6 +142,15 @@ static Adafruit_NeoPixel *rgbLed = nullptr;
 // stays a two-position toggle even where quarter turns exist).
 // GPIO9 on both boards - see bcfg, and the note there about Waveshare's pinout
 // table claiming GPIO8 for the Touch variant.
+// How often loop() checks whether the idle-text template needs saving to
+// NVS. This is what actually bounds flash wear for a template built from
+// live tokens ({uptime}, {rssi}) - see saveIdleTextPrefsIfChanged's comment
+// for why a reactive, push-triggered check cannot. One minute is short
+// enough that a genuinely new template (the case this whole mechanism
+// exists for) is saved promptly, and long enough that a template ticking
+// with every 2-second EINF still costs at most one write a minute rather
+// than one every few seconds.
+static const uint32_t IDLE_TEXT_SAVE_INTERVAL_MS = 60000;
 static const uint32_t LONG_PRESS_MS = 600;
 // A third tier, well past the long press, for the one action that should not
 // be reachable by an accidental long-hold: turning the panel off from a
@@ -294,6 +303,13 @@ static uint32_t deviceCapabilities() {
 // read by the loop, so both go through controlMux.
 static deviceproto::IdleTextMessage idleText;
 static uint32_t idleTextAt = 0;
+// The last idle-text content actually written to NVS, so loop()'s periodic
+// check (see IDLE_TEXT_SAVE_INTERVAL_MS below) can tell "really changed"
+// from "same as what is already saved" without re-touching flash. Zero-
+// initialized to an empty message by static storage; setup() overwrites it
+// with whatever was loaded, so a freshly booted panel does not immediately
+// rewrite NVS with the value it just read back out of it.
+static deviceproto::IdleTextMessage lastSavedIdleText;
 
 static const uint16_t UDP_PORT = 5568;
 static const size_t FRAME_BYTES = PANEL_GEOMETRY.frameBytes();
@@ -492,6 +508,15 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
       statBadLen = statBadLen + 1;
       return;
     }
+    // Only the RAM copy is touched here. NVS is written from loop() on its
+    // own slow timer (see IDLE_TEXT_SAVE_INTERVAL_MS) rather than reacting to
+    // this arriving - a template built from live tokens like {uptime} or
+    // {rssi} produces DIFFERENT TEXT ON EVERY PUSH by design, so comparing
+    // content on every ETXT (which the sender's 2-second EINF keeps
+    // triggering indefinitely) would still write to flash every couple of
+    // seconds for exactly the templates a user is most likely to actually
+    // use. A periodic check is the only thing that bounds the write rate
+    // regardless of what the template contains.
     portENTER_CRITICAL(&controlMux);
     idleText = message;
     idleTextAt = millis();
@@ -661,6 +686,48 @@ static void saveDisplayPrefs() {
   prefs.putUChar("bllevel", userBlLevel);
   prefs.putBool("pwroff", panelManuallyOff);
   prefs.end();
+}
+
+// If the idle text held in RAM differs from what NVS last had, write it.
+// Called from loop() on IDLE_TEXT_SAVE_INTERVAL_MS, never from the network
+// path: see the comment in the ETXT branch of handleInbound for why a
+// template built from live tokens ({uptime}, {rssi}) needs a time-bounded
+// check rather than a reactive one to keep flash wear bounded at all - the
+// EXPANDED TEXT legitimately changes on nearly every push for exactly the
+// templates most likely to be in real use, so "did the content change"
+// alone does not throttle anything for those.
+//
+// A device that reboots between checks loses at most one interval's worth of
+// freshness in the saved copy - the same trade every polled-write scheme
+// like this makes, and cheap next to what it buys: a screensaver template
+// that used to vanish on every reboot now needs a genuinely unlucky timing
+// window (a change landing in the last IDLE_TEXT_SAVE_INTERVAL_MS before a
+// crash) to lose anything at all.
+static void saveIdleTextPrefsIfChanged() {
+  deviceproto::IdleTextMessage snapshot;
+  portENTER_CRITICAL(&controlMux);
+  snapshot = idleText;
+  portEXIT_CRITICAL(&controlMux);
+
+  if (deviceproto::idleTextEqual(snapshot, lastSavedIdleText)) return;
+
+  char encoded[deviceproto::IDLE_TEXT_MAX_BYTES];
+  size_t n = deviceproto::encodeIdleTextForStorage(
+      snapshot, encoded, sizeof(encoded));
+  // A message that could not be encoded (should not happen: the buffer is
+  // sized for the protocol's own maximum) is left as whatever NVS already
+  // held rather than saving something truncated. lastSavedIdleText is
+  // deliberately NOT updated here, so the next check retries rather than
+  // treating a failed encode as if it had succeeded.
+  if (n == 0 && snapshot.lineCount > 0) return;
+
+  Preferences prefs;
+  prefs.begin("espdisp", false);
+  prefs.putString("idletxt", encoded);
+  prefs.end();
+  lastSavedIdleText = snapshot;
+  Serial.printf("idle text saved to NVS (%u lines, %u bytes)\n",
+                (unsigned)snapshot.lineCount, (unsigned)n);
 }
 
 // Apply orientation + the user's mounting rotation, then record what the panel
@@ -2038,6 +2105,26 @@ void setup() {
     userBlLevel = prefs.getUChar(
         "bllevel", prefs.getBool("blhigh", true) ? BL_HIGH : BL_LOW);
     if (userBlLevel == 0) userBlLevel = BL_HIGH;
+    // The screensaver template a sender pushed, restored so a reboot shows
+    // the user's own card rather than falling back to the panel's built-in
+    // one until the sender happens to reconnect and push again - the whole
+    // point of a template being something the user set is that it survives
+    // the events that would otherwise clear a transient one (same reasoning
+    // as "pwroff" above).
+    //
+    // idleTextAt is deliberately LEFT AT ITS DEFAULT OF 0, not set to
+    // millis(): the panel has no RTC, so a restored template's true age is
+    // unknown and could be weeks old, and stamping "now" would claim the
+    // sender just pushed it, which is worse than the truth. Left at 0, the
+    // "as of" line drawIdleScreen() prints reads as time-since-boot instead -
+    // an honest lower bound rather than a fabricated "just now".
+    String storedIdleText = prefs.getString("idletxt", "");
+    idleText = deviceproto::decodeIdleTextFromStorage(storedIdleText.c_str());
+    // What was just read back out IS what NVS already holds, by definition -
+    // recording it here is what stops the first periodic check from treating
+    // a freshly booted panel's own restored content as a change worth
+    // rewriting.
+    lastSavedIdleText = idleText;
     // Only whether a password exists, never the password: it is read again, into
     // a local, at the point ArduinoOTA needs it. An empty stored value counts as
     // absent so a blank string can never enable an unpassworded OTA.
@@ -2051,6 +2138,8 @@ void setup() {
                 ssidFromNvs ? "from NVS" : "compiled default");
   Serial.printf("display prefs: rotation=%u backlight=%u (%s)\n", panelRotation,
                 userBlLevel, blIsHigh() ? "high" : "low");
+  Serial.printf("idle text restored from NVS: %u lines\n",
+                (unsigned)idleText.lineCount);
 
   if (cfgName.isEmpty()) {
     cfgName = defaultDeviceName();
@@ -2246,6 +2335,11 @@ void loop() {
   applyPendingControl();
   updateIdentify();
   serviceTouch();
+  static uint32_t lastIdleTextCheck = 0;
+  if ((uint32_t)(millis() - lastIdleTextCheck) >= IDLE_TEXT_SAVE_INTERVAL_MS) {
+    lastIdleTextCheck = millis();
+    saveIdleTextPrefsIfChanged();
+  }
   if (restartAt != 0 && (int32_t)(millis() - restartAt) >= 0) {
     Serial.flush();
     delay(50);
