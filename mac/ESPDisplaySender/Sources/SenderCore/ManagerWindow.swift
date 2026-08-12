@@ -350,6 +350,13 @@ private struct PanelDetailView: View {
                 Button(panel.paused ? "Resume" : "Pause") {
                     manager.setPaused(!panel.paused, for: panel.serviceName)
                 }
+                // Rename and Identify are icon+label, which macOS pads on its
+                // own; a text-only button in the same toolbar gets none of
+                // that automatic breathing room, so it reads as cramped next
+                // to them. Padding explicitly rather than adding a matching
+                // icon, since neither "Pause" nor "Resume" has an obvious
+                // SF Symbol that means both without flipping per state.
+                .padding(.horizontal, 6)
                 .disabled(!panel.isOnline)
                 .help(panel.paused ? "Resume sending frames" : "Stop sending frames")
             }
@@ -365,6 +372,11 @@ private struct PanelDetailView: View {
             editedName = panel.displayName
             editedIdleText = panel.idleText
             selectInitialNetwork()
+            // A CFGSHOW round trip over USB, so the answer never arrives
+            // before this view has already picked a default from whatever
+            // was known before. The onChange below is what applies it once
+            // it lands.
+            manager.refreshCurrentSSID(for: panel.serviceName)
         }
         .onChange(of: panel.idleText) { _, newValue in
             editedIdleText = newValue
@@ -373,6 +385,9 @@ private struct PanelDetailView: View {
             if !isEditingName { editedName = newValue }
         }
         .onChange(of: manager.savedNetworkNames) { _, _ in
+            selectInitialNetwork()
+        }
+        .onChange(of: panel.currentSSID) { _, _ in
             selectInitialNetwork()
         }
         .confirmationDialog(
@@ -483,6 +498,13 @@ private struct PanelDetailView: View {
             // Only meaningful for a region, so it is not shown otherwise.
             if panel.source.kind == .region {
                 regionControls
+            }
+            LabeledContent("Uptime", value: panel.uptimeDescription)
+            // Only for a panel that advertises a battery. A C6 has no PMU and
+            // will never report one, so an unconditional row would read as a
+            // flat or missing battery instead of hardware that does not exist.
+            if panel.capabilities.contains(.battery) {
+                LabeledContent("Battery", value: panel.batteryDescription)
             }
         } header: {
             Text("Source")
@@ -865,19 +887,19 @@ private struct PanelDetailView: View {
             LabeledContent(
                 "Control protocol",
                 value: panel.controlProtocolVersion.map(String.init) ?? "Not available")
-            LabeledContent("Uptime", value: panel.uptimeDescription)
-            // Only for a panel that advertises a battery. A C6 has no PMU and
-            // will never report one, so an unconditional row would read as a
-            // flat or missing battery instead of hardware that does not exist.
-            if panel.capabilities.contains(.battery) {
-                LabeledContent("Battery", value: panel.batteryDescription)
-            }
         }
     }
 
     private var diagnosticsSection: some View {
         Section {
-            DisclosureGroup("Diagnostics", isExpanded: $showDiagnostics) {
+            // The string-title convenience initializer only makes the little
+            // triangle glyph the hit target, not the row it sits in - not
+            // what a macOS disclosure group normally does, and not what this
+            // looked like before an unrelated Form/Section migration dropped
+            // the fix (see CollapsibleGroup, removed in that same change).
+            // The label:-closure form plus an explicit full-width frame and
+            // contentShape is what makes the whole row clickable again.
+            DisclosureGroup(isExpanded: $showDiagnostics) {
                 LabeledContent("Frames displayed", value: panel.framesShown.formatted())
                 LabeledContent("Frames dropped", value: panel.framesDropped.formatted())
                 LabeledContent("Sender errors", value: panel.sendErrors.formatted())
@@ -889,6 +911,21 @@ private struct PanelDetailView: View {
                 if let hardwareID = panel.hardwareID {
                     LabeledContent("Hardware ID", value: hardwareID)
                 }
+            } label: {
+                Text("Diagnostics")
+                    // The whole label is the hit target, not just the arrow -
+                    // filled to the row's width, then given a shape to
+                    // hit-test against, since text alone is only as wide as
+                    // its characters.
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // A custom label closure opts out of whatever vertical
+                    // inset the string-title convenience initializer got for
+                    // free, which is what made this row look pinched next to
+                    // a native macOS disclosure row (System Settings' rows
+                    // read taller than a bare line of text). 4pt matches
+                    // Form's own LabeledContent row padding in .grouped style.
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
             }
         }
     }
@@ -978,9 +1015,10 @@ private struct PanelDetailView: View {
     }
 
     private func selectInitialNetwork() {
-        if selectedSSID.isEmpty || !manager.savedNetworkNames.contains(selectedSSID) {
-            selectedSSID = manager.savedNetworkNames.first ?? ""
-        }
+        selectedSSID = PanelManager.preferredSSID(
+            current: selectedSSID,
+            reportedSSID: panel.currentSSID,
+            savedNames: manager.savedNetworkNames)
     }
 
     /// Renaming, from the toolbar rather than from an editable heading.

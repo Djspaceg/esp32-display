@@ -47,6 +47,16 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// persisted, so a geometry remembered from a previous run could reshape a
     /// user's framing before the panel that justified it had said anything.
     var geometry: PanelGeometry?
+    /// The network this panel actually reported joining, read over USB with
+    /// CFGSHOW. nil until asked, and never learned any other way: EINF's
+    /// network telemetry carries a `wifiConnected` flag but never the SSID
+    /// string itself (see the comment on `deviceproto` field additions for
+    /// why - a fixed-length parser on the sender side would reject the
+    /// packet outright rather than degrade). Discovery-scoped and not
+    /// persisted, for the same reason as `chip`/`geometry`: it is a fact
+    /// about what the device is doing right now, and remembering a stale
+    /// answer from a previous run would misrepresent it.
+    var currentSSID: String?
     var frameProtocolVersion: Int?
     var controlProtocolVersion: Int?
     var capabilitiesRaw: UInt32 = 0
@@ -1187,6 +1197,27 @@ final class PanelManager: ObservableObject {
     /// exclude every square Mac display from the list rather than excluding the
     /// panel it was meant to catch. The point is to skip a display that IS a
     /// panel, and the only panels this can see are shaped like the constant.
+    /// Which saved network the "Saved WiFi" picker should default to.
+    ///
+    /// `reportedSSID` is what the device actually said over CFGSHOW
+    /// (`PanelSnapshot.currentSSID`), which wins whenever it names something
+    /// this Mac holds a credential for - a device joined to a network we
+    /// have no credential for has nothing in `savedNames` worth
+    /// preselecting, so that case falls through to the old default. `current`
+    /// is the picker's own existing selection, kept as long as it is still a
+    /// valid choice, so an in-progress pick is never clobbered by a device
+    /// reply that lands moments later.
+    ///
+    /// `nonisolated` because it is pure arithmetic over its arguments -
+    /// nothing here touches the actor.
+    nonisolated static func preferredSSID(
+        current: String, reportedSSID: String?, savedNames: [String]
+    ) -> String {
+        if !current.isEmpty, savedNames.contains(current) { return current }
+        if let reportedSSID, savedNames.contains(reportedSSID) { return reportedSSID }
+        return savedNames.first ?? ""
+    }
+
     nonisolated static func isPanelShaped(_ width: Int, _ height: Int) -> Bool {
         guard width > 0, height > 0 else { return false }
         let target = Double(PixelConvert.width) / Double(PixelConvert.height)
@@ -1810,6 +1841,31 @@ final class PanelManager: ObservableObject {
 
     func refreshSavedNetworks() {
         savedNetworkNames = WifiCredentialStore.savedNetworkNames()
+    }
+
+    /// Ask the device over USB which network it is actually on, and record
+    /// the answer against the panel.
+    ///
+    /// Best-effort and silent: this runs on appearing, not on a button press,
+    /// so a board that happens to be unreachable over USB right now (no
+    /// cable, wrong port assigned, mid-reboot) should not raise an alert -
+    /// the picker just falls back to its old default, same as before this
+    /// existed. `Task.detached` because `WifiConfigUI.currentSSID` is
+    /// blocking serial I/O with up to a several-second timeout, and this
+    /// actor must not stall on it.
+    func refreshCurrentSSID(for serviceName: String) {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return }
+        let currentName = panel.displayName
+        let preferredPort = panel.usbPort
+        Task { @MainActor [weak self] in
+            let ssid = await Task.detached {
+                WifiConfigUI.currentSSID(
+                    currentName: currentName, preferredPort: preferredPort)
+            }.value
+            guard let ssid else { return }
+            self?.updatePanel(serviceName) { $0.currentSSID = ssid }
+        }
     }
 
     func clearOperationOutcome() {
