@@ -1366,15 +1366,15 @@ def app_image(output_dir: str) -> str:
     A BUNDLE STILL DOES NOT CARRY merged.bin, now that it carries the flash parts
     a blank board needs, and the measurements are why. platform.txt:183 pads it
     with `--pad-to-size {build.flash_size}`, so the C6 export's merged.bin is
-    8388608 bytes (measured) and the S3's is 16777216 (the FQBN says FlashSize=16M;
-    UNVERIFIED, the C6 is the one that was measured). A two-board bundle would go
-    from the 2290544 bytes it is today to roughly 24MB, of which ~22MB is padding.
-    The individual parts cost 31984 bytes for the C6 (bootloader 20720, partitions
-    3072, boot_app0 8192) and 31232 for the S3 (bootloader 19968), all measured
-    from a real export. merged.bin also describes a whole-flash write, which would
-    erase NVS - and NVS is where the WiFi credentials and the panel's name live, so
-    flashing one board twice would wipe what the user configured after the first
-    time.
+    8388608 bytes and the S3's is 16777216 - both measured from a real export of
+    this sketch, and both exactly the FlashSize in that board's FQBN. A two-board
+    bundle would go from the 2290544 bytes it is today to roughly 24MB, of which
+    some 22MB is padding. The individual parts cost 31984 bytes for the C6
+    (bootloader 20720, partitions 3072, boot_app0 8192) and 31232 for the S3
+    (bootloader 19968), all measured the same way. merged.bin also describes a
+    whole-flash write, which would erase NVS - and NVS is where the WiFi
+    credentials and the panel's name live, so flashing one board twice would wipe
+    what the user configured after the first time.
     """
     candidates = [
         p
