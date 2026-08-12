@@ -2467,6 +2467,16 @@ int main() {
     CHECK(refused({0x82, 0x11, 0x22, 0x80, 0x33, 0x44}, 6));
     // A literal of 4 pixels into the same 6-byte band.
     CHECK(refused({0x03, 1, 2, 3, 4, 5, 6, 7, 8}, 6));
+    // Overrun by exactly ONE byte, pinned tight against the true boundary: a
+    // run of 4 pixels (8 bytes) into a dst one byte short of that. A margin
+    // of two or more bytes here (as above) leaves slack for an off-by-one in
+    // the bounds check (`> dstLen` vs `>= dstLen`, or `dstLen` vs `dstLen+1`)
+    // to still be caught by luck; this vector fails only if the check is
+    // exact, so a one-byte-loose check writes into ASan's redzone and aborts
+    // rather than merely returning the wrong bool.
+    CHECK(refused({0x82, 0x11, 0x22}, 7));
+    // Same one-byte-tight pin for a literal chunk.
+    CHECK(refused({0x03, 1, 2, 3, 4, 5, 6, 7, 8}, 7));
     // Short: decodes cleanly but to fewer bytes than the band needs.
     CHECK(refused({0x81, 0x11, 0x22}, 8));
     // Empty input never fills a band.
