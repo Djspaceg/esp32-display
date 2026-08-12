@@ -139,9 +139,11 @@ struct Config {
   // table shipped a firmware whose button silently did nothing on this variant.
   //
   // GPIO0 on the S3 board is the chip's standard BOOT strapping pin and what
-  // Waveshare's docs describe; UNVERIFIED on real hardware as of this entry,
-  // and the C6 history above is exactly why it must be measured before it is
-  // trusted.
+  // Waveshare's docs describe. Confirmed on real hardware: all three press
+  // tiers (short/long/extra-long, see handleButton() in display_stream.ino)
+  // fired correctly in one continuous press-and-release, watched live over
+  // serial. The C6 history above is why that check mattered rather than
+  // trusting the table outright.
   int8_t pinBootButton;
 
   // Addressable WS2812-style LED, or NO_PIN. Present only on the C6 non-touch
@@ -300,8 +302,8 @@ static const Config CONFIG_AMOLED_CO5300 = {
     /* dc    */ NO_PIN,  // QSPI: no D/C line
     /* rst   */ 2,
     /* bl    */ NO_PIN,  // AMOLED: brightness is panel command 0x51
-    // GPIO0, the S3's standard BOOT strapping pin. UNVERIFIED on hardware -
-    // see the measurement note above the struct before trusting it.
+    // GPIO0, the S3's standard BOOT strapping pin. Confirmed on hardware -
+    // see the measurement note above the struct.
     /* boot  */ 0,
     /* led   */ NO_PIN,
     TouchController::Cst9217,

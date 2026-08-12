@@ -83,13 +83,18 @@ with it, re-laying-out in landscape or portrait. Change mirroring modes,
 resize, close the window you were streaming — the sender notices within a
 couple of seconds and reattaches on its own.
 
-The board itself has two physical controls on its BOOT button: a short press
-toggles backlight brightness between high and low, a long press flips the image
-180° for upside-down mounting. Both are saved to the board's flash, so they
-survive reboots and firmware reflashes — set the orientation once for how the
-board is mounted and forget it. (A full flash erase does reset them.) The
-manager's brightness slider covers the full range in between; the button's
-toggle is the two ends of it.
+The board itself has three physical controls on its BOOT button, layered by
+how long it is held: a short press toggles backlight brightness between high
+and low, a long press (~0.6s) flips the image 180° for upside-down mounting,
+and holding through a third threshold (~3s) turns the display off - the same
+standing instruction the manager's Power switch and `CFGPOWER` set. All three
+are saved to the board's flash, so they survive reboots and firmware reflashes
+— set the orientation once for how the board is mounted and forget it. (A full
+flash erase does reset them.) The manager's brightness slider covers the full
+range in between; the button's toggle is the two ends of it. The long press and
+the extra-long press compound rather than replace each other: holding past 3s
+also fires the 180° flip on the way, since the flip already fires the instant
+it is reached rather than waiting to see how long the button stays down.
 
 A **Power** switch in the manager turns the panel's display off without
 unplugging it — a standing instruction, independent of the automatic dimming
@@ -97,9 +102,10 @@ below, that persists across a reboot until switched back on. It is not the
 same as `ESLP`/`EWAK`: those follow this Mac's own display sleep and clear the
 moment a frame is drawn or the Mac wakes, while Power stays off until someone
 turns it back on, on this Mac or another one entirely. The same switch is
-reachable over USB with `CFGPOWER 0|1`, and it applies to every board — there
-is no hardware gating, since every panel here already has a backlight or an
-AMOLED panel-brightness command to turn dark.
+reachable over USB with `CFGPOWER 0|1` or from the BOOT button's extra-long
+press, and it applies to every board — there is no hardware gating, since
+every panel here already has a backlight or an AMOLED panel-brightness
+command to turn dark.
 
 Square panels can be mounted at any quarter turn, not only upside down. A
 panel whose glass is square advertises quarter-turn rotation, and the

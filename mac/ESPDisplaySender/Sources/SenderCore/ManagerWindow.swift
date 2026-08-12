@@ -560,10 +560,18 @@ private struct PanelDetailView: View {
             // has a backlight or panel-command brightness sink, so `.power`
             // is advertised everywhere (see `Capabilities.power`).
             LabeledContent("Power") {
+                // labelsHidden, unlike the Brightness/Orientation switch
+                // fallbacks below: those keep "High"/"Rotate 180°" because the
+                // label names what turning it ON means. "On" adds nothing
+                // "Power" hasn't already said, and an unlabeled switch is the
+                // narrower, more reliably fixed-width control - the same
+                // reasoning that already gives the segmented Orientation
+                // picker labelsHidden.
                 Toggle("On", isOn: Binding(
                     get: { !panel.manuallyOff },
                     set: { manager.setPower($0, for: panel.serviceName) }))
                     .toggleStyle(.switch)
+                    .labelsHidden()
                     .fixedSize()
                     .disabled(!manager.canControl(panel.serviceName, capability: .power))
                     .help(controlHelp(
