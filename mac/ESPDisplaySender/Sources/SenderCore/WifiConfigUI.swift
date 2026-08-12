@@ -377,6 +377,29 @@ enum WifiConfigUI {
             probe: probePort)
     }
 
+    /// Ask the device over USB which network it is actually joined to, for
+    /// preselecting the "Saved WiFi" picker against reality rather than
+    /// against nothing - `CFGSHOW` is the only place the firmware reports
+    /// this: EINF's telemetry carries the `wifiConnected` flag but never the
+    /// SSID string, so this always needs a live serial port.
+    ///
+    /// Returns nil on any failure (no port, wrong device, no reply) rather
+    /// than surfacing an error: this is read-only background information for
+    /// a picker default, not a user-initiated action, so a board that is
+    /// merely unreachable over USB right now should leave the picker exactly
+    /// as it already was instead of raising an alert.
+    static func currentSSID(currentName: String?, preferredPort: String? = nil) -> String? {
+        guard case .success(let port) = matchingPort(
+            for: currentName, preferredPort: preferredPort)
+        else { return nil }
+        guard case .success(let info) = sendCommand("CFGSHOW", port: port, timeout: 3)
+        else { return nil }
+        let ssid = ConfigCommands.decodeField("ssid64=", from: info)
+        // The firmware always emits the field, but an empty string (never
+        // configured) is not a network name worth offering as a selection.
+        return ssid?.isEmpty == false ? ssid : nil
+    }
+
     /// Ask a port to identify itself. CFGSHOW answering at all is what proves
     /// the path speaks our configuration protocol.
     private static func probePort(_ port: String, timeout: TimeInterval) -> PortProbe {
