@@ -433,10 +433,18 @@ def probe_chip(address: str) -> Optional[str]:
     """Ask the bundled esptool which chip is on `address`.
 
     Returns a board key, or None if the chip could not be determined.
-    UNVERIFIED against hardware: no board was attached when this was written,
-    so only the failure path has been exercised. The parse accepts both the
-    "Chip is ESP32-C6" and "Detecting chip type... ESP32-C6" spellings esptool
-    uses.
+
+    VERIFIED against hardware, for esptool 5.3.1 and one chip: run against an
+    attached ESP32-S3 it matched on "Detecting chip type... ESP32-S3", derived the
+    token esp32s3 and returned 's3'. That is the only one of the two spellings
+    below that 5.3.1 prints - it says "Connected to ESP32-S3 on <port>:" and
+    "Chip type:          ESP32-S3 (QFN56) (revision v0.2)", and never "Chip is".
+    The "Chip is" alternative is esptool 4.x's spelling and is kept for a 4.x
+    esptool.py, which esptool_path() still locates deliberately; it is UNVERIFIED,
+    because no 4.x esptool has been run against a board here.
+
+    UNVERIFIED for the C6: no C6 was attached, so only the S3 half of the board
+    table has been exercised end to end.
     """
     tool = esptool_path()
     if not tool:
