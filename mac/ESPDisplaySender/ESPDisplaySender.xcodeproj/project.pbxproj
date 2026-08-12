@@ -75,6 +75,7 @@
 				A00000000000000000000010 /* Sources */,
 				A00000000000000000000011 /* Frameworks */,
 				A00000000000000000000012 /* Resources */,
+				A00000000000000000000013 /* Embed default firmware bundle */,
 			);
 			buildRules = (
 			);
@@ -134,6 +135,23 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+/* Begin PBXShellScriptBuildPhase section */
+		A00000000000000000000013 /* Embed default firmware bundle */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Embed default firmware bundle";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "\"$SRCROOT/../embed-firmware-bundle.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A00000000000000000000010 /* Sources */ = {
