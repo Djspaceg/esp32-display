@@ -20,6 +20,7 @@ import io
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -2163,6 +2164,77 @@ def test_utc_timestamp():
         "built_at is ISO 8601 UTC with a Z suffix: %r" % stamp)
 
 
+def test_tile_stream_wire():
+    # Byte-for-byte vectors written from tile_protocol.h's format comment,
+    # independent of BOTH the firmware and Swift suites - a third side of
+    # the no-shared-fixture rule, so a drift in any one implementation
+    # fails a test somewhere instead of agreeing with itself.
+    check_equal(
+        espdisp.tile_header(0x1234, 5, 80),
+        bytes([0x34, 0x12, 0x05, 0x80, 0x50, 0x00]),
+        "tile header: LE fields, stream flag on first_tile bit 15",
+    )
+    check_equal(
+        espdisp.tile_header(7, 899, 900, landscape=True),
+        bytes([0x07, 0x00, 0x83, 0x83, 0x84, 0x83]),
+        "tile header: landscape bit 15 of dirty_count, tile 899 = 0x383",
+    )
+    # Record: tile 5, run 3 -> tile field 0x0805; 3 payload bytes, BC1
+    # (codec 2) -> len field 0x8003.
+    check_equal(
+        espdisp.tile_record(5, 3, espdisp.TILE_CODEC_BC1, b"\xAA\xBB\xCC"),
+        bytes([0x05, 0x08, 0x03, 0x80, 0xAA, 0xBB, 0xCC]),
+        "tile record: run length in bits 14..10, codec in len bits 15..14",
+    )
+    check_fails(
+        lambda: espdisp.tile_record(0, 33, 0, b"x"),
+        "out of range",
+        "runs cap at 32 tiles",
+    )
+    # RLE565 flat runs: 129 px is one chunk (control 0xFF); 130 px is a
+    # 129-run then a 1-px literal; 131 px is 129 + a 2-run.
+    check_equal(espdisp.rle565_flat(0x1234, 129), bytes([0xFF, 0x12, 0x34]),
+                "flat 129 px = one max repeat chunk")
+    check_equal(espdisp.rle565_flat(0x1234, 130),
+                bytes([0xFF, 0x12, 0x34, 0x00, 0x12, 0x34]),
+                "flat 130 px = 129-run then 1-px literal")
+    check_equal(espdisp.rle565_flat(0x1234, 131),
+                bytes([0xFF, 0x12, 0x34, 0x80, 0x12, 0x34]),
+                "flat 131 px = 129-run then 2-run")
+    # BC1 flat tile: 16 blocks of [c0 LE][c1 LE][4 zero index bytes].
+    flat = espdisp.bc1_flat(0xF800, 16, 16)
+    check_equal(len(flat), 128, "16x16 BC1 tile is 16 blocks x 8 B")
+    check_equal(flat[:8], bytes([0x00, 0xF8, 0x00, 0xF8, 0, 0, 0, 0]),
+                "flat block: both endpoints the color, indices zero")
+    check_equal(len(espdisp.bc1_flat(0xF800, 2, 2)), 8,
+                "the 2x2 corner tile still occupies one whole block")
+    # The smoke-test packet set: every datagram within budget, keyframe
+    # covers all 900 tiles as 30 full-row runs, partial frame is 5 tiles.
+    packets = espdisp.tile_test_packets(1)
+    check(len(packets) >= 2, "at least a keyframe packet and a partial")
+    total_runs = 0
+    for p in packets:
+        check(len(p) <= espdisp.TILE_PACKET_BUDGET, "datagram within budget")
+        frame, first_field, dirty = struct.unpack("<HHH", p[:6])
+        check(first_field & 0x8000 != 0, "stream flag set on every packet")
+        # Walk the records; the first must match the header's first_tile.
+        at = 6
+        first_seen = None
+        while at < len(p):
+            tile_field, len_field = struct.unpack("<HH", p[at:at + 4])
+            check(tile_field & 0x8000 == 0, "record reserved bit clear")
+            if first_seen is None:
+                first_seen = tile_field & 0x03FF
+            body = len_field & 0x3FFF
+            check(body > 0, "no zero-length record bodies")
+            at += 4 + body
+            total_runs += 1
+        check_equal(at, len(p), "records tile the packet exactly")
+        check_equal(first_seen, first_field & 0x03FF,
+                    "header first_tile cross-checks record one")
+    check_equal(total_runs, 30 + 5, "30 keyframe rows plus 5 squares")
+
+
 def test_describe_bundle():
     """bundle-info's output is the whole point of the manifest, so it is checked.
 
@@ -2265,6 +2337,7 @@ def main():
     test_bundle_file_round_trip()
     test_git_provenance()
     test_utc_timestamp()
+    test_tile_stream_wire()
     test_describe_bundle()
 
     if failures:

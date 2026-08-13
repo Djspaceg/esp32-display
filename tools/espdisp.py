@@ -11,6 +11,8 @@ import os
 import re
 import select
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1663,6 +1665,135 @@ def espota_command(
     ]
 
 
+# --------------------------------------------------------------------------
+# Tile-stream smoke test (CAP_TILE_STREAM firmware, phase 3 of
+# docs/tile-stream-plan.md). Hand-built packets exercising every codec and
+# the reassembler before the Mac app's encoder exists. The wire vectors are
+# written from tile_protocol.h's format comment, independently of BOTH the
+# firmware and Swift suites - a third side of the no-shared-fixture rule.
+
+TILE_STREAM_FLAG = 0x8000
+TILE_DIM = 16
+TILE_PACKET_BUDGET = 1472
+TILE_CODEC_RAW = 0
+TILE_CODEC_RLE = 1
+TILE_CODEC_BC1 = 2
+
+
+def tile_header(frame_id: int, first_tile: int, dirty_count: int,
+                landscape: bool = False) -> bytes:
+    """The 6-byte tile packet header: [frame u16][first|0x8000 u16][dirty u16]."""
+    count = dirty_count | (0x8000 if landscape else 0)
+    return struct.pack("<HHH", frame_id, first_tile | TILE_STREAM_FLAG, count)
+
+
+def tile_record(start_tile: int, run_len: int, codec: int,
+                payload: bytes) -> bytes:
+    """One record: [tile: bits 9..0 start, 14..10 runLen-1][len: 13..0 bytes, 15..14 codec]."""
+    if not 1 <= run_len <= 32:
+        raise Fail("run length %d out of range" % run_len)
+    tile_field = start_tile | ((run_len - 1) << 10)
+    len_field = len(payload) | (codec << 14)
+    return struct.pack("<HH", tile_field, len_field) + payload
+
+
+def rle565_flat(pixel: int, count: int) -> bytes:
+    """RLE565-encode `count` copies of one RGB565 pixel: repeat runs of up to
+    129 (control 0x80 + n - 2), a final single pixel as a 1-pixel literal."""
+    hi, lo = pixel >> 8, pixel & 0xFF
+    out = bytearray()
+    while count > 0:
+        n = min(count, 129)
+        if n == 1:
+            out += bytes([0x00, hi, lo])  # literal of one: runs need >= 2
+        else:
+            out += bytes([0x80 + n - 2, hi, lo])
+        count -= n
+    return bytes(out)
+
+
+def raw_flat(pixel: int, pixels: int) -> bytes:
+    """A flat raster as raw big-endian RGB565."""
+    return bytes([pixel >> 8, pixel & 0xFF]) * pixels
+
+
+def bc1_flat(pixel: int, w: int, h: int) -> bytes:
+    """BC1-encode a flat w x h raster: every block is both endpoints = the
+    color (u16 LE twice) and 16 zero indices."""
+    block = struct.pack("<HH", pixel, pixel) + b"\x00" * 4
+    return block * (((w + 3) // 4) * ((h + 3) // 4))
+
+
+def tile_test_packets(frame_id: int, width: int = 466,
+                      height: int = 466) -> list:
+    """Datagrams for the smoke test: a full flat-striped keyframe (every
+    tile-row one full-width RLE run, 900 dirty tiles) followed by a partial
+    frame of distinct raw/BC1 squares including the 2x2 corner tile. Packed
+    greedily to the datagram budget; a record never spans datagrams."""
+    cols = (width + TILE_DIM - 1) // TILE_DIM
+    rows = (height + TILE_DIM - 1) // TILE_DIM
+    stripes = [0xF800, 0x07E0, 0x001F, 0xFFE0, 0x07FF, 0xF81F]  # r g b y c m
+
+    def pack(records, dirty, fid):
+        packets = []
+        current = []
+        size = 6
+        first = None
+        for start, rec in records:
+            if size + len(rec) > TILE_PACKET_BUDGET and current:
+                packets.append(tile_header(fid, first, dirty) + b"".join(current))
+                current, size, first = [], 6, None
+            if first is None:
+                first = start
+            current.append(rec)
+            size += len(rec)
+        if current:
+            packets.append(tile_header(fid, first, dirty) + b"".join(current))
+        return packets
+
+    keyframe = []
+    for r in range(rows):
+        row_h = min(TILE_DIM, height - r * TILE_DIM)
+        color = stripes[r % len(stripes)]
+        payload = rle565_flat(color, width * row_h)
+        keyframe.append((r * cols, tile_record(r * cols, cols, TILE_CODEC_RLE,
+                                               payload)))
+    packets = pack(keyframe, cols * rows, frame_id)
+
+    # Partial frame: four 16x16 squares around center (raw and BC1) plus the
+    # 2 px corner tile, proving edge-tile arithmetic end to end.
+    squares = [
+        (10 * cols + 10, TILE_CODEC_RAW, raw_flat(0xFFFF, 256)),      # white
+        (10 * cols + 19, TILE_CODEC_RLE, rle565_flat(0x0000, 256)),   # black
+        (19 * cols + 10, TILE_CODEC_BC1, bc1_flat(0xFFFF, 16, 16)),   # white
+        (19 * cols + 19, TILE_CODEC_BC1, bc1_flat(0x0000, 16, 16)),   # black
+        (cols * rows - 1, TILE_CODEC_RAW,
+         raw_flat(0xF800, (width - (cols - 1) * TILE_DIM)
+                  * (height - (rows - 1) * TILE_DIM))),               # corner
+    ]
+    partial = [(t, tile_record(t, 1, codec, payload))
+               for t, codec, payload in squares]
+    packets += pack(partial, len(partial), (frame_id + 1) & 0xFFFF)
+    return packets
+
+
+def cmd_tile_test(args) -> int:
+    packets = tile_test_packets(args.frame_id)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sent = 0
+    for i, packet in enumerate(packets):
+        sock.sendto(packet, (args.host, 5568))
+        sent += len(packet)
+        # The keyframe is everything but the last packet; give the panel a
+        # beat to complete and draw it before the partial frame lands.
+        time.sleep(0.25 if i == len(packets) - 2 else 0.005)
+    print("sent %d tile-stream datagrams (%d bytes) to %s" %
+          (len(packets), sent, args.host))
+    print("expect: colored horizontal stripes, then white/black squares "
+          "mid-panel; frames= should rise by 2 with badlen= unchanged")
+    return 0
+
+
 def cmd_compile(args) -> int:
     board = resolve_board(args.board, None)
     report_sizes(compile_board(board))
@@ -2036,6 +2167,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_pw.add_argument("--port", help="serial device (default: autodetected)")
     p_pw.add_argument("--timeout", type=float, default=6.0, help="reply timeout (s)")
     p_pw.set_defaults(func=cmd_set_password)
+
+    p_tile = subs.add_parser(
+        "tile-test",
+        help="send hand-built tile-stream packets to a CAP_TILE_STREAM panel",
+    )
+    p_tile.add_argument("host", help="panel IP address")
+    p_tile.add_argument(
+        "--frame-id", type=int, default=1,
+        help="starting frame id (bump between runs so frames are not stale)",
+    )
+    p_tile.set_defaults(func=cmd_tile_test)
 
     p_list = subs.add_parser("list", help="show the ports and chips this tool can see")
     p_list.add_argument(
