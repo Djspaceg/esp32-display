@@ -1,3 +1,4 @@
+import SenderProtocol
 import SwiftUI
 
 /// Streaming settings that used to be command-line flags only. The app normally
@@ -63,6 +64,19 @@ struct SettingsSheet: View {
                 Text("Pacing")
             } footer: {
                 Text("Sleep between packet chunks. Longer means fewer frames dropped by the panel and a lower peak rate. Automatic tuning follows the panel's reported drop rate.")
+            }
+            Section {
+                Picker("Compression", selection: $draft.tileQuality) {
+                    Text("Lossless only").tag(TileLossyPolicy.losslessOnly)
+                    Text("Automatic").tag(TileLossyPolicy.auto)
+                    Text("Aggressive").tag(TileLossyPolicy.aggressive)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Tile compression")
+            } header: {
+                Text("Tile quality")
+            } footer: {
+                Text("Panels streaming the tile protocol can compress busy regions 4:1 with slight loss, like a high-quality JPEG. Automatic keeps flat colors and gradients pixel-perfect and compresses only textured content; Aggressive compresses whenever it is smaller; Lossless never does, trading frame rate on photos and video. Other panels are unaffected.")
             }
 
             Section {

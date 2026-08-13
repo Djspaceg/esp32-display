@@ -213,14 +213,67 @@ public enum TileProtocol {
     }
 }
 
+// MARK: - TileLossyPolicy
+
+/// The user-facing quality lever for tile streaming, replacing JPEG's
+/// percentage (docs/tile-stream-plan.md section 6.3). It only decides when
+/// BC1 - the lossy codec - may win a run; raw and RLE565 are lossless and
+/// always compete.
+public enum TileLossyPolicy: String, Codable, CaseIterable, Sendable {
+    /// Never BC1. Pixel-perfect, at the cost of frame rate on content RLE
+    /// cannot compress (photos, video).
+    case losslessOnly
+    /// BC1 only where it is both the smallest encoding AND the run's
+    /// content is busy enough (see `TilePacker.runVariance`) that its 4:1
+    /// loss hides in the texture - smooth gradients, where BC1 banding
+    /// would show, stay lossless. Over-budget frames drop the variance gate
+    /// (the sender passes forceLossy) so motion keeps its frame rate.
+    case auto
+    /// BC1 whenever it is smallest, variance regardless.
+    case aggressive
+}
+
 // MARK: - TilePacker
 
 /// Builds tile-stream datagrams: per merged run, every applicable codec is
-/// tried and the smallest wins; runs whose record would not fit a datagram
-/// are split so a record never spans datagrams. Mirrors `BandPacker`'s
-/// greedy packing but with runs and a codec field instead of bands and a
-/// compressed flag.
+/// tried and the smallest wins subject to the lossy policy; runs whose
+/// record would not fit a datagram are split so a record never spans
+/// datagrams. Mirrors `BandPacker`'s greedy packing but with runs and a
+/// codec field instead of bands and a compressed flag.
 public enum TilePacker {
+    /// Content-variance floor for BC1 under `.auto`: the sum over the three
+    /// channels of per-channel population variance in 888 space (see
+    /// `runVariance`). Flat fills are 0; a gentle gradient lands in the tens
+    /// to low hundreds; photo/video texture and antialiased text land in the
+    /// thousands. 400 keeps gradients - the one place BC1's 4:1 visibly
+    /// bands - lossless while letting texture compress. A first guess to be
+    /// tuned against real content; deliberately one named constant.
+    public static let autoVarianceThreshold = 400
+
+    /// Busyness of a raster: per-channel population variance in 888 space
+    /// (channels expanded by bit replication, matching `BC1`'s distance
+    /// space), summed over R, G, B. Integer throughout - truncation is part
+    /// of the pinned definition so both suites agree on boundary content.
+    public static func runVariance(_ raw: [UInt8]) -> Int {
+        let pixels = raw.count / 2
+        guard pixels > 0 else { return 0 }
+        var sum = (r: 0, g: 0, b: 0)
+        var sumSq = (r: 0, g: 0, b: 0)
+        for i in 0..<pixels {
+            let p = (UInt16(raw[i * 2]) << 8) | UInt16(raw[i * 2 + 1])
+            let r5 = Int(p >> 11), g6 = Int((p >> 5) & 0x3F), b5 = Int(p & 0x1F)
+            let r = (r5 << 3) | (r5 >> 2)
+            let g = (g6 << 2) | (g6 >> 4)
+            let b = (b5 << 3) | (b5 >> 2)
+            sum.r += r; sum.g += g; sum.b += b
+            sumSq.r += r * r; sumSq.g += g * g; sumSq.b += b * b
+        }
+        func variance(_ s: Int, _ sq: Int) -> Int {
+            (sq - s * s / pixels) / pixels
+        }
+        return variance(sum.r, sumSq.r) + variance(sum.g, sumSq.g)
+            + variance(sum.b, sumSq.b)
+    }
     /// One run ready for packing: its placement and cheapest encoding.
     struct PreparedRecord {
         let startTile: Int
@@ -230,20 +283,23 @@ public enum TilePacker {
     }
 
     /// Build the datagrams that carry `dirtyTiles` (sorted indices) of
-    /// `pixels`. `allowLossy` gates BC1: false means lossless-only (raw or
-    /// RLE565), true lets BC1 win when it is strictly smallest. The
-    /// variance-based per-run policy arrives with the degradation work; the
-    /// packer only knows sizes.
+    /// `pixels`. `policy` decides when BC1 may win (see `TileLossyPolicy`);
+    /// `forceLossy` is the over-budget override that turns `.auto`'s
+    /// variance gate off for this frame - the sender sets it when the
+    /// frame's lossless cost would blow the pacing budget, per the
+    /// degradation ladder in docs/tile-stream-plan.md section 6.6.
     public static func packets(
         frameId: UInt16, dirtyTiles: [Int], pixels: [UInt8],
-        geometry: TileGeometry, landscape: Bool, allowLossy: Bool
+        geometry: TileGeometry, landscape: Bool,
+        policy: TileLossyPolicy, forceLossy: Bool = false
     ) -> [Data] {
         precondition(pixels.count == geometry.frameBytes)
         let runs = TileProtocol.mergeRuns(dirtyTiles: dirtyTiles, geometry: geometry)
         var prepared = [PreparedRecord]()
         for run in runs {
             prepare(run.start, run.length, into: &prepared,
-                    pixels: pixels, geometry: geometry, allowLossy: allowLossy)
+                    pixels: pixels, geometry: geometry,
+                    policy: policy, forceLossy: forceLossy)
         }
 
         let budget = TileGeometry.maxPacketBytes
@@ -285,13 +341,14 @@ public enum TilePacker {
         return packets
     }
 
-    /// Encode one run with the cheapest applicable codec; when even the
-    /// cheapest record would not fit an empty datagram, split the run in
-    /// half by tiles and recurse - a record never spans datagrams.
+    /// Encode one run with the cheapest codec the policy admits; when even
+    /// the cheapest record would not fit an empty datagram, split the run
+    /// in half by tiles and recurse - a record never spans datagrams.
     private static func prepare(
         _ startTile: Int, _ runLength: Int,
         into prepared: inout [PreparedRecord],
-        pixels: [UInt8], geometry: TileGeometry, allowLossy: Bool
+        pixels: [UInt8], geometry: TileGeometry,
+        policy: TileLossyPolicy, forceLossy: Bool
     ) {
         let raw = TileProtocol.extractRun(
             pixels: pixels, geometry: geometry,
@@ -304,7 +361,17 @@ public enum TilePacker {
                 startTile: startTile, runLength: runLength,
                 codec: .rle565, payload: rle)
         }
-        if allowLossy {
+        let lossyEligible: Bool
+        switch policy {
+        case .losslessOnly:
+            lossyEligible = false
+        case .aggressive:
+            lossyEligible = true
+        case .auto:
+            lossyEligible = forceLossy
+                || runVariance(raw) >= autoVarianceThreshold
+        }
+        if lossyEligible {
             let w = geometry.runPixelWidth(startTile: startTile, runLength: runLength)
             let h = geometry.rowHeight(geometry.row(startTile))
             if let bc1 = BC1.encode(raw[...], width: w, height: h),
@@ -324,8 +391,10 @@ public enum TilePacker {
         // fits (512 B raw at most), so the recursion terminates.
         let left = runLength / 2
         prepare(startTile, left, into: &prepared,
-                pixels: pixels, geometry: geometry, allowLossy: allowLossy)
+                pixels: pixels, geometry: geometry,
+                policy: policy, forceLossy: forceLossy)
         prepare(startTile + left, runLength - left, into: &prepared,
-                pixels: pixels, geometry: geometry, allowLossy: allowLossy)
+                pixels: pixels, geometry: geometry,
+                policy: policy, forceLossy: forceLossy)
     }
 }

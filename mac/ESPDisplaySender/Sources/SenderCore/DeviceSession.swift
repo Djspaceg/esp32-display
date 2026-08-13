@@ -243,6 +243,10 @@ final class DeviceSession {
         sender.setAdaptivePacing(adaptive)
         if !adaptive { sender.setSpacingMicros(spacingMicros) }
     }
+    /// Apply the tile-stream quality policy. A no-op for band panels.
+    func applyTileQuality(_ policy: TileLossyPolicy) {
+        sender.setTileLossyPolicy(policy)
+    }
     func restartDevice() { sender.restartDevice() }
     func sendIdleText(_ lines: [String]) { sender.sendIdleText(lines) }
 

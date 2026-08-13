@@ -17,6 +17,34 @@ struct SenderSettings: Codable, Equatable {
     var adaptivePacing: Bool = true
     /// How long Identify lights the panel's LED.
     var identifySeconds: Int = 8
+    /// When the tile protocol's lossy codec may win (see `TileLossyPolicy`).
+    /// Only meaningful for panels advertising tile streaming; band panels
+    /// have no lossy codec and ignore it.
+    var tileQuality: TileLossyPolicy = .auto
+
+    init(fps: Int = 40, spacingMicros: UInt32 = 200, adaptivePacing: Bool = true,
+         identifySeconds: Int = 8, tileQuality: TileLossyPolicy = .auto) {
+        self.fps = fps
+        self.spacingMicros = spacingMicros
+        self.adaptivePacing = adaptivePacing
+        self.identifySeconds = identifySeconds
+        self.tileQuality = tileQuality
+    }
+
+    /// Every field decodes independently with its default as the fallback,
+    /// so a settings.json written by an older build (or missing a key by
+    /// hand-editing) keeps every field it does have instead of the whole
+    /// file failing to decode and silently resetting everything. An
+    /// unrecognized tileQuality string also falls back rather than failing.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        fps = try c.decodeIfPresent(Int.self, forKey: .fps) ?? 40
+        spacingMicros = try c.decodeIfPresent(UInt32.self, forKey: .spacingMicros) ?? 200
+        adaptivePacing = try c.decodeIfPresent(Bool.self, forKey: .adaptivePacing) ?? true
+        identifySeconds = try c.decodeIfPresent(Int.self, forKey: .identifySeconds) ?? 8
+        let quality = try? c.decodeIfPresent(TileLossyPolicy.self, forKey: .tileQuality)
+        tileQuality = quality.flatMap { $0 } ?? .auto
+    }
 
     static let fpsRange = 5...60
     static let spacingRange = FrameSender.spacingRange
@@ -34,7 +62,8 @@ struct SenderSettings: Codable, Equatable {
             adaptivePacing: adaptivePacing,
             identifySeconds: min(
                 max(identifySeconds, Self.identifyRange.lowerBound),
-                Self.identifyRange.upperBound))
+                Self.identifyRange.upperBound),
+            tileQuality: tileQuality)
     }
 }
 

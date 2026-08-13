@@ -188,7 +188,7 @@ final class TileProtocolTests: XCTestCase {
         let pixels = [UInt8](repeating: 0, count: g466.frameBytes)
         let packets = TilePacker.packets(
             frameId: 7, dirtyTiles: [5], pixels: pixels,
-            geometry: g466, landscape: false, allowLossy: true)
+            geometry: g466, landscape: false, policy: .aggressive)
         XCTAssertEqual(packets.count, 1)
         let expected: [UInt8] = [
             0x07, 0x00,              // frame_id 7
@@ -215,7 +215,7 @@ final class TileProtocolTests: XCTestCase {
         }
         let lossless = TilePacker.packets(
             frameId: 1, dirtyTiles: [0], pixels: pixels,
-            geometry: g466, landscape: false, allowLossy: false)
+            geometry: g466, landscape: false, policy: .losslessOnly)
         XCTAssertEqual(lossless.count, 1)
         let bytes = [UInt8](lossless[0])
         // Record len field at offset 8: 512 | raw codec 0 -> 0x0200.
@@ -225,7 +225,7 @@ final class TileProtocolTests: XCTestCase {
         // The same tile with lossy allowed goes BC1: 128 B, codec 2.
         let lossy = TilePacker.packets(
             frameId: 1, dirtyTiles: [0], pixels: pixels,
-            geometry: g466, landscape: false, allowLossy: true)
+            geometry: g466, landscape: false, policy: .aggressive)
         let lossyBytes = [UInt8](lossy[0])
         XCTAssertEqual(lossyBytes[8], 0x80)  // 128 | 2 << 14 = 0x8080
         XCTAssertEqual(lossyBytes[9], 0x80)
@@ -245,7 +245,7 @@ final class TileProtocolTests: XCTestCase {
         }
         let packets = TilePacker.packets(
             frameId: 3, dirtyTiles: Array(0..<30), pixels: pixels,
-            geometry: g466, landscape: false, allowLossy: false)
+            geometry: g466, landscape: false, policy: .losslessOnly)
         var tilesCovered = [Int]()
         for packet in packets {
             XCTAssertLessThanOrEqual(packet.count, TileGeometry.maxPacketBytes)
@@ -288,13 +288,84 @@ final class TileProtocolTests: XCTestCase {
         XCTAssertEqual(Set(tilesCovered).count, 30)
     }
 
+    // MARK: - Lossy policy and the variance gate
+
+    func testRunVarianceIsPinned() {
+        // Flat content has zero variance whatever the color.
+        let flat = [UInt8](repeating: 0xAA, count: 16 * 16 * 2)
+        XCTAssertEqual(TilePacker.runVariance(flat), 0)
+        XCTAssertEqual(TilePacker.runVariance([]), 0)
+        // Half black, half white: per channel in 888 space, sum = 128*255,
+        // sumSq = 128*255^2 over 256 px -> population variance 16256 (the
+        // integer truncation is part of the pinned definition), x3 channels.
+        var half = [UInt8]()
+        for i in 0..<256 {
+            half.append(contentsOf: (i < 128 ? [0x00, 0x00] : [0xFF, 0xFF]) as [UInt8])
+        }
+        XCTAssertEqual(TilePacker.runVariance(half), 16256 * 3)
+    }
+
+    func testAutoKeepsGradientsLosslessButCompressesTexture() {
+        // A gentle red gradient: 4 levels across the tile, variance in the
+        // tens - BC1 (128 B) would beat raw (512 B), but under .auto the
+        // variance gate keeps it lossless, because gradients are exactly
+        // where BC1's 4:1 shows as banding.
+        var pixels = [UInt8](repeating: 0, count: g466.frameBytes)
+        for y in 0..<16 {
+            for x in 0..<16 {
+                let r5 = UInt16(x / 4)  // 0..3: gentle
+                let p = r5 << 11
+                pixels[(y * 466 + x) * 2] = UInt8(p >> 8)
+                pixels[(y * 466 + x) * 2 + 1] = UInt8(p & 0xFF)
+            }
+        }
+        func codecOfFirstRecord(_ packets: [Data]) -> Int {
+            let bytes = [UInt8](packets[0])
+            return (Int(bytes[8]) | (Int(bytes[9]) << 8)) >> 14
+        }
+        let auto = TilePacker.packets(
+            frameId: 1, dirtyTiles: [0], pixels: pixels,
+            geometry: g466, landscape: false, policy: .auto)
+        XCTAssertNotEqual(codecOfFirstRecord(auto), 2)  // not BC1
+        // The same tile under .aggressive, or under .auto with the
+        // over-budget override, goes BC1.
+        let aggressive = TilePacker.packets(
+            frameId: 1, dirtyTiles: [0], pixels: pixels,
+            geometry: g466, landscape: false, policy: .aggressive)
+        XCTAssertEqual(codecOfFirstRecord(aggressive), 2)
+        let forced = TilePacker.packets(
+            frameId: 1, dirtyTiles: [0], pixels: pixels,
+            geometry: g466, landscape: false, policy: .auto, forceLossy: true)
+        XCTAssertEqual(codecOfFirstRecord(forced), 2)
+        // Noise (photo-like texture, variance in the thousands) goes BC1
+        // under plain .auto - the gate admits busy content.
+        var seed: UInt32 = 7
+        for y in 0..<16 {
+            for x in 0..<16 {
+                seed = seed &* 1_664_525 &+ 1_013_904_223
+                pixels[(y * 466 + x) * 2] = UInt8((seed >> 24) & 0xFF)
+                pixels[(y * 466 + x) * 2 + 1] = UInt8((seed >> 16) & 0xFF)
+            }
+        }
+        let noisy = TilePacker.packets(
+            frameId: 1, dirtyTiles: [0], pixels: pixels,
+            geometry: g466, landscape: false, policy: .auto)
+        XCTAssertEqual(codecOfFirstRecord(noisy), 2)
+        // ...but never under .losslessOnly, override or not.
+        let lossless = TilePacker.packets(
+            frameId: 1, dirtyTiles: [0], pixels: pixels,
+            geometry: g466, landscape: false, policy: .losslessOnly,
+            forceLossy: true)
+        XCTAssertNotEqual(codecOfFirstRecord(lossless), 2)
+    }
+
     func testScatteredTilesShareAPacket() {
         // Non-consecutive dirty tiles - the common diff shape - pack
         // together because records carry their own indices.
         let pixels = [UInt8](repeating: 0x1F, count: g466.frameBytes)
         let packets = TilePacker.packets(
             frameId: 3, dirtyTiles: [0, 450, 899], pixels: pixels,
-            geometry: g466, landscape: false, allowLossy: true)
+            geometry: g466, landscape: false, policy: .aggressive)
         XCTAssertEqual(packets.count, 1)
     }
 

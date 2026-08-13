@@ -64,15 +64,25 @@ final class FrameSender {
     /// geometry can carry the tile protocol at all (every square panel can;
     /// this exists so a hostile mDNS geometry cannot reach tile arithmetic).
     private let tileGeometry: TileGeometry?
-    /// Whether BC1 may win a run (lossy). The lossless/auto knob lands with
-    /// the degradation policy; until then auto behavior: smallest wins.
-    private var _tileLossyAllowed = true
+    /// When BC1 may win a run - the user's quality lever (settings UI).
+    private var _tileLossyPolicy: TileLossyPolicy = .auto
     /// Tile-diff state (touched only on sendQueue), separate from prevFrame
     /// deliberately: the band path's diff invalidation rules keep their own
     /// variable so nothing about that path's reasoning changes.
     private var prevTileFrame: [UInt8]?
     private var prevTileLandscape = false
     private var lastTileKeyframeAt = Date.distantPast
+    /// Set when a diff frame's estimated cost exceeded the pacing budget
+    /// even at BC1 rates: the NEXT diff frame is dropped outright (its dirt
+    /// accumulates into the one after), halving the offered frame rate
+    /// instead of flooding the panel's receive queue - the last rung of the
+    /// degradation ladder (docs/tile-stream-plan.md section 6.6 step 3c).
+    /// sendQueue-only.
+    private var skipNextTileFrame = false
+    /// The frame rate the degradation ladder defends. Below the 60 target
+    /// deliberately: forcing BC1 (rung a) engages when lossless could not
+    /// sustain this, and frame skipping (rung c) only when even BC1 cannot.
+    private static let degradeTargetFps = 30.0
     /// Orientation of the most recent frame sent, readable from any thread.
     ///
     /// This is the frame the panel currently has on screen, and so the frame its
@@ -196,6 +206,14 @@ final class FrameSender {
     func setAdaptivePacing(_ enabled: Bool) {
         lock.lock()
         _adaptivePacing = enabled
+        lock.unlock()
+    }
+
+    /// Set the tile-stream quality policy (see `TileLossyPolicy`). No effect
+    /// on panels speaking the band protocol, which has no lossy codec.
+    func setTileLossyPolicy(_ policy: TileLossyPolicy) {
+        lock.lock()
+        _tileLossyPolicy = policy
         lock.unlock()
     }
 
@@ -1004,10 +1022,22 @@ final class FrameSender {
         _ pixels: [UInt8], landscape: Bool, tiles: TileGeometry,
         conn: NWConnection
     ) {
-        var dirty: [Int]
         let keyframeDue =
             Date().timeIntervalSince(lastTileKeyframeAt) > keyframeInterval
-        if prevTileFrame == nil || landscape != prevTileLandscape || keyframeDue {
+        let isKeyframe =
+            prevTileFrame == nil || landscape != prevTileLandscape || keyframeDue
+        if skipNextTileFrame {
+            // The previous diff frame was over budget even at BC1 rates:
+            // drop this one entirely. prevTileFrame is deliberately NOT
+            // updated, so everything this frame changed lands in the next
+            // frame's diff - deferred, never lost. Keyframes are exempt:
+            // they exist to heal loss and must not themselves be skippable.
+            skipNextTileFrame = false
+            if !isKeyframe { return }
+        }
+
+        var dirty: [Int]
+        if isKeyframe {
             dirty = Array(0..<tiles.tileCount)
             lastTileKeyframeAt = Date()
         } else {
@@ -1023,12 +1053,40 @@ final class FrameSender {
         frameId &+= 1
         let spacing = spacingMicros
         lock.lock()
-        let allowLossy = _tileLossyAllowed
+        let policy = _tileLossyPolicy
         lock.unlock()
+
+        // The degradation ladder (docs/tile-stream-plan.md section 6.6),
+        // applied to diff frames only - a keyframe is a bounded 2-second
+        // cost whose latency does not gate motion, and forcing it lossy
+        // would leave a STATIC screen at BC1 quality forever (nothing dirty
+        // afterward ever heals it). Budget = what the current pacing can
+        // carry per frame at the fps the ladder defends; estimates use the
+        // plan's flat per-tile figures (512 B raw, 128 B BC1 - edge tiles
+        // only make them conservative).
+        var forceLossy = false
+        if !isKeyframe {
+            let bytesPerSecond =
+                1_472.0 * 1_000_000.0 / Double(max(spacing, 1))
+            let budgetBytes = Int(bytesPerSecond / Self.degradeTargetFps)
+            let rawEstimate = dirty.count * 512
+            let bc1Estimate = dirty.count * 128
+            // Rung (a): lossless would blow the budget - let BC1 win busy
+            // runs regardless of variance. Only meaningful under .auto;
+            // .losslessOnly is the user forbidding this trade.
+            forceLossy = policy == .auto && rawEstimate > budgetBytes
+            // Rung (c): even all-BC1 blows the budget (or, under
+            // .losslessOnly, lossless does and no codec relief exists) -
+            // halve the frame rate rather than flood the receive queue.
+            let floorEstimate =
+                policy == .losslessOnly ? rawEstimate : bc1Estimate
+            skipNextTileFrame = floorEstimate > budgetBytes
+        }
 
         let packets = TilePacker.packets(
             frameId: id, dirtyTiles: dirty, pixels: pixels,
-            geometry: tiles, landscape: landscape, allowLossy: allowLossy)
+            geometry: tiles, landscape: landscape,
+            policy: policy, forceLossy: forceLossy)
 
         for packet in packets {
             conn.send(

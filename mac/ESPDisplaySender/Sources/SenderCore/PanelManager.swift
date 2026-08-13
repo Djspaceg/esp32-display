@@ -817,6 +817,7 @@ final class PanelManager: ObservableObject {
             session.applyPacing(
                 spacingMicros: validated.spacingMicros,
                 adaptive: validated.adaptivePacing)
+            session.applyTileQuality(validated.tileQuality)
         }
         guard let settingsURL else { return }
         do {
@@ -838,6 +839,7 @@ final class PanelManager: ObservableObject {
         session.setFPS(settings.fps)
         session.applyPacing(
             spacingMicros: settings.spacingMicros, adaptive: settings.adaptivePacing)
+        session.applyTileQuality(settings.tileQuality)
         // A session that appears while its panel is already selected has to be
         // told to produce previews; `updatePreviewFocus` would see no change in
         // focus and do nothing.
