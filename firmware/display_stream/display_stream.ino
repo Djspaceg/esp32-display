@@ -767,6 +767,53 @@ static const uint32_t TOUCH_WAKE_MS = 10000;
 static uint32_t touchWakeUntil = 0;
 static touchgesture::Tracker touchTracker;
 static uint16_t touchSequence = 0;
+
+// ---- Quick info bar (a lit panel only) ---------------------------------
+// A plain tap - not a swipe, not a long press, and not the tap that woke a
+// dimmed panel - shows a status line across the top of the panel for a few
+// seconds without touching the backlight or interrupting streaming: this is
+// the fast path to "what's the battery doing right now" that does not
+// require waiting for the sender to go quiet and the idle card to appear.
+//
+// Local and additive, the same way the wake-touch is: sendTouchEvent still
+// reports the tap to the sender for its own gesture-preset mapping, so a
+// preset bound to Tap (e.g. togglePause) is unaffected by this also showing
+// a bar - the two are independent reactions to the same gesture.
+static const uint32_t INFO_BAR_MS = 2000;
+static uint32_t infoBarUntil = 0;
+// The row range currently covered by the bar, in the CURRENT frame
+// orientation (see infoBarRows()). Recomputed on every show so a tap that
+// lands mid-rotation still gets the right band, and reused by the streaming
+// path each loop to know which run(s) to redraw the bar onto instead of
+// letting a fresh frame silently erase it (see loop()'s per-run draw path).
+static int infoBarY0 = 0;
+static int infoBarY1 = 0;
+static char infoBarText[40] = {0};
+// The glyph scale the bar's text was last drawn at, so redrawInfoBarOverRun
+// (which has to reproduce the exact same draw, not just some legible one)
+// never disagrees with showInfoBar about how big the text is - both go
+// through infoBarGlyphScale() below rather than each picking their own.
+static int infoBarScale = 2;
+
+static bool infoBarActive() {
+  return infoBarUntil != 0 && (int32_t)(millis() - infoBarUntil) < 0;
+}
+
+// The largest legible glyph scale for this text on a panel frameWidth px
+// wide: prefer 2x (14px glyphs - drawIdleScreen's own "prefer the larger
+// text" default), drop to 1x only if the string would not fit at 2x. A bare
+// scale=1 bar reads as an illegible smear of pixels at this panel's size,
+// which is what the very first hardware pass of this feature showed - this
+// mirrors drawIdleScreen's own scale-fallback exactly rather than inventing
+// a second policy for "how big should on-device text be".
+static int infoBarGlyphScale(const char *text, int frameWidth) {
+  int scale = 2;
+  if ((int)strlen(text) * 6 * scale > frameWidth - 2 * 4) {
+    scale = 1;
+  }
+  return scale;
+}
+
 // True while the current press has already been spent waking the panel.
 static bool touchConsumed = false;
 
@@ -877,18 +924,30 @@ static void sendBatteryStatus() {
   sendToSender(packet, sizeof(packet));
 }
 
-// Charge state as one word, for the serial status line.
-static const char *batteryChargeWord(boardpower::Charge charge) {
+// board_power.h's Charge enum to panel_state.h's - two separate types for the
+// reason board_power.h's own doc comment gives (that header stays independent
+// of the wire/UI format), so every caller that wants a word or a formatted
+// line converts through here rather than switching on boardpower::Charge
+// itself in more than one place.
+static panelstate::Charge toChargeWord(boardpower::Charge charge) {
   switch (charge) {
     case boardpower::Charge::Charging:
-      return "charging";
+      return panelstate::Charge::Charging;
     case boardpower::Charge::Discharging:
-      return "discharging";
+      return panelstate::Charge::Discharging;
     case boardpower::Charge::Standby:
-      return "standby";
+      return panelstate::Charge::Standby;
     default:
-      return "unknown";
+      return panelstate::Charge::Unknown;
   }
+}
+
+// Charge state as one word, for the serial status line. Forwards to
+// panelstate::chargeWord so the serial line and the on-device idle card
+// (drawIdleScreen(), via panelstate::formatBatteryLine) cannot disagree on
+// what a charge state is called - one word list, one place, every caller.
+static const char *batteryChargeWord(boardpower::Charge charge) {
+  return panelstate::chargeWord(toChargeWord(charge));
 }
 
 // Whether the cached reading is recent enough to quote. False before the first
@@ -1396,26 +1455,22 @@ static void drawIdleScreen() {
   char lineIp[24], lineWifi[24], lineAge[32], lineBattery[24];
   const char *lineName = cfgName.c_str();
   snprintf(lineIp, sizeof(lineIp), "%s", WiFi.localIP().toString().c_str());
-  if (WiFi.status() == WL_CONNECTED) {
-    snprintf(lineWifi, sizeof(lineWifi), "wifi %d dBm", (int)WiFi.RSSI());
-  } else {
-    snprintf(lineWifi, sizeof(lineWifi), "wifi down");
-  }
+  panelstate::formatWifiLine(lineWifi, sizeof(lineWifi),
+                             WiFi.status() == WL_CONNECTED, (int)WiFi.RSSI());
   // Only for a board with a PMU and a reading that has not aged out - a C6
   // never has one, and a stale reading is worse than none (see
   // panelstate::shouldShowBatteryLine).
   const bool showBattery =
       panelstate::shouldShowBatteryLine(bcfg->hasBattery(), batteryReadingCurrent());
   if (showBattery) {
-    if (lastBattery.externalPower && !lastBattery.present) {
-      snprintf(lineBattery, sizeof(lineBattery), "usb power");
-    } else if (lastBattery.percentKnown) {
-      snprintf(lineBattery, sizeof(lineBattery), "batt %u%%%s",
-                (unsigned)lastBattery.percent,
-                lastBattery.charge == boardpower::Charge::Charging ? " chg" : "");
-    } else {
-      snprintf(lineBattery, sizeof(lineBattery), "batt --");
-    }
+    // The full charging/discharging/standby distinction, not just a terse
+    // "chg" flag - see panelstate::formatBatteryLine's doc comment for why
+    // this line used to say less than the protocol and the Mac app already
+    // know about this reading.
+    panelstate::formatBatteryLine(
+        lineBattery, sizeof(lineBattery), lastBattery.externalPower,
+        lastBattery.present, lastBattery.percentKnown, lastBattery.percent,
+        toChargeWord(lastBattery.charge));
   }
 
   // Room for the pushed lines, an age line, and the four status lines.
@@ -1498,6 +1553,136 @@ static void drawIdleScreen() {
     dmaInFlight = dmaInFlight - 1;
   }
   lastIdleDrawAt = millis();
+}
+
+// What the quick info bar says by default: battery on a board that has one
+// and a current reading, "usb power" is folded into that by
+// formatBatteryLine already, and the WiFi line on a board with no battery to
+// report (both C6 boards - see board_config.h's PowerController comment) so
+// a tap there still shows something rather than an empty bar.
+//
+// A single word ("default") rather than the whole line, because this is the
+// one point meant to grow into a user-customisable choice later - the To-do
+// item that asked for this bar called it out explicitly - and everything
+// downstream of this function already treats the bar's text as an opaque
+// string, so swapping in a different default (or a small rotation of them)
+// is a change to this function alone.
+static const char *defaultInfoBarText() {
+  static char text[24];
+  if (panelstate::shouldShowBatteryLine(bcfg->hasBattery(),
+                                       batteryReadingCurrent())) {
+    panelstate::formatBatteryLine(text, sizeof(text), lastBattery.externalPower,
+                                  lastBattery.present, lastBattery.percentKnown,
+                                  lastBattery.percent,
+                                  toChargeWord(lastBattery.charge));
+  } else if (WiFi.status() == WL_CONNECTED) {
+    panelstate::formatWifiLine(text, sizeof(text), true, (int)WiFi.RSSI());
+  } else {
+    panelstate::formatWifiLine(text, sizeof(text), false, 0);
+  }
+  return text;
+}
+
+// Show (or refresh) the quick info bar: a centred status line across the top
+// of the panel for INFO_BAR_MS, triggered by a plain tap on a lit panel.
+//
+// Composed the same way drawIdleScreen composes the idle card - onto bufB
+// from bufA, so bufA (the network path's always-current framebuffer, see
+// the comment on bufA/bufB near their declaration) stays the ground truth
+// this bar sits on top of rather than replaces - but only the bar's OWN row
+// range is touched, not the whole frame: streaming keeps drawing everywhere
+// else uninterrupted, which is the entire point of this being a bar and not
+// a card.
+static void showInfoBar(const char *text) {
+  if (bufB == nullptr || panel == nullptr) return;
+
+  const int w = bufLandscape ? PANEL_H : PANEL_W;
+  const int hgt = bufLandscape ? PANEL_W : PANEL_H;
+
+  strncpy(infoBarText, text, sizeof(infoBarText) - 1);
+  infoBarText[sizeof(infoBarText) - 1] = 0;
+  infoBarScale = infoBarGlyphScale(infoBarText, w);
+  const int lineH = 9 * infoBarScale;
+  panelstate::infoBarRowRange(w, hgt, bcfg->roundDisplay, lineH, infoBarY0,
+                              infoBarY1);
+  infoBarUntil = millis() + INFO_BAR_MS;
+
+  waitForDmaIdle(200);  // bufB may still be feeding a previous transfer
+  size_t rowBytes = (size_t)w * 2;
+  size_t off = (size_t)infoBarY0 * rowBytes;
+  size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
+  memcpy(bufB + off, bufA + off, bytes);  // bufA stays pristine for the overlay
+  int textX = panelstate::centeredX(
+      w, (int)strlen(infoBarText) * 6 * infoBarScale);
+  drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
+
+  dmaInFlight = dmaInFlight + 1;
+  dmaQueuedAt = millis();
+  if (esp_lcd_panel_draw_bitmap(panel, 0, infoBarY0, w, infoBarY1,
+                                bufB + off) != ESP_OK) {
+    statDrawErrors = statDrawErrors + 1;
+    dmaInFlight = dmaInFlight - 1;
+  }
+}
+
+// Redraw the info bar's row range from bufA (plain, no text) once its
+// window has elapsed, so its last-shown text does not linger as a stale
+// overlay once the bar itself has expired. bufA is guaranteed current for
+// every row (see the comment on bufA's declaration), including the bar's,
+// because the network task keeps writing every arriving band into it
+// regardless of whether the bar is covering that row on the panel right now
+// - which is exactly what makes "just redraw bufA's rows" a correct revert
+// rather than a stale snapshot.
+static void clearInfoBarIfExpired() {
+  if (infoBarUntil == 0 || infoBarActive()) return;
+  infoBarUntil = 0;
+  if (bufB == nullptr || panel == nullptr) return;
+  const int w = bufLandscape ? PANEL_H : PANEL_W;
+  waitForDmaIdle(200);
+  size_t rowBytes = (size_t)w * 2;
+  size_t off = (size_t)infoBarY0 * rowBytes;
+  size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
+  memcpy(bufB + off, bufA + off, bytes);
+  dmaInFlight = dmaInFlight + 1;
+  dmaQueuedAt = millis();
+  if (esp_lcd_panel_draw_bitmap(panel, 0, infoBarY0, w, infoBarY1,
+                                bufB + off) != ESP_OK) {
+    statDrawErrors = statDrawErrors + 1;
+    dmaInFlight = dmaInFlight - 1;
+  }
+}
+
+// Redraw the bar over its own row range after a streaming run that just
+// overwrote part or all of it with fresh frame content. Called from
+// loop()'s per-run draw path (see forEachRun's lambda) whenever a run's
+// rows overlap the bar's, so a live stream cannot silently erase the bar
+// mid-window the way a plain per-band draw_bitmap would.
+//
+// Self-contained rather than reusing whatever the triggering run left in
+// bufB: that run's own row range and the bar's may only partially overlap,
+// so bufB is not guaranteed valid across the bar's whole range going in.
+// This re-copies bufA -> bufB for exactly the bar's rows first, the same way
+// showInfoBar() does, then draws text on top - bufA is always current (see
+// its declaration comment), so this is a correct base regardless of which
+// run triggered the call.
+static void redrawInfoBarOverRun() {
+  if (bufB == nullptr || panel == nullptr) return;
+  const int w = bufLandscape ? PANEL_H : PANEL_W;
+  const int hgt = bufLandscape ? PANEL_W : PANEL_H;
+  size_t rowBytes = (size_t)w * 2;
+  size_t off = (size_t)infoBarY0 * rowBytes;
+  size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
+  memcpy(bufB + off, bufA + off, bytes);
+  int textX = panelstate::centeredX(
+      w, (int)strlen(infoBarText) * 6 * infoBarScale);
+  drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
+  dmaInFlight = dmaInFlight + 1;
+  dmaQueuedAt = millis();
+  if (esp_lcd_panel_draw_bitmap(panel, 0, infoBarY0, w, infoBarY1,
+                                bufB + off) != ESP_OK) {
+    statDrawErrors = statDrawErrors + 1;
+    dmaInFlight = dmaInFlight - 1;
+  }
 }
 
 // Wait for queued strip DMA to finish, bounded.
@@ -1829,6 +2014,15 @@ static void serviceTouch() {
   }
   if (event.gesture == touchgesture::Gesture::None || consumed) {
     return;
+  }
+  // A plain tap on a lit panel shows the quick info bar, independent of and
+  // in addition to reporting the gesture below - the two are separate
+  // reactions to the same event, not alternatives. Swipes and long presses
+  // do not: they already have a job (whatever the sender's gesture preset
+  // binds them to), and a bar popping up on every swipe would fight that
+  // rather than complement it.
+  if (event.gesture == touchgesture::Gesture::Tap) {
+    showInfoBar(defaultInfoBarText());
   }
   sendTouchEvent(event.gesture, event.startX, event.startY);
 }
@@ -2350,6 +2544,7 @@ void loop() {
   applyPendingControl();
   updateIdentify();
   serviceTouch();
+  if (dmaInFlight == 0) clearInfoBarIfExpired();
   static uint32_t lastIdleTextCheck = 0;
   if ((uint32_t)(millis() - lastIdleTextCheck) >= IDLE_TEXT_SAVE_INTERVAL_MS) {
     lastIdleTextCheck = millis();
@@ -2458,6 +2653,19 @@ void loop() {
         dmaInFlight = dmaInFlight - 1;
       } else {
         drewAny = true;
+        // This run just overwrote the panel's pixels for its own row range
+        // with bufA's fresh content - if the info bar is up and any of its
+        // rows fell inside that range, the bar is now gone from the glass
+        // and has to be redrawn on top before this run's DMA transfer
+        // completes, or the panel briefly (or, if no later run touches
+        // those rows again, permanently until the bar's window elapses)
+        // shows the stream instead of the bar a moment after showing it.
+        if (infoBarActive() &&
+            panelstate::rowRangeOverlaps(runStart * bandRows, yEnd, infoBarY0,
+                                        infoBarY1)) {
+          waitForDmaIdle(200);
+          redrawInfoBarOverRun();
+        }
       }
     });
     if (drewAny) {
@@ -2499,7 +2707,15 @@ void loop() {
   // quit, WiFi down, Mac asleep without telling us). Show where to find
   // this device, dimmed, repositioning against burn-in. Static content is
   // explicitly NOT this state - keepalives keep arriving for a still photo.
-  uint32_t senderSilence = millis() - lastSenderPacketAt;
+  // millisSince, not a plain subtraction: lastSenderPacketAt is written by a
+  // higher-priority receive task/callback concurrently with this read, and a
+  // packet landing between millis() and reading lastSenderPacketAt below can
+  // leave lastSenderPacketAt newer than the millis() already captured. A
+  // plain "now - last" then underflows to roughly UINT32_MAX ms - this is
+  // exactly what put "sender silent 4294967s" in the serial log while the
+  // sender was actively streaming, flashing idleActive on for one loop
+  // iteration and off the next. See millisSince's doc comment.
+  uint32_t senderSilence = panelstate::millisSince(millis(), lastSenderPacketAt);
   if (!displaySleeping && dmaInFlight == 0 && lastSenderPacketAt != 0 &&
       senderSilence > SENDER_GONE_MS) {
     if (!idleActive) {
