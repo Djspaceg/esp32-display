@@ -1,6 +1,7 @@
 // Host-side unit tests for the band protocol logic. Every rule in here
 // corresponds to a failure observed on real hardware/WiFi. Build and run:
 //   firmware/test/run_tests.sh
+#include <array>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -15,6 +16,7 @@
 #include "../display_stream/device_protocol.h"
 #include "../display_stream/ota_policy.h"
 #include "../display_stream/panel_state.h"
+#include "../display_stream/tile_protocol.h"
 #include "../libraries/espdisp_board/src/board_config.h"
 #include "../libraries/espdisp_board/src/panel_orientation.h"
 #include "../libraries/espdisp_board/src/touch_gesture.h"
@@ -2913,6 +2915,325 @@ int main() {
     std::vector<uint8_t> dec(raw.size());
     CHECK(bc1::decode(enc.data(), enc.size(), dec.data(), 6, 6));
     CHECK(memcmp(dec.data(), raw.data(), raw.size()) == 0);
+  }
+
+  // --- tile stream: grid geometry ------------------------------------------
+  // The tile grid the 466x466 AMOLED runs, pinned the way G172's band layout
+  // is: these numbers ARE the wire format for tile indices and run sizes.
+  {
+    const tileproto::TileGeometry g = tileproto::GEOMETRY_466X466;
+    CHECK(g.valid());
+    CHECK(g.tileCols() == 30);
+    CHECK(g.tileRows() == 30);
+    CHECK(g.tileCount() == 900);
+    CHECK(g.frameBytes() == 434312);
+    CHECK(g.colWidth(0) == 16);
+    CHECK(g.colWidth(28) == 16);
+    CHECK(g.colWidth(29) == 2);   // 466 = 29*16 + 2
+    CHECK(g.rowHeight(29) == 2);
+    CHECK(g.col(899) == 29 && g.row(899) == 29);  // the 2x2 corner tile
+    CHECK(g.col(30) == 0 && g.row(30) == 1);      // row-major indexing
+  }
+  {
+    // Other square panels on the roadmap derive sound grids too.
+    const tileproto::TileGeometry g480 = {480, 480};
+    CHECK(g480.valid());
+    CHECK(g480.tileCount() == 900);
+    CHECK(g480.colWidth(29) == 16);  // divides evenly: no short edge
+    const tileproto::TileGeometry g412 = {412, 412};
+    CHECK(g412.valid());
+    CHECK(g412.tileCols() == 26);
+    CHECK(g412.tileCount() == 676);
+    CHECK(g412.colWidth(25) == 12);  // 412 = 25*16 + 12
+  }
+  {
+    // What the protocol cannot carry is refused up front. 511 is the widest
+    // valid panel: 32 tile columns (the run-length ceiling) and a full-row
+    // raw run of 511*16*2 = 16352 B, one byte under the record length
+    // field's 16383. 512 pushes the raw run to 16384 and is refused.
+    CHECK(!(tileproto::TileGeometry{0, 0}).valid());
+    CHECK(!(tileproto::TileGeometry{466, 0}).valid());
+    CHECK((tileproto::TileGeometry{511, 466}).valid());
+    CHECK(!(tileproto::TileGeometry{512, 466}).valid());
+    CHECK(!(tileproto::TileGeometry{528, 466}).valid());  // 33 columns
+  }
+  {
+    // Run arithmetic: what a record may claim and what it decodes to.
+    const tileproto::TileGeometry g = tileproto::GEOMETRY_466X466;
+    CHECK(g.runValid(0, 1));
+    CHECK(g.runValid(0, 30));            // one full tile-row
+    CHECK(!g.runValid(0, 31));           // wider than the grid
+    CHECK(!g.runValid(1, 30));           // would cross into row 1
+    CHECK(g.runValid(29, 1));            // the short edge column alone
+    CHECK(!g.runValid(0, 0));            // zero-length runs are meaningless
+    CHECK(!g.runValid(900, 1));          // past the grid
+    CHECK(g.runValid(899, 1));           // the corner tile
+    CHECK(g.runPixelWidth(0, 30) == 466);
+    CHECK(g.runRawBytes(0, 30) == 466 * 16 * 2);     // 14912
+    CHECK(g.runPixelWidth(28, 2) == 18);             // 16 + the 2 px edge
+    CHECK(g.runRawBytes(28, 2) == 18 * 16 * 2);
+    CHECK(g.runRawBytes(899, 1) == 2 * 2 * 2);       // corner: 8 bytes
+    CHECK(g.runRawBytes(870, 30) == 466 * 2 * 2);    // bottom row, 2 px tall
+  }
+
+  // --- tile stream: packet header ------------------------------------------
+  {
+    // Little-endian fields; stream flag bit 15 of first_tile; landscape
+    // bit 15 of dirty_count. first_tile 0x8385 = flag | tile 901... use
+    // tile 5: 0x8005. dirty 0x8050 = landscape | 80 tiles.
+    const uint8_t raw[6] = {0x34, 0x12, 0x05, 0x80, 0x50, 0x80};
+    tileproto::TileHeader h = tileproto::parseHeader(raw);
+    CHECK(h.frameId == 0x1234);
+    CHECK(h.streamFlagSet);
+    CHECK(!h.reservedBitsSet);
+    CHECK(h.firstTile == 5);
+    CHECK(h.landscape);
+    CHECK(h.dirtyCount == 80);
+
+    // Stream flag clear (a band-shaped packet) is visible to the caller.
+    const uint8_t band[6] = {0x34, 0x12, 0x05, 0x00, 0x50, 0x00};
+    h = tileproto::parseHeader(band);
+    CHECK(!h.streamFlagSet);
+    CHECK(!h.landscape);
+
+    // Reserved bits 14..10: any of them set flags the header for rejection.
+    const uint8_t reserved[6] = {0x34, 0x12, 0x05, 0x84, 0x50, 0x00};
+    h = tileproto::parseHeader(reserved);
+    CHECK(h.streamFlagSet);
+    CHECK(h.reservedBitsSet);
+    CHECK(h.firstTile == 5);
+  }
+
+  // --- tile stream: the record walker --------------------------------------
+  {
+    // Two records built by hand, byte for byte:
+    //   tile 5, run 3 (bits 14..10 = 2 -> 0x0805), BC1 (codec 2), 3 bytes
+    //     tile field 0x0805 = 05 08; len field 0x8003 = 03 80
+    //   tile 40, run 1, raw (codec 0), 4 bytes
+    const uint8_t payload[] = {
+        0x05, 0x08, 0x03, 0x80, 0xAA, 0xBB, 0xCC,        // tile 5 run 3 bc1
+        0x28, 0x00, 0x04, 0x00, 0xDE, 0xAD, 0xBE, 0xEF,  // tile 40 raw
+    };
+    struct Seen {
+      uint16_t tile;
+      uint16_t run;
+      tileproto::TileCodec codec;
+      size_t len;
+      uint8_t first;
+    };
+    std::vector<Seen> seen;
+    bool ok = tileproto::forEachRecord(
+        payload, sizeof(payload),
+        [&](uint16_t tile, uint16_t run, tileproto::TileCodec codec,
+            const uint8_t *p, size_t n) {
+          seen.push_back({tile, run, codec, n, p[0]});
+          return true;
+        });
+    CHECK(ok);
+    CHECK(seen.size() == 2);
+    CHECK(seen[0].tile == 5 && seen[0].run == 3);
+    CHECK(seen[0].codec == tileproto::TileCodec::Bc1);
+    CHECK(seen[0].len == 3 && seen[0].first == 0xAA);
+    CHECK(seen[1].tile == 40 && seen[1].run == 1);
+    CHECK(seen[1].codec == tileproto::TileCodec::Raw);
+    CHECK(seen[1].len == 4 && seen[1].first == 0xDE);
+  }
+  {
+    // Codec value 3 reaches fn as Reserved3 - refusing it is fn's job (the
+    // walker knows bytes, not codecs), and the sketch does refuse it.
+    const uint8_t payload[] = {0x05, 0x00, 0x01, 0xC0, 0x99};
+    bool sawReserved = false;
+    bool ok = tileproto::forEachRecord(
+        payload, sizeof(payload),
+        [&](uint16_t, uint16_t, tileproto::TileCodec codec, const uint8_t *,
+            size_t) {
+          sawReserved = codec == tileproto::TileCodec::Reserved3;
+          return false;  // and rejecting aborts the walk
+        });
+    CHECK(!ok);
+    CHECK(sawReserved);
+  }
+  {
+    // Structural refusals, each one byte-tight where a boundary exists.
+    auto walks = [](std::vector<uint8_t> payload) {
+      return tileproto::forEachRecord(
+          payload.data(), payload.size(),
+          [](uint16_t, uint16_t, tileproto::TileCodec, const uint8_t *,
+             size_t) { return true; });
+    };
+    CHECK(!walks({}));                          // empty
+    CHECK(!walks({0x05, 0x00, 0x01}));          // truncated record header
+    CHECK(!walks({0x05, 0x00, 0x00, 0x00}));    // zero-length body
+    CHECK(!walks({0x05, 0x00, 0x02, 0x00, 0xAA}));  // body one byte short
+    CHECK(walks({0x05, 0x00, 0x02, 0x00, 0xAA, 0xBB}));  // exact fit walks
+    CHECK(!walks({0x05, 0x80, 0x01, 0x00, 0xAA}));  // reserved tile bit 15
+    // A valid record followed by a truncated one refuses the whole packet.
+    CHECK(!walks({0x05, 0x00, 0x01, 0x00, 0xAA, 0x06, 0x00, 0x01}));
+  }
+
+  // --- tile stream: reassembler - the band matrix, restated per record -----
+  {
+    // Geometry rejection: bad dirty counts and inexpressible runs.
+    const tileproto::TileGeometry g = tileproto::GEOMETRY_466X466;
+    auto th = [](uint16_t frame, uint16_t first, uint16_t dirty,
+                 bool landscape = false) {
+      tileproto::TileHeader h;
+      h.frameId = frame;
+      h.firstTile = first;
+      h.dirtyCount = dirty;
+      h.landscape = landscape;
+      h.streamFlagSet = true;
+      h.reservedBitsSet = false;
+      return h;
+    };
+    using tileproto::RecordAction;
+    {
+      tileproto::Reassembler r(g);
+      CHECK(r.onRecord(th(1, 0, 0), 0, 1, dropped) == RecordAction::Reject);
+      CHECK(r.onRecord(th(1, 0, 901), 0, 1, dropped) == RecordAction::Reject);
+      CHECK(r.onRecord(th(1, 0, 3), 900, 1, dropped) == RecordAction::Reject);
+      CHECK(r.onRecord(th(1, 0, 3), 1, 30, dropped) == RecordAction::Reject);
+      CHECK(r.onRecord(th(1, 0, 3), 0, 0, dropped) == RecordAction::Reject);
+      // An invalid geometry rejects everything.
+      tileproto::Reassembler bad(tileproto::TileGeometry{0, 0});
+      CHECK(bad.onRecord(th(1, 0, 1), 0, 1, dropped) == RecordAction::Reject);
+    }
+    {
+      // Full keyframe completes on the last run: 30 rows of 30 tiles.
+      tileproto::Reassembler r(g);
+      for (uint16_t row = 0; row < 29; row++) {
+        CHECK(r.onRecord(th(7, row * 30, 900), row * 30, 30, dropped) ==
+              RecordAction::Apply);
+      }
+      CHECK(r.onRecord(th(7, 870, 900), 870, 30, dropped) ==
+            RecordAction::ApplyComplete);
+    }
+    {
+      // Dirty subset completes after dirtyCount tiles, any indices, and a
+      // multi-tile run counts every tile it covers.
+      tileproto::Reassembler r(g);
+      CHECK(r.onRecord(th(9, 5, 5), 5, 3, dropped) == RecordAction::Apply);
+      CHECK(r.onRecord(th(9, 42, 5), 42, 1, dropped) == RecordAction::Apply);
+      CHECK(r.onRecord(th(9, 100, 5), 100, 1, dropped) ==
+            RecordAction::ApplyComplete);
+      CHECK(!dropped);
+    }
+    {
+      // Duplicates never complete a frame early; a run that only re-covers
+      // already-seen tiles is a Duplicate, and a partially overlapping run
+      // counts only its new tiles.
+      tileproto::Reassembler r(g);
+      CHECK(r.onRecord(th(3, 5, 4), 5, 2, dropped) == RecordAction::Apply);
+      CHECK(r.onRecord(th(3, 5, 4), 5, 2, dropped) ==
+            RecordAction::Duplicate);
+      // Tiles 6,7: overlaps tile 6 (seen), adds tile 7 -> 3 of 4.
+      CHECK(r.onRecord(th(3, 6, 4), 6, 2, dropped) == RecordAction::Apply);
+      CHECK(r.onRecord(th(3, 8, 4), 8, 1, dropped) ==
+            RecordAction::ApplyComplete);
+    }
+    {
+      // Late records of older frames are ignored, current frame unharmed.
+      tileproto::Reassembler r(g);
+      CHECK(r.onRecord(th(100, 0, 2), 0, 1, dropped) == RecordAction::Apply);
+      CHECK(r.onRecord(th(99, 1, 2), 1, 1, dropped) ==
+            RecordAction::IgnoreStale);
+      CHECK(r.onRecord(th(98, 1, 900), 1, 1, dropped) ==
+            RecordAction::IgnoreStale);
+      CHECK(r.onRecord(th(100, 1, 2), 1, 1, dropped) ==
+            RecordAction::ApplyComplete);
+    }
+    {
+      // A newer frame abandons a partial one and reports the drop.
+      tileproto::Reassembler r(g);
+      CHECK(r.onRecord(th(10, 0, 3), 0, 1, dropped) == RecordAction::Apply);
+      CHECK(r.onRecord(th(11, 0, 2), 0, 1, dropped) == RecordAction::Apply);
+      CHECK(dropped);
+      CHECK(r.onRecord(th(11, 1, 2), 1, 1, dropped) ==
+            RecordAction::ApplyComplete);
+      CHECK(!dropped);
+    }
+    {
+      // Frame id wraparound: 0 is newer than 65535.
+      tileproto::Reassembler r(g);
+      CHECK(r.onRecord(th(65535, 0, 2), 0, 1, dropped) ==
+            RecordAction::Apply);
+      CHECK(r.onRecord(th(0, 0, 2), 0, 1, dropped) == RecordAction::Apply);
+      CHECK(dropped);  // partial 65535 abandoned
+      CHECK(r.onRecord(th(0, 1, 2), 1, 1, dropped) ==
+            RecordAction::ApplyComplete);
+    }
+    {
+      // Sender restart: persistent stale ids force a resync after two
+      // frames' worth of records for this grid - 1800 on 900 tiles.
+      tileproto::Reassembler r(g);
+      CHECK(r.onRecord(th(30000, 0, 2), 0, 1, dropped) ==
+            RecordAction::Apply);
+      const int resync = 2 * g.tileCount();
+      CHECK(resync == 1800);
+      int ignored = 0;
+      RecordAction last = RecordAction::Reject;
+      for (int i = 0; i < resync + 1; i++) {
+        last = r.onRecord(th(2, (uint16_t)(i % 40), 80),
+                          (uint16_t)(i % 40), 1, dropped);
+        if (last == RecordAction::IgnoreStale) ignored++;
+      }
+      CHECK(ignored == resync - 1);
+      CHECK(last == RecordAction::Apply);  // resynced onto frame 2
+    }
+    {
+      // Orientation adopted per frame - bookkeeping on square glass, but it
+      // must track the sender the way the band reassembler does.
+      tileproto::Reassembler r(g);
+      CHECK(r.onRecord(th(1, 0, 1, true), 0, 1, dropped) ==
+            RecordAction::ApplyComplete);
+      CHECK(r.landscape() == true);
+      CHECK(r.onRecord(th(2, 0, 1, false), 0, 1, dropped) ==
+            RecordAction::ApplyComplete);
+      CHECK(r.landscape() == false);
+    }
+  }
+
+  // --- tile stream: row-run coalescing for the draw path -------------------
+  {
+    const tileproto::TileGeometry g = tileproto::GEOMETRY_466X466;
+    auto runs = [&](std::initializer_list<int> setBits) {
+      uint8_t bits[tileproto::TILE_BITMAP_BYTES] = {0};
+      for (int t : setBits) bits[t >> 3] |= 1 << (t & 7);
+      std::vector<std::array<int, 3>> out;
+      tileproto::forEachRowRun(bits, g, [&](uint16_t r, uint16_t s,
+                                            uint16_t e) {
+        out.push_back({(int)r, (int)s, (int)e});
+      });
+      return out;
+    };
+    CHECK(runs({}).empty());
+    CHECK((runs({0}) == std::vector<std::array<int, 3>>{{0, 0, 1}}));
+    // Adjacent tiles in one row merge; a row boundary splits: tile 29 is
+    // (row 0, col 29) and tile 30 is (row 1, col 0) - never one rect.
+    CHECK((runs({29, 30}) ==
+           std::vector<std::array<int, 3>>{{0, 29, 30}, {1, 0, 1}}));
+    CHECK((runs({3, 4, 5, 9, 65, 66}) ==
+           std::vector<std::array<int, 3>>{
+               {0, 3, 6}, {0, 9, 10}, {2, 5, 7}}));
+    // A full bitmap coalesces to exactly one run per tile-row.
+    uint8_t bits[tileproto::TILE_BITMAP_BYTES];
+    memset(bits, 0xFF, sizeof(bits));
+    int count = 0;
+    tileproto::forEachRowRun(bits, g, [&](uint16_t, uint16_t s, uint16_t e) {
+      count++;
+      if (s != 0 || e != 30) count = -10000;
+    });
+    CHECK(count == 30);
+  }
+
+  // --- tile stream: the capability bit --------------------------------------
+  {
+    // Pinned because the Swift side spells the same number out by hand
+    // (DeviceProtocol.Capabilities.tileStream).
+    CHECK(deviceproto::CAP_TILE_STREAM == 1u << 15);
+    CHECK((deviceproto::CAP_TILE_STREAM & deviceproto::CAP_POWER) == 0);
+    CHECK((deviceproto::CAP_TILE_STREAM & deviceproto::CAP_COMPRESSED_BANDS) ==
+          0);
   }
 
   // --- packed band packets: header flag bits and the record walker ---------

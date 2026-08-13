@@ -67,6 +67,7 @@
 #include "band_protocol.h"
 #include "band_compress.h"
 #include "bc1.h"
+#include "tile_protocol.h"
 #include "device_protocol.h"
 #include "control_queue.h"
 #include "ota_policy.h"
