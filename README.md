@@ -319,6 +319,19 @@ BC1-compresses where RLE cannot. Measured against the same board on the
 band protocol, light content went from ~29 fps at ~300 datagrams/s to
 ~35 fps at ~70 datagrams/s.
 
+A panel advertising `CAP_ROUND_DISPLAY` gets one further saving that costs
+nothing: its glass is round, so 181 of the 900 tiles lie entirely outside
+the inscribed circle and are invisible forever. The sender never sends them
+— not even on a keyframe, which covers 719 tiles rather than 900 — and
+since the panel paints only what it is sent, a fifth of the QSPI paint time
+goes with them (25.7 → 22.2 ms for a full frame). The mask is deliberately
+conservative: a tile straddling the boundary is sent whole, because skipping
+a tile that turns out to be visible would leave it permanently stale rather
+than merely late. It was verified against the physical glass before being
+switched on (`espdisp.py tile-test --round-mask` paints the skippable tiles
+magenta and sends everything, so a wrong mask shows up as visible magenta
+rather than as silence).
+
 Tile packets claim bit 15 of the header's second field — the same bit
 packed band packets use, and the two layouts are byte-ambiguous past it —
 so a board advertises exactly ONE of `CAP_TILE_STREAM` /
