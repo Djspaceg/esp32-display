@@ -86,6 +86,83 @@ public struct TileGeometry: Hashable, Sendable {
     }
 }
 
+// MARK: - TileMask
+
+/// Which tiles of a grid can ever be seen.
+///
+/// On the round 466x466 AMOLED, 181 of the 900 tiles lie entirely outside the
+/// glass's inscribed circle. They are invisible forever, so sending them is
+/// pure waste — a fifth of the wire cost of a full frame AND a fifth of the
+/// panel's paint time, which is the one lever that moves the measured ~38 fps
+/// QSPI full-frame ceiling (docs/tile-stream-plan.md section 11).
+///
+/// A pixel counts as visible when its CENTRE lies inside the circle of radius
+/// width/2 centred on the frame. A tile is skippable only when its NEAREST
+/// pixel to the centre is still outside: a tile straddling the boundary has
+/// visible pixels and must be sent whole.
+///
+/// The asymmetry in the conservatism is deliberate and load-bearing. Sending
+/// a tile that turns out to be invisible costs bandwidth. SKIPPING a tile
+/// that turns out to be visible leaves it permanently stale — no keyframe
+/// heals it, because keyframes skip it too. So the predicate errs toward
+/// sending, and the mask was verified against real glass before anything
+/// relied on it (`espdisp.py tile-test --round-mask` paints the skippable
+/// tiles magenta; none of it was visible, and the boundary ring reached the
+/// bezel).
+public struct TileMask: Hashable, Sendable {
+    public let geometry: TileGeometry
+    /// Whether the mask is actually masking anything.
+    public let round: Bool
+    /// Every tile that can contain a visible pixel, ascending — the tile set
+    /// a keyframe covers.
+    public let visibleTiles: [Int]
+    private let visible: [Bool]
+
+    /// The mask for a panel. `round: false` (or a non-square geometry, which
+    /// no round panel can have) yields a mask that hides nothing, so callers
+    /// need no special case for rectangular panels.
+    public init(geometry: TileGeometry, round: Bool) {
+        self.geometry = geometry
+        let masking = round && geometry.width == geometry.height
+            && geometry.width > 0
+        self.round = masking
+        guard masking else {
+            self.visible = [Bool](repeating: true, count: max(geometry.tileCount, 0))
+            self.visibleTiles = Array(0..<max(geometry.tileCount, 0))
+            return
+        }
+        let cx = Double(geometry.width) / 2
+        let cy = Double(geometry.height) / 2
+        let r2 = cx * cx
+        var flags = [Bool]()
+        var tiles = [Int]()
+        flags.reserveCapacity(geometry.tileCount)
+        for tile in 0..<geometry.tileCount {
+            let x0 = Double(geometry.col(tile) * TileGeometry.tileDim)
+            let y0 = Double(geometry.row(tile) * TileGeometry.tileDim)
+            let x1 = x0 + Double(geometry.colWidth(geometry.col(tile)))
+            let y1 = y0 + Double(geometry.rowHeight(geometry.row(tile)))
+            // Nearest pixel centre within the tile, per axis.
+            let nx = min(max(cx, x0 + 0.5), x1 - 0.5)
+            let ny = min(max(cy, y0 + 0.5), y1 - 0.5)
+            let isVisible = (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy) < r2
+            flags.append(isVisible)
+            if isVisible { tiles.append(tile) }
+        }
+        self.visible = flags
+        self.visibleTiles = tiles
+    }
+
+    /// Whether a tile can contain a visible pixel. Out-of-range indices are
+    /// not visible rather than a trap: this is called from the diff loop.
+    public func isVisible(_ tile: Int) -> Bool {
+        tile >= 0 && tile < visible.count ? visible[tile] : false
+    }
+
+    /// Tiles hidden behind the glass — what the mask saves.
+    public var hiddenCount: Int { visible.count - visibleTiles.count }
+}
+
 // MARK: - TileProtocol
 
 /// Pure protocol logic for the tile stream - no networking, no capture. The
@@ -137,8 +214,12 @@ public enum TileProtocol {
     /// tile scanline (up to 16 rows of at most 32 bytes), short-circuiting
     /// on the first differing row; ~14,400 tiny compares for a fully clean
     /// 466x466 frame, well under a millisecond on Apple Silicon.
+    /// `mask`, when given, excludes tiles that can never be seen (round
+    /// glass): they are not compared and never reported dirty, which is both
+    /// the bandwidth saving and a slightly cheaper diff.
     public static func dirtyTiles(
-        new: [UInt8], previous: [UInt8], geometry: TileGeometry
+        new: [UInt8], previous: [UInt8], geometry: TileGeometry,
+        mask: TileMask? = nil
     ) -> [Int] {
         precondition(new.count == geometry.frameBytes)
         precondition(previous.count == geometry.frameBytes)
@@ -149,6 +230,7 @@ public enum TileProtocol {
                 let newBase = newRaw.baseAddress!
                 let oldBase = oldRaw.baseAddress!
                 for tile in 0..<geometry.tileCount {
+                    if let mask, !mask.isVisible(tile) { continue }
                     let x0 = geometry.col(tile) * TileGeometry.tileDim
                     let y0 = geometry.row(tile) * TileGeometry.tileDim
                     let w = geometry.colWidth(geometry.col(tile)) * 2

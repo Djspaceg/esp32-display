@@ -308,6 +308,11 @@ static uint32_t deviceCapabilities() {
          // 80-band keyframe becomes a handful of datagrams).
          | (tileStreamEnabled() ? deviceproto::CAP_TILE_STREAM
                                 : deviceproto::CAP_COMPRESSED_BANDS)
+         // Round glass: a fifth of the framebuffer is behind the bezel and
+         // invisible forever. Straight from the board table - the sender
+         // has no other way to know the panel's shape, and the firmware
+         // itself does nothing with it (see the CAP_ROUND_DISPLAY comment).
+         | (bcfg->roundDisplay ? deviceproto::CAP_ROUND_DISPLAY : 0u)
          // Quarter turns only where the glass is square. On a rectangular
          // panel a 90-degree mounting turn is what the sender-driven
          // landscape mechanism already expresses, and honouring rotation 1/3

@@ -2234,6 +2234,54 @@ def test_tile_stream_wire():
                     "header first_tile cross-checks record one")
     check_equal(total_runs, 30 + 5, "30 keyframe rows plus 5 squares")
 
+    # The round-glass mask. These counts drive the hardware verification
+    # pattern AND are the same numbers the Swift side computes independently
+    # (TileMask); the classification was confirmed against real glass with
+    # `tile-test --round-mask` - no magenta visible, boundary ring at the
+    # bezel - before any sender relied on it.
+    classes = espdisp.tile_visibility()
+    check_equal(len(classes["outside"]), 181, "181 tiles are never visible")
+    check_equal(len(classes["boundary"]), 106, "106 tiles straddle the circle")
+    check_equal(len(classes["inside"]), 613, "613 tiles are fully visible")
+    check_equal(sum(len(v) for v in classes.values()), 900,
+                "every tile is classified exactly once")
+    check_equal(len(classes["boundary"]) + len(classes["inside"]), 719,
+                "719 tiles must still be sent")
+    outside = set(classes["outside"])
+    # The corners are hidden; the centre is not.
+    for corner in (0, 29, 870, 899):
+        check(corner in outside, "corner tile %d is hidden" % corner)
+    for middle in (14 * 30 + 14, 15 * 30 + 15):
+        check(middle not in outside, "centre tile %d is visible" % middle)
+    # Every row's visible tiles form ONE contiguous span - a circle's
+    # intersection with a row is convex - which is why masking never costs
+    # an extra draw call on the panel.
+    for row in range(30):
+        vis = [c for c in range(30) if row * 30 + c not in outside]
+        check(vis == list(range(vis[0], vis[-1] + 1)),
+              "row %d visible tiles are contiguous" % row)
+    check_equal([c for c in range(30) if 0 * 30 + c not in outside],
+                list(range(9, 20)), "row 0 spans columns 9..19")
+    check_equal([c for c in range(30) if 29 * 30 + c not in outside],
+                list(range(12, 17)), "row 29 spans columns 12..16")
+    # The verification pattern itself: every tile painted, nothing masked,
+    # so a wrong mask shows up as visible magenta rather than as silence.
+    mask_packets = espdisp.round_mask_packets(1)
+    check(len(mask_packets) > 0, "round-mask pattern produces datagrams")
+    painted = 0
+    for p in mask_packets:
+        check(len(p) <= espdisp.TILE_PACKET_BUDGET, "mask datagram in budget")
+        _, first_field, dirty = struct.unpack("<HHH", p[:6])
+        check(first_field & 0x8000 != 0, "mask packet sets the stream flag")
+        check_equal(dirty, 900, "the pattern declares all 900 tiles dirty")
+        at = 6
+        while at < len(p):
+            _, len_field = struct.unpack("<HH", p[at:at + 4])
+            at += 4 + (len_field & 0x3FFF)
+            painted += 1
+        check_equal(at, len(p), "mask records tile the packet exactly")
+    check_equal(painted, 900, "the pattern paints every tile")
+
 
 def test_describe_bundle():
     """bundle-info's output is the whole point of the manifest, so it is checked.

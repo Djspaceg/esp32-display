@@ -3234,6 +3234,15 @@ int main() {
     CHECK((deviceproto::CAP_TILE_STREAM & deviceproto::CAP_POWER) == 0);
     CHECK((deviceproto::CAP_TILE_STREAM & deviceproto::CAP_COMPRESSED_BANDS) ==
           0);
+    // Round glass, the sender's cue to skip the fifth of the framebuffer
+    // behind the bezel. Only the CO5300 board entry sets roundDisplay, so
+    // only it can advertise this; pinned because the Swift side spells the
+    // same number out by hand (DeviceProtocol.Capabilities.roundDisplay).
+    CHECK(deviceproto::CAP_ROUND_DISPLAY == 1u << 16);
+    CHECK((deviceproto::CAP_ROUND_DISPLAY & deviceproto::CAP_TILE_STREAM) == 0);
+    CHECK(board::configFor(board::Variant::AmoledCo5300).roundDisplay);
+    CHECK(!board::configFor(board::Variant::LcdSt7789).roundDisplay);
+    CHECK(!board::configFor(board::Variant::TouchJd9853).roundDisplay);
   }
 
   // --- packed band packets: header flag bits and the record walker ---------
