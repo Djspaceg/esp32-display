@@ -107,6 +107,45 @@ final class TileProtocolTests: XCTestCase {
         XCTAssertTrue(fullRow[0] == (start: 30, length: 30))
     }
 
+    // MARK: - Tile diffing
+
+    func testDirtyTilesFindsExactlyTheChangedTiles() {
+        let clean = [UInt8](repeating: 0x11, count: g466.frameBytes)
+        var frame = clean
+        // Identical frames: nothing dirty.
+        XCTAssertEqual(
+            TileProtocol.dirtyTiles(new: frame, previous: clean, geometry: g466),
+            [])
+        // One pixel at (20, 20) - inside tile (1,1) = index 31 - dirties
+        // exactly that tile.
+        frame[(20 * 466 + 20) * 2] ^= 0xFF
+        XCTAssertEqual(
+            TileProtocol.dirtyTiles(new: frame, previous: clean, geometry: g466),
+            [31])
+        // A pixel pair straddling a tile boundary (x = 15 and 16, y = 0)
+        // dirties tiles 0 and 1 - and the result is sorted.
+        frame = clean
+        frame[(0 * 466 + 15) * 2] ^= 0xFF
+        frame[(0 * 466 + 16) * 2] ^= 0xFF
+        XCTAssertEqual(
+            TileProtocol.dirtyTiles(new: frame, previous: clean, geometry: g466),
+            [0, 1])
+        // The last pixel of the frame lives in the 2x2 corner tile (899);
+        // the edge arithmetic must reach it.
+        frame = clean
+        frame[g466.frameBytes - 1] ^= 0xFF
+        XCTAssertEqual(
+            TileProtocol.dirtyTiles(new: frame, previous: clean, geometry: g466),
+            [899])
+        // A change in the last COLUMN's 2 px strip (x = 464, y = 100 ->
+        // tile row 6, col 29 = tile 209).
+        frame = clean
+        frame[(100 * 466 + 464) * 2] ^= 0xFF
+        XCTAssertEqual(
+            TileProtocol.dirtyTiles(new: frame, previous: clean, geometry: g466),
+            [6 * 30 + 29])
+    }
+
     // MARK: - Run extraction
 
     func testExtractRunReadsTheRightRect() {
