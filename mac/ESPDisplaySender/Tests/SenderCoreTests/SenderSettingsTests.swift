@@ -8,10 +8,21 @@ import XCTest
 /// unreachable without editing a plist.
 final class SenderSettingsTests: XCTestCase {
 
+    /// The default capture rate is 60, not the historical 40: 40 became
+    /// ScreenCaptureKit's `minimumFrameInterval` and so hard-capped the whole
+    /// pipeline below the project's target.
+    ///
+    /// Asserted against the literal 60 rather than `SenderSettings.defaultFps`
+    /// on purpose. The three places that default has to agree - the property,
+    /// the explicit init's parameter, and the decode fallback - do not check
+    /// each other, and the explicit init SHADOWS the property, so a change to
+    /// the property alone does nothing observable. Comparing against the
+    /// constant would pass in exactly that broken state.
     func testDefaultsMatchTheOldFlagDefaults() {
         let settings = SenderSettings()
 
-        XCTAssertEqual(settings.fps, 40)
+        XCTAssertEqual(settings.fps, 60)
+        XCTAssertEqual(SenderSettings.defaultFps, 60)
         XCTAssertEqual(settings.spacingMicros, 200)
         XCTAssertTrue(settings.adaptivePacing)
         XCTAssertEqual(settings.identifySeconds, 8)
@@ -37,6 +48,13 @@ final class SenderSettingsTests: XCTestCase {
         let tolerant = try JSONDecoder().decode(SenderSettings.self, from: future)
         XCTAssertEqual(tolerant.tileQuality, .auto)
         XCTAssertEqual(tolerant.fps, 25)
+        // A file with no fps at all takes the current default, not a stale
+        // copy of it - the decode fallback is the third place the default is
+        // written out, and the one least likely to be noticed if it drifts.
+        let noFps = Data(#"{"identifySeconds": 9}"#.utf8)
+        let defaulted = try JSONDecoder().decode(SenderSettings.self, from: noFps)
+        XCTAssertEqual(defaulted.fps, 60)
+        XCTAssertEqual(defaulted.identifySeconds, 9)
     }
 
     func testTileQualityRoundTrips() throws {
