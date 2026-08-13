@@ -299,6 +299,35 @@ orientation-native so they align to whole rows:
 | Portrait 172×320  | 4 rows × 344B | 80          | 1382B       |
 | Landscape 320×172 | 2 rows × 640B | 86          | 1286B       |
 
+### Tile streaming (square AMOLED panels)
+
+The 466×466 AMOLED board advertises `CAP_TILE_STREAM` and speaks a
+tile-based successor to the band protocol (`firmware/display_stream/
+tile_protocol.h`, mirrored in `TileProtocol.swift`): the frame is a 30×30
+grid of 16×16 tiles, only tiles that changed travel, and horizontally
+adjacent dirty tiles merge into runs — one wire record and one panel draw
+call each. Each run is encoded three ways — raw, RLE565, and BC1 (a fixed
+4:1 lossy block codec, `bc1.h`/`BC1.swift`) — and the smallest wins,
+subject to the quality setting in the app (Lossless only / Automatic /
+Aggressive; Automatic keeps flat colors and gradients pixel-perfect and
+compresses only textured content). Records pack greedily into 1472-byte
+datagrams, because the panel's ceiling is datagrams per second, not bytes.
+
+The win over bands is granularity: a small moving element dirties a few
+512-byte tiles instead of full 932-byte rows, and photo or video content
+BC1-compresses where RLE cannot. Measured against the same board on the
+band protocol, light content went from ~29 fps at ~300 datagrams/s to
+~35 fps at ~70 datagrams/s.
+
+Tile packets claim bit 15 of the header's second field — the same bit
+packed band packets use, and the two layouts are byte-ambiguous past it —
+so a board advertises exactly ONE of `CAP_TILE_STREAM` /
+`CAP_COMPRESSED_BANDS` and parses bit-15 packets as that one. The C6
+boards keep packed bands byte-identically; classic unpacked band packets
+(bit 15 clear) stay accepted everywhere, which is what keeps a tile panel
+drivable by an older sender — slower, never wrong. Full design, budget
+math, and measured numbers: `docs/tile-stream-plan.md`.
+
 The device replies with a compatible 1Hz heartbeat (`EHB1` +
 frame/drop/packet/heap counters) to whoever sent it packets last; the sender
 emits a 2s `EPNG` keepalive so that address stays fresh through static screens.
