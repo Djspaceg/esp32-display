@@ -9,7 +9,28 @@ import SenderProtocol
 struct SenderSettings: Codable, Equatable {
     /// Capture and send rate. The panel's SPI bus and WiFi link, not the Mac,
     /// set the practical ceiling.
-    var fps: Int = 40
+    ///
+    /// 60 rather than the historical 40: this value becomes
+    /// ScreenCaptureKit's `minimumFrameInterval`, so 40 was a hard cap on
+    /// everything downstream, and the ~35 fps that
+    /// docs/tile-stream-plan.md section 12.3 recorded as an unexplained
+    /// sender-side limit was simply 87% of it. With the send path measured
+    /// at ~7 ms/frame (~139 fps of headroom) after the pacing and encode
+    /// fixes, the cap is what was left in the way of the project's stated
+    /// target. Capture still only delivers frames when content CHANGES, so
+    /// a static screen costs nothing extra; the cost of raising this is
+    /// borne only while pixels are actually moving. UNVERIFIED on the C6
+    /// boards, which have a much lower datagram ceiling - adaptive pacing
+    /// and change-driven capture should absorb it, but nobody has watched
+    /// one at 60.
+    ///
+    /// The value lives in `defaultFps` because it is needed in three places
+    /// - this property, the explicit `init`'s parameter default, and the
+    /// decode fallback - and the explicit init SHADOWS the property default,
+    /// so changing this line alone silently does nothing. That is exactly
+    /// the mistake raising this from 40 to 60 made first; the constant is
+    /// what stops it happening again.
+    var fps: Int = defaultFps
     /// Per-chunk pacing sleep in microseconds. Higher means fewer frames
     /// dropped by the device and a lower peak rate.
     var spacingMicros: UInt32 = 200
@@ -22,7 +43,12 @@ struct SenderSettings: Codable, Equatable {
     /// have no lossy codec and ignore it.
     var tileQuality: TileLossyPolicy = .auto
 
-    init(fps: Int = 40, spacingMicros: UInt32 = 200, adaptivePacing: Bool = true,
+    /// Default capture rate; see `fps` for why this is a named constant
+    /// rather than three repeated literals.
+    static let defaultFps = 60
+
+    init(fps: Int = defaultFps, spacingMicros: UInt32 = 200,
+         adaptivePacing: Bool = true,
          identifySeconds: Int = 8, tileQuality: TileLossyPolicy = .auto) {
         self.fps = fps
         self.spacingMicros = spacingMicros
@@ -38,7 +64,7 @@ struct SenderSettings: Codable, Equatable {
     /// unrecognized tileQuality string also falls back rather than failing.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        fps = try c.decodeIfPresent(Int.self, forKey: .fps) ?? 40
+        fps = try c.decodeIfPresent(Int.self, forKey: .fps) ?? Self.defaultFps
         spacingMicros = try c.decodeIfPresent(UInt32.self, forKey: .spacingMicros) ?? 200
         adaptivePacing = try c.decodeIfPresent(Bool.self, forKey: .adaptivePacing) ?? true
         identifySeconds = try c.decodeIfPresent(Int.self, forKey: .identifySeconds) ?? 8

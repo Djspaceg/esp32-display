@@ -92,6 +92,27 @@ final class FrameSender {
     /// deliberately: forcing BC1 (rung a) engages when lossless could not
     /// sustain this, and frame skipping (rung c) only when even BC1 cannot.
     private static let degradeTargetFps = 30.0
+
+    // Per-stage cost of the tile send path, accumulated on sendQueue and
+    // reported every `tileStatInterval`. Added because the sender's own
+    // cadence was the one limit in docs/tile-stream-plan.md section 12.3
+    // that had never been measured - the panel's side was instrumented from
+    // phase 0, the Mac's side not at all, and "it is probably the encoder"
+    // is exactly the kind of guess this project has been wrong about before.
+    private var tileStatFrames = 0
+    private var tileStatTiles = 0
+    private var tileStatPackets = 0
+    private var tileStatDiffNs: UInt64 = 0
+    private var tileStatEncodeNs: UInt64 = 0
+    private var tileStatSendNs: UInt64 = 0
+    private var tileStatSleepNs: UInt64 = 0
+    private var tileStatAt = Date.distantPast
+    private let tileStatInterval: TimeInterval = 5
+
+    /// Absolute time the next datagram is due, in `DispatchTime` nanoseconds.
+    /// Persists across sends so the datagram rate holds across frames; see
+    /// `sendPaced`. sendQueue-only.
+    private var pacingDeadline: UInt64 = 0
     /// Orientation of the most recent frame sent, readable from any thread.
     ///
     /// This is the frame the panel currently has on screen, and so the frame its
@@ -196,6 +217,28 @@ final class FrameSender {
         let ceiling = max(floor, 1_000_000 / (minWorstCaseFps * bands))
         return floor...ceiling
     }
+
+    /// Datagrams sent back-to-back before pausing for their whole quota.
+    ///
+    /// Sleeping after EVERY datagram cannot pace at these intervals, which
+    /// instrumenting the send path made obvious: `usleep(333)` measured
+    /// ~890us on this machine and sometimes 2.5ms, because a sub-millisecond
+    /// sleep is dominated by syscall cost and macOS timer coalescing rather
+    /// than by the interval asked for. The result was a sender capped near
+    /// ~1120 datagrams/s while the panel accepts ~2850/s (phase 6) - so the
+    /// SENDER was the ceiling every earlier measurement blamed on ingest,
+    /// and pacing was 83% of a frame's cost.
+    ///
+    /// Bursting amortizes that slop over several datagrams, and pacing
+    /// against an absolute deadline (`pacingDeadline`) makes an overlong
+    /// sleep shorten the next one instead of accumulating. 8 stays well
+    /// under the ~44 datagrams the panel's 64 KB socket buffer absorbs,
+    /// which is what makes bursting safe here rather than lossy.
+    private static let pacingBurstPackets = 8
+
+    /// Longest single pacing sleep, a failsafe against a pathological
+    /// spacing x count product stalling the send queue.
+    private static let pacingMaxSleepMicros: UInt32 = 50_000
 
     private let spacingBounds: ClosedRange<UInt32>
     private var spacingMin: UInt32 { spacingBounds.lowerBound }
@@ -1002,21 +1045,12 @@ final class FrameSender {
             }
         }
 
-        for packet in packets {
-            conn.send(
-                content: packet,
-                completion: .contentProcessed { [weak self] error in
-                    if error != nil {
-                        self?.sendErrors &+= 1
-                    }
-                })
-            // Pace every packet: the panel's receive path accepts a bounded
-            // datagram rate (~1826/s measured on the S3, less on a single-core
-            // C6) and unpaced bursts overflow it and lose nearly everything.
-            if spacing > 0 {
-                usleep(spacing)
-            }
-        }
+        // Pace the datagrams: the panel's receive path accepts a bounded
+        // datagram rate (~2850/s measured on the S3 after phase 6, less on a
+        // single-core C6) and unpaced bursts overflow it and lose nearly
+        // everything. See sendPaced for why this bursts rather than sleeping
+        // per packet.
+        _ = sendPaced(packets, spacing: spacing, on: conn)
         bandsSent &+= UInt64(dirty.count)
         framesSent &+= 1
         lastSentFrame = pixels
@@ -1059,6 +1093,7 @@ final class FrameSender {
         }
 
         var dirty: [Int]
+        let diffStart = DispatchTime.now().uptimeNanoseconds
         if isKeyframe {
             // Even a keyframe covers only what the glass can show: the tiles
             // behind a round bezel are not merely unchanged, they are
@@ -1070,6 +1105,7 @@ final class FrameSender {
                 new: pixels, previous: prevTileFrame!, geometry: tiles,
                 mask: mask)
         }
+        tileStatDiffNs &+= DispatchTime.now().uptimeNanoseconds &- diffStart
         prevTileFrame = pixels
         prevTileLandscape = landscape
         bandsConsidered &+= UInt64(mask?.visibleTiles.count ?? tiles.tileCount)
@@ -1109,25 +1145,23 @@ final class FrameSender {
             skipNextTileFrame = floorEstimate > budgetBytes
         }
 
+        let encodeStart = DispatchTime.now().uptimeNanoseconds
         let packets = TilePacker.packets(
             frameId: id, dirtyTiles: dirty, pixels: pixels,
             geometry: tiles, landscape: landscape,
             policy: policy, forceLossy: forceLossy)
+        tileStatEncodeNs &+= DispatchTime.now().uptimeNanoseconds &- encodeStart
 
-        for packet in packets {
-            conn.send(
-                content: packet,
-                completion: .contentProcessed { [weak self] error in
-                    if error != nil {
-                        self?.sendErrors &+= 1
-                    }
-                })
-            // Same per-datagram pacing as the band path: the panel's receive
-            // ceiling is datagrams per second, whatever they carry.
-            if spacing > 0 {
-                usleep(spacing)
-            }
-        }
+        let sendStart = DispatchTime.now().uptimeNanoseconds
+        // Same per-datagram pacing as the band path: the panel's receive
+        // ceiling is datagrams per second, whatever they carry.
+        let sleepNs = sendPaced(packets, spacing: spacing, on: conn)
+        tileStatSendNs &+= DispatchTime.now().uptimeNanoseconds &- sendStart
+        tileStatSleepNs &+= sleepNs
+        tileStatFrames += 1
+        tileStatTiles += dirty.count
+        tileStatPackets += packets.count
+        reportTileStatsIfDue(tiles: tiles)
         bandsSent &+= UInt64(dirty.count)
         framesSent &+= 1
         lastSentFrame = pixels
@@ -1136,6 +1170,81 @@ final class FrameSender {
         _currentLandscape = landscape
         lock.unlock()
         lastSendAt = Date()
+    }
+
+    /// Send datagrams at the target spacing and return the nanoseconds spent
+    /// asleep (so callers can report pacing separately from work).
+    ///
+    /// The deadline persists across calls, so the datagram rate is honoured
+    /// across frame boundaries too, not merely within one frame - the panel's
+    /// ceiling is datagrams per second whatever frame they belong to. An idle
+    /// gap resets it rather than letting a stale deadline authorize an
+    /// unbounded burst on the next frame.
+    private func sendPaced(
+        _ packets: [Data], spacing: UInt32, on conn: NWConnection
+    ) -> UInt64 {
+        guard !packets.isEmpty else { return 0 }
+        let spacingNs = UInt64(spacing) * 1_000
+        let start = DispatchTime.now().uptimeNanoseconds
+        if pacingDeadline < start { pacingDeadline = start }
+        var slept: UInt64 = 0
+        for (index, packet) in packets.enumerated() {
+            conn.send(
+                content: packet,
+                completion: .contentProcessed { [weak self] error in
+                    if error != nil {
+                        self?.sendErrors &+= 1
+                    }
+                })
+            guard spacingNs > 0 else { continue }
+            pacingDeadline &+= spacingNs
+            // Pause on burst boundaries only. The tail of a frame does not
+            // sleep: its debt rides on `pacingDeadline` into the next call,
+            // which is what keeps the rate honest without idling here.
+            guard (index + 1) % Self.pacingBurstPackets == 0 else { continue }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard pacingDeadline > now else { continue }
+            let micros = UInt32(
+                min((pacingDeadline - now) / 1_000,
+                    UInt64(Self.pacingMaxSleepMicros)))
+            if micros > 0 {
+                usleep(micros)
+                slept &+= DispatchTime.now().uptimeNanoseconds &- now
+            }
+        }
+        return slept
+    }
+
+    /// Report where the tile send path's time actually goes, every
+    /// `tileStatInterval` of streaming. `sleep` is the pacing usleep and is a
+    /// SUBSET of `send`, broken out because it is deliberate delay rather
+    /// than work: if it dominates, the pacing controller is the ceiling, not
+    /// the encoder. sendQueue-only, like the counters it reads.
+    private func reportTileStatsIfDue(tiles: TileGeometry) {
+        let now = Date()
+        guard now.timeIntervalSince(tileStatAt) >= tileStatInterval else { return }
+        defer {
+            tileStatAt = now
+            tileStatFrames = 0
+            tileStatTiles = 0
+            tileStatPackets = 0
+            tileStatDiffNs = 0
+            tileStatEncodeNs = 0
+            tileStatSendNs = 0
+            tileStatSleepNs = 0
+        }
+        guard tileStatFrames > 0, tileStatAt != .distantPast else { return }
+        let frames = Double(tileStatFrames)
+        func ms(_ ns: UInt64) -> Double { Double(ns) / 1_000_000 / frames }
+        let dirtyPercent = Double(tileStatTiles) / frames
+            / Double(max(tiles.tileCount, 1)) * 100
+        print(String(
+            format: "tile: %.1f frames/s, %.0f%% dirty, %.1f pkt/frame | "
+                + "per frame: diff %.2fms encode %.2fms send %.2fms "
+                + "(pacing %.2fms)",
+            frames / now.timeIntervalSince(tileStatAt), dirtyPercent,
+            Double(tileStatPackets) / frames, ms(tileStatDiffNs),
+            ms(tileStatEncodeNs), ms(tileStatSendNs), ms(tileStatSleepNs)))
     }
 
     /// Periodically re-send the current frame when capture has gone quiet.

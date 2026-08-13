@@ -702,3 +702,119 @@ Still open, and still the next conversation:
   merging**, both still unbuilt.
 - **Sender-side profiling** — limit 3 from section 12.3, still never done,
   still the cheapest remaining unknown.
+
+## 14. Sender-side profiling (phase 9, 2026-08-13)
+
+Section 12.3 listed three limits and named the third — "un-profiled
+sender-side capture/encode cadence" — as the cheapest remaining unknown.
+It was, and it was also the largest. Instrumenting the send path
+(`FrameSender.reportTileStatsIfDue`, a `tile:` line every 5 s) found two
+separate defects and one configuration mistake, none of which were where
+the guesses pointed.
+
+### 14.1 What the guesses got wrong
+
+The plan had assumed BC1 encode was the sender's expensive step
+(section 9 risk row: "BC1 encode is ~10 ops/px scalar; ~2-4 ms/full frame
+... profile in phase 4"). Phase 4 deferred that profiling and nothing
+since had looked. Measured, per full keyframe of 719 tiles:
+
+| Stage                   | First measurement | Suspected?                           |
+| ----------------------- | ----------------- | ------------------------------------ |
+| tile diff               | 0.23 ms           | feared ~1-2 ms; it is free           |
+| encode                  | 20.4 ms           | yes — but not for the reason assumed |
+| send                    | 103.3 ms          | never suspected at all               |
+| — of which pacing sleep | 100.6 ms          | —                                    |
+
+Pacing was 83% of a frame's cost and had never been measured once.
+
+### 14.2 Defect 1: sub-millisecond `usleep` cannot pace datagrams
+
+The send loop slept `spacingMicros` after every datagram. With spacing at
+333 µs, the measured cost was **890 µs per datagram**, and in the worst
+windows 2.5 ms against a 429 µs ceiling — a 6x overshoot. A
+sub-millisecond sleep is dominated by syscall cost and macOS timer
+coalescing, not by the interval requested. `sendQueue` was already
+`.userInteractive`, so QoS was not the cause.
+
+Consequence: the sender emitted at most ~1,120 datagrams/s while the
+panel accepts ~2,850/s (section 12.2). **Every earlier ceiling blamed on
+ingest was actually the sender's own pacing loop.** Phase 6 raised the
+panel's receive ceiling by 40% into headroom the sender could not use.
+
+Fix: send in bursts of 8 and sleep once per burst against an absolute
+deadline, so an overlong sleep shortens the next one instead of
+accumulating, and the datagram rate is honoured across frame boundaries
+rather than only within a frame. The burst is bounded well under the
+~44 datagrams the panel's 64 KB socket buffer absorbs — phase 6 is what
+makes bursting safe rather than lossy, so the two changes compound.
+
+Result: **890 µs → 225 µs per datagram**, i.e. ~4,440/s achievable,
+comfortably above the panel's ceiling. The sender is no longer the
+constraint on anything.
+
+### 14.3 Defect 2: the variance scan ran when it could not matter
+
+Encode's 20 ms was not BC1. On flat desktop content under `.auto`, the
+variance gate rejects BC1 — so BC1 was rarely encoded — but
+`runVariance` was computed for EVERY run first, a full pass with
+multiplies over each raster, to decide something that was already
+decided.
+
+BC1 is fixed-rate, so its encoded size is known from the run's
+dimensions without encoding anything. When the lossless winner is
+already at least as small, BC1 cannot win, and neither it nor the
+variance scan needs to run. Reordering `TilePacker.prepare` to check
+that first skips both in the common case.
+
+Also hoisted: `BC1.encode` re-expanded the same four palette colours to
+888 on every one of its 64 per-block distance comparisons. Expanding
+once per block is a pure algebraic hoist — the byte-for-byte wire
+vectors still pass unchanged.
+
+### 14.4 Mistake 3: the frame-rate default was the cap
+
+`SenderSettings.fps` defaulted to 40, and that value becomes
+ScreenCaptureKit's `minimumFrameInterval`. The ~35 fps that section 12.3
+recorded as a mysterious sender-side limit was **87% of a configured
+40 fps cap**. No amount of protocol work could ever have reached 60.
+
+Raised to 60. The default is now `SenderSettings.defaultFps`, because it
+has to agree in three places — the property, the explicit `init`'s
+parameter default, and the decode fallback — and the explicit init
+SHADOWS the property, so the first attempt at this change (editing only
+the property) compiled, passed, and did nothing. The test asserts the
+literal, not the constant, so that state cannot pass again.
+
+### 14.5 Measured after
+
+Same board, ordinary desktop content, capture at 60 fps, ~9% dirty:
+
+| Stage           | Before phase 9 | After             |
+| --------------- | -------------- | ----------------- |
+| diff            | 0.23 ms        | 0.35 ms           |
+| encode          | 20.4 ms        | **0.44 ms**       |
+| send            | 103.3 ms       | **6.4 ms**        |
+| per datagram    | 890 µs         | **225 µs**        |
+| send-path total | ~124 ms/frame  | **~7.2 ms/frame** |
+
+~7.2 ms per frame is ~139 fps of send-path headroom. The panel's `shown`
+counter tracks the sender almost exactly (124 frames per 5 s window), so
+frames are not being lost downstream either.
+
+### 14.6 Where the ceiling actually sits now
+
+~20-24 fps on desktop content, and **the send path is no longer why**.
+ScreenCaptureKit delivers frames only when content CHANGES; on a desktop
+with modest motion, 20-24 changed frames per second is what exists to
+send. That is correct behaviour, not a limit — and it means the honest
+statement of the remaining ceiling is:
+
+1. **~45 fps** full-frame QSPI paint (section 13.2, after round masking).
+2. **~2,850 datagrams/s** ingest, now genuinely reachable by the sender.
+3. **Content change rate**, which no amount of engineering raises.
+
+Untested: whether genuine 60 fps content (a 60 fps video) now delivers
+60 fps end to end. Everything measured says the pipeline has the
+headroom; nobody has watched it. That is the next measurement, and it
+needs 60 fps source material rather than a desk.

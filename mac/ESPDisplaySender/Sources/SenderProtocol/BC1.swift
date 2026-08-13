@@ -62,16 +62,21 @@ public enum BC1 {
         return [c0, c1, p2, p3]
     }
 
-    /// Squared distance between two RGB565 colors in 888 space (channels
-    /// expanded by bit replication, so green's extra bit does not double its
-    /// weight relative to a straight 5/6/5 comparison).
-    private static func distance2(_ a: UInt16, _ b: UInt16) -> Int {
-        func expand(_ c: UInt16) -> (Int, Int, Int) {
-            let r = Int(c >> 11), g = Int((c >> 5) & 0x3F), b = Int(c & 0x1F)
-            return ((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2))
-        }
-        let (ar, ag, ab) = expand(a)
-        let (br, bg, bb) = expand(b)
+    /// An RGB565 colour expanded to 8 bits per channel by bit replication,
+    /// so green's extra bit does not weigh more than a straight 5/6/5
+    /// comparison would give it.
+    @inline(__always)
+    private static func expand888(_ c: UInt16) -> (Int, Int, Int) {
+        let r = Int(c >> 11), g = Int((c >> 5) & 0x3F), b = Int(c & 0x1F)
+        return ((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2))
+    }
+
+    /// Squared distance between two RGB565 colors in 888 space. Kept for the
+    /// tests that pin the metric; `encode`'s inner loop inlines the same
+    /// arithmetic against a pre-expanded palette.
+    static func distance2(_ a: UInt16, _ b: UInt16) -> Int {
+        let (ar, ag, ab) = expand888(a)
+        let (br, bg, bb) = expand888(b)
         return (ar - br) * (ar - br) + (ag - bg) * (ag - bg)
             + (ab - bb) * (ab - bb)
     }
@@ -123,12 +128,29 @@ public enum BC1 {
                 let c0 = UInt16((rMax << 11) | (gMax << 5) | bMax)
                 let c1 = UInt16((rMin << 11) | (gMin << 5) | bMin)
                 let pal = palette(c0, c1)
+                // Expand the palette and the block's pixels to 888 ONCE.
+                // Calling distance2 per (pixel, palette entry) re-derived
+                // both sides every time - 64 expansions of the same four
+                // palette colours per block - and encode was the largest
+                // remaining cost in the send path. Pure hoist: the
+                // arithmetic and the tie-breaking are unchanged, so the
+                // bytes produced are identical.
+                var palR = [Int](repeating: 0, count: 4)
+                var palG = palR, palB = palR
+                for p in 0..<4 {
+                    let (r, g, b) = expand888(pal[p])
+                    palR[p] = r; palG[p] = g; palB[p] = b
+                }
                 var idx: UInt32 = 0
                 for i in 0..<16 {
-                    var best = distance2(px[i], pal[0])
+                    let (pr, pg, pb) = expand888(px[i])
+                    var best = Int.max
                     var sel: UInt32 = 0
-                    for p in 1..<4 {
-                        let d = distance2(px[i], pal[p])
+                    for p in 0..<4 {
+                        let dr = pr - palR[p]
+                        let dg = pg - palG[p]
+                        let db = pb - palB[p]
+                        let d = dr * dr + dg * dg + db * db
                         if d < best {  // strict: first index wins ties
                             best = d
                             sel = UInt32(p)

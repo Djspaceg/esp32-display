@@ -443,21 +443,27 @@ public enum TilePacker {
                 startTile: startTile, runLength: runLength,
                 codec: .rle565, payload: rle)
         }
-        let lossyEligible: Bool
-        switch policy {
-        case .losslessOnly:
-            lossyEligible = false
-        case .aggressive:
-            lossyEligible = true
-        case .auto:
-            lossyEligible = forceLossy
-                || runVariance(raw) >= autoVarianceThreshold
-        }
-        if lossyEligible {
-            let w = geometry.runPixelWidth(startTile: startTile, runLength: runLength)
-            let h = geometry.rowHeight(geometry.row(startTile))
-            if let bc1 = BC1.encode(raw[...], width: w, height: h),
-               bc1.count < best.payload.count {
+        // BC1 is fixed-rate, so its size is known WITHOUT encoding. When the
+        // lossless winner is already at least as small, BC1 cannot win, and
+        // neither it nor the variance scan needs to run at all. That is the
+        // common case for UI content - a flat tile RLEs to a few bytes
+        // against BC1's 128 - and encode was measured at ~30 us/tile, the
+        // single largest cost in the send path once pacing was fixed.
+        let w = geometry.runPixelWidth(startTile: startTile, runLength: runLength)
+        let h = geometry.rowHeight(geometry.row(startTile))
+        let bc1Size = BC1.encodedBytes(width: w, height: h)
+        if bc1Size > 0, bc1Size < best.payload.count {
+            let lossyEligible: Bool
+            switch policy {
+            case .losslessOnly:
+                lossyEligible = false
+            case .aggressive:
+                lossyEligible = true
+            case .auto:
+                lossyEligible = forceLossy
+                    || runVariance(raw) >= autoVarianceThreshold
+            }
+            if lossyEligible, let bc1 = BC1.encode(raw[...], width: w, height: h) {
                 best = PreparedRecord(
                     startTile: startTile, runLength: runLength,
                     codec: .bc1, payload: bc1)
