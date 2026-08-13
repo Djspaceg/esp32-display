@@ -66,6 +66,7 @@
 // host, so nothing in this file has to be declared before them.
 #include "band_protocol.h"
 #include "band_compress.h"
+#include "bc1.h"
 #include "device_protocol.h"
 #include "control_queue.h"
 #include "ota_policy.h"
