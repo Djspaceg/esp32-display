@@ -206,14 +206,19 @@ static const uint32_t BASE_CAPABILITIES =
     deviceproto::CAP_IDENTIFY | deviceproto::CAP_RESTART |
     deviceproto::CAP_SLEEP_SYNC | deviceproto::CAP_TELEMETRY |
     deviceproto::CAP_IDLE_TEXT |
-    // The RLE decode is chip-independent and the C6 gains from packing too
-    // (an 80-band keyframe becomes a handful of datagrams), so every board
-    // advertises it.
-    deviceproto::CAP_COMPRESSED_BANDS |
     // A manual on/off is not a hardware fact the way battery or rotate are -
     // every board here has a backlight or panel-command brightness sink
     // already, so every board can honour it.
     deviceproto::CAP_POWER;
+
+// Whether this board speaks the tile-stream protocol instead of packed
+// bands. A variant fact, not a shape fact: the draw path behind it is tuned
+// to this board's QSPI and PSRAM (see device_protocol.h's CAP_TILE_STREAM
+// comment), so a future square panel on other silicon must opt in
+// explicitly rather than inherit it.
+static inline bool tileStreamEnabled() {
+  return bcfg->variant == board::Variant::AmoledCo5300;
+}
 
 // Whether the touch controller came up. Not simply "is this the Touch board":
 // the chip has to actually answer, so a board with dead touch advertises no
@@ -293,6 +298,16 @@ static uint32_t deviceCapabilities() {
                               | deviceproto::CAP_TOUCH_LONGPRESS)
                            : 0u)
          | (batteryAvailable ? deviceproto::CAP_BATTERY : 0u)
+         // Exactly ONE bit-15 frame protocol per board, never both: a tile
+         // packet and a packed band packet are byte-ambiguous past the
+         // shared flag bit, so a board that accepted both could misparse
+         // one as the other. The tile board still accepts classic unpacked
+         // band packets (bit 15 clear) as the fallback for senders that
+         // predate tiles; every other board keeps packed bands, and the RLE
+         // decode is chip-independent so the C6 gains from packing too (an
+         // 80-band keyframe becomes a handful of datagrams).
+         | (tileStreamEnabled() ? deviceproto::CAP_TILE_STREAM
+                                : deviceproto::CAP_COMPRESSED_BANDS)
          // Quarter turns only where the glass is square. On a rectangular
          // panel a 90-degree mounting turn is what the sender-driven
          // landscape mechanism already expresses, and honouring rotation 1/3
@@ -353,6 +368,44 @@ static uint8_t pendingDrawBitmap[BITMAP_BYTES];
 static portMUX_TYPE drawMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t framesCompleted = 0;    // completion signal: UDP -> loop
 static volatile bool pendingLandscape = false;   // orientation for the pending draw
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+// ---- Tile stream (CAP_TILE_STREAM, tile_protocol.h) ----------------------
+// The band protocol's successor on this board: a 30x30 grid of 16x16 tiles,
+// only dirty runs travel, each raw / RLE565 / BC1. S3-compile-gated AND
+// variant-gated at runtime (tileStreamEnabled()) - the C6 binary carries
+// none of this. Bit 15 of the header's third/fourth bytes means TILE packet
+// on this board and PACKED BAND packet everywhere else; the two layouts are
+// byte-ambiguous past the flag, which is why the board advertises exactly
+// one of CAP_TILE_STREAM / CAP_COMPRESSED_BANDS, never both - see
+// deviceCapabilities().
+static const tileproto::TileGeometry TILE_GEOMETRY = {PANEL_GEOMETRY.width,
+                                                      PANEL_GEOMETRY.height};
+// Sized for the widest run any roadmap square panel can produce (30 tiles x
+// 16 px x 16 rows); the 466 panel's widest is 14,912 B. Also the size of
+// the CFGBENCH staging buffer these are shared with.
+static const size_t TILE_RUN_MAX_BYTES = (size_t)480 * 16 * 2;
+// Decode scratch for the UDP receive task: records decode here (internal
+// SRAM - the codecs' inner loops must not run against PSRAM), then rows are
+// strided-copied into bufA. Never touched by the draw path.
+static uint8_t tileScratch[TILE_RUN_MAX_BYTES] __attribute__((aligned(4)));
+// DMA staging for the draw path, double-buffered: the next run's rows are
+// gathered into one buffer while the previous run's transfer drains from
+// the other. Internal SRAM instead of the band path's full-frame PSRAM
+// bufB: phase 0 measured 340+ MB/s strided SRAM<->PSRAM against 22.3 MB/s
+// PSRAM->PSRAM (docs/tile-stream-plan.md section 11), and it keeps DMA
+// reads off PSRAM entirely.
+static uint8_t tileStaging[2][TILE_RUN_MAX_BYTES] __attribute__((aligned(4)));
+static tileproto::Reassembler tileReassembler(TILE_GEOMETRY);
+// Tiles applied to bufA but not yet drawn. Accumulates across frames like
+// pendingDrawBitmap does (per-tile recency); guarded by drawMux.
+static uint8_t pendingTileBitmap[tileproto::TILE_BITMAP_BYTES];
+// Draw calls per loop iteration. Bounds a pathological checkerboard frame
+// (up to 450 runs) so touch/serial/watchdog servicing cannot starve: 32
+// calls is ~5-29 ms of panel time at the measured 150-900 us per call. The
+// remainder is re-marked pending and finished next iteration.
+static const int TILE_DRAW_CALL_CAP = 32;
+#endif
 
 static bool panelLandscape = false;              // current panel MADCTL state
 // The user's mounting rotation, clockwise quarter turns 0-3. Supersedes the
@@ -485,6 +538,163 @@ static bool applyBandPayload(const bandproto::Header &h, bool compressed,
   return true;
 }
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+// Apply one tile record to bufA and run the reassembly bookkeeping - the
+// tile path's applyBandPayload. Same ordering rules: cheap shape checks,
+// then the reassembler classifies (stale/duplicate never touch bufA), then
+// decode. Decode goes into internal-SRAM tileScratch first because a run's
+// rows are NOT contiguous in the row-major frame buffer the way a band's
+// are - the strided copy below is the price of tiles, paid at the measured
+// 340+ MB/s, not the feared PSRAM-to-PSRAM rate.
+//
+// Both decoders are bounds-checked against exactly this run's raster
+// (rle565::decode refuses anything but an exact fill; bc1::decode refuses
+// any input length but encodedBytes(w,h) and clips edge blocks), so
+// whatever a datagram claims, nothing is written outside tileScratch. A
+// payload that fails decode after the reassembler counted its tiles leaves
+// them marked seen over the previous frame's pixels - a torn run on a
+// forged packet, healed by the next keyframe, never memory-unsafe: the
+// same accepted posture as the band path.
+static bool applyTileRecord(const tileproto::TileHeader &h,
+                            uint16_t startTile, uint16_t runLen,
+                            tileproto::TileCodec codec,
+                            const uint8_t *payload, size_t payloadLen) {
+  if (codec == tileproto::TileCodec::Reserved3) {
+    statBadLen = statBadLen + 1;  // future codec: refuse, never guess
+    return false;
+  }
+  const size_t rawLen = TILE_GEOMETRY.runRawBytes(startTile, runLen);
+  if (rawLen == 0 || rawLen > TILE_RUN_MAX_BYTES) {
+    return false;  // inexpressible run; onRecord would reject it too
+  }
+  if (codec == tileproto::TileCodec::Raw && payloadLen != rawLen) {
+    statBadLen = statBadLen + 1;
+    return false;
+  }
+
+  bool droppedFrame = false;
+  tileproto::RecordAction action =
+      tileReassembler.onRecord(h, startTile, runLen, droppedFrame);
+  if (droppedFrame) {
+    // Incomplete frame abandoned - its tiles are already in bufA and marked
+    // pending, so they still reach the panel with the next completed frame.
+    statFramesDropped = statFramesDropped + 1;
+  }
+  if (action == tileproto::RecordAction::Reject) {
+    return false;  // grid mismatch - sender misconfigured
+  }
+  if (action == tileproto::RecordAction::IgnoreStale ||
+      action == tileproto::RecordAction::Duplicate) {
+    return true;
+  }
+
+  // Orientation bookkeeping, mirroring the band path. On this square glass
+  // the grid is identical both ways, but the sender's keyframe-on-change
+  // contract and the pending-set flush must behave the same.
+  if (h.landscape != bufLandscape) {
+    portENTER_CRITICAL(&drawMux);
+    memset(pendingTileBitmap, 0, sizeof(pendingTileBitmap));
+    memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
+    portEXIT_CRITICAL(&drawMux);
+    bufLandscape = h.landscape;
+  }
+
+  const uint16_t runW = TILE_GEOMETRY.runPixelWidth(startTile, runLen);
+  const uint16_t runH = TILE_GEOMETRY.rowHeight(TILE_GEOMETRY.row(startTile));
+  switch (codec) {
+    case tileproto::TileCodec::Raw:
+      memcpy(tileScratch, payload, rawLen);
+      break;
+    case tileproto::TileCodec::Rle565:
+      if (!rle565::decode(payload, payloadLen, tileScratch, rawLen)) {
+        statBadLen = statBadLen + 1;
+        return false;
+      }
+      break;
+    case tileproto::TileCodec::Bc1:
+      if (!bc1::decode(payload, payloadLen, tileScratch, runW, runH)) {
+        statBadLen = statBadLen + 1;
+        return false;
+      }
+      break;
+    default:
+      return false;  // Reserved3 was refused above
+  }
+
+  // Strided copy into the row-major frame: the run's rows sit at the frame
+  // width's stride. Square panel, so the stride is PANEL_W both ways.
+  const size_t frameRowBytes =
+      (size_t)PANEL_GEOMETRY.frameWidth(h.landscape) * 2;
+  const size_t x0 =
+      (size_t)TILE_GEOMETRY.col(startTile) * tileproto::TILE_DIM;
+  const size_t y0 =
+      (size_t)TILE_GEOMETRY.row(startTile) * tileproto::TILE_DIM;
+  for (uint16_t r = 0; r < runH; r++) {
+    memcpy(bufA + (y0 + r) * frameRowBytes + x0 * 2,
+           tileScratch + (size_t)r * runW * 2, (size_t)runW * 2);
+  }
+
+  portENTER_CRITICAL(&drawMux);
+  for (uint16_t t = startTile; t < (uint16_t)(startTile + runLen); t++) {
+    pendingTileBitmap[t >> 3] |= (uint8_t)(1 << (t & 7));
+  }
+  portEXIT_CRITICAL(&drawMux);
+
+  if (action == tileproto::RecordAction::ApplyComplete) {
+    pendingLandscape = h.landscape;
+    framesCompleted = framesCompleted + 1;  // loop draws the pending tiles
+  }
+  return true;
+}
+
+// One tile-stream datagram (bit 15 set, on a board where that means tiles).
+// The walker validates each record's framing before applyTileRecord sees
+// it; the header's first_tile must name the first record's start tile, the
+// same cross-check the packed band path runs.
+static void handleTilePacket(const uint8_t *data, size_t len) {
+  tileproto::TileHeader h = tileproto::parseHeader(data);
+  if (!h.streamFlagSet || h.reservedBitsSet) {
+    statBadLen = statBadLen + 1;
+    return;
+  }
+  bool first = true;
+  bool ok = tileproto::forEachRecord(
+      data + tileproto::HEADER_BYTES, len - tileproto::HEADER_BYTES,
+      [&](uint16_t startTile, uint16_t runLen, tileproto::TileCodec codec,
+          const uint8_t *payload, size_t payloadLen) {
+        if (first) {
+          if (startTile != h.firstTile) return false;
+          first = false;
+        }
+        return applyTileRecord(h, startTile, runLen, codec, payload,
+                               payloadLen);
+      });
+  if (!ok) {
+    statBadLen = statBadLen + 1;
+    return;
+  }
+  statPackets = statPackets + 1;  // one datagram, one count, like packing
+}
+
+// Spin until fewer than `level` DMA transfers are queued. The tile draw
+// path's staging reuse gate: with two staging buffers alternating and the
+// panel's 2-deep transaction queue, dmaInFlight < 2 means the only transfer
+// possibly in flight is the OTHER buffer's, so writing this one is safe. A
+// spin, not delay(2)-polling, because the wait is tens of microseconds and
+// quantizing it to milliseconds would put a floor under the frame rate.
+static bool spinUntilDmaBelow(int32_t level, uint32_t maxUs) {
+  uint32_t start = micros();
+  while (dmaInFlight >= level) {
+    if ((uint32_t)(micros() - start) > maxUs) {
+      statDrawErrors = statDrawErrors + 1;
+      dmaInFlight = 0;  // same reclaim as the loop's stall failsafe
+      return false;
+    }
+  }
+  return true;
+}
+#endif
+
 // One inbound datagram, whatever transport delivered it: AsyncUDP's lwIP
 // callback on the C6, the dedicated receive task on the S3. `remoteIp` is in
 // the byte order the transport's reply path expects (IPAddress dword and
@@ -557,6 +767,17 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
     return;
   }
   if (h.packed) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    // On the tile board, bit 15 means TILE packet, full stop: this board
+    // advertises CAP_TILE_STREAM and not CAP_COMPRESSED_BANDS, so no
+    // correct sender ever sends it a packed band packet, and the two
+    // layouts are byte-ambiguous past the flag - parsing by capability is
+    // the only sound reading. See deviceCapabilities().
+    if (tileStreamEnabled()) {
+      handleTilePacket(data, len);
+      return;
+    }
+#endif
     // Packed packet: several band records in one datagram, each raw or
     // RLE-compressed (only sent to us because we advertise
     // CAP_COMPRESSED_BANDS). The walker validates each record's framing
@@ -1072,61 +1293,18 @@ static void applyPendingControl() {
 // per-draw-call overhead for the arbitrary-rectangle draws the tile protocol
 // needs. S3-gated because the tile protocol is scoped to this board and the
 // C6 binary is at 89% flash. Kept (not reverted) so phase 6's receive-path
-// tuning can re-measure with one serial command.
-//
-// The BC1 decoder here is the BENCH stand-in, shaped like the real one will
-// be (per-4x4-block palette build + 16 lookups) but without the hostile-input
-// hardening phase 1 adds. Numbers from it are representative of the decode
-// arithmetic, which is what phase 0 needs.
+// tuning can re-measure with one serial command. The decoders measured are
+// the real shipped ones (bc1.h, band_compress.h) since phase 1 landed.
 
 static const int BENCH_RUN_W = 480;  // 30 tiles x 16 px, the max wire run
 static const int BENCH_RUN_H = 16;
 static const size_t BENCH_RUN_BYTES = (size_t)BENCH_RUN_W * BENCH_RUN_H * 2;
-static uint8_t benchStaging[BENCH_RUN_BYTES] __attribute__((aligned(4)));
-
-// Decode BC1 blocks (8B per 4x4) into a wxh RGB565 raster; w and h must be
-// multiples of 4 (bench inputs are - edge-tile clipping is the real
-// decoder's problem, phase 1). Returns pixels decoded. Palette entries 2 and
-// 3 are the standard 1/3-2/3 interpolants, computed per RGB565 channel
-// without unpacking to 888.
-static size_t benchBc1Decode(const uint8_t *src, size_t srcLen, uint8_t *dst,
-                             int w, int h) {
-  if ((w & 3) != 0 || (h & 3) != 0) return 0;
-  const int bw = w / 4, bh = h / 4;
-  if (srcLen < (size_t)bw * bh * 8) return 0;
-  for (int by = 0; by < bh; by++) {
-    for (int bx = 0; bx < bw; bx++) {
-      const uint8_t *b = src + ((size_t)by * bw + bx) * 8;
-      uint16_t c0 = (uint16_t)(b[0] | (b[1] << 8));
-      uint16_t c1 = (uint16_t)(b[2] | (b[3] << 8));
-      uint16_t pal[4];
-      pal[0] = c0;
-      pal[1] = c1;
-      {
-        uint16_t r0 = c0 >> 11, g0 = (c0 >> 5) & 0x3F, b0 = c0 & 0x1F;
-        uint16_t r1 = c1 >> 11, g1 = (c1 >> 5) & 0x3F, b1 = c1 & 0x1F;
-        pal[2] = (uint16_t)((((2 * r0 + r1) / 3) << 11) |
-                            ((((2 * g0 + g1) / 3) & 0x3F) << 5) |
-                            (((2 * b0 + b1) / 3) & 0x1F));
-        pal[3] = (uint16_t)((((r0 + 2 * r1) / 3) << 11) |
-                            ((((g0 + 2 * g1) / 3) & 0x3F) << 5) |
-                            (((b0 + 2 * b1) / 3) & 0x1F));
-      }
-      uint32_t idx = (uint32_t)b[4] | ((uint32_t)b[5] << 8) |
-                     ((uint32_t)b[6] << 16) | ((uint32_t)b[7] << 24);
-      for (int py = 0; py < 4; py++) {
-        uint8_t *row = dst + ((size_t)(by * 4 + py) * w + bx * 4) * 2;
-        for (int px = 0; px < 4; px++) {
-          uint16_t c = pal[idx & 3];
-          idx >>= 2;
-          row[px * 2] = (uint8_t)(c >> 8);  // wire order: big-endian
-          row[px * 2 + 1] = (uint8_t)c;
-        }
-      }
-    }
-  }
-  return (size_t)w * h;
-}
+// Shared with the tile draw path's staging: same size by construction, same
+// task (both run from loopTask), and the bench drains DMA around every use,
+// so the two can never race. Saves 15 KB of internal SRAM.
+static uint8_t *const benchStaging = tileStaging[0];
+static_assert(BENCH_RUN_BYTES == TILE_RUN_MAX_BYTES,
+              "bench and tile staging must stay the same size to share");
 
 // Spin (not delay(2)-poll like waitForDmaIdle) so the wait itself does not
 // quantize per-call draw timings to milliseconds.
@@ -1208,14 +1386,17 @@ static void runTileBench() {
     }
   }
 
-  // (a) BC1 decode, SRAM -> SRAM.
+  // (a) BC1 decode, SRAM -> SRAM. Phase 0 measured a bench stand-in; this
+  // is now bc1.h's real hardened decoder, the one the receive path runs.
   {
     const int reps = 300;
     uint32_t t0 = micros();
     size_t px = 0;
     for (int i = 0; i < reps; i++) {
-      px += benchBc1Decode(bc1Input, sizeof(bc1Input), benchStaging,
-                           BENCH_RUN_W, BENCH_RUN_H);
+      if (bc1::decode(bc1Input, sizeof(bc1Input), benchStaging, BENCH_RUN_W,
+                      BENCH_RUN_H)) {
+        px += (size_t)BENCH_RUN_W * BENCH_RUN_H;
+      }
     }
     uint32_t us = micros() - t0;
     Serial.printf("bench: bc1 decode %u px in %lu us -> %.2f Mpx/s\n",
@@ -2869,9 +3050,16 @@ void loop() {
     // Snapshot-and-clear the pending set; the UDP task keeps marking bands
     // for the next frame while we draw this one.
     uint8_t bands[BITMAP_BYTES];
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    uint8_t tiles[tileproto::TILE_BITMAP_BYTES];
+#endif
     portENTER_CRITICAL(&drawMux);
     memcpy(bands, pendingDrawBitmap, sizeof(bands));
     memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    memcpy(tiles, pendingTileBitmap, sizeof(tiles));
+    memset(pendingTileBitmap, 0, sizeof(pendingTileBitmap));
+#endif
     bool landscape = pendingLandscape;
     portEXIT_CRITICAL(&drawMux);
 
@@ -2927,6 +3115,80 @@ void loop() {
         }
       }
     });
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    // Tile runs (CAP_TILE_STREAM): merged horizontal rects, each one strided
+    // gather from bufA into internal-SRAM staging then one clipped
+    // draw_bitmap. Staging instead of bufB for the reasons at tileStaging's
+    // declaration; double-buffered so the next run's gather overlaps the
+    // previous run's transfer. Runs never cross a tile-row (forEachRowRun),
+    // and run merging is what keeps the ~150 us fixed per-call cost paid
+    // per REGION, not per tile.
+    {
+      static int tileStagingIdx = 0;
+      int tileDrawCalls = 0;
+      bool tileDeferred = false;
+      tileproto::forEachRowRun(tiles, TILE_GEOMETRY, [&](uint16_t row,
+                                                         uint16_t colStart,
+                                                         uint16_t colEnd) {
+        if (tileDrawCalls >= TILE_DRAW_CALL_CAP) {
+          // Budget spent this iteration: put the run back and finish next
+          // time, so a pathological checkerboard cannot starve touch,
+          // serial, or the watchdog. bufA already holds the pixels; only
+          // the panel push is deferred.
+          portENTER_CRITICAL(&drawMux);
+          for (uint16_t c = colStart; c < colEnd; c++) {
+            const uint16_t t =
+                (uint16_t)(row * TILE_GEOMETRY.tileCols() + c);
+            pendingTileBitmap[t >> 3] |= (uint8_t)(1 << (t & 7));
+          }
+          portEXIT_CRITICAL(&drawMux);
+          tileDeferred = true;
+          return;
+        }
+        const int x0 = (int)colStart * tileproto::TILE_DIM;
+        const int y0 = (int)row * tileproto::TILE_DIM;
+        int x1 = (int)colEnd * tileproto::TILE_DIM;
+        if (x1 > (int)TILE_GEOMETRY.width) x1 = TILE_GEOMETRY.width;
+        const int w = x1 - x0;
+        const int hgt = TILE_GEOMETRY.rowHeight(row);
+        // Reusing a staging buffer requires its previous transfer done:
+        // two buffers alternating against the 2-deep queue means
+        // dmaInFlight < 2 leaves only the OTHER buffer possibly in flight.
+        spinUntilDmaBelow(2, 500000);
+        uint8_t *staging = tileStaging[tileStagingIdx];
+        tileStagingIdx ^= 1;
+        for (int r = 0; r < hgt; r++) {
+          memcpy(staging + (size_t)r * w * 2,
+                 bufA + ((size_t)(y0 + r) * drawWidth + x0) * 2,
+                 (size_t)w * 2);
+        }
+        dmaInFlight = dmaInFlight + 1;
+        dmaQueuedAt = millis();
+        esp_err_t err = esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + w,
+                                                  y0 + hgt, staging);
+        if (err != ESP_OK) {
+          statDrawErrors = statDrawErrors + 1;
+          dmaInFlight = dmaInFlight - 1;
+        } else {
+          drewAny = true;
+          tileDrawCalls++;
+          // Same rule as the band runs: fresh pixels over the info bar's
+          // rows would erase it, so redraw the bar on top.
+          if (infoBarActive() &&
+              panelstate::rowRangeOverlaps(y0, y0 + hgt, infoBarY0,
+                                           infoBarY1)) {
+            waitForDmaIdle(200);
+            redrawInfoBarOverRun();
+          }
+        }
+      });
+      if (tileDeferred) {
+        framesCompleted = framesCompleted + 1;  // drain the rest next pass
+      }
+    }
+#endif
+
     if (drewAny) {
       statFramesShown = statFramesShown + 1;
       // A drawn frame implies the sender is present and the Mac's displays

@@ -88,6 +88,13 @@ enum Capability : uint32_t {
   // version bump, per the reasoning at EBAT below: a sender only sends
   // tile packets to a panel that advertised it, so every other pairing -
   // including every C6 board - stays byte-identical on the wire.
+  //
+  // MUTUALLY EXCLUSIVE with CAP_COMPRESSED_BANDS: both formats claim bit 15
+  // of the header's second field and are byte-ambiguous past it, so a board
+  // advertises exactly one of the two and parses bit-15 packets as that one.
+  // Classic unpacked band packets (bit 15 clear) stay accepted everywhere,
+  // which is what keeps a tile panel drivable by a sender that predates
+  // tiles - slower, never wrong.
   CAP_TILE_STREAM = 1u << 15,
 };
 
