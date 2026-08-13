@@ -96,6 +96,20 @@ enum Capability : uint32_t {
   // which is what keeps a tile panel drivable by a sender that predates
   // tiles - slower, never wrong.
   CAP_TILE_STREAM = 1u << 15,
+  // This panel's glass is ROUND: pixels outside the frame's inscribed circle
+  // are physically not visible and never will be. A per-board hardware fact
+  // like CAP_BATTERY, not an "accepts X" - advertised so a sender can stop
+  // spending bandwidth and panel paint time on a fifth of the framebuffer
+  // nobody can see (181 of the 466x466 panel's 900 tiles, measured on the
+  // glass with `espdisp.py tile-test --round-mask`).
+  //
+  // Nothing in the firmware acts on this: the receive path accepts whatever
+  // subset of tiles the sender declares in dirty_count, so the saving is
+  // entirely the sender's to take, and a sender that ignores this bit is
+  // still correct - just slower. The bit exists because the SENDER cannot
+  // know the glass shape any other way; the board reads it from its own
+  // table (board::Config::roundDisplay).
+  CAP_ROUND_DISPLAY = 1u << 16,
 };
 
 enum class ControlOpcode : uint8_t {

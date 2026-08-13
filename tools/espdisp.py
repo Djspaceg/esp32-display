@@ -1777,9 +1777,129 @@ def tile_test_packets(frame_id: int, width: int = 466,
     return packets
 
 
+def tile_visibility(width: int = 466, height: int = 466,
+                    tile_dim: int = TILE_DIM) -> dict:
+    """Classify every tile of a round panel's grid against the inscribed circle.
+
+    Returns {"outside": [...], "boundary": [...], "inside": [...]} of tile
+    indices. A pixel (x, y) counts as visible when its CENTRE lies inside the
+    circle of radius width/2 centred on the frame's middle. A tile is
+    `outside` only when its nearest pixel to the centre is still outside (so
+    every pixel of it is invisible - the tiles a round-aware sender may skip
+    forever), `inside` when its farthest pixel is within, and `boundary`
+    otherwise: partly visible, and therefore NOT skippable.
+
+    Deliberately conservative in the one direction that matters: skipping a
+    tile that turns out to be visible leaves it permanently stale, because
+    keyframes would skip it too.
+    """
+    cx = width / 2.0
+    cy = height / 2.0
+    r2 = (width / 2.0) ** 2
+    cols = (width + tile_dim - 1) // tile_dim
+    rows = (height + tile_dim - 1) // tile_dim
+    out = {"outside": [], "boundary": [], "inside": []}
+    for ty in range(rows):
+        for tx in range(cols):
+            x0, y0 = tx * tile_dim, ty * tile_dim
+            x1 = min(x0 + tile_dim, width)   # exclusive
+            y1 = min(y0 + tile_dim, height)
+            # Nearest and farthest pixel centres in each axis.
+            nx = min(max(cx, x0 + 0.5), x1 - 0.5)
+            ny = min(max(cy, y0 + 0.5), y1 - 0.5)
+            fx = x0 + 0.5 if abs(x0 + 0.5 - cx) > abs(x1 - 0.5 - cx) else x1 - 0.5
+            fy = y0 + 0.5 if abs(y0 + 0.5 - cy) > abs(y1 - 0.5 - cy) else y1 - 0.5
+            tile = ty * cols + tx
+            if (nx - cx) ** 2 + (ny - cy) ** 2 >= r2:
+                out["outside"].append(tile)
+            elif (fx - cx) ** 2 + (fy - cy) ** 2 < r2:
+                out["inside"].append(tile)
+            else:
+                out["boundary"].append(tile)
+    return out
+
+
+def round_mask_packets(frame_id: int, width: int = 466,
+                       height: int = 466) -> list:
+    """A full keyframe that colour-codes the round-glass mask, for verifying
+    it against real hardware BEFORE a sender relies on it.
+
+    Every tile is sent - nothing is masked - so the panel paints the whole
+    framebuffer. Tiles a round-aware sender WOULD skip are magenta; if any
+    magenta is visible on the glass the mask is wrong and would leave those
+    tiles permanently stale. Boundary tiles are green, so the mask's edge is
+    visible as a ring and can be compared against the glass edge; fully
+    visible tiles are dark grey.
+    """
+    classes = tile_visibility(width, height)
+    colour = {}
+    for tile in classes["outside"]:
+        colour[tile] = 0xF81F   # magenta: must be invisible
+    for tile in classes["boundary"]:
+        colour[tile] = 0x07E0   # green: the mask's edge, partly visible
+    for tile in classes["inside"]:
+        colour[tile] = 0x2104   # dark grey: fully visible
+    cols = (width + TILE_DIM - 1) // TILE_DIM
+    rows = (height + TILE_DIM - 1) // TILE_DIM
+
+    records = []
+    for tile in range(cols * rows):
+        tx, ty = tile % cols, tile // cols
+        w = min(TILE_DIM, width - tx * TILE_DIM)
+        h = min(TILE_DIM, height - ty * TILE_DIM)
+        payload = rle565_flat(colour[tile], w * h)
+        records.append((tile, tile_record(tile, 1, TILE_CODEC_RLE, payload)))
+
+    packets = []
+    current, size, first = [], 6, None
+    for start, rec in records:
+        if size + len(rec) > TILE_PACKET_BUDGET and current:
+            packets.append(tile_header(frame_id, first, cols * rows)
+                           + b"".join(current))
+            current, size, first = [], 6, None
+        if first is None:
+            first = start
+        current.append(rec)
+        size += len(rec)
+    if current:
+        packets.append(tile_header(frame_id, first, cols * rows)
+                       + b"".join(current))
+    return packets
+
+
 def cmd_tile_test(args) -> int:
-    packets = tile_test_packets(args.frame_id)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    if args.round_mask:
+        classes = tile_visibility()
+        total = sum(len(v) for v in classes.values())
+        print("round-glass mask over a %d-tile grid:" % total)
+        print("  %d skippable (magenta - MUST be invisible)"
+              % len(classes["outside"]))
+        print("  %d boundary  (green - the mask edge, partly visible)"
+              % len(classes["boundary"]))
+        print("  %d interior  (dark grey)" % len(classes["inside"]))
+        # Re-send on a timer: the panel shows its idle card a few tens of
+        # seconds after the last packet, which would paint over the pattern
+        # while it is being inspected.
+        deadline = time.time() + args.hold
+        frame = args.frame_id
+        rounds = 0
+        while True:
+            for packet in round_mask_packets(frame):
+                sock.sendto(packet, (args.host, 5568))
+                time.sleep(0.004)
+            rounds += 1
+            frame = (frame + 1) & 0xFFFF
+            if time.time() >= deadline:
+                break
+            time.sleep(1.5)
+        print("\nheld the pattern for %.0fs (%d repaints)" % (args.hold, rounds))
+        print("PASS if no magenta is visible anywhere on the glass.")
+        print("The green ring is the mask's outermost kept tiles; it may be")
+        print("partly cut off by the glass edge - that is expected and safe.")
+        return 0
+
+    packets = tile_test_packets(args.frame_id)
     sent = 0
     for i, packet in enumerate(packets):
         sock.sendto(packet, (args.host, 5568))
@@ -2176,6 +2296,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_tile.add_argument(
         "--frame-id", type=int, default=1,
         help="starting frame id (bump between runs so frames are not stale)",
+    )
+    p_tile.add_argument(
+        "--round-mask", action="store_true",
+        help="paint the round-glass mask instead: tiles a round-aware sender "
+             "would skip are magenta and must be invisible on the glass",
+    )
+    p_tile.add_argument(
+        "--hold", type=float, default=30.0,
+        help="seconds to keep repainting the round-mask pattern (default 30)",
     )
     p_tile.set_defaults(func=cmd_tile_test)
 

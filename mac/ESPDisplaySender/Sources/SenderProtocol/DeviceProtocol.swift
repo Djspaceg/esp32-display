@@ -86,6 +86,15 @@ public enum DeviceProtocol {
         /// byte-identical on the wire, which is why this is a capability
         /// bit and not a protocol version bump.
         public static let tileStream = Capabilities(rawValue: 1 << 15)
+        /// This panel's glass is round, so pixels outside the frame's
+        /// inscribed circle are physically invisible and never need sending.
+        /// A per-board hardware fact like `battery`, and the only way the
+        /// sender can know the glass shape — the firmware acts on it not at
+        /// all, since the tile receive path accepts whatever subset of tiles
+        /// a frame declares. Ignoring it is correct, merely slower: on the
+        /// 466x466 panel it is 181 of 900 tiles, a fifth of both the wire
+        /// cost and the panel's paint time.
+        public static let roundDisplay = Capabilities(rawValue: 1 << 16)
     }
 
     public struct DeviceInfo: Equatable, Sendable {

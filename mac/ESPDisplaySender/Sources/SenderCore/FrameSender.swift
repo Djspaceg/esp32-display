@@ -64,6 +64,15 @@ final class FrameSender {
     /// geometry can carry the tile protocol at all (every square panel can;
     /// this exists so a hostile mDNS geometry cannot reach tile arithmetic).
     private let tileGeometry: TileGeometry?
+    /// Which tiles this panel can actually show. Built from
+    /// `Capabilities.roundDisplay` on the first EINF; nil until then, which
+    /// means "send everything" - the safe direction, since a tile sent
+    /// needlessly costs bandwidth while a tile skipped wrongly is permanent
+    /// corruption.
+    private var _tileMask: TileMask?
+    /// The roundness the panel last advertised, so the mask is rebuilt on a
+    /// change rather than on every 2-second EINF.
+    private var _peerRoundDisplay: Bool?
     /// When BC1 may win a run - the user's quality lever (settings UI).
     private var _tileLossyPolicy: TileLossyPolicy = .auto
     /// Tile-diff state (touched only on sendQueue), separate from prevFrame
@@ -527,6 +536,17 @@ final class FrameSender {
             _peerAcceptsPackedBands = info.capabilities.contains(.compressedBands)
             _peerAcceptsTileStream = info.capabilities.contains(.tileStream)
                 && tileGeometry != nil
+            // Round glass: rebuild the mask only when the advertised answer
+            // changes. It is a per-panel constant, but EINF repeats every
+            // 2 s and the classification walks every tile. Keyed on what the
+            // panel SAID rather than on the resulting mask, so a round flag
+            // the mask declines to honour (non-square glass, which no round
+            // panel has) does not re-walk the grid every heartbeat.
+            let round = info.capabilities.contains(.roundDisplay)
+            if _peerRoundDisplay != round, let tiles = tileGeometry {
+                _peerRoundDisplay = round
+                _tileMask = TileMask(geometry: tiles, round: round)
+            }
             _lastHeartbeatAt = Date()
             _deviceReplies &+= 1
             lock.unlock()
@@ -926,9 +946,11 @@ final class FrameSender {
 
         lock.lock()
         let tileStream = _peerAcceptsTileStream
+        let mask = _tileMask
         lock.unlock()
         if tileStream, let tiles = tileGeometry {
-            sendTileFrame(pixels, landscape: landscape, tiles: tiles, conn: conn)
+            sendTileFrame(pixels, landscape: landscape, tiles: tiles,
+                          mask: mask, conn: conn)
             return
         }
 
@@ -1020,7 +1042,7 @@ final class FrameSender {
     /// diff granularity differ.
     private func sendTileFrame(
         _ pixels: [UInt8], landscape: Bool, tiles: TileGeometry,
-        conn: NWConnection
+        mask: TileMask?, conn: NWConnection
     ) {
         let keyframeDue =
             Date().timeIntervalSince(lastTileKeyframeAt) > keyframeInterval
@@ -1038,15 +1060,19 @@ final class FrameSender {
 
         var dirty: [Int]
         if isKeyframe {
-            dirty = Array(0..<tiles.tileCount)
+            // Even a keyframe covers only what the glass can show: the tiles
+            // behind a round bezel are not merely unchanged, they are
+            // unseeable, so nothing is ever owed to them.
+            dirty = mask?.visibleTiles ?? Array(0..<tiles.tileCount)
             lastTileKeyframeAt = Date()
         } else {
             dirty = TileProtocol.dirtyTiles(
-                new: pixels, previous: prevTileFrame!, geometry: tiles)
+                new: pixels, previous: prevTileFrame!, geometry: tiles,
+                mask: mask)
         }
         prevTileFrame = pixels
         prevTileLandscape = landscape
-        bandsConsidered &+= UInt64(tiles.tileCount)
+        bandsConsidered &+= UInt64(mask?.visibleTiles.count ?? tiles.tileCount)
         guard !dirty.isEmpty else { return }  // identical frame: send nothing
 
         let id = frameId

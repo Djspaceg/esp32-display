@@ -369,6 +369,85 @@ final class TileProtocolTests: XCTestCase {
         XCTAssertEqual(packets.count, 1)
     }
 
+    // MARK: - Round-glass mask
+
+    func testRoundMaskCountsForThe466Panel() {
+        // Verified against real glass before anything relied on it:
+        // `espdisp.py tile-test --round-mask` painted these 181 tiles
+        // magenta and none of them was visible, with the boundary ring
+        // reaching the bezel. The counts are spelled out rather than
+        // recomputed so a change to the predicate fails here.
+        let mask = TileMask(geometry: g466, round: true)
+        XCTAssertTrue(mask.round)
+        XCTAssertEqual(mask.visibleTiles.count, 719)
+        XCTAssertEqual(mask.hiddenCount, 181)
+        XCTAssertEqual(mask.visibleTiles, mask.visibleTiles.sorted())
+        // The four corner tiles are the most obviously hidden.
+        XCTAssertFalse(mask.isVisible(0))
+        XCTAssertFalse(mask.isVisible(29))
+        XCTAssertFalse(mask.isVisible(870))
+        XCTAssertFalse(mask.isVisible(899))
+        // The centre is visible.
+        XCTAssertTrue(mask.isVisible(14 * 30 + 14))
+        XCTAssertTrue(mask.isVisible(15 * 30 + 15))
+        // Out of range is not visible rather than a trap.
+        XCTAssertFalse(mask.isVisible(-1))
+        XCTAssertFalse(mask.isVisible(900))
+    }
+
+    func testRoundMaskRowSpansAreOneContiguousInterval() {
+        // A circle's intersection with a tile-row is convex, so every row's
+        // visible tiles form ONE run. That is what keeps masking free on the
+        // draw side: 30 rows still cost 30 draw calls, never more. The spans
+        // are written out by hand from the geometry.
+        let expected = [
+            (9, 19), (7, 21), (5, 23), (4, 24), (3, 25), (2, 26), (2, 26),
+            (1, 27), (1, 27), (0, 28), (0, 28), (0, 28), (0, 29), (0, 29),
+            (0, 29), (0, 29), (0, 29), (0, 28), (0, 28), (0, 28), (1, 28),
+            (1, 27), (2, 27), (2, 26), (3, 25), (4, 24), (5, 23), (7, 22),
+            (9, 20), (12, 16),
+        ]
+        let mask = TileMask(geometry: g466, round: true)
+        for row in 0..<30 {
+            let cols = (0..<30).filter { mask.isVisible(row * 30 + $0) }
+            XCTAssertEqual(cols.first, expected[row].0, "row \(row) start")
+            XCTAssertEqual(cols.last, expected[row].1, "row \(row) end")
+            XCTAssertEqual(cols, Array(expected[row].0...expected[row].1),
+                           "row \(row) must be one contiguous span")
+        }
+    }
+
+    func testMaskHidesNothingWhenNotRound() {
+        // Rectangular panels need no special case at the call sites.
+        let flat = TileMask(geometry: g466, round: false)
+        XCTAssertFalse(flat.round)
+        XCTAssertEqual(flat.visibleTiles.count, 900)
+        XCTAssertEqual(flat.hiddenCount, 0)
+        // A round flag on non-square glass is refused: no such panel exists,
+        // and the inscribed-circle arithmetic would be wrong for it.
+        let oblong = TileMask(
+            geometry: TileGeometry(width: 172, height: 320), round: true)
+        XCTAssertFalse(oblong.round)
+        XCTAssertEqual(oblong.hiddenCount, 0)
+    }
+
+    func testDirtyTilesSkipsMaskedTiles() {
+        // A change in a corner tile is invisible, so it must not be reported.
+        let clean = [UInt8](repeating: 0x11, count: g466.frameBytes)
+        var frame = clean
+        frame[0] ^= 0xFF                       // tile 0: hidden corner
+        frame[(233 * 466 + 233) * 2] ^= 0xFF   // dead centre: visible
+        let mask = TileMask(geometry: g466, round: true)
+        let masked = TileProtocol.dirtyTiles(
+            new: frame, previous: clean, geometry: g466, mask: mask)
+        XCTAssertEqual(masked, [14 * 30 + 14])
+        // Without the mask both tiles report, which is what the band-era
+        // behavior was and still is for rectangular panels.
+        let unmasked = TileProtocol.dirtyTiles(
+            new: frame, previous: clean, geometry: g466)
+        XCTAssertEqual(unmasked, [0, 14 * 30 + 14])
+    }
+
     // MARK: - Constants
 
     func testWireConstantsMatchTheFirmware() {
@@ -386,9 +465,10 @@ final class TileProtocolTests: XCTestCase {
         XCTAssertEqual(TileProtocol.Codec.rle565.rawValue, 1)
         XCTAssertEqual(TileProtocol.Codec.bc1.rawValue, 2)
         // Pinned because the firmware spells the same number out by hand
-        // (deviceproto::CAP_TILE_STREAM).
+        // (deviceproto::CAP_TILE_STREAM, deviceproto::CAP_ROUND_DISPLAY).
         XCTAssertEqual(DeviceProtocol.Capabilities.tileStream.rawValue, 1 << 15)
+        XCTAssertEqual(DeviceProtocol.Capabilities.roundDisplay.rawValue, 1 << 16)
         XCTAssertTrue(DeviceProtocol.Capabilities.tileStream
-            .isDisjoint(with: [.power, .compressedBands]))
+            .isDisjoint(with: [.power, .compressedBands, .roundDisplay]))
     }
 }
