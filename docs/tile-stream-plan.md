@@ -587,3 +587,118 @@ hard limits remain, and none of them are the diffing engine:
 - **sdkconfig-locked receive knobs** (`CONFIG_LWIP_UDP_RECVMBOX_SIZE`, WiFi
   RX buffer counts, AMPDU-RX): would need an Arduino core rebuild, skipped
   per the plan's own decide-and-skip rule.
+
+## 13. Round-glass masking (phase 8, shipped 2026-08-13)
+
+The panel's glass is round. Every protocol above it — the band system, then
+the tile system — has been faithfully delivering the corners of a square
+framebuffer to a display that physically cannot show them. That is 181 of
+the 900 tiles, and it was being paid for on every keyframe and every frame
+whose changes touched a corner.
+
+Nothing in sections 1-12 noticed this. It is not a compression idea or a
+protocol idea; it is the observation that a fifth of the pixels were never
+addressable in the first place.
+
+### 13.1 The geometry
+
+A pixel is visible when its centre lies inside the frame's inscribed circle
+(radius 233 on 466x466). A tile is skippable only when its NEAREST pixel to
+the centre is still outside — a tile straddling the boundary holds visible
+pixels and must be sent whole.
+
+| Class                     | Tiles       | Note                      |
+| ------------------------- | ----------- | ------------------------- |
+| Fully outside (skippable) | 181 (20.1%) | never sent again          |
+| Straddling the boundary   | 106         | sent whole, partly wasted |
+| Fully inside              | 613         |                           |
+| Sent per keyframe         | 719         | was 900                   |
+
+Tile granularity costs almost nothing: the circle is 78.6% of the frame's
+area (π/4, as it must be), and the kept tiles cover 83.7% — so the mask
+captures 20.1 of the 21.4 percentage points theoretically available. 16 px
+tiles are simply small against a 233 px radius.
+
+Two properties make this cheaper than expected:
+
+- **A circle's intersection with a tile-row is convex**, so every row's
+  visible tiles form ONE contiguous span (row 0 is columns 9..19, row 1 is
+  7..21, ... row 29 is 12..16). Masking therefore never fragments a run and
+  never adds a draw call: 30 rows before, 30 rows after.
+- **It is sender-only.** The firmware needed no receive-path or draw-path
+  change at all, because `dirty_count` is sender-declared and the
+  reassembler completes at whatever the frame promised. A 719-tile keyframe
+  already worked. The only firmware change is one bit of advertisement.
+
+### 13.2 Why it attacks the case sections 12.3/12.4 could not
+
+Section 12.3 listed the ~38.9 fps QSPI paint ceiling as limit 1 and said
+"no protocol beats this". True, and irrelevant: masking is not a protocol
+change, it is a smaller frame. The panel paints only what the sender marks,
+so skipping 181 tiles removes their paint time too.
+
+| Path                             | Before             | After                  |
+| -------------------------------- | ------------------ | ---------------------- |
+| Full-frame paint (phase-0 model) | 25.7 ms → 38.9 fps | 22.2 ms → **45.0 fps** |
+| Keyframe tiles                   | 900                | 719                    |
+| Wire bytes, full frame           | 100%               | ~84%                   |
+
+So the one scenario still failing — majority-of-screen motion — gets ~20%
+relief on both axes at once, with no quality cost and no protocol change.
+It is not a fix for that case; it is a fifth of one.
+
+### 13.3 How the mask was made safe
+
+Skipping a tile that turns out to be visible is not like dropping a packet.
+It is permanent: no keyframe heals it, because keyframes skip it too. So
+every choice errs toward sending.
+
+- The predicate skips only tiles whose nearest pixel is outside.
+- A round flag on non-square geometry is declined outright.
+- The mask stays off until an EINF advertises `CAP_ROUND_DISPLAY`; a sender
+  that never learns is correct, merely slower.
+- **It was verified against the physical glass before anything relied on
+  it.** `espdisp.py tile-test --round-mask` paints the 181 skippable tiles
+  magenta, the 106 boundary tiles green, the interior grey, and sends all
+  900 — nothing masked — so a wrong mask appears as visible magenta rather
+  than as silence. Result on hardware: no magenta anywhere, and the green
+  ring reaching the bezel, i.e. the boundary sits exactly at the rim with
+  no margin wasted in either direction.
+- After enabling it, a window dragged to the rim rendered complete, with no
+  stale arc or frozen patch (user-verified).
+
+`CAP_ROUND_DISPLAY = 1u << 16` carries the one fact the sender cannot
+otherwise know, read from `board::Config::roundDisplay` (only the CO5300
+entry sets it). The 181/106/613 split is pinned independently in Swift
+(`TileMask`), Python (`tile_visibility`), and the C++ suite, per the
+no-shared-fixture rule.
+
+### 13.4 What was measured, and what was not
+
+Live window with the mask active, ordinary desktop content: ~20-26 fps at
+~66-140 datagrams/s, 0-2 dropped frames per 5 s window, `badlen` 0. The
+pre-mask session on comparable-but-not-identical content read ~24-27 fps at
+~450-550 datagrams/s with 5-12 drops per window.
+
+**That is not a controlled A/B and should not be read as one** — screen
+content cannot be replayed identically between runs, and the earlier
+measurement was taken during heavier use. What is exact is the arithmetic
+the suites pin (719 tiles per keyframe instead of 900, corner changes never
+reported dirty) and the paint figure projected from phase 0's measured
+per-call model. A genuine A/B would need the same content driven twice with
+the capability bit toggled between runs; it has not been done.
+
+### 13.5 What this leaves for the majority-of-motion case
+
+Still open, and still the next conversation:
+
+- **Boundary-tile flattening.** The 719 kept tiles still contain 11,244
+  invisible pixels (6.2% of what is sent) in the boundary ring. Zeroing
+  them before encoding would help RLE compress them — but it stretches
+  BC1's endpoint bounding box and would degrade the _visible_ pixels of the
+  same tile, so it is only sound applied to the RLE candidate alone. Modest,
+  with a trap in it.
+- **Half-res motion mode** (codec 3, section 6.8) and **vertical run
+  merging**, both still unbuilt.
+- **Sender-side profiling** — limit 3 from section 12.3, still never done,
+  still the cheapest remaining unknown.
