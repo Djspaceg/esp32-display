@@ -850,12 +850,40 @@ static void udpReceiveTask(void *) {
     }
     handleInbound(rxBuf, (size_t)n, from.sin_addr.s_addr,
                   ntohs(from.sin_port));
+    // Drain whatever queued while that one was being processed, without
+    // blocking. The point is lwIP's UDP receive mailbox: it is a fixed
+    // SMALL number of slots (CONFIG_LWIP_UDP_RECVMBOX_SIZE, an sdkconfig
+    // fact this build cannot change), so datagrams landing while a record
+    // decodes have very little room to wait in - pulling them out the
+    // moment processing ends, instead of taking the blocking path's
+    // suspend/wake round trip per datagram, is the one queue-depth lever
+    // available at runtime. Empty is the normal exit; a saturating flood
+    // cannot starve anything this way that it would not also starve
+    // through the blocking call, which returns immediately when data is
+    // queued.
+    while (true) {
+      fromLen = sizeof(from);
+      n = lwip_recvfrom(rxSock, rxBuf, sizeof(rxBuf), MSG_DONTWAIT,
+                        (struct sockaddr *)&from, &fromLen);
+      if (n <= 0) break;  // empty (EWOULDBLOCK) or error: back to blocking
+      handleInbound(rxBuf, (size_t)n, from.sin_addr.s_addr,
+                    ntohs(from.sin_port));
+    }
   }
 }
 
 static bool startInboundTransport() {
   rxSock = lwip_socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
   if (rxSock < 0) return false;
+  // Raise the socket's queued-byte cap (lwIP accounts SO_RCVBUF against
+  // datagrams waiting in the receive mailbox). The default is a few KB -
+  // two or three full datagrams - so a burst arriving while one record
+  // decodes gets dropped at the socket even when memory is plentiful.
+  // 64 KB holds a ~44-datagram burst. Best effort: if the option is
+  // compiled out of lwIP, the setsockopt fails and the old behavior
+  // stands - the drain loop in udpReceiveTask still helps on its own.
+  int rcvBuf = 64 * 1024;
+  lwip_setsockopt(rxSock, SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(rcvBuf));
   struct sockaddr_in addr = {};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(UDP_PORT);
