@@ -9,6 +9,7 @@
 
 #include "../display_stream/band_compress.h"
 #include "../display_stream/band_protocol.h"
+#include "../display_stream/bc1.h"
 #include "../display_stream/chip_identity.h"
 #include "../display_stream/control_queue.h"
 #include "../display_stream/device_protocol.h"
@@ -2697,6 +2698,221 @@ int main() {
       CHECK(rle565::decode(exact, sizeof(exact), dst.data(), dst.size()));
       CHECK(dst[0] == 0x11 && dst[5] == 0x22);
     }
+  }
+
+  // --- bc1: the lossy block codec for tile-stream run payloads -------------
+  // Byte-for-byte vectors written out by hand from the format comment in
+  // bc1.h, deliberately NOT shared with the Swift suite - each side asserts
+  // the wire independently, so a codec change that breaks interoperability
+  // fails a test rather than updating a fixture.
+  {
+    // Encoded size is a pure function of the raster dimensions: fixed-rate,
+    // ceil(w/4) x ceil(h/4) blocks of 8 bytes. Pinned over the 466x466 tile
+    // grid's real run shapes, including the 2 px edge tiles.
+    CHECK(bc1::encodedBytes(4, 4) == 8);
+    CHECK(bc1::encodedBytes(16, 16) == 128);       // one interior tile
+    CHECK(bc1::encodedBytes(464, 16) == 3712);     // widest full-height run
+    CHECK(bc1::encodedBytes(2, 16) == 32);         // right edge column tile
+    CHECK(bc1::encodedBytes(16, 2) == 32);         // bottom edge row tile
+    CHECK(bc1::encodedBytes(2, 2) == 8);           // the corner tile
+    CHECK(bc1::encodedBytes(466, 16) == 3744);     // full-width: 117x4 blocks
+    CHECK(bc1::encodedBytes(0, 16) == 0);          // refusals
+    CHECK(bc1::encodedBytes(16, 0) == 0);
+    CHECK(bc1::encodedBytes(4097, 4) == 0);        // beyond MAX_DIM
+  }
+  {
+    // Palette interpolants, hand-computed per RGB565 channel. c0 = 0xF800
+    // (pure red max), c1 = 0x0000 (black): r interpolants are 2*31/3 = 20
+    // and 31/3 = 10, so pal[2] = 20 << 11 = 0xA000, pal[3] = 10 << 11 =
+    // 0x5000. Integer division truncates - pinned so neither side rounds.
+    uint16_t pal[4];
+    bc1::palette(0xF800, 0x0000, pal);
+    CHECK(pal[0] == 0xF800 && pal[1] == 0x0000);
+    CHECK(pal[2] == 0xA000 && pal[3] == 0x5000);
+    // A mixed pair: c0 = 0xFFFF (white), c1 = 0x2104 (r=4,g=8,b=4).
+    // pal[2]: r=(62+4)/3=22, g=(126+8)/3=44, b=(62+4)/3=22 -> 0xB596.
+    // pal[3]: r=(31+8)/3=13, g=(63+16)/3=26, b=(31+8)/3=13 -> 0x6B4D.
+    bc1::palette(0xFFFF, 0x2104, pal);
+    CHECK(pal[2] == 0xB596);
+    CHECK(pal[3] == 0x6B4D);
+  }
+  {
+    // One hand-built block decoded byte for byte: endpoints red/black, index
+    // word 0xE4E4E4E4 = rows of indices 0,1,2,3 (LSB-first pairs). Every
+    // row must come out [red, black, 0xA000, 0x5000] in big-endian order.
+    const uint8_t block[] = {0x00, 0xF8, 0x00, 0x00,   // c0=0xF800 c1=0x0000
+                             0xE4, 0xE4, 0xE4, 0xE4};  // 0b11100100 per row
+    std::vector<uint8_t> dst(4 * 4 * 2, 0xA5);
+    CHECK(bc1::decode(block, sizeof(block), dst.data(), 4, 4));
+    for (int row = 0; row < 4; row++) {
+      const uint8_t *r = dst.data() + row * 8;
+      CHECK(r[0] == 0xF8 && r[1] == 0x00);  // index 0 -> c0
+      CHECK(r[2] == 0x00 && r[3] == 0x00);  // index 1 -> c1
+      CHECK(r[4] == 0xA0 && r[5] == 0x00);  // index 2 -> 2/3 point
+      CHECK(r[6] == 0x50 && r[7] == 0x00);  // index 3 -> 1/3 point
+    }
+  }
+  {
+    // Flat rasters round-trip exactly at every tile-grid shape, including
+    // the 2 px edges - bounding-box endpoints collapse to the one color.
+    const size_t shapes[][2] = {{16, 16}, {2, 16}, {16, 2}, {2, 2}, {48, 16}};
+    for (const auto &s : shapes) {
+      const size_t w = s[0], h = s[1];
+      std::vector<uint8_t> raw(w * h * 2);
+      for (size_t i = 0; i < raw.size(); i += 2) {
+        raw[i] = 0x2A;
+        raw[i + 1] = 0xAA;
+      }
+      std::vector<uint8_t> enc(bc1::encodedBytes(w, h));
+      CHECK(bc1::encode(raw.data(), w, h, enc.data(), enc.size()) ==
+            enc.size());
+      std::vector<uint8_t> dec(raw.size(), 0xA5);
+      CHECK(bc1::decode(enc.data(), enc.size(), dec.data(), w, h));
+      CHECK(memcmp(dec.data(), raw.data(), raw.size()) == 0);
+    }
+  }
+  {
+    // Two-tone content with channel-wise ordered colors (black-on-white
+    // text's shape) round-trips exactly: the bounding box IS the two colors.
+    const size_t w = 16, h = 16;
+    std::vector<uint8_t> raw(w * h * 2);
+    for (size_t i = 0; i < w * h; i++) {
+      const bool ink = (i / 3) % 2 == 0;  // stripes, both colors per block
+      raw[i * 2] = ink ? 0x00 : 0xFF;
+      raw[i * 2 + 1] = ink ? 0x00 : 0xFF;
+    }
+    std::vector<uint8_t> enc(bc1::encodedBytes(w, h));
+    CHECK(bc1::encode(raw.data(), w, h, enc.data(), enc.size()) == enc.size());
+    std::vector<uint8_t> dec(raw.size(), 0xA5);
+    CHECK(bc1::decode(enc.data(), enc.size(), dec.data(), w, h));
+    CHECK(memcmp(dec.data(), raw.data(), raw.size()) == 0);
+  }
+  {
+    // Lossy content: decode(encode(x)) must stay within the block's own
+    // color bounding box per channel - BC1 cannot invent colors outside the
+    // endpoints it derived. Deterministic pseudo-random rasters.
+    uint32_t seed = 0x1234567;
+    for (int trial = 0; trial < 20; trial++) {
+      const size_t w = 16, h = 16;
+      std::vector<uint8_t> raw(w * h * 2);
+      for (size_t i = 0; i < w * h; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        raw[i * 2] = (uint8_t)(seed >> 24);
+        raw[i * 2 + 1] = (uint8_t)(seed >> 16);
+      }
+      std::vector<uint8_t> enc(bc1::encodedBytes(w, h));
+      CHECK(bc1::encode(raw.data(), w, h, enc.data(), enc.size()) ==
+            enc.size());
+      std::vector<uint8_t> dec(raw.size());
+      CHECK(bc1::decode(enc.data(), enc.size(), dec.data(), w, h));
+      for (size_t by = 0; by < h / 4; by++) {
+        for (size_t bx = 0; bx < w / 4; bx++) {
+          uint16_t rMin = 0x1F, rMax = 0, gMin = 0x3F, gMax = 0, bMin = 0x1F,
+                   bMax = 0;
+          for (size_t py = 0; py < 4; py++) {
+            for (size_t px = 0; px < 4; px++) {
+              const size_t at = ((by * 4 + py) * w + bx * 4 + px) * 2;
+              const uint16_t p =
+                  (uint16_t)(((uint16_t)raw[at] << 8) | raw[at + 1]);
+              const uint16_t r = p >> 11, g = (p >> 5) & 0x3F, b = p & 0x1F;
+              if (r < rMin) rMin = r;
+              if (r > rMax) rMax = r;
+              if (g < gMin) gMin = g;
+              if (g > gMax) gMax = g;
+              if (b < bMin) bMin = b;
+              if (b > bMax) bMax = b;
+            }
+          }
+          for (size_t py = 0; py < 4; py++) {
+            for (size_t px = 0; px < 4; px++) {
+              const size_t at = ((by * 4 + py) * w + bx * 4 + px) * 2;
+              const uint16_t p =
+                  (uint16_t)(((uint16_t)dec[at] << 8) | dec[at + 1]);
+              const uint16_t r = p >> 11, g = (p >> 5) & 0x3F, b = p & 0x1F;
+              CHECK(r >= rMin && r <= rMax);
+              CHECK(g >= gMin && g <= gMax);
+              CHECK(b >= bMin && b <= bMax);
+            }
+          }
+        }
+      }
+    }
+  }
+  {
+    // Encoder refusals: zero dimensions, output that does not fit, absurd
+    // dimensions. All 0, matching rle565::encode's convention.
+    uint8_t raw[16 * 16 * 2] = {0};
+    uint8_t enc[256];
+    CHECK(bc1::encode(raw, 0, 16, enc, sizeof(enc)) == 0);
+    CHECK(bc1::encode(raw, 16, 0, enc, sizeof(enc)) == 0);
+    CHECK(bc1::encode(raw, 16, 16, enc, 127) == 0);  // needs exactly 128
+    CHECK(bc1::encode(raw, 16, 16, enc, 128) == 128);
+    CHECK(bc1::encode(raw, 4097, 4, enc, sizeof(enc)) == 0);
+  }
+  {
+    // SECURITY: the decoder must refuse malformed input and never read or
+    // write outside the buffers it was given, because it writes into the
+    // frame buffer from an unauthenticated datagram. Source and destination
+    // are heap allocations of EXACTLY the claimed sizes, ASan non-recovering
+    // (see run_tests.sh), so one stray byte in either direction aborts the
+    // suite - the same posture as the rle565 block above. BC1 is fixed-rate,
+    // so unlike RLE the whole input-length question is one exact equality:
+    // pinned one byte short AND one byte long, both sides of the boundary.
+    auto refused = [](size_t srcLen, size_t w, size_t h) {
+      std::vector<uint8_t> src(srcLen, 0x5A);
+      std::vector<uint8_t> dst(w * h * 2, 0xA5);
+      return !bc1::decode(src.data(), src.size(), dst.data(), w, h);
+    };
+    CHECK(refused(127, 16, 16));  // one byte short of the 128 required
+    CHECK(refused(129, 16, 16));  // one byte long
+    CHECK(refused(0, 16, 16));    // empty
+    CHECK(refused(7, 2, 2));      // corner tile needs exactly one block
+    CHECK(refused(9, 2, 2));
+    CHECK(refused(8, 0, 4));      // zero dimension never decodes
+    CHECK(refused(8, 4, 0));
+    CHECK(refused(32, 4097, 4));  // beyond MAX_DIM refused before any math
+    // Exact size succeeds - the positive control against the 0xA5 canary,
+    // on both the interior path (4x4) and the clipped edge path (2x2: one
+    // block, 4 of 16 index writes land, 12 are consumed and discarded).
+    {
+      const uint8_t block[] = {0x00, 0xF8, 0x00, 0xF8, 0x00, 0x00, 0x00, 0x00};
+      std::vector<uint8_t> dst(4 * 4 * 2, 0xA5);
+      CHECK(bc1::decode(block, sizeof(block), dst.data(), 4, 4));
+      CHECK(dst[0] == 0xF8 && dst[1] == 0x00);
+      CHECK(dst[30] == 0xF8 && dst[31] == 0x00);
+    }
+    {
+      // The 2x2 corner tile: dst is EXACTLY 8 bytes on the heap. A decoder
+      // that wrote any of the block's 12 padding pixels would land in ASan's
+      // redzone one byte past the raster and abort, so this vector pins the
+      // edge clip at the true boundary, not merely the return value.
+      const uint8_t block[] = {0x00, 0xF8, 0x00, 0xF8, 0x00, 0x00, 0x00, 0x00};
+      std::vector<uint8_t> dst(2 * 2 * 2, 0xA5);
+      CHECK(bc1::decode(block, sizeof(block), dst.data(), 2, 2));
+      for (size_t i = 0; i < dst.size(); i += 2) {
+        CHECK(dst[i] == 0xF8 && dst[i + 1] == 0x00);
+      }
+    }
+    {
+      // A 6x6 raster: 2x2 blocks, all four clipped (right column and bottom
+      // row of each outer block fall outside). Exact-size heap dst again.
+      std::vector<uint8_t> src(bc1::encodedBytes(6, 6), 0x00);
+      // All-black blocks: endpoints 0, all indices 0.
+      std::vector<uint8_t> dst(6 * 6 * 2, 0xA5);
+      CHECK(bc1::decode(src.data(), src.size(), dst.data(), 6, 6));
+      for (size_t i = 0; i < dst.size(); i++) CHECK(dst[i] == 0x00);
+    }
+  }
+  {
+    // Encode reads exactly w*h*2 source bytes: an exact-size heap source
+    // with edge-replication padding in play (6x6 needs 4 blocks, 3 of whose
+    // 16 gather reads per block would fall outside a naive unclamped read).
+    std::vector<uint8_t> raw(6 * 6 * 2, 0x33);
+    std::vector<uint8_t> enc(bc1::encodedBytes(6, 6));
+    CHECK(bc1::encode(raw.data(), 6, 6, enc.data(), enc.size()) == enc.size());
+    std::vector<uint8_t> dec(raw.size());
+    CHECK(bc1::decode(enc.data(), enc.size(), dec.data(), 6, 6));
+    CHECK(memcmp(dec.data(), raw.data(), raw.size()) == 0);
   }
 
   // --- packed band packets: header flag bits and the record walker ---------
