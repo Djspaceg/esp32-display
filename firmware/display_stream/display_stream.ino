@@ -1063,6 +1063,257 @@ static void applyPendingControl() {
   }
 }
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+// ---- CFGBENCH: tile-stream phase-0 measurements (S3 only) ----------------
+// On-target microbenchmarks feeding docs/tile-stream-plan.md's budget math:
+// BC1 decode rate, RLE565 decode rate, strided SRAM<->PSRAM copies, and
+// per-draw-call overhead for the arbitrary-rectangle draws the tile protocol
+// needs. S3-gated because the tile protocol is scoped to this board and the
+// C6 binary is at 89% flash. Kept (not reverted) so phase 6's receive-path
+// tuning can re-measure with one serial command.
+//
+// The BC1 decoder here is the BENCH stand-in, shaped like the real one will
+// be (per-4x4-block palette build + 16 lookups) but without the hostile-input
+// hardening phase 1 adds. Numbers from it are representative of the decode
+// arithmetic, which is what phase 0 needs.
+
+static const int BENCH_RUN_W = 480;  // 30 tiles x 16 px, the max wire run
+static const int BENCH_RUN_H = 16;
+static const size_t BENCH_RUN_BYTES = (size_t)BENCH_RUN_W * BENCH_RUN_H * 2;
+static uint8_t benchStaging[BENCH_RUN_BYTES] __attribute__((aligned(4)));
+
+// Decode BC1 blocks (8B per 4x4) into a wxh RGB565 raster; w and h must be
+// multiples of 4 (bench inputs are - edge-tile clipping is the real
+// decoder's problem, phase 1). Returns pixels decoded. Palette entries 2 and
+// 3 are the standard 1/3-2/3 interpolants, computed per RGB565 channel
+// without unpacking to 888.
+static size_t benchBc1Decode(const uint8_t *src, size_t srcLen, uint8_t *dst,
+                             int w, int h) {
+  if ((w & 3) != 0 || (h & 3) != 0) return 0;
+  const int bw = w / 4, bh = h / 4;
+  if (srcLen < (size_t)bw * bh * 8) return 0;
+  for (int by = 0; by < bh; by++) {
+    for (int bx = 0; bx < bw; bx++) {
+      const uint8_t *b = src + ((size_t)by * bw + bx) * 8;
+      uint16_t c0 = (uint16_t)(b[0] | (b[1] << 8));
+      uint16_t c1 = (uint16_t)(b[2] | (b[3] << 8));
+      uint16_t pal[4];
+      pal[0] = c0;
+      pal[1] = c1;
+      {
+        uint16_t r0 = c0 >> 11, g0 = (c0 >> 5) & 0x3F, b0 = c0 & 0x1F;
+        uint16_t r1 = c1 >> 11, g1 = (c1 >> 5) & 0x3F, b1 = c1 & 0x1F;
+        pal[2] = (uint16_t)((((2 * r0 + r1) / 3) << 11) |
+                            ((((2 * g0 + g1) / 3) & 0x3F) << 5) |
+                            (((2 * b0 + b1) / 3) & 0x1F));
+        pal[3] = (uint16_t)((((r0 + 2 * r1) / 3) << 11) |
+                            ((((g0 + 2 * g1) / 3) & 0x3F) << 5) |
+                            (((b0 + 2 * b1) / 3) & 0x1F));
+      }
+      uint32_t idx = (uint32_t)b[4] | ((uint32_t)b[5] << 8) |
+                     ((uint32_t)b[6] << 16) | ((uint32_t)b[7] << 24);
+      for (int py = 0; py < 4; py++) {
+        uint8_t *row = dst + ((size_t)(by * 4 + py) * w + bx * 4) * 2;
+        for (int px = 0; px < 4; px++) {
+          uint16_t c = pal[idx & 3];
+          idx >>= 2;
+          row[px * 2] = (uint8_t)(c >> 8);  // wire order: big-endian
+          row[px * 2 + 1] = (uint8_t)c;
+        }
+      }
+    }
+  }
+  return (size_t)w * h;
+}
+
+// Spin (not delay(2)-poll like waitForDmaIdle) so the wait itself does not
+// quantize per-call draw timings to milliseconds.
+static bool benchSpinDmaIdle(uint32_t maxUs) {
+  uint32_t start = micros();
+  while (dmaInFlight != 0) {
+    if ((uint32_t)(micros() - start) > maxUs) {
+      dmaInFlight = 0;  // same reclaim as the loop()'s stall failsafe
+      statDrawErrors = statDrawErrors + 1;
+      return false;
+    }
+  }
+  return true;
+}
+
+// One timed rect-draw pass: `reps` draws of w x h at (x,y), each serialized
+// (issue, then wait for completion), sourcing benchStaging. Staging is filled
+// from bufA first so the draws are visually invisible.
+static void benchDrawRect(const char *label, int x, int y, int w, int h,
+                          int reps) {
+  for (int r = 0; r < h; r++) {
+    memcpy(benchStaging + (size_t)r * w * 2,
+           bufA + ((size_t)(y + r) * PANEL_W + x) * 2, (size_t)w * 2);
+  }
+  benchSpinDmaIdle(500000);
+  uint32_t t0 = micros();
+  int errors = 0;
+  for (int i = 0; i < reps; i++) {
+    dmaInFlight = dmaInFlight + 1;
+    dmaQueuedAt = millis();
+    if (esp_lcd_panel_draw_bitmap(panel, x, y, x + w, y + h, benchStaging) !=
+        ESP_OK) {
+      dmaInFlight = dmaInFlight - 1;
+      errors++;
+      continue;
+    }
+    if (!benchSpinDmaIdle(500000)) errors++;
+  }
+  uint32_t us = micros() - t0;
+  Serial.printf("bench: draw %s %dx%d x%d: %lu us total, %.1f us/call, "
+                "%.0f calls/s, errors=%d\n",
+                label, w, h, reps, (unsigned long)us, (double)us / reps,
+                reps * 1e6 / (double)us, errors);
+}
+
+static void runTileBench() {
+  if (bufA == nullptr || bufB == nullptr || panel == nullptr) {
+    Serial.println("CFGERR bench: buffers/panel not ready");
+    return;
+  }
+  Serial.println("bench: starting (S3 tile-stream phase 0)");
+  esp_task_wdt_reset();
+
+  // Inputs live in internal SRAM (static/stack), like the real receive path's
+  // scratch will. Fill deterministically, mid-entropy so RLE gets a realistic
+  // mix of short runs and literals rather than an all-flat best case.
+  static uint8_t bc1Input[(BENCH_RUN_W / 4) * (BENCH_RUN_H / 4) * 8]
+      __attribute__((aligned(4)));
+  uint32_t seed = 0x1234567;
+  for (size_t i = 0; i < sizeof(bc1Input); i++) {
+    seed = seed * 1664525u + 1013904223u;
+    bc1Input[i] = (uint8_t)(seed >> 16);
+  }
+  static uint8_t rleInput[BENCH_RUN_BYTES + BENCH_RUN_BYTES / 256 + 8]
+      __attribute__((aligned(4)));
+  // Worst-case literal stream: control 0x7F + 128 distinct pixels, repeated.
+  size_t rleLen = 0;
+  {
+    size_t px = 0;
+    const size_t pixels = BENCH_RUN_W * BENCH_RUN_H;
+    while (px < pixels) {
+      size_t n = pixels - px < 128 ? pixels - px : 128;
+      rleInput[rleLen++] = (uint8_t)(n - 1);
+      for (size_t i = 0; i < n; i++) {
+        rleInput[rleLen++] = (uint8_t)(px >> 8);
+        rleInput[rleLen++] = (uint8_t)px;
+        px++;
+      }
+    }
+  }
+
+  // (a) BC1 decode, SRAM -> SRAM.
+  {
+    const int reps = 300;
+    uint32_t t0 = micros();
+    size_t px = 0;
+    for (int i = 0; i < reps; i++) {
+      px += benchBc1Decode(bc1Input, sizeof(bc1Input), benchStaging,
+                           BENCH_RUN_W, BENCH_RUN_H);
+    }
+    uint32_t us = micros() - t0;
+    Serial.printf("bench: bc1 decode %u px in %lu us -> %.2f Mpx/s\n",
+                  (unsigned)px, (unsigned long)us, (double)px / us);
+  }
+  esp_task_wdt_reset();
+
+  // (a2) RLE565 decode (worst-case all-literal), SRAM -> SRAM.
+  {
+    const int reps = 300;
+    uint32_t t0 = micros();
+    for (int i = 0; i < reps; i++) {
+      rle565::decode(rleInput, rleLen, benchStaging, BENCH_RUN_BYTES);
+    }
+    uint32_t us = micros() - t0;
+    const size_t px = (size_t)BENCH_RUN_W * BENCH_RUN_H * reps;
+    Serial.printf("bench: rle565 decode %u px in %lu us -> %.2f Mpx/s\n",
+                  (unsigned)px, (unsigned long)us, (double)px / us);
+  }
+  esp_task_wdt_reset();
+
+  // (b) Strided copies between internal SRAM and PSRAM bufA, both directions,
+  // 16 rows x 960 B at stride 932 px - the tile receive path's write and the
+  // draw path's staging read.
+  {
+    const size_t rowBytes = (size_t)PANEL_W * 2;
+    const int reps = 200;
+    uint32_t t0 = micros();
+    for (int i = 0; i < reps; i++) {
+      for (int r = 0; r < BENCH_RUN_H; r++) {
+        memcpy(bufA + (size_t)(100 + r) * rowBytes,
+               benchStaging + (size_t)r * BENCH_RUN_W * 2, BENCH_RUN_W * 2);
+      }
+    }
+    uint32_t us = micros() - t0;
+    double mb = (double)BENCH_RUN_BYTES * reps / 1e6;
+    Serial.printf("bench: strided write SRAM->PSRAM %.1f MB in %lu us -> "
+                  "%.1f MB/s\n", mb, (unsigned long)us, mb * 1e6 / us);
+    t0 = micros();
+    for (int i = 0; i < reps; i++) {
+      for (int r = 0; r < BENCH_RUN_H; r++) {
+        memcpy(benchStaging + (size_t)r * BENCH_RUN_W * 2,
+               bufA + (size_t)(100 + r) * rowBytes, BENCH_RUN_W * 2);
+      }
+    }
+    us = micros() - t0;
+    Serial.printf("bench: strided read PSRAM->SRAM %.1f MB in %lu us -> "
+                  "%.1f MB/s\n", mb, (unsigned long)us, mb * 1e6 / us);
+  }
+  esp_task_wdt_reset();
+
+  // (b2) Full-frame PSRAM -> PSRAM memcpy, the band path's bufA -> bufB cost.
+  {
+    const int reps = 5;
+    uint32_t t0 = micros();
+    for (int i = 0; i < reps; i++) memcpy(bufB, bufA, FRAME_BYTES);
+    uint32_t us = micros() - t0;
+    double mb = (double)FRAME_BYTES * reps / 1e6;
+    Serial.printf("bench: memcpy PSRAM->PSRAM %.1f MB in %lu us -> %.1f MB/s\n",
+                  mb, (unsigned long)us, mb * 1e6 / us);
+  }
+  esp_task_wdt_reset();
+
+  // (c) Draw-call overhead: serialized rect draws of the three shapes the
+  // tile draw path produces. Content is copied from bufA, so nothing visible
+  // changes on the glass.
+  benchDrawRect("tile", 200, 200, 16, 16, 200);
+  esp_task_wdt_reset();
+  benchDrawRect("run", 0, 200, BENCH_RUN_W, 16, 100);
+  esp_task_wdt_reset();
+  benchDrawRect("fullwidth", 0, 200, PANEL_W, 16, 100);
+  esp_task_wdt_reset();
+
+  // (c2) Pipelined 16x16 draws (no wait between issues, queue depth 2), the
+  // throughput bound as opposed to the per-call latency above.
+  {
+    const int reps = 200;
+    benchSpinDmaIdle(500000);
+    uint32_t t0 = micros();
+    int errors = 0;
+    for (int i = 0; i < reps; i++) {
+      dmaInFlight = dmaInFlight + 1;
+      dmaQueuedAt = millis();
+      if (esp_lcd_panel_draw_bitmap(panel, 200, 200, 216, 216, benchStaging) !=
+          ESP_OK) {
+        dmaInFlight = dmaInFlight - 1;
+        errors++;
+      }
+    }
+    benchSpinDmaIdle(500000);
+    uint32_t us = micros() - t0;
+    Serial.printf("bench: draw tile 16x16 x%d pipelined: %lu us, %.1f us/call,"
+                  " %.0f calls/s, errors=%d\n",
+                  reps, (unsigned long)us, (double)us / reps,
+                  reps * 1e6 / (double)us, errors);
+  }
+  Serial.println("CFGOK bench complete");
+}
+#endif  // CONFIG_IDF_TARGET_ESP32S3
+
 // Serial configuration protocol (USB CDC), so credentials can change
 // without reflashing:
 //   CFGWIFI <base64 ssid> <base64 password>\n  -> save to NVS, reply
@@ -1265,6 +1516,12 @@ static void processConfigLine(char *line) {
     rgbLed->show();
     ledOverrideUntil = millis() + 10000;
     Serial.printf("CFGOK led r=%d g=%d b=%d for 10s\n", r & 0xFF, g & 0xFF, b & 0xFF);
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  } else if (strcmp(line, "CFGBENCH") == 0) {
+    // Tile-stream phase-0 measurements; see runTileBench above. Blocks the
+    // loop for a few seconds while it runs, which is fine over USB.
+    runTileBench();
+#endif
   } else if (strncmp(line, "CFGOTAPW ", 9) == 0) {
     // Set or clear the OTA password:
     //   CFGOTAPW <b64 password>  enable OTA with this password
