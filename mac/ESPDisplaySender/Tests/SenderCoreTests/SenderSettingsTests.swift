@@ -15,7 +15,37 @@ final class SenderSettingsTests: XCTestCase {
         XCTAssertEqual(settings.spacingMicros, 200)
         XCTAssertTrue(settings.adaptivePacing)
         XCTAssertEqual(settings.identifySeconds, 8)
+        XCTAssertEqual(settings.tileQuality, .auto)
         XCTAssertEqual(settings, settings.validated, "defaults must be in range")
+    }
+
+    /// A settings.json written by a build that predates a field must keep
+    /// every field it does have and default the missing one - the whole file
+    /// failing to decode would silently reset the user's settings.
+    func testOlderSettingsFileDecodesWithDefaults() throws {
+        let old = Data(#"{"fps": 25, "spacingMicros": 300, "#.utf8)
+            + Data(#""adaptivePacing": false, "identifySeconds": 12}"#.utf8)
+        let decoded = try JSONDecoder().decode(SenderSettings.self, from: old)
+        XCTAssertEqual(decoded.fps, 25)
+        XCTAssertEqual(decoded.spacingMicros, 300)
+        XCTAssertFalse(decoded.adaptivePacing)
+        XCTAssertEqual(decoded.identifySeconds, 12)
+        XCTAssertEqual(decoded.tileQuality, .auto)
+        // An unrecognized quality string (a future build's value) falls back
+        // rather than failing the whole file.
+        let future = Data(#"{"fps": 25, "tileQuality": "halfRes"}"#.utf8)
+        let tolerant = try JSONDecoder().decode(SenderSettings.self, from: future)
+        XCTAssertEqual(tolerant.tileQuality, .auto)
+        XCTAssertEqual(tolerant.fps, 25)
+    }
+
+    func testTileQualityRoundTrips() throws {
+        var settings = SenderSettings()
+        settings.tileQuality = .losslessOnly
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(SenderSettings.self, from: data)
+        XCTAssertEqual(decoded.tileQuality, .losslessOnly)
+        XCTAssertEqual(decoded, settings)
     }
 
     /// The pacing bounds come from the sender itself, so the UI cannot offer a
