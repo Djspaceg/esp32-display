@@ -75,6 +75,17 @@ public enum DeviceProtocol {
         /// backlight or panel-command brightness sink, so every board can
         /// honour it.
         public static let power = Capabilities(rawValue: 1 << 14)
+        /// Accepts tile-stream packets (see `TileProtocol`): a 16x16
+        /// dirty-tile grid with per-run codec choice (raw / RLE565 / BC1)
+        /// replacing full-width bands. Advertised only by the square CO5300
+        /// AMOLED board — gated on the board variant, not on square
+        /// dimensions, so a future square panel on other silicon does not
+        /// inherit a draw path tuned for this board's QSPI and PSRAM. The
+        /// sender only sends tile packets to a panel advertising this;
+        /// every other pairing — including every C6 board — stays
+        /// byte-identical on the wire, which is why this is a capability
+        /// bit and not a protocol version bump.
+        public static let tileStream = Capabilities(rawValue: 1 << 15)
     }
 
     public struct DeviceInfo: Equatable, Sendable {

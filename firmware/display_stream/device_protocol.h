@@ -78,6 +78,17 @@ enum Capability : uint32_t {
   // it is a capability any panel with a backlight or an AMOLED panel command
   // can honour.
   CAP_POWER = 1u << 14,
+  // Accepts tile-stream packets (tile_protocol.h): a 16x16 dirty-tile grid
+  // with per-run codec choice (raw / RLE565 / BC1), replacing full-width
+  // bands on this panel. Advertised only by board::Variant::AmoledCo5300 -
+  // gated on the variant rather than panelW == panelH deliberately, so a
+  // hypothetical future square panel on other silicon does not inherit a
+  // draw path that was tuned for this board's QSPI and PSRAM (see
+  // docs/tile-stream-plan.md section 5). A capability bit rather than a
+  // version bump, per the reasoning at EBAT below: a sender only sends
+  // tile packets to a panel that advertised it, so every other pairing -
+  // including every C6 board - stays byte-identical on the wire.
+  CAP_TILE_STREAM = 1u << 15,
 };
 
 enum class ControlOpcode : uint8_t {
