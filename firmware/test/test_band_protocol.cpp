@@ -800,6 +800,138 @@ int main() {
     CHECK(panelstate::shouldShowBatteryLine(true, true));
   }
 
+  // --- idle card battery line TEXT: the full charge word, not just "chg" ---
+  // Before this the on-device card only ever said "batt NN%" or "batt NN%
+  // chg" - Discharging and Standby were indistinguishable on the glass, even
+  // though the wire protocol and the Mac app have always carried all three
+  // states. formatBatteryLine is what the card's text now goes through.
+  {
+    char buf[24];
+
+    // On USB power with no cell: reported plainly, before percent/charge is
+    // even consulted.
+    panelstate::formatBatteryLine(buf, sizeof(buf), true, false, false, 0,
+                                  panelstate::Charge::Unknown);
+    CHECK(strcmp(buf, "usb power") == 0);
+
+    // A battery present and charging: the word is "charging", not "chg".
+    panelstate::formatBatteryLine(buf, sizeof(buf), true, true, true, 84,
+                                  panelstate::Charge::Charging);
+    CHECK(strcmp(buf, "batt 84% charging") == 0);
+
+    // Discharging (on battery, no USB): this is the state the old "chg or
+    // nothing" line could never say.
+    panelstate::formatBatteryLine(buf, sizeof(buf), false, true, true, 61,
+                                  panelstate::Charge::Discharging);
+    CHECK(strcmp(buf, "batt 61% discharging") == 0);
+
+    // Standby (full and on USB, not actively charging): the other state the
+    // old line collapsed into a bare percentage indistinguishable from
+    // discharging.
+    panelstate::formatBatteryLine(buf, sizeof(buf), true, true, true, 100,
+                                  panelstate::Charge::Standby);
+    CHECK(strcmp(buf, "batt 100% standby") == 0);
+
+    // Unknown charge state still says its word rather than nothing.
+    panelstate::formatBatteryLine(buf, sizeof(buf), false, true, true, 50,
+                                  panelstate::Charge::Unknown);
+    CHECK(strcmp(buf, "batt 50% unknown") == 0);
+
+    // Present but the gauge has not settled: "batt --", same as before -
+    // there is no charge word worth printing next to a percentage that does
+    // not exist.
+    panelstate::formatBatteryLine(buf, sizeof(buf), false, true, false, 0,
+                                  panelstate::Charge::Charging);
+    CHECK(strcmp(buf, "batt --") == 0);
+
+    // chargeWord() is what both formatBatteryLine and the serial line's
+    // batteryChargeWord() go through - pinned here so the two callers cannot
+    // silently diverge on what a charge state is called.
+    CHECK(strcmp(panelstate::chargeWord(panelstate::Charge::Charging),
+                "charging") == 0);
+    CHECK(strcmp(panelstate::chargeWord(panelstate::Charge::Discharging),
+                "discharging") == 0);
+    CHECK(strcmp(panelstate::chargeWord(panelstate::Charge::Standby),
+                "standby") == 0);
+    CHECK(strcmp(panelstate::chargeWord(panelstate::Charge::Unknown),
+                "unknown") == 0);
+  }
+
+  // --- quick info bar: pure arithmetic behind the tap-triggered top bar ----
+  // The bar itself (drawing, DMA, redraw-on-overlap) needs a panel and cannot
+  // be host-tested; what is pure here is the row-range math, the overlap
+  // test that decides whether a streaming redraw must include the bar, and
+  // horizontal centring - exactly the kind of arithmetic most likely to be
+  // off by one and least likely to be caught by eye on real glass.
+  {
+    // Rectangular panel (172x320): plain 4px top margin, no round-glass
+    // inset.
+    int y0 = -1, y1 = -1;
+    panelstate::infoBarRowRange(172, 320, false, 9, y0, y1);
+    CHECK(y0 == 4 && y1 == 13);
+
+    // Round panel (466x466): the same 14.65%-of-diameter inset the idle card
+    // uses, so the bar's ends are not clipped by the bezel.
+    panelstate::infoBarRowRange(466, 466, true, 9, y0, y1);
+    CHECK(y0 == 4 + (int)(0.1465f * 466.0f));
+    CHECK(y1 == y0 + 9);
+
+    // A bar taller than the frame clamps its bottom edge rather than running
+    // off the buffer.
+    panelstate::infoBarRowRange(172, 10, false, 9, y0, y1);
+    CHECK(y0 == 4);
+    CHECK(y1 == 10);  // clamped to frameHeight, not 4+9=13
+
+    // Overlap: touching ranges overlap, adjacent (touching-but-not-crossing)
+    // ranges do not - the half-open interval convention every band offset in
+    // this codebase already uses.
+    CHECK(panelstate::rowRangeOverlaps(0, 10, 5, 15));   // straddles
+    CHECK(panelstate::rowRangeOverlaps(0, 10, 0, 10));   // identical
+    CHECK(panelstate::rowRangeOverlaps(5, 15, 0, 10));   // straddles, swapped args
+    CHECK(!panelstate::rowRangeOverlaps(0, 10, 10, 20));  // touching, not overlapping
+    CHECK(!panelstate::rowRangeOverlaps(10, 20, 0, 10));  // touching, swapped
+    CHECK(!panelstate::rowRangeOverlaps(0, 5, 10, 15));   // disjoint
+
+    // Centring: even and odd leftover space, and the never-negative clamp
+    // for a string wider than its container.
+    CHECK(panelstate::centeredX(100, 20) == 40);
+    CHECK(panelstate::centeredX(101, 20) == 40);  // odd leftover floors down
+    CHECK(panelstate::centeredX(20, 100) == 0);   // wider than container: flush left
+    CHECK(panelstate::centeredX(50, 50) == 0);    // exact fit
+  }
+
+  // --- millisSince: the underflow fix behind "sender silent 4294967s" -----
+  // The bug this guards: a plain `now - last` on a volatile written by a
+  // different task can see `last` momentarily newer than an already-
+  // captured `now`, wrapping a uint32_t subtraction to roughly UINT32_MAX.
+  // That corrupted "silence" duration is what flashed the idle screensaver
+  // on and off under load - see millisSince's doc comment in panel_state.h.
+  {
+    // Ordinary case: last strictly before now, behaves like plain subtraction.
+    CHECK(panelstate::millisSince(1000, 400) == 600);
+    CHECK(panelstate::millisSince(1000, 1000) == 0);  // simultaneous: zero, not wraparound
+
+    // The race itself: last a few ms AHEAD of now. A plain `now - last`
+    // would wrap to roughly UINT32_MAX; this clamps to zero instead of
+    // reporting billions of seconds of "silence" mid-stream.
+    CHECK(panelstate::millisSince(1000, 1005) == 0);
+    CHECK(panelstate::millisSince(0, 1) == 0);
+
+    // millis() wraparound (real, not the race): after ~49.7 days millis()
+    // itself wraps from UINT32_MAX to 0. now=5 just after the wrap and
+    // last=0xFFFFFFF0 (21ms before it) is a genuine 21ms gap spanning the
+    // wraparound, and plain unsigned subtraction already gets this right by
+    // construction (5 - 0xFFFFFFF0 wraps back around to 21) - this is
+    // exactly why the cast checks int32_t sign rather than comparing now and
+    // last directly, which would misclassify this legitimate case as the
+    // race and clamp a real small gap to zero.
+    CHECK(panelstate::millisSince(5, 0xFFFFFFF0u) == 21);
+
+    // A large but legitimate gap (near the SENDER_GONE_MS threshold and
+    // beyond) is reported exactly, not clamped - only last > now clamps.
+    CHECK(panelstate::millisSince(100000, 50000) == 50000);
+  }
+
   // --- the quarter-turn quadrant behind MADCTL and touch --------------------
   // panel_init.h cannot be host-tested (it needs the esp_lcd headers), so the
   // arithmetic it drives MADCTL with lives in panel_orientation.h and is
