@@ -132,6 +132,40 @@ public enum TileProtocol {
         return header
     }
 
+    /// Indices of tiles whose bytes differ between two frames, sorted
+    /// ascending - the tile protocol's `dirtyBands`. One strided memcmp per
+    /// tile scanline (up to 16 rows of at most 32 bytes), short-circuiting
+    /// on the first differing row; ~14,400 tiny compares for a fully clean
+    /// 466x466 frame, well under a millisecond on Apple Silicon.
+    public static func dirtyTiles(
+        new: [UInt8], previous: [UInt8], geometry: TileGeometry
+    ) -> [Int] {
+        precondition(new.count == geometry.frameBytes)
+        precondition(previous.count == geometry.frameBytes)
+        var dirty = [Int]()
+        let rowStride = geometry.width * 2
+        new.withUnsafeBytes { newRaw in
+            previous.withUnsafeBytes { oldRaw in
+                let newBase = newRaw.baseAddress!
+                let oldBase = oldRaw.baseAddress!
+                for tile in 0..<geometry.tileCount {
+                    let x0 = geometry.col(tile) * TileGeometry.tileDim
+                    let y0 = geometry.row(tile) * TileGeometry.tileDim
+                    let w = geometry.colWidth(geometry.col(tile)) * 2
+                    let h = geometry.rowHeight(geometry.row(tile))
+                    for r in 0..<h {
+                        let off = (y0 + r) * rowStride + x0 * 2
+                        if memcmp(newBase + off, oldBase + off, w) != 0 {
+                            dirty.append(tile)
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        return dirty
+    }
+
     /// Merge sorted dirty tile indices into runs of horizontally adjacent
     /// tiles, never crossing a tile-row boundary. Run merging is what makes
     /// the panel's ~150 us fixed draw-call cost affordable - phase 0

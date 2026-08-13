@@ -53,6 +53,26 @@ final class FrameSender {
     /// during which frames go in the classic one-raw-band-per-packet format -
     /// which is also everything a panel that never advertises it ever gets.
     private var _peerAcceptsPackedBands = false
+    /// Whether the panel has advertised `tileStream` over EINF. Mutually
+    /// exclusive with `compressedBands` on the wire (both formats claim bit
+    /// 15 of the header's second field - see TileProtocol), so a panel sets
+    /// at most one of these and the send path picks by whichever arrived.
+    /// Off until the first EINF, during which the classic band format flows
+    /// - the fallback every firmware accepts.
+    private var _peerAcceptsTileStream = false
+    /// The tile grid for this panel's geometry, present only when the
+    /// geometry can carry the tile protocol at all (every square panel can;
+    /// this exists so a hostile mDNS geometry cannot reach tile arithmetic).
+    private let tileGeometry: TileGeometry?
+    /// Whether BC1 may win a run (lossy). The lossless/auto knob lands with
+    /// the degradation policy; until then auto behavior: smallest wins.
+    private var _tileLossyAllowed = true
+    /// Tile-diff state (touched only on sendQueue), separate from prevFrame
+    /// deliberately: the band path's diff invalidation rules keep their own
+    /// variable so nothing about that path's reasoning changes.
+    private var prevTileFrame: [UInt8]?
+    private var prevTileLandscape = false
+    private var lastTileKeyframeAt = Date.distantPast
     /// Orientation of the most recent frame sent, readable from any thread.
     ///
     /// This is the frame the panel currently has on screen, and so the frame its
@@ -294,6 +314,7 @@ final class FrameSender {
         self.port = port
         self.serviceEndpoint = nil
         self.geometry = geometry
+        self.tileGeometry = Self.tileGeometry(for: geometry)
         self.spacingBounds = Self.spacingBounds(for: geometry)
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
@@ -309,11 +330,21 @@ final class FrameSender {
         self.port = 0
         self.serviceEndpoint = endpoint
         self.geometry = geometry
+        self.tileGeometry = Self.tileGeometry(for: geometry)
         self.spacingBounds = Self.spacingBounds(for: geometry)
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
         self._adaptivePacing = adaptivePacing
         self.onDeviceEvent = onDeviceEvent
+    }
+
+    /// The tile grid for a panel geometry, or nil when the tile protocol
+    /// cannot carry it. Nil disables the tile path outright, so a panel
+    /// advertising `tileStream` against an implausible mDNS geometry
+    /// degrades to bands instead of feeding bad numbers into grid math.
+    static func tileGeometry(for geometry: PanelGeometry) -> TileGeometry? {
+        let tiles = TileGeometry(width: geometry.width, height: geometry.height)
+        return tiles.isStreamable ? tiles : nil
     }
 
     private static let ipCachePath = "/tmp/espdisplaysender-device-ip"
@@ -476,6 +507,8 @@ final class FrameSender {
             lock.lock()
             _deviceInfo = info
             _peerAcceptsPackedBands = info.capabilities.contains(.compressedBands)
+            _peerAcceptsTileStream = info.capabilities.contains(.tileStream)
+                && tileGeometry != nil
             _lastHeartbeatAt = Date()
             _deviceReplies &+= 1
             lock.unlock()
@@ -858,7 +891,10 @@ final class FrameSender {
     /// Force the next frame to be sent in full (after reconnects or a
     /// detected device reboot, when the device's buffer state is unknown).
     func forceKeyframe() {
-        sendQueue.async { [weak self] in self?.prevFrame = nil }
+        sendQueue.async { [weak self] in
+            self?.prevFrame = nil
+            self?.prevTileFrame = nil
+        }
     }
 
     /// Send one frame, transmitting only the bands that changed since the
@@ -869,6 +905,15 @@ final class FrameSender {
     func send(frame pixels: [UInt8], landscape: Bool = false) {
         precondition(pixels.count == geometry.frameBytes, "bad frame size \(pixels.count)")
         guard let conn = connection else { return }
+
+        lock.lock()
+        let tileStream = _peerAcceptsTileStream
+        lock.unlock()
+        if tileStream, let tiles = tileGeometry {
+            sendTileFrame(pixels, landscape: landscape, tiles: tiles, conn: conn)
+            return
+        }
+
         let bands = geometry.bandCount(landscape: landscape)
 
         var dirty: [Int]
@@ -945,6 +990,70 @@ final class FrameSender {
         lastSendAt = Date()
     }
 
+    /// Send one frame over the tile-stream protocol (panels advertising
+    /// `tileStream`): per-16x16-tile diff, horizontally merged runs, each
+    /// encoded raw / RLE565 / BC1 with the smallest winning, packed greedily
+    /// into 1472 B datagrams. The lever over bands is granularity - a small
+    /// moving element dirties a few 512 B tiles instead of full 932 B rows -
+    /// plus BC1's fixed 4:1 on content RLE cannot touch.
+    ///
+    /// Same keyframe triggers as the band path (first frame, orientation
+    /// change, interval) and the same pacing loop; only the wire format and
+    /// diff granularity differ.
+    private func sendTileFrame(
+        _ pixels: [UInt8], landscape: Bool, tiles: TileGeometry,
+        conn: NWConnection
+    ) {
+        var dirty: [Int]
+        let keyframeDue =
+            Date().timeIntervalSince(lastTileKeyframeAt) > keyframeInterval
+        if prevTileFrame == nil || landscape != prevTileLandscape || keyframeDue {
+            dirty = Array(0..<tiles.tileCount)
+            lastTileKeyframeAt = Date()
+        } else {
+            dirty = TileProtocol.dirtyTiles(
+                new: pixels, previous: prevTileFrame!, geometry: tiles)
+        }
+        prevTileFrame = pixels
+        prevTileLandscape = landscape
+        bandsConsidered &+= UInt64(tiles.tileCount)
+        guard !dirty.isEmpty else { return }  // identical frame: send nothing
+
+        let id = frameId
+        frameId &+= 1
+        let spacing = spacingMicros
+        lock.lock()
+        let allowLossy = _tileLossyAllowed
+        lock.unlock()
+
+        let packets = TilePacker.packets(
+            frameId: id, dirtyTiles: dirty, pixels: pixels,
+            geometry: tiles, landscape: landscape, allowLossy: allowLossy)
+
+        for packet in packets {
+            conn.send(
+                content: packet,
+                completion: .contentProcessed { [weak self] error in
+                    if error != nil {
+                        self?.sendErrors &+= 1
+                    }
+                })
+            // Same per-datagram pacing as the band path: the panel's receive
+            // ceiling is datagrams per second, whatever they carry.
+            if spacing > 0 {
+                usleep(spacing)
+            }
+        }
+        bandsSent &+= UInt64(dirty.count)
+        framesSent &+= 1
+        lastSentFrame = pixels
+        lastSentLandscape = landscape
+        lock.lock()
+        _currentLandscape = landscape
+        lock.unlock()
+        lastSendAt = Date()
+    }
+
     /// Periodically re-send the current frame when capture has gone quiet.
     ///
     /// ScreenCaptureKit delivers nothing at all while content is static, and
@@ -963,6 +1072,7 @@ final class FrameSender {
                 return  // real frames are flowing; nothing to do
             }
             self.prevFrame = nil  // full repaint, healing any lost bands
+            self.prevTileFrame = nil  // and any lost tiles, same rule
             self.send(frame: frame, landscape: self.lastSentLandscape)
         }
         timer.resume()
