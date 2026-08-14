@@ -370,11 +370,16 @@ public enum TileLossyPolicy: String, Codable, CaseIterable, Sendable {
     /// Never BC1. Pixel-perfect, at the cost of frame rate on content RLE
     /// cannot compress (photos, video).
     case losslessOnly
-    /// BC1 only where it is both the smallest encoding AND the run's
-    /// content is busy enough (see `TilePacker.runVariance`) that its 4:1
-    /// loss hides in the texture - smooth gradients, where BC1 banding
-    /// would show, stay lossless. Over-budget frames drop the variance gate
-    /// (the sender passes forceLossy) so motion keeps its frame rate.
+    /// BC1 only where it is both the smallest encoding AND the run's content
+    /// is busy enough (see `TilePacker.runVariance`) that its 4:1 loss hides
+    /// in the texture. Over-budget frames drop the variance gate (the sender
+    /// passes forceLossy) so motion keeps its frame rate.
+    ///
+    /// The "smooth gradients stay lossless because BC1 would band them" part
+    /// of that intent is NOT what the gate achieves - BC1 returns linear
+    /// ramps bit-exact, and they score higher variance than the noise it does
+    /// damage. See `autoVarianceThreshold` for the measurements and why the
+    /// number is still 400.
     case auto
     /// BC1 whenever it is smallest, variance regardless.
     case aggressive
@@ -390,11 +395,38 @@ public enum TileLossyPolicy: String, Codable, CaseIterable, Sendable {
 public enum TilePacker {
     /// Content-variance floor for BC1 under `.auto`: the sum over the three
     /// channels of per-channel population variance in 888 space (see
-    /// `runVariance`). Flat fills are 0; a gentle gradient lands in the tens
-    /// to low hundreds; photo/video texture and antialiased text land in the
-    /// thousands. 400 keeps gradients - the one place BC1's 4:1 visibly
-    /// bands - lossless while letting texture compress. A first guess to be
-    /// tuned against real content; deliberately one named constant.
+    /// `runVariance`).
+    ///
+    /// MEASURED, and the rationale this shipped with does not survive it. The
+    /// claim was that gradients are where BC1's 4:1 visibly bands, so a low
+    /// threshold keeps them lossless while letting texture compress. Neither
+    /// half holds (docs/tile-stream-plan.md section 17.14, pinned by
+    /// `testVarianceOfRepresentativeContentClasses` and
+    /// `testBc1ErrorIsSmallestOnExactlyTheContentTheGateLetsThrough`):
+    ///
+    /// | 16x16 tile | variance | BC1 worst error /255 |
+    /// | --- | --- | --- |
+    /// | flat fill | 0 | 0 |
+    /// | 4-level gradient | 80 | 0 |
+    /// | grey ramp | 17,163 | 0 |
+    /// | photo noise | 16,528 | 166 |
+    /// | antialiased text | 23,397 | 40 |
+    ///
+    /// Variance is ANTI-correlated with BC1 damage here. A linear ramp needs
+    /// exactly the four levels BC1's endpoint line provides, so BC1 returns it
+    /// bit-exact - while scoring higher variance than the noise BC1 mangles.
+    /// Gradients were never the problem; the banding the gate was built to
+    /// prevent is endpoint quantisation at block BOUNDARIES, which no
+    /// per-tile variance can see.
+    ///
+    /// So this separates FLAT from everything else and nothing more, and on
+    /// the one class it acts upon - shallow gradients, where BC1's error is
+    /// zero - it spends extra bytes to avoid a loss that does not occur.
+    /// Retuning the number cannot fix that; the metric would have to change.
+    /// Left at 400 pending a decision on what `.auto` should mean, because
+    /// making it agree with the evidence would make `.auto` behave like
+    /// `.aggressive`, and that is a product question rather than a technical
+    /// one.
     public static let autoVarianceThreshold = 400
 
     /// Busyness of a raster: per-channel population variance in 888 space

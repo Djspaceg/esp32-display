@@ -305,6 +305,160 @@ final class TileProtocolTests: XCTestCase {
         XCTAssertEqual(TilePacker.runVariance(half), 16256 * 3)
     }
 
+    // MARK: - What autoVarianceThreshold actually separates
+
+    /// A 16x16 tile built from a per-pixel RGB565 function, wire order.
+    private func tile(_ pixel: (Int, Int) -> UInt16) -> [UInt8] {
+        var out = [UInt8]()
+        for y in 0..<16 {
+            for x in 0..<16 {
+                let p = pixel(x, y)
+                out.append(UInt8(p >> 8))
+                out.append(UInt8(p & 0xFF))
+            }
+        }
+        return out
+    }
+
+    private func rgb(_ r: Int, _ g: Int, _ b: Int) -> UInt16 {
+        (UInt16(r & 0x1F) << 11) | (UInt16(g & 0x3F) << 5) | UInt16(b & 0x1F)
+    }
+
+    func testVarianceOfRepresentativeContentClasses() {
+        // `autoVarianceThreshold` has been 400 since phase 5, described as a
+        // first guess and never checked against content. The claim it rests on
+        // is in TilePacker's own comment: flat fills are 0, a gentle gradient
+        // lands in the tens to low hundreds, and photo texture or antialiased
+        // text land in the thousands. Either that is true and 400 sits in a
+        // real gap, or it is not and the number is arbitrary. This measures it.
+        let flat = tile { _, _ in self.rgb(21, 42, 10) }
+        XCTAssertEqual(TilePacker.runVariance(flat), 0)
+
+        // A gentle gradient: 4 red levels across the tile, the case the
+        // existing policy test uses. Kept lossless by the gate.
+        let gentle = tile { x, _ in self.rgb(x / 4, 0, 0) }
+        XCTAssertEqual(TilePacker.runVariance(gentle), 80)
+
+        // A SMOOTH FULL-RANGE gradient - the content BC1 banding is actually
+        // feared on, sweeping the whole red axis across 16 px.
+        let steep = tile { x, _ in self.rgb(x * 2, 0, 0) }
+        XCTAssertEqual(TilePacker.runVariance(steep), 5781)
+
+        // A grey ramp, all three channels moving together.
+        let greyRamp = tile { x, _ in self.rgb(x * 2, x * 4, x * 2) }
+        XCTAssertEqual(TilePacker.runVariance(greyRamp), 17163)
+
+        // Antialiased text: white ground, a black stroke, one grey pixel of
+        // transition on each side.
+        let text = tile { x, _ in
+            switch x {
+            case 7, 10: return self.rgb(16, 32, 16)
+            case 8, 9: return self.rgb(0, 0, 0)
+            default: return self.rgb(31, 63, 31)
+            }
+        }
+        XCTAssertEqual(TilePacker.runVariance(text), 23397)
+
+        // Photo-like texture.
+        var seed: UInt32 = 12_345
+        let noise = tile { _, _ in
+            seed = seed &* 1_664_525 &+ 1_013_904_223
+            return UInt16((seed >> 16) & 0xFFFF)
+        }
+        XCTAssertEqual(TilePacker.runVariance(noise), 16528)
+
+        // The measured order is the point. Variance separates FLAT from
+        // everything else and nothing more: a grey ramp (17163) scores HIGHER
+        // than photo noise (16528), and a full-range red gradient (5781) is
+        // ten times over the threshold. So the comment's claim that gradients
+        // stay lossless holds only for nearly-flat ones; any gradient with
+        // real dynamic range is treated as texture and sent as BC1.
+        XCTAssertGreaterThan(TilePacker.runVariance(greyRamp),
+                             TilePacker.runVariance(noise))
+        XCTAssertGreaterThan(TilePacker.runVariance(steep),
+                             TilePacker.autoVarianceThreshold * 10)
+    }
+
+    /// Worst and mean per-channel error a tile suffers through BC1, in 888
+    /// space - the same expansion `BC1.palette` and `runVariance` work in.
+    private func bc1Error(_ raw: [UInt8]) -> (max: Int, mean: Double) {
+        guard let encoded = BC1.encode(raw[...], width: 16, height: 16),
+              let back = BC1.decode(encoded, width: 16, height: 16) else {
+            return (Int.max, .infinity)
+        }
+        func channels(_ hi: UInt8, _ lo: UInt8) -> (Int, Int, Int) {
+            let p = (UInt16(hi) << 8) | UInt16(lo)
+            let r5 = Int(p >> 11), g6 = Int((p >> 5) & 0x3F), b5 = Int(p & 0x1F)
+            return ((r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4),
+                    (b5 << 3) | (b5 >> 2))
+        }
+        var worst = 0
+        var total = 0
+        for i in stride(from: 0, to: raw.count, by: 2) {
+            let a = channels(raw[i], raw[i + 1])
+            let b = channels(back[i], back[i + 1])
+            for d in [abs(a.0 - b.0), abs(a.1 - b.1), abs(a.2 - b.2)] {
+                worst = max(worst, d)
+                total += d
+            }
+        }
+        return (worst, Double(total) / Double(raw.count / 2 * 3))
+    }
+
+    func testBc1ErrorIsSmallestOnExactlyTheContentTheGateLetsThrough() {
+        // The question the variance measurement raises: if the gate cannot
+        // tell a smooth ramp from noise, does letting ramps through actually
+        // hurt? Measured per-channel error out of 255, through a real
+        // encode/decode round trip.
+        let greyRamp = tile { x, _ in self.rgb(x * 2, x * 4, x * 2) }
+        let noise: [UInt8] = {
+            var seed: UInt32 = 12_345
+            return tile { _, _ in
+                seed = seed &* 1_664_525 &+ 1_013_904_223
+                return UInt16((seed >> 16) & 0xFFFF)
+            }
+        }()
+        let text = tile { x, _ in
+            switch x {
+            case 7, 10: return self.rgb(16, 32, 16)
+            case 8, 9: return self.rgb(0, 0, 0)
+            default: return self.rgb(31, 63, 31)
+            }
+        }
+
+        let ramp = bc1Error(greyRamp)
+        let tex = bc1Error(noise)
+        let glyph = bc1Error(text)
+
+        // A linear ramp is BC1's best case, not its worst: within a 4x4 block
+        // it needs exactly the four levels the endpoint line provides, so the
+        // fit is near exact. This is why letting ramps through costs little,
+        // and why the banding the gate was built to prevent is a
+        // BLOCK-BOUNDARY and endpoint-quantisation effect rather than
+        // something variance could ever have predicted.
+        XCTAssertEqual(ramp.max, 0)
+        XCTAssertEqual(ramp.mean, 0.0)
+
+        // Noise is where BC1 genuinely loses information - four levels cannot
+        // represent sixteen unrelated colours - and it is exactly what the
+        // gate admits. 166 out of 255 is two thirds of the range.
+        XCTAssertEqual(tex.max, 166)
+
+        // Text: the stroke and the ground come back exactly, because BC1's
+        // bounding-box endpoints ARE those two colours. The cost falls on the
+        // antialiasing pixels between them, whose mid-grey is ~40 off the
+        // nearest point on the white-to-black endpoint line.
+        XCTAssertEqual(glyph.max, 40)
+
+        // The conclusion, pinned so it cannot quietly stop being true:
+        // variance is ANTI-correlated with BC1 damage across these classes.
+        // The tile BC1 reproduces exactly scores the highest variance of the
+        // three; the tile it damages most scores lower.
+        XCTAssertGreaterThan(TilePacker.runVariance(greyRamp),
+                             TilePacker.runVariance(noise))
+        XCTAssertLessThan(ramp.max, tex.max)
+    }
+
     func testAutoKeepsGradientsLosslessButCompressesTexture() {
         // A gentle red gradient: 4 levels across the tile, variance in the
         // tens - BC1 (128 B) would beat raw (512 B), but under .auto the
