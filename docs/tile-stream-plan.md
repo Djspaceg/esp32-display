@@ -1517,3 +1517,59 @@ ceiling expresses 300/s exactly, that band panels are untouched - but
 convergence is runtime behaviour and needs the app streaming with the log
 watched for where `pacing=` lands. The installed app also needs rebuilding
 to carry this; the source change alone does not reach it.
+
+### 17.13 Live verification, and the ladder finally gets tests
+
+The app rebuilt with 17.12's ceiling (`mac/make-app.sh`), run against the
+panel on ordinary desktop content:
+
+| Measure        | Result                                               |
+| -------------- | ---------------------------------------------------- |
+| Delivered      | 56.5-57.4 fps, sustained over minutes                |
+| Device `shown` | advancing ~57/s - the panel is DISPLAYING them       |
+| `dropped`      | ~1.7/s, about 3%                                     |
+| Pacing         | oscillates 150-340 us                                |
+| Send path      | diff 0.04 ms, encode 0.08 ms, send 0.10 ms per frame |
+
+The climb stays TIGHT and never approaches the new 3333 us ceiling, which is
+correct rather than disappointing: at 1.4 packets a frame and 57 fps the
+sender offers ~97 datagrams/s, a third of what the panel absorbs, so there is
+no congestion to retreat from and tight pacing buys lower latency. The wider
+ceiling is there for heavy motion, and heavy motion is what still needs a live
+test. What this run does establish is that the change is inert when it should
+be - no regression on the common case.
+
+**57 fps displayed is itself the news.** Section 14.6 recorded ~20-24 fps and
+attributed the ceiling to ScreenCaptureKit's change-driven delivery, i.e. to
+content rather than engineering. That was measured before the fps default rose
+to 60 and before the send path was fixed; with both, the same class of content
+displays at 57. The three limits 14.6 listed were real, but the one it called
+immovable had a configuration in front of it.
+
+#### The ladder, extracted and tested
+
+`FrameSender.degradationRungs(dirtyTiles:spacingMicros:policy:halfResAvailable:)`
+is now a pure static function, lifted out of `sendTileFrame`. It shipped in
+phase 5, gained rung (b) in phase 11, and had never had a test either time -
+its behaviour was only ever inferred from hardware frame rates. Eight tests
+now pin the engagement points, and writing them corrected two things I
+believed:
+
+**The rungs are relative to pacing, not to dirty area.** A full frame of all
+719 visible tiles at 400 us pacing engages rung (a) and stops there: the
+budget is ~123 KB and 719 BC1 tiles are 92 KB, so full resolution fits.
+Half-res engages only once the climb has backed off toward the absorbable
+rate, where the budget is ~14.7 KB. "Most of the screen changed" is not what
+triggers resolution loss; "most of the screen changed AND we are pacing
+slowly" is.
+
+**Thresholds are ~4x apart, not exactly 4x.** Each codec is a quarter of the
+one above, but the budget is not a multiple of every per-tile size, so integer
+division leaves a few tiles of slack (7,666 against 7,664 at 200 us). The test
+asserts the ratio and bounds the slack rather than claiming equality.
+
+One consistency check fell out of it. At the absorbable-rate ceiling a
+full-motion frame engages every rung including frame skipping, which halves
+the ladder's 30 fps target to 15 - and section 17.7 measured the displayed
+peak at 14.2. The sender's arithmetic and the panel's behaviour agree, having
+been derived independently and never fitted to each other.
