@@ -1,0 +1,21 @@
+# ESP32-S3-Touch-AMOLED-1.75C partition table with Doom WAD support
+# 16MB flash total
+#
+# Layout:
+#   0x000000 - 0x008FFF  Bootloader (36KB, managed by esptool)
+#   0x009000 - 0x00DFFF  NVS (20KB) - WiFi creds, device name, orientation, brightness
+#   0x00E000 - 0x00FFFF  OTA data (8KB)
+#   0x010000 - 0x5FFFFF  app0 (5.94MB) - firmware + doom engine
+#   0x600000 - 0xBFFFFF  app1 (6MB) - OTA slot
+#   0xC00000 - 0xFFFFFF  doom_wad (4MB) - doom1.wad shareware
+#
+# The WAD partition uses a custom type/subtype (0x42/0x06) following the
+# convention from espressif/esp32-doom. It is memory-mapped at boot when
+# Doom mode is entered, so reads are zero-copy from flash cache.
+#
+# Name,    Type, SubType, Offset,   Size,     Flags
+nvs,       data, nvs,     0x9000,   0x5000,
+otadata,   data, ota,     0xE000,   0x2000,
+app0,      app,  ota_0,   0x10000,  0x5F0000,
+app1,      app,  ota_1,   0x600000, 0x600000,
+doom_wad,  0x42, 0x06,    0xC00000, 0x400000,
