@@ -1573,3 +1573,61 @@ full-motion frame engages every rung including frame skipping, which halves
 the ladder's 30 fps target to 15 - and section 17.7 measured the displayed
 peak at 14.2. The sender's arithmetic and the panel's behaviour agree, having
 been derived independently and never fitted to each other.
+
+### 17.14 autoVarianceThreshold cannot be tuned into correctness
+
+`autoVarianceThreshold = 400` has been carried since phase 5 as "a first
+guess to be tuned against real content", and every later section has listed
+tuning it as outstanding. Measuring it says the number is not the problem.
+
+The gate's stated rationale is that gradients are where BC1's 4:1 visibly
+bands, so a low threshold keeps them lossless while letting texture compress.
+Measured on 16x16 tiles, variance against BC1's actual worst per-channel
+error through a real encode/decode round trip:
+
+| Tile                    | Variance | BC1 worst error /255 |
+| ----------------------- | -------- | -------------------- |
+| Flat fill               | 0        | 0                    |
+| 4-level gradient        | 80       | 0                    |
+| Full-range red gradient | 5,781    | -                    |
+| Grey ramp               | 17,163   | **0**                |
+| Photo noise             | 16,528   | **166**              |
+| Antialiased text        | 23,397   | 40                   |
+
+**Variance is anti-correlated with BC1 damage across these classes.** The
+grey ramp comes back BIT-EXACT and scores the highest variance of the three
+measured; the photo noise, which BC1 damages by two thirds of the range,
+scores lower. A linear ramp needs exactly the four levels BC1's endpoint line
+provides, so BC1 fits it perfectly - gradients were never the vulnerable
+case. The banding the gate was built to prevent is endpoint quantisation at
+block BOUNDARIES, which is a 565-precision effect no per-tile variance
+statistic can see.
+
+Text is the one class that pays anything interesting, and it pays in the
+right place: the stroke and the ground return exactly, because BC1's
+bounding-box endpoints ARE those two colours, and the ~40 error falls on the
+antialiasing pixels whose mid-grey sits off the white-to-black line.
+
+So the gate separates FLAT from everything else and nothing more. On the one
+class it actually acts upon - shallow gradients, BC1 error zero - it spends
+50% more bytes (RLE at ~192 against BC1's 128 on the 4-level case) to prevent
+a loss that does not happen. No value of the threshold fixes that, because
+the metric does not measure the thing the gate is for.
+
+What NOT to do about it, and why the number is still 400: making `.auto`
+agree with this evidence means letting BC1 win whenever it is smallest, which
+is precisely what `.aggressive` already does - collapsing a user-facing
+setting into its neighbour. That is a product decision, not a technical one,
+so it is left for the user. The honest interim state is that the constant is
+unchanged and its comment no longer claims something false.
+
+If the setting is to keep three meanings, the principled version of `.auto`
+is "BC1 only where it is provably near-lossless", which means measuring error
+rather than variance - encode, decode, compare, accept under a threshold.
+That costs an encode plus a decode per candidate tile where today's gate
+costs a variance scan, and phase 9 measured encode at ~30 us/tile, so a
+full-frame keyframe would pay ~43 ms. Viable per-tile on light content,
+not viable on a keyframe, which is why it wants its own design pass rather
+than a constant change. A cheap proxy for the same property is how well a
+block's colours fit a line, which is most of what the encoder computes
+anyway.
