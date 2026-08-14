@@ -1689,3 +1689,54 @@ properly: interleave the arms rather than running them in blocks, take at
 least ten samples per arm against the ~4 fps noise floor, and report the
 spread alongside the means. Kill any running sender first
 (`pgrep -fl ESPDisplaySender`) - two senders corrupt every counter.
+
+### 17.17 Receive-side SRAM staging is impossible; a one-record handoff is not
+
+17.16 named the remaining root cause and proposed staging tiles through SRAM
+on the receive side. Two of that framing's premises are wrong, and correcting
+them kills the idea before any code:
+
+- **Decode already stages through SRAM.** `bc1::decode` writes `tileScratch`,
+  an internal-SRAM array. The scattered per-4x4-block writes are SRAM writes
+  at full speed. The receive path's ONLY PSRAM traffic is the strided per-row
+  commit into `bufA`.
+- **A cache cannot serve the draw.** The pass gathers merged runs, so a run
+  served from SRAM needs every one of its tiles resident. Roughly 200 tiles
+  arrive between passes and full-frame motion is 900 tiles (460 KB) against
+  512 KB of total internal SRAM with ~50 KB already reserved by this path. No
+  SRAM-resident copy of a 434 KB frame exists - which is why `bufA` is in
+  PSRAM in the first place. The wall is arithmetic, not tuning.
+
+So after 17.10 removed DMA from PSRAM, the two parties left are the receive
+task's `bufA` write and the pass's `bufA` read-back to fill `tileStaging`.
+The second one is removable without any capacity at all, because the pass is
+reading back bytes the receive task just wrote: hand the decoded raster
+straight across in SRAM instead.
+
+`rxHandoff` is one record's raster plus its rect, published by the receive
+task under `drawMux` and drained by the next pass, which copies it into
+`tileStaging` and draws from there. One slot suffices because `loop()`
+iterates far more often than records arrive; there is no ring and no
+eviction policy. Correctness never depends on it - the pixels are in `bufA`
+before the slot is published, so every discard path (slot busy, oversized
+run, orientation changed underneath, `draw_bitmap` error) marks the run
+pending and the pass draws it the old way. A handoff published mid-pass is
+folded into `tileDrainPending` so its tiles cannot strand.
+
+Gated behind `CFGTUNE rxhandoff <0|1>`, **default 0**, and the gain is
+NOT measured. The link was at RSSI -82 while this was written, where an A/B
+measures the radio (17.11). What is verified on hardware is that the path is
+live and correct, at 4 fps offered:
+
+| Arm           | Complete fps | Partial draws/s | Datagrams accepted |
+| ------------- | ------------ | --------------- | ------------------ |
+| `rxhandoff=0` | 3.5          | 24.6            | 249                |
+| `rxhandoff=1` | 3.5          | 187.6           | 238                |
+
+The partial-draw column is the evidence the code runs: handoff runs are
+painted individually rather than merged into a completing frame, so they
+count as partial draws. Frames complete at the same rate and no draw errors
+occurred. These are single runs per arm at bad signal - exactly the blocked
+sampling 17.11 retracted a result for - so no throughput claim is made
+either way. The knob exists so the real A/B is interleaved arms at a
+recovered link, with no reflash between samples.
