@@ -453,8 +453,21 @@ final class PanelManager: ObservableObject {
         }
     }
 
-#if DEBUG
     /// Preview and test seam: no disk, no timers, no discovery.
+    ///
+    /// Deliberately NOT wrapped in `#if DEBUG`, unlike the `#Preview` macros and
+    /// `PanelManager.preview` further down. Tests are built in whichever
+    /// configuration they are asked for, and `swift test -c release` needs this
+    /// initialiser exactly as much as the debug build does. Gating it on DEBUG
+    /// broke release-mode testing outright, and the breakage is near
+    /// undiagnosable from its symptom: thirty-odd "extra arguments at positions
+    /// #1, #2, #3" errors across unrelated test files, none of them pointing
+    /// here, because the compiler silently falls back to another initialiser
+    /// once this one disappears.
+    ///
+    /// The cost of leaving it visible is nil in practice: it is `internal`, so
+    /// it is not API surface, and it has no release callers to keep it alive
+    /// through dead-code stripping.
     init(
         previewPanels: [PanelSnapshot],
         savedNetworkNames: [String],
@@ -472,7 +485,6 @@ final class PanelManager: ObservableObject {
         self.usbSerialPorts = usbSerialPorts
         selectedServiceName = previewPanels.first?.serviceName
     }
-#endif
 
     deinit {
         refreshTimer?.invalidate()
