@@ -9,6 +9,9 @@
 #include <esp_partition.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_heap_caps.h>
+
+#include "platform/doom_splash.h"
 
 // doomgeneric entry points
 extern void doomgeneric_Create(int argc, char** argv);
@@ -81,6 +84,22 @@ void doom_enter(void) {
 
     doom_active = true;
     doom_exit_requested = false;
+
+    // Show splash screen while engine initializes
+    {
+        extern void doom_display_init(void);
+        extern void doom_display_blit(const uint16_t* buf, int w, int h);
+        doom_display_init();
+
+        // Allocate splash buffer in PSRAM (466*466*2 = 434KB)
+        uint16_t* splash = (uint16_t*)heap_caps_calloc(466 * 466, sizeof(uint16_t),
+                                                        MALLOC_CAP_SPIRAM);
+        if (splash) {
+            doom_splash::render(splash);
+            doom_display_blit(splash, 466, 466);
+            heap_caps_free(splash);
+        }
+    }
 
     // Initialize doomgeneric
     // -mb 8 = 8MB memory (PSRAM), -iwad dummy (we override W_OpenFile)

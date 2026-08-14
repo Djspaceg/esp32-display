@@ -45,15 +45,24 @@ Triple-tap BOOT (GPIO0, 3 presses within 800ms)
 ## Flash Requirements
 
 The doom1.wad shareware file (4,196,020 bytes) lives in a dedicated flash
-partition. Use the custom partition table:
+partition. The WAD is written automatically when flashing the S3 board if
+`firmware/doom/doom1.wad` exists in the repo:
 
-```
-firmware/partitions_s3_doom.csv
-```
-
-Flash the WAD:
 ```sh
-tools/espdisp.py flash-wad path/to/doom1.wad
+# Download the shareware WAD (freely redistributable)
+curl -L -o firmware/doom/doom1.wad \
+  "https://distro.ibiblio.org/slitaz/sources/packages/d/doom1.wad"
+
+# Flash firmware + WAD in one shot:
+tools/espdisp.py flash --board s3
+```
+
+The custom partition table (`firmware/partitions_s3_doom.csv`) is used
+automatically for S3 builds when the doom directory exists.
+
+To flash the WAD separately (if the firmware is already on the board):
+```sh
+tools/espdisp.py flash-wad firmware/doom/doom1.wad
 ```
 
 ## Building
@@ -62,11 +71,38 @@ The Doom engine compiles as part of the S3 firmware build. It is conditionally
 included only when `CONFIG_IDF_TARGET_ESP32S3` is defined — the C6 binary is
 completely unaffected.
 
+### Quick start (with espdisp.py)
+
 ```sh
-tools/espdisp.py compile --board s3 --partition-table firmware/partitions_s3_doom.csv
+# Download the shareware WAD once:
+curl -L -o firmware/doom/doom1.wad \
+  "https://distro.ibiblio.org/slitaz/sources/packages/d/doom1.wad"
+
+# Build and flash everything:
 tools/espdisp.py flash --board s3
-tools/espdisp.py flash-wad doom1.wad
+
+# If firmware is already on the board, flash just the WAD:
+tools/espdisp.py flash-wad firmware/doom/doom1.wad
 ```
+
+### Manual build (arduino-cli)
+
+```sh
+cd firmware/display_stream
+arduino-cli compile \
+  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=custom" \
+  --build-property "build.extra_flags=-include ../doom/doom_config.h -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200" \
+  --libraries ../libraries \
+  --libraries ../doom \
+  .
+arduino-cli upload \
+  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" \
+  -p /dev/cu.usbmodem* .
+```
+
+Note: The custom partition table (`firmware/partitions_s3_doom.csv`) must be
+placed as `partitions.csv` in the sketch directory or specified via
+`PartitionScheme=custom` in the FQBN for arduino-cli to pick it up.
 
 ## WAD File
 
