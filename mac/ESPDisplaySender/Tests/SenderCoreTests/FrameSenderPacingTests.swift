@@ -55,6 +55,47 @@ final class FrameSenderPacingTests: XCTestCase {
         }
     }
 
+    func testTileCeilingReachesTheRateATilePanelCanAbsorb() {
+        // The band-derived ceiling is aimed at a different protocol, and on
+        // this panel it makes the collapse region inescapable. 466 bands at
+        // 5 fps is 2330 pkt/s, one every 429us - and a tile panel absorbs
+        // ~300/s while still painting (docs section 17.3). So the controller
+        // could not offer less than ~8x what the panel can use, and was
+        // observed parked exactly at 429us in the app log.
+        let bandCeiling = FrameSender.spacingBounds(
+            for: PanelGeometry(width: 466, height: 466)).upperBound
+        XCTAssertEqual(bandCeiling, 429)
+        let offeredAtBandCeiling = 1_000_000 / bandCeiling
+        XCTAssertEqual(offeredAtBandCeiling, 2331)
+        XCTAssertGreaterThan(
+            offeredAtBandCeiling,
+            FrameSender.tileAbsorbablePacketsPerSecond * 7,
+            "the band bound must be shown to be the problem, not a near miss")
+
+        // The tile ceiling expresses the measured rate: 300/s is 3333us.
+        XCTAssertEqual(FrameSender.tileSpacingCeiling, 3333)
+        XCTAssertEqual(
+            1_000_000 / FrameSender.tileSpacingCeiling,
+            FrameSender.tileAbsorbablePacketsPerSecond)
+        XCTAssertGreaterThan(FrameSender.tileSpacingCeiling, bandCeiling)
+    }
+
+    func testTileCeilingIsExpressibleAndNeverTightensABandPanel() {
+        // The manual range has to be able to express it, or the settings
+        // slider and setSpacingMicros would clamp the controller's own
+        // ceiling away.
+        XCTAssertLessThanOrEqual(
+            FrameSender.tileSpacingCeiling, FrameSender.spacingRange.upperBound)
+        XCTAssertGreaterThanOrEqual(
+            FrameSender.tileSpacingCeiling, FrameSender.spacingRange.lowerBound)
+
+        // Band panels are untouched: the tile ceiling only ever widens, and
+        // only where the tile protocol is actually in use. The 172x320's
+        // band-derived ceiling is unchanged by any of this.
+        XCTAssertEqual(
+            FrameSender.spacingBounds(for: .panel172x320).upperBound, 2325)
+    }
+
     func testControllerBoundsSitInsideTheManualRange() {
         // The settings slider offers spacingRange; the controller must not be
         // able to escape it, only to stop short of its slow end.
