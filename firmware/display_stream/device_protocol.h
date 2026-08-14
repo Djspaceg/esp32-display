@@ -44,10 +44,10 @@ enum Capability : uint32_t {
   // sender can tell a panel that reports holds from one that only reports taps
   // and swipes - a gesture bound to a hold would otherwise appear to be ignored.
   CAP_TOUCH_LONGPRESS = 1u << 10,
-  // Emits EBAT, i.e. this board has a power-management IC with a battery gauge
-  // and reports its charge. Advertised because it is a per-board fact, not a
-  // firmware one: only the 1.75C carries a PMU, so a sender must not show a
-  // battery row for a panel that will never send a reading.
+  // Emits EBAT from this board's available battery telemetry source: the
+  // 1.75C's AXP2101 PMU or the C6 touch board's battery-voltage ADC. Advertised
+  // because it is a per-board fact, not a firmware one, so a sender must not
+  // show a battery row for a panel that will never send a reading.
   CAP_BATTERY = 1u << 11,
   // Accepts packed band packets (band_index bit 15): several RLE-compressed
   // or raw band records per datagram, up to MAX_PACKED_PACKET_BYTES. The
@@ -344,8 +344,9 @@ inline bool parseTouch(const uint8_t *data, size_t len, TouchEvent &out) {
 }
 
 // ---- Battery ("EBAT") ---------------------------------------------------
-// What the board's power-management IC says about its battery, sent
-// unprompted on a slow timer by firmware advertising CAP_BATTERY.
+// What the board's battery telemetry source says, sent unprompted on a slow
+// timer by firmware advertising CAP_BATTERY. Charge state may be Unknown when
+// the board exposes voltage but not its charger's status signal.
 //
 // WHY NOT EXTRA FIELDS ON EINF: EINF already carries uptime, RSSI and
 // brightness, so battery looks like it belongs there. It cannot go there.
@@ -369,8 +370,8 @@ static const size_t BATTERY_PACKET_BYTES = 12;
 static const uint8_t BATTERY_FLAG_PRESENT = 0x01;
 static const uint8_t BATTERY_FLAG_EXTERNAL_POWER = 0x02;
 
-// Percent when the gauge has no opinion - no battery attached, or the PMU
-// answered but the fuel gauge has not settled. Distinct from 0, which is a
+// Percent when the telemetry source has no opinion - no battery attached, or
+// a fuel gauge that has not settled. Distinct from 0, which is a
 // real and alarming reading, and the reason percent is not simply clamped.
 static const uint8_t BATTERY_PERCENT_UNKNOWN = 0xFF;
 
@@ -378,15 +379,15 @@ static const uint8_t BATTERY_PERCENT_UNKNOWN = 0xFF;
 //
 // A reading needs an expiry because a failed sample deliberately leaves the
 // previous one standing - reporting zeros would be worse - but "the last thing
-// the PMU said" and "what the battery is doing" stop being the same claim
-// eventually. Without a ceiling, a PMU that answers once at boot and then dies
-// keeps its percentage on the serial line, in CFGSHOW and in the sender's UI
+// the telemetry source said" and "what the battery is doing" stop being the same claim
+// eventually. Without a ceiling, a source that answers once at boot and then
+// dies keeps its percentage on the serial line, in CFGSHOW and in the sender's UI
 // forever, and those are the three places whose whole purpose is to tell the
 // truth about the cell.
 //
 // 45s is four missed samples at the firmware's 10s poll, chosen so a single
-// transient I2C failure or one dropped datagram never flips a display to
-// unknown, while a PMU that has actually stopped answering is reported as
+// transient sample failure or one dropped datagram never flips a display to
+// unknown, while a source that has actually stopped answering is reported as
 // unknown inside a minute. Both sides use this number: the firmware ages out its
 // cached reading, and the sender ages out the last EBAT it received (mirrored as
 // DeviceProtocol.batteryMaxAge, asserted equal in both test suites).

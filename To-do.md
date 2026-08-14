@@ -1,0 +1,35 @@
+# To-do
+
+- [ ] Improve display streaming frame rate beyond the current implementation.
+  - [x] Replace line-only diffs with 16×16 tiles and horizontally merged rectangular runs.
+  - [x] Add tile compression, SRAM staging, merged panel writes, and backpressure handling.
+  - [ ] Re-measure end-to-end frame rate on hardware and optimize only against an identified bottleneck.
+- [x] Support rotation in 90-degree increments on square displays.
+- [x] Keep region scale and rotation controls on the visible region overlay.
+- [x] Show battery level and the best available charge state on each battery-capable touch device.
+  - [x] Parse and show reported battery status in the macOS app.
+  - [x] Verify each board's battery telemetry hardware and enable its implementation.
+  - [x] Show battery level and the best available charge state in the on-device UI.
+- [x] Allow the display to be turned off and on remotely.
+- [x] Persist screensaver settings.
+- [x] Show uptime and battery status with the primary streaming information.
+- [x] Restore Wi-Fi information reported by the device into the macOS network selector.
+- [x] Make the complete diagnostics disclosure header clickable and use normal macOS disclosure spacing.
+- [x] Add appropriate horizontal padding to the window-header Pause button.
+- [x] Expose touch controls for the 466×466 touch display.
+- [x] Prevent frame backlog timestamp underflow from flashing the idle screen during updates.
+- [ ] Avoid transmitting pixels outside the visible circle of a round display.
+  - [x] Skip tiles that are entirely outside the circle.
+  - [x] Ignore changes that affect only invisible pixels in boundary tiles.
+  - [ ] Eliminate remaining invisible collateral in changed boundary blocks without corrupting BC1-visible pixels.
+- [ ] Use the onboard accelerometer to keep content upright at cardinal orientations.
+  - [x] Read and classify QMI8658/QMI8658A acceleration with hysteresis and dwell.
+  - [x] Compose automatic orientation with the persisted manual mounting rotation.
+  - [ ] Physically calibrate glass-relative axis signs on each IMU-equipped board in all edge-down positions.
+  - [ ] Define correct 90-degree behavior for rectangular displays before enabling it there.
+- [x] Add native Cocoa Scripting support for non-destructive app and display controls.
+  - [x] Publish and package an AppleScript dictionary.
+  - [x] Route script commands through `PanelManager`.
+  - [x] Validate commands with a built app and `osascript`.
+- [x] Add remote reboot.
+- [x] Make the literal-overrun regression use an exactly sized heap destination under ASan/UBSan.

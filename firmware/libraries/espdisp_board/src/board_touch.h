@@ -260,7 +260,13 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     return false;
   }
 
-  Wire.setClock(I2C_HZ);
+  // Start the configured bus here even when CFGBOARD forced this variant and
+  // boot-time detection was bypassed. Calling begin again after detection is
+  // harmless and keeps touch/motion/PMU initialization independently correct.
+  if (!Wire.begin(cfg.pinTouchSda, cfg.pinTouchScl, I2C_HZ)) {
+    if (verbose) Serial.println("touch: ERROR I2C bus would not start");
+    return false;
+  }
 
   pinMode(cfg.pinTouchRst, OUTPUT);
   digitalWrite(cfg.pinTouchRst, LOW);

@@ -216,6 +216,7 @@ public enum ESPDisplaySenderApp {
             let manager = PanelManager(
                 settings: overrides, defaultDisplayName: opts.displayName)
             let window = ManagerWindowController(manager: manager)
+            CocoaScriptingContext.install(manager: manager, window: window)
             let delegate = ESPDisplayApplicationDelegate(
                 managerWindow: window,
                 manager: manager,

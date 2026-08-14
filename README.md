@@ -195,27 +195,30 @@ boards that have one. Because identify keeps working everywhere, the capability
 bits the panel advertises are unchanged — the Mac app needs no modification and
 older senders keep working.
 
-The IMU is not used by this project; it is only read as part of the signal that
-says which board this is.
+The QMI8658/QMI8658A IMU is polled at 10 Hz. On the square 1.75C panel,
+firmware classifies gravity with hysteresis and dwell and composes the result
+with the persisted manual mounting rotation so content stays upright. The
+rectangular C6 touch panel reports motion diagnostics but deliberately does not
+apply odd quarter turns until the sender and firmware can agree on rotated
+172×320 geometry. Glass-relative axis signs still need edge-down calibration on
+each physical board.
 
-Touch is read but not yet acted on. `firmware/libraries/espdisp_board` contains
-the AXS5106L reader and the coordinate transform that puts a touch through the
-same orientation and flip the pixels went through, and `firmware/display_test`
-has an interactive mode that draws a marker where you touch so the transform can
-be checked against a finger. The streaming firmware does not use touch yet.
+Touch is active in the streaming firmware. The AXS5106L and CST9217 readers map
+a finger through the same effective orientation as the pixels, report taps,
+swipes, and long presses to the Mac, wake a dimmed panel without also firing an
+action, and show a local status bar on a plain tap. `firmware/display_test` keeps
+its interactive marker mode for physical transform checks.
 
-**Battery reporting is 1.75C-only.** Of the supported boards, only the
-ESP32-S3-Touch-AMOLED-1.75C has a power-management IC — an AXP2101 sharing the
-touch I2C bus — so it is the only one with a battery to report. The two C6 boards
-run straight off USB with no cell and no gauge, which makes this a per-board
-capability rather than a firmware-wide one: the board table records the
-controller, the firmware advertises `CAP_BATTERY` only after the chip actually
-answers, and the Mac shows a battery row only for a panel advertising the bit. A
-C6 shows no row rather than an empty or 0% one, and a 1.75C with a dead PMU is
-treated the same way. The reader is a minimal five-register one in
-`firmware/libraries/espdisp_board/src/board_power.h` rather than a vendored
-XPowersLib; that file explains why, and marks what is still unverified for want
-of hardware.
+**Battery reporting is available on both battery-capable touch boards.** The
+ESP32-S3-Touch-AMOLED-1.75C uses its AXP2101 PMU for cell presence, external
+power, gauge percentage, charge state, and voltage. The
+ESP32-C6-Touch-LCD-1.47 reads cell voltage through the board's 3:1 divider on
+GPIO0 and estimates percentage from the LiPo discharge curve. Its ETA6098
+charger status output drives only an LED, not the ESP32, so charge state is
+truthfully reported as unknown rather than inferred from voltage or USB. The
+non-touch C6 has no battery telemetry path. Firmware advertises `CAP_BATTERY`
+only after the configured source initializes; the Mac and the on-device status
+UI then show the best information that source can provide.
 
 ## Performance
 
@@ -361,7 +364,9 @@ a contradictory state. It is its own packet rather than extra `EINF` fields
 because a sender length-checks `EINF` exactly: appending fields there would make
 an already-shipped sender reject _every_ `EINF` and lose the telemetry it
 already had, while an unrecognised packet type is simply dropped. Advertised as
-`CAP_BATTERY`, and only the ESP32-S3-Touch-AMOLED-1.75C ever sets it.
+`CAP_BATTERY`; the ESP32-S3-Touch-AMOLED-1.75C and
+ESP32-C6-Touch-LCD-1.47 set it when their configured telemetry source
+initializes successfully.
 
 The Mac gates every control on the capability bits the panel advertises, so a
 board running older firmware simply does not offer the newer controls rather
@@ -439,21 +444,21 @@ accepted right now", not "this build has OTA code in it".
 
 ## Repo layout
 
-| Path                                 | What                                                                                                                                      |
-| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `firmware/display_stream/`           | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls                                                      |
-| `firmware/display_test/`             | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping                             |
-| `firmware/board_probe/`              | I2C-scan diagnostic reporting which board variant you have                                                                                |
-| `firmware/libraries/espdisp_board/`  | Board variant table, runtime detection, shared panel bring-up, touch reader, touch coordinate transform, AXP2101 battery reader           |
-| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance)                                                                 |
-| `mac/ESPDisplaySender/`              | Native manager app plus SwiftPM command-line workflows                                                                                    |
-| `firmware/test/`                     | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`)                                 |
-| `mac/ESPDisplaySender/Tests/`        | Swift tests for the sender's protocol and application logic (`swift test`)                                                                |
-| `tools/espdisp.py`                   | Compile, flash over USB, push over WiFi, bundle a build, and configure from one command: holds the board table, refuses to guess the chip |
-| `tools/test_espdisp.py`              | Tests for the CLI's decisions: chip and OTA-target refusals, password bounds, encodings, the bundle format (stdlib only, no framework)    |
-| `tools/read_serial.py`               | Serial monitor with optional hard-reset (native USB-Serial/JTAG)                                                                          |
-| `tools/sweep.py`                     | Pacing parameter sweep, measuring displayed fps from device stats                                                                         |
-| `docs/`                              | Original project plan                                                                                                                     |
+| Path | What |
+| --- | --- |
+| `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls |
+| `firmware/display_test/` | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping |
+| `firmware/board_probe/` | I2C-scan diagnostic reporting which board variant you have |
+| `firmware/libraries/espdisp_board/` | Board table and detection, panel bring-up, touch and motion readers/transforms, AXP2101 and C6 ADC battery telemetry |
+| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance) |
+| `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
+| `firmware/test/` | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
+| `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
+| `tools/espdisp.py` | Compile, flash over USB, push over WiFi, bundle a build, and configure from one command: holds the board table, refuses to guess the chip |
+| `tools/test_espdisp.py` | Tests for the CLI's decisions: chip and OTA-target refusals, password bounds, encodings, the bundle format (stdlib only, no framework) |
+| `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
+| `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
+| `docs/` | Original project plan |
 
 ## Getting started
 

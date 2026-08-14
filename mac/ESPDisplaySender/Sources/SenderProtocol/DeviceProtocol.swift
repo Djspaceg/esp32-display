@@ -44,11 +44,12 @@ public enum DeviceProtocol {
         /// firmware that never emits one, which is indistinguishable from the
         /// panel ignoring the finger.
         public static let touchLongPress = Capabilities(rawValue: 1 << 10)
-        /// Emits EBAT, i.e. this board has a power-management IC with a battery
-        /// gauge. Advertised because it is a per-board fact rather than a
-        /// firmware one — only the 1.75C carries a PMU — so a sender must not
-        /// show a battery row for a panel that will never report one. An empty
-        /// or 0% reading would look like a flat battery rather than no battery.
+        /// Emits EBAT from this board's available battery telemetry source:
+        /// the 1.75C's AXP2101 PMU or the C6 touch board's battery-voltage ADC.
+        /// Advertised because it is a per-board fact rather than a firmware
+        /// one, so a sender must not show a battery row for a panel that will
+        /// never report one. An empty or 0% reading would look like a flat
+        /// battery rather than no battery.
         public static let battery = Capabilities(rawValue: 1 << 11)
         /// Accepts packed band packets: several RLE-compressed or raw band
         /// records per datagram (band_index bit 15; see `BandPacker`). The
@@ -334,8 +335,8 @@ public enum DeviceProtocol {
             landscape: bytes[12] & touchFlagLandscape != 0)
     }
 
-    /// What the panel's power-management IC is doing with its battery. One enum
-    /// rather than independent charging/discharging flags, so the wire format
+    /// What the panel's battery telemetry source reports. One enum rather than
+    /// independent charging/discharging flags, so the wire format
     /// cannot express a contradictory state a receiver would have to arbitrate.
     public enum ChargeState: UInt8, CaseIterable, Sendable {
         case unknown = 0
@@ -378,15 +379,16 @@ public enum DeviceProtocol {
     /// How long a received reading may be shown as current.
     ///
     /// EBAT arrives unprompted on the panel's own 10s timer, and only when a
-    /// sample succeeded — so a panel whose PMU dies simply stops sending, and
+    /// sample succeeded — so a panel whose telemetry source stops simply stops
+    /// sending, and
     /// without an expiry the last percentage would stand for as long as the app
     /// ran. Nothing else clears it: the panel keeps heartbeating perfectly well
-    /// while saying nothing about its battery.
+    /// while saying nothing about its battery telemetry source.
     ///
     /// 45s is four missed samples, matching the firmware's
     /// `deviceproto::BATTERY_MAX_AGE_MS` so both sides call the same reading
     /// stale at the same moment. One dropped datagram therefore never blanks the
-    /// row, and a PMU that has stopped is reported inside a minute.
+    /// row, and a telemetry source that has stopped is reported inside a minute.
     public static let batteryMaxAge: TimeInterval = 45
 
     /// Parse the device's fixed-size EBAT battery report.

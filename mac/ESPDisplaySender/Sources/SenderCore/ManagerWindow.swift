@@ -280,7 +280,11 @@ private struct PanelDetailView: View {
     @State private var updateTarget: PanelManager.FirmwareUpdateTarget?
     @State private var editedName = ""
     @State private var isEditingName = false
-    @State private var selectedSSID = ""
+    /// A picker value is not necessarily user intent: before CFGSHOW returns,
+    /// the UI displays the first saved credential as an automatic fallback.
+    /// Keep only actual picker changes here so a delayed device-reported SSID
+    /// can replace that fallback without overwriting a deliberate user choice.
+    @State private var explicitlySelectedSSID: String?
     @State private var editedIdleText = ""
     @State private var isEditingOTAPassword = false
     @State private var otaPassword = ""
@@ -304,6 +308,19 @@ private struct PanelDetailView: View {
         Binding(
             get: { panel.usbPort ?? "" },
             set: { manager.setUSBPort($0.isEmpty ? nil : $0, for: panel.serviceName) })
+    }
+
+    private var selectedSSID: String {
+        PanelManager.preferredSSID(
+            explicitSelection: explicitlySelectedSSID,
+            reportedSSID: panel.currentSSID,
+            savedNames: manager.savedNetworkNames)
+    }
+
+    private var wifiSelection: Binding<String> {
+        Binding(
+            get: { selectedSSID },
+            set: { explicitlySelectedSSID = $0.isEmpty ? nil : $0 })
     }
 
     var body: some View {
@@ -375,11 +392,9 @@ private struct PanelDetailView: View {
         .onAppear {
             editedName = panel.displayName
             editedIdleText = panel.idleText
-            selectInitialNetwork()
-            // A CFGSHOW round trip over USB, so the answer never arrives
-            // before this view has already picked a default from whatever
-            // was known before. The onChange below is what applies it once
-            // it lands.
+            // CFGSHOW is asynchronous. `selectedSSID` remains derived from the
+            // optional explicit choice, so this reply can replace the initial
+            // fallback without being mistaken for a user selection.
             manager.refreshCurrentSSID(for: panel.serviceName)
         }
         .onChange(of: panel.idleText) { _, newValue in
@@ -388,11 +403,10 @@ private struct PanelDetailView: View {
         .onChange(of: panel.displayName) { _, newValue in
             if !isEditingName { editedName = newValue }
         }
-        .onChange(of: manager.savedNetworkNames) { _, _ in
-            selectInitialNetwork()
-        }
-        .onChange(of: panel.currentSSID) { _, _ in
-            selectInitialNetwork()
+        .onChange(of: manager.savedNetworkNames) { _, names in
+            if let explicit = explicitlySelectedSSID, !names.contains(explicit) {
+                explicitlySelectedSSID = nil
+            }
         }
         .confirmationDialog(
             "Restart \(panel.displayName)?", isPresented: $confirmRestart,
@@ -720,7 +734,7 @@ private struct PanelDetailView: View {
             }
             LabeledContent("Saved WiFi") {
                 HStack(spacing: 8) {
-                    Picker("Saved WiFi", selection: $selectedSSID) {
+                    Picker("Saved WiFi", selection: wifiSelection) {
                         Text("Select a network…").tag("")
                         ForEach(manager.savedNetworkNames, id: \.self) { ssid in
                             Text(ssid).tag(ssid)
@@ -1027,13 +1041,6 @@ private struct PanelDetailView: View {
         nameIsFocused = false
         isEditingName = false
         editedName = panel.displayName
-    }
-
-    private func selectInitialNetwork() {
-        selectedSSID = PanelManager.preferredSSID(
-            current: selectedSSID,
-            reportedSSID: panel.currentSSID,
-            savedNames: manager.savedNetworkNames)
     }
 
     /// Renaming, from the toolbar rather than from an editable heading.
@@ -1373,7 +1380,9 @@ private struct ScreensaverPanelPreview: View {
 // MARK: - Hosting
 
 @MainActor
-final class ManagerWindowController: NSObject, NSWindowDelegate {
+final class ManagerWindowController: NSObject, NSWindowDelegate,
+    CocoaScriptingWindowControlling
+{
     private let manager: PanelManager
     private let mainMenu = MainMenuController()
     private var window: NSWindow?
@@ -1381,6 +1390,14 @@ final class ManagerWindowController: NSObject, NSWindowDelegate {
 
     init(manager: PanelManager) {
         self.manager = manager
+    }
+
+    var isVisible: Bool { window?.isVisible == true }
+
+    func hide() {
+        window?.orderOut(nil)
+        manager.setPreviewVisible(false)
+        enterAccessoryModeWhenNoWindowsAreVisible()
     }
 
     func show() {
@@ -1449,6 +1466,12 @@ final class ManagerWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         manager.setPreviewVisible(false)
+        enterAccessoryModeWhenNoWindowsAreVisible()
+    }
+
+    private func enterAccessoryModeWhenNoWindowsAreVisible() {
+        // Defer until AppKit has completed a close/order-out transition; during
+        // windowWillClose the closing window can still report itself visible.
         DispatchQueue.main.async {
             guard NSApp.windows.allSatisfy({ !$0.isVisible }) else { return }
             NSApp.setActivationPolicy(.accessory)
