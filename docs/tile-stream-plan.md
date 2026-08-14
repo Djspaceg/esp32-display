@@ -15,30 +15,30 @@ the existing band protocol byte-for-byte; the new protocol is S3+square only.
 
 Hard constraints, all previously measured or confirmed in this codebase:
 
-| Constraint                     | Value                                     | Source                                                           |
+| Constraint | Value | Source |
 | ------------------------------ | ----------------------------------------- | ---------------------------------------------------------------- |
-| Frame size                     | 466x466 RGB565 = 434,312 B                | `bandproto::Geometry::frameBytes()`                              |
-| Datagram receive ceiling       | ~1826 datagrams/s, flat                   | measured, noted in `device_protocol.h` at `CAP_COMPRESSED_BANDS` |
-| Datagram size budget           | 1472 B (1500 MTU - IP - UDP)              | `MAX_PACKED_PACKET_BYTES`, `band_protocol.h`                     |
-| Max ingest bandwidth           | 1826 x 1472 = ~2.69 MB/s                  | product of the two above                                         |
-| S3 JPEG decode (JPEGDEC-class) | ~3.2 Mpx/s = ~68 ms/full frame            | atomic14 benchmark, 272x233 in 20ms on S3                        |
-| No hardware JPEG/video decode  | S3 has none (P4 does)                     | Espressif docs                                                   |
-| Frame buffers                  | bufA/bufB in PSRAM (octal), 434 KB each   | `display_stream.ino` ~line 341, `FRAME_BUF_CAPS`                 |
-| Panel driver rectangle support | arbitrary (x0,y0)-(x1,y1) via CASET/RASET | `esp_lcd_co5300_spi.c`, `panel_co5300_draw_bitmap`               |
-| DMA queue depth                | 2 transactions                            | panel init                                                       |
+| Frame size | 466x466 RGB565 = 434,312 B | `bandproto::Geometry::frameBytes()` |
+| Datagram receive ceiling | ~1826 datagrams/s, flat | measured, noted in `device_protocol.h` at `CAP_COMPRESSED_BANDS` |
+| Datagram size budget | 1472 B (1500 MTU - IP - UDP) | `MAX_PACKED_PACKET_BYTES`, `band_protocol.h` |
+| Max ingest bandwidth | 1826 x 1472 = ~2.69 MB/s | product of the two above |
+| S3 JPEG decode (JPEGDEC-class) | ~3.2 Mpx/s = ~68 ms/full frame | atomic14 benchmark, 272x233 in 20ms on S3 |
+| No hardware JPEG/video decode | S3 has none (P4 does) | Espressif docs |
+| Frame buffers | bufA/bufB in PSRAM (octal), 434 KB each | `display_stream.ino` ~line 341, `FRAME_BUF_CAPS` |
+| Panel driver rectangle support | arbitrary (x0,y0)-(x1,y1) via CASET/RASET | `esp_lcd_co5300_spi.c`, `panel_co5300_draw_bitmap` |
+| DMA queue depth | 2 transactions | panel init |
 
 ## 2. The budget math (read this first)
 
 The packet-rate ceiling is the dominant constraint, not decode CPU and not
 compression ratio in isolation. At ~2.69 MB/s ingest:
 
-| Scenario                                 | Bytes/frame               | FPS ceiling                                 |
+| Scenario | Bytes/frame | FPS ceiling |
 | ---------------------------------------- | ------------------------- | ------------------------------------------- |
-| Raw full frame                           | 434 KB                    | ~6 fps                                      |
-| RLE565 full frame (photo content ~= raw) | ~430 KB                   | ~6 fps                                      |
-| BC1 full frame (fixed 4:1)               | ~109 KB + record overhead | ~23 fps                                     |
-| JPEG q70 full frame (~10:1)              | ~43 KB                    | ~60 fps by bandwidth, ~14 fps by decode CPU |
-| 60 fps budget                            | <= ~45 KB/frame           | needs <= ~40% of panel dirty at BC1 4:1     |
+| Raw full frame | 434 KB | ~6 fps |
+| RLE565 full frame (photo content ~= raw) | ~430 KB | ~6 fps |
+| BC1 full frame (fixed 4:1) | ~109 KB + record overhead | ~23 fps |
+| JPEG q70 full frame (~10:1) | ~43 KB | ~60 fps by bandwidth, ~14 fps by decode CPU |
+| 60 fps budget | <= ~45 KB/frame | needs <= ~40% of panel dirty at BC1 4:1 |
 
 Conclusions that shape the whole design:
 
@@ -95,19 +95,19 @@ All file references are to the repo as of commit `5a9c24b3`.
 
 ## 4. Verdicts on alternatives considered
 
-| Approach                                 | Verdict                           | Reason                                                                                                                                                                                                                               |
+| Approach | Verdict | Reason |
 | ---------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Full-frame JPEG (JPEGDEC/TJpgDec)        | rejected                          | ~68 ms/frame decode = ~14fps ceiling; no HW decode on S3                                                                                                                                                                             |
-| Per-tile JPEG                            | rejected                          | per-tile header/table overhead exceeds payload at 16x16; needs custom shared-table decoder to be viable                                                                                                                              |
-| `esp_new_jpeg` (Espressif 2025, S3 SIMD) | benchmark in phase 0, not primary | may be several times faster than JPEGDEC via S3 PIE/SIMD; if it decodes 466x466 in <= ~16ms it becomes a candidate for keyframes/slideshow mode, but per-tile use still has the table-overhead problem                               |
-| zlib/LZ4 per tile                        | rejected as primary               | entropy coding decode cost on S3 for marginal gain over RLE on flat content, worse than BC1 on photos; LZ4 worth a phase-6 experiment layered over BC1 output (bc_crunch-style)                                                      |
-| BC1/DXT1 block compression               | **chosen lossy codec**            | fixed 4:1, decode is palette lookup (no IDCT/entropy), proven real-time on 1990s hardware, operates natively on RGB565 endpoints, 4x4 blocks tile cleanly into 16x16 tiles                                                           |
-| RLE565 (existing)                        | **kept for flat tiles**           | lossless, often beats 4:1 on UI/text/solid fills, zero new code                                                                                                                                                                      |
-| Hextile/ZRLE (RFB)                       | pattern adopted, formats not      | 16x16 tile grid mirrors Hextile; their byte formats drag in palette machinery this doesn't need                                                                                                                                      |
-| CopyRect (RFB)                           | deferred                          | scroll detection on the Mac is real work; note as future record type (the wire format reserves codec values)                                                                                                                         |
-| Half-resolution motion mode              | **adopted as adaptive fallback**  | 233x233 sent, pixel-doubled on panel: 4x fewer pixels, combined with BC1 = 16:1, enables full-frame motion near 60fps within today's packet ceiling at a visible quality cost; engaged only when dirty area exceeds the 60fps budget |
-| TCP transport                            | rejected                          | head-of-line blocking versus stale-frame-abandonment semantics the current design relies on                                                                                                                                          |
-| Raising the datagram ceiling             | **workstream, phase 6**           | lwIP mbox size, WiFi RX buffer counts, AMPDU-RX, batching reads; the single highest-leverage unknown — every % here is a % on full-frame fps                                                                                         |
+| Full-frame JPEG (JPEGDEC/TJpgDec) | rejected | ~68 ms/frame decode = ~14fps ceiling; no HW decode on S3 |
+| Per-tile JPEG | rejected | per-tile header/table overhead exceeds payload at 16x16; needs custom shared-table decoder to be viable |
+| `esp_new_jpeg` (Espressif 2025, S3 SIMD) | benchmark in phase 0, not primary | may be several times faster than JPEGDEC via S3 PIE/SIMD; if it decodes 466x466 in <= ~16ms it becomes a candidate for keyframes/slideshow mode, but per-tile use still has the table-overhead problem |
+| zlib/LZ4 per tile | rejected as primary | entropy coding decode cost on S3 for marginal gain over RLE on flat content, worse than BC1 on photos; LZ4 worth a phase-6 experiment layered over BC1 output (bc_crunch-style) |
+| BC1/DXT1 block compression | **chosen lossy codec** | fixed 4:1, decode is palette lookup (no IDCT/entropy), proven real-time on 1990s hardware, operates natively on RGB565 endpoints, 4x4 blocks tile cleanly into 16x16 tiles |
+| RLE565 (existing) | **kept for flat tiles** | lossless, often beats 4:1 on UI/text/solid fills, zero new code |
+| Hextile/ZRLE (RFB) | pattern adopted, formats not | 16x16 tile grid mirrors Hextile; their byte formats drag in palette machinery this doesn't need |
+| CopyRect (RFB) | deferred | scroll detection on the Mac is real work; note as future record type (the wire format reserves codec values) |
+| Half-resolution motion mode | **adopted as adaptive fallback** | 233x233 sent, pixel-doubled on panel: 4x fewer pixels, combined with BC1 = 16:1, enables full-frame motion near 60fps within today's packet ceiling at a visible quality cost; engaged only when dirty area exceeds the 60fps budget |
+| TCP transport | rejected | head-of-line blocking versus stale-frame-abandonment semantics the current design relies on |
+| Raising the datagram ceiling | **workstream, phase 6** | lwIP mbox size, WiFi RX buffer counts, AMPDU-RX, batching reads; the single highest-leverage unknown — every % here is a % on full-frame fps |
 
 ## 5. Scope and gating
 
@@ -149,7 +149,7 @@ All file references are to the repo as of commit `5a9c24b3`.
 Packet header (6 bytes, deliberately shaped like the band header so transport
 plumbing is reusable):
 
-```
+```plain
 [frame_id u16 LE][first_tile u16 LE][dirty_count u16 LE]
 ```
 
@@ -162,7 +162,7 @@ plumbing is reusable):
 
 Records, packed greedily to the 1472 B datagram budget:
 
-```
+```plain
 [tile u16 LE: bits 9..0 start index, bits 14..10 run length - 1, bit 15 reserved-0]
 [len u16 LE: bits 13..0 payload bytes, bits 15..14 codec]
 [payload]
@@ -262,13 +262,13 @@ band reassembler's suite (wraparound, resync, duplicates, abandonment).
 
 ### 6.7 Files
 
-| New file                                    | Contents                                                   |
+| New file | Contents |
 | ------------------------------------------- | ---------------------------------------------------------- |
-| `firmware/display_stream/tile_protocol.h`   | grid math, header/record parse, packer walker, Reassembler |
-| `firmware/display_stream/bc1.h`             | BC1 encode/decode, `maxEncodedBytes`-style bounds          |
-| `mac/.../SenderProtocol/TileProtocol.swift` | grid math, record building, packer                         |
-| `mac/.../SenderProtocol/BC1.swift`          | BC1 encode/decode                                          |
-| `mac/.../SenderCore/` (FrameSender changes) | tile diff, budget/degradation policy, capability gating    |
+| `firmware/display_stream/tile_protocol.h` | grid math, header/record parse, packer walker, Reassembler |
+| `firmware/display_stream/bc1.h` | BC1 encode/decode, `maxEncodedBytes`-style bounds |
+| `mac/.../SenderProtocol/TileProtocol.swift` | grid math, record building, packer |
+| `mac/.../SenderProtocol/BC1.swift` | BC1 encode/decode |
+| `mac/.../SenderCore/` (FrameSender changes) | tile diff, budget/degradation policy, capability gating |
 
 Modified: `device_protocol.h` (+`CAP_TILE_STREAM`), `display_stream.ino`
 (tile receive path + draw path, gated), `DeviceProtocol.swift` (+capability),
@@ -385,15 +385,15 @@ everything after.
 
 ## 9. Risks and open questions
 
-| Risk                                                                 | Mitigation                                                                                                                                                                    |
+| Risk | Mitigation |
 | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Datagram ceiling immovable                                           | 60fps stays partial-frame-only; half-res mode covers full-frame motion; set user expectations in-app (show measured fps)                                                      |
-| Draw-call overhead makes many small rects slower than few big strips | Phase 0 measures it; per-row run merging bounds it; fallback is vertical merging or reverting dense frames to full-width strips (the band draw path stays in the binary)      |
-| PSRAM bandwidth contention (bufA writes + staging reads + WiFi)      | internal-SRAM staging halves PSRAM traffic vs. band path's full-frame bufB; phase 0 measures the strided-copy cost                                                            |
-| BC1 quality on gradients (banding at 4:1, 16-bit endpoints)          | lossless/auto/aggressive knob; RLE wins flat tiles anyway; half-res mode is the only place quality drops further and it is opt-in                                             |
-| Tile seams under lossy encoding                                      | BC1 blocks are independent — no inter-block prediction — so seams only appear if encoder endpoints differ across a flat boundary; the variance gate sends flat tiles lossless |
-| 2 px edge tiles complicate BC1                                       | encoder pads by replication, decoder clips; pinned in phase 1/2 tests                                                                                                         |
-| Mac encode cost at 60fps                                             | BC1 encode is ~10 ops/px scalar; ~2-4 ms/full frame on Apple Silicon, less for partial frames; profile in phase 4, Accelerate/SIMD only if needed                             |
+| Datagram ceiling immovable | 60fps stays partial-frame-only; half-res mode covers full-frame motion; set user expectations in-app (show measured fps) |
+| Draw-call overhead makes many small rects slower than few big strips | Phase 0 measures it; per-row run merging bounds it; fallback is vertical merging or reverting dense frames to full-width strips (the band draw path stays in the binary) |
+| PSRAM bandwidth contention (bufA writes + staging reads + WiFi) | internal-SRAM staging halves PSRAM traffic vs. band path's full-frame bufB; phase 0 measures the strided-copy cost |
+| BC1 quality on gradients (banding at 4:1, 16-bit endpoints) | lossless/auto/aggressive knob; RLE wins flat tiles anyway; half-res mode is the only place quality drops further and it is opt-in |
+| Tile seams under lossy encoding | BC1 blocks are independent — no inter-block prediction — so seams only appear if encoder endpoints differ across a flat boundary; the variance gate sends flat tiles lossless |
+| 2 px edge tiles complicate BC1 | encoder pads by replication, decoder clips; pinned in phase 1/2 tests |
+| Mac encode cost at 60fps | BC1 encode is ~10 ops/px scalar; ~2-4 ms/full frame on Apple Silicon, less for partial frames; profile in phase 4, Accelerate/SIMD only if needed |
 
 ## 10. Success criteria
 
@@ -410,7 +410,7 @@ everything after.
 On-board microbenchmarks via `CFGBENCH` (`tools/bench_serial.py`), board on
 USB power, WiFi associated at RSSI -62 to -68, sender app quit. Raw output:
 
-```
+```plain
 bench: bc1 decode 2304000 px in 133949 us -> 17.20 Mpx/s
 bench: rle565 decode 2304000 px in 20202 us -> 114.05 Mpx/s
 bench: strided write SRAM->PSRAM 3.1 MB in 9020 us -> 340.6 MB/s
@@ -424,15 +424,15 @@ bench: draw tile 16x16 x200 pipelined: 154.5 us/call, 6472 calls/s
 
 ### 11.1 Interpretation
 
-| Measurement                            | Value                                                                     | Consequence                                                                                                                                                                                                                    |
+| Measurement | Value | Consequence |
 | -------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| BC1 decode (SRAM->SRAM, bench decoder) | 17.2 Mpx/s                                                                | full 466x466 frame = 12.6 ms; NOT the 60fps bottleneck for partial frames (45 KB/frame budget = ~90 Kpx = ~5.2 ms)                                                                                                             |
-| RLE565 decode (worst-case all-literal) | 114 Mpx/s                                                                 | negligible; effectively memcpy speed                                                                                                                                                                                           |
-| Strided copies SRAM<->PSRAM            | 340-356 MB/s                                                              | far faster than feared; strided tile writes to bufA and staging reads are non-issues                                                                                                                                           |
-| Full-frame memcpy PSRAM->PSRAM         | 22.3 MB/s                                                                 | the band path's bufA->bufB full-frame copy costs ~19.5 ms — by itself under 51 fps. Internal-SRAM staging (section 6.5) is VALIDATED as necessary, not just nice                                                               |
-| Draw call, 16x16 (512 B)               | 152.8 us/call, no pipelining gain                                         | fixed overhead ~140 us/call dominates small draws. 900 separate tile draws = 137 ms = 7 fps. **Run merging is mandatory, not an optimization**                                                                                 |
-| Draw call, 480x16 (15,360 B)           | 899.4 us/call                                                             | implies ~20.5 MB/s QSPI pixel rate + ~150 us fixed. Full frame painted as 30 full-width strips = ~26 ms = **~38 fps full-frame paint ceiling** (466x16: 874.7 us x 30 = 26.2 ms)                                               |
-| Datagram receive ceiling               | best 5s windows ~2,350-2,400/s (1472 B and 512 B alike); size-independent | ~3.5 MB/s max ingest at 1472 B. Slightly better than the historical 1,826/s. Sustained rates during floods were radio-limited (RSSI degraded to -70..-80 mid-test), not board-limited — re-measure closer to the AP in phase 6 |
+| BC1 decode (SRAM->SRAM, bench decoder) | 17.2 Mpx/s | full 466x466 frame = 12.6 ms; NOT the 60fps bottleneck for partial frames (45 KB/frame budget = ~90 Kpx = ~5.2 ms) |
+| RLE565 decode (worst-case all-literal) | 114 Mpx/s | negligible; effectively memcpy speed |
+| Strided copies SRAM<->PSRAM | 340-356 MB/s | far faster than feared; strided tile writes to bufA and staging reads are non-issues |
+| Full-frame memcpy PSRAM->PSRAM | 22.3 MB/s | the band path's bufA->bufB full-frame copy costs ~19.5 ms — by itself under 51 fps. Internal-SRAM staging (section 6.5) is VALIDATED as necessary, not just nice |
+| Draw call, 16x16 (512 B) | 152.8 us/call, no pipelining gain | fixed overhead ~140 us/call dominates small draws. 900 separate tile draws = 137 ms = 7 fps. **Run merging is mandatory, not an optimization** |
+| Draw call, 480x16 (15,360 B) | 899.4 us/call | implies ~20.5 MB/s QSPI pixel rate + ~150 us fixed. Full frame painted as 30 full-width strips = ~26 ms = **~38 fps full-frame paint ceiling** (466x16: 874.7 us x 30 = 26.2 ms) |
+| Datagram receive ceiling | best 5s windows ~2,350-2,400/s (1472 B and 512 B alike); size-independent | ~3.5 MB/s max ingest at 1472 B. Slightly better than the historical 1,826/s. Sustained rates during floods were radio-limited (RSSI degraded to -70..-80 mid-test), not board-limited — re-measure closer to the AP in phase 6 |
 
 Flood method note: unpaced floods (72k datagrams/s offered = ~850 Mbps at
 1472 B against a 2.4GHz-only radio) collapse the AP queue and produce
@@ -445,13 +445,13 @@ fewer/denser packets remains the right lever.
 
 Ingest at 2,400/s x 1472 B = ~3.5 MB/s. Per-frame budgets at 60 fps:
 
-| Path                                      | Cost per 60fps frame               | Verdict                                                                             |
+| Path | Cost per 60fps frame | Verdict |
 | ----------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- |
-| Network ingest                            | 58.8 KB/frame max (~40 datagrams)  | = ~54% of panel dirty at BC1 4:1, ~13% raw lossless                                 |
-| BC1 decode                                | 5.2 ms per 45 KB (90 Kpx)          | fits alongside everything else                                                      |
-| Strided bufA writes                       | ~0.5 ms                            | negligible                                                                          |
-| Draw (merged runs, staging reads)         | ~150 us + 49 us/KB per merged rect | e.g. 15 merged runs x ~250 us avg = ~3.8 ms; fits                                   |
-| Full-frame paint (all 30 tile-rows dirty) | ~26 ms                             | **hard ~38 fps ceiling for full-frame updates — QSPI bus, no protocol can beat it** |
+| Network ingest | 58.8 KB/frame max (~40 datagrams) | = ~54% of panel dirty at BC1 4:1, ~13% raw lossless |
+| BC1 decode | 5.2 ms per 45 KB (90 Kpx) | fits alongside everything else |
+| Strided bufA writes | ~0.5 ms | negligible |
+| Draw (merged runs, staging reads) | ~150 us + 49 us/KB per merged rect | e.g. 15 merged runs x ~250 us avg = ~3.8 ms; fits |
+| Full-frame paint (all 30 tile-rows dirty) | ~26 ms | **hard ~38 fps ceiling for full-frame updates — QSPI bus, no protocol can beat it** |
 
 Revised conclusions:
 
@@ -474,11 +474,11 @@ Revised conclusions:
 
 ### 11.3 Bench tooling (kept in-tree for phase 6 re-measurement)
 
-| Tool                                                 | Use                                                                                                                      |
+| Tool | Use |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `CFGBENCH` serial command                            | S3-only, in `display_stream.ino`; runs decode/copy/draw benches, ~3 s, visually invisible (draws copy bufA content back) |
-| `tools/bench_serial.py <port> [secs]`                | sends CFGBENCH, prints results                                                                                           |
-| `tools/bench_flood.py <ip> <size> <secs> [--rate N]` | offered-rate flood; read `badlen=` deltas from the 5 s serial stats for the receive rate                                 |
+| `CFGBENCH` serial command | S3-only, in `display_stream.ino`; runs decode/copy/draw benches, ~3 s, visually invisible (draws copy bufA content back) |
+| `tools/bench_serial.py <port> [secs]` | sends CFGBENCH, prints results |
+| `tools/bench_flood.py <ip> <size> <secs> [--rate N]` | offered-rate flood; read `badlen=` deltas from the 5 s serial stats for the receive rate |
 
 ## 12. Outcome (phases 1-7 shipped 2026-08-13)
 
@@ -487,15 +487,15 @@ committed. What shipped, and what the numbers actually turned out to be.
 
 ### 12.1 What shipped
 
-| Phase | Commit    | Contents                                                                                                    |
+| Phase | Commit | Contents |
 | ----- | --------- | ----------------------------------------------------------------------------------------------------------- |
-| 0     | `68e72e0` | `CFGBENCH` on-board benchmarks, `bench_serial.py`, `bench_flood.py`, section 11                             |
-| 1     | `79586e5` | `bc1.h` + `BC1.swift`: BC1 encode/decode, mutation-tested decoder                                           |
-| 2     | `f4f7dc6` | `tile_protocol.h` + `TileProtocol.swift`: grid, wire format, walker, reassembler, packer; `CAP_TILE_STREAM` |
-| 3     | `97596d6` | Firmware receive + draw path (S3-gated), capability advertisement, `espdisp.py tile-test`                   |
-| 4     | `2914773` | Mac tile diff + `sendTileFrame`, capability-gated protocol selection                                        |
-| 5     | `bc72342` | Variance gate, degradation ladder, Lossless/Automatic/Aggressive setting                                    |
-| 6     | `ed29514` | Receive-path drain loop + 64 KB `SO_RCVBUF`                                                                 |
+| 0 | `68e72e0` | `CFGBENCH` on-board benchmarks, `bench_serial.py`, `bench_flood.py`, section 11 |
+| 1 | `79586e5` | `bc1.h` + `BC1.swift`: BC1 encode/decode, mutation-tested decoder |
+| 2 | `f4f7dc6` | `tile_protocol.h` + `TileProtocol.swift`: grid, wire format, walker, reassembler, packer; `CAP_TILE_STREAM` |
+| 3 | `97596d6` | Firmware receive + draw path (S3-gated), capability advertisement, `espdisp.py tile-test` |
+| 4 | `2914773` | Mac tile diff + `sendTileFrame`, capability-gated protocol selection |
+| 5 | `bc72342` | Variance gate, degradation ladder, Lossless/Automatic/Aggressive setting |
+| 6 | `ed29514` | Receive-path drain loop + 64 KB `SO_RCVBUF` |
 
 Deviations from the plan as written:
 
@@ -524,20 +524,20 @@ end-to-end capacity.**
 
 Receive ceiling, paced floods at 1472 B, same session, RSSI -56 to -62:
 
-| Receive path   | Sustained accepted                    | Ingest    |
+| Receive path | Sustained accepted | Ingest |
 | -------------- | ------------------------------------- | --------- |
-| Before phase 6 | ~1,977-2,460/s (peak window 3,173/s)  | ~3.0 MB/s |
-| After phase 6  | ~2,700-2,880/s at 3,000-5,000 offered | ~4.2 MB/s |
+| Before phase 6 | ~1,977-2,460/s (peak window 3,173/s) | ~3.0 MB/s |
+| After phase 6 | ~2,700-2,880/s at 3,000-5,000 offered | ~4.2 MB/s |
 
 End-to-end, tile protocol against the band-protocol baseline on the same
 board and content:
 
-| Content                   | Band protocol               | Tile protocol                      |
+| Content | Band protocol | Tile protocol |
 | ------------------------- | --------------------------- | ---------------------------------- |
-| Light / mostly static     | ~29 fps at ~300 datagrams/s | ~35 fps at ~70 datagrams/s         |
-| Ordinary desktop use      | not measured                | ~24-27 fps at ~450-550 datagrams/s |
-| Video in a window         | unusable                    | smooth (user-verified)             |
-| Majority-of-screen motion | unusable                    | still saturates - see 12.4         |
+| Light / mostly static | ~29 fps at ~300 datagrams/s | ~35 fps at ~70 datagrams/s |
+| Ordinary desktop use | not measured | ~24-27 fps at ~450-550 datagrams/s |
+| Video in a window | unusable | smooth (user-verified) |
+| Majority-of-screen motion | unusable | still saturates - see 12.4 |
 
 BC1 quality: PSNR 39.1 dB at 4:1 on photo-like content (gradients + noise +
 a sharp edge), max per-channel error 9/255 - above the JPEG-q70 bar the
@@ -551,16 +551,16 @@ conditional; its wire format is untouched.
 
 ### 12.3 Success criteria, honestly scored
 
-| Criterion (section 10)                                            | Result                                                                                                                             |
+| Criterion (section 10) | Result |
 | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Pixel-perfect static content in lossless mode                     | met                                                                                                                                |
-| No tile seams or stale tiles under motion                         | met (user-verified)                                                                                                                |
-| Orientation, rotation, idle card, info bar, touch, OTA unaffected | met                                                                                                                                |
-| C6 boards byte-identical on the wire                              | met                                                                                                                                |
-| Small-motion content at 60fps                                     | NOT met - ~35 fps on light content; the ceiling is the sender's own capture/encode cadence and the datagram rate, not the protocol |
-| >= 40% dirty at 60fps                                             | NOT met                                                                                                                            |
-| Full-frame motion >= 23fps full-res                               | partially - holds for moderate motion, saturates when most of the panel changes every frame                                        |
-| All suites green, both targets compile, per-phase commits         | met                                                                                                                                |
+| Pixel-perfect static content in lossless mode | met |
+| No tile seams or stale tiles under motion | met (user-verified) |
+| Orientation, rotation, idle card, info bar, touch, OTA unaffected | met |
+| C6 boards byte-identical on the wire | met |
+| Small-motion content at 60fps | NOT met - ~35 fps on light content; the ceiling is the sender's own capture/encode cadence and the datagram rate, not the protocol |
+| >= 40% dirty at 60fps | NOT met |
+| Full-frame motion >= 23fps full-res | partially - holds for moderate motion, saturates when most of the panel changes every frame |
+| All suites green, both targets compile, per-phase commits | met |
 
 The 60fps target was not reached. The protocol work did what section 2's
 math said it would - the wire cost per frame is now near-minimal for
@@ -613,12 +613,12 @@ A pixel is visible when its centre lies inside the frame's inscribed circle
 the centre is still outside — a tile straddling the boundary holds visible
 pixels and must be sent whole.
 
-| Class                     | Tiles       | Note                      |
+| Class | Tiles | Note |
 | ------------------------- | ----------- | ------------------------- |
-| Fully outside (skippable) | 181 (20.1%) | never sent again          |
-| Straddling the boundary   | 106         | sent whole, partly wasted |
-| Fully inside              | 613         |                           |
-| Sent per keyframe         | 719         | was 900                   |
+| Fully outside (skippable) | 181 (20.1%) | never sent again |
+| Straddling the boundary | 106 | sent whole, partly wasted |
+| Fully inside | 613 | |
+| Sent per keyframe | 719 | was 900 |
 
 Tile granularity costs almost nothing: the circle is 78.6% of the frame's
 area (π/4, as it must be), and the kept tiles cover 83.7% — so the mask
@@ -643,11 +643,11 @@ Section 12.3 listed the ~38.9 fps QSPI paint ceiling as limit 1 and said
 change, it is a smaller frame. The panel paints only what the sender marks,
 so skipping 181 tiles removes their paint time too.
 
-| Path                             | Before             | After                  |
+| Path | Before | After |
 | -------------------------------- | ------------------ | ---------------------- |
 | Full-frame paint (phase-0 model) | 25.7 ms → 38.9 fps | 22.2 ms → **45.0 fps** |
-| Keyframe tiles                   | 900                | 719                    |
-| Wire bytes, full frame           | 100%               | ~84%                   |
+| Keyframe tiles | 900 | 719 |
+| Wire bytes, full frame | 100% | ~84% |
 
 So the one scenario still failing — majority-of-screen motion — gets ~20%
 relief on both axes at once, with no quality cost and no protocol change.
@@ -725,12 +725,12 @@ The plan had assumed BC1 encode was the sender's expensive step
 ... profile in phase 4"). Phase 4 deferred that profiling and nothing
 since had looked. Measured, per full keyframe of 719 tiles:
 
-| Stage                   | First measurement | Suspected?                           |
+| Stage | First measurement | Suspected? |
 | ----------------------- | ----------------- | ------------------------------------ |
-| tile diff               | 0.23 ms           | feared ~1-2 ms; it is free           |
-| encode                  | 20.4 ms           | yes — but not for the reason assumed |
-| send                    | 103.3 ms          | never suspected at all               |
-| — of which pacing sleep | 100.6 ms          | —                                    |
+| tile diff | 0.23 ms | feared ~1-2 ms; it is free |
+| encode | 20.4 ms | yes — but not for the reason assumed |
+| send | 103.3 ms | never suspected at all |
+| — of which pacing sleep | 100.6 ms | — |
 
 Pacing was 83% of a frame's cost and had never been measured once.
 
@@ -796,13 +796,13 @@ literal, not the constant, so that state cannot pass again.
 
 Same board, ordinary desktop content, capture at 60 fps, ~9% dirty:
 
-| Stage           | Before phase 9 | After             |
+| Stage | Before phase 9 | After |
 | --------------- | -------------- | ----------------- |
-| diff            | 0.23 ms        | 0.35 ms           |
-| encode          | 20.4 ms        | **0.44 ms**       |
-| send            | 103.3 ms       | **6.4 ms**        |
-| per datagram    | 890 µs         | **225 µs**        |
-| send-path total | ~124 ms/frame  | **~7.2 ms/frame** |
+| diff | 0.23 ms | 0.35 ms |
+| encode | 20.4 ms | **0.44 ms** |
+| send | 103.3 ms | **6.4 ms** |
+| per datagram | 890 µs | **225 µs** |
+| send-path total | ~124 ms/frame | **~7.2 ms/frame** |
 
 ~7.2 ms per frame is ~139 fps of send-path headroom. The panel's `shown`
 counter tracks the sender almost exactly (124 frames per 5 s window), so
@@ -871,10 +871,10 @@ compounds as the rate climbs:
 
 | Offered | Accepted dgram/s | Shown fps | Frames never completed |
 | ------- | ---------------- | --------- | ---------------------- |
-| 10      | 579              | 6.8       | 31.5%                  |
-| 15      | 962              | 10.9      | 26.8%                  |
-| 20      | 1029             | 5.5       | 59.2%                  |
-| 45      | 1342             | **0.0**   | **100%**               |
+| 10 | 579 | 6.8 | 31.5% |
+| 15 | 962 | 10.9 | 26.8% |
+| 20 | 1029 | 5.5 | 59.2% |
+| 45 | 1342 | **0.0** | **100%** |
 
 At 45 fps offered the panel accepted 1,342 datagrams/s and displayed
 NOTHING. That is the reported failure, and the pixels were never missing:
@@ -902,12 +902,12 @@ bounding how long drawing waits.
 
 ### 15.5 Result
 
-| Offered | Before            | + partial draw | + yield          |
+| Offered | Before | + partial draw | + yield |
 | ------- | ----------------- | -------------- | ---------------- |
-| 15      | 10.9 (26.8% lost) | 23.2 (36.4%)   | **13.5 (18.2%)** |
-| 20      | 5.5 (59.2%)       | 18.9 (49.0%)   | **13.8 (46.6%)** |
-| 30      | —                 | 5.4 (84.7%)    | 6.2 (83.0%)      |
-| 45      | **0.0** (100%)    | 3.7 (92.4%)    | **6.8 (86.7%)**  |
+| 15 | 10.9 (26.8% lost) | 23.2 (36.4%) | **13.5 (18.2%)** |
+| 20 | 5.5 (59.2%) | 18.9 (49.0%) | **13.8 (46.6%)** |
+| 30 | — | 5.4 (84.7%) | 6.2 (83.0%) |
+| 45 | **0.0** (100%) | 3.7 (92.4%) | **6.8 (86.7%)** |
 
 Full-frame motion goes from collapsing to zero to sustaining ~14 fps,
 and frame loss at 15 fps halves. Note the metric: `statFramesShown` now
