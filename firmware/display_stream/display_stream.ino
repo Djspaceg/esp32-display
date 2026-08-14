@@ -410,6 +410,14 @@ static uint8_t pendingTileBitmap[tileproto::TILE_BITMAP_BYTES];
 // calls is ~5-29 ms of panel time at the measured 150-900 us per call. The
 // remainder is re-marked pending and finished next iteration.
 static const int TILE_DRAW_CALL_CAP = 32;
+// How long pending tiles may wait for their frame to complete before being
+// drawn anyway. See the tilePartialDue block in loop() for why this exists:
+// a full-panel update is ~66 datagrams, so a fraction of a percent of
+// datagram loss stops a third of frames from ever completing, and the tiles
+// are already in bufA by then. 40 ms is a frame at 25 fps - long enough that
+// a merely-late frame still draws whole, short enough that a lossy stream
+// keeps moving rather than freezing.
+static const uint32_t TILE_PARTIAL_DRAW_MS = 40;
 #endif
 
 static bool panelLandscape = false;              // current panel MADCTL state
@@ -838,6 +846,9 @@ static int rxSock = -1;
 // compete with the radio.
 static const UBaseType_t RX_TASK_PRIORITY = 9;
 static const uint32_t RX_TASK_STACK = 6144;
+/// Datagrams this task may drain before yielding to the draw loop. See the
+/// drain loop in udpReceiveTask for why an explicit yield is required.
+static const int RX_DRAIN_YIELD_EVERY = 24;
 
 static void udpReceiveTask(void *) {
   // One reusable buffer, internal RAM. Sized over MAX_PACKED_PACKET_BYTES so
@@ -866,6 +877,17 @@ static void udpReceiveTask(void *) {
     // cannot starve anything this way that it would not also starve
     // through the blocking call, which returns immediately when data is
     // queued.
+    // Bounded, and it yields when it hits the bound. This task runs at
+    // priority 9 and loop() at 1, so a drain loop that keeps finding data
+    // never lets the DRAW happen: measured with `espdisp.py tile-motion`, at
+    // 30 full frames/s offered the panel accepted 1519 datagrams/s and drew
+    // only 5.4 times a second - the tiles were arriving and sitting in bufA
+    // unshown. Neither the blocking recvfrom nor MSG_DONTWAIT yields while
+    // data is queued, so the yield has to be explicit; vTaskDelay(1) is the
+    // shortest one that actually lets a lower-priority task be scheduled.
+    // 24 datagrams between yields keeps the ceiling far above the radio's
+    // (~24 per tick is ~24000/s) while bounding how long drawing waits.
+    int drained = 0;
     while (true) {
       fromLen = sizeof(from);
       n = lwip_recvfrom(rxSock, rxBuf, sizeof(rxBuf), MSG_DONTWAIT,
@@ -873,6 +895,10 @@ static void udpReceiveTask(void *) {
       if (n <= 0) break;  // empty (EWOULDBLOCK) or error: back to blocking
       handleInbound(rxBuf, (size_t)n, from.sin_addr.s_addr,
                     ntohs(from.sin_port));
+      if (++drained >= RX_DRAIN_YIELD_EVERY) {
+        drained = 0;
+        vTaskDelay(1);  // let loopTask draw what has arrived
+      }
     }
   }
 }
@@ -3077,7 +3103,44 @@ void loop() {
   }
 
   static uint32_t lastCompleted = 0;
-  if (framesCompleted != lastCompleted && dmaInFlight == 0) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  // Draw the tiles we have even when no frame ever completes.
+  //
+  // A frame is only "complete" once every tile it promised has arrived, and
+  // a full-panel update is ~66 datagrams, so half a percent of datagram loss
+  // becomes a THIRD of frames never completing - measured with
+  // `espdisp.py tile-motion`: at 20 full frames/s offered, 59% of frames
+  // never completed and the panel showed 5.5 fps; at 45, none completed and
+  // it showed NOTHING while receiving 1342 datagrams/s. That is the
+  // majority-of-screen-motion failure, and the pixels were never the
+  // problem: applyTileRecord has already written them into bufA, and the
+  // reassembler was the only thing withholding them.
+  //
+  // So if tiles are pending and nothing has completed for a while, draw what
+  // arrived. A partially updated frame during motion is imperceptible next to
+  // a frozen panel, and any tile still missing is corrected by the next frame
+  // that covers it - or by the 2-second keyframe at worst. Tile streams only:
+  // a band frame is few enough datagrams that completion is not the binding
+  // constraint there, and that path's behaviour is deliberately untouched.
+  static uint32_t lastTileDrawAt = 0;
+  bool tilePartialDue = false;
+  if (tileStreamEnabled() && (uint32_t)(millis() - lastTileDrawAt) >=
+                                 TILE_PARTIAL_DRAW_MS) {
+    portENTER_CRITICAL(&drawMux);
+    for (size_t i = 0; i < sizeof(pendingTileBitmap); i++) {
+      if (pendingTileBitmap[i] != 0) {
+        tilePartialDue = true;
+        break;
+      }
+    }
+    portEXIT_CRITICAL(&drawMux);
+  }
+  if (tilePartialDue) lastTileDrawAt = millis();
+#else
+  const bool tilePartialDue = false;
+#endif
+  if ((framesCompleted != lastCompleted || tilePartialDue) &&
+      dmaInFlight == 0) {
     lastCompleted = framesCompleted;
 
     // Snapshot-and-clear the pending set; the UDP task keeps marking bands

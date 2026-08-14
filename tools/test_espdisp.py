@@ -2282,6 +2282,45 @@ def test_tile_stream_wire():
         check_equal(at, len(p), "mask records tile the packet exactly")
     check_equal(painted, 900, "the pattern paints every tile")
 
+    # The full-frame motion benchmark (tile-motion). Its whole purpose is to
+    # cost exactly what a real majority-of-screen BC1 update costs, so the
+    # per-tile size and the frame's datagram count are what matter.
+    block, seed = espdisp.bc1_noise_tile(1, 16, 16)
+    check_equal(len(block), 128, "a 16x16 BC1 tile is 16 blocks x 8 B")
+    check(seed != 1, "the generator advances its seed")
+    for i in range(0, len(block), 8):
+        c0, c1 = struct.unpack("<HH", block[i:i + 4])
+        check(c0 >= c1, "BC1 4-colour mode needs c0 >= c1")
+    check_equal(len(espdisp.bc1_noise_tile(1, 2, 2)[0]), 8,
+                "the 2x2 corner tile is one block")
+    check_equal(len(espdisp.bc1_noise_tile(1, 2, 16)[0]), 32,
+                "a 2x16 edge tile is 4 blocks")
+    motion, _ = espdisp.motion_frame_packets(1, 0xC0FFEE)
+    check_equal(len(motion), 66, "a full-frame BC1 update is 66 datagrams")
+    total = sum(len(p) for p in motion)
+    check(90000 < total < 96000,
+          "a full BC1 frame is ~94 KB, got %d" % total)
+    covered = []
+    for p in motion:
+        check(len(p) <= espdisp.TILE_PACKET_BUDGET, "motion datagram in budget")
+        _, first_field, dirty = struct.unpack("<HHH", p[:6])
+        check(first_field & 0x8000 != 0, "motion packet sets the stream flag")
+        check_equal(dirty, 719,
+                    "motion frames declare only the VISIBLE tiles")
+        at = 6
+        while at < len(p):
+            tile_field, len_field = struct.unpack("<HH", p[at:at + 4])
+            check_equal(len_field >> 14, espdisp.TILE_CODEC_BC1,
+                        "motion records are BC1")
+            covered.append(tile_field & 0x03FF)
+            at += 4 + (len_field & 0x3FFF)
+        check_equal(at, len(p), "motion records tile the packet exactly")
+    hidden = set(espdisp.tile_visibility()["outside"])
+    check_equal(len(covered), 719, "every visible tile is sent once")
+    check_equal(len(set(covered)), 719, "no tile is sent twice")
+    check(not (set(covered) & hidden),
+          "the motion benchmark never sends a hidden tile")
+
 
 def test_describe_bundle():
     """bundle-info's output is the whole point of the manifest, so it is checked.

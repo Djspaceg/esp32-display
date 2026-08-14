@@ -1867,6 +1867,164 @@ def round_mask_packets(frame_id: int, width: int = 466,
     return packets
 
 
+def bc1_noise_tile(seed: int, w: int, h: int) -> tuple:
+    """A valid BC1 payload of noise for a w x h raster, and the next seed.
+
+    Two endpoints plus pseudo-random 2-bit indices: exactly the 8 bytes per
+    4x4 block the real encoder emits, so the wire cost and the panel's decode
+    cost match a genuine photo/video tile. The picture is meaningless - this
+    exists to measure throughput, not quality.
+    """
+    blocks = ((w + 3) // 4) * ((h + 3) // 4)
+    out = bytearray()
+    for _ in range(blocks):
+        seed = (seed * 1664525 + 1013904223) & 0xFFFFFFFF
+        c0 = (seed >> 16) & 0xFFFF
+        seed = (seed * 1664525 + 1013904223) & 0xFFFFFFFF
+        c1 = (seed >> 16) & 0xFFFF
+        # BC1's 4-colour mode needs c0 >= c1, the same rule the encoders keep.
+        if c0 < c1:
+            c0, c1 = c1, c0
+        seed = (seed * 1664525 + 1013904223) & 0xFFFFFFFF
+        out += struct.pack("<HHI", c0, c1, seed)
+    return bytes(out), seed
+
+
+def motion_frame_packets(frame_id: int, seed: int, width: int = 466,
+                         height: int = 466) -> tuple:
+    """One full-frame BC1 update covering every VISIBLE tile, packed to the
+    datagram budget. Returns (packets, next seed).
+
+    Mirrors what the real sender emits for majority-of-screen motion: the
+    round mask's 719 tiles rather than all 900, BC1 for every run, records
+    packed greedily.
+    """
+    classes = tile_visibility(width, height)
+    hidden = set(classes["outside"])
+    cols = (width + TILE_DIM - 1) // TILE_DIM
+    rows = (height + TILE_DIM - 1) // TILE_DIM
+    visible = [t for t in range(cols * rows) if t not in hidden]
+
+    records = []
+    for tile in visible:
+        tx, ty = tile % cols, tile // cols
+        w = min(TILE_DIM, width - tx * TILE_DIM)
+        h = min(TILE_DIM, height - ty * TILE_DIM)
+        payload, seed = bc1_noise_tile(seed, w, h)
+        records.append((tile, tile_record(tile, 1, TILE_CODEC_BC1, payload)))
+
+    packets = []
+    current, size, first = [], 6, None
+    for start, rec in records:
+        if size + len(rec) > TILE_PACKET_BUDGET and current:
+            packets.append(tile_header(frame_id, first, len(visible))
+                           + b"".join(current))
+            current, size, first = [], 6, None
+        if first is None:
+            first = start
+        current.append(rec)
+        size += len(rec)
+    if current:
+        packets.append(tile_header(frame_id, first, len(visible))
+                       + b"".join(current))
+    return packets, seed
+
+
+def cmd_tile_motion(args) -> int:
+    """Stream synthetic full-frame BC1 updates and report the offered rate.
+
+    The measurement docs/tile-stream-plan.md section 10 asked for and never
+    got: majority-of-screen motion, deterministic and independent of whatever
+    happens to be on the Mac's screen. Read the panel's own `frames=` delta
+    from the 5-second serial stats line for the ACHIEVED rate; this prints
+    only what was offered.
+    """
+    # Pre-build a small rotation of frames: encoding 719 BC1 tiles in Python
+    # is far slower than the wire, so building them inside the send loop
+    # would measure Python instead of the panel.
+    print("building frames...", flush=True)
+    seed = 0xC0FFEE
+    prebuilt = []
+    for i in range(args.distinct_frames):
+        packets, seed = motion_frame_packets(i + 1, seed)
+        prebuilt.append(packets)
+    per_frame = len(prebuilt[0])
+    frame_bytes = sum(len(p) for p in prebuilt[0])
+    print("%d datagrams/frame, %d bytes/frame (719 visible tiles, BC1)"
+          % (per_frame, frame_bytes))
+    print("offering %d fps for %.0fs -> %d datagrams/s"
+          % (args.target_fps, args.seconds, args.target_fps * per_frame))
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+    # Bind and read the panel's own EHB1 heartbeats here rather than from a
+    # separate watcher: the panel replies to whoever sent it a packet LAST,
+    # and this flood wins that race continuously, so any other listener would
+    # see almost nothing. Reading them here also makes the offered and
+    # achieved rates one self-contained measurement, with no serial cable in
+    # the loop - which matters because the USB CDC on this board drops out.
+    sock.bind(("", 0))
+    sock.setblocking(False)
+    spacing = 1.0 / (args.target_fps * per_frame)
+    frame_id = 1
+    sent_frames = 0
+    sent_packets = 0
+    first_hb = None
+    first_hb_at = None
+    last_hb = None
+    last_hb_at = None
+
+    def drain_heartbeats():
+        nonlocal first_hb, first_hb_at, last_hb, last_hb_at
+        while True:
+            try:
+                data, _ = sock.recvfrom(2048)
+            except (BlockingIOError, OSError):
+                return
+            if len(data) != 24 or data[:4] != b"EHB1":
+                continue
+            stats = struct.unpack("<IIIII", data[4:24])
+            if first_hb is None:
+                first_hb, first_hb_at = stats, time.time()
+            last_hb, last_hb_at = stats, time.time()
+
+    start = time.time()
+    deadline = start + args.seconds
+    next_due = start
+    while time.time() < deadline:
+        for packet in prebuilt[sent_frames % len(prebuilt)]:
+            # Rewrite the frame id so the panel treats each pass as a new
+            # frame rather than a duplicate its reassembler would ignore.
+            body = bytes([frame_id & 0xFF, (frame_id >> 8) & 0xFF]) + packet[2:]
+            sock.sendto(body, (args.host, 5568))
+            sent_packets += 1
+            next_due += spacing
+            delay = next_due - time.time()
+            if delay > 0:
+                time.sleep(delay)
+        sent_frames += 1
+        frame_id = (frame_id + 1) & 0xFFFF
+        drain_heartbeats()
+    elapsed = time.time() - start
+    print("offered %d frames (%d datagrams) in %.1fs -> %.1f fps, %.0f dgram/s"
+          % (sent_frames, sent_packets, elapsed, sent_frames / elapsed,
+             sent_packets / elapsed))
+
+    if first_hb is None or last_hb is None or last_hb_at == first_hb_at:
+        print("no heartbeat window captured - cannot report the achieved rate")
+        return 0
+    span = last_hb_at - first_hb_at
+    shown = last_hb[0] - first_hb[0]
+    dropped = last_hb[1] - first_hb[1]
+    packets = last_hb[3] - first_hb[3]
+    total = shown + dropped
+    print("ACHIEVED over %.1fs: %.1f fps shown, %.0f datagrams/s accepted, "
+          "%d dropped frames (%.1f%%)"
+          % (span, shown / span, packets / span, dropped,
+             100.0 * dropped / total if total else 0.0))
+    return 0
+
+
 def cmd_tile_test(args) -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     if args.round_mask:
@@ -2307,6 +2465,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds to keep repainting the round-mask pattern (default 30)",
     )
     p_tile.set_defaults(func=cmd_tile_test)
+
+    p_motion = subs.add_parser(
+        "tile-motion",
+        help="stream synthetic full-frame BC1 updates to measure the "
+             "majority-of-screen-motion ceiling",
+    )
+    p_motion.add_argument("host", help="panel IP address")
+    p_motion.add_argument("--seconds", type=float, default=20.0)
+    p_motion.add_argument(
+        "--target-fps", type=int, default=45,
+        help="full frames per second to offer (default 45, the paint ceiling)",
+    )
+    p_motion.add_argument(
+        "--distinct-frames", type=int, default=4,
+        help="how many distinct frames to pre-build and cycle through",
+    )
+    p_motion.set_defaults(func=cmd_tile_motion)
 
     p_list = subs.add_parser("list", help="show the ports and chips this tool can see")
     p_list.add_argument(
