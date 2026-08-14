@@ -196,7 +196,9 @@ final class FrameSender {
     ///
     /// Static so the settings UI offers exactly the range the sender enforces,
     /// rather than a second copy of these numbers that could drift.
-    static let spacingRange: ClosedRange<UInt32> = 120...2500
+    /// Upper bound raised from 2500 for tile panels: see
+    /// `tileAbsorbablePacketsPerSecond`, which needs 3333 us to express.
+    static let spacingRange: ClosedRange<UInt32> = 120...4000
 
     /// Fastest packet rate the controller may offer. 120us between packets =
     /// ~8300 pkt/s, the same cap the fixed 120us floor always was; the panel
@@ -211,6 +213,36 @@ final class FrameSender {
     /// the 80-band 172x320 but 0.86 fps on the 466-band 466x466, which is the
     /// bug where the pacing hill-climb parked a panel at ~1 fps.
     static let minWorstCaseFps: UInt32 = 5
+
+    /// Datagrams a second a TILE panel can accept and still paint what they
+    /// carry. Measured, not derived (docs/tile-stream-plan.md section 17.3):
+    /// ~300/s delivers 14 frames a second at 6% loss, ~430/s costs 38% loss,
+    /// and past ~570/s the panel collapses to under one frame a second while
+    /// still accepting datagrams. Offering more than this makes the panel
+    /// deliver strictly LESS.
+    ///
+    /// This exists because the band-derived ceiling above cannot express it.
+    /// That bound keeps `minWorstCaseFps * bandCount` datagrams a second
+    /// flowing, which on the 466-band panel pins the ceiling at 429 us -
+    /// 2331 datagrams a second, eight times what this panel can absorb. The
+    /// hill-climb was observed parked exactly there (`pacing=429us` in the
+    /// app log), having backed off as far as it was allowed and still wanting
+    /// more. So the sender was structurally unable to leave the collapse
+    /// region on a tile panel, whatever it measured.
+    ///
+    /// The band bound is not wrong, it is aimed at a different protocol: it
+    /// assumes one datagram per band, ~466 for a keyframe here, where a tile
+    /// keyframe is 18 (half-res) to 66 (BC1). And its premise fails outright
+    /// at this scale - a large keyframe CANNOT reach 5 fps at the absorbable
+    /// rate, so pacing tighter does not deliver it faster, only sooner into
+    /// the queue that drops it.
+    static let tileAbsorbablePacketsPerSecond: UInt32 = 300
+
+    /// Loosest pacing a tile panel may be held to, from the rate above.
+    static var tileSpacingCeiling: UInt32 {
+        min(spacingRange.upperBound,
+            1_000_000 / tileAbsorbablePacketsPerSecond)
+    }
 
     /// Controller bounds for a panel: the offered-rate cap as the floor, and
     /// a ceiling that keeps `minWorstCaseFps * bandCount` packets per second
@@ -247,7 +279,19 @@ final class FrameSender {
 
     private let spacingBounds: ClosedRange<UInt32>
     private var spacingMin: UInt32 { spacingBounds.lowerBound }
-    private var spacingMax: UInt32 { spacingBounds.upperBound }
+    /// The band-derived ceiling, or the tile panel's absorbable-rate ceiling
+    /// when it is looser. Never tighter than the band bound, so a tile panel
+    /// keeps at least the pacing latitude a band panel of the same geometry
+    /// would have had.
+    private var spacingMax: UInt32 {
+        pacingTileStream
+            ? max(spacingBounds.upperBound, Self.tileSpacingCeiling)
+            : spacingBounds.upperBound
+    }
+    /// Mirror of `_peerAcceptsTileStream` for the pacing bounds, deliberately
+    /// read without the lock: `spacingMax` is consulted from the climb, and a
+    /// stale read costs at most one probe window at the previous ceiling.
+    private var pacingTileStream = false
 
     private var _adaptivePacing: Bool
 
@@ -583,6 +627,10 @@ final class FrameSender {
             _deviceInfo = info
             _peerAcceptsPackedBands = info.capabilities.contains(.compressedBands)
             _peerAcceptsTileStream = info.capabilities.contains(.tileStream)
+            // Widens the pacing ceiling: a tile panel absorbs roughly an
+            // order of magnitude fewer datagrams a second than the
+            // band-derived bound assumes (see tileAbsorbablePacketsPerSecond).
+            pacingTileStream = _peerAcceptsTileStream && tileGeometry != nil
             _peerAcceptsHalfRes = info.capabilities.contains(.tileHalfRes)
                 && tileGeometry != nil
             // Round glass: rebuild the mask only when the advertised answer

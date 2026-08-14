@@ -1469,3 +1469,51 @@ established is that finer CPU interleaving recovers any of it. Attacking the
 root instead - bufA off PSRAM, or tiles staged through SRAM on the receive
 side - would produce an effect large enough to measure with the sampling
 discipline this project actually has.
+
+### 17.12 The sender could not leave the collapse region
+
+17.8 hoped the hill-climb would fix the overfeeding by itself once it was
+reading displayed frames instead of draw passes. It cannot, and the reason
+is a bound rather than a signal.
+
+`FrameSender.spacingBounds(for:)` caps how loosely the climb may pace, by
+keeping `minWorstCaseFps * bandCount` datagrams a second flowing - the fix
+for an older bug where a fixed 2500 us ceiling parked the 466-band panel at
+~1 fps. On this panel that gives:
+
+```plain
+ceiling = 1_000_000 / (5 fps x 466 bands) = 429 us = 2331 datagrams/s
+```
+
+The panel absorbs ~300 datagrams/s while painting (17.3). So the climb's
+loosest permitted pacing offers **almost eight times what the panel can
+use**, and the app log confirms it was pinned there: `pacing=429us`, having
+backed off as far as allowed and still wanting more. Whatever the climb
+measured, it was structurally unable to leave the collapse region.
+
+The bound is not wrong, it is aimed at the band protocol. It assumes one
+datagram per band - ~466 for a keyframe here - where a tile keyframe is 18
+(half-res) to 66 (BC1). And at this scale its premise fails outright: a
+large keyframe CANNOT reach 5 fps at the absorbable rate, so pacing tighter
+does not deliver it sooner, it delivers it into the queue that drops it.
+
+So tile panels get a ceiling derived from the measured absorbable rate
+instead - `tileAbsorbablePacketsPerSecond = 300`, i.e. 3333 us - applied as
+`max(bandCeiling, tileCeiling)` so it only ever widens the range, and only
+when the panel actually advertised `tileStream`. `spacingRange`'s upper
+bound moves 2500 -> 4000 so the value is expressible at all; the settings
+slider and `setSpacingMicros` clamp to that same range, and would otherwise
+have clamped the controller's own ceiling away.
+
+Convergence is not instant. Loosening is multiplicative: ~12 probe windows
+at x1.18 to walk 429 -> 3333, roughly 37 s, or ~6 steps at the x1.4 rate the
+drop-ratio branch uses when a window loses more than half its frames. Fast
+enough to matter, slow enough that a brief burst of motion will not swing it.
+
+Unverified: whether the climb actually settles near the 15 fps-offered peak
+from the app against real content. The unit tests pin the arithmetic - that
+the band ceiling is 429 us and demonstrably the problem, that the tile
+ceiling expresses 300/s exactly, that band panels are untouched - but
+convergence is runtime behaviour and needs the app streaming with the log
+watched for where `pacing=` lands. The installed app also needs rebuilding
+to carry this; the source change alone does not reach it.
