@@ -441,6 +441,13 @@ static const int TILE_DRAW_CALL_CAP = 32;
 // a merely-late frame still draws whole, short enough that a lossy stream
 // keeps moving rather than freezing.
 static const uint32_t TILE_PARTIAL_DRAW_MS = 40;
+// Runs left unpainted because a pass hit TILE_DRAW_CALL_CAP, so another pass is
+// owed. Its own flag rather than a bump of framesCompleted, which is what the
+// deferral used to do: that made framesCompleted mean either "a frame's last
+// tile arrived" or "come back for the rest", and once statFramesShown counted
+// only true completions the overload started reporting more complete frames
+// than the sender had sent (26.1/s against 15/s offered).
+static volatile bool tileDrainPending = false;
 
 // Draw-pass cost breakdown, reset every 5 s report (see the tiledraw= line in
 // loop()). Section 16.5 measured ~42 ms per pass against phase 0's ~22 ms
@@ -3215,7 +3222,11 @@ void loop() {
   // here, as this gate refusing to start the next pass while dmaInFlight is
   // nonzero. That refusal has to be counted separately or the paint time is
   // invisible to any timer placed inside the block below.
-  const bool wantDraw = (framesCompleted != lastCompleted || tilePartialDue);
+  const bool wantDraw = (framesCompleted != lastCompleted || tilePartialDue
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+                         || tileDrainPending
+#endif
+                        );
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   if (wantDraw && dmaInFlight != 0) {
     tdGateBlocked = tdGateBlocked + 1;  // each such iteration delay(1)s below
@@ -3341,10 +3352,29 @@ void loop() {
         spinUntilDmaBelow(2, 500000);
         const uint32_t tGather = micros();
         tdSpinUs += tGather - tSpin;
-        uint8_t *staging = tileStaging[tileStagingIdx];
+        // Every run stages into internal SRAM, INCLUDING full-width ones whose
+        // rows are already contiguous in bufA and could in principle be handed
+        // to DMA in place. Phase 12 tried exactly that, on the reasoning that
+        // the gather is 4.2 ms of an 8.6 ms call (section 17.2) and a
+        // byte-identical rectangle does not need copying.
+        //
+        // The theory for why staging still wins: the copy is not overhead but a
+        // memory-tier move. DMA streaming from PSRAM contends with the receive
+        // task's PSRAM writes and with the CPU, and PSRAM's ~22.3 MB/s (phase
+        // 0) is barely above what the panel needs, while a strided SRAM copy
+        // runs at 340+ MB/s and leaves the transfer reading fast memory
+        // uncontended. Paying 4.2 ms to make the other 4.4 ms cheap. That is
+        // what tileStaging's declaration means by "keeps DMA reads off PSRAM
+        // entirely", which is the load-bearing clause.
+        //
+        // Staging stays because it is what has always shipped, NOT because the
+        // experiment settled it: the run that looked much worse was measured
+        // with the Mac app streaming to the same panel, which corrupts every
+        // count (section 17.9). Worth redoing on a quiet panel.
+        uint8_t *source = tileStaging[tileStagingIdx];
         tileStagingIdx ^= 1;
         for (int r = 0; r < hgt; r++) {
-          memcpy(staging + (size_t)r * w * 2,
+          memcpy(source + (size_t)r * w * 2,
                  bufA + ((size_t)(y0 + r) * drawWidth + x0) * 2,
                  (size_t)w * 2);
         }
@@ -3353,7 +3383,7 @@ void loop() {
         dmaInFlight = dmaInFlight + 1;
         dmaQueuedAt = millis();
         esp_err_t err = esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + w,
-                                                  y0 + hgt, staging);
+                                                  y0 + hgt, source);
         tdQueueUs += micros() - tQueue;
         if (err != ESP_OK) {
           statDrawErrors = statDrawErrors + 1;
@@ -3374,9 +3404,8 @@ void loop() {
           }
         }
       });
-      if (tileDeferred) {
-        framesCompleted = framesCompleted + 1;  // drain the rest next pass
-      }
+      // Ask for another pass without pretending a frame completed.
+      tileDrainPending = tileDeferred;
     }
 #endif
 

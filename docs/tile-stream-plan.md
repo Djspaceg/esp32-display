@@ -1341,3 +1341,34 @@ run with the app streaming, watching where `spacingMicros` lands - not a
 synthetic benchmark, because the benchmark bypasses the sender entirely.
 If it does settle there, item 1 of 17.6 is already done and the default
 spacing can stay where it is.
+
+### 17.9 Two defects the split exposed, and a measurement hazard
+
+**framesCompleted meant two things.** The draw loop's deferral path - runs
+left over when a pass hits `TILE_DRAW_CALL_CAP` - asked for another pass by
+incrementing `framesCompleted`, the same variable `applyTileRecord` bumps
+when a frame's last tile arrives. Harmless while `statFramesShown` counted
+every draw pass; wrong the moment it counted only completions, because the
+panel then reported more complete frames than the sender had sent (26.1/s
+against 15/s offered). Deferral now sets its own `tileDrainPending` flag
+and the gate checks it alongside the partial-draw timer. A drain-only pass
+counts as a partial draw, which it is.
+
+**The benchmark and the app fight over the panel.** `tile-motion` numbers
+are only meaningful with ESPDisplaySender NOT streaming to the same panel.
+Two senders means two independent frame-id sequences arriving interleaved,
+so the reassembler abandons a frame nearly every record, and both
+`dropped` and `shown` inflate wildly - 506 dropped frames against 120
+offered in one run here. Anything reporting more dropped frames than were
+sent, or more complete frames than were offered, is this. Check with
+`pgrep -fl ESPDisplaySender` before trusting a number, and prefer quitting
+the app outright over hoping a static screen keeps it quiet.
+
+This invalidated the phase-12 attempt at drawing full-width runs directly
+from bufA instead of staging through SRAM (the reasoning is preserved at
+the staging loop). The "much worse" result that motivated reverting it was
+measured with the app streaming, so **the experiment is unresolved rather
+than settled** and wants redoing on a quiet panel. The comment at the
+staging loop states the PSRAM-contention theory as the reason staging
+exists, which remains the best explanation on the evidence in 17.2 - but it
+is a theory that this measurement did not actually test.
