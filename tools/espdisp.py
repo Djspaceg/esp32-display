@@ -2112,7 +2112,86 @@ def cmd_flash(args) -> int:
         cwd=SKETCH_DIR,
     )
     report_sizes(lines)
+
+    # For S3 board: also flash the Doom WAD if present (or download it)
+    if board.key == "s3":
+        _flash_doom_wad_if_available(port.address)
+
     return 0
+
+
+# WAD auto-download and flash for the Doom Easter Egg (S3 only)
+_DOOM_WAD_PATH = os.path.join(REPO_ROOT, "firmware", "doom", "doom1.wad")
+_DOOM_WAD_URL = "https://distro.ibiblio.org/slitaz/sources/packages/d/doom1.wad"
+_DOOM_WAD_SIZE = 4196020  # doom1.wad v1.9 is exactly this many bytes
+_DOOM_WAD_PARTITION_OFFSET = 0xC00000
+
+
+def _ensure_doom_wad() -> Optional[str]:
+    """Return the path to doom1.wad, downloading if needed. None on failure."""
+    if os.path.isfile(_DOOM_WAD_PATH):
+        size = os.path.getsize(_DOOM_WAD_PATH)
+        if size == _DOOM_WAD_SIZE:
+            return _DOOM_WAD_PATH
+        print("  doom1.wad exists but is %d bytes (expected %d), re-downloading..."
+              % (size, _DOOM_WAD_SIZE))
+
+    print("  Downloading doom1.wad (shareware, 4.0 MB)...", flush=True)
+    try:
+        import urllib.request
+        urllib.request.urlretrieve(_DOOM_WAD_URL, _DOOM_WAD_PATH)
+    except Exception as e:
+        print("  Download failed: %s" % e, file=sys.stderr)
+        print("  Doom Easter Egg will not be available until doom1.wad is flashed.")
+        print("  Manual download: curl -L -o firmware/doom/doom1.wad '%s'" % _DOOM_WAD_URL)
+        return None
+
+    # Verify
+    size = os.path.getsize(_DOOM_WAD_PATH)
+    if size != _DOOM_WAD_SIZE:
+        print("  WARNING: downloaded WAD is %d bytes (expected %d)" % (size, _DOOM_WAD_SIZE))
+    # Verify magic
+    with open(_DOOM_WAD_PATH, "rb") as f:
+        magic = f.read(4)
+    if magic != b"IWAD":
+        print("  WARNING: file does not start with IWAD magic", file=sys.stderr)
+        os.unlink(_DOOM_WAD_PATH)
+        return None
+
+    print("  doom1.wad ready (%d bytes)" % size)
+    return _DOOM_WAD_PATH
+
+
+def _flash_doom_wad_if_available(port_address: str) -> None:
+    """Flash the Doom WAD to the S3 board's dedicated partition."""
+    print("\n--- Doom Easter Egg ---")
+    wad_path = _ensure_doom_wad()
+    if not wad_path:
+        return
+
+    tool = esptool_path()
+    if not tool:
+        print("  esptool not found, skipping WAD flash")
+        return
+
+    print("  Flashing doom1.wad to partition at 0x%06X..." % _DOOM_WAD_PARTITION_OFFSET,
+          flush=True)
+    cmd = [
+        tool,
+        "--chip", "esp32s3",
+        "--port", port_address,
+        "--baud", "921600",
+        "--no-stub",  # faster for data-only writes
+        "write_flash",
+        "0x%X" % _DOOM_WAD_PARTITION_OFFSET,
+        wad_path,
+    ]
+    try:
+        run_streaming(cmd)
+        print("  Doom Easter Egg ready! Triple-tap BOOT to play.")
+    except Exception as e:
+        print("  WAD flash failed: %s" % e, file=sys.stderr)
+        print("  Firmware is fine. Run 'espdisp.py flash-wad' to retry the WAD.")
 
 
 def cmd_ota(args) -> int:
@@ -2341,12 +2420,18 @@ def board_help() -> str:
 
 def cmd_flash_wad(args) -> int:
     """Write a Doom WAD file to the S3 board's dedicated flash partition."""
-    wad_path = args.wad
-    if not os.path.isfile(wad_path):
+    wad_path = args.wad if args.wad else _DOOM_WAD_PATH
+
+    # Auto-download if path points to the default location and file is missing
+    if wad_path == _DOOM_WAD_PATH and not os.path.isfile(wad_path):
+        wad_path = _ensure_doom_wad()
+        if not wad_path:
+            raise Fail("Could not obtain doom1.wad")
+    elif not os.path.isfile(wad_path):
         raise Fail("WAD file not found: %s" % wad_path)
 
     wad_size = os.path.getsize(wad_path)
-    WAD_PARTITION_OFFSET = 0xC00000
+    WAD_PARTITION_OFFSET = _DOOM_WAD_PARTITION_OFFSET
     WAD_PARTITION_SIZE = 0x400000  # 4MB
 
     if wad_size > WAD_PARTITION_SIZE:
@@ -2588,9 +2673,11 @@ def build_parser() -> argparse.ArgumentParser:
         "version) to the dedicated flash partition on the ESP32-S3 board. The "
         "partition is at offset 0xC00000 and is 4MB (4,194,304 bytes). The WAD "
         "file must be <= 4MB. The S3 custom partition table "
-        "(firmware/partitions_s3_doom.csv) must be flashed first.",
+        "(firmware/partitions_s3_doom.csv) must be flashed first. If no WAD "
+        "path is given, auto-downloads the shareware doom1.wad.",
     )
-    p_wad.add_argument("wad", help="path to the WAD file (e.g. doom1.wad)")
+    p_wad.add_argument("wad", nargs="?", default=None,
+                       help="path to WAD file (default: auto-download doom1.wad)")
     p_wad.add_argument("--port", help="serial device (default: autodetected)")
     p_wad.set_defaults(func=cmd_flash_wad)
 
