@@ -356,6 +356,7 @@ static int ZenityErrorBox(char *message)
 
 static boolean already_quitting = false;
 
+#if !defined(CONFIG_IDF_TARGET_ESP32S3) && !defined(ESP_PLATFORM)
 void I_Error (char *error, ...)
 {
     char msgbuf[512];
@@ -469,6 +470,7 @@ void I_Error (char *error, ...)
     exit(-1);
 #endif
 }
+#endif  // !ESP_PLATFORM (I_Error override in doom_esp32_stubs.c)
 
 //
 // Read Access Violation emulation.

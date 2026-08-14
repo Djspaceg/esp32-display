@@ -102,8 +102,10 @@ void doom_enter(void) {
     }
 
     // Initialize doomgeneric
-    // -mb 8 = 8MB memory (PSRAM), -iwad dummy (we override W_OpenFile)
-    char* argv[] = {"doom", "-mb", "8", "-iwad", "doom1.wad", NULL};
+    // -mb 4 = 4MB memory zone (from PSRAM via malloc). PSRAM budget:
+    //   4MB zone + 256KB render buf + 434KB scaled buf = ~4.7MB of 8MB
+    // Remaining ~3.3MB is free for texture cache etc.
+    char* argv[] = {"doom", "-mb", "4", "-iwad", "doom1.wad", NULL};
     int argc = 5;
 
     doomgeneric_Create(argc, argv);
