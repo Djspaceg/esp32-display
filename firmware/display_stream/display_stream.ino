@@ -441,6 +441,24 @@ static const int TILE_DRAW_CALL_CAP = 32;
 // a merely-late frame still draws whole, short enough that a lossy stream
 // keeps moving rather than freezing.
 static const uint32_t TILE_PARTIAL_DRAW_MS = 40;
+
+// Draw-pass cost breakdown, reset every 5 s report (see the tiledraw= line in
+// loop()). Section 16.5 measured ~42 ms per pass against phase 0's ~22 ms
+// model and could not say where the difference went; phase 0 timed draw calls
+// in isolation, with no network traffic and nothing else running, which is the
+// same mistake that produced the ~2850 datagrams/s figure corrected in 15.2.
+// So this measures the real pass, under load, decomposed.
+//
+// Written only by loop(); read by loop()'s reporter. Not volatile and not
+// mutexed - the receive task never touches them.
+static uint32_t tdPasses = 0;       // draw passes actually taken
+static uint32_t tdCalls = 0;        // draw_bitmap calls issued
+static uint32_t tdSpinUs = 0;       // spinUntilDmaBelow, waiting on the queue
+static uint32_t tdGatherUs = 0;     // strided bufA -> staging memcpys
+static uint32_t tdQueueUs = 0;      // draw_bitmap itself (queues, returns)
+static uint32_t tdBarUs = 0;        // info-bar redraw over dirty rows
+static uint32_t tdPassUs = 0;       // whole pass, wall clock
+static uint32_t tdGateBlocked = 0;  // passes refused because DMA was busy
 #endif
 
 static bool panelLandscape = false;              // current panel MADCTL state
@@ -3179,8 +3197,21 @@ void loop() {
 #else
   const bool tilePartialDue = false;
 #endif
-  if ((framesCompleted != lastCompleted || tilePartialDue) &&
-      dmaInFlight == 0) {
+  // Where a draw pass's time actually goes (section 16.5 asked): the
+  // measured ~42 ms per pass is 16 ms more than phase 0's per-call model
+  // predicts, and draw_bitmap is ASYNC - it queues DMA and returns - so the
+  // paint itself is NOT inside the pass. It drains afterward and surfaces
+  // here, as this gate refusing to start the next pass while dmaInFlight is
+  // nonzero. That refusal has to be counted separately or the paint time is
+  // invisible to any timer placed inside the block below.
+  const bool wantDraw = (framesCompleted != lastCompleted || tilePartialDue);
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  if (wantDraw && dmaInFlight != 0) {
+    tdGateBlocked = tdGateBlocked + 1;  // each such iteration delay(1)s below
+  }
+  const uint32_t tdPassStart = micros();
+#endif
+  if (wantDraw && dmaInFlight == 0) {
     lastCompleted = framesCompleted;
 
     // Snapshot-and-clear the pending set; the UDP task keeps marking bands
@@ -3291,7 +3322,10 @@ void loop() {
         // Reusing a staging buffer requires its previous transfer done:
         // two buffers alternating against the 2-deep queue means
         // dmaInFlight < 2 leaves only the OTHER buffer possibly in flight.
+        const uint32_t tSpin = micros();
         spinUntilDmaBelow(2, 500000);
+        const uint32_t tGather = micros();
+        tdSpinUs += tGather - tSpin;
         uint8_t *staging = tileStaging[tileStagingIdx];
         tileStagingIdx ^= 1;
         for (int r = 0; r < hgt; r++) {
@@ -3299,29 +3333,42 @@ void loop() {
                  bufA + ((size_t)(y0 + r) * drawWidth + x0) * 2,
                  (size_t)w * 2);
         }
+        const uint32_t tQueue = micros();
+        tdGatherUs += tQueue - tGather;
         dmaInFlight = dmaInFlight + 1;
         dmaQueuedAt = millis();
         esp_err_t err = esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + w,
                                                   y0 + hgt, staging);
+        tdQueueUs += micros() - tQueue;
         if (err != ESP_OK) {
           statDrawErrors = statDrawErrors + 1;
           dmaInFlight = dmaInFlight - 1;
         } else {
           drewAny = true;
           tileDrawCalls++;
+          tdCalls = tdCalls + 1;
           // Same rule as the band runs: fresh pixels over the info bar's
           // rows would erase it, so redraw the bar on top.
           if (infoBarActive() &&
               panelstate::rowRangeOverlaps(y0, y0 + hgt, infoBarY0,
                                            infoBarY1)) {
+            const uint32_t tBar = micros();
             waitForDmaIdle(200);
             redrawInfoBarOverRun();
+            tdBarUs += micros() - tBar;
           }
         }
       });
       if (tileDeferred) {
         framesCompleted = framesCompleted + 1;  // drain the rest next pass
       }
+    }
+#endif
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    if (drewAny) {
+      tdPasses = tdPasses + 1;
+      tdPassUs += micros() - tdPassStart;
     }
 #endif
 
@@ -3564,6 +3611,28 @@ void loop() {
                   (unsigned long)statFramesSkipped, (unsigned long)statPackets,
                   (unsigned long)statBadLen, (unsigned long)statDrawErrors,
                   (unsigned long)ESP.getFreeHeap(), (int)WiFi.RSSI());
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    // Where a draw pass's time goes, averaged over the window. Only when
+    // something was drawn, so an idle panel stays quiet. `gateblocked` is the
+    // one to read first: draw_bitmap is async, so the PAINT is not inside the
+    // pass - it drains afterward, and blocks the next pass at the dmaInFlight
+    // gate. A large gateblocked with a small pass total means the panel is
+    // bus-bound, not CPU-bound, and no amount of protocol work will help.
+    if (tdPasses > 0) {
+      Serial.printf(
+          "tiledraw: %lu passes, %lu calls, %lu gateblocked | per pass: "
+          "%lu us total = spin %lu + gather %lu + queue %lu + bar %lu\n",
+          (unsigned long)tdPasses, (unsigned long)tdCalls,
+          (unsigned long)tdGateBlocked,
+          (unsigned long)(tdPassUs / tdPasses),
+          (unsigned long)(tdSpinUs / tdPasses),
+          (unsigned long)(tdGatherUs / tdPasses),
+          (unsigned long)(tdQueueUs / tdPasses),
+          (unsigned long)(tdBarUs / tdPasses));
+      tdPasses = tdCalls = tdGateBlocked = 0;
+      tdPassUs = tdSpinUs = tdGatherUs = tdQueueUs = tdBarUs = 0;
+    }
+#endif
     // Its own line, and only on a board with a PMU: the C6 boards would
     // otherwise print a battery field that can never say anything.
     if (batteryReadingCurrent()) {

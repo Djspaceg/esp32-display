@@ -1124,8 +1124,158 @@ Still open from 13.5: vertical run merging, boundary-tile RLE flattening
 
 The 60 fps end-to-end question is now answerable in principle - half-res
 makes 60 fps arithmetically deliverable over the wire for the first time -
-but 16.5 says it would still land on a ~23.5 fps paint ceiling, so the
-next measurement worth taking is where those ~42 ms per draw pass
-actually go. Vertical run merging becomes considerably more interesting in
-that light: it is the one open item that reduces DRAW CALLS rather than
-bytes.
+but 16.5 says it would still land on a paint ceiling, so the next
+measurement worth taking is where the time in a draw pass actually goes.
+
+(Taken, in section 17. Two things there supersede this section's guesses:
+the plateau is contention, not a fixed paint cost, and the panel actually
+delivers LESS as it is offered more - so the ~23.5 fps figure above is a
+property of that particular load, not a ceiling. Vertical run merging,
+which 16.5 promoted, turns out not to be the fix.)
+
+## 17. The panel is congestion-collapsing (phase 12, 2026-08-13)
+
+Section 16.5 said the next lever was paint time and named four candidates
+for the ~16 ms a pass that phase 0's model did not explain. Measuring it
+found something bigger than a missing 16 ms: **offering the panel more
+work makes it deliver strictly less**, and the "receive ceiling" every
+earlier phase has quoted describes a state in which the panel is barely
+drawing at all.
+
+### 17.1 The instrumentation
+
+`tiledraw:` on the 5 s serial line, S3 only, decomposing each draw pass
+into `spin` (waiting on the DMA queue), `gather` (the strided bufA ->
+staging memcpys), `queue` (`draw_bitmap` itself) and `bar` (info-bar
+redraw), plus `gateblocked` - iterations that wanted to draw but found
+`dmaInFlight` nonzero.
+
+`gateblocked` exists because `draw_bitmap` is asynchronous: it queues DMA
+and returns, so the paint is NOT inside the pass. It drains afterward and
+blocks the NEXT pass at that gate. A timer placed only inside the block
+would never see it.
+
+### 17.2 Per-call cost rises about tenfold under load
+
+Measured with `tile-motion --half`, RSSI -60 to -62 throughout:
+
+| Offered fps | Accepted dgram/s | Calls/pass | gather+queue per call |
+| ----------- | ---------------- | ---------- | --------------------- |
+| 8           | 176              | 8.7        | **904 us**            |
+| 25          | 427              | 26.4       | 2,665 us              |
+| 60          | 569              | 25.6       | **8,616 us**          |
+
+At 176 datagrams/s a call costs 904 us, which is phase 0's 875 us figure
+essentially exactly - the isolated bench was right about the isolated case.
+At flood the same call costs 8,616 us. Nothing about the call changed; the
+only variable is how much network traffic the panel is servicing while it
+draws.
+
+`spin` stays negligible (19-181 us) and `gateblocked` stays at 0-4, so the
+2-deep DMA queue is NOT the constraint. Both halves of the pass inflate:
+`gather` 322 -> 4,200 us and `queue` 582 -> 4,400 us.
+
+The mechanism is contention, on both resources at once. `udpReceiveTask`
+runs at priority 9 against loop()'s 1, so it preempts the gather; and it
+writes decoded tiles into bufA in PSRAM while the gather reads bufA from
+PSRAM, so they compete for the same bus. `queue` inflating too fits the
+same story - with 26 calls issued back to back the 2-deep queue is always
+full, so `draw_bitmap` blocks on DMA that is itself contending for PSRAM.
+
+Phase 0 measured draw calls with no network traffic and nothing else
+running. That is the third time in this project a clean-room number has
+been generalized past what it supported (the ~2,850 datagrams/s of 15.2,
+the 45 fps paint model of 13.6, and now this), and the pattern is worth
+naming: **on this board, any figure measured without concurrent load is a
+best case that the loaded system does not approach.**
+
+### 17.3 Delivered frames peak and then collapse
+
+Frames actually delivered = offered x (1 - drop rate):
+
+| Offered fps | Accepted dgram/s | Shown fps | Dropped | Delivered/s |
+| ----------- | ---------------- | --------- | ------- | ----------- |
+| 8           | 176              | 30.8      | 2.4%    | 7.8         |
+| 15          | 296              | 33.4      | 6.4%    | 14.0        |
+| 25          | 427              | 12.2      | 38.6%   | **15.4**    |
+| 35          | 575              | 4.1       | 83.3%   | 5.8         |
+| 60          | 569              | 2.3       | 96.3%   | 2.2         |
+
+Delivery peaks around 25 fps offered and falls off a cliff after it: 60 fps
+offered delivers 2.2 frames a second, a seventh of what 15 fps offered
+delivers. This is textbook congestion collapse, and it means the sender can
+make the panel worse by trying harder.
+
+It also explains a result from section 16.4 that looked perverse. There, at
+RSSI **-80**, 60 fps offered dropped 40.7% and showed 23.5 fps. Here, at
+RSSI -60, the same offer drops 96.3% and shows 2.3. The better radio is
+worse **because** it is better: more datagrams survive the air, so more
+reach the receive task, so it steals more time from the draw. The weak link
+had been throttling the sender on the panel's behalf.
+
+### 17.4 So the real ceiling is ~300 datagrams/s, not ~1,500
+
+Section 15.2 corrected the receive ceiling to ~1,350-1,500 datagrams/s and
+was careful to say the earlier ~2,850 measured rejected packets. It is
+still not the number that matters. At 1,350 datagrams/s the panel is
+accepting datagrams and NOT drawing - that figure is the socket's capacity,
+not the system's.
+
+The rate at which this panel can accept datagrams **and** paint what they
+carry is about **300/s** (6.4% loss, 14 fps delivered), degrading through
+430/s (38.6% loss) to useless past ~570/s. Every budget in the sender
+computed from the old figure is therefore roughly 4x too generous.
+
+Concretely, the degradation ladder's budget is
+`1472 * 1e6 / spacingMicros` bytes per second, which at the default 200 us
+spacing claims 7.36 MB/s. The panel's usable rate is closer to
+300 x 1472 = 0.44 MB/s. Rung (c) can essentially never fire, because the
+ladder believes there is 16x more headroom than exists.
+
+### 17.5 Two consequences for work already done
+
+**Vertical run merging is not the fix, and it was the plan.** Section 16.5
+promoted it on the reasoning that fewer draw calls beat fewer bytes. That
+holds when per-call cost is dominated by fixed overhead - phase 0's ~150 us
+
+- but at load a call costs 8,616 us to move a 15 KB strip, which is
+  throughput-bound, not overhead-bound. Merging 26 calls into 13 of double
+  size moves identical bytes through the identical contended bus. It should
+  be dropped from the roadmap until contention is fixed, at which point its
+  case can be re-argued on the ~150 us figure.
+
+**The pacing hill-climb is optimizing a corrupted signal.** It does
+`climbFrames += shownDelta` - the delta of the panel's `statFramesShown` -
+and since section 15.3 that counter includes partial draws. At 8 fps
+offered it reads 30.8 against 7.8 frames actually delivered, inflated
+roughly fourfold, because clean low-rate delivery is exactly when the
+40 ms partial timer fires most. The climb is steering on a number that is
+most wrong where it is most confident.
+
+By luck it is not far off: `shown` peaks at 15 fps offered while delivery
+peaks at 25, so the climb settles near 14.0 delivered against a reachable
+15.4, about 10% short. That is a small penalty on top of a real problem -
+a control loop should not be fed a metric that conflates a drawn frame
+with a partial repaint of one.
+
+### 17.6 What to do next, in order
+
+1. **Stop overfeeding.** The cheapest large win available: cap the offered
+   datagram rate near what the panel can absorb. Raising default spacing
+   from 200 us toward ~2,500 us moves the operating point from the collapse
+   region to the peak - measured here as 2.2 -> 14+ frames a second
+   delivered. Needs care against the hill-climb, which will try to tighten
+   it again for the reason in 17.5.
+2. **Separate the counters.** `statFramesShown` should count complete
+   frames, with partial draws counted separately, so both the doc and the
+   hill-climb stop conflating them. EHB1's five slots are full and EINF
+   cannot be extended (device_protocol.h is explicit that appending fields
+   makes shipped senders reject every packet), so this wants its own packet
+   type on the EBAT precedent.
+3. **Then attack contention itself.** Options not yet measured: lowering
+   `udpReceiveTask` below loop(), giving the draw its own task at a
+   comparable priority, bounding drained datagrams per unit time rather
+   than per loop, or getting the gather off PSRAM. Whichever is chosen must
+   be measured under load, which is now possible.
+4. Only after that: revisit vertical run merging, `autoVarianceThreshold`,
+   and boundary-tile RLE flattening.
