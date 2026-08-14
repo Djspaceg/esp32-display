@@ -185,12 +185,77 @@ public enum TileProtocol {
     /// Record tile field bits 14..10.
     public static let recordRunShift = 10
 
-    /// Codec values for a record's len field bits 15..14. Value 3 is
-    /// reserved (a future half-res motion mode); never emitted.
+    /// Codec values for a record's len field bits 15..14. All four values are
+    /// defined, so the field is full.
     public enum Codec: UInt8, Sendable {
         case raw = 0
         case rle565 = 1
         case bc1 = 2
+        /// Half-resolution BC1 (docs/tile-stream-plan.md section 16): BC1 of a
+        /// `halfDim` x `halfDim` raster, which the panel pixel-doubles back to
+        /// the run's true size. ~16:1 overall, and the only codec here that
+        /// costs RESOLUTION rather than just colour precision - so it is never
+        /// chosen for being smallest, only when the degradation ladder asks
+        /// for it (see `TilePacker.prepare`). Requires the panel to advertise
+        /// `Capabilities.tileHalfRes`; older tile firmware rejects the record
+        /// and drops the datagram carrying it.
+        case halfBc1 = 3
+    }
+
+    /// Half-resolution size of one raster axis: `ceil(d / 2)`, mirroring
+    /// `tileproto::halfDim`. Stated once because the encoder, the panel's
+    /// decoder, and three test suites all have to round a 2 px edge tile the
+    /// same way (2 -> 1) or the record's length check fails.
+    public static func halfDim(_ d: Int) -> Int { (d + 1) / 2 }
+
+    /// Downsample a big-endian RGB565 raster to `halfDim` x `halfDim` by
+    /// averaging each 2x2 source block - the sender's half of `.halfBc1`.
+    ///
+    /// The filter is deliberately NOT part of the wire contract: the panel
+    /// only promises to pixel-double whatever arrives, so this can be
+    /// improved later without touching the protocol or the firmware. Box
+    /// averaging rather than dropping 3 of every 4 pixels because decimation
+    /// aliases hard on exactly the content that triggers half-res - video and
+    /// scrolling text - and the cost is trivial next to BC1's own encode.
+    ///
+    /// Averaging happens in the native 5/6/5 channel space with round-half-up,
+    /// so the result needs no requantization. Out-of-raster samples replicate
+    /// the edge pixel, matching `BC1.encode`'s padding convention, which keeps
+    /// odd dimensions and the 2 px edge tiles from averaging in phantom
+    /// pixels.
+    public static func downsample(
+        _ raw: ArraySlice<UInt8>, width: Int, height: Int
+    ) -> [UInt8]? {
+        guard width > 0, height > 0, raw.count == width * height * 2 else {
+            return nil
+        }
+        let halfW = halfDim(width), halfH = halfDim(height)
+        var out = [UInt8](repeating: 0, count: halfW * halfH * 2)
+        raw.withUnsafeBytes { src in
+            let base = src.baseAddress!.assumingMemoryBound(to: UInt8.self)
+            for y in 0..<halfH {
+                for x in 0..<halfW {
+                    var r = 0, g = 0, b = 0
+                    for dy in 0..<2 {
+                        let sy = min(y * 2 + dy, height - 1)
+                        for dx in 0..<2 {
+                            let sx = min(x * 2 + dx, width - 1)
+                            let p = base + (sy * width + sx) * 2
+                            let c = (UInt16(p[0]) << 8) | UInt16(p[1])
+                            r += Int(c >> 11)
+                            g += Int((c >> 5) & 0x3F)
+                            b += Int(c & 0x1F)
+                        }
+                    }
+                    let c = (UInt16((r + 2) / 4) << 11)
+                        | (UInt16((g + 2) / 4) << 5)
+                        | UInt16((b + 2) / 4)
+                    out[(y * halfW + x) * 2] = UInt8(c >> 8)
+                    out[(y * halfW + x) * 2 + 1] = UInt8(c & 0xFF)
+                }
+            }
+        }
+        return out
     }
 
     /// The 6-byte packet header.
@@ -373,7 +438,8 @@ public enum TilePacker {
     public static func packets(
         frameId: UInt16, dirtyTiles: [Int], pixels: [UInt8],
         geometry: TileGeometry, landscape: Bool,
-        policy: TileLossyPolicy, forceLossy: Bool = false
+        policy: TileLossyPolicy, forceLossy: Bool = false,
+        forceHalfRes: Bool = false
     ) -> [Data] {
         precondition(pixels.count == geometry.frameBytes)
         let runs = TileProtocol.mergeRuns(dirtyTiles: dirtyTiles, geometry: geometry)
@@ -381,7 +447,8 @@ public enum TilePacker {
         for run in runs {
             prepare(run.start, run.length, into: &prepared,
                     pixels: pixels, geometry: geometry,
-                    policy: policy, forceLossy: forceLossy)
+                    policy: policy, forceLossy: forceLossy,
+                    forceHalfRes: forceHalfRes)
         }
 
         let budget = TileGeometry.maxPacketBytes
@@ -430,7 +497,8 @@ public enum TilePacker {
         _ startTile: Int, _ runLength: Int,
         into prepared: inout [PreparedRecord],
         pixels: [UInt8], geometry: TileGeometry,
-        policy: TileLossyPolicy, forceLossy: Bool
+        policy: TileLossyPolicy, forceLossy: Bool,
+        forceHalfRes: Bool = false
     ) {
         let raw = TileProtocol.extractRun(
             pixels: pixels, geometry: geometry,
@@ -452,7 +520,24 @@ public enum TilePacker {
         let w = geometry.runPixelWidth(startTile: startTile, runLength: runLength)
         let h = geometry.rowHeight(geometry.row(startTile))
         let bc1Size = BC1.encodedBytes(width: w, height: h)
-        if bc1Size > 0, bc1Size < best.payload.count {
+        // Half-res is the ladder's last codec rung, and it is gated
+        // differently from every other codec here on purpose. The others
+        // compete on size and win when they are smallest; half-res is ALWAYS
+        // smallest (a quarter of BC1), so letting it compete would blur
+        // static UI the moment the policy allowed lossy at all - `.aggressive`
+        // would never send anything else. So it is only ever chosen when the
+        // frame-level ladder explicitly asks (`forceHalfRes`), and even then
+        // it must still beat the lossless winner, which is what keeps flat
+        // runs - already a handful of RLE bytes - at full resolution.
+        let halfSize = BC1.encodedBytes(
+            width: TileProtocol.halfDim(w), height: TileProtocol.halfDim(h))
+        let tryHalf = forceHalfRes && policy != .losslessOnly
+            && halfSize > 0 && halfSize < best.payload.count
+        // Skipping BC1 when half-res will supersede it is not just tidiness:
+        // BC1 encode was ~30 us/tile, so encoding all 719 tiles only to throw
+        // the result away would add ~21 ms to exactly the frames the ladder is
+        // trying to make cheaper.
+        if !tryHalf, bc1Size > 0, bc1Size < best.payload.count {
             let lossyEligible: Bool
             switch policy {
             case .losslessOnly:
@@ -469,6 +554,15 @@ public enum TilePacker {
                     codec: .bc1, payload: bc1)
             }
         }
+        if tryHalf,
+           let small = TileProtocol.downsample(raw[...], width: w, height: h),
+           let half = BC1.encode(
+               small[...], width: TileProtocol.halfDim(w),
+               height: TileProtocol.halfDim(h)) {
+            best = PreparedRecord(
+                startTile: startTile, runLength: runLength,
+                codec: .halfBc1, payload: half)
+        }
         let budget = TileGeometry.maxPacketBytes - TileGeometry.headerBytes
             - TileGeometry.recordHeaderBytes
         if best.payload.count <= budget {
@@ -480,9 +574,11 @@ public enum TilePacker {
         let left = runLength / 2
         prepare(startTile, left, into: &prepared,
                 pixels: pixels, geometry: geometry,
-                policy: policy, forceLossy: forceLossy)
+                policy: policy, forceLossy: forceLossy,
+                forceHalfRes: forceHalfRes)
         prepare(startTile + left, runLength - left, into: &prepared,
                 pixels: pixels, geometry: geometry,
-                policy: policy, forceLossy: forceLossy)
+                policy: policy, forceLossy: forceLossy,
+                forceHalfRes: forceHalfRes)
     }
 }

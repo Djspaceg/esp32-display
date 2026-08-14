@@ -3039,19 +3039,21 @@ int main() {
     CHECK(seen[1].len == 4 && seen[1].first == 0xDE);
   }
   {
-    // Codec value 3 reaches fn as Reserved3 - refusing it is fn's job (the
-    // walker knows bytes, not codecs), and the sketch does refuse it.
+    // Codec value 3 reaches fn as HalfBc1 (it was Reserved3 until half-res
+    // shipped). Whether to accept it is still fn's business - the walker
+    // knows bytes, not codecs - and fn refusing still aborts the walk, which
+    // is exactly how firmware without half-res drops such a record.
     const uint8_t payload[] = {0x05, 0x00, 0x01, 0xC0, 0x99};
-    bool sawReserved = false;
+    bool sawHalf = false;
     bool ok = tileproto::forEachRecord(
         payload, sizeof(payload),
         [&](uint16_t, uint16_t, tileproto::TileCodec codec, const uint8_t *,
             size_t) {
-          sawReserved = codec == tileproto::TileCodec::Reserved3;
-          return false;  // and rejecting aborts the walk
+          sawHalf = codec == tileproto::TileCodec::HalfBc1;
+          return false;
         });
     CHECK(!ok);
-    CHECK(sawReserved);
+    CHECK(sawHalf);
   }
   {
     // Structural refusals, each one byte-tight where a boundary exists.
@@ -3243,6 +3245,102 @@ int main() {
     CHECK(board::configFor(board::Variant::AmoledCo5300).roundDisplay);
     CHECK(!board::configFor(board::Variant::LcdSt7789).roundDisplay);
     CHECK(!board::configFor(board::Variant::TouchJd9853).roundDisplay);
+    // Half-res BC1 records. Separate from CAP_TILE_STREAM because tile
+    // firmware predating codec 3 rejects it, and a rejected record takes its
+    // whole datagram down - the sender must be able to tell the two apart.
+    CHECK(deviceproto::CAP_TILE_HALFRES == 1u << 17);
+    CHECK((deviceproto::CAP_TILE_HALFRES & deviceproto::CAP_TILE_STREAM) == 0);
+    CHECK((deviceproto::CAP_TILE_HALFRES & deviceproto::CAP_ROUND_DISPLAY) ==
+          0);
+  }
+
+  // --- tile stream: half-res BC1 (codec 3) ---------------------------------
+  {
+    using tileproto::halfDim;
+    // The one rounding rule both implementations and both suites share.
+    CHECK(halfDim(16) == 8);
+    CHECK(halfDim(2) == 1);   // the 466 grid's edge tiles
+    CHECK(halfDim(1) == 1);   // never zero: a raster always has a pixel
+    CHECK(halfDim(466) == 233);
+    CHECK(halfDim(3) == 2);   // odd: rounds UP, so doubling covers the raster
+    CHECK(halfDim(0) == 0);
+
+    // Codec 3 is now a defined value, no longer reserved.
+    CHECK((uint8_t)tileproto::TileCodec::HalfBc1 == 3);
+
+    // pixelDouble replicates each source pixel into a 2x2 destination block.
+    // 2x2 -> 4x4 with four distinct colours makes every mapping visible.
+    const uint8_t src[] = {
+        0xF8, 0x00, 0x07, 0xE0,  // red, green
+        0x00, 0x1F, 0xFF, 0xFF,  // blue, white
+    };
+    uint8_t dst[4 * 4 * 2];
+    memset(dst, 0xAA, sizeof(dst));
+    CHECK(tileproto::pixelDouble(src, 2, 2, dst, 4, 4));
+    for (int y = 0; y < 4; y++) {
+      for (int x = 0; x < 4; x++) {
+        const uint8_t *s = src + ((y / 2) * 2 + (x / 2)) * 2;
+        const uint8_t *d = dst + (y * 4 + x) * 2;
+        CHECK(d[0] == s[0] && d[1] == s[1]);
+      }
+    }
+
+    // Odd destination: the last row/column take the last source pixel, and
+    // nothing reads past the source. 3x3 from 2x2.
+    uint8_t odd[3 * 3 * 2];
+    CHECK(tileproto::pixelDouble(src, 2, 2, odd, 3, 3));
+    CHECK(odd[(2 * 3 + 2) * 2] == 0xFF && odd[(2 * 3 + 2) * 2 + 1] == 0xFF);
+    CHECK(odd[0] == 0xF8 && odd[1] == 0x00);
+
+    // A 2 px edge tile: 1x1 source fills the whole 2x2 destination.
+    const uint8_t one[] = {0x12, 0x34};
+    uint8_t two[2 * 2 * 2];
+    CHECK(tileproto::pixelDouble(one, 1, 1, two, 2, 2));
+    for (int i = 0; i < 4; i++) {
+      CHECK(two[i * 2] == 0x12 && two[i * 2 + 1] == 0x34);
+    }
+
+    // The dimension relationship is REQUIRED, not assumed: a caller whose
+    // half dimensions disagree with halfDim is refused rather than trusted,
+    // because on the network path that pair decides how far reads go.
+    CHECK(!tileproto::pixelDouble(src, 2, 2, dst, 5, 4));  // halfDim(5) == 3
+    CHECK(!tileproto::pixelDouble(src, 2, 2, dst, 4, 5));
+    CHECK(!tileproto::pixelDouble(src, 3, 2, dst, 4, 4));  // claimed too wide
+    CHECK(!tileproto::pixelDouble(src, 1, 2, dst, 4, 4));  // claimed too narrow
+    CHECK(!tileproto::pixelDouble(src, 2, 2, dst, 0, 4));
+    CHECK(!tileproto::pixelDouble(src, 2, 2, dst, 4, 0));
+
+    // End to end, the way a record arrives: BC1 at half size, decoded and
+    // doubled, must equal the doubling of that BC1's own decode. This is the
+    // property the panel relies on - the codec is BC1, the codec-3 part is
+    // only the scaling.
+    uint8_t half[8 * 8 * 2];
+    for (int i = 0; i < 8 * 8; i++) {
+      half[i * 2] = (uint8_t)(i * 3);
+      half[i * 2 + 1] = (uint8_t)(255 - i);
+    }
+    uint8_t encoded[bc1::BLOCK_BYTES * 4];
+    const size_t n = bc1::encode(half, 8, 8, encoded, sizeof(encoded));
+    CHECK(n == bc1::encodedBytes(8, 8));
+    CHECK(n == 32);  // vs 128 B at full 16x16: the 4x saving, exactly
+    uint8_t viaDecode[8 * 8 * 2];
+    CHECK(bc1::decode(encoded, n, viaDecode, 8, 8));
+    uint8_t doubled[16 * 16 * 2];
+    CHECK(tileproto::pixelDouble(viaDecode, 8, 8, doubled, 16, 16));
+    for (int y = 0; y < 16; y++) {
+      for (int x = 0; x < 16; x++) {
+        const uint8_t *s = viaDecode + ((y / 2) * 8 + (x / 2)) * 2;
+        const uint8_t *d = doubled + (y * 16 + x) * 2;
+        CHECK(d[0] == s[0] && d[1] == s[1]);
+      }
+    }
+
+    // Per-record sizes on the real grid, which is what the ladder's
+    // estimates and section 16's datagram arithmetic rest on.
+    CHECK(bc1::encodedBytes(halfDim(16), halfDim(16)) == 32);
+    CHECK(bc1::encodedBytes(16, 16) == 128);
+    CHECK(bc1::encodedBytes(halfDim(2), halfDim(16)) == 16);   // edge column
+    CHECK(bc1::encodedBytes(halfDim(466), halfDim(16)) == 944);  // full row
   }
 
   // --- packed band packets: header flag bits and the record walker ---------

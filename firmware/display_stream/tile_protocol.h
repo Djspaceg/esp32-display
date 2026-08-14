@@ -79,15 +79,60 @@ static const int RECORD_RUN_SHIFT = 10;
 static const uint16_t RECORD_LENGTH_MASK = 0x3FFF;
 static const int RECORD_CODEC_SHIFT = 14;
 
-/// Codec values for a record's len field bits 15..14. Value 3 is reserved
-/// (docs/tile-stream-plan.md section 6.8 earmarks it for a half-resolution
-/// motion mode); a receiver must reject it rather than guess.
+/// Codec values for a record's len field bits 15..14. All four are now
+/// defined, so the field is full; a fifth codec would need a header change.
 enum class TileCodec : uint8_t {
   Raw = 0,
   Rle565 = 1,
   Bc1 = 2,
-  Reserved3 = 3,
+  /// Half-resolution BC1 (docs/tile-stream-plan.md section 16): the payload
+  /// is BC1 of a halfDim(w) x halfDim(h) raster, which the receiver decodes
+  /// and PIXEL-DOUBLES to the run's true w x h. ~4x smaller than Bc1 for a
+  /// ~16:1 total ratio, which is what makes majority-of-screen motion fit
+  /// the datagram ceiling (66 datagrams per full frame becomes ~17).
+  ///
+  /// How the sender chose those half-res pixels is deliberately NOT part of
+  /// the wire contract - it may decimate, box-filter, or anything else. The
+  /// receiver's obligation is only the pixel-doubling, so the sender can
+  /// improve its downsample filter without a protocol change. Gated by
+  /// CAP_TILE_HALFRES: a sender must not emit this to a panel that did not
+  /// advertise it, because older firmware rejects the record (and with it
+  /// the whole datagram).
+  HalfBc1 = 3,
 };
+
+/// Half-resolution size of one raster axis: ceil(d / 2). The one rounding
+/// rule for HalfBc1, stated once so the encoder, the decoder, and both
+/// suites cannot disagree about a 2 px edge tile (2 -> 1) or an odd width.
+inline uint16_t halfDim(uint16_t d) { return (uint16_t)((d + 1) / 2); }
+
+/// Expand a halfW x halfH big-endian RGB565 raster into a w x h one by
+/// pixel-doubling: dst(x, y) = src(x / 2, y / 2). The receive half of
+/// TileCodec::HalfBc1.
+///
+/// SECURITY: this runs on the network path, on dimensions derived from an
+/// unauthenticated datagram's claimed run. Rather than trust that halfW and
+/// halfH relate to w and h correctly, it REQUIRES the exact halfDim
+/// relationship and refuses anything else - so a caller that computed the
+/// half dimensions differently from the encoder gets a rejection, not a
+/// buffer overrun. dst must have room for w * h * 2 bytes and src must hold
+/// halfW * halfH * 2; given the dimension check, every read is inside src
+/// and every write inside dst.
+inline bool pixelDouble(const uint8_t *src, uint16_t halfW, uint16_t halfH,
+                        uint8_t *dst, uint16_t w, uint16_t h) {
+  if (w == 0 || h == 0) return false;
+  if (halfW != halfDim(w) || halfH != halfDim(h)) return false;
+  for (uint16_t r = 0; r < h; r++) {
+    const uint8_t *srcRow = src + (size_t)(r / 2) * halfW * 2;
+    uint8_t *dstRow = dst + (size_t)r * w * 2;
+    for (uint16_t x = 0; x < w; x++) {
+      const uint8_t *s = srcRow + (size_t)(x / 2) * 2;
+      dstRow[(size_t)x * 2] = s[0];
+      dstRow[(size_t)x * 2 + 1] = s[1];
+    }
+  }
+  return true;
+}
 
 /// A panel's native pixel dimensions, plus the tile grid that follows from
 /// them. Pure arithmetic, cheap to pass by value. Callers must only index

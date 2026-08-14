@@ -359,6 +359,154 @@ final class TileProtocolTests: XCTestCase {
         XCTAssertNotEqual(codecOfFirstRecord(lossless), 2)
     }
 
+    // MARK: - Half-resolution BC1 (codec 3)
+
+    func testHalfDimRoundsUpSoDoublingAlwaysCoversTheRaster() {
+        // Mirrors tileproto::halfDim. Rounding UP matters: the panel
+        // pixel-doubles, so a half raster that rounded down would leave the
+        // last row or column of an odd run unwritten.
+        XCTAssertEqual(TileProtocol.halfDim(16), 8)
+        XCTAssertEqual(TileProtocol.halfDim(2), 1)    // the 466 grid's edges
+        XCTAssertEqual(TileProtocol.halfDim(1), 1)
+        XCTAssertEqual(TileProtocol.halfDim(3), 2)
+        XCTAssertEqual(TileProtocol.halfDim(466), 233)
+        XCTAssertEqual(TileProtocol.halfDim(0), 0)
+        XCTAssertEqual(TileProtocol.Codec.halfBc1.rawValue, 3)
+    }
+
+    func testDownsampleAveragesEachTwoByTwoBlock() {
+        // Four distinct colours in one 2x2 block average to their mean per
+        // channel, computed in 5/6/5 space with round-half-up.
+        let raw: [UInt8] = [
+            0xF8, 0x00, 0x00, 0x00,  // r=31 g=0 b=0, black
+            0x00, 0x00, 0x00, 0x00,  // black, black
+        ]
+        let out = TileProtocol.downsample(raw[...], width: 2, height: 2)
+        XCTAssertEqual(out?.count, 2)  // 1x1 px
+        // r channel: (31 + 0 + 0 + 0 + 2) / 4 = 8; g and b stay 0.
+        let c = (UInt16(out![0]) << 8) | UInt16(out![1])
+        XCTAssertEqual(c >> 11, 8)
+        XCTAssertEqual((c >> 5) & 0x3F, 0)
+        XCTAssertEqual(c & 0x1F, 0)
+
+        // A flat raster survives exactly - averaging equal values cannot
+        // drift, which is what keeps flat half-res tiles from shimmering.
+        let flat = [UInt8](repeating: 0x5A, count: 16 * 16 * 2)
+        let flatOut = TileProtocol.downsample(flat[...], width: 16, height: 16)
+        XCTAssertEqual(flatOut?.count, 8 * 8 * 2)
+        XCTAssertEqual(flatOut, [UInt8](repeating: 0x5A, count: 8 * 8 * 2))
+    }
+
+    func testDownsampleReplicatesEdgesForOddDimensions() {
+        // 3x1 -> 2x1: the second output pixel's 2x2 window runs off the right
+        // edge, so it replicates the last column instead of averaging in
+        // phantom pixels (matching BC1.encode's padding convention).
+        let raw: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0xF8, 0x00]
+        let out = TileProtocol.downsample(raw[...], width: 3, height: 1)
+        XCTAssertEqual(out?.count, 2 * 2)
+        // Pixel 1 samples columns 2 and (clamped) 2, both r=31 -> stays 31.
+        let second = (UInt16(out![2]) << 8) | UInt16(out![3])
+        XCTAssertEqual(second >> 11, 31)
+
+        // Refusals: the raster's byte count must match its claimed size, or
+        // the loop would read past the end.
+        XCTAssertNil(TileProtocol.downsample(raw[...], width: 4, height: 1))
+        XCTAssertNil(TileProtocol.downsample(raw[...], width: 0, height: 1))
+        XCTAssertNil(TileProtocol.downsample(raw[...], width: 3, height: 0))
+    }
+
+    func testHalfResIsAQuarterOfBc1AndDecodesThroughPixelDoubling() {
+        // The size claim section 16 rests on: 32 B a tile against BC1's 128,
+        // so a full 719-tile frame is ~17 datagrams instead of 66.
+        XCTAssertEqual(BC1.encodedBytes(width: 16, height: 16), 128)
+        XCTAssertEqual(BC1.encodedBytes(width: 8, height: 8), 32)
+        // Edge cases on the real grid: a 2 px column halves to 1 px, and a
+        // full-width row to 233 px.
+        XCTAssertEqual(BC1.encodedBytes(width: 1, height: 8), 16)
+        XCTAssertEqual(BC1.encodedBytes(width: 233, height: 8), 944)
+
+        // Round trip: downsample, encode, decode, and the decoded raster is
+        // half-size - the panel's pixelDouble is what restores the run's true
+        // dimensions, so this side must produce exactly the half raster the
+        // firmware's length check expects.
+        var raw = [UInt8]()
+        var seed: UInt32 = 99
+        for _ in 0..<(16 * 16) {
+            seed = seed &* 1_664_525 &+ 1_013_904_223
+            raw.append(UInt8((seed >> 24) & 0xFF))
+            raw.append(UInt8((seed >> 16) & 0xFF))
+        }
+        let small = TileProtocol.downsample(raw[...], width: 16, height: 16)
+        XCTAssertEqual(small?.count, 8 * 8 * 2)
+        let encoded = BC1.encode(small![...], width: 8, height: 8)
+        XCTAssertEqual(encoded?.count, 32)
+        let decoded = BC1.decode(encoded!, width: 8, height: 8)
+        XCTAssertEqual(decoded?.count, 8 * 8 * 2)
+    }
+
+    func testHalfResIsOnlyEverChosenWhenTheLadderAsksForIt() {
+        // Noise: variance in the thousands, so BC1 wins on every policy that
+        // admits lossy. Half-res would win on SIZE against all of them (32 B
+        // vs 128), which is exactly why size must not be what selects it.
+        var pixels = [UInt8](repeating: 0, count: g466.frameBytes)
+        var seed: UInt32 = 4_242
+        for y in 0..<16 {
+            for x in 0..<16 {
+                seed = seed &* 1_664_525 &+ 1_013_904_223
+                pixels[(y * 466 + x) * 2] = UInt8((seed >> 24) & 0xFF)
+                pixels[(y * 466 + x) * 2 + 1] = UInt8((seed >> 16) & 0xFF)
+            }
+        }
+        func codec(_ packets: [Data]) -> Int {
+            let bytes = [UInt8](packets[0])
+            return (Int(bytes[8]) | (Int(bytes[9]) << 8)) >> 14
+        }
+        func packets(
+            _ policy: TileLossyPolicy, lossy: Bool = false, half: Bool = false
+        ) -> [Data] {
+            TilePacker.packets(
+                frameId: 1, dirtyTiles: [0], pixels: pixels,
+                geometry: g466, landscape: false, policy: policy,
+                forceLossy: lossy, forceHalfRes: half)
+        }
+        // Nothing reaches codec 3 without the flag - not even .aggressive,
+        // which would otherwise blur every static window on screen.
+        XCTAssertEqual(codec(packets(.auto)), 2)
+        XCTAssertEqual(codec(packets(.aggressive)), 2)
+        XCTAssertEqual(codec(packets(.auto, lossy: true)), 2)
+        // With the flag, codec 3 supersedes BC1.
+        XCTAssertEqual(codec(packets(.auto, half: true)), 3)
+        XCTAssertEqual(codec(packets(.aggressive, half: true)), 3)
+        // .losslessOnly forbids it however hard the ladder pushes: the user
+        // asked for pixel-perfect, and dropping resolution is the largest
+        // violation of that on offer.
+        XCTAssertNotEqual(codec(packets(.losslessOnly, half: true)), 3)
+        XCTAssertNotEqual(
+            codec(packets(.losslessOnly, lossy: true, half: true)), 3)
+
+        // The payload really is a half-res BC1 raster, not merely tagged as
+        // one: 32 bytes for this 16x16 tile.
+        let bytes = [UInt8](packets(.auto, half: true)[0])
+        XCTAssertEqual(Int(bytes[8]) | (Int(bytes[9]) << 8), 32 | (3 << 14))
+        XCTAssertEqual(bytes.count, 6 + 4 + 32)
+    }
+
+    func testHalfResLosesToASmallerLosslessEncoding() {
+        // A flat tile RLEs to a handful of bytes. Half-res is 32 - larger -
+        // so the size comparison keeps it at full resolution even with the
+        // ladder pushing. This is what stops a mostly-static screen from
+        // going soft the moment one busy region trips the budget.
+        let pixels = [UInt8](repeating: 0x77, count: g466.frameBytes)
+        let out = TilePacker.packets(
+            frameId: 1, dirtyTiles: [0], pixels: pixels,
+            geometry: g466, landscape: false, policy: .auto,
+            forceHalfRes: true)
+        let bytes = [UInt8](out[0])
+        let lenField = Int(bytes[8]) | (Int(bytes[9]) << 8)
+        XCTAssertEqual(lenField >> 14, 1)  // RLE565, not half-res
+        XCTAssertLessThan(lenField & 0x3FFF, 32)
+    }
+
     func testScatteredTilesShareAPacket() {
         // Non-consecutive dirty tiles - the common diff shape - pack
         // together because records carry their own indices.

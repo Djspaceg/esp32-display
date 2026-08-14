@@ -110,6 +110,20 @@ enum Capability : uint32_t {
   // know the glass shape any other way; the board reads it from its own
   // table (board::Config::roundDisplay).
   CAP_ROUND_DISPLAY = 1u << 16,
+  // Accepts tile records in the half-resolution BC1 codec
+  // (tileproto::TileCodec::HalfBc1, wire value 3): the payload is BC1 of a
+  // half-size raster which this panel pixel-doubles on arrival, ~16:1
+  // overall. The sender engages it only when a frame's motion would not fit
+  // the datagram ceiling at plain BC1 rates - it trades resolution for the
+  // frame arriving at all (docs/tile-stream-plan.md section 16).
+  //
+  // A separate bit and not implied by CAP_TILE_STREAM, on the same reasoning
+  // as that bit itself: firmware predating this REJECTS codec 3, and because
+  // a rejected record aborts its whole datagram, a sender that guessed wrong
+  // would silently lose entire frames rather than degrade. So the sender
+  // sends codec 3 only where it was advertised, and an older panel keeps
+  // getting byte-identical full-resolution records.
+  CAP_TILE_HALFRES = 1u << 17,
 };
 
 enum class ControlOpcode : uint8_t {
