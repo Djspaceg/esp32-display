@@ -21,21 +21,19 @@
 // before Doom mode is entered. We reuse the panel handle. The panel accepts
 // RGB565 big-endian pixel data via esp_lcd_panel_draw_bitmap().
 
-extern esp_lcd_panel_handle_t panel_handle;  // from panel_init.h / display_stream.ino
+// Panel handle getter defined in display_stream.ino
+extern "C" esp_lcd_panel_handle_t doom_get_panel_handle(void);
 
 void doom_display_init(void) {
-    // Panel is already initialized. Just ensure backlight is on at max.
-    // The AMOLED has no backlight pin -- brightness is via panel command 0x51.
-    // Set to max brightness for Doom.
-    // (The main firmware's applyBacklight() does this via esp_lcd_panel_io)
+    // Panel is already initialized by display_stream. AMOLED brightness is
+    // via panel command 0x51 (no backlight pin). Max brightness for Doom.
     Serial.println("[doom] Display bridge ready (reusing existing panel)");
 }
 
 void doom_display_blit(const uint16_t* rgb565_buf, int width, int height) {
-    // Push the full 466x466 frame to the AMOLED via DMA.
-    // esp_lcd_panel_draw_bitmap(handle, x_start, y_start, x_end, y_end, data)
-    if (panel_handle) {
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, width, height, rgb565_buf);
+    esp_lcd_panel_handle_t p = doom_get_panel_handle();
+    if (p) {
+        esp_lcd_panel_draw_bitmap(p, 0, 0, width, height, rgb565_buf);
     }
 }
 

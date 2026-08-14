@@ -60,7 +60,7 @@ static struct {
 static int key_queue_head = 0;
 static int key_queue_tail = 0;
 
-static void push_key(unsigned char key, int pressed) {
+void push_key(unsigned char key, int pressed) {
     int next = (key_queue_head + 1) % KEY_QUEUE_SIZE;
     if (next != key_queue_tail) {
         key_queue[key_queue_head].key = key;

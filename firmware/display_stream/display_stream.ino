@@ -130,6 +130,11 @@ static const int16_t PANEL_H = (int16_t)PANEL_GEOMETRY.height;
 
 static esp_lcd_panel_handle_t panel = nullptr;
 
+// Expose the panel handle to the Doom Easter Egg display bridge (S3 only).
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+esp_lcd_panel_handle_t doom_get_panel_handle(void) { return panel; }
+#endif
+
 // ---- Onboard RGB LED(s): WiFi signal quality indicator ------------------
 // WS2812-style addressable LED(s) glowing through the board's acrylic layer,
 // on the non-touch board only. Driven as a short strip with every pixel the
