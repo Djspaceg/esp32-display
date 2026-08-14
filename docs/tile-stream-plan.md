@@ -1671,72 +1671,55 @@ path, since the map only holds tiles that are actually clipped.
 `testDiffingIgnoresChangesBehindTheBezel` pins it: a change touching only
 hidden pixels now yields an empty dirty list.
 
-### 17.16 What is left: PSRAM contention, and why it was not measured
+### 17.16 PSRAM contention: closed at the architectural limit
 
-The one item from the phase-12 list still open is 17.6's root cause: decode
-writes into `bufA` while the draw reads `bufA`, contending on PSRAM. The idea
-to test is staging tiles through SRAM on the RECEIVE side, the mirror of the
-send-side staging 17.10 already earns 4.2 ms from.
+The last phase-12 item was to attack the receive/draw collision on `bufA`.
+Reading the path end to end changes the problem: the proposed receive-side
+SRAM staging already exists.
 
-It is not attempted here because the link degraded to RSSI -77, where only
-118-128 of 270 offered datagrams arrive. Any A/B run at that signal level
-measures the radio and attributes it to the build - the exact error retracted
-in 17.11. The prerequisite is a link back near -59/-62; check `rssi` in
-`CFGSHOW` first.
+`bc1::decode` writes into `tileScratch`, an internal-SRAM array. The decoder's
+scattered 4x4-block writes never touch PSRAM. Receive makes exactly one
+necessary PSRAM pass afterward: strided row copies into persistent `bufA`.
+The draw side then gathers each coalesced row-run from `bufA` into one of two
+internal-SRAM `tileStaging` buffers, and DMA reads only those buffers. Section
+17.10 measured why that last tier matters: keeping DMA off PSRAM changed
+accepted datagrams from 185/270 to 269/270 at the useful operating point.
 
-When the signal is back, the `CFGTUNE` knobs from 17.7 make this measurable
-properly: interleave the arms rather than running them in blocks, take at
-least ten samples per arm against the ~4 fps noise floor, and report the
-spread alongside the means. Kill any running sender first
-(`pgrep -fl ESPDisplaySender`) - two senders corrupt every counter.
+That leaves one PSRAM write and one PSRAM read per displayed pixel. Neither
+can be removed within this hardware's capacity and the protocol's recency
+contract:
 
-### 17.17 Receive-side SRAM staging is impossible; a one-record handoff is not
+- Removing the write makes SRAM the authoritative frame. The frame is
+  434,312 bytes; the S3 has 512 KB total internal SRAM, while this firmware
+  already reserves about 50 KB for tile scratch/staging before the WiFi,
+  display, task stacks, and other runtime allocations. It cannot fit.
+- Removing the read needs an SRAM cache that contains every tile in each
+  merged draw run. Roughly 200 tiles can arrive between passes, and a full
+  frame is 900 tiles (460,800 untrimmed tile bytes). A cache large enough to
+  preserve merging is the same frame-sized allocation that does not fit.
+- Keeping only one decoded record in SRAM avoids the capacity problem by
+  drawing each record immediately, but destroys horizontal run coalescing.
+  The panel then pays its fixed draw-call cost per record instead of per
+  region.
 
-17.16 named the remaining root cause and proposed staging tiles through SRAM
-on the receive side. Two of that framing's premises are wrong, and correcting
-them kills the idea before any code:
+The one-record handoff was implemented behind a runtime switch and exercised
+on hardware before removal. At 4 fps offered:
 
-- **Decode already stages through SRAM.** `bc1::decode` writes `tileScratch`,
-  an internal-SRAM array. The scattered per-4x4-block writes are SRAM writes
-  at full speed. The receive path's ONLY PSRAM traffic is the strided per-row
-  commit into `bufA`.
-- **A cache cannot serve the draw.** The pass gathers merged runs, so a run
-  served from SRAM needs every one of its tiles resident. Roughly 200 tiles
-  arrive between passes and full-frame motion is 900 tiles (460 KB) against
-  512 KB of total internal SRAM with ~50 KB already reserved by this path. No
-  SRAM-resident copy of a 434 KB frame exists - which is why `bufA` is in
-  PSRAM in the first place. The wall is arithmetic, not tuning.
+| Path | Complete fps | Partial draws/s | Datagrams accepted |
+| --- | --- | --- | --- |
+| Existing merged runs | 3.5 | 24.6 | 249 |
+| One-record handoff | 3.5 | 187.6 | 238 |
 
-So after 17.10 removed DMA from PSRAM, the two parties left are the receive
-task's `bufA` write and the pass's `bufA` read-back to fill `tileStaging`.
-The second one is removable without any capacity at all, because the pass is
-reading back bytes the receive task just wrote: hand the decoded raster
-straight across in SRAM instead.
+RSSI was -82, so the completed-frame and datagram figures are not a valid
+throughput comparison. The structural result does not depend on signal:
+partial draws increased 7.6x because the handoff replaces coalesced regions
+with per-record panel calls. It trades the measured PSRAM bottleneck for the
+older, worse fixed-call bottleneck and adds 15,360 bytes of internal-SRAM
+pressure. The experiment and its `CFGTUNE rxhandoff` switch were removed.
 
-`rxHandoff` is one record's raster plus its rect, published by the receive
-task under `drawMux` and drained by the next pass, which copies it into
-`tileStaging` and draws from there. One slot suffices because `loop()`
-iterates far more often than records arrive; there is no ring and no
-eviction policy. Correctness never depends on it - the pixels are in `bufA`
-before the slot is published, so every discard path (slot busy, oversized
-run, orientation changed underneath, `draw_bitmap` error) marks the run
-pending and the pass draws it the old way. A handoff published mid-pass is
-folded into `tileDrainPending` so its tiles cannot strand.
-
-Gated behind `CFGTUNE rxhandoff <0|1>`, **default 0**, and the gain is
-NOT measured. The link was at RSSI -82 while this was written, where an A/B
-measures the radio (17.11). What is verified on hardware is that the path is
-live and correct, at 4 fps offered:
-
-| Arm           | Complete fps | Partial draws/s | Datagrams accepted |
-| ------------- | ------------ | --------------- | ------------------ |
-| `rxhandoff=0` | 3.5          | 24.6            | 249                |
-| `rxhandoff=1` | 3.5          | 187.6           | 238                |
-
-The partial-draw column is the evidence the code runs: handoff runs are
-painted individually rather than merged into a completing frame, so they
-count as partial draws. Frames complete at the same rate and no draw errors
-occurred. These are single runs per arm at bad signal - exactly the blocked
-sampling 17.11 retracted a result for - so no throughput claim is made
-either way. The knob exists so the real A/B is interleaved arms at a
-recovered link, with no reflash between samples.
+The resolved architecture is therefore the path already shipped: decode in
+SRAM, commit once to the persistent PSRAM frame, coalesce dirty tiles into
+horizontal runs, gather each run once into double-buffered SRAM, and let DMA
+read SRAM. This is the minimum PSRAM traffic compatible with a persistent
+434 KB frame and merged panel draws on a 512 KB-SRAM part. There is no pending
+phase-12 implementation or measurement behind this conclusion.
