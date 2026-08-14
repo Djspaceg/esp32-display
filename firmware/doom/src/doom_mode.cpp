@@ -79,6 +79,7 @@ static bool should_exit(void) {
 
 void doom_enter(void) {
     ESP_LOGI(TAG, "=== DOOM EASTER EGG ACTIVATED ===");
+    ESP_LOGI(TAG, "Panel rotation locked (IMU used for movement, not display rotation)");
     ESP_LOGI(TAG, "Controls:");
     ESP_LOGI(TAG, "  Tilt device    = Move (forward/back/strafe)");
     ESP_LOGI(TAG, "  Touch drag     = Turn/aim");
