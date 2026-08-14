@@ -4,6 +4,11 @@
 // to override doomgeneric's defaults without modifying upstream source files.
 #pragma once
 
+// Mark this as an ESP platform build for all #ifdef guards
+#ifndef ESP_PLATFORM
+#define ESP_PLATFORM 1
+#endif
+
 // Render resolution (Doom's native is 320x200)
 #define DOOMGENERIC_RESX 320
 #define DOOMGENERIC_RESY 200
