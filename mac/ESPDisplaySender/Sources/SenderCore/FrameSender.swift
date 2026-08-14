@@ -60,6 +60,11 @@ final class FrameSender {
     /// Off until the first EINF, during which the classic band format flows
     /// - the fallback every firmware accepts.
     private var _peerAcceptsTileStream = false
+    /// Whether the panel has advertised `tileHalfRes` - it decodes codec 3.
+    /// Off until the first EINF, and off forever for tile firmware that
+    /// predates half-res, which is the point of asking: such a panel rejects
+    /// a codec-3 record and loses the whole datagram with it.
+    private var _peerAcceptsHalfRes = false
     /// The tile grid for this panel's geometry, present only when the
     /// geometry can carry the tile protocol at all (every square panel can;
     /// this exists so a hostile mDNS geometry cannot reach tile arithmetic).
@@ -578,6 +583,7 @@ final class FrameSender {
             _deviceInfo = info
             _peerAcceptsPackedBands = info.capabilities.contains(.compressedBands)
             _peerAcceptsTileStream = info.capabilities.contains(.tileStream)
+            _peerAcceptsHalfRes = info.capabilities.contains(.tileHalfRes)
                 && tileGeometry != nil
             // Round glass: rebuild the mask only when the advertised answer
             // changes. It is a per-panel constant, but EINF repeats every
@@ -989,11 +995,12 @@ final class FrameSender {
 
         lock.lock()
         let tileStream = _peerAcceptsTileStream
+        let halfRes = _peerAcceptsHalfRes
         let mask = _tileMask
         lock.unlock()
         if tileStream, let tiles = tileGeometry {
             sendTileFrame(pixels, landscape: landscape, tiles: tiles,
-                          mask: mask, conn: conn)
+                          mask: mask, halfRes: halfRes, conn: conn)
             return
         }
 
@@ -1076,7 +1083,7 @@ final class FrameSender {
     /// diff granularity differ.
     private func sendTileFrame(
         _ pixels: [UInt8], landscape: Bool, tiles: TileGeometry,
-        mask: TileMask?, conn: NWConnection
+        mask: TileMask?, halfRes: Bool, conn: NWConnection
     ) {
         let keyframeDue =
             Date().timeIntervalSince(lastTileKeyframeAt) > keyframeInterval
@@ -1127,21 +1134,46 @@ final class FrameSender {
         // plan's flat per-tile figures (512 B raw, 128 B BC1 - edge tiles
         // only make them conservative).
         var forceLossy = false
+        var forceHalfRes = false
         if !isKeyframe {
             let bytesPerSecond =
                 1_472.0 * 1_000_000.0 / Double(max(spacing, 1))
             let budgetBytes = Int(bytesPerSecond / Self.degradeTargetFps)
             let rawEstimate = dirty.count * 512
             let bc1Estimate = dirty.count * 128
+            let halfEstimate = dirty.count * 32
             // Rung (a): lossless would blow the budget - let BC1 win busy
             // runs regardless of variance. Only meaningful under .auto;
             // .losslessOnly is the user forbidding this trade.
             forceLossy = policy == .auto && rawEstimate > budgetBytes
-            // Rung (c): even all-BC1 blows the budget (or, under
-            // .losslessOnly, lossless does and no codec relief exists) -
-            // halve the frame rate rather than flood the receive queue.
-            let floorEstimate =
-                policy == .losslessOnly ? rawEstimate : bc1Estimate
+            // Rung (b): even all-BC1 blows the budget, so full resolution
+            // cannot fit at any colour precision - drop RESOLUTION instead,
+            // at a quarter of BC1's bytes. This is the rung that was missing
+            // while majority-of-screen motion was the one failing case: the
+            // ladder went straight from "force BC1" to "send fewer frames",
+            // and measurement (docs/tile-stream-plan.md section 15.6) put the
+            // full-res ceiling at ~14 fps because 66 datagrams per frame both
+            // saturate the datagram rate and make loss compound.
+            //
+            // Requires the panel to have advertised it: codec 3 sent to tile
+            // firmware that predates it loses whole datagrams, which would
+            // turn a quality degradation into a worse outage than the one
+            // being fixed.
+            forceHalfRes = halfRes && policy != .losslessOnly
+                && bc1Estimate > budgetBytes
+            // Rung (c): even the cheapest codec available blows the budget -
+            // halve the frame rate rather than flood the receive queue. The
+            // floor is whatever the rungs above could actually reach: raw
+            // under .losslessOnly, half-res where the panel takes it, BC1
+            // otherwise.
+            let floorEstimate: Int
+            if policy == .losslessOnly {
+                floorEstimate = rawEstimate
+            } else if forceHalfRes {
+                floorEstimate = halfEstimate
+            } else {
+                floorEstimate = bc1Estimate
+            }
             skipNextTileFrame = floorEstimate > budgetBytes
         }
 
@@ -1149,7 +1181,8 @@ final class FrameSender {
         let packets = TilePacker.packets(
             frameId: id, dirtyTiles: dirty, pixels: pixels,
             geometry: tiles, landscape: landscape,
-            policy: policy, forceLossy: forceLossy)
+            policy: policy, forceLossy: forceLossy,
+            forceHalfRes: forceHalfRes)
         tileStatEncodeNs &+= DispatchTime.now().uptimeNanoseconds &- encodeStart
 
         let sendStart = DispatchTime.now().uptimeNanoseconds

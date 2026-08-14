@@ -306,7 +306,19 @@ static uint32_t deviceCapabilities() {
          // predate tiles; every other board keeps packed bands, and the RLE
          // decode is chip-independent so the C6 gains from packing too (an
          // 80-band keyframe becomes a handful of datagrams).
-         | (tileStreamEnabled() ? deviceproto::CAP_TILE_STREAM
+         // CAP_TILE_HALFRES rides the same decision, not a second one: the
+         // half-res codec is a value of the tile record's codec field, so it
+         // is meaningless without tiles, and this build's tile path always
+         // decodes it. Folded into this ternary rather than added as its own
+         // so the C6 - where tileStreamEnabled() is always false - emits not
+         // one extra instruction for a bit it can never advertise.
+         //
+         // It is still a SEPARATE BIT on the wire, which is the part that
+         // matters: tile firmware predating this advertises CAP_TILE_STREAM
+         // alone, so a sender can tell the two apart and withhold codec 3
+         // from the older one.
+         | (tileStreamEnabled() ? (deviceproto::CAP_TILE_STREAM
+                                   | deviceproto::CAP_TILE_HALFRES)
                                 : deviceproto::CAP_COMPRESSED_BANDS)
          // Round glass: a fifth of the framebuffer is behind the bezel and
          // invisible forever. Straight from the board table - the sender
@@ -394,6 +406,17 @@ static const size_t TILE_RUN_MAX_BYTES = (size_t)480 * 16 * 2;
 // SRAM - the codecs' inner loops must not run against PSRAM), then rows are
 // strided-copied into bufA. Never touched by the draw path.
 static uint8_t tileScratch[TILE_RUN_MAX_BYTES] __attribute__((aligned(4)));
+// Second decode scratch, for TileCodec::HalfBc1 only: the half-resolution
+// raster lands here and is pixel-doubled into tileScratch above. A quarter
+// of TILE_RUN_MAX_BYTES by construction (both axes halved).
+//
+// A separate buffer rather than expanding in place inside tileScratch. The
+// in-place version is possible - walk rows back to front, right to left -
+// but its non-overlap argument is subtle, and this runs on the network path
+// where being wrong is a remote write past a buffer. 3.8 KB of internal SRAM
+// buys an obviously correct loop.
+static const size_t TILE_HALF_MAX_BYTES = (size_t)240 * 8 * 2;
+static uint8_t tileHalfScratch[TILE_HALF_MAX_BYTES] __attribute__((aligned(4)));
 // DMA staging for the draw path, double-buffered: the next run's rows are
 // gathered into one buffer while the previous run's transfer drains from
 // the other. Internal SRAM instead of the band path's full-frame PSRAM
@@ -572,10 +595,6 @@ static bool applyTileRecord(const tileproto::TileHeader &h,
                             uint16_t startTile, uint16_t runLen,
                             tileproto::TileCodec codec,
                             const uint8_t *payload, size_t payloadLen) {
-  if (codec == tileproto::TileCodec::Reserved3) {
-    statBadLen = statBadLen + 1;  // future codec: refuse, never guess
-    return false;
-  }
   const size_t rawLen = TILE_GEOMETRY.runRawBytes(startTile, runLen);
   if (rawLen == 0 || rawLen > TILE_RUN_MAX_BYTES) {
     return false;  // inexpressible run; onRecord would reject it too
@@ -630,8 +649,29 @@ static bool applyTileRecord(const tileproto::TileHeader &h,
         return false;
       }
       break;
+    case tileproto::TileCodec::HalfBc1: {
+      // Half-res: BC1 at half the run's dimensions, then pixel-doubled up to
+      // the run's true raster so everything downstream - the strided copy
+      // below, the draw path, bufA itself - stays unaware this tile ever
+      // travelled small. Ordered so nothing decodes until the destination is
+      // known to fit: bc1::decode then rejects any payloadLen that is not
+      // exactly encodedBytes(halfW, halfH), and pixelDouble re-derives the
+      // half dimensions itself rather than trusting the pair passed in.
+      const uint16_t halfW = tileproto::halfDim(runW);
+      const uint16_t halfH = tileproto::halfDim(runH);
+      if ((size_t)halfW * halfH * 2 > sizeof(tileHalfScratch) ||
+          !bc1::decode(payload, payloadLen, tileHalfScratch, halfW, halfH) ||
+          !tileproto::pixelDouble(tileHalfScratch, halfW, halfH, tileScratch,
+                                  runW, runH)) {
+        statBadLen = statBadLen + 1;
+        return false;
+      }
+      break;
+    }
     default:
-      return false;  // Reserved3 was refused above
+      // Unreachable: the codec came from a 2-bit field and all four values
+      // are handled. Kept so adding a fifth cannot silently fall through.
+      return false;
   }
 
   // Strided copy into the row-major frame: the run's rows sit at the frame

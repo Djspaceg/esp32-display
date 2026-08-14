@@ -2321,6 +2321,55 @@ def test_tile_stream_wire():
     check(not (set(covered) & hidden),
           "the motion benchmark never sends a hidden tile")
 
+    # Half-resolution BC1 (codec 3). The rounding rule first: it must round UP
+    # on every axis, or pixel-doubling would leave the last row/column of an
+    # odd run unwritten - and a 2 px edge tile would halve to nothing.
+    check_equal(espdisp.half_dim(16), 8, "a full tile halves to 8 px")
+    check_equal(espdisp.half_dim(2), 1, "a 2 px edge tile halves to 1 px")
+    check_equal(espdisp.half_dim(1), 1, "half of 1 px is still a pixel")
+    check_equal(espdisp.half_dim(3), 2, "odd dimensions round up")
+    check_equal(espdisp.half_dim(466), 233, "the full panel halves evenly")
+    check_equal(espdisp.TILE_CODEC_HALF_BC1, 3, "half-res is codec 3")
+
+    half, _ = espdisp.bc1_noise_tile(1, espdisp.half_dim(16),
+                                    espdisp.half_dim(16))
+    check_equal(len(half), 32, "a half-res 16x16 tile is 4 blocks x 8 B")
+    check_equal(len(espdisp.bc1_noise_tile(1, espdisp.half_dim(2),
+                                          espdisp.half_dim(16))[0]), 16,
+                "a half-res edge tile is 2 blocks")
+
+    # The whole point, on the wire: the same 719 tiles, a quarter of the bytes,
+    # and the datagram count that lifts the majority-of-motion ceiling.
+    hmotion, _ = espdisp.motion_frame_packets(1, 0xC0FFEE, half=True)
+    check_equal(len(hmotion), 18,
+                "a half-res full frame is 18 datagrams, against BC1's 66")
+    htotal = sum(len(p) for p in hmotion)
+    check(25000 < htotal < 26500,
+          "a half-res full frame is ~25.8 KB, got %d" % htotal)
+    # 3.67x, not 4x: the payload quarters but each record's 4-byte header does
+    # not, so a tile goes 132 B -> 36 B. Worth pinning because section 16's
+    # datagram arithmetic is built on the per-tile figure, and a 4x estimate
+    # would predict 17 datagrams where the wire actually needs 18.
+    check_equal(round(total / htotal, 2), 3.65,
+                "half-res is 3.65x smaller than BC1, header included")
+    hcovered = []
+    for p in hmotion:
+        check(len(p) <= espdisp.TILE_PACKET_BUDGET,
+              "half-res datagram in budget")
+        _, first_field, dirty = struct.unpack("<HHH", p[:6])
+        check(first_field & 0x8000 != 0, "half-res sets the stream flag")
+        check_equal(dirty, 719, "half-res frames still declare 719 tiles")
+        at = 6
+        while at < len(p):
+            tile_field, len_field = struct.unpack("<HH", p[at:at + 4])
+            check_equal(len_field >> 14, espdisp.TILE_CODEC_HALF_BC1,
+                        "half-res records carry codec 3")
+            hcovered.append(tile_field & 0x03FF)
+            at += 4 + (len_field & 0x3FFF)
+        check_equal(at, len(p), "half-res records tile the packet exactly")
+    check_equal(sorted(hcovered), sorted(covered),
+                "half-res covers exactly the tiles full-res does")
+
 
 def test_describe_bundle():
     """bundle-info's output is the whole point of the manifest, so it is checked.

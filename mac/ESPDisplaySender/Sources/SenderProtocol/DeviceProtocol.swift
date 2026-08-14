@@ -95,6 +95,12 @@ public enum DeviceProtocol {
         /// 466x466 panel it is 181 of 900 tiles, a fifth of both the wire
         /// cost and the panel's paint time.
         public static let roundDisplay = Capabilities(rawValue: 1 << 16)
+        /// This panel decodes half-resolution BC1 tile records
+        /// (`TileProtocol.Codec.halfBc1`), pixel-doubling them on arrival.
+        /// Separate from `tileStream` because tile firmware predating codec 3
+        /// REJECTS such a record — and a rejected record drops the whole
+        /// datagram — so guessing costs entire frames rather than degrading.
+        public static let tileHalfRes = Capabilities(rawValue: 1 << 17)
     }
 
     public struct DeviceInfo: Equatable, Sendable {

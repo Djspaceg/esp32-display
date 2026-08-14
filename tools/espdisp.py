@@ -1678,6 +1678,9 @@ TILE_PACKET_BUDGET = 1472
 TILE_CODEC_RAW = 0
 TILE_CODEC_RLE = 1
 TILE_CODEC_BC1 = 2
+# Half-resolution BC1: BC1 of a ceil(w/2) x ceil(h/2) raster, pixel-doubled by
+# the panel. A quarter of BC1's bytes; requires CAP_TILE_HALFRES.
+TILE_CODEC_HALF_BC1 = 3
 
 
 def tile_header(frame_id: int, first_tile: int, dirty_count: int,
@@ -1890,28 +1893,41 @@ def bc1_noise_tile(seed: int, w: int, h: int) -> tuple:
     return bytes(out), seed
 
 
+def half_dim(d: int) -> int:
+    """ceil(d / 2) - the half-res rounding rule, matching tileproto::halfDim
+    and TileProtocol.halfDim. Rounds UP so pixel-doubling always covers the
+    run: a 2 px edge tile halves to 1 px, never to 0."""
+    return (d + 1) // 2
+
+
 def motion_frame_packets(frame_id: int, seed: int, width: int = 466,
-                         height: int = 466) -> tuple:
-    """One full-frame BC1 update covering every VISIBLE tile, packed to the
+                         height: int = 466, half: bool = False) -> tuple:
+    """One full-frame update covering every VISIBLE tile, packed to the
     datagram budget. Returns (packets, next seed).
 
     Mirrors what the real sender emits for majority-of-screen motion: the
-    round mask's 719 tiles rather than all 900, BC1 for every run, records
-    packed greedily.
+    round mask's 719 tiles rather than all 900, records packed greedily.
+    `half` switches to codec 3 (half-resolution BC1), which is the same tile
+    set at a quarter of the bytes - the comparison that tells you whether the
+    half-res rung is worth what it costs in resolution.
     """
     classes = tile_visibility(width, height)
     hidden = set(classes["outside"])
     cols = (width + TILE_DIM - 1) // TILE_DIM
     rows = (height + TILE_DIM - 1) // TILE_DIM
     visible = [t for t in range(cols * rows) if t not in hidden]
+    codec = TILE_CODEC_HALF_BC1 if half else TILE_CODEC_BC1
 
     records = []
     for tile in visible:
         tx, ty = tile % cols, tile // cols
         w = min(TILE_DIM, width - tx * TILE_DIM)
         h = min(TILE_DIM, height - ty * TILE_DIM)
-        payload, seed = bc1_noise_tile(seed, w, h)
-        records.append((tile, tile_record(tile, 1, TILE_CODEC_BC1, payload)))
+        if half:
+            payload, seed = bc1_noise_tile(seed, half_dim(w), half_dim(h))
+        else:
+            payload, seed = bc1_noise_tile(seed, w, h)
+        records.append((tile, tile_record(tile, 1, codec, payload)))
 
     packets = []
     current, size, first = [], 6, None
@@ -1946,12 +1962,13 @@ def cmd_tile_motion(args) -> int:
     seed = 0xC0FFEE
     prebuilt = []
     for i in range(args.distinct_frames):
-        packets, seed = motion_frame_packets(i + 1, seed)
+        packets, seed = motion_frame_packets(i + 1, seed, half=args.half)
         prebuilt.append(packets)
     per_frame = len(prebuilt[0])
     frame_bytes = sum(len(p) for p in prebuilt[0])
-    print("%d datagrams/frame, %d bytes/frame (719 visible tiles, BC1)"
-          % (per_frame, frame_bytes))
+    print("%d datagrams/frame, %d bytes/frame (719 visible tiles, %s)"
+          % (per_frame, frame_bytes,
+             "half-res BC1 (codec 3)" if args.half else "BC1"))
     print("offering %d fps for %.0fs -> %d datagrams/s"
           % (args.target_fps, args.seconds, args.target_fps * per_frame))
 
@@ -2480,6 +2497,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_motion.add_argument(
         "--distinct-frames", type=int, default=4,
         help="how many distinct frames to pre-build and cycle through",
+    )
+    p_motion.add_argument(
+        "--half", action="store_true",
+        help="use half-resolution BC1 (codec 3): the same 719 tiles at a "
+             "quarter of the bytes, ~17 datagrams/frame instead of 66. "
+             "Needs firmware advertising CAP_TILE_HALFRES",
     )
     p_motion.set_defaults(func=cmd_tile_motion)
 
