@@ -1047,23 +1047,57 @@ factor of 2.6. Half-res demands 1,080, which fits. Full-res 45 fps got
 656 of the 2,970 datagrams/s it needed, 22%; half-res 45 fps got
 essentially all of its 810.
 
-Two measurement caveats, both mine:
+One measurement caveat: **accepted can exceed offered** (990 against 810
+at 45 fps) because 802.11 retry duplicates reach `applyTileRecord`, get
+classified `Duplicate`, and still count in `statPackets`. Duplicates are
+correctly not applied to bufA and not counted toward completion; only the
+packet counter sees them.
 
-- **`shown` fps is saturated and no longer means what it did.** Since the
-  partial-draw fallback (section 15.3) counts DRAW PASSES, and
-  `TILE_PARTIAL_DRAW_MS` is 40 ms, the counter cannot exceed ~25/s. Every
-  run above 20 fps offered reads 20-24 fps regardless of mode or codec.
-  It is useless for comparing rates above ~25 fps, which is why the table
-  above reports accepted datagrams and drop rate instead. Fixing it needs
-  a separate partial-draw counter, and the only spare EHB1 slot is
-  `statFramesSkipped`, whose meaning the Mac app already parses.
-- **Accepted can exceed offered** (990 against 810 at 45 fps): 802.11
-  retry duplicates reach `applyTileRecord`, get classified `Duplicate`,
-  and still count in `statPackets`. Duplicates are correctly not applied
-  to bufA and not counted toward completion; only the packet counter sees
-  them.
+### 16.5 The ceiling moved to the paint, and half-res cannot help it
 
-### 16.5 What is verified and what is not
+Every run above 20 fps offered reads 20-24 fps shown, in BOTH codecs. The
+first explanation written here was that `TILE_PARTIAL_DRAW_MS` (40 ms) caps
+the counter at ~25/s. That is wrong, and wrong in a way worth recording:
+the partial-draw timer only ever ADDS draw passes, so it cannot cap
+anything. 25 and the observed 23.5 are close enough that the coincidence
+was persuasive.
+
+Comparing `shown` against the frames that actually completed - offered fps
+times (1 - drop rate) - says what is really happening:
+
+| Mode, offered | Completed/s | Shown | Reading                                       |
+| ------------- | ----------- | ----- | --------------------------------------------- |
+| Half-res 20   | 16.0        | 18.1  | shown ABOVE completed: the timer adding draws |
+| Half-res 45   | 25.8        | 23.6  | about equal                                   |
+| Half-res 60   | 35.6        | 23.5  | shown BELOW completed: draws being missed     |
+| Full-res 20   | 11.1        | 24.4  | same plateau                                  |
+
+At 60 fps offered, 35.6 frames per second completed and only 23.5 draw
+passes happened. Completion is no longer the constraint - the draw is.
+
+And this is the part that bounds what half-res was ever going to buy:
+**a half-res frame paints exactly as many pixels as a full-res one.** The
+doubling happens before bufA, so the panel pushes all 719 tiles either
+way. Paint cost is identical, which is precisely why both codecs plateau
+in the same place. Half-res fixed the side it could - datagram demand and
+completion probability, both roughly halved - and handed the bottleneck to
+the QSPI bus.
+
+That plateau also does not match the model. Section 13.6 predicted 22.2 ms
+per masked full frame (45.0 fps) from phase 0's per-call figures; the
+measured plateau of ~23.5 fps implies ~42 ms. Something costs ~16 ms a pass
+that the per-call model does not account for - candidates, none of them
+measured yet: `spinUntilDmaBelow` waiting on the 2-deep queue, the staging
+memcpys, info-bar redraws over dirty rows, or the receive task now taking
+CPU at the yield points added in section 15.4. Phase 0 measured draw calls
+in isolation, with no network traffic and nothing else running; this is the
+same category of error as the ~2,850 datagrams/s figure corrected in 15.2,
+and it should be measured under load before anything is built on it.
+
+So the next lever for full-frame motion is paint time, not bytes. Nothing
+in the protocol can move it.
+
+### 16.6 What is verified and what is not
 
 Verified: the firmware decode path against synthetic codec-3 frames on
 real glass (16.4); `pixelDouble` and the rounding rule in the host suite,
@@ -1073,16 +1107,25 @@ go; the sender's encode, gating, and ladder in the Swift suite - notably
 that codec 3 appears under no policy without the flag, and never under
 `.losslessOnly`; the wire bytes in the Python suite.
 
-NOT verified on hardware: the ladder's rung-(b) THRESHOLD firing from the
-real Mac app against real screen content. The benchmark drives the
-firmware directly, so what remains untested end to end is whether
-`bc1Estimate > budgetBytes` trips at a sensible moment during genuine
-motion, and whether the resolution drop is acceptable to look at when it
-does. Both need a human watching the panel, and the threshold is the
-first thing to tune if half-res turns out to engage too eagerly or too
-late.
+Verified on the glass by eye: half-res frames render correctly, with none
+of the horizontal smearing or diagonal skew a wrong stride or a mismatched
+half/full dimension pair would produce - which is the one property no
+amount of host testing can establish, because both sides could agree on
+the same wrong arithmetic.
+
+NOT verified: the ladder's rung-(b) THRESHOLD firing from the real Mac app
+against real screen content. The benchmark drives the firmware directly, so
+what remains untested is whether `bc1Estimate > budgetBytes` trips at a
+sensible moment during genuine motion. The threshold is the first thing to
+tune if half-res engages too eagerly or too late.
 
 Still open from 13.5: vertical run merging, boundary-tile RLE flattening
-(RLE candidate only), the untuned `autoVarianceThreshold`, and whether a
-genuine 60 fps source delivers 60 fps end to end - which half-res now
-makes arithmetically possible for the first time.
+(RLE candidate only), and the untuned `autoVarianceThreshold`.
+
+The 60 fps end-to-end question is now answerable in principle - half-res
+makes 60 fps arithmetically deliverable over the wire for the first time -
+but 16.5 says it would still land on a ~23.5 fps paint ceiling, so the
+next measurement worth taking is where those ~42 ms per draw pass
+actually go. Vertical run merging becomes considerably more interesting in
+that light: it is the one open item that reduces DRAW CALLS rather than
+bytes.
