@@ -701,6 +701,18 @@ char *D_TryFindWADByName(char *filename)
 
 char *D_FindIWAD(int mask, GameMission_t *mission)
 {
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ESP_PLATFORM)
+    // On ESP32, the WAD is memory-mapped from a flash partition.
+    // Skip all filesystem searching -- just return the -iwad argument directly.
+    // W_OpenFile() handles the actual data access via the partition map.
+    int iwadparm = M_CheckParmWithArgs("-iwad", 1);
+    if (iwadparm) {
+        *mission = doom;
+        return myargv[iwadparm + 1];
+    }
+    I_Error("ESP32 Doom: -iwad argument required");
+    return NULL;
+#else
     char *result;
     char *iwadfile;
     int iwadparm;
@@ -748,6 +760,7 @@ char *D_FindIWAD(int mask, GameMission_t *mission)
     }
 
     return result;
+#endif  // ESP_PLATFORM
 }
 
 // Find all IWADs in the IWAD search path matching the given mask.
