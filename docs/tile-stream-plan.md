@@ -1631,3 +1631,61 @@ not viable on a keyframe, which is why it wants its own design pass rather
 than a constant change. A cheap proxy for the same property is how well a
 block's colours fit a line, which is most of what the encoder computes
 anyway.
+
+### 17.15 Boundary-tile flattening: rejected, and the better bug it found
+
+Section 13.5 left this open. A keyframe sends 719 tiles, and the ones that
+straddle the round bezel carry pixels the glass hides. Zeroing those would
+hand RLE long runs to collapse. It was never simply switched on because it is
+only sound on the RLE candidate: flattening drags BC1's endpoint bounding box,
+so it would damage the VISIBLE pixels of the same tile.
+
+Measured first. The ring is 106 tiles holding 11,244 invisible pixels, and
+the gain depends entirely on what happens to sit behind the bezel:
+
+| Hidden corner content     | RLE bytes over the ring |
+| ------------------------- | ----------------------- |
+| Noise (pessimistic bound) | 25,842                  |
+| Noise, flattened          | 5,170                   |
+| A flat colour of its own  | 5,170                   |
+
+The third row settles it. When the corner holds a flat colour, RLE already
+collapses it to EXACTLY the byte count flattening would reach - the figures
+are identical, not close. So the gain is 5x on a busy corner and **zero** on
+a quiet one, decided by content the sender cannot know or control, and only
+ever on one of the two codecs. Not built.
+
+The measurement did surface a real defect, though, and a strictly better fix.
+`dirtyTiles` compared a boundary tile whole, so a change confined to its
+INVISIBLE pixels marked it dirty - a window sliding behind the bezel - and
+shipped a record whose visible content the panel already had. Flattening would
+only have made that useless record smaller. Not sending it is better on every
+axis: it costs nothing in quality, and it is codec-independent, where
+flattening is unsound for BC1.
+
+`TileMask` now carries `boundaryRowSpans: [Int: [Range<Int>]]`, the visible
+x-range of each row of each straddling tile. A circle's intersection with a
+row is contiguous, so the diff still does one `memcmp` per row - just a
+shorter one - and tiles wholly inside the circle keep the original whole-tile
+path, since the map only holds tiles that are actually clipped.
+`testDiffingIgnoresChangesBehindTheBezel` pins it: a change touching only
+hidden pixels now yields an empty dirty list.
+
+### 17.16 What is left: PSRAM contention, and why it was not measured
+
+The one item from the phase-12 list still open is 17.6's root cause: decode
+writes into `bufA` while the draw reads `bufA`, contending on PSRAM. The idea
+to test is staging tiles through SRAM on the RECEIVE side, the mirror of the
+send-side staging 17.10 already earns 4.2 ms from.
+
+It is not attempted here because the link degraded to RSSI -77, where only
+118-128 of 270 offered datagrams arrive. Any A/B run at that signal level
+measures the radio and attributes it to the build - the exact error retracted
+in 17.11. The prerequisite is a link back near -59/-62; check `rssi` in
+`CFGSHOW` first.
+
+When the signal is back, the `CFGTUNE` knobs from 17.7 make this measurable
+properly: interleave the arms rather than running them in blocks, take at
+least ten samples per arm against the ~4 fps noise floor, and report the
+spread alongside the means. Kill any running sender first
+(`pgrep -fl ESPDisplaySender`) - two senders corrupt every counter.
