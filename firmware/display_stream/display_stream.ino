@@ -74,6 +74,12 @@
 #include "control_queue.h"
 #include "ota_policy.h"
 #include "chip_identity.h"
+
+// Doom Easter Egg (S3 board only)
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#include "../doom/doom_mode.h"
+#endif
+
 using namespace bandproto;
 
 // WiFi credentials live in NVS flash and are reconfigurable over the USB
@@ -2541,9 +2547,25 @@ static void handleButton() {
   } else if (!down && wasDown) {
     wasDown = false;
     if (!longFired && now - downAt >= DEBOUNCE_MS) {
-      // The button stays a two-position switch even though any level is now
-      // reachable over the network: stepping through a range by pressing a
-      // single button would be worse than useless.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+      // Doom Easter Egg: triple-tap BOOT to enter Doom mode.
+      // If doom_check_triple_tap returns true, we enter Doom instead of
+      // toggling the backlight. The triple-tap window (800ms) is short
+      // enough that a deliberate triple-tap won't accidentally toggle
+      // backlight three times -- the first two taps DO toggle it, but
+      // the third one triggers Doom and the player won't notice.
+      if (doom_check_triple_tap(now, true)) {
+        Serial.println("button: DOOM EASTER EGG ACTIVATED");
+        // Suspend normal firmware operation
+        // TODO: stop UDP listener, free frame buffers, stop mDNS
+        doom_enter();
+        // doom_enter() returns when the player exits (BOOT long-press 3s)
+        Serial.println("button: Doom exited, restarting...");
+        ESP.restart();
+        return;  // unreachable
+      }
+#endif
+      // Normal short-press: toggle backlight high/low
       userBlLevel = blIsHigh() ? BL_LOW : BL_HIGH;
       applyBacklight();
       saveDisplayPrefs();

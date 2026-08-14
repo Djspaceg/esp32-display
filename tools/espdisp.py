@@ -2339,6 +2339,57 @@ def board_help() -> str:
     return "\n".join("  %-3s %s" % (b.key, b.blurb) for b in BOARDS.values())
 
 
+def cmd_flash_wad(args) -> int:
+    """Write a Doom WAD file to the S3 board's dedicated flash partition."""
+    wad_path = args.wad
+    if not os.path.isfile(wad_path):
+        raise Fail("WAD file not found: %s" % wad_path)
+
+    wad_size = os.path.getsize(wad_path)
+    WAD_PARTITION_OFFSET = 0xC00000
+    WAD_PARTITION_SIZE = 0x400000  # 4MB
+
+    if wad_size > WAD_PARTITION_SIZE:
+        raise Fail(
+            "WAD file too large: %d bytes (partition is %d bytes / %d MB)"
+            % (wad_size, WAD_PARTITION_SIZE, WAD_PARTITION_SIZE // (1024 * 1024))
+        )
+
+    # Verify it looks like a WAD
+    with open(wad_path, "rb") as f:
+        magic = f.read(4)
+    if magic not in (b"IWAD", b"PWAD"):
+        raise Fail(
+            "Not a valid WAD file (magic: %s, expected IWAD or PWAD)" % magic.hex()
+        )
+
+    port = resolve_port(args.port)
+    tool = esptool_path()
+    if not tool:
+        raise Fail("esptool not found (install the esp32 Arduino core)")
+
+    print(
+        "Flashing WAD: %s (%d bytes / %.1f MB) to partition at 0x%06X on %s"
+        % (os.path.basename(wad_path), wad_size, wad_size / (1024 * 1024),
+           WAD_PARTITION_OFFSET, port.address)
+    )
+    print("This will take a moment (writing %.1f MB to flash)..." % (wad_size / (1024 * 1024)))
+
+    cmd = [
+        tool,
+        "--chip", "esp32s3",
+        "--port", port.address,
+        "--baud", "921600",
+        "write_flash",
+        "0x%X" % WAD_PARTITION_OFFSET,
+        wad_path,
+    ]
+    run_streaming(cmd)
+    print("\nWAD flashed successfully. The Doom Easter Egg is ready!")
+    print("Triple-tap BOOT to play.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="espdisp.py",
@@ -2529,6 +2580,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_config.add_argument("--timeout", type=float, default=6.0, help="reply timeout (s)")
     p_config.add_argument("words", nargs="+", metavar="CFG...")
     p_config.set_defaults(func=cmd_config)
+
+    p_wad = subs.add_parser(
+        "flash-wad",
+        help="write a doom1.wad file to the S3 board's WAD partition",
+        description="Writes a Doom WAD file (typically doom1.wad, the shareware "
+        "version) to the dedicated flash partition on the ESP32-S3 board. The "
+        "partition is at offset 0xC00000 and is 4MB (4,194,304 bytes). The WAD "
+        "file must be <= 4MB. The S3 custom partition table "
+        "(firmware/partitions_s3_doom.csv) must be flashed first.",
+    )
+    p_wad.add_argument("wad", help="path to the WAD file (e.g. doom1.wad)")
+    p_wad.add_argument("--port", help="serial device (default: autodetected)")
+    p_wad.set_defaults(func=cmd_flash_wad)
 
     return parser
 
