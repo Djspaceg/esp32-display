@@ -54,7 +54,9 @@
 
 void M_MakeDirectory(char *path)
 {
-#ifdef _WIN32
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ESP_PLATFORM)
+    (void)path;  // No filesystem on ESP32 -- no-op
+#elif defined(_WIN32)
     mkdir(path);
 #else
     mkdir(path, 0755);
@@ -65,6 +67,12 @@ void M_MakeDirectory(char *path)
 
 boolean M_FileExists(char *filename)
 {
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ESP_PLATFORM)
+    // On ESP32, the WAD is memory-mapped -- "doom1.wad" always "exists".
+    // Config/save files don't exist (no writable filesystem).
+    if (filename && strstr(filename, ".wad")) return true;
+    return false;
+#else
     FILE *fstream;
 
     fstream = fopen(filename, "r");
@@ -81,6 +89,7 @@ boolean M_FileExists(char *filename)
 
         return errno == EISDIR;
     }
+#endif
 }
 
 //

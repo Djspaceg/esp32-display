@@ -27,3 +27,7 @@
 // Disable sound (no audio hardware; stubs in doom_esp32_stubs.c)
 // Note: FEATURE_SOUND is NOT defined, which disables the sound system.
 // If we later add I2S audio, define it and implement the sound module.
+
+// Override exit() to signal game loop exit instead of calling abort()
+extern void doom_exit_override(int status);
+#define exit(x) doom_exit_override(x)
