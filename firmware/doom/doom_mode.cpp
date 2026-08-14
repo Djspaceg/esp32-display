@@ -4,18 +4,24 @@
 // GPL-2.0 for the doomgeneric integration; this glue file is MIT.
 #include "doom_mode.h"
 
+#include <Arduino.h>
 #include <string.h>
 #include <esp_log.h>
 #include <esp_partition.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <esp_heap_caps.h>
 
 #include "platform/doom_splash.h"
 
-// doomgeneric entry points
-extern void doomgeneric_Create(int argc, char** argv);
-extern void doomgeneric_Tick(void);
+// From doomgeneric_esp32s3.c
+extern "C" void push_key(unsigned char key, int pressed);
+
+// doomgeneric entry points (C linkage)
+extern "C" {
+    void doomgeneric_Create(int argc, char** argv);
+    void doomgeneric_Tick(void);
+}
 
 static const char* TAG = "doom_mode";
 
@@ -87,8 +93,8 @@ void doom_enter(void) {
 
     // Show splash screen while engine initializes
     {
-        extern void doom_display_init(void);
-        extern void doom_display_blit(const uint16_t* buf, int w, int h);
+        extern "C" void doom_display_init(void);
+        extern "C" void doom_display_blit(const uint16_t* buf, int w, int h);
         doom_display_init();
 
         // Allocate splash buffer in PSRAM (466*466*2 = 434KB)
@@ -114,7 +120,38 @@ void doom_enter(void) {
     while (!should_exit()) {
         doomgeneric_Tick();
 
-        // Yield to allow other tasks (button handler, watchdog)
+        // Poll BOOT button during Doom:
+        //   short press = cycle weapon (KEY_TAB acts as weapon cycle in Doom)
+        //   long press (3s) = exit
+        {
+            static bool btn_was_down = false;
+            static uint32_t btn_down_at = 0;
+            static bool btn_long_fired = false;
+
+            bool btn_down = (digitalRead(0) == LOW);  // GPIO0 = BOOT
+            uint32_t now = millis();
+
+            if (btn_down && !btn_was_down) {
+                btn_was_down = true;
+                btn_long_fired = false;
+                btn_down_at = now;
+            } else if (btn_down && btn_was_down && !btn_long_fired &&
+                       (now - btn_down_at) >= 3000) {
+                btn_long_fired = true;
+                ESP_LOGI(TAG, "BOOT long-press (3s) -- exiting Doom");
+                doom_request_exit();
+            } else if (!btn_down && btn_was_down) {
+                btn_was_down = false;
+                if (!btn_long_fired && (now - btn_down_at) >= 30) {
+                    // Short press = weapon cycle
+                    // Inject a '/' key press (weapon forward in Doom)
+                    push_key('/', 1);  // press
+                    push_key('/', 0);  // release
+                }
+            }
+        }
+
+        // Yield to allow other tasks (watchdog, WiFi stack)
         vTaskDelay(1);
     }
 
