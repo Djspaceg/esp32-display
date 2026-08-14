@@ -77,7 +77,7 @@
 
 // Doom Easter Egg (S3 board only)
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-#include "../doom/doom_mode.h"
+#include <doom_mode.h>
 #endif
 
 using namespace bandproto;

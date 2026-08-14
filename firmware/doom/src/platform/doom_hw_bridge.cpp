@@ -110,7 +110,7 @@ void doom_imu_read(float* pitch, float* roll) {
 // Extends the existing single-point touch reader to report two points and
 // gesture classification for Doom input.
 
-#include "../doom/doom_mode.h"
+#include "doom_mode.h"
 
 // Touch state tracking for gesture detection
 static int16_t touch_last_x = 0;

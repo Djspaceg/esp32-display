@@ -118,13 +118,18 @@ flash it to the device.
 
 ```
 firmware/doom/
-├── doom_mode.h          # Public API (triple-tap, enter, exit) — MIT
-├── doom_mode.c          # Mode controller — MIT
-├── platform/
-│   ├── doomgeneric_esp32s3.c  # DG_* implementations — GPL-2.0
-│   └── w_file_esp32.c         # WAD partition access — GPL-2.0
-├── src/                 # doomgeneric engine source — GPL-2.0
-│   └── (to be populated from upstream ozkl/doomgeneric)
-├── LICENSE-GPL2         # GPL-2.0 license text
-└── README.md            # This file
+├── library.properties           # Arduino library metadata
+├── LICENSE-GPL2                  # GPL-2.0 for engine code
+├── README.md                    # This file
+└── src/
+    ├── doom_mode.h              # Public API (triple-tap, enter, exit) — MIT
+    ├── doom_mode.cpp            # Mode controller + button handling — MIT
+    ├── doom_config.h            # ESP32 compile-time defines
+    ├── platform/
+    │   ├── doomgeneric_esp32s3.c   # DG_* implementations — GPL-2.0
+    │   ├── w_file_esp32.c          # WAD partition access — GPL-2.0
+    │   ├── doom_hw_bridge.cpp      # Display/IMU/Touch hardware bridge — MIT
+    │   ├── doom_esp32_stubs.c      # Sound/system stubs — GPL-2.0
+    │   └── doom_splash.h           # Procedural splash screen — MIT
+    └── (80 .c + 97 .h files)      # doomgeneric engine — GPL-2.0
 ```
