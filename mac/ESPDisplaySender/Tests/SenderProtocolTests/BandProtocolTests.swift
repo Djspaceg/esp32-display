@@ -69,7 +69,11 @@ final class BandProtocolTests: XCTestCase {
 
     func testParseHeartbeat() {
         var packet = Data("EHB1".utf8)
-        // shown=0x01020304, dropped=5, skipped=6, packets=0x00010000, heap=81920
+        // shown=0x01020304, dropped=5, partialDraws=6, packets=0x00010000,
+        // heap=81920. The third slot carried an always-zero `skipped` until the
+        // firmware split complete frames from partial draws; a value there now
+        // means partial draws, and older firmware sending 0 reads correctly as
+        // "none".
         let values: [UInt32] = [0x0102_0304, 5, 6, 0x0001_0000, 81920]
         for v in values {
             packet.append(UInt8(v & 0xFF))
@@ -81,7 +85,25 @@ final class BandProtocolTests: XCTestCase {
         XCTAssertEqual(
             stats,
             BandProtocol.DeviceStats(
-                shown: 0x0102_0304, dropped: 5, skipped: 6, packets: 0x0001_0000, heap: 81920))
+                shown: 0x0102_0304, dropped: 5, partialDraws: 6,
+                packets: 0x0001_0000, heap: 81920))
+    }
+
+    func testHeartbeatDefaultsPartialDrawsToZero() {
+        // Firmware predating the complete/partial split transmits zero in that
+        // slot, and the pacing hill-climb reads `shown` as complete frames - so
+        // a zero has to mean "no partial draws", not "unknown".
+        XCTAssertEqual(BandProtocol.DeviceStats().partialDraws, 0)
+        var packet = Data("EHB1".utf8)
+        for v in [UInt32(9), 1, 0, 100, 4096] {
+            packet.append(UInt8(v & 0xFF))
+            packet.append(UInt8((v >> 8) & 0xFF))
+            packet.append(UInt8((v >> 16) & 0xFF))
+            packet.append(UInt8((v >> 24) & 0xFF))
+        }
+        let stats = BandProtocol.parseHeartbeat(packet)
+        XCTAssertEqual(stats?.shown, 9)
+        XCTAssertEqual(stats?.partialDraws, 0)
     }
 
     func testParseHeartbeatRejectsGarbage() {

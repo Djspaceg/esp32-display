@@ -2034,10 +2034,15 @@ def cmd_tile_motion(args) -> int:
     shown = last_hb[0] - first_hb[0]
     dropped = last_hb[1] - first_hb[1]
     packets = last_hb[3] - first_hb[3]
+    partial = last_hb[2] - first_hb[2]
     total = shown + dropped
-    print("ACHIEVED over %.1fs: %.1f fps shown, %.0f datagrams/s accepted, "
-          "%d dropped frames (%.1f%%)"
-          % (span, shown / span, packets / span, dropped,
+    # `shown` is COMPLETE frames; `partial` counts draw passes that painted an
+    # incomplete frame because the panel stopped waiting for the rest. Firmware
+    # predating that split reports 0 partials and folds them into shown, which
+    # inflates it - see docs/tile-stream-plan.md section 17.5.
+    print("ACHIEVED over %.1fs: %.1f fps complete, %.1f/s partial draws, "
+          "%.0f datagrams/s accepted, %d dropped frames (%.1f%%)"
+          % (span, shown / span, partial / span, packets / span, dropped,
              100.0 * dropped / total if total else 0.0))
     return 0
 

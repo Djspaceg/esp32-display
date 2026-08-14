@@ -482,7 +482,18 @@ static bool madctlDirty = false;                 // panel config needs reapplyin
 // Stats.
 static volatile uint32_t statFramesShown = 0;
 static volatile uint32_t statFramesDropped = 0;  // incomplete, abandoned
-static volatile uint32_t statFramesSkipped = 0;  // complete but no free buffer
+// Draw passes that painted PARTIAL frames - tiles drawn because
+// TILE_PARTIAL_DRAW_MS elapsed with none of their frame's remainder arriving
+// (section 15.3). Kept apart from statFramesShown because conflating them cost
+// real accuracy: from section 15.3 until now, `shown` counted draw passes of
+// both kinds, which inflated it roughly fourfold at low frame rates (8 fps
+// offered read as 30.8) and, worse, fed that inflated number to the sender's
+// pacing hill-climb, which steers on it (section 17.5).
+//
+// This occupies EHB1's third u32, where the never-incremented
+// statFramesSkipped used to sit - the slot has always transmitted zero, so
+// nothing has ever read a meaningful value out of it.
+static volatile uint32_t statFramesPartial = 0;
 static volatile uint32_t statPackets = 0;
 static volatile uint32_t statBadLen = 0;
 static volatile uint32_t statDrawErrors = 0;
@@ -3212,6 +3223,10 @@ void loop() {
   const uint32_t tdPassStart = micros();
 #endif
   if (wantDraw && dmaInFlight == 0) {
+    // Which kind of pass this is, captured before lastCompleted moves. A frame
+    // completing outranks the partial timer: if both are true the pass paints a
+    // whole frame and counts as one.
+    const bool frameCompleted = (framesCompleted != lastCompleted);
     lastCompleted = framesCompleted;
 
     // Snapshot-and-clear the pending set; the UDP task keeps marking bands
@@ -3373,7 +3388,13 @@ void loop() {
 #endif
 
     if (drewAny) {
-      statFramesShown = statFramesShown + 1;
+      // `shown` is COMPLETE frames only, which is what it meant before
+      // section 15.3 and what the sender's hill-climb assumes it means.
+      if (frameCompleted) {
+        statFramesShown = statFramesShown + 1;
+      } else {
+        statFramesPartial = statFramesPartial + 1;
+      }
       // A drawn frame implies the sender is present and the Mac's displays
       // are awake, so leave both dimmed states.
       if (idleActive || displaySleeping) {
@@ -3564,7 +3585,7 @@ void loop() {
     lastHeartbeat = millis();
     uint8_t pkt[24];
     memcpy(pkt, "EHB1", 4);
-    uint32_t vals[5] = {statFramesShown, statFramesDropped, statFramesSkipped,
+    uint32_t vals[5] = {statFramesShown, statFramesDropped, statFramesPartial,
                         statPackets, (uint32_t)ESP.getFreeHeap()};
     for (int i = 0; i < 5; i++) {
       pkt[4 + i * 4] = vals[i] & 0xFF;
@@ -3606,9 +3627,9 @@ void loop() {
   static uint32_t lastReport = 0;
   if (millis() - lastReport >= 5000) {
     lastReport = millis();
-    Serial.printf("frames=%lu dropped=%lu skipped=%lu packets=%lu badlen=%lu drawerr=%lu heap=%lu rssi=%d\n",
+    Serial.printf("frames=%lu dropped=%lu partial=%lu packets=%lu badlen=%lu drawerr=%lu heap=%lu rssi=%d\n",
                   (unsigned long)statFramesShown, (unsigned long)statFramesDropped,
-                  (unsigned long)statFramesSkipped, (unsigned long)statPackets,
+                  (unsigned long)statFramesPartial, (unsigned long)statPackets,
                   (unsigned long)statBadLen, (unsigned long)statDrawErrors,
                   (unsigned long)ESP.getFreeHeap(), (int)WiFi.RSSI());
 #if defined(CONFIG_IDF_TARGET_ESP32S3)

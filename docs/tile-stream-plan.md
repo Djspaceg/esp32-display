@@ -1206,6 +1206,11 @@ offered delivers 2.2 frames a second, a seventh of what 15 fps offered
 delivers. This is textbook congestion collapse, and it means the sender can
 make the panel worse by trying harder.
 
+(Both right-hand columns above are approximations, superseded by 17.7. The
+`Shown fps` column is the inflated pre-fix counter, and `Delivered/s`
+counts frames that COMPLETED rather than frames that reached the glass.
+The collapse is unaffected, but the peak moves.)
+
 It also explains a result from section 16.4 that looked perverse. There, at
 RSSI **-80**, 60 fps offered dropped 40.7% and showed 23.5 fps. Here, at
 RSSI -60, the same offer drops 96.3% and shows 2.3. The better radio is
@@ -1279,3 +1284,60 @@ with a partial repaint of one.
    be measured under load, which is now possible.
 4. Only after that: revisit vertical run merging, `autoVarianceThreshold`,
    and boundary-tile RLE flattening.
+
+### 17.7 Complete frames and partial draws, split (and re-measured)
+
+`statFramesShown` now counts COMPLETE frames only. Partial draws get their
+own counter, transmitted in EHB1's third u32 - the slot the
+never-incremented `statFramesSkipped` occupied, which has always sent zero,
+so no real value was displaced and older firmware reads correctly as "no
+partial draws".
+
+Re-measured with the split, `tile-motion --half`, RSSI -60 to -62:
+
+| Offered fps | Complete fps | Partial draws/s | Accepted dgram/s | Dropped |
+| ----------- | ------------ | --------------- | ---------------- | ------- |
+| 8           | 8.0          | 23.6            | 173              | 6.2%    |
+| 15          | **14.2**     | 20.2            | 292              | 7.3%    |
+| 25          | 8.6          | 2.1             | 448              | 37.8%   |
+| 60          | 0.3          | 9.0             | 405              | 99.4%   |
+
+The split checks out against the old counter: 8.0 + 23.6 = 31.6 against the
+30.8 measured before, and 14.2 + 20.2 = 34.4 against 33.4. The old number
+was the sum, exactly as 17.5 said.
+
+**The peak is 14.2 fps at 15 fps offered**, not 15.4 at 25. Section 17.3's
+`Delivered/s` overstated the 25 fps case because it counted COMPLETIONS
+while this counts DISPLAYS, and those differ: when several frames complete
+between two draw passes, they collapse into one paint. That is not a bug -
+you cannot show two frames in one paint - but it means completions are an
+upper bound on what the glass ever shows, and the gap widens exactly where
+the panel is behind. At 25 fps offered, 15.6 frames a second completed and
+8.6 were displayed.
+
+So there are three different rates worth keeping distinct, and this project
+has conflated them at least once each: datagrams accepted, frames
+completed, and frames displayed. Only the last is what anybody sees.
+
+Partial draws are highest where delivery is cleanest (23.6/s at 8 fps
+offered) because slow arrivals give the 40 ms timer the most chances to
+fire between frames. That is the mechanism behind the fourfold inflation in
+17.5 - the old counter was most wrong precisely where the panel was
+healthiest, and the hill-climb was reading it there.
+
+### 17.8 The hill-climb may now fix the overfeeding by itself
+
+17.6 listed "stop overfeeding" first, by raising default spacing. That may
+no longer need doing by hand. The climb sums `shownDelta`, which is now
+displayed frames, and displayed frames collapse hard past the peak - 14.2
+at 15 fps offered against 0.3 at 60. A gradient that steep is exactly what
+a hill-climb is for, and it was previously being fed a signal that barely
+moved across that range (33.4 down to 2.3, but reading 30-34 across the
+whole healthy region).
+
+Untested: whether it actually settles near 15 fps offered from the app
+against real content, and how long it takes to get there. That needs a live
+run with the app streaming, watching where `spacingMicros` lands - not a
+synthetic benchmark, because the benchmark bypasses the sender entirely.
+If it does settle there, item 1 of 17.6 is already done and the default
+spacing can stay where it is.
