@@ -116,6 +116,17 @@ public struct TileMask: Hashable, Sendable {
     /// Every tile that can contain a visible pixel, ascending — the tile set
     /// a keyframe covers.
     public let visibleTiles: [Int]
+    /// For tiles that STRADDLE the boundary, the visible x-range of each of
+    /// the tile's rows, in frame coordinates. Absent for tiles wholly inside
+    /// the circle (every pixel counts) and for hidden tiles (none do).
+    ///
+    /// Exists so the diff can ignore what is behind the bezel. Comparing a
+    /// boundary tile whole reports it dirty when only its INVISIBLE pixels
+    /// changed - a window moving through the corner - and ships a record whose
+    /// visible content is identical to what the panel already has. Spans make
+    /// that free to avoid: a circle's intersection with a row is contiguous,
+    /// so each row is still one memcmp, just a shorter one.
+    public let boundaryRowSpans: [Int: [Range<Int>]]
     private let visible: [Bool]
 
     /// The mask for a panel. `round: false` (or a non-square geometry, which
@@ -129,6 +140,7 @@ public struct TileMask: Hashable, Sendable {
         guard masking else {
             self.visible = [Bool](repeating: true, count: max(geometry.tileCount, 0))
             self.visibleTiles = Array(0..<max(geometry.tileCount, 0))
+            self.boundaryRowSpans = [:]
             return
         }
         let cx = Double(geometry.width) / 2
@@ -151,6 +163,38 @@ public struct TileMask: Hashable, Sendable {
         }
         self.visible = flags
         self.visibleTiles = tiles
+
+        // Per-row visible spans, for visible tiles that are not wholly inside.
+        var spans = [Int: [Range<Int>]]()
+        for tile in tiles {
+            let x0 = geometry.col(tile) * TileGeometry.tileDim
+            let y0 = geometry.row(tile) * TileGeometry.tileDim
+            let w = geometry.colWidth(geometry.col(tile))
+            let h = geometry.rowHeight(geometry.row(tile))
+            var rows = [Range<Int>]()
+            var anyClipped = false
+            for dy in 0..<h {
+                let dyc = Double(y0 + dy) + 0.5 - cy
+                // Half-width of the circle at this row, in pixel centres.
+                let inside = r2 - dyc * dyc
+                var start = x0, end = x0 + w
+                if inside <= 0 {
+                    end = x0  // no visible pixel on this row
+                } else {
+                    let half = inside.squareRoot()
+                    // First and last x whose centre is strictly inside.
+                    let lo = Int((cx - half - 0.5).rounded(.up))
+                    let hi = Int((cx + half - 0.5).rounded(.down))
+                    start = max(x0, lo)
+                    end = min(x0 + w, hi + 1)
+                    if end < start { end = start }
+                }
+                if start != x0 || end != x0 + w { anyClipped = true }
+                rows.append(start..<end)
+            }
+            if anyClipped { spans[tile] = rows }
+        }
+        self.boundaryRowSpans = spans
     }
 
     /// Whether a tile can contain a visible pixel. Out-of-range indices are
@@ -300,6 +344,23 @@ public enum TileProtocol {
                     let y0 = geometry.row(tile) * TileGeometry.tileDim
                     let w = geometry.colWidth(geometry.col(tile)) * 2
                     let h = geometry.rowHeight(geometry.row(tile))
+                    // A tile straddling the round bezel is compared over its
+                    // VISIBLE span only. Comparing it whole reports it dirty
+                    // when a window merely passes behind the bezel, and ships
+                    // a record whose visible pixels the panel already has.
+                    // Still one memcmp a row, just a shorter one.
+                    if let spans = mask?.boundaryRowSpans[tile] {
+                        for r in 0..<h where !spans[r].isEmpty {
+                            let span = spans[r]
+                            let off = (y0 + r) * rowStride + span.lowerBound * 2
+                            if memcmp(newBase + off, oldBase + off,
+                                      span.count * 2) != 0 {
+                                dirty.append(tile)
+                                break
+                            }
+                        }
+                        continue
+                    }
                     for r in 0..<h {
                         let off = (y0 + r) * rowStride + x0 * 2
                         if memcmp(newBase + off, oldBase + off, w) != 0 {

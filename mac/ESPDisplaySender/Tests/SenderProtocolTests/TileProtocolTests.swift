@@ -513,6 +513,166 @@ final class TileProtocolTests: XCTestCase {
         XCTAssertNotEqual(codecOfFirstRecord(lossless), 2)
     }
 
+    // MARK: - Boundary-tile flattening: is it worth building?
+
+    /// Whether a pixel's centre is inside the round glass, the same predicate
+    /// `TileMask` applies per tile.
+    private func pixelVisible(_ x: Int, _ y: Int, size: Int = 466) -> Bool {
+        let c = Double(size) / 2
+        let dx = Double(x) + 0.5 - c, dy = Double(y) + 0.5 - c
+        return dx * dx + dy * dy < c * c
+    }
+
+    func testBoundaryFlatteningGainIsMeasuredBeforeBeingBuilt() {
+        // Section 13.5 left this open: the 719 tiles a keyframe sends still
+        // contain 11,244 invisible pixels in the boundary ring, and zeroing
+        // them would give RLE long runs to collapse. It is only sound on the
+        // RLE candidate - flattening drags BC1's endpoint bounding box and so
+        // would damage the VISIBLE pixels of the same tile - which is why it
+        // was never just switched on.
+        //
+        // Before building the plumbing, measure what it could win.
+        let g = g466
+        let mask = TileMask(geometry: g, round: true)
+        var boundary = [Int]()
+        for tile in mask.visibleTiles {
+            let x0 = g.col(tile) * TileGeometry.tileDim
+            let y0 = g.row(tile) * TileGeometry.tileDim
+            var hidden = 0
+            for y in y0..<(y0 + g.rowHeight(g.row(tile))) {
+                for x in x0..<(x0 + g.colWidth(g.col(tile))) {
+                    if !pixelVisible(x, y) { hidden += 1 }
+                }
+            }
+            if hidden > 0 { boundary.append(tile) }
+        }
+        // The ring, and the invisible pixels still being paid for inside it.
+        XCTAssertEqual(boundary.count, 106)
+        var hiddenPixels = 0
+        for tile in boundary {
+            let x0 = g.col(tile) * TileGeometry.tileDim
+            let y0 = g.row(tile) * TileGeometry.tileDim
+            for y in y0..<(y0 + g.rowHeight(g.row(tile))) {
+                for x in x0..<(x0 + g.colWidth(g.col(tile))) {
+                    if !pixelVisible(x, y) { hiddenPixels += 1 }
+                }
+            }
+        }
+        XCTAssertEqual(hiddenPixels, 11_244)
+
+        // Now the gain, on the content class where RLE actually wins and so
+        // where flattening could matter: UI-like content, a few flat colours.
+        // Photo content sends BC1, which flattening must not touch.
+        func uiPixel(_ x: Int, _ y: Int) -> UInt16 {
+            // Broad flat bands, the shape of a window's chrome.
+            return y % 32 < 16 ? rgb(6, 12, 20) : rgb(28, 56, 28)
+        }
+        var asIs = 0
+        var flattened = 0
+        var seed: UInt32 = 99
+        for tile in boundary {
+            let x0 = g.col(tile) * TileGeometry.tileDim
+            let y0 = g.row(tile) * TileGeometry.tileDim
+            let w = g.colWidth(g.col(tile)), h = g.rowHeight(g.row(tile))
+            var plain = [UInt8](), flat = [UInt8]()
+            for y in y0..<(y0 + h) {
+                for x in x0..<(x0 + w) {
+                    let p = uiPixel(x, y)
+                    plain.append(UInt8(p >> 8)); plain.append(UInt8(p & 0xFF))
+                    // Outside the glass the sender may write anything. As-is
+                    // it carries whatever the capture happened to contain -
+                    // modelled as noise, because a desktop corner is not
+                    // usually the same colour as the window over it.
+                    if pixelVisible(x, y) {
+                        flat.append(UInt8(p >> 8)); flat.append(UInt8(p & 0xFF))
+                    } else {
+                        seed = seed &* 1_664_525 &+ 1_013_904_223
+                        let n = UInt16((seed >> 16) & 0xFFFF)
+                        plain[plain.count - 2] = UInt8(n >> 8)
+                        plain[plain.count - 1] = UInt8(n & 0xFF)
+                        // Flattened: repeat the previous pixel so the run
+                        // continues instead of breaking.
+                        flat.append(flat.count >= 2 ? flat[flat.count - 2] : 0)
+                        flat.append(flat.count >= 2 ? flat[flat.count - 1] : 0)
+                    }
+                }
+            }
+            asIs += RLE565.encode(plain[...])?.count ?? plain.count
+            flattened += RLE565.encode(flat[...])?.count ?? flat.count
+        }
+        // 5x on the ring, ~20 KB a keyframe. But this is the PESSIMISTIC
+        // bound: it models the hidden corner as per-pixel noise, and a real
+        // desktop corner is wallpaper or a window - different from the visible
+        // content, but not random.
+        XCTAssertEqual(asIs, 25_842)
+        XCTAssertEqual(flattened, 5_170)
+
+        // The realistic bound: the corner holds a flat colour of its own. RLE
+        // already collapses that to EXACTLY what flattening would achieve, so
+        // flattening's entire value is recovering the noisy-corner case.
+        var flatCornerAsIs = 0
+        for tile in boundary {
+            let x0 = g.col(tile) * TileGeometry.tileDim
+            let y0 = g.row(tile) * TileGeometry.tileDim
+            var raster = [UInt8]()
+            for y in y0..<(y0 + g.rowHeight(g.row(tile))) {
+                for x in x0..<(x0 + g.colWidth(g.col(tile))) {
+                    let p = pixelVisible(x, y) ? uiPixel(x, y) : rgb(2, 4, 6)
+                    raster.append(UInt8(p >> 8))
+                    raster.append(UInt8(p & 0xFF))
+                }
+            }
+            flatCornerAsIs += RLE565.encode(raster[...])?.count ?? raster.count
+        }
+        XCTAssertEqual(flatCornerAsIs, 5_170)
+        // Identical to the flattened figure, which settles it: flattening wins
+        // NOTHING when the corner is flat, and 5x when it is busy. The gain is
+        // entirely a property of content the sender cannot control, and it only
+        // ever helps the RLE candidate. Not built - see section 17.15 and the
+        // bezel-diff test below, which fixes the larger problem instead.
+        XCTAssertEqual(flatCornerAsIs, flattened)
+    }
+
+    func testDiffingIgnoresChangesBehindTheBezel() {
+        // The better idea the flattening measurement surfaced. A boundary tile
+        // is compared whole, so a change confined to its INVISIBLE pixels
+        // marks it dirty and ships a record whose visible content is
+        // identical. Flattening would only make that record smaller; not
+        // sending it is strictly better, costs nothing in quality, and is
+        // codec-independent - where flattening is unsound for BC1.
+        let g = g466
+        let mask = TileMask(geometry: g, round: true)
+        var frame = [UInt8](repeating: 0x11, count: g.frameBytes)
+        let previous = frame
+
+        // Pick a boundary tile and change ONLY pixels outside the circle.
+        var target = -1
+        for tile in mask.visibleTiles {
+            let x0 = g.col(tile) * TileGeometry.tileDim
+            let y0 = g.row(tile) * TileGeometry.tileDim
+            var hidden = [(Int, Int)]()
+            for y in y0..<(y0 + g.rowHeight(g.row(tile))) {
+                for x in x0..<(x0 + g.colWidth(g.col(tile))) {
+                    if !pixelVisible(x, y) { hidden.append((x, y)) }
+                }
+            }
+            if hidden.count >= 4 {
+                target = tile
+                for (x, y) in hidden {
+                    frame[(y * g.width + x) * 2] = 0xFF
+                    frame[(y * g.width + x) * 2 + 1] = 0xFF
+                }
+                break
+            }
+        }
+        XCTAssertGreaterThanOrEqual(target, 0)
+
+        let dirty = TileProtocol.dirtyTiles(
+            new: frame, previous: previous, geometry: g, mask: mask)
+        // Nothing visible changed, so nothing should be sent.
+        XCTAssertEqual(dirty, [], "a change behind the bezel was reported dirty")
+    }
+
     // MARK: - Half-resolution BC1 (codec 3)
 
     func testHalfDimRoundsUpSoDoublingAlwaysCoversTheRaster() {
