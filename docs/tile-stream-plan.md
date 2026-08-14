@@ -516,6 +516,12 @@ Deviations from the plan as written:
 
 ### 12.2 Measured results
 
+**Correction (see section 15.2): the datagram figures below measure packets
+the firmware REJECTS instantly, i.e. the receive path with no decode and no
+draw. Real tile datagrams carrying BC1 tiles top out at ~1,350-1,500/s. The
+phase-6 improvement is real; the absolute number does not describe
+end-to-end capacity.**
+
 Receive ceiling, paced floods at 1472 B, same session, RSSI -56 to -62:
 
 | Receive path   | Sustained accepted                    | Ingest    |
@@ -818,3 +824,113 @@ Untested: whether genuine 60 fps content (a 60 fps video) now delivers
 60 fps end to end. Everything measured says the pipeline has the
 headroom; nobody has watched it. That is the next measurement, and it
 needs 60 fps source material rather than a desk.
+
+## 15. Full-frame motion: what was actually wrong (phase 10, 2026-08-13)
+
+The user's report was that majority-of-screen motion "fully fails" while
+partial motion looks great. Section 13.5 planned to answer that with
+half-res mode. Measuring it first found two defects and one wrong number,
+and none of them needed a new codec.
+
+### 15.1 A benchmark that does not need the Mac's screen
+
+`espdisp.py tile-motion <ip> --target-fps N` streams synthetic full-frame
+BC1 updates — every one of the round mask's 719 visible tiles, valid BC1
+noise at the real 8 bytes per block, packed to the datagram budget: 66
+datagrams and 94 KB per frame. It reads the panel's own EHB1 heartbeats on
+its sending socket (the panel replies to whoever spoke last, and a flood
+wins that race, so a separate listener sees nothing) and reports offered
+and achieved rates together. No serial cable, which matters because this
+board's USB CDC drops out repeatedly, and no dependence on what happens
+to be on screen.
+
+This is the measurement section 10 asked for and never got.
+
+### 15.2 Wrong number: the ~2,850 datagrams/s ceiling
+
+Sections 12.2 and 14 cite ~2,850 datagrams/s. That figure came from
+`bench_flood.py`, whose packets set a reserved header bit so the firmware
+counts and DISCARDS them immediately. It measures the receive path with
+zero decode and zero draw.
+
+Real tile datagrams carry ~11 BC1 tiles each and must be decoded and
+copied. Measured with `tile-motion`, the panel accepts **~1,350-1,500
+datagrams/s** of real work — about half. The old figure was not wrong
+about what it measured; it was generalized past what it supported, and
+the phase-6 gain it reported (~40%) is real but applies to the
+receive-path cost, not to end-to-end capacity.
+
+### 15.3 Defect: frame completion is all-or-nothing over 66 datagrams
+
+A frame draws only once every tile it promised has arrived. Full-panel
+updates are 66 datagrams, so completion probability is `(1-p)^66`.
+
+Measured loss on this link is about **0.5% per datagram** — a good link.
+Over 66 datagrams that becomes a third of frames never completing, and it
+compounds as the rate climbs:
+
+| Offered | Accepted dgram/s | Shown fps | Frames never completed |
+| ------- | ---------------- | --------- | ---------------------- |
+| 10      | 579              | 6.8       | 31.5%                  |
+| 15      | 962              | 10.9      | 26.8%                  |
+| 20      | 1029             | 5.5       | 59.2%                  |
+| 45      | 1342             | **0.0**   | **100%**               |
+
+At 45 fps offered the panel accepted 1,342 datagrams/s and displayed
+NOTHING. That is the reported failure, and the pixels were never missing:
+`applyTileRecord` writes each tile into bufA as it arrives, so the panel
+held nearly a complete frame and the reassembler was the only thing
+withholding it.
+
+Fix: if tiles are pending and no frame has completed for
+`TILE_PARTIAL_DRAW_MS` (40 ms), draw what arrived. A partially updated
+frame during motion is imperceptible next to a frozen panel, and any
+missing tile is corrected by the next frame covering it, or by the
+2-second keyframe at worst. Tile path only — a band frame is few enough
+datagrams that completion is not its binding constraint.
+
+### 15.4 Defect: the phase-6 drain loop starved the draw task
+
+Phase 6's `MSG_DONTWAIT` drain loop keeps pulling while datagrams keep
+arriving, and `udpReceiveTask` runs at priority 9 against loop()'s 1.
+Under sustained load the socket never empties, so the draw never happens:
+at 30 full frames/s the panel accepted 1,519 datagrams/s and drew 5.4
+times a second. Neither the blocking `recvfrom` nor `MSG_DONTWAIT` yields
+while data is queued, so the yield has to be explicit — 24 datagrams
+between `vTaskDelay(1)` calls, a ceiling far above the radio's while
+bounding how long drawing waits.
+
+### 15.5 Result
+
+| Offered | Before            | + partial draw | + yield          |
+| ------- | ----------------- | -------------- | ---------------- |
+| 15      | 10.9 (26.8% lost) | 23.2 (36.4%)   | **13.5 (18.2%)** |
+| 20      | 5.5 (59.2%)       | 18.9 (49.0%)   | **13.8 (46.6%)** |
+| 30      | —                 | 5.4 (84.7%)    | 6.2 (83.0%)      |
+| 45      | **0.0** (100%)    | 3.7 (92.4%)    | **6.8 (86.7%)**  |
+
+Full-frame motion goes from collapsing to zero to sustaining ~14 fps,
+and frame loss at 15 fps halves. Note the metric: `statFramesShown` now
+counts DRAW PASSES on the tile path, so a partial draw inflates it — that
+is why the middle column reads 23.2 for 15 offered. The yield's apparent
+regression there is the opposite: fewer partial draws were needed because
+more frames completed whole.
+
+### 15.6 Why half-res mode is now justified
+
+The ceiling is arithmetic: ~1,500 accepted datagrams/s over 66 datagrams
+per frame is 22.7 fps at zero loss, and loss holds it near 14. Both terms
+are the frame's SIZE, and both improve together if the frame gets smaller.
+
+Half-res (codec 3, section 6.8) sends 719 tiles at quarter resolution:
+~32 bytes per tile, ~23 KB, **17 datagrams per frame**. That is
+~88 fps of datagram headroom, and completion probability at 0.5% loss
+rises from `(0.995)^66` = 72% to `(0.995)^17` = 92%. It also quarters the
+decode work and the paint time. This is the one remaining change that
+attacks every term at once, and unlike before, there is now a measurement
+saying so rather than an estimate.
+
+Still open, unchanged: vertical run merging, boundary-tile RLE flattening
+(RLE candidate only — it would degrade BC1's visible pixels), the untuned
+`autoVarianceThreshold`, and whether genuine 60 fps source material
+delivers 60 fps end to end.
