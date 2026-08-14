@@ -61,9 +61,9 @@ struct PanelSnapshot: Identifiable, Equatable {
     var controlProtocolVersion: Int?
     var capabilitiesRaw: UInt32 = 0
     var uptimeSeconds: UInt32 = 0
-    /// Last battery report, on a panel that sends them. Only the 1.75C has a
-    /// PMU, so this stays nil forever on the C6 boards - which is why the UI
-    /// gates the row on the advertised capability rather than on this being nil.
+    /// Last battery report, on a panel that sends them. Both touch boards can
+    /// report a level: S3 uses its AXP2101 gauge, while C6 estimates from its
+    /// GPIO0 divider and necessarily reports an unknown charge state.
     var battery: DeviceProtocol.BatteryStatus?
     /// When that report arrived, so it can be aged out. A panel whose PMU dies
     /// keeps heartbeating and simply stops sending EBAT, so without this the last
@@ -1214,20 +1214,18 @@ final class PanelManager: ObservableObject {
     /// Which saved network the "Saved WiFi" picker should default to.
     ///
     /// `reportedSSID` is what the device actually said over CFGSHOW
-    /// (`PanelSnapshot.currentSSID`), which wins whenever it names something
-    /// this Mac holds a credential for - a device joined to a network we
-    /// have no credential for has nothing in `savedNames` worth
-    /// preselecting, so that case falls through to the old default. `current`
-    /// is the picker's own existing selection, kept as long as it is still a
-    /// valid choice, so an in-progress pick is never clobbered by a device
-    /// reply that lands moments later.
+    /// (`PanelSnapshot.currentSSID`). `explicitSelection` is only a value the
+    /// user picked; an automatically displayed fallback must remain nil so a
+    /// delayed device reply can replace it. An explicit choice wins while it
+    /// remains saved, then the device report, then the first saved credential.
     ///
-    /// `nonisolated` because it is pure arithmetic over its arguments -
-    /// nothing here touches the actor.
+    /// `nonisolated` because it only examines its arguments.
     nonisolated static func preferredSSID(
-        current: String, reportedSSID: String?, savedNames: [String]
+        explicitSelection: String?, reportedSSID: String?, savedNames: [String]
     ) -> String {
-        if !current.isEmpty, savedNames.contains(current) { return current }
+        if let explicitSelection, savedNames.contains(explicitSelection) {
+            return explicitSelection
+        }
         if let reportedSSID, savedNames.contains(reportedSSID) { return reportedSSID }
         return savedNames.first ?? ""
     }
@@ -1331,6 +1329,22 @@ final class PanelManager: ObservableObject {
             return "This display does not report support for "
                 + "\(Self.describe(capability))."
         }
+        return nil
+    }
+
+    /// Why a local streaming action such as pause/resume cannot run.
+    /// Unlike device controls, these actions do not have a capability bit or a
+    /// control-protocol version, but they still require a live session and a
+    /// recent heartbeat. Cocoa Scripting uses this instead of mutating an
+    /// offline snapshot and reporting success for a command sent nowhere.
+    func streamingUnavailableReason(_ serviceName: String) -> String? {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
+            return "This display is not known yet."
+        }
+        guard sessions[serviceName] != nil else {
+            return "No streaming session is connected to this display."
+        }
+        guard panel.isOnline else { return "This display is offline." }
         return nil
     }
 

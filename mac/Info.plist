@@ -18,6 +18,10 @@
 	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<key>NSAppleScriptEnabled</key>
+	<true/>
+	<key>OSAScriptingDefinition</key>
+	<string>ESPDisplaySender.sdef</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_espdisp._udp</string>

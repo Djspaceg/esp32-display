@@ -33,6 +33,7 @@ final class PanelPersistenceTests: XCTestCase {
             freeHeap: 186_624,
             spacingMicros: 200,
             firmwareVersion: "1.1.0",
+            currentSSID: "Studio WiFi",
             frameProtocolVersion: 2,
             controlProtocolVersion: 3,
             capabilitiesRaw: 0x6F,
@@ -63,6 +64,7 @@ final class PanelPersistenceTests: XCTestCase {
         XCTAssertEqual(panel.freeHeap, 0, "freeHeap", file: file, line: line)
         XCTAssertEqual(panel.spacingMicros, 0, "spacingMicros", file: file, line: line)
         XCTAssertNil(panel.firmwareVersion, "firmwareVersion", file: file, line: line)
+        XCTAssertNil(panel.currentSSID, "currentSSID", file: file, line: line)
         XCTAssertNil(panel.frameProtocolVersion, "frameProtocolVersion", file: file, line: line)
         XCTAssertNil(panel.controlProtocolVersion, "controlProtocolVersion", file: file, line: line)
         XCTAssertEqual(panel.capabilitiesRaw, 0, "capabilitiesRaw", file: file, line: line)
@@ -134,8 +136,8 @@ final class PanelPersistenceTests: XCTestCase {
                     "framesSent", "framesShown", "framesDropped", "sendErrors",
                     "diffPercent", "brightness", "brightnessHigh", "flipped", "sleeping",
                     "idle", "paused", "discovered", "lastHeartbeatAt", "firmwareVersion",
-                    "capabilitiesRaw", "frameProtocolVersion", "controlProtocolVersion",
-                    "sourceDescription", "lastError"] {
+                    "currentSSID", "capabilitiesRaw", "frameProtocolVersion",
+                    "controlProtocolVersion", "sourceDescription", "lastError"] {
             XCTAssertFalse(json.contains("\"\(key)\""), "\(key) reached disk")
         }
         for key in ["serviceName", "displayName", "hardwareID", "usbPort", "address",

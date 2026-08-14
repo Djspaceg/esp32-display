@@ -8,14 +8,14 @@ import XCTest
 /// sorted first, with no notion of what the device was actually joined to -
 /// CFGSHOW reports that over USB, but nothing read it. `preferredSSID` is the
 /// pure decision behind fixing that: pulled out of the SwiftUI view so the
-/// three-way tie-break (existing selection, device-reported network, saved
-/// list) can be checked without a live picker or a board.
+/// tie-break between explicit user intent, device report, and saved fallback
+/// can be checked without a live picker or a board.
 final class PreferredSSIDTests: XCTestCase {
 
     func testReportedNetworkWinsWhenItIsSaved() {
         XCTAssertEqual(
             PanelManager.preferredSSID(
-                current: "", reportedSSID: "Studio WiFi",
+                explicitSelection: nil, reportedSSID: "Studio WiFi",
                 savedNames: ["Guest", "Studio WiFi"]),
             "Studio WiFi")
     }
@@ -26,7 +26,7 @@ final class PreferredSSIDTests: XCTestCase {
     func testReportedNetworkNotSavedFallsBackToFirst() {
         XCTAssertEqual(
             PanelManager.preferredSSID(
-                current: "", reportedSSID: "Neighbours WiFi",
+                explicitSelection: nil, reportedSSID: "Neighbours WiFi",
                 savedNames: ["Guest", "Studio WiFi"]),
             "Guest")
     }
@@ -34,13 +34,15 @@ final class PreferredSSIDTests: XCTestCase {
     func testNoReportedNetworkFallsBackToFirst() {
         XCTAssertEqual(
             PanelManager.preferredSSID(
-                current: "", reportedSSID: nil, savedNames: ["Guest", "Studio WiFi"]),
+                explicitSelection: nil, reportedSSID: nil,
+                savedNames: ["Guest", "Studio WiFi"]),
             "Guest")
     }
 
     func testEmptySavedListWithNoReportProducesEmptySelection() {
         XCTAssertEqual(
-            PanelManager.preferredSSID(current: "", reportedSSID: nil, savedNames: []), "")
+            PanelManager.preferredSSID(
+                explicitSelection: nil, reportedSSID: nil, savedNames: []), "")
     }
 
     /// An in-progress pick must survive a device reply landing moments later -
@@ -49,7 +51,7 @@ final class PreferredSSIDTests: XCTestCase {
     func testAnExistingValidSelectionIsKeptOverTheReportedNetwork() {
         XCTAssertEqual(
             PanelManager.preferredSSID(
-                current: "Guest", reportedSSID: "Studio WiFi",
+                explicitSelection: "Guest", reportedSSID: "Studio WiFi",
                 savedNames: ["Guest", "Studio WiFi"]),
             "Guest")
     }
@@ -59,8 +61,23 @@ final class PreferredSSIDTests: XCTestCase {
     func testASelectionNoLongerInTheSavedListIsReplaced() {
         XCTAssertEqual(
             PanelManager.preferredSSID(
-                current: "Deleted Network", reportedSSID: "Studio WiFi",
+                explicitSelection: "Deleted Network", reportedSSID: "Studio WiFi",
                 savedNames: ["Guest", "Studio WiFi"]),
+            "Studio WiFi")
+    }
+
+    /// The displayed fallback is not user intent. Recomputing after CFGSHOW
+    /// with the same nil explicit selection must therefore restore the network
+    /// the device actually reports instead of preserving the fallback.
+    func testDelayedDeviceReportReplacesAutomaticFallback() {
+        let saved = ["Guest", "Studio WiFi"]
+        XCTAssertEqual(
+            PanelManager.preferredSSID(
+                explicitSelection: nil, reportedSSID: nil, savedNames: saved),
+            "Guest")
+        XCTAssertEqual(
+            PanelManager.preferredSSID(
+                explicitSelection: nil, reportedSSID: "Studio WiFi", savedNames: saved),
             "Studio WiFi")
     }
 
@@ -70,7 +87,7 @@ final class PreferredSSIDTests: XCTestCase {
         // empty report cannot silently match one.
         XCTAssertEqual(
             PanelManager.preferredSSID(
-                current: "", reportedSSID: "", savedNames: ["Guest"]),
+                explicitSelection: nil, reportedSSID: "", savedNames: ["Guest"]),
             "Guest")
     }
 }

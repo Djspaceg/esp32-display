@@ -17,7 +17,9 @@
 #include "../display_stream/ota_policy.h"
 #include "../display_stream/panel_state.h"
 #include "../display_stream/tile_protocol.h"
+#include "../libraries/espdisp_board/src/battery_estimate.h"
 #include "../libraries/espdisp_board/src/board_config.h"
+#include "../libraries/espdisp_board/src/motion_orientation.h"
 #include "../libraries/espdisp_board/src/panel_orientation.h"
 #include "../libraries/espdisp_board/src/touch_gesture.h"
 #include "../libraries/espdisp_board/src/touch_map.h"
@@ -1262,12 +1264,63 @@ int main() {
     CHECK(st.touch == board::TouchController::None);
     CHECK(st.pinTouchSda == board::NO_PIN && st.pinTouchScl == board::NO_PIN);
     CHECK(jd.touch == board::TouchController::Axs5106l);
-    // Neither C6 board has a PMU: they run off USB with no cell and no gauge,
-    // so neither may advertise a battery.
-    for (const board::Config *c : {&st, &jd}) {
-      CHECK(c->power == board::PowerController::None);
-      CHECK(!c->hasBattery());
-    }
+    // The plain C6 has no battery or motion source. The touch C6 exposes its
+    // cell through a 3:1 divider on GPIO0 and carries a QMI8658 on the shared
+    // I2C bus.
+    CHECK(st.power == board::PowerController::None);
+    CHECK(st.pinBatteryAdc == board::NO_PIN);
+    CHECK(st.batteryAdcScale == 0);
+    CHECK(!st.hasBattery());
+    CHECK(st.motion == board::MotionController::None);
+    CHECK(!st.hasMotion());
+
+    CHECK(jd.power == board::PowerController::BatteryAdc);
+    CHECK(jd.pinBatteryAdc == 0);
+    CHECK(jd.batteryAdcScale == 3);
+    CHECK(jd.hasBattery());
+    CHECK(jd.motion == board::MotionController::Qmi8658);
+    CHECK(jd.motionXAxis == 0 && jd.motionXSign == 1);
+    CHECK(jd.motionYAxis == 1 && jd.motionYSign == 1);
+    CHECK(jd.hasMotion());
+
+    // Capability predicates must reject incomplete table rows rather than
+    // advertise hardware whose pins or calibration cannot be used.
+    board::Config invalid = jd;
+    invalid.pinBatteryAdc = board::NO_PIN;
+    CHECK(!invalid.hasBattery());
+    invalid = jd;
+    invalid.batteryAdcScale = 0;
+    CHECK(!invalid.hasBattery());
+    invalid = jd;
+    invalid.motion = board::MotionController::None;
+    CHECK(!invalid.hasMotion());
+    invalid = jd;
+    invalid.pinTouchSda = board::NO_PIN;
+    CHECK(!invalid.hasMotion());
+    invalid = jd;
+    invalid.pinTouchScl = board::NO_PIN;
+    CHECK(!invalid.hasMotion());
+    invalid = jd;
+    invalid.motionXAxis = 3;
+    CHECK(!invalid.hasMotion());
+    invalid = jd;
+    invalid.motionYAxis = 3;
+    CHECK(!invalid.hasMotion());
+    invalid = jd;
+    invalid.motionYAxis = invalid.motionXAxis;
+    CHECK(!invalid.hasMotion());
+    invalid = jd;
+    invalid.motionXSign = 0;
+    CHECK(!invalid.hasMotion());
+    invalid = jd;
+    invalid.motionXSign = 2;
+    CHECK(!invalid.hasMotion());
+    invalid = jd;
+    invalid.motionYSign = 0;
+    CHECK(!invalid.hasMotion());
+    invalid = jd;
+    invalid.motionYSign = -2;
+    CHECK(!invalid.hasMotion());
     // Touch rides the shared detection bus on the C6 Touch board.
     CHECK(jd.pinTouchSda == board::PIN_PROBE_SDA);
     CHECK(jd.pinTouchScl == board::PIN_PROBE_SCL);
@@ -1316,14 +1369,26 @@ int main() {
     CHECK(am.pinTouchInt == 11);
     CHECK(am.pinTouchRst == am.pinRst);
 
-    // AXP2101 PMU: the only board here with a battery. It has no pins of its
-    // own - it shares the touch I2C bus, which is why hasBattery() tests those
-    // pins too, and why the reader must not go looking for a PMU reset line.
+    // AXP2101 PMU: shares the touch I2C bus. The touch C6 also has battery
+    // telemetry, but through its GPIO0 divider rather than this PMU path.
     CHECK(am.power == board::PowerController::Axp2101);
+    CHECK(am.pinBatteryAdc == board::NO_PIN);
+    CHECK(am.batteryAdcScale == 0);
     CHECK(am.hasBattery());
     CHECK(am.pinTouchSda != board::NO_PIN && am.pinTouchScl != board::NO_PIN);
+    CHECK(am.motion == board::MotionController::Qmi8658);
+    CHECK(am.motionXAxis == 0 && am.motionXSign == 1);
+    CHECK(am.motionYAxis == 1 && am.motionYSign == 1);
+    CHECK(am.hasMotion());
     CHECK(!board::configFor(Variant::LcdSt7789).hasBattery());
-    CHECK(!board::configFor(Variant::TouchJd9853).hasBattery());
+    CHECK(board::configFor(Variant::TouchJd9853).hasBattery());
+
+    board::Config invalid = am;
+    invalid.pinTouchSda = board::NO_PIN;
+    CHECK(!invalid.hasBattery());
+    invalid = am;
+    invalid.pinTouchScl = board::NO_PIN;
+    CHECK(!invalid.hasBattery());
 
     // The panel dimensions in the table produce a carryable band geometry -
     // the link between the board table and the wire format.
@@ -1342,6 +1407,166 @@ int main() {
     // probe must fall back to a C6 board, and the S3 build never probes.
     CHECK(board::resolve(Variant::Unknown) != Variant::AmoledCo5300);
     CHECK(board::resolve(Variant::AmoledCo5300) == Variant::AmoledCo5300);
+  }
+
+  // --- C6 voltage-derived battery estimate -------------------------------
+  {
+    using batteryestimate::CurvePoint;
+    CHECK(batteryestimate::PRESENT_MILLIVOLTS == 2500);
+    CHECK(!batteryestimate::cellPresent(2499));
+    CHECK(batteryestimate::cellPresent(2500));
+    CHECK(batteryestimate::cellPresent(2501));
+
+    static const CurvePoint expected[] = {
+        {3300, 0}, {3500, 5}, {3600, 10}, {3700, 20}, {3750, 35},
+        {3800, 50}, {3850, 65}, {3900, 75}, {4000, 85}, {4100, 95},
+        {4200, 100},
+    };
+    const size_t count = sizeof(expected) / sizeof(expected[0]);
+    CHECK(count == sizeof(batteryestimate::CURVE) /
+                       sizeof(batteryestimate::CURVE[0]));
+    for (size_t i = 0; i < count; i++) {
+      CHECK(batteryestimate::CURVE[i].millivolts == expected[i].millivolts);
+      CHECK(batteryestimate::CURVE[i].percent == expected[i].percent);
+      CHECK(batteryestimate::percentFromMillivolts(expected[i].millivolts) ==
+            expected[i].percent);
+      if (i > 0) {
+        CHECK(expected[i].millivolts > expected[i - 1].millivolts);
+        CHECK(expected[i].percent >= expected[i - 1].percent);
+      }
+    }
+
+    for (uint16_t mv : {0, 2499, 2500, 3299, 3300}) {
+      CHECK(batteryestimate::percentFromMillivolts(mv) == 0);
+    }
+    CHECK(batteryestimate::percentFromMillivolts(4200) == 100);
+    CHECK(batteryestimate::percentFromMillivolts(4201) == 100);
+    CHECK(batteryestimate::percentFromMillivolts(UINT16_MAX) == 100);
+
+    static const uint16_t midpointMv[] = {
+        3400, 3550, 3650, 3725, 3775, 3825, 3875, 3950, 4050, 4150};
+    static const uint8_t midpointPercent[] = {
+        2, 7, 15, 27, 42, 57, 70, 80, 90, 97};
+    for (size_t i = 0; i < sizeof(midpointMv) / sizeof(midpointMv[0]); i++) {
+      CHECK(batteryestimate::percentFromMillivolts(midpointMv[i]) ==
+            midpointPercent[i]);
+    }
+    CHECK(batteryestimate::percentFromMillivolts(3499) == 4);
+    CHECK(batteryestimate::percentFromMillivolts(3501) == 5);
+  }
+
+  // --- automatic cardinal orientation ------------------------------------
+  {
+    using motionorient::Calibration;
+    const Calibration identity = {0, 1, 1, 1};
+    CHECK(motionorient::INVALID_ROTATION == 0xFF);
+    CHECK(motionorient::ENTER_MIN == 5325);
+    CHECK(motionorient::HOLD_MIN == 4505);
+    CHECK(motionorient::ENTER_DOMINANCE == 1229);
+    CHECK(motionorient::HOLD_DOMINANCE == 819);
+    CHECK(motionorient::DWELL_MS == 500);
+
+    static const uint8_t composition[4][4] = {
+        {0, 1, 2, 3}, {1, 2, 3, 0}, {2, 3, 0, 1}, {3, 0, 1, 2}};
+    for (uint8_t manual = 0; manual < 4; manual++) {
+      for (uint8_t automatic = 0; automatic < 4; automatic++) {
+        CHECK(motionorient::compose(manual, automatic) ==
+              composition[manual][automatic]);
+      }
+    }
+    CHECK(motionorient::compose(6, 7) == 1);
+
+    const int16_t upright[3] = {0, 8192, 0};
+    const int16_t left[3] = {-8192, 0, 0};
+    const int16_t upsideDown[3] = {0, -8192, 0};
+    const int16_t right[3] = {8192, 0, 0};
+    CHECK(motionorient::cardinalFor(0, 8192) == 0);
+    CHECK(motionorient::cardinalFor(-8192, 0) == 1);
+    CHECK(motionorient::cardinalFor(0, -8192) == 2);
+    CHECK(motionorient::cardinalFor(8192, 0) == 3);
+    CHECK(motionorient::classify(upright, identity, 2) == 0);
+    CHECK(motionorient::classify(left, identity, 0) == 1);
+    CHECK(motionorient::classify(upsideDown, identity, 0) == 2);
+    CHECK(motionorient::classify(right, identity, 0) == 3);
+
+    const Calibration swapped = {1, -1, 0, 1};
+    CHECK(motionorient::classify(right, swapped, 2) == 0);
+
+    const int16_t faceUp[3] = {0, 0, 8192};
+    const int16_t belowEntry[3] = {5324, 0, 0};
+    const int16_t atEntry[3] = {5325, 0, 0};
+    const int16_t diagonal[3] = {5325, 5325, 0};
+    const int16_t belowEntryDominance[3] = {5325, 4097, 0};
+    const int16_t atEntryDominance[3] = {5325, 4096, 0};
+    CHECK(motionorient::classify(faceUp, identity, 0) ==
+          motionorient::INVALID_ROTATION);
+    CHECK(motionorient::classify(belowEntry, identity, 0) ==
+          motionorient::INVALID_ROTATION);
+    CHECK(motionorient::classify(atEntry, identity, 0) == 3);
+    CHECK(motionorient::classify(diagonal, identity, 0) ==
+          motionorient::INVALID_ROTATION);
+    CHECK(motionorient::classify(belowEntryDominance, identity, 2) ==
+          motionorient::INVALID_ROTATION);
+    CHECK(motionorient::classify(atEntryDominance, identity, 2) == 3);
+
+    const int16_t hold0[3] = {0, 4505, 0};
+    const int16_t hold1[3] = {-4505, 0, 0};
+    const int16_t hold2[3] = {0, -4505, 0};
+    const int16_t hold3[3] = {4505, 0, 0};
+    CHECK(motionorient::classify(hold0, identity, 0) == 0);
+    CHECK(motionorient::classify(hold1, identity, 1) == 1);
+    CHECK(motionorient::classify(hold2, identity, 2) == 2);
+    CHECK(motionorient::classify(hold3, identity, 3) == 3);
+    const int16_t belowHold[3] = {0, 4504, 0};
+    const int16_t atHoldDominance[3] = {5324, 4505, 0};
+    const int16_t belowHoldDominance[3] = {5323, 4505, 0};
+    CHECK(motionorient::classify(belowHold, identity, 0) ==
+          motionorient::INVALID_ROTATION);
+    CHECK(motionorient::classify(atHoldDominance, identity, 0) == 0);
+    CHECK(motionorient::classify(belowHoldDominance, identity, 0) ==
+          motionorient::INVALID_ROTATION);
+    CHECK(motionorient::classify(upsideDown, identity, 0) == 2);
+
+    motionorient::Tracker dwell;
+    CHECK(!dwell.update(left, identity, 1000));
+    CHECK(dwell.candidate() == 1 && dwell.rotation() == 0);
+    CHECK(!dwell.update(left, identity, 1499));
+    CHECK(dwell.update(left, identity, 1500));
+    CHECK(dwell.rotation() == 1);
+    CHECK(dwell.candidate() == motionorient::INVALID_ROTATION);
+    CHECK(!dwell.update(left, identity, 1501));
+    CHECK(dwell.candidate() == motionorient::INVALID_ROTATION);
+
+    motionorient::Tracker rejected;
+    CHECK(!rejected.update(left, identity, 0));
+    CHECK(!rejected.update(faceUp, identity, 499));
+    CHECK(rejected.candidate() == motionorient::INVALID_ROTATION);
+    CHECK(!rejected.update(left, identity, 500));
+    CHECK(!rejected.update(left, identity, 999));
+    CHECK(rejected.update(left, identity, 1000));
+
+    motionorient::Tracker changed;
+    CHECK(!changed.update(left, identity, 0));
+    CHECK(changed.update(left, identity, 500));
+    CHECK(!changed.update(upsideDown, identity, 501));
+    CHECK(!changed.update(upsideDown, identity, 1000));
+    CHECK(changed.update(upsideDown, identity, 1001));
+    CHECK(changed.rotation() == 2);
+
+    motionorient::Tracker touchBlocked;
+    CHECK(!touchBlocked.update(left, identity, 1000));
+    CHECK(!touchBlocked.update(left, identity, 1500, false));
+    CHECK(touchBlocked.rotation() == 0);
+    CHECK(touchBlocked.candidate() == motionorient::INVALID_ROTATION);
+    CHECK(!touchBlocked.update(left, identity, 1501));
+    CHECK(!touchBlocked.update(left, identity, 2000));
+    CHECK(touchBlocked.update(left, identity, 2001));
+
+    motionorient::Tracker rollover;
+    CHECK(!rollover.update(left, identity, 0xFFFFFF00u));
+    CHECK(!rollover.update(left, identity, 0x000000F3u));
+    CHECK(rollover.update(left, identity, 0x000000F4u));
+    CHECK(rollover.rotation() == 1);
   }
 
   // --- touch coordinate mapping --------------------------------------------

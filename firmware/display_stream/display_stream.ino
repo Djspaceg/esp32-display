@@ -43,8 +43,10 @@
 // way this firmware does. panel_init.h pulls in the esp_lcd and SPI headers.
 #include <board_config.h>
 #include <board_detect.h>
+#include <board_motion.h>
 #include <board_power.h>
 #include <board_touch.h>
+#include <motion_orientation.h>
 #include <panel_init.h>
 #include <touch_gesture.h>
 #include <touch_map.h>
@@ -233,10 +235,19 @@ static bool touchAvailable = false;
 // that was never measured on its hardware.
 static touchmap::Calibration touchCalibration = touchmap::AXS5106L_ON_C6;
 
-// Whether the power-management IC came up, on the same "the chip has to answer"
-// rule as touchAvailable: only the 1.75C has a PMU, and a 1.75C whose PMU is
-// silent must advertise no battery rather than promise readings that never come.
+// Whether a battery telemetry source came up. On S3 this is the AXP2101 PMU;
+// on C6 touch it is the GPIO0 voltage divider, whose charge state is unavailable.
 static bool batteryAvailable = false;
+
+// QMI8658 state. Automatic correction is intentionally transient: the user's
+// mounting rotation remains the only value persisted or reported to the Mac.
+// Only square panels apply it; the rectangular C6 is sampled for diagnostics
+// but stays on its sender-defined geometry until that protocol is redesigned.
+static bool motionAvailable = false;
+static motionorient::Tracker motionTracker;
+static boardmotion::Sample lastMotionSample = {0, 0, 0};
+static bool motionSampleValid = false;
+static uint32_t lastMotionPollAt = 0;
 
 // ---- OTA (ArduinoOTA over WiFi, LAN only) -------------------------------
 // Fails closed, deliberately: an unpassworded ArduinoOTA is an unauthenticated
@@ -272,15 +283,15 @@ static uint8_t otaShownPercent = 0;
 // sleeping panel for anything on the LAN that got the password wrong.
 static otapolicy::SavedPanelState otaSavedPanel;
 
-// Last successful PMU reading, so the 5s status line and CFGSHOW can report a
-// battery without doing I2C traffic of their own. Only meaningful once
-// batteryReadingValid is set; a failed sample leaves the previous one standing
-// rather than reporting a zeroed battery as fact.
+// Last successful battery reading, so the 5s status line and CFGSHOW can report
+// it without resampling the PMU or ADC. Only meaningful once batteryReadingValid
+// is set; a failed sample leaves the previous one standing rather than reporting
+// a zeroed battery as fact.
 //
 // It does not stand forever, though. lastBatteryAt ages it out after
-// deviceproto::BATTERY_MAX_AGE_MS, so a PMU that answers at boot and then goes
-// silent stops being quoted as if it were still talking. batteryReadingCurrent()
-// is the one test both the serial line and CFGSHOW go through.
+// deviceproto::BATTERY_MAX_AGE_MS, so a telemetry source that answers at boot and
+// then goes silent stops being quoted as if it were still talking.
+// batteryReadingCurrent() is the one test both serial and CFGSHOW go through.
 static boardpower::Reading lastBattery = {};
 static bool batteryReadingValid = false;
 static uint32_t lastBatteryAt = 0;
@@ -478,6 +489,15 @@ static bool panelLandscape = false;              // current panel MADCTL state
 // Rotate case in applyPendingControl and CFGROT); rectangular panels express
 // a physical quarter turn through the sender's landscape mechanism instead.
 static uint8_t panelRotation = 0;
+// Gravity-derived correction, RAM-only. `appliedPanelRotation` records the
+// effective value actually in MADCTL, so touch never gets ahead of a pending
+// DMA-gated orientation change.
+static uint8_t automaticRotation = 0;
+static uint8_t appliedPanelRotation = 0;
+
+static uint8_t effectivePanelRotation() {
+  return motionorient::compose(panelRotation, automaticRotation);
+}
 
 // User-requested "display off", independent of the Mac's own ESLP/EWAK sleep
 // sync and the idle timer. Both of those are transient states this firmware
@@ -1113,7 +1133,8 @@ static void saveIdleTextPrefsIfChanged() {
 // both boards (verified against Waveshare's own example for the JD9853, not
 // assumed from the ST7789).
 static void applyPanelConfig(bool landscape) {
-  boardpanel::applyOrientation(panel, *bcfg, landscape, panelRotation);
+  appliedPanelRotation = effectivePanelRotation();
+  boardpanel::applyOrientation(panel, *bcfg, landscape, appliedPanelRotation);
   panelLandscape = landscape;
   madctlDirty = false;
 }
@@ -1254,7 +1275,8 @@ static void sendDeviceInfo() {
   }
 }
 
-// Sample the PMU and report it. Its own packet rather than fields on EINF: an
+// Sample the active battery telemetry source and report it. Its own packet
+// rather than fields on EINF: an
 // already-shipped sender length-checks EINF exactly and would reject every one
 // of them, whereas an unknown packet type is simply dropped (see the EBAT
 // comment in device_protocol.h).
@@ -1320,16 +1342,16 @@ static const char *batteryChargeWord(boardpower::Charge charge) {
 }
 
 // Whether the cached reading is recent enough to quote. False before the first
-// sample and again once one stops arriving - a PMU that answered at boot and then
-// died must not keep its percentage on the serial line and in CFGSHOW, which are
+// sample and again once one stops arriving - a source that answered at boot and
+// then died must not keep its percentage on the serial line and in CFGSHOW, which are
 // the only ways to read a battery on a panel no sender has found.
 static bool batteryReadingCurrent() {
   return batteryAvailable && batteryReadingValid &&
          deviceproto::batteryReadingCurrent(millis(), lastBatteryAt);
 }
 
-// Battery percentage for CFGSHOW, or -1 when there is no PMU, no cell, no
-// settled gauge reading, or nothing recent enough to report. Negative rather
+// Battery percentage for CFGSHOW, or -1 when there is no telemetry source, no
+// cell, no settled estimate/gauge reading, or nothing recent enough to report. Negative rather
 // than 0 so "we do not know" can never be read as "empty".
 static int batteryPercentOrUnknown() {
   if (!batteryReadingCurrent()) return -1;
@@ -2000,10 +2022,12 @@ static void processConfigLine(char *line) {
     // keeps reading the truth; rot= carries the full quarter-turn value.
     Serial.printf(
         "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d "
-        "rot=%u bl=%s pwr=%s board=%s bat=%d ota=%s ssid=%s\n",
+        "rot=%u auto=%u effective=%u motion=%d bl=%s pwr=%s board=%s "
+        "bat=%d ota=%s ssid=%s\n",
         (const char *)b64, (const char *)name64, WiFi.status() == WL_CONNECTED,
         WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(),
         panelRotation == 2, panelRotation,
+        automaticRotation, effectivePanelRotation(), motionAvailable,
         blIsHigh() ? "high" : "low", panelManuallyOff ? "off" : "on",
         board::variantToken(boardVariant),
         batteryPercentOrUnknown(),
@@ -2093,8 +2117,8 @@ static void drawIdleScreen() {
   snprintf(lineIp, sizeof(lineIp), "%s", WiFi.localIP().toString().c_str());
   panelstate::formatWifiLine(lineWifi, sizeof(lineWifi),
                              WiFi.status() == WL_CONNECTED, (int)WiFi.RSSI());
-  // Only for a board with a PMU and a reading that has not aged out - a C6
-  // never has one, and a stale reading is worse than none (see
+  // Only for a board with a battery telemetry source and a reading that has
+  // not aged out. A stale reading is worse than none (see
   // panelstate::shouldShowBatteryLine).
   const bool showBattery =
       panelstate::shouldShowBatteryLine(bcfg->hasBattery(), batteryReadingCurrent());
@@ -2137,7 +2161,7 @@ static void drawIdleScreen() {
     // adding to them - appending them unconditionally used to print the name,
     // address, and signal twice for anyone whose template already had them.
     // Battery is appended rather than folded into the template, because only
-    // one board in the fleet has one to report.
+    // boards with working telemetry sources have one to report.
     lines[lineCount++] = lineName;
     lines[lineCount++] = lineIp;
     lines[lineCount++] = lineWifi;
@@ -2194,8 +2218,7 @@ static void drawIdleScreen() {
 // What the quick info bar says by default: battery on a board that has one
 // and a current reading, "usb power" is folded into that by
 // formatBatteryLine already, and the WiFi line on a board with no battery to
-// report (both C6 boards - see board_config.h's PowerController comment) so
-// a tap there still shows something rather than an empty bar.
+// report, so a tap there still shows something rather than an empty bar.
 //
 // A single word ("default") rather than the whole line, because this is the
 // one point meant to grow into a user-customisable choice later - the To-do
@@ -2622,9 +2645,9 @@ static void serviceTouch() {
   // axis is mirrored (see touch_map.h), so touchCalibration is picked once at
   // boot from bcfg->touch rather than the AXS5106L default every call site
   // used to take implicitly.
-  touchmap::Point p = touchmap::map((int16_t)sample.rawX, (int16_t)sample.rawY,
-                                    panelLandscape, panelRotation,
-                                    touchCalibration);
+  touchmap::Point p = touchmap::map(
+      (int16_t)sample.rawX, (int16_t)sample.rawY, panelLandscape,
+      appliedPanelRotation, touchCalibration);
   touchgesture::Event event =
       touchTracker.onReport(sample.pressed, p.x, p.y, millis());
 
@@ -2661,6 +2684,36 @@ static void serviceTouch() {
     showInfoBar(defaultInfoBarText());
   }
   sendTouchEvent(event.gesture, event.startX, event.startY);
+}
+
+// Poll gravity at 10Hz and commit a new cardinal correction only after the
+// pure classifier has held it for 500ms. A live press resets the candidate so
+// one gesture cannot begin under one coordinate transform and end under another.
+static void serviceAutoRotation() {
+  if (!motionAvailable) return;
+  const uint32_t now = millis();
+  if ((uint32_t)(now - lastMotionPollAt) < 100) return;
+  lastMotionPollAt = now;
+
+  boardmotion::Sample sample;
+  if (!boardmotion::read(sample)) return;
+  lastMotionSample = sample;
+  motionSampleValid = true;
+
+  const int16_t raw[3] = {sample.x, sample.y, sample.z};
+  const motionorient::Calibration calibration = {
+      bcfg->motionXAxis, bcfg->motionXSign,
+      bcfg->motionYAxis, bcfg->motionYSign};
+  const bool square = bcfg->panelW == bcfg->panelH;
+  if (!motionTracker.update(raw, calibration, now,
+                            square && !boardtouch::isPressed())) {
+    return;
+  }
+
+  automaticRotation = motionTracker.rotation();
+  madctlDirty = true;
+  Serial.printf("motion: auto=%u manual=%u effective=%u\n",
+                automaticRotation, panelRotation, effectivePanelRotation());
 }
 
 // Fill the whole panel with one RGB565 color (used for status feedback).
@@ -3071,11 +3124,15 @@ void setup() {
   touchCalibration = bcfg->touch == board::TouchController::Cst9217
       ? touchmap::CST9217_ON_CO5300 : touchmap::AXS5106L_ON_C6;
   touchAvailable = boardtouch::init(*bcfg);
-  // The PMU, for the same reason and so before the announce: CAP_BATTERY
-  // depends on the chip having answered, and addMdnsService() bakes
-  // deviceCapabilities() into its TXT record. Returns false on the C6 boards,
-  // which have no PMU, and never touches the bus there.
+  // Battery telemetry, for the same reason and before announce: CAP_BATTERY
+  // depends on either the S3 PMU or the C6 touch board's voltage divider being
+  // usable. The C6 path reports charge state unknown because ETA6098 STAT is
+  // wired only to an LED.
   batteryAvailable = boardpower::init(*bcfg);
+  // Motion also precedes mDNS so diagnostics start from a settled hardware
+  // verdict. Rectangular C6 panels are read but never automatically rotated;
+  // their host raster geometry cannot represent odd firmware-only quadrants.
+  motionAvailable = boardmotion::init(*bcfg);
   // The device name doubles as the DHCP hostname (option 12), so the router
   // lists this board by name instead of "esp32c6-XXXXXX". This MUST precede
   // WiFi.mode(): the core latches the hostname onto the STA netif inside
@@ -3180,6 +3237,7 @@ void loop() {
   applyPendingControl();
   updateIdentify();
   serviceTouch();
+  serviceAutoRotation();
   if (dmaInFlight == 0) clearInfoBarIfExpired();
   static uint32_t lastIdleTextCheck = 0;
   if ((uint32_t)(millis() - lastIdleTextCheck) >= IDLE_TEXT_SAVE_INTERVAL_MS) {
@@ -3236,7 +3294,9 @@ void loop() {
       // fill looks the same either way up, so there is nothing to correct.
       repainted = "nothing to repaint";
     }
-    Serial.printf("rotation=%u applied (%s)\n", panelRotation, repainted);
+    Serial.printf("rotation manual=%u auto=%u effective=%u applied (%s)\n",
+                  panelRotation, automaticRotation, appliedPanelRotation,
+                  repainted);
   }
 
   static uint32_t lastCompleted = 0;
@@ -3697,13 +3757,12 @@ void loop() {
   }
 
   // Battery, well slower than EINF's 2s. A cell does not move perceptibly in
-  // ten seconds, and each sample is five I2C reads on the loop that also
-  // services DMA and WiFi - so the cheapest cadence that still feels live wins.
-  // Unlike the two timers above this is not gated on hbPort: the sample also
+  // ten seconds, and each sample is either a small PMU read or eight local ADC
+  // samples. Unlike the two timers above this is not gated on hbPort: the sample
   // feeds the serial status line and CFGSHOW, which are the only way to read a
   // battery on a panel no sender has found yet. sendBatteryStatus() does the
   // hbPort check itself before it puts anything on the wire, and returns
-  // immediately on a board with no PMU.
+  // immediately on a board with no battery telemetry source.
   static uint32_t lastBatteryPoll = 0;
   if (millis() - lastBatteryPoll >= 10000) {
     lastBatteryPoll = millis();
@@ -3746,8 +3805,17 @@ void loop() {
       tdPassUs = tdSpinUs = tdGatherUs = tdQueueUs = tdBarUs = 0;
     }
 #endif
-    // Its own line, and only on a board with a PMU: the C6 boards would
-    // otherwise print a battery field that can never say anything.
+    if (motionAvailable && motionSampleValid) {
+      Serial.printf(
+          "motion: raw=%d,%d,%d candidate=%d auto=%u effective=%u apply=%d\n",
+          (int)lastMotionSample.x, (int)lastMotionSample.y,
+          (int)lastMotionSample.z,
+          motionTracker.candidate() == motionorient::INVALID_ROTATION
+              ? -1 : (int)motionTracker.candidate(),
+          automaticRotation, effectivePanelRotation(),
+          bcfg->panelW == bcfg->panelH);
+    }
+    // Its own line, and only where a battery telemetry source exists.
     if (batteryReadingCurrent()) {
       Serial.printf("battery: %d%% %s %umV present=%d vbus=%d\n",
                     batteryPercentOrUnknown(),
@@ -3755,10 +3823,10 @@ void loop() {
                     (unsigned)lastBattery.millivolts, lastBattery.present,
                     lastBattery.externalPower);
     } else if (batteryAvailable && batteryReadingValid) {
-      // The PMU answered once and has stopped. Said out loud rather than
+      // The source answered once and has stopped. Said out loud rather than
       // silently repeating the last percentage, because this line is where a
-      // dead PMU is diagnosed.
-      Serial.printf("battery: no reading for %us (PMU stopped answering?)\n",
+      // dead battery telemetry path is diagnosed.
+      Serial.printf("battery: no reading for %us (source stopped answering?)\n",
                     (unsigned)((millis() - lastBatteryAt) / 1000));
     }
   }

@@ -7,7 +7,7 @@
 //                              GPIO8, BOOT on GPIO9
 //   ESP32-C6-Touch-LCD-1.47    JD9853 172x320 over SPI, no addressable LED,
 //                              BOOT on GPIO9, AXS5106L touch + QMI8658A IMU on
-//                              I2C GPIO18/19
+//                              I2C GPIO18/19, battery voltage on ADC GPIO0
 //   ESP32-S3-Touch-AMOLED-1.75C  CO5300 466x466 AMOLED over QSPI, CST9217
 //                              touch on I2C GPIO15/14, AXP2101 PMU, QMI8658
 //                              IMU
@@ -61,13 +61,15 @@ enum class PanelBus : uint8_t { Spi, Qspi };
 /// which register protocol to speak. The pins alone cannot tell these apart.
 enum class TouchController : uint8_t { None, Axs5106l, Cst9217 };
 
-/// Which power-management IC the board carries, so the sketch knows whether a
-/// battery reading is even possible and which register protocol to speak.
-///
-/// Only the 1.75C has one. The two C6 boards run straight off USB with no cell
-/// and no gauge, which is why battery reporting is a per-board capability here
-/// rather than a firmware-wide one.
-enum class PowerController : uint8_t { None, Axp2101 };
+/// How battery telemetry is obtained. The S3's AXP2101 reports voltage,
+/// percentage, external power, and charge state. The C6 touch board exposes
+/// only a 3:1 battery-voltage divider on GPIO0; it can estimate percentage but
+/// cannot observe the ETA6098 charger's STAT output, so charge state remains
+/// explicitly unknown.
+enum class PowerController : uint8_t { None, Axp2101, BatteryAdc };
+
+/// Which inertial sensor supplies acceleration for automatic orientation.
+enum class MotionController : uint8_t { None, Qmi8658 };
 
 /// The variant this binary serves, when the compile target admits exactly one.
 /// The C6 binary serves two boards, so there it is Unknown and the boot-time
@@ -168,12 +170,22 @@ struct Config {
   int8_t pinTouchRst;
   int8_t pinTouchInt;
 
-  /// Power-management IC, or None. No pins of its own: on the one board that
-  /// has a PMU it shares the touch I2C bus (pinTouchSda/pinTouchScl), which is
-  /// what Waveshare's own pin_config.h and their AXP2101 example do. Recorded
-  /// here rather than inferred from the variant so the reader can be gated on
-  /// a fact in the table like every other per-board fact.
+  /// Battery telemetry source. AXP2101 shares the touch I2C bus; BatteryAdc
+  /// uses pinBatteryAdc and batteryAdcScale to reconstruct cell millivolts from
+  /// the board's resistor divider.
   PowerController power;
+  int8_t pinBatteryAdc;
+  uint8_t batteryAdcScale;
+
+  /// QMI8658-family accelerometer on the shared touch I2C bus. The axis fields
+  /// map sensor X/Y/Z indices onto panel-right and panel-down coordinates. Both
+  /// vendor board examples use the identity map; keeping it in the table makes
+  /// a board-revision correction local rather than baking it into the classifier.
+  MotionController motion;
+  uint8_t motionXAxis;
+  int8_t motionXSign;
+  uint8_t motionYAxis;
+  int8_t motionYSign;
 
   /// Gap on the X axis inside the controller's RAM. The 1.47" panels are 172
   /// wide in a 240-wide controller, centred: 34. The 1.75C's CO5300 maps the
@@ -200,8 +212,20 @@ struct Config {
   /// controller with nowhere to talk cannot be read, and claiming otherwise
   /// would make the firmware advertise a battery it can never sample.
   bool hasBattery() const {
-    return power != PowerController::None && pinTouchSda != NO_PIN &&
-           pinTouchScl != NO_PIN;
+    if (power == PowerController::Axp2101) {
+      return pinTouchSda != NO_PIN && pinTouchScl != NO_PIN;
+    }
+    if (power == PowerController::BatteryAdc) {
+      return pinBatteryAdc != NO_PIN && batteryAdcScale > 0;
+    }
+    return false;
+  }
+  bool hasMotion() const {
+    return motion != MotionController::None && pinTouchSda != NO_PIN &&
+           pinTouchScl != NO_PIN && motionXAxis < 3 && motionYAxis < 3 &&
+           motionXAxis != motionYAxis &&
+           (motionXSign == 1 || motionXSign == -1) &&
+           (motionYSign == 1 || motionYSign == -1);
   }
   bool isQspi() const { return bus == PanelBus::Qspi; }
   /// Brightness sink: PWM duty on this pin, or panel command 0x51 when absent.
@@ -233,7 +257,12 @@ static const Config CONFIG_LCD_ST7789 = {
     /* touchScl */ NO_PIN,
     /* touchRst */ NO_PIN,
     /* touchInt */ NO_PIN,
-    PowerController::None,  // USB powered, no cell and no gauge
+    PowerController::None,
+    /* batteryAdc */ NO_PIN,
+    /* adcScale */ 0,
+    MotionController::None,
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
     /* colOffset   */ 34,
     /* invertColor */ true,
     /* roundDisplay */ false,
@@ -271,7 +300,16 @@ static const Config CONFIG_TOUCH_JD9853 = {
     /* touchScl */ 19,
     /* touchRst */ 20,
     /* touchInt */ 21,
-    PowerController::None,  // USB powered, no cell and no gauge
+    // ETA6098 charger STAT is LED-only, but the cell rail reaches ADC1_CH0
+    // through a 200k/100k divider, so voltage and an estimated level are real
+    // while charge state is reported as unknown.
+    PowerController::BatteryAdc,
+    /* batteryAdc */ 0,
+    /* adcScale */ 3,
+    MotionController::Qmi8658,
+    // Waveshare's board examples leave the QMI8658 geometry at identity.
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
     /* colOffset   */ 34,
     /* invertColor */ true,
     /* roundDisplay */ false,
@@ -311,9 +349,15 @@ static const Config CONFIG_AMOLED_CO5300 = {
     /* touchScl */ 14,
     /* touchRst */ 2,  // shared with panel reset - never pulse independently
     /* touchInt */ 11,
-    // AXP2101 PMU at 0x34 on the touch bus above (GPIO15/14). The only board
-    // here with a battery, so the only one that reports one.
+    // AXP2101 PMU at 0x34 on the touch bus above (GPIO15/14). Battery
+    // telemetry also exists on the touch C6, but through its GPIO0 divider.
     PowerController::Axp2101,
+    /* batteryAdc */ NO_PIN,
+    /* adcScale */ 0,
+    MotionController::Qmi8658,
+    // Waveshare's board examples leave the QMI8658 geometry at identity.
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
     /* colOffset   */ 6,
     /* invertColor */ false,
     /* roundDisplay */ true,

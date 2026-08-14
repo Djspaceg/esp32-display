@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<dictionary title="ESPDisplaySender Terminology">
+    <suite name="ESPDisplaySender Suite" code="ESPD" description="Non-destructive control of ESPDisplaySender and its panels.">
+        <command name="show manager" code="ESPDshwm" description="Show the display manager window.">
+            <cocoa class="ESPDisplayShowManagerCommand"/>
+        </command>
+        <command name="hide manager" code="ESPDhidm" description="Hide the display manager window without stopping streaming.">
+            <cocoa class="ESPDisplayHideManagerCommand"/>
+        </command>
+        <command name="manager visible" code="ESPDmvis" description="Return whether the display manager window is visible.">
+            <cocoa class="ESPDisplayManagerVisibleCommand"/>
+            <result type="boolean" description="True when the manager window is visible."/>
+        </command>
+        <command name="list displays" code="ESPDlstd" description="List known display service names.">
+            <cocoa class="ESPDisplayListDisplaysCommand"/>
+            <result type="any" description="A list of stable service names accepted by display commands."/>
+        </command>
+        <command name="display status" code="ESPDstat" description="Return structured JSON status for one display.">
+            <cocoa class="ESPDisplayStatusCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+            <result type="text" description="A JSON object containing display status."/>
+        </command>
+        <command name="select display" code="ESPDseld" description="Select a display in the manager window.">
+            <cocoa class="ESPDisplaySelectCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+            <result type="text" description="The selected display service name."/>
+        </command>
+        <command name="pause display" code="ESPDpaus" description="Pause frame transmission while preserving the current image.">
+            <cocoa class="ESPDisplayPauseCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+        </command>
+        <command name="resume display" code="ESPDresm" description="Resume frame transmission.">
+            <cocoa class="ESPDisplayResumeCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+        </command>
+        <command name="identify display" code="ESPDiden" description="Run the display's identify indication.">
+            <cocoa class="ESPDisplayIdentifyCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+        </command>
+        <command name="set display power" code="ESPDpowr" description="Turn a display panel on or off.">
+            <cocoa class="ESPDisplaySetPowerCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+            <parameter name="enabled" code="enab" type="boolean" description="True to turn the panel on; false to turn it off.">
+                <cocoa key="enabled"/>
+            </parameter>
+        </command>
+        <command name="set display brightness" code="ESPDbrit" description="Set an exact display brightness level.">
+            <cocoa class="ESPDisplaySetBrightnessCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+            <parameter name="level" code="levl" type="integer" description="Brightness from 0 through 255.">
+                <cocoa key="level"/>
+            </parameter>
+        </command>
+        <command name="set display rotation" code="ESPDrota" description="Set display mounting rotation in cardinal degrees.">
+            <cocoa class="ESPDisplaySetRotationCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+            <parameter name="degrees" code="degr" type="integer" description="One of 0, 90, 180, or 270.">
+                <cocoa key="degrees"/>
+            </parameter>
+        </command>
+        <command name="set display source" code="ESPDsour" description="Use automatic selection or a named attached macOS display as the source.">
+            <cocoa class="ESPDisplaySetSourceCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+            <parameter name="source" code="sour" type="text" description="The word automatic or an attached display name.">
+                <cocoa key="source"/>
+            </parameter>
+        </command>
+        <command name="set display idle text" code="ESPDidle" description="Set the template shown by a panel while no frames are arriving.">
+            <cocoa class="ESPDisplaySetIdleTextCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+            <parameter name="text" code="idtx" type="text" description="Screensaver template text; an empty string clears it.">
+                <cocoa key="text"/>
+            </parameter>
+        </command>
+        <command name="set display gesture preset" code="ESPDgest" description="Set a panel's gesture binding preset.">
+            <cocoa class="ESPDisplaySetGesturePresetCommand"/>
+            <direct-parameter type="text" description="A service name or unique display name."/>
+            <parameter name="preset" code="gpre" type="text" description="sourceCycling, multimedia, or windowCycling.">
+                <cocoa key="preset"/>
+            </parameter>
+        </command>
+        <command name="sender settings" code="ESPDgset" description="Return global sender settings as JSON.">
+            <cocoa class="ESPDisplaySenderSettingsCommand"/>
+            <result type="text" description="A JSON object containing global sender settings."/>
+        </command>
+        <command name="set sender settings" code="ESPDsset" description="Update one or more validated global sender settings.">
+            <cocoa class="ESPDisplaySetSenderSettingsCommand"/>
+            <parameter name="fps" code="fps " type="integer" optional="yes" description="Capture frame rate.">
+                <cocoa key="fps"/>
+            </parameter>
+            <parameter name="spacing micros" code="spac" type="integer" optional="yes" description="Fixed datagram pacing in microseconds.">
+                <cocoa key="spacingMicros"/>
+            </parameter>
+            <parameter name="adaptive pacing" code="adap" type="boolean" optional="yes" description="Whether pacing tunes itself from panel feedback.">
+                <cocoa key="adaptivePacing"/>
+            </parameter>
+            <parameter name="identify seconds" code="idsc" type="integer" optional="yes" description="Identify indication duration.">
+                <cocoa key="identifySeconds"/>
+            </parameter>
+            <parameter name="tile quality" code="tqua" type="text" optional="yes" description="losslessOnly, auto, or aggressive.">
+                <cocoa key="tileQuality"/>
+            </parameter>
+        </command>
+    </suite>
+</dictionary>
