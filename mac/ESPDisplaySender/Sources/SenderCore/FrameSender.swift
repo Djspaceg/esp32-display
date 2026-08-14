@@ -96,7 +96,75 @@ final class FrameSender {
     /// The frame rate the degradation ladder defends. Below the 60 target
     /// deliberately: forcing BC1 (rung a) engages when lossless could not
     /// sustain this, and frame skipping (rung c) only when even BC1 cannot.
-    private static let degradeTargetFps = 30.0
+    static let degradeTargetFps = 30.0
+
+    /// Flat per-tile byte estimates the ladder reasons with. Edge tiles are
+    /// smaller than these, so every estimate is conservative in the safe
+    /// direction: the ladder engages slightly early rather than slightly late.
+    /// Measured per-record sizes including the 4-byte header are 516 / 132 /
+    /// 36 (docs/tile-stream-plan.md section 16.1); the header is excluded here
+    /// because the ladder is comparing payload against a payload budget.
+    static let rawBytesPerTile = 512
+    static let bc1BytesPerTile = 128
+    static let halfResBytesPerTile = 32
+
+    /// The degradation ladder (docs/tile-stream-plan.md sections 6.6, 16.2),
+    /// as a pure function of the things that decide it.
+    ///
+    /// Extracted from `sendTileFrame` to be testable: these three thresholds
+    /// decide when the stream sheds colour precision, then resolution, then
+    /// whole frames, and none of them had a test. Diff frames only - a
+    /// keyframe is a bounded 2-second cost whose latency does not gate
+    /// motion, and forcing one lossy would leave a STATIC screen at BC1
+    /// quality forever, since nothing dirty afterward ever heals it.
+    static func degradationRungs(
+        dirtyTiles: Int, spacingMicros: UInt32, policy: TileLossyPolicy,
+        halfResAvailable: Bool
+    ) -> (forceLossy: Bool, forceHalfRes: Bool, skipNextFrame: Bool) {
+        // What the current pacing can carry per frame at the fps the ladder
+        // defends.
+        let bytesPerSecond =
+            1_472.0 * 1_000_000.0 / Double(max(spacingMicros, 1))
+        let budgetBytes = Int(bytesPerSecond / degradeTargetFps)
+        let rawEstimate = dirtyTiles * rawBytesPerTile
+        let bc1Estimate = dirtyTiles * bc1BytesPerTile
+        let halfEstimate = dirtyTiles * halfResBytesPerTile
+
+        // Rung (a): lossless would blow the budget - let BC1 win busy runs
+        // regardless of variance. Only meaningful under .auto; .losslessOnly
+        // is the user forbidding this trade, and .aggressive already lets BC1
+        // win on size alone so it needs no push.
+        let forceLossy = policy == .auto && rawEstimate > budgetBytes
+
+        // Rung (b): even all-BC1 blows the budget, so full resolution cannot
+        // fit at any colour precision - drop RESOLUTION instead, at a quarter
+        // of BC1's bytes. This is the rung that was missing while
+        // majority-of-screen motion was the one failing case: the ladder went
+        // straight from "force BC1" to "send fewer frames", and measurement
+        // (section 15.6) put the full-res ceiling at ~14 fps because 66
+        // datagrams per frame both saturate the datagram rate and make loss
+        // compound.
+        //
+        // Requires the panel to have advertised it: codec 3 sent to tile
+        // firmware that predates it loses whole datagrams, turning a quality
+        // degradation into a worse outage than the one being fixed.
+        let forceHalfRes = halfResAvailable && policy != .losslessOnly
+            && bc1Estimate > budgetBytes
+
+        // Rung (c): even the cheapest codec available blows the budget - send
+        // fewer frames rather than flood the receive queue. The floor is
+        // whatever the rungs above could actually reach: raw under
+        // .losslessOnly, half-res where the panel takes it, BC1 otherwise.
+        let floorEstimate: Int
+        if policy == .losslessOnly {
+            floorEstimate = rawEstimate
+        } else if forceHalfRes {
+            floorEstimate = halfEstimate
+        } else {
+            floorEstimate = bc1Estimate
+        }
+        return (forceLossy, forceHalfRes, floorEstimate > budgetBytes)
+    }
 
     // Per-stage cost of the tile send path, accumulated on sendQueue and
     // reported every `tileStatInterval`. Added because the sender's own
@@ -1184,45 +1252,12 @@ final class FrameSender {
         var forceLossy = false
         var forceHalfRes = false
         if !isKeyframe {
-            let bytesPerSecond =
-                1_472.0 * 1_000_000.0 / Double(max(spacing, 1))
-            let budgetBytes = Int(bytesPerSecond / Self.degradeTargetFps)
-            let rawEstimate = dirty.count * 512
-            let bc1Estimate = dirty.count * 128
-            let halfEstimate = dirty.count * 32
-            // Rung (a): lossless would blow the budget - let BC1 win busy
-            // runs regardless of variance. Only meaningful under .auto;
-            // .losslessOnly is the user forbidding this trade.
-            forceLossy = policy == .auto && rawEstimate > budgetBytes
-            // Rung (b): even all-BC1 blows the budget, so full resolution
-            // cannot fit at any colour precision - drop RESOLUTION instead,
-            // at a quarter of BC1's bytes. This is the rung that was missing
-            // while majority-of-screen motion was the one failing case: the
-            // ladder went straight from "force BC1" to "send fewer frames",
-            // and measurement (docs/tile-stream-plan.md section 15.6) put the
-            // full-res ceiling at ~14 fps because 66 datagrams per frame both
-            // saturate the datagram rate and make loss compound.
-            //
-            // Requires the panel to have advertised it: codec 3 sent to tile
-            // firmware that predates it loses whole datagrams, which would
-            // turn a quality degradation into a worse outage than the one
-            // being fixed.
-            forceHalfRes = halfRes && policy != .losslessOnly
-                && bc1Estimate > budgetBytes
-            // Rung (c): even the cheapest codec available blows the budget -
-            // halve the frame rate rather than flood the receive queue. The
-            // floor is whatever the rungs above could actually reach: raw
-            // under .losslessOnly, half-res where the panel takes it, BC1
-            // otherwise.
-            let floorEstimate: Int
-            if policy == .losslessOnly {
-                floorEstimate = rawEstimate
-            } else if forceHalfRes {
-                floorEstimate = halfEstimate
-            } else {
-                floorEstimate = bc1Estimate
-            }
-            skipNextTileFrame = floorEstimate > budgetBytes
+            let rungs = Self.degradationRungs(
+                dirtyTiles: dirty.count, spacingMicros: spacing,
+                policy: policy, halfResAvailable: halfRes)
+            forceLossy = rungs.forceLossy
+            forceHalfRes = rungs.forceHalfRes
+            skipNextTileFrame = rungs.skipNextFrame
         }
 
         let encodeStart = DispatchTime.now().uptimeNanoseconds
