@@ -432,7 +432,9 @@ static uint8_t pendingTileBitmap[tileproto::TILE_BITMAP_BYTES];
 // (up to 450 runs) so touch/serial/watchdog servicing cannot starve: 32
 // calls is ~5-29 ms of panel time at the measured 150-900 us per call. The
 // remainder is re-marked pending and finished next iteration.
-static const int TILE_DRAW_CALL_CAP = 32;
+// A variable, not a constant, so CFGTUNE can move it at runtime - see
+// tuneRxDrainYieldEvery for why that matters for measurement.
+static int tuneDrawCallCap = 32;
 // How long pending tiles may wait for their frame to complete before being
 // drawn anyway. See the tilePartialDue block in loop() for why this exists:
 // a full-panel update is ~66 datagrams, so a fraction of a percent of
@@ -440,8 +442,9 @@ static const int TILE_DRAW_CALL_CAP = 32;
 // are already in bufA by then. 40 ms is a frame at 25 fps - long enough that
 // a merely-late frame still draws whole, short enough that a lossy stream
 // keeps moving rather than freezing.
-static const uint32_t TILE_PARTIAL_DRAW_MS = 40;
-// Runs left unpainted because a pass hit TILE_DRAW_CALL_CAP, so another pass is
+// Also CFGTUNE-settable, for the same measurement reason.
+static uint32_t tunePartialDrawMs = 40;
+// Runs left unpainted because a pass hit tuneDrawCallCap, so another pass is
 // owed. Its own flag rather than a bump of framesCompleted, which is what the
 // deferral used to do: that made framesCompleted mean either "a frame's last
 // tile arrived" or "come back for the rest", and once statFramesShown counted
@@ -490,7 +493,7 @@ static bool madctlDirty = false;                 // panel config needs reapplyin
 static volatile uint32_t statFramesShown = 0;
 static volatile uint32_t statFramesDropped = 0;  // incomplete, abandoned
 // Draw passes that painted PARTIAL frames - tiles drawn because
-// TILE_PARTIAL_DRAW_MS elapsed with none of their frame's remainder arriving
+// tunePartialDrawMs elapsed with none of their frame's remainder arriving
 // (section 15.3). Kept apart from statFramesShown because conflating them cost
 // real accuracy: from section 15.3 until now, `shown` counted draw passes of
 // both kinds, which inflated it roughly fourfold at low frame rates (8 fps
@@ -924,7 +927,15 @@ static const UBaseType_t RX_TASK_PRIORITY = 9;
 static const uint32_t RX_TASK_STACK = 6144;
 /// Datagrams this task may drain before yielding to the draw loop. See the
 /// drain loop in udpReceiveTask for why an explicit yield is required.
-static const int RX_DRAIN_YIELD_EVERY = 24;
+///
+/// A variable rather than a constant so `CFGTUNE` can change it at runtime.
+/// That is a measurement requirement, not a feature: the run-to-run spread on
+/// this hardware is ~4 fps peak-to-peak at the operating point
+/// (docs/tile-stream-plan.md section 17.11), so resolving anything smaller
+/// needs many samples with the arms INTERLEAVED - and a reflash per swap costs
+/// ~2 minutes, which forces blocked sampling, which is exactly how this
+/// project already accepted one false positive.
+static int tuneRxDrainYieldEvery = 24;
 
 static void udpReceiveTask(void *) {
   // One reusable buffer, internal RAM. Sized over MAX_PACKED_PACKET_BYTES so
@@ -971,7 +982,7 @@ static void udpReceiveTask(void *) {
       if (n <= 0) break;  // empty (EWOULDBLOCK) or error: back to blocking
       handleInbound(rxBuf, (size_t)n, from.sin_addr.s_addr,
                     ntohs(from.sin_port));
-      if (++drained >= RX_DRAIN_YIELD_EVERY) {
+      if (++drained >= tuneRxDrainYieldEvery) {
         drained = 0;
         vTaskDelay(1);  // let loopTask draw what has arrived
       }
@@ -1839,6 +1850,56 @@ static void processConfigLine(char *line) {
     // Tile-stream phase-0 measurements; see runTileBench above. Blocks the
     // loop for a few seconds while it runs, which is fine over USB.
     runTileBench();
+  } else if (strncmp(line, "CFGTUNE", 7) == 0) {
+    // Read or set the tile path's experiment knobs, live:
+    //   CFGTUNE                    print the current values
+    //   CFGTUNE rxyield <1-256>    datagrams drained between yields
+    //   CFGTUNE partialms <1-1000> how long tiles wait for their frame
+    //   CFGTUNE drawcap <1-450>    draw calls per loop iteration
+    //
+    // Exists for measurement discipline rather than for users. The run-to-run
+    // spread here is ~4 fps peak-to-peak at the operating point (section
+    // 17.11), so resolving a smaller effect needs the A/B arms INTERLEAVED
+    // over many samples - and at ~2 minutes per reflash, a compiled-in
+    // constant makes interleaving so expensive that blocked sampling becomes
+    // inevitable. Blocked sampling is what let this project accept a false
+    // positive it then had to retract.
+    //
+    // Deliberately NOT persisted to NVS: a knob left somewhere odd by an
+    // abandoned experiment would silently bias every later measurement, and a
+    // reboot is the cheapest possible reset. Values are refused rather than
+    // clamped, so a typo cannot quietly become a data point.
+    const char *arg = line + 7;
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+      // CFGINFO, like CFGSHOW's reply: the tooling only recognises CFGOK,
+      // CFGERR and CFGINFO as replies (CFG_PREFIXES in espdisp.py), so a line
+      // starting with anything else reads as no answer at all and times out.
+      Serial.printf("CFGINFO rxyield=%d partialms=%lu drawcap=%d\n",
+                    tuneRxDrainYieldEvery,
+                    (unsigned long)tunePartialDrawMs, tuneDrawCallCap);
+      return;
+    }
+    char name[16] = {0};
+    int value = 0;
+    if (sscanf(arg, "%15s %d", name, &value) != 2) {
+      Serial.println("CFGERR expected: CFGTUNE <rxyield|partialms|drawcap> <n>");
+      return;
+    }
+    if (strcmp(name, "rxyield") == 0 && value >= 1 && value <= 256) {
+      tuneRxDrainYieldEvery = value;
+    } else if (strcmp(name, "partialms") == 0 && value >= 1 && value <= 1000) {
+      tunePartialDrawMs = (uint32_t)value;
+    } else if (strcmp(name, "drawcap") == 0 && value >= 1 && value <= 450) {
+      tuneDrawCallCap = value;
+    } else {
+      Serial.println("CFGERR bad knob or out of range (rxyield 1-256, "
+                     "partialms 1-1000, drawcap 1-450)");
+      return;
+    }
+    Serial.printf("CFGOK rxyield=%d partialms=%lu drawcap=%d (not persisted)\n",
+                  tuneRxDrainYieldEvery, (unsigned long)tunePartialDrawMs,
+                  tuneDrawCallCap);
 #endif
   } else if (strncmp(line, "CFGOTAPW ", 9) == 0) {
     // Set or clear the OTA password:
@@ -3201,7 +3262,7 @@ void loop() {
   static uint32_t lastTileDrawAt = 0;
   bool tilePartialDue = false;
   if (tileStreamEnabled() && (uint32_t)(millis() - lastTileDrawAt) >=
-                                 TILE_PARTIAL_DRAW_MS) {
+                                 tunePartialDrawMs) {
     portENTER_CRITICAL(&drawMux);
     for (size_t i = 0; i < sizeof(pendingTileBitmap); i++) {
       if (pendingTileBitmap[i] != 0) {
@@ -3324,7 +3385,7 @@ void loop() {
       tileproto::forEachRowRun(tiles, TILE_GEOMETRY, [&](uint16_t row,
                                                          uint16_t colStart,
                                                          uint16_t colEnd) {
-        if (tileDrawCalls >= TILE_DRAW_CALL_CAP) {
+        if (tileDrawCalls >= tuneDrawCallCap) {
           // Budget spent this iteration: put the run back and finish next
           // time, so a pathological checkerboard cannot starve touch,
           // serial, or the watchdog. bufA already holds the pixels; only
