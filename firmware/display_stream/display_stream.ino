@@ -424,48 +424,6 @@ static uint8_t tileHalfScratch[TILE_HALF_MAX_BYTES] __attribute__((aligned(4)));
 // PSRAM->PSRAM (docs/tile-stream-plan.md section 11), and it keeps DMA
 // reads off PSRAM entirely.
 static uint8_t tileStaging[2][TILE_RUN_MAX_BYTES] __attribute__((aligned(4)));
-
-// ---- Receive-to-draw handoff (section 17.17) -----------------------------
-// One record's decoded raster, handed from the receive task to the draw pass
-// in SRAM so the pass does NOT read back out of PSRAM what the receive task
-// just wrote there.
-//
-// Section 17.10 removed DMA from PSRAM and measured what that was worth
-// (269 of 270 datagrams accepted against 185). Two parties are left on the
-// bus: the receive task's strided bufA write, and the pass's strided bufA
-// read to fill tileStaging. This removes the second one for as many records
-// as the pass can keep up with, which halves the tile path's PSRAM traffic
-// in the limit - the frame is written once and never read back.
-//
-// ONE slot, deliberately, and the reason is arithmetic rather than
-// conservatism. A cache big enough to serve the pass's merged runs would
-// have to hold every tile of each run, ~200 tiles arrive between passes,
-// and full-frame motion is 900 tiles = 460 KB against 512 KB of total
-// internal SRAM with ~50 KB already reserved here. No SRAM-resident copy of
-// a 434 KB frame exists, which is why bufA is in PSRAM at all. A single
-// slot needs no capacity at all: it is drained by the very next pass, and
-// loop() iterates far more often than records arrive.
-//
-// Correctness never depends on it. The pixels are in bufA before the slot
-// is published, so every discard path just re-marks the run pending and the
-// pass draws it the old way.
-static uint8_t rxHandoff[TILE_RUN_MAX_BYTES] __attribute__((aligned(4)));
-static uint16_t rxHandoffTile = 0;   // run start tile
-static uint16_t rxHandoffLen = 0;    // run length, tiles
-static uint16_t rxHandoffW = 0;      // run raster width, px
-static uint16_t rxHandoffH = 0;      // run raster height, px
-static bool rxHandoffLandscape = false;
-// Published by the receive task, consumed by the draw pass. Written only
-// inside drawMux, which is what orders the raster and metadata stores
-// before the flag becomes visible on the other core.
-static volatile bool rxHandoffFull = false;
-// Whether the handoff is used at all. Off by default: the mechanism is
-// derived rather than measured (see section 17.17 - the link was at RSSI -82
-// when it was written, where an A/B measures the radio), and a knob makes
-// the arms interleavable without a reflash, which section 17.11 established
-// as the requirement for resolving anything under the ~4 fps noise floor.
-static int tuneRxHandoff = 0;
-
 static tileproto::Reassembler tileReassembler(TILE_GEOMETRY);
 // Tiles applied to bufA but not yet drawn. Accumulates across frames like
 // pendingDrawBitmap does (per-tile recency); guarded by drawMux.
@@ -768,39 +726,11 @@ static bool applyTileRecord(const tileproto::TileHeader &h,
            tileScratch + (size_t)r * runW * 2, (size_t)runW * 2);
   }
 
-  // Hand this raster to the draw pass in SRAM when the slot is free, so the
-  // pass can skip reading the run back out of PSRAM (see rxHandoff). Purely
-  // an optimisation: on any refusal the run is marked pending and drawn from
-  // bufA exactly as before, and the pixels are already committed above
-  // either way.
-  bool handedOff = false;
-  if (tuneRxHandoff && !rxHandoffFull) {
-    const size_t runBytes = (size_t)runW * runH * 2;
-    if (runBytes > 0 && runBytes <= sizeof(rxHandoff)) {
-      memcpy(rxHandoff, tileScratch, runBytes);
-      rxHandoffTile = startTile;
-      rxHandoffLen = runLen;
-      rxHandoffW = runW;
-      rxHandoffH = runH;
-      rxHandoffLandscape = h.landscape;
-      // The spinlock is the publish barrier: the raster and metadata stores
-      // above must be visible on the drawing core before the flag is.
-      portENTER_CRITICAL(&drawMux);
-      rxHandoffFull = true;
-      portEXIT_CRITICAL(&drawMux);
-      handedOff = true;
-      // Wake the pass without claiming a frame completed - the same reason
-      // tileDrainPending exists instead of a framesCompleted bump.
-      tileDrainPending = true;
-    }
+  portENTER_CRITICAL(&drawMux);
+  for (uint16_t t = startTile; t < (uint16_t)(startTile + runLen); t++) {
+    pendingTileBitmap[t >> 3] |= (uint8_t)(1 << (t & 7));
   }
-  if (!handedOff) {
-    portENTER_CRITICAL(&drawMux);
-    for (uint16_t t = startTile; t < (uint16_t)(startTile + runLen); t++) {
-      pendingTileBitmap[t >> 3] |= (uint8_t)(1 << (t & 7));
-    }
-    portEXIT_CRITICAL(&drawMux);
-  }
+  portEXIT_CRITICAL(&drawMux);
 
   if (action == tileproto::RecordAction::ApplyComplete) {
     pendingLandscape = h.landscape;
@@ -1926,11 +1856,6 @@ static void processConfigLine(char *line) {
     //   CFGTUNE rxyield <1-256>    datagrams drained between yields
     //   CFGTUNE partialms <1-1000> how long tiles wait for their frame
     //   CFGTUNE drawcap <1-450>    draw calls per loop iteration
-    //   CFGTUNE rxhandoff <0|1>    draw runs from the SRAM handoff (17.17)
-    //
-    // rxhandoff is the one knob that accepts 0, because unlike the other
-    // three it selects a code path rather than sizing one - 0 is the old
-    // behaviour, not a degenerate value.
     //
     // Exists for measurement discipline rather than for users. The run-to-run
     // spread here is ~4 fps peak-to-peak at the operating point (section
@@ -1950,17 +1875,15 @@ static void processConfigLine(char *line) {
       // CFGINFO, like CFGSHOW's reply: the tooling only recognises CFGOK,
       // CFGERR and CFGINFO as replies (CFG_PREFIXES in espdisp.py), so a line
       // starting with anything else reads as no answer at all and times out.
-      Serial.printf("CFGINFO rxyield=%d partialms=%lu drawcap=%d rxhandoff=%d\n",
+      Serial.printf("CFGINFO rxyield=%d partialms=%lu drawcap=%d\n",
                     tuneRxDrainYieldEvery,
-                    (unsigned long)tunePartialDrawMs, tuneDrawCallCap,
-                    tuneRxHandoff);
+                    (unsigned long)tunePartialDrawMs, tuneDrawCallCap);
       return;
     }
     char name[16] = {0};
     int value = 0;
     if (sscanf(arg, "%15s %d", name, &value) != 2) {
-      Serial.println("CFGERR expected: "
-                     "CFGTUNE <rxyield|partialms|drawcap|rxhandoff> <n>");
+      Serial.println("CFGERR expected: CFGTUNE <rxyield|partialms|drawcap> <n>");
       return;
     }
     if (strcmp(name, "rxyield") == 0 && value >= 1 && value <= 256) {
@@ -1969,17 +1892,14 @@ static void processConfigLine(char *line) {
       tunePartialDrawMs = (uint32_t)value;
     } else if (strcmp(name, "drawcap") == 0 && value >= 1 && value <= 450) {
       tuneDrawCallCap = value;
-    } else if (strcmp(name, "rxhandoff") == 0 && value >= 0 && value <= 1) {
-      tuneRxHandoff = value;
     } else {
       Serial.println("CFGERR bad knob or out of range (rxyield 1-256, "
-                     "partialms 1-1000, drawcap 1-450, rxhandoff 0-1)");
+                     "partialms 1-1000, drawcap 1-450)");
       return;
     }
-    Serial.printf("CFGOK rxyield=%d partialms=%lu drawcap=%d rxhandoff=%d "
-                  "(not persisted)\n",
+    Serial.printf("CFGOK rxyield=%d partialms=%lu drawcap=%d (not persisted)\n",
                   tuneRxDrainYieldEvery, (unsigned long)tunePartialDrawMs,
-                  tuneDrawCallCap, tuneRxHandoff);
+                  tuneDrawCallCap);
 #endif
   } else if (strncmp(line, "CFGOTAPW ", 9) == 0) {
     // Set or clear the OTA password:
@@ -3462,73 +3382,6 @@ void loop() {
       static int tileStagingIdx = 0;
       int tileDrawCalls = 0;
       bool tileDeferred = false;
-      // Drain the receive-to-draw handoff first. Its gather reads SRAM
-      // instead of bufA, which is the entire point: one strided PSRAM read
-      // per run disappears. Drawn BEFORE the pending runs so that an older
-      // pending run covering the same tiles paints after it - that run
-      // gathers the same committed content out of bufA, so the overlap is
-      // wasted work rather than a wrong pixel.
-      if (rxHandoffFull) {
-        if (rxHandoffLandscape != landscape) {
-          // Orientation changed under it. Dropped rather than re-marked:
-          // applyTileRecord's flush abandons old-orientation pixels by
-          // design, and the sender owes a keyframe after any change.
-          portENTER_CRITICAL(&drawMux);
-          rxHandoffFull = false;
-          portEXIT_CRITICAL(&drawMux);
-        } else {
-          const uint16_t hoStart = rxHandoffTile;
-          const uint16_t hoLen = rxHandoffLen;
-          const int x0 =
-              (int)TILE_GEOMETRY.col(hoStart) * tileproto::TILE_DIM;
-          const int y0 =
-              (int)TILE_GEOMETRY.row(hoStart) * tileproto::TILE_DIM;
-          const int w = (int)rxHandoffW;
-          const int hgt = (int)rxHandoffH;
-          const uint32_t tSpin = micros();
-          spinUntilDmaBelow(2, 500000);
-          const uint32_t tGather = micros();
-          tdSpinUs += tGather - tSpin;
-          uint8_t *source = tileStaging[tileStagingIdx];
-          tileStagingIdx ^= 1;
-          memcpy(source, rxHandoff, (size_t)w * hgt * 2);
-          // Freed only after the copy. The producer refills the slot the
-          // moment this clears, so clearing any earlier would let it
-          // overwrite the bytes being read.
-          portENTER_CRITICAL(&drawMux);
-          rxHandoffFull = false;
-          portEXIT_CRITICAL(&drawMux);
-          const uint32_t tQueue = micros();
-          tdGatherUs += tQueue - tGather;
-          dmaInFlight = dmaInFlight + 1;
-          dmaQueuedAt = millis();
-          esp_err_t err = esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + w,
-                                                   y0 + hgt, source);
-          tdQueueUs += micros() - tQueue;
-          if (err != ESP_OK) {
-            statDrawErrors = statDrawErrors + 1;
-            dmaInFlight = dmaInFlight - 1;
-            // Put the run back so the pixels still reach the glass.
-            portENTER_CRITICAL(&drawMux);
-            for (uint16_t t = hoStart; t < (uint16_t)(hoStart + hoLen); t++) {
-              pendingTileBitmap[t >> 3] |= (uint8_t)(1 << (t & 7));
-            }
-            portEXIT_CRITICAL(&drawMux);
-          } else {
-            drewAny = true;
-            tileDrawCalls++;
-            tdCalls = tdCalls + 1;
-            if (infoBarActive() &&
-                panelstate::rowRangeOverlaps(y0, y0 + hgt, infoBarY0,
-                                             infoBarY1)) {
-              const uint32_t tBar = micros();
-              waitForDmaIdle(200);
-              redrawInfoBarOverRun();
-              tdBarUs += micros() - tBar;
-            }
-          }
-        }
-      }
       tileproto::forEachRowRun(tiles, TILE_GEOMETRY, [&](uint16_t row,
                                                          uint16_t colStart,
                                                          uint16_t colEnd) {
@@ -3614,12 +3467,8 @@ void loop() {
           }
         }
       });
-      // Ask for another pass without pretending a frame completed. A handoff
-      // published DURING this pass counts too: without it the assignment
-      // would clear the flag the producer just set, and that run's tiles are
-      // in neither the pending set nor this pass, so they would wait for an
-      // unrelated later record to wake the pass.
-      tileDrainPending = tileDeferred || rxHandoffFull;
+      // Ask for another pass without pretending a frame completed.
+      tileDrainPending = tileDeferred;
     }
 #endif
 
