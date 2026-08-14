@@ -1408,3 +1408,64 @@ nothing for bus pressure and is now the least promising; bounding drained
 datagrams per unit time is more interesting, because it would leave the
 gather uninterrupted windows; and moving bufA itself, or double-buffering
 tiles through SRAM on the receive side, attacks the root.
+
+### 17.11 Yielding harder while drawing: UNPROVEN, and how the noise fooled me
+
+17.10 identified PSRAM as the contended resource. The cheapest test of that
+reading: have the receive task yield harder while a pass is painting, so the
+gather gets quieter windows. Implemented as a `tileDrawActive` flag around
+the tile run loop and a 4-datagram drain interval instead of 24 while set -
+the 64 KB `SO_RCVBUF` holds ~44 datagrams and a pass moves ~20, so the burst
+buffers rather than being lost.
+
+Three runs each at 15 fps offered looked like a clear win:
+
+| Yield interval while drawing | Complete fps     | Mean | Spread |
+| ---------------------------- | ---------------- | ---- | ------ |
+| 24 (unchanged)               | 13.7, 9.9, 12.4  | 12.0 | 3.8    |
+| 4                            | 14.8, 14.1, 14.5 | 14.5 | 0.7    |
+
++21% on the mean, and the spread apparently collapsing from 3.8 to 0.7 -
+which read as the yield keeping the panel out of the loss spiral that
+produced the 9.9.
+
+Then a confirmation run on the SAME 4-datagram binary returned 10.4 fps at
+23.2% loss. Four more runs of that identical binary: 13.6, 14.7, 14.3, 13.9.
+
+| Series                                    | Values                       | Range   |
+| ----------------------------------------- | ---------------------------- | ------- |
+| Between builds (what I was measuring)     | 12.0 vs 14.5                 | 2.5     |
+| Within ONE binary (what noise alone does) | 10.4, 13.6, 14.7, 14.3, 13.9 | **4.3** |
+
+**The within-binary range exceeds the effect.** The tight 0.7 spread was a
+lucky consecutive triple, not a property of the build. The change is
+unproven and has been reverted rather than shipped on the strength of a
+mechanism that sounds right - which is precisely how the ~2,850 datagrams/s
+figure and the 45 fps paint model got into this document.
+
+The methodology error is worth more than the experiment. Both arms were
+sampled in BLOCKS - three runs of one build, reflash, three of the other -
+so any drift in radio conditions over those minutes is indistinguishable
+from a build difference, and RSSI on this link wanders between -59 and -80
+across a session. Blocked sampling attributes drift to whatever changed
+between the blocks.
+
+So, for any future A/B on this hardware:
+
+- The noise floor at the operating point is about **4 fps peak-to-peak**.
+  An effect smaller than that cannot be resolved by a handful of runs.
+- Interleave the arms rather than blocking them, which needs the parameter
+  runtime-settable (a `CFG` command) instead of compiled in - a reflash per
+  swap makes interleaving cost ~2 minutes a sample and so guarantees blocked
+  sampling.
+- Report the within-arm spread alongside any claimed difference. A mean
+  without a spread is not a measurement.
+
+The 17.2 numbers still stand as the size of the prize - a gather costing
+322 us idle and 4,200 us loaded - and 17.10 still stands as evidence that
+the bus is what is contended, because its effect (13.7 against 7.1, 269
+accepted against 185) is far outside this noise floor. What is not
+established is that finer CPU interleaving recovers any of it. Attacking the
+root instead - bufA off PSRAM, or tiles staged through SRAM on the receive
+side - would produce an effect large enough to measure with the sampling
+discipline this project actually has.
