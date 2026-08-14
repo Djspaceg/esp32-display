@@ -184,17 +184,31 @@ public enum BandProtocol {
     }
 
     public struct DeviceStats: Equatable {
+        /// COMPLETE frames drawn. Between the partial-draw fallback shipping
+        /// and the firmware that pairs with this comment, it counted draw
+        /// passes of either kind and so overstated delivery - up to fourfold at
+        /// low frame rates. It is complete frames again, which matters because
+        /// `FrameSender`'s pacing hill-climb steers on its delta.
         public var shown: UInt32 = 0
         public var dropped: UInt32 = 0
-        public var skipped: UInt32 = 0
+        /// Draw passes that painted only part of a frame, because the panel gave
+        /// up waiting for the rest (see the firmware's TILE_PARTIAL_DRAW_MS).
+        /// A useful signal in its own right: a high ratio against `shown` means
+        /// datagram loss is stopping frames from completing.
+        ///
+        /// Occupies the u32 that carried the always-zero `skipped` before, so
+        /// no real value was displaced. Firmware predating the split reports 0
+        /// here, which reads correctly as "no partial draws".
+        public var partialDraws: UInt32 = 0
         public var packets: UInt32 = 0
         public var heap: UInt32 = 0
 
-        public init(shown: UInt32 = 0, dropped: UInt32 = 0, skipped: UInt32 = 0,
+        public init(shown: UInt32 = 0, dropped: UInt32 = 0,
+                    partialDraws: UInt32 = 0,
                     packets: UInt32 = 0, heap: UInt32 = 0) {
             self.shown = shown
             self.dropped = dropped
-            self.skipped = skipped
+            self.partialDraws = partialDraws
             self.packets = packets
             self.heap = heap
         }
@@ -208,6 +222,7 @@ public enum BandProtocol {
             return UInt32(b[0]) | (UInt32(b[1]) << 8) | (UInt32(b[2]) << 16) | (UInt32(b[3]) << 24)
         }
         return DeviceStats(
-            shown: u32(0), dropped: u32(1), skipped: u32(2), packets: u32(3), heap: u32(4))
+            shown: u32(0), dropped: u32(1), partialDraws: u32(2),
+            packets: u32(3), heap: u32(4))
     }
 }
