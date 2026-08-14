@@ -3358,19 +3358,21 @@ void loop() {
         // the gather is 4.2 ms of an 8.6 ms call (section 17.2) and a
         // byte-identical rectangle does not need copying.
         //
-        // The theory for why staging still wins: the copy is not overhead but a
-        // memory-tier move. DMA streaming from PSRAM contends with the receive
-        // task's PSRAM writes and with the CPU, and PSRAM's ~22.3 MB/s (phase
-        // 0) is barely above what the panel needs, while a strided SRAM copy
-        // runs at 340+ MB/s and leaves the transfer reading fast memory
-        // uncontended. Paying 4.2 ms to make the other 4.4 ms cheap. That is
-        // what tileStaging's declaration means by "keeps DMA reads off PSRAM
-        // entirely", which is the load-bearing clause.
+        // Measured on a quiet panel, at the 15 fps offered where this board
+        // delivers best: staging 13.7 complete frames a second at 2.8% loss,
+        // direct-from-bufA 7.1 at 47.5%. The decisive number is the datagrams
+        // the panel ACCEPTED - 269 of 270 offered with staging against 185
+        // without it. Drawing from PSRAM does not just cost the draw; it starves
+        // the receive path of the same bus, so tiles never arrive and frames
+        // never complete.
         //
-        // Staging stays because it is what has always shipped, NOT because the
-        // experiment settled it: the run that looked much worse was measured
-        // with the Mac app streaming to the same panel, which corrupts every
-        // count (section 17.9). Worth redoing on a quiet panel.
+        // So the copy is not overhead, it is a memory-tier move: PSRAM's
+        // ~22.3 MB/s (phase 0) is barely above what the panel needs and is
+        // shared with the receive task's writes, while a strided SRAM copy runs
+        // at 340+ MB/s and leaves the transfer reading fast memory uncontended.
+        // Paying 4.2 ms to make the other 4.4 ms cheap, and to leave the radio
+        // its bandwidth. That is what tileStaging's declaration means by "keeps
+        // DMA reads off PSRAM entirely" - the load-bearing clause.
         uint8_t *source = tileStaging[tileStagingIdx];
         tileStagingIdx ^= 1;
         for (int r = 0; r < hgt; r++) {

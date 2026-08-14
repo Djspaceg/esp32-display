@@ -1364,11 +1364,47 @@ sent, or more complete frames than were offered, is this. Check with
 `pgrep -fl ESPDisplaySender` before trusting a number, and prefer quitting
 the app outright over hoping a static screen keeps it quiet.
 
-This invalidated the phase-12 attempt at drawing full-width runs directly
-from bufA instead of staging through SRAM (the reasoning is preserved at
-the staging loop). The "much worse" result that motivated reverting it was
-measured with the app streaming, so **the experiment is unresolved rather
-than settled** and wants redoing on a quiet panel. The comment at the
-staging loop states the PSRAM-contention theory as the reason staging
-exists, which remains the best explanation on the evidence in 17.2 - but it
-is a theory that this measurement did not actually test.
+This invalidated the first attempt at measuring whether full-width runs
+could skip staging, which is redone properly in 17.10.
+
+### 17.10 Staging into SRAM earns its 4.2 ms (measured, quietly)
+
+A full-width run is already contiguous in bufA, so its staging copy
+produces a byte-identical rectangle - and that copy is 4.2 ms of an 8.6 ms
+call (17.2). Skipping it for those runs looks like free money. It is not.
+
+Both builds, app quit, RSSI -60 to -62:
+
+| Offered fps | Staging: complete | Direct: complete | Staging: lost | Direct: lost |
+| ----------- | ----------------- | ---------------- | ------------- | ------------ |
+| 8           | 7.9               | 7.1              | 0.8%          | 11.7%        |
+| 15          | **13.7**          | **7.1**          | **2.8%**      | **47.5%**    |
+| 25          | 4.8               | 8.8              | 22.3%         | 24.4%        |
+| 60          | 0.2               | 0.0              | 99.6%         | 100.0%       |
+
+At 15 fps offered - where this board delivers best - dropping the copy
+halves delivered frames and multiplies loss seventeenfold. The 25 fps row
+reverses, but that staging sample accepted only 181 of 450 offered datagrams
+where its 15 fps sample took 269 of 270, so it is a bad sample rather than a
+crossover; single runs in the collapse region are not worth much.
+
+The decisive column is neither of the ones above. It is the datagrams the
+panel ACCEPTED at 15 fps offered: 269 of 270 with staging, 185 without.
+Drawing from PSRAM does not merely cost the draw, it starves the RECEIVE
+path of the same bus, so tiles never arrive and frames cannot complete. The
+draw and the radio are competing for PSRAM, and staging is what keeps them
+apart.
+
+That also sharpens 17.2's reading. `gather` and `queue` both inflating
+tenfold under load is not two independent contentions; it is one bus
+oversubscribed by three parties - the receive task writing tiles, the gather
+reading them, and DMA streaming pixels out. Staging removes the third from
+PSRAM entirely, which is why it is worth 4.2 ms.
+
+So contention is confirmed as the mechanism, and the fix is not to remove
+work from the draw path but to keep PSRAM traffic off it. Remaining ideas
+from 17.6 item 3 in that light: lowering `udpReceiveTask`'s priority does
+nothing for bus pressure and is now the least promising; bounding drained
+datagrams per unit time is more interesting, because it would leave the
+gather uninterrupted windows; and moving bufA itself, or double-buffering
+tiles through SRAM on the receive side, attacks the root.
