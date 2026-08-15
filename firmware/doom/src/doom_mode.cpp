@@ -17,6 +17,10 @@
 // From doomgeneric_esp32s3.c
 extern "C" void push_key(unsigned char key, int pressed);
 
+// From doom_hw_bridge.cpp
+extern "C" void doom_display_init(void);
+extern "C" void doom_display_blit(const uint16_t* buf, int w, int h);
+
 // doomgeneric entry points (C linkage)
 extern "C" {
     void doomgeneric_Create(int argc, char** argv);
@@ -94,8 +98,6 @@ void doom_enter(void) {
 
     // Show splash screen while engine initializes
     {
-        extern "C" void doom_display_init(void);
-        extern "C" void doom_display_blit(const uint16_t* buf, int w, int h);
         doom_display_init();
 
         // Allocate splash buffer in PSRAM (466*466*2 = 434KB)
