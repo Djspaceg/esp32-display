@@ -26,7 +26,7 @@ int M_MakeDirectory(const char* path) {
 
 #include <esp_log.h>
 
-void I_Error(const char* error, ...) {
+void I_Error(char *error, ...) {
     static char buf[256];
     va_list args;
     va_start(args, error);
@@ -116,22 +116,10 @@ void I_Sleep(int ms) {
     DG_SleepMs((uint32_t)ms);
 }
 
-// --- Video stubs ---
-// DG_DrawFrame handles all display. These are called by the engine's video
-// layer but we don't need them to do anything.
-void I_InitGraphics(void) {}
-void I_ShutdownGraphics(void) {}
-void I_StartFrame(void) {}
-void I_StartTic(void) {}
-void I_UpdateNoBlit(void) {}
-void I_FinishUpdate(void) {}
-void I_ReadScreen(unsigned char* scr) { (void)scr; }
-void I_SetPalette(unsigned char* palette) { (void)palette; }
-int I_GetPaletteIndex(int r, int g, int b) {
-    (void)r; (void)g; (void)b;
-    return 0;
-}
-void I_SetWindowTitle(const char* title) { (void)title; }
+// --- Video ---
+// Video is handled by i_video.c (from doomgeneric) which calls DG_DrawFrame.
+// We do NOT stub video functions here -- i_video.c provides them.
+// DG_DrawFrame and DG_SetWindowTitle are in platform/doomgeneric_esp32s3.c.
 
 // --- Network stubs ---
 void I_InitNetwork(void) {}

@@ -1,7 +1,10 @@
 // Network module stub for ESP32 (no multiplayer support)
 // Replaces the SDL_net-based networking with no-ops.
 #include "net_defs.h"
+#include "net_client.h"
 #include "doomtype.h"
+
+// net_client_connected and drone are defined in dummy.c
 
 static boolean NET_ESP32_InitClient(void) { return false; }
 static boolean NET_ESP32_InitServer(void) { return false; }
