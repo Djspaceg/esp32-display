@@ -26,13 +26,20 @@
 // Disable savegames (no writable filesystem)
 // The engine handles missing save gracefully -- it just won't offer Load Game
 
-// Disable network multiplayer
-#define NET_CLIENT_H  // prevent net_client.h from defining anything
+// Network: multiplayer is disabled (single player only on embedded).
+// The network headers are still included for variable declarations
+// (net_client_connected, drone), which are defined in net_sdl.c as false.
 
 // Disable sound (no audio hardware; stubs in doom_esp32_stubs.c)
 // Note: FEATURE_SOUND is NOT defined, which disables the sound system.
 // If we later add I2S audio, define it and implement the sound module.
 
-// Override exit() to signal game loop exit instead of calling abort()
+// Override exit() in Doom engine C files only.
+// This cannot be a global macro because it conflicts with C++ <cstdlib>.
+// Instead, we redefine exit() only in the .c files that call it, via a
+// separate header (doom_exit.h) included at the bottom of this config.
+// The C++ files (doom_mode.cpp, doom_hw_bridge.cpp) don't call exit().
+#ifndef __cplusplus
 extern void doom_exit_override(int status);
 #define exit(x) doom_exit_override(x)
+#endif
