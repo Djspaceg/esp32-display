@@ -21,6 +21,10 @@ tools/__pycache__/
 *.espdispfw
 *.espdispfw.*.partial
 
+# Doom WAD files (4MB+, user downloads separately -- see firmware/doom/README.md)
+firmware/doom/doom1.wad
+*.wad
+
 # Xcode
 #
 # gitignore contributors: remember to update Global/Xcode.gitignore, Objective-C.gitignore & Swift.gitignore
