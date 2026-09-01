@@ -388,6 +388,25 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertFalse(session.senderPausedForTesting)
     }
 
+    func testUserPauseSurvivesRepeatedInfo() throws {
+        // EINF repeats every 2 seconds and every arrival re-binds identity.
+        // The provisional pause must lift on the FIRST bind only: unpausing
+        // on every bind silently undid a user's pause within seconds.
+        let manager = makeManager([controllablePanel()])
+        let session = makeSession(name: "studio-display")
+        manager.register(session)
+        let info = try makeInfo(
+            name: "studio-display", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])
+        manager.update(.info(info), for: "studio-display", sessionID: session.id)
+        XCTAssertFalse(session.senderPausedForTesting)
+
+        manager.setPaused(true, for: "studio-display")
+        manager.update(.info(info), for: "studio-display", sessionID: session.id)
+
+        XCTAssertTrue(session.senderPausedForTesting,
+                      "a repeated EINF must not undo a user pause")
+    }
+
     func testProvisionalUnownedSessionIsStoppedAfterIdentity() throws {
         let manager = makeManager([controllablePanel()])
         let session = makeSession(name: "unowned-display")

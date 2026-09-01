@@ -2912,6 +2912,20 @@ final class PanelManager: ObservableObject {
         panel.manuallyOff = info.manuallyOff
     }
 
+    /// Sessions whose one-time provisional pause has already been lifted.
+    private var identityBoundSessionIDs: Set<UUID> = []
+
+    /// Lift a session's provisional pause on its FIRST identity bind only.
+    /// EINF repeats every 2 seconds and every arrival re-binds, so unpausing
+    /// unconditionally here silently undid any user pause within seconds of
+    /// it being set - the "panel keeps un-pausing itself" bug.
+    private func liftProvisionalPause(_ serviceName: String) {
+        guard let session = sessions[serviceName],
+              identityBoundSessionIDs.insert(session.id).inserted
+        else { return }
+        session.setPaused(false)
+    }
+
     /// Bind a paused discovery session to one owned hardware record. Returns
     /// whether the record's service name migrated, or nil when this service is
     /// not owned and the provisional session was stopped.
@@ -2926,7 +2940,7 @@ final class PanelManager: ObservableObject {
                 return nil
             }
             unownedServiceNames.remove(serviceName)
-            sessions[serviceName]?.setPaused(false)
+            liftProvisionalPause(serviceName)
             return false
         }
 
@@ -2937,7 +2951,7 @@ final class PanelManager: ObservableObject {
             return nil
         }
         unownedServiceNames.remove(serviceName)
-        sessions[serviceName]?.setPaused(false)
+        liftProvisionalPause(serviceName)
         refreshPreviewDriver()
         return reconciled
     }
