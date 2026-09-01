@@ -164,6 +164,13 @@ static const uint32_t LONG_PRESS_MS = 600;
 // meaning to - the long-press flip already fired and released the button in
 // any ordinary press.
 static const uint32_t EXTRA_LONG_PRESS_MS = 3000;
+// Two short presses within this window toggle the signal survey - the one
+// panel-side action that must be reachable MID-STREAM (its whole job is
+// walking an actively-failing panel to better air), so it cannot live on the
+// idle card, and all three single-press tiers are taken. The two presses'
+// backlight toggles cancel each other, so the double-press costs nothing but
+// a blink - which doubles as feedback.
+static const uint32_t DOUBLE_PRESS_MS = 600;
 static const uint32_t DEBOUNCE_MS = 30;
 static const uint8_t BL_HIGH = 128;  // 50%, Waveshare's recommended ceiling
 static const uint8_t BL_LOW = 24;    // ~10%
@@ -195,13 +202,14 @@ static uint32_t lastIdleDrawAt = 0;
 static volatile bool sleepRequested = false;  // set by UDP task on ESLP
 static volatile bool wakeRequested = false;   // set by UDP task on EWAK
 static bool displaySleeping = false;
-// Signal-survey mode: tap the lit status card to turn the panel into a
-// bright, half-second-refresh RSSI meter, so a marginal panel can be walked
-// around the room to find placement that actually carries the stream -
-// sections 17.17 and 18.5-18.6 are all stories about radio placement, and
-// until now the only live readout was a laptop pinging it. Tap again to
-// exit, or resume streaming (any drawn frame clears it, like the dim
-// states). Touch boards only, by construction: the entry is a tap.
+// Signal-survey mode: a bright, half-second-refresh RSSI meter on the glass,
+// so a marginal panel can be walked around the room to find placement that
+// actually carries the stream - sections 17.17 and 18.5-18.6 are all stories
+// about radio placement, and until now the only live readout was a laptop
+// pinging it. Entered and left by a BOOT double-press at ANY time (streaming
+// included - the stream's draw pass is suppressed while the meter is up and
+// its dirty state keeps accumulating for the exit repaint), or by a tap on
+// touch boards; a tap on the lit status card also enters it.
 static bool surveyActive = false;
 static uint32_t lastSurveyDrawAt = 0;
 
@@ -2409,7 +2417,7 @@ static void drawSurveyScreen() {
     snprintf(lineRssi, sizeof(lineRssi), "--");
   }
   const char *lines[4] = {"SIGNAL", lineRssi, surveyQualityWord(connected, rssi),
-                          "tap to exit"};
+                          "2x boot / tap exits"};
   // Per-line scales: the number dominates, everything else is legible-small.
   // Width-capped like infoBarGlyphScale, so the C6's 172 px and the S3's 466
   // both centre without clipping.
@@ -2775,6 +2783,28 @@ static void handleButton() {
       saveDisplayPrefs();
       Serial.printf("button: short press -> backlight %s (saved)\n",
                     blIsHigh() ? "high" : "low");
+      // Two shorts inside DOUBLE_PRESS_MS toggle the signal survey, at any
+      // time - streaming included, which is the point: a panel is surveyed
+      // BECAUSE its stream is struggling, so the entry cannot depend on the
+      // idle card (which never appears while a paused sender's keepalives
+      // still flow). The two backlight toggles above cancelled each other.
+      static uint32_t lastShortAt = 0;
+      if (now - lastShortAt <= DOUBLE_PRESS_MS) {
+        lastShortAt = 0;
+        surveyActive = !surveyActive;
+        Serial.printf("button: double press -> signal survey %s\n",
+                      surveyActive ? "on" : "off");
+        if (surveyActive) {
+          drawSurveyScreen();
+        } else {
+          applyBacklight();
+          if (idleActive) drawIdleScreen();
+          // A live stream repaints itself: its pending tiles/bands kept
+          // accumulating while the pass was suppressed below.
+        }
+      } else {
+        lastShortAt = now;
+      }
     }
   }
 }
@@ -3663,7 +3693,7 @@ void loop() {
   }
   const uint32_t tdPassStart = micros();
 #endif
-  if (wantDraw && dmaInFlight == 0) {
+  if (wantDraw && dmaInFlight == 0 && !surveyActive) {
     // Which kind of pass this is, captured before lastCompleted moves. A frame
     // completing outranks the partial timer: if both are true the pass paints a
     // whole frame and counts as one.
