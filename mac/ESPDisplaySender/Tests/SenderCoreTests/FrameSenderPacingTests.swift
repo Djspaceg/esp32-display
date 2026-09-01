@@ -281,4 +281,31 @@ final class FrameSenderLadderTests: XCTestCase {
         // fitted to each other.
         XCTAssertEqual(FrameSender.degradeTargetFps / 2, 15.0)
     }
+
+    // MARK: keyframes riding half-res
+
+    func testKeyframeRidesHalfResOnlyAmidOverBudgetMotion() {
+        // The signal is the motion around the keyframe, never the keyframe's
+        // own size - a keyframe is ALWAYS over any per-frame budget, so
+        // sizing it against the budget would pin every keyframe (including a
+        // static screen's) at half-res forever with nothing to heal it.
+        XCTAssertTrue(FrameSender.keyframeRidesHalfRes(
+            motionOverBudget: true, halfResAvailable: true, policy: .auto))
+        XCTAssertFalse(FrameSender.keyframeRidesHalfRes(
+            motionOverBudget: false, halfResAvailable: true, policy: .auto))
+    }
+
+    func testKeyframeHalfResNeedsTheCapabilityAndPermission() {
+        // Codec 3 to firmware that predates it loses whole datagrams, and
+        // .losslessOnly is the user forbidding the resolution trade outright
+        // - both are harder constraints than the stall being avoided.
+        XCTAssertFalse(FrameSender.keyframeRidesHalfRes(
+            motionOverBudget: true, halfResAvailable: false, policy: .auto))
+        XCTAssertFalse(FrameSender.keyframeRidesHalfRes(
+            motionOverBudget: true, halfResAvailable: true,
+            policy: .losslessOnly))
+        XCTAssertTrue(FrameSender.keyframeRidesHalfRes(
+            motionOverBudget: true, halfResAvailable: true,
+            policy: .aggressive))
+    }
 }
