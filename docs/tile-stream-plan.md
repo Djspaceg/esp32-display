@@ -1926,3 +1926,29 @@ protocol-side lever is fewer/larger records, which the record-count
 finding just showed is worth more than assumed (the C6-style full-frame
 coalescing the band path enjoys, applied vertically to tiles, is worth
 re-arguing on these numbers despite 17.5 deferring it).
+
+### 18.5 The lost-decrement wedge: a latent race the new throughput exposed
+
+After 18.4's session the user reported a regression on real streaming:
+~15 fps against the earlier 25, with visibly stale regions. Live serial
+counters found it in one look: `drawerr` climbing ~1/s with `gateblocked`
+~2,000 per 5 s window - the DMA-stall failsafe firing over and over. Four
+to five times a second, `dmaInFlight` wedged above zero with nothing in
+flight, the draw gate refused every pass for 500 ms (the failsafe's
+timeout, ~450 blocked 1 ms iterations - the two counters agree exactly),
+then the failsafe reclaimed and the cycle repeated. Roughly 40% of all
+draw time went to those freezes.
+
+The race was in this code from the beginning: tasks increment dmaInFlight
+with a plain read-modify-write while the SPI ISR decrements it, and an ISR
+landing between a task's load and store has its decrement silently
+overwritten. What changed is the hit rate: the retuned pacing and the
+denser merged-record traffic multiplied completions per second until a
+once-rare coincidence became constant.
+
+Fix: every task-side update goes through dmaMarkQueued()/dmaUnmarkFailed(),
+which mask interrupts around the RMW (portMUX critical section shared with
+the ISR's own guarded decrement). Verified on the same live stream:
+drawerr flat at zero, gateblocked 0-15 per window, continuous drawing.
+The `dmaInFlight = 0` failsafe reclaims stay plain stores - a racing ISR
+decrement after a store is rejected by the ISR's own > 0 check.
