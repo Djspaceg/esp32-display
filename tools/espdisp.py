@@ -2080,31 +2080,63 @@ def motion_frame_packets(frame_id: int, seed: int, width: int = 466,
     visible = [t for t in range(cols * rows) if t not in hidden]
     codec = TILE_CODEC_HALF_BC1 if half else TILE_CODEC_BC1
 
-    records = []
+    # Merged horizontal runs split to fill each datagram, like the real
+    # sender's TilePacker - not one record per tile. This tool originally
+    # emitted per-tile records, which misrepresented the load in two ways at
+    # once: 4 bytes of record header per TILE instead of per run (a
+    # ~2.9 KB/frame overstatement), and a per-record decode entry on the
+    # panel for every tile - 719 of them instead of dozens, which overstated
+    # the receive task's fixed costs and made the firmware's
+    # run-length-gated paths (CFGTUNE directmin) unreachable from this tool
+    # entirely.
+    runs = []
     for tile in visible:
-        tx, ty = tile % cols, tile // cols
-        w = min(TILE_DIM, width - tx * TILE_DIM)
+        if runs and tile == runs[-1][0] + runs[-1][1] \
+                and tile % cols != 0 and runs[-1][1] < 32:
+            runs[-1][1] += 1
+        else:
+            runs.append([tile, 1])
+
+    def encode(start, run_len, seed):
+        """One record for `run_len` tiles from `start`, and the next seed."""
+        tx, ty = start % cols, start // cols
+        x0 = tx * TILE_DIM
+        w = min((tx + run_len) * TILE_DIM, width) - x0
         h = min(TILE_DIM, height - ty * TILE_DIM)
         if half:
             payload, seed = bc1_noise_tile(seed, half_dim(w), half_dim(h))
         else:
             payload, seed = bc1_noise_tile(seed, w, h)
-        records.append((tile, tile_record(tile, 1, codec, payload)))
+        return tile_record(start, run_len, codec, payload), seed
 
+    # Conservative per-tile cost for the split decision: a full 16x16 tile
+    # is 16 BC1 blocks (128 B), an 8x8 half raster is 4 (32 B); edge tiles
+    # only shrink a record below the estimate, never past it.
+    per_tile = 32 if half else 128
     packets = []
     current, size, first = [], 6, None
-    for start, rec in records:
-        if size + len(rec) > TILE_PACKET_BUDGET and current:
+
+    def flush():
+        nonlocal current, size, first
+        if current:
             packets.append(tile_header(frame_id, first, len(visible))
                            + b"".join(current))
-            current, size, first = [], 6, None
-        if first is None:
-            first = start
-        current.append(rec)
-        size += len(rec)
-    if current:
-        packets.append(tile_header(frame_id, first, len(visible))
-                       + b"".join(current))
+        current, size, first = [], 6, None
+
+    for start, run_len in runs:
+        while run_len > 0:
+            take = min(run_len, (TILE_PACKET_BUDGET - size - 4) // per_tile)
+            if take < 1:
+                flush()
+                continue
+            record, seed = encode(start, take, seed)
+            if first is None:
+                first = start
+            current.append(record)
+            size += len(record)
+            start += take
+            run_len -= take
+    flush()
     return packets, seed
 
 

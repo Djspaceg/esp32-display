@@ -2561,10 +2561,10 @@ def test_tile_stream_wire():
     check_equal(len(espdisp.bc1_noise_tile(1, 2, 16)[0]), 32,
                 "a 2x16 edge tile is 4 blocks")
     motion, _ = espdisp.motion_frame_packets(1, 0xC0FFEE)
-    check_equal(len(motion), 66, "a full-frame BC1 update is 66 datagrams")
+    check_equal(len(motion), 65, "a full-frame BC1 update is 65 datagrams")
     total = sum(len(p) for p in motion)
     check(90000 < total < 96000,
-          "a full BC1 frame is ~94 KB, got %d" % total)
+          "a full BC1 frame is ~92 KB, got %d" % total)
     covered = []
     for p in motion:
         check(len(p) <= espdisp.TILE_PACKET_BUDGET, "motion datagram in budget")
@@ -2577,7 +2577,10 @@ def test_tile_stream_wire():
             tile_field, len_field = struct.unpack("<HH", p[at:at + 4])
             check_equal(len_field >> 14, espdisp.TILE_CODEC_BC1,
                         "motion records are BC1")
-            covered.append(tile_field & 0x03FF)
+            # Records are merged runs now (matching TilePacker), so coverage
+            # expands each record to the tiles it carries.
+            start = tile_field & 0x03FF
+            covered.extend(range(start, start + ((tile_field >> 10) & 0x1F) + 1))
             at += 4 + (len_field & 0x3FFF)
         check_equal(at, len(p), "motion records tile the packet exactly")
     hidden = set(espdisp.tile_visibility()["outside"])
@@ -2606,17 +2609,18 @@ def test_tile_stream_wire():
     # The whole point, on the wire: the same 719 tiles, a quarter of the bytes,
     # and the datagram count that lifts the majority-of-motion ceiling.
     hmotion, _ = espdisp.motion_frame_packets(1, 0xC0FFEE, half=True)
-    check_equal(len(hmotion), 18,
-                "a half-res full frame is 18 datagrams, against BC1's 66")
+    check_equal(len(hmotion), 16,
+                "a half-res full frame is 16 datagrams, against BC1's 65")
     htotal = sum(len(p) for p in hmotion)
-    check(25000 < htotal < 26500,
-          "a half-res full frame is ~25.8 KB, got %d" % htotal)
-    # 3.67x, not 4x: the payload quarters but each record's 4-byte header does
-    # not, so a tile goes 132 B -> 36 B. Worth pinning because section 16's
-    # datagram arithmetic is built on the per-tile figure, and a 4x estimate
-    # would predict 17 datagrams where the wire actually needs 18.
-    check_equal(round(total / htotal, 2), 3.65,
-                "half-res is 3.65x smaller than BC1, header included")
+    check(22500 < htotal < 24000,
+          "a half-res full frame is ~23.1 KB, got %d" % htotal)
+    # 3.97x, not 4x: payloads quarter exactly, but full-res splits into more
+    # records (92 against 44 - a run's BC1 bytes outgrow the datagram sooner)
+    # and more packets, so it pays more header overhead per pixel. Worth
+    # pinning because section 16's datagram arithmetic is built on these
+    # figures, and a clean 4x estimate would predict the wrong packet counts.
+    check_equal(round(total / htotal, 2), 3.97,
+                "half-res is 3.97x smaller than BC1, header included")
     hcovered = []
     for p in hmotion:
         check(len(p) <= espdisp.TILE_PACKET_BUDGET,
@@ -2629,7 +2633,9 @@ def test_tile_stream_wire():
             tile_field, len_field = struct.unpack("<HH", p[at:at + 4])
             check_equal(len_field >> 14, espdisp.TILE_CODEC_HALF_BC1,
                         "half-res records carry codec 3")
-            hcovered.append(tile_field & 0x03FF)
+            start = tile_field & 0x03FF
+            hcovered.extend(
+                range(start, start + ((tile_field >> 10) & 0x1F) + 1))
             at += 4 + (len_field & 0x3FFF)
         check_equal(at, len(p), "half-res records tile the packet exactly")
     check_equal(sorted(hcovered), sorted(covered),

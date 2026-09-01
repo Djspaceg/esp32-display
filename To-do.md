@@ -24,18 +24,27 @@
     - [x] Ride interval keyframes at half-res while surrounding diffs are over
           budget (keyframeRidesHalfRes); quiet-screen keyframes stay lossless
           and the refresh timer heals a half-res screen back to full quality.
-  - [ ] Cut draw CPU per frame: size-gate a direct-from-SRAM draw for large
-        runs — records of at least N tiles draw straight from the decode
-        scratch while still committing to bufA for persistence, deleting the
-        gather that §18.2 measured at 30–40% of pass time under load. §17.16
-        only tested and rejected the ungated per-record variant; needs a
-        cross-task draw lock (receive task and loop() would both issue panel
-        calls). Measure at the §18 operating point (half-res, 35 fps offered).
+  - [x] Size-gated direct-from-SRAM draw — BUILT, MEASURED, REMOVED (§18.4):
+        lost 30–60% complete fps in every interleaved sample, because the
+        CASET/queue work it moves onto the receive task stalls the drain
+        loop and drops datagrams. On one oversubscribed core, work moved
+        between tasks is not work removed. Side discovery worth more than
+        the feature: tile-motion emitted per-tile records (719/frame) where
+        the real sender merges runs (44–92); fixing the tool nearly doubled
+        baseline delivery (7.3 → 12.8 complete fps at the same offered pixel
+        load), so per-record cost is first-order and §18.1's sweep
+        understated real-traffic capacity.
   - [ ] Stop sharing core 1: move the draw pass to its own task pinned to
         core 0 (WiFi/lwIP live there but their CPU work is bursty), so the
-        two heavy loops stop arbitrating one core. §18.2 shows arbitration
-        cannot win — parallelism might. Compile-time experiment; measure at
-        the same operating point.
+        two heavy loops stop arbitrating one core. §18.2 and §18.4 both show
+        same-core shuffling cannot win — parallelism is the remaining
+        device-side lever. Compile-time experiment; measure at the §18
+        operating point.
+  - [ ] Fewer, larger records: §18.4's record-count finding re-opens
+        vertical/multi-row coalescing on the SENDER side (more tiles per
+        record within the 32-tile and datagram limits), which §17.5 deferred
+        on draw-call grounds — the win now shows up in receive-path decode
+        cost, not draw calls.
   - [x] Re-measure sender ceilings on the new firmware (§18.1) and retune:
         ingest now accepts ~600 datagrams/s and delivery peaks at ~450/s
         offered, so tileAbsorbablePacketsPerSecond moves 300 → 450. Repeat
