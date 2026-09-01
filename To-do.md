@@ -13,12 +13,14 @@
     - [ ] Measure the arms on a panel whose link carries 430+ datagrams/s
           (needs ~RSSI -60; silver-round at -78 to -86 was radio-bound and the
           arms were indistinguishable — §17.17).
-  - [ ] Let half-res carry full-frame motion: a half-res full frame is ~17
+  - [x] Let half-res carry full-frame motion: a half-res full frame is ~17
         datagrams → ~16 fps at the current absorbable rate (14.2 complete fps
-        measured, §17.7). Verify the panel is not pinned to losslessOnly, and
-        extend the degradation ladder to keyframes (half-res keyframe plus a
-        lossless settle pass) so the 2 s keyframe stops stalling the stream for
-        ~220 ms of pacing budget.
+        measured, §17.7).
+    - [x] Verify the quality policy is not pinned to losslessOnly (settings
+          hold tileQuality=auto).
+    - [x] Ride interval keyframes at half-res while surrounding diffs are over
+          budget (keyframeRidesHalfRes); quiet-screen keyframes stay lossless
+          and the refresh timer heals a half-res screen back to full quality.
   - [ ] Size-gate a direct-from-SRAM draw for large runs: records of at least
         N tiles draw straight from the decode scratch while still committing to
         bufA for persistence, halving PSRAM traffic in exactly the full-frame
