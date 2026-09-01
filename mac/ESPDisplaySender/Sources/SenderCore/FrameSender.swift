@@ -97,6 +97,13 @@ final class FrameSender {
     /// degradation ladder (docs/tile-stream-plan.md section 6.6 step 3c).
     /// sendQueue-only.
     private var skipNextTileFrame = false
+    /// Whether the most recent diff frame engaged the ladder's upper rungs
+    /// (half-res or frame skipping) - i.e. motion is currently saturating the
+    /// pacing budget. Interval keyframes consult this: amid over-budget
+    /// motion, a full-res BC1 keyframe is ~66 datagrams (~220 ms of pacing at
+    /// the tile ceiling) that stalls the very motion the ladder is defending,
+    /// so it rides half-res (~17 datagrams) instead. sendQueue-only.
+    private var motionOverBudget = false
     /// The frame rate the degradation ladder defends. Below the 60 target
     /// deliberately: forcing BC1 (rung a) engages when lossless could not
     /// sustain this, and frame skipping (rung c) only when even BC1 cannot.
@@ -168,6 +175,25 @@ final class FrameSender {
             floorEstimate = bc1Estimate
         }
         return (forceLossy, forceHalfRes, floorEstimate > budgetBytes)
+    }
+
+    /// Whether an interval keyframe should ride half-res: only when motion
+    /// is already saturating the budget (the ladder's upper rungs engaged on
+    /// the surrounding diffs), the panel decodes codec 3, and the user has
+    /// not forbidden lossy outright. A pure function beside
+    /// `degradationRungs` for the same reason it is one: this threshold
+    /// decides when a keyframe sheds resolution, and thresholds without
+    /// tests are how this project shipped its earlier ladder gaps.
+    ///
+    /// Deliberately NOT keyed on the keyframe's own size: a keyframe is
+    /// always over any per-frame budget (719 tiles), so sizing it against
+    /// the budget would force every keyframe half-res forever, including on
+    /// a static screen where nothing would ever heal the quality back. The
+    /// signal is the MOTION around it, not the keyframe itself.
+    static func keyframeRidesHalfRes(
+        motionOverBudget: Bool, halfResAvailable: Bool, policy: TileLossyPolicy
+    ) -> Bool {
+        motionOverBudget && halfResAvailable && policy != .losslessOnly
     }
 
     // Per-stage cost of the tile send path, accumulated on sendQueue and
@@ -1274,13 +1300,18 @@ final class FrameSender {
         lock.unlock()
 
         // The degradation ladder (docs/tile-stream-plan.md section 6.6),
-        // applied to diff frames only - a keyframe is a bounded 2-second
-        // cost whose latency does not gate motion, and forcing it lossy
-        // would leave a STATIC screen at BC1 quality forever (nothing dirty
-        // afterward ever heals it). Budget = what the current pacing can
+        // decided per diff frame. Budget = what the current pacing can
         // carry per frame at the fps the ladder defends; estimates use the
         // plan's flat per-tile figures (512 B raw, 128 B BC1 - edge tiles
         // only make them conservative).
+        //
+        // Keyframes take a narrower decision: amid motion the ladder already
+        // judged over budget, a full-res BC1 keyframe (~66 datagrams, ~220 ms
+        // of pacing at the tile ceiling) stalls the very stream the ladder is
+        // defending, so it rides half-res too. A QUIET screen's keyframes
+        // stay lossless - motionOverBudget is cleared by any in-budget diff
+        // and by the refresh timer - so static content still heals to full
+        // quality within one keyframe/refresh interval of pressure ending.
         var forceLossy = false
         var forceHalfRes = false
         if !isKeyframe {
@@ -1290,6 +1321,11 @@ final class FrameSender {
             forceLossy = rungs.forceLossy
             forceHalfRes = rungs.forceHalfRes
             skipNextTileFrame = rungs.skipNextFrame
+            motionOverBudget = rungs.forceHalfRes || rungs.skipNextFrame
+        } else if Self.keyframeRidesHalfRes(
+            motionOverBudget: motionOverBudget, halfResAvailable: halfRes,
+            policy: policy) {
+            forceHalfRes = true
         }
 
         let encodeStart = DispatchTime.now().uptimeNanoseconds
@@ -1415,6 +1451,11 @@ final class FrameSender {
             }
             self.prevFrame = nil  // full repaint, healing any lost bands
             self.prevTileFrame = nil  // and any lost tiles, same rule
+            // This timer only fires after refreshInterval of no real frames,
+            // which is proof the motion (and any budget pressure it carried)
+            // has ended - so the repaint below heals a half-res screen back
+            // to lossless rather than re-sending it small.
+            self.motionOverBudget = false
             self.send(frame: frame, landscape: self.lastSentLandscape)
         }
         timer.resume()
