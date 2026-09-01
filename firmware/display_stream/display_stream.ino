@@ -535,6 +535,36 @@ static volatile uint32_t statBadLen = 0;
 static volatile uint32_t statDrawErrors = 0;
 static volatile int32_t dmaInFlight = 0;  // queued strip draws not yet completed
 static uint32_t dmaQueuedAt = 0;          // for DMA-stall detection
+// dmaInFlight is incremented by tasks and decremented by the SPI ISR, and a
+// task-side read-modify-write interrupted by the ISR between its load and
+// store silently discards the ISR's decrement - the counter then sits above
+// zero with nothing in flight until the 500 ms stall failsafe reclaims it,
+// and the panel draws NOTHING for that half second. Measured live on the
+// 466x466 panel under real streaming: drawerr climbing ~1/s with
+// gateblocked ~2000 per 5 s window - 4-5 wedges of ~450 blocked-millisecond
+// iterations each, exactly the failsafe's 500 ms - costing ~40% of draw
+// time (a reliable 25 fps stream degraded to ~15 with visibly stale
+// regions). The race was always in this code; denser record traffic and the
+// retuned pacing raised its hit rate from rare to constant.
+//
+// Masking interrupts around every task-side RMW makes it atomic against the
+// ISR; the ISR's own RMW cannot be preempted by a task. The spinlock also
+// keeps it sound if the ISR and a task ever land on different cores.
+static portMUX_TYPE dmaCountMux = portMUX_INITIALIZER_UNLOCKED;
+static inline void dmaMarkQueued() {
+  portENTER_CRITICAL(&dmaCountMux);
+  dmaInFlight = dmaInFlight + 1;
+  portEXIT_CRITICAL(&dmaCountMux);
+  dmaQueuedAt = millis();
+}
+// A failed queue never fires the completion callback, so its increment is
+// rolled back - through the same mask, or the rollback can itself lose a
+// racing decrement.
+static inline void dmaUnmarkFailed() {
+  portENTER_CRITICAL(&dmaCountMux);
+  dmaInFlight = dmaInFlight - 1;
+  portEXIT_CRITICAL(&dmaCountMux);
+}
 
 // Reply endpoint: source of the most recent packet from the Mac. Used for
 // the 1Hz heartbeat so the sender can detect blackholing (wrong IP after a
@@ -555,9 +585,13 @@ AsyncUDP udp;
 // ISR context: one queued strip transfer finished.
 static bool IRAM_ATTR onColorTransDone(esp_lcd_panel_io_handle_t,
                                        esp_lcd_panel_io_event_data_t *, void *) {
+  // The ISR-safe critical section pairs with dmaMarkQueued/dmaUnmarkFailed:
+  // see dmaCountMux for the lost-decrement race this closes.
+  portENTER_CRITICAL_ISR(&dmaCountMux);
   if (dmaInFlight > 0) {
     dmaInFlight = dmaInFlight - 1;
   }
+  portEXIT_CRITICAL_ISR(&dmaCountMux);
   return false;
 }
 
@@ -1551,11 +1585,10 @@ static void benchDrawRect(const char *label, int x, int y, int w, int h,
   uint32_t t0 = micros();
   int errors = 0;
   for (int i = 0; i < reps; i++) {
-    dmaInFlight = dmaInFlight + 1;
-    dmaQueuedAt = millis();
+    dmaMarkQueued();
     if (esp_lcd_panel_draw_bitmap(panel, x, y, x + w, y + h, benchStaging) !=
         ESP_OK) {
-      dmaInFlight = dmaInFlight - 1;
+      dmaUnmarkFailed();
       errors++;
       continue;
     }
@@ -1696,11 +1729,10 @@ static void runTileBench() {
     uint32_t t0 = micros();
     int errors = 0;
     for (int i = 0; i < reps; i++) {
-      dmaInFlight = dmaInFlight + 1;
-      dmaQueuedAt = millis();
+      dmaMarkQueued();
       if (esp_lcd_panel_draw_bitmap(panel, 200, 200, 216, 216, benchStaging) !=
           ESP_OK) {
-        dmaInFlight = dmaInFlight - 1;
+        dmaUnmarkFailed();
         errors++;
       }
     }
@@ -2293,11 +2325,10 @@ static void drawIdleScreen() {
     drawOutlinedText(bufB, w, hgt, x, y + i * lineH, lines[i], scale);
   }
 
-  dmaInFlight = dmaInFlight + 1;
-  dmaQueuedAt = millis();
+  dmaMarkQueued();
   if (esp_lcd_panel_draw_bitmap(panel, 0, 0, w, hgt, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaInFlight = dmaInFlight - 1;
+    dmaUnmarkFailed();
   }
   lastIdleDrawAt = millis();
 }
@@ -2362,12 +2393,11 @@ static void showInfoBar(const char *text) {
       w, (int)strlen(infoBarText) * 6 * infoBarScale);
   drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
 
-  dmaInFlight = dmaInFlight + 1;
-  dmaQueuedAt = millis();
+  dmaMarkQueued();
   if (esp_lcd_panel_draw_bitmap(panel, 0, infoBarY0, w, infoBarY1,
                                 bufB + off) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaInFlight = dmaInFlight - 1;
+    dmaUnmarkFailed();
   }
 }
 
@@ -2389,12 +2419,11 @@ static void clearInfoBarIfExpired() {
   size_t off = (size_t)infoBarY0 * rowBytes;
   size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
   memcpy(bufB + off, bufA + off, bytes);
-  dmaInFlight = dmaInFlight + 1;
-  dmaQueuedAt = millis();
+  dmaMarkQueued();
   if (esp_lcd_panel_draw_bitmap(panel, 0, infoBarY0, w, infoBarY1,
                                 bufB + off) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaInFlight = dmaInFlight - 1;
+    dmaUnmarkFailed();
   }
 }
 
@@ -2422,12 +2451,11 @@ static void redrawInfoBarOverRun() {
   int textX = panelstate::centeredX(
       w, (int)strlen(infoBarText) * 6 * infoBarScale);
   drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
-  dmaInFlight = dmaInFlight + 1;
-  dmaQueuedAt = millis();
+  dmaMarkQueued();
   if (esp_lcd_panel_draw_bitmap(panel, 0, infoBarY0, w, infoBarY1,
                                 bufB + off) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaInFlight = dmaInFlight - 1;
+    dmaUnmarkFailed();
   }
 }
 
@@ -2533,10 +2561,10 @@ static void drawOtaScreen(const char *headline, int percent) {
     }
   }
 
-  dmaInFlight = dmaInFlight + 1;
+  dmaMarkQueued();
   if (esp_lcd_panel_draw_bitmap(panel, 0, 0, w, hgt, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaInFlight = dmaInFlight - 1;
+    dmaUnmarkFailed();
   }
   // Drain before returning: the caller is about to resume writing flash.
   waitForDmaIdle(500);
@@ -2811,9 +2839,9 @@ static void fillPanel(uint16_t rgb565) {
     bufB[i] = hi;
     bufB[i + 1] = lo;
   }
-  dmaInFlight = dmaInFlight + 1;  // its completion fires onColorTransDone
+  dmaMarkQueued();  // its completion fires onColorTransDone
   if (esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, bufB) != ESP_OK) {
-    dmaInFlight = dmaInFlight - 1;
+    dmaUnmarkFailed();
   }
   delay(30);  // let DMA finish before bufB is reused
 }
@@ -3550,8 +3578,7 @@ void loop() {
       int yEnd = runEnd * bandRows;
       if (yEnd > frameRows) yEnd = frameRows;
       memcpy(bufB + off, bufA + off, bytes);
-      dmaInFlight = dmaInFlight + 1;
-      dmaQueuedAt = millis();
+      dmaMarkQueued();
       // Queues async; blocks briefly only if the 2-deep transaction queue
       // is full. A failed queue never fires the completion callback, so
       // roll the counter back to avoid a permanent wedge.
@@ -3559,7 +3586,7 @@ void loop() {
           panel, 0, runStart * bandRows, drawWidth, yEnd, bufB + off);
       if (err != ESP_OK) {
         statDrawErrors = statDrawErrors + 1;
-        dmaInFlight = dmaInFlight - 1;
+        dmaUnmarkFailed();
       } else {
         drewAny = true;
         // This run just overwrote the panel's pixels for its own row range
@@ -3651,14 +3678,13 @@ void loop() {
         }
         const uint32_t tQueue = micros();
         tdGatherUs += tQueue - tGather;
-        dmaInFlight = dmaInFlight + 1;
-        dmaQueuedAt = millis();
+        dmaMarkQueued();
         esp_err_t err = esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + w,
                                                   y0 + hgt, source);
         tdQueueUs += micros() - tQueue;
         if (err != ESP_OK) {
           statDrawErrors = statDrawErrors + 1;
-          dmaInFlight = dmaInFlight - 1;
+          dmaUnmarkFailed();
         } else {
           drewAny = true;
           tileDrawCalls++;
