@@ -144,9 +144,15 @@ final class DiscoveryMetadataTests: XCTestCase {
 
     // MARK: - what the panel list keeps
 
-    func testDiscoveryRecordsTheChipOnThePanelRow() {
+    func testDiscoveryRecordsTheChipOnOwnedPanelRows() {
         let manager = PanelManager(
-            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+            previewPanels: [
+                PanelSnapshot(
+                    serviceName: "espdisplay-9050", displayName: "espdisplay-9050"),
+                PanelSnapshot(
+                    serviceName: "espdisplay-amoled", displayName: "espdisplay-amoled"),
+            ],
+            savedNetworkNames: [], usbSerialPorts: [])
         manager.noteDiscovery([
             DeviceBrowser.Device(
                 name: "espdisplay-9050",
@@ -166,7 +172,9 @@ final class DiscoveryMetadataTests: XCTestCase {
 
     func testAPanelThatAdvertisesNoChipHasNoneRecorded() {
         let manager = PanelManager(
-            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+            previewPanels: [PanelSnapshot(
+                serviceName: "espdisplay-9050", displayName: "espdisplay-9050")],
+            savedNetworkNames: [], usbSerialPorts: [])
         manager.noteDiscovery([
             DeviceBrowser.Device(
                 name: "espdisplay-9050", endpoint: service("espdisplay-9050"))
@@ -181,7 +189,9 @@ final class DiscoveryMetadataTests: XCTestCase {
         // already arrived, and there is no such thing as a panel that stops
         // knowing which chip it is.
         let manager = PanelManager(
-            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+            previewPanels: [PanelSnapshot(
+                serviceName: "espdisplay-9050", displayName: "espdisplay-9050")],
+            savedNetworkNames: [], usbSerialPorts: [])
         let endpoint = service("espdisplay-9050")
         manager.noteDiscovery([
             DeviceBrowser.Device(name: "espdisplay-9050", endpoint: endpoint,

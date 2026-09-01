@@ -139,7 +139,22 @@ final class UsbOnboardingAppTests: XCTestCase {
         else { return XCTFail("a non-executable file was taken for a tool") }
     }
 
-    // MARK: - running a process at all
+    func testExpectedHardwareIDRejectsAnotherCFGSHOWResponder() {
+        let expected = "020000123456"
+        XCTAssertTrue(UsbOnboarder.matchesExpectedHardwareID(
+            .answered(name: "panel", hardwareID: expected),
+            expectedHardwareID: expected))
+        XCTAssertFalse(UsbOnboarder.matchesExpectedHardwareID(
+            .answered(name: "panel", hardwareID: "020000abcdef"),
+            expectedHardwareID: expected))
+        XCTAssertFalse(UsbOnboarder.matchesExpectedHardwareID(
+            .answered(name: "panel", hardwareID: nil),
+            expectedHardwareID: expected))
+        XCTAssertFalse(UsbOnboarder.matchesExpectedHardwareID(
+            .silent, expectedHardwareID: expected))
+    }
+
+    // MARK: - writing a process
 
     /// The first process this app has ever spawned, exercised against something that
     /// cannot do any harm.

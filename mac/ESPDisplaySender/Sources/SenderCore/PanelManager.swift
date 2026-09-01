@@ -15,6 +15,9 @@ struct PanelSnapshot: Identifiable, Equatable {
     var hardwareID: String?
     var address: String?
     var usbPort: String?
+    /// Stable identity of the manually selected USB device. Unlike `usbPort`,
+    /// this survives the board resetting under a different macOS device node.
+    var usbHardwareID: String?
     var discovered = false
     var lastSeen: Date?
     var lastHeartbeatAt: Date?
@@ -239,8 +242,8 @@ private extension String {
 /// The result of something the user just asked for, success or failure, shown
 /// in one place. Previously failures arrived either here or as an NSAlert put
 /// up by the serial layer, depending on which code path produced them.
-struct OperationOutcome: Equatable {
-    enum Kind: Equatable {
+struct OperationOutcome: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
         case success
         case failure
     }
@@ -294,7 +297,10 @@ struct ReportedIssue: Identifiable, Equatable {
 final class PanelManager: ObservableObject {
     @Published private(set) var panels: [PanelSnapshot] = []
     @Published private(set) var savedNetworkNames: [String] = []
-    @Published private(set) var usbSerialPorts: [String] = []
+    @Published private(set) var usbDevices: [WifiConfigUI.USBDeviceOption] = []
+    /// Current transport paths. Kept as a projection for flashing/configuration
+    /// code that needs a path rather than a display label.
+    var usbSerialPorts: [String] { usbDevices.map(\.path) }
     /// Displays the user can pick from, by name.
     ///
     /// Listed in the window rather than reached through the macOS picker, so
@@ -334,9 +340,29 @@ final class PanelManager: ObservableObject {
     private let defaultDisplayName: String
     private var screenChangeObserver: NSObjectProtocol?
     private var supersededServiceNames: Set<String> = []
+    /// Unknown services that completed one provisional EINF probe and matched no
+    /// owned hardware record. Retained only while that advertisement stays
+    /// visible so discovery does not relaunch the same unowned board in a loop.
+    private var unownedServiceNames: Set<String> = []
     private weak var picker: PickerSource?
     private var pickerTarget: String?
     private var refreshTimer: Timer?
+    /// Identity probes are blocking serial reads. Store the detached task itself
+    /// so setup inspection and background refresh share one read per path rather
+    /// than racing two readers on the same tty. The generation prevents a result
+    /// from an unplugged device being applied after macOS reuses its path.
+    private var usbProbeTasks: [
+        String: (generation: Int, task: Task<WifiConfigUI.PortProbe, Never>)
+    ] = [:]
+    private var usbPathGenerations: [String: Int] = [:]
+    /// A path-only USB choice made during this app run. Legacy firmware cannot
+    /// report CFGSHOW id=, so this is the narrow bridge that lets the user choose
+    /// among several name-only devices. It is never persisted and expires when
+    /// the macOS path generation changes; esptool still has to read the panel's
+    /// exact EINF MAC before any write.
+    private var explicitLegacyUSBSelections: [
+        String: (path: String, generation: Int)
+    ] = [:]
     private var lastPersistedAt = Date.distantPast
     /// Where per-panel OTA passwords are kept. Injected rather than reached for
     /// directly so that previews and tests, which run unsigned, cannot touch the
@@ -388,7 +414,9 @@ final class PanelManager: ObservableObject {
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         selectedServiceName = panels.first?.serviceName
         savedNetworkNames = WifiCredentialStore.savedNetworkNames()
-        usbSerialPorts = WifiConfigUI.candidatePorts()
+        usbDevices = WifiConfigUI.candidatePorts().map {
+            WifiConfigUI.USBDeviceOption(path: $0)
+        }
         if let failure = loaded.failure {
             report(.persistence, detail: "Saved display settings could not be read "
                 + "from \(url?.path ?? "disk"): \(failure)")
@@ -451,6 +479,7 @@ final class PanelManager: ObservableObject {
                 panel.captureStatus = .waiting("Nothing to preview. \(reason)")
             }
         }
+        identifyUSBPorts(usbSerialPorts)
     }
 
     /// Preview and test seam: no disk, no timers, no discovery.
@@ -482,7 +511,7 @@ final class PanelManager: ObservableObject {
         settingsURL = nil
         panels = previewPanels
         self.savedNetworkNames = savedNetworkNames
-        self.usbSerialPorts = usbSerialPorts
+        usbDevices = usbSerialPorts.map { WifiConfigUI.USBDeviceOption(path: $0) }
         selectedServiceName = previewPanels.first?.serviceName
     }
 
@@ -750,7 +779,11 @@ final class PanelManager: ObservableObject {
     /// Accept a frame from a session. Frames from a panel that is no longer
     /// selected are dropped by `FramePreview` itself, since a callback already
     /// in flight can outlive a selection change.
-    func acceptPreview(image: CGImage, landscape: Bool, from serviceName: String) {
+    func acceptPreview(
+        image: CGImage, landscape: Bool, from serviceName: String,
+        sessionID: UUID? = nil
+    ) {
+        if let sessionID, sessions[serviceName]?.id != sessionID { return }
         preview.accept(image: image, landscape: landscape, from: serviceName)
     }
 
@@ -770,18 +803,15 @@ final class PanelManager: ObservableObject {
 
     func noteDiscovery(_ devices: [DeviceBrowser.Device]) {
         let visible = Set(devices.map(\.name))
+        unownedServiceNames.formIntersection(visible)
         for index in panels.indices {
             panels[index].discovered = visible.contains(panels[index].serviceName)
         }
-        for device in devices
-            where !supersededServiceNames.contains(device.name)
-                && !panels.contains(where: { $0.serviceName == device.name })
-        {
-            panels.append(PanelSnapshot(serviceName: device.name, displayName: device.name,
-                                        discovered: true, lastSeen: Date(),
-                                        chip: device.metadata.chip,
-                                        geometry: device.metadata.geometry))
-        }
+        // Discovery attaches live state to records; it does not create records.
+        // A physical board becomes a sidebar item only through Add Display over
+        // USB, where its stable hardware ID is established first. Records loaded
+        // from older versions are grandfathered and continue matching by their
+        // saved service name until EINF confirms the hardware ID.
         // Recorded after the append loop so it reaches panels that already
         // existed - a panel restored from disk, or one whose first browse result
         // arrived before its TXT query answered.
@@ -812,7 +842,22 @@ final class PanelManager: ObservableObject {
         if selectedServiceName == nil {
             selectedServiceName = panels.first?.serviceName
         }
-        persistIfNeeded(force: true)
+    }
+
+    func hasRecord(forServiceName serviceName: String) -> Bool {
+        panels.contains { $0.serviceName == serviceName }
+            && !supersededServiceNames.contains(serviceName)
+    }
+
+    func shouldLaunchDiscoveredService(_ serviceName: String) -> Bool {
+        guard !supersededServiceNames.contains(serviceName),
+              !unownedServiceNames.contains(serviceName)
+        else { return false }
+        if hasRecord(forServiceName: serviceName) { return true }
+        // A record may have been renamed outside this process. One paused
+        // provisional session obtains EINF so the stable hardware ID can bind
+        // it; non-matches are suppressed above.
+        return panels.contains { stableHardwareID(of: $0) != nil }
     }
 
     /// Apply new streaming settings to every live session and remember them.
@@ -841,33 +886,35 @@ final class PanelManager: ObservableObject {
         }
     }
 
-    func register(_ session: DeviceSession) {
-        guard !supersededServiceNames.contains(session.name) else { return }
+    func register(
+        _ session: DeviceSession,
+        allowUnowned: Bool = false,
+        provisional: Bool = false
+    ) {
+        guard !supersededServiceNames.contains(session.name) else {
+            session.stop()
+            return
+        }
+        let ownsName = panels.contains { $0.serviceName == session.name }
+        guard ownsName || provisional else {
+            if !allowUnowned { session.stop() }
+            return
+        }
         sessions[session.name] = session
-        // Bring the session up to the current settings whatever it was built
-        // with. A session created after the user changed something would
-        // otherwise keep the old rate; a frame-rate difference restarts its
-        // capture within a couple of seconds, so this self-heals.
         session.setFPS(settings.fps)
         session.applyPacing(
             spacingMicros: settings.spacingMicros, adaptive: settings.adaptivePacing)
         session.applyTileQuality(settings.tileQuality)
-        // A session that appears while its panel is already selected has to be
-        // told to produce previews; `updatePreviewFocus` would see no change in
-        // focus and do nothing.
+        // No frames leave until EINF proves this service is the owned hardware.
+        session.setPaused(true)
         if session.name == previewFocus {
             session.setPreviewEnabled(true)
         }
-        // A real session supersedes the stand-in preview.
-        refreshPreviewDriver()
-        if !panels.contains(where: { $0.serviceName == session.name }) {
-            panels.append(PanelSnapshot(serviceName: session.name, displayName: session.name,
-                                        discovered: true, lastSeen: Date()))
-            sortPanels()
-        }
+        if ownsName { refreshPreviewDriver() }
     }
 
-    func retire(_ serviceName: String) {
+    func retire(_ serviceName: String, sessionID: UUID? = nil) {
+        if let sessionID, sessions[serviceName]?.id != sessionID { return }
         sessions[serviceName] = nil
         if previewFocus == serviceName { preview.clearFrame() }
         // No session left to preview from, so the stand-in takes over.
@@ -908,13 +955,18 @@ final class PanelManager: ObservableObject {
         resolve(issue)
     }
 
-    func update(_ status: DeviceSession.Status) {
+    func update(_ status: DeviceSession.Status, sessionID: UUID? = nil) {
+        if let sessionID, sessions[status.serviceName]?.id != sessionID { return }
         guard !supersededServiceNames.contains(status.serviceName) else { return }
         let reconciledIdentity: Bool
         if let hardwareID = status.info?.deviceID {
-            reconciledIdentity = reconcilePanelIdentity(
+            guard let reconciled = bindSessionIdentity(
                 hardwareID: hardwareID, serviceName: status.serviceName)
+            else { return }
+            reconciledIdentity = reconciled
         } else {
+            guard panels.contains(where: { $0.serviceName == status.serviceName })
+            else { return }
             reconciledIdentity = false
         }
         updatePanel(status.serviceName) { panel in
@@ -952,7 +1004,12 @@ final class PanelManager: ObservableObject {
     /// Publish network events immediately, independently of capture startup.
     /// This keeps the manager online and its controls usable while
     /// ScreenCaptureKit is waiting for a source or permission.
-    func update(_ event: FrameSender.DeviceEvent, for serviceName: String) {
+    func update(
+        _ event: FrameSender.DeviceEvent,
+        for serviceName: String,
+        sessionID: UUID? = nil
+    ) {
+        if let sessionID, sessions[serviceName]?.id != sessionID { return }
         guard !supersededServiceNames.contains(serviceName) else { return }
         let now = Date()
         var reconciledIdentity = false
@@ -967,8 +1024,10 @@ final class PanelManager: ObservableObject {
                 panel.freeHeap = stats.heap
             }
         case .info(let info):
-            reconciledIdentity = reconcilePanelIdentity(
+            guard let reconciled = bindSessionIdentity(
                 hardwareID: info.deviceID, serviceName: serviceName)
+            else { return }
+            reconciledIdentity = reconciled
             let keepBrightness = ignoreReportedBrightness(
                 Int(info.brightness), for: serviceName)
             updatePanel(serviceName) { panel in
@@ -1508,105 +1567,186 @@ final class PanelManager: ObservableObject {
 
     // MARK: firmware updates
 
-    /// Everything a push needs about one panel, gathered once so the update sheet
-    /// cannot half-know a panel.
-    struct FirmwareUpdateTarget: Equatable, Identifiable {
-        /// One update sheet per panel, keyed the way the rest of the UI is.
+    enum FirmwareUpdateTransport: String, CaseIterable, Identifiable, Sendable {
+        case wifi
+        case usb
+
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .wifi: return "Over WiFi (OTA)"
+            case .usb: return "Over USB"
+            }
+        }
+    }
+
+    /// Everything an update sheet needs about one panel, gathered as one coherent
+    /// snapshot so it cannot silently switch addresses or USB identities while a
+    /// write is being confirmed. The sheet may explicitly replace transport fields
+    /// after the user refreshes its USB-device row.
+    struct FirmwareUpdateTarget: Equatable, Identifiable, Sendable {
         var id: String { serviceName }
 
         let serviceName: String
         let displayName: String
-        /// The 6-byte EINF device ID, hex. The key the OTA password is stored
-        /// under, because it survives a rename.
+        /// Stable 6-byte EINF/CFGSHOW identity. It keys the OTA password and is
+        /// also what a USB device must match before esptool may write it.
         let hardwareID: String
-        /// The panel's IP, as the live streaming session resolved it.
-        let address: String
-        /// The `chip` TXT record: `esp32c6`, `esp32s3`, `unknown`, or nil from
-        /// firmware older than the record. Passed to the bundle as-is; nil and
-        /// `unknown` both mean "cannot choose an image on this evidence".
+        /// Live session address. Nil when OTA is unavailable but USB is safe.
+        var address: String?
         let chip: String?
-        /// The version from EINF, which is what the panel is running now.
         let firmwareVersion: String
+        /// A currently connected, positively identity-matched USB device.
+        var usbDevice: WifiConfigUI.USBDeviceOption?
+        /// Generation of that path when the sheet opened. A removal/reuse makes
+        /// it stale and the preflight refuses before invoking esptool.
+        var usbPathGeneration: Int?
+        /// True only for a current-session explicit choice or one unique exact
+        /// CFGSHOW name match on firmware predating the id= field. A nil CFGSHOW
+        /// ID may pass the read-only preflight in this case, but esptool's MAC
+        /// must still equal `hardwareID` before any write.
+        var usbAllowsLegacyIdentity: Bool
+
+        init(
+            serviceName: String, displayName: String, hardwareID: String,
+            address: String?, chip: String?, firmwareVersion: String,
+            usbDevice: WifiConfigUI.USBDeviceOption? = nil,
+            usbPathGeneration: Int? = nil,
+            usbAllowsLegacyIdentity: Bool = false
+        ) {
+            self.serviceName = serviceName
+            self.displayName = displayName
+            self.hardwareID = hardwareID
+            self.address = address
+            self.chip = chip
+            self.firmwareVersion = firmwareVersion
+            self.usbDevice = usbDevice
+            self.usbPathGeneration = usbPathGeneration
+            self.usbAllowsLegacyIdentity = usbAllowsLegacyIdentity
+        }
+
+        var transports: [FirmwareUpdateTransport] {
+            var result: [FirmwareUpdateTransport] = []
+            if address != nil { result.append(.wifi) }
+            if usbDevice != nil { result.append(.usb) }
+            return result
+        }
     }
 
-    /// Whether a panel can be updated right now, and if not, why not in words.
     enum FirmwareUpdateReadiness: Equatable {
         case ready(FirmwareUpdateTarget)
         case notReady(String)
     }
 
-    /// What the Update Firmware button does: hand back a target to open the sheet
-    /// with, or report why not.
-    ///
-    /// The button is disabled on `canControl(.ota)`, which covers the capability
-    /// and the session, but not the two things that can still be missing at the
-    /// moment of the click - a hardware ID and a resolved address. Reporting those
-    /// through the same outcome alert as every other refusal beats opening a sheet
-    /// that cannot do anything.
     func beginFirmwareUpdate(_ serviceName: String) -> FirmwareUpdateTarget? {
         switch firmwareUpdateReadiness(serviceName) {
         case .ready(let target):
             return target
         case .notReady(let reason):
-            // Titled through `describe` like every other refusal, which is what
-            // makes the `.ota` case in it load-bearing: without one this would
-            // read "This control unavailable".
-            operationOutcome = .failure(
-                "\(Self.describe(.ota).capitalizedFirst) unavailable", reason)
+            operationOutcome = .failure("Firmware updates unavailable", reason)
             return nil
         }
     }
 
-    /// Gather what a push needs, or say what is missing.
-    ///
-    /// The address comes from the LIVE SESSION rather than from `panel.address`.
-    /// They are usually the same value, but `panel.address` is persisted and so
-    /// can be a leftover from a previous run - and pushing two megabytes of
-    /// firmware at whatever now holds that IP is a worse failure than declining to
-    /// start. `FrameSender` learns the real one from `conn.currentPath` the moment
-    /// the socket is ready, which is the same address the panel's own datagrams
-    /// arrive from.
-    func firmwareUpdateReadiness(_ serviceName: String) -> FirmwareUpdateReadiness {
-        if let reason = controlUnavailableReason(serviceName, capability: .ota) {
-            return .notReady(reason)
+    func canBeginFirmwareUpdate(_ serviceName: String) -> Bool {
+        if case .ready = firmwareUpdateReadiness(serviceName) { return true }
+        return false
+    }
+
+    func firmwareUpdateUnavailableReason(_ serviceName: String) -> String? {
+        if case .notReady(let reason) = firmwareUpdateReadiness(serviceName) {
+            return reason
         }
+        return nil
+    }
+
+    /// Gather every currently safe transport. OTA uses only the live session's
+    /// resolved address; USB uses only one connected device whose reported ID
+    /// matches this panel. A remembered IP or serial path is never enough.
+    func firmwareUpdateReadiness(_ serviceName: String) -> FirmwareUpdateReadiness {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
             return .notReady("This display is not known yet.")
         }
-        guard let hardwareID = panel.hardwareID else {
+        guard let hardwareID = stableHardwareID(of: panel) else {
             return .notReady(
-                "This panel has not reported its hardware ID yet, so there is "
-                    + "nowhere to keep its OTA password.")
+                "This panel has not reported its hardware ID yet, so an update "
+                    + "cannot be tied to the correct device.")
         }
         guard let version = panel.firmwareVersion else {
             return .notReady(
                 "This panel has not reported its firmware version yet, so there "
                     + "is nothing to compare a bundle against.")
         }
-        guard let address = sessions[serviceName]?.resolvedAddress else {
-            return .notReady(
-                "This panel's address has not been resolved yet. An update is "
-                    + "sent to the panel directly, so it cannot start until the "
-                    + "streaming session has an address to send it to.")
+
+        let otaReason = controlUnavailableReason(serviceName, capability: .ota)
+        let address = otaReason == nil ? sessions[serviceName]?.resolvedAddress : nil
+
+        let expectedUSBID = ConfigCommands.canonicalHardwareID(
+            panel.usbHardwareID ?? hardwareID)
+        let stableMatches = usbDevices.filter { device in
+            device.isConnected && !device.path.isEmpty
+                && ConfigCommands.canonicalHardwareID(device.hardwareID)
+                    == expectedUSBID
         }
+        var usbDevice = stableMatches.count == 1 ? stableMatches[0] : nil
+        var usbAllowsLegacyIdentity = false
+
+        // Legacy CFGSHOW has a name but no id=. Stable-ID matching remains the
+        // authority; only when it finds nothing may one current-session explicit
+        // path or one unique exact name match enter the read-only preflight.
+        if stableMatches.isEmpty {
+            if let explicit = explicitLegacyUSBSelections[serviceName],
+               explicit.generation == usbPathGeneration(explicit.path),
+               let candidate = usbDevices.first(where: {
+                   $0.path == explicit.path && $0.isConnected
+                       && $0.hardwareID == nil
+               }) {
+                usbDevice = candidate
+                usbAllowsLegacyIdentity = true
+            } else {
+                let nameMatches = usbDevices.filter {
+                    $0.isConnected && !$0.path.isEmpty && $0.hardwareID == nil
+                        && $0.name == panel.displayName
+                }
+                if nameMatches.count == 1 {
+                    usbDevice = nameMatches[0]
+                    usbAllowsLegacyIdentity = true
+                }
+            }
+        }
+        let usbGeneration = usbDevice.map { usbPathGeneration($0.path) }
+
+        guard address != nil || usbDevice != nil else {
+            if otaReason == nil {
+                return .notReady(
+                    "This panel's live network address has not been resolved yet, "
+                        + "and no connected USB device is positively matched to it.")
+            }
+            if !usbDevices.isEmpty {
+                return .notReady(
+                    otaReason! + " A USB device is connected, but none reports "
+                        + "this display's hardware ID; refresh or select the correct "
+                        + "device under Connection.")
+            }
+            return .notReady(otaReason!)
+        }
+
         return .ready(FirmwareUpdateTarget(
             serviceName: serviceName,
             displayName: panel.displayName,
             hardwareID: hardwareID,
             address: address,
             chip: panel.chip,
-            firmwareVersion: version))
+            firmwareVersion: version,
+            usbDevice: usbDevice,
+            usbPathGeneration: usbGeneration,
+            usbAllowsLegacyIdentity: usbAllowsLegacyIdentity))
     }
 
-    /// The remembered password for a panel, or nil.
     func rememberedOTAPassword(for hardwareID: String) -> String? {
         otaPasswords.password(forHardwareID: hardwareID)
     }
 
-    /// Remember or forget a password. Returns a message if the store refused,
-    /// which the caller shows alongside the push's own outcome - a keychain that
-    /// would not save is worth saying, but it is not a reason to abandon a push
-    /// that is otherwise ready to go.
     func setRememberedOTAPassword(
         _ password: String?, for hardwareID: String
     ) -> String? {
@@ -1622,33 +1762,178 @@ final class PanelManager: ObservableObject {
         }
     }
 
-    /// Push an image to a panel and report the outcome the same way every other
-    /// device action does.
-    ///
-    /// Returns whether it succeeded, so the sheet can stay open on a failure with
-    /// the password still typed in rather than making the user start again.
+    /// Run OTA and return its result to the sheet that owns the operation. The
+    /// manager-window alert is deliberately not touched here: it sits behind the
+    /// sheet and would otherwise be deferred until the sheet closed.
     func pushFirmware(
         image: Data,
         filename: String,
         to target: FirmwareUpdateTarget,
         password: String,
         progress: @escaping @Sendable (FirmwarePusher.Progress) -> Void
-    ) async -> Bool {
+    ) async -> OperationOutcome {
+        guard let address = target.address else {
+            return .failure(
+                "WiFi update unavailable",
+                "This panel no longer has a live resolved address. Choose USB, "
+                    + "or wait for it to reconnect and try again.")
+        }
         let pusher = FirmwarePusher()
         do {
             try await pusher.push(
-                image: image, filename: filename, to: target.address,
+                image: image, filename: filename, to: address,
                 password: password, progress: progress)
-            operationOutcome = .success(
+            return .success(
                 "Update sent",
                 "\(target.displayName) has the new firmware and is restarting "
                     + "onto it. Streaming reconnects by itself; the version in "
                     + "the Firmware section updates when it reports in.")
-            return true
         } catch {
-            operationOutcome = .failure("Update failed", error.localizedDescription)
-            return false
+            return .failure("Update failed", error.localizedDescription)
         }
+    }
+
+    /// Write a current format-2 bundle over USB after re-verifying every fact
+    /// that makes the selected serial path safe. No whole-chip erase is issued,
+    /// so NVS credentials, name, brightness, orientation and OTA password remain.
+    func flashFirmwareOverUSB(
+        bundle: FirmwareBundle,
+        to target: FirmwareUpdateTarget,
+        progress: @escaping @Sendable (UsbOnboarder.Progress) -> Void
+    ) async -> OperationOutcome {
+        guard let device = target.usbDevice,
+              let expectedGeneration = target.usbPathGeneration,
+              !device.path.isEmpty
+        else {
+            return .failure(
+                "USB update unavailable",
+                "No connected USB device was positively matched to this display.")
+        }
+        let path = device.path
+        let expectedID = ConfigCommands.canonicalHardwareID(target.hardwareID)
+        guard let expectedID else {
+            return .failure(
+                "USB identity unavailable",
+                "This display's hardware ID is not a six-byte MAC address, so the "
+                    + "app cannot prove which connected board is safe to write.")
+        }
+        guard usbPathGeneration(path) == expectedGeneration,
+              let current = usbDevices.first(where: {
+                  $0.path == path && $0.isConnected
+              })
+        else {
+            return .failure(
+                "USB device changed",
+                "The serial device was unplugged, renumbered, or reused after the "
+                    + "update window opened. Refresh the USB device and try again.")
+        }
+        let currentID = ConfigCommands.canonicalHardwareID(current.hardwareID)
+        guard currentID == expectedID
+                || (currentID == nil && target.usbAllowsLegacyIdentity)
+        else {
+            return .failure(
+                "USB device mismatch",
+                "The connected USB device reports a different hardware ID, so "
+                    + "nothing was written.")
+        }
+
+        progress(.readingChip)
+        switch await probeUSBDevice(path, timeout: 3) {
+        case .unavailable(let reason):
+            return .failure(
+                "Could not verify the USB display",
+                "CFGSHOW did not verify \(path): \(reason)")
+        case .identified(let identity):
+            let reportedID = ConfigCommands.canonicalHardwareID(identity.hardwareID)
+            guard reportedID == expectedID
+                    || (reportedID == nil && target.usbAllowsLegacyIdentity)
+            else {
+                return .failure(
+                    "USB device mismatch",
+                    "The device at \(path) did not report \(target.hardwareID), "
+                        + "so nothing was written.")
+            }
+        }
+        guard usbPathGeneration(path) == expectedGeneration else {
+            return .failure(
+                "USB device changed",
+                "The serial device changed while it was being verified, so "
+                    + "nothing was written.")
+        }
+
+        let tool: EsptoolCommand.Tool
+        switch EsptoolInstallation.locate() {
+        case .installed(let path):
+            tool = EsptoolCommand.Tool(path: path)
+        case .missing(let searched):
+            return .failure(
+                "The esp32 core is not installed",
+                "USB updating uses the esptool included with the Arduino esp32 "
+                    + "core. It was not found under \(searched.joined(separator: " or ")).")
+        }
+
+        let detection = await UsbOnboarder.detectChip(port: path, tool: tool)
+        let detectedChip: String
+        let detectedMAC: String?
+        switch detection {
+        case .detected(let chip, let mac):
+            detectedChip = chip
+            detectedMAC = ConfigCommands.canonicalHardwareID(mac)
+        case .failed(let reason):
+            return .failure("Could not read the USB board", reason)
+        case .notAttempted:
+            return .failure(
+                "Could not read the USB board",
+                "esptool did not attempt chip detection, so nothing was written.")
+        }
+        guard detectedMAC == expectedID else {
+            return .failure(
+                "USB device mismatch",
+                "esptool read \(detectedMAC ?? "no MAC address") from \(path), "
+                    + "not \(target.hardwareID), so nothing was written.")
+        }
+        if let expectedChip = target.chip,
+           !expectedChip.isEmpty,
+           expectedChip != ServiceMetadata.unknownChip,
+           expectedChip != detectedChip {
+            return .failure(
+                "USB chip mismatch",
+                "The display reported \(expectedChip), but esptool read "
+                    + "\(detectedChip). Nothing was written.")
+        }
+        guard usbPathGeneration(path) == expectedGeneration,
+              usbDevices.contains(where: { $0.path == path && $0.isConnected })
+        else {
+            return .failure(
+                "USB device changed",
+                "The serial device changed after chip detection, so nothing was written.")
+        }
+        guard let writes = bundle.flashPlan(forChip: detectedChip) else {
+            let imageExists = bundle.image(forChip: detectedChip) != nil
+            return .failure(
+                imageExists ? "Bundle is OTA-only" : "Wrong firmware bundle",
+                imageExists
+                    ? "This format-1 bundle has an application image but not the "
+                        + "bootloader, partition table and boot_app0 required for "
+                        + "a safe USB write. Choose a current format-2 bundle."
+                    : "This bundle has no image for \(detectedChip).")
+        }
+
+        do {
+            try await UsbOnboarder.flash(
+                writes: writes, chip: detectedChip, port: path, tool: tool,
+                eraseAll: false, onProgress: progress)
+        } catch let failure as WifiConfigUI.ConfigFailure {
+            return .failure(failure)
+        } catch {
+            return .failure("Flashing failed", error.localizedDescription)
+        }
+        refreshUSBPorts()
+        return .success(
+            "Firmware written over USB",
+            "\(bundle.firmwareVersion) was written to \(target.displayName) "
+                + "without erasing the chip, and the display is restarting. Its "
+                + "saved WiFi, name, display settings and OTA password remain.")
     }
 
     func rename(_ newName: String, for serviceName: String) {
@@ -1656,10 +1941,24 @@ final class PanelManager: ObservableObject {
         switch WifiConfigUI.renameDevice(
             currentName: panel.displayName,
             newName: newName,
-            preferredPort: panel.usbPort)
+            preferredPort: panel.usbPort,
+            expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
         {
         case .success(let appliedName):
-            updatePanel(serviceName) { $0.displayName = appliedName }
+            if appliedName != serviceName,
+               let index = panels.firstIndex(where: { $0.serviceName == serviceName }) {
+                supersededServiceNames.insert(serviceName)
+                supersededServiceNames.remove(appliedName)
+                sessions.removeValue(forKey: serviceName)?.stop()
+                panels[index].serviceName = appliedName
+                panels[index].displayName = appliedName
+                if selectedServiceName == serviceName {
+                    selectedServiceName = appliedName
+                }
+                sortPanels()
+            } else {
+                updatePanel(serviceName) { $0.displayName = appliedName }
+            }
             persistIfNeeded(force: true)
             operationOutcome = .success(
                 "Name saved",
@@ -1688,7 +1987,10 @@ final class PanelManager: ObservableObject {
             return
         }
         switch WifiConfigUI.setOTAPassword(
-            password, currentName: panel.displayName, preferredPort: panel.usbPort)
+            password,
+            currentName: panel.displayName,
+            preferredPort: panel.usbPort,
+            expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
         {
         case .success:
             var keychainNote = ""
@@ -1699,8 +2001,10 @@ final class PanelManager: ObservableObject {
                 }
             }
             operationOutcome = .success(
-                "OTA password set",
-                "The display is restarting with OTA enabled." + keychainNote)
+                "OTA password saved",
+                "The OTA password was saved and the display is restarting. "
+                    + "Wireless updates become available after it rejoins WiFi "
+                    + "and reports that its OTA listener is active." + keychainNote)
         case .failure(let failure):
             operationOutcome = .failure(failure)
         }
@@ -1713,7 +2017,9 @@ final class PanelManager: ObservableObject {
     func clearOTAPassword(for serviceName: String) {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else { return }
         switch WifiConfigUI.clearOTAPassword(
-            currentName: panel.displayName, preferredPort: panel.usbPort)
+            currentName: panel.displayName,
+            preferredPort: panel.usbPort,
+            expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
         {
         case .success:
             if let hardwareID = panel.hardwareID {
@@ -1737,7 +2043,8 @@ final class PanelManager: ObservableObject {
         switch WifiConfigUI.applySavedNetwork(
             ssid,
             currentName: panel.displayName,
-            preferredPort: panel.usbPort)
+            preferredPort: panel.usbPort,
+            expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
         {
         case .success:
             operationOutcome = .success(
@@ -1757,6 +2064,7 @@ final class PanelManager: ObservableObject {
         }
         let result = WifiConfigUI.run(
             currentName: panel.displayName,
+            expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID,
             preferredPort: panel.usbPort,
             preferredSSID: preferredSSID)
         refreshSavedNetworks()
@@ -1789,6 +2097,13 @@ final class PanelManager: ObservableObject {
         var bundle: FirmwareBundle?
         var chip: String?
         var mac: String?
+        /// Canonical station-MAC identity learned from CFGSHOW or esptool.
+        var hardwareID: String?
+        /// USB enumeration generation captured by the Add sheet. It must still
+        /// match immediately before any write begins.
+        var usbPathGeneration: Int
+        /// Name reported before onboarding, used when the user leaves Name blank.
+        var existingName: String?
         var tool: EsptoolCommand.Tool?
         var ssid: String
         var password: ConfigCommands.PasswordChange
@@ -1800,15 +2115,9 @@ final class PanelManager: ObservableObject {
         var eraseAll: Bool
     }
 
-    /// Write a board if asked to, hand it credentials, and let discovery do the
-    /// rest.
-    ///
-    /// NOTHING IS ADDED TO THE SIDEBAR HERE, and that is the design rather than an
-    /// omission. A panel becomes a row by being discovered, which is the same path
-    /// every other panel arrives through and the only one that proves the board
-    /// actually joined the network. Inventing a row from a successful serial write
-    /// would put an entry in the sidebar that might never come online, and the user
-    /// would have no way to tell that from a panel that had.
+    /// Write/configure one physical board and create its durable sidebar record.
+    /// The record is saved before network discovery: discovery makes an existing
+    /// record online, but is never allowed to invent ownership of hardware.
     ///
     /// Returns whether it got all the way, so the sheet can stay open on a failure
     /// with everything still filled in.
@@ -1816,6 +2125,90 @@ final class PanelManager: ObservableObject {
         _ request: USBOnboardRequest,
         progress: @escaping @Sendable (UsbOnboarder.Progress) -> Void
     ) async -> Bool {
+        guard let stableID = ConfigCommands.canonicalHardwareID(
+            request.hardwareID ?? request.mac)
+        else {
+            operationOutcome = .failure(
+                "Could not identify this board",
+                "A permanent display record needs the board's hardware ID. Refresh "
+                    + "the USB devices and select it again before continuing.")
+            return false
+        }
+        if let existing = panelAssociated(withHardwareID: stableID) {
+            selectedServiceName = existing.serviceName
+            operationOutcome = .failure(
+                "Display already added",
+                "\(existing.displayName) is already represented in the sidebar.")
+            return false
+        }
+        let requestedName = WifiConfigUI.normalizedDeviceName(request.name)
+        let priorName = WifiConfigUI.normalizedDeviceName(request.existingName ?? "")
+        let recordName = !requestedName.isEmpty
+            ? requestedName
+            : !priorName.isEmpty
+                ? priorName
+                : "espdisplay-" + stableID.suffix(4)
+        if let collision = panels.first(where: {
+            $0.serviceName == recordName
+                && stableHardwareID(of: $0) != stableID
+        }) {
+            operationOutcome = .failure(
+                "Display name already in use",
+                "\(collision.displayName) already owns the name \"\(recordName)\". "
+                    + "Enter a unique name for this board before adding it.")
+            return false
+        }
+        guard usbPathGeneration(request.port) == request.usbPathGeneration,
+              usbDevices.contains(where: { $0.path == request.port && $0.isConnected })
+        else {
+            operationOutcome = .failure(
+                "USB device changed",
+                "The selected serial port was unplugged, renumbered, or reused. "
+                    + "Refresh the device list and select the board again.")
+            return false
+        }
+
+        // Re-read identity at the last safe point before a write. CFGSHOW is
+        // enough on current firmware; blank/legacy boards are verified through
+        // esptool's chip and MAC read, which is non-destructive.
+        var cfgIdentityMatched = false
+        if case .identified(let identity) = await probeUSBDevice(request.port, timeout: 3),
+           let reportedID = ConfigCommands.canonicalHardwareID(identity.hardwareID) {
+            guard reportedID == stableID else {
+                operationOutcome = .failure(
+                    "USB device mismatch",
+                    "The board now connected at \(request.port) is not the one "
+                        + "that was selected, so nothing was written.")
+                return false
+            }
+            cfgIdentityMatched = true
+        }
+        if request.mode == .flashAndConfigure || !cfgIdentityMatched {
+            guard let tool = request.tool else {
+                operationOutcome = .failure(
+                    "Could not verify this board",
+                    "esptool is required to re-read the chip and MAC before writing.")
+                return false
+            }
+            let detection = await UsbOnboarder.detectChip(port: request.port, tool: tool)
+            guard case .detected(let chip, let mac) = detection,
+                  ConfigCommands.canonicalHardwareID(mac) == stableID,
+                  request.chip == nil || request.chip == chip
+            else {
+                operationOutcome = .failure(
+                    "USB device mismatch",
+                    "The chip or MAC at \(request.port) changed after inspection, "
+                        + "so nothing was written.")
+                return false
+            }
+        }
+        guard usbPathGeneration(request.port) == request.usbPathGeneration else {
+            operationOutcome = .failure(
+                "USB device changed",
+                "The serial device changed during verification, so nothing was written.")
+            return false
+        }
+
         let steps = UsbOnboarding.configurationSteps(
             name: request.name, ssid: request.ssid, password: request.password)
 
@@ -1850,7 +2243,8 @@ final class PanelManager: ObservableObject {
 
         let finalPort: String
         switch await UsbOnboarder.sendConfiguration(
-            steps: steps, flashedPort: request.port, onProgress: progress)
+            steps: steps, flashedPort: request.port,
+            expectedHardwareID: stableID, onProgress: progress)
         {
         case .success(let port):
             finalPort = port
@@ -1878,6 +2272,29 @@ final class PanelManager: ObservableObject {
         refreshSavedNetworks()
         refreshUSBPorts()
 
+        // Recheck after the write/configuration window: another Add sheet or a
+        // background identity probe may have associated this board meanwhile.
+        if let existing = panelAssociated(withHardwareID: stableID) {
+            selectedServiceName = existing.serviceName
+            operationOutcome = .success(
+                "Display already recorded",
+                "\(existing.displayName) was configured and its existing record is selected.")
+            return true
+        }
+
+        let serviceName = recordName
+        let record = PanelSnapshot(
+            serviceName: serviceName,
+            displayName: recordName,
+            hardwareID: stableID,
+            usbPort: finalPort,
+            usbHardwareID: stableID)
+        supersededServiceNames.remove(serviceName)
+        panels.append(record)
+        sortPanels()
+        selectedServiceName = serviceName
+        persistIfNeeded(force: true)
+
         let wrote = request.mode == .flashAndConfigure
             ? "\(request.bundle?.firmwareVersion ?? "the firmware") is on the board and it "
             : "The board "
@@ -1886,9 +2303,9 @@ final class PanelManager: ObservableObject {
             : " It is called \"\(WifiConfigUI.normalizedDeviceName(request.name))\"."
         operationOutcome = .success(
             request.mode == .flashAndConfigure ? "Board set up" : "WiFi saved",
-            wrote + "is joining \"\(request.ssid)\". It appears in the sidebar by "
-                + "itself once it announces itself on the network, which takes a "
-                + "few seconds." + named + keychainNote)
+            wrote + "is joining \"\(request.ssid)\". Its record is now in the "
+                + "sidebar and becomes Online when the board announces itself, "
+                + "which takes a few seconds." + named + keychainNote)
         return true
     }
 
@@ -1901,26 +2318,283 @@ final class PanelManager: ObservableObject {
         return WifiCredentialStore.credential(for: ssid)
     }
 
-    func usbPortOptions(for serviceName: String) -> [String] {
-        guard let assigned = panels.first(where: { $0.serviceName == serviceName })?.usbPort,
-              !assigned.isEmpty,
-              !usbSerialPorts.contains(assigned)
-        else { return usbSerialPorts }
-        return [assigned] + usbSerialPorts
+    private func stableHardwareID(of panel: PanelSnapshot) -> String? {
+        ConfigCommands.canonicalHardwareID(panel.hardwareID)
+            ?? ConfigCommands.canonicalHardwareID(panel.usbHardwareID)
     }
 
-    func setUSBPort(_ port: String?, for serviceName: String) {
-        let normalized = port?.trimmingCharacters(in: .whitespacesAndNewlines)
-        updatePanel(serviceName) { panel in
-            panel.usbPort = normalized?.isEmpty == false ? normalized : nil
+    private func panelAssociated(withHardwareID hardwareID: String) -> PanelSnapshot? {
+        let canonical = ConfigCommands.canonicalHardwareID(hardwareID)
+        return panels.first { stableHardwareID(of: $0) == canonical }
+    }
+
+    func associatedDisplayName(forUSBPath path: String) -> String? {
+        guard let device = usbDevices.first(where: { $0.path == path }) else { return nil }
+        if let hardwareID = device.hardwareID,
+           let panel = panelAssociated(withHardwareID: hardwareID) {
+            return panel.displayName
+        }
+        return panels.first(where: {
+            $0.usbPort == path && $0.hardwareID == nil && $0.usbHardwareID == nil
+        })?.displayName
+    }
+
+    func isUSBDeviceAssociated(_ path: String) -> Bool {
+        associatedDisplayName(forUSBPath: path) != nil
+    }
+
+    func usbHardwareID(for path: String) -> String? {
+        usbDevices.first(where: { $0.path == path })?.hardwareID
+    }
+
+    func currentUSBPort(for serviceName: String) -> String? {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return nil }
+        if let explicit = explicitLegacyUSBSelections[serviceName],
+           explicit.generation == usbPathGeneration(explicit.path),
+           usbDevices.contains(where: { $0.path == explicit.path && $0.isConnected }) {
+            return explicit.path
+        }
+        let hardwareID = stableHardwareID(of: panel)
+        if let hardwareID {
+            let matches = usbDevices.filter { $0.hardwareID == hardwareID }
+            if matches.count == 1 { return matches[0].path }
+            if matches.count > 1 { return "Ambiguous" }
+            return nil
+        }
+        guard let saved = panel.usbPort, usbSerialPorts.contains(saved) else { return nil }
+        return saved
+    }
+
+    func usbPortOptions(for serviceName: String) -> [WifiConfigUI.USBDeviceOption] {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return usbDevices }
+        if let hardwareID = panel.usbHardwareID {
+            guard !usbDevices.contains(where: { $0.hardwareID == hardwareID }) else {
+                return usbDevices
+            }
+            let disconnected = WifiConfigUI.USBDeviceOption(
+                path: panel.usbPort ?? "",
+                name: panel.displayName,
+                hardwareID: hardwareID,
+                isConnected: false)
+            return [disconnected] + usbDevices
+        }
+        guard let assigned = panel.usbPort,
+              !assigned.isEmpty,
+              !usbDevices.contains(where: { $0.path == assigned })
+        else { return usbDevices }
+        let disconnected = WifiConfigUI.USBDeviceOption(
+            path: assigned,
+            name: panel.displayName,
+            isConnected: false)
+        return [disconnected] + usbDevices
+    }
+
+    func usbDeviceSelection(for serviceName: String) -> String {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return "" }
+        if let hardwareID = panel.usbHardwareID { return "hardware:\(hardwareID)" }
+        if let path = panel.usbPort { return "path:\(path)" }
+        return ""
+    }
+
+    func setUSBDeviceSelection(_ selection: String, for serviceName: String) {
+        let normalized = selection.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            explicitLegacyUSBSelections[serviceName] = nil
+            updatePanel(serviceName) { panel in
+                panel.usbPort = nil
+                panel.usbHardwareID = nil
+            }
+            persistIfNeeded(force: true)
+            return
+        }
+
+        let options = usbPortOptions(for: serviceName)
+        if normalized.hasPrefix("hardware:"),
+           let hardwareID = ConfigCommands.canonicalHardwareID(
+               String(normalized.dropFirst("hardware:".count))) {
+            explicitLegacyUSBSelections[serviceName] = nil
+            let device = options.first { $0.hardwareID == hardwareID }
+            updatePanel(serviceName) { panel in
+                panel.usbHardwareID = hardwareID
+                panel.usbPort = device?.path.isEmpty == false ? device?.path : nil
+            }
+        } else if normalized.hasPrefix("path:") {
+            let path = String(normalized.dropFirst("path:".count))
+            let device = options.first { $0.path == path }
+            if let device, device.isConnected, device.hardwareID == nil,
+               !path.isEmpty {
+                explicitLegacyUSBSelections[serviceName] = (
+                    path: path, generation: usbPathGeneration(path))
+            } else {
+                explicitLegacyUSBSelections[serviceName] = nil
+            }
+            updatePanel(serviceName) { panel in
+                panel.usbPort = path.isEmpty ? nil : path
+                panel.usbHardwareID = device?.hardwareID
+            }
         }
         persistIfNeeded(force: true)
     }
 
+    /// Compatibility entry point for path-oriented callers and tests.
+    func setUSBPort(_ port: String?, for serviceName: String) {
+        let normalized = port?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let path = normalized, !path.isEmpty else {
+            setUSBDeviceSelection("", for: serviceName)
+            return
+        }
+        let selection = usbPortOptions(for: serviceName)
+            .first(where: { $0.path == path })?.selectionID ?? "path:\(path)"
+        setUSBDeviceSelection(selection, for: serviceName)
+    }
+
+    /// Refresh transport paths without blocking the main actor. Only newly seen
+    /// paths are identified automatically; the explicit refresh action below
+    /// re-probes every connected device.
     func refreshUSBPorts() {
-        let current = WifiConfigUI.candidatePorts()
-        if current != usbSerialPorts {
-            usbSerialPorts = current
+        let paths = WifiConfigUI.candidatePorts()
+        let existing = Dictionary(
+            usbDevices.map { ($0.path, $0) },
+            uniquingKeysWith: { first, _ in first })
+        let removed = Set(existing.keys).subtracting(paths)
+        for path in removed { invalidateUSBPath(path) }
+        let added = paths.filter { existing[$0] == nil }
+        for path in added { usbPathGenerations[path, default: 0] += 1 }
+        let refreshed = paths.map { existing[$0] ?? WifiConfigUI.USBDeviceOption(path: $0) }
+        if refreshed != usbDevices { usbDevices = refreshed }
+        identifyUSBPorts(added)
+    }
+
+    func refreshUSBDevices() {
+        refreshUSBPorts()
+        for path in usbSerialPorts { invalidateUSBPath(path) }
+        identifyUSBPorts(usbSerialPorts)
+    }
+
+    func usbPathGeneration(_ path: String) -> Int {
+        usbPathGenerations[path, default: 0]
+    }
+
+    private func invalidateUSBPath(_ path: String) {
+        usbPathGenerations[path, default: 0] += 1
+        usbProbeTasks[path]?.task.cancel()
+        usbProbeTasks[path] = nil
+        let expired = explicitLegacyUSBSelections.compactMap { service, selection in
+            selection.path == path ? service : nil
+        }
+        for service in expired { explicitLegacyUSBSelections[service] = nil }
+    }
+
+    /// Record identity learned either by a background CFGSHOW probe or by the
+    /// setup sheet's selected-device inspection.
+    func noteUSBIdentity(path: String, name: String?, hardwareID: String?) {
+        guard let index = usbDevices.firstIndex(where: { $0.path == path }) else { return }
+        let canonicalID = ConfigCommands.canonicalHardwareID(hardwareID)
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName?.isEmpty == false { usbDevices[index].name = trimmedName }
+        if let canonicalID { usbDevices[index].hardwareID = canonicalID }
+
+        guard let canonicalID else { return }
+        var associationChanged = false
+        for panelIndex in panels.indices {
+            if panels[panelIndex].usbPort == path {
+                if let savedID = panels[panelIndex].usbHardwareID {
+                    if savedID != canonicalID {
+                        // macOS reused this path for another board. Preserve the
+                        // stable assignment and discard only the stale path hint.
+                        panels[panelIndex].usbPort = nil
+                        associationChanged = true
+                    }
+                } else if let panelID = ConfigCommands.canonicalHardwareID(
+                    panels[panelIndex].hardwareID), panelID != canonicalID {
+                    // A legacy record already knows this panel's MAC from EINF.
+                    // Promote it before discarding the reused path so a later
+                    // probe can still find the assigned board at its new path.
+                    panels[panelIndex].usbHardwareID = panelID
+                    panels[panelIndex].usbPort = nil
+                    associationChanged = true
+                } else {
+                    // Legacy path-only assignment: migrate it once, never replace
+                    // a non-nil identity merely because a path was reused.
+                    panels[panelIndex].usbHardwareID = canonicalID
+                    associationChanged = true
+                }
+            } else {
+                let panelID = ConfigCommands.canonicalHardwareID(
+                    panels[panelIndex].hardwareID)
+                let hasLegacyPath = panels[panelIndex].usbPort?.isEmpty == false
+                if panels[panelIndex].usbHardwareID == canonicalID
+                    || (panels[panelIndex].usbHardwareID == nil
+                        && hasLegacyPath && panelID == canonicalID)
+                {
+                    panels[panelIndex].usbHardwareID = canonicalID
+                    panels[panelIndex].usbPort = path
+                    associationChanged = true
+                }
+            }
+        }
+        if associationChanged { persistIfNeeded(force: true) }
+    }
+
+    /// Return one coalesced CFGSHOW probe for this path and publish its identity.
+    func probeUSBDevice(
+        _ path: String, timeout: TimeInterval = 2
+    ) async -> WifiConfigUI.PortProbe {
+        let generation = usbPathGenerations[path, default: 0]
+        let task: Task<WifiConfigUI.PortProbe, Never>
+        if let existing = usbProbeTasks[path], existing.generation == generation {
+            task = existing.task
+        } else {
+            task = Task.detached(priority: .utility) {
+                WifiConfigUI.probePort(path, timeout: timeout)
+            }
+            usbProbeTasks[path] = (generation, task)
+        }
+        let result = await task.value
+        if usbProbeTasks[path]?.generation == generation {
+            usbProbeTasks[path] = nil
+        }
+        guard usbPathGenerations[path, default: 0] == generation,
+              usbDevices.contains(where: { $0.path == path })
+        else {
+            return .unavailable("USB device changed while it was being identified")
+        }
+        guard case .identified(let identity) = result else { return result }
+        noteUSBIdentity(
+            path: path, name: identity.name,
+            hardwareID: identity.hardwareID)
+        return result
+    }
+
+    func probeExistingFirmware(
+        at path: String
+    ) async -> UsbOnboarding.ExistingFirmware {
+        let deadline = Date(timeIntervalSinceNow: 3)
+        var result = await probeUSBDevice(path, timeout: 3)
+        if case .unavailable = result {
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining > 0.05 {
+                result = await probeUSBDevice(path, timeout: remaining)
+            }
+        }
+        switch result {
+        case .identified(let identity):
+            return .answered(
+                name: identity.name,
+                hardwareID: identity.hardwareID)
+        case .unavailable:
+            return .silent
+        }
+    }
+
+    private func identifyUSBPorts(_ ports: [String]) {
+        for path in ports {
+            Task { @MainActor [weak self] in
+                _ = await self?.probeUSBDevice(path)
+            }
         }
     }
 
@@ -1942,15 +2616,22 @@ final class PanelManager: ObservableObject {
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return }
         let currentName = panel.displayName
+        let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
         let preferredPort = panel.usbPort
         Task { @MainActor [weak self] in
             let ssid = await Task.detached {
                 WifiConfigUI.currentSSID(
-                    currentName: currentName, preferredPort: preferredPort)
+                    currentName: currentName,
+                    expectedHardwareID: expectedHardwareID,
+                    preferredPort: preferredPort)
             }.value
             guard let ssid else { return }
             self?.updatePanel(serviceName) { $0.currentSSID = ssid }
         }
+    }
+
+    func presentOperationOutcome(_ outcome: OperationOutcome) {
+        operationOutcome = outcome
     }
 
     func clearOperationOutcome() {
@@ -1958,14 +2639,30 @@ final class PanelManager: ObservableObject {
     }
 
     func canForget(_ serviceName: String) -> Bool {
-        sessions[serviceName] == nil
+        panels.contains { $0.serviceName == serviceName }
     }
 
     func forget(_ serviceName: String) {
-        guard canForget(serviceName) else { return }
-        panels.removeAll { $0.serviceName == serviceName }
+        guard let index = panels.firstIndex(where: { $0.serviceName == serviceName })
+        else { return }
+        let panel = panels[index]
+        supersededServiceNames.insert(serviceName)
+        sessions.removeValue(forKey: serviceName)?.stop()
+        commandedBrightness[serviceName] = nil
+        lastTouchSequence[serviceName] = nil
+        if pickerTarget == serviceName { pickerTarget = nil }
+        if regionTarget == serviceName {
+            regionSelector.hide()
+            regionTarget = nil
+            sourceBeforeRegion = nil
+        }
+        if let hardwareID = stableHardwareID(of: panel) {
+            _ = setRememberedOTAPassword(nil, for: hardwareID)
+        }
+        panels.remove(at: index)
         if selectedServiceName == serviceName {
-            selectedServiceName = panels.first?.serviceName
+            let next = panels.isEmpty ? nil : min(index, panels.count - 1)
+            selectedServiceName = next.map { panels[$0].serviceName }
         }
         persistIfNeeded(force: true)
     }
@@ -2085,14 +2782,50 @@ final class PanelManager: ObservableObject {
         panel.manuallyOff = info.manuallyOff
     }
 
+    /// Bind a paused discovery session to one owned hardware record. Returns
+    /// whether the record's service name migrated, or nil when this service is
+    /// not owned and the provisional session was stopped.
+    private func bindSessionIdentity(
+        hardwareID: String, serviceName: String
+    ) -> Bool? {
+        let actualID = ConfigCommands.canonicalHardwareID(hardwareID) ?? hardwareID
+        if let exact = panels.first(where: { $0.serviceName == serviceName }) {
+            let expectedID = stableHardwareID(of: exact)
+            if let expectedID, expectedID != actualID {
+                rejectProvisionalSession(serviceName)
+                return nil
+            }
+            unownedServiceNames.remove(serviceName)
+            sessions[serviceName]?.setPaused(false)
+            return false
+        }
+
+        let reconciled = reconcilePanelIdentity(
+            hardwareID: actualID, serviceName: serviceName)
+        guard panels.contains(where: { $0.serviceName == serviceName }) else {
+            rejectProvisionalSession(serviceName)
+            return nil
+        }
+        unownedServiceNames.remove(serviceName)
+        sessions[serviceName]?.setPaused(false)
+        refreshPreviewDriver()
+        return reconciled
+    }
+
+    private func rejectProvisionalSession(_ serviceName: String) {
+        unownedServiceNames.insert(serviceName)
+        sessions.removeValue(forKey: serviceName)?.stop()
+    }
+
     /// Migrate a persisted record when the same hardware reappears under a
     /// different Bonjour name. The service name remains the live routing key,
     /// while EINF's hardware ID preserves identity across USB renames.
     private func reconcilePanelIdentity(
         hardwareID: String, serviceName: String
     ) -> Bool {
+        let targetID = ConfigCommands.canonicalHardwareID(hardwareID) ?? hardwareID
         guard let oldIndex = panels.firstIndex(where: {
-            $0.hardwareID == hardwareID && $0.serviceName != serviceName
+            stableHardwareID(of: $0) == targetID && $0.serviceName != serviceName
         }) else { return false }
 
         let oldServiceName = panels[oldIndex].serviceName
@@ -2123,11 +2856,6 @@ final class PanelManager: ObservableObject {
     ) {
         if let index = panels.firstIndex(where: { $0.serviceName == serviceName }) {
             change(&panels[index])
-        } else {
-            var panel = PanelSnapshot(serviceName: serviceName, displayName: serviceName)
-            change(&panel)
-            panels.append(panel)
-            sortPanels()
         }
     }
 

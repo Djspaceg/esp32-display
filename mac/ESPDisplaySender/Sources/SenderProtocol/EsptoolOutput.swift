@@ -44,7 +44,15 @@ public enum EsptoolOutput {
         return token.isEmpty ? nil : token
     }
 
-    /// The MAC esptool printed, in its own `28:84:85:55:55:94` spelling, or nil.
+    /// The six-byte base MAC esptool printed, in its own
+    /// `28:84:85:55:55:94` spelling, or nil.
+    ///
+    /// C6 output contains two different address widths: `MAC:` is its eight-byte
+    /// IEEE 802.15.4 EUI-64, while `BASE MAC:` is the six-byte identity used by
+    /// Wi-Fi station firmware. The explicit base line must win. Matching a whole
+    /// line also prevents the first six bytes of the EUI-64 from looking like a
+    /// valid answer. S3 output has only a six-byte `MAC:` line, which remains the
+    /// fallback.
     ///
     /// THE ONLY STABLE IDENTITY A BOARD HAS ON THIS PATH. The tty path is not one:
     /// the same physical board was observed here at /dev/cu.usbmodem1101 and,
@@ -56,8 +64,17 @@ public enum EsptoolOutput {
     /// persisted: a panel becomes a sidebar entry through discovery, which knows
     /// it by its Bonjour service name.
     public static func macAddress(in output: String) -> String? {
-        let pattern = "MAC:[ \t]*((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        exactMacAddress(labeled: "BASE MAC", in: output)
+            ?? exactMacAddress(labeled: "MAC", in: output)
+    }
+
+    private static func exactMacAddress(labeled label: String, in output: String) -> String? {
+        let escapedLabel = NSRegularExpression.escapedPattern(for: label)
+        let pattern = "^[ \\t]*\(escapedLabel):[ \\t]*"
+            + "((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})[ \\t\\r]*$"
+        guard let regex = try? NSRegularExpression(
+            pattern: pattern, options: .anchorsMatchLines)
+        else { return nil }
         let range = NSRange(output.startIndex..<output.endIndex, in: output)
         guard let match = regex.firstMatch(in: output, range: range),
               let macRange = Range(match.range(at: 1), in: output)

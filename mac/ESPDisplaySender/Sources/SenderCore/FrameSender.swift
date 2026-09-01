@@ -65,6 +65,10 @@ final class FrameSender {
     /// predates half-res, which is the point of asking: such a panel rejects
     /// a codec-3 record and loses the whole datagram with it.
     private var _peerAcceptsHalfRes = false
+    /// Whether record tile bit 15 carries per-row visible spans. Kept behind
+    /// its own capability because firmware predating the decoder rejects that
+    /// bit and drops the entire datagram.
+    private var _peerAcceptsVisibleSpans = false
     /// The tile grid for this panel's geometry, present only when the
     /// geometry can carry the tile protocol at all (every square panel can;
     /// this exists so a hostile mDNS geometry cannot reach tile arithmetic).
@@ -483,6 +487,28 @@ final class FrameSender {
         if !paused { forceKeyframe() }
     }
 
+    func stop() {
+        lock.withLock {
+            _paused = true
+            _parked = true
+            pendingFrame = nil
+        }
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.pingTimer?.cancel()
+            self.pingTimer = nil
+            self.connection?.cancel()
+            self.connection = nil
+        }
+        sendQueue.async { [weak self] in
+            guard let self else { return }
+            self.refreshTimer?.cancel()
+            self.refreshTimer = nil
+            self.pendingFrame = nil
+            self.sendInFlight = false
+        }
+    }
+
     /// - Parameters:
     ///   - host: device hostname or IP (typically the mDNS name).
     ///   - port: UDP port the firmware listens on.
@@ -700,6 +726,9 @@ final class FrameSender {
             // band-derived bound assumes (see tileAbsorbablePacketsPerSecond).
             pacingTileStream = _peerAcceptsTileStream && tileGeometry != nil
             _peerAcceptsHalfRes = info.capabilities.contains(.tileHalfRes)
+                && tileGeometry != nil
+            _peerAcceptsVisibleSpans =
+                info.capabilities.contains(.tileVisibleSpans)
                 && tileGeometry != nil
             // Round glass: rebuild the mask only when the advertised answer
             // changes. It is a per-panel constant, but EINF repeats every
@@ -1112,11 +1141,13 @@ final class FrameSender {
         lock.lock()
         let tileStream = _peerAcceptsTileStream
         let halfRes = _peerAcceptsHalfRes
+        let visibleSpans = _peerAcceptsVisibleSpans
         let mask = _tileMask
         lock.unlock()
         if tileStream, let tiles = tileGeometry {
             sendTileFrame(pixels, landscape: landscape, tiles: tiles,
-                          mask: mask, halfRes: halfRes, conn: conn)
+                          mask: mask, halfRes: halfRes,
+                          visibleSpans: visibleSpans, conn: conn)
             return
         }
 
@@ -1199,7 +1230,8 @@ final class FrameSender {
     /// diff granularity differ.
     private func sendTileFrame(
         _ pixels: [UInt8], landscape: Bool, tiles: TileGeometry,
-        mask: TileMask?, halfRes: Bool, conn: NWConnection
+        mask: TileMask?, halfRes: Bool, visibleSpans: Bool,
+        conn: NWConnection
     ) {
         let keyframeDue =
             Date().timeIntervalSince(lastTileKeyframeAt) > keyframeInterval
@@ -1265,7 +1297,8 @@ final class FrameSender {
             frameId: id, dirtyTiles: dirty, pixels: pixels,
             geometry: tiles, landscape: landscape,
             policy: policy, forceLossy: forceLossy,
-            forceHalfRes: forceHalfRes)
+            forceHalfRes: forceHalfRes,
+            visibleSpanMask: visibleSpans ? mask : nil)
         tileStatEncodeNs &+= DispatchTime.now().uptimeNanoseconds &- encodeStart
 
         let sendStart = DispatchTime.now().uptimeNanoseconds

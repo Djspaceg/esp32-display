@@ -17,6 +17,7 @@ struct ManagerView: View {
     @ObservedObject var manager: PanelManager
     @State private var showingSettings = false
     @State private var showingAddDevice = false
+    @State private var pendingDeletion: PanelSnapshot?
 
     var body: some View {
         NavigationSplitView {
@@ -38,7 +39,10 @@ struct ManagerView: View {
                 // all - see the note on `AddDisplayFooter`.
                 .contentMargins(.bottom, 34, for: .scrollContent)
                 .overlay(alignment: .bottom) {
-                    AddDisplayFooter { showingAddDevice = true }
+                    DisplayListFooter(
+                        onAdd: { showingAddDevice = true },
+                        onRemove: { pendingDeletion = manager.selectedPanel },
+                        canRemove: manager.selectedPanel != nil)
                 }
                 .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
         } detail: {
@@ -69,6 +73,26 @@ struct ManagerView: View {
         }
         .sheet(isPresented: $showingAddDevice) {
             AddDeviceSheet(manager: manager)
+        }
+        .confirmationDialog(
+            pendingDeletion.map { "Remove \($0.displayName)?" } ?? "Remove display?",
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Remove Display", role: .destructive) {
+                if let panel = pendingDeletion {
+                    manager.forget(panel.serviceName)
+                }
+                pendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeletion = nil }
+        } message: {
+            Text("This removes the hardware record and its saved display settings "
+                + "from this Mac. It does not change the physical display, its "
+                + "firmware, or its saved WiFi credentials.")
         }
         .onReceive(
             NotificationCenter.default.publisher(for: .espDisplayShowSettings)
@@ -106,11 +130,6 @@ struct ManagerView: View {
                                 Button(panel.paused ? "Resume" : "Pause") {
                                     manager.setPaused(!panel.paused, for: panel.serviceName)
                                 }
-                                Divider()
-                                Button("Forget Display", role: .destructive) {
-                                    manager.forget(panel.serviceName)
-                                }
-                                .disabled(!manager.canForget(panel.serviceName))
                             }
                     }
                 } header: {
@@ -167,12 +186,14 @@ struct ManagerView: View {
 ///      or in the accessibility tree.
 ///   4. An overlay on the List, with `contentMargins` insetting the scrollable
 ///      content so rows are not hidden behind it. This one renders.
-private struct AddDisplayFooter: View {
-    let action: () -> Void
+private struct DisplayListFooter: View {
+    let onAdd: () -> Void
+    let onRemove: () -> Void
+    let canRemove: Bool
 
     var body: some View {
-        HStack(spacing: 0) {
-            Button(action: action) {
+        HStack(spacing: 2) {
+            Button(action: onAdd) {
                 Image(systemName: "plus")
                     .frame(width: 24, height: 20)
                     .contentShape(Rectangle())
@@ -181,6 +202,18 @@ private struct AddDisplayFooter: View {
             .help("Add a display connected to this Mac by USB")
             .accessibilityLabel("Add a display over USB")
             .accessibilityIdentifier("add-display-over-usb")
+
+            Button(action: onRemove) {
+                Image(systemName: "minus")
+                    .frame(width: 24, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .disabled(!canRemove)
+            .help(canRemove ? "Remove the selected display record" : "Select a display to remove")
+            .accessibilityLabel("Remove selected display")
+            .accessibilityIdentifier("remove-display-record")
+
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 8)
@@ -302,12 +335,6 @@ private struct PanelDetailView: View {
 
     private var nameHasChanges: Bool {
         !normalizedName.isEmpty && normalizedName != panel.displayName
-    }
-
-    private var usbPortSelection: Binding<String> {
-        Binding(
-            get: { panel.usbPort ?? "" },
-            set: { manager.setUSBPort($0.isEmpty ? nil : $0, for: panel.serviceName) })
     }
 
     private var selectedSSID: String {
@@ -709,29 +736,6 @@ private struct PanelDetailView: View {
                 CopyableAddress(address: panel.address)
             }
             LabeledContent("WiFi signal", value: panel.signalDescription)
-            LabeledContent("USB device") {
-                HStack(spacing: 8) {
-                    Picker("USB device", selection: usbPortSelection) {
-                        Text("Automatic (match by name)").tag("")
-                        ForEach(manager.usbPortOptions(for: panel.serviceName), id: \.self)
-                        { port in
-                            Text((port as NSString).lastPathComponent).tag(port)
-                        }
-                    }
-                    .labelsHidden()
-                    // Sized to its widest option rather than stretched to a
-                    // fixed width, which left a popup padded with dead space.
-                    .fixedSize()
-                    .help(panel.usbPort ?? "Automatically match this display by its reported name")
-
-                    Button {
-                        manager.refreshUSBPorts()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .help("Refresh connected USB serial devices")
-                }
-            }
             LabeledContent("Saved WiFi") {
                 HStack(spacing: 8) {
                     Picker("Saved WiFi", selection: wifiSelection) {
@@ -755,9 +759,10 @@ private struct PanelDetailView: View {
                 }
             }
         } header: {
-            Text("Connection")
+            Text("Network Connection")
         } footer: {
-            Text("Automatic verifies the reported display name; a manual assignment is saved with this display. WiFi credentials are stored in your login Keychain and applied over USB.")
+            Text("WiFi credentials are stored in your login Keychain and applied "
+                + "to this physical display over its current USB connection.")
         }
     }
 
@@ -905,6 +910,13 @@ private struct PanelDetailView: View {
             LabeledContent(
                 "Control protocol",
                 value: panel.controlProtocolVersion.map(String.init) ?? "Not available")
+            LabeledContent("Wireless updates") {
+                Text(panel.capabilities.contains(.ota) && panel.isOnline
+                    ? "Available now" : "Unavailable")
+                    .foregroundStyle(
+                        panel.capabilities.contains(.ota) && panel.isOnline
+                            ? .primary : .secondary)
+            }
             LabeledContent("OTA password") {
                 Button("Set…") {
                     beginOTAPasswordEdit()
@@ -913,9 +925,9 @@ private struct PanelDetailView: View {
                     otaPasswordPopover
                 }
             }
-            .help("Enable or change wireless updates over USB. Off until a "
-                + "password is set; \"Update Firmware…\" below stays "
-                + "unavailable until then.")
+            .help("Enable or change wireless updates over USB. OTA requires a "
+                + "password; a positively matched connected USB device can also "
+                + "be updated directly without enabling OTA.")
         }
     }
 
@@ -929,6 +941,21 @@ private struct PanelDetailView: View {
             // The label:-closure form plus an explicit full-width frame and
             // contentShape is what makes the whole row clickable again.
             DisclosureGroup(isExpanded: $showDiagnostics) {
+                LabeledContent("Port") {
+                    HStack(spacing: 8) {
+                        let currentPort = manager.currentUSBPort(for: panel.serviceName)
+                        Text(currentPort ?? "Not connected")
+                            .foregroundStyle(currentPort == nil ? .secondary : .primary)
+                            .textSelection(.enabled)
+                            .monospaced()
+                        Button {
+                            manager.refreshUSBDevices()
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .help("Refresh connected USB serial ports")
+                    }
+                }
                 LabeledContent("Frames displayed", value: panel.framesShown.formatted())
                 LabeledContent("Frames dropped", value: panel.framesDropped.formatted())
                 LabeledContent("Sender errors", value: panel.sendErrors.formatted())
@@ -955,6 +982,10 @@ private struct PanelDetailView: View {
                     // Form's own LabeledContent row padding in .grouped style.
                     .padding(.vertical, 4)
                     .contentShape(Rectangle())
+                    .onTapGesture {
+                        showDiagnostics.toggle()
+                    }
+                    .accessibilityAddTraits(.isButton)
             }
         }
     }
@@ -967,18 +998,14 @@ private struct PanelDetailView: View {
             Button("Update Firmware…") {
                 updateTarget = manager.beginFirmwareUpdate(panel.serviceName)
             }
-            .disabled(!manager.canControl(panel.serviceName, capability: .ota))
-            .help(controlHelp(.ota, "Push a firmware bundle to this panel"))
+            .disabled(!manager.canBeginFirmwareUpdate(panel.serviceName))
+            .help(manager.firmwareUpdateUnavailableReason(panel.serviceName)
+                ?? "Update this display over WiFi or a matched USB connection")
             Button("Restart Display…", role: .destructive) {
                 confirmRestart = true
             }
             .disabled(!manager.canControl(panel.serviceName, capability: .restart))
             .help(controlHelp(.restart, "Reboot the panel"))
-            Button("Forget Display", role: .destructive) {
-                manager.forget(panel.serviceName)
-            }
-            .disabled(!manager.canForget(panel.serviceName))
-            .help("A display can be forgotten after its active session retires")
         }
     }
 
@@ -1124,8 +1151,9 @@ private struct PanelDetailView: View {
                     .frame(width: 260, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("Written over USB. The display restarts and enables wireless "
-                    + "updates; streaming reconnects on its own.")
+                Text("Written over USB. The display restarts; wireless updates "
+                    + "become available only after it rejoins WiFi and reports "
+                    + "that its OTA listener is active.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(width: 260, alignment: .leading)

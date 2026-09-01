@@ -130,6 +130,12 @@ final class IssueReportingTests: XCTestCase {
             fps: 30)
     }
 
+    private func knownManager() -> PanelManager {
+        makeManager([PanelSnapshot(
+            serviceName: "studio-display",
+            displayName: "studio-display")])
+    }
+
     // MARK: app-wide issues
 
     func testReportedIssueIsPublishedWithItsTitle() {
@@ -224,7 +230,7 @@ final class IssueReportingTests: XCTestCase {
     /// Giving up on a device previously left the row saying "Offline" with the
     /// reason only in the log.
     func testRetirementExplainsItselfOnThePanel() {
-        let manager = makeManager()
+        let manager = knownManager()
         manager.register(makeSession(name: "studio-display"))
 
         manager.retire("studio-display")
@@ -235,7 +241,7 @@ final class IssueReportingTests: XCTestCase {
     }
 
     func testHeartbeatClearsTheRetirementMessage() {
-        let manager = makeManager()
+        let manager = knownManager()
         manager.register(makeSession(name: "studio-display"))
         manager.retire("studio-display")
         XCTAssertNotNil(manager.panels.first?.lastError)
@@ -251,7 +257,7 @@ final class IssueReportingTests: XCTestCase {
     /// A panel that never had a problem must not gain an error field from
     /// ordinary traffic.
     func testHealthyPanelHasNoError() {
-        let manager = makeManager()
+        let manager = knownManager()
         manager.register(makeSession(name: "studio-display"))
 
         manager.update(

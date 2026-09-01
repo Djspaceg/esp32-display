@@ -108,9 +108,11 @@ final class FirmwarePusher {
                     + (text == "Authentication Failed"
                         ? "." : ": \(Self.quote(text, whenEmpty: "it replied with nothing"))")
             case .panelNeverConnected(let seconds):
-                return "The panel accepted the update but never connected back "
-                    + "within \(seconds) seconds. A firewall on this Mac blocking "
-                    + "incoming connections would look like this."
+                return "The panel accepted the update invitation but did not "
+                    + "establish its return connection within \(seconds) seconds. "
+                    + "That is the only fact the app can observe here. Network "
+                    + "isolation, routing, Local Network permission, a panel-side "
+                    + "connection failure, or a Mac firewall can all cause it."
             case .transferFailed(let sent, let total, let reason):
                 return "The transfer stopped after \(sent) of \(total) bytes: "
                     + "\(reason). The panel keeps running the firmware it booted."

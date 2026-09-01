@@ -3242,6 +3242,7 @@ int main() {
     struct Seen {
       uint16_t tile;
       uint16_t run;
+      bool visibleSpans;
       tileproto::TileCodec codec;
       size_t len;
       uint8_t first;
@@ -3249,14 +3250,15 @@ int main() {
     std::vector<Seen> seen;
     bool ok = tileproto::forEachRecord(
         payload, sizeof(payload),
-        [&](uint16_t tile, uint16_t run, tileproto::TileCodec codec,
-            const uint8_t *p, size_t n) {
-          seen.push_back({tile, run, codec, n, p[0]});
+        [&](uint16_t tile, uint16_t run, bool visibleSpans,
+            tileproto::TileCodec codec, const uint8_t *p, size_t n) {
+          seen.push_back({tile, run, visibleSpans, codec, n, p[0]});
           return true;
         });
     CHECK(ok);
     CHECK(seen.size() == 2);
     CHECK(seen[0].tile == 5 && seen[0].run == 3);
+    CHECK(!seen[0].visibleSpans);
     CHECK(seen[0].codec == tileproto::TileCodec::Bc1);
     CHECK(seen[0].len == 3 && seen[0].first == 0xAA);
     CHECK(seen[1].tile == 40 && seen[1].run == 1);
@@ -3272,9 +3274,9 @@ int main() {
     bool sawHalf = false;
     bool ok = tileproto::forEachRecord(
         payload, sizeof(payload),
-        [&](uint16_t, uint16_t, tileproto::TileCodec codec, const uint8_t *,
-            size_t) {
-          sawHalf = codec == tileproto::TileCodec::HalfBc1;
+        [&](uint16_t, uint16_t, bool visibleSpans,
+            tileproto::TileCodec codec, const uint8_t *, size_t) {
+          sawHalf = !visibleSpans && codec == tileproto::TileCodec::HalfBc1;
           return false;
         });
     CHECK(!ok);
@@ -3285,15 +3287,15 @@ int main() {
     auto walks = [](std::vector<uint8_t> payload) {
       return tileproto::forEachRecord(
           payload.data(), payload.size(),
-          [](uint16_t, uint16_t, tileproto::TileCodec, const uint8_t *,
-             size_t) { return true; });
+          [](uint16_t, uint16_t, bool, tileproto::TileCodec,
+             const uint8_t *, size_t) { return true; });
     };
     CHECK(!walks({}));                          // empty
     CHECK(!walks({0x05, 0x00, 0x01}));          // truncated record header
     CHECK(!walks({0x05, 0x00, 0x00, 0x00}));    // zero-length body
     CHECK(!walks({0x05, 0x00, 0x02, 0x00, 0xAA}));  // body one byte short
     CHECK(walks({0x05, 0x00, 0x02, 0x00, 0xAA, 0xBB}));  // exact fit walks
-    CHECK(!walks({0x05, 0x80, 0x01, 0x00, 0xAA}));  // reserved tile bit 15
+    CHECK(walks({0x05, 0x80, 0x01, 0x00, 0xAA}));  // visible-span flag
     // A valid record followed by a truncated one refuses the whole packet.
     CHECK(!walks({0x05, 0x00, 0x01, 0x00, 0xAA, 0x06, 0x00, 0x01}));
   }
@@ -3477,6 +3479,13 @@ int main() {
     CHECK((deviceproto::CAP_TILE_HALFRES & deviceproto::CAP_TILE_STREAM) == 0);
     CHECK((deviceproto::CAP_TILE_HALFRES & deviceproto::CAP_ROUND_DISPLAY) ==
           0);
+    CHECK(deviceproto::CAP_TILE_VISIBLE_SPANS == 1u << 18);
+    CHECK((deviceproto::CAP_TILE_VISIBLE_SPANS &
+           deviceproto::CAP_TILE_STREAM) == 0);
+    CHECK((deviceproto::CAP_TILE_VISIBLE_SPANS &
+           deviceproto::CAP_ROUND_DISPLAY) == 0);
+    CHECK(tileproto::RECORD_VISIBLE_SPANS == 0x8000);
+    CHECK(tileproto::VISIBLE_SPAN_DESCRIPTOR_BYTES == 4);
   }
 
   // --- tile stream: half-res BC1 (codec 3) ---------------------------------

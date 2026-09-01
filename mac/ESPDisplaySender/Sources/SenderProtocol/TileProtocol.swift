@@ -216,9 +216,16 @@ public struct TileMask: Hashable, Sendable {
 /// first_tile bit 15 always set, bits 14..10 reserved-zero, bits 9..0 the
 /// first record's starting tile. dirty_count bit 15 = landscape, bits 14..0
 /// the number of dirty TILES in this frame. Then records:
-///   [tile u16 LE: bits 9..0 start, bits 14..10 run length - 1, bit 15 = 0]
+///   [tile u16 LE: bits 9..0 start, bits 14..10 run length - 1,
+///    bit 15 = visible-span payload]
 ///   [len u16 LE: bits 13..0 payload bytes, bits 15..14 codec]
 ///   [payload]
+///
+/// A visible-span record starts with one `[xOffset u16][pixelCount u16]`
+/// descriptor per raster row, followed by raw or RLE565 pixels concatenated
+/// in row order. It is capability-gated because older firmware rejects bit 15.
+/// BC1 is never combined with spans: omitting hidden samples while retaining
+/// BC1's shared 4x4 palette would otherwise change visible colours.
 public enum TileProtocol {
     /// first_tile bit 15: this datagram is a tile-stream packet.
     public static let firstTileStreamFlag: UInt16 = 0x8000
@@ -228,6 +235,10 @@ public enum TileProtocol {
     public static let recordCodecShift = 14
     /// Record tile field bits 14..10.
     public static let recordRunShift = 10
+    /// Record tile field bit 15: payload begins with per-row visible spans.
+    public static let recordVisibleSpansFlag: UInt16 = 0x8000
+    /// One visible-row descriptor: x offset and pixel count, both u16 LE.
+    public static let visibleSpanDescriptorBytes = 4
 
     /// Codec values for a record's len field bits 15..14. All four values are
     /// defined, so the field is full.
@@ -419,6 +430,83 @@ public enum TileProtocol {
         }
         return out
     }
+
+    /// A boundary run reduced to the pixels the glass can show. Spans are
+    /// relative to the run's x origin; `pixels` concatenates them row-major.
+    public struct VisibleRun: Equatable, Sendable {
+        public let spans: [Range<Int>]
+        public let pixels: [UInt8]
+
+        /// Prefix an encoded compact raster with the fixed per-row span table.
+        public func payload(encodedPixels: [UInt8]) -> [UInt8] {
+            var out = [UInt8]()
+            out.reserveCapacity(
+                spans.count * TileProtocol.visibleSpanDescriptorBytes
+                    + encodedPixels.count)
+            for span in spans {
+                let offset = UInt16(span.lowerBound)
+                let count = UInt16(span.count)
+                out.append(UInt8(offset & 0xFF))
+                out.append(UInt8(offset >> 8))
+                out.append(UInt8(count & 0xFF))
+                out.append(UInt8(count >> 8))
+            }
+            out.append(contentsOf: encodedPixels)
+            return out
+        }
+    }
+
+    /// Extract only the visible pixels of a run that crosses a round bezel.
+    /// Returns nil for an unmasked or wholly visible run so its legacy encoding
+    /// stays byte-identical and may still use BC1/half-BC1.
+    public static func extractVisibleRun(
+        pixels: [UInt8], geometry: TileGeometry, startTile: Int,
+        runLength: Int, mask: TileMask
+    ) -> VisibleRun? {
+        guard mask.round, mask.geometry == geometry,
+              geometry.runValid(startTile: startTile, runLength: runLength),
+              pixels.count == geometry.frameBytes
+        else { return nil }
+
+        let x0 = geometry.col(startTile) * TileGeometry.tileDim
+        let y0 = geometry.row(startTile) * TileGeometry.tileDim
+        let width = geometry.runPixelWidth(
+            startTile: startTile, runLength: runLength)
+        let height = geometry.rowHeight(geometry.row(startTile))
+        var spans = [Range<Int>]()
+        var compact = [UInt8]()
+        var clipped = false
+        spans.reserveCapacity(height)
+        compact.reserveCapacity(width * height * 2)
+
+        for row in 0..<height {
+            var lower = x0 + width
+            var upper = x0
+            for tile in startTile..<(startTile + runLength) {
+                let tileX = geometry.col(tile) * TileGeometry.tileDim
+                let tileWidth = geometry.colWidth(geometry.col(tile))
+                let visible: Range<Int>
+                if let boundary = mask.boundaryRowSpans[tile] {
+                    visible = boundary[row]
+                } else if mask.isVisible(tile) {
+                    visible = tileX..<(tileX + tileWidth)
+                } else {
+                    continue
+                }
+                guard !visible.isEmpty else { continue }
+                lower = min(lower, visible.lowerBound)
+                upper = max(upper, visible.upperBound)
+            }
+            let span = lower < upper ? (lower - x0)..<(upper - x0) : 0..<0
+            spans.append(span)
+            if span != 0..<width { clipped = true }
+            guard !span.isEmpty else { continue }
+            let source = ((y0 + row) * geometry.width + x0 + span.lowerBound) * 2
+            compact.append(contentsOf: pixels[source..<(source + span.count * 2)])
+        }
+        guard clipped, !compact.isEmpty else { return nil }
+        return VisibleRun(spans: spans, pixels: compact)
+    }
 }
 
 // MARK: - TileLossyPolicy
@@ -519,6 +607,7 @@ public enum TilePacker {
         let startTile: Int
         let runLength: Int
         let codec: TileProtocol.Codec
+        let visibleSpans: Bool
         let payload: [UInt8]
     }
 
@@ -532,7 +621,7 @@ public enum TilePacker {
         frameId: UInt16, dirtyTiles: [Int], pixels: [UInt8],
         geometry: TileGeometry, landscape: Bool,
         policy: TileLossyPolicy, forceLossy: Bool = false,
-        forceHalfRes: Bool = false
+        forceHalfRes: Bool = false, visibleSpanMask: TileMask? = nil
     ) -> [Data] {
         precondition(pixels.count == geometry.frameBytes)
         let runs = TileProtocol.mergeRuns(dirtyTiles: dirtyTiles, geometry: geometry)
@@ -541,7 +630,8 @@ public enum TilePacker {
             prepare(run.start, run.length, into: &prepared,
                     pixels: pixels, geometry: geometry,
                     policy: policy, forceLossy: forceLossy,
-                    forceHalfRes: forceHalfRes)
+                    forceHalfRes: forceHalfRes,
+                    visibleSpanMask: visibleSpanMask)
         }
 
         let budget = TileGeometry.maxPacketBytes
@@ -558,6 +648,8 @@ public enum TilePacker {
             for record in current {
                 let tileField = UInt16(record.startTile)
                     | (UInt16(record.runLength - 1) << TileProtocol.recordRunShift)
+                    | (record.visibleSpans
+                        ? TileProtocol.recordVisibleSpansFlag : 0)
                 let lenField = UInt16(record.payload.count)
                     | (UInt16(record.codec.rawValue) << TileProtocol.recordCodecShift)
                 packet.append(UInt8(tileField & 0xFF))
@@ -591,18 +683,60 @@ public enum TilePacker {
         into prepared: inout [PreparedRecord],
         pixels: [UInt8], geometry: TileGeometry,
         policy: TileLossyPolicy, forceLossy: Bool,
-        forceHalfRes: Bool = false
+        forceHalfRes: Bool = false, visibleSpanMask: TileMask? = nil
     ) {
         let raw = TileProtocol.extractRun(
             pixels: pixels, geometry: geometry,
             startTile: startTile, runLength: runLength)
-        var best = PreparedRecord(
-            startTile: startTile, runLength: runLength,
-            codec: .raw, payload: raw)
-        if let rle = RLE565.encode(raw[...]), rle.count < best.payload.count {
+        var best: PreparedRecord
+        if let mask = visibleSpanMask,
+           let visible = TileProtocol.extractVisibleRun(
+               pixels: pixels, geometry: geometry, startTile: startTile,
+               runLength: runLength, mask: mask) {
+            // A boundary record carries only visible pixels. Keep it lossless:
+            // BC1's palette is shared by visible and hidden samples, and
+            // half-BC1 mixes them during downsampling before encoding.
+            best = PreparedRecord(
+                startTile: startTile, runLength: runLength, codec: .raw,
+                visibleSpans: true,
+                payload: visible.payload(encodedPixels: visible.pixels))
+            if let rle = RLE565.encode(visible.pixels[...]) {
+                let payload = visible.payload(encodedPixels: rle)
+                if payload.count < best.payload.count {
+                    best = PreparedRecord(
+                        startTile: startTile, runLength: runLength,
+                        codec: .rle565, visibleSpans: true, payload: payload)
+                }
+            }
+        } else {
             best = PreparedRecord(
                 startTile: startTile, runLength: runLength,
-                codec: .rle565, payload: rle)
+                codec: .raw, visibleSpans: false, payload: raw)
+            if let rle = RLE565.encode(raw[...]), rle.count < best.payload.count {
+                best = PreparedRecord(
+                    startTile: startTile, runLength: runLength,
+                    codec: .rle565, visibleSpans: false, payload: rle)
+            }
+        }
+        if best.visibleSpans {
+            let budget = TileGeometry.maxPacketBytes - TileGeometry.headerBytes
+                - TileGeometry.recordHeaderBytes
+            if best.payload.count <= budget {
+                prepared.append(best)
+                return
+            }
+            let left = runLength / 2
+            prepare(startTile, left, into: &prepared,
+                    pixels: pixels, geometry: geometry,
+                    policy: policy, forceLossy: forceLossy,
+                    forceHalfRes: forceHalfRes,
+                    visibleSpanMask: visibleSpanMask)
+            prepare(startTile + left, runLength - left, into: &prepared,
+                    pixels: pixels, geometry: geometry,
+                    policy: policy, forceLossy: forceLossy,
+                    forceHalfRes: forceHalfRes,
+                    visibleSpanMask: visibleSpanMask)
+            return
         }
         // BC1 is fixed-rate, so its size is known WITHOUT encoding. When the
         // lossless winner is already at least as small, BC1 cannot win, and
@@ -644,7 +778,7 @@ public enum TilePacker {
             if lossyEligible, let bc1 = BC1.encode(raw[...], width: w, height: h) {
                 best = PreparedRecord(
                     startTile: startTile, runLength: runLength,
-                    codec: .bc1, payload: bc1)
+                    codec: .bc1, visibleSpans: false, payload: bc1)
             }
         }
         if tryHalf,
@@ -654,7 +788,7 @@ public enum TilePacker {
                height: TileProtocol.halfDim(h)) {
             best = PreparedRecord(
                 startTile: startTile, runLength: runLength,
-                codec: .halfBc1, payload: half)
+                codec: .halfBc1, visibleSpans: false, payload: half)
         }
         let budget = TileGeometry.maxPacketBytes - TileGeometry.headerBytes
             - TileGeometry.recordHeaderBytes
@@ -668,10 +802,12 @@ public enum TilePacker {
         prepare(startTile, left, into: &prepared,
                 pixels: pixels, geometry: geometry,
                 policy: policy, forceLossy: forceLossy,
-                forceHalfRes: forceHalfRes)
+                forceHalfRes: forceHalfRes,
+                visibleSpanMask: visibleSpanMask)
         prepare(startTile + left, runLength - left, into: &prepared,
                 pixels: pixels, geometry: geometry,
                 policy: policy, forceLossy: forceLossy,
-                forceHalfRes: forceHalfRes)
+                forceHalfRes: forceHalfRes,
+                visibleSpanMask: visibleSpanMask)
     }
 }

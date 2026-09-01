@@ -312,9 +312,15 @@ final class UsbOnboardingTests: XCTestCase {
     /// would be a much bigger action than the one asked for.
     func testTheSuggestedModeFollowsWhatTheBoardAnswered() {
         XCTAssertEqual(
-            UsbOnboarding.suggestedMode(for: .answered(name: "panel")), .configureOnly)
+            UsbOnboarding.suggestedMode(
+                for: .answered(name: "panel", hardwareID: "020000123456")),
+            .configureOnly)
         XCTAssertEqual(
-            UsbOnboarding.suggestedMode(for: .answered(name: "")), .configureOnly)
+            UsbOnboarding.suggestedMode(for: .answered(name: "panel")),
+            .flashAndConfigure)
+        XCTAssertEqual(
+            UsbOnboarding.suggestedMode(for: .answered(name: "")),
+            .flashAndConfigure)
         XCTAssertEqual(UsbOnboarding.suggestedMode(for: .silent), .flashAndConfigure)
         XCTAssertEqual(UsbOnboarding.suggestedMode(for: .notChecked), .flashAndConfigure)
     }

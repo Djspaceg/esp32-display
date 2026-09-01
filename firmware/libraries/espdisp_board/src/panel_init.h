@@ -30,6 +30,29 @@
 
 namespace boardpanel {
 
+// Waveshare's maintained 16 MB production-board sequence. Its CO5300 must
+// leave sleep before the remaining configuration is applied; the older
+// engineering sample continues using the vendored driver's default table.
+static const uint8_t CO5300_CURRENT_FE[] = {0x00};
+static const uint8_t CO5300_CURRENT_C4[] = {0x80};
+static const uint8_t CO5300_CURRENT_COLMOD[] = {0x55};
+static const uint8_t CO5300_CURRENT_CTRL1[] = {0x20};
+static const uint8_t CO5300_CURRENT_HBM[] = {0xFF};
+static const uint8_t CO5300_CURRENT_BRIGHTNESS[] = {0xD0};
+static const uint8_t CO5300_CURRENT_CONTRAST[] = {0x00};
+static const co5300_lcd_init_cmd_t CO5300_CURRENT_INIT[] = {
+    {0x11, nullptr, 0, 120},
+    {0xFE, CO5300_CURRENT_FE, sizeof(CO5300_CURRENT_FE), 0},
+    {0xC4, CO5300_CURRENT_C4, sizeof(CO5300_CURRENT_C4), 0},
+    {0x3A, CO5300_CURRENT_COLMOD, sizeof(CO5300_CURRENT_COLMOD), 0},
+    {0x53, CO5300_CURRENT_CTRL1, sizeof(CO5300_CURRENT_CTRL1), 0},
+    {0x63, CO5300_CURRENT_HBM, sizeof(CO5300_CURRENT_HBM), 0},
+    {0x29, nullptr, 0, 0},
+    {0x51, CO5300_CURRENT_BRIGHTNESS,
+     sizeof(CO5300_CURRENT_BRIGHTNESS), 0},
+    {0x58, CO5300_CURRENT_CONTRAST, sizeof(CO5300_CURRENT_CONTRAST), 10},
+};
+
 /// Bring up the SPI/QSPI bus and the panel described by cfg.
 ///
 /// spiHz is the pixel clock; pass cfg.pclkHz unless deliberately
@@ -113,6 +136,11 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
       // init table (which carries this glass's column window and SLPOUT).
       co5300_vendor_config_t vendor = {};
       vendor.flags.use_qspi_interface = cfg.isQspi() ? 1 : 0;
+      if (cfg.usesCurrentCo5300Profile()) {
+        vendor.init_cmds = CO5300_CURRENT_INIT;
+        vendor.init_cmds_size =
+            sizeof(CO5300_CURRENT_INIT) / sizeof(CO5300_CURRENT_INIT[0]);
+      }
       panel_config.vendor_config = &vendor;
       err = esp_lcd_new_panel_co5300(io, &panel_config, &panel);
       break;

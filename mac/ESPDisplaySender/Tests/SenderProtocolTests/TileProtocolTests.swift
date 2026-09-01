@@ -513,7 +513,7 @@ final class TileProtocolTests: XCTestCase {
         XCTAssertNotEqual(codecOfFirstRecord(lossless), 2)
     }
 
-    // MARK: - Boundary-tile flattening: is it worth building?
+    // MARK: - Boundary visible-span records
 
     /// Whether a pixel's centre is inside the round glass, the same predicate
     /// `TileMask` applies per tile.
@@ -523,7 +523,7 @@ final class TileProtocolTests: XCTestCase {
         return dx * dx + dy * dy < c * c
     }
 
-    func testBoundaryFlatteningGainIsMeasuredBeforeBeingBuilt() {
+    func testBoundaryCollateralMeasurementPinsVisibleSpanOpportunity() {
         // Section 13.5 left this open: the 719 tiles a keyframe sends still
         // contain 11,244 invisible pixels in the boundary ring, and zeroing
         // them would give RLE long runs to collapse. It is only sound on the
@@ -625,11 +625,10 @@ final class TileProtocolTests: XCTestCase {
             flatCornerAsIs += RLE565.encode(raster[...])?.count ?? raster.count
         }
         XCTAssertEqual(flatCornerAsIs, 5_170)
-        // Identical to the flattened figure, which settles it: flattening wins
-        // NOTHING when the corner is flat, and 5x when it is busy. The gain is
-        // entirely a property of content the sender cannot control, and it only
-        // ever helps the RLE candidate. Not built - see section 17.15 and the
-        // bezel-diff test below, which fixes the larger problem instead.
+        // The visible-span wire record now removes that collateral outright.
+        // This historical measurement remains useful because it pins the size
+        // of the boundary problem and the content-dependent gain over merely
+        // flattening hidden values into ordinary RLE.
         XCTAssertEqual(flatCornerAsIs, flattened)
     }
 
@@ -923,6 +922,8 @@ final class TileProtocolTests: XCTestCase {
         XCTAssertEqual(TileProtocol.recordLengthMask, 0x3FFF)
         XCTAssertEqual(TileProtocol.recordCodecShift, 14)
         XCTAssertEqual(TileProtocol.recordRunShift, 10)
+        XCTAssertEqual(TileProtocol.recordVisibleSpansFlag, 0x8000)
+        XCTAssertEqual(TileProtocol.visibleSpanDescriptorBytes, 4)
         XCTAssertEqual(TileProtocol.Codec.raw.rawValue, 0)
         XCTAssertEqual(TileProtocol.Codec.rle565.rawValue, 1)
         XCTAssertEqual(TileProtocol.Codec.bc1.rawValue, 2)
@@ -930,7 +931,10 @@ final class TileProtocolTests: XCTestCase {
         // (deviceproto::CAP_TILE_STREAM, deviceproto::CAP_ROUND_DISPLAY).
         XCTAssertEqual(DeviceProtocol.Capabilities.tileStream.rawValue, 1 << 15)
         XCTAssertEqual(DeviceProtocol.Capabilities.roundDisplay.rawValue, 1 << 16)
+        XCTAssertEqual(DeviceProtocol.Capabilities.tileVisibleSpans.rawValue, 1 << 18)
         XCTAssertTrue(DeviceProtocol.Capabilities.tileStream
-            .isDisjoint(with: [.power, .compressedBands, .roundDisplay]))
+            .isDisjoint(with: [
+                .power, .compressedBands, .roundDisplay, .tileVisibleSpans,
+            ]))
     }
 }

@@ -20,6 +20,7 @@ final class PanelPersistenceTests: XCTestCase {
             hardwareID: "esp32c6-a1b2c3d4",
             address: "192.168.1.42",
             usbPort: "/dev/cu.usbserial-A1B2C3D4",
+            usbHardwareID: "288485a1b2c3",
             discovered: true,
             lastSeen: Date(timeIntervalSince1970: 1_700_000_000),
             lastHeartbeatAt: Date(timeIntervalSince1970: 1_700_000_050),
@@ -87,6 +88,7 @@ final class PanelPersistenceTests: XCTestCase {
         XCTAssertEqual(record.serviceName, "studio-display")
         XCTAssertEqual(record.displayName, "Studio Display")
         XCTAssertEqual(record.hardwareID, "esp32c6-a1b2c3d4")
+        XCTAssertEqual(record.usbHardwareID, "288485a1b2c3")
         XCTAssertEqual(record.usbPort, "/dev/cu.usbserial-A1B2C3D4")
         XCTAssertEqual(record.address, "192.168.1.42")
         XCTAssertEqual(record.lastSeen, Date(timeIntervalSince1970: 1_700_000_000))
@@ -98,6 +100,7 @@ final class PanelPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.serviceName, "studio-display")
         XCTAssertEqual(restored.displayName, "Studio Display")
         XCTAssertEqual(restored.hardwareID, "esp32c6-a1b2c3d4")
+        XCTAssertEqual(restored.usbHardwareID, "288485a1b2c3")
         XCTAssertEqual(restored.usbPort, "/dev/cu.usbserial-A1B2C3D4")
         XCTAssertEqual(restored.address, "192.168.1.42")
         XCTAssertEqual(restored.lastSeen, Date(timeIntervalSince1970: 1_700_000_000))
@@ -140,8 +143,8 @@ final class PanelPersistenceTests: XCTestCase {
                     "controlProtocolVersion", "sourceDescription", "lastError"] {
             XCTAssertFalse(json.contains("\"\(key)\""), "\(key) reached disk")
         }
-        for key in ["serviceName", "displayName", "hardwareID", "usbPort", "address",
-                    "lastSeen"] {
+        for key in ["serviceName", "displayName", "hardwareID", "usbHardwareID",
+                    "usbPort", "address", "lastSeen"] {
             XCTAssertTrue(json.contains("\"\(key)\""), "\(key) missing from disk")
         }
     }
@@ -195,6 +198,7 @@ final class PanelPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.serviceName, "studio-display")
         XCTAssertEqual(restored.displayName, "Studio Display")
         XCTAssertEqual(restored.hardwareID, "esp32c6-a1b2c3d4")
+        XCTAssertNil(restored.usbHardwareID)
         XCTAssertEqual(restored.usbPort, "/dev/cu.usbserial-A1B2C3D4")
         XCTAssertEqual(restored.address, "192.168.1.42")
         XCTAssertEqual(restored.lastSeen, Date(timeIntervalSince1970: 1_700_000_000))
@@ -214,6 +218,7 @@ final class PanelPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.serviceName, "travel-display")
         XCTAssertEqual(restored.displayName, "travel-display")
         XCTAssertNil(restored.hardwareID)
+        XCTAssertNil(restored.usbHardwareID)
         XCTAssertNil(restored.usbPort)
         XCTAssertNil(restored.address)
         XCTAssertNil(restored.lastSeen)

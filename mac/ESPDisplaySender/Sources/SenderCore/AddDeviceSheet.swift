@@ -26,6 +26,8 @@ struct AddDeviceSheet: View {
     @State private var detection: UsbOnboarding.ChipDetection = .notAttempted
     @State private var existing: UsbOnboarding.ExistingFirmware = .notChecked
     @State private var inspecting = false
+    @State private var inspectionGeneration = 0
+    @State private var inspectedPathGeneration: Int?
     @State private var tool: UsbOnboarding.ToolAvailability = .missing(searched: [])
 
     @State private var bundle: FirmwareBundle?
@@ -74,6 +76,9 @@ struct AddDeviceSheet: View {
             // way.
             work?.cancel()
         }
+        .onChange(of: manager.usbDevices) { _, _ in
+            usbDevicesChanged()
+        }
         .confirmationDialog(
             confirmationTitle, isPresented: $confirming, titleVisibility: .visible
         ) {
@@ -93,17 +98,28 @@ struct AddDeviceSheet: View {
                 HStack(spacing: 8) {
                     Picker("USB device", selection: $port) {
                         Text("Choose…").tag("")
-                        ForEach(manager.usbSerialPorts, id: \.self) { candidate in
-                            Text((candidate as NSString).lastPathComponent)
-                                .tag(candidate)
+                        ForEach(manager.usbDevices) { device in
+                            if let recordName = manager.associatedDisplayName(
+                                forUSBPath: device.path) {
+                                Text("\(device.displayName) — already added as \(recordName)")
+                                    .tag(device.path)
+                                    .disabled(true)
+                            } else {
+                                Text(device.displayName).tag(device.path)
+                            }
                         }
                     }
                     .labelsHidden()
                     .fixedSize()
                     .disabled(running)
+                    .help(port.isEmpty ? "Choose a connected display" : port)
+                    .onChange(of: port) { _, _ in
+                        work?.cancel()
+                        inspect()
+                    }
 
                     Button {
-                        manager.refreshUSBPorts()
+                        manager.refreshUSBDevices()
                         inspect()
                     } label: {
                         Image(systemName: "arrow.clockwise")
@@ -132,7 +148,11 @@ struct AddDeviceSheet: View {
             LabeledContent("What to do") {
                 Picker("What to do", selection: $mode) {
                     ForEach(UsbOnboarding.Mode.allCases) { option in
-                        Text(option.label).tag(option)
+                        Text(option.label)
+                            .tag(option)
+                            .disabled(
+                                option == .configureOnly
+                                    && requiresFirmwareForStableIdentity)
                     }
                 }
                 .labelsHidden()
@@ -278,7 +298,9 @@ struct AddDeviceSheet: View {
             }
             .buttonStyle(.glassProminent)
             .keyboardShortcut(.defaultAction)
-            .disabled(!plan.canStart || running)
+            .disabled(
+                !plan.canStart || running || selectedHardwareID == nil
+                    || manager.isUSBDeviceAssociated(port))
         }
         .padding(12)
         .glassCard(cornerRadius: 16)
@@ -306,11 +328,25 @@ struct AddDeviceSheet: View {
         return .ready(saved.password.isEmpty ? .openNetwork : .set(saved.password))
     }
 
+    private var requiresFirmwareForStableIdentity: Bool {
+        if case .answered(_, let hardwareID) = existing {
+            return ConfigCommands.canonicalHardwareID(hardwareID) == nil
+        }
+        return false
+    }
+
+    private var effectiveMode: UsbOnboarding.Mode {
+        requiresFirmwareForStableIdentity ? .flashAndConfigure : mode
+    }
+
     private var request: UsbOnboarding.Request {
-        UsbOnboarding.Request(
-            port: port,
+        let evidenceIsCurrent = port.isEmpty
+            || inspectedPathGeneration == manager.usbPathGeneration(port)
+        let eligible = evidenceIsCurrent && !manager.isUSBDeviceAssociated(port)
+        return UsbOnboarding.Request(
+            port: eligible ? port : "",
             availablePorts: manager.usbSerialPorts,
-            mode: mode,
+            mode: effectiveMode,
             tool: tool,
             bundle: bundle,
             detection: detection,
@@ -319,9 +355,29 @@ struct AddDeviceSheet: View {
             credential: credential)
     }
 
+    private var selectedHardwareID: String? {
+        if let hardwareID = manager.usbHardwareID(for: port) { return hardwareID }
+        if case .answered(_, let hardwareID) = existing,
+           let hardwareID = ConfigCommands.canonicalHardwareID(hardwareID) {
+            return hardwareID
+        }
+        if case .detected(_, let mac) = detection {
+            return ConfigCommands.canonicalHardwareID(mac)
+        }
+        return nil
+    }
+
+    private var existingDeviceName: String? {
+        if case .answered(let name, _) = existing, !name.isEmpty { return name }
+        return nil
+    }
+
     private var plan: UsbOnboardingPlan { UsbOnboardingPlan.make(request) }
 
     private var boardDescription: String {
+        if let recordName = manager.associatedDisplayName(forUSBPath: port) {
+            return "Already added as \"\(recordName)\""
+        }
         switch detection {
         case .detected(let chip, let mac):
             guard let mac else { return chip }
@@ -331,7 +387,7 @@ struct AddDeviceSheet: View {
         case .notAttempted:
             if inspecting { return "Reading…" }
             switch existing {
-            case .answered(let name) where !name.isEmpty:
+            case .answered(let name, _) where !name.isEmpty:
                 return "Already set up as \"\(name)\""
             case .answered:
                 return "Already running this firmware"
@@ -387,7 +443,7 @@ struct AddDeviceSheet: View {
     // MARK: - actions
 
     private func prepare() {
-        manager.refreshUSBPorts()
+        manager.refreshUSBDevices()
         manager.refreshSavedNetworks()
         tool = EsptoolInstallation.locate()
         loadShippedBundle()
@@ -395,10 +451,12 @@ struct AddDeviceSheet: View {
         // One device connected is not a guess about which board it is - there is
         // only one - and it saves the most common case a click. Still shown in the
         // picker, and still re-chooseable.
-        if port.isEmpty, manager.usbSerialPorts.count == 1 {
-            port = manager.usbSerialPorts[0]
+        let eligible = manager.usbDevices.filter {
+            !manager.isUSBDeviceAssociated($0.path)
         }
-        inspect()
+        if port.isEmpty, eligible.count == 1 {
+            port = eligible[0].path
+        }
     }
 
     private func loadShippedBundle() {
@@ -431,28 +489,64 @@ struct AddDeviceSheet: View {
     private func inspect() {
         detection = .notAttempted
         existing = .notChecked
+        work?.cancel()
+        inspectionGeneration += 1
+        let generation = inspectionGeneration
         let target = port
-        guard !target.isEmpty, !running else { return }
+        let pathGeneration = manager.usbPathGeneration(target)
+        inspectedPathGeneration = pathGeneration
+        guard !target.isEmpty, !running else {
+            inspecting = false
+            return
+        }
         inspecting = true
         work = Task {
-            // Cleared on every exit path, including the two early returns below: a
-            // spinner that never stops reads as a hang.
-            defer { inspecting = false }
-            let answered = await Task.detached {
-                UsbOnboarder.probeExistingFirmware(port: target)
-            }.value
+            // A cancelled earlier inspection can finish after this one starts.
+            // Only the newest generation owns the shared spinner.
+            defer {
+                if generation == inspectionGeneration { inspecting = false }
+            }
+            let answered = await manager.probeExistingFirmware(at: target)
             // The user may have changed the port, or closed the sheet, during the
             // three seconds CFGSHOW is allowed. Answers about a port nobody is
             // asking about any more are dropped rather than displayed.
-            guard !Task.isCancelled, target == port else { return }
+            guard !Task.isCancelled, target == port,
+                  pathGeneration == manager.usbPathGeneration(target)
+            else { return }
             existing = answered
+            if case .answered(let name, let hardwareID) = answered {
+                manager.noteUSBIdentity(
+                    path: target, name: name, hardwareID: hardwareID)
+            }
             mode = UsbOnboarding.suggestedMode(for: answered)
-            guard mode == .flashAndConfigure, case .installed(let path) = tool
+            let needsHardwareID = selectedHardwareID == nil
+            guard (mode == .flashAndConfigure || needsHardwareID),
+                  case .installed(let path) = tool
             else { return }
             let read = await UsbOnboarder.detectChip(
                 port: target, tool: EsptoolCommand.Tool(path: path))
-            guard !Task.isCancelled, target == port else { return }
+            guard !Task.isCancelled, target == port,
+                  pathGeneration == manager.usbPathGeneration(target)
+            else { return }
             detection = read
+            if case .detected(_, let mac) = read {
+                manager.noteUSBIdentity(
+                    path: target, name: nil,
+                    hardwareID: ConfigCommands.canonicalHardwareID(mac))
+            }
+        }
+    }
+
+    private func usbDevicesChanged() {
+        guard !running, !port.isEmpty else { return }
+        guard manager.usbSerialPorts.contains(port),
+              !manager.isUSBDeviceAssociated(port)
+        else {
+            port = ""
+            return
+        }
+        if inspectedPathGeneration != manager.usbPathGeneration(port) {
+            inspect()
         }
     }
 
@@ -481,19 +575,26 @@ struct AddDeviceSheet: View {
     }
 
     private func start() {
-        guard plan.canStart, let change = credential.passwordChange else { return }
+        guard plan.canStart, !manager.isUSBDeviceAssociated(port),
+              let hardwareID = selectedHardwareID,
+              let change = credential.passwordChange
+        else { return }
         running = true
-        progress = mode == .flashAndConfigure ? .writing(percent: nil, status: "Starting…")
+        progress = effectiveMode == .flashAndConfigure
+            ? .writing(percent: nil, status: "Starting…")
             : .waitingForBoard
         let job = PanelManager.USBOnboardRequest(
             port: port,
-            mode: mode,
+            mode: effectiveMode,
             bundle: bundle,
             chip: detection.chip,
             mac: {
                 if case .detected(_, let mac) = detection { return mac }
                 return nil
             }(),
+            hardwareID: hardwareID,
+            usbPathGeneration: manager.usbPathGeneration(port),
+            existingName: existingDeviceName,
             tool: {
                 if case .installed(let path) = tool {
                     return EsptoolCommand.Tool(path: path)

@@ -29,6 +29,7 @@ final class PortSelectionTests: XCTestCase {
 
     private func select(
         expectedName: String? = nil,
+        expectedHardwareID: String? = nil,
         preferredPort: String? = nil,
         availablePorts: [String] = [],
         answers: [String: WifiConfigUI.PortProbe] = [:],
@@ -37,6 +38,7 @@ final class PortSelectionTests: XCTestCase {
         let recorder = recorder ?? Recorder(answers: answers)
         return WifiConfigUI.selectPort(
             expectedName: expectedName,
+            expectedHardwareID: expectedHardwareID,
             preferredPort: preferredPort,
             availablePorts: availablePorts,
             probe: recorder.probe)
@@ -55,6 +57,36 @@ final class PortSelectionTests: XCTestCase {
             XCTAssertEqual(failure.title, title, file: file, line: line)
             return failure
         }
+    }
+
+    func testHardwareIDFindsDeviceAfterPortRenumbering() throws {
+        let result = select(
+            expectedName: "studio-display",
+            expectedHardwareID: "02:00:00:12:34:56",
+            preferredPort: "/dev/cu.usbmodem-old",
+            availablePorts: ["/dev/cu.usbmodem-new"],
+            answers: [
+                "/dev/cu.usbmodem-old": .unavailable("port disappeared"),
+                "/dev/cu.usbmodem-new": .identified(.init(
+                    name: "studio-display", hardwareID: "020000123456")),
+            ])
+
+        XCTAssertEqual(try result.get(), "/dev/cu.usbmodem-new")
+    }
+
+    func testHardwareIDDistinguishesDuplicateDeviceNames() throws {
+        let result = select(
+            expectedName: "studio-display",
+            expectedHardwareID: "020000123456",
+            availablePorts: ["/dev/cu.usbmodem-1", "/dev/cu.usbmodem-2"],
+            answers: [
+                "/dev/cu.usbmodem-1": .identified(.init(
+                    name: "studio-display", hardwareID: "020000abcdef")),
+                "/dev/cu.usbmodem-2": .identified(.init(
+                    name: "studio-display", hardwareID: "020000123456")),
+            ])
+
+        XCTAssertEqual(try result.get(), "/dev/cu.usbmodem-2")
     }
 
     // MARK: assigned port
@@ -265,6 +297,32 @@ final class PortSelectionTests: XCTestCase {
             availablePorts: ["/dev/cu.usbmodem-1", "/dev/cu.usbserial-2"],
             recorder: scan)
         XCTAssertEqual(scan.calls.map(\.timeout), [2, 2])
+    }
+}
+
+final class USBDeviceOptionTests: XCTestCase {
+    func testReportedNameIsThePickerLabelInsteadOfThePort() {
+        let device = WifiConfigUI.USBDeviceOption(
+            path: "/dev/cu.usbmodem1101",
+            name: "espdisplay-5594",
+            hardwareID: "288485555594")
+
+        XCTAssertEqual(device.displayName, "espdisplay-5594")
+        XCTAssertEqual(device.path, "/dev/cu.usbmodem1101")
+    }
+
+    func testMacSuffixLabelsAnUnconfiguredBoard() {
+        let device = WifiConfigUI.USBDeviceOption(
+            path: "/dev/cu.usbmodem1101",
+            hardwareID: "28:84:85:55:55:94")
+
+        XCTAssertEqual(device.displayName, "ESP32-5594")
+        XCTAssertEqual(device.hardwareID, "288485555594")
+    }
+
+    func testPortNameIsOnlyTheLastResort() {
+        let device = WifiConfigUI.USBDeviceOption(path: "/dev/cu.usbserial-unknown")
+        XCTAssertEqual(device.displayName, "cu.usbserial-unknown")
     }
 }
 

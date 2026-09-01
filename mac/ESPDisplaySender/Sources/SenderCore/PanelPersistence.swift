@@ -18,7 +18,11 @@ struct PersistedPanel: Codable, Equatable {
     var displayName: String
     /// Stable across renames and re-flashes; the real identity of the panel.
     var hardwareID: String?
-    /// Serial port the user assigned for USB configuration.
+    /// Stable identity of the USB device the user assigned. The serial path is
+    /// only a reconnect hint because macOS can rename it across a board reset.
+    var usbHardwareID: String?
+    /// Last serial path used for USB configuration, retained for older firmware
+    /// that cannot report a hardware ID and as a diagnostic hint.
     var usbPort: String?
     /// Last known address, kept as a hint for the UI while offline.
     var address: String?
@@ -39,6 +43,7 @@ struct PersistedPanel: Codable, Equatable {
         serviceName = snapshot.serviceName
         displayName = snapshot.displayName
         hardwareID = snapshot.hardwareID
+        usbHardwareID = snapshot.usbHardwareID
         usbPort = snapshot.usbPort
         address = snapshot.address
         lastSeen = snapshot.lastSeen
@@ -58,6 +63,7 @@ struct PersistedPanel: Codable, Equatable {
             hardwareID: hardwareID,
             address: address,
             usbPort: usbPort,
+            usbHardwareID: usbHardwareID,
             lastSeen: lastSeen)
         panel.source = PanelSource(source)
         panel.idleText = idleText ?? ""
@@ -69,7 +75,7 @@ struct PersistedPanel: Codable, Equatable {
 /// Reading and writing the durable records. Split out from `PanelManager` so
 /// the manager decides *when* to save while this decides *how*, and so failures
 /// are returned rather than swallowed: the file holds the user's display names
-/// and USB port assignments, and losing it silently is not acceptable.
+/// and stable USB-device assignments, and losing it silently is not acceptable.
 enum PanelStore {
     static var defaultURL: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
