@@ -1115,9 +1115,25 @@ static bool startInboundTransport() {
     rxSock = -1;
     return false;
   }
+  // Which core the receive task pins to. Boot default is core 1 (away from
+  // lwIP/WiFi on core 0), which is the arrangement every measurement so far
+  // was taken under. CFGRXCORE persists 0 to test the section 18.2/18.4
+  // hypothesis - that core 1 is oversubscribed by decode + draw together and
+  // only PARALLELISM (not priorities, not moving work between tasks) can
+  // help - by putting decode with the radio on core 0 and leaving core 1 to
+  // the draw loop. NVS-persisted, unlike the CFGTUNE knobs, because task
+  // affinity is fixed at creation: applying it takes the restart, and an A/B
+  // arm swap is then a 5-second reboot instead of a 2-minute reflash.
+  Preferences corePrefs;
+  corePrefs.begin("espdisp", true);
+  uint8_t rxCore = corePrefs.getUChar("rxcore", 1);
+  corePrefs.end();
+  if (rxCore > 1) rxCore = 1;
+  Serial.printf("udprx pinned to core %u%s\n", (unsigned)rxCore,
+                rxCore == 0 ? " (CFGRXCORE experiment)" : "");
   return xTaskCreatePinnedToCore(udpReceiveTask, "udprx", RX_TASK_STACK,
                                  nullptr, RX_TASK_PRIORITY, &rxTaskHandle,
-                                 1) == pdPASS;
+                                 rxCore) == pdPASS;
 }
 
 static void sendToSender(const uint8_t *data, size_t len) {
@@ -2038,6 +2054,26 @@ static void processConfigLine(char *line) {
                       ? (unsigned)uxTaskPriorityGet(rxTaskHandle)
                       : 0u,
                   (unsigned)uxTaskPriorityGet(nullptr));
+  } else if (strncmp(line, "CFGRXCORE ", 10) == 0) {
+    // Pin the receive task to core 0 or 1 and restart to apply - task
+    // affinity is fixed at creation, so unlike the CFGTUNE knobs this one
+    // persists (the CFGBOARD pattern) and takes a reboot. See the comment in
+    // startInboundTransport for the hypothesis it exists to test; 1 is the
+    // boot default every measurement so far was taken under.
+    const char *arg = line + 10;
+    while (*arg == ' ') arg++;
+    if (strcmp(arg, "0") != 0 && strcmp(arg, "1") != 0) {
+      Serial.println("CFGERR expected: CFGRXCORE <0|1>");
+      return;
+    }
+    Preferences prefs;
+    prefs.begin("espdisp", false);
+    prefs.putUChar("rxcore", (uint8_t)(arg[0] - '0'));
+    prefs.end();
+    Serial.printf("CFGOK rxcore=%c, restarting\n", arg[0]);
+    Serial.flush();
+    delay(200);
+    ESP.restart();
 #endif
   } else if (strncmp(line, "CFGOTAPW ", 9) == 0) {
     // Set or clear the OTA password:

@@ -34,12 +34,15 @@
         baseline delivery (7.3 → 12.8 complete fps at the same offered pixel
         load), so per-record cost is first-order and §18.1's sweep
         understated real-traffic capacity.
-  - [ ] Stop sharing core 1: move the draw pass to its own task pinned to
-        core 0 (WiFi/lwIP live there but their CPU work is bursty), so the
-        two heavy loops stop arbitrating one core. §18.2 and §18.4 both show
-        same-core shuffling cannot win — parallelism is the remaining
-        device-side lever. Compile-time experiment; measure at the §18
-        operating point.
+  - [ ] Stop sharing core 1: §18.2 and §18.4 both show same-core shuffling
+        cannot win — parallelism is the remaining device-side lever.
+    - [x] Build the reboot-swappable mechanism: CFGRXCORE <0|1> pins the
+          receive task's core, NVS-persisted so an A/B arm swap is a
+          5-second reboot (§18.6). Both arms verified swapping live.
+    - [ ] Measure the arms once the link carries the §18 operating point
+          again (`ping -s 1450` under ~15 ms; it sat at 328 ms idle when the
+          mechanism was built). Interleave CFGRXCORE 0/1 under tile-motion
+          half-res 25 and 35 fps; if core 0 wins it becomes the default.
   - [ ] Fewer, larger records: §18.4's record-count finding re-opens
         vertical/multi-row coalescing on the SENDER side (more tiles per
         record within the 32-tile and datagram limits), which §17.5 deferred

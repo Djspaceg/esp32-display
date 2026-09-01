@@ -1952,3 +1952,24 @@ the ISR's own guarded decrement). Verified on the same live stream:
 drawerr flat at zero, gateblocked 0-15 per window, continuous drawing.
 The `dmaInFlight = 0` failsafe reclaims stay plain stores - a racing ISR
 decrement after a store is rejected by the ISR's own > 0 check.
+
+### 18.6 The core-split experiment is armed, pending a link that can carry it
+
+`CFGRXCORE <0|1>` (NVS-persisted, CFGBOARD pattern, restart to apply) pins
+the receive task to either core. Core 1 is the boot default every
+measurement so far was taken under; core 0 puts decode with the radio and
+leaves core 1 to the draw loop - the parallelism 18.2 and 18.4 both
+concluded is the only device-side lever left. Persisted rather than a
+CFGTUNE knob because affinity is fixed at task creation: an A/B arm swap
+is a 5-second reboot instead of a 2-minute reflash. Both arms verified
+swapping live over serial ("udprx pinned to core 0/1" on the boot banner).
+
+UNMEASURED, deliberately: at the time of building, the panel's air path
+carried 1450-byte pings at 328 ms average RTT with every stream paused -
+the same radio-bound condition 17.17 records drawing no conclusions from.
+The verdict needs the link back near ~15 ms RTTs (RSSI ~-74 or better),
+then: `tile-motion --half --target-fps 25` and `35`, arms interleaved by
+CFGRXCORE reboot, read complete fps / accepted datagrams / gq-per-call
+from the 5 s serial lines. If core 0 wins, it becomes the default; if it
+loses (decode contending with WiFi's own CPU work), this section gets the
+numbers either way.
