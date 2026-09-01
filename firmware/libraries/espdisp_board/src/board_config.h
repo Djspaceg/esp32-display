@@ -50,8 +50,8 @@ enum class Variant : uint8_t {
 };
 
 /// Which panel controller to construct. The ESP32 Arduino core ships an
-/// esp_lcd ST7789 driver; the JD9853 and CO5300 ones are vendored in
-/// firmware/libraries.
+/// esp_lcd ST7789 driver; the JD9853, CO5300, and ST77916 drivers are vendored
+/// in firmware/libraries.
 enum class PanelDriver : uint8_t { St7789, Jd9853, Co5300, St77916 };
 
 /// How the panel is wired to the chip. SPI is single-lane with a D/C line;
@@ -73,10 +73,10 @@ enum class PowerController : uint8_t { None, Axp2101, BatteryAdc };
 /// Which inertial sensor supplies acceleration for automatic orientation.
 enum class MotionController : uint8_t { None, Qmi8658 };
 
-/// The variant this binary serves, when the compile target admits exactly one.
-/// The C6 binary serves two boards, so there it is Unknown and the boot-time
-/// I2C probe decides. The S3 binary serves only the AMOLED board; probing
-/// would be pointless and the C6 probe pins mean nothing on that chip.
+/// The variant this artifact serves when its exact target admits one profile.
+/// The C6 target serves two profiles, so it remains Unknown until its boot-time
+/// I2C probe resolves one. Each S3 exact target is compile-fixed because a
+/// generic S3 probe cannot safely distinguish the attached display.
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 #if defined(ESPDISP_BOARD_S3_185)
 static const Variant COMPILED_VARIANT = Variant::LcdSt77916;
@@ -167,10 +167,9 @@ struct Config {
   // unconditionally would attach an interrupt to the other board's panel reset
   // line, and pulse GPIO20 there for no reason.
   //
-  // The 32 MB engineering sample shares panel and touch reset on GPIO2. The
-  // current 16 MB board has separate LCD reset GPIO39 and touch reset GPIO40.
-  // Touch bring-up compares these fields: it never re-pulses a shared line,
-  // but it must pulse a dedicated touch reset before the first I2C command.
+  // Reset topology is profile-specific. Touch bring-up compares these fields:
+  // it never re-pulses a line shared with the panel, but it must pulse a
+  // dedicated GPIO or expander output before the first I2C command.
   TouchController touch;
   int8_t pinTouchSda;
   int8_t pinTouchScl;

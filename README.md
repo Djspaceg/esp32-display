@@ -1,18 +1,17 @@
 # esp32-display
 
-A wireless second display for macOS, built from a $10 ESP32-C6 board with a
-1.47" LCD. The Mac captures screen content with ScreenCaptureKit, streams raw
-RGB565 pixels over WiFi, and the board pushes them to its ST7789 panel over
-80MHz SPI with DMA. No compression, no video codecs — at 172×320 the whole
-frame is 110KB, so the pipeline stays simple and the latency stays low.
+A wireless second display for macOS using supported ESP32-C6 and ESP32-S3
+boards with integrated LCD or AMOLED panels. The Mac captures content with
+ScreenCaptureKit, converts it to RGB565, and streams only changed regions over
+WiFi. Firmware reassembles those regions and drives each panel over SPI or QSPI
+with direct memory access (DMA).
 
-Hardware: either of the two Waveshare 1.47" ESP32-C6 boards — the
-[ESP32-C6-LCD-1.47](https://spotpear.com/shop/ESP32-C6-1.47-inch-LCD-Display-Screen-LVGL-SD-WIFI6-ST7789.html)
-(ST7789 panel) or the
-[ESP32-C6-Touch-LCD-1.47](https://www.waveshare.com/wiki/ESP32-C6-Touch-LCD-1.47)
-(JD9853 panel, capacitive touch, IMU). Both are ESP32-C6, WiFi 6, 8MB flash,
-1.47" 172×320 IPS. One firmware binary runs on both — see
-[Supported boards](#supported-boards).
+The project ships precompiled images for three exact firmware targets. One `c6`
+image safely detects either supported 1.47-inch C6 profile at boot; the
+`s3-175` and `s3-185` images remain separate because those products share an
+ESP32-S3 chip but not a controller, geometry, or pin map. See
+[Supported hardware and firmware targets](#supported-hardware-and-firmware-targets)
+and the [firmware target architecture](docs/firmware-target-architecture.md).
 
 ## What it does
 
@@ -138,31 +137,48 @@ but is disabled and labelled with the record that owns it. No reflashing, and th
 works even when the stored credentials are wrong. SSIDs with spaces, emoji, and
 extended Unicode all work — everything crosses the wire base64-encoded.
 
-## Supported boards
+## Supported hardware and firmware targets
 
-Two Waveshare boards share this form factor. They have the same MCU, the same
-8MB flash, and the same 172×320 panel resolution — but not the same panel
-controller or pin map:
+A target is a precompiled artifact compatibility key, not a chip family. The
+current release catalog is:
 
-|                     | ESP32-C6-LCD-1.47 | ESP32-C6-Touch-LCD-1.47      |
-| ------------------- | ----------------- | ---------------------------- |
-| Panel controller    | ST7789            | JD9853                       |
-| SCLK / MOSI         | 7 / 6             | 1 / 2                        |
-| CS / DC             | 14 / 15           | 14 / 15                      |
-| RST / backlight     | 21 / 22           | 22 / 23                      |
-| BOOT button         | GPIO9             | GPIO9 (see note)             |
-| Addressable RGB LED | GPIO8             | none                         |
-| Extras              | —                 | AXS5106L touch, QMI8658A IMU |
+| Target | Hardware profile(s) | Chip | Display | Selection |
+| --- | --- | --- | --- | --- |
+| `c6` | ESP32-C6-LCD-1.47; ESP32-C6-Touch-LCD-1.47 | `esp32c6` | 172×320 ST7789 or JD9853 SPI LCD | Chip selects image; firmware probes profile |
+| `s3-175` | ESP32-S3-Touch-AMOLED-1.75C | `esp32s3` | 466×466 CO5300 QSPI AMOLED | Exact target reported when running; user selects when blank |
+| `s3-185` | ESP32-S3-Touch-LCD-1.85C | `esp32s3` | 360×360 ST77916 QSPI LCD | Exact target reported when running; user selects when blank |
 
-Because the resolution matches, nothing above the panel differs: the band
-protocol, the buffers, the Mac app, and the advertised capabilities are
-identical on both. Only the display half of the firmware is board-aware, so
-**one binary serves both boards** and picks its pins and panel driver at boot.
+The legacy CLI alias `s3` means only `s3-175`; new commands and automation
+should use canonical exact target keys. The
+[firmware target architecture](docs/firmware-target-architecture.md) explains
+the target/profile distinction, selection and flashing flows, format-3 bundle,
+and safe extension process.
 
-Detection is an I2C scan of the shared bus on GPIO18/19. The Touch board's touch
-controller and IMU answer there (0x63 and 0x6B); the non-touch board's bus is
-silent. `firmware/libraries/espdisp_board/src/board_config.h` is the single
-source of truth for the table above, and it is unit tested on the host.
+### C6 runtime profiles
+
+The C6 profiles use the same chip, 8 MB flash, and 172×320 geometry, but have
+different panel controllers and pin maps:
+
+| Hardware fact | ESP32-C6-LCD-1.47 | ESP32-C6-Touch-LCD-1.47 |
+| --- | --- | --- |
+| Panel controller | ST7789 | JD9853 |
+| SCLK / MOSI | 7 / 6 | 1 / 2 |
+| CS / DC | 14 / 15 | 14 / 15 |
+| RST / backlight | 21 / 22 | 22 / 23 |
+| BOOT button | GPIO9 | GPIO9 (see note) |
+| Addressable RGB LED | GPIO8 | none |
+| Extras | — | AXS5106L touch, QMI8658A IMU |
+
+Because their geometry and build platform match, one `c6` image serves both.
+Before panel initialization, firmware scans the shared I2C bus on GPIO18/19.
+The touch controller and motion sensor identify `TouchJd9853`; a silent bus
+identifies `LcdSt7789`. `board_config.h` is the source of truth for both
+profiles and their safety fallback.
+
+The two S3 products do not share an image. Esptool can identify `esp32s3`, but
+it cannot identify which integrated display surrounds that chip. Each S3
+artifact therefore links only its own panel controller, and a blank S3 requires
+an explicit `s3-175` or `s3-185` selection.
 
 An inconclusive probe resolves to the **Touch** board, which inverts this
 project's historical default on purpose. The two possible misdetections are not
@@ -287,12 +303,12 @@ did. Everything below exists because the failure actually happened:
 
 ```
 [macOS display / window / picker selection]
-   → ScreenCaptureKit capture, hardware-scaled to 172×320
-   → BGRA → RGB565 (big-endian, panel byte order — the ESP32 never touches a pixel)
-   → per-band diff against previous frame
-   → dirty bands over UDP, paced, ~1.3KB per packet
-   → ESP32-C6: reassemble into persistent framebuffer
-   → coalesce dirty bands into strips, DMA to ST7789 at 80MHz SPI
+   → ScreenCaptureKit capture, hardware-scaled to the panel's advertised geometry
+   → BGRA → RGB565 in panel byte order
+   → per-band or per-tile diff and optional compression
+   → changed regions over paced UDP datagrams
+   → ESP32: reassemble into a persistent framebuffer
+   → coalesce dirty regions and DMA them to the selected panel controller
 ```
 
 Transport is UDP by design: a lost frame should be skipped, not replayed.
@@ -305,10 +321,10 @@ Each packet: `[frame_id u16][band_index u16][dirty_count u16][band payload]`,
 little-endian, where bit 15 of `dirty_count` carries orientation. Bands are
 orientation-native so they align to whole rows:
 
-| Orientation       | Band          | Bands/frame | Packet size |
-| ----------------- | ------------- | ----------- | ----------- |
-| Portrait 172×320  | 4 rows × 344B | 80          | 1382B       |
-| Landscape 320×172 | 2 rows × 640B | 86          | 1286B       |
+| Orientation | Band | Bands/frame | Packet size |
+| --- | --- | --- | --- |
+| Portrait 172×320 | 4 rows × 344B | 80 | 1382B |
+| Landscape 320×172 | 2 rows × 640B | 86 | 1286B |
 
 ### Tile streaming (square AMOLED panels)
 
@@ -400,44 +416,42 @@ so the Mac browses for panels instead of resolving a fixed hostname, and
 connects to the Bonjour endpoint directly (which re-resolves itself on every
 reconnect — address changes need no bookkeeping).
 
-The TXT records carry `name`, `res=WxH`, `fw` (the firmware version), `proto`
-(the frame protocol version), `caps` (the capability bits as eight hex digits),
-and `chip` — the chip this binary was built for, `esp32c6` or `esp32s3`, taken
-from the IDF's own `CONFIG_IDF_TARGET`. `chip` is what tells a reader which
-image out of a firmware bundle belongs to this panel. It is advertised rather
-than worked out from `res`, because 172x320 meaning a C6 and 466x466 meaning an
-S3 is a coincidence of the boards that exist today, and the firmware is
-resolution-parametric precisely so that coincidence can end. A build that cannot
-name its chip says `chip=unknown`, which means "could not tell" and not "some
-other chip" — a reader treats it as missing information rather than as a
-mismatch. This is a different record from the `board=` one discussed under OTA
-below: that one belongs to the separate `_arduino._tcp` service and is published
-by the core's own code. They spell the chip the same way on purpose; they do not
-come from the same place.
+The TXT records carry `name`, `res=WxH`, `fw` (firmware version), `proto`
+(frame protocol version), `caps` (capability bits as eight hex digits), `chip`,
+and `target`. `chip` is the processor token from `CONFIG_IDF_TARGET`:
+`esp32c6` or `esp32s3`. `target` is the exact artifact key: `c6`, `s3-175`, or
+`s3-185`.
 
-The Mac app reads these records during discovery, which it did not always do —
-it kept the service name and the endpoint and dropped the rest, so every panel
-was streamed as though it were a 172×320 one. It now streams each panel at the
-resolution that panel advertises, and falls back to 172×320 when `res` is
-missing or is a size the band protocol cannot carry (a row has to fit one
-packet, and the band count has to stay within the firmware's reassembly
-bitmap). That includes region mode: the rectangle the presets frame, and the
-size the 1×/2×/3× buttons describe, come from the panel's advertised geometry,
-so a square panel is framed square rather than being handed a 172:320 crop
-stretched to fit. `chip` is kept against the panel so a firmware bundle's images
-can be matched to it. Reading TXT records at all requires browsing with
-`bonjourWithTXTRecord`: Network.framework does not query for them by default,
-so with a plain Bonjour browse every result's metadata is empty however much
-the panel advertises.
+The exact target selects an image from a firmware bundle. The chip independently
+cross-checks that choice. This distinction matters because both S3 images carry
+the same ESP image chip identifier and only the target distinguishes their
+attached displays. Resolution is never used as identity. A build that cannot
+name its chip or target advertises `unknown`; S3 updates fail closed without
+exact target evidence.
+
+The separate `_arduino._tcp` OTA service also carries chip-level `board` and
+exact `target` records. `CFGSHOW` reports the active runtime board profile in
+addition to chip and target, so `board=st77916` answers a different question
+from `target=s3-185`.
+
+The Mac app reads these records during discovery and keeps `target` and `chip`
+against the live panel for firmware selection and preflight checks. It also
+streams each panel at the resolution the panel advertises, falling back to
+172×320 when `res` is missing or is a size the band protocol cannot carry. That
+includes region mode: the rectangle the presets frame, and the size the
+1×/2×/3× buttons describe, come from the panel's advertised geometry, so a
+square panel is framed square rather than receiving a stretched 172:320 crop.
+Reading TXT records requires browsing with `bonjourWithTXTRecord`;
+Network.framework does not query for them during a plain Bonjour browse.
 
 Over USB serial (115200), the firmware also accepts configuration commands:
 `CFGWIFI <base64 ssid> <base64 password>` saves credentials to NVS and
 reboots, and `CFGWIFI <base64 ssid>` (password argument omitted) keeps the
 password currently in use; `CFGNAME <base64 name>` sets the device name;
 `CFGSHOW` reports the current network, name, stable MAC-derived hardware ID,
-IP, signal strength, the saved
-orientation/brightness/power state, the detected board, the battery, and
-whether OTA is enabled; `CFGFLIP 0|1` sets the 180° flip without the button;
+IP, signal strength, saved orientation/brightness/power state, the detected
+board profile, exact firmware target, battery, and whether OTA is enabled;
+`CFGFLIP 0|1` sets the 180° flip without the button;
 `CFGROT 0|1|2|3` sets the quarter-turn rotation on square panels; `CFGPOWER
 0|1` turns the display off or on, saved and applied immediately — the same
 switch the manager's Power toggle uses; `CFGLED <r> <g> <b>` shows a literal
@@ -467,7 +481,9 @@ accepted right now", not "this build has OTA code in it".
 | `tools/test_espdisp.py` | Tests for the CLI's decisions: chip and OTA-target refusals, password bounds, encodings, the bundle format (stdlib only, no framework) |
 | `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
 | `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
-| `docs/` | Original project plan |
+| `docs/firmware-target-architecture.md` | Current target/profile architecture, selection and flashing flows, bundle format, and extension recipes |
+| `docs/esp32-wireless-display-plan.md` | Historical original C6 project plan |
+| `docs/tile-stream-plan.md` | S3 tile-stream implementation and performance history |
 
 ## Getting started
 
@@ -481,7 +497,8 @@ arduino-cli compile -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" --librar
 arduino-cli upload  -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" -p /dev/cu.usbmodem* .
 ```
 
-For the **ESP32-S3-Touch-AMOLED-1.75C** (466x466 QSPI AMOLED):
+For target **`s3-175`** (ESP32-S3-Touch-AMOLED-1.75C, 466×466 QSPI
+AMOLED):
 
 ```sh
 cd firmware/display_stream
@@ -490,32 +507,43 @@ arduino-cli compile -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=op
 arduino-cli upload  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" -p /dev/cu.usbmodem* .
 ```
 
-The S3 board has 16MB flash and 8MB octal PSRAM (stacked on the ESP32-S3R8
-module). `PSRAM=opi` enables the octal PSRAM interface, which is required
-because the 466x466 frame buffers (~434KB each) do not fit internal SRAM and
-are allocated from PSRAM instead.
-
-`--libraries ../libraries` puts the in-repo libraries on the search path: the
-board table and shared panel bring-up, plus the vendored JD9853 and CO5300
-esp_lcd drivers (the Arduino core ships an ST7789 driver but neither of
-these). The same flag applies to `display_test` and `board_probe`. It is a
-compile-only flag; `upload` reuses the cached build. The C6 binary is
-board-independent (one build runs on either 1.47" board); the S3 binary
-serves only its own panel.
-
-`tools/espdisp.py` runs exactly those commands for you, so the two FQBNs, the
-`--libraries` flag, and the port glob stay out of your shell history:
+For target **`s3-185`** (ESP32-S3-Touch-LCD-1.85C, 360×360 QSPI LCD):
 
 ```sh
-tools/espdisp.py list                  # ports it can see, and the chip on each
-tools/espdisp.py compile --board c6    # or --board s3
-tools/espdisp.py flash                 # detect the chip, build, upload
-tools/espdisp.py flash --board s3      # skip detection and build that target
-tools/espdisp.py set-password          # store an OTA password (prompts for it)
-tools/espdisp.py ota panel.local --board c6   # build, then push over WiFi
-tools/espdisp.py bundle                # build both boards into one portable file
-tools/espdisp.py bundle-info FILE      # verify a bundle and print what is in it
-tools/espdisp.py config CFGSHOW        # send one CFG* line, print the reply
+cd firmware/display_stream
+cp wifi_config.h.example wifi_config.h   # fill in your 2.4GHz network
+arduino-cli compile -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" --build-property "compiler.cpp.extra_flags=-DESPDISP_BOARD_S3_185" --libraries ../libraries .
+arduino-cli upload  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" -p /dev/cu.usbmodem* .
+```
+
+Both current S3 targets use 16 MB flash and 8 MB octal PSRAM on an
+ESP32-S3R8 module. `PSRAM=opi` enables that interface. The 466×466 `s3-175`
+framebuffers require PSRAM because each is about 434 KB; `s3-185` keeps the same
+validated platform configuration.
+
+`--libraries ../libraries` puts the in-repo board and panel libraries on the
+search path, including the vendored JD9853, CO5300, and ST77916 drivers. It is a
+compile-only flag; `upload` reuses the cached build. The C6 binary detects one
+of two runtime profiles. Each S3 binary serves one fixed exact target and links
+only its controller. Prefer `tools/espdisp.py compile --board TARGET` so manual
+FQBNs and target-specific compiler flags cannot drift.
+
+`tools/espdisp.py` runs those build definitions for you, so FQBNs,
+target-specific compiler flags, the `--libraries` flag, and the port glob stay
+out of your shell history:
+
+```sh
+tools/espdisp.py list                        # serial ports and detected chips
+tools/espdisp.py compile --board c6          # shared C6 image
+tools/espdisp.py compile --board s3-175      # 1.75-inch CO5300 S3 image
+tools/espdisp.py compile --board s3-185      # 1.85-inch ST77916 S3 image
+tools/espdisp.py flash                       # detects C6; refuses ambiguous S3
+tools/espdisp.py flash --board s3-185        # explicit blank-S3 target
+tools/espdisp.py set-password                # store an OTA password (prompts)
+tools/espdisp.py ota panel.local --board c6  # exact-target OTA update
+tools/espdisp.py bundle                      # all three exact targets
+tools/espdisp.py bundle-info FILE            # verify manifest, parts, and hashes
+tools/espdisp.py config CFGSHOW              # report board profile and target
 ```
 
 `tools/test_espdisp.py` covers what the tool decides — the chip and target
@@ -528,19 +556,17 @@ only, no test framework, run it by path.
 at the end, so app-partition headroom is visible without hunting through
 scrollback.
 
-`flash` refuses rather than guesses when it cannot tell which chip is attached.
-Both boards are native USB CDC at VID 0x303A PID 0x1001, so neither the port name
-nor the VID/PID distinguishes a C6 from the S3. It asks arduino-cli first, then
-the esptool bundled with the core, and if neither answers it stops and tells you
-to pass `--board c6|s3`. More than one candidate port is likewise a refusal, not a
-coin flip: pass `--port`.
+`flash` refuses when it cannot determine an exact target. A detected
+`esp32c6` maps to `c6`; a detected `esp32s3` is deliberately ambiguous because
+both S3 products use the same chip. For a blank S3, pass `--board s3-175` or
+`--board s3-185` after checking the product model. More than one candidate USB
+port is also a refusal; pass `--port`.
 
-That refusal buys a clear message rather than a rescue: the core's upload recipe
-passes `--chip {build.mcu}` to esptool (`platform.txt` line 346), and esptool
-refuses to talk to a chip that is not the one it was told to expect. So a
-wrong-target USB flash ends in a refusal from one tool or the other — the point of
-stopping early is that you find out before a full compile and with a message that
-names the fix.
+Esptool's image-header check rejects a cross-chip write such as S3 firmware to a
+C6. It cannot reject `s3-175` versus `s3-185`, because those images carry the
+same S3 chip identifier. A board already running current firmware reports its
+exact target for preflight checks. A blank S3 cannot, so its explicit model
+selection is a safety boundary rather than a convenience option.
 
 The script is standard-library Python 3 only: unlike the other `tools/` scripts
 it does not need pyserial. The explicit `arduino-cli` commands above remain the
@@ -576,28 +602,20 @@ then on takes pushes over the LAN:
 ```sh
 export ESPDISP_OTA_PASSWORD='a-real-password'
 tools/espdisp.py ota panel.local --board c6
+tools/espdisp.py ota panel.local --board s3-185
 ```
 
-`--board` is required here: over the network there is no chip to probe, so the tool
-asks rather than assumes. It then checks the answer where it can. `arduino-cli`
-already runs an mDNS discovery that browses `_arduino._tcp` — the service the panel
-registers and `espota` pushes to — and the panel publishes `board=esp32c6` or
-`board=esp32s3` in its TXT record, so a `--board` that contradicts the panel is
-refused before the compile starts. A panel discovery cannot find is a note rather
-than a refusal: mDNS not answering says nothing about the chip, and pushing to a
-panel on another subnet has to keep working. `--discovery-timeout 0` skips the
-check outright, and so does any negative value, since the check runs only for a
-positive timeout: that is the override for this guard, and past it the panel
-itself is the only thing left that will refuse a wrong-chip image.
+`--board` names an exact target. Before compiling, the tool discovers the
+panel's `_arduino._tcp` service and compares its `target` and chip records. A
+unique chip can confirm `c6`. An S3 update requires discoverable, matching
+`s3-175` or `s3-185` target evidence plus a matching `esp32s3` chip record. If
+that evidence is missing, mismatched, or discovery is disabled, the S3 update
+stops.
 
-A wrong-target push that does get through is refused by the panel, not fatal to it:
-the ESP image header carries a `chip_id` (0x0D for the C6, 0x09 for the S3)
-and `esp_ota_set_boot_partition` validates it through `esp_image_verify` before the
-boot slot moves, so the image lands in the inactive slot, fails validation, and the
-panel carries on running the firmware it booted with `bad image` on the glass. The
-cost of getting `--board` wrong is a wasted compile and transfer. This chain was
-read out of `Updater.cpp`, `esp_ota_ops.c` and `bootloader_common_loader.c`;
-**UNVERIFIED** by an actual mismatched push, since no board is attached.
+This fail-closed behavior is required because the ESP image header validates the
+processor, not the attached display. It safely rejects C6 firmware on an S3,
+but it cannot distinguish the two same-chip S3 artifacts. USB remains the
+recovery path if a panel cannot advertise its identity or join the network.
 
 The password comes from `--password`, else `$ESPDISP_OTA_PASSWORD`, else a prompt;
 it is never echoed, though the core's `espota.py` takes it as an argument, so it is
@@ -666,79 +684,78 @@ name (default `Tiny Monitor`), learns its UUID, and tracks it from then on.
 other case: build here, update from there.
 
 ```sh
-tools/espdisp.py bundle                        # both boards -> ./espdisp-firmware-1.2.0.espdispfw
+tools/espdisp.py bundle                            # c6 + s3-175 + s3-185
 tools/espdisp.py bundle --board c6 --output ~/fw.espdispfw
-tools/espdisp.py bundle-info ~/fw.espdispfw    # check a file before handing it over
+tools/espdisp.py bundle --board s3-185 --output ~/fw.espdispfw
+tools/espdisp.py bundle-info ~/fw.espdispfw        # verify before sharing
 ```
 
-`bundle` compiles each board and writes one self-contained `.espdispfw` file
-holding everything a board needs plus a manifest. Nothing is pushed and no
-panel is contacted. The file is portable on purpose — it can be emailed, dropped in
-a share, or carried on a stick to a Mac that has never seen this repo and has no
-`arduino-cli`, where the app opens the file the user picks and pushes it itself.
-That is why it is one file rather than a directory of images.
+`bundle` compiles each exact target and writes one self-contained `.espdispfw`
+file containing its images, blank-board parts, and manifest. Nothing is pushed
+and no panel is contacted. The file is portable on purpose — it can be emailed,
+dropped in a share, or carried to a Mac that has never seen this repo and has no
+`arduino-cli`, where the app opens the selected file and pushes it. That is why
+it is one file rather than a directory of images.
 
-Per board it carries four payloads: the application image, which is what an
-over-the-air update needs because it lands in an app slot, and the three things a
-board that has never been flashed needs written to fixed flash addresses before
-that image will boot at all — the second-stage bootloader, the partition table, and
-`boot_app0.bin`, which initialises the OTA data so the bootloader starts the app
-rather than an empty slot. The first two come out of the compile; `boot_app0.bin`
-is the core's own copy, the same file `arduino-cli` writes when it uploads over USB.
+Per target it carries four payloads: the application image used for OTA, plus
+the second-stage bootloader, partition table, and `boot_app0.bin` needed to
+bring up a blank board. The last part initializes OTA data so the bootloader
+starts the application rather than an empty slot. The compile produces the
+first three; `boot_app0.bin` is the core's own copy, matching what
+`arduino-cli` writes over USB.
 
 Each payload's flash address travels in the file rather than being a constant in
-whatever writes it. That matters because the address is per-chip data: `boards.txt`
-puts the bootloader at `0x0` for both boards here and at `0x1000` on a classic
-ESP32, so a hardcoded address would be wrong for some board later — and wrong
-silently, because the flash would accept the write and the chip would then fail to
-boot. The partition table travels beside the app for the same reason: it is the
-table that decides the app lives at `0x10000`, so the two cannot drift apart.
+whatever writes it. That matters because addresses are platform data:
+`boards.txt` puts the bootloader at `0x0` for the current C6 and S3 targets and
+at `0x1000` on a classic ESP32. A copied constant could produce a flash that
+writes successfully but never boots. The partition table travels beside the app
+for the same reason: it defines the app address, so the two cannot drift apart.
 
-The whole-flash `<sketch>.ino.merged.bin` is deliberately **not** carried. It is
-padded to the full flash size — 8 MB for the C6 and 16 MB for the S3 — so a
-two-board bundle would grow from about 2.2 MB to roughly 24 MB, almost all of it
-padding, where the individual parts cost about 31 KB per board. It also describes a
-whole-flash write, which would erase NVS, and NVS is where a panel's WiFi
-credentials and its name live.
+The whole-flash `<sketch>.ino.merged.bin` is deliberately **not** carried. It
+is padded to the target's full flash size, so a multi-target bundle would grow
+to tens of megabytes, mostly padding. It also describes a whole-flash write
+that would erase non-volatile storage (NVS), where the panel keeps WiFi
+credentials and its name.
 
-The manifest carries the firmware version, an ISO 8601 UTC build timestamp, the
-commit it was built from and whether that tree was dirty, the tool that wrote it,
-and for every image the board key, the chip token (`esp32c6` or `esp32s3`), the
-FQBN it was compiled with, its size, its SHA-256, the flash address the application
-image is written to, and the same details for each of its flash parts.
-`bundle-info` prints all of that, including every part and the address it goes to,
-and refuses the file if anything does not add up: bad magic, a manifest that
-does not parse, offsets that are not contiguous, a payload running past the end of
-the file, the same chip listed twice, a bundle missing one of the three parts a new
-board needs, two payloads claiming one flash address, or a payload whose hash is not
-the one the manifest claims. Payloads are stored raw, so every hash `bundle-info`
-prints is the same number `shasum -a 256` gives for the file the compile produced.
+The format-3 manifest carries the firmware version, an ISO 8601 UTC build
+timestamp, source commit and dirty state, tool version, and each image's chip,
+FQBN, exact `targets` claims, application payload, flash address, and blank-board
+parts. Duplicate chips are valid because `s3-175` and `s3-185` are separate
+images for `esp32s3`; duplicate exact-target claims are not.
 
-Files written before this — generation 1, magic `ESPDISPFW1` — carried the
-application images and nothing else. Both the CLI and the app still read one: it
-cannot bring up a blank board, and it is a perfectly good over-the-air payload that
-whoever holds it may have no way to rebuild. `bundle-info` says which of the two it
-is looking at and says plainly when a file cannot set up a new board. An **older**
-app meeting a generation-2 file refuses it and names the app as the side that is
-behind, which is the honest answer: the generation was bumped rather than extended
-because the checks that catch a truncated or concatenated file are exactly the
-checks an extra payload would have had to be smuggled past.
+`bundle-info` prints and verifies every field. It refuses bad magic, malformed
+JSON, non-contiguous offsets, out-of-range payloads, missing blank-board parts,
+duplicate flash addresses within an image, duplicate exact-target claims, and
+hash mismatches. Payloads are raw, so each reported SHA-256 matches
+`shasum -a 256` on the compiled file.
+
+Readers remain compatible with all shipped bundle generations:
+
+| Format | Selection | Contents | Use |
+| --- | --- | --- | --- |
+| 1 | Chip | Application image | OTA only |
+| 2 | Chip | Application plus blank-board parts | USB or OTA when one image per chip is sufficient |
+| 3 | Exact target | Application plus blank-board parts | Current USB and OTA flow, including multiple images per chip |
+
+Writers produce format 3 (`ESPDISPFW3`). Each image has a `targets` array; one
+image may claim multiple byte-compatible targets, while each exact target may be
+claimed only once. Older apps reject a newer format they cannot validate rather
+than weakening its integrity checks.
 
 The version is read out of the sketch (`FW_VERSION` in
 `firmware/display_stream/display_stream.ino`) rather than passed in as a flag, so
 the manifest cannot claim a version its images do not have — the app compares that
 number against what a panel reports to decide whether to offer an update.
 
-`--board` narrows the file to one image, and the summary says so plainly: a bundle
-with only a C6 image has nothing to offer an S3 panel. Bundles are gitignored
-(`*.espdispfw`), and the write is atomic, so an interrupted build leaves either the
-previous file or no file rather than a half-written one.
+`--board` narrows the file to one exact target. A bundle containing only `c6`
+has nothing to offer either S3 target. Bundles are gitignored
+(`*.espdispfw`), and writes are atomic, so interruption leaves the previous
+file or no file rather than a partial bundle.
 
-**The app ships one.** `mac/make-app.sh` builds a bundle before it builds the app
-and puts it in the app's Resources, which is what lets **Add Display over USB…**
-work without a terminal — a `.espdispfw` can only come from `espdisp.py bundle`, so
-an app that asked for a file would be asking you to open one. It is reused if it is
-already there, since compiling both boards takes minutes:
+The app ships one. `mac/make-app.sh` builds or reuses a format-3 bundle, verifies
+`--require-all-targets`, and places it in the app's Resources. This lets **Add
+Display over USB…** select a precompiled image without asking the user to run a
+firmware build:
 
 ```sh
 mac/make-app.sh                                # reuse the bundle if present
@@ -746,11 +763,10 @@ ESPDISP_REBUILD_FIRMWARE=1 mac/make-app.sh     # rebuild it from the sketch
 ESPDISP_SKIP_FIRMWARE=1 mac/make-app.sh        # ship without one
 ```
 
-Two things follow from that, and neither is hidden: the `.app` grows by the
-bundle's size (2.3MB for both boards today), and the firmware inside it is fixed
-when the app is packaged. A board flashed from a six-month-old app gets six-month-old
-firmware and can be brought up to date over the air immediately afterwards. To
-refresh what the app carries, rebuild it with `ESPDISP_REBUILD_FIRMWARE=1`.
+The `.app` grows by the validated bundle's size, and its embedded firmware is
+fixed when the app is packaged. Rebuild with `ESPDISP_REBUILD_FIRMWARE=1` to
+refresh it. A board flashed from an older app can be updated immediately
+afterward.
 
 ### Adding a board over USB
 
@@ -770,8 +786,9 @@ identity. What happens then:
    protocol. A board that answers is offered **Set Up WiFi only** — it already
    works, and what it is missing is credentials, so it is not re-flashed by
    default. Flashing it is still one radio button away.
-2. For a blank board, the chip is read off it with esptool. You are never asked
-   whether it is a C6 or an S3.
+2. For a blank board, esptool reads the chip. `esp32c6` selects `c6`. An
+   `esp32s3` chip matches two exact targets, so the sheet requires the user to
+   choose `s3-175` or `s3-185` before flashing.
 3. Everything a blank board needs is written in one esptool run — bootloader,
    partition table, boot_app0 and the application image, at the addresses the
    bundle carries. The partition table travels with the app deliberately: it is
@@ -807,26 +824,17 @@ would do, type the OTA password, and confirm. No `arduino-cli` and no Python are
 involved: the app speaks the `espota` protocol itself.
 
 The file is one written by `tools/espdisp.py bundle` (see
-[Firmware bundles](#firmware-bundles)), and it does not have to have been built on
-the Mac doing the pushing — that is the point of it being one portable file. The
-sheet reads the manifest and shows the version, when it was built, the commit it
-came from and whether that tree was dirty, and the size of the image for this
-panel's chip.
+[Firmware bundles](#firmware-bundles)), and it does not have to have been built
+on the Mac doing the pushing — that is the point of it being one portable file.
+The sheet reads the manifest and shows the version, build time, source commit,
+dirty state, and application size for this panel's exact target.
 
-Then it says what pushing it would do, and the awkward answers are separate
-answers rather than one refusal. The bundle can be newer (an update), the same
-version (a reinstall, which is a reasonable way to recover a panel that is
-misbehaving), or **older** — a downgrade, which is offered because going back after
-a bad release is a real thing to want, but never labelled as an update. If either
-version is not a dotted number the sheet says which way round they go cannot be
-worked out rather than guessing. If the panel named a chip this bundle has no image
-for, that is the one case that is simply the wrong file and it is refused. If the
-panel did not name its chip at all — firmware older than the `chip` TXT record, or
-a build that could not name its own — the push is still offered, with the image
-chosen by hand and a warning saying so, for the same reason `--board` has an
-override on the command line: not knowing is not the same as being wrong, and the
-panel validates the image header's `chip_id` before it moves the boot slot, so the
-wrong choice costs a transfer rather than the panel.
+It then classifies the operation as update, reinstall, or downgrade. If either
+version is not a dotted number, it says ordering is unknown rather than
+guessing. A bundle without the panel's exact target is refused. Current S3
+updates also require matching live target and chip evidence; there is no manual
+image picker or chip-only override because `s3-175` and `s3-185` share an ESP
+image chip identifier.
 
 The password is the one set with `tools/espdisp.py set-password`. **Update
 Firmware…** is greyed out until a panel advertises that OTA is listening, and the
@@ -859,7 +867,7 @@ guarantee, because "it has OTA" covers a wide range.
 
 **No partition table change was needed.** An earlier version of this section said
 OTA required a custom 8MB dual-partition layout. That was wrong:
-`tools/partitions/default.csv` in the esp32 core — which both targets already use
+`tools/partitions/default.csv` in the ESP32 core — which all current targets use
 — has `otadata` at 0xe000 plus two 0x140000 app slots at 0x10000 and 0x150000.
 The firmware has always been installed into an OTA-capable layout; nothing had to
 move, and NVS (`0x9000`, `0x5000`) is untouched, so saved WiFi credentials, name,
@@ -876,11 +884,10 @@ What this implementation provides:
 - An integrity check on the image. The pusher sends its MD5 and the `Update`
   library refuses to switch the boot slot unless what landed matches, so a
   truncated or mangled transfer never becomes the firmware that boots.
-- A target check on the image, from the bootloader rather than from this project.
-  `Update.end()` calls `esp_ota_set_boot_partition`, which runs `esp_image_verify`
-  first, and that compares the image header's `chip_id` against the running chip
-  (`bootloader_common_check_chip_validity`). An S3 image pushed to a C6 is
-  therefore refused at exactly the same point a corrupt one is.
+- Two target checks protect different boundaries. The bootloader compares the
+  image header's `chip_id` with the running processor, so a C6/S3 mismatch is
+  refused. The CLI and app compare the reported exact target before transfer,
+  so same-chip `s3-175`/`s3-185` mismatches are also refused.
 - Writes to the _inactive_ app slot. A failed or rejected push — bad password,
   lost transfer, wrong chip, failed MD5 — leaves the panel running exactly the
   firmware it booted; the failure reason appears on the glass.
@@ -901,20 +908,17 @@ What remains open, and would each be a real piece of work:
 Every fact above about the protocol, the password handling, and the integrity and
 target checks was read out of the core's `ArduinoOTA.cpp`, `Updater.cpp` and
 `espota.py`, and out of ESP-IDF's `esp_ota_ops.c`, `esp_image_format.c` and
-`bootloader_common_loader.c`; what has actually been exercised here is that both
-targets compile, that the pusher builds the right command line, and that it fails
-cleanly against a host that does not answer.
+`bootloader_common_loader.c`; what has been exercised here is that all three
+exact targets compile, the pusher builds the expected command line, and failure
+against a host that does not answer is clean.
 
-Sizing, which is the real constraint on the C6: the OTA code costs ~45KB, taking
-that build from 85% to **89% of the 1.31MB app slot (1167976 bytes, 142744
-free)**. The S3 sits at 80%. That still fits with room, and both slots are the
-same size so an update is no tighter than an install — but the headroom is
-finite, and carrying both panel drivers plus the PMU reader in one binary is what
-spends it. The escape hatch, if a later feature stops fitting, is
-`PartitionScheme=min_spiffs` on the FQBN: 1.9MB app slots, still two of them,
-with NVS in the same place so settings survive. It would have to be applied
-everywhere the FQBN appears (here, and `tools/espdisp.py`), and it needs one USB
-flash to take effect because OTA cannot rewrite the partition table.
+Application-slot headroom is finite. The latest validated builds use 1,187,800
+bytes (90%) for `c6`, 1,076,074 bytes (82%) for `s3-175`, and 1,077,346 bytes
+(82%) for `s3-185`. Every release must recheck these figures independently.
+Each fixed S3 artifact links only its own panel driver. If a future target needs
+`PartitionScheme=min_spiffs`, apply that partition choice everywhere its FQBN is
+built and install it once over USB because OTA cannot rewrite the partition
+table.
 
 The management datagrams remain unauthenticated and intended for a trusted local
 network — a forged `ECTL` can still dim a panel or reboot it. OTA is the one path
@@ -931,13 +935,13 @@ beside the panel's saved WiFi network, over USB.
 Dimming follows the Mac, never the picture. Unchanging content — a photo, a
 dashboard, a paused video — stays at full brightness indefinitely:
 
-| Condition                                   | Panel                         |
-| ------------------------------------------- | ----------------------------- |
-| Streaming, even perfectly static content    | Last frame, full brightness   |
-| Mac's displays sleep, or screensaver        | Backlight off (`ESLP`)        |
-| Mac system sleep                            | Backlight off (`ESLP`)        |
-| Mac wakes                                   | Restored immediately (`EWAK`) |
-| Sender gone ~45s (quit, crashed, WiFi down) | Dimmed status card            |
+| Condition | Panel |
+| --- | --- |
+| Streaming, even perfectly static content | Last frame, full brightness |
+| Mac's displays sleep, or screensaver | Backlight off (`ESLP`) |
+| Mac system sleep | Backlight off (`ESLP`) |
+| Mac wakes | Restored immediately (`EWAK`) |
+| Sender gone ~45s (quit, crashed, WiFi down) | Dimmed status card |
 
 The status card shows whatever lines you gave the panel under **When Idle**,
 followed by how long ago they arrived, then device name, IP, and WiFi strength
@@ -971,8 +975,8 @@ signal quality, updated every 2 seconds. The ESP32-C6-Touch-LCD-1.47 has no
 addressable LED, so this indicator is absent there — use the status card or
 `CFGSHOW` for signal strength on that board.
 
-| Color           | Meaning                                             |
-| --------------- | --------------------------------------------------- |
-| Green           | Strong signal (-55 dBm or better)                   |
+| Color | Meaning |
+| --- | --- |
+| Green | Strong signal (-55 dBm or better) |
 | Yellow → orange | Fading signal (-55 to -90 dBm, continuous gradient) |
-| Red             | Very weak signal, or not connected                  |
+| Red | Very weak signal, or not connected |

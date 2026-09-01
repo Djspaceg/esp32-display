@@ -1,5 +1,11 @@
 # Tile Stream: findings and implementation plan
 
+> **Scope note:** This document is the S3 tile-stream implementation and
+> performance diary. Its historical target counts and build commands are not
+> the current firmware catalog. See the
+> [firmware target architecture](firmware-target-architecture.md) for target
+> selection, bundles, flashing safety, and extension guidance.
+
 A design and implementation plan for replacing the full-width band diffing
 system with a tile/rectangle-based dirty-region protocol on the
 ESP32-S3-Touch-AMOLED-1.75C (466x466 CO5300), targeting maximum throughput up

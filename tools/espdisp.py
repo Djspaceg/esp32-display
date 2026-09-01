@@ -29,10 +29,9 @@ class Board(NamedTuple):
     blurb: str
 
 
-# The whole point of this tool: these two strings live here instead of in
-# shell history. Keep them byte-identical to the commands documented in
-# README.md "Getting started" - the README is the fallback when this
-# misbehaves, so the two must not drift.
+# The whole point of this tool: target build definitions live here instead of in
+# shell history. Keep them byte-identical to README.md "Getting started" - the
+# README is the manual fallback, so the two must not drift.
 BOARDS = {
     "c6": Board(
         key="c6",
@@ -81,7 +80,7 @@ SKETCH_DIR = os.path.join(REPO_ROOT, "firmware", "display_stream")
 SKETCH_INO = os.path.join(SKETCH_DIR, "display_stream.ino")
 LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware", "libraries")
 
-# Both boards are native USB CDC, so they always enumerate here on macOS.
+# All current targets use native USB CDC and enumerate here on macOS.
 PORT_GLOB = "/dev/cu.usbmodem*"
 
 BAUD = 115200
@@ -941,8 +940,9 @@ def bundle_manifest(
     change the argument for the iteration bound: an offset only ever moves the
     length by gaining digits, the length therefore only grows, and each pass makes
     every offset at least as large as the last, so the fixpoint is reached from
-    below. Eight passes is far more than the two it takes for a two-board bundle
-    (test_bundle_manifest_offsets drives payload sizes that force rollovers).
+    below. Eight passes is far more than the two needed by the current
+    three-target bundle (`test_bundle_manifest_offsets` drives payload sizes that
+    force digit rollovers).
     """
     if not images:
         raise Fail("a bundle needs at least one image")
@@ -1508,18 +1508,12 @@ def app_image(output_dir: str) -> str:
     esptool over USB, wrong for OTA, and 8MB of wrong at that. Only the bare
     <sketch>.ino.bin goes into an app slot.
 
-    A BUNDLE STILL DOES NOT CARRY merged.bin, now that it carries the flash parts
-    a blank board needs, and the measurements are why. platform.txt:183 pads it
-    with `--pad-to-size {build.flash_size}`, so the C6 export's merged.bin is
-    8388608 bytes and the S3's is 16777216 - both measured from a real export of
-    this sketch, and both exactly the FlashSize in that board's FQBN. A two-board
-    bundle would go from the 2290544 bytes it is today to roughly 24MB, of which
-    some 22MB is padding. The individual parts cost 31984 bytes for the C6
-    (bootloader 20720, partitions 3072, boot_app0 8192) and 31232 for the S3
-    (bootloader 19968), all measured the same way. merged.bin also describes a
-    whole-flash write, which would erase NVS - and NVS is where the WiFi
-    credentials and the panel's name live, so flashing one board twice would wipe
-    what the user configured after the first time.
+    A BUNDLE STILL DOES NOT CARRY merged.bin. It is padded to the target's full
+    flash size — 8 MB for C6 and 16 MB for either S3 target — so carrying one
+    merged image per exact target would add tens of megabytes, mostly padding.
+    The individual bootloader, partition, and boot_app0 parts cost about 31 KB
+    per target. merged.bin also describes a whole-flash write that would erase
+    NVS, where WiFi credentials and the panel name live.
     """
     candidates = [
         p
@@ -2326,8 +2320,8 @@ def cmd_ota(args) -> int:
 
 def cmd_bundle(args) -> int:
     # Version first, before any compile: it is read from the sketch and can fail
-    # instantly, and finding out after two multi-minute builds would be
-    # irritating. Same ordering, and the same reason, as cmd_ota's password.
+    # instantly, and finding out after all target builds would be irritating.
+    # Same ordering, and the same reason, as cmd_ota's password.
     version = sketch_fw_version()
     keys = bundle_board_keys(args.board)
     boards = [BOARDS[key] for key in keys]
@@ -2592,7 +2586,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="seconds to browse mDNS for exact target/chip metadata (default 5; "
-        "0 or less skips the check and takes --board on trust)",
+        "0 or less skips the check only for targets whose chip is unambiguous; "
+        "same-chip S3 targets refuse without exact discovery)",
     )
     p_ota.set_defaults(func=cmd_ota)
 
@@ -2601,10 +2596,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="compile and pack the firmware into one portable %s file" % BUNDLE_SUFFIX,
         description="Build the firmware and write it into a single file the Mac "
         "app can open later - on this machine or on another one, with no copy of "
-        "this repo and no arduino-cli in sight. The file carries, per board, the "
-        "application image plus the bootloader, partition table and boot_app0 a "
-        "board that has never been flashed needs, each with the flash address it "
-        "is written to, and a manifest naming the firmware version, when it was "
+        "this repo and no arduino-cli in sight. The file carries, per exact "
+        "target, the application image plus the bootloader, partition table and "
+        "boot_app0 needed by a board that has never been flashed, each with its "
+        "flash address, and a manifest naming the firmware version, when it was "
         "built, which commit it came from and the sha256 of every payload. Nothing "
         "is pushed: `bundle` only writes the file, and `ota` is still the way to "
         "push from here.",

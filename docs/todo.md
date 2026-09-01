@@ -1,5 +1,11 @@
 # ESPDisplaySender — Improvement Backlog
 
+> **Historical archive:** This backlog records an earlier implementation state.
+> Items such as "OTA not implemented" are no longer current requirements or
+> architecture. See the [README](../README.md) for current behavior and the
+> [firmware target architecture](firmware-target-architecture.md) for current
+> target and update policy.
+
 The capture → diff → stream pipeline from `esp32-wireless-display-plan.md` is
 done, including both of its stretch goals (dirty-band diffing, adaptive
 pacing). What remains falls into three themes:
