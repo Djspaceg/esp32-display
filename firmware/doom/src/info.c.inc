@@ -124,7 +124,8 @@ void A_SpawnFly();
 void A_BrainExplode();
 
 
-state_t	states[NUMSTATES] = {
+state_t *states;
+static const state_t doom_initial_states[NUMSTATES] = {
     {SPR_TROO,0,-1,{NULL},S_NULL,0,0},	// S_NULL
     {SPR_SHTG,4,0,{A_Light0},S_NULL,0,0},	// S_LIGHTDONE
     {SPR_PUNG,0,1,{A_WeaponReady},S_PUNCH,0,0},	// S_PUNCH
@@ -1095,7 +1096,8 @@ state_t	states[NUMSTATES] = {
 };
 
 
-mobjinfo_t mobjinfo[NUMMOBJTYPES] = {
+mobjinfo_t *mobjinfo;
+static const mobjinfo_t doom_initial_mobjinfo[NUMMOBJTYPES] = {
 
     {		// MT_PLAYER
 	-1,		// doomednum

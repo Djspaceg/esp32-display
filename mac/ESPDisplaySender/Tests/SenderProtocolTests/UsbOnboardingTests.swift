@@ -49,7 +49,7 @@ final class UsbOnboardingTests: XCTestCase {
         XCTAssertTrue(plan.headline.contains("s3-175"))
         XCTAssertTrue(plan.detail.contains("esp32s3"))
         XCTAssertTrue(plan.detail.contains("\"Home\""))
-        XCTAssertTrue(plan.detail.contains("4 parts"))
+        XCTAssertTrue(plan.detail.contains("5 parts"))
     }
 
     func testESP32S3RequiresAnExactTargetChoice() {

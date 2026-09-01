@@ -393,6 +393,10 @@ void M_BindChatControls(unsigned int num_players)
 
 void M_ApplyPlatformDefaults(void)
 {
-    // no-op. Add your platform-specific patches here.
+#if defined(ESPDISP_DOOM_S3_175)
+    // Doom has no default keyboard binding for next weapon. The touch platform
+    // emits this binding for a vertical gameplay swipe.
+    key_nextweapon = '/';
+#endif
 }
 

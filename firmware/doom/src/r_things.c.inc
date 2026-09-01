@@ -278,7 +278,7 @@ void R_InitSpriteDefs (char** namelist)
 //
 // GAME FUNCTIONS
 //
-vissprite_t	vissprites[MAXVISSPRITES];
+vissprite_t*	vissprites;
 vissprite_t*	vissprite_p;
 int		newvissprite;
 

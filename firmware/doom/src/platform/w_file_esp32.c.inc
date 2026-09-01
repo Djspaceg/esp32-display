@@ -14,25 +14,29 @@
 #include "w_file.h"
 #include "doom_mode.h"
 
-static const char* TAG = "doom_wad";
+static const char* WAD_TAG = "doom_wad";
 
 static const void* wad_mapped_ptr = NULL;
 static uint32_t wad_size = 0;
 static spi_flash_mmap_handle_t wad_map_handle;
 
-// Called once at Doom init to map the WAD partition
-static void ensure_wad_mapped(void) {
-    if (wad_mapped_ptr != NULL) return;
+static uint32_t wad_u32_le(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+// Called once at Doom init to map and structurally validate the WAD partition.
+static bool ensure_wad_mapped(void) {
+    if (wad_mapped_ptr != NULL) return true;
 
     const esp_partition_t* part = esp_partition_find_first(
         (esp_partition_type_t)DOOM_WAD_PARTITION_TYPE,
         (esp_partition_subtype_t)DOOM_WAD_PARTITION_SUBTYPE,
         NULL);
 
-    if (!part) {
-        ESP_LOGE(TAG, "WAD partition not found! Flash doom1.wad with: "
-                      "tools/espdisp.py flash-wad doom1.wad");
-        return;
+    if (!part || part->size < 12) {
+        ESP_LOGE(WAD_TAG, "WAD partition missing or too small");
+        return false;
     }
 
     esp_err_t err = esp_partition_mmap(
@@ -41,26 +45,57 @@ static void ensure_wad_mapped(void) {
         &wad_mapped_ptr, &wad_map_handle);
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mmap WAD partition: %s", esp_err_to_name(err));
+        ESP_LOGE(WAD_TAG, "Failed to mmap WAD partition: %s", esp_err_to_name(err));
         wad_mapped_ptr = NULL;
-        return;
+        return false;
     }
 
-    wad_size = part->size;
-
-    // Verify WAD magic ("IWAD" or "PWAD" at offset 0)
-    const char* magic = (const char*)wad_mapped_ptr;
-    if (memcmp(magic, "IWAD", 4) != 0 && memcmp(magic, "PWAD", 4) != 0) {
-        ESP_LOGE(TAG, "WAD partition does not contain valid WAD data "
-                      "(magic: %02x %02x %02x %02x)",
-                      magic[0], magic[1], magic[2], magic[3]);
+    const uint32_t mapped_size = part->size;
+    const uint8_t* header = (const uint8_t*)wad_mapped_ptr;
+    bool valid_magic = memcmp(header, "IWAD", 4) == 0 ||
+                       memcmp(header, "PWAD", 4) == 0;
+    uint32_t lump_count = wad_u32_le(header + 4);
+    uint32_t directory_offset = wad_u32_le(header + 8);
+    bool valid_directory = mapped_size >= DOOM_WAD_EXPECTED_BYTES &&
+                           lump_count > 0 &&
+                           directory_offset <= DOOM_WAD_EXPECTED_BYTES &&
+                           lump_count <=
+                               (DOOM_WAD_EXPECTED_BYTES - directory_offset) / 16;
+    if (valid_directory) {
+        for (uint32_t i = 0; i < lump_count; ++i) {
+            const uint8_t* entry = header + directory_offset + i * 16;
+            int32_t file_offset = (int32_t)wad_u32_le(entry);
+            int32_t file_size = (int32_t)wad_u32_le(entry + 4);
+            if (file_offset < 0 || file_size < 0 ||
+                (uint32_t)file_offset > DOOM_WAD_EXPECTED_BYTES ||
+                (uint32_t)file_size >
+                    DOOM_WAD_EXPECTED_BYTES - (uint32_t)file_offset) {
+                valid_directory = false;
+                break;
+            }
+        }
+    }
+    if (!valid_magic || !valid_directory) {
+        ESP_LOGE(WAD_TAG,
+                 "Invalid WAD structure (magic=%02x%02x%02x%02x lumps=%lu dir=%lu partition=%lu)",
+                 header[0], header[1], header[2], header[3],
+                 (unsigned long)lump_count, (unsigned long)directory_offset,
+                 (unsigned long)mapped_size);
         esp_partition_munmap(wad_map_handle);
         wad_mapped_ptr = NULL;
-        return;
+        wad_size = 0;
+        return false;
     }
 
-    ESP_LOGI(TAG, "WAD mapped: %lu bytes at %p (%.4s)",
-             (unsigned long)wad_size, wad_mapped_ptr, magic);
+    wad_size = DOOM_WAD_EXPECTED_BYTES;
+    ESP_LOGI(WAD_TAG, "WAD mapped: %lu bytes at %p (%.4s, %lu lumps)",
+             (unsigned long)wad_size, wad_mapped_ptr, header,
+             (unsigned long)lump_count);
+    return true;
+}
+
+bool doom_wad_available(void) {
+    return ensure_wad_mapped();
 }
 
 // --- doomgeneric WAD file interface ---
@@ -70,9 +105,7 @@ static wad_file_t doom_wad_file;
 
 wad_file_t* W_OpenFile(char* path) {
     (void)path;  // We ignore the path -- there's only one WAD
-    ensure_wad_mapped();
-
-    if (!wad_mapped_ptr) {
+    if (!ensure_wad_mapped()) {
         return NULL;
     }
 
@@ -92,10 +125,8 @@ size_t W_Read(wad_file_t* wad, unsigned int offset,
               void* buffer, size_t buffer_len) {
     (void)wad;
 
-    if (!wad_mapped_ptr) return 0;
-    if (offset + buffer_len > wad_size) {
-        // Clamp to available data
-        if (offset >= wad_size) return 0;
+    if (!wad_mapped_ptr || offset >= wad_size) return 0;
+    if (buffer_len > wad_size - offset) {
         buffer_len = wad_size - offset;
     }
 

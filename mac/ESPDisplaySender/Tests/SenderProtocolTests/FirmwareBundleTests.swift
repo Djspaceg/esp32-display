@@ -272,7 +272,9 @@ final class FirmwareBundleTests: XCTestCase {
             bundle.flashPayload(forChip: "esp32c6", role: "bootloader"),
             bundle.flashPayload(forChip: "esp32s3", role: "bootloader"))
         XCTAssertTrue(bundle.canFlashBlankDevice(chip: "esp32c6"))
-        XCTAssertTrue(bundle.canFlashBlankDevice(chip: "esp32s3"))
+        XCTAssertFalse(
+            bundle.canFlashBlankDevice(chip: "esp32s3"),
+            "legacy s3 bundles predate the required partition/WAD pair")
         XCTAssertFalse(bundle.canFlashBlankDevice(chip: "esp32p4"))
         XCTAssertNil(bundle.flashPlan(forChip: "esp32p4"))
         // A payload containing the magic is framed by the offsets rather than by
@@ -320,12 +322,12 @@ final class FirmwareBundleTests: XCTestCase {
         XCTAssertNotEqual(
             bundle.flashPayload(forTarget: "s3-175", role: "bootloader"),
             bundle.flashPayload(forTarget: "s3-185", role: "bootloader"))
-        XCTAssertEqual(
-            bundle.flashPlan(forTarget: "s3-175")?.last?.payload,
-            s3_175.payload)
-        XCTAssertEqual(
-            bundle.flashPlan(forTarget: "s3-185")?.last?.payload,
-            s3_185.payload)
+        XCTAssertNil(
+            bundle.flashPlan(forTarget: "s3-175"),
+            "s3-175 needs its canonical partition table and verified Doom WAD")
+        XCTAssertNil(
+            bundle.flashPlan(forTarget: "s3-185"),
+            "format-3 blank-device plans require a decodable partition table")
 
         XCTAssertNil(bundle.image(forChip: "esp32s3"))
         XCTAssertNil(bundle.payload(forChip: "esp32s3"))
@@ -812,10 +814,9 @@ final class FirmwareBundleTests: XCTestCase {
             bundle?.images[0].flashParts.map(\.role),
             ["bootloader", "partitions", "boot_app0", "spiffs"],
             "an unknown role is carried rather than refused")
-        XCTAssertEqual(
-            bundle?.flashPlan(forChip: "esp32c6")?.map(\.role),
-            ["bootloader", "partitions", "boot_app0", "app", "spiffs"],
-            "and it takes its place in the plan by address, at 0x290000")
+        XCTAssertNil(
+            bundle?.flashPlan(forChip: "esp32c6"),
+            "current targets do not forward unknown absolute-address writes")
     }
 
     func testRefusesNonsensicalFlashAddresses() {

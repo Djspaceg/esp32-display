@@ -42,9 +42,12 @@ BOARDS = {
     ),
     "s3-175": Board(
         key="s3-175",
-        fqbn="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
+        fqbn=(
+            "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,"
+            "PartitionScheme=custom"
+        ),
         chip="esp32s3",
-        extra_flags=(),
+        extra_flags=("-DESPDISP_DOOM_S3_175",),
         blurb="ESP32-S3-Touch-AMOLED-1.75C 466x466 round AMOLED (needs PSRAM=opi)",
     ),
     "s3-185": Board(
@@ -79,6 +82,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKETCH_DIR = os.path.join(REPO_ROOT, "firmware", "display_stream")
 SKETCH_INO = os.path.join(SKETCH_DIR, "display_stream.ino")
 LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware", "libraries")
+DOOM_LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware")
+DOOM_PARTITIONS_CSV = os.path.join(REPO_ROOT, "firmware", "partitions_s3_doom.csv")
 
 # All current targets use native USB CDC and enumerate here on macOS.
 PORT_GLOB = "/dev/cu.usbmodem*"
@@ -1492,12 +1497,53 @@ def report_sizes(lines: List[str]) -> None:
 def compile_board(board: Board, output_dir: Optional[str] = None) -> List[str]:
     if not os.path.isdir(SKETCH_DIR):
         raise Fail("sketch directory not found: %s" % SKETCH_DIR)
+
+    build_sketch_dir = SKETCH_DIR
+    staged_root: Optional[str] = None
     cmd = [arduino_cli(), "compile", "-b", board.fqbn, "--libraries", LIBRARIES_DIR]
-    if board.extra_flags:
+    if board.key == "s3-175":
+        doom_metadata = os.path.join(DOOM_LIBRARIES_DIR, "doom", "library.properties")
+        if not os.path.isfile(doom_metadata):
+            raise Fail("Doom library metadata not found: %s" % doom_metadata)
+        if not os.path.isfile(DOOM_PARTITIONS_CSV):
+            raise Fail("Doom partition table not found: %s" % DOOM_PARTITIONS_CSV)
+        # Arduino's custom scheme only reads partitions.csv from the sketch
+        # directory. Stage a private sketch copy so c6/s3-185 can never inherit
+        # the Doom table and concurrent target builds cannot race over one file.
+        staged_root = tempfile.mkdtemp(prefix="espdisp-sketch-s3-175-")
+        build_sketch_dir = os.path.join(staged_root, "display_stream")
+        shutil.copytree(
+            SKETCH_DIR,
+            build_sketch_dir,
+            ignore=shutil.ignore_patterns("build", "partitions.csv"),
+        )
+        shutil.copy2(
+            DOOM_PARTITIONS_CSV,
+            os.path.join(build_sketch_dir, "partitions.csv"),
+        )
+        # --libraries takes a directory CONTAINING libraries. Pointing it at
+        # firmware/doom would mis-detect doom/src as an old-format library and
+        # silently omit the platform/*.cpp hardware bridge.
+        cmd += ["--libraries", DOOM_LIBRARIES_DIR]
+        doom_flags = " ".join(board.extra_flags)
+        cmd += [
+            "--build-property", "compiler.c.extra_flags=%s" % doom_flags,
+            "--build-property", "compiler.cpp.extra_flags=%s" % doom_flags,
+        ]
+    elif os.path.exists(os.path.join(SKETCH_DIR, "partitions.csv")):
+        raise Fail(
+            "unexpected firmware/display_stream/partitions.csv would override "
+            "%s's standard partition scheme" % board.key
+        )
+    elif board.extra_flags:
         cmd += ["--build-property", "compiler.cpp.extra_flags=%s" % " ".join(board.extra_flags)]
     if output_dir:
         cmd += ["--output-dir", output_dir]
-    return run_streaming(cmd + ["."], cwd=SKETCH_DIR)
+    try:
+        return run_streaming(cmd + ["."], cwd=build_sketch_dir)
+    finally:
+        if staged_root:
+            shutil.rmtree(staged_root, ignore_errors=True)
 
 
 def app_image(output_dir: str) -> str:
@@ -2300,97 +2346,238 @@ def cmd_flash(args) -> int:
     port = resolve_port(args.port)
     board = resolve_board(args.board, port)
     print("Target: %s (%s) on %s" % (board.key, board.fqbn, port.address), flush=True)
+
+    wad_path: Optional[str] = None
+    tool: Optional[str] = None
+    if board.key == "s3-175":
+        wad_path = _ensure_doom_wad()
+        if not wad_path:
+            raise Fail("cannot flash s3-175 without the verified doom1.wad")
+        _validate_doom_wad(wad_path, require_shareware=True)
+        tool = esptool_path()
+        if not tool:
+            raise Fail("esptool not found (install the esp32 Arduino core)")
+
     out_dir = tempfile.mkdtemp(prefix="espdisp-flash-%s-" % board.key)
     try:
         lines = compile_board(board, output_dir=out_dir)
-        run_streaming(
-            [arduino_cli(), "upload", "-b", board.fqbn, "-p", port.address,
-             "--input-dir", out_dir],
-            cwd=SKETCH_DIR,
+        partition_path = export_binary(out_dir, ".ino.partitions.bin")
+        partition_blob = read_binary(partition_path)
+        _verify_partition_payload(board, partition_blob)
+        app_path = app_image(out_dir)
+        _verify_app_payload(
+            board, partition_blob, APP_FLASH_ADDRESS, os.path.getsize(app_path)
         )
+        if board.key == "s3-175":
+            assert tool is not None and wad_path is not None
+            # One esptool transaction writes the partition table and its WAD
+            # payload together. A failed command is a failed flash, never a
+            # successful firmware upload followed by a silently missing WAD.
+            run_streaming([
+                tool,
+                "--chip", board.chip,
+                "--port", port.address,
+                "--baud", "921600",
+                "write_flash",
+                "0x%X" % core_bootloader_address(board.chip),
+                export_binary(out_dir, ".ino.bootloader.bin"),
+                "0x%X" % PARTITIONS_FLASH_ADDRESS,
+                partition_path,
+                "0x%X" % BOOT_APP0_FLASH_ADDRESS,
+                core_boot_app0(),
+                "0x%X" % APP_FLASH_ADDRESS,
+                app_path,
+                "0x%X" % _DOOM_WAD_PARTITION_OFFSET,
+                wad_path,
+            ])
+        else:
+            run_streaming(
+                [arduino_cli(), "upload", "-b", board.fqbn, "-p", port.address,
+                 "--input-dir", out_dir],
+                cwd=SKETCH_DIR,
+            )
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
     report_sizes(lines)
-
-    # For S3 board: also flash the Doom WAD if present (or download it)
-    if board.key == "s3":
-        _flash_doom_wad_if_available(port.address)
-
     return 0
 
 
-# WAD auto-download and flash for the Doom Easter Egg (S3 only)
+# WAD auto-download and flash for the Doom Easter Egg (s3-175 only).
+# The digest is the canonical shareware v1.9 IWAD (MD5
+# f0cefca49926d00903cf57551d901abe). Size plus SHA-256 is checked before any
+# bundle or raw write so a mirror change cannot silently reach a device.
 _DOOM_WAD_PATH = os.path.join(REPO_ROOT, "firmware", "doom", "doom1.wad")
-_DOOM_WAD_URL = "https://distro.ibiblio.org/slitaz/sources/packages/d/doom1.wad"
-_DOOM_WAD_SIZE = 4196020  # doom1.wad v1.9 is exactly this many bytes
-_DOOM_WAD_PARTITION_OFFSET = 0xC00000
+_DOOM_WAD_URL = "https://raw.githubusercontent.com/nneonneo/universal-doom/main/DOOM1.WAD"
+_DOOM_WAD_SIZE = 4196020
+_DOOM_WAD_SHA256 = "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771"
+_DOOM_WAD_PARTITION_OFFSET = 0xBFF000
+_DOOM_WAD_PARTITION_SIZE = 0x401000
+_DOOM_WAD_FLASH_ROLE = "doom_wad"
+
+
+def _partition_entries(blob: bytes) -> List[Tuple[str, int, int, int, int]]:
+    """Decode the fixed 32-byte ESP partition entries needed for safety checks."""
+    entries = []
+    labels = set()
+    for offset in range(0, len(blob), 32):
+        entry = blob[offset:offset + 32]
+        if len(entry) < 32 or entry[:2] in (b"\xff\xff", b"\xeb\xeb"):
+            break
+        if entry[:2] != b"\xaaP":
+            raise Fail("partition table has invalid magic at byte %d" % offset)
+        part_type = entry[2]
+        subtype = entry[3]
+        address, size = struct.unpack_from("<II", entry, 4)
+        label = entry[12:28].split(b"\0", 1)[0].decode("ascii", errors="replace")
+        if not label or label in labels:
+            raise Fail("partition table has an empty or duplicate label %r" % label)
+        labels.add(label)
+        entries.append((label, part_type, subtype, address, size))
+    if not entries:
+        raise Fail("partition table contains no entries")
+    return entries
+
+
+def _verify_partition_payload(board: Board, blob: bytes) -> None:
+    entries = _partition_entries(blob)
+    by_label = {entry[0]: entry[1:] for entry in entries}
+    doom_claims = [
+        entry for entry in entries
+        if entry[0] == "doom_wad" or (entry[1], entry[2]) == (0x42, 0x06)
+    ]
+    if board.key != "s3-175":
+        if doom_claims:
+            raise Fail("%s partition table incorrectly contains the Doom WAD" % board.key)
+        return
+
+    expected = {
+        "nvs": (0x01, 0x02, 0x009000, 0x005000),
+        "otadata": (0x01, 0x00, 0x00E000, 0x002000),
+        "app0": (0x00, 0x10, 0x010000, 0x5F0000),
+        "app1": (0x00, 0x11, 0x600000, 0x5F0000),
+        "doom_wad": (0x42, 0x06, _DOOM_WAD_PARTITION_OFFSET,
+                     _DOOM_WAD_PARTITION_SIZE),
+    }
+    if len(entries) != len(expected) or set(by_label) != set(expected):
+        raise Fail(
+            "s3-175 partition labels are %s, expected %s"
+            % (", ".join(sorted(by_label)), ", ".join(sorted(expected)))
+        )
+    for label, want in expected.items():
+        if by_label[label] != want:
+            raise Fail(
+                "s3-175 partition %s is %r, expected %r"
+                % (label, by_label[label], want)
+            )
+
+
+def _verify_app_payload(
+    board: Board, partition_blob: bytes, app_address: int, app_bytes: int
+) -> None:
+    app_partitions = [
+        entry for entry in _partition_entries(partition_blob)
+        if entry[1] == 0x00 and entry[3] == app_address
+    ]
+    if len(app_partitions) != 1:
+        raise Fail(
+            "%s partition table has no unique app partition at 0x%X"
+            % (board.key, app_address)
+        )
+    capacity = app_partitions[0][4]
+    if app_bytes <= 0 or app_bytes > capacity:
+        raise Fail(
+            "%s application is %d bytes but its app partition holds %d"
+            % (board.key, app_bytes, capacity)
+        )
+
+
+def _validate_doom_wad(path: str, require_shareware: bool = False) -> None:
+    """Refuse a WAD that cannot safely be written to the declared partition."""
+    if not os.path.isfile(path):
+        raise Fail("WAD file not found: %s" % path)
+    size = os.path.getsize(path)
+    if size > _DOOM_WAD_PARTITION_SIZE:
+        raise Fail(
+            "WAD file too large: %d bytes (partition is %d bytes)"
+            % (size, _DOOM_WAD_PARTITION_SIZE)
+        )
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[:4] not in (b"IWAD", b"PWAD"):
+        raise Fail(
+            "Not a valid WAD file (magic: %s, expected IWAD or PWAD)"
+            % data[:4].hex()
+        )
+    if require_shareware:
+        digest = hashlib.sha256(data).hexdigest()
+        if size != _DOOM_WAD_SIZE or digest != _DOOM_WAD_SHA256:
+            raise Fail(
+                "doom1.wad is not the verified shareware v1.9 image "
+                "(bytes=%d sha256=%s)" % (size, digest)
+            )
 
 
 def _ensure_doom_wad() -> Optional[str]:
-    """Return the path to doom1.wad, downloading if needed. None on failure."""
+    """Return a verified shareware IWAD, downloading atomically if needed."""
     if os.path.isfile(_DOOM_WAD_PATH):
-        size = os.path.getsize(_DOOM_WAD_PATH)
-        if size == _DOOM_WAD_SIZE:
+        try:
+            _validate_doom_wad(_DOOM_WAD_PATH, require_shareware=True)
             return _DOOM_WAD_PATH
-        print("  doom1.wad exists but is %d bytes (expected %d), re-downloading..."
-              % (size, _DOOM_WAD_SIZE))
+        except Fail as exc:
+            print("  %s; re-downloading..." % exc, file=sys.stderr)
 
-    print("  Downloading doom1.wad (shareware, 4.0 MB)...", flush=True)
+    print("  Downloading verified doom1.wad shareware v1.9 (4.0 MB)...", flush=True)
+    download = _DOOM_WAD_PATH + ".download"
     try:
         import urllib.request
-        urllib.request.urlretrieve(_DOOM_WAD_URL, _DOOM_WAD_PATH)
-    except Exception as e:
-        print("  Download failed: %s" % e, file=sys.stderr)
-        print("  Doom Easter Egg will not be available until doom1.wad is flashed.")
-        print("  Manual download: curl -L -o firmware/doom/doom1.wad '%s'" % _DOOM_WAD_URL)
+        urllib.request.urlretrieve(_DOOM_WAD_URL, download)
+        _validate_doom_wad(download, require_shareware=True)
+        os.replace(download, _DOOM_WAD_PATH)
+    except Exception as exc:
+        try:
+            os.unlink(download)
+        except OSError:
+            pass
+        print("  Download failed verification: %s" % exc, file=sys.stderr)
+        print("  Doom is unavailable until the verified doom1.wad is present.")
         return None
 
-    # Verify
-    size = os.path.getsize(_DOOM_WAD_PATH)
-    if size != _DOOM_WAD_SIZE:
-        print("  WARNING: downloaded WAD is %d bytes (expected %d)" % (size, _DOOM_WAD_SIZE))
-    # Verify magic
-    with open(_DOOM_WAD_PATH, "rb") as f:
-        magic = f.read(4)
-    if magic != b"IWAD":
-        print("  WARNING: file does not start with IWAD magic", file=sys.stderr)
-        os.unlink(_DOOM_WAD_PATH)
-        return None
-
-    print("  doom1.wad ready (%d bytes)" % size)
+    print("  doom1.wad ready (%d bytes, sha256 %s)"
+          % (_DOOM_WAD_SIZE, _DOOM_WAD_SHA256))
     return _DOOM_WAD_PATH
 
 
-def _flash_doom_wad_if_available(port_address: str) -> None:
-    """Flash the Doom WAD to the S3 board's dedicated partition."""
-    print("\n--- Doom Easter Egg ---")
-    wad_path = _ensure_doom_wad()
-    if not wad_path:
-        return
-
-    tool = esptool_path()
-    if not tool:
-        print("  esptool not found, skipping WAD flash")
-        return
-
-    print("  Flashing doom1.wad to partition at 0x%06X..." % _DOOM_WAD_PARTITION_OFFSET,
-          flush=True)
-    cmd = [
+def _write_doom_wad(port_address: str, tool: str, wad_path: str) -> None:
+    """Write a pre-validated WAD; any failure propagates to the caller."""
+    run_streaming([
         tool,
         "--chip", "esp32s3",
         "--port", port_address,
         "--baud", "921600",
-        "--no-stub",  # faster for data-only writes
         "write_flash",
         "0x%X" % _DOOM_WAD_PARTITION_OFFSET,
         wad_path,
-    ]
+    ])
+
+
+def _verify_installed_doom_partition(port_address: str, tool: str) -> None:
+    """Read back and verify the installed table before any standalone WAD write."""
+    directory = tempfile.mkdtemp(prefix="espdisp-read-partitions-")
+    path = os.path.join(directory, "partitions.bin")
     try:
-        run_streaming(cmd)
-        print("  Doom Easter Egg ready! Triple-tap BOOT to play.")
-    except Exception as e:
-        print("  WAD flash failed: %s" % e, file=sys.stderr)
-        print("  Firmware is fine. Run 'espdisp.py flash-wad' to retry the WAD.")
+        run_streaming([
+            tool,
+            "--chip", "esp32s3",
+            "--port", port_address,
+            "--baud", "921600",
+            "read_flash",
+            "0x%X" % PARTITIONS_FLASH_ADDRESS,
+            "0xC00",
+            path,
+        ])
+        _verify_partition_payload(BOARDS["s3-175"], read_binary(path))
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def cmd_ota(args) -> int:
@@ -2456,6 +2643,25 @@ def cmd_bundle(args) -> int:
             image = app_image(out_dir)
             blob = read_binary(image)
             parts, part_payloads = collect_flash_parts(board, out_dir)
+            partition_blob = part_payloads[FLASH_ROLE_PARTITIONS]
+            _verify_partition_payload(board, partition_blob)
+            _verify_app_payload(board, partition_blob, APP_FLASH_ADDRESS, len(blob))
+            if board.key == "s3-175":
+                wad_path = _ensure_doom_wad()
+                if not wad_path:
+                    raise Fail("cannot bundle s3-175 without the verified doom1.wad")
+                _validate_doom_wad(wad_path, require_shareware=True)
+                wad_blob = read_binary(wad_path)
+                parts.append(
+                    {
+                        "role": _DOOM_WAD_FLASH_ROLE,
+                        "address": _DOOM_WAD_PARTITION_OFFSET,
+                        "filename": os.path.basename(wad_path),
+                        "bytes": len(wad_blob),
+                        "sha256": sha256_hex(wad_blob),
+                    }
+                )
+                part_payloads[_DOOM_WAD_FLASH_ROLE] = wad_blob
             entries.append(
                 {
                     "board": board.key,
@@ -2520,6 +2726,74 @@ def cmd_bundle_info(args) -> int:
                 "%s is missing required exact target%s %s"
                 % (args.path, "s" if len(missing) != 1 else "", ", ".join(missing))
             )
+        for target, roles in flash_payloads.items():
+            if target in BOARDS and FLASH_ROLE_PARTITIONS in roles:
+                partition_blob = roles[FLASH_ROLE_PARTITIONS]
+                _verify_partition_payload(BOARDS[target], partition_blob)
+                image = next(
+                    entry for entry in manifest.get("images", [])
+                    if target in entry.get("targets", [])
+                )
+                partition_parts = [
+                    part for part in image.get("flash_parts", [])
+                    if part.get("role") == FLASH_ROLE_PARTITIONS
+                ]
+                if len(partition_parts) != 1 or partition_parts[0].get("address") != PARTITIONS_FLASH_ADDRESS:
+                    raise Fail(
+                        "%s assigns %s's partition table to the wrong flash address"
+                        % (args.path, target)
+                    )
+                expected_addresses = {
+                    FLASH_ROLE_BOOTLOADER: core_bootloader_address(BOARDS[target].chip),
+                    FLASH_ROLE_PARTITIONS: PARTITIONS_FLASH_ADDRESS,
+                    FLASH_ROLE_BOOT_APP0: BOOT_APP0_FLASH_ADDRESS,
+                }
+                if target == "s3-175":
+                    expected_addresses[_DOOM_WAD_FLASH_ROLE] = _DOOM_WAD_PARTITION_OFFSET
+                actual_addresses = {
+                    part.get("role"): part.get("address")
+                    for part in image.get("flash_parts", [])
+                }
+                if actual_addresses != expected_addresses:
+                    raise Fail(
+                        "%s gives %s unexpected flash roles or addresses"
+                        % (args.path, target)
+                    )
+                _verify_app_payload(
+                    BOARDS[target], partition_blob,
+                    image.get("app_address"), image.get("bytes"),
+                )
+        doom_images = [
+            image for image in manifest.get("images", [])
+            if "s3-175" in image.get("targets", [])
+        ]
+        if len(doom_images) != 1:
+            raise Fail("%s has no unique s3-175 image" % args.path)
+        doom_parts = [
+            part for part in doom_images[0].get("flash_parts", [])
+            if part.get("role") == _DOOM_WAD_FLASH_ROLE
+        ]
+        wad_payload = flash_payloads.get("s3-175", {}).get(_DOOM_WAD_FLASH_ROLE)
+        if len(doom_parts) != 1 or wad_payload is None:
+            raise Fail("%s has no verified s3-175 Doom WAD payload" % args.path)
+        doom_part = doom_parts[0]
+        if (
+            doom_part.get("address") != _DOOM_WAD_PARTITION_OFFSET
+            or doom_part.get("bytes") != _DOOM_WAD_SIZE
+            or doom_part.get("sha256") != _DOOM_WAD_SHA256
+            or len(wad_payload) != _DOOM_WAD_SIZE
+            or sha256_hex(wad_payload) != _DOOM_WAD_SHA256
+        ):
+            raise Fail(
+                "%s has a non-canonical s3-175 Doom WAD address, size, or hash"
+                % args.path
+            )
+        for image in manifest.get("images", []):
+            if "s3-175" not in image.get("targets", []) and any(
+                part.get("role") == _DOOM_WAD_FLASH_ROLE
+                for part in image.get("flash_parts", [])
+            ):
+                raise Fail("%s assigns the Doom WAD to a non-s3-175 target" % args.path)
     size = os.path.getsize(args.path)
     print("%s" % args.path)
     print("  size:     %d bytes (%.1f MiB)" % (size, size / (1024.0 * 1024.0)))
@@ -2650,46 +2924,29 @@ def cmd_flash_wad(args) -> int:
     elif not os.path.isfile(wad_path):
         raise Fail("WAD file not found: %s" % wad_path)
 
+    _validate_doom_wad(
+        wad_path, require_shareware=(os.path.abspath(wad_path) == os.path.abspath(_DOOM_WAD_PATH))
+    )
     wad_size = os.path.getsize(wad_path)
-    WAD_PARTITION_OFFSET = _DOOM_WAD_PARTITION_OFFSET
-    WAD_PARTITION_SIZE = 0x400000  # 4MB
-
-    if wad_size > WAD_PARTITION_SIZE:
-        raise Fail(
-            "WAD file too large: %d bytes (partition is %d bytes / %d MB)"
-            % (wad_size, WAD_PARTITION_SIZE, WAD_PARTITION_SIZE // (1024 * 1024))
-        )
-
-    # Verify it looks like a WAD
-    with open(wad_path, "rb") as f:
-        magic = f.read(4)
-    if magic not in (b"IWAD", b"PWAD"):
-        raise Fail(
-            "Not a valid WAD file (magic: %s, expected IWAD or PWAD)" % magic.hex()
-        )
 
     port = resolve_port(args.port)
+    board = resolve_board(args.board, port)
+    if board.key != "s3-175":
+        raise Fail("the Doom WAD partition exists only on exact target s3-175")
     tool = esptool_path()
     if not tool:
         raise Fail("esptool not found (install the esp32 Arduino core)")
+    print("Reading the installed partition table before the WAD write...", flush=True)
+    _verify_installed_doom_partition(port.address, tool)
 
     print(
         "Flashing WAD: %s (%d bytes / %.1f MB) to partition at 0x%06X on %s"
         % (os.path.basename(wad_path), wad_size, wad_size / (1024 * 1024),
-           WAD_PARTITION_OFFSET, port.address)
+           _DOOM_WAD_PARTITION_OFFSET, port.address)
     )
     print("This will take a moment (writing %.1f MB to flash)..." % (wad_size / (1024 * 1024)))
 
-    cmd = [
-        tool,
-        "--chip", "esp32s3",
-        "--port", port.address,
-        "--baud", "921600",
-        "write_flash",
-        "0x%X" % WAD_PARTITION_OFFSET,
-        wad_path,
-    ]
-    run_streaming(cmd)
+    _write_doom_wad(port.address, tool, wad_path)
     print("\nWAD flashed successfully. The Doom Easter Egg is ready!")
     print("Triple-tap BOOT to play.")
     return 0
@@ -2893,15 +3150,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_wad = subs.add_parser(
         "flash-wad",
         help="write a doom1.wad file to the S3 board's WAD partition",
-        description="Writes a Doom WAD file (typically doom1.wad, the shareware "
-        "version) to the dedicated flash partition on the ESP32-S3 board. The "
-        "partition is at offset 0xC00000 and is 4MB (4,194,304 bytes). The WAD "
-        "file must be <= 4MB. The S3 custom partition table "
-        "(firmware/partitions_s3_doom.csv) must be flashed first. If no WAD "
-        "path is given, auto-downloads the shareware doom1.wad.",
+        description="Writes a Doom WAD file to the dedicated s3-175 flash "
+        "partition. Exact target selection is required because s3-175 and "
+        "s3-185 share the same MCU. The verified shareware v1.9 WAD is "
+        "downloaded when no path is given.",
     )
     p_wad.add_argument("wad", nargs="?", default=None,
-                       help="path to WAD file (default: auto-download doom1.wad)")
+                       help="path to WAD file (default: verified shareware doom1.wad)")
+    p_wad.add_argument(
+        "--board", required=True, choices=("s3", "s3-175"),
+        help="exact target confirmation; s3 is an alias for s3-175",
+    )
     p_wad.add_argument("--port", help="serial device (default: autodetected)")
     p_wad.set_defaults(func=cmd_flash_wad)
 

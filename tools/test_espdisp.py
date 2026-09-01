@@ -95,20 +95,32 @@ def test_board_table():
         "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M",
         "C6 FQBN",
     )
+    check_equal(
+        espdisp.BOARDS["s3-175"].fqbn,
+        "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,"
+        "PartitionScheme=custom",
+        "s3-175 FQBN",
+    )
+    check_equal(
+        espdisp.BOARDS["s3-185"].fqbn,
+        "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
+        "s3-185 FQBN",
+    )
     for key in ("s3-175", "s3-185"):
-        check_equal(
-            espdisp.BOARDS[key].fqbn,
-            "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
-            "%s FQBN" % key,
-        )
         check_equal(espdisp.BOARDS[key].chip, "esp32s3", "%s chip" % key)
     check_equal(
         espdisp.BOARDS["s3-185"].extra_flags,
         ("-DESPDISP_BOARD_S3_185",),
         "the 1.85-inch profile has its compile-time selector")
-    check_equal(espdisp.BOARDS["s3-175"].extra_flags, (), "the 1.75-inch default")
-    for key, board in espdisp.BOARDS.items():
-        check("PartitionScheme" not in board.fqbn, "%s uses the default scheme" % key)
+    check_equal(
+        espdisp.BOARDS["s3-175"].extra_flags,
+        ("-DESPDISP_DOOM_S3_175",),
+        "the 1.75-inch profile owns the Doom compile selector")
+    check("PartitionScheme=custom" in espdisp.BOARDS["s3-175"].fqbn,
+          "s3-175 uses the Doom partition scheme")
+    for key in ("c6", "s3-185"):
+        check("PartitionScheme" not in espdisp.BOARDS[key].fqbn,
+              "%s keeps its default partition scheme" % key)
     check_equal(espdisp.board_key_for_fqbn("esp32:esp32:esp32c6"), "c6", "FQBN -> key")
     check_equal(
         espdisp.board_key_for_fqbn("esp32:esp32:esp32s3:PSRAM=opi"), None,

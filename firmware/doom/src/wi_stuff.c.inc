@@ -124,7 +124,9 @@ typedef struct
 
 //
 // Animation.
-// There is another anim_t used in p_spec.
+// There is another anim_t used in p_spec. The unity build puts both source
+// files in one translation unit, so this intermission-only type needs a
+// distinct name even though the original separate-object build did not.
 //
 typedef struct
 {
@@ -166,7 +168,7 @@ typedef struct
     // used by RANDOM and LEVEL when animating
     int		state;  
 
-} anim_t;
+} wi_anim_t;
 
 
 static point_t lnodes[NUMEPISODES][NUMMAPS] =
@@ -224,7 +226,7 @@ static point_t lnodes[NUMEPISODES][NUMMAPS] =
      0, { NULL, NULL, NULL }, 0, 0, 0, 0 }
 
 
-static anim_t epsd0animinfo[] =
+static wi_anim_t epsd0animinfo[] =
 {
     ANIM(ANIM_ALWAYS, TICRATE/3, 3, 224, 104, 0),
     ANIM(ANIM_ALWAYS, TICRATE/3, 3, 184, 160, 0),
@@ -238,7 +240,7 @@ static anim_t epsd0animinfo[] =
     ANIM(ANIM_ALWAYS, TICRATE/3, 3, 64, 24, 0),
 };
 
-static anim_t epsd1animinfo[] =
+static wi_anim_t epsd1animinfo[] =
 {
     ANIM(ANIM_LEVEL, TICRATE/3, 1, 128, 136, 1),
     ANIM(ANIM_LEVEL, TICRATE/3, 1, 128, 136, 2),
@@ -251,7 +253,7 @@ static anim_t epsd1animinfo[] =
     ANIM(ANIM_LEVEL, TICRATE/3, 1, 128, 136, 8),
 };
 
-static anim_t epsd2animinfo[] =
+static wi_anim_t epsd2animinfo[] =
 {
     ANIM(ANIM_ALWAYS, TICRATE/3, 3, 104, 168, 0),
     ANIM(ANIM_ALWAYS, TICRATE/3, 3, 40, 136, 0),
@@ -268,7 +270,7 @@ static int NUMANIMS[NUMEPISODES] =
     arrlen(epsd2animinfo),
 };
 
-static anim_t *anims[NUMEPISODES] =
+static wi_anim_t *wi_anims[NUMEPISODES] =
 {
     epsd0animinfo,
     epsd1animinfo,
@@ -519,7 +521,7 @@ WI_drawOnLnode
 void WI_initAnimatedBack(void)
 {
     int		i;
-    anim_t*	a;
+    wi_anim_t*	a;
 
     if (gamemode == commercial)
 	return;
@@ -529,7 +531,7 @@ void WI_initAnimatedBack(void)
 
     for (i=0;i<NUMANIMS[wbs->epsd];i++)
     {
-	a = &anims[wbs->epsd][i];
+	a = &wi_anims[wbs->epsd][i];
 
 	// init variables
 	a->ctr = -1;
@@ -548,7 +550,7 @@ void WI_initAnimatedBack(void)
 void WI_updateAnimatedBack(void)
 {
     int		i;
-    anim_t*	a;
+    wi_anim_t*	a;
 
     if (gamemode == commercial)
 	return;
@@ -558,7 +560,7 @@ void WI_updateAnimatedBack(void)
 
     for (i=0;i<NUMANIMS[wbs->epsd];i++)
     {
-	a = &anims[wbs->epsd][i];
+	a = &wi_anims[wbs->epsd][i];
 
 	if (bcnt == a->nexttic)
 	{
@@ -599,7 +601,7 @@ void WI_updateAnimatedBack(void)
 void WI_drawAnimatedBack(void)
 {
     int			i;
-    anim_t*		a;
+    wi_anim_t*		a;
 
     if (gamemode == commercial)
 	return;
@@ -609,7 +611,7 @@ void WI_drawAnimatedBack(void)
 
     for (i=0 ; i<NUMANIMS[wbs->epsd] ; i++)
     {
-	a = &anims[wbs->epsd][i];
+	a = &wi_anims[wbs->epsd][i];
 
 	if (a->ctr >= 0)
 	    V_DrawPatch(a->loc.x, a->loc.y, a->p[a->ctr]);
@@ -1555,7 +1557,7 @@ static void WI_loadUnloadData(load_callback_t callback)
 {
     int i, j;
     char name[9];
-    anim_t *a;
+    wi_anim_t *a;
 
     if (gamemode == commercial)
     {
@@ -1586,7 +1588,7 @@ static void WI_loadUnloadData(load_callback_t callback)
 	{
 	    for (j=0;j<NUMANIMS[wbs->epsd];j++)
 	    {
-		a = &anims[wbs->epsd][j];
+		a = &wi_anims[wbs->epsd][j];
 		for (i=0;i<a->nanims;i++)
 		{
 		    // MONDO HACK!
@@ -1599,7 +1601,7 @@ static void WI_loadUnloadData(load_callback_t callback)
 		    else
 		    {
 			// HACK ALERT!
-			a->p[i] = anims[1][4].p[i];
+			a->p[i] = wi_anims[1][4].p[i];
 		    }
 		}
 	    }

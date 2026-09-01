@@ -14,8 +14,13 @@
 
 #include "platform/doom_splash.h"
 
-// From doomgeneric_esp32s3.c
+// From doomgeneric_esp32s3.c and the C engine unity build.
 extern "C" void push_key(unsigned char key, int pressed);
+extern "C" int doom_menu_is_active(void);
+
+// doomkeys.h contains only key-code macros, so no C declarations cross into
+// this C++ translation unit.
+#include "doomkeys.h"
 
 // From doom_hw_bridge.cpp
 extern "C" void doom_display_init(void);
@@ -25,6 +30,8 @@ extern "C" void doom_display_blit(const uint16_t* buf, int w, int h);
 extern "C" {
     void doomgeneric_Create(int argc, char** argv);
     void doomgeneric_Tick(void);
+    bool doom_prepare_static_buffers(void);
+    bool doom_wad_available(void);
 }
 
 static const char* TAG = "doom_mode";
@@ -82,6 +89,15 @@ static bool should_exit(void) {
 }
 
 void doom_enter(void) {
+    if (!doom_prepare_static_buffers()) {
+        ESP_LOGE(TAG, "Doom renderer PSRAM allocation failed; returning to normal boot");
+        return;
+    }
+    if (!doom_wad_available()) {
+        ESP_LOGE(TAG, "Doom WAD is missing or invalid; returning to normal boot");
+        return;
+    }
+
     ESP_LOGI(TAG, "=== DOOM EASTER EGG ACTIVATED ===");
     ESP_LOGI(TAG, "Panel rotation locked (IMU used for movement, not display rotation)");
     ESP_LOGI(TAG, "Controls:");
@@ -90,7 +106,9 @@ void doom_enter(void) {
     ESP_LOGI(TAG, "  Tap            = Shoot");
     ESP_LOGI(TAG, "  Double-tap     = Use/Open");
     ESP_LOGI(TAG, "  2nd finger     = Run");
-    ESP_LOGI(TAG, "  BOOT short     = Cycle weapon");
+    ESP_LOGI(TAG, "  Menu tap/swipe = Select/navigate");
+    ESP_LOGI(TAG, "  BOOT short     = Open menu / select");
+    ESP_LOGI(TAG, "  BOOT 0.6-<3s   = Previous menu");
     ESP_LOGI(TAG, "  BOOT 3s hold   = Exit Doom");
 
     doom_active = true;
@@ -123,13 +141,13 @@ void doom_enter(void) {
     while (!should_exit()) {
         doomgeneric_Tick();
 
-        // Poll BOOT button during Doom:
-        //   short press = cycle weapon (KEY_TAB acts as weapon cycle in Doom)
-        //   long press (3s) = exit
+        // Poll BOOT during Doom. Capture menu state at button-down so a menu
+        // transition during the hold cannot change what its release means.
         {
             static bool btn_was_down = false;
             static uint32_t btn_down_at = 0;
             static bool btn_long_fired = false;
+            static bool btn_menu_was_active = false;
 
             bool btn_down = (digitalRead(0) == LOW);  // GPIO0 = BOOT
             uint32_t now = millis();
@@ -137,6 +155,7 @@ void doom_enter(void) {
             if (btn_down && !btn_was_down) {
                 btn_was_down = true;
                 btn_long_fired = false;
+                btn_menu_was_active = doom_menu_is_active() != 0;
                 btn_down_at = now;
             } else if (btn_down && btn_was_down && !btn_long_fired &&
                        (now - btn_down_at) >= 3000) {
@@ -145,11 +164,18 @@ void doom_enter(void) {
                 doom_request_exit();
             } else if (!btn_down && btn_was_down) {
                 btn_was_down = false;
-                if (!btn_long_fired && (now - btn_down_at) >= 30) {
-                    // Short press = weapon cycle
-                    // Inject a '/' key press (weapon forward in Doom)
-                    push_key('/', 1);  // press
-                    push_key('/', 0);  // release
+                uint32_t held_ms = now - btn_down_at;
+                if (!btn_long_fired && held_ms >= 3000) {
+                    ESP_LOGI(TAG, "BOOT released at 3s -- exiting Doom");
+                    doom_request_exit();
+                } else if (!btn_long_fired && held_ms >= 30 && held_ms < 600) {
+                    unsigned char key =
+                        btn_menu_was_active ? KEY_ENTER : KEY_ESCAPE;
+                    push_key(key, 1);
+                    push_key(key, 0);
+                } else if (!btn_long_fired && held_ms >= 600) {
+                    push_key(KEY_BACKSPACE, 1);
+                    push_key(KEY_BACKSPACE, 0);
                 }
             }
         }
@@ -158,18 +184,9 @@ void doom_enter(void) {
         vTaskDelay(1);
     }
 
-    // Cleanup
-    ESP_LOGI(TAG, "Exiting Doom mode...");
-    doom_active = false;
-    doom_exit_requested = false;
-
-    // Free PSRAM buffers (DG_ScreenBuffer and scaled_buffer are in PSRAM)
-    extern void* DG_ScreenBuffer;
-    if (DG_ScreenBuffer) {
-        heap_caps_free(DG_ScreenBuffer);
-        DG_ScreenBuffer = NULL;
-    }
-
-    ESP_LOGI(TAG, "Doom cleanup complete. Restarting to normal firmware...");
-    // The caller (display_stream.ino) will call esp_restart()
+    // A restart is the ownership boundary for the engine zone, scaled buffer,
+    // WAD mapping, and every upstream global. The caller restarts immediately;
+    // partial in-process teardown would add use-after-free paths without ever
+    // returning to normal operation.
+    ESP_LOGI(TAG, "Doom stopped. Restarting to normal firmware...");
 }

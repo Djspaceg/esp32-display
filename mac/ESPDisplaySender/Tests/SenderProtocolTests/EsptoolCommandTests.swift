@@ -385,18 +385,70 @@ final class EsptoolCommandTests: XCTestCase {
     /// asserts it against hand-solved offsets, and these tests are about what the
     /// manifest MEANS once read. Building bytes here would duplicate that solver
     /// without testing anything this file is responsible for.
+    private static func partitionTable(appAddress: Int, doom: Bool) -> Data {
+        var bytes = [UInt8](repeating: 0xFF, count: 3072)
+        func writeU32(_ value: Int, at offset: Int) {
+            bytes[offset] = UInt8(value & 0xFF)
+            bytes[offset + 1] = UInt8((value >> 8) & 0xFF)
+            bytes[offset + 2] = UInt8((value >> 16) & 0xFF)
+            bytes[offset + 3] = UInt8((value >> 24) & 0xFF)
+        }
+        func writeEntry(
+            _ index: Int, _ label: String, _ type: UInt8, _ subtype: UInt8,
+            _ address: Int, _ byteCount: Int
+        ) {
+            let offset = index * 32
+            bytes[offset] = 0xAA
+            bytes[offset + 1] = 0x50
+            bytes[offset + 2] = type
+            bytes[offset + 3] = subtype
+            writeU32(address, at: offset + 4)
+            writeU32(byteCount, at: offset + 8)
+            for index in (offset + 12)..<(offset + 32) { bytes[index] = 0 }
+            for (labelOffset, byte) in label.utf8.prefix(16).enumerated() {
+                bytes[offset + 12 + labelOffset] = byte
+            }
+        }
+
+        writeEntry(0, "nvs", 0x01, 0x02, 0x9000, 0x5000)
+        writeEntry(1, "otadata", 0x01, 0x00, 0xE000, 0x2000)
+        if doom {
+            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x5F0000)
+            writeEntry(3, "app1", 0x00, 0x11, 0x600000, 0x5F0000)
+            writeEntry(4, "doom_wad", 0x42, 0x06, 0xBFF000, 0x401000)
+        } else {
+            writeEntry(2, "app0", 0x00, 0x10, appAddress, 0x200000)
+        }
+        return Data(bytes)
+    }
+
+    private static let syntheticDoomWad: Data = {
+        var bytes = [UInt8](repeating: 0, count: 4_196_020)
+        bytes.replaceSubrange(0..<4, with: "IWAD".utf8)
+        bytes[4] = 1  // one directory entry
+        bytes[8] = 12  // directory starts immediately after the header
+        bytes[12] = 28  // zero-byte lump at the end of its directory entry
+        bytes.replaceSubrange(20..<24, with: "TEST".utf8)
+        return Data(bytes)
+    }()
+
     static func bundle(
         chip: String, bootloader: Int, app: Int, version: String = "1.2.0"
     ) -> FirmwareBundle {
         let appPayload = Data("app".utf8)
-        let parts: [(String, Int, Data)] = [
-            ("bootloader", bootloader, Data("boot".utf8)),
-            ("partitions", 0x8000, Data("parts".utf8)),
-            ("boot_app0", 0xe000, Data("otadata".utf8)),
-        ]
         let target = chip == "esp32c6"
             ? "c6"
             : chip == "esp32s3" ? "s3-175" : chip
+        let hasDoom = target == "s3-175"
+        let partitionPayload = partitionTable(appAddress: app, doom: hasDoom)
+        var parts: [(String, Int, Data)] = [
+            ("bootloader", bootloader, Data("boot".utf8)),
+            ("partitions", 0x8000, partitionPayload),
+            ("boot_app0", 0xe000, Data("otadata".utf8)),
+        ]
+        if hasDoom {
+            parts.append(("doom_wad", 0xBFF000, syntheticDoomWad))
+        }
         let image = FirmwareBundle.Image(
             board: target,
             chip: chip,
