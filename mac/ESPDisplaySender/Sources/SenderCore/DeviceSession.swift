@@ -62,6 +62,7 @@ final class DeviceSession {
         var owner: String?
     }
 
+    let id: UUID
     let name: String
     /// The panel's IP as this session's socket resolved it, or nil before the
     /// connection is ready.
@@ -82,6 +83,7 @@ final class DeviceSession {
     private var pickedGeneration: UInt64 = 0
     private var _captureStatus: CaptureStatus = .waiting("Starting up…")
     private var _previewEnabled = false
+    private var _stopped = false
     private weak var activeCapture: DisplayCapture?
     /// The rectangle the user wants captured, and the one the running stream has
     /// actually been given, so the drain loop knows when it has caught up.
@@ -133,9 +135,12 @@ final class DeviceSession {
     private var lastReport = Date()
     private var lastCount: UInt64 = 0
 
-    init(name: String, sender: FrameSender, source: Source, picker: PickerSource?, fps: Int,
+    init(
+        id: UUID = UUID(),
+        name: String, sender: FrameSender, source: Source, picker: PickerSource?, fps: Int,
          onStatus: ((Status) -> Void)? = nil,
          onPreview: ((CGImage, Bool) -> Void)? = nil) {
+        self.id = id
         self.name = name
         self.sender = sender
         self.source = source
@@ -143,6 +148,26 @@ final class DeviceSession {
         self._fps = fps
         self.onStatus = onStatus
         self.onPreview = onPreview
+    }
+
+    /// Permanent local teardown used when the owning hardware record is deleted.
+    var isStopped: Bool {
+        stateLock.withLock { _stopped }
+    }
+
+    func stop() {
+        let capture: DisplayCapture? = stateLock.withLock {
+            guard !_stopped else { return nil }
+            _stopped = true
+            _previewEnabled = false
+            pickedGeneration &+= 1
+            settingsGeneration &+= 1
+            return activeCapture
+        }
+        sender.stop()
+        if let capture {
+            Task { await capture.stop() }
+        }
     }
 
     /// What capture is doing right now.
@@ -213,6 +238,10 @@ final class DeviceSession {
         defer { stateLock.unlock() }
         return settingsGeneration
     }
+
+    /// Test seam for proving provisional sessions cannot send before EINF binds
+    /// them to an owned record.
+    var senderPausedForTesting: Bool { sender.paused }
 
     func sendDisplaySleep() { sender.sendDisplaySleep() }
     func sendDisplayWake() { sender.sendDisplayWake() }
@@ -415,11 +444,12 @@ final class DeviceSession {
     func run() async -> Bool {
         var attempts = 0
         let maxAttempts = 5
-        while true {
+        while !isStopped {
             do {
                 try await sender.start()
                 break
             } catch {
+                if isStopped { return true }
                 attempts += 1
                 if attempts >= maxAttempts {
                     print("[\(name)] unreachable after \(maxAttempts) attempts - "
@@ -431,6 +461,8 @@ final class DeviceSession {
             }
         }
 
+        guard !isStopped else { return true }
+
         let uuidCachePath = "/tmp/espdisplaysender-uuid-\(name)"
         var knownUUID = try? String(
             contentsOfFile: uuidCachePath, encoding: .utf8
@@ -440,7 +472,7 @@ final class DeviceSession {
         var pickerFailures = 0
         var parkRequested = false
 
-        while true {
+        while !isStopped {
             let capture = DisplayCapture(
                 // The sender's geometry, not a constant: the capture has to
                 // produce frames of exactly the size the sender will send, and
@@ -676,7 +708,7 @@ final class DeviceSession {
 
             // ---- Watchdog: poll for death, reconfiguration, silent stalls,
             // source changes, and a blackholed network path.
-            while true {
+            while !isStopped {
                 await waitForWatchdogTick(baselineSource: baselineSourceGeneration)
                 reportProgress()
 
@@ -748,12 +780,16 @@ final class DeviceSession {
                 }
             }
             await capture.stop()
+            if isStopped { break }
             if parkRequested {
                 parkRequested = false
                 await waitForDeviceToReturn()
                 announced = false
             }
         }
+        adopt(nil)
+        sender.stop()
+        return true
     }
 
     /// Keep a running stream pointed at the window it is following, absorbing
@@ -842,7 +878,7 @@ final class DeviceSession {
                 + "itself as soon as the panel is back."))
 
         var lastAttemptAt = Date()
-        while !Self.hasDeviceReturned(
+        while !isStopped && !Self.hasDeviceReturned(
             repliesNow: sender.deviceRepliesReceived,
             repliesWhenParked: repliesBeforeParking)
         {
@@ -854,6 +890,7 @@ final class DeviceSession {
         }
 
         sender.setParked(false)
+        guard !isStopped else { return }
         setCaptureStatus(.waiting("The panel answered again. Restarting mirroring…"))
         print("[\(name)] display answered again - resuming capture")
     }
@@ -875,8 +912,9 @@ final class DeviceSession {
         let slices = max(1, Int((Self.watchdogInterval / Self.sourcePollInterval).rounded()))
         let slice = UInt64(Self.sourcePollInterval * 1_000_000_000)
         for _ in 0..<slices {
+            guard !isStopped else { return }
             try? await Task.sleep(nanoseconds: slice)
-            if sourceGeneration != baselineSource { return }
+            if isStopped || sourceGeneration != baselineSource { return }
         }
     }
 
@@ -987,7 +1025,13 @@ final class SessionRegistry: @unchecked Sendable {
     func shouldSkip(_ name: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        if sessions[name] != nil { return true }
+        if let session = sessions[name] {
+            if session.isStopped {
+                sessions[name] = nil
+            } else {
+                return true
+            }
+        }
         if let failed = retiredAt[name],
             Date().timeIntervalSince(failed) < Self.retryCooldown
         {
@@ -996,8 +1040,12 @@ final class SessionRegistry: @unchecked Sendable {
         return false
     }
 
-    func retire(_ name: String) {
+    func retire(_ name: String, sessionID: UUID? = nil) {
         lock.lock()
+        if let sessionID, sessions[name]?.id != sessionID {
+            lock.unlock()
+            return
+        }
         sessions[name] = nil
         retiredAt[name] = Date()
         lock.unlock()

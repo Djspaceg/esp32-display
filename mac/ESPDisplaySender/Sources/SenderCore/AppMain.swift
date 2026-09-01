@@ -449,28 +449,50 @@ public enum ESPDisplaySenderApp {
                 }
                 return .auto(defaultDisplay: opts.displayName)
             }
-            func launchSession(name: String, sender: FrameSender) {
+            func launchSession(
+                id: UUID = UUID(),
+                name: String,
+                sender: FrameSender,
+                allowUnowned: Bool = false,
+                provisional: Bool = false
+            ) {
                 let session = DeviceSession(
+                    id: id,
                     name: name, sender: sender, source: sourceFor(name),
                     picker: picker, fps: streaming.fps,
                     onStatus: { status in
-                        Task { @MainActor in panelManager.update(status) }
+                        Task { @MainActor in
+                            panelManager.update(status, sessionID: id)
+                        }
                     },
                     onPreview: { image, landscape in
                         Task { @MainActor in
                             panelManager.acceptPreview(
-                                image: image, landscape: landscape, from: name)
+                                image: image, landscape: landscape, from: name,
+                                sessionID: id)
                         }
                     })
+                // A provisional discovery must be unable to send even if its
+                // run task wins the scheduler race against manager registration.
+                if provisional { session.setPaused(true) }
                 registry.add(session)
-                Task { @MainActor in panelManager.register(session) }
+                Task {
+                    await MainActor.run {
+                        panelManager.register(
+                            session,
+                            allowUnowned: allowUnowned,
+                            provisional: provisional)
+                    }
+                }
                 Task {
                     // run() only returns if the device never became
                     // reachable; retire it so the browser can retry later
                     // instead of spinning on an mDNS ghost.
                     if await session.run() == false {
-                        registry.retire(name)
-                        await MainActor.run { panelManager.retire(name) }
+                        registry.retire(name, sessionID: id)
+                        await MainActor.run {
+                            panelManager.retire(name, sessionID: id)
+                        }
                     }
                 }
             }
@@ -478,7 +500,9 @@ public enum ESPDisplaySenderApp {
             if opts.hostExplicit {
                 // As in makeSingleSender: an explicit host skips discovery, so
                 // there are no TXT records and the 172x320 default stands.
+                let sessionID = UUID()
                 launchSession(
+                    id: sessionID,
                     name: "device",
                     sender: FrameSender(
                         host: opts.host, port: opts.port,
@@ -486,71 +510,42 @@ public enum ESPDisplaySenderApp {
                         adaptivePacing: streaming.adaptivePacing,
                         onDeviceEvent: { event in
                             Task { @MainActor in
-                                panelManager.update(event, for: "device")
+                                panelManager.update(
+                                    event, for: "device", sessionID: sessionID)
                             }
-                        }))
+                        }),
+                    allowUnowned: true)
             } else {
-                // Discovery: every _espdisp._udp service gets a session as
-                // it appears. Disappearance is deliberately NOT fatal - mDNS
-                // flaps during network transitions, and sessions already
-                // self-heal through unreachable devices.
-                print("discovering devices (_espdisp._udp) - sessions start as panels appear")
+                // Discovery attaches sessions only to records the user added.
+                // Unknown hardware remains visible to Add Display over USB but
+                // does not stream or create a sidebar row on its own.
+                print("discovering recorded devices (_espdisp._udp)")
                 let browser = DeviceBrowser { devices in
-                    Task { @MainActor in panelManager.noteDiscovery(devices) }
-                    // A SESSION'S GEOMETRY IS LATCHED FROM THE FIRST BROWSE
-                    // RESULT, and that is a known limitation rather than an
-                    // oversight. `shouldSkip` is true as soon as a session exists,
-                    // so if the first callback for a panel arrives without its TXT
-                    // record the sender is built at 172x320 and stays there for the
-                    // life of the session, while `noteDiscovery` corrects the
-                    // panel row on the next callback.
-                    //
-                    // NOT FIXED HERE, and the reason is what fixing it would take.
-                    // Rebuilding the session needs the running one stopped first,
-                    // and `DeviceSession` has no teardown at all - it runs until
-                    // `run()` gives up. Relaunching without stopping leaves two
-                    // senders streaming to one panel, which is worse than a wrong
-                    // geometry, so this is a new capability in the streaming core
-                    // rather than a correction, and there is no board attached to
-                    // verify it against.
-                    //
-                    // Whether Network.framework can even deliver a
-                    // `bonjourWithTXTRecord` result before the TXT query resolves
-                    // is UNVERIFIED. `PanelManager.noteDiscovery` guards against it
-                    // because the cost there is one field; here the cost of being
-                    // wrong is a duplicate stream.
-                    //
-                    // What does self-correct: the panel's row, its chip, its
-                    // advertised resolution, the region presets and the firmware
-                    // update sheet all read the snapshot, which takes a late `res`.
-                    // Retiring the panel (or restarting the app) rebuilds the
-                    // session with it.
-                    for device in devices where !registry.shouldSkip(device.name) {
-                        print("discovered device \"\(device.name)\"")
-                        launchSession(
-                            name: device.name,
-                            sender: FrameSender(
-                                endpoint: device.endpoint,
-                                spacingMicros: streaming.spacingMicros,
-                                adaptivePacing: streaming.adaptivePacing,
-                                // The panel's own resolution, from its `res` TXT
-                                // record, or 172x320 when it did not say. This
-                                // is the whole point of parsing TXT: every panel
-                                // was streamed as a 172x320 one before, so a
-                                // 466x466 AMOLED was sent bands computed for a
-                                // frame a quarter of its size.
-                                //
-                                // UNVERIFIED that a real 466x466 panel now
-                                // streams at its native geometry: no board is
-                                // attached, so what is demonstrated here is the
-                                // plumbing - which geometry reaches which
-                                // sender - and not a picture on glass.
-                                geometry: device.geometry,
-                                onDeviceEvent: { event in
-                                    Task { @MainActor in
-                                        panelManager.update(event, for: device.name)
-                                    }
-                                }))
+                    Task { @MainActor in
+                        panelManager.noteDiscovery(devices)
+                        for device in devices
+                            where panelManager.shouldLaunchDiscoveredService(device.name)
+                                && !registry.shouldSkip(device.name)
+                        {
+                            let sessionID = UUID()
+                            print("probing discovered device \"\(device.name)\"")
+                            launchSession(
+                                id: sessionID,
+                                name: device.name,
+                                sender: FrameSender(
+                                    endpoint: device.endpoint,
+                                    spacingMicros: streaming.spacingMicros,
+                                    adaptivePacing: streaming.adaptivePacing,
+                                    geometry: device.geometry,
+                                    onDeviceEvent: { event in
+                                        Task { @MainActor in
+                                            panelManager.update(
+                                                event, for: device.name,
+                                                sessionID: sessionID)
+                                        }
+                                    }),
+                                provisional: true)
+                        }
                     }
                 }
                 browser.start()

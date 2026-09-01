@@ -102,6 +102,13 @@ public enum DeviceProtocol {
         /// REJECTS such a record — and a rejected record drops the whole
         /// datagram — so guessing costs entire frames rather than degrading.
         public static let tileHalfRes = Capabilities(rawValue: 1 << 17)
+        /// Accepts tile records whose tile-field bit 15 marks a visible-span
+        /// payload. One validated x-offset/count pair per raster row precedes
+        /// raw or RLE565 pixels for only those spans. This lets round displays
+        /// omit every behind-bezel pixel without feeding hidden samples into
+        /// BC1 palettes. Separate from `roundDisplay`: the latter describes
+        /// glass shape, while this bit promises a decoder older firmware lacks.
+        public static let tileVisibleSpans = Capabilities(rawValue: 1 << 18)
     }
 
     public struct DeviceInfo: Equatable, Sendable {

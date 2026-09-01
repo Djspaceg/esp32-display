@@ -867,10 +867,26 @@ final class ConfigCommandsTests: XCTestCase {
 
     func testDecodeFieldHandlesSpacesAndMissingKeys() {
         let line = "CFGINFO ssid64=U3RlcGhlbnMgTWFub3I= name64=ZXNwZGlzcGxheS05MDUw "
-            + "connected=1 ip=192.168.1.120 rssi=-67 ssid=Stephens Manor"
+            + "id=288485555594 connected=1 ip=192.168.1.120 rssi=-67 "
+            + "ssid=Stephens Manor"
         XCTAssertEqual(ConfigCommands.decodeField("ssid64=", from: line), "Stephens Manor")
         XCTAssertEqual(ConfigCommands.decodeField("name64=", from: line), "espdisplay-9050")
+        XCTAssertEqual(ConfigCommands.hardwareID(from: line), "288485555594")
         XCTAssertNil(ConfigCommands.decodeField("nope64=", from: line))
+    }
+
+    func testHardwareIDNormalizesMacSpellingsAndRejectsGarbage() {
+        XCTAssertEqual(
+            ConfigCommands.canonicalHardwareID("28:84:85:55:55:94"),
+            "288485555594")
+        XCTAssertEqual(
+            ConfigCommands.canonicalHardwareID("28-84-85-55-55-94"),
+            "288485555594")
+        XCTAssertNil(ConfigCommands.canonicalHardwareID("28:84:85:55"))
+        XCTAssertNil(ConfigCommands.canonicalHardwareID("not-a-device"))
+        XCTAssertNil(ConfigCommands.hardwareID(from: "CFGINFO name64=cGFuZWw="))
+        XCTAssertNil(ConfigCommands.hardwareID(
+            from: "CFGINFO name64=cGFuZWw= ssid=288485555594"))
     }
 
     func testSetName() {

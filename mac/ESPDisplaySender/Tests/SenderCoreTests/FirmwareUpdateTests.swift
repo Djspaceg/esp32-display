@@ -265,7 +265,12 @@ final class FirmwareUpdateTests: XCTestCase {
     // are in PanelManagerTests with the rest of the capability gating.
 
     func testReadinessGathersEverythingAPushNeeds() throws {
-        let manager = Self.manager()
+        let manager = Self.manager([
+            Self.panel(
+                serviceName: "espdisplay",
+                hardwareID: "020000123456",
+                capabilities: .ota),
+        ])
         let session = Self.session(name: "espdisplay")
         manager.register(session)
         manager.noteDiscovery([Self.device("espdisplay", chip: "esp32c6")])
@@ -349,7 +354,12 @@ final class FirmwareUpdateTests: XCTestCase {
     /// readiness check as well as through the button's disabled state, so the two
     /// cannot disagree.
     func testReadinessRefusesAPanelWithoutOTA() throws {
-        let manager = Self.manager()
+        let manager = Self.manager([
+            Self.panel(
+                serviceName: "espdisplay",
+                hardwareID: "020000123456",
+                capabilities: .restart),
+        ])
         manager.register(Self.session(name: "espdisplay"))
         manager.update(
             .info(try Self.info(

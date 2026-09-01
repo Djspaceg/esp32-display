@@ -14,7 +14,12 @@ import XCTest
 final class CaptureStatusReportingTests: XCTestCase {
 
     private func manager() -> PanelManager {
-        PanelManager(previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+        PanelManager(
+            previewPanels: [PanelSnapshot(
+                serviceName: "studio-display",
+                displayName: "studio-display")],
+            savedNetworkNames: [],
+            usbSerialPorts: [])
     }
 
     private func status(

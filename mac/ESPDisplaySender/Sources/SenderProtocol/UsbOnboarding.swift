@@ -56,8 +56,9 @@ public enum UsbOnboarding {
     public enum ExistingFirmware: Equatable, Sendable {
         case notChecked
         /// It answered, so it is already running display_stream. The name is empty
-        /// when the board has not been given one.
-        case answered(name: String)
+        /// when the board has not been given one. Current firmware also reports the
+        /// station MAC as a stable hardware ID; older firmware leaves it nil.
+        case answered(name: String, hardwareID: String? = nil)
         /// Nothing answered. A blank board looks like this - and so does a board
         /// running something else entirely, which is why this does not by itself
         /// authorise a write.
@@ -97,7 +98,9 @@ public enum UsbOnboarding {
     /// user confirms with the sheet's own button either way.
     public static func suggestedMode(for existing: ExistingFirmware) -> Mode {
         switch existing {
-        case .answered: return .configureOnly
+        case .answered(_, let hardwareID):
+            return ConfigCommands.canonicalHardwareID(hardwareID) == nil
+                ? .flashAndConfigure : .configureOnly
         case .silent, .notChecked: return .flashAndConfigure
         }
     }
@@ -439,7 +442,7 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
 
     private static func describeExisting(_ existing: UsbOnboarding.ExistingFirmware) -> String {
         switch existing {
-        case .answered(let name) where !name.isEmpty:
+        case .answered(let name, _) where !name.isEmpty:
             return "This board already runs this firmware and calls itself "
                 + "\"\(name)\". "
         case .answered:

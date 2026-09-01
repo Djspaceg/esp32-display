@@ -1,5 +1,32 @@
 # To-do
 
+- [ ] HIGH PRIORITY: Recover full-frame rate on the 466×466 panel. Full-frame
+  updates deliver 1–4 fps because the panel absorbs only ~300 datagrams/s
+  while painting (congestion collapse, docs/tile-stream-plan.md §17.3–17.4),
+  and a full frame is 66 (BC1) to ~300 (raw) datagrams. Work these in order:
+  - [ ] Fix draw starvation: the draw loop (loopTask, priority 1) shares
+    core 1 with udpReceiveTask (priority 9), and per-call draw cost inflates
+    ~10x under load (§17.2). Make the two task priorities runtime-tunable via
+    CFGTUNE so measurement arms can be interleaved without reflashing, then
+    measure lowered rx priority vs. raised draw priority vs. a time-bounded
+    rx drain under tile-motion load.
+  - [ ] Let half-res carry full-frame motion: a half-res full frame is ~17
+    datagrams → ~16 fps at the current absorbable rate (14.2 complete fps
+    measured, §17.7). Verify the panel is not pinned to losslessOnly, and
+    extend the degradation ladder to keyframes (half-res keyframe plus a
+    lossless settle pass) so the 2 s keyframe stops stalling the stream for
+    ~220 ms of pacing budget.
+  - [ ] Size-gate a direct-from-SRAM draw for large runs: records of at least
+    N tiles draw straight from the decode scratch while still committing to
+    bufA for persistence, halving PSRAM traffic in exactly the full-frame
+    case. §17.16 only tested and rejected the ungated per-record variant.
+  - [ ] After contention is fixed, revisit per-call fixed costs: vertical run
+    merging and CASET/RASET elimination, re-argued on the quiet ~900 µs
+    per-call figure (§17.5).
+  - [ ] Re-measure sender ceilings after each device-side win:
+    tileAbsorbablePacketsPerSecond, the spacing bounds, and the degradation
+    ladder budget all encode today's collapse point and will hide any
+    firmware improvement until retuned.
 - [ ] Improve display streaming frame rate beyond the current implementation.
   - [x] Replace line-only diffs with 16×16 tiles and horizontally merged rectangular runs.
   - [x] Add tile compression, SRAM staging, merged panel writes, and backpressure handling.
@@ -18,10 +45,10 @@
 - [x] Add appropriate horizontal padding to the window-header Pause button.
 - [x] Expose touch controls for the 466×466 touch display.
 - [x] Prevent frame backlog timestamp underflow from flashing the idle screen during updates.
-- [ ] Avoid transmitting pixels outside the visible circle of a round display.
+- [x] Avoid transmitting pixels outside the visible circle of a round display.
   - [x] Skip tiles that are entirely outside the circle.
   - [x] Ignore changes that affect only invisible pixels in boundary tiles.
-  - [ ] Eliminate remaining invisible collateral in changed boundary blocks without corrupting BC1-visible pixels.
+  - [x] Eliminate remaining invisible collateral in changed boundary blocks without corrupting BC1-visible pixels.
 - [ ] Use the onboard accelerometer to keep content upright at cardinal orientations.
   - [x] Read and classify QMI8658/QMI8658A acceleration with hysteresis and dwell.
   - [x] Compose automatic orientation with the persisted manual mounting rotation.

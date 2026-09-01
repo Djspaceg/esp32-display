@@ -88,12 +88,61 @@ enum WifiConfigUI {
         var message: String
     }
 
+    /// Stable identity returned by CFGSHOW for one board.
+    struct USBIdentity: Equatable, Sendable {
+        var name: String
+        var hardwareID: String?
+    }
+
+    /// A serial transport plus the device identity shown in pickers.
+    struct USBDeviceOption: Identifiable, Equatable, Sendable {
+        var id: String { path }
+
+        /// Stable picker value for post-setup assignment. A configured board is
+        /// selected by hardware ID; path-only devices retain a transport key.
+        var selectionID: String {
+            hardwareID.map { "hardware:\($0)" } ?? "path:\(path)"
+        }
+
+        var path: String
+        var name: String?
+        var hardwareID: String?
+        var isConnected: Bool
+
+        init(
+            path: String,
+            name: String? = nil,
+            hardwareID: String? = nil,
+            isConnected: Bool = true
+        ) {
+            self.path = path
+            self.name = name
+            self.hardwareID = ConfigCommands.canonicalHardwareID(hardwareID)
+            self.isConnected = isConnected
+        }
+
+        var displayName: String {
+            if let name = name?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !name.isEmpty {
+                return name
+            }
+            if let hardwareID {
+                return "ESP32-" + hardwareID.suffix(4).uppercased()
+            }
+            return (path as NSString).lastPathComponent
+        }
+    }
+
     /// What a serial port reported when asked to identify itself.
-    enum PortProbe: Equatable {
-        /// CFGSHOW answered. The name is empty if the device has none set.
-        case named(String)
+    enum PortProbe: Equatable, Sendable {
+        case identified(USBIdentity)
         /// The port could not be verified, with the reason to show the user.
         case unavailable(String)
+
+        /// Compatibility shorthand for name-only fixtures and older firmware.
+        static func named(_ name: String) -> PortProbe {
+            .identified(USBIdentity(name: name, hardwareID: nil))
+        }
     }
 
     /// A message worth showing after a configuration change went through.
@@ -238,77 +287,128 @@ enum WifiConfigUI {
 
     /// Decide which serial port a configuration command should be sent to.
     ///
-    /// Pure policy: no serial I/O and no alerts, so the disambiguation rules
-    /// can be exercised without a board attached. `probe` supplies what each
-    /// port reports and receives the timeout to use, because scanning several
-    /// ports has to be quicker per port than checking a single known one.
-    ///
-    /// An explicitly assigned `preferredPort` is the user's identity override:
-    /// it is accepted whatever name the device reports, as long as the port
-    /// answers the configuration protocol at all.
+    /// The serial path is transport, not identity. Current firmware is matched
+    /// by its station-MAC hardware ID, including after macOS assigns a different
+    /// `/dev/cu.*` path. Name matching remains the fallback for older firmware
+    /// whose CFGSHOW reply predates the ID field.
     static func selectPort(
         expectedName: String?,
+        expectedHardwareID: String? = nil,
         preferredPort: String?,
         availablePorts: [String],
         probe: (String, TimeInterval) -> PortProbe
     ) -> Result<String, ConfigFailure> {
         let expectedName = expectedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expectedHardwareID = ConfigCommands.canonicalHardwareID(expectedHardwareID)
+        let trimmedPreferredPort = preferredPort?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        let preferredPort = trimmedPreferredPort?.isEmpty == false
+            ? trimmedPreferredPort : nil
+        let availablePorts = Array(NSOrderedSet(array: availablePorts)) as? [String]
+            ?? availablePorts
+        var answers: [String: PortProbe] = [:]
 
-        if let preferredPort,
-           !preferredPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        {
-            switch probe(preferredPort, 3) {
-            case .named:
-                return .success(preferredPort)
+        func checked(_ port: String, timeout: TimeInterval) -> PortProbe {
+            if let answer = answers[port] { return answer }
+            let answer = probe(port, timeout)
+            answers[port] = answer
+            return answer
+        }
+
+        func identityMatches(_ identity: USBIdentity) -> Bool {
+            if let expectedHardwareID {
+                if let actual = ConfigCommands.canonicalHardwareID(identity.hardwareID) {
+                    return actual == expectedHardwareID
+                }
+                guard let expectedName, !expectedName.isEmpty else { return false }
+                return identity.name == expectedName
+            }
+            guard let expectedName, !expectedName.isEmpty else { return true }
+            return identity.name == expectedName
+        }
+
+        var preferredFailure: String?
+        var preferredMismatch = false
+        if let preferredPort {
+            switch checked(preferredPort, timeout: 3) {
+            case .identified(let identity):
+                // A legacy assignment with no stable ID remains an explicit
+                // override. Once an ID is known, the ID is authoritative.
+                if expectedHardwareID == nil || identityMatches(identity) {
+                    return .success(preferredPort)
+                }
+                preferredMismatch = true
             case .unavailable(let reason):
-                return .failure(ConfigFailure(
-                    title: "Assigned USB device unavailable",
-                    message: "Could not verify \(preferredPort): \(reason)"))
+                preferredFailure = reason
             }
         }
 
-        guard !availablePorts.isEmpty else {
+        let candidates = availablePorts.filter { $0 != preferredPort }
+        if candidates.isEmpty {
+            if let preferredPort, let preferredFailure {
+                return .failure(ConfigFailure(
+                    title: "Assigned USB device unavailable",
+                    message: "Could not verify \(preferredPort): \(preferredFailure)"))
+            }
+            if preferredMismatch, let preferredPort {
+                return .failure(ConfigFailure(
+                    title: "Assigned USB device mismatch",
+                    message: "The device at \(preferredPort) is not the saved hardware device."))
+            }
             return .failure(ConfigFailure(
                 title: "No device found",
                 message: "Connect the display board to this Mac with a USB cable, then try again."))
         }
 
-        if availablePorts.count == 1 {
-            let port = availablePorts[0]
-            switch probe(port, 3) {
-            case .named(let reportedName):
-                guard let expectedName, !expectedName.isEmpty else { return .success(port) }
-                guard reportedName == expectedName else {
-                    return .failure(ConfigFailure(
-                        title: "USB device mismatch",
-                        message: "The connected USB device at \(port) reports \"\(reportedName)\", not \"\(expectedName)\". Assign the correct port under Connection before changing the display."))
-                }
-                return .success(port)
-            case .unavailable(let reason):
-                return .failure(ConfigFailure(
-                    title: "USB device unavailable",
-                    message: "Could not verify \(port): \(reason)"))
-            }
-        }
-
-        guard let expectedName, !expectedName.isEmpty else {
+        if preferredPort == nil, expectedHardwareID == nil,
+           expectedName?.isEmpty != false, candidates.count > 1 {
             return .failure(ConfigFailure(
                 title: "Select a USB device",
                 message: "More than one USB serial device is connected. Select a display in the manager and assign its USB device under Connection."))
         }
 
-        // A port that does not answer is simply not a match here; alerting on
-        // each one would bury the real problem behind unrelated devices.
-        let matches = availablePorts.filter { probe($0, 2) == .named(expectedName) }
-        if matches.count == 1 { return .success(matches[0]) }
-        if matches.count > 1 {
+        let timeout: TimeInterval = preferredPort == nil && candidates.count == 1 ? 3 : 2
+        let identified = candidates.compactMap { port -> (String, USBIdentity)? in
+            guard case .identified(let identity) = checked(port, timeout: timeout)
+            else { return nil }
+            return (port, identity)
+        }
+        let matching = identified.filter { identityMatches($0.1) }
+        if matching.count == 1 { return .success(matching[0].0) }
+        if matching.count > 1 {
+            if let expectedHardwareID {
+                return .failure(ConfigFailure(
+                    title: "USB device is ambiguous",
+                    message: "More than one USB device reports hardware ID \"\(expectedHardwareID)\". Assign the correct device under Connection before changing the display."))
+            }
             return .failure(ConfigFailure(
                 title: "USB device is ambiguous",
-                message: "More than one USB device reports the name \"\(expectedName)\". Assign the correct port under Connection before changing the display."))
+                message: "More than one USB device reports the name \"\(expectedName ?? "")\". Assign the correct port under Connection before changing the display."))
+        }
+
+        if preferredPort == nil, candidates.count == 1,
+           let identity = identified.first?.1,
+           let expectedName, !expectedName.isEmpty,
+           expectedHardwareID == nil {
+            return .failure(ConfigFailure(
+                title: "USB device mismatch",
+                message: "The connected USB device at \(candidates[0]) reports \"\(identity.name)\", not \"\(expectedName)\". Assign the correct port under Connection before changing the display."))
+        }
+        if preferredPort == nil, candidates.count == 1,
+           case .unavailable(let reason) = checked(candidates[0], timeout: timeout) {
+            return .failure(ConfigFailure(
+                title: "USB device unavailable",
+                message: "Could not verify \(candidates[0]): \(reason)"))
+        }
+
+        if let expectedHardwareID {
+            return .failure(ConfigFailure(
+                title: "Display not found",
+                message: "No connected USB device reports hardware ID \"\(expectedHardwareID)\". Reconnect the display and try again."))
         }
         return .failure(ConfigFailure(
             title: "Display not found",
-            message: "No connected USB device reports the name \"\(expectedName)\". Assign its port under Connection, or reconnect the display and try again."))
+            message: "No connected USB device reports the name \"\(expectedName ?? "")\". Assign its port under Connection, or reconnect the display and try again."))
     }
 
     // MARK: direct manager actions
@@ -318,7 +418,8 @@ enum WifiConfigUI {
     static func renameDevice(
         currentName: String,
         newName: String,
-        preferredPort: String? = nil
+        preferredPort: String? = nil,
+        expectedHardwareID: String? = nil
     ) -> Result<String, ConfigFailure> {
         let normalized = normalizedDeviceName(newName)
         guard !normalized.isEmpty else {
@@ -327,7 +428,10 @@ enum WifiConfigUI {
                 message: "Use letters, numbers, spaces, underscores, or dashes."))
         }
         let port: String
-        switch matchingPort(for: currentName, preferredPort: preferredPort) {
+        switch matchingPort(
+            for: currentName, expectedHardwareID: expectedHardwareID,
+            preferredPort: preferredPort)
+        {
         case .success(let resolved): port = resolved
         case .failure(let failure): return .failure(failure)
         }
@@ -342,7 +446,8 @@ enum WifiConfigUI {
     static func applySavedNetwork(
         _ ssid: String,
         currentName: String,
-        preferredPort: String? = nil
+        preferredPort: String? = nil,
+        expectedHardwareID: String? = nil
     ) -> Result<Void, ConfigFailure> {
         guard let credential = WifiCredentialStore.credential(for: ssid) else {
             return .failure(ConfigFailure(
@@ -350,7 +455,10 @@ enum WifiConfigUI {
                 message: "Add \"\(ssid)\" again to store it in Keychain."))
         }
         let port: String
-        switch matchingPort(for: currentName, preferredPort: preferredPort) {
+        switch matchingPort(
+            for: currentName, expectedHardwareID: expectedHardwareID,
+            preferredPort: preferredPort)
+        {
         case .success(let resolved): port = resolved
         case .failure(let failure): return .failure(failure)
         }
@@ -373,10 +481,14 @@ enum WifiConfigUI {
     static func setOTAPassword(
         _ password: String,
         currentName: String,
-        preferredPort: String? = nil
+        preferredPort: String? = nil,
+        expectedHardwareID: String? = nil
     ) -> Result<Void, ConfigFailure> {
         let port: String
-        switch matchingPort(for: currentName, preferredPort: preferredPort) {
+        switch matchingPort(
+            for: currentName, expectedHardwareID: expectedHardwareID,
+            preferredPort: preferredPort)
+        {
         case .success(let resolved): port = resolved
         case .failure(let failure): return .failure(failure)
         }
@@ -392,10 +504,14 @@ enum WifiConfigUI {
     /// The panel restarts on success, same as `setOTAPassword`.
     static func clearOTAPassword(
         currentName: String,
-        preferredPort: String? = nil
+        preferredPort: String? = nil,
+        expectedHardwareID: String? = nil
     ) -> Result<Void, ConfigFailure> {
         let port: String
-        switch matchingPort(for: currentName, preferredPort: preferredPort) {
+        switch matchingPort(
+            for: currentName, expectedHardwareID: expectedHardwareID,
+            preferredPort: preferredPort)
+        {
         case .success(let resolved): port = resolved
         case .failure(let failure): return .failure(failure)
         }
@@ -409,10 +525,12 @@ enum WifiConfigUI {
 
     private static func matchingPort(
         for currentName: String?,
+        expectedHardwareID: String? = nil,
         preferredPort: String? = nil
     ) -> Result<String, ConfigFailure> {
         selectPort(
             expectedName: currentName,
+            expectedHardwareID: expectedHardwareID,
             preferredPort: preferredPort,
             availablePorts: candidatePorts(),
             probe: probePort)
@@ -429,9 +547,14 @@ enum WifiConfigUI {
     /// a picker default, not a user-initiated action, so a board that is
     /// merely unreachable over USB right now should leave the picker exactly
     /// as it already was instead of raising an alert.
-    static func currentSSID(currentName: String?, preferredPort: String? = nil) -> String? {
+    static func currentSSID(
+        currentName: String?,
+        expectedHardwareID: String? = nil,
+        preferredPort: String? = nil
+    ) -> String? {
         guard case .success(let port) = matchingPort(
-            for: currentName, preferredPort: preferredPort)
+            for: currentName, expectedHardwareID: expectedHardwareID,
+            preferredPort: preferredPort)
         else { return nil }
         guard case .success(let info) = sendCommand("CFGSHOW", port: port, timeout: 3)
         else { return nil }
@@ -443,10 +566,12 @@ enum WifiConfigUI {
 
     /// Ask a port to identify itself. CFGSHOW answering at all is what proves
     /// the path speaks our configuration protocol.
-    private static func probePort(_ port: String, timeout: TimeInterval) -> PortProbe {
+    static func probePort(_ port: String, timeout: TimeInterval) -> PortProbe {
         switch sendCommand("CFGSHOW", port: port, timeout: timeout) {
         case .success(let info):
-            return .named(ConfigCommands.decodeField("name64=", from: info) ?? "")
+            return .identified(USBIdentity(
+                name: ConfigCommands.decodeField("name64=", from: info) ?? "",
+                hardwareID: ConfigCommands.hardwareID(from: info)))
         case .failure(let reason):
             return .unavailable(reason)
         }
@@ -460,6 +585,7 @@ enum WifiConfigUI {
     /// every other action.
     static func run(
         currentName: String? = nil,
+        expectedHardwareID: String? = nil,
         preferredPort: String? = nil,
         preferredSSID: String? = nil
     ) -> Result<Confirmation?, ConfigFailure> {
@@ -469,7 +595,10 @@ enum WifiConfigUI {
         NSApp.activate(ignoringOtherApps: true)
 
         let port: String
-        switch matchingPort(for: currentName, preferredPort: preferredPort) {
+        switch matchingPort(
+            for: currentName, expectedHardwareID: expectedHardwareID,
+            preferredPort: preferredPort)
+        {
         case .success(let resolved): port = resolved
         case .failure(let failure): return .failure(failure)
         }

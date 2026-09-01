@@ -212,7 +212,12 @@ final class SettingsStoreTests: XCTestCase {
 final class SettingsApplicationTests: XCTestCase {
 
     private func makeManager() -> PanelManager {
-        PanelManager(previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+        PanelManager(
+            previewPanels: [
+                PanelSnapshot(serviceName: "a", displayName: "a"),
+                PanelSnapshot(serviceName: "late", displayName: "late"),
+            ],
+            savedNetworkNames: [], usbSerialPorts: [])
     }
 
     /// Never started, so no socket is opened.

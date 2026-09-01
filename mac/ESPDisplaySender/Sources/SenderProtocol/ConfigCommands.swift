@@ -6,7 +6,7 @@ import Foundation
 public enum ConfigCommands {
 
     /// What to do with the WiFi password when saving credentials.
-    public enum PasswordChange: Equatable {
+    public enum PasswordChange: Equatable, Sendable {
         /// Leave the device's current password alone (blank field).
         case keepCurrent
         /// Join with no password at all.
@@ -48,11 +48,35 @@ public enum ConfigCommands {
     /// `CFGOTAPW clear`: forget the stored password, which turns OTA back off.
     public static let clearOTAPassword = "CFGOTAPW clear"
 
+    /// Read one space-delimited `key=value` field from a CFGINFO reply.
+    public static func field(_ key: String, from line: String) -> String? {
+        for token in line.split(separator: " ", omittingEmptySubsequences: true) {
+            guard token.hasPrefix(key) else { continue }
+            return String(token.dropFirst(key.count))
+        }
+        return nil
+    }
+
     /// Decode a `key64=` field out of a CFGINFO reply line.
     public static func decodeField(_ key: String, from line: String) -> String? {
-        guard let range = line.range(of: key) else { return nil }
-        let b64 = String(line[range.upperBound...].prefix(while: { $0 != " " }))
-        guard let data = Data(base64Encoded: b64) else { return nil }
+        guard let value = field(key, from: line),
+              let data = Data(base64Encoded: value)
+        else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    /// Normalize a six-byte MAC to the EINF/persistence spelling.
+    public static func canonicalHardwareID(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let compact = value.lowercased().filter { $0 != ":" && $0 != "-" }
+        guard compact.count == 12,
+              compact.allSatisfy({ $0.isASCII && ($0.isNumber || ("a"..."f").contains($0)) })
+        else { return nil }
+        return compact
+    }
+
+    /// The station-MAC identity emitted by current firmware's CFGSHOW.
+    public static func hardwareID(from line: String) -> String? {
+        canonicalHardwareID(field("id=", from: line))
     }
 }

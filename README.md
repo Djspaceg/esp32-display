@@ -16,22 +16,28 @@ Hardware: either of the two Waveshare 1.47" ESP32-C6 boards — the
 
 ## What it does
 
-Plug the board into USB power anywhere on your network. It joins WiFi,
-announces itself over mDNS, and the Mac finds it automatically — no IP or
-hostname to configure. Plug in a second board and it gets its own stream.
+Plug the board into USB power anywhere on your network. After it has been added
+to the app over USB, it joins WiFi, announces itself over mDNS, and its existing
+hardware record comes online automatically. Additional boards stay unowned until
+you add each one; discovery never creates sidebar records by itself.
 
-The native ESPDisplaySender manager lists discovered and previously known
-panels with online state, IP address, RSSI, displayed frame rate, firmware
-version, and diagnostics. Select a panel to choose its ScreenCaptureKit source,
+The native ESPDisplaySender manager lists hardware records you added, with
+online state, IP address, RSSI, displayed frame rate, firmware version, and
+diagnostics. Each record represents one physical board and is keyed by its
+MAC-derived hardware ID; mDNS discovery attaches live state to that record but
+never changes which board it owns. Select a record to choose its ScreenCaptureKit source,
 pause or resume it, set brightness or orientation, give it something to show
 while idle, identify it, restart it, or configure WiFi over USB. Device names
 are static until you click the selected panel's title to enter explicit rename
 mode. Anything you choose for a panel — its source, its idle text, its name,
-its USB port — persists in
+its selected USB device — persists in
 `~/Library/Application Support/ESPDisplaySender/panels.json`, so powered-off
 panels remain visible as offline with their settings intact. Only your choices
 are stored there; live telemetry is not, so a fresh launch shows a restored
 panel as offline rather than replaying last week's RSSI as if it were current.
+Use the sidebar's **−** button to remove the selected hardware record; the app
+confirms first, and removal does not alter the physical display, its firmware, or
+its saved WiFi credentials.
 
 When something goes wrong the window says so. A denied Screen Recording
 permission, an unreadable config file, or a panel that stopped answering each
@@ -123,10 +129,12 @@ WiFi credentials live in the board's flash, not in the firmware — change
 networks by plugging the board into the Mac over USB and choosing **Add…** or
 **Edit…** beside the selected panel's saved WiFi network. The WiFi-only dialog
 shows the current network and saves new credentials over serial. The
-**USB device** setting under Connection defaults to automatic name matching;
-choose a specific `cu.usbserial` or `cu.usbmodem` port there when more than one
-device is connected or automatic matching cannot identify the panel. Manual
-assignments persist with the known panel. No reflashing, and the recovery path
+**Port** under Connection is a read-only view of the current `/dev/cu.*` serial
+interface for that record's physical board. It can change after a reset without
+changing the record; when the board is disconnected it reads **Not connected**.
+The Add Display sheet lists every connected USB device by reported board name.
+A device whose hardware ID already belongs to a sidebar record remains visible
+but is disabled and labelled with the record that owns it. No reflashing, and the recovery path
 works even when the stored credentials are wrong. SSIDs with spaces, emoji, and
 extended Unicode all work — everything crosses the wire base64-encoded.
 
@@ -426,7 +434,8 @@ Over USB serial (115200), the firmware also accepts configuration commands:
 `CFGWIFI <base64 ssid> <base64 password>` saves credentials to NVS and
 reboots, and `CFGWIFI <base64 ssid>` (password argument omitted) keeps the
 password currently in use; `CFGNAME <base64 name>` sets the device name;
-`CFGSHOW` reports the current network, name, IP, signal strength, the saved
+`CFGSHOW` reports the current network, name, stable MAC-derived hardware ID,
+IP, signal strength, the saved
 orientation/brightness/power state, the detected board, the battery, and
 whether OTA is enabled; `CFGFLIP 0|1` sets the 180° flip without the button;
 `CFGROT 0|1|2|3` sets the quarter-turn rotation on square panels; `CFGPOWER
@@ -751,7 +760,11 @@ The **+** at the top of the Displays list starts from the cable instead, and it 
 the one control in the window that works with an empty sidebar (⌘N, or the button on
 the empty detail pane, do the same thing).
 
-Pick the board's USB serial device and press **Flash and Add**. What happens then:
+Pick the board by its reported device name in the USB device menu and press
+**Flash and Add**. Boards already represented by records remain in the menu but
+are disabled. The underlying `/dev/cu.*` path is verified again immediately
+before every write and may change during resets without becoming the board's
+identity. What happens then:
 
 1. The app asks the port whether it already speaks this firmware's config
    protocol. A board that answers is offered **Set Up WiFi only** — it already
@@ -767,9 +780,11 @@ Pick the board's USB serial device and press **Flash and Add**. What happens the
 4. The WiFi credentials go down the same cable, and the board saves them and
    restarts. A name is optional; if you give one it is sent first, so the last
    restart is the one that joins the network.
-5. The board joins, announces `_espdisp._udp`, and arrives in the sidebar through
-   the same discovery every other panel arrives through. Nothing is added to the
-   list until it really is on the network.
+5. Once configuration succeeds, the app creates and selects the permanent
+   hardware record immediately, keyed by the board's full MAC-derived ID. The
+   board then joins and announces `_espdisp._udp`; discovery attaches the live
+   session to that record and changes it from offline to online. Unknown
+   advertisements never create records.
 
 **This path needs the esp32 core installed** (`arduino-cli core install
 esp32:esp32`), because the app runs the esptool that comes with it rather than

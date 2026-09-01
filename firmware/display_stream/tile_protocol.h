@@ -24,14 +24,19 @@
 //
 // Then records, packed greedily to the datagram budget:
 //   [tile u16 LE: bits 9..0 start index, bits 14..10 run length - 1,
-//    bit 15 reserved-0]
+//    bit 15 = visible-span payload]
 //   [len u16 LE: bits 13..0 payload bytes, bits 15..14 codec]
 //   [payload]
+// A visible-span payload starts with one [xOffset u16][pixelCount u16]
+// descriptor per raster row, followed by raw or RLE565 pixels concatenated
+// row-major. It is gated by CAP_TILE_VISIBLE_SPANS because older firmware
+// rejects tile bit 15. BC1/half-BC1 are invalid with the flag: their shared
+// blocks cannot omit hidden samples without changing visible colours.
 // A record covers 1..32 horizontally adjacent tiles in ONE tile-row (never
 // crossing a row boundary), its payload the run's rectangle rasterized
 // row-major in big-endian RGB565. Codecs: 0 = raw, 1 = RLE565, 2 = BC1,
-// 3 = reserved (future: half-res motion mode). A record never spans
-// datagrams - the sender splits runs so each record fits one packet.
+// 3 = half-resolution BC1. A record never spans datagrams - the sender
+// splits runs so each record fits one packet.
 //
 // Tile geometry is derived from panel dimensions like band geometry is: a
 // 466x466 panel gives a 30x30 grid whose last column and row are 2 px
@@ -73,7 +78,8 @@ static const uint16_t FIRST_TILE_RESERVED_MASK = 0x7C00;  // must be zero
 static const uint16_t TILE_INDEX_MASK = 0x03FF;
 
 static const size_t RECORD_HEADER_BYTES = 4;
-static const uint16_t RECORD_RESERVED_BIT = 0x8000;  // tile field bit 15
+static const uint16_t RECORD_VISIBLE_SPANS = 0x8000;  // tile field bit 15
+static const size_t VISIBLE_SPAN_DESCRIPTOR_BYTES = 4;  // x offset + count
 static const uint16_t RECORD_RUN_MASK = 0x7C00;
 static const int RECORD_RUN_SHIFT = 10;
 static const uint16_t RECORD_LENGTH_MASK = 0x3FFF;
@@ -233,17 +239,57 @@ inline TileHeader parseHeader(const uint8_t *d) {
   return h;
 }
 
+struct VisibleSpanPlan {
+  size_t descriptorBytes;
+  size_t rawBytes;
+};
+
+/// Validate the row descriptors at the front of a visible-span payload and
+/// calculate the exact compact raster size its raw/RLE body must decode to.
+/// Zero-length rows are allowed at the circle's extreme edge; a record with
+/// no visible pixel anywhere is not.
+inline bool parseVisibleSpanPlan(const uint8_t *payload, size_t payloadLen,
+                                 uint16_t runW, uint16_t runH,
+                                 VisibleSpanPlan &out) {
+  if (payload == nullptr || runW == 0 || runH == 0) return false;
+  const size_t descriptors = (size_t)runH * VISIBLE_SPAN_DESCRIPTOR_BYTES;
+  if (payloadLen <= descriptors) return false;  // body must contain a codec
+  size_t rawBytes = 0;
+  for (uint16_t row = 0; row < runH; row++) {
+    const uint8_t *d = payload + (size_t)row * VISIBLE_SPAN_DESCRIPTOR_BYTES;
+    const uint16_t offset = (uint16_t)d[0] | ((uint16_t)d[1] << 8);
+    const uint16_t count = (uint16_t)d[2] | ((uint16_t)d[3] << 8);
+    if (offset > runW || count > (uint16_t)(runW - offset)) return false;
+    rawBytes += (size_t)count * 2;
+  }
+  if (rawBytes == 0) return false;
+  out.descriptorBytes = descriptors;
+  out.rawBytes = rawBytes;
+  return true;
+}
+
+inline uint16_t visibleSpanOffset(const uint8_t *payload, uint16_t row) {
+  const uint8_t *d = payload + (size_t)row * VISIBLE_SPAN_DESCRIPTOR_BYTES;
+  return (uint16_t)d[0] | ((uint16_t)d[1] << 8);
+}
+
+inline uint16_t visibleSpanCount(const uint8_t *payload, uint16_t row) {
+  const uint8_t *d = payload + (size_t)row * VISIBLE_SPAN_DESCRIPTOR_BYTES;
+  return (uint16_t)d[2] | ((uint16_t)d[3] << 8);
+}
+
 /// Walk the records of a packet payload (the bytes after the 6-byte
-/// header). Calls fn(startTile, runLen, codec, payload, payloadLen) per
-/// record; fn returns false to reject the record, which aborts the walk.
+/// header). Calls fn(startTile, runLen, visibleSpans, codec, payload,
+/// payloadLen) per record; fn returns false to reject the record, which aborts
+/// the walk.
 ///
 /// Returns false when the payload is structurally invalid - empty, a
-/// record header that overruns, the reserved tile bit set, a record body
-/// past the end, a zero-length body - or when fn rejected one. Structural
-/// checks happen per record BEFORE fn sees it, so a decoder behind fn is
-/// never handed a length that lies about the buffer. Geometry-dependent
-/// validity (run inside the grid, payload decodes to the run's size) is
-/// fn's business - the walker knows bytes, not panels.
+/// record header that overruns, a record body past the end, a zero-length
+/// body, or when fn rejected one. Structural checks happen per record BEFORE
+/// fn sees it, so a decoder behind fn is never handed a length that lies about
+/// the buffer. Geometry-dependent validity (run inside the grid, payload
+/// decodes to the run's size) is fn's business - the walker knows bytes, not
+/// panels.
 template <typename F>
 inline bool forEachRecord(const uint8_t *payload, size_t len, F fn) {
   if (len < RECORD_HEADER_BYTES) return false;
@@ -254,7 +300,7 @@ inline bool forEachRecord(const uint8_t *payload, size_t len, F fn) {
         (uint16_t)payload[at] | ((uint16_t)payload[at + 1] << 8);
     uint16_t lenField =
         (uint16_t)payload[at + 2] | ((uint16_t)payload[at + 3] << 8);
-    if ((tileField & RECORD_RESERVED_BIT) != 0) return false;
+    const bool visibleSpans = (tileField & RECORD_VISIBLE_SPANS) != 0;
     const uint16_t startTile = tileField & TILE_INDEX_MASK;
     const uint16_t runLen =
         (uint16_t)(((tileField & RECORD_RUN_MASK) >> RECORD_RUN_SHIFT) + 1);
@@ -262,7 +308,9 @@ inline bool forEachRecord(const uint8_t *payload, size_t len, F fn) {
     const size_t bodyLen = lenField & RECORD_LENGTH_MASK;
     at += RECORD_HEADER_BYTES;
     if (bodyLen == 0 || at + bodyLen > len) return false;
-    if (!fn(startTile, runLen, codec, payload + at, bodyLen)) return false;
+    if (!fn(startTile, runLen, visibleSpans, codec, payload + at, bodyLen)) {
+      return false;
+    }
     at += bodyLen;
   }
   return true;

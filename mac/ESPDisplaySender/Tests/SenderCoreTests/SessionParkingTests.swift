@@ -101,6 +101,25 @@ final class SenderParkingTests: XCTestCase {
         XCTAssertEqual(makeSender().deviceRepliesReceived, 0)
     }
 
+    func testStaleRetirementCannotRemoveReplacementSession() {
+        let registry = SessionRegistry()
+        let old = DeviceSession(
+            name: "panel",
+            sender: makeSender(),
+            source: .auto(defaultDisplay: ""), picker: nil, fps: 30)
+        let replacement = DeviceSession(
+            name: "panel",
+            sender: makeSender(),
+            source: .auto(defaultDisplay: ""), picker: nil, fps: 30)
+        registry.add(old)
+        registry.add(replacement)
+
+        registry.retire("panel", sessionID: old.id)
+
+        XCTAssertTrue(registry.shouldSkip("panel"), "replacement was retired by stale task")
+        XCTAssertTrue(registry.all.contains { $0.id == replacement.id })
+    }
+
     func testParkingDoesNotCountAsAReply() {
         let sender = makeSender()
 
@@ -114,6 +133,14 @@ final class SenderParkingTests: XCTestCase {
 /// The manager side: a parked panel has to look different from an idle one.
 @MainActor
 final class ParkedPanelPresentationTests: XCTestCase {
+
+    private func manager() -> PanelManager {
+        PanelManager(
+            previewPanels: [PanelSnapshot(
+                serviceName: "studio-display",
+                displayName: "studio-display")],
+            savedNetworkNames: [], usbSerialPorts: [])
+    }
 
     private func status(
         parked: Bool, serviceName: String = "studio-display"
@@ -141,8 +168,7 @@ final class ParkedPanelPresentationTests: XCTestCase {
     }
 
     func testParkedSessionExplainsItselfOnThePanel() {
-        let manager = PanelManager(
-            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+        let manager = manager()
 
         manager.update(status(parked: true))
 
@@ -150,8 +176,7 @@ final class ParkedPanelPresentationTests: XCTestCase {
     }
 
     func testResumingClearsTheExplanation() {
-        let manager = PanelManager(
-            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+        let manager = manager()
         manager.update(status(parked: true))
         XCTAssertNotNil(manager.panels.first?.lastError)
 
@@ -162,8 +187,7 @@ final class ParkedPanelPresentationTests: XCTestCase {
 
     /// Parking is not pausing: the pause control must not appear engaged.
     func testParkedPanelIsNotShownAsPaused() {
-        let manager = PanelManager(
-            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+        let manager = manager()
 
         manager.update(status(parked: true))
 

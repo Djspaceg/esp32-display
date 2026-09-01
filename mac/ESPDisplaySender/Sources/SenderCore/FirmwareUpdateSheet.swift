@@ -160,8 +160,12 @@ struct FirmwareUpdatePlan: Equatable {
 /// row in the detail form.
 struct FirmwareUpdateSheet: View {
     @ObservedObject var manager: PanelManager
-    let target: PanelManager.FirmwareUpdateTarget
     @Environment(\.dismiss) private var dismiss
+
+    @State private var target: PanelManager.FirmwareUpdateTarget
+    @State private var selectedTransport: PanelManager.FirmwareUpdateTransport
+    @State private var isRefreshingUSBDevices = false
+    @State private var usbRefreshTask: Task<Void, Never>?
 
     /// The file, once one has been read successfully.
     @State private var bundle: FirmwareBundle?
@@ -176,18 +180,34 @@ struct FirmwareUpdateSheet: View {
     @State private var rememberPassword = false
     @State private var passwordProblem: String?
     @State private var confirmPush = false
-    @State private var progress: FirmwarePusher.Progress?
+    @State private var otaProgress: FirmwarePusher.Progress?
+    @State private var usbProgress: UsbOnboarder.Progress?
+    /// A sheet-owned failure appears immediately above the action bar. Routing
+    /// this through the manager window's alert defers it behind this sheet.
+    @State private var updateFailure: OperationOutcome?
     @State private var isPushing = false
+    @State private var sheetIsVisible = false
+
+    init(manager: PanelManager, target: PanelManager.FirmwareUpdateTarget) {
+        self.manager = manager
+        _target = State(initialValue: target)
+        _selectedTransport = State(
+            initialValue: target.usbDevice != nil ? .usb : .wifi)
+    }
 
     var body: some View {
         Form {
             panelSection
+            transportSection
             bundleSection
             if let bundle {
                 verdictSection(bundle)
-                if plan(bundle).canPush {
+                if selectedTransport == .wifi, plan(bundle).canPush {
                     passwordSection
                 }
+            }
+            if let updateFailure {
+                failureSection(updateFailure)
             }
             if isPushing {
                 progressSection
@@ -200,8 +220,22 @@ struct FirmwareUpdateSheet: View {
         .safeAreaInset(edge: .bottom) {
             actionBar
         }
-        .frame(width: 560, height: 560)
-        .onAppear(perform: prefillPassword)
+        .frame(width: 560, height: 620)
+        .onAppear {
+            sheetIsVisible = true
+            prefillPassword()
+            loadBundledFirmwareIfAvailable()
+        }
+        .onDisappear {
+            sheetIsVisible = false
+            usbRefreshTask?.cancel()
+        }
+        .onChange(of: selectedTransport) { _, _ in
+            updateFailure = nil
+            passwordProblem = nil
+            otaProgress = nil
+            usbProgress = nil
+        }
         // A firmware write is at least as consequential as a restart, so the
         // confirmation is at least as deliberate as the restart one in
         // ManagerWindow - and it names the direction, so a downgrade cannot be
@@ -225,7 +259,80 @@ struct FirmwareUpdateSheet: View {
             LabeledContent("Display", value: target.displayName)
             LabeledContent("Running", value: target.firmwareVersion)
             LabeledContent("Chip", value: chipDescription)
-            LabeledContent("Address", value: target.address)
+            LabeledContent("Address", value: target.address ?? "Not available")
+            LabeledContent("USB device") {
+                HStack(spacing: 8) {
+                    let path = target.usbDevice?.path
+                    Text(path ?? "Not connected")
+                        .foregroundStyle(path == nil ? .secondary : .primary)
+                        .textSelection(.enabled)
+                        .monospaced()
+                    Button {
+                        refreshUSBDevice()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .accessibilityLabel("Refresh USB device")
+                    .disabled(isPushing || isRefreshingUSBDevices)
+                    .help("Refresh connected USB serial ports")
+                }
+            }
+        }
+    }
+
+    private func refreshUSBDevice() {
+        guard !isPushing, !isRefreshingUSBDevices else { return }
+        isRefreshingUSBDevices = true
+        updateFailure = nil
+        manager.refreshUSBDevices()
+        let paths = manager.usbSerialPorts
+        usbRefreshTask = Task {
+            defer {
+                isRefreshingUSBDevices = false
+                usbRefreshTask = nil
+            }
+            for path in paths {
+                guard !Task.isCancelled else { return }
+                _ = await manager.probeUSBDevice(path)
+            }
+            guard !Task.isCancelled else { return }
+            applyRefreshedTarget()
+        }
+    }
+
+    private func applyRefreshedTarget() {
+        switch manager.firmwareUpdateReadiness(target.serviceName) {
+        case .ready(let refreshed):
+            target = refreshed
+        case .notReady:
+            target.address = nil
+            target.usbDevice = nil
+            target.usbPathGeneration = nil
+            target.usbAllowsLegacyIdentity = false
+        }
+        if !target.transports.contains(selectedTransport),
+           let fallback = target.transports.first {
+            selectedTransport = fallback
+        }
+    }
+
+    private var transportSection: some View {
+        Section("Update methods") {
+            LabeledContent(
+                "USB",
+                value: target.usbDevice != nil ? "Available" : "Unavailable")
+            LabeledContent(
+                "WiFi (OTA)",
+                value: target.address != nil ? "Available" : "Unavailable")
+            Picker("Use", selection: $selectedTransport) {
+                ForEach(PanelManager.FirmwareUpdateTransport.allCases) { transport in
+                    Text(transportLabel(transport))
+                        .tag(transport)
+                        .disabled(!target.transports.contains(transport))
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(isPushing || isRefreshingUSBDevices)
         }
     }
 
@@ -277,18 +384,24 @@ struct FirmwareUpdateSheet: View {
     @ViewBuilder
     private func verdictSection(_ bundle: FirmwareBundle) -> some View {
         let plan = plan(bundle)
+        let usbWillDetect = selectedTransport == .usb && !chipIsConfirmed
         Section("What this would do") {
             VStack(alignment: .leading, spacing: 6) {
-                Text(plan.headline)
+                Text(usbWillDetect
+                    ? "Verify the USB board, then choose its image"
+                    : plan.headline)
                     .fontWeight(.medium)
-                Text(plan.detail)
+                Text(usbWillDetect
+                    ? "Before writing, the app re-reads the board's hardware ID, "
+                        + "chip and MAC with CFGSHOW and esptool, then uses only "
+                        + "the matching format-2 image from this bundle."
+                    : plan.detail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            // The one case where the user has to make the choice the panel could
-            // not make for them.
-            if plan.action == .chooseImage, bundle.images.count > 1 {
+            if selectedTransport == .wifi,
+               plan.action == .chooseImage, bundle.images.count > 1 {
                 Picker("Image", selection: Binding(
                     get: { chosenChip ?? "" },
                     set: { chosenChip = $0.isEmpty ? nil : $0 })
@@ -298,6 +411,14 @@ struct FirmwareUpdateSheet: View {
                         Text("\(image.chip) (\(image.board))").tag(image.chip)
                     }
                 }
+            }
+            if selectedTransport == .usb, !usbBundleCanWrite(bundle) {
+                Label(
+                    "USB updating needs a current format-2 bundle with all flash "
+                        + "parts for this board.",
+                    systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
             }
         }
     }
@@ -324,6 +445,18 @@ struct FirmwareUpdateSheet: View {
         }
     }
 
+    private func failureSection(_ failure: OperationOutcome) -> some View {
+        Section("Update failed") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(failure.title).fontWeight(.medium)
+                Text(failure.message)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     private var progressSection: some View {
         Section("Progress") {
             VStack(alignment: .leading, spacing: 8) {
@@ -339,7 +472,8 @@ struct FirmwareUpdateSheet: View {
                     .monospacedDigit()
                 if isWaitingForResult {
                     Text("This can take a while on a large image. You can close "
-                        + "this window; the result appears as an alert either way.")
+                        + "this window; if it is closed, the result appears in "
+                        + "the manager window. Otherwise it appears here.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -367,8 +501,8 @@ struct FirmwareUpdateSheet: View {
                 // still arrives as an alert.
                 .disabled(isPushing && !isWaitingForResult)
                 .help(isWaitingForResult
-                    ? "Close this window and let the update finish. The result "
-                        + "appears as an alert."
+                    ? "Close this window and let the update finish. Its result "
+                        + "will appear in the manager window."
                     : "")
             Button(pushButtonTitle) { beginConfirmation() }
                 .buttonStyle(.glassProminent)
@@ -417,7 +551,7 @@ struct FirmwareUpdateSheet: View {
     /// Every byte is out and the panel is deciding. Nothing this side can still
     /// interrupt, which is what makes leaving safe.
     private var isWaitingForResult: Bool {
-        if case .finishing = progress { return true }
+        if case .finishing = otaProgress { return true }
         return false
     }
 
@@ -429,8 +563,13 @@ struct FirmwareUpdateSheet: View {
     }
 
     private var canBeginPush: Bool {
-        guard !isPushing, let bundle else { return false }
-        return plan(bundle).canPush && !password.isEmpty
+        guard !isPushing, !isRefreshingUSBDevices, let bundle else { return false }
+        switch selectedTransport {
+        case .wifi:
+            return plan(bundle).canPush && !password.isEmpty
+        case .usb:
+            return target.usbDevice != nil && usbBundleCanWrite(bundle)
+        }
     }
 
     private var confirmationTitle: String {
@@ -444,22 +583,48 @@ struct FirmwareUpdateSheet: View {
     }
 
     private var confirmationMessage: String {
-        guard let bundle, let image = bundle.payloadImage(forChip: effectiveChip)
-        else { return "" }
-        return "\(byteCount(image.byteCount)) will be written to the panel's "
-            + "inactive firmware slot, and it will restart onto it. USB stays the "
-            + "way back: tools/espdisp.py flash."
+        guard let bundle else { return "" }
+        switch selectedTransport {
+        case .wifi:
+            guard let image = bundle.payloadImage(forChip: effectiveChip) else {
+                return ""
+            }
+            return "\(byteCount(image.byteCount)) will be written to the panel's "
+                + "inactive firmware slot, and it will restart onto it."
+        case .usb:
+            let bytes = effectiveChip.flatMap { bundle.flashPlan(forChip: $0) }
+                .map { $0.reduce(0) { $0 + $1.payload.count } }
+            let amount = bytes.map { "\(byteCount($0)) in the bundle" }
+                ?? "The matching image and flash parts"
+            return "\(amount) will be written over USB after the board's hardware "
+                + "ID, chip and MAC are re-verified. No whole-chip erase is "
+                + "performed, so saved WiFi, name, settings and OTA password remain."
+        }
     }
 
     private var progressFraction: Double? {
-        guard case .sending(let sent, let total) = progress, total > 0 else {
-            return nil
+        if case .sending(let sent, let total) = otaProgress, total > 0 {
+            return Double(sent) / Double(total)
         }
-        return Double(sent) / Double(total)
+        if case .writing(let percent?, _) = usbProgress {
+            return Double(percent) / 100
+        }
+        return nil
     }
 
     private var progressDescription: String {
-        switch progress {
+        if selectedTransport == .usb {
+            switch usbProgress {
+            case .none: return "Starting…"
+            case .readingChip: return "Re-verifying the board's chip and MAC…"
+            case .writing(let percent, let status):
+                guard let percent else { return status }
+                return "\(percent)% · \(status)"
+            case .waitingForBoard: return "Waiting for the board to restart…"
+            case .configuring(let label): return label
+            }
+        }
+        switch otaProgress {
         case .none:
             return "Starting…"
         case .inviting(let attempt, let total):
@@ -475,6 +640,22 @@ struct FirmwareUpdateSheet: View {
         case .finishing:
             return "Waiting for the panel to finish writing…"
         }
+    }
+
+    private func transportLabel(
+        _ transport: PanelManager.FirmwareUpdateTransport
+    ) -> String {
+        switch transport {
+        case .wifi: return "WiFi"
+        case .usb: return "USB"
+        }
+    }
+
+    private func usbBundleCanWrite(_ bundle: FirmwareBundle) -> Bool {
+        if let chip = effectiveChip {
+            return bundle.flashPlan(forChip: chip) != nil
+        }
+        return bundle.images.contains { bundle.flashPlan(forChip: $0.chip) != nil }
     }
 
     private func imageDescription(_ image: FirmwareBundle.Image) -> String {
@@ -500,6 +681,22 @@ struct FirmwareUpdateSheet: View {
         // Pre-ticked only when there was already a password to remember, so
         // leaving the toggle alone keeps whatever the user chose last time.
         rememberPassword = true
+    }
+
+    private func loadBundledFirmwareIfAvailable() {
+        guard bundle == nil else { return }
+        switch BundledFirmware.load() {
+        case .ready(let bundled, let url):
+            bundle = bundled
+            bundleURL = url
+            chosenChip = bundled.images.count == 1 ? bundled.images[0].chip : nil
+            readFailure = nil
+        case .unreadable(let path, let reason):
+            readFailure = "The firmware bundled with the app (\(path)) could not "
+                + "be read: \(reason)"
+        case .none:
+            break
+        }
     }
 
     /// The open panel, restricted to the one extension this app can read.
@@ -528,6 +725,7 @@ struct FirmwareUpdateSheet: View {
             bundle = read
             bundleURL = url
             readFailure = nil
+            updateFailure = nil
             // A bundle with exactly one image needs no choice, so a panel that
             // did not name its chip still gets a verdict rather than a picker
             // with one entry.
@@ -536,11 +734,17 @@ struct FirmwareUpdateSheet: View {
             bundle = nil
             bundleURL = nil
             chosenChip = nil
+            updateFailure = nil
             readFailure = error.localizedDescription
         }
     }
 
     private func beginConfirmation() {
+        updateFailure = nil
+        guard selectedTransport == .wifi else {
+            confirmPush = true
+            return
+        }
         switch OTAPasswordPolicy.judge(password) {
         case .accept:
             passwordProblem = nil
@@ -555,37 +759,59 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func startPush() {
-        guard let bundle, let chip = effectiveChip,
-              let image = bundle.payload(forChip: chip),
-              let entry = bundle.image(forChip: chip)
-        else { return }
-        if rememberPassword {
-            if let failure = manager.setRememberedOTAPassword(
-                password, for: target.hardwareID) {
-                passwordProblem = failure
-            }
-        } else {
-            // Unticking it is a request to forget, not merely to skip saving.
-            _ = manager.setRememberedOTAPassword(nil, for: target.hardwareID)
-        }
-
+        guard let bundle else { return }
         isPushing = true
-        progress = nil
-        // Not `.task`, deliberately: this Task must outlive the sheet's dismissal
-        // at the end of it, and a `.task` modifier's work is cancelled when the
-        // view goes away.
-        Task {
-            let succeeded = await manager.pushFirmware(
-                image: image, filename: entry.filename, to: target,
-                password: password
-            ) { update in
-                Task { @MainActor in progress = update }
+        updateFailure = nil
+        otaProgress = nil
+        usbProgress = nil
+
+        switch selectedTransport {
+        case .wifi:
+            guard let chip = effectiveChip,
+                  let image = bundle.payload(forChip: chip),
+                  let entry = bundle.image(forChip: chip)
+            else {
+                isPushing = false
+                return
             }
-            isPushing = false
-            // On a failure the sheet stays open with the file and the password
-            // still in it, so a retry is one click. The outcome alert explains
-            // what happened either way.
-            if succeeded { dismiss() }
+            if rememberPassword {
+                if let failure = manager.setRememberedOTAPassword(
+                    password, for: target.hardwareID) {
+                    passwordProblem = failure
+                }
+            } else {
+                _ = manager.setRememberedOTAPassword(nil, for: target.hardwareID)
+            }
+            Task {
+                let outcome = await manager.pushFirmware(
+                    image: image, filename: entry.filename, to: target,
+                    password: password
+                ) { update in
+                    Task { @MainActor in otaProgress = update }
+                }
+                finish(outcome)
+            }
+        case .usb:
+            Task {
+                let outcome = await manager.flashFirmwareOverUSB(
+                    bundle: bundle, to: target
+                ) { update in
+                    Task { @MainActor in usbProgress = update }
+                }
+                finish(outcome)
+            }
+        }
+    }
+
+    private func finish(_ outcome: OperationOutcome) {
+        isPushing = false
+        if outcome.kind == .success {
+            manager.presentOperationOutcome(outcome)
+            dismiss()
+        } else if sheetIsVisible {
+            updateFailure = outcome
+        } else {
+            manager.presentOperationOutcome(outcome)
         }
     }
 }

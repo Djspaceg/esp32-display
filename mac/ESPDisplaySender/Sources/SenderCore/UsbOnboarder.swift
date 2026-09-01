@@ -83,10 +83,12 @@ enum UsbOnboarder {
     /// `WifiConfigUI.probePort` applies. Blocking serial I/O, so this is called
     /// from a background task.
     static func probeExistingFirmware(port: String) -> UsbOnboarding.ExistingFirmware {
-        switch WifiConfigUI.sendCommand("CFGSHOW", port: port, timeout: 3) {
-        case .success(let info):
-            return .answered(name: ConfigCommands.decodeField("name64=", from: info) ?? "")
-        case .failure:
+        switch WifiConfigUI.probePort(port, timeout: 3) {
+        case .identified(let identity):
+            return .answered(
+                name: identity.name,
+                hardwareID: identity.hardwareID)
+        case .unavailable:
             return .silent
         }
     }
@@ -157,12 +159,15 @@ enum UsbOnboarder {
     static func sendConfiguration(
         steps: [UsbOnboarding.ConfigStep],
         flashedPort: String,
+        expectedHardwareID: String? = nil,
         onProgress: @escaping @Sendable (Progress) -> Void
     ) async -> Result<String, WifiConfigUI.ConfigFailure> {
         var port = flashedPort
         for step in steps {
             onProgress(.waitingForBoard)
-            switch await settle(flashedPort: port) {
+            switch await settle(
+                flashedPort: port, expectedHardwareID: expectedHardwareID)
+            {
             case .success(let resolved):
                 port = resolved
             case .failure(let failure):
@@ -182,6 +187,19 @@ enum UsbOnboarder {
         return .success(port)
     }
 
+    static func matchesExpectedHardwareID(
+        _ existing: UsbOnboarding.ExistingFirmware,
+        expectedHardwareID: String?
+    ) -> Bool {
+        guard let expected = ConfigCommands.canonicalHardwareID(expectedHardwareID)
+        else {
+            if case .answered = existing { return true }
+            return false
+        }
+        guard case .answered(_, let reported) = existing else { return false }
+        return ConfigCommands.canonicalHardwareID(reported) == expected
+    }
+
     /// Find the board again and prove it is listening.
     ///
     /// A DEVICE NODE IS NOT AN ANSWER. `SerialSettlePolicy` decides which node to
@@ -189,8 +207,10 @@ enum UsbOnboarder {
     /// replying, because the node reappears seconds before the firmware is reading
     /// lines.
     static func settle(
-        flashedPort: String
+        flashedPort: String,
+        expectedHardwareID: String? = nil
     ) async -> Result<String, WifiConfigUI.ConfigFailure> {
+        let expectedHardwareID = ConfigCommands.canonicalHardwareID(expectedHardwareID)
         for attempt in 0...SerialSettlePolicy.attempts {
             let ports = WifiConfigUI.candidatePorts()
             let step = SerialSettlePolicy.step(
@@ -199,7 +219,9 @@ enum UsbOnboarder {
             case .waitAndRetry(let seconds):
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             case .use(let port):
-                if case .answered = probeExistingFirmware(port: port) {
+                let existing = probeExistingFirmware(port: port)
+                if matchesExpectedHardwareID(
+                    existing, expectedHardwareID: expectedHardwareID) {
                     return .success(port)
                 }
                 try? await Task.sleep(

@@ -30,6 +30,7 @@
 
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoOTA.h>
+#include <Update.h>
 #include <AsyncUDP.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
@@ -276,6 +277,11 @@ static inline otapolicy::Status currentOtaStatus() {
 // screen and no DMA is queued underneath the flash writes.
 static volatile bool otaInProgress = false;
 static uint8_t otaShownPercent = 0;
+// First ArduinoOTA error from the current attempt. Core 3.3.11 invokes
+// OTA_CONNECT_ERROR and then falls through to Update.end(), which invokes
+// OTA_END_ERROR with "Aborted". Without remembering the first callback, the
+// second one overwrites the useful "connect lost" screen with "bad image".
+static int otaPrimaryError = -1;
 // The dimmed states onStart clears so an update is visible, held so onError can
 // put them back. A successful push reboots, so only the failure path needs them.
 // See otapolicy::SavedPanelState for why this is a type rather than two bools:
@@ -317,19 +323,19 @@ static uint32_t deviceCapabilities() {
          // predate tiles; every other board keeps packed bands, and the RLE
          // decode is chip-independent so the C6 gains from packing too (an
          // 80-band keyframe becomes a handful of datagrams).
-         // CAP_TILE_HALFRES rides the same decision, not a second one: the
-         // half-res codec is a value of the tile record's codec field, so it
-         // is meaningless without tiles, and this build's tile path always
-         // decodes it. Folded into this ternary rather than added as its own
-         // so the C6 - where tileStreamEnabled() is always false - emits not
-         // one extra instruction for a bit it can never advertise.
+         // CAP_TILE_HALFRES and CAP_TILE_VISIBLE_SPANS ride the same
+         // decision, not separate ones: both modify tile records and are
+         // meaningless without tiles. Folded into this ternary rather than
+         // added independently so the C6 - where tileStreamEnabled() is
+         // always false - emits no capability for bytes it never parses.
          //
          // It is still a SEPARATE BIT on the wire, which is the part that
          // matters: tile firmware predating this advertises CAP_TILE_STREAM
          // alone, so a sender can tell the two apart and withhold codec 3
          // from the older one.
          | (tileStreamEnabled() ? (deviceproto::CAP_TILE_STREAM
-                                   | deviceproto::CAP_TILE_HALFRES)
+                                   | deviceproto::CAP_TILE_HALFRES
+                                   | deviceproto::CAP_TILE_VISIBLE_SPANS)
                                 : deviceproto::CAP_COMPRESSED_BANDS)
          // Round glass: a fifth of the framebuffer is behind the bezel and
          // invisible forever. Straight from the board table - the sender
@@ -652,13 +658,27 @@ static bool applyBandPayload(const bandproto::Header &h, bool compressed,
 // same accepted posture as the band path.
 static bool applyTileRecord(const tileproto::TileHeader &h,
                             uint16_t startTile, uint16_t runLen,
-                            tileproto::TileCodec codec,
+                            bool visibleSpans, tileproto::TileCodec codec,
                             const uint8_t *payload, size_t payloadLen) {
   const size_t rawLen = TILE_GEOMETRY.runRawBytes(startTile, runLen);
   if (rawLen == 0 || rawLen > TILE_RUN_MAX_BYTES) {
     return false;  // inexpressible run; onRecord would reject it too
   }
-  if (codec == tileproto::TileCodec::Raw && payloadLen != rawLen) {
+  const uint16_t runW = TILE_GEOMETRY.runPixelWidth(startTile, runLen);
+  const uint16_t runH = TILE_GEOMETRY.rowHeight(TILE_GEOMETRY.row(startTile));
+  tileproto::VisibleSpanPlan spanPlan = {0, 0};
+  if (visibleSpans) {
+    if ((codec != tileproto::TileCodec::Raw &&
+         codec != tileproto::TileCodec::Rle565) ||
+        !tileproto::parseVisibleSpanPlan(payload, payloadLen, runW, runH,
+                                         spanPlan) ||
+        spanPlan.rawBytes > TILE_RUN_MAX_BYTES ||
+        (codec == tileproto::TileCodec::Raw &&
+         payloadLen != spanPlan.descriptorBytes + spanPlan.rawBytes)) {
+      statBadLen = statBadLen + 1;
+      return false;
+    }
+  } else if (codec == tileproto::TileCodec::Raw && payloadLen != rawLen) {
     statBadLen = statBadLen + 1;
     return false;
   }
@@ -690,20 +710,26 @@ static bool applyTileRecord(const tileproto::TileHeader &h,
     bufLandscape = h.landscape;
   }
 
-  const uint16_t runW = TILE_GEOMETRY.runPixelWidth(startTile, runLen);
-  const uint16_t runH = TILE_GEOMETRY.rowHeight(TILE_GEOMETRY.row(startTile));
+  const uint8_t *encoded = payload;
+  size_t encodedLen = payloadLen;
+  size_t decodedLen = rawLen;
+  if (visibleSpans) {
+    encoded += spanPlan.descriptorBytes;
+    encodedLen -= spanPlan.descriptorBytes;
+    decodedLen = spanPlan.rawBytes;
+  }
   switch (codec) {
     case tileproto::TileCodec::Raw:
-      memcpy(tileScratch, payload, rawLen);
+      memcpy(tileScratch, encoded, decodedLen);
       break;
     case tileproto::TileCodec::Rle565:
-      if (!rle565::decode(payload, payloadLen, tileScratch, rawLen)) {
+      if (!rle565::decode(encoded, encodedLen, tileScratch, decodedLen)) {
         statBadLen = statBadLen + 1;
         return false;
       }
       break;
     case tileproto::TileCodec::Bc1:
-      if (!bc1::decode(payload, payloadLen, tileScratch, runW, runH)) {
+      if (!bc1::decode(encoded, encodedLen, tileScratch, runW, runH)) {
         statBadLen = statBadLen + 1;
         return false;
       }
@@ -719,7 +745,7 @@ static bool applyTileRecord(const tileproto::TileHeader &h,
       const uint16_t halfW = tileproto::halfDim(runW);
       const uint16_t halfH = tileproto::halfDim(runH);
       if ((size_t)halfW * halfH * 2 > sizeof(tileHalfScratch) ||
-          !bc1::decode(payload, payloadLen, tileHalfScratch, halfW, halfH) ||
+          !bc1::decode(encoded, encodedLen, tileHalfScratch, halfW, halfH) ||
           !tileproto::pixelDouble(tileHalfScratch, halfW, halfH, tileScratch,
                                   runW, runH)) {
         statBadLen = statBadLen + 1;
@@ -741,9 +767,23 @@ static bool applyTileRecord(const tileproto::TileHeader &h,
       (size_t)TILE_GEOMETRY.col(startTile) * tileproto::TILE_DIM;
   const size_t y0 =
       (size_t)TILE_GEOMETRY.row(startTile) * tileproto::TILE_DIM;
-  for (uint16_t r = 0; r < runH; r++) {
-    memcpy(bufA + (y0 + r) * frameRowBytes + x0 * 2,
-           tileScratch + (size_t)r * runW * 2, (size_t)runW * 2);
+  if (visibleSpans) {
+    size_t compactOffset = 0;
+    for (uint16_t r = 0; r < runH; r++) {
+      const uint16_t offset = tileproto::visibleSpanOffset(payload, r);
+      const uint16_t count = tileproto::visibleSpanCount(payload, r);
+      const size_t bytes = (size_t)count * 2;
+      if (bytes > 0) {
+        memcpy(bufA + (y0 + r) * frameRowBytes + (x0 + offset) * 2,
+               tileScratch + compactOffset, bytes);
+      }
+      compactOffset += bytes;
+    }
+  } else {
+    for (uint16_t r = 0; r < runH; r++) {
+      memcpy(bufA + (y0 + r) * frameRowBytes + x0 * 2,
+             tileScratch + (size_t)r * runW * 2, (size_t)runW * 2);
+    }
   }
 
   portENTER_CRITICAL(&drawMux);
@@ -772,14 +812,15 @@ static void handleTilePacket(const uint8_t *data, size_t len) {
   bool first = true;
   bool ok = tileproto::forEachRecord(
       data + tileproto::HEADER_BYTES, len - tileproto::HEADER_BYTES,
-      [&](uint16_t startTile, uint16_t runLen, tileproto::TileCodec codec,
-          const uint8_t *payload, size_t payloadLen) {
+      [&](uint16_t startTile, uint16_t runLen, bool visibleSpans,
+          tileproto::TileCodec codec, const uint8_t *payload,
+          size_t payloadLen) {
         if (first) {
           if (startTile != h.firstTile) return false;
           first = false;
         }
-        return applyTileRecord(h, startTile, runLen, codec, payload,
-                               payloadLen);
+        return applyTileRecord(h, startTile, runLen, visibleSpans, codec,
+                               payload, payloadLen);
       });
   if (!ok) {
     statBadLen = statBadLen + 1;
@@ -945,6 +986,15 @@ static int rxSock = -1;
 // compete with the radio.
 static const UBaseType_t RX_TASK_PRIORITY = 9;
 static const uint32_t RX_TASK_STACK = 6144;
+// The receive task's handle, kept so CFGTUNE rxprio can move its priority at
+// runtime. Section 17.2 measured the draw pass's per-call cost inflating
+// ~10x under network load, and the scheduling half of that mechanism is this
+// task preempting loopTask's gather memcpys from priority 9 against 1 on the
+// same core; section 17.6 item 3 names re-prioritising the two tasks as the
+// untested lever. A runtime knob rather than a constant for the same
+// measurement-discipline reason as tuneRxDrainYieldEvery: interleaved A/B
+// arms need to swap without a ~2 minute reflash per swap.
+static TaskHandle_t rxTaskHandle = nullptr;
 /// Datagrams this task may drain before yielding to the draw loop. See the
 /// drain loop in udpReceiveTask for why an explicit yield is required.
 ///
@@ -1032,7 +1082,7 @@ static bool startInboundTransport() {
     return false;
   }
   return xTaskCreatePinnedToCore(udpReceiveTask, "udprx", RX_TASK_STACK,
-                                 nullptr, RX_TASK_PRIORITY, nullptr,
+                                 nullptr, RX_TASK_PRIORITY, &rxTaskHandle,
                                  1) == pdPASS;
 }
 
@@ -1878,6 +1928,18 @@ static void processConfigLine(char *line) {
     //   CFGTUNE rxyield <1-256>    datagrams drained between yields
     //   CFGTUNE partialms <1-1000> how long tiles wait for their frame
     //   CFGTUNE drawcap <1-450>    draw calls per loop iteration
+    //   CFGTUNE rxprio <1-18>      udpReceiveTask priority (boot: 9)
+    //   CFGTUNE loopprio <1-18>    loopTask (draw) priority (boot: 1)
+    //
+    // The two priority knobs exist for section 17.6 item 3: the draw loop is
+    // starved by the receive task (17.2's ~10x per-call inflation under
+    // load), and the candidate fixes - lower rx below the draw, or raise the
+    // draw to meet it - are scheduling arms that have never been measured.
+    // Both are bounded to 1-18: 0 would contend with the idle task that
+    // feeds the task watchdog, and 19+ would preempt the WiFi/lwIP tasks
+    // (18+) that feed the receive path itself. loopprio uses the calling
+    // task's own handle - handleSerialConfig only ever runs on loopTask
+    // (setup()'s WiFi wait and loop() are its two call sites).
     //
     // Exists for measurement discipline rather than for users. The run-to-run
     // spread here is ~4 fps peak-to-peak at the operating point (section
@@ -1897,15 +1959,21 @@ static void processConfigLine(char *line) {
       // CFGINFO, like CFGSHOW's reply: the tooling only recognises CFGOK,
       // CFGERR and CFGINFO as replies (CFG_PREFIXES in espdisp.py), so a line
       // starting with anything else reads as no answer at all and times out.
-      Serial.printf("CFGINFO rxyield=%d partialms=%lu drawcap=%d\n",
+      Serial.printf("CFGINFO rxyield=%d partialms=%lu drawcap=%d rxprio=%u "
+                    "loopprio=%u\n",
                     tuneRxDrainYieldEvery,
-                    (unsigned long)tunePartialDrawMs, tuneDrawCallCap);
+                    (unsigned long)tunePartialDrawMs, tuneDrawCallCap,
+                    rxTaskHandle != nullptr
+                        ? (unsigned)uxTaskPriorityGet(rxTaskHandle)
+                        : 0u,
+                    (unsigned)uxTaskPriorityGet(nullptr));
       return;
     }
     char name[16] = {0};
     int value = 0;
     if (sscanf(arg, "%15s %d", name, &value) != 2) {
-      Serial.println("CFGERR expected: CFGTUNE <rxyield|partialms|drawcap> <n>");
+      Serial.println("CFGERR expected: CFGTUNE "
+                     "<rxyield|partialms|drawcap|rxprio|loopprio> <n>");
       return;
     }
     if (strcmp(name, "rxyield") == 0 && value >= 1 && value <= 256) {
@@ -1914,14 +1982,30 @@ static void processConfigLine(char *line) {
       tunePartialDrawMs = (uint32_t)value;
     } else if (strcmp(name, "drawcap") == 0 && value >= 1 && value <= 450) {
       tuneDrawCallCap = value;
+    } else if (strcmp(name, "rxprio") == 0 && value >= 1 && value <= 18) {
+      // Refused rather than ignored when the transport never started: a
+      // silently absorbed knob would bias the measurement it exists for.
+      if (rxTaskHandle == nullptr) {
+        Serial.println("CFGERR no receive task (transport not started)");
+        return;
+      }
+      vTaskPrioritySet(rxTaskHandle, (UBaseType_t)value);
+    } else if (strcmp(name, "loopprio") == 0 && value >= 1 && value <= 18) {
+      vTaskPrioritySet(nullptr, (UBaseType_t)value);
     } else {
       Serial.println("CFGERR bad knob or out of range (rxyield 1-256, "
-                     "partialms 1-1000, drawcap 1-450)");
+                     "partialms 1-1000, drawcap 1-450, rxprio 1-18, "
+                     "loopprio 1-18)");
       return;
     }
-    Serial.printf("CFGOK rxyield=%d partialms=%lu drawcap=%d (not persisted)\n",
+    Serial.printf("CFGOK rxyield=%d partialms=%lu drawcap=%d rxprio=%u "
+                  "loopprio=%u (not persisted)\n",
                   tuneRxDrainYieldEvery, (unsigned long)tunePartialDrawMs,
-                  tuneDrawCallCap);
+                  tuneDrawCallCap,
+                  rxTaskHandle != nullptr
+                      ? (unsigned)uxTaskPriorityGet(rxTaskHandle)
+                      : 0u,
+                  (unsigned)uxTaskPriorityGet(nullptr));
 #endif
   } else if (strncmp(line, "CFGOTAPW ", 9) == 0) {
     // Set or clear the OTA password:
@@ -2021,10 +2105,13 @@ static void processConfigLine(char *line) {
     // flip= stays (derived: rotation == 2) so anything parsing the old field
     // keeps reading the truth; rot= carries the full quarter-turn value.
     Serial.printf(
-        "CFGINFO ssid64=%s name64=%s connected=%d ip=%s rssi=%d flip=%d "
-        "rot=%u auto=%u effective=%u motion=%d bl=%s pwr=%s board=%s "
-        "bat=%d ota=%s ssid=%s\n",
-        (const char *)b64, (const char *)name64, WiFi.status() == WL_CONNECTED,
+        "CFGINFO ssid64=%s name64=%s id=%02x%02x%02x%02x%02x%02x "
+        "connected=%d ip=%s rssi=%d flip=%d rot=%u auto=%u effective=%u "
+        "motion=%d bl=%s pwr=%s board=%s bat=%d ota=%s ssid=%s\n",
+        (const char *)b64, (const char *)name64,
+        deviceId[0], deviceId[1], deviceId[2],
+        deviceId[3], deviceId[4], deviceId[5],
+        WiFi.status() == WL_CONNECTED,
         WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(),
         panelRotation == 2, panelRotation,
         automaticRotation, effectivePanelRotation(), motionAvailable,
@@ -2832,6 +2919,7 @@ static bool startOtaIfConfigured() {
     esp_task_wdt_reset();
     otaInProgress = true;
     otaShownPercent = 0;
+    otaPrimaryError = -1;
     // Make the update visible whatever state the panel was in: a push that
     // arrives while the Mac's displays are asleep would otherwise happen behind
     // a dark screen. Saved so a FAILED push can put it back - on success the
@@ -2887,19 +2975,64 @@ static bool startOtaIfConfigured() {
     // sets and which only the comment above records. One call makes the invariant
     // hold from this side instead of depending on that.
     otaSavedPanel.discard();
+    otaPrimaryError = -1;
   });
 
   ArduinoOTA.onError([](ota_error_t error) {
     otaInProgress = false;
+    const char *detail = error == OTA_END_ERROR ? Update.errorString() : "";
+
+    // Core 3.3.11 does not return after its reverse TCP connect fails. It first
+    // reports OTA_CONNECT_ERROR, then calls Update.end() with zero bytes written,
+    // which reports OTA_END_ERROR / Aborted. The second callback is fallout from
+    // the first failure, not an image verdict, and must not replace the useful
+    // message already on the glass.
+    if (otaPrimaryError == (int)OTA_CONNECT_ERROR &&
+        error == OTA_END_ERROR && strcmp(detail, "Aborted") == 0) {
+      Serial.println(
+          "ota: ignored secondary end error after connect failure (Aborted)");
+      return;
+    }
+    if (error != OTA_END_ERROR || otaPrimaryError < 0) {
+      otaPrimaryError = (int)error;
+    }
+
     const char *what = "failed";
     switch (error) {
-      case OTA_AUTH_ERROR: what = "bad password"; break;
-      case OTA_BEGIN_ERROR: what = "no free slot"; break;
-      case OTA_CONNECT_ERROR: what = "connect lost"; break;
-      case OTA_RECEIVE_ERROR: what = "transfer lost"; break;
-      case OTA_END_ERROR: what = "bad image"; break;
+      case OTA_AUTH_ERROR:
+        what = "bad password";
+        break;
+      case OTA_BEGIN_ERROR:
+        what = "no free slot";
+        break;
+      case OTA_CONNECT_ERROR:
+        what = "connect lost";
+        break;
+      case OTA_RECEIVE_ERROR:
+        what = "transfer lost";
+        break;
+      case OTA_END_ERROR:
+        if (strcmp(detail, "MD5 Check Failed") == 0) {
+          what = "md5 failed";
+        } else if (strcmp(detail, "Wrong Magic Byte") == 0) {
+          what = "wrong image";
+        } else if (strcmp(detail, "Could Not Activate The Firmware") == 0) {
+          what = "image refused";
+        } else if (strcmp(detail, "Aborted") == 0) {
+          what = "incomplete";
+        } else if (strstr(detail, "Flash ") == detail) {
+          what = "flash failed";
+        } else {
+          what = "bad image";
+        }
+        break;
     }
-    Serial.printf("ota: %s (error %d)\n", what, (int)error);
+    if (error == OTA_END_ERROR) {
+      Serial.printf("ota: %s (error %d, detail: %s)\n", what, (int)error,
+                    detail[0] ? detail : "unknown");
+    } else {
+      Serial.printf("ota: %s (error %d)\n", what, (int)error);
+    }
     // Leave the reason on the glass rather than snapping back to the stream: a
     // failed push is exactly when someone is standing in front of the panel. The
     // next completed frame overwrites it, and a rejected image never touched the
@@ -3049,8 +3182,6 @@ void setup() {
   // Chips with exactly one supported board never probe at all.
   if (board::COMPILED_VARIANT != board::Variant::Unknown) {
     boardVariant = board::COMPILED_VARIANT;
-    Serial.printf("board: fixed at compile time: %s\n",
-                  board::variantToken(boardVariant));
   } else {
     board::Variant forced = board::variantFromStored(boardOverride);
     if (forced != board::Variant::Unknown) {
@@ -3061,7 +3192,18 @@ void setup() {
       boardVariant = boarddetect::probe();
     }
   }
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  const uint32_t flashBytes = ESP.getFlashChipSize();
+  bcfg = &board::s3AmoledConfigForFlashSize(flashBytes);
+  Serial.printf(
+      "board: fixed at compile time: %s (%luMB flash profile, lcd_rst=%d, "
+      "tp_rst=%d)\n",
+      board::variantToken(boardVariant),
+      (unsigned long)(flashBytes / (1024 * 1024)), bcfg->pinRst,
+      bcfg->pinTouchRst);
+#else
   bcfg = &board::configFor(boardVariant);
+#endif
   // A stored override written by an older firmware can name a board whose
   // glass this binary was not sized for. The geometry is compiled in
   // (buffers, band layout, mDNS), so refuse the override and re-probe rather

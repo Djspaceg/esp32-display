@@ -120,21 +120,23 @@ inline bool cst9217ReadReg(uint16_t reg, uint8_t *out, size_t len) {
   return true;
 }
 
-/// Bring up the CST9217/9220. Never drives cfg.pinTouchRst: on this board
-/// that pin IS the panel reset (GPIO2, one shared line - see board_config.h),
-/// already pulsed by initDisplay() before this runs, and pulsing it again
-/// here would hard-reset a CO5300 panel that has already been brought up,
-/// leaving it dark or showing garbage. The controller comes out of its own
-/// bootloader on that same reset edge, which is why this can start talking
-/// to it directly rather than resetting it itself.
+/// Bring up the CST9217/9220. The 32 MB engineering sample shares touch and
+/// panel reset on GPIO2, so panel initialization has already reset both and this
+/// path must not pulse it again. The current 16 MB board has a dedicated GPIO40
+/// touch reset; that line must be pulsed before its first command.
 inline bool initCst9217(const board::Config &cfg, bool verbose) {
   if (!Wire.begin(cfg.pinTouchSda, cfg.pinTouchScl, I2C_HZ)) {
     if (verbose) Serial.println("touch: ERROR I2C bus would not start");
     return false;
   }
-  // The controller needs time to leave its bootloader after the shared
-  // reset; ESPHome's cst9220 component and SensorLib's getAttribute() both
-  // wait 30ms here before their first transaction.
+  if (cfg.pinTouchRst != cfg.pinRst) {
+    pinMode(cfg.pinTouchRst, OUTPUT);
+    digitalWrite(cfg.pinTouchRst, LOW);
+    delay(10);
+    digitalWrite(cfg.pinTouchRst, HIGH);
+  }
+  // The controller needs time to leave its bootloader after either its own
+  // reset above or the legacy board's shared panel-reset edge.
   delay(30);
 
   // Enter command mode so the configuration/identity registers can be read.

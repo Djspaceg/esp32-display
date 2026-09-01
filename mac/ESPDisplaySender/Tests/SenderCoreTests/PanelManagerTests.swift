@@ -101,7 +101,7 @@ final class PanelManagerTests: XCTestCase {
     // MARK: capability gating
 
     func testControlIsAllowedWhenOnlineAndAdvertised() throws {
-        let manager = makeManager()
+        let manager = makeManager([controllablePanel()])
         manager.register(makeSession(name: "studio-display"))
         manager.update(
             .info(try makeInfo(name: "studio-display", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])),
@@ -121,7 +121,7 @@ final class PanelManagerTests: XCTestCase {
     }
 
     func testControlIsRefusedForUnadvertisedCapability() throws {
-        let manager = makeManager()
+        let manager = makeManager([controllablePanel(capabilities: .brightness)])
         manager.register(makeSession(name: "studio-display"))
         manager.update(
             .info(try makeInfo(
@@ -139,7 +139,7 @@ final class PanelManagerTests: XCTestCase {
     /// Firmware speaking a different control protocol would misread the opcode,
     /// so every control is refused regardless of the capability bits.
     func testControlIsRefusedOnControlProtocolMismatch() throws {
-        let manager = makeManager()
+        let manager = makeManager([controllablePanel()])
         manager.register(makeSession(name: "studio-display"))
         manager.update(
             .info(try makeInfo(
@@ -176,7 +176,7 @@ final class PanelManagerTests: XCTestCase {
     /// absence means either no password or a password that never got to listen,
     /// and from out here those look identical.
     func testFirmwareUpdateRefusalNamesSetPassword() throws {
-        let manager = makeManager()
+        let manager = makeManager([controllablePanel()])
         manager.register(makeSession(name: "studio-display"))
         manager.update(
             .info(try makeInfo(
@@ -199,7 +199,7 @@ final class PanelManagerTests: XCTestCase {
     /// case is a special case and not a rewrite of the ladder. Same panel, same
     /// rung, different capability.
     func testOtherCapabilitiesKeepTheGenericRefusal() throws {
-        let manager = makeManager()
+        let manager = makeManager([controllablePanel()])
         manager.register(makeSession(name: "studio-display"))
         manager.update(
             .info(try makeInfo(
@@ -293,8 +293,8 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertEqual(manager.selectedServiceName, "espdisplay-9050")
     }
 
-    /// Two different boards must stay two panels, however similar their names.
-    func testDifferentHardwareDoesNotMerge() throws {
+    /// Discovery of unowned hardware must not create a permanent record.
+    func testDifferentHardwareDoesNotCreateARecord() throws {
         let manager = makeManager([controllablePanel(serviceName: "espdisplay")])
 
         manager.update(
@@ -302,15 +302,13 @@ final class PanelManagerTests: XCTestCase {
                 name: "espdisplay-9050", deviceID: [9, 9, 9, 9, 9, 9])),
             for: "espdisplay-9050")
 
-        XCTAssertEqual(manager.panels.count, 2)
-        XCTAssertEqual(
-            Set(manager.panels.map(\.serviceName)), ["espdisplay", "espdisplay-9050"])
+        XCTAssertEqual(manager.panels.count, 1)
+        XCTAssertEqual(manager.panels.first?.serviceName, "espdisplay")
     }
 
-    /// The common case: a panel reporting in repeatedly under its own name is
-    /// not a rename and must not fan out into duplicates.
+    /// Repeated telemetry updates an existing record but never invents one.
     func testRepeatedInfoUnderTheSameNameIsNotAMigration() throws {
-        let manager = makeManager()
+        let manager = makeManager([controllablePanel()])
         let info = try makeInfo(name: "studio-display", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])
 
         for _ in 0..<3 {
@@ -320,7 +318,185 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertEqual(manager.panels.count, 1)
     }
 
-    // MARK: USB port assignment
+    // MARK: record ownership and deletion
+
+    func testDiscoveryDoesNotCreateARecord() {
+        let manager = makeManager()
+
+        manager.noteDiscovery([makeDevice("unowned-display")])
+
+        XCTAssertTrue(manager.panels.isEmpty)
+        XCTAssertFalse(manager.hasRecord(forServiceName: "unowned-display"))
+    }
+
+    func testUnknownSessionIsStoppedInsteadOfCreatingARecord() {
+        let manager = makeManager()
+        let session = makeSession(name: "unowned-display")
+
+        manager.register(session)
+
+        XCTAssertTrue(session.isStopped)
+        XCTAssertTrue(manager.panels.isEmpty)
+    }
+
+    func testLegacyPrimaryIDFallsBackToCanonicalUSBIdentity() throws {
+        var panel = controllablePanel(serviceName: "old-name")
+        panel.hardwareID = "esp32c6-legacy"
+        panel.usbHardwareID = "020000123456"
+        panel.usbPort = "/dev/cu.usbmodem-old"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-new"])
+
+        XCTAssertTrue(manager.shouldLaunchDiscoveredService("new-name"))
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-new",
+            name: "new-name",
+            hardwareID: "020000123456")
+        XCTAssertEqual(
+            manager.currentUSBPort(for: "old-name"),
+            "/dev/cu.usbmodem-new")
+
+        let session = makeSession(name: "new-name")
+        manager.register(session, provisional: true)
+        manager.update(
+            .info(try makeInfo(
+                name: "new-name", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])),
+            for: "new-name",
+            sessionID: session.id)
+
+        XCTAssertEqual(manager.panels.count, 1)
+        XCTAssertEqual(manager.panels.first?.serviceName, "new-name")
+        XCTAssertFalse(session.senderPausedForTesting)
+    }
+
+    func testProvisionalSessionBindsExternallyRenamedRecordByHardwareID() throws {
+        let manager = makeManager([controllablePanel(serviceName: "old-name")])
+        let session = makeSession(name: "new-name")
+        manager.register(session, provisional: true)
+        XCTAssertTrue(session.senderPausedForTesting)
+
+        manager.update(
+            .info(try makeInfo(
+                name: "new-name", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])),
+            for: "new-name",
+            sessionID: session.id)
+
+        XCTAssertEqual(manager.panels.count, 1)
+        XCTAssertEqual(manager.panels.first?.serviceName, "new-name")
+        XCTAssertFalse(session.senderPausedForTesting)
+    }
+
+    func testProvisionalUnownedSessionIsStoppedAfterIdentity() throws {
+        let manager = makeManager([controllablePanel()])
+        let session = makeSession(name: "unowned-display")
+        manager.register(session, provisional: true)
+
+        manager.update(
+            .info(try makeInfo(
+                name: "unowned-display", deviceID: [9, 9, 9, 9, 9, 9])),
+            for: "unowned-display",
+            sessionID: session.id)
+
+        XCTAssertTrue(session.isStopped)
+        XCTAssertEqual(manager.panels.count, 1)
+        XCTAssertFalse(manager.shouldLaunchDiscoveredService("unowned-display"))
+    }
+
+    func testLateSupersededRegistrationStopsSession() throws {
+        let manager = makeManager([controllablePanel(serviceName: "old-name")])
+        manager.update(
+            .info(try makeInfo(
+                name: "new-name", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])),
+            for: "new-name")
+        let stale = makeSession(name: "old-name")
+
+        manager.register(stale, provisional: true)
+
+        XCTAssertTrue(stale.isStopped)
+    }
+
+    func testStaleSessionTokenCannotOverwriteReplacementRecord() throws {
+        let manager = makeManager([controllablePanel()])
+        let current = makeSession(name: "studio-display")
+        manager.register(current)
+
+        manager.update(
+            .info(try makeInfo(
+                name: "studio-display", deviceID: [9, 9, 9, 9, 9, 9])),
+            for: "studio-display",
+            sessionID: UUID())
+
+        XCTAssertEqual(manager.panels.first?.hardwareID, "020000123456")
+    }
+
+    func testSelectedOnlineRecordCanBeDeleted() {
+        let manager = makeManager([controllablePanel()])
+        let session = makeSession(name: "studio-display")
+        manager.register(session)
+        XCTAssertTrue(manager.canForget("studio-display"))
+
+        manager.forget("studio-display")
+
+        XCTAssertTrue(session.isStopped)
+        XCTAssertTrue(manager.panels.isEmpty)
+        XCTAssertNil(manager.selectedServiceName)
+    }
+
+    func testDeletingSelectionChoosesNearestRemainingRecord() {
+        let manager = makeManager([
+            controllablePanel(serviceName: "one"),
+            controllablePanel(serviceName: "two"),
+            controllablePanel(serviceName: "three"),
+        ])
+        manager.selectedServiceName = "two"
+
+        manager.forget("two")
+
+        XCTAssertEqual(manager.panels.map(\.serviceName), ["one", "three"])
+        XCTAssertEqual(manager.selectedServiceName, "three")
+    }
+
+    // MARK: USB record association
+
+
+    func testAssociatedUSBDeviceIsIdentifiedByHardwareID() {
+        let manager = PanelManager(
+            previewPanels: [controllablePanel()],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-1"])
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-1",
+            name: "studio-display",
+            hardwareID: "020000123456")
+
+        XCTAssertTrue(manager.isUSBDeviceAssociated("/dev/cu.usbmodem-1"))
+        XCTAssertEqual(
+            manager.associatedDisplayName(forUSBPath: "/dev/cu.usbmodem-1"),
+            "studio-display")
+        XCTAssertEqual(
+            manager.currentUSBPort(for: "studio-display"),
+            "/dev/cu.usbmodem-1")
+    }
+
+    func testReusedPathWithDifferentHardwareIsAvailableForAdd() {
+        var panel = controllablePanel()
+        panel.usbPort = "/dev/cu.usbmodem-1"
+        panel.usbHardwareID = "020000123456"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-1"])
+
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-1",
+            name: "new-board",
+            hardwareID: "020000abcdef")
+
+        XCTAssertFalse(manager.isUSBDeviceAssociated("/dev/cu.usbmodem-1"))
+        XCTAssertNil(manager.currentUSBPort(for: "studio-display"))
+    }
 
     /// An assigned port that is currently unplugged still has to appear in the
     /// menu, otherwise the assignment silently disappears from the UI.
@@ -333,7 +509,7 @@ final class PanelManagerTests: XCTestCase {
             usbSerialPorts: ["/dev/cu.usbmodem-1"])
 
         XCTAssertEqual(
-            manager.usbPortOptions(for: "studio-display"),
+            manager.usbPortOptions(for: "studio-display").map(\.path),
             ["/dev/cu.usbserial-GONE", "/dev/cu.usbmodem-1"])
     }
 
@@ -346,7 +522,7 @@ final class PanelManagerTests: XCTestCase {
             usbSerialPorts: ["/dev/cu.usbmodem-1", "/dev/cu.usbserial-2"])
 
         XCTAssertEqual(
-            manager.usbPortOptions(for: "studio-display"),
+            manager.usbPortOptions(for: "studio-display").map(\.path),
             ["/dev/cu.usbmodem-1", "/dev/cu.usbserial-2"])
     }
 
@@ -357,7 +533,8 @@ final class PanelManagerTests: XCTestCase {
             usbSerialPorts: ["/dev/cu.usbmodem-1"])
 
         XCTAssertEqual(
-            manager.usbPortOptions(for: "studio-display"), ["/dev/cu.usbmodem-1"])
+            manager.usbPortOptions(for: "studio-display").map(\.path),
+            ["/dev/cu.usbmodem-1"])
     }
 
     /// Clearing the assignment has to store nil, not an empty string, or the
@@ -369,11 +546,138 @@ final class PanelManagerTests: XCTestCase {
 
         manager.setUSBPort("   ", for: "studio-display")
         XCTAssertNil(manager.panels.first?.usbPort)
+        XCTAssertNil(manager.panels.first?.usbHardwareID)
 
         manager.setUSBPort("  /dev/cu.usbmodem-2  ", for: "studio-display")
         XCTAssertEqual(manager.panels.first?.usbPort, "/dev/cu.usbmodem-2")
 
         manager.setUSBPort(nil, for: "studio-display")
         XCTAssertNil(manager.panels.first?.usbPort)
+        XCTAssertNil(manager.panels.first?.usbHardwareID)
+    }
+
+    func testSelectingNamedDevicePersistsHardwareIdentity() {
+        let manager = PanelManager(
+            previewPanels: [controllablePanel()],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-1"])
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-1",
+            name: "espdisplay-3456",
+            hardwareID: "020000123456")
+
+        manager.setUSBPort("/dev/cu.usbmodem-1", for: "studio-display")
+
+        XCTAssertEqual(manager.panels.first?.usbHardwareID, "020000123456")
+        XCTAssertEqual(
+            manager.usbPortOptions(for: "studio-display").first?.displayName,
+            "espdisplay-3456")
+    }
+
+    func testHardwareIdentityFollowsDeviceToNewPort() {
+        var panel = controllablePanel()
+        panel.usbPort = "/dev/cu.usbmodem-old"
+        panel.usbHardwareID = "020000123456"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-new"])
+
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-new",
+            name: "studio-display",
+            hardwareID: "02:00:00:12:34:56")
+
+        XCTAssertEqual(manager.panels.first?.usbPort, "/dev/cu.usbmodem-new")
+        XCTAssertEqual(manager.panels.first?.usbHardwareID, "020000123456")
+    }
+
+    func testLegacyPathAssignmentMigratesAfterDeviceMoves() {
+        var panel = controllablePanel()
+        panel.usbPort = "/dev/cu.usbmodem-old"
+        panel.usbHardwareID = nil
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-new"])
+
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-new",
+            name: "studio-display",
+            hardwareID: "020000123456")
+
+        XCTAssertEqual(manager.panels.first?.usbPort, "/dev/cu.usbmodem-new")
+        XCTAssertEqual(manager.panels.first?.usbHardwareID, "020000123456")
+    }
+
+    func testAutomaticPanelDoesNotBecomeManuallyAssignedDuringProbe() {
+        let manager = PanelManager(
+            previewPanels: [controllablePanel()],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-1"])
+
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-1",
+            name: "studio-display",
+            hardwareID: "020000123456")
+
+        XCTAssertNil(manager.panels.first?.usbPort)
+        XCTAssertNil(manager.panels.first?.usbHardwareID)
+    }
+
+    func testReusedPortPromotesLegacyPanelIDBeforeMoving() {
+        var panel = controllablePanel()
+        panel.usbPort = "/dev/cu.usbmodem-reused"
+        panel.usbHardwareID = nil
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [
+                "/dev/cu.usbmodem-reused",
+                "/dev/cu.usbmodem-correct",
+            ])
+
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-reused",
+            name: "another-display",
+            hardwareID: "020000abcdef")
+        XCTAssertNil(manager.panels.first?.usbPort)
+        XCTAssertEqual(manager.panels.first?.usbHardwareID, "020000123456")
+
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-correct",
+            name: "studio-display",
+            hardwareID: "020000123456")
+        XCTAssertEqual(manager.panels.first?.usbPort, "/dev/cu.usbmodem-correct")
+        XCTAssertEqual(manager.panels.first?.usbHardwareID, "020000123456")
+    }
+
+    func testReusedPortDoesNotReplaceSavedHardwareIdentity() {
+        var panel = controllablePanel()
+        panel.usbPort = "/dev/cu.usbmodem-1"
+        panel.usbHardwareID = "020000123456"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-1"])
+
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-1",
+            name: "another-display",
+            hardwareID: "020000abcdef")
+
+        XCTAssertNil(manager.panels.first?.usbPort, "stale path hint was retained")
+        XCTAssertEqual(manager.panels.first?.usbHardwareID, "020000123456")
+        XCTAssertEqual(
+            manager.usbDeviceSelection(for: "studio-display"),
+            "hardware:020000123456")
+        XCTAssertEqual(
+            manager.usbPortOptions(for: "studio-display").first?.displayName,
+            "studio-display")
+        XCTAssertFalse(
+            manager.usbPortOptions(for: "studio-display").first?.isConnected ?? true)
+
+        manager.setUSBDeviceSelection("", for: "studio-display")
+        XCTAssertNil(manager.panels.first?.usbHardwareID)
     }
 }

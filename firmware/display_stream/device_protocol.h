@@ -124,6 +124,13 @@ enum Capability : uint32_t {
   // sends codec 3 only where it was advertised, and an older panel keeps
   // getting byte-identical full-resolution records.
   CAP_TILE_HALFRES = 1u << 17,
+  // Accepts tile records whose tile-field bit 15 marks a visible-span
+  // payload. Each run row contributes an x-offset/count descriptor followed
+  // by raw or RLE565 pixels for only those spans. The sender uses this on
+  // round glass so hidden samples neither cross the wire nor influence a
+  // shared BC1 palette. Separate from CAP_ROUND_DISPLAY because that bit is a
+  // shape fact; this one promises a decoder firmware built before it lacks.
+  CAP_TILE_VISIBLE_SPANS = 1u << 18,
 };
 
 enum class ControlOpcode : uint8_t {
