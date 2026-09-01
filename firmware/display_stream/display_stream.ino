@@ -195,6 +195,15 @@ static uint32_t lastIdleDrawAt = 0;
 static volatile bool sleepRequested = false;  // set by UDP task on ESLP
 static volatile bool wakeRequested = false;   // set by UDP task on EWAK
 static bool displaySleeping = false;
+// Signal-survey mode: tap the lit status card to turn the panel into a
+// bright, half-second-refresh RSSI meter, so a marginal panel can be walked
+// around the room to find placement that actually carries the stream -
+// sections 17.17 and 18.5-18.6 are all stories about radio placement, and
+// until now the only live readout was a laptop pinging it. Tap again to
+// exit, or resume streaming (any drawn frame clears it, like the dim
+// states). Touch boards only, by construction: the entry is a tap.
+static bool surveyActive = false;
+static uint32_t lastSurveyDrawAt = 0;
 
 // ---- Protocol (v2: dirty bands) -----------------------------------------
 // All wire-format constants and the reassembly/coalescing decision logic
@@ -2369,6 +2378,72 @@ static void drawIdleScreen() {
   lastIdleDrawAt = millis();
 }
 
+// One word for what an RSSI is worth to THIS project's stream, thresholds
+// from the measured sessions: -60s carried 430+ datagrams/s (sections
+// 17.2/18.1), -74 carried the 25 fps field result (17.17.1), -78 and worse
+// was radio-bound every time it was measured (17.17, 18.5). Not a generic
+// WiFi bar - the words answer "will the stream work HERE".
+static const char *surveyQualityWord(bool connected, int rssi) {
+  if (!connected) return "no wifi";
+  if (rssi >= -60) return "excellent";
+  if (rssi >= -70) return "good";
+  if (rssi >= -75) return "fair";
+  if (rssi >= -80) return "poor";
+  return "unusable";
+}
+
+// Compose and push the signal-survey card: the live RSSI, huge, centred,
+// at full brightness, so the panel itself is the meter while it is carried
+// around the room. Redrawn every 500 ms by loop() while surveyActive.
+static void drawSurveyScreen() {
+  if (dmaInFlight != 0) return;  // skip a beat rather than race bufB
+  const int w = bufLandscape ? PANEL_H : PANEL_W;
+  const int hgt = bufLandscape ? PANEL_W : PANEL_H;
+  const bool connected = WiFi.status() == WL_CONNECTED;
+  const int rssi = connected ? (int)WiFi.RSSI() : 0;
+
+  char lineRssi[16];
+  if (connected) {
+    snprintf(lineRssi, sizeof(lineRssi), "%d", rssi);
+  } else {
+    snprintf(lineRssi, sizeof(lineRssi), "--");
+  }
+  const char *lines[4] = {"SIGNAL", lineRssi, surveyQualityWord(connected, rssi),
+                          "tap to exit"};
+  // Per-line scales: the number dominates, everything else is legible-small.
+  // Width-capped like infoBarGlyphScale, so the C6's 172 px and the S3's 466
+  // both centre without clipping.
+  int scales[4];
+  for (int i = 0; i < 4; i++) {
+    const int wanted = i == 1 ? 8 : 2;
+    int fit = (w - 8) / ((int)strlen(lines[i]) * 6);
+    scales[i] = fit < wanted ? fit : wanted;
+    if (scales[i] < 1) scales[i] = 1;
+  }
+  int blockH = 0;
+  for (int i = 0; i < 4; i++) blockH += 9 * scales[i] + 4;
+  int y = (hgt - blockH) / 2;
+  if (y < 4) y = 4;
+
+  memset(bufB, 0, FRAME_BYTES);  // black field: maximum contrast, no burn-in
+  for (int i = 0; i < 4; i++) {
+    const int lineW = (int)strlen(lines[i]) * 6 * scales[i];
+    drawOutlinedText(bufB, w, hgt, (w - lineW) / 2, y, lines[i], scales[i]);
+    y += 9 * scales[i] + 4;
+  }
+
+  dmaMarkQueued();
+  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, w, hgt, bufB) != ESP_OK) {
+    statDrawErrors = statDrawErrors + 1;
+    dmaUnmarkFailed();
+  }
+  lastSurveyDrawAt = millis();
+  // Full brightness whatever the idle/sleep state dimmed to: a meter being
+  // carried around the room must be readable at arm's length. Exiting the
+  // survey restores the state-driven level via applyBacklight().
+  driveBrightness(255);
+}
+
 // What the quick info bar says by default: battery on a board that has one
 // and a current reading, "usb power" is folded into that by
 // formatBatteryLine already, and the WiFi line on a board with no battery to
@@ -2802,7 +2877,12 @@ static void serviceTouch() {
   touchgesture::Event event =
       touchTracker.onReport(sample.pressed, p.x, p.y, millis());
 
-  if (event.pressStarted && (idleActive || displaySleeping)) {
+  // Wake-swallow only while the panel is actually DIM: once a wake press has
+  // lit the status card (touchWakeActive), or the survey meter is up at full
+  // brightness, the next tap must reach the handlers below - that second tap
+  // is how the survey mode is entered and left.
+  if (event.pressStarted && !surveyActive &&
+      (displaySleeping || (idleActive && !touchWakeActive()))) {
     touchConsumed = true;
     touchWakeUntil = millis() + TOUCH_WAKE_MS;
     applyBacklight();
@@ -2831,6 +2911,23 @@ static void serviceTouch() {
   // do not: they already have a job (whatever the sender's gesture preset
   // binds them to), and a bar popping up on every swipe would fight that
   // rather than complement it.
+  // A tap on the lit status card enters the signal survey; a tap on the
+  // survey leaves it. Handled before the info bar and before gesture
+  // forwarding: a survey tap is panel-local by definition (the whole point
+  // is that no Mac is nearby), so the sender never hears about it.
+  if (event.gesture == touchgesture::Gesture::Tap &&
+      (surveyActive || idleActive)) {
+    surveyActive = !surveyActive;
+    if (surveyActive) {
+      Serial.println("touch: signal survey on");
+      drawSurveyScreen();
+    } else {
+      Serial.println("touch: signal survey off");
+      applyBacklight();  // back to the state-driven level
+      if (idleActive) drawIdleScreen();
+    }
+    return;
+  }
   if (event.gesture == touchgesture::Gesture::Tap) {
     showInfoBar(defaultInfoBarText());
   }
@@ -3758,15 +3855,25 @@ void loop() {
         statFramesPartial = statFramesPartial + 1;
       }
       // A drawn frame implies the sender is present and the Mac's displays
-      // are awake, so leave both dimmed states.
-      if (idleActive || displaySleeping) {
+      // are awake, so leave both dimmed states - and the signal survey,
+      // which a resumed stream has just painted over anyway.
+      if (idleActive || displaySleeping || surveyActive) {
         idleActive = false;
         displaySleeping = false;
+        surveyActive = false;
         applyBacklight();
       }
     }
   } else {
     delay(1);
+  }
+
+  // Signal-survey refresh: a live meter that only updates on entry is a
+  // photograph. Half a second tracks a walk around a room; skipped while
+  // DMA is busy rather than gated, because a beat late is fine.
+  if (surveyActive && dmaInFlight == 0 &&
+      (uint32_t)(millis() - lastSurveyDrawAt) >= 500) {
+    drawSurveyScreen();
   }
 
   // Display sleep: the Mac's screens slept, so stale pixels are pointless -
@@ -3803,8 +3910,8 @@ void loop() {
   // sender was actively streaming, flashing idleActive on for one loop
   // iteration and off the next. See millisSince's doc comment.
   uint32_t senderSilence = panelstate::millisSince(millis(), lastSenderPacketAt);
-  if (!displaySleeping && dmaInFlight == 0 && lastSenderPacketAt != 0 &&
-      senderSilence > SENDER_GONE_MS) {
+  if (!displaySleeping && !surveyActive && dmaInFlight == 0 &&
+      lastSenderPacketAt != 0 && senderSilence > SENDER_GONE_MS) {
     if (!idleActive) {
       idleActive = true;
       applyBacklight();
