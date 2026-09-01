@@ -1,5 +1,10 @@
 # ESP32-C6 Wireless macOS Extended Display — Project Plan
 
+> **Historical scope:** This is the original C6 project plan, preserved for
+> design history. It does not describe the current hardware catalog, exact
+> targets, bundle format, or flashing safeguards. See the
+> [firmware target architecture](firmware-target-architecture.md).
+
 ## Goal
 
 Turn the ESP32-C6 1.47" LCD board (172×320 ST7789 panel) into a small wireless

@@ -43,8 +43,8 @@ namespace boardpanel {
 /// Bring up the SPI/QSPI bus and the panel described by cfg.
 ///
 /// spiHz is the pixel clock; pass cfg.pclkHz unless deliberately
-/// experimenting (80MHz single-lane on the C6 LCDs, 40MHz quad on the
-/// CO5300 - both straight from the vendors' own BSPs).
+/// experimenting. Each validated profile owns its measured SPI or QSPI rate in
+/// board_config.h.
 ///
 /// doneCb fires from an ISR when a queued transfer completes; pass nullptr if
 /// the caller does not track DMA completions.
@@ -87,8 +87,8 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
   io_config.user_ctx = userCtx;
   if (cfg.isQspi()) {
     // The QSPI command envelope: [opcode 0x02][cmd][0x00] in a 32-bit
-    // command word, 8-bit parameters, all four lanes. The CO5300 driver
-    // builds the envelope; these widths are what let it through the IO layer.
+    // command word, 8-bit parameters, all four lanes. The selected QSPI panel
+    // driver builds the envelope; these widths let it through the IO layer.
     io_config.lcd_cmd_bits = 32;
     io_config.lcd_param_bits = 8;
     io_config.flags.quad_mode = 1;
@@ -109,8 +109,7 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
   // The framebuffer arrives from the Mac already in panel byte order, so the
   // ESP32 never touches a pixel. The core's ST7789 driver defaults to
   // big-endian and only diverges when this is set to LITTLE; the vendored
-  // JD9853 and CO5300 drivers do not read the field at all and their panel
-  // default is likewise big-endian. Setting BIG is therefore correct on all
+  // panel drivers keep the same panel byte order. Setting BIG is correct on all
   // and a no-op on all - it documents the buffer's contract rather than
   // changing anything.
   panel_config.data_endian = LCD_RGB_DATA_ENDIAN_BIG;

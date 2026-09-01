@@ -1,43 +1,15 @@
-// Which chip this binary was built for, as the one token the panel advertises.
+// Which chip this artifact was built for, as an independent compatibility
+// token advertised beside the exact firmware target.
 //
-// WHY THE PANEL SAYS IT RATHER THAN THE APP GUESSING. A firmware bundle carries
-// one image per chip, and whoever opens that bundle - the Mac app, on another
-// machine, weeks later - has to pick one. The only thing it knows about a panel
-// today is what the _espdisp._udp TXT records say, and none of them name the
-// chip. It could be inferred from `res=WxH`, and that would work right now,
-// because 172x320 happens to mean C6 and 466x466 happens to mean S3. It works
-// only by coincidence of the current board set, and the firmware was made
-// resolution-parametric (bandproto::Geometry, board::Config) specifically so
-// that coincidence can end: two panels of the same size on different chips, or
-// one chip driving a new size, both break the inference silently and the app
-// would push a C6 image at an S3.
+// A format-3 bundle is selected by exact target, not by chip: s3-175 and s3-185
+// both use esp32s3. The chip still provides a separate cross-check against the
+// ESP image header and prevents cross-platform mistakes such as C6 versus S3.
+// Resolution is never identity; products on different chips may share geometry.
 //
-// The cost of saying it instead is one TXT record: "chip=esp32c6" is twelve
-// bytes plus the length byte mDNS puts in front of every TXT string, announced
-// with the records already there. What it buys is the difference between
-// guessing and knowing: the app can refuse a definite mismatch ("this bundle has
-// no esp32s3 image") instead of pushing the wrong image and learning it from the
-// panel, which cannot tell until the whole two megabytes have crossed the LAN -
-// the ESP image header's chip_id is checked by esp_ota_set_boot_partition, so a
-// wrong-chip push is refused safely, but only at the end.
-//
-// THE VOCABULARY IS THE IDF'S, NOT OURS. The token is the IDF's own
-// CONFIG_IDF_TARGET string, which expands to exactly "esp32c6"
-// (esp32c6-libs/3.3.11/qio_qspi/include/sdkconfig.h:429) and exactly "esp32s3"
-// (esp32s3-libs/3.3.11/*/include/sdkconfig.h:394) in the core this firmware is
-// built with. Those are byte-identical to tools/espdisp.py's BOARDS[*].chip, to
-// the `chip` field in a .espdispfw manifest, and to the `board=` record on the
-// separate _arduino._tcp service, which the core fills in from ARDUINO_VARIANT
-// (ESPmDNS.cpp:114) and which boards.txt sets to esp32c6 and esp32s3 for these
-// two FQBNs (lines 810 and 1187). So the TXT record, the bundle, the CLI and the
-// app all spell the chip the same way, and no layer needs a translation table
-// that can rot.
-//
-// UNVERIFIED: that a real panel publishes this record and that a browser sees
-// it. No board is attached to the machine this was written on, so what is known
-// is that ESPmDNS::addServiceTxt is the same call the existing name/res/fw/
-// proto/caps records go through and those are observed to work. The record's
-// arrival has not been measured this session.
+// The vocabulary comes from the ESP-IDF CONFIG_IDF_TARGET string and stays
+// byte-identical across firmware mDNS, the CLI Board catalog, bundle manifests,
+// and Mac preflight checks. targetToken() in board_config.h owns the separate
+// exact-target vocabulary.
 #pragma once
 
 // The IDF's generated sdkconfig.h is where both CONFIG_IDF_TARGET and the
@@ -59,7 +31,7 @@ namespace chipidentity {
 /// Keep these byte-identical to tools/espdisp.py BOARDS[*].chip. They are only
 /// reached through the fallback rungs below - a real build answers with the
 /// IDF's own string - but they are what the static_asserts at the bottom of this
-/// file check that string against, so a drift between the two vocabularies is a
+/// file check that string against, so drift between the two vocabularies is a
 /// compile error on the affected target rather than a wrong image on a panel.
 ///
 /// constexpr rather than the `static const char[]` the neighbouring headers use,
@@ -71,15 +43,10 @@ static constexpr char TOKEN_ESP32S3[] = "esp32s3";
 
 /// What a build that cannot name its chip advertises.
 ///
-/// This is "I could not tell", NOT "some other chip", and the difference is the
-/// whole reason it is a defined token rather than an omitted record. A reader
-/// must treat it as missing knowledge and fall back to whatever it did before
-/// (asking, or offering every image it has), because refusing on it would turn
-/// a build this header failed to recognise into a panel nothing can update.
-/// Only a token that names a DIFFERENT chip is a contradiction worth refusing -
-/// the same three-valued stance verify_ota_target takes in tools/espdisp.py,
-/// where a panel mDNS cannot find is a note and a panel that answers with the
-/// wrong chip is a refusal.
+/// This means "the build could not name its chip", not "another chip". Readers
+/// treat it as missing evidence. Exact-target policy decides whether an
+/// operation may continue; same-chip S3 updates still require a discovered,
+/// matching target and chip and therefore fail closed on this value.
 static constexpr char TOKEN_UNKNOWN[] = "unknown";
 
 /// Equality for two tokens, usable in a constant expression.
@@ -167,8 +134,8 @@ constexpr const char *chipToken() {
 // time. A real build defines both CONFIG_IDF_TARGET and its CONFIG_IDF_TARGET_
 // flag, so these are the checks that the fallback rungs of the ladder answer
 // with the same string the IDF does - the one thing a host test cannot see,
-// because neither macro exists there. Compiled for both targets on every build,
-// so a token renamed on one side fails the build of the affected chip.
+// because neither macro exists there. Compiled for every exact target, so a
+// token renamed on one side fails the affected build.
 #if defined(CONFIG_IDF_TARGET) && defined(CONFIG_IDF_TARGET_ESP32C6)
 static_assert(sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32C6),
               "CONFIG_IDF_TARGET disagrees with TOKEN_ESP32C6: the advertised "
