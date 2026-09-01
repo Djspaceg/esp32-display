@@ -100,9 +100,10 @@ final class DeviceBrowser {
             // .bonjour descriptor every result's metadata is .none no matter
             // what the panel advertises. Nothing on NWParameters affects this.
             // It costs one TXT query per service, which the same header warns
-            // "may increase network traffic"; against that, res and chip are
-            // the difference between streaming a panel at its own resolution
-            // and guessing, and they are needed before a session exists.
+            // "may increase network traffic"; against that, res, chip and target
+            // are the difference between streaming a panel at its own resolution,
+            // selecting its exact firmware image, and guessing. All three are
+            // needed before a session exists.
             for: .bonjourWithTXTRecord(type: "_espdisp._udp", domain: nil), using: params)
         self.browser = browser
 

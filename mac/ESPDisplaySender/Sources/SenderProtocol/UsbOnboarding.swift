@@ -137,6 +137,9 @@ public enum UsbOnboarding {
         public var tool: ToolAvailability
         /// The bundle to write, embedded or chosen. Nil when neither is available.
         public var bundle: FirmwareBundle?
+        /// Exact firmware target selected for a flash. ESP32-C6 may resolve to
+        /// `c6` automatically; same-chip S3 boards require an explicit choice.
+        public var target: String?
         public var detection: ChipDetection
         public var existing: ExistingFirmware
         /// The network to join. Empty when none is chosen.
@@ -150,6 +153,7 @@ public enum UsbOnboarding {
             mode: Mode,
             tool: ToolAvailability,
             bundle: FirmwareBundle?,
+            target: String? = nil,
             detection: ChipDetection,
             existing: ExistingFirmware,
             ssid: String,
@@ -160,6 +164,7 @@ public enum UsbOnboarding {
             self.mode = mode
             self.tool = tool
             self.bundle = bundle
+            self.target = target
             self.detection = detection
             self.existing = existing
             self.ssid = ssid
@@ -250,6 +255,10 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
         /// No firmware bundle at all: the app shipped without one and none was
         /// chosen.
         case chooseBundle
+        /// The chip is known, but more than one exact target can use it.
+        case chooseTarget
+        /// The selected exact target is absent or belongs to another chip.
+        case noImageForTarget
         /// The bundle has no image for the chip on the cable. The wrong file.
         case noImageForChip
         /// The bundle carries an image for this chip but cannot bring up a blank
@@ -276,8 +285,9 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
         case .flash, .configureOnly:
             return true
         case .chooseDevice, .connectDevice, .detectChip, .chipUnreadable,
-             .chooseBundle, .noImageForChip, .bundleIsOTAOnly, .esptoolMissing,
-             .chooseNetwork, .enterPassword, .boardNotAnswering:
+             .chooseBundle, .chooseTarget, .noImageForTarget, .noImageForChip,
+             .bundleIsOTAOnly, .esptoolMissing, .chooseNetwork, .enterPassword,
+             .boardNotAnswering:
             return false
         }
     }
@@ -377,7 +387,10 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                         + "said what it is.",
                     action: .chipUnreadable)
             case .detected(let chip, _):
-                guard bundle.image(forChip: chip) != nil else {
+                let compatibleTargets = Array(Set(bundle.images
+                    .filter { $0.chip == chip }
+                    .flatMap(\.targets))).sorted()
+                guard !compatibleTargets.isEmpty else {
                     return UsbOnboardingPlan(
                         headline: "Nothing in this firmware for this board",
                         detail: "This board is an \(chip). The bundle carries "
@@ -386,13 +399,40 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                             + "tools/espdisp.py bundle --board.",
                         action: .noImageForChip)
                 }
-                guard let writes = bundle.flashPlan(forChip: chip) else {
+
+                let target: String
+                if let selected = request.target?.trimmingCharacters(
+                    in: .whitespacesAndNewlines), !selected.isEmpty {
+                    guard let image = bundle.image(forTarget: selected),
+                          image.chip == chip
+                    else {
+                        return UsbOnboardingPlan(
+                            headline: "That target does not match this board",
+                            detail: "The selected target \(selected) is not a \(chip) "
+                                + "image in this bundle. Choose one of "
+                                + "\(compatibleTargets.joined(separator: ", ")).",
+                            action: .noImageForTarget)
+                    }
+                    target = selected
+                } else if chip == "esp32c6", compatibleTargets.contains("c6") {
+                    // C6 has one exact target, so its chip identifies it safely.
+                    target = "c6"
+                } else {
+                    return UsbOnboardingPlan(
+                        headline: "Choose the exact display target",
+                        detail: "esptool identified the \(chip), but that does not "
+                            + "distinguish its attached display and pin layout. "
+                            + "Choose \(compatibleTargets.joined(separator: " or ")) "
+                            + "before anything is written.",
+                        action: .chooseTarget)
+                }
+
+                guard let writes = bundle.flashPlan(forTarget: target) else {
                     return UsbOnboardingPlan(
                         headline: "This bundle cannot set up a blank board",
-                        detail: "It is a format 1 bundle: it carries the "
-                            + "application image and not the bootloader, "
-                            + "partition table and boot_app0 a board that has "
-                            + "never been flashed also needs. It is still a good "
+                        detail: "The \(target) image does not carry the bootloader, "
+                            + "partition table and boot_app0 a board that has never "
+                            + "been flashed also needs. It is still a good "
                             + "over-the-air update. Build a current one with "
                             + "tools/espdisp.py bundle.",
                         action: .bundleIsOTAOnly)
@@ -400,10 +440,11 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                 if let plan = networkPlan(request) { return plan }
                 let bytes = writes.reduce(0) { $0 + $1.payload.count }
                 return UsbOnboardingPlan(
-                    headline: "Write \(bundle.firmwareVersion) to this \(chip)",
+                    headline: "Write \(bundle.firmwareVersion) for \(target)",
                     detail: describeExisting(request.existing)
                         + "\(writes.count) parts, \(bytes) bytes, are written in "
-                        + "one go at the addresses the bundle carries. Then the "
+                        + "one go at the addresses the bundle carries. The image "
+                        + "targets \(target) and its chip matches \(chip). Then the "
                         + "credentials for \"\(request.ssid)\" go over the same "
                         + "cable and the board restarts, joins, and appears in "
                         + "the sidebar by itself.",

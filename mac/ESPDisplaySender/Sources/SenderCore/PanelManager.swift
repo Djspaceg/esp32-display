@@ -41,6 +41,9 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// remembered from a previous run would risk pushing an image chosen from
     /// stale information. A panel has to be discovered to be pushed to anyway.
     var chip: String?
+    /// Exact firmware target from mDNS, such as `c6`, `s3-175`, or `s3-185`.
+    /// Discovery-scoped and deliberately excluded from `PersistedPanel`.
+    var target: String?
     /// What this panel says its screen is, from its `res` TXT record, or nil when
     /// it did not say or said something `PanelGeometry.isStreamable` refused.
     ///
@@ -805,7 +808,17 @@ final class PanelManager: ObservableObject {
         let visible = Set(devices.map(\.name))
         unownedServiceNames.formIntersection(visible)
         for index in panels.indices {
-            panels[index].discovered = visible.contains(panels[index].serviceName)
+            let isVisible = visible.contains(panels[index].serviceName)
+            panels[index].discovered = isVisible
+            if !isVisible {
+                // These values are evidence from this browse generation, not
+                // durable hardware facts. Clear them when the service leaves so
+                // a reboot into target-less firmware cannot inherit an earlier
+                // S3 target and pass an OTA safety check on stale metadata.
+                panels[index].chip = nil
+                panels[index].target = nil
+                panels[index].geometry = nil
+            }
         }
         // Discovery attaches live state to records; it does not create records.
         // A physical board becomes a sidebar item only through Add Display over
@@ -829,6 +842,11 @@ final class PanelManager: ObservableObject {
             guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
             else { continue }
             panels[index].chip = device.metadata.chip
+        }
+        for device in devices where device.metadata.target != nil {
+            guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
+            else { continue }
+            panels[index].target = device.metadata.target
         }
         // The resolution takes the same treatment and for the same reason: a
         // second browse result without metadata must not erase a `res` that has
@@ -1595,6 +1613,8 @@ final class PanelManager: ObservableObject {
         /// Live session address. Nil when OTA is unavailable but USB is safe.
         var address: String?
         let chip: String?
+        /// Exact firmware target captured from live discovery. Never persisted.
+        let target: String?
         let firmwareVersion: String
         /// A currently connected, positively identity-matched USB device.
         var usbDevice: WifiConfigUI.USBDeviceOption?
@@ -1609,7 +1629,8 @@ final class PanelManager: ObservableObject {
 
         init(
             serviceName: String, displayName: String, hardwareID: String,
-            address: String?, chip: String?, firmwareVersion: String,
+            address: String?, chip: String?, target: String? = nil,
+            firmwareVersion: String,
             usbDevice: WifiConfigUI.USBDeviceOption? = nil,
             usbPathGeneration: Int? = nil,
             usbAllowsLegacyIdentity: Bool = false
@@ -1619,6 +1640,7 @@ final class PanelManager: ObservableObject {
             self.hardwareID = hardwareID
             self.address = address
             self.chip = chip
+            self.target = target
             self.firmwareVersion = firmwareVersion
             self.usbDevice = usbDevice
             self.usbPathGeneration = usbPathGeneration
@@ -1737,6 +1759,7 @@ final class PanelManager: ObservableObject {
             hardwareID: hardwareID,
             address: address,
             chip: panel.chip,
+            target: panel.target,
             firmwareVersion: version,
             usbDevice: usbDevice,
             usbPathGeneration: usbGeneration,
@@ -1793,7 +1816,27 @@ final class PanelManager: ObservableObject {
         }
     }
 
-    /// Write a current format-2 bundle over USB after re-verifying every fact
+    /// Whether CFGSHOW's physical panel/controller profile belongs to an exact
+    /// firmware target. This is independent of the esptool chip check: `board=`
+    /// is `st77916`/`co5300`/etc., not `esp32s3`.
+    nonisolated static func physicalBoard(
+        _ board: String, isCompatibleWith target: String
+    ) -> Bool {
+        switch target {
+        case "c6":
+            return board == "st7789" || board == "jd9853"
+        case "s3-175":
+            return board == "co5300"
+        case "s3-185":
+            return board == "st77916"
+        default:
+            // A future app can teach this build the new composition. Treating an
+            // unknown pair as compatible would turn missing knowledge into proof.
+            return false
+        }
+    }
+
+    /// Write a current bundle over USB after re-verifying every fact
     /// that makes the selected serial path safe. No whole-chip erase is issued,
     /// so NVS credentials, name, brightness, orientation and OTA password remain.
     func flashFirmwareOverUSB(
@@ -1838,6 +1881,8 @@ final class PanelManager: ObservableObject {
         }
 
         progress(.readingChip)
+        var cfgTarget: String?
+        var cfgBoard: String?
         switch await probeUSBDevice(path, timeout: 3) {
         case .unavailable(let reason):
             return .failure(
@@ -1852,6 +1897,16 @@ final class PanelManager: ObservableObject {
                     "USB device mismatch",
                     "The device at \(path) did not report \(target.hardwareID), "
                         + "so nothing was written.")
+            }
+            cfgTarget = identity.target
+            cfgBoard = identity.board
+            if let liveTarget = target.target,
+               let reportedTarget = identity.target,
+               liveTarget != reportedTarget {
+                return .failure(
+                    "USB target mismatch",
+                    "The live panel reports target \(liveTarget), but CFGSHOW now "
+                        + "reports \(reportedTarget). Nothing was written.")
             }
         }
         guard usbPathGeneration(path) == expectedGeneration else {
@@ -1892,6 +1947,15 @@ final class PanelManager: ObservableObject {
                 "esptool read \(detectedMAC ?? "no MAC address") from \(path), "
                     + "not \(target.hardwareID), so nothing was written.")
         }
+        if let reportedTarget = cfgTarget,
+           let physicalBoard = cfgBoard,
+           !Self.physicalBoard(physicalBoard, isCompatibleWith: reportedTarget) {
+            return .failure(
+                "USB board profile mismatch",
+                "CFGSHOW reports physical board \(physicalBoard) with target "
+                    + "\(reportedTarget), which is not a supported composition. "
+                    + "Nothing was written.")
+        }
         if let expectedChip = target.chip,
            !expectedChip.isEmpty,
            expectedChip != ServiceMetadata.unknownChip,
@@ -1901,6 +1965,32 @@ final class PanelManager: ObservableObject {
                 "The display reported \(expectedChip), but esptool read "
                     + "\(detectedChip). Nothing was written.")
         }
+        let exactTarget = cfgTarget ?? target.target
+            ?? (detectedChip == "esp32c6" ? "c6" : nil)
+        guard let exactTarget else {
+            return .failure(
+                "Exact firmware target unavailable",
+                "This \(detectedChip) board did not report an exact target through "
+                    + "CFGSHOW. Same-chip S3 display variants cannot be selected "
+                    + "safely without target metadata, so nothing was written.")
+        }
+        if detectedChip == "esp32s3", cfgTarget == nil {
+            return .failure(
+                "Exact firmware target unavailable",
+                "CFGSHOW did not report whether this S3 is s3-175 or s3-185, so "
+                    + "nothing was written.")
+        }
+        guard let selectedImage = bundle.image(forTarget: exactTarget) else {
+            return .failure(
+                "Wrong firmware bundle",
+                "This bundle has no image for exact target \(exactTarget).")
+        }
+        guard selectedImage.chip == detectedChip else {
+            return .failure(
+                "USB chip mismatch",
+                "The \(exactTarget) image is for \(selectedImage.chip), but esptool "
+                    + "read \(detectedChip). Nothing was written.")
+        }
         guard usbPathGeneration(path) == expectedGeneration,
               usbDevices.contains(where: { $0.path == path && $0.isConnected })
         else {
@@ -1908,15 +1998,12 @@ final class PanelManager: ObservableObject {
                 "USB device changed",
                 "The serial device changed after chip detection, so nothing was written.")
         }
-        guard let writes = bundle.flashPlan(forChip: detectedChip) else {
-            let imageExists = bundle.image(forChip: detectedChip) != nil
+        guard let writes = bundle.flashPlan(forTarget: exactTarget) else {
             return .failure(
-                imageExists ? "Bundle is OTA-only" : "Wrong firmware bundle",
-                imageExists
-                    ? "This format-1 bundle has an application image but not the "
-                        + "bootloader, partition table and boot_app0 required for "
-                        + "a safe USB write. Choose a current format-2 bundle."
-                    : "This bundle has no image for \(detectedChip).")
+                "Bundle is OTA-only",
+                "The \(exactTarget) image does not include the bootloader, partition "
+                    + "table and boot_app0 required for a safe USB write. Choose a "
+                    + "current format-3 bundle.")
         }
 
         do {
@@ -2095,6 +2182,8 @@ final class PanelManager: ObservableObject {
         var mode: UsbOnboarding.Mode
         /// nil in configure-only mode, where nothing is written.
         var bundle: FirmwareBundle?
+        /// Exact firmware target selected in the Add Display sheet.
+        var target: String?
         var chip: String?
         var mac: String?
         /// Canonical station-MAC identity learned from CFGSHOW or esptool.
@@ -2172,6 +2261,7 @@ final class PanelManager: ObservableObject {
         // enough on current firmware; blank/legacy boards are verified through
         // esptool's chip and MAC read, which is non-destructive.
         var cfgIdentityMatched = false
+        var cfgTarget: String?
         if case .identified(let identity) = await probeUSBDevice(request.port, timeout: 3),
            let reportedID = ConfigCommands.canonicalHardwareID(identity.hardwareID) {
             guard reportedID == stableID else {
@@ -2182,7 +2272,18 @@ final class PanelManager: ObservableObject {
                 return false
             }
             cfgIdentityMatched = true
+            cfgTarget = identity.target
+            if let selectedTarget = request.target,
+               let reportedTarget = identity.target,
+               selectedTarget != reportedTarget {
+                operationOutcome = .failure(
+                    "USB target mismatch",
+                    "The selected target is \(selectedTarget), but CFGSHOW reports "
+                        + "\(reportedTarget). Nothing was written.")
+                return false
+            }
         }
+        var verifiedChip = request.chip
         if request.mode == .flashAndConfigure || !cfgIdentityMatched {
             guard let tool = request.tool else {
                 operationOutcome = .failure(
@@ -2201,6 +2302,7 @@ final class PanelManager: ObservableObject {
                         + "so nothing was written.")
                 return false
             }
+            verifiedChip = chip
         }
         guard usbPathGeneration(request.port) == request.usbPathGeneration else {
             operationOutcome = .failure(
@@ -2213,9 +2315,16 @@ final class PanelManager: ObservableObject {
             name: request.name, ssid: request.ssid, password: request.password)
 
         if request.mode == .flashAndConfigure {
-            guard let bundle = request.bundle, let chip = request.chip,
+            let exactTarget = request.target
+                ?? cfgTarget
+                ?? (verifiedChip == "esp32c6" ? "c6" : nil)
+            guard let bundle = request.bundle,
+                  let chip = verifiedChip,
+                  let exactTarget,
+                  let image = bundle.image(forTarget: exactTarget),
+                  image.chip == chip,
                   let tool = request.tool,
-                  let writes = bundle.flashPlan(forChip: chip)
+                  let writes = bundle.flashPlan(forTarget: exactTarget)
             else {
                 // The sheet's button is gated on `UsbOnboardingPlan.canStart`, so
                 // reaching here means the two disagree. Reported rather than
@@ -2223,8 +2332,8 @@ final class PanelManager: ObservableObject {
                 // shipped app.
                 operationOutcome = .failure(
                     "Cannot write this board",
-                    "The firmware, the chip and the esptool to write with are not "
-                        + "all known, so nothing was sent.")
+                    "The firmware, exact target, chip and esptool are not all known "
+                        + "and mutually compatible, so nothing was sent.")
                 return false
             }
             do {
@@ -2345,6 +2454,10 @@ final class PanelManager: ObservableObject {
 
     func usbHardwareID(for path: String) -> String? {
         usbDevices.first(where: { $0.path == path })?.hardwareID
+    }
+
+    func usbTarget(for path: String) -> String? {
+        usbDevices.first(where: { $0.path == path })?.target
     }
 
     func currentUSBPort(for serviceName: String) -> String? {
@@ -2490,12 +2603,20 @@ final class PanelManager: ObservableObject {
 
     /// Record identity learned either by a background CFGSHOW probe or by the
     /// setup sheet's selected-device inspection.
-    func noteUSBIdentity(path: String, name: String?, hardwareID: String?) {
+    func noteUSBIdentity(
+        path: String,
+        name: String?,
+        hardwareID: String?,
+        target: String? = nil,
+        board: String? = nil
+    ) {
         guard let index = usbDevices.firstIndex(where: { $0.path == path }) else { return }
         let canonicalID = ConfigCommands.canonicalHardwareID(hardwareID)
         let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedName?.isEmpty == false { usbDevices[index].name = trimmedName }
         if let canonicalID { usbDevices[index].hardwareID = canonicalID }
+        if let target, !target.isEmpty { usbDevices[index].target = target }
+        if let board, !board.isEmpty { usbDevices[index].board = board }
 
         guard let canonicalID else { return }
         var associationChanged = false
@@ -2563,9 +2684,18 @@ final class PanelManager: ObservableObject {
             return .unavailable("USB device changed while it was being identified")
         }
         guard case .identified(let identity) = result else { return result }
+        if let index = usbDevices.firstIndex(where: { $0.path == path }) {
+            // A completed CFGSHOW probe is authoritative for discovery-scoped
+            // target metadata. Clear an older value when current firmware omits it.
+            usbDevices[index].target = identity.target
+            usbDevices[index].board = identity.board
+        }
         noteUSBIdentity(
-            path: path, name: identity.name,
-            hardwareID: identity.hardwareID)
+            path: path,
+            name: identity.name,
+            hardwareID: identity.hardwareID,
+            target: identity.target,
+            board: identity.board)
         return result
     }
 

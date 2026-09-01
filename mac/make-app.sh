@@ -74,20 +74,28 @@ trap cleanup EXIT INT TERM
 # it here uses the CLI on the machine of whoever packages the app, which is a
 # different thing from requiring it of whoever uses the app.
 #
-# Reused when it is already there, because compiling both boards takes minutes and
-# most rebuilds are not firmware changes. ESPDISP_REBUILD_FIRMWARE=1 forces a fresh
-# one; ESPDISP_SKIP_FIRMWARE=1 packages without any, and the app then asks for a
-# file. A failure here is a warning rather than the end of the build: an app with no
-# embedded firmware still works, and still updates panels over the air.
+# Reused only when it is a current format bundle covering every exact target.
+# Compiling all three targets takes minutes, but reusing a legacy two-image bundle
+# would silently omit s3-185 from the installed app. ESPDISP_REBUILD_FIRMWARE=1
+# forces a fresh one; ESPDISP_SKIP_FIRMWARE=1 packages without any, and the app
+# then asks for a file. A build failure remains a warning: the rest of the app
+# still works and a bundle can be chosen manually.
 FIRMWARE_DIR="$HERE/ESPDisplaySender/Resources"
 FIRMWARE="$FIRMWARE_DIR/espdisp-default.espdispfw"
+firmware_bundle_is_current() {
+  python3 "$HERE/../tools/espdisp.py" bundle-info --require-all-targets "$FIRMWARE" >/dev/null 2>&1
+}
 if [[ -n "${ESPDISP_SKIP_FIRMWARE:-}" ]]; then
   echo "skipping the default firmware bundle (ESPDISP_SKIP_FIRMWARE is set)"
-elif [[ -f "$FIRMWARE" && -z "${ESPDISP_REBUILD_FIRMWARE:-}" ]]; then
+elif [[ -f "$FIRMWARE" && -z "${ESPDISP_REBUILD_FIRMWARE:-}" ]] && firmware_bundle_is_current; then
   echo "reusing $FIRMWARE ($(stat -f %z "$FIRMWARE") bytes)"
+  echo "  verified format 3 coverage: c6, s3-175, s3-185"
   echo "  rebuild it with ESPDISP_REBUILD_FIRMWARE=1 $0"
 else
-  echo "building the default firmware bundle (compiles both boards, minutes)"
+  if [[ -f "$FIRMWARE" && -z "${ESPDISP_REBUILD_FIRMWARE:-}" ]]; then
+    echo "existing firmware bundle is stale or incomplete; rebuilding it"
+  fi
+  echo "building the default firmware bundle (compiles three exact targets, minutes)"
   mkdir -p "$FIRMWARE_DIR"
   if ! python3 "$HERE/../tools/espdisp.py" bundle --output "$FIRMWARE"; then
     echo "warning: could not build a firmware bundle; the app will ask for one" >&2

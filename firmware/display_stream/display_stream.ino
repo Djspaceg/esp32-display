@@ -103,9 +103,9 @@ static String defaultDeviceName() {
 // ---- Board identity ---------------------------------------------------
 // On the C6, one binary serves both Waveshare 1.47" boards: the panel
 // controller and pin map differ, the 172x320 resolution does not. Detected at
-// boot, cached only when explicitly forced with CFGBOARD over USB. On the S3
-// the variant is a compile-time fact (COMPILED_VARIANT) and none of the probe
-// machinery runs.
+// boot, cached only when explicitly forced with CFGBOARD over USB. S3 geometry
+// is compile-time selected: the default is 1.75C/CO5300 and
+// ESPDISP_BOARD_S3_185 selects 1.85C/ST77916.
 static board::Variant boardVariant = board::COMPILED_VARIANT;
 static const board::Config *bcfg = &board::configFor(board::COMPILED_VARIANT);
 
@@ -2107,7 +2107,7 @@ static void processConfigLine(char *line) {
     Serial.printf(
         "CFGINFO ssid64=%s name64=%s id=%02x%02x%02x%02x%02x%02x "
         "connected=%d ip=%s rssi=%d flip=%d rot=%u auto=%u effective=%u "
-        "motion=%d bl=%s pwr=%s board=%s bat=%d ota=%s ssid=%s\n",
+        "motion=%d bl=%s pwr=%s board=%s target=%s bat=%d ota=%s ssid=%s\n",
         (const char *)b64, (const char *)name64,
         deviceId[0], deviceId[1], deviceId[2],
         deviceId[3], deviceId[4], deviceId[5],
@@ -2116,7 +2116,7 @@ static void processConfigLine(char *line) {
         panelRotation == 2, panelRotation,
         automaticRotation, effectivePanelRotation(), motionAvailable,
         blIsHigh() ? "high" : "low", panelManuallyOff ? "off" : "on",
-        board::variantToken(boardVariant),
+        board::variantToken(boardVariant), board::targetToken(boardVariant),
         batteryPercentOrUnknown(),
         otapolicy::statusToken(currentOtaStatus()), cfgSsid.c_str());
   }
@@ -2841,6 +2841,7 @@ static void addMdnsService() {
   // records beside it go through, not on an observation.
   const char *caps = capsBuf, *res = resBuf, *proto = protoBuf;
   const char *chip = chipidentity::chipToken();
+  const char *target = board::targetToken(boardVariant);
   MDNS.setInstanceName(cfgName);
   MDNS.addService("espdisp", "udp", UDP_PORT);
   MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
@@ -2849,6 +2850,7 @@ static void addMdnsService() {
   MDNS.addServiceTxt("espdisp", "udp", "proto", proto);
   MDNS.addServiceTxt("espdisp", "udp", "caps", caps);
   MDNS.addServiceTxt("espdisp", "udp", "chip", chip);
+  MDNS.addServiceTxt("espdisp", "udp", "target", target);
   if (otaActive) {
     // _arduino._tcp is what espota/arduino-cli browse for. It is registered from
     // here rather than by ArduinoOTA itself (which is why setupOta calls
@@ -2860,6 +2862,10 @@ static void addMdnsService() {
     // without this line OTA would silently stop being discoverable after the
     // first heal.
     MDNS.enableArduino(OTA_PORT, true /* auth required */);
+    // `enableArduino` supplies chip-level board metadata. Add the exact image
+    // target separately so OTA tooling can distinguish the two ESP32-S3 panels;
+    // their ESP image headers both say esp32s3 and cannot protect this boundary.
+    MDNS.addServiceTxt("arduino", "tcp", "target", target);
   }
 }
 
@@ -3193,14 +3199,10 @@ void setup() {
     }
   }
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-  const uint32_t flashBytes = ESP.getFlashChipSize();
-  bcfg = &board::s3AmoledConfigForFlashSize(flashBytes);
-  Serial.printf(
-      "board: fixed at compile time: %s (%luMB flash profile, lcd_rst=%d, "
-      "tp_rst=%d)\n",
-      board::variantToken(boardVariant),
-      (unsigned long)(flashBytes / (1024 * 1024)), bcfg->pinRst,
-      bcfg->pinTouchRst);
+  bcfg = &board::configFor(boardVariant);
+  Serial.printf("board: fixed at compile time: %s (target=%s)\n",
+                board::variantToken(boardVariant),
+                board::targetToken(boardVariant));
 #else
   bcfg = &board::configFor(boardVariant);
 #endif
@@ -3219,9 +3221,10 @@ void setup() {
   }
   Serial.printf("board: %s\n", bcfg->name);
   Serial.printf("  driver=%s bus=%s %ux%u pclk=%luMHz\n",
-                bcfg->driver == board::PanelDriver::Co5300   ? "CO5300"
-                : bcfg->driver == board::PanelDriver::Jd9853 ? "JD9853"
-                                                             : "ST7789",
+                bcfg->driver == board::PanelDriver::Co5300    ? "CO5300"
+                : bcfg->driver == board::PanelDriver::St77916 ? "ST77916"
+                : bcfg->driver == board::PanelDriver::Jd9853  ? "JD9853"
+                                                               : "ST7789",
                 bcfg->isQspi() ? "qspi" : "spi", bcfg->panelW, bcfg->panelH,
                 (unsigned long)(bcfg->pclkHz / 1000000));
   Serial.printf("  sclk=%d d0/mosi=%d d1=%d d2=%d d3=%d cs=%d dc=%d rst=%d bl=%d boot=%d led=%d\n",
@@ -3264,7 +3267,10 @@ void setup() {
   // Touch, before WiFi: the capability bits mDNS advertises depend on whether
   // the controller answered, so this has to be settled before we announce.
   touchCalibration = bcfg->touch == board::TouchController::Cst9217
-      ? touchmap::CST9217_ON_CO5300 : touchmap::AXS5106L_ON_C6;
+      ? touchmap::CST9217_ON_CO5300
+      : bcfg->touch == board::TouchController::Cst816
+          ? touchmap::CST816_ON_ST77916
+          : touchmap::AXS5106L_ON_C6;
   touchAvailable = boardtouch::init(*bcfg);
   // Battery telemetry, for the same reason and before announce: CAP_BATTERY
   // depends on either the S3 PMU or the C6 touch board's voltage divider being

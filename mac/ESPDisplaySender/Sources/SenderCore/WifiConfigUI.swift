@@ -92,6 +92,23 @@ enum WifiConfigUI {
     struct USBIdentity: Equatable, Sendable {
         var name: String
         var hardwareID: String?
+        /// Exact firmware target reported by CFGSHOW.
+        var target: String?
+        /// Physical panel/controller profile reported by CFGSHOW (`st7789`,
+        /// `jd9853`, `co5300`, or `st77916`), when present.
+        var board: String?
+
+        init(
+            name: String,
+            hardwareID: String? = nil,
+            target: String? = nil,
+            board: String? = nil
+        ) {
+            self.name = name
+            self.hardwareID = ConfigCommands.canonicalHardwareID(hardwareID)
+            self.target = target
+            self.board = board
+        }
     }
 
     /// A serial transport plus the device identity shown in pickers.
@@ -107,17 +124,23 @@ enum WifiConfigUI {
         var path: String
         var name: String?
         var hardwareID: String?
+        var target: String?
+        var board: String?
         var isConnected: Bool
 
         init(
             path: String,
             name: String? = nil,
             hardwareID: String? = nil,
+            target: String? = nil,
+            board: String? = nil,
             isConnected: Bool = true
         ) {
             self.path = path
             self.name = name
             self.hardwareID = ConfigCommands.canonicalHardwareID(hardwareID)
+            self.target = target
+            self.board = board
             self.isConnected = isConnected
         }
 
@@ -141,7 +164,7 @@ enum WifiConfigUI {
 
         /// Compatibility shorthand for name-only fixtures and older firmware.
         static func named(_ name: String) -> PortProbe {
-            .identified(USBIdentity(name: name, hardwareID: nil))
+            .identified(USBIdentity(name: name))
         }
     }
 
@@ -564,14 +587,28 @@ enum WifiConfigUI {
         return ssid?.isEmpty == false ? ssid : nil
     }
 
+    /// Parse the identity fields from one CFGSHOW response.
+    static func usbIdentity(from info: String) -> USBIdentity {
+        func token(_ key: String) -> String? {
+            guard let value = ConfigCommands.field(key, from: info),
+                  !value.isEmpty,
+                  value == value.trimmingCharacters(in: .whitespacesAndNewlines)
+            else { return nil }
+            return value
+        }
+        return USBIdentity(
+            name: ConfigCommands.decodeField("name64=", from: info) ?? "",
+            hardwareID: ConfigCommands.hardwareID(from: info),
+            target: token("target="),
+            board: token("board="))
+    }
+
     /// Ask a port to identify itself. CFGSHOW answering at all is what proves
     /// the path speaks our configuration protocol.
     static func probePort(_ port: String, timeout: TimeInterval) -> PortProbe {
         switch sendCommand("CFGSHOW", port: port, timeout: timeout) {
         case .success(let info):
-            return .identified(USBIdentity(
-                name: ConfigCommands.decodeField("name64=", from: info) ?? "",
-                hardwareID: ConfigCommands.hardwareID(from: info)))
+            return .identified(usbIdentity(from: info))
         case .failure(let reason):
             return .unavailable(reason)
         }

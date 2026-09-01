@@ -301,6 +301,27 @@ final class PortSelectionTests: XCTestCase {
 }
 
 final class USBDeviceOptionTests: XCTestCase {
+    func testCFGSHOWCarriesExactTargetAndPhysicalBoard() {
+        let name = Data("round-panel".utf8).base64EncodedString()
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=\(name) id=28:84:85:55:55:94 "
+                + "target=s3-185 board=st77916")
+
+        XCTAssertEqual(identity.name, "round-panel")
+        XCTAssertEqual(identity.hardwareID, "288485555594")
+        XCTAssertEqual(identity.target, "s3-185")
+        XCTAssertEqual(identity.board, "st77916")
+    }
+
+    func testUSBDeviceOptionCarriesExactTargetAndPhysicalBoard() {
+        let device = WifiConfigUI.USBDeviceOption(
+            path: "/dev/cu.usbmodem1101",
+            target: "s3-185",
+            board: "st77916")
+        XCTAssertEqual(device.target, "s3-185")
+        XCTAssertEqual(device.board, "st77916")
+    }
+
     func testReportedNameIsThePickerLabelInsteadOfThePort() {
         let device = WifiConfigUI.USBDeviceOption(
             path: "/dev/cu.usbmodem1101",

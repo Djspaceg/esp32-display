@@ -88,29 +88,72 @@ def check_accepts(fn, what):
 
 def test_board_table():
     check_equal(
+        sorted(espdisp.BOARDS), ["c6", "s3-175", "s3-185"],
+        "only canonical exact targets are board-table keys")
+    check_equal(
         espdisp.BOARDS["c6"].fqbn,
         "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M",
         "C6 FQBN",
     )
+    for key in ("s3-175", "s3-185"):
+        check_equal(
+            espdisp.BOARDS[key].fqbn,
+            "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
+            "%s FQBN" % key,
+        )
+        check_equal(espdisp.BOARDS[key].chip, "esp32s3", "%s chip" % key)
     check_equal(
-        espdisp.BOARDS["s3"].fqbn,
-        "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
-        "S3 FQBN",
-    )
-    # No PartitionScheme= on either: the default table already has two app slots
-    # and otadata, so OTA needed no change. If that ever has to change it must
-    # change in the README too, and this is the tripwire.
+        espdisp.BOARDS["s3-185"].extra_flags,
+        ("-DESPDISP_BOARD_S3_185",),
+        "the 1.85-inch profile has its compile-time selector")
+    check_equal(espdisp.BOARDS["s3-175"].extra_flags, (), "the 1.75-inch default")
     for key, board in espdisp.BOARDS.items():
         check("PartitionScheme" not in board.fqbn, "%s uses the default scheme" % key)
     check_equal(espdisp.board_key_for_fqbn("esp32:esp32:esp32c6"), "c6", "FQBN -> key")
     check_equal(
-        espdisp.board_key_for_fqbn("esp32:esp32:esp32s3:PSRAM=opi"), "s3",
-        "FQBN with options -> key")
+        espdisp.board_key_for_fqbn("esp32:esp32:esp32s3:PSRAM=opi"), None,
+        "an S3 FQBN cannot identify the attached display")
     check_equal(espdisp.board_key_for_fqbn("esp32:esp32:esp32c3"), None, "unknown chip")
     check_equal(espdisp.board_key_for_fqbn("nonsense"), None, "malformed FQBN")
-    check_equal(espdisp.board_key_for_chip("esp32c6"), "c6", "chip -> key")
-    check_equal(espdisp.board_key_for_chip("ESP32S3"), "s3", "chip -> key, any case")
+    check_equal(espdisp.board_key_for_chip("esp32c6"), "c6", "unique chip -> target")
+    check_equal(
+        espdisp.board_key_for_chip("ESP32S3"), None,
+        "a shared chip cannot identify an exact target")
+    check_equal(
+        espdisp.board_keys_for_chip("ESP32S3"), ["s3-175", "s3-185"],
+        "all exact S3 targets remain discoverable")
+    check_equal(espdisp.canonical_board_key("s3"), "s3-175", "CLI compatibility alias")
+    check_equal(espdisp.canonical_board_key("s3-185"), "s3-185", "canonical key stays exact")
     check_equal(espdisp.board_key_for_chip(""), None, "no chip -> no key")
+
+
+def test_argparse_board_targets():
+    parser = espdisp.build_parser()
+    check_equal(
+        espdisp.board_choices(), ["c6", "s3", "s3-175", "s3-185"],
+        "argparse accepts canonical targets plus the compatibility alias")
+    for command in ("compile", "flash"):
+        args = parser.parse_args([command, "--board", "s3"])
+        check_equal(args.board, "s3", "%s accepts the s3 alias" % command)
+    ota = parser.parse_args(["ota", "panel.local", "--board", "s3"])
+    check_equal(ota.board, "s3", "OTA accepts the s3 alias")
+    bundle = parser.parse_args(
+        ["bundle", "--board", "s3", "--board", "s3-175", "--board", "s3-185"])
+    check_equal(
+        espdisp.bundle_board_keys(bundle.board), ["s3-175", "s3-185"],
+        "alias and canonical spelling do not duplicate a bundle build")
+    default_bundle = parser.parse_args(["bundle"])
+    check_equal(default_bundle.board, None, "bundle selection remains optional")
+    check_equal(
+        espdisp.bundle_board_keys(default_bundle.board),
+        ["c6", "s3-175", "s3-185"],
+        "default bundle builds every canonical target exactly once")
+    info = parser.parse_args([
+        "bundle-info", "--require-all-targets", "/tmp/firmware.espdispfw",
+    ])
+    check_equal(
+        info.require_all_targets, True,
+        "bundle-info can enforce complete packaging coverage")
 
 
 # --------------------------------------------------------------------------
@@ -120,43 +163,37 @@ def test_board_table():
 
 def test_resolve_board():
     c6_port = espdisp.PortInfo("/dev/cu.usbmodem1", ["c6"], "c6 board")
-    s3_port = espdisp.PortInfo("/dev/cu.usbmodem2", ["s3"], "s3 board")
+    s3_port = espdisp.PortInfo("/dev/cu.usbmodem2", ["s3-175"], "s3 board")
     blank = espdisp.PortInfo("/dev/cu.usbmodem3", [], "unknown")
-    both = espdisp.PortInfo("/dev/cu.usbmodem4", ["c6", "s3"], "ambiguous")
+    both = espdisp.PortInfo(
+        "/dev/cu.usbmodem4", ["s3-175", "s3-185"], "ambiguous")
 
-    # arduino-cli named one board: that is the answer, no probing needed.
     check_equal(espdisp.resolve_board(None, c6_port).key, "c6", "port names c6")
-    check_equal(espdisp.resolve_board(None, s3_port).key, "s3", "port names s3")
-
-    # An explicit board agreeing with the port, and an explicit board for a port
-    # arduino-cli could not identify - both fine.
+    check_equal(
+        espdisp.resolve_board(None, s3_port).key, "s3-175", "port names exact S3 target")
     check_equal(espdisp.resolve_board("c6", c6_port).key, "c6", "explicit agrees")
-    check_equal(espdisp.resolve_board("s3", blank).key, "s3", "explicit, port silent")
+    check_equal(
+        espdisp.resolve_board("s3", blank).key, "s3-175", "CLI alias resolves exactly")
+    check_equal(
+        espdisp.resolve_board("s3-185", blank).key, "s3-185", "explicit 1.85 target")
     check_equal(espdisp.resolve_board("c6", None).key, "c6", "explicit, no port")
 
-    # An explicit board contradicting the port is refused, and the message names
-    # both the fix and the escape hatch - there is no override flag, so a user
-    # whose arduino-cli is wrong needs to be told where to go instead.
     check_fails(
-        lambda: espdisp.resolve_board("s3", c6_port),
+        lambda: espdisp.resolve_board("s3-175", c6_port),
         "contradicts",
         "explicit board contradicting the port",
     )
     check_fails(
-        lambda: espdisp.resolve_board("s3", c6_port),
+        lambda: espdisp.resolve_board("s3-175", c6_port),
         "no flag to override",
         "the refusal admits it cannot be overridden",
     )
     check_fails(
-        lambda: espdisp.resolve_board("s3", c6_port),
+        lambda: espdisp.resolve_board("s3-175", c6_port),
         "arduino-cli compile -b esp32:esp32:esp32s3",
         "the refusal spells out the raw command as the way past",
     )
 
-    # No board and nothing to go on: refuse, naming both choices. Probing is
-    # tried first, so it is stubbed out - a real probe resets the board - and its
-    # progress line is swallowed to keep this runner's output as quiet as
-    # firmware/test/run_tests.sh.
     with unittest.mock.patch.object(
         espdisp, "probe_chip", return_value=None
     ), unittest.mock.patch("sys.stdout", io.StringIO()):
@@ -170,11 +207,21 @@ def test_resolve_board():
             "could not determine which chip",
             "ambiguous port, probe fails",
         )
-    # And when probing does answer, it is believed.
     with unittest.mock.patch.object(
-        espdisp, "probe_chip", return_value="s3"
+        espdisp, "probe_chip", return_value="esp32c6"
     ), unittest.mock.patch("sys.stdout", io.StringIO()):
-        check_equal(espdisp.resolve_board(None, blank).key, "s3", "probe answers")
+        check_equal(espdisp.resolve_board(None, blank).key, "c6", "unique C6 probe answers")
+    with unittest.mock.patch.object(
+        espdisp, "probe_chip", return_value="esp32s3"
+    ), unittest.mock.patch("sys.stdout", io.StringIO()):
+        check_fails(
+            lambda: espdisp.resolve_board(None, blank),
+            "used by multiple display boards",
+            "an ESP32-S3 probe requires an explicit display target")
+        check_fails(
+            lambda: espdisp.resolve_board(None, blank),
+            "--board s3-175|s3-185",
+            "the S3 ambiguity names both exact choices")
     check_fails(
         lambda: espdisp.resolve_board(None, None),
         "--board is required",
@@ -207,6 +254,7 @@ DISCOVERY_JSON = {
                 "protocol": "network",
                 "properties": {
                     "board": "esp32c6",
+                    "target": "c6",
                     "hostname": "panel.local.",
                     "port": "3232",
                     "auth_upload": "yes",
@@ -219,7 +267,20 @@ DISCOVERY_JSON = {
                 "protocol": "network",
                 "properties": {
                     "board": "esp32s3",
+                    "target": "s3-175",
                     "hostname": "round-panel.local.",
+                    "port": "3232",
+                },
+            }
+        },
+        {
+            "port": {
+                "address": "192.168.1.44",
+                "protocol": "network",
+                "properties": {
+                    "board": "esp32s3",
+                    "target": "s3-185",
+                    "hostname": "lcd-panel.local.",
                     "port": "3232",
                 },
             }
@@ -230,9 +291,10 @@ DISCOVERY_JSON = {
 
 def test_network_discovery():
     ports = espdisp.parse_network_ports(DISCOVERY_JSON)
-    check_equal(len(ports), 2, "serial ports are not network ports")
+    check_equal(len(ports), 3, "serial ports are not network ports")
     check_equal(ports[0].address, "192.168.1.42", "network address")
     check_equal(ports[0].board, "esp32c6", "board TXT record")
+    check_equal(ports[0].target, "c6", "exact target TXT record")
     check_equal(ports[0].hostname, "panel.local", "hostname, trailing dot stripped")
 
     # Nothing to parse is not an error: no panels found is a normal answer.
@@ -252,15 +314,16 @@ def test_network_discovery():
             "properties": {"hostname": "mystery.local."}}}]})
     check_equal(len(partial), 1, "board-less panel is still a port")
     check_equal(partial[0].board, "", "board-less panel has no board")
+    check_equal(partial[0].target, "", "target-less panel has no target")
 
     # Every way a user names the same panel.
     for host in ("192.168.1.42", "panel.local", "panel.local.", "PANEL", "panel"):
         found = espdisp.network_port_for_host(ports, host)
         check(found is not None and found.board == "esp32c6", "host %r resolves" % host)
     check_equal(
-        espdisp.network_port_for_host(ports, "round-panel.local").board,
-        "esp32s3",
-        "the other panel resolves to the other board")
+        espdisp.network_port_for_host(ports, "lcd-panel.local").target,
+        "s3-185",
+        "same-chip panels retain distinct exact targets")
     # An unknown host is None, never a guess: the caller must be able to tell
     # "not found" from "wrong board", because only one of them refuses.
     check_equal(
@@ -272,29 +335,49 @@ def test_network_discovery():
 
 
 def test_classify_ota_target():
-    c6, s3 = espdisp.BOARDS["c6"], espdisp.BOARDS["s3"]
+    c6 = espdisp.BOARDS["c6"]
+    s3_175 = espdisp.BOARDS["s3-175"]
+    s3_185 = espdisp.BOARDS["s3-185"]
 
-    check_equal(espdisp.classify_ota_target(c6, "esp32c6"), espdisp.TARGET_OK, "c6 ok")
-    check_equal(espdisp.classify_ota_target(s3, "esp32s3"), espdisp.TARGET_OK, "s3 ok")
     check_equal(
-        espdisp.classify_ota_target(c6, "ESP32C6 "), espdisp.TARGET_OK,
-        "case and whitespace do not make a mismatch")
+        espdisp.classify_ota_target(c6, "c6", "esp32c6"),
+        espdisp.TARGET_OK, "exact C6 target")
+    check_equal(
+        espdisp.classify_ota_target(s3_175, "s3-175", "esp32s3"),
+        espdisp.TARGET_OK, "exact S3-1.75 target")
+    check_equal(
+        espdisp.classify_ota_target(s3_185, "S3-185 ", "esp32s3"),
+        espdisp.TARGET_OK, "target comparison normalizes case and whitespace")
+    check_equal(
+        espdisp.classify_ota_target(s3_185, "s3-185", "esp32c6"),
+        espdisp.TARGET_WRONG, "matching target still requires a matching chip")
+    check_equal(
+        espdisp.classify_ota_target(s3_185, "s3-185", ""),
+        espdisp.TARGET_UNKNOWN, "target without independent chip is unconfirmed")
+    check_equal(
+        espdisp.classify_ota_target(s3_175, "s3-185", "esp32s3"),
+        espdisp.TARGET_WRONG, "same-chip exact target mismatch refuses")
+    check_equal(
+        espdisp.classify_ota_target(c6, "s3-175", "esp32c6"),
+        espdisp.TARGET_WRONG, "exact target is classified before chip")
 
-    # The case this whole check exists for.
     check_equal(
-        espdisp.classify_ota_target(c6, "esp32s3"), espdisp.TARGET_WRONG,
-        "S3 panel, C6 image")
+        espdisp.classify_ota_target(c6, "", "esp32c6"),
+        espdisp.TARGET_OK, "chip confirms the one known C6 target")
     check_equal(
-        espdisp.classify_ota_target(s3, "esp32c6"), espdisp.TARGET_WRONG,
-        "C6 panel, S3 image")
-
-    # Anything this tool cannot place is UNKNOWN, not WRONG. Refusing on an
-    # unrecognised board would turn "I do not know" into "you are wrong", and
-    # would break the day a third variant is added to the firmware first.
+        espdisp.classify_ota_target(s3_175, "", "esp32s3"),
+        espdisp.TARGET_UNKNOWN, "S3 chip alone cannot confirm 1.75")
+    check_equal(
+        espdisp.classify_ota_target(s3_185, "", "esp32s3"),
+        espdisp.TARGET_UNKNOWN, "S3 chip alone cannot confirm 1.85")
+    check_equal(
+        espdisp.classify_ota_target(c6, "", "esp32s3"),
+        espdisp.TARGET_WRONG, "different known chip is wrong")
     for advertised in ("", "   ", "esp32c3", "esp32", "nonsense"):
         check_equal(
-            espdisp.classify_ota_target(c6, advertised), espdisp.TARGET_UNKNOWN,
-            "board=%r cannot be placed" % advertised)
+            espdisp.classify_ota_target(c6, "", advertised),
+            espdisp.TARGET_UNKNOWN,
+            "chip=%r cannot be placed" % advertised)
 
 
 def test_discovery_command():
@@ -353,27 +436,58 @@ def test_verify_ota_target():
 
     check("Confirmed" in run(c6, "panel.local", ports), "agreement is confirmed")
 
-    # A panel nobody can find is a warning, not a refusal. mDNS not answering is
-    # not evidence about the chip, and pushing to a panel on another subnet -
-    # which works today - must keep working.
+    check_equal(
+        espdisp.ota_target_requires_exact_discovery(c6), False,
+        "C6 chip identity names its one exact target")
+    check_equal(
+        espdisp.ota_target_requires_exact_discovery(espdisp.BOARDS["s3-175"]), True,
+        "S3 OTA requires exact discovered target metadata")
+
+    # A C6 panel nobody can find is a warning, not a refusal: its chip maps to
+    # one exact target and cross-subnet pushes remain possible.
     text = run(c6, "10.0.0.9", ports)
     check("Not found" in text, "an undiscovered panel is only a note")
     check("taken on trust" in text, "and says what that means")
     check(len(run(c6, "panel.local", [])) > 0, "discovery finding nothing is survivable")
 
     # A board it cannot place is also only a note.
-    mystery = [espdisp.NetworkPort("10.0.0.5", "mystery.local", "esp32c3")]
-    check("cannot place" in run(c6, "10.0.0.5", mystery), "unplaceable board is a note")
+    mystery = [espdisp.NetworkPort("10.0.0.5", "mystery.local", "esp32c3", "")]
+    check("do not uniquely confirm" in run(c6, "10.0.0.5", mystery),
+          "unplaceable metadata is a note")
 
     # A definite contradiction refuses, and names the target to use instead.
     check_fails(
         lambda: run(c6, "round-panel.local", ports),
-        "advertises board=esp32s3",
+        "advertises target=s3-175",
         "pushing a C6 image at the S3 panel")
     check_fails(
         lambda: run(c6, "round-panel.local", ports),
-        "--board s3",
-        "and the refusal names the right target")
+        "--board s3-175",
+        "and the refusal names the exact target")
+    check_fails(
+        lambda: run(espdisp.BOARDS["s3-175"], "lcd-panel.local", ports),
+        "advertises target=s3-185",
+        "same-chip target mismatch is refused")
+    legacy_s3 = [espdisp.NetworkPort(
+        "192.168.1.45", "legacy.local", "esp32s3", "")]
+    check_fails(
+        lambda: run(espdisp.BOARDS["s3-175"], "legacy.local", legacy_s3),
+        "matching exact target and chip metadata",
+        "target-less S3 is refused rather than falsely confirmed")
+    check_fails(
+        lambda: run(espdisp.BOARDS["s3-185"], "10.0.0.9", ports),
+        "was not found with exact target metadata",
+        "an undiscovered S3 is refused rather than taken on trust")
+
+    disabled = espdisp.build_parser().parse_args([
+        "ota", "lcd-panel.local", "--board", "s3-185",
+        "--password", "12345678", "--discovery-timeout", "0",
+    ])
+    with unittest.mock.patch.object(espdisp, "espota_path", return_value="/tmp/espota.py"):
+        check_fails(
+            lambda: disabled.func(disabled),
+            "--discovery-timeout cannot be disabled",
+            "the CLI cannot bypass exact S3 target verification")
 
 
 # --------------------------------------------------------------------------
@@ -511,8 +625,9 @@ def test_app_image_picks_the_app_not_the_flash_image():
 # manifest's offsets, so a reader that scanned for a marker rather than doing
 # arithmetic would find one here and go wrong. Both carry non-UTF-8 bytes, because
 # an app image is not text and nothing in this path may treat it as text.
-FAKE_C6 = b"\x00\x01\x02\xffc6 image ESPDISPFW2\nESPDISPFW1\n\x00 tail"
-FAKE_S3 = bytes(range(256)) + b"\xffs3 image"
+FAKE_C6 = b"\x00\x01\x02\xffc6 image ESPDISPFW3\nESPDISPFW2\nESPDISPFW1\n\x00 tail"
+FAKE_S3 = bytes(range(256)) + b"\xffs3-175 image"
+FAKE_S3_185 = bytes(reversed(range(256))) + b"\xffs3-185 image"
 
 
 def fake_flash_payloads(key):
@@ -566,6 +681,7 @@ def image_entry(key, blob):
     """One pre-offset manifest entry, the way cmd_bundle builds them."""
     return {
         "board": key,
+        "targets": [key],
         "chip": espdisp.BOARDS[key].chip,
         "fqbn": espdisp.BOARDS[key].fqbn,
         "filename": "display_stream.ino.bin",
@@ -592,12 +708,12 @@ def payload_bytes(*keys_and_blobs):
     return out
 
 
-SAMPLE_PAYLOADS = (("c6", FAKE_C6), ("s3", FAKE_S3))
+SAMPLE_PAYLOADS = (("c6", FAKE_C6), ("s3-175", FAKE_S3))
 
 
 def sample_manifest(entries=None):
     if entries is None:
-        entries = [image_entry("c6", FAKE_C6), image_entry("s3", FAKE_S3)]
+        entries = [image_entry("c6", FAKE_C6), image_entry("s3-175", FAKE_S3)]
     return espdisp.bundle_manifest(
         "1.2.0",
         entries,
@@ -608,16 +724,31 @@ def sample_manifest(entries=None):
 
 
 def sample_flash_payloads(*keys):
-    return {espdisp.BOARDS[key].chip: fake_flash_payloads(key) for key in keys}
+    return {key: fake_flash_payloads(key) for key in keys}
 
 
 def sample_bundle():
     manifest = sample_manifest()
     return manifest, espdisp.pack_bundle(
         manifest,
-        {"esp32c6": FAKE_C6, "esp32s3": FAKE_S3},
-        sample_flash_payloads("c6", "s3"),
+        {"c6": FAKE_C6, "s3-175": FAKE_S3},
+        sample_flash_payloads("c6", "s3-175"),
     )
+
+
+def two_s3_bundle():
+    """A v3 fixture with two distinct images sharing the ESP32-S3 chip."""
+    entries = [
+        image_entry("s3-175", FAKE_S3),
+        image_entry("s3-185", FAKE_S3_185),
+    ]
+    manifest = sample_manifest(entries)
+    data = espdisp.pack_bundle(
+        manifest,
+        {"s3-175": FAKE_S3, "s3-185": FAKE_S3_185},
+        sample_flash_payloads("s3-175", "s3-185"),
+    )
+    return manifest, data
 
 
 def handmade_bundle(manifest_bytes, payload=b"", magic=None, line=None):
@@ -887,9 +1018,9 @@ def test_bundle_layout_is_pinned():
 
     data = espdisp.pack_bundle(
         manifest,
-        {"esp32c6": PINNED_APP},
+        {"c6": PINNED_APP},
         {
-            "esp32c6": {
+            "c6": {
                 "bootloader": PINNED_BOOTLOADER,
                 "partitions": PINNED_PARTITIONS,
                 "boot_app0": PINNED_BOOT_APP0,
@@ -922,11 +1053,11 @@ def test_bundle_layout_is_pinned():
     # than a shape nobody parses.
     got_manifest, payloads, flash_payloads = espdisp.unpack_bundle(data)
     check_equal(got_manifest, manifest, "the manifest survives a round trip")
-    check_equal(payloads, {"esp32c6": PINNED_APP}, "so does the app payload")
+    check_equal(payloads, {"c6": PINNED_APP}, "so does the app payload")
     check_equal(
         flash_payloads,
         {
-            "esp32c6": {
+            "c6": {
                 "bootloader": PINNED_BOOTLOADER,
                 "partitions": PINNED_PARTITIONS,
                 "boot_app0": PINNED_BOOT_APP0,
@@ -962,7 +1093,7 @@ def test_generation_one_layout_is_pinned_and_still_read():
 
     manifest, payloads, flash_payloads = espdisp.unpack_bundle(data)
     check_equal(manifest["format"], 1, "read as format 1")
-    check_equal(payloads, {"esp32c6": PINNED_APP}, "the app payload is reachable")
+    check_equal(payloads, {"c6": PINNED_APP}, "the app payload is reachable")
     # The one thing that is different about it, and the reason the app has to ask:
     # there is nothing here to write to a blank board.
     check_equal(flash_payloads, {}, "a v1 bundle carries no flash parts")
@@ -975,6 +1106,46 @@ def test_generation_one_layout_is_pinned_and_still_read():
         lambda: espdisp.unpack_bundle(b"ESPDISPFW2\n0000000350\n" + want_json + PINNED_APP),
         "magic means format 2",
         "generation 2's magic over a format 1 manifest")
+
+
+def test_legacy_target_mapping():
+    """Legacy board fields map deterministically without changing legacy bytes."""
+    expected = {
+        "c6": "c6",
+        "s3": "s3-175",
+        "s3-175": "s3-175",
+        "s3-185": "s3-185",
+    }
+    for board_name, target in expected.items():
+        chip = "esp32c6" if board_name == "c6" else "esp32s3"
+        entry = {
+            "board": board_name,
+            "chip": chip,
+            "fqbn": "esp32:esp32:%s" % chip,
+            "filename": "display_stream.ino.bin",
+            "bytes": len(PINNED_APP),
+            "sha256": PINNED_APP_SHA,
+        }
+        manifest = handmade_manifest([entry], format=1)
+        data = handmade_bundle(
+            espdisp.encode_manifest(manifest), PINNED_APP,
+            magic=espdisp.BUNDLE_MAGIC_V1)
+        _, payloads, flash_payloads = espdisp.unpack_bundle(data)
+        check_equal(payloads, {target: PINNED_APP}, "%s maps to %s" % (board_name, target))
+        check_equal(flash_payloads, {}, "legacy v1 remains app-only")
+
+    legacy_s3 = image_entry("s3-175", FAKE_S3)
+    legacy_s3["board"] = "s3"
+    del legacy_s3["targets"]
+    manifest = handmade_manifest([legacy_s3], format=2)
+    data = handmade_bundle(
+        espdisp.encode_manifest(manifest), payload_bytes(("s3-175", FAKE_S3)),
+        magic=espdisp.BUNDLE_MAGIC_V2)
+    _, payloads, flash_payloads = espdisp.unpack_bundle(data)
+    check_equal(payloads, {"s3-175": FAKE_S3}, "v2 s3 never maps to s3-185")
+    check_equal(
+        flash_payloads, {"s3-175": fake_flash_payloads("s3-175")},
+        "v2 flash parts use the mapped exact target")
 
 
 def test_flash_part_vocabulary():
@@ -1250,7 +1421,8 @@ def test_collect_flash_parts():
         with unittest.mock.patch.object(espdisp, "core_boot_app0", lambda: boot_app0), \
                 unittest.mock.patch.object(
                     espdisp, "core_bootloader_address", lambda chip: 0x0):
-            entries, payloads = espdisp.collect_flash_parts(espdisp.BOARDS["s3"], export)
+            entries, payloads = espdisp.collect_flash_parts(
+                espdisp.BOARDS["s3-175"], export)
 
         check_equal(
             [entry["role"] for entry in entries],
@@ -1294,7 +1466,8 @@ def test_collect_flash_parts():
                 unittest.mock.patch.object(
                     espdisp, "core_bootloader_address", lambda chip: 0x0):
             check_fails(
-                lambda: espdisp.collect_flash_parts(espdisp.BOARDS["s3"], export),
+                lambda: espdisp.collect_flash_parts(
+                    espdisp.BOARDS["s3-175"], export),
                 "is empty",
                 "a zero-byte binary in the export")
         # A missing one names the file rather than the role, because the fix is to
@@ -1304,7 +1477,8 @@ def test_collect_flash_parts():
                 unittest.mock.patch.object(
                     espdisp, "core_bootloader_address", lambda chip: 0x0):
             check_fails(
-                lambda: espdisp.collect_flash_parts(espdisp.BOARDS["s3"], export),
+                lambda: espdisp.collect_flash_parts(
+                    espdisp.BOARDS["s3-175"], export),
                 "expected exactly one *.ino.partitions.bin",
                 "an export with no partition table in it")
     finally:
@@ -1349,7 +1523,7 @@ def test_bundle_manifest_offsets():
     check_equal(second["bytes"], len(FAKE_S3), "for both images")
     check_equal(first["chip"], "esp32c6", "chip token, the app's vocabulary")
     check_equal(second["chip"], "esp32s3", "and the other one")
-    check_equal(manifest["format"], 2, "format generation")
+    check_equal(manifest["format"], 3, "format generation")
     check_equal(manifest["firmware_version"], "1.2.0", "version as given")
     check_equal(manifest["source_commit"], "a" * 40, "provenance is carried")
     check_equal(manifest["source_dirty"], False, "and so is cleanliness")
@@ -1357,7 +1531,7 @@ def test_bundle_manifest_offsets():
     check_equal(sorted(manifest), sorted(espdisp.MANIFEST_KEYS), "no key is missing")
     for image in manifest["images"]:
         check_equal(
-            sorted(image), sorted(espdisp.IMAGE_KEYS_V2), "no image key is missing")
+            sorted(image), sorted(espdisp.IMAGE_KEYS_V3), "no image key is missing")
         check_equal(
             [part["role"] for part in image["flash_parts"]],
             list(espdisp.REQUIRED_FLASH_ROLES),
@@ -1400,7 +1574,7 @@ def test_bundle_manifest_offsets():
             image["flash_parts"][0]["offset"], image["offset"] + size,
             "and so does the first flash part's, for %d bytes" % size)
         # And the file it produces agrees, which is what the offsets are for.
-        packed = espdisp.pack_bundle(one, {"esp32c6": blob}, sample_flash_payloads("c6"))
+        packed = espdisp.pack_bundle(one, {"c6": blob}, sample_flash_payloads("c6"))
         check_equal(
             packed[image["offset"]:], payload_bytes(("c6", blob)),
             "the payloads land at the stated offsets for %d bytes" % size)
@@ -1431,61 +1605,110 @@ def test_bundle_manifest_offsets():
         "an image with no flash parts at all is refused by the writer")
 
 
+    check_fails(
+        lambda: espdisp.bundle_manifest(
+            "1.2.0", [dict(image_entry("c6", FAKE_C6), targets=[])],
+            "2026-01-02T03:04:05Z"),
+        "non-empty targets list",
+        "format 3 rejects an empty targets list")
+    check_fails(
+        lambda: espdisp.bundle_manifest(
+            "1.2.0", [dict(image_entry("c6", FAKE_C6), targets=["   "])],
+            "2026-01-02T03:04:05Z"),
+        "no usable target",
+        "format 3 rejects a blank target string")
+    check_fails(
+        lambda: espdisp.bundle_manifest(
+            "1.2.0", [dict(image_entry("c6", FAKE_C6), targets=["c6", "c6"])],
+            "2026-01-02T03:04:05Z"),
+        "lists target c6 twice",
+        "one image cannot repeat an exact target")
+
+
 def test_bundle_round_trip():
     manifest, data = sample_bundle()
     got, payloads, flash_payloads = espdisp.unpack_bundle(data)
 
     check_equal(got, manifest, "the manifest round trips unchanged")
-    check_equal(sorted(payloads), ["esp32c6", "esp32s3"], "keyed by chip token")
-    # Byte for byte, not merely the right length: the images are pushed to a panel
-    # that validates a hash of its own, so a payload that survives with the right
-    # size and the wrong bytes would be the worst possible outcome.
-    check_equal(payloads["esp32c6"], FAKE_C6, "the C6 image, byte for byte")
-    check_equal(payloads["esp32s3"], FAKE_S3, "the S3 image, byte for byte")
-    check(
-        b"ESPDISPFW2\n" in payloads["esp32c6"],
-        "a payload containing the magic is framed by offsets, not by scanning")
-    check(
-        b"ESPDISPFW1\n" in payloads["esp32c6"],
-        "and the same for the older generation's magic")
+    check_equal(sorted(payloads), ["c6", "s3-175"], "keyed by exact target")
+    check_equal(payloads["c6"], FAKE_C6, "the C6 image, byte for byte")
+    check_equal(payloads["s3-175"], FAKE_S3, "the S3-1.75 image, byte for byte")
+    check(b"ESPDISPFW3\n" in payloads["c6"], "v3 magic inside payload is not scanned")
+    check(b"ESPDISPFW2\n" in payloads["c6"], "v2 magic inside payload is not scanned")
+    check(b"ESPDISPFW1\n" in payloads["c6"], "v1 magic inside payload is not scanned")
     check_equal(
-        espdisp.sha256_hex(payloads["esp32c6"]), manifest["images"][0]["sha256"],
+        espdisp.sha256_hex(payloads["c6"]), manifest["images"][0]["sha256"],
         "the hash in the manifest is the hash of the payload")
 
-    # The flash parts, keyed by chip and then by role, byte for byte and per
-    # board: identical stand-ins would let a reader that handed the C6 its S3
-    # bootloader pass, and that is a payload written to address 0x0 of a board
-    # with nothing else working on it.
-    check_equal(sorted(flash_payloads), ["esp32c6", "esp32s3"], "parts keyed by chip")
-    check_equal(flash_payloads["esp32c6"], fake_flash_payloads("c6"), "the C6's parts")
-    check_equal(flash_payloads["esp32s3"], fake_flash_payloads("s3"), "the S3's parts")
+    check_equal(sorted(flash_payloads), ["c6", "s3-175"], "parts keyed by target")
+    check_equal(flash_payloads["c6"], fake_flash_payloads("c6"), "the C6's parts")
+    check_equal(
+        flash_payloads["s3-175"], fake_flash_payloads("s3-175"),
+        "the S3-1.75 parts")
     check(
-        flash_payloads["esp32c6"]["bootloader"]
-        != flash_payloads["esp32s3"]["bootloader"],
-        "and the two boards' bootloaders are not interchangeable")
+        flash_payloads["c6"]["bootloader"]
+        != flash_payloads["s3-175"]["bootloader"],
+        "different targets keep distinct bootloaders")
     for image in got["images"]:
         for part in image["flash_parts"]:
-            check_equal(
-                espdisp.sha256_hex(flash_payloads[image["chip"]][part["role"]]),
-                part["sha256"],
-                "the manifest's %s %s hash is the payload's"
-                % (image["chip"], part["role"]))
+            for target in image["targets"]:
+                check_equal(
+                    espdisp.sha256_hex(flash_payloads[target][part["role"]]),
+                    part["sha256"],
+                    "the manifest's %s %s hash is the payload's"
+                    % (target, part["role"]))
 
-    # A single-image bundle is a normal file, not a special case: --board c6 on a
-    # machine that only owns one panel writes one.
-    one = espdisp.bundle_manifest(
-        "1.2.0", [image_entry("s3", FAKE_S3)], "2026-01-02T03:04:05Z")
-    _, only, only_parts = espdisp.unpack_bundle(
-        espdisp.pack_bundle(one, {"esp32s3": FAKE_S3}, sample_flash_payloads("s3")))
-    check_equal(only, {"esp32s3": FAKE_S3}, "one image round trips too")
+    s3_manifest, s3_data = two_s3_bundle()
+    got_s3, s3_payloads, s3_parts = espdisp.unpack_bundle(s3_data)
     check_equal(
-        only_parts, {"esp32s3": fake_flash_payloads("s3")}, "and so do its parts")
+        [image["chip"] for image in got_s3["images"]],
+        ["esp32s3", "esp32s3"],
+        "v3 permits duplicate chips")
+    check_equal(
+        sorted(s3_payloads), ["s3-175", "s3-185"],
+        "two S3 images are selected by exact target")
+    check_equal(s3_payloads["s3-175"], FAKE_S3, "S3-1.75 payload")
+    check_equal(s3_payloads["s3-185"], FAKE_S3_185, "S3-1.85 payload")
+    check_equal(s3_parts["s3-175"], fake_flash_payloads("s3-175"), "S3-1.75 parts")
+    check_equal(s3_parts["s3-185"], fake_flash_payloads("s3-185"), "S3-1.85 parts")
+
+    shared = image_entry("s3-175", FAKE_S3)
+    shared["targets"] = ["s3-175", "s3-175-compatible"]
+    shared_manifest = sample_manifest([shared])
+    shared_data = espdisp.pack_bundle(
+        shared_manifest,
+        {"s3-175": FAKE_S3, "s3-175-compatible": FAKE_S3},
+        {
+            "s3-175": fake_flash_payloads("s3-175"),
+            "s3-175-compatible": fake_flash_payloads("s3-175"),
+        },
+    )
+    _, shared_payloads, shared_parts = espdisp.unpack_bundle(shared_data)
+    check_equal(
+        sorted(shared_payloads), ["s3-175", "s3-175-compatible"],
+        "one image can claim multiple exact compatible profiles")
+    check_equal(
+        shared_payloads["s3-175-compatible"], FAKE_S3,
+        "each compatible target resolves to the shared bytes")
+    check_equal(
+        shared_parts["s3-175-compatible"], fake_flash_payloads("s3-175"),
+        "shared flash parts are also keyed by each exact target")
+
+    one = espdisp.bundle_manifest(
+        "1.2.0", [image_entry("s3-175", FAKE_S3)], "2026-01-02T03:04:05Z")
+    _, only, only_parts = espdisp.unpack_bundle(
+        espdisp.pack_bundle(
+            one, {"s3-175": FAKE_S3}, sample_flash_payloads("s3-175")))
+    check_equal(only, {"s3-175": FAKE_S3}, "one image round trips too")
+    check_equal(
+        only_parts, {"s3-175": fake_flash_payloads("s3-175")},
+        "and so do its parts")
 
 
 def test_pack_bundle_refusals():
     """The writer's own checks: the last place a disagreement can still be fixed."""
     manifest = sample_manifest()
-    both = sample_flash_payloads("c6", "s3")
+    both = sample_flash_payloads("c6", "s3-175")
 
     def one_image(**changes):
         """A settled single-image manifest, optionally broken in one way.
@@ -1506,7 +1729,7 @@ def test_pack_bundle_refusals():
         return one_image(flash_parts=mutate(flash_entries("c6")))
 
     check_fails(
-        lambda: espdisp.pack_bundle(manifest, {"esp32c6": FAKE_C6}, both),
+        lambda: espdisp.pack_bundle(manifest, {"c6": FAKE_C6}, both),
         "no payload was given",
         "a manifest listing an image nobody supplied")
     # The needle is the length message specifically, not the "the manifest says"
@@ -1514,21 +1737,21 @@ def test_pack_bundle_refusals():
     # looser needle would pass with the length check deleted.
     check_fails(
         lambda: espdisp.pack_bundle(
-            manifest, {"esp32c6": FAKE_C6, "esp32s3": FAKE_S3 + b"!"}, both),
+            manifest, {"c6": FAKE_C6, "s3-175": FAKE_S3 + b"!"}, both),
         "payload is %d bytes" % (len(FAKE_S3) + 1),
         "a payload whose length does not match the manifest")
     swapped = one_image()
     swapped["images"][0]["sha256"] = "0" * 64
     check_fails(
         lambda: espdisp.pack_bundle(
-            swapped, {"esp32c6": FAKE_C6}, sample_flash_payloads("c6")),
+            swapped, {"c6": FAKE_C6}, sample_flash_payloads("c6")),
         "hashes to",
         "a payload whose hash does not match the manifest")
     moved = one_image()
     moved["images"][0]["offset"] += 1
     check_fails(
         lambda: espdisp.pack_bundle(
-            moved, {"esp32c6": FAKE_C6}, sample_flash_payloads("c6")),
+            moved, {"c6": FAKE_C6}, sample_flash_payloads("c6")),
         "do not describe this file",
         "an offset that does not describe the file being written")
     check_fails(
@@ -1540,28 +1763,28 @@ def test_pack_bundle_refusals():
     # payload written to an absolute flash address on a board with nothing working
     # on it is the worst place for bytes that are not what the manifest says.
     check_fails(
-        lambda: espdisp.pack_bundle(manifest, {"esp32c6": FAKE_C6, "esp32s3": FAKE_S3}),
-        "esp32c6 bootloader but no payload",
+        lambda: espdisp.pack_bundle(manifest, {"c6": FAKE_C6, "s3-175": FAKE_S3}),
+        "no payload was given for target c6",
         "flash parts listed with no payloads supplied at all")
     short_of_one = {
-        "esp32c6": {
+        "c6": {
             role: blob for role, blob in fake_flash_payloads("c6").items()
             if role != espdisp.FLASH_ROLE_BOOT_APP0
         },
-        "esp32s3": fake_flash_payloads("s3"),
+        "s3-175": fake_flash_payloads("s3-175"),
     }
     check_fails(
         lambda: espdisp.pack_bundle(
-            manifest, {"esp32c6": FAKE_C6, "esp32s3": FAKE_S3}, short_of_one),
-        "esp32c6 boot_app0 but no payload",
+            manifest, {"c6": FAKE_C6, "s3-175": FAKE_S3}, short_of_one),
+        "no payload was given for target c6",
         "one missing flash payload, named by role")
-    stretched = dict(both, esp32c6=dict(
+    stretched = dict(both, c6=dict(
         fake_flash_payloads("c6"),
         bootloader=fake_flash_payloads("c6")[espdisp.FLASH_ROLE_BOOTLOADER] + b"!"))
     check_fails(
         lambda: espdisp.pack_bundle(
-            manifest, {"esp32c6": FAKE_C6, "esp32s3": FAKE_S3}, stretched),
-        "esp32c6 bootloader payload is",
+            manifest, {"c6": FAKE_C6, "s3-175": FAKE_S3}, stretched),
+        "c6 bootloader payload is",
         "a flash payload whose length does not match its entry")
 
     def zero_the_partition_hash(parts):
@@ -1571,14 +1794,14 @@ def test_pack_bundle_refusals():
     rehashed = one_image_with_parts(zero_the_partition_hash)
     check_fails(
         lambda: espdisp.pack_bundle(
-            rehashed, {"esp32c6": FAKE_C6}, sample_flash_payloads("c6")),
-        "esp32c6 partitions payload hashes to",
+            rehashed, {"c6": FAKE_C6}, sample_flash_payloads("c6")),
+        "c6 partitions payload hashes to",
         "a flash payload whose hash does not match its entry")
     shifted = one_image()
     shifted["images"][0]["flash_parts"][0]["offset"] += 1
     check_fails(
         lambda: espdisp.pack_bundle(
-            shifted, {"esp32c6": FAKE_C6}, sample_flash_payloads("c6")),
+            shifted, {"c6": FAKE_C6}, sample_flash_payloads("c6")),
         "do not describe this file",
         "a flash part offset that does not describe the file being written")
 
@@ -1589,7 +1812,7 @@ def test_pack_bundle_refusals():
             lambda parts, role=role: [p for p in parts if p["role"] != role])
         check_fails(
             lambda thinned=thinned: espdisp.pack_bundle(
-                thinned, {"esp32c6": FAKE_C6}, sample_flash_payloads("c6")),
+                thinned, {"c6": FAKE_C6}, sample_flash_payloads("c6")),
             "carries no %s" % role,
             "a manifest with no %s is refused by the writer" % role)
 
@@ -1599,7 +1822,7 @@ def test_pack_bundle_refusals():
 
     check_fails(
         lambda: espdisp.pack_bundle(
-            one_image_with_parts(collide), {"esp32c6": FAKE_C6},
+            one_image_with_parts(collide), {"c6": FAKE_C6},
             sample_flash_payloads("c6")),
         "writes both bootloader and partitions to flash address 0x0",
         "two parts at one flash address")
@@ -1610,10 +1833,30 @@ def test_pack_bundle_refusals():
 
     check_fails(
         lambda: espdisp.pack_bundle(
-            one_image_with_parts(land_on_the_app), {"esp32c6": FAKE_C6},
+            one_image_with_parts(land_on_the_app), {"c6": FAKE_C6},
             sample_flash_payloads("c6")),
         "writes both the app and boot_app0 to flash address 0x10000",
         "a part landing on top of the application image")
+
+
+    shared = image_entry("s3-175", FAKE_S3)
+    shared["targets"] = ["s3-175", "s3-compatible"]
+    shared_manifest = sample_manifest([shared])
+    shared_parts = fake_flash_payloads("s3-175")
+    check_fails(
+        lambda: espdisp.pack_bundle(
+            shared_manifest,
+            {"s3-175": FAKE_S3},
+            {"s3-175": shared_parts}),
+        "no payload was given for target s3-compatible",
+        "every claimed target must key the shared application payload")
+    check_fails(
+        lambda: espdisp.pack_bundle(
+            shared_manifest,
+            {"s3-175": FAKE_S3, "s3-compatible": b"x" * len(FAKE_S3)},
+            {"s3-175": shared_parts, "s3-compatible": shared_parts}),
+        "different application payloads",
+        "one image cannot receive different bytes for compatible targets")
 
 
 def test_unpack_bundle_refusals():
@@ -1641,23 +1884,19 @@ def test_unpack_bundle_refusals():
         "a file that stops inside the header")
     check_fails(
         lambda: espdisp.unpack_bundle(handmade_bundle(raw, magic=b"NOTABUNDL1\n")),
-        "does not start with the ESPDISPFW2 magic",
+        "does not start with an ESPDISPFW magic",
         "bad magic")
     check_fails(
         lambda: espdisp.unpack_bundle(b"\x00" * 64), "magic", "a file of zeros")
-    # A future generation gets a message that says which ones this tool speaks,
-    # rather than "not a bundle" - the file is fine, the reader is old. Generation
-    # 3 is the one that does not exist yet; generation 1 does and is accepted, so
-    # this is now a check that the dispatch is a lookup rather than a comparison
-    # against whatever the newest magic happens to be.
+    # Generation 4 is not supported; the refusal names all three readable ones.
     check_fails(
-        lambda: espdisp.unpack_bundle(handmade_bundle(raw, magic=b"ESPDISPFW3\n")),
+        lambda: espdisp.unpack_bundle(handmade_bundle(raw, magic=b"ESPDISPFW4\n")),
         "unsupported bundle generation",
         "a newer format generation")
     check_fails(
-        lambda: espdisp.unpack_bundle(handmade_bundle(raw, magic=b"ESPDISPFW3\n")),
-        "'ESPDISPFW1', 'ESPDISPFW2'",
-        "and it names both generations this tool does read")
+        lambda: espdisp.unpack_bundle(handmade_bundle(raw, magic=b"ESPDISPFW4\n")),
+        "'ESPDISPFW1', 'ESPDISPFW2', 'ESPDISPFW3'",
+        "and it names every generation this tool reads")
     check_fails(
         lambda: espdisp.unpack_bundle(handmade_bundle(raw, line=b"abcdefghij\n")),
         "not 10 digits",
@@ -1699,8 +1938,8 @@ def test_unpack_bundle_refusals():
             "a manifest with no %r" % key)
     check_fails(
         lambda: espdisp.unpack_bundle(
-            handmade_bundle(espdisp.encode_manifest(dict(manifest, format=3)), area)),
-        "this tool reads formats 1 and 2",
+            handmade_bundle(espdisp.encode_manifest(dict(manifest, format=4)), area)),
+        "this tool reads formats 1 and 2 and 3",
         "an unknown format generation in the manifest")
     # THE MAGIC AND THE MANIFEST'S OWN `format` HAVE TO AGREE, both ways round.
     # Two statements of one fact, so a file where they differ is self-
@@ -1709,13 +1948,13 @@ def test_unpack_bundle_refusals():
     check_fails(
         lambda: espdisp.unpack_bundle(
             handmade_bundle(espdisp.encode_manifest(dict(manifest, format=1)), area)),
-        "ESPDISPFW2 magic means format 2",
-        "a format 1 manifest behind generation 2's magic")
+        "ESPDISPFW3 magic means format 3",
+        "a format 1 manifest behind generation 3's magic")
     check_fails(
         lambda: espdisp.unpack_bundle(
             handmade_bundle(raw, area, magic=espdisp.BUNDLE_MAGIC_V1)),
         "ESPDISPFW1 magic means format 1",
-        "a format 2 manifest behind generation 1's magic")
+        "a format 3 manifest behind generation 1's magic")
     check_fails(
         lambda: espdisp.unpack_bundle(
             handmade_bundle(espdisp.encode_manifest(dict(manifest, images=[])))),
@@ -1731,7 +1970,7 @@ def test_unpack_bundle_refusals():
             handmade_bundle(espdisp.encode_manifest(dict(manifest, images=["c6"])))),
         "not a JSON object",
         "an image entry that is a string")
-    for key in espdisp.IMAGE_KEYS_V2:
+    for key in espdisp.IMAGE_KEYS_V3:
         broken = dict(manifest)
         image = dict(broken["images"][0])
         del image[key]
@@ -1742,10 +1981,10 @@ def test_unpack_bundle_refusals():
             "missing %s" % key,
             "an image with no %r" % key)
     check_equal(
-        sorted(espdisp.IMAGE_KEYS_V2),
+        sorted(espdisp.IMAGE_KEYS_V3),
         ["app_address", "board", "bytes", "chip", "filename", "flash_parts", "fqbn",
-         "offset", "sha256"],
-        "the generation-2 image key set is itself part of the format")
+         "offset", "sha256", "targets"],
+        "the generation-3 image key set requires exact targets")
     check_equal(
         sorted(espdisp.FLASH_PART_KEYS),
         ["address", "bytes", "filename", "offset", "role", "sha256"],
@@ -1820,17 +2059,34 @@ def test_unpack_bundle_refusals():
         "past the end",
         "a file truncated inside the last payload")
 
-    # -- duplicate chips: the app looks an image up by chip, so two would make
-    # "the c6 image" ambiguous rather than merely redundant.
-    twice = espdisp.bundle_manifest(
-        "1.2.0", [image_entry("c6", FAKE_C6), image_entry("c6", FAKE_C6)],
-        "2026-01-02T03:04:05Z")
+    # A v3 target can be claimed once, even though two different targets may
+    # share a chip. Duplicate exact-target claims are rejected.
+    duplicate_target_entries = [
+        image_entry("s3-175", FAKE_S3),
+        image_entry("s3-175", FAKE_S3),
+    ]
+    check_fails(
+        lambda: espdisp.bundle_manifest(
+            "1.2.0", duplicate_target_entries, "2026-01-02T03:04:05Z"),
+        "target s3-175 is claimed",
+        "the same exact target claimed twice")
+
+    # Legacy readers still reject duplicate chips, even when their board names
+    # map to different modern targets.
+    legacy_entries = []
+    for key, blob in (("s3-175", FAKE_S3), ("s3-185", FAKE_S3_185)):
+        entry = image_entry(key, blob)
+        del entry["targets"]
+        legacy_entries.append(entry)
+    legacy_twice = handmade_manifest(legacy_entries, format=2)
     check_fails(
         lambda: espdisp.unpack_bundle(
-            handmade_bundle(espdisp.encode_manifest(twice),
-                            payload_bytes(("c6", FAKE_C6), ("c6", FAKE_C6)))),
-        "twice",
-        "the same chip listed twice")
+            handmade_bundle(
+                espdisp.encode_manifest(legacy_twice),
+                payload_bytes(("s3-175", FAKE_S3), ("s3-185", FAKE_S3_185)),
+                magic=espdisp.BUNDLE_MAGIC_V2)),
+        "legacy bundle lists esp32s3 twice",
+        "format 2 still rejects duplicate chips")
 
     # -- generation 2's own fields. One refusal per way a flash part can be
     # wrong, asserted separately: these are the payloads that go to absolute
@@ -1854,14 +2110,16 @@ def test_unpack_bundle_refusals():
         first = dict(image_entry("c6", FAKE_C6), flash_parts=parts)
         if app_address is not keep:
             first["app_address"] = app_address
-        built = handmade_manifest([first, image_entry("s3", FAKE_S3)], edit=edit)
+        built = handmade_manifest(
+            [first, image_entry("s3-175", FAKE_S3)], edit=edit)
         c6_parts = fake_flash_payloads("c6")
         claimed = FAKE_C6
         for part in parts if isinstance(parts, list) else []:
             if isinstance(part, dict) and part.get("role") in c6_parts:
                 claimed += c6_parts[part["role"]]
         return handmade_bundle(
-            espdisp.encode_manifest(built), claimed + payload_bytes(("s3", FAKE_S3)))
+            espdisp.encode_manifest(built),
+            claimed + payload_bytes(("s3-175", FAKE_S3)))
 
     good_parts = flash_entries("c6")
     # The helper is only useful if it produces a file that READS, so that every
@@ -2053,11 +2311,18 @@ def test_bundle_file_round_trip():
             check_equal(fh.read(), data, "the file holds exactly what was packed")
         got, payloads, flash_payloads = espdisp.read_bundle(path)
         check_equal(got, manifest, "read back through the file")
-        check_equal(payloads["esp32s3"], FAKE_S3, "payload survives the filesystem")
+        check_equal(payloads["s3-175"], FAKE_S3, "payload survives the filesystem")
         check_equal(
-            flash_payloads["esp32s3"], fake_flash_payloads("s3"),
+            flash_payloads["s3-175"], fake_flash_payloads("s3-175"),
             "and so do the parts a blank board needs")
         check_equal(os.listdir(tmp), [os.path.basename(path)], "no temp file left behind")
+
+        strict = espdisp.build_parser().parse_args(
+            ["bundle-info", "--require-all-targets", path])
+        check_fails(
+            lambda: strict.func(strict),
+            "missing required exact target s3-185",
+            "packaging refuses to reuse an incomplete default bundle")
 
         # Overwriting is a replace, so a second bundle at the same path cannot
         # leave a mixture of the two.
@@ -2383,7 +2648,7 @@ def test_describe_bundle():
     check("1.2.0" in text, "the version is shown")
     check("2026-01-02T03:04:05Z" in text, "and when it was built")
     check("a" * 40 in text, "and the commit")
-    check("esp32c6" in text and "esp32s3" in text, "and every chip")
+    check("c6" in text and "s3-175" in text, "and every exact target")
     check("dirty" not in text, "a clean tree says nothing about dirt")
     check(
         manifest["images"][0]["sha256"][:16] in text,
@@ -2435,7 +2700,7 @@ def test_describe_bundle():
     v1 = dict(sample_manifest(), format=1)
     v1["images"] = [
         {key: value for key, value in image.items()
-         if key not in ("app_address", "flash_parts")}
+         if key not in ("app_address", "flash_parts", "targets")}
         for image in v1["images"]
     ]
     older = "\n".join(espdisp.describe_bundle(v1))
@@ -2448,6 +2713,7 @@ def test_describe_bundle():
 
 def main():
     test_board_table()
+    test_argparse_board_targets()
     test_resolve_board()
     test_network_discovery()
     test_discovery_command()
@@ -2461,6 +2727,7 @@ def main():
     test_bundle_length_line()
     test_bundle_layout_is_pinned()
     test_generation_one_layout_is_pinned_and_still_read()
+    test_legacy_target_mapping()
     test_flash_part_vocabulary()
     test_bootloader_address_from_boards_txt()
     test_core_lookups()

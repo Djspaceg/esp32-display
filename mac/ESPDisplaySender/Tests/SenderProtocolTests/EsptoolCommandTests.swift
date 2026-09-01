@@ -394,8 +394,11 @@ final class EsptoolCommandTests: XCTestCase {
             ("partitions", 0x8000, Data("parts".utf8)),
             ("boot_app0", 0xe000, Data("otadata".utf8)),
         ]
+        let target = chip == "esp32c6"
+            ? "c6"
+            : chip == "esp32s3" ? "s3-175" : chip
         let image = FirmwareBundle.Image(
-            board: chip == "esp32c6" ? "c6" : "s3",
+            board: target,
             chip: chip,
             fqbn: "esp32:esp32:\(chip)",
             filename: "display_stream.ino.bin",
@@ -409,7 +412,8 @@ final class EsptoolCommandTests: XCTestCase {
                     filename: "display_stream.ino.\(role).bin",
                     offset: 0, byteCount: payload.count,
                     sha256: FirmwareBundle.sha256Hex(payload))
-            })
+            },
+            targets: [target])
         return FirmwareBundle(
             format: FirmwareBundle.format,
             firmwareVersion: version,
@@ -418,9 +422,9 @@ final class EsptoolCommandTests: XCTestCase {
             sourceDirty: false,
             tool: "espdisp.py bundle",
             images: [image],
-            payloads: [chip: appPayload],
+            payloads: [target: appPayload],
             flashPayloads: [
-                chip: Dictionary(
+                target: Dictionary(
                     uniqueKeysWithValues: parts.map { ($0.0, $0.2) }),
             ])
     }
@@ -442,7 +446,7 @@ final class EsptoolCommandTests: XCTestCase {
                 byteCount: payload.count,
                 sha256: FirmwareBundle.sha256Hex(payload),
                 appAddress: nil, flashParts: [])],
-            payloads: [chip: payload],
+            payloads: [chip == "esp32c6" ? "c6" : "s3-175": payload],
             flashPayloads: [:])
     }
 }

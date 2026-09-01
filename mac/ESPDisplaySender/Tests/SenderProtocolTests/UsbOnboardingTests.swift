@@ -28,6 +28,7 @@ final class UsbOnboardingTests: XCTestCase {
             mode: mode,
             tool: tool,
             bundle: EsptoolCommandTests.bundle(chip: chip, bootloader: 0x0, app: 0x10000),
+            target: chip == "esp32c6" ? nil : "s3-175",
             detection: .detected(chip: chip, mac: "28:84:85:55:55:94"),
             existing: .silent,
             ssid: "Home",
@@ -45,9 +46,33 @@ final class UsbOnboardingTests: XCTestCase {
         // The detail says what will be written and where the parts came from, and
         // names the network the board is going to try.
         XCTAssertTrue(plan.headline.contains("1.2.0"))
-        XCTAssertTrue(plan.headline.contains("esp32s3"))
+        XCTAssertTrue(plan.headline.contains("s3-175"))
+        XCTAssertTrue(plan.detail.contains("esp32s3"))
         XCTAssertTrue(plan.detail.contains("\"Home\""))
         XCTAssertTrue(plan.detail.contains("4 parts"))
+    }
+
+    func testESP32S3RequiresAnExactTargetChoice() {
+        var request = ready()
+        request.target = nil
+        let plan = UsbOnboardingPlan.make(request)
+        XCTAssertEqual(plan.action, .chooseTarget)
+        XCTAssertFalse(plan.canStart)
+        XCTAssertTrue(plan.detail.contains("s3-175"))
+    }
+
+    func testC6AutomaticallyUsesItsOnlyExactTarget() {
+        let plan = UsbOnboardingPlan.make(ready(chip: "esp32c6"))
+        XCTAssertEqual(plan.action, .flash)
+        XCTAssertTrue(plan.headline.contains("c6"))
+    }
+
+    func testASelectedTargetMustBelongToTheDetectedChip() {
+        var request = ready()
+        request.target = "c6"
+        let plan = UsbOnboardingPlan.make(request)
+        XCTAssertEqual(plan.action, .noImageForTarget)
+        XCTAssertFalse(plan.canStart)
     }
 
     func testConfigureOnlyDoesNotWriteFlashAndSaysSo() {
@@ -163,7 +188,7 @@ final class UsbOnboardingTests: XCTestCase {
         let plan = UsbOnboardingPlan.make(request)
         XCTAssertEqual(plan.action, .bundleIsOTAOnly)
         XCTAssertFalse(plan.canStart)
-        XCTAssertTrue(plan.detail.contains("format 1"))
+        XCTAssertTrue(plan.detail.contains("s3-175"))
         XCTAssertTrue(plan.detail.contains("over-the-air"))
         XCTAssertTrue(plan.detail.contains("bootloader"))
     }
@@ -356,6 +381,8 @@ final class UsbOnboardingTests: XCTestCase {
         record { $0.detection = .notAttempted }
         record { $0.detection = .failed(reason: "nothing answered") }
         record { $0.bundle = nil }
+        record { $0.target = nil }
+        record { $0.target = "c6" }
         record { $0.detection = .detected(chip: "esp32c6", mac: nil) }
         record { $0.bundle = EsptoolCommandTests.otaOnlyBundle(chip: "esp32s3") }
         record { $0.tool = .missing(searched: []) }
@@ -365,7 +392,8 @@ final class UsbOnboardingTests: XCTestCase {
 
         let expected: [UsbOnboardingPlan.Action] = [
             .flash, .configureOnly, .chooseDevice, .connectDevice, .detectChip,
-            .chipUnreadable, .chooseBundle, .noImageForChip, .bundleIsOTAOnly,
+            .chipUnreadable, .chooseBundle, .chooseTarget, .noImageForTarget,
+            .noImageForChip, .bundleIsOTAOnly,
             .esptoolMissing, .chooseNetwork, .enterPassword, .boardNotAnswering,
         ]
         XCTAssertEqual(Set(reachable.keys), Set(expected))
@@ -383,7 +411,8 @@ final class UsbOnboardingTests: XCTestCase {
         for action in [
             UsbOnboardingPlan.Action.flash, .configureOnly, .chooseDevice,
             .connectDevice, .detectChip, .chipUnreadable, .chooseBundle,
-            .noImageForChip, .bundleIsOTAOnly, .esptoolMissing, .chooseNetwork,
+            .chooseTarget, .noImageForTarget, .noImageForChip,
+            .bundleIsOTAOnly, .esptoolMissing, .chooseNetwork,
             .enterPassword, .boardNotAnswering,
         ] {
             let plan = UsbOnboardingPlan(headline: "", detail: "", action: action)

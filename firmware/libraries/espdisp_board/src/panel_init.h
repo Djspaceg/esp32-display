@@ -6,52 +6,39 @@
 // exists to remove.
 //
 // The pieces that vary by board (driver, bus, pins, gap, inversion) all come
-// out of board_config.h, so there are no board conditionals here beyond
-// picking the bus shape and the driver constructor.
+// out of board_config.h. Compile-time guards below limit each artifact to the
+// driver set it can actually select: C6 keeps its two runtime-detected panels,
+// while each fixed S3 target links only its own controller.
 //
 // Two bus shapes exist:
 //   SPI   single data lane plus a D/C pin (the C6 LCDs). 8-bit commands.
-//   QSPI  four data lanes, no D/C pin (the CO5300 AMOLED). Commands travel in
+//   QSPI  four data lanes, no D/C pin (the S3 panels). Commands travel in
 //         a 32-bit envelope the panel driver builds itself; this file only
 //         has to configure the IO layer for quad mode and 32-bit commands.
 #pragma once
 
 #include <driver/spi_master.h>
+#include <esp_err.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
-#include <esp_lcd_panel_st7789.h>
 #include <esp_lcd_panel_vendor.h>
 
 #include <board_config.h>
+#include <board_io.h>
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_BOARD_S3_185)
+#include <esp_lcd_st77916.h>
+#else
 #include <esp_lcd_co5300.h>
+#endif
+#else
+#include <esp_lcd_panel_st7789.h>
 #include <esp_lcd_jd9853.h>
+#endif
 
 #include "panel_orientation.h"
 
 namespace boardpanel {
-
-// Waveshare's maintained 16 MB production-board sequence. Its CO5300 must
-// leave sleep before the remaining configuration is applied; the older
-// engineering sample continues using the vendored driver's default table.
-static const uint8_t CO5300_CURRENT_FE[] = {0x00};
-static const uint8_t CO5300_CURRENT_C4[] = {0x80};
-static const uint8_t CO5300_CURRENT_COLMOD[] = {0x55};
-static const uint8_t CO5300_CURRENT_CTRL1[] = {0x20};
-static const uint8_t CO5300_CURRENT_HBM[] = {0xFF};
-static const uint8_t CO5300_CURRENT_BRIGHTNESS[] = {0xD0};
-static const uint8_t CO5300_CURRENT_CONTRAST[] = {0x00};
-static const co5300_lcd_init_cmd_t CO5300_CURRENT_INIT[] = {
-    {0x11, nullptr, 0, 120},
-    {0xFE, CO5300_CURRENT_FE, sizeof(CO5300_CURRENT_FE), 0},
-    {0xC4, CO5300_CURRENT_C4, sizeof(CO5300_CURRENT_C4), 0},
-    {0x3A, CO5300_CURRENT_COLMOD, sizeof(CO5300_CURRENT_COLMOD), 0},
-    {0x53, CO5300_CURRENT_CTRL1, sizeof(CO5300_CURRENT_CTRL1), 0},
-    {0x63, CO5300_CURRENT_HBM, sizeof(CO5300_CURRENT_HBM), 0},
-    {0x29, nullptr, 0, 0},
-    {0x51, CO5300_CURRENT_BRIGHTNESS,
-     sizeof(CO5300_CURRENT_BRIGHTNESS), 0},
-    {0x58, CO5300_CURRENT_CONTRAST, sizeof(CO5300_CURRENT_CONTRAST), 10},
-};
 
 /// Bring up the SPI/QSPI bus and the panel described by cfg.
 ///
@@ -66,6 +53,9 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
                  esp_lcd_panel_io_color_trans_done_cb_t doneCb, void *userCtx,
                  esp_lcd_panel_io_handle_t *outIo,
                  esp_lcd_panel_handle_t *outPanel) {
+  if (!boardio::begin(cfg) || !boardio::pulseReset(cfg.panelResetExio)) {
+    return false;
+  }
   spi_bus_config_t buscfg = {};
   buscfg.sclk_io_num = cfg.pinSclk;
   buscfg.max_transfer_sz = (int)maxTransferSz;
@@ -127,8 +117,18 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
   panel_config.bits_per_pixel = 16;
 
   esp_lcd_panel_handle_t panel = nullptr;
-  esp_err_t err;
+  esp_err_t err = ESP_ERR_NOT_SUPPORTED;
   switch (cfg.driver) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_BOARD_S3_185)
+    case board::PanelDriver::St77916: {
+      st77916_vendor_config_t vendor = {};
+      vendor.flags.use_qspi_interface = cfg.isQspi() ? 1 : 0;
+      panel_config.vendor_config = &vendor;
+      err = esp_lcd_new_panel_st77916(io, &panel_config, &panel);
+      break;
+    }
+#else
     case board::PanelDriver::Co5300: {
       // The driver must know it is on QSPI to wrap commands in the envelope.
       // It copies what it needs out of vendor_config during construction, so
@@ -136,21 +136,20 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
       // init table (which carries this glass's column window and SLPOUT).
       co5300_vendor_config_t vendor = {};
       vendor.flags.use_qspi_interface = cfg.isQspi() ? 1 : 0;
-      if (cfg.usesCurrentCo5300Profile()) {
-        vendor.init_cmds = CO5300_CURRENT_INIT;
-        vendor.init_cmds_size =
-            sizeof(CO5300_CURRENT_INIT) / sizeof(CO5300_CURRENT_INIT[0]);
-      }
       panel_config.vendor_config = &vendor;
       err = esp_lcd_new_panel_co5300(io, &panel_config, &panel);
       break;
     }
+#endif
+#else
     case board::PanelDriver::Jd9853:
       err = esp_lcd_new_panel_jd9853(io, &panel_config, &panel);
       break;
     case board::PanelDriver::St7789:
-    default:
       err = esp_lcd_new_panel_st7789(io, &panel_config, &panel);
+      break;
+#endif
+    default:
       break;
   }
   if (err != ESP_OK) {
@@ -180,11 +179,18 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
 /// callers can fall through to their PWM path.
 inline bool setPanelBrightness(esp_lcd_panel_handle_t panel,
                                const board::Config &cfg, uint8_t level) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3) && !defined(ESPDISP_BOARD_S3_185)
   if (cfg.hasBacklightPin() || cfg.driver != board::PanelDriver::Co5300) {
     return false;
   }
   uint8_t percent = (uint8_t)(((unsigned)level * 100) / 255);
   return esp_lcd_panel_co5300_set_brightness(panel, percent) == ESP_OK;
+#else
+  (void)panel;
+  (void)cfg;
+  (void)level;
+  return false;
+#endif
 }
 
 /// Apply orientation and the user's mounting rotation (clockwise quarter
