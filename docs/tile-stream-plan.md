@@ -1780,3 +1780,21 @@ fps). For such a panel, placement/antenna/2.4 GHz congestion is the
 first-order fix; no on-device scheduling or memory work changes it. The
 association-rot heal is real but insufficient: it restored large-frame
 delivery, not capacity.
+
+### 17.17.1 Field report after the session (same day)
+
+With the session's changes deployed together - HEAD firmware on the panel
+(first on-device build carrying the visible-spans work), the rebuilt app
+(half-res keyframes amid over-budget motion), a fresh association, and a
+fresh pacing climb - the user reports silver-round went from under 0.1 fps
+(effectively a static image) to a reliable 25.1 fps while repainting the
+entire screen.
+
+Provenance: 25.1 is the app's per-session fps line, which counts frames the
+MAC SENT; the glass-side rate is the firmware's complete/partial counters
+(the three-rates distinction of 17.7). Even so, the direction and magnitude
+are unambiguous, and the reliable full-screen number sits above 17.7's 14.2
+fps peak - consistent with visible spans and half-res cutting datagrams per
+frame well below the 66 that peak was measured against, on top of the healed
+link. No arm-style instrumented measurement was taken; the scheduling
+question of 17.17 remains open, and the panel has since moved off USB.
