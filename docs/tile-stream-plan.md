@@ -1798,3 +1798,75 @@ fps peak - consistent with visible spans and half-res cutting datagrams per
 frame well below the 66 that peak was measured against, on top of the healed
 link. No arm-style instrumented measurement was taken; the scheduling
 question of 17.17 remains open, and the panel has since moved off USB.
+
+## 18. Re-measured on the visible-spans firmware (phase 14, 2026-08-31)
+
+Section 17.17.1's field report demanded instrumented numbers. Same panel
+(silver-round), back on USB at RSSI -74 with lossless 1450-byte pings, app
+quit, HEAD firmware. Two measurements: an ascending-rate capacity sweep at
+boot scheduling, then the section 17.6 item 3 arms at the new collapse point.
+
+### 18.1 The capacity sweep: every ceiling moved
+
+`tile-motion`, 20 s per rate, `tools/measure_sched_arms.py`'s serial
+reduction with the arm fixed at boot defaults (rxprio 9, loopprio 1):
+
+| Load    | Offered dgram/s | Accepted | Complete fps | gq/call |
+| ------- | --------------- | -------- | ------------ | ------- |
+| half 15 | 270             | 119      | 4.6-5.1      | 1.25 ms |
+| half 25 | 450             | 335      | 7.3          | 2.1 ms  |
+| half 35 | 630             | 602      | 2.2          | 12.4 ms |
+| half 45 | 810             | 557      | 0.9          | 11.1 ms |
+| full 4  | 264             | 168      | 1.8          | 0.74 ms |
+| full 8  | 528             | 302      | 2.6          | 0.89 ms |
+| full 15 | 990             | 513      | 2.0          | 1.13 ms |
+
+Readings:
+
+- **Ingest roughly doubled.** The socket path now accepts ~600 datagrams/s
+  (17.4's accept-and-paint ceiling was ~300, its accept-only ~1,350). The
+  visible-spans firmware plus this link accept far more than the sender's
+  `tileAbsorbablePacketsPerSecond = 300` assumes.
+- **Delivery now peaks at ~450/s offered** (335 accepted, 7.3 complete fps
+  synthetic), not ~300. Past ~600 accepted the draw collapses exactly as
+  17.2 described: gq/call inflates 1.25 ms -> 12.4 ms.
+- Synthetic complete-fps is far below the field 25.1 because tile-motion's
+  content defeats RLE and dirties all 719 tiles every frame; real content
+  diffs smaller and compresses better. The synthetic sweep maps the
+  ceilings, not the user experience.
+
+### 18.2 The scheduling arms, finally measured - and priorities are not the fix
+
+Arms at the collapse point (half-res, 35 fps offered = 630 dgram/s), 20 s
+samples, interleaved twice:
+
+| Arm                       | Accepted | Complete fps | gq/call    |
+| ------------------------- | -------- | ------------ | ---------- |
+| A rx9/loop1 (boot)        | 376-543  | 2.6-3.3      | 2.9-6.0 ms |
+| B rx9/loop9 (equal)       | 298-307  | 1.1-1.4      | 1.5-1.6 ms |
+| C rx9/loop10 (draw above) | 273-277  | 0.5-0.9      | 0.78 ms    |
+
+The 17.2 mechanism is CONFIRMED: giving the draw priority flattens per-call
+cost to the quiet ~775 us, reproducibly, both rounds. And it DELIVERS THE
+FEWEST FRAMES: what the draw stops paying, the receiver starts paying -
+accepted datagrams fall by half and drops triple. At overload core 1 is
+simply oversubscribed; priorities only choose which half starves. The boot
+arrangement (receiver above draw, with the rxyield escape valve) is the best
+of the three and stays.
+
+So the lever is not arbitration but total work: cut CPU per frame, or add a
+core. In arm A's passes the gather is 30-40% of pass time - the size-gated
+direct-from-SRAM draw (17.16's rejected experiment, gated to large records
+only) attacks exactly that share; a draw task pinned to core 0 (WiFi/lwIP
+live there, but the radio's CPU work is bursty) would stop the two heavy
+loops sharing core 1 at all. Both remain unmeasured; both now have a
+reproducible operating point to be measured at.
+
+### 18.3 What this retunes immediately
+
+`tileAbsorbablePacketsPerSecond` 300 -> 450: the sender's pacing ceiling and
+the degradation ladder's budget both derive from it, and 300 now UNDERSHOOTS
+the measured delivery peak - the collapse guard could park pacing at 3,333 us
+when the panel delivers most at ~2,222 us. 450 is the measured
+peak-delivery offered rate on the new firmware, not the accept ceiling
+(~600), keeping the same conservative posture the original 300 had.

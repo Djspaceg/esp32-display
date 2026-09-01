@@ -4,15 +4,18 @@
       updates deliver 1–4 fps because the panel absorbs only ~300 datagrams/s
       while painting (congestion collapse, docs/tile-stream-plan.md §17.3–17.4),
       and a full frame is 66 (BC1) to ~300 (raw) datagrams. Work these in order:
-  - [ ] Fix draw starvation: the draw loop (loopTask, priority 1) shares
-        core 1 with udpReceiveTask (priority 9), and per-call draw cost inflates
-        ~10x under load (§17.2).
+  - [x] Fix draw starvation by scheduling — MEASURED AND CLOSED (§18.2):
+        priorities are not the fix. Raising the draw's priority flattens
+        per-call cost to the quiet ~775 µs but delivers the FEWEST frames,
+        because the receiver then starves instead — core 1 is oversubscribed
+        at overload and priorities only choose which half starves. The boot
+        arrangement stays. The real levers are cutting CPU per frame and
+        adding a core (next two items).
     - [x] Make the two task priorities runtime-tunable via CFGTUNE (rxprio,
           loopprio) and build the interleaved-arm harness
           (tools/measure_sched_arms.py).
-    - [ ] Measure the arms on a panel whose link carries 430+ datagrams/s
-          (needs ~RSSI -60; silver-round at -78 to -86 was radio-bound and the
-          arms were indistinguishable — §17.17).
+    - [x] Measure the arms at the collapse point (§18.2; the first attempt
+          was radio-bound, §17.17).
   - [x] Let half-res carry full-frame motion: a half-res full frame is ~17
         datagrams → ~16 fps at the current absorbable rate (14.2 complete fps
         measured, §17.7).
@@ -21,17 +24,25 @@
     - [x] Ride interval keyframes at half-res while surrounding diffs are over
           budget (keyframeRidesHalfRes); quiet-screen keyframes stay lossless
           and the refresh timer heals a half-res screen back to full quality.
-  - [ ] Size-gate a direct-from-SRAM draw for large runs: records of at least
-        N tiles draw straight from the decode scratch while still committing to
-        bufA for persistence, halving PSRAM traffic in exactly the full-frame
-        case. §17.16 only tested and rejected the ungated per-record variant.
+  - [ ] Cut draw CPU per frame: size-gate a direct-from-SRAM draw for large
+        runs — records of at least N tiles draw straight from the decode
+        scratch while still committing to bufA for persistence, deleting the
+        gather that §18.2 measured at 30–40% of pass time under load. §17.16
+        only tested and rejected the ungated per-record variant; needs a
+        cross-task draw lock (receive task and loop() would both issue panel
+        calls). Measure at the §18 operating point (half-res, 35 fps offered).
+  - [ ] Stop sharing core 1: move the draw pass to its own task pinned to
+        core 0 (WiFi/lwIP live there but their CPU work is bursty), so the
+        two heavy loops stop arbitrating one core. §18.2 shows arbitration
+        cannot win — parallelism might. Compile-time experiment; measure at
+        the same operating point.
+  - [x] Re-measure sender ceilings on the new firmware (§18.1) and retune:
+        ingest now accepts ~600 datagrams/s and delivery peaks at ~450/s
+        offered, so tileAbsorbablePacketsPerSecond moves 300 → 450. Repeat
+        after each device-side win.
   - [ ] After contention is fixed, revisit per-call fixed costs: vertical run
         merging and CASET/RASET elimination, re-argued on the quiet ~900 µs
         per-call figure (§17.5).
-  - [ ] Re-measure sender ceilings after each device-side win:
-        tileAbsorbablePacketsPerSecond, the spacing bounds, and the degradation
-        ladder budget all encode today's collapse point and will hide any
-        firmware improvement until retuned.
 - [ ] Improve display streaming frame rate beyond the current implementation.
   - [x] Replace line-only diffs with 16×16 tiles and horizontally merged rectangular runs.
   - [x] Add tile compression, SRAM staging, merged panel writes, and backpressure handling.

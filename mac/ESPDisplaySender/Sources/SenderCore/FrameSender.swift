@@ -313,11 +313,14 @@ final class FrameSender {
     static let minWorstCaseFps: UInt32 = 5
 
     /// Datagrams a second a TILE panel can accept and still paint what they
-    /// carry. Measured, not derived (docs/tile-stream-plan.md section 17.3):
-    /// ~300/s delivers 14 frames a second at 6% loss, ~430/s costs 38% loss,
-    /// and past ~570/s the panel collapses to under one frame a second while
-    /// still accepting datagrams. Offering more than this makes the panel
-    /// deliver strictly LESS.
+    /// carry. Measured, not derived. Section 17.3 measured ~300/s on the
+    /// pre-visible-spans firmware; section 18.1 re-measured on the
+    /// visible-spans firmware and every ceiling moved: ingest accepts ~600/s
+    /// and delivery peaks at ~450/s offered (335 accepted), collapsing past
+    /// ~600 accepted exactly as 17.2 described. 450 is the measured
+    /// peak-delivery OFFERED rate, deliberately not the accept ceiling, which
+    /// keeps the same conservative posture the original 300 had. Offering
+    /// more than this makes the panel deliver strictly LESS.
     ///
     /// This exists because the band-derived ceiling above cannot express it.
     /// That bound keeps `minWorstCaseFps * bandCount` datagrams a second
@@ -334,7 +337,7 @@ final class FrameSender {
     /// at this scale - a large keyframe CANNOT reach 5 fps at the absorbable
     /// rate, so pacing tighter does not deliver it faster, only sooner into
     /// the queue that drops it.
-    static let tileAbsorbablePacketsPerSecond: UInt32 = 300
+    static let tileAbsorbablePacketsPerSecond: UInt32 = 450
 
     /// Loosest pacing a tile panel may be held to, from the rate above.
     static var tileSpacingCeiling: UInt32 {

@@ -58,10 +58,11 @@ final class FrameSenderPacingTests: XCTestCase {
     func testTileCeilingReachesTheRateATilePanelCanAbsorb() {
         // The band-derived ceiling is aimed at a different protocol, and on
         // this panel it makes the collapse region inescapable. 466 bands at
-        // 5 fps is 2330 pkt/s, one every 429us - and a tile panel absorbs
-        // ~300/s while still painting (docs section 17.3). So the controller
-        // could not offer less than ~8x what the panel can use, and was
-        // observed parked exactly at 429us in the app log.
+        // 5 fps is 2330 pkt/s, one every 429us - and a tile panel delivers
+        // most at ~450/s offered (docs section 18.1; ~300/s on the
+        // pre-visible-spans firmware, section 17.3). So the controller could
+        // not offer less than ~5x what the panel can use, and was observed
+        // parked exactly at 429us in the app log.
         let bandCeiling = FrameSender.spacingBounds(
             for: PanelGeometry(width: 466, height: 466)).upperBound
         XCTAssertEqual(bandCeiling, 429)
@@ -69,11 +70,11 @@ final class FrameSenderPacingTests: XCTestCase {
         XCTAssertEqual(offeredAtBandCeiling, 2331)
         XCTAssertGreaterThan(
             offeredAtBandCeiling,
-            FrameSender.tileAbsorbablePacketsPerSecond * 7,
+            FrameSender.tileAbsorbablePacketsPerSecond * 5,
             "the band bound must be shown to be the problem, not a near miss")
 
-        // The tile ceiling expresses the measured rate: 300/s is 3333us.
-        XCTAssertEqual(FrameSender.tileSpacingCeiling, 3333)
+        // The tile ceiling expresses the measured rate: 450/s is 2222us.
+        XCTAssertEqual(FrameSender.tileSpacingCeiling, 2222)
         XCTAssertEqual(
             1_000_000 / FrameSender.tileSpacingCeiling,
             FrameSender.tileAbsorbablePacketsPerSecond)
@@ -231,8 +232,8 @@ final class FrameSenderLadderTests: XCTestCase {
 
     func testLooserPacingShrinksTheBudgetAndEngagesRungsSooner() {
         // The ladder's budget is derived FROM pacing, so the wider tile
-        // ceiling (section 17.12) makes it stricter, not laxer: at 3333us the
-        // budget is ~16x smaller than at 200us, and a frame that fit before
+        // ceiling (section 17.12) makes it stricter, not laxer: at 2222us the
+        // budget is ~11x smaller than at 200us, and a frame that fit before
         // now needs help. Worth pinning because it is counterintuitive - the
         // sender slowing down makes the ladder work harder.
         let tiles = 200
@@ -264,9 +265,9 @@ final class FrameSenderLadderTests: XCTestCase {
 
     func testAFullFrameAtTheAbsorbableRateEngagesEveryRung() {
         // The same frame once the climb has backed off to what the panel can
-        // actually absorb (section 17.12): the budget is ~14.7 KB, so 92 KB of
-        // BC1 is hopeless and even 23 KB of half-res does not fit 30 fps.
-        // Every rung engages, including frame skipping.
+        // actually absorb (sections 17.12, 18.1): the budget is ~22 KB, so
+        // 92 KB of BC1 is hopeless and even 23 KB of half-res does not fit
+        // 30 fps. Every rung engages, including frame skipping.
         let rungs = FrameSender.degradationRungs(
             dirtyTiles: 719, spacingMicros: FrameSender.tileSpacingCeiling,
             policy: .auto, halfResAvailable: true)
