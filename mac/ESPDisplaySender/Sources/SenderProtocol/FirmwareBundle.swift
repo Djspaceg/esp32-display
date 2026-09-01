@@ -12,7 +12,7 @@ import Foundation
 ///
 /// LAYOUT, byte for byte:
 ///
-///     offset 0        "ESPDISPFW2\n"    11 bytes, magic and format generation
+///     offset 0        "ESPDISPFW3\n"    11 bytes, magic and format generation
 ///     offset 11       "%010d\n"         11 bytes, manifest length, zero padded
 ///     offset 22       manifest          UTF-8 JSON object, exactly that many bytes
 ///     offset 22+len   payloads          raw, concatenated in manifest order: for
@@ -24,12 +24,14 @@ import Foundation
 /// `<sketch>.ino.bin`, so `sha256` in the manifest is the number `shasum -a 256`
 /// prints for the compiled file.
 ///
-/// TWO GENERATIONS, AND WHY BOTH ARE READ. Generation 1 carried one application
+/// THREE GENERATIONS, AND WHY ALL ARE READ. Generation 1 carried one application
 /// image per chip: right for OTA, where the image goes into an app slot and the
 /// bootloader already on the panel boots it, and not enough for a board that has
 /// never been flashed, which needs the second-stage bootloader, the partition
 /// table and boot_app0 written at their own flash addresses first. Generation 2
-/// carries those, with their addresses.
+/// carries those, with their addresses. Generation 3 adds exact target lists so
+/// two images for the same chip can safely represent different displays and pin
+/// layouts.
 ///
 /// The generation was bumped rather than extended because a generation-1 reader
 /// walks the payload area with `offset == cursor` and then requires
@@ -43,11 +45,10 @@ import Foundation
 /// OTA payload and whoever holds one may have no way to rebuild it. `format`
 /// records which generation was read.
 ///
-/// WHAT THIS CANNOT CHECK. That an image is right for a panel. The hashes prove
-/// the file is intact and the `chip` token says who each image is for, but only
-/// the panel's own image validation settles it - see
-/// `FirmwareUpdateAvailability` for how much of an opinion this side is entitled
-/// to.
+/// WHAT THIS CANNOT CHECK. That the discovered metadata names the physical
+/// display attached to a board correctly. Hashes prove the file is intact;
+/// `target` chooses a display/pin configuration and `chip` independently confirms
+/// the MCU family. Update callers require both facts before an OTA transfer.
 public struct FirmwareBundle: Equatable, Sendable {
     /// One payload that is written to a fixed flash address over USB, rather than
     /// into an app slot: the bootloader, the partition table, or boot_app0.
@@ -75,11 +76,14 @@ public struct FirmwareBundle: Equatable, Sendable {
 
     /// One application image and everything the manifest says about it.
     public struct Image: Equatable, Sendable {
-        /// The CLI's board key, e.g. `c6`. For display; `chip` is the identifier.
+        /// The CLI's historical board key. Format 1/2 derive one exact target
+        /// from it; format 3 carries `targets` explicitly.
         public let board: String
-        /// The IDF target token, e.g. `esp32c6`. One vocabulary with the panel's
-        /// `chip` TXT record and with `tools/espdisp.py BOARDS[*].chip`.
+        /// The IDF chip token reported by esptool and the panel.
         public let chip: String
+        /// Exact firmware targets this one image can serve. A format-3 image may
+        /// intentionally serve several targets when their bytes are identical.
+        public let targets: [String]
         /// The FQBN it was compiled with, so a user can see what they have.
         public let fqbn: String
         /// The image's filename as arduino-cli produced it.
@@ -101,6 +105,32 @@ public struct FirmwareBundle: Equatable, Sendable {
         /// which is also the order they are written. Empty for a generation-1 file.
         public let flashParts: [FlashPart]
 
+        public init(
+            board: String,
+            chip: String,
+            fqbn: String,
+            filename: String,
+            offset: Int,
+            byteCount: Int,
+            sha256: String,
+            appAddress: Int?,
+            flashParts: [FlashPart],
+            targets: [String]? = nil
+        ) {
+            self.board = board
+            self.chip = chip
+            self.targets = targets
+                ?? FirmwareBundle.legacyTarget(forBoard: board).map { [$0] }
+                ?? []
+            self.fqbn = fqbn
+            self.filename = filename
+            self.offset = offset
+            self.byteCount = byteCount
+            self.sha256 = sha256
+            self.appAddress = appAddress
+            self.flashParts = flashParts
+        }
+
         /// The part for a role, or nil if this image carries none.
         public func flashPart(role: String) -> FlashPart? {
             flashParts.first { $0.role == role }
@@ -109,7 +139,7 @@ public struct FirmwareBundle: Equatable, Sendable {
 
     /// One write in a USB flash: an address and the bytes that go there.
     ///
-    /// Assembled by `flashPlan(forChip:)` so the decision of what goes where is
+    /// Assembled by `flashPlan(forTarget:)` so the decision of what goes where is
     /// made here, against a verified file, rather than in whatever spawns esptool.
     public struct FlashWrite: Equatable, Sendable {
         /// `app`, or the `FlashPart.role` this write came from.
@@ -120,7 +150,7 @@ public struct FirmwareBundle: Equatable, Sendable {
         public let payload: Data
     }
 
-    /// The role `flashPlan(forChip:)` gives the application image, which is not a
+    /// The role `flashPlan(forTarget:)` gives the application image, which is not a
     /// `FlashPart` in the manifest - it is the OTA payload, and it is carried once.
     public static let appFlashRole = "app"
 
@@ -140,25 +170,33 @@ public struct FirmwareBundle: Equatable, Sendable {
     public let tool: String
     /// The images, in manifest order, which is also payload order.
     public let images: [Image]
-    /// The application payloads, keyed by chip token. Verified against their
-    /// hashes.
+    /// The application payloads, keyed by exact firmware target. Verified
+    /// against their hashes. Multi-target images intentionally repeat the same
+    /// `Data` value under each target.
     public let payloads: [String: Data]
-    /// The flash parts, keyed by chip token and then by role. Verified against
-    /// their hashes. Empty for a generation-1 file.
+    /// The flash parts, keyed by exact target and then by role. Empty for a
+    /// generation-1 file.
     public let flashPayloads: [String: [String: Data]]
 
     /// The newest generation, which is what a current writer produces.
-    public static let magic = Data("ESPDISPFW2\n".utf8)
+    public static let magic = Data("ESPDISPFW3\n".utf8)
     /// The `format` field that goes with `magic`.
-    public static let format = 2
+    public static let format = 3
     /// Generation 1, still read: app images only, no flash parts.
     public static let magicV1 = Data("ESPDISPFW1\n".utf8)
     public static let formatV1 = 1
+    /// Generation 2, still read: blank-board flash parts, chip-unique images.
+    public static let magicV2 = Data("ESPDISPFW2\n".utf8)
+    public static let formatV2 = 2
     /// Which magic means which format. Every magic is the same width, which is
     /// what keeps the manifest at offset 22 for every generation - `headerBytes`
     /// is one number for both, and
     /// `testGenerationOneIsStillReadAndCarriesNoFlashParts` pins it.
-    public static let generations: [Data: Int] = [magicV1: formatV1, magic: format]
+    public static let generations: [Data: Int] = [
+        magicV1: formatV1,
+        magicV2: formatV2,
+        magic: format,
+    ]
     public static let lengthDigits = 10
     /// Magic line plus length line. The manifest starts here, always.
     public static let headerBytes = 22
@@ -176,13 +214,14 @@ public struct FirmwareBundle: Equatable, Sendable {
         "board", "chip", "fqbn", "filename", "offset", "bytes", "sha256",
     ]
     public static let imageKeysV2 = imageKeys + ["app_address", "flash_parts"]
+    public static let imageKeysV3 = imageKeysV2 + ["targets"]
     public static let flashPartKeys = [
         "role", "address", "filename", "offset", "bytes", "sha256",
     ]
 
     /// The three parts a board with nothing on it needs, in write order.
     ///
-    /// A generation-2 image must carry all three, and this reader refuses one
+    /// A generation-2-or-newer image must carry all three, and this reader refuses one
     /// that does not: the generation exists so that "this file can bring up a
     /// blank board" is true of every file claiming to be one, and a caller that
     /// had to check role by role would be left answering "maybe". Extra roles are
@@ -290,8 +329,15 @@ public struct FirmwareBundle: Equatable, Sendable {
         var images = [Image]()
         var payloads = [String: Data]()
         var flashPayloads = [String: [String: Data]]()
+        var claimedTargets = [String: Int]()
+        var seenLegacyChips = Set<String>()
         var cursor = manifestEnd
-        let keysForGeneration = generation == formatV1 ? imageKeys : imageKeysV2
+        let keysForGeneration: [String]
+        switch generation {
+        case formatV1: keysForGeneration = imageKeys
+        case formatV2: keysForGeneration = imageKeysV2
+        default: keysForGeneration = imageKeysV3
+        }
         for (index, rawImage) in rawImages.enumerated() {
             let where_ = "image \(index)"
             guard let entry = rawImage as? [String: Any] else {
@@ -301,7 +347,23 @@ public struct FirmwareBundle: Equatable, Sendable {
             guard absent.isEmpty else {
                 throw FirmwareBundleError.imageMissingKeys(index: index, keys: absent)
             }
+            let board = try string(entry["board"], key: "board", where: where_)
             let chip = try string(entry["chip"], key: "chip", where: where_)
+            let targets = try imageTargets(
+                entry: entry, generation: generation, imageIndex: index, board: board)
+            if generation < Self.format {
+                guard seenLegacyChips.insert(chip).inserted else {
+                    throw FirmwareBundleError.duplicateChip(chip)
+                }
+            } else {
+                for target in targets {
+                    if let first = claimedTargets[target] {
+                        throw FirmwareBundleError.duplicateTargetClaim(
+                            target: target, firstImage: first, secondImage: index)
+                    }
+                    claimedTargets[target] = index
+                }
+            }
             let offset = try integer(entry["offset"], key: "offset", where: where_)
             let byteCount = try integer(entry["bytes"], key: "bytes", where: where_)
             guard offset >= 0, byteCount > 0 else {
@@ -316,9 +378,6 @@ public struct FirmwareBundle: Equatable, Sendable {
                 throw FirmwareBundleError.pastEndOfFile(
                     index: index, chip: chip, end: offset + byteCount, fileBytes: total)
             }
-            guard payloads[chip] == nil else {
-                throw FirmwareBundleError.duplicateChip(chip)
-            }
             let expected = try string(entry["sha256"], key: "sha256", where: where_)
             let payload = Data(data[(base + offset)..<(base + offset + byteCount)])
             let digest = sha256Hex(payload)
@@ -326,7 +385,7 @@ public struct FirmwareBundle: Equatable, Sendable {
                 throw FirmwareBundleError.hashMismatch(
                     index: index, chip: chip, expected: expected, actual: digest)
             }
-            payloads[chip] = payload
+            for target in targets { payloads[target] = payload }
             cursor += byteCount
 
             // GENERATION 2: the parts a board with nothing on it needs. The same
@@ -429,11 +488,11 @@ public struct FirmwareBundle: Equatable, Sendable {
                     }
                     claimed[write.address] = write.role
                 }
-                flashPayloads[chip] = roles
+                for target in targets { flashPayloads[target] = roles }
             }
 
             images.append(Image(
-                board: try string(entry["board"], key: "board", where: where_),
+                board: board,
                 chip: chip,
                 fqbn: try string(entry["fqbn"], key: "fqbn", where: where_),
                 filename: try string(entry["filename"], key: "filename", where: where_),
@@ -441,7 +500,8 @@ public struct FirmwareBundle: Equatable, Sendable {
                 byteCount: byteCount,
                 sha256: expected,
                 appAddress: appAddress,
-                flashParts: parts))
+                flashParts: parts,
+                targets: targets))
         }
         guard cursor == total else {
             throw FirmwareBundleError.trailingBytes(total - cursor)
@@ -484,24 +544,39 @@ public struct FirmwareBundle: Equatable, Sendable {
         return try read(data)
     }
 
-    /// The image for a chip token, or nil if this bundle carries none.
+    /// The image claiming an exact target, or nil if the bundle carries none.
+    public func image(forTarget target: String) -> Image? {
+        images.first { $0.targets.contains(target) }
+    }
+
+    /// The verified OTA payload for an exact target.
+    public func payload(forTarget target: String) -> Data? {
+        payloads[target]
+    }
+
+    /// A verified flash part's bytes for an exact target.
+    public func flashPayload(forTarget target: String, role: String) -> Data? {
+        flashPayloads[target]?[role]
+    }
+
+    /// Compatibility lookup by chip. It succeeds only when that chip identifies
+    /// one image; two same-chip images are deliberately ambiguous.
     public func image(forChip chip: String) -> Image? {
-        images.first { $0.chip == chip }
+        let matches = images.filter { $0.chip == chip }
+        return matches.count == 1 ? matches[0] : nil
     }
 
-    /// The verified payload for a chip token, or nil if this bundle carries none.
-    ///
-    /// This is the OTA payload and it is unchanged by generation 2: a
-    /// generation-1 file still answers it, which is why reading both generations
-    /// costs the update path nothing.
+    /// Compatibility lookup by chip. Exact-target callers should use
+    /// `payload(forTarget:)`.
     public func payload(forChip chip: String) -> Data? {
-        payloads[chip]
+        guard let target = image(forChip: chip)?.targets.first else { return nil }
+        return payload(forTarget: target)
     }
 
-    /// A verified flash part's bytes, or nil if this bundle carries none for that
-    /// chip and role.
+    /// Compatibility lookup by chip and role.
     public func flashPayload(forChip chip: String, role: String) -> Data? {
-        flashPayloads[chip]?[role]
+        guard let target = image(forChip: chip)?.targets.first else { return nil }
+        return flashPayload(forTarget: target, role: role)
     }
 
     /// Everything that has to be written, in ascending flash address order, to
@@ -516,10 +591,10 @@ public struct FirmwareBundle: Equatable, Sendable {
     /// order the core's own upload recipe uses (platform.txt:346). The order is
     /// derived from the addresses in the file rather than from the roles, so a
     /// board whose map differs still gets a sensible sequence.
-    public func flashPlan(forChip chip: String) -> [FlashWrite]? {
-        guard let image = image(forChip: chip),
+    public func flashPlan(forTarget target: String) -> [FlashWrite]? {
+        guard let image = image(forTarget: target),
               let appAddress = image.appAddress,
-              let appPayload = payloads[chip],
+              let appPayload = payloads[target],
               !image.flashParts.isEmpty
         else { return nil }
         guard Self.requiredFlashRoles.allSatisfy({ image.flashPart(role: $0) != nil })
@@ -528,7 +603,8 @@ public struct FirmwareBundle: Equatable, Sendable {
             role: Self.appFlashRole, address: appAddress, filename: image.filename,
             sha256: image.sha256, payload: appPayload)]
         for part in image.flashParts {
-            guard let payload = flashPayload(forChip: chip, role: part.role) else { return nil }
+            guard let payload = flashPayload(forTarget: target, role: part.role)
+            else { return nil }
             writes.append(FlashWrite(
                 role: part.role, address: part.address, filename: part.filename,
                 sha256: part.sha256, payload: payload))
@@ -541,16 +617,31 @@ public struct FirmwareBundle: Equatable, Sendable {
             .map(\.element)
     }
 
-    /// Whether this bundle can bring a board of this chip up from nothing.
+    /// Compatibility flash plan by chip. Ambiguous same-chip images return nil.
+    public func flashPlan(forChip chip: String) -> [FlashWrite]? {
+        guard let target = image(forChip: chip)?.targets.first else { return nil }
+        return flashPlan(forTarget: target)
+    }
+
+    public func canFlashBlankDevice(target: String) -> Bool {
+        flashPlan(forTarget: target) != nil
+    }
+
+    /// Whether this bundle can bring an unambiguous chip up from nothing.
     public func canFlashBlankDevice(chip: String) -> Bool {
         flashPlan(forChip: chip) != nil
+    }
+
+    /// Exact targets this bundle can serve.
+    public var targets: [String] {
+        Array(Set(images.flatMap(\.targets))).sorted()
     }
 
     /// Chip tokens this bundle can serve, sorted so a message reads the same way
     /// twice. `--board c6` alone writes a one-image bundle, which is a normal
     /// file, so this can legitimately be shorter than the boards that exist.
     public var chips: [String] {
-        images.map(\.chip).sorted()
+        Array(Set(images.map(\.chip))).sorted()
     }
 
     // MARK: - update availability
@@ -562,6 +653,34 @@ public struct FirmwareBundle: Equatable, Sendable {
     /// sent one it could not fill in. `panelVersion` is the version from EINF,
     /// which is authoritative and session-bound - not the `fw` TXT record, which
     /// can be a stale cache entry.
+    public func availability(
+        forTarget target: String?, panelVersion: String
+    ) -> FirmwareUpdateAvailability {
+        guard let target, !target.isEmpty else {
+            return .targetUnknown(bundleTargets: targets)
+        }
+        guard let image = image(forTarget: target) else {
+            return .noImageForTarget(target: target, bundleTargets: targets)
+        }
+        return versionAvailability(image: image, panelVersion: panelVersion)
+    }
+
+    /// Target selection plus the independent chip cross-check used before OTA.
+    public func availability(
+        forTarget target: String?, chip: String?, panelVersion: String
+    ) -> FirmwareUpdateAvailability {
+        let selected = availability(forTarget: target, panelVersion: panelVersion)
+        guard let image = selected.image, let target else { return selected }
+        guard let chip, !chip.isEmpty, chip != ServiceMetadata.unknownChip else {
+            return .chipUnknownForTarget(target: target, expectedChip: image.chip)
+        }
+        guard chip == image.chip else {
+            return .targetChipMismatch(
+                target: target, imageChip: image.chip, panelChip: chip)
+        }
+        return selected
+    }
+
     public func availability(
         forChip chip: String?, panelVersion: String
     ) -> FirmwareUpdateAvailability {
@@ -577,6 +696,12 @@ public struct FirmwareBundle: Equatable, Sendable {
         guard let image = image(forChip: chip) else {
             return .noImageForChip(chip: chip, bundleChips: chips)
         }
+        return versionAvailability(image: image, panelVersion: panelVersion)
+    }
+
+    private func versionAvailability(
+        image: Image, panelVersion: String
+    ) -> FirmwareUpdateAvailability {
         switch FirmwareVersion.compare(firmwareVersion, to: panelVersion) {
         case .newer:
             return .updateAvailable(
@@ -593,6 +718,48 @@ public struct FirmwareBundle: Equatable, Sendable {
     }
 
     // MARK: - helpers
+
+    static func legacyTarget(forBoard board: String) -> String? {
+        let token = board.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !token.isEmpty else { return nil }
+        return [
+            "c6": "c6",
+            "s3": "s3-175",
+            "s3-175": "s3-175",
+            "s3-185": "s3-185",
+        ][token] ?? token
+    }
+
+    private static func imageTargets(
+        entry: [String: Any], generation: Int, imageIndex: Int, board: String
+    ) throws -> [String] {
+        guard generation >= format else {
+            guard let target = legacyTarget(forBoard: board) else {
+                throw FirmwareBundleError.legacyImageHasNoUsableTarget(
+                    index: imageIndex, board: board)
+            }
+            return [target]
+        }
+        guard let rawTargets = entry["targets"] as? [Any], !rawTargets.isEmpty else {
+            throw FirmwareBundleError.noTargets(index: imageIndex)
+        }
+        var targets = [String]()
+        for (targetIndex, rawTarget) in rawTargets.enumerated() {
+            guard let target = rawTarget as? String,
+                  !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  target == target.trimmingCharacters(in: .whitespacesAndNewlines)
+            else {
+                throw FirmwareBundleError.unusableTarget(
+                    image: imageIndex, targetIndex: targetIndex)
+            }
+            guard !targets.contains(target) else {
+                throw FirmwareBundleError.duplicateTargetInImage(
+                    image: imageIndex, target: target)
+            }
+            targets.append(target)
+        }
+        return targets
+    }
 
     /// Lowercase hex sha256, the spelling the manifest uses.
     public static func sha256Hex(_ data: Data) -> String {
@@ -700,9 +867,14 @@ public enum FirmwareBundleError: Error, LocalizedError, Equatable {
     case notContiguous(index: Int, chip: String, offset: Int, expected: Int)
     case pastEndOfFile(index: Int, chip: String, end: Int, fileBytes: Int)
     case duplicateChip(String)
+    case legacyImageHasNoUsableTarget(index: Int, board: String)
+    case noTargets(index: Int)
+    case unusableTarget(image: Int, targetIndex: Int)
+    case duplicateTargetInImage(image: Int, target: String)
+    case duplicateTargetClaim(target: String, firstImage: Int, secondImage: Int)
     case hashMismatch(index: Int, chip: String, expected: String, actual: String)
     case trailingBytes(Int)
-    // Generation 2's flash parts. One case per way one can be wrong, for the same
+    // Generation 2 and newer flash parts. One case per way one can be wrong, for
     // reason as above and one more: these are written to absolute flash addresses
     // on a board that has nothing working on it, so "which part" and "what
     // address" are the two things a person needs told.
@@ -727,8 +899,8 @@ public enum FirmwareBundleError: Error, LocalizedError, Equatable {
             return "This is not a firmware bundle: \(bytes) bytes is shorter than the "
                 + "\(FirmwareBundle.headerBytes)-byte header."
         case .notABundle:
-            return "This is not a firmware bundle: it does not start with the "
-                + "ESPDISPFW2 magic."
+            return "This is not a firmware bundle: it does not start with an "
+                + "ESPDISPFW1, ESPDISPFW2, or ESPDISPFW3 magic."
         case .unsupportedGeneration(let found, let supported):
             return "This bundle is generation \(found); this app reads \(supported). "
                 + "A newer version of the app can open it."
@@ -766,8 +938,21 @@ public enum FirmwareBundleError: Error, LocalizedError, Equatable {
             return "Image \(index) (\(chip)) runs to offset \(end), past the end of a "
                 + "\(fileBytes)-byte file."
         case .duplicateChip(let chip):
-            return "The bundle lists \(chip) twice, so there is no way to tell which "
-                + "image to push."
+            return "The legacy bundle lists \(chip) twice, so there is no way to tell "
+                + "which image to push."
+        case .legacyImageHasNoUsableTarget(let index, let board):
+            return "Legacy image \(index) has no usable board target: "
+                + "\(board.debugDescription)."
+        case .noTargets(let index):
+            return "Format-3 image \(index) requires a non-empty targets list."
+        case .unusableTarget(let image, let targetIndex):
+            return "Target \(targetIndex) in format-3 image \(image) is not a usable "
+                + "exact target string."
+        case .duplicateTargetInImage(let image, let target):
+            return "Format-3 image \(image) lists target \(target) twice."
+        case .duplicateTargetClaim(let target, let firstImage, let secondImage):
+            return "Target \(target) is claimed by both image \(firstImage) and image "
+                + "\(secondImage), so there is no unique payload for it."
         case .hashMismatch(let index, let chip, let expected, let actual):
             return "Image \(index) (\(chip)) hash mismatch: the manifest says sha256 "
                 + "\(expected.prefix(16)), the image hashes to \(actual.prefix(16)). "
@@ -841,6 +1026,15 @@ public enum FirmwareUpdateAvailability: Equatable, Sendable {
     /// The panel named its chip and this bundle has no image for it. A definite
     /// contradiction, and the only case here that is genuinely the wrong file.
     case noImageForChip(chip: String, bundleChips: [String])
+    /// The panel named an exact target this bundle does not carry.
+    case noImageForTarget(target: String, bundleTargets: [String])
+    /// The panel did not report an exact target.
+    case targetUnknown(bundleTargets: [String])
+    /// An exact target selected an image, but the independently reported chip
+    /// contradicts that image.
+    case targetChipMismatch(target: String, imageChip: String, panelChip: String)
+    /// An exact target was reported but the independent chip was not.
+    case chipUnknownForTarget(target: String, expectedChip: String)
     /// The panel did not name its chip, or named it as `unknown`. Not a
     /// contradiction, so not a refusal on the file's account - there is simply no
     /// way to choose an image.
@@ -853,7 +1047,8 @@ public enum FirmwareUpdateAvailability: Equatable, Sendable {
         case .updateAvailable(let image, _, _), .upToDate(let image, _),
              .bundleIsOlder(let image, _, _), .versionsIncomparable(let image, _, _):
             return image
-        case .noImageForChip, .chipUnknown:
+        case .noImageForChip, .noImageForTarget, .targetUnknown,
+             .targetChipMismatch, .chipUnknownForTarget, .chipUnknown:
             return nil
         }
     }

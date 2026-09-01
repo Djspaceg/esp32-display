@@ -183,15 +183,10 @@ static esp_err_t panel_co5300_reset(esp_lcd_panel_t *panel)
 
     // Perform hardware reset
     if (co5300->reset_gpio_num >= 0) {
-        // Both observed CO5300 boards tolerate the maintained production
-        // timing. Drive inactive first, then hold reset and recovery for the
-        // full 200 ms Waveshare's current Arduino driver requires.
-        gpio_set_level(co5300->reset_gpio_num, !co5300->flags.reset_level);
-        vTaskDelay(pdMS_TO_TICKS(10));
         gpio_set_level(co5300->reset_gpio_num, co5300->flags.reset_level);
-        vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(10));
         gpio_set_level(co5300->reset_gpio_num, !co5300->flags.reset_level);
-        vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(150));
     } else { // Perform software reset
         ESP_RETURN_ON_ERROR(tx_param(co5300, io, LCD_CMD_SWRESET, NULL, 0), TAG, "send command failed");
         vTaskDelay(pdMS_TO_TICKS(80));

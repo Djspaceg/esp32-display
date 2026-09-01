@@ -23,6 +23,7 @@ final class ServiceMetadataTests: XCTestCase {
         // bits 0 to 10, and not bit 11, because no C6 board carries a PMU.
         "caps": "000007ff",
         "chip": "esp32c6",
+        "target": "c6",
     ]
 
     func testReadsEveryRecordARealPanelSends() throws {
@@ -32,6 +33,7 @@ final class ServiceMetadataTests: XCTestCase {
         XCTAssertEqual(metadata.geometry, .panel172x320, "the same panel by either name")
         XCTAssertEqual(metadata.firmwareVersion, "1.2.0")
         XCTAssertEqual(metadata.chip, "esp32c6")
+        XCTAssertEqual(metadata.target, "c6")
         XCTAssertEqual(metadata.frameProtocolVersion, 2)
         XCTAssertEqual(
             metadata.frameProtocolVersion, Int(DeviceProtocol.frameProtocolVersion),
@@ -57,9 +59,11 @@ final class ServiceMetadataTests: XCTestCase {
         let metadata = ServiceMetadata(txtRecords: [
             "name": "espdisplay-amoled", "res": "466x466", "fw": "1.2.0",
             "proto": "2", "caps": "00000fff", "chip": "esp32s3",
+            "target": "s3-175",
         ])
         XCTAssertEqual(metadata.geometry, PanelGeometry(width: 466, height: 466))
         XCTAssertEqual(metadata.chip, "esp32s3")
+        XCTAssertEqual(metadata.target, "s3-175")
         XCTAssertEqual(metadata.capabilities?.contains(.battery), true)
     }
 
@@ -73,6 +77,7 @@ final class ServiceMetadataTests: XCTestCase {
         XCTAssertNil(metadata.geometry)
         XCTAssertNil(metadata.firmwareVersion)
         XCTAssertNil(metadata.chip)
+        XCTAssertNil(metadata.target)
         XCTAssertNil(metadata.capabilities)
         XCTAssertNil(metadata.frameProtocolVersion)
         XCTAssertFalse(metadata.namesAChip)
@@ -92,6 +97,7 @@ final class ServiceMetadataTests: XCTestCase {
                 key == "res" ? metadata.geometry == nil : metadata.geometry == .panel172x320,
                 key == "fw" ? true : metadata.firmwareVersion == "1.2.0",
                 key == "chip" ? true : metadata.chip == "esp32c6",
+                key == "target" ? true : metadata.target == "c6",
                 key == "caps" ? metadata.capabilities == nil
                     : metadata.capabilities?.rawValue == 0x7FF,
                 key == "proto" ? metadata.frameProtocolVersion == nil
@@ -113,6 +119,7 @@ final class ServiceMetadataTests: XCTestCase {
         // an empty string. An empty name is not a name.
         let metadata = ServiceMetadata(txtRecords: [
             "name": "", "res": "", "fw": "", "proto": "", "caps": "", "chip": "",
+            "target": "",
         ])
         XCTAssertEqual(metadata, .empty)
     }
@@ -240,11 +247,13 @@ final class ServiceMetadataTests: XCTestCase {
         // us through something that rewrote it.
         let metadata = ServiceMetadata(txtRecords: [
             "NAME": "panel", "Res": "466x466", "FW": "1.2.0", "CHIP": "esp32s3",
+            "TARGET": "s3-185",
         ])
         XCTAssertEqual(metadata.name, "panel")
         XCTAssertEqual(metadata.geometry, PanelGeometry(width: 466, height: 466))
         XCTAssertEqual(metadata.firmwareVersion, "1.2.0")
         XCTAssertEqual(metadata.chip, "esp32s3")
+        XCTAssertEqual(metadata.target, "s3-185")
     }
 
     func testTwoKeysDifferingOnlyInCaseAreDropped() {

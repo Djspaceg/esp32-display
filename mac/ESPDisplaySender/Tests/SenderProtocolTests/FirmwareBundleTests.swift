@@ -98,9 +98,11 @@ final class FirmwareBundleTests: XCTestCase {
         XCTAssertEqual(file[11..<21], Data("0000000914".utf8), "ten digits, zero padded")
         XCTAssertEqual(file[21..<22], Data("\n".utf8), "and a newline")
         XCTAssertEqual(FirmwareBundle.headerBytes, 22)
-        XCTAssertEqual(FirmwareBundle.magic, Data("ESPDISPFW2\n".utf8))
+        XCTAssertEqual(FirmwareBundle.magicV2, Data("ESPDISPFW2\n".utf8))
         XCTAssertEqual(FirmwareBundle.lengthDigits, 10)
-        XCTAssertEqual(FirmwareBundle.format, 2)
+        XCTAssertEqual(FirmwareBundle.formatV2, 2)
+        XCTAssertEqual(FirmwareBundle.magic, Data("ESPDISPFW3\n".utf8))
+        XCTAssertEqual(FirmwareBundle.format, 3)
         XCTAssertEqual(FirmwareBundle.fileExtension, "espdispfw")
         // Payload order, byte for byte: the app, then this image's parts in listed
         // order. A reader that put the parts first, or sorted them by flash
@@ -122,6 +124,7 @@ final class FirmwareBundleTests: XCTestCase {
         let image = try XCTUnwrap(bundle.image(forChip: "esp32c6"))
         XCTAssertEqual(image.board, "c6")
         XCTAssertEqual(image.chip, "esp32c6")
+        XCTAssertEqual(image.targets, ["c6"])
         XCTAssertEqual(image.fqbn, "esp32:esp32:esp32c6")
         XCTAssertEqual(image.filename, "display_stream.ino.bin")
         XCTAssertEqual(image.offset, 936, "22 + 914")
@@ -193,9 +196,12 @@ final class FirmwareBundleTests: XCTestCase {
         // Both magics are the same width, which is what keeps the manifest at
         // offset 22 for every generation and lets `headerBytes` stay one number.
         XCTAssertEqual(FirmwareBundle.magicV1.count, FirmwareBundle.magic.count)
+        XCTAssertEqual(FirmwareBundle.magicV2.count, FirmwareBundle.magic.count)
         XCTAssertEqual(
             FirmwareBundle.generations,
-            [FirmwareBundle.magicV1: 1, FirmwareBundle.magic: 2],
+            [FirmwareBundle.magicV1: 1,
+             FirmwareBundle.magicV2: 2,
+             FirmwareBundle.magic: 3],
             "the generations this build reads are part of the format")
 
         let bundle = try FirmwareBundle.read(file)
@@ -205,7 +211,8 @@ final class FirmwareBundleTests: XCTestCase {
         // both generations cost the update path nothing: `payload(forChip:)` is
         // what FirmwareUpdateSheet asks for, and this file still answers it.
         XCTAssertEqual(bundle.payload(forChip: "esp32c6"), app)
-        XCTAssertEqual(bundle.chips, ["esp32c6"])
+        XCTAssertEqual(bundle.payload(forTarget: "c6"), app)
+        XCTAssertEqual(bundle.targets, ["c6"])
         let image = try XCTUnwrap(bundle.image(forChip: "esp32c6"))
         XCTAssertEqual(image.offset, 372, "22 + 350")
 
@@ -270,8 +277,77 @@ final class FirmwareBundleTests: XCTestCase {
         XCTAssertNil(bundle.flashPlan(forChip: "esp32p4"))
         // A payload containing the magic is framed by the offsets rather than by
         // scanning for a marker, which is why the format can carry raw images.
-        XCTAssertTrue(Self.c6Payload.range(of: FirmwareBundle.magic) != nil,
+        XCTAssertTrue(Self.c6Payload.range(of: FirmwareBundle.magicV2) != nil,
                       "this fixture is only interesting if it contains the magic")
+    }
+
+    func testLegacyS3AlwaysMapsToS3175AndNeverS3185() throws {
+        for generation in [FirmwareBundle.formatV1, FirmwareBundle.formatV2] {
+            let bundle = try Self.readBundle(
+                version: "1.2.0", images: [Self.s3Spec], generation: generation)
+            XCTAssertEqual(bundle.targets, ["s3-175"])
+            XCTAssertNotNil(bundle.image(forTarget: "s3-175"))
+            XCTAssertNil(bundle.image(forTarget: "s3-185"))
+            XCTAssertEqual(
+                bundle.payload(forTarget: "s3-175"), Self.s3Payload)
+            XCTAssertNil(bundle.payload(forTarget: "s3-185"))
+        }
+    }
+
+    func testFormatThreeSelectsTwoESP32S3ImagesByExactTarget() throws {
+        let s3_175 = ImageSpec(
+            board: "s3-175",
+            chip: "esp32s3",
+            payload: Data("s3-175 app".utf8),
+            flashParts: Self.flashParts("s3-175"),
+            targets: ["s3-175"])
+        let s3_185 = ImageSpec(
+            board: "s3-185",
+            chip: "esp32s3",
+            payload: Data("s3-185 app".utf8),
+            flashParts: Self.flashParts("s3-185"),
+            targets: ["s3-185"])
+        let bundle = try Self.readBundle(
+            version: "3.0.0", images: [s3_175, s3_185],
+            generation: FirmwareBundle.format)
+
+        XCTAssertEqual(bundle.format, 3)
+        XCTAssertEqual(bundle.targets, ["s3-175", "s3-185"])
+        XCTAssertEqual(bundle.chips, ["esp32s3"], "chips are vocabulary, not selectors")
+        XCTAssertEqual(bundle.images.map(\.targets), [["s3-175"], ["s3-185"]])
+        XCTAssertEqual(bundle.payload(forTarget: "s3-175"), s3_175.payload)
+        XCTAssertEqual(bundle.payload(forTarget: "s3-185"), s3_185.payload)
+        XCTAssertNotEqual(
+            bundle.flashPayload(forTarget: "s3-175", role: "bootloader"),
+            bundle.flashPayload(forTarget: "s3-185", role: "bootloader"))
+        XCTAssertEqual(
+            bundle.flashPlan(forTarget: "s3-175")?.last?.payload,
+            s3_175.payload)
+        XCTAssertEqual(
+            bundle.flashPlan(forTarget: "s3-185")?.last?.payload,
+            s3_185.payload)
+
+        XCTAssertNil(bundle.image(forChip: "esp32s3"))
+        XCTAssertNil(bundle.payload(forChip: "esp32s3"))
+        XCTAssertNil(bundle.flashPlan(forChip: "esp32s3"))
+        XCTAssertFalse(bundle.canFlashBlankDevice(chip: "esp32s3"))
+    }
+
+    func testFormatThreeImageMayClaimSeveralTargets() throws {
+        var shared = Self.s3Spec
+        shared.targets = ["s3-175", "s3-175-rev2"]
+        let bundle = try Self.readBundle(
+            version: "3.0.0", images: [shared], generation: FirmwareBundle.format)
+
+        XCTAssertEqual(bundle.images[0].targets, ["s3-175", "s3-175-rev2"])
+        XCTAssertEqual(
+            bundle.payload(forTarget: "s3-175"),
+            bundle.payload(forTarget: "s3-175-rev2"))
+        XCTAssertEqual(
+            bundle.flashPlan(forTarget: "s3-175"),
+            bundle.flashPlan(forTarget: "s3-175-rev2"))
+        XCTAssertNotNil(bundle.image(forChip: "esp32s3"),
+                        "one shared image is not an ambiguous chip lookup")
     }
 
     func testSingleImageBundleIsNormal() throws {
@@ -341,7 +417,7 @@ final class FirmwareBundleTests: XCTestCase {
         XCTAssertNotEqual(appOffset, 0, "no offset settled; adjust the manifest text")
 
         let bundle = try FirmwareBundle.read(
-            FirmwareBundle.magic + Self.lengthLine(encoded.count) + encoded
+            FirmwareBundle.magicV2 + Self.lengthLine(encoded.count) + encoded
                 + payload + bootloader + partitions + bootApp0)
         XCTAssertEqual(bundle.firmwareVersion, "3.1")
         XCTAssertEqual(bundle.tool, "another writer")
@@ -417,15 +493,15 @@ final class FirmwareBundleTests: XCTestCase {
         // this app open" is now two things rather than one.
         let file = Data("ESPDISPFW9\n0000000350\n".utf8) + Data(repeating: 0x20, count: 350)
         expect(.unsupportedGeneration(found: "ESPDISPFW9",
-                                      supported: "ESPDISPFW1 and ESPDISPFW2"),
+                                      supported: "ESPDISPFW1 and ESPDISPFW2 and ESPDISPFW3"),
                reading: file)
-        // Generation 3 is the one that does not exist yet. Generation 1 does and is
-        // accepted, so this also pins that the dispatch is a lookup over known
-        // magics rather than a comparison against whichever is newest.
-        let next = Data("ESPDISPFW3\n0000000350\n".utf8) + Data(repeating: 0x20, count: 350)
-        expect(.unsupportedGeneration(found: "ESPDISPFW3",
-                                      supported: "ESPDISPFW1 and ESPDISPFW2"),
-               reading: next)
+        // Generation 4 is the one that does not exist yet. Generations 1-3 do.
+        let next = Data("ESPDISPFW4\n0000000350\n".utf8)
+            + Data(repeating: 0x20, count: 350)
+        expect(.unsupportedGeneration(
+            found: "ESPDISPFW4",
+            supported: "ESPDISPFW1 and ESPDISPFW2 and ESPDISPFW3"),
+            reading: next)
     }
 
     func testRefusesAMalformedLengthLine() {
@@ -1146,9 +1222,48 @@ final class FirmwareBundleTests: XCTestCase {
 
     func testRefusesTheSameChipTwice() {
         let file = Self.bundleBytes(
-            Self.manifest(images: [Self.c6Spec, Self.c6Spec]),
-            payloads: Self.area([Self.c6Spec, Self.c6Spec]))
+            Self.manifest(
+                images: [Self.c6Spec, Self.c6Spec],
+                generation: FirmwareBundle.formatV2),
+            payloads: Self.area(
+                [Self.c6Spec, Self.c6Spec], generation: FirmwareBundle.formatV2),
+            magic: FirmwareBundle.magicV2)
         expect(.duplicateChip("esp32c6"), reading: file)
+    }
+
+    func testFormatThreeRequiresUsableUniqueTargets() {
+        func file(_ targets: Any) -> Data {
+            Self.bundleBytes(
+                Self.manifest(
+                    images: [Self.s3Spec], generation: FirmwareBundle.format),
+                payloads: Self.area(
+                    [Self.s3Spec], generation: FirmwareBundle.format),
+                magic: FirmwareBundle.magic,
+                mutate: { manifest in
+                    var images = manifest["images"] as! [[String: Any]]
+                    images[0]["targets"] = targets
+                    manifest["images"] = images
+                })
+        }
+        expect(.noTargets(index: 0), reading: file([]))
+        expect(.unusableTarget(image: 0, targetIndex: 0), reading: file([" "]))
+        expect(.unusableTarget(image: 0, targetIndex: 0), reading: file([7]))
+        expect(.duplicateTargetInImage(image: 0, target: "s3-175"),
+               reading: file(["s3-175", "s3-175"]))
+    }
+
+    func testFormatThreeRefusesATargetClaimedByTwoImages() {
+        var first = Self.s3Spec
+        first.targets = ["s3-175"]
+        var second = Self.s3Spec
+        second.targets = ["s3-175"]
+        let file = Self.bundleBytes(
+            Self.manifest(
+                images: [first, second], generation: FirmwareBundle.format),
+            payloads: Self.area([first, second], generation: FirmwareBundle.format),
+            magic: FirmwareBundle.magic)
+        expect(.duplicateTargetClaim(
+            target: "s3-175", firstImage: 0, secondImage: 1), reading: file)
     }
 
     func testRefusesAHashThatDoesNotMatch() throws {
@@ -1200,6 +1315,11 @@ final class FirmwareBundleTests: XCTestCase {
             .notContiguous(index: 0, chip: "esp32c6", offset: 5, expected: 4),
             .pastEndOfFile(index: 0, chip: "esp32c6", end: 99, fileBytes: 50),
             .duplicateChip("esp32c6"),
+            .legacyImageHasNoUsableTarget(index: 0, board: ""),
+            .noTargets(index: 0),
+            .unusableTarget(image: 0, targetIndex: 0),
+            .duplicateTargetInImage(image: 0, target: "s3-175"),
+            .duplicateTargetClaim(target: "s3-175", firstImage: 0, secondImage: 1),
             .hashMismatch(index: 0, chip: "esp32c6", expected: "aa", actual: "bb"),
             .trailingBytes(8),
             .noFlashParts(index: 0, chip: "esp32c6"),
@@ -1366,6 +1486,7 @@ final class FirmwareBundleTests: XCTestCase {
         let chip: String
         let payload: Data
         var flashParts: [FlashPartSpec]
+        var targets: [String] = []
 
         /// This image's slice of the payload area: its application image, then its
         /// flash parts in listed order. The format's one rule about where payloads
@@ -1417,7 +1538,7 @@ final class FirmwareBundleTests: XCTestCase {
     /// file carries the application images and nothing else, which is the entire
     /// difference between the two generations expressed in bytes.
     private static func area(
-        _ images: [ImageSpec], generation: Int = FirmwareBundle.format
+        _ images: [ImageSpec], generation: Int = FirmwareBundle.formatV2
     ) -> Data {
         images.reduce(Data()) {
             generation == FirmwareBundle.formatV1 ? $0 + $1.payload : $0 + $1.area
@@ -1432,7 +1553,7 @@ final class FirmwareBundleTests: XCTestCase {
     /// difference between the two generations.
     private static func manifest(
         images: [ImageSpec], version: String = "1.2.0",
-        generation: Int = FirmwareBundle.format
+        generation: Int = FirmwareBundle.formatV2
     ) -> [String: Any] {
         var manifest: [String: Any] = [
             "format": generation,
@@ -1451,6 +1572,11 @@ final class FirmwareBundleTests: XCTestCase {
                     "bytes": spec.payload.count,
                     "sha256": FirmwareBundle.sha256Hex(spec.payload),
                 ]
+                if generation >= FirmwareBundle.format {
+                    entry["targets"] = spec.targets.isEmpty
+                        ? [FirmwareBundle.legacyTarget(forBoard: spec.board)!]
+                        : spec.targets
+                }
                 if generation != FirmwareBundle.formatV1 {
                     entry["app_address"] = appFlashAddress
                     entry["flash_parts"] = spec.flashParts.map { part -> [String: Any] in
@@ -1536,7 +1662,7 @@ final class FirmwareBundleTests: XCTestCase {
     private static func bundleBytes(
         _ manifest: [String: Any],
         payloads: Data,
-        magic: Data = FirmwareBundle.magic,
+        magic: Data = FirmwareBundle.magicV2,
         solveOffsets: Bool = true,
         editAfterEachSolve: ((inout [String: Any]) -> Void)? = nil,
         mutate: (inout [String: Any]) -> Void = { _ in }
@@ -1556,19 +1682,22 @@ final class FirmwareBundleTests: XCTestCase {
     /// about a manifest this deliberately made wrong somewhere else.
     private static func bundleBytes(manifestText: String, payloads: Data) -> Data {
         let encoded = Data(manifestText.utf8)
-        return FirmwareBundle.magic + lengthLine(encoded.count) + encoded + payloads
+        return FirmwareBundle.magicV2 + lengthLine(encoded.count) + encoded + payloads
     }
 
     private static func readBundle(
         version: String, images: [ImageSpec],
-        generation: Int = FirmwareBundle.format
+        generation: Int = FirmwareBundle.formatV2
     ) throws -> FirmwareBundle {
         try FirmwareBundle.read(
             bundleBytes(
                 manifest(images: images, version: version, generation: generation),
                 payloads: area(images, generation: generation),
                 magic: generation == FirmwareBundle.formatV1
-                    ? FirmwareBundle.magicV1 : FirmwareBundle.magic))
+                    ? FirmwareBundle.magicV1
+                    : generation == FirmwareBundle.formatV2
+                        ? FirmwareBundle.magicV2
+                        : FirmwareBundle.magic))
     }
 
     private static func temporaryDirectory() throws -> URL {

@@ -34,6 +34,7 @@ struct AddDeviceSheet: View {
     @State private var bundleLabel = ""
     @State private var bundleIsShipped = false
     @State private var bundleProblem: String?
+    @State private var selectedTarget = ""
 
     /// Empty means the network is being typed in rather than chosen.
     @State private var savedSSID = ""
@@ -78,6 +79,15 @@ struct AddDeviceSheet: View {
         }
         .onChange(of: manager.usbDevices) { _, _ in
             usbDevicesChanged()
+        }
+        .onChange(of: mode) { _, selected in
+            if selected == .flashAndConfigure,
+               detection.chip == nil,
+               !port.isEmpty,
+               !inspecting,
+               !running {
+                inspect(preserveMode: true)
+            }
         }
         .confirmationDialog(
             confirmationTitle, isPresented: $confirming, titleVisibility: .visible
@@ -162,10 +172,10 @@ struct AddDeviceSheet: View {
         } header: {
             Text("Device")
         } footer: {
-            Text("The chip is read off the board, so there is nothing to choose "
-                + "between a C6 and an S3. A board that already runs this firmware "
-                + "is offered WiFi setup on its own; a blank one is offered the "
-                + "firmware as well.")
+            Text("The chip is read from the board. C6 has one exact firmware "
+                + "target and can be selected automatically; ESP32-S3 boards "
+                + "also require choosing the attached display target before "
+                + "anything is written.")
         }
     }
 
@@ -176,7 +186,16 @@ struct AddDeviceSheet: View {
                 LabeledContent("Version", value: bundle.firmwareVersion)
                 LabeledContent("Built", value: bundle.builtAt)
                 LabeledContent("File", value: bundleLabel)
-                LabeledContent("Images", value: bundle.chips.joined(separator: ", "))
+                LabeledContent("Images", value: bundle.targets.joined(separator: ", "))
+                if !compatibleTargets.isEmpty {
+                    Picker("Exact target", selection: $selectedTarget) {
+                        Text("Choose…").tag("")
+                        ForEach(compatibleTargets, id: \.self) { target in
+                            Text(target).tag(target)
+                        }
+                    }
+                    .disabled(running)
+                }
             } else {
                 Text(bundleProblem
                     ?? "This copy of the app was packaged without a firmware "
@@ -349,10 +368,35 @@ struct AddDeviceSheet: View {
             mode: effectiveMode,
             tool: tool,
             bundle: bundle,
+            target: selectedTarget.isEmpty ? nil : selectedTarget,
             detection: detection,
             existing: existing,
             ssid: ssid,
             credential: credential)
+    }
+
+    private var compatibleTargets: [String] {
+        guard let bundle, let chip = detection.chip else { return [] }
+        return Array(Set(bundle.images
+            .filter { $0.chip == chip }
+            .flatMap(\.targets))).sorted()
+    }
+
+    private func preselectExactTarget() {
+        let compatible = compatibleTargets
+        guard !compatible.isEmpty else {
+            selectedTarget = ""
+            return
+        }
+        if let reported = manager.usbTarget(for: port), compatible.contains(reported) {
+            selectedTarget = reported
+        } else if compatible.contains(selectedTarget) {
+            return
+        } else if detection.chip == "esp32c6", compatible.contains("c6") {
+            selectedTarget = "c6"
+        } else {
+            selectedTarget = ""
+        }
     }
 
     private var selectedHardwareID: String? {
@@ -466,6 +510,7 @@ struct AddDeviceSheet: View {
             bundleLabel = url.lastPathComponent + " (bundled with the app)"
             bundleIsShipped = true
             bundleProblem = nil
+            preselectExactTarget()
         case .unreadable(let path, let reason):
             bundle = nil
             bundleLabel = ""
@@ -486,9 +531,10 @@ struct AddDeviceSheet: View {
     /// an already-open tty and leaves the board running, while every esptool run
     /// ends by resetting it. A board that answers CFGSHOW and only needs
     /// credentials is therefore never reset at all.
-    private func inspect() {
+    private func inspect(preserveMode: Bool = false) {
         detection = .notAttempted
         existing = .notChecked
+        selectedTarget = ""
         work?.cancel()
         inspectionGeneration += 1
         let generation = inspectionGeneration
@@ -516,11 +562,17 @@ struct AddDeviceSheet: View {
             existing = answered
             if case .answered(let name, let hardwareID) = answered {
                 manager.noteUSBIdentity(
-                    path: target, name: name, hardwareID: hardwareID)
+                    path: target,
+                    name: name,
+                    hardwareID: hardwareID)
+                preselectExactTarget()
             }
-            mode = UsbOnboarding.suggestedMode(for: answered)
+            if !preserveMode {
+                mode = UsbOnboarding.suggestedMode(for: answered)
+            }
             let needsHardwareID = selectedHardwareID == nil
-            guard (mode == .flashAndConfigure || needsHardwareID),
+            guard ((preserveMode ? .flashAndConfigure : mode) == .flashAndConfigure
+                    || needsHardwareID),
                   case .installed(let path) = tool
             else { return }
             let read = await UsbOnboarder.detectChip(
@@ -534,6 +586,7 @@ struct AddDeviceSheet: View {
                     path: target, name: nil,
                     hardwareID: ConfigCommands.canonicalHardwareID(mac))
             }
+            preselectExactTarget()
         }
     }
 
@@ -566,6 +619,7 @@ struct AddDeviceSheet: View {
             bundleLabel = url.lastPathComponent
             bundleIsShipped = false
             bundleProblem = nil
+            preselectExactTarget()
         } catch {
             bundle = nil
             bundleLabel = ""
@@ -587,6 +641,7 @@ struct AddDeviceSheet: View {
             port: port,
             mode: effectiveMode,
             bundle: bundle,
+            target: selectedTarget.isEmpty ? nil : selectedTarget,
             chip: detection.chip,
             mac: {
                 if case .detected(_, let mac) = detection { return mac }

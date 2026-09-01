@@ -24,7 +24,8 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 class Board(NamedTuple):
     key: str
     fqbn: str
-    chip: str  # esptool/FQBN board id, used to match a detected chip
+    chip: str  # esptool/FQBN chip id; several board targets may share it
+    extra_flags: Tuple[str, ...]
     blurb: str
 
 
@@ -37,15 +38,43 @@ BOARDS = {
         key="c6",
         fqbn="esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M",
         chip="esp32c6",
+        extra_flags=(),
         blurb='ESP32-C6 1.47" 172x320 - one binary serves both Waveshare variants',
     ),
-    "s3": Board(
-        key="s3",
+    "s3-175": Board(
+        key="s3-175",
         fqbn="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
         chip="esp32s3",
+        extra_flags=(),
         blurb="ESP32-S3-Touch-AMOLED-1.75C 466x466 round AMOLED (needs PSRAM=opi)",
     ),
+    "s3-185": Board(
+        key="s3-185",
+        fqbn="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
+        chip="esp32s3",
+        extra_flags=("-DESPDISP_BOARD_S3_185",),
+        blurb="ESP32-S3-Touch-LCD-1.85C 360x360 round ST77916 LCD",
+    ),
 }
+
+# Kept at the CLI boundary only. Manifests, payload maps, discovery, coverage,
+# and default builds always use canonical exact target names.
+BOARD_ALIASES = {"s3": "s3-175"}
+
+
+def canonical_board_key(key: str) -> str:
+    return BOARD_ALIASES.get(key, key)
+
+
+def board_choices() -> List[str]:
+    return sorted(set(BOARDS) | set(BOARD_ALIASES))
+
+
+def bundle_board_keys(requested: Optional[List[str]]) -> List[str]:
+    """Canonical bundle targets, deduplicated without adding aliases by default."""
+    selected = requested or sorted(BOARDS)
+    return list(dict.fromkeys(canonical_board_key(key) for key in selected))
+
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKETCH_DIR = os.path.join(REPO_ROOT, "firmware", "display_stream")
@@ -175,7 +204,8 @@ def detected_ports() -> List[PortInfo]:
 class NetworkPort(NamedTuple):
     address: str  # IPv4 the responder answered with
     hostname: str  # SRV target, e.g. "panel.local."
-    board: str  # the "board" TXT record, e.g. "esp32c6"
+    board: str  # the chip-level "board" TXT record, e.g. "esp32c6"
+    target: str  # exact firmware target, e.g. "s3-185", when advertised
 
 
 def parse_network_ports(payload: dict) -> List[NetworkPort]:
@@ -197,11 +227,12 @@ def parse_network_ports(payload: dict) -> List[NetworkPort]:
             continue
         props = port.get("properties") or {}
         board = (props.get("board") or "").strip().lower()
+        target = (props.get("target") or "").strip().lower()
         hostname = (props.get("hostname") or "").strip().rstrip(".")
         address = (port.get("address") or "").strip()
         if not address and not hostname:
             continue
-        out.append(NetworkPort(address, hostname, board))
+        out.append(NetworkPort(address, hostname, board, target))
     return out
 
 
@@ -229,35 +260,43 @@ TARGET_WRONG = "wrong"  # it advertises the other board this tool knows
 TARGET_UNKNOWN = "unknown"  # nothing to compare, or a board this tool cannot place
 
 
-def classify_ota_target(board: Board, advertised: str) -> str:
-    """Decide whether an advertised board contradicts the chosen target.
+def classify_ota_target(board: Board, advertised_target: str, advertised_chip: str) -> str:
+    """Compare exact target first, then use chip only when it is unambiguous.
 
-    Deliberately three-valued, and only TARGET_WRONG refuses. An empty or
-    unrecognised `board=` means this tool cannot place the panel - a newer variant,
-    a different project answering on the same service - and refusing on that would
-    turn "I do not know" into "you are wrong". The USB path has the same shape: it
-    only refuses when arduino-cli names a single, different board.
+    An exact target is authoritative: a same-chip `s3-175`/`s3-185` mismatch is
+    still wrong. Without one, a chip can confirm only a target that is unique for
+    that chip; ESP32-S3 therefore stays unknown rather than being declared safe.
     """
-    token = (advertised or "").strip().lower()
-    if not token:
+    target = (advertised_target or "").strip().lower()
+    chip = (advertised_chip or "").strip().lower()
+    known_chips = {candidate.chip for candidate in BOARDS.values()}
+    if target:
+        if target != board.key:
+            return TARGET_WRONG
+        if not chip:
+            return TARGET_UNKNOWN
+        if chip == board.chip:
+            return TARGET_OK
+        return TARGET_WRONG if chip in known_chips else TARGET_UNKNOWN
+
+    if not chip:
         return TARGET_UNKNOWN
-    if token == board.chip:
-        return TARGET_OK
-    if any(token == other.chip for other in BOARDS.values()):
+    if chip not in known_chips:
+        return TARGET_UNKNOWN
+    if chip != board.chip:
         return TARGET_WRONG
-    return TARGET_UNKNOWN
+    matches = [candidate for candidate in BOARDS.values() if candidate.chip == chip]
+    return TARGET_OK if len(matches) == 1 else TARGET_UNKNOWN
 
 
 def board_key_for_fqbn(fqbn: str) -> Optional[str]:
-    """Map an arduino-cli FQBN (vendor:arch:board[:opts]) onto a board key."""
+    """Map an FQBN only when exactly one target uses its chip id."""
     parts = fqbn.split(":")
     if len(parts) < 3:
         return None
     board_id = parts[2].strip().lower()
-    for board in BOARDS.values():
-        if board_id == board.chip:
-            return board.key
-    return None
+    matches = [board.key for board in BOARDS.values() if board_id == board.chip]
+    return matches[0] if len(matches) == 1 else None
 
 
 def candidate_ports() -> List[PortInfo]:
@@ -432,22 +471,7 @@ def core_bootloader_address(chip: str) -> int:
 
 
 def probe_chip(address: str) -> Optional[str]:
-    """Ask the bundled esptool which chip is on `address`.
-
-    Returns a board key, or None if the chip could not be determined.
-
-    VERIFIED against hardware, for esptool 5.3.1 and one chip: run against an
-    attached ESP32-S3 it matched on "Detecting chip type... ESP32-S3", derived the
-    token esp32s3 and returned 's3'. That is the only one of the two spellings
-    below that 5.3.1 prints - it says "Connected to ESP32-S3 on <port>:" and
-    "Chip type:          ESP32-S3 (QFN56) (revision v0.2)", and never "Chip is".
-    The "Chip is" alternative is esptool 4.x's spelling and is kept for a 4.x
-    esptool.py, which esptool_path() still locates deliberately; it is UNVERIFIED,
-    because no 4.x esptool has been run against a board here.
-
-    UNVERIFIED for the C6: no C6 was attached, so only the S3 half of the board
-    table has been exercised end to end.
-    """
+    """Ask esptool for the IDF chip token; it cannot identify the carrier."""
     tool = esptool_path()
     if not tool:
         return None
@@ -457,37 +481,31 @@ def probe_chip(address: str) -> Optional[str]:
     proc = run_capture(cmd, timeout=60.0)
     blob = (proc.stdout or "") + (proc.stderr or "")
     if "chip-id" in blob and re.search(r"(No such command|Usage:)", blob):
-        # esptool 4.x spells it with an underscore.
         cmd[-1] = "chip_id"
         proc = run_capture(cmd, timeout=60.0)
         blob = (proc.stdout or "") + (proc.stderr or "")
-    for raw in re.findall(r"(?:Chip is|Detecting chip type\.\.\.)\s*(ESP32[\w-]*)", blob):
-        token = re.sub(r"[^a-z0-9]", "", raw.lower())
-        for board in BOARDS.values():
-            if token.startswith(board.chip):
-                return board.key
-    return None
+    found = re.findall(
+        r"(?:Chip is|Detecting chip type\.\.\.)\s*(ESP32[\w-]*)", blob)
+    if not found:
+        return None
+    return re.sub(r"[^a-z0-9]", "", found[0].lower())
+
 
 
 def resolve_board(explicit: Optional[str], port: Optional[PortInfo]) -> Board:
-    """Pick a board, or refuse.
+    """Pick an exact board target, or refuse.
 
-    Never guesses. Both boards are native USB CDC at VID 0x303A PID 0x1001, so
-    neither the port name nor the VID/PID distinguishes a C6 from the S3, and a
-    tool that picked one would be picking for the user with nothing to go on.
-
-    A wrong guess is not fatal to a board - the core's upload recipe passes
-    `--chip {build.mcu}` to esptool (platform.txt line 346) and esptool refuses a
-    chip that is not the one it was told to expect. What a refusal here buys is
-    the difference between that and a message that names the fix, before a
-    multi-minute compile rather than after it.
+    USB metadata and esptool can identify a chip, not the attached panel. A chip
+    mismatch is rejected by esptool, but two ESP32-S3 targets pass the same image
+    header check, so S3 always requires an explicit exact target.
     """
     if explicit:
-        board = BOARDS[explicit]
+        board = BOARDS[canonical_board_key(explicit)]
         # Free cross-check: if arduino-cli itself named a single, different
         # board for this port, the user has almost certainly typed the wrong
         # target. This costs no extra port access.
-        if port and len(port.board_keys) == 1 and port.board_keys[0] != board.key:
+        reported = canonical_board_key(port.board_keys[0]) if port and len(port.board_keys) == 1 else None
+        if reported and reported != board.key:
             raise Fail(
                 "--board %s contradicts %s, which arduino-cli reports as %s.\n"
                 "  Re-run with --board %s, or with --port pointing at the other board.\n"
@@ -499,8 +517,8 @@ def resolve_board(explicit: Optional[str], port: Optional[PortInfo]) -> Board:
                 % (
                     board.key,
                     port.address,
-                    port.board_keys[0],
-                    port.board_keys[0],
+                    reported,
+                    reported,
                     board.fqbn,
                     LIBRARIES_DIR,
                     board.fqbn,
@@ -513,20 +531,23 @@ def resolve_board(explicit: Optional[str], port: Optional[PortInfo]) -> Board:
         raise Fail("--board is required here (one of: %s)" % ", ".join(BOARDS))
 
     if len(port.board_keys) == 1:
-        return BOARDS[port.board_keys[0]]
+        return BOARDS[canonical_board_key(port.board_keys[0])]
 
     print("Probing %s for its chip type..." % port.address, flush=True)
-    key = probe_chip(port.address)
-    if key:
-        print("Detected %s (%s)." % (BOARDS[key].chip, key), flush=True)
-        return BOARDS[key]
+    chip = probe_chip(port.address)
+    matches = [board for board in BOARDS.values() if board.chip == chip]
+    if len(matches) == 1:
+        print("Detected %s (%s)." % (chip, matches[0].key), flush=True)
+        return matches[0]
+    if len(matches) > 1:
+        raise Fail(
+            "%s is %s, which is used by multiple display boards.\n"
+            "  Re-run with --board %s; the chip alone cannot identify its panel."
+            % (port.address, chip, "|".join(board.key for board in matches)))
 
     raise Fail(
         "could not determine which chip is on %s.\n"
-        "  Both boards are native USB CDC (VID 0x303A PID 0x1001), so the port\n"
-        "  name cannot tell them apart, and probing did not answer either.\n"
-        "  Re-run with --board %s." % (port.address, "|".join(BOARDS))
-    )
+        "  Re-run with --board %s." % (port.address, "|".join(BOARDS)))
 
 
 # --------------------------------------------------------------------------
@@ -606,7 +627,7 @@ def send_config_line(address: str, line: str, timeout: float) -> str:
 # LAYOUT, byte-exact. A reader on the other side of this format implements four
 # lines:
 #
-#   offset 0        "ESPDISPFW2\n"   11 bytes, magic and format generation
+#   offset 0        "ESPDISPFW3\n"   11 bytes, magic and format generation
 #   offset 11       "%010d\n"        11 bytes, manifest length, zero-padded ASCII
 #   offset 22       manifest         UTF-8 JSON object, exactly that many bytes
 #   offset 22+len   payloads         raw, in manifest order: for each image its
@@ -618,14 +639,12 @@ def send_config_line(address: str, line: str, timeout: float) -> str:
 # <sketch>.ino.bin, so the sha256 in the manifest is the same number
 # `shasum -a 256` prints for the file the compile produced.
 #
-# WHAT GENERATION 2 ADDED, AND WHY IT IS A NEW GENERATION. A generation-1 bundle
-# carried one application image per chip. That is exactly right for OTA - the
-# image goes into an app slot and the running bootloader boots it - and it is not
-# enough for a board that has never been flashed, which needs the second-stage
-# bootloader, the partition table and boot_app0 written at their own flash
-# addresses before the app at 0x10000 will boot at all. Generation 2 carries
-# those three per image, with their addresses, so the file is a complete answer
-# to "bring this board up from nothing".
+# WHAT GENERATIONS ADDED. Generation 2 added the bootloader, partition table and
+# boot_app0 needed to bring up a blank board. Generation 3 makes exact firmware
+# targets first-class: every image carries one or more `targets`, duplicate chips
+# are valid, and one exact target can be claimed by only one image. This matters
+# for s3-175 and s3-185: esptool sees the same ESP32-S3 chip in both, while their
+# panel geometry, controller and pin configuration require different firmware.
 #
 # Extending generation 1 in place was not available. The generation-1 reader
 # walks the payload area with `offset == cursor` per image and then requires
@@ -653,16 +672,25 @@ def send_config_line(address: str, line: str, timeout: float) -> str:
 # This container is about thirty lines on each side and leaves the images
 # checkable with ordinary tools.
 
-BUNDLE_MAGIC = b"ESPDISPFW2\n"
-BUNDLE_FORMAT = 2  # the `format` field inside the manifest, kept in step with the magic
 BUNDLE_MAGIC_V1 = b"ESPDISPFW1\n"
 BUNDLE_FORMAT_V1 = 1
-# Which magic means which format. Read-only for generation 1: this tool writes
-# the newest generation and only ever writes one, so there is one BUNDLE_MAGIC.
-# Every magic is the same width, which is what keeps the manifest at offset 22
-# for every generation and lets one reader dispatch on the first line
-# (test_generation_one_layout_is_pinned_and_still_read pins that).
-BUNDLE_GENERATIONS = {BUNDLE_MAGIC_V1: BUNDLE_FORMAT_V1, BUNDLE_MAGIC: BUNDLE_FORMAT}
+BUNDLE_MAGIC_V2 = b"ESPDISPFW2\n"
+BUNDLE_FORMAT_V2 = 2
+BUNDLE_MAGIC_V3 = b"ESPDISPFW3\n"
+BUNDLE_FORMAT_V3 = 3
+BUNDLE_MAGIC = BUNDLE_MAGIC_V3
+BUNDLE_FORMAT = BUNDLE_FORMAT_V3
+# Every magic has the same width, preserving the byte-exact 22-byte header and
+# all generation-1/2 offsets. The writer emits v3; pack_bundle can still assemble
+# a pinned legacy manifest with its matching legacy magic.
+BUNDLE_GENERATIONS = {
+    BUNDLE_MAGIC_V1: BUNDLE_FORMAT_V1,
+    BUNDLE_MAGIC_V2: BUNDLE_FORMAT_V2,
+    BUNDLE_MAGIC_V3: BUNDLE_FORMAT_V3,
+}
+BUNDLE_MAGIC_BY_FORMAT = {
+    generation: magic for magic, generation in BUNDLE_GENERATIONS.items()
+}
 BUNDLE_LENGTH_DIGITS = 10
 BUNDLE_HEADER_BYTES = len(BUNDLE_MAGIC) + BUNDLE_LENGTH_DIGITS + 1  # 22
 BUNDLE_SUFFIX = ".espdispfw"
@@ -679,9 +707,11 @@ MANIFEST_KEYS = (
     "tool",
     "images",
 )
-# Generation 1's image keys, which generation 2 keeps unchanged and adds to.
+# Generation 1's image keys, generation 2's blank-board additions, and
+# generation 3's exact compatible-target list.
 IMAGE_KEYS = ("board", "chip", "fqbn", "filename", "offset", "bytes", "sha256")
 IMAGE_KEYS_V2 = IMAGE_KEYS + ("app_address", "flash_parts")
+IMAGE_KEYS_V3 = IMAGE_KEYS_V2 + ("targets",)
 FLASH_PART_KEYS = ("role", "address", "filename", "offset", "bytes", "sha256")
 
 # The three parts a board that has never been flashed needs, in the order they
@@ -744,6 +774,58 @@ def bundle_length_line(length: int) -> bytes:
 
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+LEGACY_TARGET_BY_BOARD = {
+    "c6": "c6",
+    "s3": "s3-175",
+    "s3-175": "s3-175",
+    "s3-185": "s3-185",
+}
+
+
+def image_targets(image: dict, generation: int) -> List[str]:
+    """Return exact targets for one image, translating legacy board names."""
+    if generation >= BUNDLE_FORMAT_V3:
+        targets = image.get("targets")
+        if not isinstance(targets, list) or not targets:
+            raise Fail("a format-3 image requires a non-empty targets list")
+        exact: List[str] = []
+        for target in targets:
+            if (
+                not isinstance(target, str)
+                or not target.strip()
+                or target != target.strip()
+            ):
+                raise Fail("format-3 image has no usable target: %r" % target)
+            if target in exact:
+                raise Fail("format-3 image lists target %s twice" % target)
+            exact.append(target)
+        return exact
+
+    board = image.get("board")
+    if not isinstance(board, str) or not board.strip():
+        raise Fail("legacy image has no usable board: %r" % board)
+    token = board.strip().lower()
+    return [LEGACY_TARGET_BY_BOARD.get(token, token)]
+
+
+def validate_target_claims(images: List[dict], generation: int) -> List[List[str]]:
+    """Validate image target lists and reject duplicate v3 target claims."""
+    result = [image_targets(image, generation) for image in images]
+    if generation < BUNDLE_FORMAT_V3:
+        return result
+
+    claimed: Dict[str, int] = {}
+    for index, targets in enumerate(result):
+        for target in targets:
+            if target in claimed:
+                raise Fail(
+                    "target %s is claimed by both image %d and image %d"
+                    % (target, claimed[target], index)
+                )
+            claimed[target] = index
+    return result
 
 
 # The one spelling of FW_VERSION in the sketch (display_stream.ino:84). Loose
@@ -864,13 +946,13 @@ def bundle_manifest(
     """
     if not images:
         raise Fail("a bundle needs at least one image")
+    validate_target_claims(images, BUNDLE_FORMAT)
     prepared = []
     for image in images:
         parts = image.get("flash_parts")
         if not isinstance(parts, list):
-            # This tool writes generation 2 only, so an image with no flash parts
-            # is a caller bug rather than an older file. Reading generation 1 is
-            # unpack_bundle's business, not the writer's.
+            # The newest writer always describes everything a blank board needs.
+            # Reading generation 1 remains unpack_bundle's business.
             raise Fail(
                 "image for %r carries no flash_parts list; a generation-%d bundle "
                 "describes what a blank board needs" % (image.get("chip"), BUNDLE_FORMAT)
@@ -933,8 +1015,8 @@ def pack_bundle(
 ) -> bytes:
     """Serialise a manifest and its payloads into a bundle file's bytes.
 
-    `payloads` is {chip: application image}; `flash_payloads` is
-    {chip: {role: bytes}} for the parts a blank board needs.
+    Payload maps are keyed by exact target. For a multi-target image, every
+    claimed target must map to the same application and flash-part bytes.
 
     Re-checks the manifest against the payloads it claims to describe - present,
     right length, right hash, landing where the offsets say - because the writer
@@ -947,10 +1029,37 @@ def pack_bundle(
     images = manifest.get("images") or []
     if not images:
         raise Fail("a bundle needs at least one image")
+    generation = manifest.get("format")
+    magic = BUNDLE_MAGIC_BY_FORMAT.get(generation)
+    if magic is None:
+        raise Fail("cannot pack unsupported bundle format %r" % generation)
+    targets_by_image = validate_target_claims(images, generation)
+    if generation < BUNDLE_FORMAT_V3:
+        seen_chips = set()
+        for image in images:
+            chip = image.get("chip")
+            if chip in seen_chips:
+                raise Fail("legacy bundle lists %s twice" % chip)
+            seen_chips.add(chip)
     flash_payloads = flash_payloads or {}
     raw = encode_manifest(manifest)
-    out = [BUNDLE_MAGIC, bundle_length_line(len(raw)), raw]
+    out = [magic, bundle_length_line(len(raw)), raw]
     cursor = BUNDLE_HEADER_BYTES + len(raw)
+
+    def shared_payload(mapping: dict, targets: List[str], label: str) -> bytes:
+        missing = [target for target in targets if mapping.get(target) is None]
+        if missing:
+            raise Fail(
+                "the manifest lists %s but no payload was given for target %s"
+                % (label, ", ".join(missing))
+            )
+        blobs = [mapping[target] for target in targets]
+        if any(blob != blobs[0] for blob in blobs[1:]):
+            raise Fail(
+                "targets %s claim one image but were given different %s payloads"
+                % (", ".join(targets), label)
+            )
+        return blobs[0]
 
     def place(entry: dict, blob: Optional[bytes], label: str) -> None:
         """One payload, checked against its manifest entry and appended."""
@@ -976,9 +1085,10 @@ def pack_bundle(
         out.append(blob)
         cursor += len(blob)
 
-    for image in images:
+    for image, targets in zip(images, targets_by_image):
         chip = image["chip"]
-        place(image, payloads.get(chip), chip)
+        target_label = "/".join(targets)
+        place(image, shared_payload(payloads, targets, "application"), target_label)
         parts = image.get("flash_parts") or []
         absent = missing_flash_roles(part.get("role") for part in parts)
         if absent:
@@ -999,8 +1109,15 @@ def pack_bundle(
         for part in parts:
             place(
                 part,
-                (flash_payloads.get(chip) or {}).get(part["role"]),
-                "%s %s" % (chip, part["role"]),
+                shared_payload(
+                    {
+                        target: (flash_payloads.get(target) or {}).get(part["role"])
+                        for target in targets
+                    },
+                    targets,
+                    part["role"],
+                ),
+                "%s %s" % (target_label, part["role"]),
             )
     return b"".join(out)
 
@@ -1023,20 +1140,20 @@ def unpack_bundle(
 ) -> Tuple[dict, Dict[str, bytes], Dict[str, Dict[str, bytes]]]:
     """Read a bundle, checking everything a reader can check.
 
-    Returns (manifest, {chip: application image}, {chip: {role: flash part}}).
-    The third is empty for a generation-1 file, which carries no flash parts.
+    Returns maps keyed by exact target. Format 3 reads `targets`; legacy `board`
+    values are translated (`s3` is always `s3-175`, never `s3-185`). The third
+    map is empty for a generation-1 file, which carries no flash parts.
     Raises Fail, one specific line per way a file can be wrong, because by the
     time this runs the file arrived from somewhere else and "invalid bundle" tells
     the user nothing about whether to re-download it, rebuild it, or go and find
     the person who sent it.
 
-    Everything here is checkable without the panel: the hashes catch a corrupt or
-    edited payload, and the contiguity check catches a truncation that happens to
-    leave a valid-looking manifest. What it cannot check is whether the image is
-    right for the panel - only the chip token in the manifest speaks to that, and
-    only the panel's own image validation settles it.
+    Everything here is checkable without the panel: hashes catch corrupt or
+    edited payloads and contiguity catches truncation. Target claims are manifest
+    metadata; same-chip image-header validation cannot distinguish s3-175 from
+    s3-185, so callers must select by exact target.
 
-    BOTH GENERATIONS ARE ACCEPTED. A generation-1 file carries application images
+    BOTH LEGACY GENERATIONS ARE ACCEPTED. A generation-1 file carries application images
     and nothing else: it cannot flash a blank board, and it is still a valid OTA
     payload that the person holding it may not be able to rebuild. Refusing it
     would break a feature that works over a file nobody can re-create.
@@ -1046,7 +1163,8 @@ def unpack_bundle(
             "not a firmware bundle: %d bytes is shorter than the %d-byte header"
             % (len(data), BUNDLE_HEADER_BYTES)
         )
-    generation = BUNDLE_GENERATIONS.get(bytes(data[: len(BUNDLE_MAGIC)]))
+    magic = bytes(data[: len(BUNDLE_MAGIC)])
+    generation = BUNDLE_GENERATIONS.get(magic)
     if generation is None:
         if data.startswith(b"ESPDISPFW"):
             # A future generation. Say which ones this tool reads, so an old tool
@@ -1061,7 +1179,7 @@ def unpack_bundle(
                     ),
                 )
             )
-        raise Fail("not a firmware bundle: it does not start with the ESPDISPFW2 magic")
+        raise Fail("not a firmware bundle: it does not start with an ESPDISPFW magic")
 
     line = data[len(BUNDLE_MAGIC):BUNDLE_HEADER_BYTES]
     if not line.endswith(b"\n") or not line[:-1].isdigit():
@@ -1097,9 +1215,7 @@ def unpack_bundle(
             "this tool reads formats %s"
             % (
                 manifest["format"],
-                BUNDLE_MAGIC_V1.decode("ascii").strip()
-                if generation == BUNDLE_FORMAT_V1
-                else BUNDLE_MAGIC.decode("ascii").strip(),
+                magic.decode("ascii", "replace").strip(),
                 generation,
                 " and ".join(str(v) for v in sorted(BUNDLE_GENERATIONS.values())),
             )
@@ -1147,7 +1263,15 @@ def unpack_bundle(
         cursor += size
         return blob
 
-    image_keys = IMAGE_KEYS if generation == BUNDLE_FORMAT_V1 else IMAGE_KEYS_V2
+    image_keys = (
+        IMAGE_KEYS
+        if generation == BUNDLE_FORMAT_V1
+        else IMAGE_KEYS_V2
+        if generation == BUNDLE_FORMAT_V2
+        else IMAGE_KEYS_V3
+    )
+    seen_targets: Dict[str, int] = {}
+    seen_legacy_chips = set()
     for index, image in enumerate(images):
         where = "image %d" % index
         if not isinstance(image, dict):
@@ -1155,13 +1279,26 @@ def unpack_bundle(
         missing = [key for key in image_keys if key not in image]
         if missing:
             raise Fail("%s is missing %s" % (where, ", ".join(missing)))
+        targets = image_targets(image, generation)
+        if generation >= BUNDLE_FORMAT_V3:
+            for target in targets:
+                if target in seen_targets:
+                    raise Fail(
+                        "target %s is claimed by both image %d and image %d"
+                        % (target, seen_targets[target], index)
+                    )
+                seen_targets[target] = index
         chip = image["chip"]
-        if chip in payloads:
-            raise Fail(
-                "bundle lists %s twice; a reader could not tell which image to push"
-                % chip
-            )
-        payloads[chip] = take(image, "%s (%s)" % (where, chip))
+        if generation < BUNDLE_FORMAT_V3:
+            if chip in seen_legacy_chips:
+                raise Fail(
+                    "legacy bundle lists %s twice; a reader could not tell which "
+                    "image to push" % chip
+                )
+            seen_legacy_chips.add(chip)
+        app = take(image, "%s (%s; targets %s)" % (where, chip, ", ".join(targets)))
+        for target in targets:
+            payloads[target] = app
         if generation == BUNDLE_FORMAT_V1:
             continue
 
@@ -1217,7 +1354,8 @@ def unpack_bundle(
                 "%s (%s) writes both %s and %s to flash address 0x%x"
                 % (where, chip, clash[1], clash[2], clash[0])
             )
-        flash_payloads[chip] = roles
+        for target in targets:
+            flash_payloads[target] = dict(roles)
 
     if cursor != len(data):
         raise Fail(
@@ -1284,10 +1422,15 @@ def describe_bundle(manifest: dict, full_hash: bool = False) -> List[str]:
     ]
     for image in manifest.get("images") or []:
         digest = str(image.get("sha256", ""))
+        generation = manifest.get("format")
+        try:
+            targets = image_targets(image, generation)
+        except Fail:
+            targets = [str(image.get("board"))]
         lines.append(
-            "  image:    %-3s %-8s %8d bytes  sha256 %s"
+            "  image:    targets=%-17s chip=%-8s %8d bytes  sha256 %s"
             % (
-                image.get("board"),
+                ",".join(targets),
                 image.get("chip"),
                 image.get("bytes", 0),
                 digest if full_hash else digest[:16] + "...",
@@ -1350,9 +1493,9 @@ def compile_board(board: Board, output_dir: Optional[str] = None) -> List[str]:
     if not os.path.isdir(SKETCH_DIR):
         raise Fail("sketch directory not found: %s" % SKETCH_DIR)
     cmd = [arduino_cli(), "compile", "-b", board.fqbn, "--libraries", LIBRARIES_DIR]
+    if board.extra_flags:
+        cmd += ["--build-property", "compiler.cpp.extra_flags=%s" % " ".join(board.extra_flags)]
     if output_dir:
-        # Only the OTA path needs the binaries copied out; USB upload re-derives
-        # the same build directory from the sketch path.
         cmd += ["--output-dir", output_dir]
     return run_streaming(cmd + ["."], cwd=SKETCH_DIR)
 
@@ -1579,19 +1722,21 @@ def discovered_network_ports(timeout: float) -> List[NetworkPort]:
         return []
 
 
+def ota_target_requires_exact_discovery(board: Board) -> bool:
+    """Whether chip identity alone cannot prove this exact OTA target."""
+    return len(board_keys_for_chip(board.chip)) > 1
+
+
 def verify_ota_target(board: Board, host: str, timeout: float) -> None:
     """Cross-check --board against what the panel says it is, if it can be found.
 
-    The USB path gets this guard for free twice over - arduino-cli's own board
-    matching, then esptool's --chip refusal. Over the network there was nothing:
-    --board was required and then believed. But the panel publishes `board=` in the
-    `_arduino._tcp` TXT record espota already browses for, so the answer is
-    available for the cost of one discovery pass.
+    The USB path can reject a different chip through esptool, but neither USB
+    metadata nor an ESP image header distinguishes two targets on the same chip.
+    Network discovery can: new firmware advertises exact `target=` alongside the
+    chip-level `board=` record, so target is checked first and chip second.
 
-    Refuses only a definite contradiction. A panel discovery cannot find, or one
-    advertising a board this tool does not know, prints a note and continues -
-    mDNS not answering is not evidence about the chip, and refusing on silence
-    would break pushing to a panel on another subnet, which works today.
+    A discovery miss remains a warning so pushing by IP across subnets keeps
+    working. A discovered exact-target contradiction always refuses.
 
     UNVERIFIED: no panel has been discovered by this code. The parse is tested
     against captured JSON, but that arduino-cli reports these properties for this
@@ -1600,38 +1745,61 @@ def verify_ota_target(board: Board, host: str, timeout: float) -> None:
     print("Checking what %s says it is..." % host, flush=True)
     found = network_port_for_host(discovered_network_ports(timeout), host)
     if found is None:
+        if ota_target_requires_exact_discovery(board):
+            raise Fail(
+                "%s was not found with exact target metadata, so target %s cannot "
+                "be verified. Refusing an ESP32-S3 OTA push because its image "
+                "header cannot distinguish the attached display."
+                % (host, board.key)
+            )
         print(
-            "  Not found by mDNS discovery, so --board %s is taken on trust.\n"
-            "  A wrong target is refused by the panel rather than breaking it, but\n"
-            "  it costs a compile and a transfer." % board.key
+            "  Not found by mDNS discovery, so --board %s is taken on trust."
+            % board.key
         )
         return
 
-    verdict = classify_ota_target(board, found.board)
+    verdict = classify_ota_target(board, found.target, found.board)
     if verdict == TARGET_WRONG:
-        other = board_key_for_chip(found.board) or found.board
+        advertised = "target=%s" % found.target if found.target else "board=%s" % found.board
+        if found.target:
+            suggestions = [canonical_board_key(found.target)]
+        else:
+            suggestions = board_keys_for_chip(found.board)
+        suggestion = "|".join(key for key in suggestions if key in BOARDS) or "<exact-target>"
         raise Fail(
-            "%s advertises board=%s, but --board %s builds for %s.\n"
-            "  Pushing this image would waste a compile and a transfer: the panel\n"
-            "  validates the image header's chip id and would refuse it.\n"
-            "  Re-run with --board %s." % (host, found.board, board.key, board.chip, other)
+            "%s advertises %s, but --board %s selects target %s (%s).\n"
+            "  Refusing: chip-header validation cannot protect against a same-chip\n"
+            "  display-target mismatch. Re-run with --board %s."
+            % (host, advertised, board.key, board.key, board.chip, suggestion)
         )
     if verdict == TARGET_OK:
-        print("  Confirmed: %s advertises board=%s." % (host, found.board))
+        identity = "target=%s" % found.target if found.target else "board=%s" % found.board
+        print("  Confirmed: %s advertises %s." % (host, identity))
     else:
+        if ota_target_requires_exact_discovery(board):
+            raise Fail(
+                "%s did not advertise matching exact target and chip metadata, "
+                "so %s cannot be verified. Refusing an ESP32-S3 OTA push because "
+                "both identities are required to select its display firmware."
+                % (host, board.key)
+            )
         print(
-            "  Found %s, but it advertises board=%r, which this tool cannot place.\n"
-            "  Continuing with --board %s." % (host, found.board, board.key)
+            "  Found %s, but target=%r and board=%r do not uniquely confirm %s.\n"
+            "  Continuing with the unique target for this chip."
+            % (host, found.target, found.board, board.key)
         )
+
+
+def board_keys_for_chip(chip: str) -> List[str]:
+    """All exact targets for an esptool/variant chip id."""
+    token = (chip or "").strip().lower()
+    return [board.key for board in BOARDS.values() if board.chip == token]
 
 
 def board_key_for_chip(chip: str) -> Optional[str]:
-    """Map an esptool/variant chip id (esp32c6) onto a board key (c6)."""
-    token = (chip or "").strip().lower()
-    for board in BOARDS.values():
-        if board.chip == token:
-            return board.key
-    return None
+    """Map a chip only when it has exactly one known exact target."""
+    matches = board_keys_for_chip(chip)
+    return matches[0] if len(matches) == 1 else None
 
 
 def espota_command(
@@ -2106,11 +2274,16 @@ def cmd_flash(args) -> int:
     port = resolve_port(args.port)
     board = resolve_board(args.board, port)
     print("Target: %s (%s) on %s" % (board.key, board.fqbn, port.address), flush=True)
-    lines = compile_board(board)
-    run_streaming(
-        [arduino_cli(), "upload", "-b", board.fqbn, "-p", port.address, "."],
-        cwd=SKETCH_DIR,
-    )
+    out_dir = tempfile.mkdtemp(prefix="espdisp-flash-%s-" % board.key)
+    try:
+        lines = compile_board(board, output_dir=out_dir)
+        run_streaming(
+            [arduino_cli(), "upload", "-b", board.fqbn, "-p", port.address,
+             "--input-dir", out_dir],
+            cwd=SKETCH_DIR,
+        )
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
     report_sizes(lines)
     return 0
 
@@ -2120,11 +2293,16 @@ def cmd_ota(args) -> int:
     # after a multi-minute compile would be irritating.
     password = ota_password(args.password)
     tool = espota_path()
-    board = BOARDS[args.board]
+    board = BOARDS[canonical_board_key(args.board)]
     print("Target: %s (%s) over the air at %s" % (board.key, board.fqbn, args.host))
     # Before the compile, so a wrong --board costs seconds instead of minutes.
     if args.discovery_timeout > 0:
         verify_ota_target(board, args.host, args.discovery_timeout)
+    elif ota_target_requires_exact_discovery(board):
+        raise Fail(
+            "--discovery-timeout cannot be disabled for %s: exact target metadata "
+            "is required before an ESP32-S3 OTA push" % board.key
+        )
 
     out_dir = tempfile.mkdtemp(prefix="espdisp-ota-")
     try:
@@ -2151,7 +2329,7 @@ def cmd_bundle(args) -> int:
     # instantly, and finding out after two multi-minute builds would be
     # irritating. Same ordering, and the same reason, as cmd_ota's password.
     version = sketch_fw_version()
-    keys = list(dict.fromkeys(args.board or sorted(BOARDS)))  # dedupe, keep order
+    keys = bundle_board_keys(args.board)
     boards = [BOARDS[key] for key in keys]
     path = args.output or os.path.join(
         os.getcwd(), "espdisp-firmware-%s%s" % (version, BUNDLE_SUFFIX)
@@ -2176,6 +2354,7 @@ def cmd_bundle(args) -> int:
             entries.append(
                 {
                     "board": board.key,
+                    "targets": [board.key],
                     "chip": board.chip,
                     "fqbn": board.fqbn,
                     "filename": os.path.basename(image),
@@ -2189,8 +2368,8 @@ def cmd_bundle(args) -> int:
                     "flash_parts": parts,
                 }
             )
-            payloads[board.chip] = blob
-            flash_payloads[board.chip] = part_payloads
+            payloads[board.key] = blob
+            flash_payloads[board.key] = part_payloads
     finally:
         # Same shape as cmd_ota: the export directories go whatever happens, so an
         # interrupted build does not leave two megabytes per board in /tmp.
@@ -2207,17 +2386,16 @@ def cmd_bundle(args) -> int:
     for line in describe_bundle(manifest):
         print(line)
 
-    absent = [board for board in BOARDS.values() if board.chip not in payloads]
+    absent = [board for board in BOARDS.values() if board.key not in payloads]
     if absent:
         print(
-            "\nThis bundle carries %d of %d images: nothing in it is for %s. The app\n"
-            "  will have nothing to offer such a panel - it can only push an image the\n"
-            "  file actually contains. Build without --board, or add %s, if\n"
-            "  those panels need this version too."
+            "\nThis bundle covers %d of %d exact targets: nothing in it is for %s.\n"
+            "  The app can only install an image that claims the panel's exact target.\n"
+            "  Build without --board, or add %s, if those panels need this version too."
             % (
                 len(payloads),
                 len(BOARDS),
-                " or ".join(board.chip for board in absent),
+                " or ".join(board.key for board in absent),
                 " ".join("--board %s" % board.key for board in absent),
             )
         )
@@ -2230,6 +2408,13 @@ def cmd_bundle(args) -> int:
 
 def cmd_bundle_info(args) -> int:
     manifest, payloads, flash_payloads = read_bundle(args.path)
+    if args.require_all_targets:
+        missing = sorted(set(BOARDS).difference(payloads))
+        if missing:
+            raise Fail(
+                "%s is missing required exact target%s %s"
+                % (args.path, "s" if len(missing) != 1 else "", ", ".join(missing))
+            )
     size = os.path.getsize(args.path)
     print("%s" % args.path)
     print("  size:     %d bytes (%.1f MiB)" % (size, size / (1024.0 * 1024.0)))
@@ -2238,10 +2423,17 @@ def cmd_bundle_info(args) -> int:
     # unpack_bundle already refused anything that did not add up, so reaching here
     # is the verification result: say so, rather than leaving the user to infer it
     # from the absence of an error.
-    extra = sum(len(roles) for roles in flash_payloads.values())
+    image_count = len(manifest.get("images") or [])
+    extra = sum(
+        len(image.get("flash_parts") or [])
+        for image in manifest.get("images") or []
+        if isinstance(image, dict)
+    )
     print(
-        "\nVerified: %d image%s%s, contiguous, every sha256 matches."
+        "\nVerified: %d image%s covering %d exact target%s%s, contiguous, every sha256 matches."
         % (
+            image_count,
+            "" if image_count == 1 else "s",
             len(payloads),
             "" if len(payloads) == 1 else "s",
             "" if not extra else " plus %d flash part%s" % (extra, "" if extra == 1 else "s"),
@@ -2263,11 +2455,11 @@ def cmd_bundle_info(args) -> int:
             "that\n  has never been flashed. Rebuild it with `%s bundle` for that."
             % (manifest.get("format"), os.path.basename(sys.argv[0]))
         )
-    known = [chip for chip in payloads if board_key_for_chip(chip)]
-    if len(known) < len(BOARDS):
+    absent = [key for key in BOARDS if key not in payloads]
+    if absent:
         print(
-            "Carries %s. A panel running anything else finds nothing to install here."
-            % ", ".join(sorted(payloads))
+            "Carries exact targets %s; missing %s. Other targets find nothing to install."
+            % (", ".join(sorted(payloads)), ", ".join(sorted(absent)))
         )
     return 0
 
@@ -2336,7 +2528,9 @@ def cmd_config(args) -> int:
 
 
 def board_help() -> str:
-    return "\n".join("  %-3s %s" % (b.key, b.blurb) for b in BOARDS.values())
+    lines = ["  %-7s %s" % (b.key, b.blurb) for b in BOARDS.values()]
+    lines.append("  %-7s compatibility alias for s3-175" % "s3")
+    return "\n".join(lines)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2351,14 +2545,14 @@ def build_parser() -> argparse.ArgumentParser:
     subs = parser.add_subparsers(dest="command", metavar="<command>")
 
     p_compile = subs.add_parser("compile", help="build the firmware for one board")
-    p_compile.add_argument("--board", required=True, choices=sorted(BOARDS))
+    p_compile.add_argument("--board", required=True, choices=board_choices())
     p_compile.set_defaults(func=cmd_compile)
 
     p_flash = subs.add_parser("flash", help="build then upload over USB")
     p_flash.add_argument(
         "--board",
-        choices=sorted(BOARDS),
-        help="skip chip detection and build this target",
+        choices=board_choices(),
+        help="skip chip detection and build this exact target",
     )
     p_flash.add_argument("--port", help="serial device (default: the one %s match)" % PORT_GLOB)
     p_flash.set_defaults(func=cmd_flash)
@@ -2379,10 +2573,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ota.add_argument(
         "--board",
         required=True,
-        choices=sorted(BOARDS),
-        help="which target to build; required because there is no chip to probe "
-        "over the network. A wrong-target push is refused by the panel's own "
-        "image validation, not fatal to it, but it wastes a compile",
+        choices=board_choices(),
+        help="which exact target to build; s3 is an alias for s3-175. Required "
+        "because a chip-level network identity cannot distinguish same-chip panels",
     )
     p_ota.add_argument("--password", help="OTA password (prefer $%s)" % OTA_PASSWORD_ENV)
     p_ota.add_argument(
@@ -2398,9 +2591,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--discovery-timeout",
         type=float,
         default=5.0,
-        help="seconds to browse mDNS for the panel to cross-check --board "
-        "(default 5; 0 or less skips the check entirely, leaving the panel itself "
-        "as the only thing that will refuse a wrong-chip image)",
+        help="seconds to browse mDNS for exact target/chip metadata (default 5; "
+        "0 or less skips the check and takes --board on trust)",
     )
     p_ota.set_defaults(func=cmd_ota)
 
@@ -2425,9 +2617,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_bundle.add_argument(
         "--board",
         action="append",
-        choices=sorted(BOARDS),
-        help="build only this board; repeatable. Default is every board, because a "
-        "file with one image has nothing to offer a panel of the other chip",
+        choices=board_choices(),
+        help="build only this exact target; repeatable. s3 is an alias for s3-175. "
+        "Default is every canonical target exactly once",
     )
     p_bundle.add_argument(
         "--output",
@@ -2443,6 +2635,11 @@ def build_parser() -> argparse.ArgumentParser:
         "and the sha256 of every payload) and print what it holds, including "
         "whether it can bring up a board that has never been flashed. Run this "
         "before handing a file to someone, and on a file someone handed you.",
+    )
+    p_bundle_info.add_argument(
+        "--require-all-targets",
+        action="store_true",
+        help="fail unless the bundle covers every canonical target known to this tool",
     )
     p_bundle_info.add_argument("path", help="the %s file to inspect" % BUNDLE_SUFFIX)
     p_bundle_info.set_defaults(func=cmd_bundle_info)

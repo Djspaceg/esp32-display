@@ -47,6 +47,7 @@
 #include <Wire.h>
 
 #include <board_config.h>
+#include <board_io.h>
 
 namespace boardtouch {
 
@@ -63,6 +64,11 @@ static const size_t AXS5106L_READ_BYTES = 14;
 /// CST9217/CST9220 family: 16-bit big-endian register addresses, one I2C
 /// device address for both chips. MAX_TOUCHES is the family's own limit
 /// (SensorLib and ESPHome agree); this project reads only the first point.
+static const uint8_t CST816_ADDR = 0x15;
+static const uint8_t CST816_REG_GESTURE = 0x01;
+static const uint8_t CST816_REG_CHIP_ID = 0xA7;
+static const size_t CST816_REPORT_BYTES = 6;
+
 static const uint8_t CST9217_ADDR = 0x5A;
 static const uint16_t CST9217_REG_TOUCH_DATA = 0xD000;
 static const uint16_t CST9217_REG_CMD_MODE = 0xD101;
@@ -98,6 +104,51 @@ static bool pressed = false;
 static board::TouchController activeController = board::TouchController::None;
 
 static void IRAM_ATTR onTouchInterrupt() { interruptFlag = true; }
+
+inline bool cst816ReadReg(uint8_t reg, uint8_t *out, size_t len) {
+  Wire.beginTransmission(CST816_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission() != 0) return false;
+  Wire.requestFrom(CST816_ADDR, len);
+  if (Wire.available() != (int)len) return false;
+  Wire.readBytes(out, len);
+  return true;
+}
+
+inline bool initCst816(const board::Config &cfg, bool verbose) {
+  if (!Wire.begin(cfg.pinTouchSda, cfg.pinTouchScl, I2C_HZ) ||
+      !boardio::pulseReset(cfg.touchResetExio)) {
+    if (verbose) Serial.println("touch: ERROR CST816 reset/bus failed");
+    return false;
+  }
+  uint8_t identity[3] = {0};
+  if (!cst816ReadReg(CST816_REG_CHIP_ID, identity, sizeof(identity))) {
+    if (verbose) Serial.println("touch: ERROR no CST816 at 0x15");
+    return false;
+  }
+  pinMode(cfg.pinTouchInt, INPUT_PULLUP);
+  attachInterrupt(cfg.pinTouchInt, onTouchInterrupt, FALLING);
+  if (verbose) {
+    Serial.printf("touch: CST816 ready (chip=%02X project=%02X fw=%02X, int=%d)\n",
+                  identity[0], identity[1], identity[2], cfg.pinTouchInt);
+  }
+  return true;
+}
+
+inline bool parseCst816Report(const uint8_t *data, size_t len, Sample &out) {
+  if (data == nullptr || len != CST816_REPORT_BYTES) return false;
+  out.points = data[1] > 1 ? 1 : data[1];
+  out.rawX = (uint16_t)(((data[2] & 0x0F) << 8) | data[3]);
+  out.rawY = (uint16_t)(((data[4] & 0x0F) << 8) | data[5]);
+  out.pressed = out.points != 0;
+  return true;
+}
+
+inline bool pollCst816(Sample &out) {
+  uint8_t data[CST816_REPORT_BYTES] = {0};
+  return cst816ReadReg(CST816_REG_GESTURE, data, sizeof(data)) &&
+         parseCst816Report(data, sizeof(data), out);
+}
 
 /// Write a CST9217/9220 16-bit register: [regHi][regLo][payload...].
 inline bool cst9217WriteReg(uint16_t reg, const uint8_t *payload, size_t len) {
@@ -248,6 +299,13 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     return false;
   }
 
+  if (cfg.touch == board::TouchController::Cst816) {
+    if (!initCst816(cfg, verbose)) return false;
+    activeController = board::TouchController::Cst816;
+    enabled = true;
+    return true;
+  }
+
   if (cfg.touch == board::TouchController::Cst9217) {
     if (!initCst9217(cfg, verbose)) return false;
     activeController = board::TouchController::Cst9217;
@@ -320,7 +378,9 @@ inline bool poll(Sample &out) {
   interruptFlag = false;
 
   bool ok;
-  if (activeController == board::TouchController::Cst9217) {
+  if (activeController == board::TouchController::Cst816) {
+    ok = pollCst816(out);
+  } else if (activeController == board::TouchController::Cst9217) {
     ok = pollCst9217(out);
   } else {
     uint8_t data[AXS5106L_READ_BYTES] = {0};

@@ -71,23 +71,16 @@ struct FirmwareUpdatePlan: Equatable {
 
     /// Turn the FEAT-003 classifier's answer into what the sheet says.
     ///
-    /// `chipConfirmed` is false when the image was chosen by hand because the
-    /// panel never named its chip. It adds a sentence rather than changing the
-    /// verdict, deliberately: an unconfirmed chip is missing information, not a
-    /// contradiction, and `classify_ota_target` in tools/espdisp.py takes the same
-    /// three-valued stance. What makes that safe to offer is that the panel
-    /// validates the image header's chip id before it moves the boot slot, so a
-    /// wrong guess costs a transfer and reads `bad image` on the glass rather than
-    /// bricking the panel.
+    /// `chipConfirmed` means the panel reported both an exact target and an
+    /// independently matching chip. Missing identity is a refusal for same-chip
+    /// S3 variants rather than a manual chip guess.
     static func make(
         _ availability: FirmwareUpdateAvailability, chipConfirmed: Bool
     ) -> FirmwareUpdatePlan {
         let caveat = chipConfirmed
             ? ""
-            : " This panel did not report which chip it is, so this image was "
-                + "chosen by hand. The panel checks the image header before it "
-                + "switches over, so the wrong one is refused rather than "
-                + "installed."
+            : " The exact target and independently reported chip must both match "
+                + "before this image can be sent."
         switch availability {
         case .updateAvailable(let image, let bundleVersion, let panelVersion):
             return FirmwareUpdatePlan(
@@ -118,6 +111,32 @@ struct FirmwareUpdatePlan: Equatable {
                     + "those is not a dotted version number, so which one is "
                     + "newer cannot be worked out here." + caveat,
                 action: .uncertain)
+        case .noImageForTarget(let target, let bundleTargets):
+            return FirmwareUpdatePlan(
+                headline: "Nothing in this bundle for this target",
+                detail: "This panel reports exact target \(target). This bundle "
+                    + "carries \(describeTargets(bundleTargets)).",
+                action: .blocked)
+        case .targetUnknown(let bundleTargets):
+            return FirmwareUpdatePlan(
+                headline: "Exact firmware target not reported",
+                detail: "ESP32-S3 boards can use different displays and pin maps "
+                    + "while reporting the same chip. This bundle carries "
+                    + "\(describeTargets(bundleTargets)); reconnect over USB to "
+                    + "read CFGSHOW target metadata. C6 can use its unique c6 target.",
+                action: .chooseImage)
+        case .targetChipMismatch(let target, let imageChip, let panelChip):
+            return FirmwareUpdatePlan(
+                headline: "Target and chip disagree",
+                detail: "Target \(target) selects a \(imageChip) image, but the panel "
+                    + "reports \(panelChip). Nothing can be sent safely.",
+                action: .blocked)
+        case .chipUnknownForTarget(let target, let expectedChip):
+            return FirmwareUpdatePlan(
+                headline: "Chip metadata not reported",
+                detail: "Target \(target) selects a \(expectedChip) image, but the "
+                    + "panel did not independently report that chip.",
+                action: .blocked)
         case .noImageForChip(let chip, let bundleChips):
             return FirmwareUpdatePlan(
                 headline: "Nothing in this bundle for this panel",
@@ -135,6 +154,17 @@ struct FirmwareUpdatePlan: Equatable {
                     + "tools/espdisp.py flash, which reads the chip from the "
                     + "board.",
                 action: .chooseImage)
+        }
+    }
+
+    private static func describeTargets(_ targets: [String]) -> String {
+        switch targets.count {
+        case 0: return "no exact targets"
+        case 1: return "target \(targets[0])"
+        default:
+            let last = targets[targets.count - 1]
+            let rest = targets.dropLast().joined(separator: ", ")
+            return "targets \(rest) and \(last)"
         }
     }
 
@@ -174,8 +204,8 @@ struct FirmwareUpdateSheet: View {
     /// than an error, because `FirmwareBundleError` already writes messages for
     /// exactly this reader and rewording them here would only make them worse.
     @State private var readFailure: String?
-    /// Which image to push when the panel did not name its chip.
-    @State private var chosenChip: String?
+    /// The bundle no longer permits manual chip selection: exact target metadata
+    /// must choose the image, with C6 as the sole chip-derived legacy exception.
     @State private var password = ""
     @State private var rememberPassword = false
     @State private var passwordProblem: String?
@@ -259,6 +289,7 @@ struct FirmwareUpdateSheet: View {
             LabeledContent("Display", value: target.displayName)
             LabeledContent("Running", value: target.firmwareVersion)
             LabeledContent("Chip", value: chipDescription)
+            LabeledContent("Target", value: targetDescription)
             LabeledContent("Address", value: target.address ?? "Not available")
             LabeledContent("USB device") {
                 HStack(spacing: 8) {
@@ -345,6 +376,10 @@ struct FirmwareUpdateSheet: View {
         return chip == ServiceMetadata.unknownChip ? "Reported as unknown" : chip
     }
 
+    private var targetDescription: String {
+        target.target ?? (target.chip == "esp32c6" ? "c6 (derived from chip)" : "Not reported")
+    }
+
     @ViewBuilder
     private var bundleSection: some View {
         Section("Firmware bundle") {
@@ -353,8 +388,9 @@ struct FirmwareUpdateSheet: View {
                 LabeledContent("Version", value: bundle.firmwareVersion)
                 LabeledContent("Built", value: bundle.builtAt)
                 LabeledContent("Source", value: sourceDescription(bundle))
-                ForEach(bundle.images, id: \.chip) { image in
-                    LabeledContent(image.chip, value: imageDescription(image))
+                ForEach(bundle.images, id: \.offset) { image in
+                    LabeledContent(image.targets.joined(separator: ", "),
+                                   value: imageDescription(image))
                 }
                 Button("Choose a Different File…") { chooseFile() }
                     .disabled(isPushing)
@@ -384,7 +420,7 @@ struct FirmwareUpdateSheet: View {
     @ViewBuilder
     private func verdictSection(_ bundle: FirmwareBundle) -> some View {
         let plan = plan(bundle)
-        let usbWillDetect = selectedTransport == .usb && !chipIsConfirmed
+        let usbWillDetect = selectedTransport == .usb && effectiveTarget == nil
         Section("What this would do") {
             VStack(alignment: .leading, spacing: 6) {
                 Text(usbWillDetect
@@ -393,29 +429,17 @@ struct FirmwareUpdateSheet: View {
                     .fontWeight(.medium)
                 Text(usbWillDetect
                     ? "Before writing, the app re-reads the board's hardware ID, "
-                        + "chip and MAC with CFGSHOW and esptool, then uses only "
-                        + "the matching format-2 image from this bundle."
+                        + "target, chip and MAC with CFGSHOW and esptool, then uses "
+                        + "only the matching exact-target image from this bundle."
                     : plan.detail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if selectedTransport == .wifi,
-               plan.action == .chooseImage, bundle.images.count > 1 {
-                Picker("Image", selection: Binding(
-                    get: { chosenChip ?? "" },
-                    set: { chosenChip = $0.isEmpty ? nil : $0 })
-                ) {
-                    Text("Choose…").tag("")
-                    ForEach(bundle.images, id: \.chip) { image in
-                        Text("\(image.chip) (\(image.board))").tag(image.chip)
-                    }
-                }
-            }
             if selectedTransport == .usb, !usbBundleCanWrite(bundle) {
                 Label(
-                    "USB updating needs a current format-2 bundle with all flash "
-                        + "parts for this board.",
+                    "USB updating needs a current bundle with all flash parts "
+                        + "for a compatible exact target.",
                     systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
                     .foregroundStyle(.orange)
@@ -517,25 +541,29 @@ struct FirmwareUpdateSheet: View {
 
     // MARK: derived
 
-    /// Which chip's image is under discussion: the panel's own answer when it
-    /// gave one, otherwise whatever the user chose.
-    private var effectiveChip: String? {
-        if let chip = target.chip, !chip.isEmpty,
-           chip != ServiceMetadata.unknownChip {
-            return chip
-        }
-        return chosenChip
+    /// Which exact target is under discussion. C6 is the sole safe chip-only
+    /// fallback because no second C6 target exists.
+    private var effectiveTarget: String? {
+        if let exact = target.target, !exact.isEmpty { return exact }
+        return target.chip == "esp32c6" ? "c6" : nil
     }
 
     private var chipIsConfirmed: Bool {
-        guard let chip = target.chip else { return false }
-        return !chip.isEmpty && chip != ServiceMetadata.unknownChip
+        guard let chip = target.chip,
+              let exactTarget = effectiveTarget,
+              let bundle
+        else { return false }
+        return !chip.isEmpty
+            && chip != ServiceMetadata.unknownChip
+            && bundle.image(forTarget: exactTarget)?.chip == chip
     }
 
     private func plan(_ bundle: FirmwareBundle) -> FirmwareUpdatePlan {
         FirmwareUpdatePlan.make(
             bundle.availability(
-                forChip: effectiveChip, panelVersion: target.firmwareVersion),
+                forTarget: effectiveTarget,
+                chip: target.chip,
+                panelVersion: target.firmwareVersion),
             chipConfirmed: chipIsConfirmed)
     }
 
@@ -586,13 +614,13 @@ struct FirmwareUpdateSheet: View {
         guard let bundle else { return "" }
         switch selectedTransport {
         case .wifi:
-            guard let image = bundle.payloadImage(forChip: effectiveChip) else {
+            guard let image = bundle.payloadImage(forTarget: effectiveTarget) else {
                 return ""
             }
             return "\(byteCount(image.byteCount)) will be written to the panel's "
                 + "inactive firmware slot, and it will restart onto it."
         case .usb:
-            let bytes = effectiveChip.flatMap { bundle.flashPlan(forChip: $0) }
+            let bytes = effectiveTarget.flatMap { bundle.flashPlan(forTarget: $0) }
                 .map { $0.reduce(0) { $0 + $1.payload.count } }
             let amount = bytes.map { "\(byteCount($0)) in the bundle" }
                 ?? "The matching image and flash parts"
@@ -652,14 +680,23 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func usbBundleCanWrite(_ bundle: FirmwareBundle) -> Bool {
-        if let chip = effectiveChip {
-            return bundle.flashPlan(forChip: chip) != nil
+        if let exactTarget = effectiveTarget {
+            return bundle.flashPlan(forTarget: exactTarget) != nil
         }
-        return bundle.images.contains { bundle.flashPlan(forChip: $0.chip) != nil }
+        if let chip = target.chip,
+           !chip.isEmpty,
+           chip != ServiceMetadata.unknownChip {
+            return bundle.images.contains {
+                $0.chip == chip && $0.targets.contains {
+                    bundle.flashPlan(forTarget: $0) != nil
+                }
+            }
+        }
+        return false
     }
 
     private func imageDescription(_ image: FirmwareBundle.Image) -> String {
-        "\(byteCount(image.byteCount)) · \(image.board)"
+        "\(byteCount(image.byteCount)) · \(image.chip) · \(image.board)"
     }
 
     private func sourceDescription(_ bundle: FirmwareBundle) -> String {
@@ -689,7 +726,6 @@ struct FirmwareUpdateSheet: View {
         case .ready(let bundled, let url):
             bundle = bundled
             bundleURL = url
-            chosenChip = bundled.images.count == 1 ? bundled.images[0].chip : nil
             readFailure = nil
         case .unreadable(let path, let reason):
             readFailure = "The firmware bundled with the app (\(path)) could not "
@@ -726,15 +762,10 @@ struct FirmwareUpdateSheet: View {
             bundleURL = url
             readFailure = nil
             updateFailure = nil
-            // A bundle with exactly one image needs no choice, so a panel that
-            // did not name its chip still gets a verdict rather than a picker
-            // with one entry.
-            chosenChip = read.images.count == 1 ? read.images[0].chip : nil
+            // Exact target metadata, not image count, chooses an image.
         } catch {
             bundle = nil
             bundleURL = nil
-            chosenChip = nil
-            updateFailure = nil
             readFailure = error.localizedDescription
         }
     }
@@ -767,9 +798,10 @@ struct FirmwareUpdateSheet: View {
 
         switch selectedTransport {
         case .wifi:
-            guard let chip = effectiveChip,
-                  let image = bundle.payload(forChip: chip),
-                  let entry = bundle.image(forChip: chip)
+            guard let exactTarget = effectiveTarget,
+                  let image = bundle.payload(forTarget: exactTarget),
+                  let entry = bundle.image(forTarget: exactTarget),
+                  entry.chip == target.chip
             else {
                 isPushing = false
                 return
@@ -817,11 +849,11 @@ struct FirmwareUpdateSheet: View {
 }
 
 private extension FirmwareBundle {
-    /// The manifest entry for a chip, tolerating a nil chip so the confirmation
-    /// message can be composed without unwrapping twice.
-    func payloadImage(forChip chip: String?) -> FirmwareBundle.Image? {
-        guard let chip else { return nil }
-        return image(forChip: chip)
+    /// The manifest entry for an exact target, tolerating nil so confirmation
+    /// text can be composed without unwrapping twice.
+    func payloadImage(forTarget target: String?) -> FirmwareBundle.Image? {
+        guard let target else { return nil }
+        return image(forTarget: target)
     }
 }
 

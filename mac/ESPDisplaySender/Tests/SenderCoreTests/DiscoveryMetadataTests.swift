@@ -49,11 +49,13 @@ final class DiscoveryMetadataTests: XCTestCase {
         let devices = DeviceBrowser.devices(from: [
             DeviceBrowser.Advertisement(
                 endpoint: service("espdisplay-amoled"),
-                txtRecords: ["res": "466x466", "chip": "esp32s3", "fw": "1.2.0"])
+                txtRecords: ["res": "466x466", "chip": "esp32s3",
+                             "target": "s3-175", "fw": "1.2.0"])
         ])
         XCTAssertEqual(devices[0].geometry, PanelGeometry(width: 466, height: 466))
         XCTAssertEqual(devices[0].metadata.geometry, PanelGeometry(width: 466, height: 466))
         XCTAssertEqual(devices[0].metadata.chip, "esp32s3")
+        XCTAssertEqual(devices[0].metadata.target, "s3-175")
         XCTAssertEqual(devices[0].metadata.firmwareVersion, "1.2.0")
         // The band layout that follows, which is the thing that was wrong before:
         // this panel was being sent 80 bands of 172-pixel rows.
@@ -157,17 +159,25 @@ final class DiscoveryMetadataTests: XCTestCase {
             DeviceBrowser.Device(
                 name: "espdisplay-9050",
                 endpoint: service("espdisplay-9050"),
-                metadata: ServiceMetadata(txtRecords: ["chip": "esp32c6", "res": "172x320"])),
+                metadata: ServiceMetadata(txtRecords: [
+                    "chip": "esp32c6", "target": "c6", "res": "172x320",
+                ])),
             DeviceBrowser.Device(
                 name: "espdisplay-amoled",
                 endpoint: service("espdisplay-amoled"),
-                metadata: ServiceMetadata(txtRecords: ["chip": "esp32s3", "res": "466x466"])),
+                metadata: ServiceMetadata(txtRecords: [
+                    "chip": "esp32s3", "target": "s3-185", "res": "466x466",
+                ])),
         ])
         XCTAssertEqual(manager.panels.count, 2)
         XCTAssertEqual(manager.panels.first { $0.serviceName == "espdisplay-9050" }?.chip,
                        "esp32c6")
+        XCTAssertEqual(manager.panels.first { $0.serviceName == "espdisplay-9050" }?.target,
+                       "c6")
         XCTAssertEqual(manager.panels.first { $0.serviceName == "espdisplay-amoled" }?.chip,
                        "esp32s3")
+        XCTAssertEqual(manager.panels.first { $0.serviceName == "espdisplay-amoled" }?.target,
+                       "s3-185")
     }
 
     func testAPanelThatAdvertisesNoChipHasNoneRecorded() {
@@ -180,6 +190,7 @@ final class DiscoveryMetadataTests: XCTestCase {
                 name: "espdisplay-9050", endpoint: service("espdisplay-9050"))
         ])
         XCTAssertNil(manager.panels[0].chip, "firmware older than the record says nothing")
+        XCTAssertNil(manager.panels[0].target)
     }
 
     func testALaterResultWithoutAChipDoesNotEraseOne() {
@@ -211,6 +222,59 @@ final class DiscoveryMetadataTests: XCTestCase {
                                  metadata: ServiceMetadata(txtRecords: ["chip": "esp32s3"]))
         ])
         XCTAssertEqual(manager.panels[0].chip, "esp32s3")
+    }
+
+    func testALaterResultWithoutATargetDoesNotEraseOne() {
+        let manager = PanelManager(
+            previewPanels: [PanelSnapshot(
+                serviceName: "espdisplay-amoled", displayName: "espdisplay-amoled")],
+            savedNetworkNames: [], usbSerialPorts: [])
+        let endpoint = service("espdisplay-amoled")
+        manager.noteDiscovery([
+            DeviceBrowser.Device(
+                name: "espdisplay-amoled", endpoint: endpoint,
+                metadata: ServiceMetadata(txtRecords: [
+                    "chip": "esp32s3", "target": "s3-185",
+                ])),
+        ])
+        XCTAssertEqual(manager.panels[0].target, "s3-185")
+
+        manager.noteDiscovery([
+            DeviceBrowser.Device(name: "espdisplay-amoled", endpoint: endpoint),
+        ])
+        XCTAssertEqual(manager.panels[0].target, "s3-185")
+    }
+
+    func testDisappearanceStartsANewMetadataGeneration() {
+        let manager = PanelManager(
+            previewPanels: [PanelSnapshot(
+                serviceName: "espdisplay-amoled", displayName: "espdisplay-amoled")],
+            savedNetworkNames: [], usbSerialPorts: [])
+        let endpoint = service("espdisplay-amoled")
+        manager.noteDiscovery([
+            DeviceBrowser.Device(
+                name: "espdisplay-amoled", endpoint: endpoint,
+                metadata: ServiceMetadata(txtRecords: [
+                    "chip": "esp32s3", "target": "s3-185", "res": "360x360",
+                ])),
+        ])
+        XCTAssertEqual(manager.panels[0].target, "s3-185")
+        XCTAssertEqual(manager.panels[0].geometry, PanelGeometry(width: 360, height: 360))
+
+        manager.noteDiscovery([])
+        XCTAssertNil(manager.panels[0].chip)
+        XCTAssertNil(manager.panels[0].target)
+        XCTAssertNil(manager.panels[0].geometry)
+
+        // Reappearing on target-less firmware is a new answer, not permission
+        // to reuse the previous same-chip S3 target.
+        manager.noteDiscovery([
+            DeviceBrowser.Device(
+                name: "espdisplay-amoled", endpoint: endpoint,
+                metadata: ServiceMetadata(txtRecords: ["chip": "esp32s3"])),
+        ])
+        XCTAssertEqual(manager.panels[0].chip, "esp32s3")
+        XCTAssertNil(manager.panels[0].target)
     }
 
     func testChipArrivesOnAPanelThatWasAlreadyInTheList() {
@@ -292,9 +356,13 @@ final class DiscoveryMetadataTests: XCTestCase {
         let device = DeviceBrowser.devices(from: [
             DeviceBrowser.Advertisement(
                 endpoint: service("espdisplay-9050"),
-                txtRecords: ["chip": "esp32c6", "res": "172x320", "fw": "1.2.0"])
+                txtRecords: [
+                    "chip": "esp32c6", "target": "c6", "res": "172x320",
+                    "fw": "1.2.0",
+                ])
         ])[0]
         XCTAssertEqual(device.metadata.chip, "esp32c6")
+        XCTAssertEqual(device.metadata.target, "c6")
         XCTAssertTrue(device.metadata.namesAChip)
         // And the token a firmware that cannot tell sends, which must not read as
         // a chip.

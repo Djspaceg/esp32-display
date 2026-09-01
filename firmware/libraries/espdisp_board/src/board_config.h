@@ -1,7 +1,7 @@
 // Which supported board this binary is running on, and every board fact that
 // follows from that.
 //
-// Three boards are supported, across two chips:
+// Four board profiles are supported, across two chips:
 //
 //   ESP32-C6-LCD-1.47          ST7789 172x320 over SPI, addressable RGB LED on
 //                              GPIO8, BOOT on GPIO9
@@ -11,13 +11,13 @@
 //   ESP32-S3-Touch-AMOLED-1.75C  CO5300 466x466 AMOLED over QSPI, CST9217
 //                              touch on I2C GPIO15/14, AXP2101 PMU, QMI8658
 //                              IMU
+//   ESP32-S3-Touch-LCD-1.85C   ST77916 360x360 LCD over QSPI, CST816 touch
+//                              on I2C GPIO11/10, reset through TCA9554
 //
-// The two C6 boards share one binary: same chip, same resolution, different
-// panel controller and pin map, so the variant is detected at boot and the
-// pins read out of this table. The S3 family also shares one binary, but its
-// two observed revisions are distinguished by their fitted flash capacity:
-// the 32 MB engineering sample uses a shared GPIO2 panel/touch reset, while
-// the current 16 MB board uses LCD reset GPIO39 and touch reset GPIO40.
+// The two C6 boards share one binary: same chip and resolution, with runtime
+// detection selecting their pin maps. The two S3 boards share a chip but not a
+// resolution or controller, so they are separate compile-time targets selected
+// by ESPDISP_BOARD_S3_185. A generic ESP32-S3 probe cannot distinguish them.
 //
 // Unlike the original two-board design, resolution is now a per-board fact:
 // the sketch derives its frame geometry (bandproto::Geometry) from panelW and
@@ -46,12 +46,13 @@ enum class Variant : uint8_t {
   LcdSt7789 = 1,     // ESP32-C6-LCD-1.47 (non-touch)
   TouchJd9853 = 2,   // ESP32-C6-Touch-LCD-1.47
   AmoledCo5300 = 3,  // ESP32-S3-Touch-AMOLED-1.75C
+  LcdSt77916 = 4,    // ESP32-S3-Touch-LCD-1.85C
 };
 
 /// Which panel controller to construct. The ESP32 Arduino core ships an
 /// esp_lcd ST7789 driver; the JD9853 and CO5300 ones are vendored in
 /// firmware/libraries.
-enum class PanelDriver : uint8_t { St7789, Jd9853, Co5300 };
+enum class PanelDriver : uint8_t { St7789, Jd9853, Co5300, St77916 };
 
 /// How the panel is wired to the chip. SPI is single-lane with a D/C line;
 /// QSPI is four data lanes with the command/data distinction encoded in a
@@ -60,7 +61,7 @@ enum class PanelBus : uint8_t { Spi, Qspi };
 
 /// Which capacitive touch controller the board carries, so the sketch knows
 /// which register protocol to speak. The pins alone cannot tell these apart.
-enum class TouchController : uint8_t { None, Axs5106l, Cst9217 };
+enum class TouchController : uint8_t { None, Axs5106l, Cst9217, Cst816 };
 
 /// How battery telemetry is obtained. The S3's AXP2101 reports voltage,
 /// percentage, external power, and charge state. The C6 touch board exposes
@@ -77,7 +78,11 @@ enum class MotionController : uint8_t { None, Qmi8658 };
 /// I2C probe decides. The S3 binary serves only the AMOLED board; probing
 /// would be pointless and the C6 probe pins mean nothing on that chip.
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_BOARD_S3_185)
+static const Variant COMPILED_VARIANT = Variant::LcdSt77916;
+#else
 static const Variant COMPILED_VARIANT = Variant::AmoledCo5300;
+#endif
 #else
 static const Variant COMPILED_VARIANT = Variant::Unknown;
 #endif
@@ -204,9 +209,15 @@ struct Config {
   /// has to keep inside the inscribed square.
   bool roundDisplay;
 
+  /// Reset lines provided by a TCA9554 at address 0x20. Zero means the reset
+  /// is a direct GPIO (`pinRst` / `pinTouchRst`) or absent. EXIO is 1..8.
+  uint8_t panelResetExio;
+  uint8_t touchResetExio;
+
   bool hasRgbLed() const { return pinRgbLed != NO_PIN; }
   bool hasTouch() const {
-    return touch != TouchController::None && pinTouchRst != NO_PIN &&
+    return touch != TouchController::None &&
+           (pinTouchRst != NO_PIN || touchResetExio != 0) &&
            pinTouchInt != NO_PIN;
   }
   /// Whether a battery reading is possible at all on this board. The bus pins
@@ -230,8 +241,8 @@ struct Config {
            (motionYSign == 1 || motionYSign == -1);
   }
   bool isQspi() const { return bus == PanelBus::Qspi; }
-  bool usesCurrentCo5300Profile() const {
-    return driver == PanelDriver::Co5300 && pinRst == 39 && pinTouchRst == 40;
+  bool hasExpanderReset() const {
+    return panelResetExio != 0 || touchResetExio != 0;
   }
   /// Brightness sink: PWM duty on this pin, or panel command 0x51 when absent.
   bool hasBacklightPin() const { return pinBl != NO_PIN; }
@@ -271,6 +282,8 @@ static const Config CONFIG_LCD_ST7789 = {
     /* colOffset   */ 34,
     /* invertColor */ true,
     /* roundDisplay */ false,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
 };
 
 /// ESP32-C6-Touch-LCD-1.47: JD9853, no addressable LED, BOOT on GPIO9.
@@ -318,62 +331,16 @@ static const Config CONFIG_TOUCH_JD9853 = {
     /* colOffset   */ 34,
     /* invertColor */ true,
     /* roundDisplay */ false,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
 };
 
-/// ESP32-S3-Touch-AMOLED-1.75 engineering sample: CO5300 466x466 AMOLED
-/// over QSPI, CST9217 touch, AXP2101 PMU.
-///
-/// The measured 32 MB unit uses the engineering-sample repository pin map:
-/// panel and touch reset share GPIO2. The current 16 MB production board moved
-/// those resets to GPIO39 and GPIO40; its otherwise-identical profile follows.
-static const Config CONFIG_AMOLED_CO5300_LEGACY = {
+/// ESP32-S3-Touch-AMOLED-1.75C: CO5300 466x466 AMOLED over QSPI,
+/// CST9217 touch and AXP2101 PMU. The measured board shares panel and touch
+/// reset on GPIO2.
+static const Config CONFIG_AMOLED_CO5300 = {
     Variant::AmoledCo5300,
     "ESP32-S3-Touch-AMOLED-1.75C (CO5300)",
-    PanelDriver::Co5300,
-    PanelBus::Qspi,
-    /* panelW */ 466,
-    /* panelH */ 466,
-    /* pclkHz */ 40 * 1000 * 1000,
-    /* sclk  */ 38,
-    /* mosi  */ 4,  // SDIO0
-    /* data1 */ 5,
-    /* data2 */ 6,
-    /* data3 */ 7,
-    /* cs    */ 12,
-    /* dc    */ NO_PIN,  // QSPI: no D/C line
-    /* rst   */ 2,
-    /* bl    */ NO_PIN,  // AMOLED: brightness is panel command 0x51
-    // GPIO0, the S3's standard BOOT strapping pin. Confirmed on hardware -
-    // see the measurement note above the struct.
-    /* boot  */ 0,
-    /* led   */ NO_PIN,
-    TouchController::Cst9217,
-    /* touchSda */ 15,
-    /* touchScl */ 14,
-    /* touchRst */ 2,  // shared with panel reset - never pulse independently
-    /* touchInt */ 11,
-    // AXP2101 PMU at 0x34 on the touch bus above (GPIO15/14). Battery
-    // telemetry also exists on the touch C6, but through its GPIO0 divider.
-    PowerController::Axp2101,
-    /* batteryAdc */ NO_PIN,
-    /* adcScale */ 0,
-    MotionController::Qmi8658,
-    // Waveshare's board examples leave the QMI8658 geometry at identity.
-    /* motion X */ 0, 1,
-    /* motion Y */ 1, 1,
-    /* colOffset   */ 6,
-    /* invertColor */ false,
-    /* roundDisplay */ true,
-};
-
-/// Current ESP32-S3-Touch-AMOLED-1.75 production board. Waveshare's maintained
-/// hardware reference and Arduino pin_config.h specify LCD_RST=39 and
-/// TP_RST=40. The observed unit has 16 MB flash, matching that reference; the
-/// working engineering sample has 32 MB. Every other display and peripheral
-/// connection remains the same.
-static const Config CONFIG_AMOLED_CO5300_CURRENT = {
-    Variant::AmoledCo5300,
-    "ESP32-S3-Touch-AMOLED-1.75 current (CO5300)",
     PanelDriver::Co5300,
     PanelBus::Qspi,
     /* panelW */ 466,
@@ -386,14 +353,14 @@ static const Config CONFIG_AMOLED_CO5300_CURRENT = {
     /* data3 */ 7,
     /* cs    */ 12,
     /* dc    */ NO_PIN,
-    /* rst   */ 39,
+    /* rst   */ 2,
     /* bl    */ NO_PIN,
     /* boot  */ 0,
     /* led   */ NO_PIN,
     TouchController::Cst9217,
     /* touchSda */ 15,
     /* touchScl */ 14,
-    /* touchRst */ 40,
+    /* touchRst */ 2,
     /* touchInt */ 11,
     PowerController::Axp2101,
     /* batteryAdc */ NO_PIN,
@@ -404,18 +371,48 @@ static const Config CONFIG_AMOLED_CO5300_CURRENT = {
     /* colOffset   */ 6,
     /* invertColor */ false,
     /* roundDisplay */ true,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
 };
 
-static const uint32_t S3_CURRENT_FLASH_BYTES = 16u * 1024u * 1024u;
-
-/// Select the S3 wiring profile from a physical fact that differs between the
-/// two measured revisions. Unknown capacities fail toward the already-shipped
-/// 32 MB profile rather than driving newly assumed reset pins.
-inline const Config &s3AmoledConfigForFlashSize(uint32_t flashBytes) {
-  return flashBytes == S3_CURRENT_FLASH_BYTES
-             ? CONFIG_AMOLED_CO5300_CURRENT
-             : CONFIG_AMOLED_CO5300_LEGACY;
-}
+/// ESP32-S3-Touch-LCD-1.85C: ST77916 360x360 round TFT over QSPI.
+/// Panel and CST816 touch reset are TCA9554 EXIO2 and EXIO1 respectively.
+static const Config CONFIG_LCD_ST77916 = {
+    Variant::LcdSt77916,
+    "ESP32-S3-Touch-LCD-1.85C (ST77916)",
+    PanelDriver::St77916,
+    PanelBus::Qspi,
+    /* panelW */ 360,
+    /* panelH */ 360,
+    /* pclkHz */ 80 * 1000 * 1000,
+    /* sclk  */ 40,
+    /* mosi  */ 46,
+    /* data1 */ 45,
+    /* data2 */ 42,
+    /* data3 */ 41,
+    /* cs    */ 21,
+    /* dc    */ NO_PIN,
+    /* rst   */ NO_PIN,
+    /* bl    */ 5,
+    /* boot  */ 0,
+    /* led   */ NO_PIN,
+    TouchController::Cst816,
+    /* touchSda */ 11,
+    /* touchScl */ 10,
+    /* touchRst */ NO_PIN,
+    /* touchInt */ 4,
+    PowerController::None,
+    /* batteryAdc */ NO_PIN,
+    /* adcScale */ 0,
+    MotionController::None,
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* colOffset   */ 0,
+    /* invertColor */ true,
+    /* roundDisplay */ true,
+    /* panelResetExio */ 2,
+    /* touchResetExio */ 1,
+};
 
 /// Map a possibly-Unknown variant onto one that is safe to run.
 ///
@@ -451,10 +448,9 @@ inline const Config &configFor(Variant variant) {
     case Variant::LcdSt7789:
       return CONFIG_LCD_ST7789;
     case Variant::AmoledCo5300:
-      // The target-independent lookup retains the already-shipped 32 MB
-      // profile. S3 setup has the physical flash size and calls
-      // s3AmoledConfigForFlashSize() instead.
-      return CONFIG_AMOLED_CO5300_LEGACY;
+      return CONFIG_AMOLED_CO5300;
+    case Variant::LcdSt77916:
+      return CONFIG_LCD_ST77916;
     default:
       return CONFIG_TOUCH_JD9853;
   }
@@ -488,6 +484,7 @@ inline Variant variantFromStored(uint8_t raw) {
   if (raw == (uint8_t)Variant::LcdSt7789) return Variant::LcdSt7789;
   if (raw == (uint8_t)Variant::TouchJd9853) return Variant::TouchJd9853;
   if (raw == (uint8_t)Variant::AmoledCo5300) return Variant::AmoledCo5300;
+  if (raw == (uint8_t)Variant::LcdSt77916) return Variant::LcdSt77916;
   return Variant::Unknown;
 }
 
@@ -501,6 +498,7 @@ inline Variant variantFromName(const char *token) {
   if (strcmp(token, "st7789") == 0) return Variant::LcdSt7789;
   if (strcmp(token, "jd9853") == 0) return Variant::TouchJd9853;
   if (strcmp(token, "co5300") == 0) return Variant::AmoledCo5300;
+  if (strcmp(token, "st77916") == 0) return Variant::LcdSt77916;
   return Variant::Unknown;
 }
 
@@ -513,8 +511,25 @@ inline const char *variantToken(Variant variant) {
       return "jd9853";
     case Variant::AmoledCo5300:
       return "co5300";
+    case Variant::LcdSt77916:
+      return "st77916";
     default:
       return "auto";
+  }
+}
+
+/// Stable firmware-image target, distinct from the IDF chip token.
+inline const char *targetToken(Variant variant) {
+  switch (variant) {
+    case Variant::AmoledCo5300:
+      return "s3-175";
+    case Variant::LcdSt77916:
+      return "s3-185";
+    case Variant::LcdSt7789:
+    case Variant::TouchJd9853:
+      return "c6";
+    default:
+      return "unknown";
   }
 }
 

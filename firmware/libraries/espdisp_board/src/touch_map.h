@@ -91,6 +91,13 @@ static const Calibration CST9217_ON_CO5300 = {
     /* panelShort */ 466, /* panelLong */ 466,
     /* rawXMirrored */ false, /* rotateClockwise */ true};
 
+/// Starting calibration for the ESP32-S3-Touch-LCD-1.85C's CST816. The
+/// Waveshare example consumes its 360x360 raw coordinates directly. Physical
+/// corner validation can change the mirror bit without changing shared math.
+static const Calibration CST816_ON_ST77916 = {
+    /* panelShort */ 360, /* panelLong */ 360,
+    /* rawXMirrored */ false, /* rotateClockwise */ true};
+
 inline int16_t frameWidth(bool landscape, Calibration cal = AXS5106L_ON_C6) {
   return landscape ? cal.panelLong : cal.panelShort;
 }

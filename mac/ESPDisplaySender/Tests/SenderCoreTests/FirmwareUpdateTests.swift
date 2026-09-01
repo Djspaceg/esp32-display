@@ -373,6 +373,44 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertTrue(reason.contains("set-password"), "got: \(reason)")
     }
 
+    func testReadinessCarriesDiscoveryTargetWithoutPersistingIt() throws {
+        var panel = Self.panel(
+            serviceName: "espdisplay",
+            hardwareID: "020000123456",
+            capabilities: .restart)
+        panel.chip = "esp32s3"
+        panel.target = "s3-185"
+        panel.usbHardwareID = "020000123456"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-1"])
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-1",
+            name: "espdisplay",
+            hardwareID: "020000123456",
+            target: "s3-185",
+            board: "st77916")
+
+        guard case .ready(let target) = manager.firmwareUpdateReadiness("espdisplay")
+        else { return XCTFail("the identity-matched USB target should be ready") }
+        XCTAssertEqual(target.chip, "esp32s3")
+        XCTAssertEqual(target.target, "s3-185")
+        XCTAssertEqual(target.usbDevice?.target, "s3-185")
+    }
+
+    func testPhysicalBoardProfilesMatchOnlyTheirExactTargets() {
+        XCTAssertTrue(PanelManager.physicalBoard("st7789", isCompatibleWith: "c6"))
+        XCTAssertTrue(PanelManager.physicalBoard("jd9853", isCompatibleWith: "c6"))
+        XCTAssertTrue(PanelManager.physicalBoard("co5300", isCompatibleWith: "s3-175"))
+        XCTAssertTrue(PanelManager.physicalBoard("st77916", isCompatibleWith: "s3-185"))
+
+        XCTAssertFalse(PanelManager.physicalBoard("co5300", isCompatibleWith: "s3-185"))
+        XCTAssertFalse(PanelManager.physicalBoard("st77916", isCompatibleWith: "s3-175"))
+        XCTAssertFalse(PanelManager.physicalBoard("st77916", isCompatibleWith: "esp32s3"))
+        XCTAssertFalse(PanelManager.physicalBoard("future", isCompatibleWith: "s3-185"))
+    }
+
     // MARK: - what a bundle means for a panel
 
     /// The ordinary case, and the one sentence that has to be right: the version
@@ -460,15 +498,51 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertEqual(chosen.action, .update)
         XCTAssertTrue(chosen.canPush)
         XCTAssertTrue(
-            chosen.detail.contains("did not report which chip"), "got: \(chosen.detail)")
+            chosen.detail.contains("exact target"), "got: \(chosen.detail)")
         XCTAssertTrue(
-            chosen.detail.contains("refused rather than installed"),
-            "the warning has to say what a wrong choice costs; got: \(chosen.detail)")
+            chosen.detail.contains("independently reported chip"),
+            "the warning has to require both identities; got: \(chosen.detail)")
     }
 
     /// The caveat appears only when the chip was NOT confirmed. Without this, a
     /// panel that reported its chip perfectly well would be warned about a
     /// guess nobody made.
+    func testTwoS3TargetsAreSelectedExactlyAndChipLookupIsAmbiguous() throws {
+        let bundle = try Self.bundle(
+            version: "1.3.0", chips: ["esp32s3", "esp32s3"])
+
+        XCTAssertEqual(bundle.targets, ["s3-175", "s3-185"])
+        XCTAssertNil(bundle.image(forChip: "esp32s3"))
+        let small = bundle.availability(
+            forTarget: "s3-175", chip: "esp32s3", panelVersion: "1.2.0")
+        let round = bundle.availability(
+            forTarget: "s3-185", chip: "esp32s3", panelVersion: "1.2.0")
+        XCTAssertEqual(small.image?.targets, ["s3-175"])
+        XCTAssertEqual(round.image?.targets, ["s3-185"])
+        XCTAssertNotEqual(
+            bundle.payload(forTarget: "s3-175"),
+            bundle.payload(forTarget: "s3-185"))
+    }
+
+    func testS3WithoutExactTargetIsBlockedAndTargetChipMustAgree() throws {
+        let bundle = try Self.bundle(
+            version: "1.3.0", chips: ["esp32s3", "esp32s3"])
+        let missing = FirmwareUpdatePlan.make(
+            bundle.availability(
+                forTarget: nil, chip: "esp32s3", panelVersion: "1.2.0"),
+            chipConfirmed: false)
+        XCTAssertEqual(missing.action, .chooseImage)
+        XCTAssertFalse(missing.canPush)
+        XCTAssertTrue(missing.detail.contains("different displays"))
+
+        let mismatch = FirmwareUpdatePlan.make(
+            bundle.availability(
+                forTarget: "s3-185", chip: "esp32c6", panelVersion: "1.2.0"),
+            chipConfirmed: false)
+        XCTAssertEqual(mismatch.action, .blocked)
+        XCTAssertTrue(mismatch.headline.contains("disagree"))
+    }
+
     func testConfirmedChipCarriesNoCaveat() throws {
         let plan = try Self.plan(bundleVersion: "1.3.0", panelVersion: "1.2.0")
 
@@ -635,7 +709,7 @@ final class FirmwareUpdateTests: XCTestCase {
                     version: bundleVersion, chips: ["esp32c6"],
                     generation: FirmwareBundle.formatV1)
                 XCTAssertEqual(old.format, 1)
-                XCTAssertEqual(new.format, 2)
+                XCTAssertEqual(new.format, 3)
                 XCTAssertEqual(
                     old.payload(forChip: "esp32c6"), new.payload(forChip: "esp32c6"),
                     "the OTA payload is the same bytes in both generations")
@@ -679,6 +753,14 @@ final class FirmwareUpdateTests: XCTestCase {
                 ("boot_app0", 0xE000, Data("ota \(chip)\n".utf8)),
             ]
         }
+        let exactTargets: [String] = {
+            var s3Index = 0
+            return chips.map { chip in
+                guard chip == "esp32s3" else { return "c6" }
+                defer { s3Index += 1 }
+                return s3Index == 0 ? "s3-175" : "s3-185"
+            }
+        }()
         var manifest: [String: Any] = [
             "format": generation,
             "firmware_version": version,
@@ -686,9 +768,10 @@ final class FirmwareUpdateTests: XCTestCase {
             "source_commit": String(repeating: "a", count: 40),
             "source_dirty": false,
             "tool": "espdisp.py bundle",
-            "images": zip(chips, payloads).map { chip, payload in
+            "images": zip(zip(chips, exactTargets), payloads).map { pair, payload in
+                let (chip, target) = pair
                 var entry: [String: Any] = [
-                    "board": String(chip.dropFirst("esp32".count)),
+                    "board": target,
                     "chip": chip,
                     "fqbn": "esp32:esp32:\(chip)",
                     "filename": "display_stream.ino.bin",
@@ -696,6 +779,9 @@ final class FirmwareUpdateTests: XCTestCase {
                     "bytes": payload.count,
                     "sha256": FirmwareBundle.sha256Hex(payload),
                 ]
+                if generation >= FirmwareBundle.format {
+                    entry["targets"] = [target]
+                }
                 if generation != FirmwareBundle.formatV1 {
                     entry["app_address"] = 0x10000
                     entry["flash_parts"] = parts(for: chip).map { part in
@@ -744,7 +830,10 @@ final class FirmwareUpdateTests: XCTestCase {
             return parts(for: pair.0).reduce(area + pair.1) { $0 + $1.payload }
         }
         let file = (generation == FirmwareBundle.formatV1
-            ? FirmwareBundle.magicV1 : FirmwareBundle.magic)
+            ? FirmwareBundle.magicV1
+            : generation == FirmwareBundle.formatV2
+                ? FirmwareBundle.magicV2
+                : FirmwareBundle.magic)
             + lengthLine + encoded + area
         return try FirmwareBundle.read(file)
     }

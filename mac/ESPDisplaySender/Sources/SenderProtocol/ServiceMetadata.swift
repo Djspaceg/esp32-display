@@ -15,7 +15,8 @@ import Foundation
 /// | `fw` | `FW_VERSION` verbatim | firmware version, e.g. `1.2.0` |
 /// | `proto` | `%u` | `deviceproto::FRAME_PROTOCOL_VERSION` |
 /// | `caps` | `%08lx` | capability bits, lowercase hex |
-/// | `chip` | `CONFIG_IDF_TARGET` | `esp32c6`, `esp32s3`, or `unknown` |
+/// | `chip` | `CONFIG_IDF_TARGET` | MCU family: `esp32c6`, `esp32s3`, or `unknown` |
+/// | `target` | exact build target | `c6`, `s3-175`, or `s3-185` |
 ///
 /// TOLERANT BY CONSTRUCTION. Nothing here throws and nothing here is required:
 /// a record that is missing, empty, misspelled, out of range, or written by a
@@ -42,12 +43,11 @@ public struct ServiceMetadata: Hashable, Sendable {
     public let geometry: PanelGeometry?
     /// `fw`. See the note above about EINF being the authority.
     public let firmwareVersion: String?
-    /// `chip`. The IDF target token, one vocabulary with
-    /// `tools/espdisp.py BOARDS[*].chip` and with a `.espdispfw` manifest's
-    /// `chip` field. `unknownChip` is a value the firmware really sends and
-    /// means "this build could not name its chip", which is not the same as
-    /// this key being absent - see that constant.
+    /// `chip`. The IDF chip token, such as `esp32c6` or `esp32s3`.
     public let chip: String?
+    /// `target`. The exact firmware target, such as `c6`, `s3-175`, or
+    /// `s3-185`. Unlike `chip`, this distinguishes same-chip panel variants.
+    public let target: String?
     /// `caps`. The same bits EINF reports, available before a session exists.
     public let capabilities: DeviceProtocol.Capabilities?
     /// `proto`. Which frame-protocol generation this panel speaks.
@@ -58,6 +58,7 @@ public struct ServiceMetadata: Hashable, Sendable {
         geometry: PanelGeometry? = nil,
         firmwareVersion: String? = nil,
         chip: String? = nil,
+        target: String? = nil,
         capabilities: DeviceProtocol.Capabilities? = nil,
         frameProtocolVersion: Int? = nil
     ) {
@@ -65,6 +66,7 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.geometry = geometry
         self.firmwareVersion = firmwareVersion
         self.chip = chip
+        self.target = target
         self.capabilities = capabilities
         self.frameProtocolVersion = frameProtocolVersion
     }
@@ -96,6 +98,7 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.name = Self.nonEmpty(records["name"])
         self.firmwareVersion = Self.nonEmpty(records["fw"])
         self.chip = Self.nonEmpty(records["chip"])
+        self.target = Self.nonEmpty(records["target"])
         self.geometry = Self.parseResolution(records["res"])
         self.capabilities = Self.parseCapabilities(records["caps"])
         self.frameProtocolVersion = Self.parseUnsignedDecimal(records["proto"])

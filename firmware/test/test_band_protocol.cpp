@@ -1243,7 +1243,20 @@ int main() {
           Variant::TouchJd9853);
     CHECK(board::variantFromName(board::variantToken(Variant::AmoledCo5300)) ==
           Variant::AmoledCo5300);
+    CHECK(board::variantFromName(board::variantToken(Variant::LcdSt77916)) ==
+          Variant::LcdSt77916);
     CHECK(strcmp(board::variantToken(Variant::Unknown), "auto") == 0);
+
+    // Firmware-image identity is deliberately separate from the chip token and
+    // from the physical controller token. Both S3 variants compile for
+    // esp32s3, but they must never select one another's image.
+    CHECK(strcmp(board::targetToken(Variant::LcdSt7789), "c6") == 0);
+    CHECK(strcmp(board::targetToken(Variant::TouchJd9853), "c6") == 0);
+    CHECK(strcmp(board::targetToken(Variant::AmoledCo5300), "s3-175") == 0);
+    CHECK(strcmp(board::targetToken(Variant::LcdSt77916), "s3-185") == 0);
+    CHECK(strcmp(board::targetToken(Variant::Unknown), "unknown") == 0);
+    CHECK(strcmp(board::targetToken(Variant::AmoledCo5300),
+                 board::targetToken(Variant::LcdSt77916)) != 0);
 
     // Host tests compile without an IDF target, which is the C6 path: the
     // variant is Unknown until the boot probe says otherwise.
@@ -1407,6 +1420,46 @@ int main() {
     // probe must fall back to a C6 board, and the S3 build never probes.
     CHECK(board::resolve(Variant::Unknown) != Variant::AmoledCo5300);
     CHECK(board::resolve(Variant::AmoledCo5300) == Variant::AmoledCo5300);
+  }
+
+  // --- the S3 1.85-inch LCD board entry -----------------------------------
+  {
+    using board::Variant;
+    const board::Config &lcd = board::configFor(Variant::LcdSt77916);
+
+    CHECK(lcd.variant == Variant::LcdSt77916);
+    CHECK(lcd.driver == board::PanelDriver::St77916);
+    CHECK(lcd.bus == board::PanelBus::Qspi);
+    CHECK(lcd.isQspi());
+    CHECK(lcd.panelW == 360 && lcd.panelH == 360);
+    CHECK(lcd.pclkHz == 80 * 1000 * 1000);
+    CHECK(lcd.pinSclk == 40);
+    CHECK(lcd.pinMosi == 46);
+    CHECK(lcd.pinData1 == 45 && lcd.pinData2 == 42 && lcd.pinData3 == 41);
+    CHECK(lcd.pinCs == 21 && lcd.pinDc == board::NO_PIN);
+    CHECK(lcd.pinRst == board::NO_PIN && lcd.panelResetExio == 2);
+    CHECK(lcd.pinBl == 5 && lcd.hasBacklightPin());
+    CHECK(lcd.touch == board::TouchController::Cst816);
+    CHECK(lcd.pinTouchSda == 11 && lcd.pinTouchScl == 10);
+    CHECK(lcd.pinTouchRst == board::NO_PIN && lcd.touchResetExio == 1);
+    CHECK(lcd.pinTouchInt == 4 && lcd.hasTouch());
+    CHECK(lcd.power == board::PowerController::None && !lcd.hasBattery());
+    CHECK(lcd.motion == board::MotionController::None && !lcd.hasMotion());
+    CHECK(lcd.colOffset == 0);
+    CHECK(lcd.invertColor);
+    CHECK(lcd.roundDisplay);
+    CHECK(lcd.hasExpanderReset());
+
+    const Geometry geometry = {lcd.panelW, lcd.panelH};
+    CHECK(geometry.valid());
+    CHECK(geometry.bandCount(false) == 360);
+    CHECK(geometry.maxBandCount() <= MAX_BANDS);
+
+    CHECK(board::variantFromStored((uint8_t)Variant::LcdSt77916) ==
+          Variant::LcdSt77916);
+    CHECK(board::variantFromName("st77916") == Variant::LcdSt77916);
+    CHECK(strcmp(board::variantToken(Variant::LcdSt77916), "st77916") == 0);
+    CHECK(strcmp(board::targetToken(Variant::LcdSt77916), "s3-185") == 0);
   }
 
   // --- C6 voltage-derived battery estimate -------------------------------
