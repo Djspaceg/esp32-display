@@ -5,7 +5,8 @@
 //   DG_DrawFrame  - scale 320x200 -> 466x466 (letterboxed, round-masked)
 //   DG_SleepMs    - FreeRTOS vTaskDelay
 //   DG_GetTicksMs - esp_timer microseconds / 1000
-//   DG_GetKey     - IMU tilt + touch gestures -> Doom key events
+//   DG_PollInput  - sample hardware once per Doom input phase
+//   DG_GetKey     - dequeue one sampled Doom key event
 //
 // Display strategy for 466x466 square (round) AMOLED:
 //   Doom renders 320x200 (16:10). We scale to fill the 466px width:
@@ -25,17 +26,19 @@
 //   FULL SCREEN:
 //     - Second finger: run modifier
 //
-// In MENU mode (title screen, menus):
-//     - Tap anywhere: ENTER (select)
-//     - Swipe up: UP arrow (menu navigate)
-//     - Swipe down: DOWN arrow (menu navigate)
-//     - No IMU input in menus
+// Outside active gameplay (title/demo/menu):
+//     - Tap on title/demo: ESCAPE (open menu)
+//     - Tap in menu: ENTER (select)
+//     - Dominant-axis swipe in menu: UP/DOWN/LEFT/RIGHT
+//     - No IMU input
 //
 // GPL-2.0 (inherits from doomgeneric/id Software Doom source)
 #include "doomgeneric.h"
 #include "doomkeys.h"
 #include "doom_mode.h"
 #include "doom_config.h"
+#include "doomstat.h"
+#include "m_controls.h"
 
 #include <string.h>
 #include <math.h>
@@ -64,7 +67,7 @@ typedef struct {
 
 extern void doom_touch_poll(doom_touch_state_t* state);
 
-static const char* TAG = "doom_gfx";
+static const char* GFX_TAG = "doom_gfx";
 
 // --- Display constants ---
 #define PANEL_SIZE       466
@@ -93,7 +96,7 @@ static struct {
 static int key_queue_head = 0;
 static int key_queue_tail = 0;
 
-// Externally callable (used by doom_mode.cpp for button weapon cycle)
+// Externally callable (used by doom_mode.cpp for BOOT menu controls)
 void push_key(unsigned char key, int pressed) {
     int next = (key_queue_head + 1) % KEY_QUEUE_SIZE;
     if (next != key_queue_tail) {
@@ -114,12 +117,93 @@ static bool key_back_held = false;
 static bool key_strafe_l_held = false;
 static bool key_strafe_r_held = false;
 static bool key_run_held = false;
+static bool key_turn_l_held = false;
+static bool key_turn_r_held = false;
 
-// Track whether we're in a menu (no IMU, different touch behavior)
-static bool in_menu = true;  // Start true (title screen)
+// Synthetic gameplay taps must remain down through one BuildTiccmd. Menu
+// responders act immediately on keydown, but gameplay samples held-key state
+// after the event queue is drained; an adjacent down/up pair would disappear.
+static bool dg_pulse_key_held = false;
+static unsigned char dg_pulse_key = 0;
+static uint32_t dg_input_generation = 0;
+static uint32_t dg_pulse_release_generation = 0;
+static bool dg_fire_pending = false;
+static uint32_t dg_fire_due_at = 0;
+
+// --- Touch -> aim/shoot/weapon mapping ---
+#define TOUCH_TURN_THRESHOLD  8
+#define TOUCH_SWIPE_THRESHOLD 40
+#define TOUCH_SWIPE_RATIO     1.5f
+
+typedef enum {
+    DG_INPUT_TITLE_OR_DEMO,
+    DG_INPUT_MENU,
+    DG_INPUT_GAMEPLAY,
+} dg_input_context_t;
+
+static bool dg_touch_active = false;
+static bool dg_touch_suppressed = false;
+static dg_input_context_t dg_touch_context = DG_INPUT_TITLE_OR_DEMO;
+static int32_t dg_touch_dx = 0;
+static int32_t dg_touch_dy = 0;
+static bool dg_swipe_committed = false;
+
+static bool dg_gameplay_input_active(void) {
+    return !menuactive && usergame && gamestate == GS_LEVEL && !demoplayback;
+}
+
+static dg_input_context_t dg_current_input_context(void) {
+    if (menuactive) return DG_INPUT_MENU;
+    if (dg_gameplay_input_active()) return DG_INPUT_GAMEPLAY;
+    return DG_INPUT_TITLE_OR_DEMO;
+}
+
+static void dg_release_gameplay_keys(void) {
+    if (key_forward_held) { push_key(KEY_UPARROW, 0); key_forward_held = false; }
+    if (key_back_held) { push_key(KEY_DOWNARROW, 0); key_back_held = false; }
+    if (key_strafe_l_held) { push_key(KEY_STRAFE_L, 0); key_strafe_l_held = false; }
+    if (key_strafe_r_held) { push_key(KEY_STRAFE_R, 0); key_strafe_r_held = false; }
+    if (key_run_held) { push_key(KEY_RSHIFT, 0); key_run_held = false; }
+    if (key_turn_l_held) { push_key(KEY_LEFTARROW, 0); key_turn_l_held = false; }
+    if (key_turn_r_held) { push_key(KEY_RIGHTARROW, 0); key_turn_r_held = false; }
+    if (dg_pulse_key_held) {
+        push_key(dg_pulse_key, 0);
+        dg_pulse_key_held = false;
+    }
+    dg_fire_pending = false;
+}
+
+static void dg_begin_gameplay_pulse(unsigned char key) {
+    if (dg_pulse_key_held) {
+        push_key(dg_pulse_key, 0);
+    }
+    push_key(key, 1);
+    dg_pulse_key = key;
+    dg_pulse_key_held = true;
+    dg_pulse_release_generation = dg_input_generation + 1;
+}
+
+static void dg_release_gameplay_pulse_for_new_poll(void) {
+    if (dg_pulse_key_held &&
+        dg_input_generation >= dg_pulse_release_generation) {
+        push_key(dg_pulse_key, 0);
+        dg_pulse_key_held = false;
+    }
+}
+
+static void dg_reset_touch_gesture(void) {
+    dg_touch_active = false;
+    dg_touch_suppressed = false;
+    dg_touch_dx = 0;
+    dg_touch_dy = 0;
+    dg_swipe_committed = false;
+}
 
 static void process_imu_input(void) {
-    if (in_menu) return;  // No tilt control in menus
+    if (!dg_gameplay_input_active()) {
+        dg_release_gameplay_keys();
+        return;
+    }
 
     float pitch, roll;
     doom_imu_read(&pitch, &roll);
@@ -147,73 +231,98 @@ static void process_imu_input(void) {
     }
 }
 
-// --- Touch -> aim/shoot/weapon mapping ---
-#define TOUCH_TURN_THRESHOLD  8    // px drag before registering as turn
-#define TOUCH_SWIPE_THRESHOLD 40   // px vertical movement for weapon swipe
-#define TOUCH_SWIPE_RATIO     1.5f // dy/dx must exceed this for vertical swipe
-
-static bool key_turn_l_held = false;
-static bool key_turn_r_held = false;
-static bool key_fire_held = false;
-static bool key_use_held = false;
-static int16_t touch_start_y = 0;        // Y at touch-down for swipe detection
-static bool swipe_committed = false;      // Once a swipe is detected, don't also fire
-
 static void process_touch_input(void) {
     doom_touch_state_t touch;
     doom_touch_poll(&touch);
 
-    // --- Menu mode: simplified input ---
-    if (in_menu) {
-        if (touch.tap_detected) {
-            push_key(KEY_ENTER, 1);
-            push_key(KEY_ENTER, 0);
+    const dg_input_context_t context = dg_current_input_context();
+    if (context == DG_INPUT_GAMEPLAY && dg_fire_pending &&
+        (int32_t)(DG_GetTicksMs() - dg_fire_due_at) >= 0) {
+        dg_fire_pending = false;
+        dg_begin_gameplay_pulse(KEY_FIRE);
+    }
+
+    if (touch.pressed) {
+        if (!dg_touch_active) {
+            dg_touch_active = true;
+            dg_touch_suppressed = false;
+            dg_touch_context = context;
+            dg_touch_dx = 0;
+            dg_touch_dy = 0;
+            dg_swipe_committed = false;
+        } else {
+            dg_touch_dx += touch.dx;
+            dg_touch_dy += touch.dy;
         }
-        if (touch.dy < -TOUCH_SWIPE_THRESHOLD && touch.pressed) {
-            push_key(KEY_UPARROW, 1);
-            push_key(KEY_UPARROW, 0);
-        }
-        if (touch.dy > TOUCH_SWIPE_THRESHOLD && touch.pressed) {
-            push_key(KEY_DOWNARROW, 1);
-            push_key(KEY_DOWNARROW, 0);
-        }
+    }
+    bool gesture_ended = !touch.pressed && dg_touch_active;
+
+    // A physical contact belongs to the engine context where it began. If a
+    // BOOT press or engine transition changes context while the finger remains
+    // down, discard that contact instead of reinterpreting its accumulated
+    // motion as a command in the new context.
+    if (dg_touch_active && context != dg_touch_context) {
+        dg_touch_suppressed = true;
+    }
+    if (dg_touch_suppressed) {
+        if (gesture_ended) dg_reset_touch_gesture();
         return;
     }
 
-    // --- Game mode ---
+    if (menuactive) {
+        // Accumulate controller-report deltas so a smooth swipe is not lost
+        // merely because no individual report crosses the threshold.
+        if (touch.pressed && !dg_swipe_committed &&
+            (abs(dg_touch_dx) >= TOUCH_SWIPE_THRESHOLD ||
+             abs(dg_touch_dy) >= TOUCH_SWIPE_THRESHOLD)) {
+            unsigned char key;
+            if (abs(dg_touch_dx) > abs(dg_touch_dy)) {
+                key = dg_touch_dx < 0 ? KEY_LEFTARROW : KEY_RIGHTARROW;
+            } else {
+                key = dg_touch_dy < 0 ? KEY_UPARROW : KEY_DOWNARROW;
+            }
+            push_key(key, 1);
+            push_key(key, 0);
+            dg_swipe_committed = true;
+        }
+        if (touch.tap_detected && !dg_swipe_committed) {
+            push_key(KEY_ENTER, 1);
+            push_key(KEY_ENTER, 0);
+        }
+        if (gesture_ended) dg_reset_touch_gesture();
+        return;
+    }
 
-    // Run modifier from second touch point
+    if (!dg_gameplay_input_active()) {
+        // Attract-mode demos and title screens are not user gameplay. A tap
+        // opens the menu instead of firing into a demo that ignores control.
+        if (touch.tap_detected && !dg_swipe_committed) {
+            push_key(KEY_ESCAPE, 1);
+            push_key(KEY_ESCAPE, 0);
+        }
+        if (gesture_ended) dg_reset_touch_gesture();
+        return;
+    }
+
+    // Run modifier from second touch point.
     if (touch.second_pressed != key_run_held) {
         push_key(KEY_RSHIFT, touch.second_pressed ? 1 : 0);
         key_run_held = touch.second_pressed;
     }
 
-    // Weapon switching: vertical swipe on right half
-    if (touch.pressed) {
-        if (!swipe_committed && abs(touch.dy) > TOUCH_SWIPE_THRESHOLD) {
-            float ratio = (float)abs(touch.dy) / (float)(abs(touch.dx) + 1);
-            if (ratio > TOUCH_SWIPE_RATIO) {
-                // Vertical swipe detected
-                if (touch.dy < 0) {
-                    // Swipe UP = next weapon
-                    push_key('/', 1);  // weapon forward
-                    push_key('/', 0);
-                } else {
-                    // Swipe DOWN = previous weapon (Doom uses '/' for next only,
-                    // but we can cycle with number keys. Use '0' for "best weapon")
-                    // Actually: just send multiple '/' to cycle forward
-                    push_key('/', 1);
-                    push_key('/', 0);
-                }
-                swipe_committed = true;  // Don't fire after a swipe
-            }
+    // A dominant vertical swipe cycles weapons once per gesture.
+    if (touch.pressed && !dg_swipe_committed &&
+        abs(dg_touch_dy) >= TOUCH_SWIPE_THRESHOLD) {
+        float ratio = (float)abs(dg_touch_dy) / (float)(abs(dg_touch_dx) + 1);
+        if (ratio > TOUCH_SWIPE_RATIO) {
+            dg_begin_gameplay_pulse((unsigned char)key_nextweapon);
+            dg_swipe_committed = true;
         }
-    } else {
-        swipe_committed = false;  // Reset on release
     }
 
-    // Turn from horizontal drag (only if not swiping vertically)
-    if (!swipe_committed && touch.pressed && abs(touch.dx) > TOUCH_TURN_THRESHOLD) {
+    // Turn from horizontal drag (only if not swiping vertically).
+    if (!dg_swipe_committed && touch.pressed &&
+        abs(touch.dx) > TOUCH_TURN_THRESHOLD) {
         if (touch.dx < -TOUCH_TURN_THRESHOLD) {
             if (!key_turn_l_held) { push_key(KEY_LEFTARROW, 1); key_turn_l_held = true; }
             if (key_turn_r_held) { push_key(KEY_RIGHTARROW, 0); key_turn_r_held = false; }
@@ -226,25 +335,20 @@ static void process_touch_input(void) {
         if (key_turn_r_held) { push_key(KEY_RIGHTARROW, 0); key_turn_r_held = false; }
     }
 
-    // Fire from tap (only if no swipe was committed)
-    if (!swipe_committed) {
-        if (touch.tap_detected && !key_fire_held) {
-            push_key(KEY_FIRE, 1);
-            key_fire_held = true;
-        } else if (!touch.tap_detected && key_fire_held) {
-            push_key(KEY_FIRE, 0);
-            key_fire_held = false;
-        }
-
-        // Use/open from double-tap
-        if (touch.double_tap && !key_use_held) {
-            push_key(KEY_USE, 1);
-            key_use_held = true;
-        } else if (!touch.double_tap && key_use_held) {
-            push_key(KEY_USE, 0);
-            key_use_held = false;
+    if (!dg_swipe_committed) {
+        if (touch.double_tap) {
+            dg_fire_pending = false;
+            dg_begin_gameplay_pulse(KEY_USE);
+        } else if (touch.tap_detected) {
+            // The bridge reports the first release before it can know whether
+            // another tap will follow. Wait out that same classification window
+            // so a double-tap means Use without also firing once.
+            dg_fire_pending = true;
+            dg_fire_due_at = DG_GetTicksMs() + DOOM_DOUBLE_TAP_WINDOW_MS;
         }
     }
+
+    if (gesture_ended) dg_reset_touch_gesture();
 }
 
 // ==========================================================================
@@ -252,8 +356,8 @@ static void process_touch_input(void) {
 // ==========================================================================
 
 void DG_Init() {
-    ESP_LOGI(TAG, "Initializing Doom Easter Egg...");
-    ESP_LOGI(TAG, "  Render: %dx%d -> %dx%d (letterboxed, y_offset=%d)",
+    ESP_LOGI(GFX_TAG, "Initializing Doom Easter Egg...");
+    ESP_LOGI(GFX_TAG, "  Render: %dx%d -> %dx%d (letterboxed, y_offset=%d)",
              DOOM_RENDER_WIDTH, DOOM_RENDER_HEIGHT, SCALED_W, SCALED_H, Y_OFFSET);
 
     // Allocate render buffer in PSRAM (320x200 x 4 bytes = 256KB)
@@ -269,12 +373,13 @@ void DG_Init() {
     assert(scaled_buffer && "Failed to allocate scaled_buffer in PSRAM");
 
     doom_display_init();
-    doom_imu_init();
+    // Touch starts Wire; the QMI8658 shares that bus and must follow it.
     doom_touch_init();
+    doom_imu_init();
 
     last_frame_time = DG_GetTicksMs();
 
-    ESP_LOGI(TAG, "Doom initialized. PSRAM: render=256KB + scaled=434KB + zone=4MB");
+    ESP_LOGI(GFX_TAG, "Doom initialized. PSRAM: render=256KB + scaled=434KB + zone=4MB");
 }
 
 void DG_DrawFrame() {
@@ -359,12 +464,16 @@ uint32_t DG_GetTicksMs() {
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-int DG_GetKey(int* pressed, unsigned char* key) {
-    // Process hardware inputs
+void DG_PollInput(void) {
+    ++dg_input_generation;
+    dg_release_gameplay_pulse_for_new_poll();
     process_imu_input();
     process_touch_input();
+}
 
-    // Pop from key queue
+int DG_GetKey(int* pressed, unsigned char* key) {
+    // Pure dequeue: hardware is sampled once by DG_PollInput() before the
+    // caller drains this queue, so producers cannot refill it mid-drain.
     if (key_queue_tail != key_queue_head) {
         *key = key_queue[key_queue_tail].key;
         *pressed = key_queue[key_queue_tail].pressed;
@@ -375,15 +484,7 @@ int DG_GetKey(int* pressed, unsigned char* key) {
 }
 
 void DG_SetWindowTitle(const char* title) {
-    // Use the title to detect menu vs gameplay state.
-    // doomgeneric sets the title to the map name when a level starts.
-    // If it contains "E1M" or similar, we're in gameplay.
-    if (title && (strstr(title, "E1M") || strstr(title, "MAP"))) {
-        if (in_menu) {
-            in_menu = false;
-            ESP_LOGI(TAG, "Entering gameplay mode (IMU active): %s", title);
-        }
-    }
-    // Title screen / menus don't set a map name, so in_menu stays true
-    // until the first level loads.
+    // The engine's own menu/game/demo globals are authoritative. Window titles
+    // are presentation text and do not reliably change on every state transition.
+    (void)title;
 }

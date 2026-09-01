@@ -9,17 +9,12 @@
 #include <string.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <esp_system.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
-// --- File I/O stubs ---
-// doomgeneric's config and save systems call fopen/mkdir/etc.
-// On ESP32 we have no filesystem beyond the WAD partition, so these are no-ops.
-
-#if !defined(HAVE_MKDIR)
-int M_MakeDirectory(const char* path) {
-    (void)path;
-    return 0;  // pretend success
-}
-#endif
+// Config/save path stubs live in m_misc.c.inc. Keeping their one definition in
+// the upstream module avoids duplicate symbols in the ESP32 unity build.
 
 // --- i_system.c overrides ---
 // These are called by the engine for error handling and exit.
@@ -33,10 +28,10 @@ void I_Error(char *error, ...) {
     vsnprintf(buf, sizeof(buf), error, args);
     va_end(args);
     ESP_LOGE("DOOM", "I_Error: %s", buf);
-    // Don't call exit() on embedded -- signal the game loop to stop
-    extern void doom_request_exit(void);
-    doom_request_exit();
-    // Spin until the main loop picks it up
+    // Fatal engine errors cannot unwind Doom's global state safely. The
+    // one-shot boot flag was consumed before entry, so restart always returns
+    // to the normal display firmware instead of looping back into Doom.
+    esp_restart();
     while (1) { vTaskDelay(pdMS_TO_TICKS(100)); }
 }
 
@@ -108,13 +103,8 @@ music_module_t DG_music_module = {
     DG_MusicIsPlaying,
 };
 
-// --- Timer stubs ---
-// DG_GetTicksMs and DG_SleepMs are in doomgeneric_esp32s3.c, but the engine
-// also calls I_Sleep from i_timer.c
-void I_Sleep(int ms) {
-    extern void DG_SleepMs(uint32_t);
-    DG_SleepMs((uint32_t)ms);
-}
+// --- Timer ---
+// i_timer.c.inc owns I_Sleep and delegates timing to the DG_* platform calls.
 
 // --- Video ---
 // Video is handled by i_video.c (from doomgeneric) which calls DG_DrawFrame.
@@ -126,14 +116,10 @@ void I_InitNetwork(void) {}
 int I_NetCmd(void) { return 0; }
 
 // --- exit() override ---
-// On ESP32, exit() would call abort() and trigger the task watchdog.
-// Instead, signal the Doom game loop to stop cleanly, then spin.
-// The game loop checks doom_exit_requested and returns to doom_enter(),
-// which returns to handleButton(), which calls esp_restart().
+// The engine's exit paths share the same restart boundary as fatal errors.
 void doom_exit_override(int status) {
     (void)status;
-    extern void doom_request_exit(void);
-    doom_request_exit();
+    esp_restart();
     while (1) { vTaskDelay(pdMS_TO_TICKS(100)); }
 }
 

@@ -1153,7 +1153,7 @@ typedef struct
     int misc2;
 } state_t;
 
-extern state_t	states[NUMSTATES];
+extern state_t*	states;
 extern char *sprnames[];
 
 typedef enum {
@@ -1326,6 +1326,6 @@ typedef struct
 
 } mobjinfo_t;
 
-extern mobjinfo_t mobjinfo[NUMMOBJTYPES];
+extern mobjinfo_t* mobjinfo;
 
 #endif

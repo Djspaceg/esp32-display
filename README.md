@@ -101,6 +101,14 @@ the extra-long press compound rather than replace each other: holding past 3s
 also fires the 180° flip on the way, since the flip already fires the instant
 it is reached rather than waiting to see how long the button stays down.
 
+On `s3-175` only, three short presses within 800 ms request the Doom easter egg.
+The panel reboots into an isolated Doom session before networking or streaming
+starts. In Doom, a short BOOT press opens/selects the menu, a hold from 0.6
+seconds to under 3 seconds returns to the previous menu, four-direction swipes
+navigate it, and holding BOOT for 3 seconds exits and reboots into normal
+firmware. See
+`firmware/doom/README.md` for gameplay controls and the hardware test checklist.
+
 A **Power** switch in the manager turns the panel's display off without
 unplugging it — a standing instruction, independent of the automatic dimming
 below, that persists across a reboot until switched back on. It is not the
@@ -474,6 +482,7 @@ accepted right now", not "this build has OTA code in it".
 | `firmware/board_probe/` | I2C-scan diagnostic reporting which board variant you have |
 | `firmware/libraries/espdisp_board/` | Board table and detection, panel bring-up, touch and motion readers/transforms, AXP2101 and C6 ADC battery telemetry |
 | `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance) |
+| `firmware/doom/` | `s3-175`-only Doom engine, hardware bridge, WAD verification, and test procedure |
 | `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
 | `firmware/test/` | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
 | `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
@@ -503,8 +512,8 @@ AMOLED):
 ```sh
 cd firmware/display_stream
 cp wifi_config.h.example wifi_config.h   # fill in your 2.4GHz network
-arduino-cli compile -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" --libraries ../libraries .
-arduino-cli upload  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" -p /dev/cu.usbmodem* .
+arduino-cli compile -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=custom" --libraries ../libraries --libraries .. --build-property "compiler.c.extra_flags=-DESPDISP_DOOM_S3_175" --build-property "compiler.cpp.extra_flags=-DESPDISP_DOOM_S3_175" .
+arduino-cli upload  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=custom" -p /dev/cu.usbmodem* .
 ```
 
 For target **`s3-185`** (ESP32-S3-Touch-LCD-1.85C, 360×360 QSPI LCD):
@@ -522,11 +531,14 @@ framebuffers require PSRAM because each is about 434 KB; `s3-185` keeps the same
 validated platform configuration.
 
 `--libraries ../libraries` puts the in-repo board and panel libraries on the
-search path, including the vendored JD9853, CO5300, and ST77916 drivers. It is a
-compile-only flag; `upload` reuses the cached build. The C6 binary detects one
-of two runtime profiles. Each S3 binary serves one fixed exact target and links
-only its controller. Prefer `tools/espdisp.py compile --board TARGET` so manual
-FQBNs and target-specific compiler flags cannot drift.
+search path, including the vendored JD9853, CO5300, and ST77916 drivers. The
+`s3-175` build additionally passes `--libraries ..` because Arduino expects a
+directory containing the `doom` library, plus its exact-target compile define
+and custom partition scheme. These are compile-only settings; `upload` reuses
+the cached build. The C6 binary detects one of two runtime profiles. Each S3
+binary serves one fixed exact target and links only its controller. Prefer
+`tools/espdisp.py compile --board TARGET` so manual FQBNs and target-specific
+compiler flags cannot drift.
 
 `tools/espdisp.py` runs those build definitions for you, so FQBNs,
 target-specific compiler flags, the `--libraries` flag, and the port glob stay
@@ -538,6 +550,7 @@ tools/espdisp.py compile --board c6          # shared C6 image
 tools/espdisp.py compile --board s3-175      # 1.75-inch CO5300 S3 image
 tools/espdisp.py compile --board s3-185      # 1.85-inch ST77916 S3 image
 tools/espdisp.py flash                       # detects C6; refuses ambiguous S3
+tools/espdisp.py flash --board s3-175        # firmware + verified Doom WAD
 tools/espdisp.py flash --board s3-185        # explicit blank-S3 target
 tools/espdisp.py set-password                # store an OTA password (prompts)
 tools/espdisp.py ota panel.local --board c6  # exact-target OTA update
@@ -697,12 +710,12 @@ dropped in a share, or carried to a Mac that has never seen this repo and has no
 `arduino-cli`, where the app opens the selected file and pushes it. That is why
 it is one file rather than a directory of images.
 
-Per target it carries four payloads: the application image used for OTA, plus
-the second-stage bootloader, partition table, and `boot_app0.bin` needed to
-bring up a blank board. The last part initializes OTA data so the bootloader
-starts the application rather than an empty slot. The compile produces the
-first three; `boot_app0.bin` is the core's own copy, matching what
-`arduino-cli` writes over USB.
+Per target it carries the application image used for OTA, plus the second-stage
+bootloader, partition table, and `boot_app0.bin` needed to bring up a blank
+board. The `s3-175` image carries one additional `doom_wad` payload at
+`0xBFF000`; `c6` and `s3-185` never carry that role. The compile produces the
+application, bootloader, and partition table; `boot_app0.bin` is the core's own
+copy, and the WAD is accepted only at the pinned shareware-v1.9 size and SHA-256.
 
 Each payload's flash address travels in the file rather than being a constant in
 whatever writes it. That matters because addresses are platform data:
@@ -753,9 +766,9 @@ has nothing to offer either S3 target. Bundles are gitignored
 file or no file rather than a partial bundle.
 
 The app ships one. `mac/make-app.sh` builds or reuses a format-3 bundle, verifies
-`--require-all-targets`, and places it in the app's Resources. This lets **Add
-Display over USB…** select a precompiled image without asking the user to run a
-firmware build:
+`--require-all-targets` (including the `s3-175` Doom WAD role), and places it in
+the app's Resources. This lets **Add Display over USB…** select a precompiled
+image without asking the user to run a firmware build:
 
 ```sh
 mac/make-app.sh                                # reuse the bundle if present
@@ -790,10 +803,11 @@ identity. What happens then:
    `esp32s3` chip matches two exact targets, so the sheet requires the user to
    choose `s3-175` or `s3-185` before flashing.
 3. Everything a blank board needs is written in one esptool run — bootloader,
-   partition table, boot_app0 and the application image, at the addresses the
-   bundle carries. The partition table travels with the app deliberately: it is
-   the table that says where the app lives, so writing one without the other puts
-   an image where the old table thinks something else is.
+   partition table, boot_app0 and the application image, plus the verified Doom
+   WAD for `s3-175`, at the addresses the bundle carries. The partition table
+   travels with the app deliberately: it is the table that says where the app
+   and target-specific data live, so writing one without the other puts bytes
+   where the old table assigns a different role.
 4. The WiFi credentials go down the same cable, and the board saves them and
    restarts. A name is optional; if you give one it is sent first, so the last
    restart is the one that joins the network.
@@ -865,13 +879,14 @@ The firmware accepts a WiFi push (see [Updating over WiFi](#updating-over-wifi))
 on the LAN, with a password. This section is about what that does and does not
 guarantee, because "it has OTA" covers a wide range.
 
-**No partition table change was needed.** An earlier version of this section said
-OTA required a custom 8MB dual-partition layout. That was wrong:
-`tools/partitions/default.csv` in the ESP32 core — which all current targets use
-— has `otadata` at 0xe000 plus two 0x140000 app slots at 0x10000 and 0x150000.
-The firmware has always been installed into an OTA-capable layout; nothing had to
-move, and NVS (`0x9000`, `0x5000`) is untouched, so saved WiFi credentials, name,
-orientation, and brightness all survive an update.
+**The `s3-175` Doom release does require one USB partition migration.** `c6` and
+`s3-185` retain the core's standard OTA layout. `s3-175` stages
+`firmware/partitions_s3_doom.csv` only inside its private build copy, with equal
+`0x5F0000` OTA app slots and a `0x401000` WAD partition at `0xBFF000`. The Mac
+app's bundle and `tools/espdisp.py flash --board s3-175` install the matching partition table,
+application, and verified WAD together. OTA cannot rewrite that table or add a
+missing WAD; after the USB migration it updates the inactive app slot and
+preserves the WAD and NVS.
 
 What this implementation provides:
 
@@ -912,13 +927,13 @@ target checks was read out of the core's `ArduinoOTA.cpp`, `Updater.cpp` and
 exact targets compile, the pusher builds the expected command line, and failure
 against a host that does not answer is clean.
 
-Application-slot headroom is finite. The latest validated builds use 1,187,800
-bytes (90%) for `c6`, 1,076,074 bytes (82%) for `s3-175`, and 1,077,346 bytes
-(82%) for `s3-185`. Every release must recheck these figures independently.
-Each fixed S3 artifact links only its own panel driver. If a future target needs
-`PartitionScheme=min_spiffs`, apply that partition choice everywhere its FQBN is
-built and install it once over USB because OTA cannot rewrite the partition
-table.
+Application-slot headroom is finite. The latest validated builds use 1,189,088
+bytes for `c6`, 1,352,178 bytes for `s3-175`, and 1,078,774 bytes for `s3-185`.
+The Doom target's two app slots are each 6,225,920 bytes; the other targets use
+their core-selected slot sizes. Every release must recheck these figures
+independently. Each fixed S3 artifact links only its own panel driver. Any future
+partition choice must be applied everywhere that target's FQBN is built and
+installed once over USB because OTA cannot rewrite the partition table.
 
 The management datagrams remain unauthenticated and intended for a trusted local
 network — a forged `ECTL` can still dim a panel or reboot it. OTA is the one path

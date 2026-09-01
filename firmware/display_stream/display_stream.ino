@@ -76,8 +76,8 @@
 #include "ota_policy.h"
 #include "chip_identity.h"
 
-// Doom Easter Egg (S3 board only)
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+// Doom Easter Egg (exact s3-175 target only)
+#if defined(ESPDISP_DOOM_S3_175)
 #include <doom_mode.h>
 #endif
 
@@ -94,7 +94,7 @@ static String cfgPass;
 // resolving a hardcoded hostname. Default is unique per board
 // (espdisplay-XXXX from the MAC); changeable via CFGNAME over USB.
 static String cfgName;
-static const char *FW_VERSION = "1.3.0";
+static const char *FW_VERSION = "1.4.1";
 static uint8_t deviceId[6] = {0};
 
 // Reads the MAC straight from eFuse rather than via WiFi.macAddress(),
@@ -131,8 +131,10 @@ static const int16_t PANEL_H = (int16_t)PANEL_GEOMETRY.height;
 
 static esp_lcd_panel_handle_t panel = nullptr;
 
-// Expose the panel handle to the Doom Easter Egg display bridge (S3 only).
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+// Expose the panel handle to the Doom Easter Egg display bridge. The build
+// define exists only on the 466x466 CO5300 target; the same-chip s3-185 image
+// neither links nor advertises this hardware-specific mode.
+#if defined(ESPDISP_DOOM_S3_175)
 esp_lcd_panel_handle_t doom_get_panel_handle(void) { return panel; }
 #endif
 
@@ -622,6 +624,37 @@ static bool IRAM_ATTR onColorTransDone(esp_lcd_panel_io_handle_t,
   portEXIT_CRITICAL_ISR(&dmaCountMux);
   return false;
 }
+
+#if defined(ESPDISP_DOOM_S3_175)
+// Doom renders into one reusable full-panel buffer. esp_lcd queues the source
+// pointer rather than copying it, so every blit must block until the completion
+// ISR says DMA is done before Doom rewrites or frees that buffer. A timeout
+// fails closed; the caller immediately restarts instead of continuing with an
+// unknown transfer lifetime.
+extern "C" bool doom_display_blit_blocking(const uint16_t *pixels,
+                                             int width, int height) {
+  if (panel == nullptr || pixels == nullptr || width <= 0 || height <= 0) {
+    return false;
+  }
+  uint32_t startedAt = millis();
+  while (dmaInFlight != 0 && millis() - startedAt < 1000) {
+    delay(1);
+  }
+  if (dmaInFlight != 0) return false;
+
+  dmaMarkQueued();
+  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, width, height, pixels) != ESP_OK) {
+    dmaUnmarkFailed();
+    return false;
+  }
+
+  startedAt = millis();
+  while (dmaInFlight != 0 && millis() - startedAt < 1000) {
+    delay(1);
+  }
+  return dmaInFlight == 0;
+}
+#endif
 
 // Apply one band's payload to bufA and run the reassembly bookkeeping. The
 // shared body of both packet layouts: the classic one-raw-band packet and
@@ -2786,22 +2819,28 @@ static void handleButton() {
   } else if (!down && wasDown) {
     wasDown = false;
     if (!longFired && now - downAt >= DEBOUNCE_MS) {
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-      // Doom Easter Egg: triple-tap BOOT to enter Doom mode.
-      // If doom_check_triple_tap returns true, we enter Doom instead of
-      // toggling the backlight. The triple-tap window (800ms) is short
-      // enough that a deliberate triple-tap won't accidentally toggle
-      // backlight three times -- the first two taps DO toggle it, but
-      // the third one triggers Doom and the player won't notice.
+#if defined(ESPDISP_DOOM_S3_175)
+      // Enter through a one-shot reboot rather than tearing down a live stream.
+      // The next setup consumes the flag before starting networking, allocating
+      // normal frame buffers, or subscribing loopTask to the watchdog, giving
+      // Doom exclusive panel and PSRAM ownership. Any crash then boots normally
+      // because the flag has already been removed.
       if (doom_check_triple_tap(now, true)) {
-        Serial.println("button: DOOM EASTER EGG ACTIVATED");
-        // Suspend normal firmware operation
-        // TODO: stop UDP listener, free frame buffers, stop mDNS
-        doom_enter();
-        // doom_enter() returns when the player exits (BOOT long-press 3s)
-        Serial.println("button: Doom exited, restarting...");
+        Preferences prefs;
+        bool saved = prefs.begin("espdisp", false);
+        if (saved) {
+          saved = prefs.putBool("doomonce", true) == sizeof(uint8_t);
+          prefs.end();
+        }
+        if (!saved) {
+          Serial.println("button: Doom request could not be saved; staying normal");
+          return;
+        }
+        Serial.println("button: Doom requested; rebooting into isolated mode");
+        Serial.flush();
+        delay(50);
         ESP.restart();
-        return;  // unreachable
+        return;
       }
 #endif
       // Normal short-press: toggle backlight high/low
@@ -3306,6 +3345,57 @@ void setup() {
                 FW_VERSION, deviceproto::FRAME_PROTOCOL_VERSION,
                 deviceproto::CONTROL_PROTOCOL_VERSION);
   esp_read_mac(deviceId, ESP_MAC_WIFI_STA);
+
+#if defined(ESPDISP_DOOM_S3_175)
+  // Consume before doing anything fallible so a missing/corrupt WAD or a Doom
+  // crash cannot create a reboot loop. This boot intentionally skips normal
+  // frame buffers, WiFi, mDNS, OTA, udprx, and loopTask watchdog enrollment.
+  Preferences doomPrefs;
+  bool doomRequested = false;
+  if (!doomPrefs.begin("espdisp", false)) {
+    Serial.println("doom: NVS unavailable; ignoring one-shot request");
+  } else {
+    bool requested = doomPrefs.getBool("doomonce", false);
+    if (requested) {
+      doomRequested = doomPrefs.remove("doomonce") &&
+                      !doomPrefs.isKey("doomonce");
+      if (!doomRequested) {
+        Serial.println("doom: could not consume one-shot request; staying normal");
+      }
+    }
+    doomPrefs.end();
+  }
+  if (doomRequested) {
+    boardVariant = board::COMPILED_VARIANT;
+    bcfg = &board::configFor(boardVariant);
+    if (boardVariant != board::Variant::AmoledCo5300) {
+      Serial.println("doom: exact target check failed; returning to normal boot");
+      delay(50);
+      ESP.restart();
+      return;
+    }
+
+    panelRotation = 0;
+    panelManuallyOff = false;
+    displaySleeping = false;
+    userBlLevel = BL_HIGH;
+    pinMode(bcfg->pinBootButton, INPUT_PULLUP);
+    if (!initDisplay()) {
+      Serial.println("doom: display init failed; returning to normal boot");
+      delay(50);
+      ESP.restart();
+      return;
+    }
+    applyPanelConfig(false);
+    applyBacklight();
+    doom_enter();
+    Serial.println("doom: exited or unavailable; restarting normal firmware");
+    Serial.flush();
+    delay(50);
+    ESP.restart();
+    return;
+  }
+#endif
 
   bufA = (uint8_t *)heap_caps_malloc(FRAME_BYTES, FRAME_BUF_CAPS);
   bufB = (uint8_t *)heap_caps_malloc(FRAME_BYTES, FRAME_BUF_CAPS);

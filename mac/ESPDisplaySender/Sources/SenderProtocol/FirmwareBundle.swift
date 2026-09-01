@@ -153,6 +153,23 @@ public struct FirmwareBundle: Equatable, Sendable {
     /// The role `flashPlan(forTarget:)` gives the application image, which is not a
     /// `FlashPart` in the manifest - it is the OTA payload, and it is carried once.
     public static let appFlashRole = "app"
+    private static let bootloaderFlashRole = "bootloader"
+    private static let bootloaderFlashAddress = 0x0
+    private static let partitionsFlashRole = "partitions"
+    private static let partitionsFlashAddress = 0x8000
+    private static let bootApp0FlashRole = "boot_app0"
+    private static let bootApp0FlashAddress = 0xE000
+    private static let doomWadFlashRole = "doom_wad"
+    private static let doomWadAddress = 0xBFF000
+    private static let doomWadPartitionBytes = 0x401000
+    private static let doomWadBytes = 4_196_020
+
+    private struct PartitionEntry {
+        let type: UInt8
+        let subtype: UInt8
+        let address: Int
+        let byteCount: Int
+    }
 
     public let format: Int
     /// `FW_VERSION` as read out of the sketch the images were built from.
@@ -408,7 +425,8 @@ public struct FirmwareBundle: Equatable, Sendable {
                 guard let rawParts = entry["flash_parts"] as? [Any], !rawParts.isEmpty else {
                     throw FirmwareBundleError.noFlashParts(index: index, chip: chip)
                 }
-                var writes = [(address: address, role: Self.appFlashRole)]
+                var writes = [(address: address, bytes: byteCount,
+                               role: Self.appFlashRole)]
                 for (partIndex, rawPart) in rawParts.enumerated() {
                     guard let part = rawPart as? [String: Any] else {
                         throw FirmwareBundleError.flashPartNotAnObject(
@@ -469,7 +487,7 @@ public struct FirmwareBundle: Equatable, Sendable {
                         byteCount: partBytes,
                         sha256: partExpected))
                     roles[role] = partPayload
-                    writes.append((address: partAddress, role: role))
+                    writes.append((address: partAddress, bytes: partBytes, role: role))
                     cursor += partBytes
                 }
                 let missingRoles = requiredFlashRoles.filter { roles[$0] == nil }
@@ -477,16 +495,26 @@ public struct FirmwareBundle: Equatable, Sendable {
                     throw FirmwareBundleError.missingFlashRoles(
                         chip: chip, roles: missingRoles)
                 }
-                // Two payloads claiming one flash address is a contradiction, not
-                // a preference: only whichever went last would survive the write.
-                var claimed = [Int: String]()
-                for write in writes {
-                    if let first = claimed[write.address] {
-                        throw FirmwareBundleError.conflictingFlashAddresses(
-                            chip: chip, address: write.address, first: first,
-                            second: write.role)
+                // Every write owns a half-open range. Equal starts are only one
+                // kind of overlap; a WAD beginning inside an app slot is equally
+                // destructive even though the two addresses differ.
+                let orderedWrites = writes.sorted {
+                    ($0.address, $0.role) < ($1.address, $1.role)
+                }
+                for index in orderedWrites.indices.dropLast() {
+                    let current = orderedWrites[index]
+                    let next = orderedWrites[index + 1]
+                    let (end, overflow) = current.address.addingReportingOverflow(
+                        current.bytes)
+                    guard !overflow else {
+                        throw FirmwareBundleError.nonsensicalFlashAddress(
+                            chip: chip, role: current.role, address: current.address)
                     }
-                    claimed[write.address] = write.role
+                    if next.address < end {
+                        throw FirmwareBundleError.conflictingFlashAddresses(
+                            chip: chip, address: next.address, first: current.role,
+                            second: next.role)
+                    }
                 }
                 for target in targets { flashPayloads[target] = roles }
             }
@@ -599,6 +627,63 @@ public struct FirmwareBundle: Equatable, Sendable {
         else { return nil }
         guard Self.requiredFlashRoles.allSatisfy({ image.flashPart(role: $0) != nil })
         else { return nil }
+
+        let currentTargets = Set(["c6", "s3-175", "s3-185"])
+        if !currentTargets.isDisjoint(with: image.targets) {
+            var expectedRoles = Set(Self.requiredFlashRoles)
+            if image.targets.contains("s3-175") {
+                expectedRoles.insert(Self.doomWadFlashRole)
+            }
+            guard Set(image.flashParts.map(\.role)) == expectedRoles,
+                  image.flashPart(role: Self.bootloaderFlashRole)?.address
+                    == Self.bootloaderFlashAddress,
+                  image.flashPart(role: Self.partitionsFlashRole)?.address
+                    == Self.partitionsFlashAddress,
+                  image.flashPart(role: Self.bootApp0FlashRole)?.address
+                    == Self.bootApp0FlashAddress
+            else { return nil }
+        }
+
+        guard let partitionPart = image.flashPart(role: Self.partitionsFlashRole),
+              partitionPart.address == Self.partitionsFlashAddress,
+              let partitionPayload = flashPayload(
+                forTarget: target, role: Self.partitionsFlashRole)
+        else { return nil }
+        let partitionEntries = Self.partitionEntries(partitionPayload)
+        if format >= Self.format && partitionEntries == nil { return nil }
+        if let partitionEntries {
+            let appPartitions = partitionEntries.values.filter {
+                $0.type == 0x00 && $0.address == appAddress
+            }
+            guard appPartitions.count == 1,
+                  appPayload.count <= appPartitions[0].byteCount
+            else { return nil }
+        }
+
+        let requiresDoomPayload = image.targets.contains("s3-175")
+        if requiresDoomPayload {
+            guard let doomPart = image.flashPart(role: Self.doomWadFlashRole),
+                  let partitionEntries,
+                  Self.isCanonicalDoomPartition(partitionEntries),
+                  let doomEntry = partitionEntries[Self.doomWadFlashRole],
+                  doomEntry.type == 0x42,
+                  doomEntry.subtype == 0x06,
+                  doomEntry.address == Self.doomWadAddress,
+                  doomEntry.byteCount == Self.doomWadPartitionBytes,
+                  doomPart.address == Self.doomWadAddress,
+                  doomPart.byteCount == Self.doomWadBytes,
+                  let doomPayload = flashPayload(
+                    forTarget: target, role: Self.doomWadFlashRole),
+                  doomPayload.count == Self.doomWadBytes,
+                  doomPart.sha256 == Self.sha256Hex(doomPayload),
+                  Self.isStructurallyValidDoomWad(doomPayload)
+            else { return nil }
+        } else if image.flashPart(role: Self.doomWadFlashRole) != nil
+                    || partitionEntries?[Self.doomWadFlashRole] != nil {
+            // A non-Doom target must not carry a raw write or partition for it.
+            return nil
+        }
+
         var writes = [FlashWrite(
             role: Self.appFlashRole, address: appAddress, filename: image.filename,
             sha256: image.sha256, payload: appPayload)]
@@ -718,6 +803,87 @@ public struct FirmwareBundle: Equatable, Sendable {
     }
 
     // MARK: - helpers
+
+    private static func partitionEntries(
+        _ data: Data
+    ) -> [String: PartitionEntry]? {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 32 else { return nil }
+        func u32(_ offset: Int) -> Int {
+            Int(bytes[offset])
+                | (Int(bytes[offset + 1]) << 8)
+                | (Int(bytes[offset + 2]) << 16)
+                | (Int(bytes[offset + 3]) << 24)
+        }
+
+        var entries = [String: PartitionEntry]()
+        var offset = 0
+        while offset + 32 <= bytes.count {
+            let magic = (bytes[offset], bytes[offset + 1])
+            if magic == (0xFF, 0xFF) || magic == (0xEB, 0xEB) { break }
+            guard magic == (0xAA, 0x50) else { return nil }
+            let labelBytes = bytes[(offset + 12)..<(offset + 28)]
+                .prefix { $0 != 0 }
+            guard let label = String(bytes: labelBytes, encoding: .ascii),
+                  !label.isEmpty, entries[label] == nil
+            else { return nil }
+            entries[label] = PartitionEntry(
+                type: bytes[offset + 2], subtype: bytes[offset + 3],
+                address: u32(offset + 4), byteCount: u32(offset + 8))
+            offset += 32
+        }
+        return entries.isEmpty ? nil : entries
+    }
+
+    private static func isStructurallyValidDoomWad(_ data: Data) -> Bool {
+        let bytes = [UInt8](data)
+        guard bytes.count == doomWadBytes,
+              bytes.count >= 12,
+              Array(bytes[0..<4]) == Array("IWAD".utf8)
+                || Array(bytes[0..<4]) == Array("PWAD".utf8)
+        else { return false }
+        func u32(_ offset: Int) -> UInt32 {
+            UInt32(bytes[offset])
+                | (UInt32(bytes[offset + 1]) << 8)
+                | (UInt32(bytes[offset + 2]) << 16)
+                | (UInt32(bytes[offset + 3]) << 24)
+        }
+        let lumpCount = Int(u32(4))
+        let directoryOffset = Int(u32(8))
+        guard lumpCount > 0, directoryOffset <= bytes.count,
+              lumpCount <= (bytes.count - directoryOffset) / 16
+        else { return false }
+        for index in 0..<lumpCount {
+            let entry = directoryOffset + index * 16
+            let fileOffset = u32(entry)
+            let fileBytes = u32(entry + 4)
+            guard fileOffset <= UInt32(bytes.count),
+                  fileBytes <= UInt32(bytes.count) - fileOffset
+            else { return false }
+        }
+        return true
+    }
+
+    private static func isCanonicalDoomPartition(
+        _ entries: [String: PartitionEntry]
+    ) -> Bool {
+        func matches(
+            _ label: String, _ type: UInt8, _ subtype: UInt8,
+            _ address: Int, _ byteCount: Int
+        ) -> Bool {
+            guard let entry = entries[label] else { return false }
+            return entry.type == type && entry.subtype == subtype
+                && entry.address == address && entry.byteCount == byteCount
+        }
+        return entries.count == 5
+            && matches("nvs", 0x01, 0x02, 0x009000, 0x005000)
+            && matches("otadata", 0x01, 0x00, 0x00E000, 0x002000)
+            && matches("app0", 0x00, 0x10, 0x010000, 0x5F0000)
+            && matches("app1", 0x00, 0x11, 0x600000, 0x5F0000)
+            && matches(
+                doomWadFlashRole, 0x42, 0x06,
+                doomWadAddress, doomWadPartitionBytes)
+    }
 
     static func legacyTarget(forBoard board: String) -> String? {
         let token = board.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()

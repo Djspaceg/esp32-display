@@ -1,135 +1,175 @@
 # Doom Easter Egg
 
-A playable Doom (shareware Episode 1) running on the ESP32-S3-Touch-AMOLED-1.75C
-board, activated by triple-tapping the BOOT button.
+A playable Doom shareware Episode 1 easter egg for the
+ESP32-S3-Touch-AMOLED-1.75C (`s3-175`) target. Triple-tap BOOT within 800 ms
+to start it. The same-chip `s3-185` target does not compile or expose Doom.
+
+## Play Doom
+
+1. Start from the normal display firmware, then press BOOT three times within
+   800 ms. The panel restarts, shows the Doom splash, and enters the title/demo
+   loop.
+2. Short-press BOOT or tap the screen to open the main menu.
+3. Swipe up or down to move the menu cursor. Swipe left or right to change a
+   highlighted slider, such as screen size, mouse sensitivity, or sound volume.
+4. Short-press BOOT or tap to select the highlighted item. Hold BOOT for at
+   least 0.6 seconds but less than 3 seconds, then release it, to return to the
+   previous menu.
+5. To start Episode 1, select **New Game**, **Knee-Deep in the Dead**, and a
+   difficulty. Use up/down swipes to highlight each choice and a short BOOT
+   press or tap to select it.
+6. During play, tilt to move, drag to turn, tap to fire, double-tap to use or
+   open, touch with a second finger to run, and swipe vertically to cycle
+   weapons. A single tap waits up to 400 ms before firing so the firmware can
+   distinguish it from a double-tap.
+7. Hold BOOT for 3 seconds to exit Doom. The panel restarts into the normal
+   streaming firmware; release is not required once the threshold is reached.
 
 ## License
 
-The Doom engine source code in `src/` is based on
-[doomgeneric](https://github.com/ozkl/doomgeneric) by ozkl, which is derived
-from the original [linuxdoom-1.10](https://github.com/id-Software/DOOM) source
-release by id Software. It is licensed under **GPL-2.0** — see
-[LICENSE-GPL2](LICENSE-GPL2).
+The engine under `src/` is based on
+[doomgeneric](https://github.com/ozkl/doomgeneric), derived from id Software's
+[linuxdoom-1.10](https://github.com/id-Software/DOOM) release, and is licensed
+under GPL-2.0; see `LICENSE-GPL2`. The ESP32 hardware bridge and mode controller
+use the repository's MIT license.
 
-The platform integration files in `platform/` and the mode controller
-(`doom_mode.c`, `doom_mode.h`) are MIT-licensed, matching the rest of this
-repository.
+## Runtime architecture
 
-## Architecture
-
+```text
+Triple-tap BOOT
+  → save one-shot `doomonce` request in NVS
+  → restart
+  → consume and remove request before normal setup
+  → initialize only the CO5300 panel, touch bus, and Doom PSRAM state
+  → validate and memory-map the WAD partition
+  → run doomgeneric with blocking, completion-tracked panel DMA
+  → BOOT 3-second hold exits
+  → restart into normal streaming firmware
 ```
-Triple-tap BOOT (GPIO0, 3 presses within 800ms)
-  → display_stream suspends (UDP, mDNS, frame buffers freed)
-  → doom_enter() takes control
-  → doomgeneric game loop with ESP32-S3 platform functions:
-      DG_DrawFrame → 320×200 XRGB8888 → RGB565 → scale to 466×466 → QSPI DMA
-      DG_GetKey    → QMI8658 IMU tilt → movement keys
-                   → CST9217 touch drag → turn keys
-                   → CST9217 tap/double-tap → fire/use
-  → BOOT long-press (3s) → doom_request_exit() → esp_restart()
-```
+
+The reboot boundary is intentional. Doom starts before normal frame buffers,
+WiFi, mDNS, OTA, the UDP receive task, or the loop-task watchdog, so no other
+application task can write the panel or compete for the same PSRAM. The request
+is removed before initialization, so a missing WAD or a crash returns to normal
+firmware rather than creating a boot loop.
+
+Large renderer work arrays and mutable engine tables allocate from PSRAM only
+when Doom starts. The normal streaming binary retains internal RAM for its DMA
+staging and UDP codec scratch.
 
 ## Controls
 
 | Input | Action |
-|---|---|
-| Tilt forward/back | Move forward / backward |
-| Tilt left/right | Strafe left / right |
-| Touch drag | Turn / aim |
-| Tap | Shoot |
-| Double-tap | Use / open door |
-| 2nd finger (hold) | Run modifier |
-| BOOT short press | Cycle weapon |
-| BOOT long press (3s) | Exit Doom → reboot |
+| --- | --- |
+| Tap on title/demo | Open the menu |
+| Swipe in menu | Navigate up, down, left, or right by dominant axis |
+| Tap in menu | Select the highlighted item |
+| BOOT short press with menu closed | Open the menu |
+| BOOT short press with menu open | Select the highlighted item |
+| BOOT 0.6 to under 3-second hold | Return to the previous menu |
+| BOOT 3-second hold | Exit and restart normally |
+| Tilt forward/back during play | Move forward/backward |
+| Tilt left/right during play | Strafe left/right |
+| Touch drag during play | Turn |
+| Tap during play | Fire |
+| Double-tap during play | Use/open |
+| Second finger during play | Run modifier |
+| Vertical swipe during play | Cycle weapon |
 
-## Flash Requirements
+## Firmware and WAD delivery
 
-The doom1.wad shareware file (4,196,020 bytes) lives in a dedicated flash
-partition. The WAD is written automatically when flashing the S3 board if
-`firmware/doom/doom1.wad` exists in the repo:
+`firmware/partitions_s3_doom.csv` is staged as `partitions.csv` only inside
+the `s3-175` build's private sketch copy. It provides equal `0x5F0000` OTA app
+slots and a `0x401000` WAD partition at `0xBFF000`. The canonical
+4,196,020-byte shareware v1.9 IWAD fits with 2,380 bytes to spare.
+
+The CLI downloads the WAD only when an `s3-175` flash or bundle needs it, then
+requires all of the following before writing or packaging it:
+
+* `IWAD` magic
+* exactly 4,196,020 bytes
+* SHA-256 `1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771`
+* fit within the declared partition
+
+A format-3 bundle carries the verified WAD as the `doom_wad` flash role only on
+`s3-175`. The Mac app's generic flash-plan reader verifies its hash and writes
+it in the same esptool operation as the bootloader, partition table, `boot_app0`,
+and application image. OTA updates replace only the application slot and leave
+the installed WAD partition intact.
+
+Preferred commands from the repository root:
 
 ```sh
-# Download the shareware WAD (freely redistributable)
-curl -L -o firmware/doom/doom1.wad \
-  "https://distro.ibiblio.org/slitaz/sources/packages/d/doom1.wad"
-
-# Flash firmware + WAD in one shot:
-tools/espdisp.py flash --board s3
+tools/espdisp.py compile --board s3-175
+tools/espdisp.py flash --board s3-175 --port /dev/cu.usbmodemXXXX
+tools/espdisp.py bundle
+tools/espdisp.py bundle-info --require-all-targets FILE.espdispfw
+tools/espdisp.py flash-wad --board s3-175 --port /dev/cu.usbmodemXXXX
 ```
 
-The custom partition table (`firmware/partitions_s3_doom.csv`) is used
-automatically for S3 builds when the doom directory exists.
+`flash` writes the bootloader, custom partition table, OTA initializer,
+application, and verified WAD in one esptool transaction. `flash-wad` is only
+for a device that already has the `s3-175` partition table: it reads that table
+back from the device and requires the exact five-entry layout before writing.
+Both paths require an exact target selection and refuse `s3-185`.
 
-To flash the WAD separately (if the firmware is already on the board):
-```sh
-tools/espdisp.py flash-wad firmware/doom/doom1.wad
-```
+## Manual compile
 
-## Building
-
-The Doom engine compiles as part of the S3 firmware build. It is conditionally
-included only when `CONFIG_IDF_TARGET_ESP32S3` is defined — the C6 binary is
-completely unaffected.
-
-### Quick start (with espdisp.py)
+The CLI is the source of truth. The equivalent compile from
+`firmware/display_stream` is:
 
 ```sh
-# Download the shareware WAD once:
-curl -L -o firmware/doom/doom1.wad \
-  "https://distro.ibiblio.org/slitaz/sources/packages/d/doom1.wad"
-
-# Build and flash everything:
-tools/espdisp.py flash --board s3
-
-# If firmware is already on the board, flash just the WAD:
-tools/espdisp.py flash-wad firmware/doom/doom1.wad
-```
-
-### Manual build (arduino-cli)
-
-```sh
-cd firmware/display_stream
+cp ../partitions_s3_doom.csv partitions.csv
 arduino-cli compile \
   -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=custom" \
-  --build-property "build.extra_flags=-include ../doom/doom_config.h -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200" \
   --libraries ../libraries \
-  --libraries ../doom \
+  --libraries .. \
+  --build-property "compiler.c.extra_flags=-DESPDISP_DOOM_S3_175" \
+  --build-property "compiler.cpp.extra_flags=-DESPDISP_DOOM_S3_175" \
   .
-arduino-cli upload \
-  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" \
-  -p /dev/cu.usbmodem* .
+rm partitions.csv
 ```
 
-Note: The custom partition table (`firmware/partitions_s3_doom.csv`) must be
-placed as `partitions.csv` in the sketch directory or specified via
-`PartitionScheme=custom` in the FQBN for arduino-cli to pick it up.
+`--libraries ..` is deliberate: Arduino expects a directory containing the
+`doom` library. Passing `../doom` mis-detects `doom/src` as an old-format
+library and omits the recursive `platform/doom_hw_bridge.cpp` source.
 
-## WAD File
+## Hardware test checklist
 
-The Doom shareware WAD (`doom1.wad` v1.9, 4,196,020 bytes) is freely
-redistributable. It contains Episode 1: "Knee-Deep in the Dead" (9 levels).
-Download from [doomwiki.org](https://doomwiki.org/wiki/DOOM1.WAD) or various
-mirrors.
+1. Use a recoverable `s3-175` device and USB, not OTA, for the first install.
+2. Verify the bundle lists `doom_wad` at `0xBFF000` only for `s3-175`.
+3. Flash through the app or `espdisp.py flash --board s3-175`.
+4. After normal streaming starts, triple-tap BOOT and confirm one reboot into
+   the splash and title/demo loop.
+5. Short-press BOOT and confirm the main menu opens from the title/demo.
+6. Swipe in all four directions; confirm up/down move the cursor and left/right
+   adjust slider items. Short-press BOOT to select and hold it for at least
+   0.6 seconds but less than 3 seconds to return to the previous menu.
+7. Start a game and check tap, double-tap, drag, vertical swipe,
+   second-finger run, and tilt.
+8. Hold BOOT for three seconds; confirm a reboot and normal streaming recovery.
+9. Perform an OTA application update and confirm Doom still starts, proving the
+   WAD partition was preserved.
+10. Confirm `s3-185` has no triple-tap activation and cannot be selected by
+    `flash-wad`.
 
-The WAD is NOT included in this repository. You must provide your own copy and
-flash it to the device.
+## Directory layout
 
-## Directory Layout
-
-```
+```text
 firmware/doom/
-├── library.properties           # Arduino library metadata
-├── LICENSE-GPL2                  # GPL-2.0 for engine code
-├── README.md                    # This file
+├── library.properties
+├── LICENSE-GPL2
+├── README.md
 └── src/
-    ├── doom_mode.h              # Public API (triple-tap, enter, exit) — MIT
-    ├── doom_mode.cpp            # Mode controller + button handling — MIT
-    ├── doom_config.h            # ESP32 compile-time defines
+    ├── doom_mode.h
+    ├── doom_mode.cpp
+    ├── doom_config.h
+    ├── doom_unity_build.c
     ├── platform/
-    │   ├── doomgeneric_esp32s3.c   # DG_* implementations — GPL-2.0
-    │   ├── w_file_esp32.c          # WAD partition access — GPL-2.0
-    │   ├── doom_hw_bridge.cpp      # Display/IMU/Touch hardware bridge — MIT
-    │   ├── doom_esp32_stubs.c      # Sound/system stubs — GPL-2.0
-    │   └── doom_splash.h           # Procedural splash screen — MIT
-    └── (80 .c + 97 .h files)      # doomgeneric engine — GPL-2.0
+    │   ├── doomgeneric_esp32s3.c.inc
+    │   ├── w_file_esp32.c.inc
+    │   ├── doom_hw_bridge.cpp
+    │   ├── doom_esp32_stubs.c.inc
+    │   └── doom_splash.h
+    └── upstream Doom engine sources and headers
 ```

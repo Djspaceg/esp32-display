@@ -9,6 +9,10 @@
 // W_OpenFile in WAD access), archive linking fails. Unity build solves
 // this by putting everything in one object file.
 
+#include <esp_heap_caps.h>
+#include <stdbool.h>
+#include <string.h>
+
 // Platform stubs and bridge (order matters: stubs before engine)
 #include "platform/doom_esp32_stubs.c.inc"
 #include "platform/doomgeneric_esp32s3.c.inc"
@@ -98,3 +102,56 @@
 #include "w_wad.c.inc"
 #include "wi_stuff.c.inc"
 #include "z_zone.c.inc"
+
+// C-linkage state accessor for the C++ BOOT-button controller. Keep the engine
+// global authoritative instead of duplicating menu state in platform glue.
+int doom_menu_is_active(void) {
+    return menuactive ? 1 : 0;
+}
+
+// Arduino's precompiled IDF permits PSRAM heap allocation but not external
+// BSS placement. Allocate only the largest Doom renderer work arrays here;
+// display_stream's DMA staging and UDP codec scratch remain internal.
+bool doom_prepare_static_buffers(void) {
+    const uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    if (visplanes == NULL) {
+        visplanes = (visplane_t*)heap_caps_calloc(
+            MAXVISPLANES, sizeof(*visplanes), caps);
+    }
+    if (openings == NULL) {
+        openings = (short*)heap_caps_calloc(MAXOPENINGS, sizeof(*openings), caps);
+    }
+    if (viewangletox == NULL) {
+        viewangletox = (int*)heap_caps_calloc(
+            FINEANGLES / 2, sizeof(*viewangletox), caps);
+    }
+    if (drawsegs == NULL) {
+        drawsegs = (drawseg_t*)heap_caps_calloc(
+            MAXDRAWSEGS, sizeof(*drawsegs), caps);
+    }
+    if (vissprites == NULL) {
+        vissprites = (vissprite_t*)heap_caps_calloc(
+            MAXVISSPRITES, sizeof(*vissprites), caps);
+    }
+    if (captured_stats == NULL) {
+        captured_stats = (wbstartstruct_t*)heap_caps_calloc(
+            MAX_CAPTURES, sizeof(*captured_stats), caps);
+    }
+    if (states == NULL) {
+        states = (state_t*)heap_caps_malloc(sizeof(doom_initial_states), caps);
+        if (states != NULL) {
+            memcpy(states, doom_initial_states, sizeof(doom_initial_states));
+        }
+    }
+    if (mobjinfo == NULL) {
+        mobjinfo = (mobjinfo_t*)heap_caps_malloc(
+            sizeof(doom_initial_mobjinfo), caps);
+        if (mobjinfo != NULL) {
+            memcpy(mobjinfo, doom_initial_mobjinfo,
+                   sizeof(doom_initial_mobjinfo));
+        }
+    }
+    return visplanes != NULL && openings != NULL && viewangletox != NULL &&
+           drawsegs != NULL && vissprites != NULL && captured_stats != NULL &&
+           states != NULL && mobjinfo != NULL;
+}

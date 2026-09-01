@@ -50,6 +50,7 @@ void doom_request_exit(void);
 
 // Configuration
 #define DOOM_TRIPLE_TAP_WINDOW_MS  800   // 3 presses must complete within this
+#define DOOM_DOUBLE_TAP_WINDOW_MS  400   // Distinguish Fire from Use/Open
 #define DOOM_RENDER_WIDTH          320   // Native Doom resolution
 #define DOOM_RENDER_HEIGHT         200
 #define DOOM_TARGET_FPS            35    // Target frame rate
@@ -57,3 +58,4 @@ void doom_request_exit(void);
 // WAD partition type/subtype (must match partitions_s3_doom.csv)
 #define DOOM_WAD_PARTITION_TYPE    0x42
 #define DOOM_WAD_PARTITION_SUBTYPE 0x06
+#define DOOM_WAD_EXPECTED_BYTES    4196020U
