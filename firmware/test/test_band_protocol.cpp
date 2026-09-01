@@ -1391,7 +1391,10 @@ int main() {
     CHECK(am.pinTouchSda != board::NO_PIN && am.pinTouchScl != board::NO_PIN);
     CHECK(am.motion == board::MotionController::Qmi8658);
     CHECK(am.motionXAxis == 0 && am.motionXSign == 1);
-    CHECK(am.motionYAxis == 1 && am.motionYSign == 1);
+    // Y sign is -1 from field calibration: identity classified one opposite
+    // edge-down pair 180 degrees off on this board (see the note in
+    // board_config.h). Pinned so the calibration cannot silently revert.
+    CHECK(am.motionYAxis == 1 && am.motionYSign == -1);
     CHECK(am.hasMotion());
     CHECK(!board::configFor(Variant::LcdSt7789).hasBattery());
     CHECK(board::configFor(Variant::TouchJd9853).hasBattery());

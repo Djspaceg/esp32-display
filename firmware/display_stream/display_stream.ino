@@ -3615,7 +3615,14 @@ void loop() {
     bool orientationSettled = (bufLandscape == pendingLandscape);
     applyPanelConfig(bufLandscape);
     const char *repainted;
-    if (idleActive) {
+    if (surveyActive) {
+      // The survey card must turn with the glass like everything else.
+      // MADCTL only affects writes, so the pixels already on the panel keep
+      // their old orientation until redrawn - redraw now rather than leaving
+      // it to the 500 ms tick, which reads as the meter lagging the picture.
+      drawSurveyScreen();
+      repainted = "survey card";
+    } else if (idleActive) {
       drawIdleScreen();  // composes the card over bufA and pushes all of it
       repainted = "status card";
     } else if (orientationSettled && statFramesShown != 0) {
