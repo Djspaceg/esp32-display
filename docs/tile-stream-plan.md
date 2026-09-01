@@ -1876,3 +1876,53 @@ the measured delivery peak - the collapse guard could park pacing at 3,333 us
 when the panel delivers most at ~2,222 us. 450 is the measured
 peak-delivery offered rate on the new firmware, not the accept ceiling
 (~600), keeping the same conservative posture the original 300 had.
+
+### 18.4 The size-gated direct draw: built, measured, removed - and a tool bug worth more than the feature
+
+The direct-from-SRAM draw (the 17.16 idea, size-gated per this plan's
+roadmap) was implemented behind `CFGTUNE directmin <0-32>`: records of at
+least N tiles, already whole in SRAM decode scratch, drawn by the receive
+task itself - skipping the pending path's PSRAM gather - with a recursive
+panel mutex spanning every CASET/RASET window, an alternating decode
+scratch, and a FIFO completion counter proving the previous direct
+transfer drained (the first gate design required an idle bus, which under
+exactly the load the path exists for NEVER happens: direct=0 across an
+entire interleaved run).
+
+**Finding one, the accidental one: tile-motion was lying about record
+count, and record count is a first-order cost.** The tool emitted one
+record per tile - 719 per frame - where the real sender's TilePacker
+merges runs; directmin could never fire against it, which is how the
+misrepresentation surfaced. Fixed to merged runs split to fill datagrams
+(92 records full-res, 44 half-res; 65/16 datagrams against the old 66/18).
+Baseline delivery at the same offered pixel load nearly doubled: 12.3-12.8
+complete fps at the half-res 25 fps point against 18.1's 7.3. The 18.1
+capacity sweep therefore UNDERSTATES the panel's capacity for real
+(merged) traffic - its record-heavy datagrams inflated per-record decode
+cost. The 450/s pacing retune derived from it stays, as a conservative
+bound.
+
+**Finding two: the direct draw itself is a measured loss.** With the tool
+fixed the path fired constantly (31,170 direct draws over the session),
+and directmin 8 lost to directmin 0 in every interleaved sample, both
+rounds, both operating points:
+
+| Point       | directmin 0, complete fps | directmin 8 | Accepted 0 vs 8    |
+| ----------- | ------------------------- | ----------- | ------------------ |
+| half 25 fps | 12.3 / 12.8               | 8.5 / 8.8   | 386-396 vs 350-375 |
+| half 35 fps | 5.9 / 6.5                 | 3.1 / 2.0   | 411-525 vs 299-358 |
+
+The mechanism is 18.2's verdict restated: the direct draw moves the
+CASET/queue work onto the receive task, whose drain loop then stalls for
+exactly that long - accepted datagrams fall 10-40% and drops rise to
+match. On one oversubscribed core, work moved between tasks is not work
+removed. The experiment and its knob were removed, like 17.16's
+`rxhandoff` before it; this section is the record.
+
+What survives: the tile-motion fidelity fix, and a sharpened roadmap. The
+remaining device-side lever is the one that ADDS capacity instead of
+shuffling it - a draw task pinned to core 0 - and the remaining
+protocol-side lever is fewer/larger records, which the record-count
+finding just showed is worth more than assumed (the C6-style full-frame
+coalescing the band path enjoys, applied vertically to tiles, is worth
+re-arguing on these numbers despite 17.5 deferring it).
