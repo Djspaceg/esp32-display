@@ -1705,10 +1705,10 @@ contract:
 The one-record handoff was implemented behind a runtime switch and exercised
 on hardware before removal. At 4 fps offered:
 
-| Path | Complete fps | Partial draws/s | Datagrams accepted |
-| --- | --- | --- | --- |
-| Existing merged runs | 3.5 | 24.6 | 249 |
-| One-record handoff | 3.5 | 187.6 | 238 |
+| Path                 | Complete fps | Partial draws/s | Datagrams accepted |
+| -------------------- | ------------ | --------------- | ------------------ |
+| Existing merged runs | 3.5          | 24.6            | 249                |
+| One-record handoff   | 3.5          | 187.6           | 238                |
 
 RSSI was -82, so the completed-frame and datagram figures are not a valid
 throughput comparison. The structural result does not depend on signal:
@@ -1723,3 +1723,60 @@ horizontal runs, gather each run once into double-buffered SRAM, and let DMA
 read SRAM. This is the minimum PSRAM traffic compatible with a persistent
 434 KB frame and merged panel draws on a 512 KB-SRAM part. There is no pending
 phase-12 implementation or measurement behind this conclusion.
+
+## 17.17 Scheduling arms: knobs shipped, measurement blocked by the radio (phase 13, 2026-08-31)
+
+Section 17.6 item 3 named re-prioritising `udpReceiveTask` (boot: 9) against
+`loopTask` (boot: 1) as the untested lever behind 17.2's ~10x per-call
+inflation. Two things came out of attempting that measurement.
+
+### What shipped
+
+- `CFGTUNE rxprio <1-18>` and `CFGTUNE loopprio <1-18>`: live task-priority
+  knobs, in the existing CFGTUNE style (not persisted, refused out of range,
+  reported in CFGINFO). Bounded 1-18 so an arm can neither contend with the
+  idle task that feeds the task watchdog nor preempt the WiFi/lwIP tasks that
+  feed the receive path.
+- `tools/measure_sched_arms.py`: an interleaved-arm harness (A baseline 9/1,
+  B equal 9/9, C draw-above 9/10) that toggles the knobs over one held serial
+  fd, drives `tile-motion` per sample, and reduces the panel's 5 s `frames=`
+  and `tiledraw:` lines to per-arm rates and per-call costs.
+
+### What the session measured instead
+
+The measurement panel (silver-round) sat at RSSI -77 to -86, and every run
+was radio-bound before the contention regime was reachable:
+
+- First runs: 15-52 datagrams/s accepted of 450-528/s offered, `badlen=0`
+  throughout - the datagrams died on the air, not in the parser. Small pings
+  were lossless while `ping -s 1450` lost 45% at ~600 ms RTT: the
+  association-rot signature the link supervisor's comment describes. A forced
+  fresh association (CFGWIFI restart) healed large-ping loss to 0%.
+- Healed, the link still saturated near ~100-150 accepted datagrams/s
+  (105/270 offered at half-res 15 fps). The per-call inflation the arms exist
+  to relieve starts around ~430 accepted/s (17.2), which this link cannot
+  deliver at this RSSI.
+- At the reachable 40-110 accepted/s, gather+queue per call read 600-750 us
+  across ALL arms - consistent with the quiet-panel ~900 us figure, and
+  complete fps tracked accepted datagrams per sample rather than the arm.
+  Between two samples of the SAME arm, acceptance swung 34-108/s; between
+  arms within a round it swung just as much. Nothing arm-shaped survives that
+  noise.
+
+### Verdict, and the operating-point precondition
+
+The scheduling question remains UNMEASURED at the operating point where it
+matters. The arms need a panel whose link carries ~430+ datagrams/s - the
+17.2/17.3 measurements were taken at RSSI -60 to -62 - and a quiesced sender
+(the app un-pauses panels through its own supervision; quit it entirely).
+The harness's docstring carries the preconditions.
+
+The session also sharpened the fps diagnosis for weak-link panels: at RSSI
+worse than about -78, the air itself cannot carry even the sender's 300/s
+pacing ceiling, so full-frame updates lose most of their 17-66 datagrams,
+all-or-nothing completion kills nearly every frame, and the panel lives on
+partial draws (measured here: 14-23 partial draws/s against 0-4 complete
+fps). For such a panel, placement/antenna/2.4 GHz congestion is the
+first-order fix; no on-device scheduling or memory work changes it. The
+association-rot heal is real but insufficient: it restored large-frame
+delivery, not capacity.
