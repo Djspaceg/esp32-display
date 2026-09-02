@@ -856,14 +856,20 @@ def test_fw_version_from_sketch():
     check(bool(re.fullmatch(r"\d+\.\d+\.\d+", version)),
           "the sketch's FW_VERSION reads as a version: %r" % version)
 
-    # The exact line from display_stream.ino:84.
+    # The module's own spelling (app_state.cpp): external linkage, no static.
     check_equal(
         espdisp.fw_version_from_sketch(
-            'static String cfgName;\n'
-            'static const char *FW_VERSION = "1.2.0";\n'
-            'static uint8_t deviceId[6] = {0};\n'),
+            'String cfgName;\n'
+            'const char *FW_VERSION = "1.2.0";\n'
+            'uint8_t deviceId[6] = {0};\n'),
         "1.2.0",
-        "the sketch's own spelling")
+        "the module's own spelling")
+    # The pre-split spelling stays accepted: `static` is style, not meaning.
+    check_equal(
+        espdisp.fw_version_from_sketch(
+            'static const char *FW_VERSION = "1.2.0";\n'),
+        "1.2.0",
+        "the historical static spelling")
     # Spacing and the position of the * are style, not meaning.
     check_equal(
         espdisp.fw_version_from_sketch('static const char* FW_VERSION="4.5.6" ;'),

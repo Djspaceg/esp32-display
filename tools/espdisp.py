@@ -81,6 +81,9 @@ def bundle_board_keys(requested: Optional[List[str]]) -> List[str]:
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKETCH_DIR = os.path.join(REPO_ROOT, "firmware", "display_stream")
 SKETCH_INO = os.path.join(SKETCH_DIR, "display_stream.ino")
+# Where FW_VERSION lives since the sketch was split into modules: the device
+# identity module, not the .ino (which is now only setup/loop scheduling).
+FW_VERSION_SOURCE = os.path.join(SKETCH_DIR, "app_state.cpp")
 LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware", "libraries")
 DOOM_LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware")
 DOOM_PARTITIONS_CSV = os.path.join(REPO_ROOT, "firmware", "partitions_s3_doom.csv")
@@ -832,12 +835,14 @@ def validate_target_claims(images: List[dict], generation: int) -> List[List[str
     return result
 
 
-# The one spelling of FW_VERSION in the sketch (display_stream.ino:84). Loose
+# The one spelling of FW_VERSION in the sketch (app_state.cpp; `static` is
+# optional because the definition has external linkage there). Loose
 # about whitespace and the position of the `*`, strict about everything that
 # makes it a definition, so a rename or a move breaks loudly here rather than
 # quietly producing a manifest with the wrong version in it.
 FW_VERSION_RE = re.compile(
-    r'^\s*static\s+const\s+char\s*\*\s*FW_VERSION\s*=\s*"([^"\n]*)"\s*;', re.MULTILINE
+    r'^\s*(?:static\s+)?const\s+char\s*\*\s*FW_VERSION\s*=\s*"([^"\n]*)"\s*;',
+    re.MULTILINE
 )
 
 
@@ -872,7 +877,7 @@ def fw_version_from_sketch(text: str) -> str:
     return found[0]
 
 
-def sketch_fw_version(path: str = SKETCH_INO) -> str:
+def sketch_fw_version(path: str = FW_VERSION_SOURCE) -> str:
     try:
         with open(path, "r", encoding="utf-8") as fh:
             text = fh.read()
@@ -2627,7 +2632,8 @@ def cmd_bundle(args) -> int:
         os.getcwd(), "espdisp-firmware-%s%s" % (version, BUNDLE_SUFFIX)
     )
     commit, dirty = git_provenance()
-    print("Firmware %s (FW_VERSION in %s)" % (version, os.path.relpath(SKETCH_INO, REPO_ROOT)))
+    print("Firmware %s (FW_VERSION in %s)"
+          % (version, os.path.relpath(FW_VERSION_SOURCE, REPO_ROOT)))
     print("Building: %s" % ", ".join(board.key for board in boards), flush=True)
 
     entries: List[dict] = []
@@ -3029,7 +3035,7 @@ def build_parser() -> argparse.ArgumentParser:
         "is pushed: `bundle` only writes the file, and `ota` is still the way to "
         "push from here.",
         epilog="The version is read out of the sketch (FW_VERSION in\n"
-        "firmware/display_stream/display_stream.ino), never passed in, so the\n"
+        "firmware/display_stream/app_state.cpp), never passed in, so the\n"
         "manifest cannot disagree with the images beside it.\n"
         "Inspect a file with `bundle-info`.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -1,0 +1,63 @@
+#include "mdns_announce.h"
+
+#include <Arduino.h>
+#include <ESPmDNS.h>
+
+#include "app_state.h"
+#include "chip_identity.h"
+#include "device_protocol.h"
+#include "ota_service.h"
+#include "telemetry.h"
+
+
+// Advertise the service and every TXT record. Both the initial announce and
+// the post-heal re-announce call this, and every value is derived from the
+// constant it describes - the previous copies hardcoded "caps" and "res" in
+// two places, so adding a capability would have silently left the advertised
+// value stale.
+void addMdnsService() {
+  char capsBuf[9], resBuf[16], protoBuf[4];
+  snprintf(capsBuf, sizeof(capsBuf), "%08lx", (unsigned long)deviceCapabilities());
+  snprintf(resBuf, sizeof(resBuf), "%ux%u", (unsigned)PANEL_W, (unsigned)PANEL_H);
+  snprintf(protoBuf, sizeof(protoBuf), "%u",
+           (unsigned)deviceproto::FRAME_PROTOCOL_VERSION);
+  // Bind as const char *: ESPmDNS overloads addServiceTxt on char *,
+  // const char *, and String, and a mutable buffer makes all three viable
+  // under the -fpermissive the Arduino build uses, which is ambiguous.
+  //
+  // chip is already a const char * from chip_identity.h, and is bound here with
+  // the others so the whole record set reads as one list. It says which of a
+  // firmware bundle's images belongs to this panel; see chip_identity.h for why
+  // that is advertised instead of inferred from res. UNVERIFIED that a browser
+  // sees it - no board is attached, so this rests on it being the same call the
+  // records beside it go through, not on an observation.
+  const char *caps = capsBuf, *res = resBuf, *proto = protoBuf;
+  const char *chip = chipidentity::chipToken();
+  const char *target = board::targetToken(boardVariant);
+  MDNS.setInstanceName(cfgName);
+  MDNS.addService("espdisp", "udp", UDP_PORT);
+  MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
+  MDNS.addServiceTxt("espdisp", "udp", "res", res);
+  MDNS.addServiceTxt("espdisp", "udp", "fw", FW_VERSION);
+  MDNS.addServiceTxt("espdisp", "udp", "proto", proto);
+  MDNS.addServiceTxt("espdisp", "udp", "caps", caps);
+  MDNS.addServiceTxt("espdisp", "udp", "chip", chip);
+  MDNS.addServiceTxt("espdisp", "udp", "target", target);
+  if (otaActive) {
+    // _arduino._tcp is what espota/arduino-cli browse for. It is registered from
+    // here rather than by ArduinoOTA itself (which is why setupOta calls
+    // setMdnsEnabled(false)) for two reasons, both read out of the core's
+    // ArduinoOTA.cpp: its begin() would call MDNS.begin() a second time, and its
+    // end() calls MDNS.end(), i.e. mdns_free(), which would take _espdisp._udp
+    // down with it. Registering here also means the WiFi-heal path gets OTA back
+    // for free - that path tears mDNS down and calls this function again, so
+    // without this line OTA would silently stop being discoverable after the
+    // first heal.
+    MDNS.enableArduino(OTA_PORT, true /* auth required */);
+    // `enableArduino` supplies chip-level board metadata. Add the exact image
+    // target separately so OTA tooling can distinguish the two ESP32-S3 panels;
+    // their ESP image headers both say esp32s3 and cannot protect this boundary.
+    MDNS.addServiceTxt("arduino", "tcp", "target", target);
+  }
+}
+
