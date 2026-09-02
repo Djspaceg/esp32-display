@@ -150,11 +150,11 @@ extended Unicode all work — everything crosses the wire base64-encoded.
 A target is a precompiled artifact compatibility key, not a chip family. The
 current release catalog is:
 
-| Target | Hardware profile(s) | Chip | Display | Selection |
-| --- | --- | --- | --- | --- |
-| `c6` | ESP32-C6-LCD-1.47; ESP32-C6-Touch-LCD-1.47 | `esp32c6` | 172×320 ST7789 or JD9853 SPI LCD | Chip selects image; firmware probes profile |
-| `s3-175` | ESP32-S3-Touch-AMOLED-1.75C | `esp32s3` | 466×466 CO5300 QSPI AMOLED | Exact target reported when running; user selects when blank |
-| `s3-185` | ESP32-S3-Touch-LCD-1.85C | `esp32s3` | 360×360 ST77916 QSPI LCD | Exact target reported when running; user selects when blank |
+| Target   | Hardware profile(s)                        | Chip      | Display                          | Selection                                                   |
+| -------- | ------------------------------------------ | --------- | -------------------------------- | ----------------------------------------------------------- |
+| `c6`     | ESP32-C6-LCD-1.47; ESP32-C6-Touch-LCD-1.47 | `esp32c6` | 172×320 ST7789 or JD9853 SPI LCD | Chip selects image; firmware probes profile                 |
+| `s3-175` | ESP32-S3-Touch-AMOLED-1.75C                | `esp32s3` | 466×466 CO5300 QSPI AMOLED       | Exact target reported when running; user selects when blank |
+| `s3-185` | ESP32-S3-Touch-LCD-1.85C                   | `esp32s3` | 360×360 ST77916 QSPI LCD         | Exact target reported when running; user selects when blank |
 
 The legacy CLI alias `s3` means only `s3-175`; new commands and automation
 should use canonical exact target keys. The
@@ -167,15 +167,15 @@ and safe extension process.
 The C6 profiles use the same chip, 8 MB flash, and 172×320 geometry, but have
 different panel controllers and pin maps:
 
-| Hardware fact | ESP32-C6-LCD-1.47 | ESP32-C6-Touch-LCD-1.47 |
-| --- | --- | --- |
-| Panel controller | ST7789 | JD9853 |
-| SCLK / MOSI | 7 / 6 | 1 / 2 |
-| CS / DC | 14 / 15 | 14 / 15 |
-| RST / backlight | 21 / 22 | 22 / 23 |
-| BOOT button | GPIO9 | GPIO9 (see note) |
-| Addressable RGB LED | GPIO8 | none |
-| Extras | — | AXS5106L touch, QMI8658A IMU |
+| Hardware fact       | ESP32-C6-LCD-1.47 | ESP32-C6-Touch-LCD-1.47      |
+| ------------------- | ----------------- | ---------------------------- |
+| Panel controller    | ST7789            | JD9853                       |
+| SCLK / MOSI         | 7 / 6             | 1 / 2                        |
+| CS / DC             | 14 / 15           | 14 / 15                      |
+| RST / backlight     | 21 / 22           | 22 / 23                      |
+| BOOT button         | GPIO9             | GPIO9 (see note)             |
+| Addressable RGB LED | GPIO8             | none                         |
+| Extras              | —                 | AXS5106L touch, QMI8658A IMU |
 
 Because their geometry and build platform match, one `c6` image serves both.
 Before panel initialization, firmware scans the shared I2C bus on GPIO18/19.
@@ -329,10 +329,10 @@ Each packet: `[frame_id u16][band_index u16][dirty_count u16][band payload]`,
 little-endian, where bit 15 of `dirty_count` carries orientation. Bands are
 orientation-native so they align to whole rows:
 
-| Orientation | Band | Bands/frame | Packet size |
-| --- | --- | --- | --- |
-| Portrait 172×320 | 4 rows × 344B | 80 | 1382B |
-| Landscape 320×172 | 2 rows × 640B | 86 | 1286B |
+| Orientation       | Band          | Bands/frame | Packet size |
+| ----------------- | ------------- | ----------- | ----------- |
+| Portrait 172×320  | 4 rows × 344B | 80          | 1382B       |
+| Landscape 320×172 | 2 rows × 640B | 86          | 1286B       |
 
 ### Tile streaming (square AMOLED panels)
 
@@ -475,24 +475,25 @@ accepted right now", not "this build has OTA code in it".
 
 ## Repo layout
 
-| Path | What |
-| --- | --- |
-| `firmware/display_stream/` | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls |
-| `firmware/display_test/` | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping |
-| `firmware/board_probe/` | I2C-scan diagnostic reporting which board variant you have |
-| `firmware/libraries/espdisp_board/` | Board table and detection, panel bring-up, touch and motion readers/transforms, AXP2101 and C6 ADC battery telemetry |
-| `firmware/libraries/esp_lcd_jd9853/` | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance) |
-| `firmware/doom/` | `s3-175`-only Doom engine, hardware bridge, WAD verification, and test procedure |
-| `mac/ESPDisplaySender/` | Native manager app plus SwiftPM command-line workflows |
-| `firmware/test/` | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`) |
-| `mac/ESPDisplaySender/Tests/` | Swift tests for the sender's protocol and application logic (`swift test`) |
-| `tools/espdisp.py` | Compile, flash over USB, push over WiFi, bundle a build, and configure from one command: holds the board table, refuses to guess the chip |
-| `tools/test_espdisp.py` | Tests for the CLI's decisions: chip and OTA-target refusals, password bounds, encodings, the bundle format (stdlib only, no framework) |
-| `tools/read_serial.py` | Serial monitor with optional hard-reset (native USB-Serial/JTAG) |
-| `tools/sweep.py` | Pacing parameter sweep, measuring displayed fps from device stats |
-| `docs/firmware-target-architecture.md` | Current target/profile architecture, selection and flashing flows, bundle format, and extension recipes |
-| `docs/esp32-wireless-display-plan.md` | Historical original C6 project plan |
-| `docs/tile-stream-plan.md` | S3 tile-stream implementation and performance history |
+| Path                                   | What                                                                                                                                                                                      |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `firmware/display_stream/`             | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls. A thin `.ino` (setup and the loop skeleton) over per-concern modules — see `docs/code-structure.md` |
+| `firmware/display_test/`               | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping                                                                             |
+| `firmware/board_probe/`                | I2C-scan diagnostic reporting which board variant you have                                                                                                                                |
+| `firmware/libraries/espdisp_board/`    | Board table and detection, panel bring-up, touch and motion readers/transforms, AXP2101 and C6 ADC battery telemetry                                                                      |
+| `firmware/libraries/esp_lcd_jd9853/`   | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance)                                                                                                                 |
+| `firmware/doom/`                       | `s3-175`-only Doom engine, hardware bridge, WAD verification, and test procedure                                                                                                          |
+| `mac/ESPDisplaySender/`                | Native manager app plus SwiftPM command-line workflows                                                                                                                                    |
+| `firmware/test/`                       | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`)                                                                                 |
+| `mac/ESPDisplaySender/Tests/`          | Swift tests for the sender's protocol and application logic (`swift test`)                                                                                                                |
+| `tools/espdisp.py`                     | Compile, flash over USB, push over WiFi, bundle a build, and configure from one command: holds the board table, refuses to guess the chip                                                 |
+| `tools/test_espdisp.py`                | Tests for the CLI's decisions: chip and OTA-target refusals, password bounds, encodings, the bundle format (stdlib only, no framework)                                                    |
+| `tools/read_serial.py`                 | Serial monitor with optional hard-reset (native USB-Serial/JTAG)                                                                                                                          |
+| `tools/sweep.py`                       | Pacing parameter sweep, measuring displayed fps from device stats                                                                                                                         |
+| `docs/code-structure.md`               | Module layout of the firmware sketch and the Mac app, and the rules that keep the boundaries sound                                                                                        |
+| `docs/firmware-target-architecture.md` | Current target/profile architecture, selection and flashing flows, bundle format, and extension recipes                                                                                   |
+| `docs/esp32-wireless-display-plan.md`  | Historical original C6 project plan                                                                                                                                                       |
+| `docs/tile-stream-plan.md`             | S3 tile-stream implementation and performance history                                                                                                                                     |
 
 ## Getting started
 
@@ -744,11 +745,11 @@ hash mismatches. Payloads are raw, so each reported SHA-256 matches
 
 Readers remain compatible with all shipped bundle generations:
 
-| Format | Selection | Contents | Use |
-| --- | --- | --- | --- |
-| 1 | Chip | Application image | OTA only |
-| 2 | Chip | Application plus blank-board parts | USB or OTA when one image per chip is sufficient |
-| 3 | Exact target | Application plus blank-board parts | Current USB and OTA flow, including multiple images per chip |
+| Format | Selection    | Contents                           | Use                                                          |
+| ------ | ------------ | ---------------------------------- | ------------------------------------------------------------ |
+| 1      | Chip         | Application image                  | OTA only                                                     |
+| 2      | Chip         | Application plus blank-board parts | USB or OTA when one image per chip is sufficient             |
+| 3      | Exact target | Application plus blank-board parts | Current USB and OTA flow, including multiple images per chip |
 
 Writers produce format 3 (`ESPDISPFW3`). Each image has a `targets` array; one
 image may claim multiple byte-compatible targets, while each exact target may be
@@ -950,13 +951,13 @@ beside the panel's saved WiFi network, over USB.
 Dimming follows the Mac, never the picture. Unchanging content — a photo, a
 dashboard, a paused video — stays at full brightness indefinitely:
 
-| Condition | Panel |
-| --- | --- |
-| Streaming, even perfectly static content | Last frame, full brightness |
-| Mac's displays sleep, or screensaver | Backlight off (`ESLP`) |
-| Mac system sleep | Backlight off (`ESLP`) |
-| Mac wakes | Restored immediately (`EWAK`) |
-| Sender gone ~45s (quit, crashed, WiFi down) | Dimmed status card |
+| Condition                                   | Panel                         |
+| ------------------------------------------- | ----------------------------- |
+| Streaming, even perfectly static content    | Last frame, full brightness   |
+| Mac's displays sleep, or screensaver        | Backlight off (`ESLP`)        |
+| Mac system sleep                            | Backlight off (`ESLP`)        |
+| Mac wakes                                   | Restored immediately (`EWAK`) |
+| Sender gone ~45s (quit, crashed, WiFi down) | Dimmed status card            |
 
 The status card shows whatever lines you gave the panel under **When Idle**,
 followed by how long ago they arrived, then device name, IP, and WiFi strength
@@ -990,8 +991,8 @@ signal quality, updated every 2 seconds. The ESP32-C6-Touch-LCD-1.47 has no
 addressable LED, so this indicator is absent there — use the status card or
 `CFGSHOW` for signal strength on that board.
 
-| Color | Meaning |
-| --- | --- |
-| Green | Strong signal (-55 dBm or better) |
+| Color           | Meaning                                             |
+| --------------- | --------------------------------------------------- |
+| Green           | Strong signal (-55 dBm or better)                   |
 | Yellow → orange | Fading signal (-55 to -90 dBm, continuous gradient) |
-| Red | Very weak signal, or not connected |
+| Red             | Very weak signal, or not connected                  |
