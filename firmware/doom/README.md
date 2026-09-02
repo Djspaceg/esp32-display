@@ -20,8 +20,9 @@ to start it. The same-chip `s3-185` target does not compile or expose Doom.
    press or tap to select it.
 6. During play, tilt to move, drag to turn, tap to fire, double-tap to use or
    open, touch with a second finger to run, and swipe vertically to cycle
-   weapons. A single tap waits up to 400 ms before firing so the firmware can
-   distinguish it from a double-tap.
+   weapons: swipe up for the next weapon and swipe down for the previous one. A
+   single tap waits up to 400 ms before firing so the firmware can distinguish
+   it from a double-tap.
 7. Hold BOOT for 3 seconds to exit Doom. The panel restarts into the normal
    streaming firmware; release is not required once the threshold is reached.
 
@@ -74,7 +75,8 @@ staging and UDP codec scratch.
 | Tap during play | Fire |
 | Double-tap during play | Use/open |
 | Second finger during play | Run modifier |
-| Vertical swipe during play | Cycle weapon |
+| Swipe up during play | Next weapon |
+| Swipe down during play | Previous weapon |
 
 ## Firmware and WAD delivery
 

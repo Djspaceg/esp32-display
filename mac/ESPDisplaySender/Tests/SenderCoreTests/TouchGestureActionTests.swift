@@ -70,12 +70,14 @@ final class MultimediaPresetTests: XCTestCase {
         XCTAssertEqual(action(.tap, landscape: true), .mediaPlayPause)
     }
 
-    /// Portrait: 172 wide by 320 tall, so the long axis is vertical.
+    /// Portrait: 172 wide by 320 tall, so the long axis is vertical. Track sits
+    /// on the horizontal short axis and follows the spatial "more" direction, so
+    /// swipe right skips to the next track and swipe left goes to the previous.
     func testPortraitPutsVolumeOnTheVerticalAxis() {
         XCTAssertEqual(action(.swipeUp, landscape: false), .volume(up: true))
         XCTAssertEqual(action(.swipeDown, landscape: false), .volume(up: false))
-        XCTAssertEqual(action(.swipeLeft, landscape: false), .track(next: true))
-        XCTAssertEqual(action(.swipeRight, landscape: false), .track(next: false))
+        XCTAssertEqual(action(.swipeRight, landscape: false), .track(next: true))
+        XCTAssertEqual(action(.swipeLeft, landscape: false), .track(next: false))
     }
 
     /// Landscape: 320 by 172, so the same physical gesture along the long edge is

@@ -66,14 +66,18 @@ enum SwipeAxis: Equatable, Sendable {
 /// A swipe, reduced to the two things a binding cares about.
 struct SwipeVector: Equatable, Sendable {
     let axis: SwipeAxis
-    /// Up or right: the direction that reads as "more of something".
+    /// Up or right: the direction that reads as "more of something". Media
+    /// track order rides on this too — next track is the "more" direction on
+    /// each axis — so it stays spatially consistent with volume.
     let towardsIncrease: Bool
-    /// Up or left: the direction that reads as "forward through a sequence",
-    /// matching how a list and a carousel respectively advance.
+    /// Up or left: the direction that advances the source ring and the window
+    /// list, matching how a list and a carousel respectively move forward. This
+    /// is the source/window navigation convention, not media track order —
+    /// tracks follow `towardsIncrease` so that swipe right skips forward.
     ///
     /// Both senses are carried because they only agree on the vertical axis. A
-    /// swipe right is more volume but not a step forward, and collapsing the two
-    /// would force one of volume or track order to run backwards.
+    /// swipe right is more volume but steps the source ring backwards, and
+    /// collapsing the two would force one of those to run the wrong way.
     let towardsNext: Bool
 }
 
@@ -186,9 +190,17 @@ enum TouchAction: Equatable, Sendable {
             // Volume gets the long axis because it is the axis with room for a
             // deliberate, gradual gesture; track skipping is discrete and suits
             // the short one.
+            //
+            // Track uses towardsIncrease, not towardsNext, so it reads spatially
+            // like the media transport it drives: on the short axis a swipe
+            // towards the "more" direction (right in portrait, up in landscape)
+            // means next track, and away from it means previous. On the vertical
+            // axis the two senses agree, so landscape up/down track mapping is
+            // unchanged; the only behaviour this flips is portrait, where swipe
+            // right now means next track and swipe left means previous.
             return vector.axis == .long
                 ? .volume(up: vector.towardsIncrease)
-                : .track(next: vector.towardsNext)
+                : .track(next: vector.towardsIncrease)
 
         case .windowCycling:
             if gesture == .longPress { return .showFullDisplay }

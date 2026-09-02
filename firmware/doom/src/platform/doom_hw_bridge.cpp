@@ -97,17 +97,79 @@ extern "C" void doom_imu_read(float* pitch, float* roll) {
 // gesture classification for Doom input.
 
 #include "doom_mode.h"
+#include "doom_touch_bridge.h"
 
-// Touch state tracking for gesture detection
-static int16_t touch_last_x = 0;
-static int16_t touch_last_y = 0;
-static int16_t touch_start_x = 0;
-static int16_t touch_start_y = 0;
-static uint8_t touch_points = 0;
-static bool touch_was_pressed = false;
-static bool touch_moved = false;
-static uint32_t touch_down_at = 0;
-static uint32_t touch_last_tap_at = 0;
+#include <touch_gesture.h>
+#include <touch_map.h>
+
+// Doom runs at one fixed panel orientation regardless of what macOS would ask
+// for during normal streaming: portrait-upright, no mounting rotation. The
+// gesture tracker and the coordinate transform below are both pinned to it, so
+// "swipe up" means up as the player sees the round panel.
+static const bool DOOM_TOUCH_LANDSCAPE = false;
+static const uint8_t DOOM_TOUCH_ROTATION = 0;
+
+// One finger's presses, classified into taps and swipes on framebuffer
+// coordinates. Shared with the C6/normal-firmware touch path, so Doom and the
+// streaming panel agree on what a swipe is.
+static touchgesture::Tracker s_tracker;
+
+// Live contact state, surfaced to the platform layer on every poll.
+static bool s_pressed = false;
+static bool s_second_held = false;
+static int16_t s_cur_x = 0;
+static int16_t s_cur_y = 0;
+
+// Last mapped point of the current press, for per-report delta accumulation.
+static bool s_has_last = false;
+static int16_t s_last_x = 0;
+static int16_t s_last_y = 0;
+
+// Double-tap timing: a Tap arriving within DOOM_DOUBLE_TAP_WINDOW_MS of the
+// previous one is the second half of a double-tap rather than a new single tap.
+static uint32_t s_last_tap_ms = 0;
+
+// Pending edge events, accumulated by doom_touch_sample() and drained by
+// doom_touch_poll().
+static int32_t s_pending_dx = 0;
+static int32_t s_pending_dy = 0;
+static bool s_pending_press_started = false;
+static doom_touch_gesture_t s_pending_gesture = DOOM_TOUCH_GESTURE_NONE;
+static bool s_pending_tap = false;
+static bool s_pending_double_tap = false;
+
+static doom_touch_gesture_t doom_map_swipe(touchgesture::Gesture g) {
+    switch (g) {
+        case touchgesture::Gesture::SwipeLeft:
+            return DOOM_TOUCH_GESTURE_SWIPE_LEFT;
+        case touchgesture::Gesture::SwipeRight:
+            return DOOM_TOUCH_GESTURE_SWIPE_RIGHT;
+        case touchgesture::Gesture::SwipeUp:
+            return DOOM_TOUCH_GESTURE_SWIPE_UP;
+        case touchgesture::Gesture::SwipeDown:
+            return DOOM_TOUCH_GESTURE_SWIPE_DOWN;
+        default:
+            return DOOM_TOUCH_GESTURE_NONE;
+    }
+}
+
+static void doom_touch_reset_state(void) {
+    s_tracker.reset();
+    s_pressed = false;
+    s_second_held = false;
+    s_cur_x = 0;
+    s_cur_y = 0;
+    s_has_last = false;
+    s_last_x = 0;
+    s_last_y = 0;
+    s_last_tap_ms = 0;
+    s_pending_dx = 0;
+    s_pending_dy = 0;
+    s_pending_press_started = false;
+    s_pending_gesture = DOOM_TOUCH_GESTURE_NONE;
+    s_pending_tap = false;
+    s_pending_double_tap = false;
+}
 
 extern "C" void doom_touch_init(void) {
     // Header-only boardtouch state is translation-unit local. Initialize it
@@ -122,82 +184,90 @@ extern "C" void doom_touch_init(void) {
         ESP.restart();
         while (true) delay(1000);
     }
-    touch_last_x = 0;
-    touch_last_y = 0;
-    touch_start_x = 0;
-    touch_start_y = 0;
-    touch_points = 0;
-    touch_was_pressed = false;
-    touch_moved = false;
-    Serial.println("[doom] Touch bridge ready (CST9217, dual-point mode)");
+    doom_touch_reset_state();
+    Serial.println("[doom] Touch bridge ready (CST9217, gesture tracker)");
 }
 
-// Defined in doomgeneric_esp32s3.c
-typedef struct {
-    bool pressed;
-    bool second_pressed;
-    int16_t x, y;
-    int16_t dx, dy;
-    bool tap_detected;
-    bool double_tap;
-} doom_touch_state_t;
+extern "C" void doom_touch_sample(void) {
+    // Drain every report the controller has queued this cycle. boardtouch::poll
+    // returns false immediately when no interrupt has fired, so this is cheap to
+    // call repeatedly; when a fast down/move/release burst has landed it lets us
+    // fold the whole burst into the pending state before the next Doom tick.
+    boardtouch::Sample sample = {};
+    while (boardtouch::poll(sample)) {
+        const uint32_t now = millis();
+        const touchmap::Point p = touchmap::map(
+            (int16_t)sample.rawX, (int16_t)sample.rawY, DOOM_TOUCH_LANDSCAPE,
+            DOOM_TOUCH_ROTATION, touchmap::CST9217_ON_CO5300);
+
+        const touchgesture::Event ev =
+            s_tracker.onReport(sample.pressed, p.x, p.y, now);
+
+        if (sample.pressed) {
+            if (ev.pressStarted) {
+                s_pending_press_started = true;
+            } else if (s_has_last) {
+                // Mapped per-report delta for gameplay drag/turn.
+                s_pending_dx += (int32_t)(p.x - s_last_x);
+                s_pending_dy += (int32_t)(p.y - s_last_y);
+            }
+            s_last_x = p.x;
+            s_last_y = p.y;
+            s_has_last = true;
+            s_cur_x = p.x;
+            s_cur_y = p.y;
+            s_pressed = true;
+            s_second_held = sample.points >= 2;
+        } else {
+            // A release report carries no coordinates.
+            s_pressed = false;
+            s_second_held = false;
+            s_has_last = false;
+        }
+
+        if (ev.gesture == touchgesture::Gesture::Tap) {
+            if (s_last_tap_ms != 0 &&
+                (uint32_t)(now - s_last_tap_ms) < DOOM_DOUBLE_TAP_WINDOW_MS) {
+                // Second tap inside the window: this is a double-tap, and the
+                // single-fire the first tap may have scheduled must be cancelled
+                // rather than fired. The C side reads double_tap and drops its
+                // pending fire. Clear the clock so a third tap starts a new pair.
+                s_pending_double_tap = true;
+                s_pending_tap = false;
+                s_last_tap_ms = 0;
+            } else {
+                s_pending_tap = true;
+                s_last_tap_ms = now;
+            }
+        } else if (ev.gesture != touchgesture::Gesture::None) {
+            // A swipe (or any non-tap classification) is not a tap; keep only
+            // the latest completed swipe for dispatch.
+            s_pending_gesture = doom_map_swipe(ev.gesture);
+        }
+    }
+}
 
 extern "C" void doom_touch_poll(doom_touch_state_t* state) {
-    state->pressed = touch_was_pressed;
-    state->second_pressed = touch_points >= 2;
-    state->x = touch_last_x;
-    state->y = touch_last_y;
-    state->dx = 0;
-    state->dy = 0;
-    state->tap_detected = false;
-    state->double_tap = false;
+    doom_touch_sample();
 
-    boardtouch::Sample sample = {};
-    if (!boardtouch::poll(sample)) {
-        return;  // no new controller report; preserve the held state
-    }
+    state->pressed = s_pressed;
+    state->second_pressed = s_second_held;
+    state->x = s_cur_x;
+    state->y = s_cur_y;
+    state->dx = (int16_t)s_pending_dx;
+    state->dy = (int16_t)s_pending_dy;
+    state->press_started = s_pending_press_started;
+    state->gesture = s_pending_gesture;
+    state->tap_detected = s_pending_tap;
+    state->double_tap = s_pending_double_tap;
 
-    uint32_t now = millis();
-    if (sample.pressed) {
-        int16_t x = (int16_t)sample.rawX;
-        int16_t y = (int16_t)sample.rawY;
-        if (!touch_was_pressed) {
-            touch_down_at = now;
-            touch_start_x = x;
-            touch_start_y = y;
-            touch_moved = false;
-        } else {
-            state->dx = x - touch_last_x;
-            state->dy = y - touch_last_y;
-            if (abs(x - touch_start_x) >= 20 || abs(y - touch_start_y) >= 20) {
-                touch_moved = true;
-            }
-        }
-        touch_last_x = x;
-        touch_last_y = y;
-        touch_points = sample.points;
-        touch_was_pressed = true;
-        state->pressed = true;
-        state->second_pressed = sample.points >= 2;
-        state->x = x;
-        state->y = y;
-        return;
-    }
-
-    // A release report carries no coordinates. Use the accumulated movement
-    // from touch-down rather than comparing a synthetic (0,0) release point.
-    if (touch_was_pressed && now - touch_down_at < 200 && !touch_moved) {
-        if (now - touch_last_tap_at < DOOM_DOUBLE_TAP_WINDOW_MS) {
-            state->double_tap = true;
-        } else {
-            state->tap_detected = true;
-        }
-        touch_last_tap_at = now;
-    }
-    touch_was_pressed = false;
-    touch_points = 0;
-    state->pressed = false;
-    state->second_pressed = false;
+    // Consume edge events; live pressed/second/x/y persist for the next poll.
+    s_pending_dx = 0;
+    s_pending_dy = 0;
+    s_pending_press_started = false;
+    s_pending_gesture = DOOM_TOUCH_GESTURE_NONE;
+    s_pending_tap = false;
+    s_pending_double_tap = false;
 }
 
 #endif  // ESPDISP_DOOM_S3_175

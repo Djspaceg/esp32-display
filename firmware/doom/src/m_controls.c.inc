@@ -394,9 +394,14 @@ void M_BindChatControls(unsigned int num_players)
 void M_ApplyPlatformDefaults(void)
 {
 #if defined(ESPDISP_DOOM_S3_175)
-    // Doom has no default keyboard binding for next weapon. The touch platform
-    // emits this binding for a vertical gameplay swipe.
+    // Doom has no default keyboard binding for either weapon-cycle direction.
+    // The touch platform emits these for vertical gameplay swipes: swipe up
+    // fires key_nextweapon, swipe down fires key_prevweapon. Both must be a
+    // distinct, nonzero key the engine will accept, and distinct from each
+    // other so up and down cycle opposite ways. '/' is kept for next; '.' is
+    // an otherwise-unbound key used for previous.
     key_nextweapon = '/';
+    key_prevweapon = '.';
 #endif
 }
 
