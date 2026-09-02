@@ -27,28 +27,28 @@ keep it that way:
 
 ### Module map
 
-| Module | Owns |
-| --- | --- |
-| `display_stream.ino` | `setup()`, `loop()`'s scheduling skeleton (timers, failsafes, the link-heal state machine), and the Doom one-shot boot path |
-| `app_state.h/.cpp` | Read-mostly identity: WiFi credentials, device name, `FW_VERSION`, MAC-derived `deviceId`, board variant/config, compile-time panel geometry, the `esp_lcd` panel handle, peripheral availability flags, and the shared stats counters |
-| `glyph_draw.h` | Pure 5×7 text rasterization over a caller-supplied RGB565 buffer (host-tested) |
-| `dma_gate.h/.cpp` | `dmaInFlight` + `dmaCountMux`, the DMA-complete ISR, mark/unmark, spin/wait helpers, and the 500 ms stall reclaim |
-| `display_power.h/.cpp` | The backlight/visibility state machine: user level, manual off, sleep, idle, touch-wake, survey flag, identify pulse; every path to the brightness sink |
-| `orientation.h/.cpp` | Manual and gravity-derived rotation, MADCTL application, and the 10 Hz motion poll |
-| `frame_pipeline.h/.cpp` | Frame buffers, band/tile reassembly state and appliers, `drawMux` and the pending bitmaps, the draw pass, and `fillPanel` |
-| `net_link.h/.cpp` | Per-chip inbound UDP transport, the reply endpoint, inbound dispatch (`EPNG`/`ESLP`/`EWAK`/`ETXT`/`ECTL`/frames), and `sendToSender` |
-| `control_apply.h/.cpp` | `controlMux`, the control queue, idle-text RAM state, and applying queued ECTL commands on the loop task |
-| `telemetry.h/.cpp` | Capability/flag derivation and the outbound EINF, EHB1, EBAT, and EACK packets, plus the battery reading cache |
-| `mdns_announce.h/.cpp` | The `_espdisp._udp` service, its TXT records, and OTA's `_arduino._tcp` |
-| `ota_service.h/.cpp` | ArduinoOTA bring-up, its progress callbacks, and the OTA state flags |
-| `ui_screens.h/.cpp` | The idle/status card, the signal survey, the quick info bar, and the OTA progress screen |
-| `input_button.h/.cpp` | BOOT button tiers: short, double, long, extra-long, and the Doom triple-tap |
-| `input_touch.h/.cpp` | Touch polling, wake-consumption, gesture forwarding |
-| `serial_config.h/.cpp` | The `CFG*` serial command surface |
-| `tile_bench.h/.cpp` | `CFGBENCH` microbenchmarks (S3 only) |
-| `signal_led.h/.cpp` | The addressable LED: WiFi-signal color, identify and `CFGLED` overrides |
-| `prefs_store.h/.cpp` | Every NVS read and write: display prefs, idle text, boot-time load |
-| `doom_bridge.cpp` | The two `extern "C"`/global symbols the Doom library links against (gated on `ESPDISP_DOOM_S3_175`) |
+| Module                  | Owns                                                                                                                                                                                                                                   |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_stream.ino`    | `setup()`, `loop()`'s scheduling skeleton (timers, failsafes, the link-heal state machine), and the Doom one-shot boot path                                                                                                            |
+| `app_state.h/.cpp`      | Read-mostly identity: WiFi credentials, device name, `FW_VERSION`, MAC-derived `deviceId`, board variant/config, compile-time panel geometry, the `esp_lcd` panel handle, peripheral availability flags, and the shared stats counters |
+| `glyph_draw.h`          | Pure 5×7 text rasterization over a caller-supplied RGB565 buffer (host-tested)                                                                                                                                                         |
+| `dma_gate.h/.cpp`       | `dmaInFlight` + `dmaCountMux`, the DMA-complete ISR, mark/unmark, spin/wait helpers, and the 500 ms stall reclaim                                                                                                                      |
+| `display_power.h/.cpp`  | The backlight/visibility state machine: user level, manual off, sleep, idle, touch-wake, survey flag, identify pulse; every path to the brightness sink                                                                                |
+| `orientation.h/.cpp`    | Manual and gravity-derived rotation, MADCTL application, and the 10 Hz motion poll                                                                                                                                                     |
+| `frame_pipeline.h/.cpp` | Frame buffers, band/tile reassembly state and appliers, `drawMux` and the pending bitmaps, the draw pass, and `fillPanel`                                                                                                              |
+| `net_link.h/.cpp`       | Per-chip inbound UDP transport, the reply endpoint, inbound dispatch (`EPNG`/`ESLP`/`EWAK`/`ETXT`/`ECTL`/frames), and `sendToSender`                                                                                                   |
+| `control_apply.h/.cpp`  | `controlMux`, the control queue, idle-text RAM state, and applying queued ECTL commands on the loop task                                                                                                                               |
+| `telemetry.h/.cpp`      | Capability/flag derivation and the outbound EINF, EHB1, EBAT, and EACK packets, plus the battery reading cache                                                                                                                         |
+| `mdns_announce.h/.cpp`  | The `_espdisp._udp` service, its TXT records, and OTA's `_arduino._tcp`                                                                                                                                                                |
+| `ota_service.h/.cpp`    | ArduinoOTA bring-up, its progress callbacks, and the OTA state flags                                                                                                                                                                   |
+| `ui_screens.h/.cpp`     | The idle/status card, the signal survey, the quick info bar, and the OTA progress screen                                                                                                                                               |
+| `input_button.h/.cpp`   | BOOT button tiers: short, double, long, extra-long, and the Doom triple-tap                                                                                                                                                            |
+| `input_touch.h/.cpp`    | Touch polling, wake-consumption, gesture forwarding                                                                                                                                                                                    |
+| `serial_config.h/.cpp`  | The `CFG*` serial command surface                                                                                                                                                                                                      |
+| `tile_bench.h/.cpp`     | `CFGBENCH` microbenchmarks (S3 only)                                                                                                                                                                                                   |
+| `signal_led.h/.cpp`     | The addressable LED: WiFi-signal color, identify and `CFGLED` overrides                                                                                                                                                                |
+| `prefs_store.h/.cpp`    | Every NVS read and write: display prefs, idle text, boot-time load                                                                                                                                                                     |
+| `doom_bridge.cpp`       | The two `extern "C"`/global symbols the Doom library links against (gated on `ESPDISP_DOOM_S3_175`)                                                                                                                                    |
 
 Compile guards are unchanged by the split: S3-only code stays inside
 `CONFIG_IDF_TARGET_ESP32S3`, the 1.85 board inside `ESPDISP_BOARD_S3_185`, and
@@ -68,44 +68,41 @@ changed is inside `SenderCore`: `PanelManager` used to be a 3,100-line god
 object; it is now a facade over focused collaborators, and its value types
 live in their own files.
 
-### `PanelManager` and its collaborators
+### `PanelManager` and its concern files
 
 `PanelManager` remains the single `@MainActor ObservableObject` the UI
 observes, keeps every `@Published` property, both initializers, and the public
 method surface — views, Cocoa scripting, `AppMain`, and the tests are unchanged
-by the split. Behind the facade, each concern is one type in one file:
+by the split. Its 3,100 lines are now one core file plus one
+`extension PanelManager` file per concern:
 
-| Type | File | Owns |
-| --- | --- | --- |
-| `PanelManager` | `PanelManager.swift` | `@Published` state, selection, settings, issue/outcome plumbing, and wiring |
-| `PanelSnapshot` | `PanelSnapshot.swift` | The published value type and its presentation helpers |
-| `OperationOutcome`, `AppIssue`, `ReportedIssue` | `AppFeedback.swift` | User-feedback value types |
-| `PanelRecordCoordinator` | `PanelRecordCoordinator.swift` | Record lifecycle: identity binding, service-name migration, superseded/unowned tracking, sort, and the 30 s persistence throttle |
-| `SessionIngest` | `SessionIngest.swift` | `DeviceSession.Status` and `FrameSender.DeviceEvent` ingestion into snapshots |
-| `DeviceControls` | `DeviceControls.swift` | Capability gating and the brightness/flip/rotate/power/identify/restart commands, including brightness echo suppression |
-| `CaptureSources` | `CaptureSources.swift` | Display list, region marquee, live preview, and the macOS picker |
-| `TouchGestureRouter` | `TouchGestureRouter.swift` | Gesture dedup and preset dispatch (media keys, window/source cycling) |
-| `UsbDeviceInventory` | `UsbDeviceInventory.swift` | USB device list, identity probes, path generations, and legacy path selections |
-| `FirmwareUpdateService` | `FirmwareUpdateService.swift` | OTA/USB readiness preflight, `FirmwareUpdateTarget` gathering, and both push paths |
-| `UsbConfigOperations` | `UsbConfigOperations.swift` | Serial configuration: rename, WiFi, OTA password, and USB onboarding |
+| File                                 | Owns                                                                                                                                                                                                                                |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PanelManager.swift`                 | Stored state, both initializers and their wiring, settings, issue/outcome plumbing, the nonisolated statics, and the core mutation trio (`updatePanel` / `sortPanels` / `persistIfNeeded`, including the 30 s persistence throttle) |
+| `PanelSnapshot.swift`                | The published value type and its presentation helpers                                                                                                                                                                               |
+| `AppFeedback.swift`                  | `OperationOutcome`, `AppIssue`, `ReportedIssue`                                                                                                                                                                                     |
+| `PanelManager+Records.swift`         | Record lifecycle: discovery, session registration, hardware-ID identity binding and service-name migration (including the one-shot provisional-pause lift), and removal                                                             |
+| `PanelManager+SessionIngest.swift`   | `DeviceSession.Status` and `FrameSender.DeviceEvent` ingestion, guarded by session ID and superseded-name checks                                                                                                                    |
+| `PanelManager+DeviceControls.swift`  | Capability gating and the brightness/flip/rotate/power/identify/restart/idle-text commands, including brightness echo suppression                                                                                                   |
+| `PanelManager+CaptureSources.swift`  | Display list, region marquee, live preview, and the macOS picker                                                                                                                                                                    |
+| `PanelManager+Gestures.swift`        | Gesture dedup and preset dispatch (pause, media keys, window/source cycling)                                                                                                                                                        |
+| `PanelManager+UsbDevices.swift`      | USB device inventory, coalesced identity probes, and path generations                                                                                                                                                               |
+| `PanelManager+FirmwareUpdates.swift` | OTA/USB readiness preflight, `PanelManager.FirmwareUpdateTarget` gathering, remembered OTA passwords, and both push paths                                                                                                           |
+| `PanelManager+UsbConfig.swift`       | Serial configuration (rename, WiFi, OTA password) and USB onboarding — the only path that creates a sidebar record                                                                                                                  |
 
-Collaborators are `@MainActor` classes owned by the facade. State that only
-one concern touches lives on that collaborator; state the UI observes stays
-`@Published` on the facade and is mutated through it. Nested type names such
-as `PanelManager.FirmwareUpdateTarget` are preserved (declared in extensions),
-so call sites and tests never renamed anything.
+Extensions were chosen over collaborator objects deliberately: SwiftUI
+observation forces one `ObservableObject`, and nearly every concern reads
+`panels`, `sessions`, and the outcome plumbing — collaborator classes would
+each have held an `unowned` manager reference and reached back for
+everything, adding ceremony without decoupling. Swift stored properties
+cannot live in extensions, so all stored state stays declared in
+`PanelManager.swift`, grouped and documented by the concern that owns it.
 
-Behavioral invariants the split preserves, in the module that now owns each:
-
-- every ingestion path is guarded by session ID and superseded-name checks
-  (`SessionIngest`);
-- a session's provisional pause lifts only on its first identity bind
-  (`PanelRecordCoordinator`);
-- USB writes re-verify path generation and device identity immediately before
-  esptool runs (`UsbDeviceInventory`, `FirmwareUpdateService`);
-- persistence is throttled to 30 s unless forced (`PanelRecordCoordinator`);
-- the 2 s refresh tick that keeps time-derived text current lives with the
-  facade, because it re-renders facade-published state.
+Because `private` is file-scoped in Swift, members used across concern files
+are `internal` (and the `@Published` collections are `internal(set)`); the
+module boundary is the real wall — none of this is visible outside
+`SenderCore`. Nested type names such as `PanelManager.FirmwareUpdateTarget`
+are preserved, so call sites and tests never renamed anything.
 
 ### `tools/espdisp.py`
 
