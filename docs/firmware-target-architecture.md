@@ -54,11 +54,11 @@ of those conditions is false, create a separate exact target.
 
 ## Current targets
 
-| Target | Alias | Chip | Runtime profile(s) | Geometry | Controller and bus | Selector |
-| --- | --- | --- | --- | --- | --- | --- |
-| `c6` | — | `esp32c6` | `LcdSt7789`, `TouchJd9853` | 172×320 | ST7789 or JD9853 over SPI | USB chip detection, then firmware I2C probe |
-| `s3-175` | `s3` | `esp32s3` | `AmoledCo5300` | 466×466 | CO5300 over QSPI | User choice when blank; reported exact target when running |
-| `s3-185` | — | `esp32s3` | `LcdSt77916` | 360×360 | ST77916 over QSPI | User choice when blank; reported exact target when running |
+| Target   | Alias | Chip      | Runtime profile(s)         | Geometry | Controller and bus        | Selector                                                   |
+| -------- | ----- | --------- | -------------------------- | -------- | ------------------------- | ---------------------------------------------------------- |
+| `c6`     | —     | `esp32c6` | `LcdSt7789`, `TouchJd9853` | 172×320  | ST7789 or JD9853 over SPI | USB chip detection, then firmware I2C probe                |
+| `s3-175` | `s3`  | `esp32s3` | `AmoledCo5300`             | 466×466  | CO5300 over QSPI          | User choice when blank; reported exact target when running |
+| `s3-185` | —     | `esp32s3` | `LcdSt77916`               | 360×360  | ST77916 over QSPI         | User choice when blank; reported exact target when running |
 
 The `s3` alias is compatibility syntax for `s3-175`. It never means any S3
 board and must not be used in new automation or documentation.
@@ -179,11 +179,11 @@ byte-for-byte compatible; no format change is needed for that future case.
 
 Compatibility behavior is deliberate:
 
-| Format | Contents | Supported use |
-| --- | --- | --- |
-| 1 | Application images selected by chip | OTA only |
-| 2 | Application and blank-board parts selected by chip | USB or OTA where one image per chip is sufficient |
-| 3 | Application and blank-board parts selected by exact target | Current USB and OTA flow, including multiple images per chip |
+| Format | Contents                                                   | Supported use                                                |
+| ------ | ---------------------------------------------------------- | ------------------------------------------------------------ |
+| 1      | Application images selected by chip                        | OTA only                                                     |
+| 2      | Application and blank-board parts selected by chip         | USB or OTA where one image per chip is sufficient            |
+| 3      | Application and blank-board parts selected by exact target | Current USB and OTA flow, including multiple images per chip |
 
 Current readers accept formats 1, 2, and 3. Legacy `s3` input resolves only to
 `s3-175`. New bundles and user interfaces must use exact target keys.
@@ -194,17 +194,20 @@ bundle. A release bundle is incomplete unless it claims `c6`, `s3-175`, and
 
 ## Implementation map
 
-| Responsibility | Canonical implementation |
-| --- | --- |
-| CLI target catalog, aliases, compile flags, bundle validation, OTA safeguards | `tools/espdisp.py`: `Board`, `BOARDS`, `BOARD_ALIASES`, `canonical_board_key`, `resolve_board`, `compile_board`, `validate_target_claims`, `verify_ota_target` |
-| Runtime profiles and target tokens | `firmware/libraries/espdisp_board/src/board_config.h`: `Variant`, `Config`, `COMPILED_VARIANT`, `configFor`, `variantFromI2cProbe`, `variantToken`, `targetToken` |
-| Per-artifact linked panel drivers | `firmware/libraries/espdisp_board/src/panel_init.h` |
-| Geometry, startup selection, `CFGSHOW`, mDNS metadata | `firmware/display_stream/display_stream.ino` and `chip_identity.h` |
-| Bundle parsing and exact-target image selection | `FirmwareBundle.swift`: `Image.targets`, `image(forTarget:)`, `payload(forTarget:)`, `flashPlan(forTarget:)` |
-| USB request planning | `UsbOnboarding.swift`: `Request.target`, `UsbOnboardingPlan.make` |
-| User target choice and compatible target filtering | `AddDeviceSheet.swift`: `selectedTarget`, `compatibleTargets` |
-| USB and OTA preflight checks | `PanelManager.swift`: `USBOnboardRequest.target` and CFGSHOW/esptool validation |
-| Required app resources | `mac/make-app.sh`: `bundle-info --require-all-targets` |
+| Responsibility                                                                | Canonical implementation                                                                                                                                          |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CLI target catalog, aliases, compile flags, bundle validation, OTA safeguards | `tools/espdisp.py`: `Board`, `BOARDS`, `BOARD_ALIASES`, `canonical_board_key`, `resolve_board`, `compile_board`, `validate_target_claims`, `verify_ota_target`    |
+| Runtime profiles and target tokens                                            | `firmware/libraries/espdisp_board/src/board_config.h`: `Variant`, `Config`, `COMPILED_VARIANT`, `configFor`, `variantFromI2cProbe`, `variantToken`, `targetToken` |
+| Per-artifact linked panel drivers                                             | `firmware/libraries/espdisp_board/src/panel_init.h`                                                                                                               |
+| Geometry and device identity                                                  | `firmware/display_stream/app_state.h/.cpp` and `chip_identity.h`                                                                                                  |
+| Startup selection                                                             | `setup()` in `firmware/display_stream/display_stream.ino`                                                                                                         |
+| `CFGSHOW`                                                                     | `firmware/display_stream/serial_config.cpp`                                                                                                                       |
+| mDNS metadata                                                                 | `firmware/display_stream/mdns_announce.cpp` (records) and `telemetry.cpp` (capability bits)                                                                       |
+| Bundle parsing and exact-target image selection                               | `FirmwareBundle.swift`: `Image.targets`, `image(forTarget:)`, `payload(forTarget:)`, `flashPlan(forTarget:)`                                                      |
+| USB request planning                                                          | `UsbOnboarding.swift`: `Request.target`, `UsbOnboardingPlan.make`                                                                                                 |
+| User target choice and compatible target filtering                            | `AddDeviceSheet.swift`: `selectedTarget`, `compatibleTargets`                                                                                                     |
+| USB and OTA preflight checks                                                  | `PanelManager.swift`: `USBOnboardRequest.target` and CFGSHOW/esptool validation                                                                                   |
+| Required app resources                                                        | `mac/make-app.sh`: `bundle-info --require-all-targets`                                                                                                            |
 
 ## Extension recipes
 
@@ -249,8 +252,10 @@ memory settings.
    `COMPILED_VARIANT` using a target-specific compiler define and return its
    exact key from `targetToken`.
 3. Update `panel_init.h` so the target links only the controller it can select.
-4. Update startup and metadata code in `display_stream.ino` where the new
-   composition needs distinct initialization or capabilities.
+4. Update startup code in `display_stream.ino`'s `setup()` and metadata code
+   in `telemetry.cpp` / `mdns_announce.cpp` where the new composition needs
+   distinct initialization or capabilities (see `docs/code-structure.md` for
+   the sketch's module map).
 5. Confirm generic Swift bundle and onboarding APIs accept the new target, then
    expose it in `AddDeviceSheet.compatibleTargets` for the detected chip.
 6. Add the target to app bundle completeness checks and package resources.
