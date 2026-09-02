@@ -16,7 +16,6 @@
 
 // From doomgeneric_esp32s3.c and the C engine unity build.
 extern "C" void push_key(unsigned char key, int pressed);
-extern "C" int doom_menu_is_active(void);
 
 // doomkeys.h contains only key-code macros, so no C declarations cross into
 // this C++ translation unit.
@@ -107,7 +106,7 @@ void doom_enter(void) {
     ESP_LOGI(TAG, "  Double-tap     = Use/Open");
     ESP_LOGI(TAG, "  2nd finger     = Run");
     ESP_LOGI(TAG, "  Menu tap/swipe = Select/navigate");
-    ESP_LOGI(TAG, "  BOOT short     = Open menu / select");
+    ESP_LOGI(TAG, "  BOOT short     = Escape (open/close menu)");
     ESP_LOGI(TAG, "  BOOT 0.6-<3s   = Previous menu");
     ESP_LOGI(TAG, "  BOOT 3s hold   = Exit Doom");
 
@@ -141,13 +140,13 @@ void doom_enter(void) {
     while (!should_exit()) {
         doomgeneric_Tick();
 
-        // Poll BOOT during Doom. Capture menu state at button-down so a menu
-        // transition during the hold cannot change what its release means.
+        // Poll BOOT during Doom. Every short release is a normal Escape press:
+        // the first opens the root menu and the next closes it. Touch tap owns
+        // menu selection, while the longer Back and Exit tiers remain separate.
         {
             static bool btn_was_down = false;
             static uint32_t btn_down_at = 0;
             static bool btn_long_fired = false;
-            static bool btn_menu_was_active = false;
 
             bool btn_down = (digitalRead(0) == LOW);  // GPIO0 = BOOT
             uint32_t now = millis();
@@ -155,7 +154,6 @@ void doom_enter(void) {
             if (btn_down && !btn_was_down) {
                 btn_was_down = true;
                 btn_long_fired = false;
-                btn_menu_was_active = doom_menu_is_active() != 0;
                 btn_down_at = now;
             } else if (btn_down && btn_was_down && !btn_long_fired &&
                        (now - btn_down_at) >= 3000) {
@@ -169,10 +167,8 @@ void doom_enter(void) {
                     ESP_LOGI(TAG, "BOOT released at 3s -- exiting Doom");
                     doom_request_exit();
                 } else if (!btn_long_fired && held_ms >= 30 && held_ms < 600) {
-                    unsigned char key =
-                        btn_menu_was_active ? KEY_ENTER : KEY_ESCAPE;
-                    push_key(key, 1);
-                    push_key(key, 0);
+                    push_key(KEY_ESCAPE, 1);
+                    push_key(KEY_ESCAPE, 0);
                 } else if (!btn_long_fired && held_ms >= 600) {
                     push_key(KEY_BACKSPACE, 1);
                     push_key(KEY_BACKSPACE, 0);

@@ -89,10 +89,15 @@ struct Reading {
   uint16_t millivolts;  ///< 0 when the ADC returned nothing
 };
 
-static bool enabled = false;
-static board::PowerController activeController = board::PowerController::None;
-static int8_t activeAdcPin = board::NO_PIN;
-static uint8_t activeAdcScale = 0;
+// Shared across translation units: setup initializes the active source from the
+// sketch TU, while telemetry.cpp reads it after the firmware module split.
+// These fields form one state cluster; keeping any of them namespace-static
+// would advertise battery support but leave the telemetry reader disabled or
+// pointed at the wrong controller/pin.
+inline bool enabled = false;
+inline board::PowerController activeController = board::PowerController::None;
+inline int8_t activeAdcPin = board::NO_PIN;
+inline uint8_t activeAdcScale = 0;
 
 /// Read one register.
 ///

@@ -20,8 +20,8 @@ extern "C" {
 
 // One completed, discrete touch gesture, classified on release by the shared
 // touchgesture::Tracker. A single press yields at most one of these. Continuous
-// motion (turning) rides on dx/dy instead, and taps ride on the tap_detected /
-// double_tap flags below -- so this enum carries only the swipes.
+// turning uses the live point relative to start_x/start_y, while taps use the
+// tap_detected/double_tap flags; this enum carries only completed swipes.
 typedef enum {
     DOOM_TOUCH_GESTURE_NONE = 0,
     DOOM_TOUCH_GESTURE_SWIPE_LEFT,
@@ -31,21 +31,17 @@ typedef enum {
 } doom_touch_gesture_t;
 
 // Snapshot handed from the hardware bridge to the platform input code once per
-// poll.
-//
-// Two kinds of field:
-//   - live state (pressed, second_pressed, x, y) describes the contact as of the
-//     most recent sample, and persists across polls;
-//   - edge events (dx, dy, press_started, gesture, tap_detected, double_tap) are
-//     accumulated since the previous poll and cleared by it, so a quick
-//     down/move/release between Doom ticks is reported rather than lost.
+// poll. Live coordinates and the touch-down origin persist for the full contact;
+// press_duration_ms is live while held and remains the completed duration on the
+// release poll. Edge fields are accumulated between Doom input polls.
 typedef struct {
     bool pressed;         // a finger is down as of the most recent sample
     bool second_pressed;  // a second finger is down (gameplay run modifier)
     int16_t x;            // latest mapped X (framebuffer coordinates)
     int16_t y;            // latest mapped Y (framebuffer coordinates)
-    int16_t dx;           // mapped X movement accumulated since the last poll
-    int16_t dy;           // mapped Y movement accumulated since the last poll
+    int16_t start_x;      // mapped X captured on touch-down
+    int16_t start_y;      // mapped Y captured on touch-down
+    uint32_t press_duration_ms;  // live or completed down-to-release age
     bool press_started;   // a new press began since the last poll
     doom_touch_gesture_t gesture;  // one completed swipe since the last poll
     bool tap_detected;    // a single tap completed (fire candidate)
@@ -57,11 +53,9 @@ typedef struct {
 // reboot architecture -- Doom never limps on with half its input.
 void doom_touch_init(void);
 
-// Drain any interrupt-backed controller reports and fold them into the pending
-// edge state: accumulate dx/dy, latch press-start, record one completed gesture,
-// and update double-tap timing. Cheap when no report is waiting, so it is safe to
-// call many times per frame; call it often so a fast gesture is not lost between
-// polls.
+// Drain any controller reports and fold them into the pending state: preserve
+// the exact touch-down origin and timing, latch press-start, record one completed
+// gesture, and update double-tap timing. Cheap when no report is waiting.
 void doom_touch_sample(void);
 
 // Sample once, then copy the accumulated state into *state and clear the pending

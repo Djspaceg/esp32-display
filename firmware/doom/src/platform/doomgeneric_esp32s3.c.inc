@@ -108,8 +108,7 @@ static bool key_back_held = false;
 static bool key_strafe_l_held = false;
 static bool key_strafe_r_held = false;
 static bool key_run_held = false;
-static bool key_turn_l_held = false;
-static bool key_turn_r_held = false;
+static int dg_mouse_dx = 0;  // synthetic one-tic mouse movement from touch joystick
 
 // Synthetic gameplay taps must remain down through one BuildTiccmd. Menu
 // responders act immediately on keydown, but gameplay samples held-key state
@@ -122,10 +121,13 @@ static bool dg_fire_pending = false;
 static uint32_t dg_fire_due_at = 0;
 
 // --- Touch -> aim/shoot/weapon mapping ---
-// Swipe detection now lives in the shared gesture tracker (touch_gesture.h) via
-// the bridge, so this layer keeps only the continuous-turn threshold: how much
-// horizontal drag, per poll, counts as a deliberate turn rather than jitter.
-#define TOUCH_TURN_THRESHOLD  8
+// Touch-down is the centre of a virtual joystick. Horizontal displacement past
+// tap slop becomes per-tic mouse movement, so turn rate grows continuously with
+// distance and persists while the finger holds position. A vertical release is
+// a weapon switch only inside the same 400ms window used for quick taps.
+#define TOUCH_TURN_DEADZONE_PX       12
+#define TOUCH_TURN_MAX_MOUSE_DELTA  160
+#define TOUCH_WEAPON_SWIPE_MAX_MS   400
 
 typedef enum {
     DG_INPUT_TITLE_OR_DEMO,
@@ -156,8 +158,7 @@ static void dg_release_gameplay_keys(void) {
     if (key_strafe_l_held) { push_key(KEY_STRAFE_L, 0); key_strafe_l_held = false; }
     if (key_strafe_r_held) { push_key(KEY_STRAFE_R, 0); key_strafe_r_held = false; }
     if (key_run_held) { push_key(KEY_RSHIFT, 0); key_run_held = false; }
-    if (key_turn_l_held) { push_key(KEY_LEFTARROW, 0); key_turn_l_held = false; }
-    if (key_turn_r_held) { push_key(KEY_RIGHTARROW, 0); key_turn_r_held = false; }
+    dg_mouse_dx = 0;
     if (dg_pulse_key_held) {
         push_key(dg_pulse_key, 0);
         dg_pulse_key_held = false;
@@ -186,6 +187,19 @@ static void dg_release_gameplay_pulse_for_new_poll(void) {
 static void dg_reset_touch_gesture(void) {
     dg_touch_active = false;
     dg_touch_suppressed = false;
+    dg_mouse_dx = 0;
+}
+
+static int dg_touch_joystick_mouse_dx(const doom_touch_state_t* touch) {
+    if (!touch->pressed) return 0;
+    const int displacement = (int)touch->x - (int)touch->start_x;
+    const int absolute = displacement < 0 ? -displacement : displacement;
+    if (absolute <= TOUCH_TURN_DEADZONE_PX) return 0;
+    int magnitude = absolute - TOUCH_TURN_DEADZONE_PX;
+    if (magnitude > TOUCH_TURN_MAX_MOUSE_DELTA) {
+        magnitude = TOUCH_TURN_MAX_MOUSE_DELTA;
+    }
+    return displacement < 0 ? -magnitude : magnitude;
 }
 
 static void process_imu_input(void) {
@@ -223,6 +237,9 @@ static void process_imu_input(void) {
 static void process_touch_input(void) {
     doom_touch_state_t touch;
     doom_touch_poll(&touch);
+    // Mouse movement is one-tic input. Recomputed below from the held finger's
+    // origin-relative displacement; zero everywhere outside gameplay.
+    dg_mouse_dx = 0;
 
     const dg_input_context_t context = dg_current_input_context();
     // A double-tap delivered on the same poll where the delayed single would
@@ -271,15 +288,20 @@ static void process_touch_input(void) {
         // Enter. No delta thresholds -- the tracker already decided.
         switch (touch.gesture) {
             case DOOM_TOUCH_GESTURE_SWIPE_LEFT:
+                ESP_LOGI(GFX_TAG, "touch menu: swipe-left -> left");
                 push_key(KEY_LEFTARROW, 1); push_key(KEY_LEFTARROW, 0); break;
             case DOOM_TOUCH_GESTURE_SWIPE_RIGHT:
+                ESP_LOGI(GFX_TAG, "touch menu: swipe-right -> right");
                 push_key(KEY_RIGHTARROW, 1); push_key(KEY_RIGHTARROW, 0); break;
             case DOOM_TOUCH_GESTURE_SWIPE_UP:
+                ESP_LOGI(GFX_TAG, "touch menu: swipe-up -> up");
                 push_key(KEY_UPARROW, 1); push_key(KEY_UPARROW, 0); break;
             case DOOM_TOUCH_GESTURE_SWIPE_DOWN:
+                ESP_LOGI(GFX_TAG, "touch menu: swipe-down -> down");
                 push_key(KEY_DOWNARROW, 1); push_key(KEY_DOWNARROW, 0); break;
             default:
                 if (touch.tap_detected || touch.double_tap) {
+                    ESP_LOGI(GFX_TAG, "touch menu: tap -> enter");
                     push_key(KEY_ENTER, 1);
                     push_key(KEY_ENTER, 0);
                 }
@@ -294,6 +316,7 @@ static void process_touch_input(void) {
         // here as well means a swipe is never silently dead before the menu is
         // even open -- the player always gets in.
         if (is_swipe || touch.tap_detected || touch.double_tap) {
+            ESP_LOGI(GFX_TAG, "touch title/demo -> escape");
             push_key(KEY_ESCAPE, 1);
             push_key(KEY_ESCAPE, 0);
         }
@@ -309,25 +332,25 @@ static void process_touch_input(void) {
         key_run_held = touch.second_pressed;
     }
 
-    // Vertical swipe cycles weapons: up = next, down = previous. Horizontal
-    // swipes are left to the continuous turn below and add no release action.
-    if (touch.gesture == DOOM_TOUCH_GESTURE_SWIPE_UP) {
+    // A quick vertical gesture cycles weapons. Once a press is older than
+    // 400ms, vertical displacement is ignored so a deliberate joystick hold
+    // cannot become a weapon switch when the finger lifts.
+    const bool quick_weapon_gesture =
+        touch.press_duration_ms <= TOUCH_WEAPON_SWIPE_MAX_MS;
+    if (quick_weapon_gesture &&
+        touch.gesture == DOOM_TOUCH_GESTURE_SWIPE_UP) {
+        ESP_LOGI(GFX_TAG, "touch gameplay: swipe-up -> next weapon");
         dg_begin_gameplay_pulse((unsigned char)key_nextweapon);
-    } else if (touch.gesture == DOOM_TOUCH_GESTURE_SWIPE_DOWN) {
+    } else if (quick_weapon_gesture &&
+               touch.gesture == DOOM_TOUCH_GESTURE_SWIPE_DOWN) {
+        ESP_LOGI(GFX_TAG, "touch gameplay: swipe-down -> previous weapon");
         dg_begin_gameplay_pulse((unsigned char)key_prevweapon);
     }
 
-    // Turn from horizontal drag, continuously, from the per-poll mapped delta.
-    if (touch.pressed && touch.dx < -TOUCH_TURN_THRESHOLD) {
-        if (!key_turn_l_held) { push_key(KEY_LEFTARROW, 1); key_turn_l_held = true; }
-        if (key_turn_r_held) { push_key(KEY_RIGHTARROW, 0); key_turn_r_held = false; }
-    } else if (touch.pressed && touch.dx > TOUCH_TURN_THRESHOLD) {
-        if (!key_turn_r_held) { push_key(KEY_RIGHTARROW, 1); key_turn_r_held = true; }
-        if (key_turn_l_held) { push_key(KEY_LEFTARROW, 0); key_turn_l_held = false; }
-    } else {
-        if (key_turn_l_held) { push_key(KEY_LEFTARROW, 0); key_turn_l_held = false; }
-        if (key_turn_r_held) { push_key(KEY_RIGHTARROW, 0); key_turn_r_held = false; }
-    }
+    // Virtual joystick: the landing point is neutral. Holding farther left or
+    // right emits a larger native mouse delta every tic, so turn speed rises
+    // smoothly with displacement and remains steady when the finger stops.
+    dg_mouse_dx = dg_touch_joystick_mouse_dx(&touch);
 
     // Fire/use from the tap classification. A swipe this poll is a weapon
     // change, not a fire, so tap handling is skipped when one arrived.
@@ -497,6 +520,14 @@ int DG_GetKey(int* pressed, unsigned char* key) {
         return 1;
     }
     return 0;
+}
+
+int DG_GetMouse(int* dx, int* dy) {
+    if (dg_mouse_dx == 0) return 0;
+    *dx = dg_mouse_dx;
+    *dy = 0;
+    dg_mouse_dx = 0;
+    return 1;
 }
 
 void DG_SetWindowTitle(const char* title) {

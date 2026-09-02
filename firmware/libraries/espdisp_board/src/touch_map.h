@@ -48,18 +48,17 @@ struct Point {
 
 /// Everything about a board's touch controller that this transform needs and
 /// that is NOT shared across boards: the panel's native short/long sides, and
-/// the two axis facts (RAW_X_MIRRORED, ROTATE_CLOCKWISE below) that were
+/// the three axis facts (RAW_X_MIRRORED, RAW_Y_MIRRORED, ROTATE_CLOCKWISE)
 /// measured against one specific controller wired to one specific panel.
-/// Those two bools are calibration data, not physics - a different touch
-/// chip on a different panel has no reason to share them, so a second board
-/// needs its own Calibration rather than a global override of these
-/// constants. The rotation/landscape composition itself (quadrant()) is true
-/// geometry and takes no calibration, which is why it stays a free function
-/// below rather than a Calibration method.
+/// Those bools are calibration data, not physics - a different touch chip on a
+/// different panel has no reason to share them, so a second board needs its own
+/// Calibration rather than a global override. The rotation/landscape
+/// composition itself (quadrant()) is true geometry and takes no calibration.
 struct Calibration {
   int16_t panelShort;
   int16_t panelLong;
   bool rawXMirrored;
+  bool rawYMirrored;
   bool rotateClockwise;
 };
 
@@ -68,35 +67,27 @@ struct Calibration {
 /// never mentions calibration gets today's C6 behaviour exactly.
 static const Calibration AXS5106L_ON_C6 = {
     PANEL_SHORT, PANEL_LONG,
-    /* rawXMirrored */ true, /* rotateClockwise */ true};
+    /* rawXMirrored */ true, /* rawYMirrored */ false,
+    /* rotateClockwise */ true};
 
-/// The ESP32-S3-Touch-AMOLED-1.75C's CST9217 calibration. Panel is square
-/// (466x466), so PANEL_SHORT == PANEL_LONG here and the frame never actually
-/// swaps shape between portrait and landscape - only the touch AXIS mapping
-/// still matters, which is what rawXMirrored/rotateClockwise capture.
-///
-/// STATUS: the driver end to end is confirmed on hardware - CST9217 answers
-/// its chip ID (0x9217), and taps and swipes register with in-range
-/// coordinates and classify into the right gesture shapes. rawXMirrored is
-/// NOT independently confirmed the way AXS5106L_ON_C6's was (no measured
-/// raw-coordinate-vs-known-screen-position pair, because this panel is round
-/// and has no drawable corners to touch by feel); `false` here is the
-/// convention every reference implementation checked for this project
-/// (lewisxhe's SensorLib TouchDrvCST92xx, which Waveshare's own
-/// 10_Touch_CST9217 example uses, and ESPHome's independent cst9220
-/// component) reports raw coordinates in, with no mirroring step of their
-/// own. If a tap is later found to land mirrored on this board, flip this
-/// one bool - nothing else in this file needs to change.
+/// The ESP32-S3-Touch-AMOLED-1.75C's CST9217 calibration. Hardware testing
+/// across all four visible swipe directions showed that the controller's raw
+/// coordinate space is rotated 180 degrees from portrait-upright glass: both X
+/// and Y run opposite to the displayed axes. Mirroring both here corrects the
+/// glass-space calibration once; the normal orientation transform then composes
+/// it with every manual/IMU quadrant, and Doom uses the same corrected profile.
 static const Calibration CST9217_ON_CO5300 = {
     /* panelShort */ 466, /* panelLong */ 466,
-    /* rawXMirrored */ false, /* rotateClockwise */ true};
+    /* rawXMirrored */ true, /* rawYMirrored */ true,
+    /* rotateClockwise */ true};
 
 /// Starting calibration for the ESP32-S3-Touch-LCD-1.85C's CST816. The
 /// Waveshare example consumes its 360x360 raw coordinates directly. Physical
-/// corner validation can change the mirror bit without changing shared math.
+/// corner validation can change either mirror bit without changing shared math.
 static const Calibration CST816_ON_ST77916 = {
     /* panelShort */ 360, /* panelLong */ 360,
-    /* rawXMirrored */ false, /* rotateClockwise */ true};
+    /* rawXMirrored */ false, /* rawYMirrored */ false,
+    /* rotateClockwise */ true};
 
 inline int16_t frameWidth(bool landscape, Calibration cal = AXS5106L_ON_C6) {
   return landscape ? cal.panelLong : cal.panelShort;
@@ -105,12 +96,10 @@ inline int16_t frameHeight(bool landscape, Calibration cal = AXS5106L_ON_C6) {
   return landscape ? cal.panelShort : cal.panelLong;
 }
 
-/// Whether the controller's X axis runs opposite to the display's X axis in
-/// portrait, and which way the image rotates when the panel goes landscape.
-/// Both are measured facts about ONE controller on ONE panel, carried on
-/// AXS5106L_ON_C6.rawXMirrored / .rotateClockwise above - see that struct's
-/// doc comment for why a second board gets its own Calibration rather than a
-/// shared override of these two.
+/// Whether each controller axis runs opposite to the display axis in portrait,
+/// and which way the image rotates when the panel goes landscape. These are
+/// measured facts about one controller/panel pair, carried on the selected
+/// Calibration; a second board gets its own profile rather than shared flags.
 ///
 /// STATUS for AXS5106L_ON_C6, confirmed on an ESP32-C6-Touch-LCD-1.47:
 /// Waveshare's own Arduino AXS5106L driver applies `x = width - 1 - x` in its
@@ -136,7 +125,7 @@ inline Point rawToGlass(int16_t rawX, int16_t rawY,
                         Calibration cal = AXS5106L_ON_C6) {
   Point g;
   g.x = cal.rawXMirrored ? (int16_t)(cal.panelShort - 1 - rawX) : rawX;
-  g.y = rawY;
+  g.y = cal.rawYMirrored ? (int16_t)(cal.panelLong - 1 - rawY) : rawY;
   return g;
 }
 

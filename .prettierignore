@@ -3,6 +3,11 @@
 mac/ESPDisplaySender/.build/
 **/build/
 
+# Doom's unity-build C sources use .c.inc so Arduino includes them as one
+# translation unit. Prettier treats the unknown suffix as prose and collapses
+# C line structure, including preprocessor directives.
+firmware/doom/src/**/*.c.inc
+
 # Vendored third-party source, kept byte-identical to upstream so the SHA-256
 # hashes recorded in firmware/libraries/esp_lcd_jd9853/README.md stay meaningful.
 # Prettier has no C parser today, but this makes the intent explicit if that

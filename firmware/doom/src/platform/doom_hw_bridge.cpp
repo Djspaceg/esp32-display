@@ -120,10 +120,13 @@ static bool s_second_held = false;
 static int16_t s_cur_x = 0;
 static int16_t s_cur_y = 0;
 
-// Last mapped point of the current press, for per-report delta accumulation.
-static bool s_has_last = false;
-static int16_t s_last_x = 0;
-static int16_t s_last_y = 0;
+// Exact origin and timing of the current/most recently completed press. Doom
+// samples touch throughout rendering, so these live in the bridge where a fast
+// down/move/release cannot lose its origin before the next engine input poll.
+static int16_t s_start_x = 0;
+static int16_t s_start_y = 0;
+static uint32_t s_touch_down_ms = 0;
+static uint32_t s_last_press_duration_ms = 0;
 
 // Double-tap timing: a Tap arriving within DOOM_DOUBLE_TAP_WINDOW_MS of the
 // previous one is the second half of a double-tap rather than a new single tap.
@@ -131,8 +134,6 @@ static uint32_t s_last_tap_ms = 0;
 
 // Pending edge events, accumulated by doom_touch_sample() and drained by
 // doom_touch_poll().
-static int32_t s_pending_dx = 0;
-static int32_t s_pending_dy = 0;
 static bool s_pending_press_started = false;
 static doom_touch_gesture_t s_pending_gesture = DOOM_TOUCH_GESTURE_NONE;
 static bool s_pending_tap = false;
@@ -159,12 +160,11 @@ static void doom_touch_reset_state(void) {
     s_second_held = false;
     s_cur_x = 0;
     s_cur_y = 0;
-    s_has_last = false;
-    s_last_x = 0;
-    s_last_y = 0;
+    s_start_x = 0;
+    s_start_y = 0;
+    s_touch_down_ms = 0;
+    s_last_press_duration_ms = 0;
     s_last_tap_ms = 0;
-    s_pending_dx = 0;
-    s_pending_dy = 0;
     s_pending_press_started = false;
     s_pending_gesture = DOOM_TOUCH_GESTURE_NONE;
     s_pending_tap = false;
@@ -172,9 +172,8 @@ static void doom_touch_reset_state(void) {
 }
 
 extern "C" void doom_touch_init(void) {
-    // Header-only boardtouch state is translation-unit local. Initialize it
-    // here, in the same translation unit that polls it, rather than from the
-    // display sketch's separate copy.
+    // Doom owns the controller for its isolated reboot session; initialize the
+    // shared boardtouch state before any Doom input sampling begins.
     const board::Config& cfg = board::configFor(board::COMPILED_VARIANT);
     bool available = boardtouch::init(cfg);
     if (!available) {
@@ -189,12 +188,13 @@ extern "C" void doom_touch_init(void) {
 }
 
 extern "C" void doom_touch_sample(void) {
-    // Drain every report the controller has queued this cycle. boardtouch::poll
-    // returns false immediately when no interrupt has fired, so this is cheap to
-    // call repeatedly; when a fast down/move/release burst has landed it lets us
-    // fold the whole burst into the pending state before the next Doom tick.
+    // Consume at most one mailbox report per call. Doom invokes this throughout
+    // scaling, frame pacing, DMA waits, and input polling, so another report is
+    // serviced within a few milliseconds. One-at-a-time also bounds this call
+    // when the active-low INT level fallback is recovering an ACK failure.
     boardtouch::Sample sample = {};
-    while (boardtouch::poll(sample)) {
+    if (boardtouch::poll(sample)) {
+        const bool wasPressed = s_pressed;
         const uint32_t now = millis();
         const touchmap::Point p = touchmap::map(
             (int16_t)sample.rawX, (int16_t)sample.rawY, DOOM_TOUCH_LANDSCAPE,
@@ -206,23 +206,23 @@ extern "C" void doom_touch_sample(void) {
         if (sample.pressed) {
             if (ev.pressStarted) {
                 s_pending_press_started = true;
-            } else if (s_has_last) {
-                // Mapped per-report delta for gameplay drag/turn.
-                s_pending_dx += (int32_t)(p.x - s_last_x);
-                s_pending_dy += (int32_t)(p.y - s_last_y);
+                s_start_x = ev.startX;
+                s_start_y = ev.startY;
+                s_touch_down_ms = now;
+                s_last_press_duration_ms = 0;
             }
-            s_last_x = p.x;
-            s_last_y = p.y;
-            s_has_last = true;
             s_cur_x = p.x;
             s_cur_y = p.y;
             s_pressed = true;
             s_second_held = sample.points >= 2;
         } else {
-            // A release report carries no coordinates.
+            // A release report carries no coordinates; retain the last mapped
+            // position and the completed duration for the engine's release poll.
+            if (wasPressed) {
+                s_last_press_duration_ms = now - s_touch_down_ms;
+            }
             s_pressed = false;
             s_second_held = false;
-            s_has_last = false;
         }
 
         if (ev.gesture == touchgesture::Gesture::Tap) {
@@ -244,6 +244,7 @@ extern "C" void doom_touch_sample(void) {
             // the latest completed swipe for dispatch.
             s_pending_gesture = doom_map_swipe(ev.gesture);
         }
+
     }
 }
 
@@ -254,16 +255,17 @@ extern "C" void doom_touch_poll(doom_touch_state_t* state) {
     state->second_pressed = s_second_held;
     state->x = s_cur_x;
     state->y = s_cur_y;
-    state->dx = (int16_t)s_pending_dx;
-    state->dy = (int16_t)s_pending_dy;
+    state->start_x = s_start_x;
+    state->start_y = s_start_y;
+    state->press_duration_ms = s_pressed
+        ? (uint32_t)(millis() - s_touch_down_ms)
+        : s_last_press_duration_ms;
     state->press_started = s_pending_press_started;
     state->gesture = s_pending_gesture;
     state->tap_detected = s_pending_tap;
     state->double_tap = s_pending_double_tap;
 
-    // Consume edge events; live pressed/second/x/y persist for the next poll.
-    s_pending_dx = 0;
-    s_pending_dy = 0;
+    // Consume edge events; live contact/origin/timing state persists.
     s_pending_press_started = false;
     s_pending_gesture = DOOM_TOUCH_GESTURE_NONE;
     s_pending_tap = false;
