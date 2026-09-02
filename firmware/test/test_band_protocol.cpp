@@ -1778,21 +1778,17 @@ int main() {
   }
 
   // --- touch coordinate mapping: CO5300/CST9217 (square, 466x466) ----------
-  // The 1.75C's calibration differs from the C6's default in both axis facts
-  // (rawXMirrored is false, not true - see touch_map.h's STATUS note) and in
-  // being square, which collapses several of the C6 sweep's distinctions:
-  // frameWidth/frameHeight no longer differ by orientation, and every
-  // quadrant has the same frame shape. What still has to hold is the same
-  // structural contract - in range, the rotate-by-2 involution, and the
-  // portrait-quarter-turn == landscape composition rule - now exercised
-  // against a Calibration explicitly, since this is the first calibration
-  // that is not the default.
+  // The 1.75C CST9217 is rotated 180 degrees in raw glass space: hardware
+  // swipes showed both raw axes running opposite to visible screen directions.
+  // The square geometry still collapses frame-shape distinctions, while the
+  // structural rotation and landscape composition rules remain unchanged.
   {
     using touchmap::Point;
     const touchmap::Calibration cal = touchmap::CST9217_ON_CO5300;
     const int16_t SIDE = cal.panelShort;
     CHECK(SIDE == 466 && cal.panelLong == 466);
-    CHECK(!cal.rawXMirrored);
+    CHECK(cal.rawXMirrored);
+    CHECK(cal.rawYMirrored);
     CHECK(cal.rotateClockwise);
 
     // Square glass: landscape and portrait share one frame shape.
@@ -1801,18 +1797,19 @@ int main() {
     CHECK(touchmap::frameWidth(true, cal) == SIDE);
     CHECK(touchmap::frameHeight(true, cal) == SIDE);
 
-    // Step 1 in isolation: unlike the C6, the raw X passes through unmirrored.
-    CHECK(touchmap::rawToGlass(0, 0, cal).x == 0);
-    CHECK(touchmap::rawToGlass(SIDE - 1, 0, cal).x == SIDE - 1);
-    CHECK(touchmap::rawToGlass(0, 17, cal).y == 17);
+    // Step 1 applies the measured 180-degree raw-to-glass correction.
+    CHECK(touchmap::rawToGlass(0, 0, cal).x == SIDE - 1);
+    CHECK(touchmap::rawToGlass(0, 0, cal).y == SIDE - 1);
+    CHECK(touchmap::rawToGlass(SIDE - 1, 17, cal).x == 0);
+    CHECK(touchmap::rawToGlass(SIDE - 1, 17, cal).y == SIDE - 1 - 17);
 
-    // Portrait upright: raw passes straight through to the frame.
-    CHECK(touchmap::map(10, 20, false, 0, cal).x == 10);
-    CHECK(touchmap::map(10, 20, false, 0, cal).y == 20);
+    // Portrait upright uses the corrected glass point directly.
+    CHECK(touchmap::map(10, 20, false, 0, cal).x == SIDE - 1 - 10);
+    CHECK(touchmap::map(10, 20, false, 0, cal).y == SIDE - 1 - 20);
 
-    // Rotation 2 (180) is a point reflection, exactly as on the C6.
-    CHECK(touchmap::map(10, 20, false, 2, cal).x == SIDE - 1 - 10);
-    CHECK(touchmap::map(10, 20, false, 2, cal).y == SIDE - 1 - 20);
+    // Rotation 2 cancels the fixed glass-space 180-degree correction.
+    CHECK(touchmap::map(10, 20, false, 2, cal).x == 10);
+    CHECK(touchmap::map(10, 20, false, 2, cal).y == 20);
 
     // Structural properties that must hold in every orientation, with this
     // Calibration threaded through instead of the default.

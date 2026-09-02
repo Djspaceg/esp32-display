@@ -105,10 +105,9 @@ void serviceTouch() {
 
   // Through the same orientation transform the pixels went through, so a swipe
   // means the direction the user actually swiped. Calibration is per board:
-  // the C6 Touch's AXS5106L and the 1.75C's CST9217 disagree on which raw
-  // axis is mirrored (see touch_map.h), so touchCalibration is picked once at
-  // boot from bcfg->touch rather than the AXS5106L default every call site
-  // used to take implicitly.
+  // each controller/panel pair has its own raw X/Y mirror facts (see
+  // touch_map.h), so touchCalibration is picked once at boot from bcfg->touch
+  // rather than taking the AXS5106L default implicitly.
   touchmap::Point p = touchmap::map(
       (int16_t)sample.rawX, (int16_t)sample.rawY, panelLandscape,
       appliedPanelRotation, touchCalibration);

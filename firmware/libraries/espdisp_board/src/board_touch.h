@@ -73,7 +73,9 @@ static const uint8_t CST9217_ADDR = 0x5A;
 static const uint16_t CST9217_REG_TOUCH_DATA = 0xD000;
 static const uint16_t CST9217_REG_CMD_MODE = 0xD101;
 static const uint16_t CST9217_REG_CHECKCODE = 0xD1FC;
+static const uint16_t CST9217_REG_RESOLUTION = 0xD1F8;
 static const uint16_t CST9217_REG_CHIP_INFO = 0xD204;
+static const uint16_t CST9217_REG_FIRMWARE = 0xD208;
 static const uint8_t CST9217_TOUCH_ACK = 0xAB;
 static const uint8_t CST9217_EVENT_DOWN = 0x06;
 static const uint16_t CST9220_CHIP_ID = 0x9220;
@@ -98,10 +100,20 @@ struct Sample {
 // Set from the ISR, cleared by poll(). The ISR does nothing but raise this flag:
 // an I2C transaction cannot run in interrupt context, and this loop already has
 // a task watchdog watching it.
-static volatile bool interruptFlag = false;
-static bool enabled = false;
-static bool pressed = false;
-static board::TouchController activeController = board::TouchController::None;
+// Runtime state is shared across translation units. Normal firmware initializes
+// touch from display_stream.ino, polls from input_touch.cpp, and checks pressed
+// state from orientation.cpp; namespace-static variables would give each file a
+// separate disabled copy after the module split. C++17 inline variables keep one
+// boardtouch instance while leaving the register constants above TU-local.
+inline volatile bool interruptFlag = false;
+inline bool enabled = false;
+inline bool pressed = false;
+inline board::TouchController activeController = board::TouchController::None;
+inline int8_t activeInterruptPin = board::NO_PIN;
+inline bool levelFallbackLogged = false;
+inline bool timedFallbackLogged = false;
+inline uint32_t lastCst9217PollAt = 0;
+static const uint32_t CST9217_POLL_FALLBACK_MS = 20;
 
 static void IRAM_ATTR onTouchInterrupt() { interruptFlag = true; }
 
@@ -213,6 +225,13 @@ inline bool initCst9217(const board::Config &cfg, bool verbose) {
     return false;
   }
 
+  uint8_t resolution[4] = {0};
+  if (!cst9217ReadReg(CST9217_REG_RESOLUTION, resolution,
+                      sizeof(resolution))) {
+    if (verbose) Serial.println("touch: ERROR CST9217 did not answer resolution");
+    return false;
+  }
+
   if (!cst9217ReadReg(CST9217_REG_CHIP_INFO, buf, sizeof(buf))) {
     if (verbose) Serial.println("touch: ERROR CST9217 did not answer its chip ID");
     return false;
@@ -223,21 +242,48 @@ inline bool initCst9217(const board::Config &cfg, bool verbose) {
     return false;
   }
 
+  uint8_t firmware[8] = {0};
+  if (!cst9217ReadReg(CST9217_REG_FIRMWARE, firmware, sizeof(firmware))) {
+    if (verbose) Serial.println("touch: ERROR CST9217 did not answer firmware info");
+    return false;
+  }
+  if (firmware[0] == 0xA5 && firmware[1] == 0xA5 &&
+      firmware[2] == 0xA5 && firmware[3] == 0xA5) {
+    if (verbose) Serial.println("touch: ERROR CST9217 reports no firmware");
+    return false;
+  }
+
   pinMode(cfg.pinTouchInt, INPUT_PULLUP);
   attachInterrupt(cfg.pinTouchInt, onTouchInterrupt, FALLING);
+  const int interruptLevel = digitalRead(cfg.pinTouchInt);
+  // INT is active-low. If the controller asserted it before attachInterrupt(),
+  // no falling edge remains to invoke the ISR; seed the same pending flag so
+  // the first poll reads and acknowledges that already-latched mailbox.
+  if (interruptLevel == LOW) interruptFlag = true;
 
   if (verbose) {
-    Serial.printf("touch: %s ready (chip 0x%04X, sda=%d scl=%d int=%d, %lukHz)\n",
-                  chipId == CST9217_CHIP_ID ? "CST9217" : "CST9220", chipId,
-                  cfg.pinTouchSda, cfg.pinTouchScl, cfg.pinTouchInt,
-                  (unsigned long)(I2C_HZ / 1000));
+    const uint16_t resolutionX =
+        (uint16_t)((resolution[1] << 8) | resolution[0]);
+    const uint16_t resolutionY =
+        (uint16_t)((resolution[3] << 8) | resolution[2]);
+    const uint32_t firmwareVersion =
+        (uint32_t)firmware[0] | ((uint32_t)firmware[1] << 8) |
+        ((uint32_t)firmware[2] << 16) | ((uint32_t)firmware[3] << 24);
+    Serial.printf(
+        "touch: %s ready (chip 0x%04X, %ux%u fw=0x%08lX, "
+        "sda=%d scl=%d int=%d level=%s, %lukHz)\n",
+        chipId == CST9217_CHIP_ID ? "CST9217" : "CST9220", chipId,
+        resolutionX, resolutionY, (unsigned long)firmwareVersion,
+        cfg.pinTouchSda, cfg.pinTouchScl, cfg.pinTouchInt,
+        interruptLevel == LOW ? "low" : "high",
+        (unsigned long)(I2C_HZ / 1000));
   }
   return true;
 }
 
-/// Fetch a report from the CST9217/9220, or false on an I2C failure. Mirrors
-/// pollAxs5106l's contract: true whenever a transaction went through,
-/// whatever it said, so out.pressed/points can carry a release.
+/// Fetch one CST9217/9220 mailbox frame. Returns true only for a valid touch
+/// report (including the explicit event-0 release); I2C/ACK failures and idle or
+/// stale post-ACK mailboxes return false.
 inline bool pollCst9217(Sample &out) {
   uint8_t data[CST9217_READ_BYTES] = {0};
   if (!cst9217ReadReg(CST9217_REG_TOUCH_DATA, data, sizeof(data))) {
@@ -247,16 +293,19 @@ inline bool pollCst9217(Sample &out) {
   // reference implementations do this unconditionally, whether or not the
   // frame below turns out to carry a valid report.
   uint8_t ack = CST9217_TOUCH_ACK;
-  cst9217WriteReg(CST9217_REG_TOUCH_DATA, &ack, 1);
+  if (!cst9217WriteReg(CST9217_REG_TOUCH_DATA, &ack, 1)) {
+    return false;
+  }
 
-  // A valid report carries the ACK marker at offset 6; offset 0 must be
-  // neither the ACK marker nor empty. Anything else is not a report this
-  // cycle - not an I2C failure, so it still returns true, but as zero
-  // touches (a release), the same way ESPHome's component treats it.
-  if (data[0] == CST9217_TOUCH_ACK || data[0] == 0x00 || data[6] != CST9217_TOUCH_ACK) {
-    out.pressed = false;
-    out.points = 0;
-    return true;
+  // The raw probe on the 32 MB CST9217 board established the mailbox states:
+  //   0x06 + marker 0xAB: down/movement
+  //   0x00 + marker 0xAB: explicit release
+  //   leading 0xAB: stale post-ACK mailbox
+  //   missing marker: idle/invalid mailbox
+  // Only the first two are reports. Do not synthesize release from idle data;
+  // the controller provides a valid event-0 frame when the finger lifts.
+  if (data[0] == CST9217_TOUCH_ACK || data[6] != CST9217_TOUCH_ACK) {
+    return false;
   }
 
   uint8_t numTouches = data[5] & 0x7F;
@@ -294,10 +343,16 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
   pressed = false;
   interruptFlag = false;
   activeController = board::TouchController::None;
+  activeInterruptPin = board::NO_PIN;
+  levelFallbackLogged = false;
+  timedFallbackLogged = false;
+  lastCst9217PollAt = 0;
   if (!cfg.hasTouch()) {
     if (verbose) Serial.printf("touch: not present on %s\n", cfg.name);
     return false;
   }
+
+  activeInterruptPin = cfg.pinTouchInt;
 
   if (cfg.touch == board::TouchController::Cst816) {
     if (!initCst816(cfg, verbose)) return false;
@@ -372,10 +427,40 @@ inline bool available() { return enabled; }
 /// "nothing happened" from "the finger lifted" - the distinction the vendor
 /// drivers lose. A report with points == 0 is a release and still returns true.
 inline bool poll(Sample &out) {
-  if (!enabled || !interruptFlag) {
+  if (!enabled) {
     return false;
   }
+
+  // CST9217 INT is active-low and the report mailbox stays latched until ACK.
+  // FALLING catches normal reports, while the level check recovers an assertion
+  // that happened before attachInterrupt() or while interrupts were masked.
+  // Clear the old flag before reading the pin so a new ISR edge arriving after
+  // this point remains pending for the next call.
+  const bool flagged = interruptFlag;
   interruptFlag = false;
+  const bool levelAsserted =
+      activeController == board::TouchController::Cst9217 &&
+      activeInterruptPin != board::NO_PIN &&
+      digitalRead(activeInterruptPin) == LOW;
+  const uint32_t now = millis();
+  const bool timedFallback =
+      activeController == board::TouchController::Cst9217 &&
+      (uint32_t)(now - lastCst9217PollAt) >= CST9217_POLL_FALLBACK_MS;
+  if (!flagged && !levelAsserted && !timedFallback) {
+    return false;
+  }
+  if (activeController == board::TouchController::Cst9217) {
+    lastCst9217PollAt = now;
+  }
+  if (levelAsserted && !flagged && !levelFallbackLogged) {
+    Serial.println("touch: CST9217 INT low without ISR flag; polling mailbox");
+    levelFallbackLogged = true;
+  }
+  if (timedFallback && !flagged && !levelAsserted && !timedFallbackLogged) {
+    Serial.printf("touch: CST9217 IRQ idle; polling mailbox every %lums\n",
+                  (unsigned long)CST9217_POLL_FALLBACK_MS);
+    timedFallbackLogged = true;
+  }
 
   bool ok;
   if (activeController == board::TouchController::Cst816) {
@@ -400,7 +485,18 @@ inline bool poll(Sample &out) {
       out.pressed = out.points > 0;
     }
   }
-  if (!ok) return false;
+  if (!ok) {
+    // A failed CST9217 read or ACK leaves active-low INT asserted. Retry only
+    // while the line still says a mailbox is pending; rearming unconditionally
+    // after an empty fallback read would create a permanent polling loop after
+    // INT had already returned high.
+    if (activeController == board::TouchController::Cst9217 &&
+        activeInterruptPin != board::NO_PIN &&
+        digitalRead(activeInterruptPin) == LOW) {
+      interruptFlag = true;
+    }
+    return false;
+  }
   pressed = out.pressed;
   return true;
 }

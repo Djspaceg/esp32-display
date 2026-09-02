@@ -63,21 +63,10 @@ enum SwipeAxis: Equatable, Sendable {
     case short
 }
 
-/// A swipe, reduced to the two things a binding cares about.
+/// A swipe, reduced to the two things source/window bindings care about.
 struct SwipeVector: Equatable, Sendable {
     let axis: SwipeAxis
-    /// Up or right: the direction that reads as "more of something". Media
-    /// track order rides on this too — next track is the "more" direction on
-    /// each axis — so it stays spatially consistent with volume.
-    let towardsIncrease: Bool
-    /// Up or left: the direction that advances the source ring and the window
-    /// list, matching how a list and a carousel respectively move forward. This
-    /// is the source/window navigation convention, not media track order —
-    /// tracks follow `towardsIncrease` so that swipe right skips forward.
-    ///
-    /// Both senses are carried because they only agree on the vertical axis. A
-    /// swipe right is more volume but steps the source ring backwards, and
-    /// collapsing the two would force one of those to run the wrong way.
+    /// Up or left advances an ordered sequence; down or right retreats.
     let towardsNext: Bool
 }
 
@@ -146,20 +135,16 @@ enum TouchAction: Equatable, Sendable {
             return nil
         case .swipeUp:
             return SwipeVector(
-                axis: landscape ? .short : .long,
-                towardsIncrease: true, towardsNext: true)
+                axis: landscape ? .short : .long, towardsNext: true)
         case .swipeDown:
             return SwipeVector(
-                axis: landscape ? .short : .long,
-                towardsIncrease: false, towardsNext: false)
+                axis: landscape ? .short : .long, towardsNext: false)
         case .swipeRight:
             return SwipeVector(
-                axis: landscape ? .long : .short,
-                towardsIncrease: true, towardsNext: false)
+                axis: landscape ? .long : .short, towardsNext: false)
         case .swipeLeft:
             return SwipeVector(
-                axis: landscape ? .long : .short,
-                towardsIncrease: false, towardsNext: true)
+                axis: landscape ? .long : .short, towardsNext: true)
         }
     }
 
@@ -183,24 +168,17 @@ enum TouchAction: Equatable, Sendable {
             return .cycleSource(forward: vector.towardsNext)
 
         case .multimedia:
-            if gesture == .tap { return .mediaPlayPause }
-            guard let vector = vector(of: gesture, landscape: landscape) else {
-                return nil
+            // Firmware reports directions in visible screen space after applying
+            // the panel's current IMU/manual rotation. Keep media controls fixed
+            // to those visible directions; orientation must not swap their jobs.
+            switch gesture {
+            case .tap: return .mediaPlayPause
+            case .longPress: return nil
+            case .swipeRight: return .track(next: true)
+            case .swipeLeft: return .track(next: false)
+            case .swipeUp: return .volume(up: true)
+            case .swipeDown: return .volume(up: false)
             }
-            // Volume gets the long axis because it is the axis with room for a
-            // deliberate, gradual gesture; track skipping is discrete and suits
-            // the short one.
-            //
-            // Track uses towardsIncrease, not towardsNext, so it reads spatially
-            // like the media transport it drives: on the short axis a swipe
-            // towards the "more" direction (right in portrait, up in landscape)
-            // means next track, and away from it means previous. On the vertical
-            // axis the two senses agree, so landscape up/down track mapping is
-            // unchanged; the only behaviour this flips is portrait, where swipe
-            // right now means next track and swipe left means previous.
-            return vector.axis == .long
-                ? .volume(up: vector.towardsIncrease)
-                : .track(next: vector.towardsIncrease)
 
         case .windowCycling:
             if gesture == .longPress { return .showFullDisplay }

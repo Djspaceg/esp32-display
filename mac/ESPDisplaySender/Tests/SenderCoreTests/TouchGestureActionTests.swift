@@ -53,10 +53,9 @@ final class SourceCyclingPresetTests: XCTestCase {
     }
 }
 
-/// The point of the multimedia preset is that it is axis-relative: volume runs
-/// along the panel's long edge whichever way it is facing. That only works
-/// because the firmware reports directions in screen space and flags the
-/// orientation, so both orientations are tested.
+/// Multimedia controls are fixed to visible screen directions. Firmware has
+/// already rotated gestures into screen space, so physical reorientation must
+/// not change what up, down, left, or right means to the media player.
 final class MultimediaPresetTests: XCTestCase {
 
     private func action(
@@ -70,35 +69,18 @@ final class MultimediaPresetTests: XCTestCase {
         XCTAssertEqual(action(.tap, landscape: true), .mediaPlayPause)
     }
 
-    /// Portrait: 172 wide by 320 tall, so the long axis is vertical. Track sits
-    /// on the horizontal short axis and follows the spatial "more" direction, so
-    /// swipe right skips to the next track and swipe left goes to the previous.
-    func testPortraitPutsVolumeOnTheVerticalAxis() {
-        XCTAssertEqual(action(.swipeUp, landscape: false), .volume(up: true))
-        XCTAssertEqual(action(.swipeDown, landscape: false), .volume(up: false))
-        XCTAssertEqual(action(.swipeRight, landscape: false), .track(next: true))
-        XCTAssertEqual(action(.swipeLeft, landscape: false), .track(next: false))
-    }
-
-    /// Landscape: 320 by 172, so the same physical gesture along the long edge is
-    /// now horizontal — and must still be volume.
-    func testLandscapePutsVolumeOnTheHorizontalAxis() {
-        XCTAssertEqual(action(.swipeRight, landscape: true), .volume(up: true))
-        XCTAssertEqual(action(.swipeLeft, landscape: true), .volume(up: false))
-        XCTAssertEqual(action(.swipeUp, landscape: true), .track(next: true))
-        XCTAssertEqual(action(.swipeDown, landscape: true), .track(next: false))
-    }
-
-    /// Up and right both mean "more" even though up and *left* mean "forward".
-    /// Collapsing those two senses would make either volume or track order run
-    /// backwards in one of the orientations.
-    func testIncreasingIsUpOrRightInBothOrientations() {
-        XCTAssertEqual(action(.swipeUp, landscape: false), .volume(up: true))
-        XCTAssertEqual(action(.swipeRight, landscape: true), .volume(up: true))
+    func testVisibleDirectionsStayFixedAcrossOrientation() {
+        for landscape in [false, true] {
+            XCTAssertEqual(action(.swipeRight, landscape: landscape), .track(next: true))
+            XCTAssertEqual(action(.swipeLeft, landscape: landscape), .track(next: false))
+            XCTAssertEqual(action(.swipeUp, landscape: landscape), .volume(up: true))
+            XCTAssertEqual(action(.swipeDown, landscape: landscape), .volume(up: false))
+        }
     }
 
     func testHoldingIsNotBound() {
         XCTAssertNil(action(.longPress, landscape: false))
+        XCTAssertNil(action(.longPress, landscape: true))
     }
 }
 
@@ -222,19 +204,20 @@ final class GestureHelpTests: XCTestCase {
             "tap is unbound in this preset but was listed anyway")
     }
 
-    /// The payoff of the whole axis-relative design, stated as the user sees it:
-    /// the same swipe is described differently depending on how the panel is
-    /// turned, so the readout is never quietly wrong.
-    func testTheReadoutFollowsTheOrientation() {
-        let portrait = GestureHelpRow.rows(for: .multimedia, landscape: false)
-        let landscape = GestureHelpRow.rows(for: .multimedia, landscape: true)
-
-        XCTAssertEqual(
-            portrait.first { $0.gesture == "Swipe up" }?.effect, "Volume up")
-        XCTAssertEqual(
-            landscape.first { $0.gesture == "Swipe up" }?.effect, "Next track")
-        XCTAssertEqual(
-            landscape.first { $0.gesture == "Swipe right" }?.effect, "Volume up")
+    /// Multimedia meanings are fixed to visible directions. Rotating the panel
+    /// may change row order, but it must never change an action label.
+    func testMultimediaReadoutStaysScreenRelativeAcrossOrientation() {
+        for landscape in [false, true] {
+            let rows = GestureHelpRow.rows(for: .multimedia, landscape: landscape)
+            XCTAssertEqual(
+                rows.first { $0.gesture == "Swipe right" }?.effect, "Next track")
+            XCTAssertEqual(
+                rows.first { $0.gesture == "Swipe left" }?.effect, "Previous track")
+            XCTAssertEqual(
+                rows.first { $0.gesture == "Swipe up" }?.effect, "Volume up")
+            XCTAssertEqual(
+                rows.first { $0.gesture == "Swipe down" }?.effect, "Volume down")
+        }
     }
 
     /// Rows are ordered so the two gestures doing one job land next to each

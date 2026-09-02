@@ -103,12 +103,6 @@
 #include "wi_stuff.c.inc"
 #include "z_zone.c.inc"
 
-// C-linkage state accessor for the C++ BOOT-button controller. Keep the engine
-// global authoritative instead of duplicating menu state in platform glue.
-int doom_menu_is_active(void) {
-    return menuactive ? 1 : 0;
-}
-
 // Arduino's precompiled IDF permits PSRAM heap allocation but not external
 // BSS placement. Allocate only the largest Doom renderer work arrays here;
 // display_stream's DMA staging and UDP codec scratch remain internal.

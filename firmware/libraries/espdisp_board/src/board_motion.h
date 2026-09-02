@@ -24,7 +24,10 @@ struct Sample {
   int16_t z;
 };
 
-static bool enabled = false;
+// Shared across translation units: setup initializes the QMI8658 from the
+// sketch TU, while orientation.cpp samples it after the firmware module split.
+// Namespace-static state would leave the sampler's private copy disabled.
+inline bool enabled = false;
 
 inline bool writeRegister(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(I2C_ADDR);
