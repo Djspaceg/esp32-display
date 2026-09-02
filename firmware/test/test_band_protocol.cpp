@@ -14,6 +14,7 @@
 #include "../display_stream/chip_identity.h"
 #include "../display_stream/control_queue.h"
 #include "../display_stream/device_protocol.h"
+#include "../display_stream/glyph_draw.h"
 #include "../display_stream/ota_policy.h"
 #include "../display_stream/panel_state.h"
 #include "../display_stream/tile_protocol.h"
@@ -3731,6 +3732,42 @@ int main() {
     CHECK(MAX_BANDS - 1 <= BAND_INDEX_VALUE_MASK);
     // The packed budget really holds a worst-case S3 row as one raw record.
     CHECK(HEADER_BYTES + RECORD_HEADER_BYTES + 932 <= MAX_PACKED_PACKET_BYTES);
+  }
+
+  // --- glyph_draw: the on-device text rasterizer (glyph_draw.h)
+  {
+    // An exactly sized heap buffer, so the sanitizers prove the clipping:
+    // any write outside the declared bufW x bufH raster is a hard failure.
+    const int w = 20, h = 12;
+    std::vector<uint8_t> buf((size_t)w * h * 2, 0);
+
+    // 'I' at scale 1 lights pixels inside the glyph cell and nowhere else on
+    // the empty rows above it. Column 2 of the 5x7 'I' is a full vertical
+    // stroke, so (x+2, y..y+6) must all carry the color.
+    drawText(buf.data(), w, h, 1, 2, "I", 0xF800, 1);
+    auto px = [&](int x, int y) {
+      size_t off = ((size_t)y * w + x) * 2;
+      return (uint16_t)((buf[off] << 8) | buf[off + 1]);
+    };
+    for (int row = 0; row < 7; row++) CHECK(px(3, 2 + row) == 0xF800);
+    CHECK(px(3, 0) == 0x0000);   // above the glyph: untouched
+    CHECK(px(0, 2) == 0x0000);   // left of the glyph: untouched
+
+    // Text hanging past every edge is clipped, not written out of bounds -
+    // this ran on the panel's row-range math before it was unit tested, and
+    // under ASan an off-by-one here is a hard failure rather than a wrap.
+    drawText(buf.data(), w, h, -3, -4, "WWW", 0xFFFF, 2);
+    drawText(buf.data(), w, h, w - 2, h - 2, "WWW", 0xFFFF, 3);
+
+    // The outline draw paints the black ring before the white core, so the
+    // core must survive: the stroke pixel is white, its outline black.
+    std::fill(buf.begin(), buf.end(), 0x55);
+    drawOutlinedText(buf.data(), w, h, 4, 3, "I", 1);
+    // Probed at the glyph's middle row: the classic 'I' has serifs on its
+    // top and bottom rows (columns 1 and 3 carry 0x41), so only the middle
+    // rows have a bare stroke with outline directly beside it.
+    CHECK(px(6, 6) == 0xFFFF);   // the stroke itself: white core
+    CHECK(px(7, 6) == 0x0000);   // right of the stroke: black outline
   }
 
   printf("OK: %d checks passed\n", checks);
