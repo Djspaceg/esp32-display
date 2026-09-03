@@ -89,6 +89,14 @@ static const Calibration CST816_ON_ST77916 = {
     /* rawXMirrored */ false, /* rawYMirrored */ false,
     /* rotateClockwise */ true};
 
+/// Starting calibration for the ESP32-S3-Touch-LCD-1.54's CST816. Both the
+/// Arduino and ESP-IDF examples consume rotation-0 coordinates without swapping
+/// or mirroring. Physical corner testing can refine these bits independently.
+static const Calibration CST816_ON_ST7789_240 = {
+    /* panelShort */ 240, /* panelLong */ 240,
+    /* rawXMirrored */ false, /* rawYMirrored */ false,
+    /* rotateClockwise */ true};
+
 inline int16_t frameWidth(bool landscape, Calibration cal = AXS5106L_ON_C6) {
   return landscape ? cal.panelLong : cal.panelShort;
 }

@@ -7,9 +7,9 @@
 
 // ---- Onboard RGB LED(s): WiFi signal quality indicator ------------------
 // WS2812-style addressable LED(s) glowing through the board's acrylic layer,
-// on the non-touch board only. Driven as a short strip with every pixel the
-// same color: data past the real LED count is ignored, so this works whether
-// the board has one LED or several.
+// on profiles whose board table declares an LED pin. Driven as a short strip
+// with every pixel the same color: data past the real LED count is ignored, so
+// this works whether the board has one LED or several.
 //
 // Constructed lazily, after detection, and only when the board actually has an
 // LED. Adafruit_NeoPixel drives its pin in begin(), and GPIO8's function on the
@@ -27,7 +27,7 @@ Adafruit_NeoPixel *rgbLed = nullptr;
 //   down / < -90  red
 void updateSignalLed() {
   if (rgbLed == nullptr) {
-    return;  // Touch board: no addressable LED to report signal on
+    return;  // This profile has no addressable LED.
   }
   if (millis() < ledOverrideUntil) {
     return;  // a CFGLED test color is being shown

@@ -16,7 +16,7 @@ import Foundation
 /// | `proto` | `%u` | `deviceproto::FRAME_PROTOCOL_VERSION` |
 /// | `caps` | `%08lx` | capability bits, lowercase hex |
 /// | `chip` | `CONFIG_IDF_TARGET` | MCU family: `esp32c6`, `esp32s3`, or `unknown` |
-/// | `target` | exact build target | `c6`, `s3-175`, or `s3-185` |
+/// | `target` | exact build target | `c6`, `s3-085`, `s3-154`, `s3-175`, or `s3-185` |
 ///
 /// TOLERANT BY CONSTRUCTION. Nothing here throws and nothing here is required:
 /// a record that is missing, empty, misspelled, out of range, or written by a
@@ -45,8 +45,9 @@ public struct ServiceMetadata: Hashable, Sendable {
     public let firmwareVersion: String?
     /// `chip`. The IDF chip token, such as `esp32c6` or `esp32s3`.
     public let chip: String?
-    /// `target`. The exact firmware target, such as `c6`, `s3-175`, or
-    /// `s3-185`. Unlike `chip`, this distinguishes same-chip panel variants.
+    /// `target`. The exact firmware target, such as `c6`, `s3-085`, `s3-154`,
+    /// `s3-175`, or `s3-185`. Unlike `chip`, this distinguishes same-chip panel
+    /// variants.
     public let target: String?
     /// `caps`. The same bits EINF reports, available before a session exists.
     public let capabilities: DeviceProtocol.Capabilities?

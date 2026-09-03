@@ -304,6 +304,7 @@ void setup() {
   Serial.printf("  driver=%s bus=%s %ux%u pclk=%luMHz\n",
                 bcfg->driver == board::PanelDriver::Co5300    ? "CO5300"
                 : bcfg->driver == board::PanelDriver::St77916 ? "ST77916"
+                : bcfg->driver == board::PanelDriver::Gc9107  ? "GC9107"
                 : bcfg->driver == board::PanelDriver::Jd9853  ? "JD9853"
                                                                : "ST7789",
                 bcfg->isQspi() ? "qspi" : "spi", bcfg->panelW, bcfg->panelH,
@@ -316,8 +317,9 @@ void setup() {
   // Only construct the LED driver on a board that has one - begin() drives the
   // pin, and GPIO8 has no known function on the Touch board.
   if (bcfg->hasRgbLed()) {
-    // NEO_RGB, not the usual NEO_GRB: this board's LED takes red first.
-    // (Diagnosed with CFGLED - pure red displayed as green under GRB.)
+    // NEO_RGB, not the usual NEO_GRB. This was measured with CFGLED on the C6;
+    // the 0.85-inch S3 follows Waveshare's explicit Arduino RGB declaration and
+    // still requires physical red/green/blue validation.
     rgbLed = new Adafruit_NeoPixel(RGB_COUNT, bcfg->pinRgbLed,
                                    NEO_RGB + NEO_KHZ800);
     rgbLed->begin();
@@ -347,16 +349,18 @@ void setup() {
 
   // Touch, before WiFi: the capability bits mDNS advertises depend on whether
   // the controller answered, so this has to be settled before we announce.
-  touchCalibration = bcfg->touch == board::TouchController::Cst9217
+  touchCalibration = bcfg->variant == board::Variant::AmoledCo5300
       ? touchmap::CST9217_ON_CO5300
-      : bcfg->touch == board::TouchController::Cst816
+      : bcfg->variant == board::Variant::LcdSt77916
           ? touchmap::CST816_ON_ST77916
-          : touchmap::AXS5106L_ON_C6;
+          : bcfg->variant == board::Variant::TouchSt7789
+              ? touchmap::CST816_ON_ST7789_240
+              : touchmap::AXS5106L_ON_C6;
   touchAvailable = boardtouch::init(*bcfg);
   // Battery telemetry, for the same reason and before announce: CAP_BATTERY
-  // depends on either the S3 PMU or the C6 touch board's voltage divider being
-  // usable. The C6 path reports charge state unknown because ETA6098 STAT is
-  // wired only to an LED.
+  // depends on either the AXP2101 PMU or a configured ADC divider being usable.
+  // The C6 ADC has no charger-status input; the 0.85-inch S3 has an active-low
+  // charge input but still cannot infer external power or standby.
   batteryAvailable = boardpower::init(*bcfg);
   // Motion also precedes mDNS so diagnostics start from a settled hardware
   // verdict. Rectangular C6 panels are read but never automatically rotated;

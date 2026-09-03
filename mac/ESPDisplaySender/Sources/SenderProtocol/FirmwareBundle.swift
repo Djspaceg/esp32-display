@@ -163,6 +163,16 @@ public struct FirmwareBundle: Equatable, Sendable {
     private static let doomWadAddress = 0xBFF000
     private static let doomWadPartitionBytes = 0x401000
     private static let doomWadBytes = 4_196_020
+    /// Known exact target-to-chip ownership. Format-3 images may additionally
+    /// claim unknown compatible aliases, but one image must never span two known
+    /// hardware targets or claim a known target for the wrong chip.
+    private static let currentTargetChips: [String: String] = [
+        "c6": "esp32c6",
+        "s3-085": "esp32s3",
+        "s3-154": "esp32s3",
+        "s3-175": "esp32s3",
+        "s3-185": "esp32s3",
+    ]
 
     private struct PartitionEntry {
         let type: UInt8
@@ -368,6 +378,20 @@ public struct FirmwareBundle: Equatable, Sendable {
             let chip = try string(entry["chip"], key: "chip", where: where_)
             let targets = try imageTargets(
                 entry: entry, generation: generation, imageIndex: index, board: board)
+            if generation >= Self.format {
+                let knownTargets = targets.filter { Self.currentTargetChips[$0] != nil }
+                guard knownTargets.count <= 1 else {
+                    throw FirmwareBundleError.imageClaimsIncompatibleTargets(
+                        index: index, targets: knownTargets)
+                }
+                if let target = knownTargets.first,
+                   let expectedChip = Self.currentTargetChips[target],
+                   chip != expectedChip {
+                    throw FirmwareBundleError.targetChipMismatch(
+                        index: index, target: target, chip: chip,
+                        expectedChip: expectedChip)
+                }
+            }
             if generation < Self.format {
                 guard seenLegacyChips.insert(chip).inserted else {
                     throw FirmwareBundleError.duplicateChip(chip)
@@ -628,7 +652,7 @@ public struct FirmwareBundle: Equatable, Sendable {
         guard Self.requiredFlashRoles.allSatisfy({ image.flashPart(role: $0) != nil })
         else { return nil }
 
-        let currentTargets = Set(["c6", "s3-175", "s3-185"])
+        let currentTargets = Set(Self.currentTargetChips.keys)
         if !currentTargets.isDisjoint(with: image.targets) {
             var expectedRoles = Set(Self.requiredFlashRoles)
             if image.targets.contains("s3-175") {
@@ -891,6 +915,8 @@ public struct FirmwareBundle: Equatable, Sendable {
         return [
             "c6": "c6",
             "s3": "s3-175",
+            "s3-085": "s3-085",
+            "s3-154": "s3-154",
             "s3-175": "s3-175",
             "s3-185": "s3-185",
         ][token] ?? token
@@ -1037,6 +1063,9 @@ public enum FirmwareBundleError: Error, LocalizedError, Equatable {
     case noTargets(index: Int)
     case unusableTarget(image: Int, targetIndex: Int)
     case duplicateTargetInImage(image: Int, target: String)
+    case imageClaimsIncompatibleTargets(index: Int, targets: [String])
+    case targetChipMismatch(
+        index: Int, target: String, chip: String, expectedChip: String)
     case duplicateTargetClaim(target: String, firstImage: Int, secondImage: Int)
     case hashMismatch(index: Int, chip: String, expected: String, actual: String)
     case trailingBytes(Int)
@@ -1116,6 +1145,12 @@ public enum FirmwareBundleError: Error, LocalizedError, Equatable {
                 + "exact target string."
         case .duplicateTargetInImage(let image, let target):
             return "Format-3 image \(image) lists target \(target) twice."
+        case .imageClaimsIncompatibleTargets(let index, let targets):
+            return "Format-3 image \(index) claims multiple known hardware targets "
+                + "(\(targets.joined(separator: ", "))). Each requires its own image."
+        case .targetChipMismatch(let index, let target, let chip, let expectedChip):
+            return "Format-3 image \(index) claims target \(target) for chip \(chip), "
+                + "but that target requires \(expectedChip)."
         case .duplicateTargetClaim(let target, let firstImage, let secondImage):
             return "Target \(target) is claimed by both image \(firstImage) and image "
                 + "\(secondImage), so there is no unique payload for it."

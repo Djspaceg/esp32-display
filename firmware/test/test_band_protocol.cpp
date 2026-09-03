@@ -1246,6 +1246,8 @@ int main() {
           Variant::AmoledCo5300);
     CHECK(board::variantFromName(board::variantToken(Variant::LcdSt77916)) ==
           Variant::LcdSt77916);
+    CHECK(board::variantFromName(board::variantToken(Variant::TouchSt7789)) ==
+          Variant::TouchSt7789);
     CHECK(strcmp(board::variantToken(Variant::Unknown), "auto") == 0);
 
     // Firmware-image identity is deliberately separate from the chip token and
@@ -1255,6 +1257,7 @@ int main() {
     CHECK(strcmp(board::targetToken(Variant::TouchJd9853), "c6") == 0);
     CHECK(strcmp(board::targetToken(Variant::AmoledCo5300), "s3-175") == 0);
     CHECK(strcmp(board::targetToken(Variant::LcdSt77916), "s3-185") == 0);
+    CHECK(strcmp(board::targetToken(Variant::TouchSt7789), "s3-154") == 0);
     CHECK(strcmp(board::targetToken(Variant::Unknown), "unknown") == 0);
     CHECK(strcmp(board::targetToken(Variant::AmoledCo5300),
                  board::targetToken(Variant::LcdSt77916)) != 0);
@@ -1270,6 +1273,7 @@ int main() {
       CHECK(!c->isQspi());
       CHECK(c->panelW == 172 && c->panelH == 320);
       CHECK(c->pclkHz == 80 * 1000 * 1000);
+      CHECK(c->spiMode == 0);
       CHECK(c->pinData1 == board::NO_PIN && c->pinData2 == board::NO_PIN &&
             c->pinData3 == board::NO_PIN);
       CHECK(c->pinDc != board::NO_PIN);
@@ -1464,6 +1468,179 @@ int main() {
     CHECK(board::variantFromName("st77916") == Variant::LcdSt77916);
     CHECK(strcmp(board::variantToken(Variant::LcdSt77916), "st77916") == 0);
     CHECK(strcmp(board::targetToken(Variant::LcdSt77916), "s3-185") == 0);
+  }
+
+  // --- the S3 1.54-inch ST7789 touch board entry ------------------------
+  {
+    using board::Variant;
+    const board::Config &lcd = board::configFor(Variant::TouchSt7789);
+
+    CHECK(lcd.variant == Variant::TouchSt7789);
+    CHECK(lcd.driver == board::PanelDriver::St7789);
+    CHECK(lcd.bus == board::PanelBus::Spi && !lcd.isQspi());
+    CHECK(lcd.panelW == 240 && lcd.panelH == 240);
+    CHECK(lcd.pclkHz == 40 * 1000 * 1000);
+    CHECK(lcd.spiMode == 3);
+    CHECK(lcd.pinSclk == 38 && lcd.pinMosi == 39);
+    CHECK(lcd.pinData1 == board::NO_PIN && lcd.pinData2 == board::NO_PIN &&
+          lcd.pinData3 == board::NO_PIN);
+    CHECK(lcd.pinCs == 21 && lcd.pinDc == 45 && lcd.pinRst == 40);
+    CHECK(lcd.pinBl == 46 && lcd.hasBacklightPin());
+    CHECK(lcd.pinBootButton == 0);
+    CHECK(lcd.pinRgbLed == board::NO_PIN && !lcd.hasRgbLed());
+
+    CHECK(lcd.touch == board::TouchController::Cst816 && lcd.hasTouch());
+    CHECK(lcd.pinTouchSda == 42 && lcd.pinTouchScl == 41);
+    CHECK(lcd.pinTouchRst == 47 && lcd.pinTouchInt == 48);
+    CHECK(lcd.touchResetExio == 0);
+    CHECK(lcd.motion == board::MotionController::Qmi8658 && lcd.hasMotion());
+    CHECK(lcd.motionXAxis == 0 && lcd.motionXSign == 1);
+    CHECK(lcd.motionYAxis == 1 && lcd.motionYSign == 1);
+
+    CHECK(lcd.power == board::PowerController::BatteryAdc);
+    CHECK(lcd.pinBatteryAdc == 1 && lcd.batteryAdcScale == 3);
+    CHECK(lcd.pinBatteryEnable == 2 && lcd.pinChargeStatus == 3);
+    CHECK(lcd.hasBattery());
+
+    CHECK(lcd.colOffset == 0 && lcd.rowOffset == 0);
+    CHECK(lcd.orientationOffset == 0);
+    CHECK(lcd.invertColor && !lcd.roundDisplay);
+    CHECK(!lcd.hasExpanderReset());
+
+    const Geometry geometry = {lcd.panelW, lcd.panelH};
+    CHECK(geometry.valid());
+    CHECK(tilesExactly(geometry, false));
+    CHECK(tilesExactly(geometry, true));
+
+    const touchmap::Calibration cal = touchmap::CST816_ON_ST7789_240;
+    CHECK(cal.panelShort == 240 && cal.panelLong == 240);
+    CHECK(!cal.rawXMirrored && !cal.rawYMirrored);
+    touchmap::Point p = touchmap::map(12, 34, false, 0, cal);
+    CHECK(p.x == 12 && p.y == 34);
+
+    CHECK(board::variantFromStored((uint8_t)Variant::TouchSt7789) ==
+          Variant::TouchSt7789);
+    CHECK(board::variantFromName("st7789-154") == Variant::TouchSt7789);
+    CHECK(strcmp(board::variantToken(Variant::TouchSt7789), "st7789-154") == 0);
+    CHECK(strcmp(board::targetToken(Variant::TouchSt7789), "s3-154") == 0);
+    CHECK(board::resolve(Variant::TouchSt7789) == Variant::TouchSt7789);
+
+    // Adding a mode-3 panel must not change any shipped profile's bus mode.
+    CHECK(board::configFor(Variant::LcdSt7789).spiMode == 0);
+    CHECK(board::configFor(Variant::TouchJd9853).spiMode == 0);
+    CHECK(board::configFor(Variant::AmoledCo5300).spiMode == 0);
+    CHECK(board::configFor(Variant::LcdSt77916).spiMode == 0);
+    CHECK(board::configFor(Variant::LcdGc9107).spiMode == 0);
+  }
+
+  // --- the S3 0.85-inch GC9107 board entry --------------------------------
+  {
+    using board::Variant;
+    const board::Config &gc = board::configFor(Variant::LcdGc9107);
+
+    CHECK(gc.variant == Variant::LcdGc9107);
+    CHECK(gc.driver == board::PanelDriver::Gc9107);
+    // A single-lane SPI panel with a D/C line, unlike the QSPI S3 panels.
+    CHECK(gc.bus == board::PanelBus::Spi);
+    CHECK(!gc.isQspi());
+    CHECK(gc.pinDc == 45);
+
+    // Waveshare's ESP32-S3-LCD-0.85 pin map, pin by pin so a copy-paste
+    // between rows cannot pass silently.
+    CHECK(gc.pinSclk == 38);
+    CHECK(gc.pinMosi == 39);
+    CHECK(gc.pinData1 == board::NO_PIN && gc.pinData2 == board::NO_PIN &&
+          gc.pinData3 == board::NO_PIN);
+    CHECK(gc.pinCs == 21);
+    CHECK(gc.pinRst == 40);
+    CHECK(gc.pinBl == 46 && gc.hasBacklightPin());
+    CHECK(gc.pinBootButton == 0);
+    CHECK(gc.pinRgbLed == 48 && gc.hasRgbLed());
+
+    // 128x128 square glass at 40 MHz SPI.
+    CHECK(gc.panelW == 128 && gc.panelH == 128);
+    CHECK(gc.pclkHz == 40 * 1000 * 1000);
+
+    // Controller RAM is 128x160: the visible glass starts at column 2, row 1.
+    CHECK(gc.colOffset == 2);
+    CHECK(gc.rowOffset == 1);
+
+    // Native orientation is two quarter turns; existing boards keep zero.
+    CHECK(gc.orientationOffset == 2);
+    CHECK(board::configFor(Variant::AmoledCo5300).orientationOffset == 0);
+    CHECK(board::configFor(Variant::LcdSt77916).orientationOffset == 0);
+    CHECK(board::configFor(Variant::LcdSt7789).orientationOffset == 0);
+    CHECK(board::configFor(Variant::TouchJd9853).orientationOffset == 0);
+    CHECK(board::configFor(Variant::AmoledCo5300).rowOffset == 0);
+    CHECK(board::configFor(Variant::LcdSt77916).rowOffset == 0);
+    CHECK(board::configFor(Variant::LcdSt7789).rowOffset == 0);
+    CHECK(board::configFor(Variant::TouchJd9853).rowOffset == 0);
+
+    // The orientation composition panel_init.h performs: firmware rotation 0
+    // lands on quadrant 2 (MADCTL MX|MY, no axis swap), which is Waveshare's
+    // rotation 0 for this glass. Odd quadrants swap the axes, and the gap axis
+    // follows: colOffset/rowOffset (2/1) exchange under an odd quadrant.
+    {
+      const uint8_t q0 = panelorient::quadrant(
+          (uint8_t)(0 + gc.orientationOffset), false);
+      CHECK(q0 == 2);
+      CHECK(!panelorient::swapXY(q0));
+      CHECK(panelorient::mirrorX(q0) && panelorient::mirrorY(q0));
+      // A quarter turn from there is an odd quadrant: axes swap, so the 2/1
+      // gap swaps to 1/2.
+      const uint8_t q1 = panelorient::quadrant(
+          (uint8_t)(1 + gc.orientationOffset), false);
+      CHECK(q1 == 3);
+      CHECK(panelorient::swapXY(q1));
+    }
+
+    // Square, not round: 128x128 still enables the square-panel quarter turns.
+    CHECK(!gc.roundDisplay);
+    CHECK(gc.invertColor);
+
+    // No touch and no motion at all.
+    CHECK(gc.touch == board::TouchController::None);
+    CHECK(!gc.hasTouch());
+    CHECK(gc.pinTouchSda == board::NO_PIN && gc.pinTouchScl == board::NO_PIN);
+    CHECK(gc.pinTouchRst == board::NO_PIN && gc.pinTouchInt == board::NO_PIN);
+    CHECK(gc.motion == board::MotionController::None);
+    CHECK(!gc.hasMotion());
+
+    // Battery ADC on GPIO1 through a 3:1 divider, enabled by GPIO2, with an
+    // active-low charge-status line on GPIO3. This is not the AXP2101 PMU path.
+    CHECK(gc.power == board::PowerController::BatteryAdc);
+    CHECK(gc.pinBatteryAdc == 1);
+    CHECK(gc.batteryAdcScale == 3);
+    CHECK(gc.pinBatteryEnable == 2);
+    CHECK(gc.pinChargeStatus == 3);
+    CHECK(gc.hasBattery());
+
+    // 128x128 produces a band layout the packed-band wire format carries
+    // exactly, in both orientations - the link between the board table and the
+    // protocol. (Tile streaming stays limited to the AmoledCo5300 elsewhere, so
+    // this board uses the packed-band path.)
+    const Geometry g = {gc.panelW, gc.panelH};
+    CHECK(g.valid());
+    CHECK(g.maxBandCount() <= MAX_BANDS);
+    CHECK(tilesExactly(g, false));
+    CHECK(tilesExactly(g, true));
+
+    // Round-trips for the new variant: NVS byte, CFGBOARD token, and the
+    // firmware-image target token that keeps it off the other S3 images.
+    CHECK(board::variantFromStored((uint8_t)Variant::LcdGc9107) ==
+          Variant::LcdGc9107);
+    CHECK(board::variantFromName("gc9107") == Variant::LcdGc9107);
+    CHECK(strcmp(board::variantToken(Variant::LcdGc9107), "gc9107") == 0);
+    CHECK(strcmp(board::targetToken(Variant::LcdGc9107), "s3-085") == 0);
+    CHECK(strcmp(board::targetToken(Variant::LcdGc9107),
+                 board::targetToken(Variant::AmoledCo5300)) != 0);
+    CHECK(strcmp(board::targetToken(Variant::LcdGc9107),
+                 board::targetToken(Variant::LcdSt77916)) != 0);
+
+    // resolve() never lands on an S3 board from Unknown: an inconclusive C6
+    // probe must fall back to a C6 board, and the S3 build never probes.
+    CHECK(board::resolve(Variant::Unknown) != Variant::LcdGc9107);
+    CHECK(board::resolve(Variant::LcdGc9107) == Variant::LcdGc9107);
   }
 
   // --- C6 voltage-derived battery estimate -------------------------------

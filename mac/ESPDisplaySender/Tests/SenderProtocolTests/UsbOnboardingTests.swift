@@ -61,6 +61,58 @@ final class UsbOnboardingTests: XCTestCase {
         XCTAssertTrue(plan.detail.contains("s3-175"))
     }
 
+    func testS3085UsesItsExactNonDoomImage() {
+        var request = ready()
+        request.bundle = EsptoolCommandTests.bundle(
+            chip: "esp32s3", bootloader: 0x0, app: 0x10000,
+            target: "s3-085")
+        request.target = "s3-085"
+
+        let plan = UsbOnboardingPlan.make(request)
+        XCTAssertEqual(plan.action, .flash)
+        XCTAssertTrue(plan.canStart)
+        XCTAssertTrue(plan.headline.contains("s3-085"))
+        XCTAssertTrue(plan.detail.contains("4 parts"))
+    }
+
+    func testS3085BundleRefusesAnotherSameChipTarget() {
+        var request = ready()
+        request.bundle = EsptoolCommandTests.bundle(
+            chip: "esp32s3", bootloader: 0x0, app: 0x10000,
+            target: "s3-085")
+        request.target = "s3-175"
+
+        let plan = UsbOnboardingPlan.make(request)
+        XCTAssertEqual(plan.action, .noImageForTarget)
+        XCTAssertFalse(plan.canStart)
+    }
+
+    func testS3154UsesItsExactNonDoomImage() {
+        var request = ready()
+        request.bundle = EsptoolCommandTests.bundle(
+            chip: "esp32s3", bootloader: 0x0, app: 0x10000,
+            target: "s3-154")
+        request.target = "s3-154"
+
+        let plan = UsbOnboardingPlan.make(request)
+        XCTAssertEqual(plan.action, .flash)
+        XCTAssertTrue(plan.canStart)
+        XCTAssertTrue(plan.headline.contains("s3-154"))
+        XCTAssertTrue(plan.detail.contains("4 parts"))
+    }
+
+    func testS3154BundleRefusesAnotherSameChipTarget() {
+        var request = ready()
+        request.bundle = EsptoolCommandTests.bundle(
+            chip: "esp32s3", bootloader: 0x0, app: 0x10000,
+            target: "s3-154")
+        request.target = "s3-085"
+
+        let plan = UsbOnboardingPlan.make(request)
+        XCTAssertEqual(plan.action, .noImageForTarget)
+        XCTAssertFalse(plan.canStart)
+    }
+
     func testC6AutomaticallyUsesItsOnlyExactTarget() {
         let plan = UsbOnboardingPlan.make(ready(chip: "esp32c6"))
         XCTAssertEqual(plan.action, .flash)

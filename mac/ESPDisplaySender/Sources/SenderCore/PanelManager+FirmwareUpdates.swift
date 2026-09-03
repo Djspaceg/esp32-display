@@ -250,6 +250,10 @@ extension PanelManager {
         switch target {
         case "c6":
             return board == "st7789" || board == "jd9853"
+        case "s3-085":
+            return board == "gc9107"
+        case "s3-154":
+            return board == "st7789-154"
         case "s3-175":
             return board == "co5300"
         case "s3-185":
@@ -402,8 +406,8 @@ extension PanelManager {
         if detectedChip == "esp32s3", cfgTarget == nil {
             return .failure(
                 "Exact firmware target unavailable",
-                "CFGSHOW did not report whether this S3 is s3-175 or s3-185, so "
-                    + "nothing was written.")
+                "CFGSHOW did not report whether this S3 is s3-085, s3-154, "
+                    + "s3-175, or s3-185, so nothing was written.")
         }
         guard let selectedImage = bundle.image(forTarget: exactTarget) else {
             return .failure(

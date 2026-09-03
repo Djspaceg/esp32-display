@@ -15,15 +15,15 @@ The project distributes precompiled firmware. It does not compile a custom
 image on an end user's Mac.
 
 A release contains one or more images. Each image claims one or more exact
-target keys such as `c6`, `s3-175`, or `s3-185`. The command-line interface
-(CLI) or Mac app determines the exact target, selects its image, and flashes the
-parts already stored in the bundle.
+target keys such as `c6`, `s3-085`, `s3-154`, `s3-175`, or `s3-185`. The
+command-line interface (CLI) or Mac app determines the exact target, selects its
+image, and flashes the parts already stored in the bundle.
 
 One image may support multiple hardware profiles when the firmware can detect
 them safely at runtime. This is why one `c6` image supports both 1.47-inch C6
 boards. Hardware that shares a chip but cannot be distinguished safely uses
-separate exact targets. This is why the two S3 displays use `s3-175` and
-`s3-185`, even though both report `esp32s3`.
+separate exact targets. This is why the four S3 displays use `s3-085`,
+`s3-154`, `s3-175`, and `s3-185`, even though all four report `esp32s3`.
 
 ## Vocabulary and ownership
 
@@ -57,6 +57,8 @@ of those conditions is false, create a separate exact target.
 | Target   | Alias | Chip      | Runtime profile(s)         | Geometry | Controller and bus        | Selector                                                   |
 | -------- | ----- | --------- | -------------------------- | -------- | ------------------------- | ---------------------------------------------------------- |
 | `c6`     | —     | `esp32c6` | `LcdSt7789`, `TouchJd9853` | 172×320  | ST7789 or JD9853 over SPI | USB chip detection, then firmware I2C probe                |
+| `s3-085` | —     | `esp32s3` | `LcdGc9107`                | 128×128  | GC9107 over SPI           | User choice when blank; reported exact target when running |
+| `s3-154` | —     | `esp32s3` | `TouchSt7789`              | 240×240  | ST7789 over SPI           | User choice when blank; reported exact target when running |
 | `s3-175` | `s3`  | `esp32s3` | `AmoledCo5300`             | 466×466  | CO5300 over QSPI          | User choice when blank; reported exact target when running |
 | `s3-185` | —     | `esp32s3` | `LcdSt77916`               | 360×360  | ST77916 over QSPI         | User choice when blank; reported exact target when running |
 
@@ -76,18 +78,22 @@ recovery override.
 This runtime detector is specific to these profiles. It is not a generic rule
 that same-chip products should share an image.
 
-### Why S3 uses two images
+### Why S3 uses four images
 
-The S3 products differ in panel geometry, controller, bus pins, touch wiring,
-reset topology, power hardware, and memory use. Esptool can identify the
-`esp32s3` chip, but it cannot identify the product soldered around it. No safe
-runtime probe currently distinguishes the two products before display pins
-must be configured.
+The S3 products differ in panel geometry, controller, SPI mode or bus shape,
+touch wiring, reset topology, power hardware, and memory use. Esptool can
+identify the `esp32s3` chip, but it cannot identify the product soldered around
+it. No safe runtime probe currently distinguishes the four products before
+display pins must be configured.
 
-The build therefore produces two artifacts. `s3-175` links only the CO5300
+The build therefore produces four S3 artifacts. `s3-175` links only the CO5300
 path. `s3-185` is compiled with `-DESPDISP_BOARD_S3_185` and links only the
-ST77916 path. Chip identity alone cannot authorize a flash between them because
-both ESP image headers contain the same `esp32s3` chip identifier.
+ST77916 path. `s3-085` is compiled with `-DESPDISP_BOARD_S3_085` and links only
+the GC9107 path. `s3-154` is compiled with `-DESPDISP_BOARD_S3_154` and links
+the core ST7789 driver with its 240×240 mode-3 profile. The `s3-085`, `s3-154`,
+and `s3-185` targets use the standard partition scheme and no Doom library.
+Chip identity alone cannot authorize a flash among them because all four ESP
+image headers contain the same `esp32s3` chip identifier.
 
 ## Selection and flashing flow
 
@@ -100,8 +106,9 @@ from display resolution and never treats a chip token as an exact S3 target.
    hardware identity.
 2. `esp32c6` maps unambiguously to target `c6`. After boot, the shared image
    probes which C6 profile is present.
-3. `esp32s3` maps to both `s3-175` and `s3-185`. The user must choose the
-   product model because the blank device has no trustworthy display identity.
+3. `esp32s3` maps to `s3-085`, `s3-154`, `s3-175`, and `s3-185`. The user
+   must choose the product model because the blank device has no trustworthy
+   display identity.
 4. The selected format-3 bundle image supplies the bootloader, partition table,
    OTA initializer, application, and every flash address. The app writes those
    parts in one esptool operation.
@@ -120,9 +127,10 @@ separate questions:
 
 - `chip=esp32c6|esp32s3` identifies the processor and cross-checks the ESP image
   header.
-- `target=c6|s3-175|s3-185` identifies the compatible firmware artifact.
-- `board=st7789|jd9853|co5300|st77916` identifies the active runtime hardware
-  profile.
+- `target=c6|s3-085|s3-154|s3-175|s3-185` identifies the compatible firmware
+  artifact.
+- `board=st7789|jd9853|gc9107|st7789-154|co5300|st77916` identifies the active
+  runtime hardware profile.
 
 The `_espdisp._udp` multicast Domain Name System (mDNS) record carries `chip`
 and `target`; `CFGSHOW` exposes the same target plus the active board profile.
@@ -139,9 +147,9 @@ name, and WiFi credentials.
 The exact target chooses the application payload. The chip is an independent
 cross-check, not the selector. For S3, the CLI and app fail closed when they
 cannot discover both a matching exact target and chip, or when discovery is
-disabled. This protects `s3-175` from `s3-185` and the reverse. The ESP image
-header protects only cross-chip mistakes such as C6 versus S3; it cannot protect
-two images for the same S3 chip.
+disabled. This protects `s3-085`, `s3-154`, `s3-175`, and `s3-185` from one
+another. The ESP image header protects only cross-chip mistakes such as C6
+versus S3; it cannot protect images that share the same S3 chip.
 
 USB remains the recovery path because OTA cannot replace the bootloader or
 partition table and cannot reach a board that no longer joins the network.
@@ -172,8 +180,8 @@ Each image carries:
 - build metadata including firmware version, timestamp, source commit, dirty
   state, FQBN, and tool version.
 
-Format 3 allows multiple images for one chip because `s3-175` and `s3-185` are
-both `esp32s3`. Every exact target may be claimed by only one image. One image
+Format 3 allows multiple images for one chip because `s3-085`, `s3-175`, and
+`s3-185` are all `esp32s3`. Every exact target may be claimed by only one image. One image
 may claim multiple targets when those targets have been validated as
 byte-for-byte compatible; no format change is needed for that future case.
 
@@ -189,8 +197,8 @@ Current readers accept formats 1, 2, and 3. Legacy `s3` input resolves only to
 `s3-175`. New bundles and user interfaces must use exact target keys.
 
 The app package runs `bundle-info --require-all-targets` before embedding a
-bundle. A release bundle is incomplete unless it claims `c6`, `s3-175`, and
-`s3-185` exactly once and every payload hash verifies.
+bundle. A release bundle is incomplete unless it claims `c6`, `s3-085`,
+`s3-175`, and `s3-185` exactly once and every payload hash verifies.
 
 ## Implementation map
 
@@ -266,7 +274,12 @@ memory settings.
 
 `s3-185` is the reference implementation of this recipe: it shares
 `esp32s3` with `s3-175` but uses `-DESPDISP_BOARD_S3_185` and a separate
-ST77916-only artifact.
+ST77916-only artifact. `s3-085` follows the same recipe on the same chip: it
+selects its profile under `CONFIG_IDF_TARGET_ESP32S3 && ESPDISP_BOARD_S3_085`,
+links only the GC9107 path (the vendored `esp_lcd_gc9107` driver), and stays on
+the standard partition scheme with no Doom library or WAD. `s3-154` uses the
+same exact-target mechanism with `ESPDISP_BOARD_S3_154`, the core ST7789 driver,
+and its own mode-3 240×240 carrier profile.
 
 ### Add a new chip and target
 
@@ -321,7 +334,8 @@ Complete all applicable checks before publishing an artifact:
 - Run `firmware/test/run_tests.sh`.
 - Run `python3 tools/test_espdisp.py`.
 - Run `swift test` in `mac/ESPDisplaySender`.
-- Compile `c6`, `s3-175`, `s3-185`, and every new target independently.
+- Compile `c6`, `s3-085`, `s3-154`, `s3-175`, `s3-185`, and every new target
+  independently.
 - Record application size and confirm OTA-slot headroom for each target.
 - Build a format-3 bundle; run `bundle-info --require-all-targets`; verify target
   claims, part addresses, sizes, and hashes.

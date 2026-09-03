@@ -6,10 +6,10 @@ ScreenCaptureKit, converts it to RGB565, and streams only changed regions over
 WiFi. Firmware reassembles those regions and drives each panel over SPI or QSPI
 with direct memory access (DMA).
 
-The project ships precompiled images for three exact firmware targets. One `c6`
+The project ships precompiled images for five exact firmware targets. One `c6`
 image safely detects either supported 1.47-inch C6 profile at boot; the
-`s3-175` and `s3-185` images remain separate because those products share an
-ESP32-S3 chip but not a controller, geometry, or pin map. See
+`s3-085`, `s3-154`, `s3-175`, and `s3-185` images remain separate because those
+products share an ESP32-S3 chip but not a controller, geometry, or pin map. See
 [Supported hardware and firmware targets](#supported-hardware-and-firmware-targets)
 and the [firmware target architecture](docs/firmware-target-architecture.md).
 
@@ -153,6 +153,8 @@ current release catalog is:
 | Target   | Hardware profile(s)                        | Chip      | Display                          | Selection                                                   |
 | -------- | ------------------------------------------ | --------- | -------------------------------- | ----------------------------------------------------------- |
 | `c6`     | ESP32-C6-LCD-1.47; ESP32-C6-Touch-LCD-1.47 | `esp32c6` | 172×320 ST7789 or JD9853 SPI LCD | Chip selects image; firmware probes profile                 |
+| `s3-085` | Waveshare ESP32-S3-LCD-0.85                | `esp32s3` | 128×128 GC9107 SPI LCD           | Exact target reported when running; user selects when blank |
+| `s3-154` | Waveshare ESP32-S3-Touch-LCD-1.54          | `esp32s3` | 240×240 ST7789 SPI touch LCD     | Exact target reported when running; user selects when blank |
 | `s3-175` | ESP32-S3-Touch-AMOLED-1.75C                | `esp32s3` | 466×466 CO5300 QSPI AMOLED       | Exact target reported when running; user selects when blank |
 | `s3-185` | ESP32-S3-Touch-LCD-1.85C                   | `esp32s3` | 360×360 ST77916 QSPI LCD         | Exact target reported when running; user selects when blank |
 
@@ -183,10 +185,10 @@ The touch controller and motion sensor identify `TouchJd9853`; a silent bus
 identifies `LcdSt7789`. `board_config.h` is the source of truth for both
 profiles and their safety fallback.
 
-The two S3 products do not share an image. Esptool can identify `esp32s3`, but
+The four S3 products do not share an image. Esptool can identify `esp32s3`, but
 it cannot identify which integrated display surrounds that chip. Each S3
 artifact therefore links only its own panel controller, and a blank S3 requires
-an explicit `s3-175` or `s3-185` selection.
+an explicit `s3-085`, `s3-154`, `s3-175`, or `s3-185` selection.
 
 An inconclusive probe resolves to the **Touch** board, which inverts this
 project's historical default on purpose. The two possible misdetections are not
@@ -241,16 +243,86 @@ swipes, and long presses to the Mac, wake a dimmed panel without also firing an
 action, and show a local status bar on a plain tap. `firmware/display_test` keeps
 its interactive marker mode for physical transform checks.
 
-**Battery reporting is available on both battery-capable touch boards.** The
+**Battery reporting is available on all four battery-capable boards.** The
 ESP32-S3-Touch-AMOLED-1.75C uses its AXP2101 PMU for cell presence, external
 power, gauge percentage, charge state, and voltage. The
 ESP32-C6-Touch-LCD-1.47 reads cell voltage through the board's 3:1 divider on
 GPIO0 and estimates percentage from the LiPo discharge curve. Its ETA6098
 charger status output drives only an LED, not the ESP32, so charge state is
-truthfully reported as unknown rather than inferred from voltage or USB. The
-non-touch C6 has no battery telemetry path. Firmware advertises `CAP_BATTERY`
-only after the configured source initializes; the Mac and the on-device status
-UI then show the best information that source can provide.
+reported as unknown rather than inferred from voltage or USB. The 0.85-inch and
+1.54-inch S3 boards use the shared GPIO1/2/3 3:1 ADC path and report Charging
+only while the active-low status input is asserted. The non-touch C6 has no
+battery telemetry path. Firmware advertises `CAP_BATTERY` only after the
+configured source initializes; the Mac and the on-device status UI then show
+the best information that source can provide.
+
+### ESP32-S3-Touch-LCD-1.54 (`s3-154`)
+
+The `s3-154` target is a separate 16 MB image for the Waveshare
+ESP32-S3-Touch-LCD-1.54. It reports `board=st7789-154`, `target=s3-154`,
+`res=240x240`, and `chip=esp32s3`. The profile follows Waveshare's official
+Arduino and ESP-IDF source at commit `5157db7c888e476fd57f8a95020800377447478f`.
+
+| Hardware fact   | `s3-154` (Waveshare ESP32-S3-Touch-LCD-1.54)                                                       |
+| --------------- | -------------------------------------------------------------------------------------------------- |
+| MCU / memory    | ESP32-S3R8, 16 MB flash, 8 MB octal PSRAM                                                          |
+| Panel           | ST7789, 240×240 square LCD, RGB565, inversion enabled                                              |
+| Display bus     | 4-wire write-only SPI, 40 MHz, mode 3                                                              |
+| SCLK / MOSI     | GPIO38 / GPIO39                                                                                    |
+| CS / DC         | GPIO21 / GPIO45                                                                                    |
+| RST / backlight | GPIO40 / GPIO46 (PWM)                                                                              |
+| Touch           | CST816 at I2C address `0x15`; SDA GPIO42, SCL GPIO41, reset GPIO47, interrupt GPIO48               |
+| Motion          | QMI8658 at `0x6B` on GPIO42/41; initial axis map is identity pending physical edge-down validation |
+| Battery         | ADC GPIO1 through 3:1 divider; enable GPIO2; active-low charge status GPIO3                        |
+| Buttons         | BOOT GPIO0; auxiliary buttons GPIO4 and GPIO5 have no stream-firmware actions                      |
+| TF card         | SDMMC CLK 16, CMD 15, D0 17, D1 18, D2 13, D3 14; not initialized by display firmware              |
+| Audio           | MCLK 8, BCLK 9, LRCK 10, DIN 11, DOUT 12, amplifier control 7; codecs on GPIO42/41; disabled       |
+| USB             | native ESP32-S3 USB, CDC on boot                                                                   |
+
+The existing packed-band protocol carries the 240×240 framebuffer; tile
+streaming remains limited to the CO5300 target. On attached hardware, a full USB
+flash preserved MAC `28:84:85:49:8d:60`, WiFi, and name; `CFGSHOW` reported the
+new profile/target, motion, and battery; and EINF advertised touch, long-press,
+and battery capabilities. Physical corner/orientation, touch-axis, IMU-axis,
+and charge-state checks remain to be observed.
+
+### ESP32-S3-LCD-0.85 (`s3-085`)
+
+The `s3-085` target drives the Waveshare ESP32-S3-LCD-0.85: a 128×128 square
+GC9107 LCD on the same `esp32s3` chip as the other three S3 targets, but with
+its own controller, geometry, and pin map. It is not a Doom target and uses the
+core's standard (non-custom) partition scheme. At runtime it reports
+`board=gc9107`, `target=s3-085`, `res=128x128`, and `chip=esp32s3`. Its GC9107
+driver is the vendored `esp_lcd_gc9107` library.
+
+| Hardware fact         | `s3-085` (Waveshare ESP32-S3-LCD-0.85)                                                                                      |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Module                | ESP32-S3-PICO-1-N8R8 (8 MB flash, 8 MB octal PSRAM)                                                                         |
+| Panel controller      | GC9107, 128×128 square LCD                                                                                                  |
+| Bus                   | 4-wire write-only SPI, 40 MHz, SPI mode 0 (no MISO)                                                                         |
+| Pixel format          | RGB565, BGR element order, big-endian bytes, inversion on                                                                   |
+| SCLK / MOSI           | GPIO38 / GPIO39                                                                                                             |
+| CS / DC               | GPIO21 / GPIO45                                                                                                             |
+| RST / backlight       | GPIO40 / GPIO46 (PWM)                                                                                                       |
+| Address window offset | column 2, row 1 (controller RAM 128×160)                                                                                    |
+| Native rotation base  | two quarter turns; square glass allows all four quarter turns (`roundDisplay=false`)                                        |
+| BOOT button           | GPIO0 (mapped to the existing button behavior)                                                                              |
+| Other buttons         | PLUS GPIO4, PWR GPIO5 (carrier facts only; no firmware action)                                                              |
+| Addressable RGB LEDs  | eight WS2812B-compatible on GPIO48; RGB order follows the vendor demo and awaits physical validation                        |
+| Battery charger       | ETA6098                                                                                                                     |
+| Battery ADC           | GPIO1 through a 200k/100k 3:1 divider                                                                                       |
+| Battery enable        | GPIO2 (asserted before sampling)                                                                                            |
+| Charge status         | GPIO3, active-low                                                                                                           |
+| Touch / motion        | none                                                                                                                        |
+| Exposed I2C           | SDA GPIO42, SCL GPIO41                                                                                                      |
+| TF card (SDMMC)       | CLK GPIO16, CMD GPIO15, D0 GPIO17, D1 GPIO18, D2 GPIO13, D3 GPIO14; not initialized by display firmware                     |
+| Audio                 | I2S MCLK GPIO8, BCLK GPIO9, LRCK GPIO10, DIN GPIO11, DOUT GPIO12, amplifier control GPIO7; codec I2C on GPIO42/41; disabled |
+| USB                   | native ESP32-S3 USB on GPIO19/20, CDC on boot                                                                               |
+
+Charge state is reported truthfully rather than inferred: the active-low GPIO3
+line reports Charging only when low, and the external/standby state is
+unavailable rather than guessed from voltage or USB. The board has no touch
+controller and no motion sensor.
 
 ## Performance
 
@@ -427,12 +499,12 @@ reconnect — address changes need no bookkeeping).
 The TXT records carry `name`, `res=WxH`, `fw` (firmware version), `proto`
 (frame protocol version), `caps` (capability bits as eight hex digits), `chip`,
 and `target`. `chip` is the processor token from `CONFIG_IDF_TARGET`:
-`esp32c6` or `esp32s3`. `target` is the exact artifact key: `c6`, `s3-175`, or
-`s3-185`.
+`esp32c6` or `esp32s3`. `target` is the exact artifact key: `c6`, `s3-085`,
+`s3-154`, `s3-175`, or `s3-185`.
 
 The exact target selects an image from a firmware bundle. The chip independently
-cross-checks that choice. This distinction matters because both S3 images carry
-the same ESP image chip identifier and only the target distinguishes their
+cross-checks that choice. This distinction matters because all four S3 images
+carry the same ESP image chip identifier and only the target distinguishes their
 attached displays. Resolution is never used as identity. A build that cannot
 name its chip or target advertises `unknown`; S3 updates fail closed without
 exact target evidence.
@@ -478,10 +550,11 @@ accepted right now", not "this build has OTA code in it".
 | Path                                   | What                                                                                                                                                                                      |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `firmware/display_stream/`             | The real firmware: WiFi, mDNS, UDP receiver, esp_lcd DMA, button and remote controls. A thin `.ino` (setup and the loop skeleton) over per-concern modules — see `docs/code-structure.md` |
-| `firmware/display_test/`               | Panel bring-up test on either board (colors, offsets, orientation, SPI timing) plus interactive touch mapping                                                                             |
+| `firmware/display_test/`               | Shared panel bring-up test for every fixed target and the runtime-detected C6 profiles (colors, offsets, orientation, SPI timing) plus interactive touch mapping                          |
 | `firmware/board_probe/`                | I2C-scan diagnostic reporting which board variant you have                                                                                                                                |
-| `firmware/libraries/espdisp_board/`    | Board table and detection, panel bring-up, touch and motion readers/transforms, AXP2101 and C6 ADC battery telemetry                                                                      |
+| `firmware/libraries/espdisp_board/`    | Board table and detection, panel bring-up, touch and motion readers/transforms, AXP2101 and ADC battery telemetry                                                                         |
 | `firmware/libraries/esp_lcd_jd9853/`   | Vendored Apache-2.0 JD9853 esp_lcd driver (see its README for provenance)                                                                                                                 |
+| `firmware/libraries/esp_lcd_gc9107/`   | Vendored Apache-2.0 GC9107 esp_lcd driver, Espressif esp_lcd_gc9107 2.0.0                                                                                                                 |
 | `firmware/doom/`                       | `s3-175`-only Doom engine, hardware bridge, WAD verification, and test procedure                                                                                                          |
 | `mac/ESPDisplaySender/`                | Native manager app plus SwiftPM command-line workflows                                                                                                                                    |
 | `firmware/test/`                       | Host-side unit tests for the protocol, control-queue, board-table, and panel-state logic (`run_tests.sh`)                                                                                 |
@@ -507,6 +580,30 @@ arduino-cli compile -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" --librar
 arduino-cli upload  -b "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M" -p /dev/cu.usbmodem* .
 ```
 
+For target **`s3-085`** (Waveshare ESP32-S3-LCD-0.85, 128×128 GC9107 SPI
+LCD):
+
+```sh
+cd firmware/display_stream
+cp wifi_config.h.example wifi_config.h   # fill in your 2.4GHz network
+arduino-cli compile -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi" --libraries ../libraries --build-property "compiler.cpp.extra_flags=-DESPDISP_BOARD_S3_085" .
+arduino-cli upload  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi" -p /dev/cu.usbmodem* .
+```
+
+Unlike the other S3 targets, `s3-085` uses 8 MB flash with 8 MB octal PSRAM on
+an ESP32-S3-PICO-1-N8R8 module, the core's standard (non-custom) partition
+scheme, and no Doom library or WAD — so its compile needs only the board and
+`--libraries ../libraries`.
+
+For target **`s3-154`** (ESP32-S3-Touch-LCD-1.54, 240×240 ST7789 SPI LCD):
+
+```sh
+cd firmware/display_stream
+cp wifi_config.h.example wifi_config.h   # fill in your 2.4GHz network
+arduino-cli compile -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" --libraries ../libraries --build-property "compiler.cpp.extra_flags=-DESPDISP_BOARD_S3_154" .
+arduino-cli upload  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" -p /dev/cu.usbmodem* .
+```
+
 For target **`s3-175`** (ESP32-S3-Touch-AMOLED-1.75C, 466×466 QSPI
 AMOLED):
 
@@ -526,14 +623,14 @@ arduino-cli compile -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=op
 arduino-cli upload  -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" -p /dev/cu.usbmodem* .
 ```
 
-Both current S3 targets use 16 MB flash and 8 MB octal PSRAM on an
-ESP32-S3R8 module. `PSRAM=opi` enables that interface. The 466×466 `s3-175`
-framebuffers require PSRAM because each is about 434 KB; `s3-185` keeps the same
-validated platform configuration.
+The `s3-154`, `s3-175`, and `s3-185` targets use 16 MB flash and 8 MB octal
+PSRAM on an ESP32-S3R8 module. `PSRAM=opi` enables that interface. The 466×466
+`s3-175` framebuffers require PSRAM because each is about 434 KB; the other S3R8
+targets keep the same validated platform configuration.
 
 `--libraries ../libraries` puts the in-repo board and panel libraries on the
-search path, including the vendored JD9853, CO5300, and ST77916 drivers. The
-`s3-175` build additionally passes `--libraries ..` because Arduino expects a
+search path, including the vendored JD9853, CO5300, ST77916, and GC9107 drivers.
+The `s3-175` build additionally passes `--libraries ..` because Arduino expects a
 directory containing the `doom` library, plus its exact-target compile define
 and custom partition scheme. These are compile-only settings; `upload` reuses
 the cached build. The C6 binary detects one of two runtime profiles. Each S3
@@ -548,6 +645,8 @@ out of your shell history:
 ```sh
 tools/espdisp.py list                        # serial ports and detected chips
 tools/espdisp.py compile --board c6          # shared C6 image
+tools/espdisp.py compile --board s3-085      # 0.85-inch GC9107 S3 image
+tools/espdisp.py compile --board s3-154      # 1.54-inch ST7789 touch S3 image
 tools/espdisp.py compile --board s3-175      # 1.75-inch CO5300 S3 image
 tools/espdisp.py compile --board s3-185      # 1.85-inch ST77916 S3 image
 tools/espdisp.py flash                       # detects C6; refuses ambiguous S3
@@ -555,7 +654,7 @@ tools/espdisp.py flash --board s3-175        # firmware + verified Doom WAD
 tools/espdisp.py flash --board s3-185        # explicit blank-S3 target
 tools/espdisp.py set-password                # store an OTA password (prompts)
 tools/espdisp.py ota panel.local --board c6  # exact-target OTA update
-tools/espdisp.py bundle                      # all three exact targets
+tools/espdisp.py bundle                      # all five exact targets
 tools/espdisp.py bundle-info FILE            # verify manifest, parts, and hashes
 tools/espdisp.py config CFGSHOW              # report board profile and target
 ```
@@ -572,15 +671,17 @@ scrollback.
 
 `flash` refuses when it cannot determine an exact target. A detected
 `esp32c6` maps to `c6`; a detected `esp32s3` is deliberately ambiguous because
-both S3 products use the same chip. For a blank S3, pass `--board s3-175` or
-`--board s3-185` after checking the product model. More than one candidate USB
-port is also a refusal; pass `--port`.
+all four S3 products use the same chip. For a blank S3, pass `--board s3-085`,
+`--board s3-154`, `--board s3-175`, or `--board s3-185` after checking the
+product model. More than one candidate USB port is also a refusal; pass
+`--port`.
 
 Esptool's image-header check rejects a cross-chip write such as S3 firmware to a
-C6. It cannot reject `s3-175` versus `s3-185`, because those images carry the
-same S3 chip identifier. A board already running current firmware reports its
-exact target for preflight checks. A blank S3 cannot, so its explicit model
-selection is a safety boundary rather than a convenience option.
+C6. It cannot reject one S3 target from another (`s3-085`, `s3-154`, `s3-175`,
+`s3-185`), because those images carry the same S3 chip identifier. A board
+already running current firmware reports its exact target for preflight checks.
+A blank S3 cannot, so its explicit model selection is a safety boundary rather
+than a convenience option.
 
 The script is standard-library Python 3 only: unlike the other `tools/` scripts
 it does not need pyserial. The explicit `arduino-cli` commands above remain the
@@ -622,13 +723,14 @@ tools/espdisp.py ota panel.local --board s3-185
 `--board` names an exact target. Before compiling, the tool discovers the
 panel's `_arduino._tcp` service and compares its `target` and chip records. A
 unique chip can confirm `c6`. An S3 update requires discoverable, matching
-`s3-175` or `s3-185` target evidence plus a matching `esp32s3` chip record. If
+`s3-085`, `s3-154`, `s3-175`, or `s3-185` target evidence plus a matching
+`esp32s3` chip record. If
 that evidence is missing, mismatched, or discovery is disabled, the S3 update
 stops.
 
 This fail-closed behavior is required because the ESP image header validates the
 processor, not the attached display. It safely rejects C6 firmware on an S3,
-but it cannot distinguish the two same-chip S3 artifacts. USB remains the
+but it cannot distinguish the three same-chip S3 artifacts. USB remains the
 recovery path if a panel cannot advertise its identity or join the network.
 
 The password comes from `--password`, else `$ESPDISP_OTA_PASSWORD`, else a prompt;
@@ -698,7 +800,7 @@ name (default `Tiny Monitor`), learns its UUID, and tracks it from then on.
 other case: build here, update from there.
 
 ```sh
-tools/espdisp.py bundle                            # c6 + s3-175 + s3-185
+tools/espdisp.py bundle                            # c6 + s3-085 + s3-154 + s3-175 + s3-185
 tools/espdisp.py bundle --board c6 --output ~/fw.espdispfw
 tools/espdisp.py bundle --board s3-185 --output ~/fw.espdispfw
 tools/espdisp.py bundle-info ~/fw.espdispfw        # verify before sharing
@@ -714,9 +816,10 @@ it is one file rather than a directory of images.
 Per target it carries the application image used for OTA, plus the second-stage
 bootloader, partition table, and `boot_app0.bin` needed to bring up a blank
 board. The `s3-175` image carries one additional `doom_wad` payload at
-`0xBFF000`; `c6` and `s3-185` never carry that role. The compile produces the
-application, bootloader, and partition table; `boot_app0.bin` is the core's own
-copy, and the WAD is accepted only at the pinned shareware-v1.9 size and SHA-256.
+`0xBFF000`; `c6`, `s3-085`, and `s3-185` never carry that role. The compile
+produces the application, bootloader, and partition table; `boot_app0.bin` is
+the core's own copy, and the WAD is accepted only at the pinned shareware-v1.9
+size and SHA-256.
 
 Each payload's flash address travels in the file rather than being a constant in
 whatever writes it. That matters because addresses are platform data:
@@ -734,8 +837,9 @@ credentials and its name.
 The format-3 manifest carries the firmware version, an ISO 8601 UTC build
 timestamp, source commit and dirty state, tool version, and each image's chip,
 FQBN, exact `targets` claims, application payload, flash address, and blank-board
-parts. Duplicate chips are valid because `s3-175` and `s3-185` are separate
-images for `esp32s3`; duplicate exact-target claims are not.
+parts. Duplicate chips are valid because `s3-085`, `s3-154`, `s3-175`, and
+`s3-185` are separate images for `esp32s3`; duplicate exact-target claims are
+not.
 
 `bundle-info` prints and verifies every field. It refuses bad magic, malformed
 JSON, non-contiguous offsets, out-of-range payloads, missing blank-board parts,
@@ -801,12 +905,11 @@ identity. What happens then:
    works, and what it is missing is credentials, so it is not re-flashed by
    default. Flashing it is still one radio button away.
 2. For a blank board, esptool reads the chip. `esp32c6` selects `c6`. An
-   `esp32s3` chip matches two exact targets, so the sheet requires the user to
-   choose `s3-175` or `s3-185` before flashing.
+   `esp32s3` chip matches four exact targets, so the sheet requires the user to
+   choose `s3-085`, `s3-154`, `s3-175`, or `s3-185` before flashing.
 3. Everything a blank board needs is written in one esptool run — bootloader,
    partition table, boot_app0 and the application image, plus the verified Doom
-   WAD for `s3-175`, at the addresses the bundle carries. The partition table
-   travels with the app deliberately: it is the table that says where the app
+   WAD for `s3-175`, at the addresses the bundle carries. The partition table travels with the app deliberately: it is the table that says
    and target-specific data live, so writing one without the other puts bytes
    where the old table assigns a different role.
 4. The WiFi credentials go down the same cable, and the board saves them and
@@ -848,8 +951,8 @@ It then classifies the operation as update, reinstall, or downgrade. If either
 version is not a dotted number, it says ordering is unknown rather than
 guessing. A bundle without the panel's exact target is refused. Current S3
 updates also require matching live target and chip evidence; there is no manual
-image picker or chip-only override because `s3-175` and `s3-185` share an ESP
-image chip identifier.
+image picker or chip-only override because `s3-085`, `s3-154`, `s3-175`, and
+`s3-185` share an ESP image chip identifier.
 
 The password is the one set with `tools/espdisp.py set-password`. **Update
 Firmware…** is greyed out until a panel advertises that OTA is listening, and the
@@ -903,7 +1006,8 @@ What this implementation provides:
 - Two target checks protect different boundaries. The bootloader compares the
   image header's `chip_id` with the running processor, so a C6/S3 mismatch is
   refused. The CLI and app compare the reported exact target before transfer,
-  so same-chip `s3-175`/`s3-185` mismatches are also refused.
+  so same-chip S3 mismatches among `s3-085`, `s3-154`, `s3-175`, and `s3-185`
+  are also refused.
 - Writes to the _inactive_ app slot. A failed or rejected push — bad password,
   lost transfer, wrong chip, failed MD5 — leaves the panel running exactly the
   firmware it booted; the failure reason appears on the glass.
@@ -924,14 +1028,15 @@ What remains open, and would each be a real piece of work:
 Every fact above about the protocol, the password handling, and the integrity and
 target checks was read out of the core's `ArduinoOTA.cpp`, `Updater.cpp` and
 `espota.py`, and out of ESP-IDF's `esp_ota_ops.c`, `esp_image_format.c` and
-`bootloader_common_loader.c`; what has been exercised here is that all three
+`bootloader_common_loader.c`; what has been exercised here is that all five
 exact targets compile, the pusher builds the expected command line, and failure
 against a host that does not answer is clean.
 
-Application-slot headroom is finite. The latest validated builds use 1,189,088
-bytes for `c6`, 1,352,178 bytes for `s3-175`, and 1,078,774 bytes for `s3-185`.
-The Doom target's two app slots are each 6,225,920 bytes; the other targets use
-their core-selected slot sizes. Every release must recheck these figures
+Application-slot headroom is finite. The latest validated builds use 1,193,694
+bytes for `c6`, 1,079,722 bytes for `s3-085`, 1,078,770 bytes for `s3-154`,
+1,354,938 bytes for `s3-175`, and 1,081,334 bytes for `s3-185`. The `s3-175`
+Doom target has 6,225,920-byte app slots; the other targets use the
+core-selected 1,310,720-byte slot. Every release must recheck these figures
 independently. Each fixed S3 artifact links only its own panel driver. Any future
 partition choice must be applied everywhere that target's FQBN is built and
 installed once over USB because OTA cannot rewrite the partition table.
@@ -986,10 +1091,12 @@ be in real use — a periodic check is what actually bounds it. The age line
 reads as time-since-boot after a restart rather than claiming a stale
 template just arrived, since there is no clock to say otherwise.
 
-On the ESP32-C6-LCD-1.47, the RGB LED behind the display glows with live WiFi
-signal quality, updated every 2 seconds. The ESP32-C6-Touch-LCD-1.47 has no
-addressable LED, so this indicator is absent there — use the status card or
-`CFGSHOW` for signal strength on that board.
+On the ESP32-C6-LCD-1.47 and ESP32-S3-LCD-0.85, the addressable RGB LED
+chain glows with live WiFi signal quality, updated every 2 seconds. The C6 board
+has one LED; the S3 board has eight. The S3 color order follows Waveshare's
+Arduino demo and still requires physical red/green/blue validation. The
+ESP32-C6-Touch-LCD-1.47 has no addressable LED, so this indicator is absent
+there — use the status card or `CFGSHOW` for signal strength on that board.
 
 | Color           | Meaning                                             |
 | --------------- | --------------------------------------------------- |

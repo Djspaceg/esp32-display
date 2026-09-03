@@ -1,16 +1,19 @@
-// Battery telemetry for both touch boards:
+// Battery telemetry for the four battery-capable boards:
 // - AXP2101 PMU on the ESP32-S3-Touch-AMOLED-1.75C.
 // - A 3:1 resistor-divider ADC on the ESP32-C6-Touch-LCD-1.47.
+// - A shared 3:1 divider design on the ESP32-S3-LCD-0.85 and
+//   ESP32-S3-Touch-LCD-1.54, with an ADC enable and charger-status input.
 //
 // The AXP2101 reports attachment, external power, charging state, gauge
-// percentage, and voltage. The C6's ETA6098 charger exposes STAT only to an
-// LED, not to the ESP32, so its ADC path reports measured voltage, an estimated
-// percentage, and an explicitly unknown charge state.
+// percentage, and voltage. The ADC paths report measured voltage and an
+// estimated percentage. The C6 charger's status output drives only an LED, so
+// its charge state remains unknown; the two S3 ADC boards report Charging only
+// while their active-low status input is asserted.
 //
 // Every entry point is a no-op unless the board table says this board has a
-// battery telemetry path (`board::Config::hasBattery()`). That keeps the C6
-// non-touch variant from sampling an unconnected ADC and keeps the AXP2101
-// register path exclusive to the S3.
+// battery telemetry path (`board::Config::hasBattery()`). That keeps boards
+// without telemetry from sampling an unconnected ADC or entering the AXP2101
+// register path.
 //
 // WHY NOT XPOWERSLIB: the vendor library is the obvious thing to vendor, and it
 // is where the register map below comes from. It was not vendored. It is a
@@ -34,7 +37,10 @@
 // board: initialization succeeded and live readings reported a present cell,
 // VBUS, standby state, 100%, and 4166 mV. The C6 GPIO0 ADC path is based on the
 // board schematic but has not yet been physically measured on a C6 touch board;
-// its ETA6098 charge state remains explicitly unknown by design.
+// its ETA6098 charge state remains explicitly unknown by design. The 1.54-inch
+// S3 GPIO1/2/3 path initialized and produced a live percentage on attached
+// hardware; its voltage plausibility and active-low charging transition remain
+// to be checked. The 0.85-inch path still awaits hardware validation.
 #pragma once
 
 #include <Arduino.h>
@@ -98,6 +104,8 @@ inline bool enabled = false;
 inline board::PowerController activeController = board::PowerController::None;
 inline int8_t activeAdcPin = board::NO_PIN;
 inline uint8_t activeAdcScale = 0;
+inline int8_t activeBatteryEnable = board::NO_PIN;
+inline int8_t activeChargeStatus = board::NO_PIN;
 
 /// Read one register.
 ///
@@ -157,22 +165,33 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
   activeController = board::PowerController::None;
   activeAdcPin = board::NO_PIN;
   activeAdcScale = 0;
+  activeBatteryEnable = board::NO_PIN;
+  activeChargeStatus = board::NO_PIN;
   if (!cfg.hasBattery()) {
     if (verbose) Serial.printf("power: no battery telemetry on %s\n", cfg.name);
     return false;
   }
 
   if (cfg.power == board::PowerController::BatteryAdc) {
+    if (cfg.pinBatteryEnable != board::NO_PIN) {
+      pinMode(cfg.pinBatteryEnable, OUTPUT);
+      digitalWrite(cfg.pinBatteryEnable, HIGH);
+    }
+    if (cfg.pinChargeStatus != board::NO_PIN) {
+      pinMode(cfg.pinChargeStatus, INPUT_PULLUP);
+    }
     pinMode(cfg.pinBatteryAdc, INPUT);
     analogReadResolution(12);
     activeController = cfg.power;
     activeAdcPin = cfg.pinBatteryAdc;
     activeAdcScale = cfg.batteryAdcScale;
+    activeBatteryEnable = cfg.pinBatteryEnable;
+    activeChargeStatus = cfg.pinChargeStatus;
     enabled = true;
     if (verbose) {
       Serial.printf(
-          "power: battery ADC ready (gpio=%d divider=%u:1; charge state unavailable)\n",
-          activeAdcPin, activeAdcScale);
+          "power: battery ADC ready (gpio=%d divider=%u:1 enable=%d charge=%d)\n",
+          activeAdcPin, activeAdcScale, activeBatteryEnable, activeChargeStatus);
     }
     return true;
   }
@@ -245,8 +264,11 @@ inline bool read(Reading &out) {
     Reading reading = {};
     reading.millivolts = (uint16_t)cellMillivolts;
     reading.present = batteryestimate::cellPresent(reading.millivolts);
-    reading.externalPower = false;  // ETA6098 STAT is not wired to the ESP32
-    reading.charge = Charge::Unknown;
+    reading.externalPower = false;  // no reliable external-power signal
+    reading.charge = activeChargeStatus != board::NO_PIN &&
+                             digitalRead(activeChargeStatus) == LOW
+                         ? Charge::Charging
+                         : Charge::Unknown;
     reading.percentKnown = reading.present;
     reading.percent = reading.present
         ? batteryestimate::percentFromMillivolts(reading.millivolts)

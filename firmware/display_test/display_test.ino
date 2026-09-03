@@ -1,11 +1,5 @@
-// Panel bring-up test for BOTH Waveshare ESP32-C6 1.47" boards.
-//
-//   ESP32-C6-LCD-1.47        ST7789, 172x320
-//   ESP32-C6-Touch-LCD-1.47  JD9853, 172x320
-//
-// The board is detected at boot (I2C probe, see board_detect.h) and the pins,
-// driver, gap and inversion all come from the board table. One binary, either
-// board - the same arrangement display_stream uses.
+// Panel bring-up test for every supported Waveshare board. Fixed S3 targets use
+// their compile-selected profile; the shared C6 target keeps its safe I2C probe.
 //
 // This uses esp_lcd through the shared boardpanel::init, not Arduino_GFX, on
 // purpose: it is the code path the real firmware runs, so a pass here means
@@ -25,10 +19,10 @@
 #include <panel_init.h>
 #include <touch_map.h>
 
-static const int16_t PANEL_W = 172;
-static const int16_t PANEL_H = 320;
-static const uint32_t SPI_HZ = 80000000;
-static const size_t FRAME_BYTES = (size_t)PANEL_W * PANEL_H * 2;
+static int16_t PANEL_W = 0;
+static int16_t PANEL_H = 0;
+static uint32_t SPI_HZ = 0;
+static size_t FRAME_BYTES = 0;
 
 // RGB565. Stored big-endian in the buffer, which is panel byte order.
 static const uint16_t C_BLACK = 0x0000;
@@ -42,6 +36,7 @@ static const uint16_t C_MAGENTA = 0xF81F;
 
 static board::Variant variant = board::Variant::Unknown;
 static const board::Config *cfg = nullptr;
+static touchmap::Calibration touchCalibration = touchmap::AXS5106L_ON_C6;
 static esp_lcd_panel_handle_t panel = nullptr;
 static uint8_t *fb = nullptr;
 static volatile int32_t dmaInFlight = 0;
@@ -170,8 +165,8 @@ static const char *orientName() {
 
 static void enterTouchOrientation() {
   boardpanel::applyOrientation(panel, *cfg, orientLandscape(), orientRotation());
-  int w = touchmap::frameWidth(orientLandscape());
-  int h = touchmap::frameHeight(orientLandscape());
+  int w = touchmap::frameWidth(orientLandscape(), touchCalibration);
+  int h = touchmap::frameHeight(orientLandscape(), touchCalibration);
   drawCornerCard(w, h);
   Serial.printf("touch mode: %s (%dx%d) - press BOOT to rotate\n", orientName(),
                 w, h);
@@ -187,16 +182,28 @@ static void enterTouchOrientation() {
 // So watch both candidates and report which one actually moves. This only runs
 // in touch mode, i.e. only on the Touch board, so reading GPIO8 here can never
 // disturb the non-touch board's LED.
-static const int8_t BUTTON_PROBE_PINS[] = {8, 9};
-static const size_t BUTTON_PROBE_COUNT =
-    sizeof(BUTTON_PROBE_PINS) / sizeof(BUTTON_PROBE_PINS[0]);
-static bool buttonProbeLast[BUTTON_PROBE_COUNT];
+// The C6 touch board has a vendor-documentation conflict between GPIO8 and
+// GPIO9, so it probes both. Fixed S3 targets already know BOOT is GPIO0 and
+// must not touch GPIO8/GPIO9, which are audio pins on the 1.54-inch board.
+static const int8_t C6_BUTTON_PROBE_PINS[] = {8, 9};
+static bool buttonProbeLast[2];
+
+static size_t buttonProbeCount() {
+  return variant == board::Variant::TouchJd9853 ? 2 : 1;
+}
+
+static int8_t buttonProbePin(size_t index) {
+  return variant == board::Variant::TouchJd9853
+      ? C6_BUTTON_PROBE_PINS[index]
+      : cfg->pinBootButton;
+}
 
 static void reportButtonPins(const char *why) {
   Serial.printf("button [%s]:", why);
-  for (size_t i = 0; i < BUTTON_PROBE_COUNT; i++) {
-    Serial.printf(" GPIO%d=%s", BUTTON_PROBE_PINS[i],
-                  digitalRead(BUTTON_PROBE_PINS[i]) == LOW ? "LOW" : "HIGH");
+  for (size_t i = 0; i < buttonProbeCount(); i++) {
+    const int8_t pin = buttonProbePin(i);
+    Serial.printf(" GPIO%d=%s", pin,
+                  digitalRead(pin) == LOW ? "LOW" : "HIGH");
   }
   Serial.printf("  (table says BOOT=GPIO%d)  orientation=%s\n",
                 cfg->pinBootButton, orientName());
@@ -212,9 +219,10 @@ static void setupTouchMode() {
     markerBuf[i] = 0xF8;  // magenta, RGB565 big-endian: stands out on the card
     markerBuf[i + 1] = 0x1F;
   }
-  for (size_t i = 0; i < BUTTON_PROBE_COUNT; i++) {
-    pinMode(BUTTON_PROBE_PINS[i], INPUT_PULLUP);
-    buttonProbeLast[i] = digitalRead(BUTTON_PROBE_PINS[i]) == LOW;
+  for (size_t i = 0; i < buttonProbeCount(); i++) {
+    const int8_t pin = buttonProbePin(i);
+    pinMode(pin, INPUT_PULLUP);
+    buttonProbeLast[i] = digitalRead(pin) == LOW;
   }
   orientationIndex = 0;
   enterTouchOrientation();
@@ -243,18 +251,19 @@ static void serviceTouchMode() {
 
   // Watch every candidate button pin, report any edge, and rotate on a falling
   // edge of whichever one turns out to be real.
-  for (size_t i = 0; i < BUTTON_PROBE_COUNT; i++) {
-    bool down = digitalRead(BUTTON_PROBE_PINS[i]) == LOW;
+  for (size_t i = 0; i < buttonProbeCount(); i++) {
+    const int8_t pin = buttonProbePin(i);
+    bool down = digitalRead(pin) == LOW;
     if (down == buttonProbeLast[i]) {
       continue;
     }
     delay(30);  // debounce; this loop has nothing else to do
-    down = digitalRead(BUTTON_PROBE_PINS[i]) == LOW;
+    down = digitalRead(pin) == LOW;
     if (down == buttonProbeLast[i]) {
       continue;  // bounce, not a real edge
     }
     buttonProbeLast[i] = down;
-    Serial.printf("button: GPIO%d -> %s\n", BUTTON_PROBE_PINS[i],
+    Serial.printf("button: GPIO%d -> %s\n", pin,
                   down ? "LOW (pressed)" : "HIGH (released)");
     if (down) {
       orientationIndex = (uint8_t)((orientationIndex + 1) & 3);
@@ -281,9 +290,9 @@ static void serviceTouchMode() {
 
   touchmap::Point p =
       touchmap::map((int16_t)s.rawX, (int16_t)s.rawY, orientLandscape(),
-                    orientRotation());
-  int w = touchmap::frameWidth(orientLandscape());
-  int h = touchmap::frameHeight(orientLandscape());
+                    orientRotation(), touchCalibration);
+  int w = touchmap::frameWidth(orientLandscape(), touchCalibration);
+  int h = touchmap::frameHeight(orientLandscape(), touchCalibration);
 
   // Keep the whole marker on screen so the pushed rect always matches the
   // buffer size.
@@ -306,17 +315,34 @@ void setup() {
   while (!Serial && millis() - start < 6000) delay(50);
 
   Serial.println();
-  Serial.println("=== display_test: dual-board panel bring-up ===");
+  Serial.println("=== display_test: shared panel bring-up ===");
   Serial.printf("chip %s rev %d, %d MB flash, heap %lu\n", ESP.getChipModel(),
                 ESP.getChipRevision(), ESP.getFlashChipSize() / (1024 * 1024),
                 (unsigned long)ESP.getFreeHeap());
 
-  // Detect before touching any panel or LED pin. See board_detect.h.
-  variant = boarddetect::probe();
+  // Fixed targets select a profile before any GPIO is driven. The C6 artifact
+  // alone uses the I2C detector.
+  variant = board::COMPILED_VARIANT != board::Variant::Unknown
+      ? board::COMPILED_VARIANT
+      : boarddetect::probe();
   cfg = &board::configFor(variant);
+  touchCalibration = variant == board::Variant::AmoledCo5300
+      ? touchmap::CST9217_ON_CO5300
+      : variant == board::Variant::LcdSt77916
+          ? touchmap::CST816_ON_ST77916
+          : variant == board::Variant::TouchSt7789
+              ? touchmap::CST816_ON_ST7789_240
+              : touchmap::AXS5106L_ON_C6;
+  PANEL_W = (int16_t)cfg->panelW;
+  PANEL_H = (int16_t)cfg->panelH;
+  SPI_HZ = cfg->pclkHz;
+  FRAME_BYTES = (size_t)PANEL_W * PANEL_H * 2;
   Serial.printf("board: %s\n", cfg->name);
   Serial.printf("  driver=%s sclk=%d mosi=%d cs=%d dc=%d rst=%d bl=%d\n",
-                cfg->driver == board::PanelDriver::Jd9853 ? "JD9853" : "ST7789",
+                cfg->driver == board::PanelDriver::Gc9107 ? "GC9107"
+                : cfg->driver == board::PanelDriver::Co5300 ? "CO5300"
+                : cfg->driver == board::PanelDriver::St77916 ? "ST77916"
+                : cfg->driver == board::PanelDriver::Jd9853 ? "JD9853" : "ST7789",
                 cfg->pinSclk, cfg->pinMosi, cfg->pinCs, cfg->pinDc, cfg->pinRst,
                 cfg->pinBl);
   Serial.printf("  boot_button=%d rgb_led=%d gap=%u invert=%d\n",
@@ -329,9 +355,11 @@ void setup() {
     while (true) delay(1000);
   }
 
-  // Backlight at Waveshare's recommended 50% ceiling.
-  pinMode(cfg->pinBl, OUTPUT);
-  analogWrite(cfg->pinBl, 128);
+  // PWM only exists on carrier profiles with a backlight pin.
+  if (cfg->hasBacklightPin()) {
+    pinMode(cfg->pinBl, OUTPUT);
+    analogWrite(cfg->pinBl, 128);
+  }
 
   if (!boardpanel::init(*cfg, SPI2_HOST, SPI_HZ, FRAME_BYTES, onTransDone,
                         nullptr, nullptr, &panel)) {

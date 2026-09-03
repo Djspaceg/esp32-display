@@ -38,7 +38,8 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// remembered from a previous run would risk pushing an image chosen from
     /// stale information. A panel has to be discovered to be pushed to anyway.
     var chip: String?
-    /// Exact firmware target from mDNS, such as `c6`, `s3-175`, or `s3-185`.
+    /// Exact firmware target from mDNS, such as `c6`, `s3-085`, `s3-154`,
+    /// `s3-175`, or `s3-185`.
     /// Discovery-scoped and deliberately excluded from `PersistedPanel`.
     var target: String?
     /// What this panel says its screen is, from its `res` TXT record, or nil when

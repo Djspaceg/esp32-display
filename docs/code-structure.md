@@ -51,10 +51,11 @@ keep it that way:
 | `doom_bridge.cpp`       | The two `extern "C"`/global symbols the Doom library links against (gated on `ESPDISP_DOOM_S3_175`)                                                                                                                                    |
 
 Compile guards are unchanged by the split: S3-only code stays inside
-`CONFIG_IDF_TARGET_ESP32S3`, the 1.85 board inside `ESPDISP_BOARD_S3_185`, and
-Doom inside `ESPDISP_DOOM_S3_175`, whichever file it lives in. The C6 image
-runs near its flash ceiling, so the split is code motion, not new abstraction:
-no virtual dispatch, no wrapper layers.
+`CONFIG_IDF_TARGET_ESP32S3`; the fixed LCD targets use
+`ESPDISP_BOARD_S3_085`, `ESPDISP_BOARD_S3_154`, or `ESPDISP_BOARD_S3_185` and
+link only their selected controller; and Doom stays inside
+`ESPDISP_DOOM_S3_175`. The C6 image runs near its flash ceiling, so the split is
+code motion, not new abstraction: no virtual dispatch, no wrapper layers.
 
 Code shared with `display_test` or `board_probe` belongs in
 `firmware/libraries/espdisp_board`, not the sketch folder — that boundary is
@@ -118,4 +119,6 @@ Any change to these boundaries runs the same gate as a feature:
 - `bash firmware/test/run_tests.sh`
 - `python3 tools/test_espdisp.py`
 - `swift test` in `mac/ESPDisplaySender`
-- `python3 tools/espdisp.py compile --board c6|s3-175|s3-185`
+- `python3 tools/espdisp.py compile --board c6|s3-085|s3-154|s3-175|s3-185`
+  (`s3-085` and `s3-154` use standard partitions with their own exact-target
+  compiler selectors)

@@ -88,7 +88,7 @@ def check_accepts(fn, what):
 
 def test_board_table():
     check_equal(
-        sorted(espdisp.BOARDS), ["c6", "s3-175", "s3-185"],
+        sorted(espdisp.BOARDS), ["c6", "s3-085", "s3-154", "s3-175", "s3-185"],
         "only canonical exact targets are board-table keys")
     check_equal(
         espdisp.BOARDS["c6"].fqbn,
@@ -106,7 +106,27 @@ def test_board_table():
         "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
         "s3-185 FQBN",
     )
-    for key in ("s3-175", "s3-185"):
+    check_equal(
+        espdisp.BOARDS["s3-085"].fqbn,
+        "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi",
+        "s3-085 FQBN",
+    )
+    check_equal(
+        espdisp.BOARDS["s3-085"].extra_flags,
+        ("-DESPDISP_BOARD_S3_085",),
+        "s3-085 uses only its exact board selector",
+    )
+    check_equal(
+        espdisp.BOARDS["s3-154"].fqbn,
+        "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
+        "s3-154 FQBN",
+    )
+    check_equal(
+        espdisp.BOARDS["s3-154"].extra_flags,
+        ("-DESPDISP_BOARD_S3_154",),
+        "s3-154 uses only its exact board selector",
+    )
+    for key in ("s3-085", "s3-154", "s3-175", "s3-185"):
         check_equal(espdisp.BOARDS[key].chip, "esp32s3", "%s chip" % key)
     check_equal(
         espdisp.BOARDS["s3-185"].extra_flags,
@@ -118,7 +138,7 @@ def test_board_table():
         "the 1.75-inch profile owns the Doom compile selector")
     check("PartitionScheme=custom" in espdisp.BOARDS["s3-175"].fqbn,
           "s3-175 uses the Doom partition scheme")
-    for key in ("c6", "s3-185"):
+    for key in ("c6", "s3-085", "s3-154", "s3-185"):
         check("PartitionScheme" not in espdisp.BOARDS[key].fqbn,
               "%s keeps its default partition scheme" % key)
     check_equal(espdisp.board_key_for_fqbn("esp32:esp32:esp32c6"), "c6", "FQBN -> key")
@@ -132,7 +152,8 @@ def test_board_table():
         espdisp.board_key_for_chip("ESP32S3"), None,
         "a shared chip cannot identify an exact target")
     check_equal(
-        espdisp.board_keys_for_chip("ESP32S3"), ["s3-175", "s3-185"],
+        espdisp.board_keys_for_chip("ESP32S3"),
+        ["s3-085", "s3-154", "s3-175", "s3-185"],
         "all exact S3 targets remain discoverable")
     check_equal(espdisp.canonical_board_key("s3"), "s3-175", "CLI compatibility alias")
     check_equal(espdisp.canonical_board_key("s3-185"), "s3-185", "canonical key stays exact")
@@ -142,23 +163,27 @@ def test_board_table():
 def test_argparse_board_targets():
     parser = espdisp.build_parser()
     check_equal(
-        espdisp.board_choices(), ["c6", "s3", "s3-175", "s3-185"],
+        espdisp.board_choices(),
+        ["c6", "s3", "s3-085", "s3-154", "s3-175", "s3-185"],
         "argparse accepts canonical targets plus the compatibility alias")
     for command in ("compile", "flash"):
         args = parser.parse_args([command, "--board", "s3"])
         check_equal(args.board, "s3", "%s accepts the s3 alias" % command)
     ota = parser.parse_args(["ota", "panel.local", "--board", "s3"])
     check_equal(ota.board, "s3", "OTA accepts the s3 alias")
-    bundle = parser.parse_args(
-        ["bundle", "--board", "s3", "--board", "s3-175", "--board", "s3-185"])
+    bundle = parser.parse_args([
+        "bundle", "--board", "s3", "--board", "s3-085",
+        "--board", "s3-154", "--board", "s3-175", "--board", "s3-185",
+    ])
     check_equal(
-        espdisp.bundle_board_keys(bundle.board), ["s3-175", "s3-185"],
+        espdisp.bundle_board_keys(bundle.board),
+        ["s3-175", "s3-085", "s3-154", "s3-185"],
         "alias and canonical spelling do not duplicate a bundle build")
     default_bundle = parser.parse_args(["bundle"])
     check_equal(default_bundle.board, None, "bundle selection remains optional")
     check_equal(
         espdisp.bundle_board_keys(default_bundle.board),
-        ["c6", "s3-175", "s3-185"],
+        ["c6", "s3-085", "s3-154", "s3-175", "s3-185"],
         "default bundle builds every canonical target exactly once")
     info = parser.parse_args([
         "bundle-info", "--require-all-targets", "/tmp/firmware.espdispfw",
@@ -232,8 +257,8 @@ def test_resolve_board():
             "an ESP32-S3 probe requires an explicit display target")
         check_fails(
             lambda: espdisp.resolve_board(None, blank),
-            "--board s3-175|s3-185",
-            "the S3 ambiguity names both exact choices")
+            "--board s3-085|s3-154|s3-175|s3-185",
+            "the S3 ambiguity names all four exact choices")
     check_fails(
         lambda: espdisp.resolve_board(None, None),
         "--board is required",
@@ -490,6 +515,32 @@ def test_verify_ota_target():
         lambda: run(espdisp.BOARDS["s3-185"], "10.0.0.9", ports),
         "was not found with exact target metadata",
         "an undiscovered S3 is refused rather than taken on trust")
+
+    s3_085 = espdisp.BOARDS["s3-085"]
+    gc9107_port = [espdisp.NetworkPort(
+        "192.168.1.46", "gc9107-panel.local", "esp32s3", "s3-085")]
+    check_equal(
+        espdisp.classify_ota_target(s3_085, "s3-085", "esp32s3"),
+        espdisp.TARGET_OK,
+        "the exact GC9107 target and chip agree")
+    check_equal(
+        espdisp.classify_ota_target(s3_085, "s3-175", "esp32s3"),
+        espdisp.TARGET_WRONG,
+        "the GC9107 image refuses another exact same-chip target")
+    check_equal(
+        espdisp.classify_ota_target(s3_085, "", "esp32s3"),
+        espdisp.TARGET_UNKNOWN,
+        "the S3 chip alone cannot confirm the GC9107 target")
+    check_equal(
+        espdisp.ota_target_requires_exact_discovery(s3_085), True,
+        "GC9107 OTA requires exact discovered target metadata")
+    check("Confirmed" in run(s3_085, "gc9107-panel.local", gc9107_port),
+          "matching GC9107 target metadata authorizes OTA")
+    check_fails(
+        lambda: run(espdisp.BOARDS["s3-175"],
+                    "gc9107-panel.local", gc9107_port),
+        "advertises target=s3-085",
+        "another S3 image is refused for the GC9107 panel")
 
     disabled = espdisp.build_parser().parse_args([
         "ota", "lcd-panel.local", "--board", "s3-185",
@@ -2339,7 +2390,7 @@ def test_bundle_file_round_trip():
             ["bundle-info", "--require-all-targets", path])
         check_fails(
             lambda: strict.func(strict),
-            "missing required exact target s3-185",
+            "missing required exact targets s3-085, s3-154, s3-185",
             "packaging refuses to reuse an incomplete default bundle")
 
         # Overwriting is a replace, so a second bundle at the same path cannot
