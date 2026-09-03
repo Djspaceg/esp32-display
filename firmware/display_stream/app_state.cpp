@@ -16,7 +16,7 @@ String cfgPass;
 // resolving a hardcoded hostname. Default is unique per board
 // (espdisplay-XXXX from the MAC); changeable via CFGNAME over USB.
 String cfgName;
-const char *FW_VERSION = "1.4.1";
+const char *FW_VERSION = "1.4.2";
 uint8_t deviceId[6] = {0};
 
 // Reads the MAC straight from eFuse rather than via WiFi.macAddress(),
