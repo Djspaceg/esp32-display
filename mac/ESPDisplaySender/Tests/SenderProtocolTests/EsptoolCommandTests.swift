@@ -227,6 +227,31 @@ final class EsptoolCommandTests: XCTestCase {
         ])
     }
 
+    func testExactTargetS3085FlashesFromStandardNonDoomParts() throws {
+        // s3-085 shares the ESP32-S3 chip with the Doom-enabled s3-175 target,
+        // but uses the standard three blank-board parts plus the app with no
+        // partition-table WAD slot.
+        let bundle = Self.bundle(
+            chip: "esp32s3", bootloader: 0x0, app: 0x10000, target: "s3-085")
+        let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "s3-085"))
+        XCTAssertEqual(
+            plan.map(\.role), ["bootloader", "partitions", "boot_app0", "app"])
+        XCTAssertEqual(plan.map(\.address), [0x0, 0x8000, 0xE000, 0x10000])
+        XCTAssertFalse(
+            plan.contains { $0.role == "doom_wad" },
+            "s3-085 is not a Doom target and carries no WAD")
+    }
+
+    func testExactTargetS3154FlashesFromStandardNonDoomParts() throws {
+        let bundle = Self.bundle(
+            chip: "esp32s3", bootloader: 0x0, app: 0x10000, target: "s3-154")
+        let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "s3-154"))
+        XCTAssertEqual(
+            plan.map(\.role), ["bootloader", "partitions", "boot_app0", "app"])
+        XCTAssertEqual(plan.map(\.address), [0x0, 0x8000, 0xE000, 0x10000])
+        XCTAssertFalse(plan.contains { $0.role == "doom_wad" })
+    }
+
     func testStagedFilenamesAreOrderedAndNamedAfterTheirRole() {
         XCTAssertEqual(
             EsptoolCommand.stagedFilename(index: 0, role: "bootloader"),
@@ -433,12 +458,13 @@ final class EsptoolCommandTests: XCTestCase {
     }()
 
     static func bundle(
-        chip: String, bootloader: Int, app: Int, version: String = "1.2.0"
+        chip: String, bootloader: Int, app: Int, version: String = "1.2.0",
+        target explicitTarget: String? = nil
     ) -> FirmwareBundle {
         let appPayload = Data("app".utf8)
-        let target = chip == "esp32c6"
+        let target = explicitTarget ?? (chip == "esp32c6"
             ? "c6"
-            : chip == "esp32s3" ? "s3-175" : chip
+            : chip == "esp32s3" ? "s3-175" : chip)
         let hasDoom = target == "s3-175"
         let partitionPayload = partitionTable(appAddress: app, doom: hasDoom)
         var parts: [(String, Int, Data)] = [

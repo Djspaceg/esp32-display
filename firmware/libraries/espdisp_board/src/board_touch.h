@@ -1,8 +1,9 @@
-// Reading the capacitive touch controller: AXS5106L on the
-// ESP32-C6-Touch-LCD-1.47, CST9217 on the ESP32-S3-Touch-AMOLED-1.75C. The
-// coordinate transform is in touch_map.h; this file only gets numbers off
-// the chip, and only exposes one Sample/poll() API regardless of which chip
-// answered - the caller never branches on board::TouchController.
+// Reading the capacitive touch controllers: AXS5106L on the
+// ESP32-C6-Touch-LCD-1.47, CST9217 on the ESP32-S3-Touch-AMOLED-1.75C, and
+// CST816 on the ESP32-S3-Touch-LCD-1.54/1.85C profiles. The coordinate
+// transform is in touch_map.h; this file only gets numbers off the chip, and
+// only exposes one Sample/poll() API regardless of which chip answered - the
+// caller never branches on board::TouchController.
 //
 // Every entry point is a no-op unless the board actually has touch. On the
 // C6 pair this matters because the interrupt pin (GPIO21) is LCD_RST on the
@@ -128,10 +129,22 @@ inline bool cst816ReadReg(uint8_t reg, uint8_t *out, size_t len) {
 }
 
 inline bool initCst816(const board::Config &cfg, bool verbose) {
-  if (!Wire.begin(cfg.pinTouchSda, cfg.pinTouchScl, I2C_HZ) ||
-      !boardio::pulseReset(cfg.touchResetExio)) {
-    if (verbose) Serial.println("touch: ERROR CST816 reset/bus failed");
+  if (!Wire.begin(cfg.pinTouchSda, cfg.pinTouchScl, I2C_HZ)) {
+    if (verbose) Serial.println("touch: ERROR CST816 bus failed");
     return false;
+  }
+  if (cfg.touchResetExio != 0) {
+    if (!boardio::pulseReset(cfg.touchResetExio)) {
+      if (verbose) Serial.println("touch: ERROR CST816 expander reset failed");
+      return false;
+    }
+  } else if (cfg.pinTouchRst != board::NO_PIN) {
+    // SensorLib's CST816 path, used by Waveshare on the 1.54-inch board.
+    pinMode(cfg.pinTouchRst, OUTPUT);
+    digitalWrite(cfg.pinTouchRst, LOW);
+    delay(30);
+    digitalWrite(cfg.pinTouchRst, HIGH);
+    delay(50);
   }
   uint8_t identity[3] = {0};
   if (!cst816ReadReg(CST816_REG_CHIP_ID, identity, sizeof(identity))) {

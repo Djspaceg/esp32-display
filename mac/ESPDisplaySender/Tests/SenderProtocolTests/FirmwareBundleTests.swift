@@ -335,6 +335,71 @@ final class FirmwareBundleTests: XCTestCase {
         XCTAssertFalse(bundle.canFlashBlankDevice(chip: "esp32s3"))
     }
 
+    /// All four ESP32-S3 targets share one chip, so none can be chosen by chip;
+    /// only the exact target selects an image. s3-085, s3-154, and s3-185 are
+    /// non-Doom targets and need only the standard blank-board flash parts.
+    func testFormatThreeSelectsFourESP32S3ImagesByExactTarget() throws {
+        let s3_085 = ImageSpec(
+            board: "s3-085",
+            chip: "esp32s3",
+            payload: Data("s3-085 app".utf8),
+            flashParts: Self.flashParts("s3-085"),
+            targets: ["s3-085"])
+        let s3_154 = ImageSpec(
+            board: "s3-154",
+            chip: "esp32s3",
+            payload: Data("s3-154 app".utf8),
+            flashParts: Self.flashParts("s3-154"),
+            targets: ["s3-154"])
+        let s3_175 = ImageSpec(
+            board: "s3-175",
+            chip: "esp32s3",
+            payload: Data("s3-175 app".utf8),
+            flashParts: Self.flashParts("s3-175"),
+            targets: ["s3-175"])
+        let s3_185 = ImageSpec(
+            board: "s3-185",
+            chip: "esp32s3",
+            payload: Data("s3-185 app".utf8),
+            flashParts: Self.flashParts("s3-185"),
+            targets: ["s3-185"])
+        let bundle = try Self.readBundle(
+            version: "3.0.0", images: [s3_085, s3_154, s3_175, s3_185],
+            generation: FirmwareBundle.format)
+
+        XCTAssertEqual(bundle.targets, ["s3-085", "s3-154", "s3-175", "s3-185"])
+        XCTAssertEqual(bundle.chips, ["esp32s3"], "one chip cannot pick among four")
+        // Exact-target selection reaches the GC9107 image and no other.
+        XCTAssertEqual(bundle.image(forTarget: "s3-085")?.targets, ["s3-085"])
+        XCTAssertEqual(bundle.payload(forTarget: "s3-085"), s3_085.payload)
+        XCTAssertEqual(bundle.image(forTarget: "s3-154")?.targets, ["s3-154"])
+        XCTAssertEqual(bundle.payload(forTarget: "s3-154"), s3_154.payload)
+        XCTAssertNotEqual(
+            bundle.payload(forTarget: "s3-085"), bundle.payload(forTarget: "s3-154"))
+        XCTAssertNotEqual(
+            bundle.payload(forTarget: "s3-154"), bundle.payload(forTarget: "s3-175"))
+        XCTAssertNotEqual(
+            bundle.payload(forTarget: "s3-085"), bundle.payload(forTarget: "s3-175"))
+        XCTAssertNotEqual(
+            bundle.payload(forTarget: "s3-085"), bundle.payload(forTarget: "s3-185"))
+        // The chip alone still resolves nothing, which is the same-chip refusal.
+        XCTAssertNil(bundle.image(forChip: "esp32s3"))
+        XCTAssertFalse(bundle.canFlashBlankDevice(chip: "esp32s3"))
+        // s3-085 is a standard (non-Doom) target: it carries only the three
+        // blank-board roles and no Doom WAD part (the full non-Doom flash-plan
+        // assembly against a real partition table is in EsptoolCommandTests).
+        let s3_085Image = try XCTUnwrap(bundle.image(forTarget: "s3-085"))
+        XCTAssertEqual(
+            s3_085Image.flashParts.map(\.role),
+            ["bootloader", "partitions", "boot_app0"])
+        XCTAssertNil(bundle.flashPayload(forTarget: "s3-085", role: "doom_wad"))
+        let s3_154Image = try XCTUnwrap(bundle.image(forTarget: "s3-154"))
+        XCTAssertEqual(
+            s3_154Image.flashParts.map(\.role),
+            ["bootloader", "partitions", "boot_app0"])
+        XCTAssertNil(bundle.flashPayload(forTarget: "s3-154", role: "doom_wad"))
+    }
+
     func testFormatThreeImageMayClaimSeveralTargets() throws {
         var shared = Self.s3Spec
         shared.targets = ["s3-175", "s3-175-rev2"]
@@ -1233,12 +1298,12 @@ final class FirmwareBundleTests: XCTestCase {
     }
 
     func testFormatThreeRequiresUsableUniqueTargets() {
-        func file(_ targets: Any) -> Data {
+        func file(_ targets: Any, image: ImageSpec = Self.s3Spec) -> Data {
             Self.bundleBytes(
                 Self.manifest(
-                    images: [Self.s3Spec], generation: FirmwareBundle.format),
+                    images: [image], generation: FirmwareBundle.format),
                 payloads: Self.area(
-                    [Self.s3Spec], generation: FirmwareBundle.format),
+                    [image], generation: FirmwareBundle.format),
                 magic: FirmwareBundle.magic,
                 mutate: { manifest in
                     var images = manifest["images"] as! [[String: Any]]
@@ -1251,6 +1316,19 @@ final class FirmwareBundleTests: XCTestCase {
         expect(.unusableTarget(image: 0, targetIndex: 0), reading: file([7]))
         expect(.duplicateTargetInImage(image: 0, target: "s3-175"),
                reading: file(["s3-175", "s3-175"]))
+        expect(
+            .targetChipMismatch(
+                index: 0, target: "s3-185", chip: "esp32c6",
+                expectedChip: "esp32s3"),
+            reading: file(["s3-185"], image: Self.c6Spec))
+        expect(
+            .imageClaimsIncompatibleTargets(
+                index: 0, targets: ["c6", "s3-185"]),
+            reading: file(["c6", "s3-185"], image: Self.c6Spec))
+        expect(
+            .imageClaimsIncompatibleTargets(
+                index: 0, targets: ["s3-175", "s3-185"]),
+            reading: file(["s3-175", "s3-185"]))
     }
 
     func testFormatThreeRefusesATargetClaimedByTwoImages() {

@@ -75,8 +75,12 @@ trap cleanup EXIT INT TERM
 # different thing from requiring it of whoever uses the app.
 #
 # Reused only when it is a current format bundle covering every exact target.
-# Compiling all three targets takes minutes, but reusing a legacy two-image bundle
-# would silently omit s3-185 from the installed app. ESPDISP_REBUILD_FIRMWARE=1
+# The five canonical targets are c6, s3-085, s3-154, s3-175, and s3-185;
+# `bundle` with no --board writes all five and --require-all-targets enforces
+# that below. Compiling all five targets takes minutes, but reusing a legacy
+# bundle would silently omit a newer target (s3-085, s3-154, or s3-185) from
+# the installed app.
+# ESPDISP_REBUILD_FIRMWARE=1
 # forces a fresh one; ESPDISP_SKIP_FIRMWARE=1 packages without any, and the app
 # then asks for a file. A build failure remains a warning: the rest of the app
 # still works and a bundle can be chosen manually.
@@ -89,13 +93,13 @@ if [[ -n "${ESPDISP_SKIP_FIRMWARE:-}" ]]; then
   echo "skipping the default firmware bundle (ESPDISP_SKIP_FIRMWARE is set)"
 elif [[ -f "$FIRMWARE" && -z "${ESPDISP_REBUILD_FIRMWARE:-}" ]] && firmware_bundle_is_current; then
   echo "reusing $FIRMWARE ($(stat -f %z "$FIRMWARE") bytes)"
-  echo "  verified format 3 coverage: c6, s3-175, s3-185"
+  echo "  verified format 3 coverage: c6, s3-085, s3-154, s3-175, s3-185"
   echo "  rebuild it with ESPDISP_REBUILD_FIRMWARE=1 $0"
 else
   if [[ -f "$FIRMWARE" && -z "${ESPDISP_REBUILD_FIRMWARE:-}" ]]; then
     echo "existing firmware bundle is stale or incomplete; rebuilding it"
   fi
-  echo "building the default firmware bundle (compiles three exact targets, minutes)"
+  echo "building the default firmware bundle (compiles five exact targets, minutes)"
   mkdir -p "$FIRMWARE_DIR"
   if ! python3 "$HERE/../tools/espdisp.py" bundle --output "$FIRMWARE"; then
     echo "warning: could not build a firmware bundle; the app will ask for one" >&2

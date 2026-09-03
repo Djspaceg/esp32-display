@@ -32,8 +32,9 @@ String defaultDeviceName() {
 // On the C6, one binary serves both Waveshare 1.47" boards: the panel
 // controller and pin map differ, the 172x320 resolution does not. Detected at
 // boot, cached only when explicitly forced with CFGBOARD over USB. S3 geometry
-// is compile-time selected: the default is 1.75C/CO5300 and
-// ESPDISP_BOARD_S3_185 selects 1.85C/ST77916.
+// is compile-time selected: the default is 1.75C/CO5300, while
+// ESPDISP_BOARD_S3_085, ESPDISP_BOARD_S3_154, and ESPDISP_BOARD_S3_185 select
+// their exact LCD profiles.
 board::Variant boardVariant = board::COMPILED_VARIANT;
 const board::Config *bcfg = &board::configFor(board::COMPILED_VARIANT);
 

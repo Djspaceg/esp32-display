@@ -402,9 +402,22 @@ final class FirmwareUpdateTests: XCTestCase {
     func testPhysicalBoardProfilesMatchOnlyTheirExactTargets() {
         XCTAssertTrue(PanelManager.physicalBoard("st7789", isCompatibleWith: "c6"))
         XCTAssertTrue(PanelManager.physicalBoard("jd9853", isCompatibleWith: "c6"))
+        XCTAssertTrue(PanelManager.physicalBoard("gc9107", isCompatibleWith: "s3-085"))
+        XCTAssertTrue(
+            PanelManager.physicalBoard("st7789-154", isCompatibleWith: "s3-154"))
         XCTAssertTrue(PanelManager.physicalBoard("co5300", isCompatibleWith: "s3-175"))
         XCTAssertTrue(PanelManager.physicalBoard("st77916", isCompatibleWith: "s3-185"))
 
+        // Each same-chip S3 profile belongs only to its exact target.
+        XCTAssertFalse(PanelManager.physicalBoard("gc9107", isCompatibleWith: "s3-154"))
+        XCTAssertFalse(PanelManager.physicalBoard("gc9107", isCompatibleWith: "s3-175"))
+        XCTAssertFalse(PanelManager.physicalBoard("gc9107", isCompatibleWith: "s3-185"))
+        XCTAssertFalse(PanelManager.physicalBoard("st7789-154", isCompatibleWith: "c6"))
+        XCTAssertFalse(PanelManager.physicalBoard("st7789-154", isCompatibleWith: "s3-085"))
+        XCTAssertFalse(PanelManager.physicalBoard("st7789-154", isCompatibleWith: "s3-175"))
+        XCTAssertFalse(PanelManager.physicalBoard("st7789-154", isCompatibleWith: "s3-185"))
+        XCTAssertFalse(PanelManager.physicalBoard("co5300", isCompatibleWith: "s3-085"))
+        XCTAssertFalse(PanelManager.physicalBoard("st77916", isCompatibleWith: "s3-085"))
         XCTAssertFalse(PanelManager.physicalBoard("co5300", isCompatibleWith: "s3-185"))
         XCTAssertFalse(PanelManager.physicalBoard("st77916", isCompatibleWith: "s3-175"))
         XCTAssertFalse(PanelManager.physicalBoard("st77916", isCompatibleWith: "esp32s3"))

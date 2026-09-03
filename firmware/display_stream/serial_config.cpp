@@ -162,7 +162,8 @@ static void processConfigLine(char *line) {
     applyBacklight();
     Serial.printf("CFGOK pwr=%s (saved)\n", panelManuallyOff ? "off" : "on");
   } else if (strncmp(line, "CFGBOARD ", 9) == 0) {
-    // Override board auto-detection: CFGBOARD st7789|jd9853|auto.
+    // Override C6 board auto-detection. Fixed S3 builds parse every profile
+    // token for telemetry round-trips but reject overrides below.
     // The escape hatch for a board whose I2C peripherals do not answer, and the
     // way to undo a wrong forcing ("auto"). Reboots, because the pin map and
     // panel driver are chosen during setup and cannot be swapped underneath a
@@ -171,7 +172,8 @@ static void processConfigLine(char *line) {
     board::Variant want = board::variantFromName(token);
     bool isAuto = strcmp(token, "auto") == 0;
     if (want == board::Variant::Unknown && !isAuto) {
-      Serial.println("CFGERR expected: CFGBOARD st7789|jd9853|co5300|auto");
+      Serial.println(
+          "CFGERR expected: CFGBOARD st7789|jd9853|gc9107|st7789-154|co5300|st77916|auto");
       return;
     }
     if (board::COMPILED_VARIANT != board::Variant::Unknown) {

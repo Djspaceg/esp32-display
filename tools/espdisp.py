@@ -40,6 +40,20 @@ BOARDS = {
         extra_flags=(),
         blurb='ESP32-C6 1.47" 172x320 - one binary serves both Waveshare variants',
     ),
+    "s3-085": Board(
+        key="s3-085",
+        fqbn="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi",
+        chip="esp32s3",
+        extra_flags=("-DESPDISP_BOARD_S3_085",),
+        blurb="ESP32-S3-LCD-0.85 128x128 square GC9107 SPI LCD",
+    ),
+    "s3-154": Board(
+        key="s3-154",
+        fqbn="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
+        chip="esp32s3",
+        extra_flags=("-DESPDISP_BOARD_S3_154",),
+        blurb="ESP32-S3-Touch-LCD-1.54 240x240 square ST7789 SPI LCD",
+    ),
     "s3-175": Board(
         key="s3-175",
         fqbn=(
@@ -786,6 +800,8 @@ def sha256_hex(data: bytes) -> str:
 LEGACY_TARGET_BY_BOARD = {
     "c6": "c6",
     "s3": "s3-175",
+    "s3-085": "s3-085",
+    "s3-154": "s3-154",
     "s3-175": "s3-175",
     "s3-185": "s3-185",
 }
@@ -1543,7 +1559,15 @@ def compile_board(board: Board, output_dir: Optional[str] = None) -> List[str]:
     elif board.extra_flags:
         cmd += ["--build-property", "compiler.cpp.extra_flags=%s" % " ".join(board.extra_flags)]
     if output_dir:
-        cmd += ["--output-dir", output_dir]
+        # Arduino's default sketch cache is shared by every compile of this
+        # sketch, even when each caller has a distinct --output-dir. Concurrent
+        # target builds can then delete or replace one another's generated
+        # sources and objects. Keep the build intermediates beside this export;
+        # callers already own and remove the per-operation output directory.
+        cmd += [
+            "--build-path", os.path.join(output_dir, "build"),
+            "--output-dir", output_dir,
+        ]
     try:
         return run_streaming(cmd + ["."], cwd=build_sketch_dir)
     finally:

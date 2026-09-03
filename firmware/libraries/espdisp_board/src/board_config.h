@@ -1,7 +1,7 @@
 // Which supported board this binary is running on, and every board fact that
 // follows from that.
 //
-// Four board profiles are supported, across two chips:
+// Six board profiles are supported, across two chips:
 //
 //   ESP32-C6-LCD-1.47          ST7789 172x320 over SPI, addressable RGB LED on
 //                              GPIO8, BOOT on GPIO9
@@ -11,13 +11,17 @@
 //   ESP32-S3-Touch-AMOLED-1.75C  CO5300 466x466 AMOLED over QSPI, CST9217
 //                              touch on I2C GPIO15/14, AXP2101 PMU, QMI8658
 //                              IMU
+//   ESP32-S3-LCD-0.85          GC9107 128x128 over SPI, BOOT on GPIO0,
+//                              battery ADC and eight addressable RGB LEDs
+//   ESP32-S3-Touch-LCD-1.54    ST7789 240x240 over SPI, CST816 touch and
+//                              QMI8658 IMU on I2C GPIO42/41, battery ADC
 //   ESP32-S3-Touch-LCD-1.85C   ST77916 360x360 LCD over QSPI, CST816 touch
 //                              on I2C GPIO11/10, reset through TCA9554
 //
 // The two C6 boards share one binary: same chip and resolution, with runtime
-// detection selecting their pin maps. The two S3 boards share a chip but not a
-// resolution or controller, so they are separate compile-time targets selected
-// by ESPDISP_BOARD_S3_185. A generic ESP32-S3 probe cannot distinguish them.
+// detection selecting their pin maps. The four S3 boards share a chip but not
+// a safely distinguishable pre-display identity, so they are separate
+// compile-time targets. A generic ESP32-S3 probe cannot distinguish them.
 //
 // Unlike the original two-board design, resolution is now a per-board fact:
 // the sketch derives its frame geometry (bandproto::Geometry) from panelW and
@@ -47,12 +51,14 @@ enum class Variant : uint8_t {
   TouchJd9853 = 2,   // ESP32-C6-Touch-LCD-1.47
   AmoledCo5300 = 3,  // ESP32-S3-Touch-AMOLED-1.75C
   LcdSt77916 = 4,    // ESP32-S3-Touch-LCD-1.85C
+  LcdGc9107 = 5,     // ESP32-S3-LCD-0.85
+  TouchSt7789 = 6,   // ESP32-S3-Touch-LCD-1.54
 };
 
 /// Which panel controller to construct. The ESP32 Arduino core ships an
-/// esp_lcd ST7789 driver; the JD9853, CO5300, and ST77916 drivers are vendored
-/// in firmware/libraries.
-enum class PanelDriver : uint8_t { St7789, Jd9853, Co5300, St77916 };
+/// esp_lcd ST7789 driver; the JD9853, CO5300, ST77916, and GC9107 drivers are
+/// vendored in firmware/libraries.
+enum class PanelDriver : uint8_t { St7789, Jd9853, Co5300, St77916, Gc9107 };
 
 /// How the panel is wired to the chip. SPI is single-lane with a D/C line;
 /// QSPI is four data lanes with the command/data distinction encoded in a
@@ -78,7 +84,11 @@ enum class MotionController : uint8_t { None, Qmi8658 };
 /// I2C probe resolves one. Each S3 exact target is compile-fixed because a
 /// generic S3 probe cannot safely distinguish the attached display.
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-#if defined(ESPDISP_BOARD_S3_185)
+#if defined(ESPDISP_BOARD_S3_085)
+static const Variant COMPILED_VARIANT = Variant::LcdGc9107;
+#elif defined(ESPDISP_BOARD_S3_154)
+static const Variant COMPILED_VARIANT = Variant::TouchSt7789;
+#elif defined(ESPDISP_BOARD_S3_185)
 static const Variant COMPILED_VARIANT = Variant::LcdSt77916;
 #else
 static const Variant COMPILED_VARIANT = Variant::AmoledCo5300;
@@ -114,10 +124,11 @@ struct Config {
   uint16_t panelH;
 
   /// Pixel clock. 80MHz single-lane on the C6 LCDs (what both Waveshare BSPs
-  /// use); 40MHz quad on the CO5300 (what Espressif's driver macro and
-  /// Waveshare's demo use - 4 lanes at 40MHz still doubles the single-lane
-  /// byte rate).
+  /// use); 40MHz on the S3 SPI/QSPI panels. SPI mode is a separate carrier
+  /// fact because the 1.54-inch ST7789's official Arduino and ESP-IDF paths use
+  /// mode 3 while the existing single-lane profiles retain mode 0.
   uint32_t pclkHz;
+  uint8_t spiMode;
 
   // Panel bus + control pins. pinMosi is the single data line on SPI boards
   // and data lane 0 on QSPI boards - the same physical role, and the same
@@ -178,10 +189,13 @@ struct Config {
 
   /// Battery telemetry source. AXP2101 shares the touch I2C bus; BatteryAdc
   /// uses pinBatteryAdc and batteryAdcScale to reconstruct cell millivolts from
-  /// the board's resistor divider.
+  /// the board's resistor divider. pinBatteryEnable and pinChargeStatus are
+  /// optional carrier controls for ADC paths; charge status is active-low.
   PowerController power;
   int8_t pinBatteryAdc;
   uint8_t batteryAdcScale;
+  int8_t pinBatteryEnable;
+  int8_t pinChargeStatus;
 
   /// QMI8658-family accelerometer on the shared touch I2C bus. The axis fields
   /// map sensor X/Y/Z indices onto panel-right and panel-down coordinates. Both
@@ -193,10 +207,16 @@ struct Config {
   uint8_t motionYAxis;
   int8_t motionYSign;
 
-  /// Gap on the X axis inside the controller's RAM. The 1.47" panels are 172
-  /// wide in a 240-wide controller, centred: 34. The 1.75C's CO5300 maps the
-  /// 466px glass starting at column 6 (the offset Waveshare's own demo passes).
+  /// Gap inside controller RAM. The 1.47-inch panels are 172 wide in a
+  /// 240-wide controller, centred at column 34. The 0.85-inch GC9107 glass
+  /// starts at controller column 2 and row 1.
   uint8_t colOffset;
+  uint8_t rowOffset;
+
+  /// Native clockwise quarter turns that make firmware rotation zero match the
+  /// carrier's documented rotation zero. Existing profiles keep zero; the
+  /// GC9107 profile uses two.
+  uint8_t orientationOffset;
 
   /// Whether the panel needs INVON. True on both C6 boards (both are IPS),
   /// false on the AMOLED. Kept per-variant because it is a property of the
@@ -256,6 +276,7 @@ static const Config CONFIG_LCD_ST7789 = {
     /* panelW */ 172,
     /* panelH */ 320,
     /* pclkHz */ 80 * 1000 * 1000,
+    /* spiMode */ 0,
     /* sclk  */ 7,
     /* mosi  */ 6,
     /* data1 */ NO_PIN,
@@ -275,10 +296,14 @@ static const Config CONFIG_LCD_ST7789 = {
     PowerController::None,
     /* batteryAdc */ NO_PIN,
     /* adcScale */ 0,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
     MotionController::None,
     /* motion X */ 0, 1,
     /* motion Y */ 1, 1,
     /* colOffset   */ 34,
+    /* rowOffset   */ 0,
+    /* nativeRotation */ 0,
     /* invertColor */ true,
     /* roundDisplay */ false,
     /* panelResetExio */ 0,
@@ -298,6 +323,7 @@ static const Config CONFIG_TOUCH_JD9853 = {
     /* panelW */ 172,
     /* panelH */ 320,
     /* pclkHz */ 80 * 1000 * 1000,
+    /* spiMode */ 0,
     /* sclk  */ 1,
     /* mosi  */ 2,
     /* data1 */ NO_PIN,
@@ -323,11 +349,15 @@ static const Config CONFIG_TOUCH_JD9853 = {
     PowerController::BatteryAdc,
     /* batteryAdc */ 0,
     /* adcScale */ 3,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
     MotionController::Qmi8658,
     // Waveshare's board examples leave the QMI8658 geometry at identity.
     /* motion X */ 0, 1,
     /* motion Y */ 1, 1,
     /* colOffset   */ 34,
+    /* rowOffset   */ 0,
+    /* nativeRotation */ 0,
     /* invertColor */ true,
     /* roundDisplay */ false,
     /* panelResetExio */ 0,
@@ -345,6 +375,7 @@ static const Config CONFIG_AMOLED_CO5300 = {
     /* panelW */ 466,
     /* panelH */ 466,
     /* pclkHz */ 40 * 1000 * 1000,
+    /* spiMode */ 0,
     /* sclk  */ 38,
     /* mosi  */ 4,
     /* data1 */ 5,
@@ -364,6 +395,8 @@ static const Config CONFIG_AMOLED_CO5300 = {
     PowerController::Axp2101,
     /* batteryAdc */ NO_PIN,
     /* adcScale */ 0,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
     MotionController::Qmi8658,
     // Identity was Waveshare's unverified example geometry, and on this
     // board it classified one opposite edge-down pair 180 degrees off (the
@@ -374,6 +407,8 @@ static const Config CONFIG_AMOLED_CO5300 = {
     /* motion X */ 0, 1,
     /* motion Y */ 1, -1,
     /* colOffset   */ 6,
+    /* rowOffset   */ 0,
+    /* nativeRotation */ 0,
     /* invertColor */ false,
     /* roundDisplay */ true,
     /* panelResetExio */ 0,
@@ -390,6 +425,7 @@ static const Config CONFIG_LCD_ST77916 = {
     /* panelW */ 360,
     /* panelH */ 360,
     /* pclkHz */ 80 * 1000 * 1000,
+    /* spiMode */ 0,
     /* sclk  */ 40,
     /* mosi  */ 46,
     /* data1 */ 45,
@@ -409,14 +445,110 @@ static const Config CONFIG_LCD_ST77916 = {
     PowerController::None,
     /* batteryAdc */ NO_PIN,
     /* adcScale */ 0,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
     MotionController::None,
     /* motion X */ 0, 1,
     /* motion Y */ 1, 1,
     /* colOffset   */ 0,
+    /* rowOffset   */ 0,
+    /* nativeRotation */ 0,
     /* invertColor */ true,
     /* roundDisplay */ true,
     /* panelResetExio */ 2,
     /* touchResetExio */ 1,
+};
+
+/// ESP32-S3-LCD-0.85: GC9107 128x128 square LCD over 4-wire SPI.
+/// PLUS (GPIO4) and PWR (GPIO5) are carrier controls with no stream-firmware
+/// action; only BOOT GPIO0 is mapped to the established button behavior.
+static const Config CONFIG_LCD_GC9107 = {
+    Variant::LcdGc9107,
+    "ESP32-S3-LCD-0.85 (GC9107)",
+    PanelDriver::Gc9107,
+    PanelBus::Spi,
+    /* panelW */ 128,
+    /* panelH */ 128,
+    /* pclkHz */ 40 * 1000 * 1000,
+    /* spiMode */ 0,
+    /* sclk  */ 38,
+    /* mosi  */ 39,
+    /* data1 */ NO_PIN,
+    /* data2 */ NO_PIN,
+    /* data3 */ NO_PIN,
+    /* cs    */ 21,
+    /* dc    */ 45,
+    /* rst   */ 40,
+    /* bl    */ 46,
+    /* boot  */ 0,
+    /* led   */ 48,
+    TouchController::None,
+    /* touchSda */ NO_PIN,
+    /* touchScl */ NO_PIN,
+    /* touchRst */ NO_PIN,
+    /* touchInt */ NO_PIN,
+    PowerController::BatteryAdc,
+    /* batteryAdc */ 1,
+    /* adcScale */ 3,
+    /* batteryEnable */ 2,
+    /* chargeStatus */ 3,
+    MotionController::None,
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* colOffset   */ 2,
+    /* rowOffset   */ 1,
+    /* nativeRotation */ 2,
+    /* invertColor */ true,
+    /* roundDisplay */ false,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
+};
+
+/// ESP32-S3-Touch-LCD-1.54: 240x240 ST7789 over 4-wire SPI, with a
+/// directly-reset CST816 touch controller and QMI8658 on I2C GPIO42/41.
+/// GPIO4/GPIO5 are auxiliary carrier buttons; only BOOT GPIO0 is assigned an
+/// established stream-firmware action.
+static const Config CONFIG_TOUCH_ST7789 = {
+    Variant::TouchSt7789,
+    "ESP32-S3-Touch-LCD-1.54 (ST7789)",
+    PanelDriver::St7789,
+    PanelBus::Spi,
+    /* panelW */ 240,
+    /* panelH */ 240,
+    /* pclkHz */ 40 * 1000 * 1000,
+    /* spiMode */ 3,
+    /* sclk  */ 38,
+    /* mosi  */ 39,
+    /* data1 */ NO_PIN,
+    /* data2 */ NO_PIN,
+    /* data3 */ NO_PIN,
+    /* cs    */ 21,
+    /* dc    */ 45,
+    /* rst   */ 40,
+    /* bl    */ 46,
+    /* boot  */ 0,
+    /* led   */ NO_PIN,
+    TouchController::Cst816,
+    /* touchSda */ 42,
+    /* touchScl */ 41,
+    /* touchRst */ 47,
+    /* touchInt */ 48,
+    PowerController::BatteryAdc,
+    /* batteryAdc */ 1,
+    /* adcScale */ 3,
+    /* batteryEnable */ 2,
+    /* chargeStatus */ 3,
+    MotionController::Qmi8658,
+    // Waveshare's QMI8658 example exposes the sensor axes without remapping.
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* colOffset   */ 0,
+    /* rowOffset   */ 0,
+    /* nativeRotation */ 0,
+    /* invertColor */ true,
+    /* roundDisplay */ false,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
 };
 
 /// Map a possibly-Unknown variant onto one that is safe to run.
@@ -456,6 +588,10 @@ inline const Config &configFor(Variant variant) {
       return CONFIG_AMOLED_CO5300;
     case Variant::LcdSt77916:
       return CONFIG_LCD_ST77916;
+    case Variant::LcdGc9107:
+      return CONFIG_LCD_GC9107;
+    case Variant::TouchSt7789:
+      return CONFIG_TOUCH_ST7789;
     default:
       return CONFIG_TOUCH_JD9853;
   }
@@ -490,6 +626,8 @@ inline Variant variantFromStored(uint8_t raw) {
   if (raw == (uint8_t)Variant::TouchJd9853) return Variant::TouchJd9853;
   if (raw == (uint8_t)Variant::AmoledCo5300) return Variant::AmoledCo5300;
   if (raw == (uint8_t)Variant::LcdSt77916) return Variant::LcdSt77916;
+  if (raw == (uint8_t)Variant::LcdGc9107) return Variant::LcdGc9107;
+  if (raw == (uint8_t)Variant::TouchSt7789) return Variant::TouchSt7789;
   return Variant::Unknown;
 }
 
@@ -504,6 +642,8 @@ inline Variant variantFromName(const char *token) {
   if (strcmp(token, "jd9853") == 0) return Variant::TouchJd9853;
   if (strcmp(token, "co5300") == 0) return Variant::AmoledCo5300;
   if (strcmp(token, "st77916") == 0) return Variant::LcdSt77916;
+  if (strcmp(token, "gc9107") == 0) return Variant::LcdGc9107;
+  if (strcmp(token, "st7789-154") == 0) return Variant::TouchSt7789;
   return Variant::Unknown;
 }
 
@@ -518,6 +658,10 @@ inline const char *variantToken(Variant variant) {
       return "co5300";
     case Variant::LcdSt77916:
       return "st77916";
+    case Variant::LcdGc9107:
+      return "gc9107";
+    case Variant::TouchSt7789:
+      return "st7789-154";
     default:
       return "auto";
   }
@@ -530,6 +674,10 @@ inline const char *targetToken(Variant variant) {
       return "s3-175";
     case Variant::LcdSt77916:
       return "s3-185";
+    case Variant::LcdGc9107:
+      return "s3-085";
+    case Variant::TouchSt7789:
+      return "s3-154";
     case Variant::LcdSt7789:
     case Variant::TouchJd9853:
       return "c6";
