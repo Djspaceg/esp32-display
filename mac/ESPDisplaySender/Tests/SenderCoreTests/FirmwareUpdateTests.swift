@@ -424,7 +424,30 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertFalse(PanelManager.physicalBoard("future", isCompatibleWith: "s3-185"))
     }
 
-    func testReleaseNotesPresentationCopyAndOrdering() {
+    func testReleaseNotesPresentationCopyAndOrdering() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("SenderProtocolTests", isDirectory: true)
+            .appendingPathComponent("Fixtures", isDirectory: true)
+            .appendingPathComponent("release-notes-from-espdisp-v3.espdispfw")
+        let fixture = try FirmwareBundle.read(Data(contentsOf: fixtureURL))
+        let fixturePresentation = FirmwareReleaseNotesPresentation.make(
+            version: fixture.firmwareVersion, items: fixture.releaseNotes)
+        XCTAssertEqual(
+            fixturePresentation,
+            .available(
+                version: "1.4.2",
+                items: ["Added generic fixture metadata.", "Fixed generic fixture ordering."]))
+        XCTAssertEqual(
+            fixturePresentation.accessibilityLabel,
+            "Release notes for 1.4.2. Added generic fixture metadata. Fixed generic fixture ordering.")
+        let fixturePlan = FirmwareUpdatePlan.make(
+            fixture.availability(forTarget: "c6", chip: "esp32c6", panelVersion: "1.4.1"),
+            chipConfirmed: true)
+        XCTAssertEqual(fixturePlan.action, .update)
+        XCTAssertTrue(fixturePlan.canPush, "release notes do not alter update eligibility")
+
         let available = FirmwareReleaseNotesPresentation.make(
             version: "1.4.2", items: ["Added first item.", "Fixed second item."])
         XCTAssertEqual(
@@ -434,6 +457,10 @@ final class FirmwareUpdateTests: XCTestCase {
             available.accessibilityLabel,
             "Release notes for 1.4.2. Added first item. Fixed second item.")
         XCTAssertNil(available.fallbackText)
+
+        let literal = FirmwareReleaseNotesPresentation.make(
+            version: "1.4.2", items: ["Added <literal> text."])
+        XCTAssertEqual(literal, .available(version: "1.4.2", items: ["Added <literal> text."]))
 
         let unavailable = FirmwareReleaseNotesPresentation.make(version: "1.4.2", items: nil)
         XCTAssertEqual(unavailable, .unavailable)

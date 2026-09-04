@@ -2931,6 +2931,315 @@ def test_bundle_release_notes_preflight_order():
             "release-note preflight stops before board resolution")
 
 
+def test_release_notes_diagnostics_and_precedence():
+    """Every finite source diagnostic and its required precedence stay pinned."""
+    def source_failure(raw, expected, label, version="1.4.2"):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "release-notes.md")
+            with open(path, "wb") as source:
+                source.write(raw)
+            try:
+                espdisp.release_notes_for_version(path, version)
+            except espdisp.Fail as exc:
+                check_equal(str(exc), expected % path, label)
+            else:
+                check(False, "%s: did not refuse" % label)
+
+    source_cases = [
+        (
+            b"# Notes\n",
+            "release notes %s:1: section none: expected exact title '# Release Notes'",
+            "title is exact",
+        ),
+        (
+            b"# Release Notes\n",
+            "release notes %s:1: section none: document contains no release sections",
+            "a document needs a section",
+        ),
+        (
+            b"# Release Notes\n# Other\n",
+            "release notes %s:2: section none: section heading must be exactly '## <SemVer 2.0.0>'",
+            "other Markdown headings are refused",
+        ),
+        (
+            b"# Release Notes\n## version\n",
+            "release notes %s:2: section none: version 'version' is not SemVer 2.0.0",
+            "section label must be SemVer",
+        ),
+        (
+            b"# Release Notes\nplain text\n",
+            "release notes %s:2: section none: content appears before the first release section",
+            "content needs a section",
+        ),
+        (
+            b"# Release Notes\n## 1.4.2\nplain text\n",
+            "release notes %s:3: section 1.4.2: item must begin with '- '",
+            "section content needs an item marker",
+        ),
+        (
+            b"# Release Notes\n## 1.4.2\n- \n",
+            "release notes %s:3: section 1.4.2: item text must contain 1–280 Unicode scalars",
+            "empty item is refused",
+        ),
+        (
+            b"# Release Notes\n## 1.4.2\n- Added bad\x00.\n",
+            "release notes %s:3: section 1.4.2: item text contains forbidden scalar U+0000",
+            "control scalar is refused",
+        ),
+        (
+            "# Release Notes\n## 1.4.2\n- Added valid.\u00a0\n".encode("utf-8"),
+            "release notes %s:3: section 1.4.2: item text has forbidden leading or trailing whitespace",
+            "protocol edge whitespace is refused",
+        ),
+        (
+            b"# Release Notes\n## 1.4.2\n- Other valid text.\n",
+            "release notes %s:3: section 1.4.2: item text must begin with Added, Changed, Fixed, or Removed",
+            "item verb is constrained",
+        ),
+        (
+            b"# Release Notes\n## 1.4.2\n- Added missing punctuation\n",
+            "release notes %s:3: section 1.4.2: item text must end with '.', '!', or '?'",
+            "item punctuation is constrained",
+        ),
+        (
+            b"# Release Notes\n## 1.4.2\n",
+            "release notes %s:2: section 1.4.2: section must contain 1–32 items",
+            "section needs at least one item",
+        ),
+        (
+            b"# Release Notes\n## 2.0.0\n- Added newer item.\n## 2.0.0\n- Fixed duplicate item.\n",
+            "release notes %s:2,4: duplicate version 2.0.0",
+            "duplicate version labels are refused",
+        ),
+        (
+            b"# Release Notes\n## 1.0.0\n- Added older item.\n## 2.0.0\n- Fixed newer item.\n",
+            "release notes %s:2,4: version 2.0.0 is not older than 1.0.0",
+            "sections are newest first",
+        ),
+        (
+            b"# Release Notes\n## 2.0.0\n- Added another release.\n",
+            "release notes %s: no section exactly matching FW_VERSION 1.4.2",
+            "current firmware needs an exact section",
+        ),
+        (
+            b"# Release Notes\n\n## 1.4.2\r\n",
+            "release notes %s:3: section 1.4.2: carriage return byte is not allowed",
+            "CR framing is refused before decoding",
+        ),
+        (
+            b"# Release Notes\n\xff",
+            "release notes %s: byte 16: line 2: not valid UTF-8",
+            "UTF-8 diagnostics name the byte and LF line",
+        ),
+    ]
+    for raw, expected, label in source_cases:
+        source_failure(raw, expected, label)
+
+    with tempfile.TemporaryDirectory() as directory:
+        unreadable = os.path.join(directory, "missing-release-notes.md")
+        try:
+            espdisp.release_notes_for_version(unreadable, "1.4.2")
+        except espdisp.Fail as exc:
+            check_equal(str(exc), "release notes %s: cannot read" % unreadable,
+                        "unreadable release-note source has a stable envelope")
+        else:
+            check(False, "unreadable release-note source did not refuse")
+
+    requested = "bad'\\value\n\U0001f600"
+    try:
+        espdisp.release_notes_for_version("not opened", requested)
+    except espdisp.Fail as exc:
+        check_equal(
+            str(exc),
+            "release notes not opened: requested FW_VERSION 'bad\\'\\\\value\\u000A\\uD83D\\uDE00' is not SemVer 2.0.0",
+            "requested values use safe scalar-by-scalar quoting")
+    else:
+        check(False, "invalid requested FW_VERSION did not refuse")
+    check_equal(
+        espdisp.quote_release_value("a'b\\c\n\U0001f600"),
+        "'a\\'b\\\\c\\u000A\\uD83D\\uDE00'",
+        "release value quoting handles apostrophe, slash, control, and supplementary scalars")
+
+    source_failure(
+        b"# Release Notes\n\xff\r",
+        "release notes %s:2: section none: carriage return byte is not allowed",
+        "a later CR wins over earlier invalid UTF-8")
+    source_failure(
+        b"# Release Notes\n# malformed\norphan\n",
+        "release notes %s:2: section none: section heading must be exactly '## <SemVer 2.0.0>'",
+        "a malformed heading wins over apparent orphan content")
+    source_failure(
+        b"# Release Notes\n## 1.4.2\nnot-an-item\n## 1.0.0\n",
+        "release notes %s:3: section 1.4.2: item must begin with '- '",
+        "line-local item defects win over section cardinality")
+    source_failure(
+        b"# Release Notes\n## 1.0.0\n\n## 2.0.0\n- Added later release.\n",
+        "release notes %s:2: section 1.0.0: section must contain 1–32 items",
+        "section cardinality wins over ordering")
+    source_failure(
+        b"# Release Notes\n## 2.0.0\n- Added current item.\n## 1.0.0\n- Fixed older item.\n## 2.0.0\n- Changed duplicate item.\n",
+        "release notes %s:2,6: duplicate version 2.0.0",
+        "duplicate labels win over ordering")
+    source_failure(
+        b"# Release Notes\n## 1.0.0\n- Added older release.\n## 2.0.0\n- Fixed newer release.\n",
+        "release notes %s:2,4: version 2.0.0 is not older than 1.0.0",
+        "ordering wins over an absent current section")
+
+
+def test_release_notes_reader_vectors():
+    """Current metadata, legacy absence, and duplicate diagnostics share one contract."""
+    def exact_failure(fn, expected, label):
+        try:
+            fn()
+        except espdisp.Fail as exc:
+            check_equal(str(exc), expected, label)
+        else:
+            check(False, "%s: did not refuse" % label)
+
+    def external_manifest(notes):
+        manifest = handmade_manifest([image_entry("c6", FAKE_C6)])
+        manifest["release_notes"] = notes
+        return handmade_bundle(
+            espdisp.encode_manifest(manifest), payload_bytes(("c6", FAKE_C6)))
+
+    valid_notes = ["Added interior\u0085text.", "Fixed wrapped\u2028text?"]
+    valid_manifest = espdisp.bundle_manifest(
+        "1.2.0", [image_entry("c6", FAKE_C6)], "2026-01-02T03:04:05Z",
+        release_notes=valid_notes)
+    valid_data = espdisp.pack_bundle(
+        valid_manifest, {"c6": FAKE_C6}, sample_flash_payloads("c6"))
+    decoded, _, _ = espdisp.unpack_bundle(valid_data)
+    check_equal(decoded["release_notes"], valid_notes,
+                "reader preserves ordered valid metadata and allowed interior scalars")
+
+    for value, reason, label in [
+        (None, "bundle manifest: release_notes: must be a list containing 1–32 items", "null metadata"),
+        ("Added text.", "bundle manifest: release_notes: must be a list containing 1–32 items", "string metadata"),
+        ({}, "bundle manifest: release_notes: must be a list containing 1–32 items", "object metadata"),
+        ([], "bundle manifest: release_notes: must be a list containing 1–32 items", "empty metadata"),
+        (["Added valid text."] * 33, "bundle manifest: release_notes: must be a list containing 1–32 items", "too many metadata items"),
+        ([False], "bundle manifest: release_notes[0]: item must be a string", "non-string metadata item"),
+        ([""], "bundle manifest: release_notes[0]: item text must contain 1–280 Unicode scalars", "empty metadata item"),
+        (["Added bad\x00."], "bundle manifest: release_notes[0]: item text contains forbidden scalar U+0000", "control metadata item"),
+        ([" Added valid text."], "bundle manifest: release_notes[0]: item text has forbidden leading or trailing whitespace", "edge whitespace metadata item"),
+        (["Other valid text."], "bundle manifest: release_notes[0]: item text must begin with Added, Changed, Fixed, or Removed", "metadata item verb"),
+        (["Added missing punctuation"], "bundle manifest: release_notes[0]: item text must end with '.', '!', or '?'", "metadata item punctuation"),
+        (["Added " + "x" * 274 + "."], "bundle manifest: release_notes[0]: item text must contain 1–280 Unicode scalars", "metadata item scalar bound"),
+    ]:
+        exact_failure(lambda value=value: espdisp.unpack_bundle(external_manifest(value)), reason, label)
+
+    exact_failure(
+        lambda: espdisp.validated_manifest_release_notes({"release_notes": ["Added \ud800."]}),
+        "bundle manifest: release_notes[0]: item text contains forbidden scalar U+D800",
+        "decoded unpaired surrogate is an item error in Python")
+
+    legacy_vectors = []
+    v1_entry = image_entry("c6", FAKE_C6)
+    for key in ("targets", "app_address", "flash_parts"):
+        del v1_entry[key]
+    legacy_vectors.append((
+        "format-1", handmade_bundle(
+            espdisp.encode_manifest(handmade_manifest([v1_entry], format=1)),
+            FAKE_C6, magic=espdisp.BUNDLE_MAGIC_V1)))
+    v2_entry = image_entry("c6", FAKE_C6)
+    del v2_entry["targets"]
+    legacy_vectors.append((
+        "format-2", handmade_bundle(
+            espdisp.encode_manifest(handmade_manifest([v2_entry], format=2)),
+            payload_bytes(("c6", FAKE_C6)), magic=espdisp.BUNDLE_MAGIC_V2)))
+    legacy_vectors.append((
+        "field-free format-3", handmade_bundle(
+            espdisp.encode_manifest(handmade_manifest([image_entry("c6", FAKE_C6)])),
+            payload_bytes(("c6", FAKE_C6)))))
+    for label, data in legacy_vectors:
+        try:
+            manifest, _, _ = espdisp.unpack_bundle(data)
+        except espdisp.Fail as exc:
+            check(False, "%s legacy bundle refused: %s" % (label, exc))
+        else:
+            check("release_notes" not in manifest, "%s preserves absent metadata" % label)
+
+    for raw in [
+        b'{"release_notes":null,"release_notes":["Added valid text."]}',
+        b'{"release_notes":["Added valid text."],"release_notes":null}',
+        b'{"release_notes":null,"release_\\u006eotes":["Added valid text."]}',
+    ]:
+        exact_failure(
+            lambda raw=raw: espdisp.unpack_bundle(handmade_bundle(raw)),
+            "bundle manifest: duplicate key release_notes",
+            "duplicate release-note names take precedence")
+    for raw, key, label in [
+        (b'{"images":{"a":1,"a":2}}', "a", "nested image-object duplicate"),
+        (b'{"line\\n":1,"line\\u000A":2}', r"line\u000A", "control key is rendered safely"),
+        (b'{"a\\\\b":1,"a\\u005Cb":2}', r"a\\b", "backslash key is rendered safely"),
+        (b'{"\\uD83D\\uDE00":1,"\\uD83D\\uDE00":2}', r"\uD83D\uDE00", "supplementary key is rendered safely"),
+    ]:
+        exact_failure(
+            lambda raw=raw: espdisp.unpack_bundle(handmade_bundle(raw)),
+            "bundle manifest: duplicate key %s" % key,
+            label)
+    check_fails(
+        lambda: espdisp.unpack_bundle(handmade_bundle(b'{"a":truee,"a":2}')),
+        "bundle manifest is not valid UTF-8 JSON",
+        "native malformed JSON wins over a completed duplicate candidate")
+
+
+def test_bundle_release_notes_preflight_barriers():
+    """All declaration/source failures happen before bundle side effects."""
+    args = type("BundleArgs", (), {"board": None, "output": None})()
+    blockers = [
+        unittest.mock.patch.object(
+            espdisp, "bundle_board_keys", side_effect=AssertionError("board lookup ran")),
+        unittest.mock.patch.object(
+            espdisp, "git_provenance", side_effect=AssertionError("provenance ran")),
+        unittest.mock.patch.object(
+            espdisp.tempfile, "mkdtemp", side_effect=AssertionError("temporary output ran")),
+        unittest.mock.patch.object(
+            espdisp, "compile_board", side_effect=AssertionError("compile ran")),
+        unittest.mock.patch.object(
+            espdisp, "write_file_atomically", side_effect=AssertionError("output write ran")),
+        unittest.mock.patch.object(
+            espdisp.os, "getcwd", side_effect=AssertionError("output path ran")),
+    ]
+    with unittest.mock.patch.object(
+        espdisp, "sketch_fw_version_declaration", return_value=("not-a-version", 7)), \
+         unittest.mock.patch.object(
+             espdisp, "RELEASE_NOTES_PATH", "/unreadable-release-notes.md"), \
+         blockers[0], blockers[1], blockers[2], blockers[3], blockers[4], blockers[5]:
+        try:
+            espdisp.cmd_bundle(args)
+        except espdisp.Fail as exc:
+            check_equal(
+                str(exc),
+                "firmware/display_stream/app_state.cpp:7: FW_VERSION 'not-a-version' is not SemVer 2.0.0",
+                "invalid FW_VERSION wins over an unreadable release source")
+        else:
+            check(False, "invalid FW_VERSION did not refuse")
+
+    blockers = [
+        unittest.mock.patch.object(
+            espdisp, "bundle_board_keys", side_effect=AssertionError("board lookup ran")),
+        unittest.mock.patch.object(
+            espdisp, "git_provenance", side_effect=AssertionError("provenance ran")),
+        unittest.mock.patch.object(
+            espdisp.tempfile, "mkdtemp", side_effect=AssertionError("temporary output ran")),
+        unittest.mock.patch.object(
+            espdisp, "compile_board", side_effect=AssertionError("compile ran")),
+        unittest.mock.patch.object(
+            espdisp, "write_file_atomically", side_effect=AssertionError("output write ran")),
+        unittest.mock.patch.object(
+            espdisp.os, "getcwd", side_effect=AssertionError("output path ran")),
+    ]
+    with unittest.mock.patch.object(
+        espdisp, "sketch_fw_version_declaration", return_value=("1.4.2", 7)), \
+         unittest.mock.patch.object(
+             espdisp, "release_notes_for_version", side_effect=espdisp.Fail("source failed")), \
+         blockers[0], blockers[1], blockers[2], blockers[3], blockers[4], blockers[5]:
+        check_fails(
+            lambda: espdisp.cmd_bundle(args), "source failed",
+            "release-note preflight blocks board, provenance, output, and compilation")
+
+
 def main():
     test_board_table()
     test_argparse_board_targets()
@@ -2946,6 +3255,9 @@ def main():
     test_fw_version_from_sketch()
     test_release_notes_source_and_manifest_contract()
     test_bundle_release_notes_preflight_order()
+    test_release_notes_diagnostics_and_precedence()
+    test_release_notes_reader_vectors()
+    test_bundle_release_notes_preflight_barriers()
     test_bundle_length_line()
     test_bundle_layout_is_pinned()
     test_generation_one_layout_is_pinned_and_still_read()
