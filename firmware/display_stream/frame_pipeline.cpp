@@ -2,10 +2,13 @@
 
 #include <Arduino.h>
 
+#include "large_tile_protocol.h"
+
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
 
 #include "app_state.h"
+#include <display_backend.h>
 #include "band_compress.h"
 #include "band_protocol.h"
 #include "bc1.h"
@@ -30,20 +33,15 @@ using namespace bandproto;
 // stacked PSRAM, which the S3's GDMA can read. UNVERIFIED on hardware:
 // sustained QSPI-from-PSRAM throughput and any alignment constraints need
 // measuring on a real 1.75C before this is trusted.
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-const uint32_t FRAME_BUF_CAPS = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-#else
-const uint32_t FRAME_BUF_CAPS = MALLOC_CAP_DMA;
-#endif
+const uint32_t FRAME_BUF_CAPS =
+    board::COMPILED_PLATFORM.usePsramFrameBuffers
+        ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : MALLOC_CAP_DMA;
 uint8_t *bufA = nullptr;
 uint8_t *bufB = nullptr;
 
-// Constructed from the board table rather than PANEL_GEOMETRY: this is
-// namespace-scope dynamic initialization, and PANEL_GEOMETRY lives in
-// another translation unit whose initialization order is unspecified.
-// compiledPanelGeometry() reads only the constant-initialized table, so
-// it is safe at any point of static initialization. Same value.
-static Reassembler reassembler(compiledPanelGeometry());  // tested logic: band_protocol.h
+// Runtime profile resolution assigns protocol geometry before networking starts.
+static Reassembler *reassembler = nullptr;  // tested logic: band_protocol.h
 bool bufLandscape = false;                // orientation of bufA's content
 
 // Bands applied to bufA but not yet drawn. Accumulates across frames so
@@ -64,10 +62,7 @@ static volatile bool pendingLandscape = false;   // orientation for the pending 
 // byte-ambiguous past the flag, which is why the board advertises exactly
 // one of CAP_TILE_STREAM / CAP_COMPRESSED_BANDS, never both - see
 // deviceCapabilities().
-// Board-table derivation for the same initialization-order reason as
-// `reassembler` above.
-static const tileproto::TileGeometry TILE_GEOMETRY = {
-    compiledPanelGeometry().width, compiledPanelGeometry().height};
+static tileproto::TileGeometry TILE_GEOMETRY = {0, 0};
 // Decode scratch for the UDP receive task: records decode here (internal
 // SRAM - the codecs' inner loops must not run against PSRAM), then rows are
 // strided-copied into bufA. Never touched by the draw path.
@@ -90,7 +85,7 @@ static uint8_t tileHalfScratch[TILE_HALF_MAX_BYTES] __attribute__((aligned(4)));
 // PSRAM->PSRAM (docs/tile-stream-plan.md section 11), and it keeps DMA
 // reads off PSRAM entirely.
 uint8_t tileStaging[2][TILE_RUN_MAX_BYTES] __attribute__((aligned(4)));
-static tileproto::Reassembler tileReassembler(TILE_GEOMETRY);
+static tileproto::Reassembler *tileReassembler = nullptr;
 // Tiles applied to bufA but not yet drawn. Accumulates across frames like
 // pendingDrawBitmap does (per-tile recency); guarded by drawMux.
 static uint8_t pendingTileBitmap[tileproto::TILE_BITMAP_BYTES];
@@ -137,6 +132,26 @@ static uint32_t tdPassUs = 0;       // whole pass, wall clock
 static uint32_t tdGateBlocked = 0;  // passes refused because DMA was busy
 #endif
 
+bool initializeFramePipeline() {
+  if (reassembler != nullptr) return false;
+  const largetileproto::Geometry largeGeometry = {
+      PANEL_GEOMETRY.width, PANEL_GEOMETRY.height};
+  if (!PANEL_GEOMETRY.valid() &&
+      (!largeTileStreamEnabled() || !largeGeometry.valid())) {
+    return false;
+  }
+  reassembler = new Reassembler(PANEL_GEOMETRY);
+  if (reassembler == nullptr) return false;
+  memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  TILE_GEOMETRY = {PANEL_GEOMETRY.width, PANEL_GEOMETRY.height};
+  tileReassembler = new tileproto::Reassembler(TILE_GEOMETRY);
+  if (tileReassembler == nullptr) return false;
+  memset(pendingTileBitmap, 0, sizeof(pendingTileBitmap));
+#endif
+  return true;
+}
+
 // Apply one band's payload to bufA and run the reassembly bookkeeping. The
 // shared body of both packet layouts: the classic one-raw-band packet and
 // each record of a packed packet. `countPacket` keeps the classic path's
@@ -166,7 +181,7 @@ bool applyBandPayload(const bandproto::Header &h, bool compressed,
   }
 
   bool droppedFrame = false;
-  ChunkAction action = reassembler.onChunk(h, droppedFrame);
+  ChunkAction action = reassembler->onChunk(h, droppedFrame);
   if (droppedFrame) {
     // Incomplete frame abandoned - but its bands are already applied to
     // bufA and marked in pendingDrawBitmap, so they still reach the panel
@@ -261,7 +276,7 @@ static bool applyTileRecord(const tileproto::TileHeader &h,
 
   bool droppedFrame = false;
   tileproto::RecordAction action =
-      tileReassembler.onRecord(h, startTile, runLen, droppedFrame);
+      tileReassembler->onRecord(h, startTile, runLen, droppedFrame);
   if (droppedFrame) {
     // Incomplete frame abandoned - its tiles are already in bufA and marked
     // pending, so they still reach the panel with the next completed frame.
@@ -406,6 +421,227 @@ void handleTilePacket(const uint8_t *data, size_t len) {
 }
 #endif
 
+#if defined(ESPDISP_LARGE_TILE_STREAM)
+// ---- Large tile stream (ETL1) -------------------------------------------
+static const largetileproto::Geometry LARGE_GEOMETRY = {720, 720};
+static largetileproto::Reassembler largeReassembler(LARGE_GEOMETRY);
+static uint8_t largePending[largetileproto::BITMAP_BYTES];
+static uint8_t largeScratch[720 * largetileproto::TILE_DIM * 2]
+    __attribute__((aligned(4)));
+static uint8_t largeHalfScratch[360 * 8 * 2] __attribute__((aligned(4)));
+static uint8_t largeDrawStage[720 * largetileproto::TILE_DIM * 2]
+    __attribute__((aligned(4)));
+static volatile uint32_t largeFramesCompleted = 0;
+static volatile bool largePendingLandscape = false;
+static volatile uint32_t largePendingSince = 0;
+static const uint32_t LARGE_PARTIAL_DRAW_MS = 40;
+
+static bool applyLargeRecord(const largetileproto::Header &header,
+                             const largetileproto::Record &record) {
+  if (!LARGE_GEOMETRY.runValid(record.startTile, record.runLength)) return false;
+  const uint16_t width = LARGE_GEOMETRY.runPixelWidth(
+      record.startTile, record.runLength);
+  const uint16_t height = LARGE_GEOMETRY.rowHeight(
+      LARGE_GEOMETRY.row(record.startTile));
+  const size_t rawBytes = (size_t)width * height * 2;
+  if (rawBytes > sizeof(largeScratch)) return false;
+
+  tileproto::VisibleSpanPlan span = {0, 0};
+  bool dropped = false;
+  const largetileproto::Action action = largeReassembler.onRecordIfValid(
+      header, record.startTile, record.runLength, [&]() {
+        const uint8_t *encoded = record.payload;
+        size_t encodedLength = record.payloadLength;
+        size_t decodedLength = rawBytes;
+        if (record.visibleSpans) {
+          if ((record.codec != largetileproto::Codec::Raw &&
+               record.codec != largetileproto::Codec::Rle565) ||
+              !tileproto::parseVisibleSpanPlan(
+                  record.payload, record.payloadLength, width, height, span)) {
+            return false;
+          }
+          encoded += span.descriptorBytes;
+          encodedLength -= span.descriptorBytes;
+          decodedLength = span.rawBytes;
+        }
+        switch (record.codec) {
+          case largetileproto::Codec::Raw:
+            if (encodedLength != decodedLength) return false;
+            memcpy(largeScratch, encoded, decodedLength);
+            break;
+          case largetileproto::Codec::Rle565:
+            if (!rle565::decode(encoded, encodedLength, largeScratch,
+                                decodedLength)) {
+              return false;
+            }
+            break;
+          case largetileproto::Codec::Bc1:
+            if (record.visibleSpans ||
+                !bc1::decode(encoded, encodedLength, largeScratch,
+                             width, height)) {
+              return false;
+            }
+            break;
+          case largetileproto::Codec::HalfBc1: {
+            if (record.visibleSpans) return false;
+            const uint16_t halfWidth = tileproto::halfDim(width);
+            const uint16_t halfHeight = tileproto::halfDim(height);
+            if ((size_t)halfWidth * halfHeight * 2 >
+                    sizeof(largeHalfScratch) ||
+                !bc1::decode(encoded, encodedLength, largeHalfScratch,
+                             halfWidth, halfHeight) ||
+                !tileproto::pixelDouble(largeHalfScratch, halfWidth, halfHeight,
+                                        largeScratch, width, height)) {
+              return false;
+            }
+            break;
+          }
+        }
+        return true;
+      }, dropped);
+  if (dropped) statFramesDropped++;
+  if (action == largetileproto::Action::Reject) return false;
+  if (action == largetileproto::Action::IgnoreStale ||
+      action == largetileproto::Action::Duplicate) return true;
+
+  if (header.landscape != bufLandscape) {
+    portENTER_CRITICAL(&drawMux);
+    memset(largePending, 0, sizeof(largePending));
+    largePendingSince = 0;
+    portEXIT_CRITICAL(&drawMux);
+    bufLandscape = header.landscape;
+  }
+  const size_t stride = (size_t)PANEL_W * 2;
+  const size_t x0 = (size_t)LARGE_GEOMETRY.col(record.startTile) *
+                    largetileproto::TILE_DIM;
+  const size_t y0 = (size_t)LARGE_GEOMETRY.row(record.startTile) *
+                    largetileproto::TILE_DIM;
+  if (record.visibleSpans) {
+    size_t compactOffset = 0;
+    for (uint16_t row = 0; row < height; ++row) {
+      const uint16_t offset = tileproto::visibleSpanOffset(record.payload, row);
+      const uint16_t count = tileproto::visibleSpanCount(record.payload, row);
+      const size_t bytes = (size_t)count * 2;
+      if (bytes) {
+        memcpy(bufA + (y0 + row) * stride + (x0 + offset) * 2,
+               largeScratch + compactOffset, bytes);
+      }
+      compactOffset += bytes;
+    }
+  } else {
+    for (uint16_t row = 0; row < height; ++row) {
+      memcpy(bufA + (y0 + row) * stride + x0 * 2,
+             largeScratch + (size_t)row * width * 2, (size_t)width * 2);
+    }
+  }
+  portENTER_CRITICAL(&drawMux);
+  if (largePendingSince == 0) largePendingSince = millis();
+  for (uint16_t tile = record.startTile;
+       tile < (uint16_t)(record.startTile + record.runLength); ++tile) {
+    largePending[tile >> 3] |= (uint8_t)(1u << (tile & 7));
+  }
+  largePendingLandscape = header.landscape;
+  portEXIT_CRITICAL(&drawMux);
+  if (action == largetileproto::Action::ApplyComplete) {
+    largeFramesCompleted++;
+  }
+  return true;
+}
+
+void handleLargeTilePacket(const uint8_t *data, size_t len) {
+  largetileproto::Header header;
+  if (!largetileproto::parseHeader(data, len, header) ||
+      header.dirtyTileCount == 0 ||
+      header.dirtyTileCount > LARGE_GEOMETRY.tileCount()) {
+    statBadLen++;
+    return;
+  }
+  const bool ok = largetileproto::forEachRecord(
+      data, len, [&](const largetileproto::Record &record) {
+        return applyLargeRecord(header, record);
+      });
+  if (!ok) {
+    statBadLen++;
+    return;
+  }
+  statPackets++;
+}
+
+static void serviceLargeTileDraw() {
+  static uint32_t lastCompleted = 0;
+  const uint32_t now = millis();
+  bool hasPending = false;
+  uint32_t pendingSince = 0;
+  portENTER_CRITICAL(&drawMux);
+  pendingSince = largePendingSince;
+  for (size_t i = 0; i < sizeof(largePending); ++i) {
+    if (largePending[i] != 0) {
+      hasPending = true;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&drawMux);
+  const largetileproto::DrawReason reason = largetileproto::pendingDrawReason(
+      now, pendingSince, largeFramesCompleted, lastCompleted, hasPending,
+      LARGE_PARTIAL_DRAW_MS);
+  if (reason == largetileproto::DrawReason::None || dmaInFlight != 0 ||
+      surveyActive) {
+    delay(1);
+    return;
+  }
+
+  const bool frameCompleted = reason == largetileproto::DrawReason::Complete;
+  if (frameCompleted) lastCompleted = largeFramesCompleted;
+  uint8_t tiles[largetileproto::BITMAP_BYTES];
+  portENTER_CRITICAL(&drawMux);
+  memcpy(tiles, largePending, sizeof(tiles));
+  memset(largePending, 0, sizeof(largePending));
+  largePendingSince = 0;
+  const bool landscape = largePendingLandscape;
+  portEXIT_CRITICAL(&drawMux);
+  if (landscape != panelLandscape || madctlDirty) applyPanelConfig(landscape);
+
+  bool drew = false;
+  largetileproto::forEachRowRun(
+      tiles, LARGE_GEOMETRY,
+      [&](uint16_t row, uint16_t colStart, uint16_t colEnd) {
+        const int x0 = colStart * largetileproto::TILE_DIM;
+        const int y0 = row * largetileproto::TILE_DIM;
+        int x1 = colEnd * largetileproto::TILE_DIM;
+        if (x1 > PANEL_W) x1 = PANEL_W;
+        const int width = x1 - x0;
+        const int height = LARGE_GEOMETRY.rowHeight(row);
+        for (int r = 0; r < height; ++r) {
+          memcpy(largeDrawStage + (size_t)r * width * 2,
+                 bufA + ((size_t)(y0 + r) * PANEL_W + x0) * 2,
+                 (size_t)width * 2);
+        }
+        dmaMarkQueued();
+        if (boarddisplay::drawBitmap(panel, *bcfg, x0, y0, x1,
+                                     y0 + height, largeDrawStage) != ESP_OK) {
+          dmaUnmarkFailed();
+          statDrawErrors++;
+        } else {
+          waitForDmaIdle(500);
+          drew = true;
+        }
+      });
+  if (drew) {
+    if (frameCompleted) {
+      statFramesShown++;
+    } else {
+      statFramesPartial++;
+    }
+    if (idleActive || displaySleeping || surveyActive) {
+      idleActive = false;
+      displaySleeping = false;
+      surveyActive = false;
+      applyBacklight();
+    }
+  }
+}
+#endif
+
 // Fill the whole panel with one RGB565 color (used for status feedback).
 // Draws from staging (bufB) - bufA belongs to the network path.
 void fillPanel(uint16_t rgb565) {
@@ -415,7 +651,7 @@ void fillPanel(uint16_t rgb565) {
     bufB[i + 1] = lo;
   }
   dmaMarkQueued();  // its completion fires onColorTransDone
-  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, PANEL_W, PANEL_H, bufB) != ESP_OK) {
+  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, PANEL_W, PANEL_H, bufB) != ESP_OK) {
     dmaUnmarkFailed();
   }
   delay(30);  // let DMA finish before bufB is reused
@@ -484,6 +720,12 @@ void serviceRotationRepaint() {
 // pending-band/tile snapshot, the DMA gate, and the delay(1) idle pacing
 // (the else branch) exactly as loop() did before the split.
 void serviceStreamDraw() {
+#if defined(ESPDISP_LARGE_TILE_STREAM)
+  if (largeTileStreamEnabled()) {
+    serviceLargeTileDraw();
+    return;
+  }
+#endif
   static uint32_t lastCompleted = 0;
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   // Draw the tiles we have even when no frame ever completes.
@@ -591,8 +833,8 @@ void serviceStreamDraw() {
       // Queues async; blocks briefly only if the 2-deep transaction queue
       // is full. A failed queue never fires the completion callback, so
       // roll the counter back to avoid a permanent wedge.
-      esp_err_t err = esp_lcd_panel_draw_bitmap(
-          panel, 0, runStart * bandRows, drawWidth, yEnd, bufB + off);
+      esp_err_t err = boarddisplay::drawBitmap(
+          panel, *bcfg, 0, runStart * bandRows, drawWidth, yEnd, bufB + off);
       if (err != ESP_OK) {
         statDrawErrors = statDrawErrors + 1;
         dmaUnmarkFailed();
@@ -688,7 +930,7 @@ void serviceStreamDraw() {
         const uint32_t tQueue = micros();
         tdGatherUs += tQueue - tGather;
         dmaMarkQueued();
-        esp_err_t err = esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + w,
+        esp_err_t err = boarddisplay::drawBitmap(panel, *bcfg, x0, y0, x0 + w,
                                                   y0 + hgt, source);
         tdQueueUs += micros() - tQueue;
         if (err != ESP_OK) {

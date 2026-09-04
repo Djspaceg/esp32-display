@@ -15,9 +15,7 @@ extern volatile uint16_t hbPort;
 bool startInboundTransport();
 void sendToSender(const uint8_t *data, size_t len);
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-// CFGTUNE knobs (serial_config.cpp): the receive task's drain-yield bound and
-// its handle for runtime priority experiments.
+// CFGTUNE knobs (serial_config.cpp): meaningful only when the selected
+// PlatformConfig uses the raw lwIP receive task.
 extern int tuneRxDrainYieldEvery;
 extern TaskHandle_t rxTaskHandle;
-#endif

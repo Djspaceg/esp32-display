@@ -16,7 +16,9 @@ import Foundation
 /// | `proto` | `%u` | `deviceproto::FRAME_PROTOCOL_VERSION` |
 /// | `caps` | `%08lx` | capability bits, lowercase hex |
 /// | `chip` | `CONFIG_IDF_TARGET` | MCU family: `esp32c6`, `esp32s3`, or `unknown` |
-/// | `target` | exact build target | `c6`, `s3-085`, `s3-154`, `s3-175`, or `s3-185` |
+/// | `target` | release family token | `c6`, `s3`, or `p4` |
+/// | `profile` | runtime hardware token | selected carrier/panel profile |
+/// | `partition` | compatibility token | installed flash layout |
 ///
 /// TOLERANT BY CONSTRUCTION. Nothing here throws and nothing here is required:
 /// a record that is missing, empty, misspelled, out of range, or written by a
@@ -45,10 +47,12 @@ public struct ServiceMetadata: Hashable, Sendable {
     public let firmwareVersion: String?
     /// `chip`. The IDF chip token, such as `esp32c6` or `esp32s3`.
     public let chip: String?
-    /// `target`. The exact firmware target, such as `c6`, `s3-085`, `s3-154`,
-    /// `s3-175`, or `s3-185`. Unlike `chip`, this distinguishes same-chip panel
-    /// variants.
+    /// `target`. The firmware release family (`c6`, `s3`, or `p4`).
     public let target: String?
+    /// `profile`. Runtime physical panel/controller profile.
+    public let profile: String?
+    /// `partition`. Flash-layout compatibility token.
+    public let partition: String?
     /// `caps`. The same bits EINF reports, available before a session exists.
     public let capabilities: DeviceProtocol.Capabilities?
     /// `proto`. Which frame-protocol generation this panel speaks.
@@ -60,6 +64,8 @@ public struct ServiceMetadata: Hashable, Sendable {
         firmwareVersion: String? = nil,
         chip: String? = nil,
         target: String? = nil,
+        profile: String? = nil,
+        partition: String? = nil,
         capabilities: DeviceProtocol.Capabilities? = nil,
         frameProtocolVersion: Int? = nil
     ) {
@@ -68,6 +74,8 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.firmwareVersion = firmwareVersion
         self.chip = chip
         self.target = target
+        self.profile = profile
+        self.partition = partition
         self.capabilities = capabilities
         self.frameProtocolVersion = frameProtocolVersion
     }
@@ -100,6 +108,8 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.firmwareVersion = Self.nonEmpty(records["fw"])
         self.chip = Self.nonEmpty(records["chip"])
         self.target = Self.nonEmpty(records["target"])
+        self.profile = Self.nonEmpty(records["profile"])
+        self.partition = Self.nonEmpty(records["partition"])
         self.geometry = Self.parseResolution(records["res"])
         self.capabilities = Self.parseCapabilities(records["caps"])
         self.frameProtocolVersion = Self.parseUnsignedDecimal(records["proto"])

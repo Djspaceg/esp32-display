@@ -396,7 +396,7 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                         detail: "This board is an \(chip). The bundle carries "
                             + "\(describe(bundle.chips)). Choose a bundle that "
                             + "includes \(chip), or build one with "
-                            + "tools/espdisp.py bundle --board.",
+                            + "tools/espdisp.py bundle --family <family>.",
                         action: .noImageForChip)
                 }
 

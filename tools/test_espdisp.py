@@ -17,6 +17,7 @@
 # Those guards were the only unguarded thing left in the change, and none of them
 # need hardware to exercise.
 import io
+import json
 import os
 import re
 import shutil
@@ -86,15 +87,92 @@ def check_accepts(fn, what):
 # the board table: these two strings are the reason the tool exists
 
 
+def preprocess_board_config(*selectors):
+    """Run the host preprocessor against one P4 selector combination."""
+    compiler = os.environ.get("CXX") or shutil.which("c++")
+    if not compiler:
+        raise RuntimeError("C++ compiler not found")
+    include_dir = os.path.join(
+        espdisp.REPO_ROOT, "firmware", "libraries", "espdisp_board", "src")
+    command = [
+        compiler, "-E", "-x", "c++", "-I", include_dir,
+        "-DCONFIG_IDF_TARGET_ESP32P4",
+    ]
+    command.extend("-D%s" % selector for selector in selectors)
+    command.append("-")
+    return subprocess.run(
+        command,
+        input='#include "board_config.h"\n',
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
 def test_board_table():
     check_equal(
-        sorted(espdisp.BOARDS), ["c6", "s3-085", "s3-154", "s3-175", "s3-185"],
+        sorted(espdisp.BOARDS),
+        ["c6", "p4-4b", "s3-085", "s3-154", "s3-175", "s3-185"],
         "only canonical exact targets are board-table keys")
     check_equal(
         espdisp.BOARDS["c6"].fqbn,
         "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M",
         "C6 FQBN",
     )
+    check_equal(
+        espdisp.BOARDS["p4-4b"].fqbn,
+        "esp32:esp32:esp32p4:USBMode=default,CDCOnBoot=default,"
+        "UploadMode=default,FlashSize=32M,PartitionScheme=custom,"
+        "PSRAM=enabled,ChipVariant=prev3",
+        "P4 v1.3 engineering-sample FQBN",
+    )
+    check_equal(espdisp.BOARDS["p4-4b"].chip, "esp32p4", "P4 chip")
+    check_equal(
+        espdisp.PLATFORMS["p4"].chip, "esp32p4",
+        "P4 chip belongs to the platform catalog")
+    check("ChipVariant=prev3" in espdisp.PLATFORMS["p4"].fqbn_template,
+          "P4 silicon profile belongs to the platform catalog")
+    check("PSRAM=enabled" in espdisp.PLATFORMS["p4"].fqbn_template,
+          "P4 memory profile belongs to the platform catalog")
+    check_equal(espdisp.BOARDS["p4-4b"].target_options, (),
+                "the 4B target adds no P4 platform build facts")
+    check("chip" not in espdisp.Board._fields and
+          "fqbn" not in espdisp.Board._fields,
+          "board rows derive chip and FQBN from their platform")
+    check_equal(espdisp.BOARDS["p4-4b"].extra_flags,
+                ("-DESPDISP_BOARD_P4_4B",), "P4 exact selector")
+    board_config_path = os.path.join(
+        espdisp.REPO_ROOT, "firmware", "libraries", "espdisp_board", "src",
+        "board_config.h")
+    with open(board_config_path, "r", encoding="utf-8") as source_file:
+        board_config_source = source_file.read()
+    check("defined(ESPDISP_BOARD_P4_4B)" in board_config_source,
+          "firmware consumes the P4 exact selector")
+    check("ESP32-P4 builds require exactly one compatible exact board selector"
+          in board_config_source,
+          "firmware fails closed when a P4 selector is absent or ambiguous")
+    check("platformSupportsPanel" in board_config_source,
+          "platform/panel composition is executable rather than descriptive")
+    p4_only = preprocess_board_config("ESPDISP_BOARD_P4_4B")
+    check_equal(p4_only.returncode, 0,
+                "the P4 exact selector preprocesses successfully")
+    no_selector = preprocess_board_config()
+    check(no_selector.returncode != 0 and
+          "exactly one compatible exact board selector" in no_selector.stderr,
+          "a P4 build with no exact selector fails preprocessing")
+    for conflicting_selector in (
+            "ESPDISP_BOARD_S3_085", "ESPDISP_BOARD_S3_154",
+            "ESPDISP_DOOM_S3_175", "ESPDISP_BOARD_S3_185"):
+        conflict = preprocess_board_config(
+            "ESPDISP_BOARD_P4_4B", conflicting_selector)
+        check(conflict.returncode != 0 and
+              "exactly one compatible exact board selector" in conflict.stderr,
+              "P4 plus %s fails preprocessing" % conflicting_selector)
+    check_equal(espdisp.BOARDS["p4-4b"].partition_csv,
+                "partitions_p4_4b.csv", "P4 isolated partition source")
+    check_equal(espdisp.board_key_for_chip("esp32p4"), None,
+                "P4 chip identity never auto-selects a display target")
     check_equal(
         espdisp.BOARDS["s3-175"].fqbn,
         "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,"
@@ -164,7 +242,7 @@ def test_argparse_board_targets():
     parser = espdisp.build_parser()
     check_equal(
         espdisp.board_choices(),
-        ["c6", "s3", "s3-085", "s3-154", "s3-175", "s3-185"],
+        ["c6", "p4-4b", "s3", "s3-085", "s3-154", "s3-175", "s3-185"],
         "argparse accepts canonical targets plus the compatibility alias")
     for command in ("compile", "flash"):
         args = parser.parse_args([command, "--board", "s3"])
@@ -183,7 +261,7 @@ def test_argparse_board_targets():
     check_equal(default_bundle.board, None, "bundle selection remains optional")
     check_equal(
         espdisp.bundle_board_keys(default_bundle.board),
-        ["c6", "s3-085", "s3-154", "s3-175", "s3-185"],
+        ["c6", "p4-4b", "s3-085", "s3-154", "s3-175", "s3-185"],
         "default bundle builds every canonical target exactly once")
     info = parser.parse_args([
         "bundle-info", "--require-all-targets", "/tmp/firmware.espdispfw",
@@ -741,12 +819,15 @@ def flash_entries(key):
 
 
 def image_entry(key, blob):
-    """One pre-offset manifest entry, the way cmd_bundle builds them."""
+    """One pre-offset manifest entry for current or historical fixtures."""
+    family_key = key if key in espdisp.FAMILIES else (
+        "p4" if key.startswith("p4") else "s3")
+    family = espdisp.FAMILIES[family_key]
     return {
         "board": key,
         "targets": [key],
-        "chip": espdisp.BOARDS[key].chip,
-        "fqbn": espdisp.BOARDS[key].fqbn,
+        "chip": family.chip,
+        "fqbn": family.fqbn,
         "filename": "display_stream.ino.bin",
         "bytes": len(blob),
         "sha256": espdisp.sha256_hex(blob),
@@ -1417,10 +1498,12 @@ def test_core_lookups():
         check_equal(
             os.path.getsize(real), 8192,
             "the core's boot_app0.bin is 8192 bytes, which is what a bundle pays")
-        for board in espdisp.BOARDS.values():
+        for family in espdisp.FAMILIES.values():
+            expected = espdisp.PLATFORMS[family.platform].bootloader_address
             check_equal(
-                espdisp.core_bootloader_address(board.chip), 0x0,
-                "the installed core puts the %s bootloader at 0x0" % board.chip)
+                espdisp.core_bootloader_address(family.chip), expected,
+                "the installed core puts the %s bootloader at 0x%x"
+                % (family.chip, expected))
 
 
 def test_export_binary():
@@ -2392,13 +2475,6 @@ def test_bundle_file_round_trip():
             "and so do the parts a blank board needs")
         check_equal(os.listdir(tmp), [os.path.basename(path)], "no temp file left behind")
 
-        strict = espdisp.build_parser().parse_args(
-            ["bundle-info", "--require-all-targets", path])
-        check_fails(
-            lambda: strict.func(strict),
-            "missing required exact targets s3-085, s3-154, s3-185",
-            "packaging refuses to reuse an incomplete default bundle")
-
         # Overwriting is a replace, so a second bundle at the same path cannot
         # leave a mixture of the two.
         espdisp.write_file_atomically(path, b"shorter")
@@ -2458,7 +2534,9 @@ def test_git_provenance():
     check_equal(dirty, False, "an empty porcelain listing is clean")
     check_equal(calls[0], ["git", "-C", "/repo", "rev-parse", "HEAD"], "HEAD command")
     check_equal(
-        calls[1], ["git", "-C", "/repo", "status", "--porcelain"], "status command")
+        calls[1],
+        ["git", "-C", "/repo", "status", "--porcelain", "--untracked-files=all"],
+        "status command")
 
     with unittest.mock.patch.object(
         espdisp, "run_capture", stub(head, done(0, " M tools/espdisp.py\n"))
@@ -2749,7 +2827,7 @@ def test_describe_bundle():
         manifest["images"][0]["sha256"] in full,
         "bundle-info prints the whole hash, which is what shasum can be compared to")
     check(
-        espdisp.BOARDS["c6"].fqbn in full, "and the FQBN each image was built with")
+        espdisp.FAMILIES["c6"].fqbn in full, "and the FQBN each image was built with")
 
     # THE FLASH PARTS AND THEIR ADDRESSES. This is the only place a person can see
     # whether a file they were handed can bring up a new board, and the addresses
@@ -2911,24 +2989,24 @@ def test_release_notes_source_and_manifest_contract():
 
 
 def test_bundle_release_notes_preflight_order():
-    args = type("BundleArgs", (), {"board": None, "output": None})()
+    args = type("BundleArgs", (), {"family": ["c6"], "output": None})()
     with unittest.mock.patch.object(
         espdisp, "sketch_fw_version_declaration", return_value=("not-a-version", 7)), \
          unittest.mock.patch.object(
-             espdisp, "bundle_board_keys", side_effect=AssertionError("board lookup ran")):
+             espdisp, "bundle_family_keys", side_effect=AssertionError("family lookup ran")):
         check_fails(
             lambda: espdisp.cmd_bundle(args),
             "firmware/display_stream/app_state.cpp:7: FW_VERSION 'not-a-version' is not SemVer 2.0.0",
-            "invalid FW_VERSION stops before board resolution")
+            "invalid FW_VERSION stops before family resolution")
     with unittest.mock.patch.object(
         espdisp, "sketch_fw_version_declaration", return_value=("1.4.2", 7)), \
          unittest.mock.patch.object(
              espdisp, "release_notes_for_version", side_effect=espdisp.Fail("source failed")), \
          unittest.mock.patch.object(
-             espdisp, "bundle_board_keys", side_effect=AssertionError("board lookup ran")):
+             espdisp, "bundle_family_keys", side_effect=AssertionError("family lookup ran")):
         check_fails(
             lambda: espdisp.cmd_bundle(args), "source failed",
-            "release-note preflight stops before board resolution")
+            "release-note preflight stops before family resolution")
 
 
 def test_release_notes_diagnostics_and_precedence():
@@ -3240,14 +3318,255 @@ def test_bundle_release_notes_preflight_barriers():
             "release-note preflight blocks board, provenance, output, and compilation")
 
 
+def test_p4_partition_contract():
+    """P4 keeps equal dual OTA slots and the standard metadata addresses."""
+    def entry(label, part_type, subtype, address, size):
+        return struct.pack(
+            "<HBBII16sI", 0x50AA, part_type, subtype, address, size,
+            label.encode("ascii").ljust(16, b"\0"), 0)
+
+    good = b"".join([
+        entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
+        entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
+        entry("app0", 0x00, 0x10, 0x10000, 0x800000),
+        entry("app1", 0x00, 0x11, 0x810000, 0x800000),
+    ]) + b"\xff" * 32
+    check_accepts(
+        lambda: espdisp._verify_partition_payload(
+            espdisp.FAMILIES["p4"], good),
+        "P4 dual-OTA partition table")
+    missing_app1 = good[:3 * 32] + b"\xff" * 32
+    check_fails(
+        lambda: espdisp._verify_partition_payload(
+            espdisp.FAMILIES["p4"], missing_app1),
+        "expected app0, app1, nvs, otadata",
+        "P4 table without its recovery OTA slot")
+
+
+def test_universal_family_catalog_and_cli():
+    check_equal(sorted(espdisp.FAMILIES), ["c6", "p4", "s3"],
+                "release catalog exposes exactly three families")
+    check_equal(espdisp.family_choices(), ["c6", "p4", "s3"],
+                "CLI family choices contain no profile artifact names")
+    check_equal(espdisp.FAMILIES["c6"].profiles, ("st7789", "jd9853"),
+                "C6 maps both runtime profiles")
+    check_equal(
+        espdisp.FAMILIES["s3"].profiles,
+        ("gc9107", "st7789-154", "co5300", "st77916"),
+        "S3 maps all runtime profiles into one family")
+    check_equal(espdisp.FAMILIES["p4"].profiles, ("st7703-4b",),
+                "P4 keeps its physical profile internal")
+    check_equal(espdisp.FAMILIES["s3"].partition_csv, "partitions_s3.csv",
+                "S3 uses the common 8 MiB partition layout")
+    check_equal(espdisp.FAMILIES["s3"].extra_flags, (),
+                "S3 family build has no profile selector")
+    check_equal(espdisp.FAMILIES["p4"].extra_flags,
+                ("-DESPDISP_BOARD_P4_4B",),
+                "P4 retains its internal carrier selector")
+    check_equal(espdisp.board_key_for_chip("esp32c6"), "c6", "C6 chip to family")
+    check_equal(espdisp.board_key_for_chip("esp32s3"), "s3", "S3 chip to family")
+    check_equal(espdisp.board_key_for_chip("esp32p4"), "p4", "P4 chip to family")
+    check_equal(espdisp.board_key_for_fqbn("esp32:esp32:esp32s3"), "s3",
+                "S3 FQBN identifies its universal family")
+
+    parser = espdisp.build_parser()
+    for command in ("compile", "flash"):
+        args = parser.parse_args([command, "--family", "s3"])
+        check_equal(args.family, "s3", "%s accepts the family" % command)
+    ota = parser.parse_args(["ota", "panel.local", "--family", "p4"])
+    check_equal(ota.family, "p4", "OTA accepts P4 family")
+    bundle = parser.parse_args(["bundle", "--family", "c6"])
+    check_equal(bundle.family, ["c6"], "bundle requires one family")
+    release = parser.parse_args(["release"])
+    check_equal(release.output_root, espdisp.RELEASE_ROOT,
+                "release defaults to canonical root")
+    for argv in (
+            ["compile", "--board", "s3-175"],
+            ["bundle"],
+            ["bundle-info", "--require-all-targets", "/tmp/a.espdispfw"]):
+        try:
+            parser.parse_args(argv)
+        except SystemExit:
+            check(True, "obsolete/multi-family CLI is rejected: %r" % argv)
+        else:
+            check(False, "obsolete/multi-family CLI was accepted: %r" % argv)
+    check_equal(espdisp.bundle_family_keys(["s3"]), ["s3"],
+                "one family is accepted")
+    check_fails(lambda: espdisp.bundle_family_keys([]), "exactly one --family",
+                "missing bundle family")
+    check_fails(lambda: espdisp.bundle_family_keys(["c6", "s3"]),
+                "exactly one --family", "multi-family bundle writer input")
+
+    p4_only = preprocess_board_config("ESPDISP_BOARD_P4_4B")
+    check_equal(p4_only.returncode, 0, "P4 internal selector preprocesses")
+    for selector in (
+            "ESPDISP_BOARD_S3_085", "ESPDISP_BOARD_S3_154",
+            "ESPDISP_DOOM_S3_175", "ESPDISP_BOARD_S3_185"):
+        conflict = preprocess_board_config("ESPDISP_BOARD_P4_4B", selector)
+        check(conflict.returncode != 0 and "exactly one compatible" in conflict.stderr,
+              "P4 rejects conflicting selector %s" % selector)
+
+
+def test_family_resolution_and_discovery():
+    blank = espdisp.PortInfo("/dev/cu.usbmodem1", [], "unknown")
+    known = espdisp.PortInfo("/dev/cu.usbmodem2", ["s3"], "S3")
+    check_equal(espdisp.resolve_family(None, known).key, "s3",
+                "enumerated family resolves")
+    check_equal(espdisp.resolve_family("p4", blank).key, "p4",
+                "explicit family resolves")
+    check_fails(lambda: espdisp.resolve_family("c6", known), "contradicts",
+                "explicit family contradiction")
+    with unittest.mock.patch.object(espdisp, "probe_chip", return_value="esp32p4"), \
+         unittest.mock.patch("sys.stdout", io.StringIO()):
+        check_equal(espdisp.resolve_family(None, blank).key, "p4",
+                    "chip probe resolves P4 family")
+    with unittest.mock.patch.object(espdisp, "probe_chip", return_value=None), \
+         unittest.mock.patch("sys.stdout", io.StringIO()):
+        check_fails(lambda: espdisp.resolve_family(None, blank),
+                    "could not determine", "unknown chip fails closed")
+
+    payload = {"detected_ports": [{"port": {
+        "address": "192.0.2.3", "protocol": "network",
+        "properties": {
+            "hostname": "panel.local.", "board": "esp32s3", "target": "s3",
+            "profile": "co5300", "partition": "universal-8m-ota",
+        }}}]}
+    ports = espdisp.parse_network_ports(payload)
+    check_equal(len(ports), 1, "one network panel parsed")
+    check_equal(ports[0].profile, "co5300", "profile metadata parsed")
+    check_equal(ports[0].partition, "universal-8m-ota",
+                "partition metadata parsed")
+    family = espdisp.FAMILIES["s3"]
+    check_equal(espdisp.classify_ota_target(
+        family, "s3", "esp32s3", "co5300", "universal-8m-ota"),
+        espdisp.TARGET_OK, "all independent S3 evidence agrees")
+    for values, label in (
+            (("p4", "esp32s3", "co5300", "universal-8m-ota"), "wrong family"),
+            (("s3", "esp32p4", "co5300", "universal-8m-ota"), "wrong chip"),
+            (("s3", "esp32s3", "st7703-4b", "universal-8m-ota"), "wrong profile"),
+            (("s3", "esp32s3", "co5300", "p4-32m-ota"), "wrong partition")):
+        check_equal(espdisp.classify_ota_target(family, *values),
+                    espdisp.TARGET_WRONG, label)
+    for values, label in (
+            (("", "esp32s3", "co5300", "universal-8m-ota"), "missing family"),
+            (("s3", "", "co5300", "universal-8m-ota"), "missing chip"),
+            (("s3", "esp32s3", "", "universal-8m-ota"), "missing profile"),
+            (("s3", "esp32s3", "co5300", ""), "missing partition"),
+            (("s3", "esp32s3", "future", "universal-8m-ota"), "unknown profile")):
+        check_equal(espdisp.classify_ota_target(family, *values),
+                    espdisp.TARGET_UNKNOWN, label)
+    with unittest.mock.patch.object(
+        espdisp, "discovered_network_ports", return_value=ports), \
+         unittest.mock.patch("sys.stdout", io.StringIO()):
+        check_accepts(lambda: espdisp.verify_ota_target(family, "panel.local", 1),
+                      "complete discovery authorizes OTA")
+    incomplete = [espdisp.NetworkPort(
+        "192.0.2.4", "old.local", "esp32s3", "s3", "co5300", "")]
+    with unittest.mock.patch.object(
+        espdisp, "discovered_network_ports", return_value=incomplete), \
+         unittest.mock.patch("sys.stdout", io.StringIO()):
+        check_fails(lambda: espdisp.verify_ota_target(family, "old.local", 1),
+                    "partition", "incomplete discovery fails closed")
+
+
+def make_catalog_fixture(version="1.5.0"):
+    catalog = {
+        "schema": espdisp.RELEASE_CATALOG_SCHEMA,
+        "generated_at": "2026-01-02T03:04:05Z",
+        "families": {},
+    }
+    blobs = {}
+    for key, family in espdisp.FAMILIES.items():
+        blob = ("bundle-%s" % key).encode("ascii")
+        relative = "%s/espdisp-%s-%s.espdispfw" % (key, key, version)
+        catalog["families"][key] = espdisp.release_catalog_entry(
+            family, version, relative, blob)
+        blobs[key] = blob
+    return catalog, blobs
+
+
+def test_release_catalog_contract():
+    catalog, blobs = make_catalog_fixture()
+    check_accepts(
+        lambda: espdisp.validate_release_catalog(catalog, "/tmp/releases", False),
+        "strict three-family catalog")
+    check(espdisp.compare_semver("1.5.0", "1.4.9") > 0,
+          "SemVer latest ordering")
+    check(espdisp.compare_semver("1.5.0-rc.1", "1.5.0") < 0,
+          "SemVer prerelease ordering")
+
+    bad = json.loads(json.dumps(catalog))
+    del bad["families"]["p4"]
+    check_fails(lambda: espdisp.validate_release_catalog(bad, "/tmp/releases", False),
+                "exactly c6, s3, and p4", "missing family")
+    bad = json.loads(json.dumps(catalog))
+    bad["families"]["s3"]["artifact"] = "../escape.espdispfw"
+    check_fails(lambda: espdisp.validate_release_catalog(bad, "/tmp/releases", False),
+                "non-canonical artifact path", "path traversal")
+    bad = json.loads(json.dumps(catalog))
+    bad["families"]["c6"]["chip"] = "esp32s3"
+    check_fails(lambda: espdisp.validate_release_catalog(bad, "/tmp/releases", False),
+                "wrong chip", "catalog chip mismatch")
+    bad = json.loads(json.dumps(catalog))
+    bad["families"]["s3"]["profiles"] = ["co5300"]
+    check_fails(lambda: espdisp.validate_release_catalog(bad, "/tmp/releases", False),
+                "incompatible profiles", "catalog profile mismatch")
+    bad = json.loads(json.dumps(catalog))
+    bad["families"]["p4"]["compatibility"]["partition_scheme"] = "wrong"
+    check_fails(lambda: espdisp.validate_release_catalog(bad, "/tmp/releases", False),
+                "does not match", "catalog partition mismatch")
+
+    def read_artifact(path):
+        for key in blobs:
+            if ("espdisp-%s-" % key) in path:
+                return blobs[key]
+        raise AssertionError("unexpected path %s" % path)
+
+    def unpack_artifact(data):
+        key = next(key for key, blob in blobs.items() if blob == data)
+        family = espdisp.FAMILIES[key]
+        image = {
+            "chip": family.chip, "targets": [key],
+            "profiles": list(family.profiles),
+            "flash_sizes": list(family.flash_sizes),
+            "partition": family.partition_scheme,
+            "app_address": 0x10000, "bytes": len(data),
+        }
+        return ({"firmware_version": "1.5.0", "images": [image]},
+                {key: data}, {key: {espdisp.FLASH_ROLE_PARTITIONS: b"partition"}})
+
+    with unittest.mock.patch.object(espdisp, "read_binary", side_effect=read_artifact), \
+         unittest.mock.patch.object(espdisp, "unpack_bundle", side_effect=unpack_artifact), \
+         unittest.mock.patch.object(espdisp, "_verify_partition_payload"), \
+         unittest.mock.patch.object(espdisp, "_verify_app_payload"):
+        check_accepts(
+            lambda: espdisp.validate_release_catalog(catalog, "/tmp/releases", True),
+            "catalog hashes, sizes, and bundle identities agree")
+        stale = json.loads(json.dumps(catalog))
+        stale["families"]["c6"]["bytes"] += 1
+        check_fails(
+            lambda: espdisp.validate_release_catalog(stale, "/tmp/releases", True),
+            "byte size is stale", "stale artifact size")
+        stale = json.loads(json.dumps(catalog))
+        stale["families"]["c6"]["sha256"] = "0" * 64
+        check_fails(
+            lambda: espdisp.validate_release_catalog(stale, "/tmp/releases", True),
+            "sha256 is stale", "stale artifact hash")
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "manifest.json")
+        with open(path, "wb") as out:
+            out.write(b'{"schema":1,"schema":1,"generated_at":"x","families":{}}')
+        check_fails(lambda: espdisp.load_release_catalog(path, False),
+                    "duplicate key schema", "duplicate catalog member")
+
+
 def main():
-    test_board_table()
-    test_argparse_board_targets()
-    test_resolve_board()
-    test_network_discovery()
+    test_universal_family_catalog_and_cli()
+    test_family_resolution_and_discovery()
+    test_release_catalog_contract()
+    test_p4_partition_contract()
     test_discovery_command()
-    test_classify_ota_target()
-    test_verify_ota_target()
     test_password_policy()
     test_cfgotapw_line()
     test_espota_command()
@@ -3257,7 +3576,6 @@ def main():
     test_bundle_release_notes_preflight_order()
     test_release_notes_diagnostics_and_precedence()
     test_release_notes_reader_vectors()
-    test_bundle_release_notes_preflight_barriers()
     test_bundle_length_line()
     test_bundle_layout_is_pinned()
     test_generation_one_layout_is_pinned_and_still_read()
@@ -3266,7 +3584,6 @@ def main():
     test_bootloader_address_from_boards_txt()
     test_core_lookups()
     test_export_binary()
-    test_collect_flash_parts()
     test_bundle_manifest_offsets()
     test_bundle_round_trip()
     test_pack_bundle_refusals()

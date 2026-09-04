@@ -42,6 +42,13 @@ extension PanelManager {
         usbDevices.first(where: { $0.path == path })?.target
     }
 
+    func usbReleaseIdentity(for path: String) -> FirmwareReleaseCatalog.Identity? {
+        guard let device = usbDevices.first(where: { $0.path == path }) else { return nil }
+        return FirmwareReleaseCatalog.Identity(
+            family: device.target, chip: device.chip,
+            profile: device.board, partition: device.partition)
+    }
+
     func currentUSBPort(for serviceName: String) -> String? {
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return nil }
@@ -190,7 +197,9 @@ extension PanelManager {
         name: String?,
         hardwareID: String?,
         target: String? = nil,
-        board: String? = nil
+        board: String? = nil,
+        chip: String? = nil,
+        partition: String? = nil
     ) {
         guard let index = usbDevices.firstIndex(where: { $0.path == path }) else { return }
         let canonicalID = ConfigCommands.canonicalHardwareID(hardwareID)
@@ -199,6 +208,8 @@ extension PanelManager {
         if let canonicalID { usbDevices[index].hardwareID = canonicalID }
         if let target, !target.isEmpty { usbDevices[index].target = target }
         if let board, !board.isEmpty { usbDevices[index].board = board }
+        if let chip, !chip.isEmpty { usbDevices[index].chip = chip }
+        if let partition, !partition.isEmpty { usbDevices[index].partition = partition }
 
         guard let canonicalID else { return }
         var associationChanged = false
@@ -271,13 +282,17 @@ extension PanelManager {
             // target metadata. Clear an older value when current firmware omits it.
             usbDevices[index].target = identity.target
             usbDevices[index].board = identity.board
+            usbDevices[index].chip = identity.chip
+            usbDevices[index].partition = identity.partition
         }
         noteUSBIdentity(
             path: path,
             name: identity.name,
             hardwareID: identity.hardwareID,
             target: identity.target,
-            board: identity.board)
+            board: identity.board,
+            chip: identity.chip,
+            partition: identity.partition)
         return result
     }
 

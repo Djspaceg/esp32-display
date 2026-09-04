@@ -1,61 +1,97 @@
 import Foundation
 import SenderProtocol
 
-/// The firmware bundle the app ships with.
-///
-/// WHY THE APP CARRIES ONE AT ALL, since the over-the-air sheet asks the user for a
-/// file. A `.espdispfw` can only come from `tools/espdisp.py bundle`, so a path
-/// that requires the user to supply one requires the user to open a terminal - and
-/// the whole point of onboarding a blank board from the app is that they do not
-/// have to. For an update that is a reasonable ask, because anyone updating already
-/// has a panel working; for a board straight out of its box it is the difference
-/// between working and not.
-///
-/// SO `mac/make-app.sh` BUILDS ONE AT PACKAGING TIME and the Xcode build copies it
-/// into Resources. That does use the CLI, on the machine of whoever packages the
-/// app, which is not what the requirement is about.
-///
-/// TWO COSTS, both real and neither hidden:
-///
-///   - The app grows by the bundle, about 2.3MB today for both boards.
-///   - The firmware in it is fixed when the app is packaged, so an app installed
-///     six months ago writes six-month-old firmware. The board can be updated over
-///     the air immediately afterwards, and the README says so.
-///
-/// A build with no bundle is normal rather than broken: `swift build` produces no
-/// app wrapper and therefore no Resources, and the packaging step can be skipped
-/// deliberately. `UsbOnboardingPlan.chooseBundle` is the case for it, and picking a
-/// file by hand still works.
+/// The canonical c6, s3, and p4 firmware resources shipped inside the app.
 enum BundledFirmware {
-    /// The resource name make-app.sh writes. Fixed rather than globbed so that
-    /// what the app looks for and what the script installs are one string in one
-    /// place - and so a second file left in Resources cannot change which firmware
-    /// a board gets.
-    static let resourceName = "espdisp-default"
+    static let catalogResourceName = "manifest"
 
-    /// What the app has to offer.
-    enum Availability: Equatable {
-        /// Packaged without one.
-        case none
-        /// There is a file and it could not be read. Kept distinct from `none`
-        /// because a corrupt shipped bundle is a packaging fault and should not
-        /// read as "this app does not do that".
-        case unreadable(path: String, reason: String)
-        case ready(FirmwareBundle, url: URL)
+    struct Selection: Equatable {
+        let catalogEntry: FirmwareReleaseCatalog.Entry
+        let bundle: FirmwareBundle
+        let url: URL
     }
 
-    static func defaultBundleURL(in bundle: Bundle = .main) -> URL? {
-        bundle.url(
-            forResource: resourceName, withExtension: FirmwareBundle.fileExtension)
+    struct ReleaseSet: Equatable {
+        let catalog: FirmwareReleaseCatalog
+        let selections: [String: Selection]
+
+        func select(
+            family: String?, chip: String?, profile: String?, partition: String?
+        ) throws -> Selection {
+            let entry = try catalog.entry(for: .init(
+                family: family, chip: chip, profile: profile, partition: partition))
+            guard let selection = selections[entry.family] else {
+                throw FirmwareReleaseCatalogError.bundleMetadataMismatch(entry.family)
+            }
+            return selection
+        }
+
+        /// Explicit recovery selection. Callers must present the profile choice
+        /// to the user before using this when runtime identity is unavailable.
+        func selectForRecovery(family: String, profile: String) throws -> Selection {
+            guard let entry = catalog.families[family], entry.profiles.contains(profile),
+                  let selection = selections[family]
+            else {
+                throw FirmwareReleaseCatalogError.profileMismatch(
+                    family: family, found: profile)
+            }
+            return selection
+        }
+    }
+
+    enum Availability: Equatable {
+        case none
+        case unreadable(path: String, reason: String)
+        case ready(ReleaseSet)
+    }
+
+    static func catalogURL(in bundle: Bundle = .main) -> URL? {
+        bundle.url(forResource: catalogResourceName, withExtension: "json")
     }
 
     static func load(in bundle: Bundle = .main) -> Availability {
-        guard let url = defaultBundleURL(in: bundle) else { return .none }
+        guard let catalogURL = catalogURL(in: bundle) else { return .none }
         do {
-            return .ready(try FirmwareBundle.read(contentsOf: url), url: url)
+            let catalog = try FirmwareReleaseCatalog.read(contentsOf: catalogURL)
+            guard let resourceURL = bundle.resourceURL else { return .none }
+            let files = try FileManager.default.contentsOfDirectory(
+                at: resourceURL, includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles])
+            let firmwareFiles = files.filter {
+                $0.pathExtension == FirmwareBundle.fileExtension
+            }
+            let expectedNames = Set(catalog.families.values.map {
+                URL(fileURLWithPath: $0.artifact).lastPathComponent
+            })
+            guard firmwareFiles.count == expectedNames.count,
+                  Set(firmwareFiles.map(\.lastPathComponent)) == expectedNames
+            else {
+                return .unreadable(
+                    path: catalogURL.lastPathComponent,
+                    reason: "embedded firmware resources do not exactly match the catalog")
+            }
+
+            var selections = [String: Selection]()
+            for entry in catalog.families.values {
+                let name = URL(fileURLWithPath: entry.artifact).lastPathComponent
+                guard let url = firmwareFiles.first(where: { $0.lastPathComponent == name })
+                else {
+                    return .unreadable(path: name, reason: "catalog artifact is missing")
+                }
+                let data = try Data(contentsOf: url)
+                let firmware = try catalog.bundle(for: entry, data: data)
+                guard selections.updateValue(
+                    Selection(catalogEntry: entry, bundle: firmware, url: url),
+                    forKey: entry.family) == nil
+                else {
+                    return .unreadable(path: name, reason: "duplicate family resource")
+                }
+            }
+            return .ready(ReleaseSet(catalog: catalog, selections: selections))
         } catch {
             return .unreadable(
-                path: url.lastPathComponent, reason: error.localizedDescription)
+                path: catalogURL.lastPathComponent,
+                reason: error.localizedDescription)
         }
     }
 }

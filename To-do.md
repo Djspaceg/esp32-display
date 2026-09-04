@@ -1,5 +1,16 @@
 # To-do
 
+- [x] Publish universal `c6`, `s3`, and `p4` firmware-family infrastructure:
+      single-family format-3 writers, canonical release catalog/storage,
+      fail-closed app selection, and direct app resource embedding.
+- [x] Add the reusable ESP32-P4 platform, ST7703 MIPI-DSI panel profile, and
+      Waveshare 4B carrier profile with capability-gated ETL1 streaming.
+- [ ] Complete attached 4B hardware validation: display colors, edges, four
+      transforms, portrait touch corners/releases, BOOT rotation, and backlight
+      controls now pass. Hosted-C6 compatibility, odd-orientation touch corners,
+      reconnect, ETL1 streaming/loss recovery, tearing, and OTA recovery remain
+      blocked until compatible C6 firmware is established.
+
 - [ ] HIGH PRIORITY: Recover full-frame rate on the 466×466 panel. Full-frame
       updates deliver 1–4 fps because the panel absorbs only ~300 datagrams/s
       while painting (congestion collapse, docs/tile-stream-plan.md §17.3–17.4),

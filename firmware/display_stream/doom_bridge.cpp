@@ -7,6 +7,7 @@
 #include "esp_lcd_panel_ops.h"
 
 #include "app_state.h"
+#include <display_backend.h>
 #include "dma_gate.h"
 
 
@@ -43,7 +44,7 @@ extern "C" bool doom_display_blit_blocking(const uint16_t *pixels,
   if (dmaInFlight != 0) return false;
 
   dmaMarkQueued();
-  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, width, height, pixels) != ESP_OK) {
+  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, width, height, pixels) != ESP_OK) {
     dmaUnmarkFailed();
     return false;
   }

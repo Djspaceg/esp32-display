@@ -17,11 +17,20 @@ extern uint8_t *bufA;
 extern uint8_t *bufB;
 extern bool bufLandscape;  // orientation of bufA's content
 
+// Bind protocol reassemblers to the runtime-selected profile geometry. Called
+// once after configurePanelGeometry() and before any network packet can arrive.
+bool initializeFramePipeline();
+
 // Apply one band's payload to bufA and run the reassembly bookkeeping
 // (called from the inbound dispatch in net_link.cpp).
 bool applyBandPayload(const bandproto::Header &h, bool compressed,
                       const uint8_t *payload, size_t payloadLen,
                       bool countPacket);
+
+#if defined(ESPDISP_LARGE_TILE_STREAM)
+// One magic-prefixed ETL1 large-tile datagram.
+void handleLargeTilePacket(const uint8_t *data, size_t len);
+#endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 // One tile-stream datagram (bit 15 set, on a board where that means tiles).

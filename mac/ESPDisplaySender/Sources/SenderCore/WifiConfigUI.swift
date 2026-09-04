@@ -92,22 +92,26 @@ enum WifiConfigUI {
     struct USBIdentity: Equatable, Sendable {
         var name: String
         var hardwareID: String?
-        /// Exact firmware target reported by CFGSHOW.
+        /// Firmware family and independent compatibility evidence from CFGSHOW.
         var target: String?
-        /// Physical panel/controller profile reported by CFGSHOW (`st7789`,
-        /// `jd9853`, `co5300`, or `st77916`), when present.
         var board: String?
+        var chip: String?
+        var partition: String?
 
         init(
             name: String,
             hardwareID: String? = nil,
             target: String? = nil,
-            board: String? = nil
+            board: String? = nil,
+            chip: String? = nil,
+            partition: String? = nil
         ) {
             self.name = name
             self.hardwareID = ConfigCommands.canonicalHardwareID(hardwareID)
             self.target = target
             self.board = board
+            self.chip = chip
+            self.partition = partition
         }
     }
 
@@ -126,6 +130,8 @@ enum WifiConfigUI {
         var hardwareID: String?
         var target: String?
         var board: String?
+        var chip: String?
+        var partition: String?
         var isConnected: Bool
 
         init(
@@ -134,6 +140,8 @@ enum WifiConfigUI {
             hardwareID: String? = nil,
             target: String? = nil,
             board: String? = nil,
+            chip: String? = nil,
+            partition: String? = nil,
             isConnected: Bool = true
         ) {
             self.path = path
@@ -141,6 +149,8 @@ enum WifiConfigUI {
             self.hardwareID = ConfigCommands.canonicalHardwareID(hardwareID)
             self.target = target
             self.board = board
+            self.chip = chip
+            self.partition = partition
             self.isConnected = isConnected
         }
 
@@ -600,7 +610,9 @@ enum WifiConfigUI {
             name: ConfigCommands.decodeField("name64=", from: info) ?? "",
             hardwareID: ConfigCommands.hardwareID(from: info),
             target: token("target="),
-            board: token("board="))
+            board: token("board="),
+            chip: token("chip="),
+            partition: token("partition="))
     }
 
     /// Ask a port to identify itself. CFGSHOW answering at all is what proves

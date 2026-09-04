@@ -25,26 +25,34 @@
 
 #include <board_config.h>
 #include <board_io.h>
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-#if defined(ESPDISP_BOARD_S3_085)
+#if defined(ESPDISP_PANEL_S3_RUNTIME)
 #include <esp_lcd_gc9107.h>
-#elif defined(ESPDISP_BOARD_S3_154)
 #include <esp_lcd_panel_st7789.h>
-#elif defined(ESPDISP_BOARD_S3_185)
 #include <esp_lcd_st77916.h>
-#else
 #include <esp_lcd_co5300.h>
-#endif
-#else
+#elif defined(ESPDISP_PANEL_GC9107_128X128)
+#include <esp_lcd_gc9107.h>
+#elif defined(ESPDISP_PANEL_ST7789_240X240)
+#include <esp_lcd_panel_st7789.h>
+#elif defined(ESPDISP_PANEL_ST77916_360X360)
+#include <esp_lcd_st77916.h>
+#elif defined(ESPDISP_PANEL_CO5300_466X466)
+#include <esp_lcd_co5300.h>
+#elif defined(ESPDISP_PANEL_C6_RUNTIME)
 #include <esp_lcd_panel_st7789.h>
 #include <esp_lcd_jd9853.h>
+#elif defined(ESPDISP_PANEL_ST7703_720X720)
+// MIPI-DSI targets are constructed by panel_init_dsi.h.
+#else
+#error "No panel implementation selected for this firmware family"
 #endif
 
 #include "panel_orientation.h"
 
 namespace boardpanel {
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3) && defined(ESPDISP_BOARD_S3_085)
+#if defined(ESPDISP_PANEL_GC9107_128X128) || \
+    defined(ESPDISP_PANEL_S3_RUNTIME)
 // Waveshare's controller-specific Arduino GC9107 sequence. It deliberately
 // includes COLMOD=0x05, INVON, SLPOUT with 120ms delay, and DISPON with 20ms
 // delay; the generic Espressif defaults are not this panel's sequence.
@@ -110,14 +118,14 @@ static const gc9107_lcd_init_cmd_t GC9107_WAVESHARE_INIT[] = {
 
 /// Bring up the SPI/QSPI bus and the panel described by cfg.
 ///
-/// spiHz is the pixel clock; pass cfg.pclkHz unless deliberately
-/// experimenting. Each validated profile owns its measured SPI or QSPI rate in
-/// board_config.h.
+/// The composed PanelConfig is the sole source for pixel clock, bus mode,
+/// controller, inversion, geometry and address offsets. Carrier Config supplies
+/// only wiring and reset topology.
 ///
 /// doneCb fires from an ISR when a queued transfer completes; pass nullptr if
 /// the caller does not track DMA completions.
 inline bool init(const board::Config &cfg, spi_host_device_t host,
-                 uint32_t spiHz, size_t maxTransferSz,
+                 size_t maxTransferSz,
                  esp_lcd_panel_io_color_trans_done_cb_t doneCb, void *userCtx,
                  esp_lcd_panel_io_handle_t *outIo,
                  esp_lcd_panel_handle_t *outPanel) {
@@ -148,8 +156,8 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
   esp_lcd_panel_io_spi_config_t io_config = {};
   io_config.cs_gpio_num = cfg.pinCs;
   io_config.dc_gpio_num = cfg.pinDc;  // NO_PIN (-1) on QSPI: no D/C line
-  io_config.spi_mode = cfg.spiMode;
-  io_config.pclk_hz = spiHz;
+  io_config.spi_mode = cfg.panel->spiMode;
+  io_config.pclk_hz = cfg.panel->pixelClockHz;
   io_config.trans_queue_depth = 2;
   io_config.on_color_trans_done = doneCb;
   io_config.user_ctx = userCtx;
@@ -174,7 +182,7 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
   esp_lcd_panel_dev_config_t panel_config = {};
   panel_config.reset_gpio_num = cfg.pinRst;
   panel_config.rgb_ele_order =
-      cfg.driver == board::PanelDriver::Gc9107
+      cfg.panel->driver == board::PanelDriver::Gc9107
           ? LCD_RGB_ELEMENT_ORDER_BGR
           : LCD_RGB_ELEMENT_ORDER_RGB;
   // The framebuffer arrives from the Mac already in panel byte order, so the
@@ -188,9 +196,9 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
 
   esp_lcd_panel_handle_t panel = nullptr;
   esp_err_t err = ESP_ERR_NOT_SUPPORTED;
-  switch (cfg.driver) {
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-#if defined(ESPDISP_BOARD_S3_085)
+  switch (cfg.panel->driver) {
+#if defined(ESPDISP_PANEL_GC9107_128X128) || \
+    defined(ESPDISP_PANEL_S3_RUNTIME)
     case board::PanelDriver::Gc9107: {
       gc9107_vendor_config_t vendor = {
           .init_cmds = GC9107_WAVESHARE_INIT,
@@ -201,11 +209,15 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
       err = esp_lcd_new_panel_gc9107(io, &panel_config, &panel);
       break;
     }
-#elif defined(ESPDISP_BOARD_S3_154)
+#endif
+#if defined(ESPDISP_PANEL_ST7789_240X240) || \
+    defined(ESPDISP_PANEL_S3_RUNTIME)
     case board::PanelDriver::St7789:
       err = esp_lcd_new_panel_st7789(io, &panel_config, &panel);
       break;
-#elif defined(ESPDISP_BOARD_S3_185)
+#endif
+#if defined(ESPDISP_PANEL_ST77916_360X360) || \
+    defined(ESPDISP_PANEL_S3_RUNTIME)
     case board::PanelDriver::St77916: {
       st77916_vendor_config_t vendor = {};
       vendor.flags.use_qspi_interface = cfg.isQspi() ? 1 : 0;
@@ -213,12 +225,10 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
       err = esp_lcd_new_panel_st77916(io, &panel_config, &panel);
       break;
     }
-#else
+#endif
+#if defined(ESPDISP_PANEL_CO5300_466X466) || \
+    defined(ESPDISP_PANEL_S3_RUNTIME)
     case board::PanelDriver::Co5300: {
-      // The driver must know it is on QSPI to wrap commands in the envelope.
-      // It copies what it needs out of vendor_config during construction, so
-      // a stack instance is fine; init_cmds = NULL selects the driver's own
-      // init table (which carries this glass's column window and SLPOUT).
       co5300_vendor_config_t vendor = {};
       vendor.flags.use_qspi_interface = cfg.isQspi() ? 1 : 0;
       panel_config.vendor_config = &vendor;
@@ -226,7 +236,7 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
       break;
     }
 #endif
-#else
+#if defined(ESPDISP_PANEL_C6_RUNTIME)
     case board::PanelDriver::Jd9853:
       err = esp_lcd_new_panel_jd9853(io, &panel_config, &panel);
       break;
@@ -243,8 +253,8 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
 
   esp_lcd_panel_reset(panel);
   esp_lcd_panel_init(panel);
-  esp_lcd_panel_invert_color(panel, cfg.invertColor);
-  esp_lcd_panel_set_gap(panel, cfg.colOffset, cfg.rowOffset);
+  esp_lcd_panel_invert_color(panel, cfg.panel->invertColor);
+  esp_lcd_panel_set_gap(panel, cfg.panel->colOffset, cfg.panel->rowOffset);
   esp_lcd_panel_disp_on_off(panel, true);
 
   if (outIo != nullptr) *outIo = io;
@@ -264,12 +274,11 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
 /// callers can fall through to their PWM path.
 inline bool setPanelBrightness(esp_lcd_panel_handle_t panel,
                                const board::Config &cfg, uint8_t level) {
-#if defined(CONFIG_IDF_TARGET_ESP32S3) && !defined(ESPDISP_BOARD_S3_185) && \
-    !defined(ESPDISP_BOARD_S3_154) && !defined(ESPDISP_BOARD_S3_085)
-  // Only the default S3 build includes the CO5300 header, so the panel-command
-  // brightness path is compiled only there. Every fixed S3 LCD target has a
-  // PWM backlight pin and falls through to that path.
-  if (cfg.hasBacklightPin() || cfg.driver != board::PanelDriver::Co5300) {
+#if defined(ESPDISP_PANEL_CO5300_466X466) || \
+    defined(ESPDISP_PANEL_S3_RUNTIME)
+  // Only a family that links the CO5300 command API can reach this path.
+  if (cfg.hasBacklightPin() ||
+      cfg.panel->driver != board::PanelDriver::Co5300) {
     return false;
   }
   uint8_t percent = (uint8_t)(((unsigned)level * 100) / 255);
@@ -318,12 +327,13 @@ inline void applyOrientation(esp_lcd_panel_handle_t panel,
                              const board::Config &cfg, bool landscape,
                              uint8_t rotation) {
   const uint8_t q = panelorient::quadrant(
-      (uint8_t)(rotation + cfg.orientationOffset), landscape);
+      (uint8_t)(rotation + cfg.panel->orientationOffset), landscape);
   const bool swap = panelorient::swapXY(q);
   esp_lcd_panel_swap_xy(panel, swap);
   esp_lcd_panel_mirror(panel, panelorient::mirrorX(q), panelorient::mirrorY(q));
-  esp_lcd_panel_set_gap(panel, swap ? cfg.rowOffset : cfg.colOffset,
-                        swap ? cfg.colOffset : cfg.rowOffset);
+  esp_lcd_panel_set_gap(panel,
+                        swap ? cfg.panel->rowOffset : cfg.panel->colOffset,
+                        swap ? cfg.panel->colOffset : cfg.panel->rowOffset);
 }
 
 }  // namespace boardpanel

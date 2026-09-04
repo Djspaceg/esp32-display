@@ -320,10 +320,9 @@ final class PanelGeometryTests: XCTestCase {
     }
 
     func testIsStreamableBoundsTheFrameAllocation() {
-        // No separate cap on frameBytes, because the two bounds above already put
-        // one there. Searched rather than asserted: the largest frame any
-        // streamable geometry can ask for is what matters, and it is not obvious
-        // by inspection which shape produces it.
+        // Band bounds cap legacy geometries, while the one admitted ETL1
+        // target is the known 720x720 profile. Search the combined admission
+        // edge so a future broadening is deliberate.
         var largest = (bytes: 0, width: 0, height: 0)
         for width in 1...800 {
             for height in 1...800 {
@@ -334,8 +333,9 @@ final class PanelGeometryTests: XCTestCase {
                 largest = (geometry.frameBytes, width, height)
             }
         }
-        XCTAssertEqual(largest.bytes, 512 * 512 * 2, "the biggest streamable frame")
-        XCTAssertEqual([largest.width, largest.height], [512, 512])
+        XCTAssertEqual(largest.bytes, 720 * 720 * 2,
+                       "the biggest streamable frame")
+        XCTAssertEqual([largest.width, largest.height], [720, 720])
         XCTAssertLessThan(largest.bytes, 1_048_576, "still under a megabyte")
     }
 }

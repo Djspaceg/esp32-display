@@ -23,6 +23,66 @@ final class TileStreamSelectionTests: XCTestCase {
         XCTAssertNotNil(FrameSender.tileGeometry(for: .panel172x320))
     }
 
+    func testLargeTileTransportRequiresCapabilityAndGeometry() {
+        let large = PanelGeometry(width: 720, height: 720)
+        XCTAssertEqual(
+            FrameSender.frameTransport(for: large, capabilities: []),
+            .unavailable,
+            "720x720 must wait for EINF rather than emit oversized bands")
+        XCTAssertEqual(
+            FrameSender.frameTransport(for: large, capabilities: .tileStream),
+            .unavailable,
+            "tile-v1 cannot carry the 2025-tile grid")
+        XCTAssertEqual(
+            FrameSender.frameTransport(for: large, capabilities: .largeTileStream),
+            .largeTiles)
+
+        let pixels = [UInt8](repeating: 0, count: large.frameBytes)
+        XCTAssertTrue(FrameSender.firstFramePackets(
+            frameId: 1, pixels: pixels, geometry: large).isEmpty)
+        let packets = FrameSender.firstFramePackets(
+            frameId: 1, pixels: pixels, geometry: large,
+            capabilities: .largeTileStream)
+        XCTAssertFalse(packets.isEmpty)
+        XCTAssertTrue(packets.allSatisfy { $0.prefix(4) == Data("ETL1".utf8) })
+    }
+
+    func testLegacyBandAndTilePacketsStayOnTheirExistingPackers() {
+        let bandGeometry = PanelGeometry.panel172x320
+        let bandPixels = [UInt8](repeating: 0x5A, count: bandGeometry.frameBytes)
+        let classic = FrameSender.firstFramePackets(
+            frameId: 0x1234, pixels: bandPixels, geometry: bandGeometry)
+        var expectedFirst = BandProtocol.packetHeader(
+            frameId: 0x1234, band: 0,
+            dirtyCount: bandGeometry.bandCount(landscape: false),
+            landscape: false)
+        expectedFirst.append(contentsOf: bandPixels[0..<bandGeometry.bandPayloadBytes(
+            index: 0, landscape: false)])
+        XCTAssertEqual(classic.first, expectedFirst)
+
+        let tileGeometry = PanelGeometry(width: 466, height: 466)
+        let tilePixels = [UInt8](repeating: 0, count: tileGeometry.frameBytes)
+        let selected = FrameSender.firstFramePackets(
+            frameId: 7, pixels: tilePixels, geometry: tileGeometry,
+            capabilities: .tileStream)
+        let grid = TileGeometry(width: 466, height: 466)
+        let existing = TilePacker.packets(
+            frameId: 7, dirtyTiles: Array(0..<grid.tileCount),
+            pixels: tilePixels, geometry: grid, landscape: false,
+            policy: .losslessOnly)
+        XCTAssertEqual(selected, existing)
+        XCTAssertFalse(selected.contains { $0.prefix(4) == Data("ETL1".utf8) })
+    }
+
+    func testTransportNegotiationChangeForcesAKeyframe() {
+        XCTAssertTrue(FrameSender.transportChangeRequiresKeyframe(
+            from: .unavailable, to: .largeTiles))
+        XCTAssertTrue(FrameSender.transportChangeRequiresKeyframe(
+            from: .classicBands, to: .tileV1))
+        XCTAssertFalse(FrameSender.transportChangeRequiresKeyframe(
+            from: .tileV1, to: .tileV1))
+    }
+
     func testHostileGeometryDisablesTheTilePath() {
         // A geometry the tile grid cannot carry (33+ tile columns) yields
         // nil, which keeps a panel advertising the bit against a bogus mDNS

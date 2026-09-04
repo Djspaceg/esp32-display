@@ -126,20 +126,22 @@ static void processConfigLine(char *line) {
                   want != 0, panelRotation);
   } else if (strncmp(line, "CFGROT ", 7) == 0) {
     // Set the mounting rotation in clockwise quarter turns: CFGROT 0|1|2|3.
-    // Quarter turns (1 and 3) are refused on rectangular glass for the same
-    // reason CAP_ROTATE is not advertised there: a physical 90-degree turn
-    // of those panels is what the sender's landscape mechanism expresses,
-    // and a MADCTL quarter turn would fight it. Persisted, and applied on
-    // the next drawn frame.
+    // Quarter turns (1 and 3) require a square panel whose backend has passed
+    // physical transform validation. Rectangular panels use sender landscape;
+    // an unvalidated backend such as P4 DSI fails closed until enabled in its
+    // PanelConfig.
     int want = atoi(line + 7);
     if (want < 0 || want > 3) {
       Serial.println("CFGERR expected: CFGROT 0|1|2|3");
       return;
     }
-    if ((want & 1) != 0 && bcfg->panelW != bcfg->panelH) {
-      Serial.printf("CFGERR rotation %d needs a square panel (%s is %ux%u); "
+    if ((want & 1) != 0 &&
+        (bcfg->panel->width != bcfg->panel->height ||
+         !bcfg->panel->supportsCommandRotation)) {
+      Serial.printf("CFGERR rotation %d unsupported by %s (%ux%u); "
                     "only 0 and 2 apply here\n",
-                    want, bcfg->name, bcfg->panelW, bcfg->panelH);
+                    want, bcfg->name, bcfg->panel->width,
+                    bcfg->panel->height);
       return;
     }
     panelRotation = (uint8_t)want;
@@ -177,25 +179,18 @@ static void processConfigLine(char *line) {
       return;
     }
     if (board::COMPILED_VARIANT != board::Variant::Unknown) {
-      // Single-board chips have nothing to override: the variant is a
-      // compile-time fact there, and persisting a wrong answer would only
-      // manufacture a broken boot.
-      Serial.printf("CFGERR board is fixed at compile time on this chip (%s)\n",
+      Serial.printf("CFGERR profile is fixed internally for family %s (%s)\n",
+                    board::targetToken(board::COMPILED_VARIANT),
                     board::variantToken(board::COMPILED_VARIANT));
       return;
     }
-    if (want != board::Variant::Unknown) {
-      const board::Config &wantCfg = board::configFor(want);
-      if (wantCfg.panelW != PANEL_GEOMETRY.width ||
-          wantCfg.panelH != PANEL_GEOMETRY.height) {
-        // Buffers, band layout, and the mDNS advertisement in this binary are
-        // sized for the compiled resolution; forcing a board with different
-        // glass cannot work, so refuse rather than persist a broken boot.
-        Serial.printf("CFGERR %s is %ux%u; this binary is built for %ux%u\n",
-                      board::variantToken(want), wantCfg.panelW, wantCfg.panelH,
-                      PANEL_GEOMETRY.width, PANEL_GEOMETRY.height);
-        return;
-      }
+    if (want != board::Variant::Unknown &&
+        !board::variantMatchesPlatform(
+            want, board::COMPILED_PLATFORM.platform)) {
+      Serial.printf("CFGERR profile %s is not compatible with family %s\n",
+                    board::variantToken(want),
+                    board::COMPILED_PLATFORM.chipToken);
+      return;
     }
     Preferences prefs;
     prefs.begin("espdisp", false);
@@ -434,7 +429,8 @@ static void processConfigLine(char *line) {
     Serial.printf(
         "CFGINFO ssid64=%s name64=%s id=%02x%02x%02x%02x%02x%02x "
         "connected=%d ip=%s rssi=%d flip=%d rot=%u auto=%u effective=%u "
-        "motion=%d bl=%s pwr=%s board=%s target=%s bat=%d ota=%s ssid=%s\n",
+        "motion=%d bl=%s pwr=%s board=%s profile=%s target=%s chip=%s "
+        "partition=%s bat=%d ota=%s ssid=%s\n",
         (const char *)b64, (const char *)name64,
         deviceId[0], deviceId[1], deviceId[2],
         deviceId[3], deviceId[4], deviceId[5],
@@ -443,7 +439,9 @@ static void processConfigLine(char *line) {
         panelRotation == 2, panelRotation,
         automaticRotation, effectivePanelRotation(), motionAvailable,
         blIsHigh() ? "high" : "low", panelManuallyOff ? "off" : "on",
-        board::variantToken(boardVariant), board::targetToken(boardVariant),
+        board::variantToken(boardVariant), board::variantToken(boardVariant),
+        board::targetToken(boardVariant), bcfg->platform->chipToken,
+        bcfg->platform->partitionToken,
         batteryPercentOrUnknown(),
         otapolicy::statusToken(currentOtaStatus()), cfgSsid.c_str());
   }

@@ -71,21 +71,26 @@ uint32_t deviceCapabilities() {
          // matters: tile firmware predating this advertises CAP_TILE_STREAM
          // alone, so a sender can tell the two apart and withhold codec 3
          // from the older one.
-         | (tileStreamEnabled() ? (deviceproto::CAP_TILE_STREAM
-                                   | deviceproto::CAP_TILE_HALFRES
-                                   | deviceproto::CAP_TILE_VISIBLE_SPANS)
-                                : deviceproto::CAP_COMPRESSED_BANDS)
+         | (largeTileStreamEnabled()
+                ? deviceproto::CAP_LARGE_TILE_STREAM
+                : (tileStreamEnabled()
+                       ? (deviceproto::CAP_TILE_STREAM
+                          | deviceproto::CAP_TILE_HALFRES
+                          | deviceproto::CAP_TILE_VISIBLE_SPANS)
+                       : deviceproto::CAP_COMPRESSED_BANDS))
          // Round glass: a fifth of the framebuffer is behind the bezel and
          // invisible forever. Straight from the board table - the sender
          // has no other way to know the panel's shape, and the firmware
          // itself does nothing with it (see the CAP_ROUND_DISPLAY comment).
-         | (bcfg->roundDisplay ? deviceproto::CAP_ROUND_DISPLAY : 0u)
+         | (bcfg->panel->roundDisplay ? deviceproto::CAP_ROUND_DISPLAY : 0u)
          // Quarter turns only where the glass is square. On a rectangular
          // panel a 90-degree mounting turn is what the sender-driven
          // landscape mechanism already expresses, and honouring rotation 1/3
          // there would fight it - so the capability is withheld and the
          // Rotate handler NACKs those values as defense in depth behind it.
-         | (bcfg->panelW == bcfg->panelH ? deviceproto::CAP_ROTATE : 0u)
+         | (bcfg->panel->width == bcfg->panel->height &&
+                    bcfg->panel->supportsCommandRotation
+                ? deviceproto::CAP_ROTATE : 0u)
          // Only when OTA actually came up, not merely because this build
          // contains the code and not merely because a password is stored: a
          // panel that is not listening advertises no OTA, so nothing offers an

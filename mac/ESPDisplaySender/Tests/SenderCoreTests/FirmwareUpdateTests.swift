@@ -407,8 +407,10 @@ final class FirmwareUpdateTests: XCTestCase {
             PanelManager.physicalBoard("st7789-154", isCompatibleWith: "s3-154"))
         XCTAssertTrue(PanelManager.physicalBoard("co5300", isCompatibleWith: "s3-175"))
         XCTAssertTrue(PanelManager.physicalBoard("st77916", isCompatibleWith: "s3-185"))
+        XCTAssertTrue(
+            PanelManager.physicalBoard("st7703-4b", isCompatibleWith: "p4-4b"))
 
-        // Each same-chip S3 profile belongs only to its exact target.
+        // Each same-chip/profile mapping belongs only to its exact target.
         XCTAssertFalse(PanelManager.physicalBoard("gc9107", isCompatibleWith: "s3-154"))
         XCTAssertFalse(PanelManager.physicalBoard("gc9107", isCompatibleWith: "s3-175"))
         XCTAssertFalse(PanelManager.physicalBoard("gc9107", isCompatibleWith: "s3-185"))
@@ -421,6 +423,9 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertFalse(PanelManager.physicalBoard("co5300", isCompatibleWith: "s3-185"))
         XCTAssertFalse(PanelManager.physicalBoard("st77916", isCompatibleWith: "s3-175"))
         XCTAssertFalse(PanelManager.physicalBoard("st77916", isCompatibleWith: "esp32s3"))
+        XCTAssertFalse(PanelManager.physicalBoard("st7703-4b", isCompatibleWith: "s3-185"))
+        XCTAssertFalse(PanelManager.physicalBoard("st7703-4b", isCompatibleWith: "esp32p4"))
+        XCTAssertFalse(PanelManager.physicalBoard("st77916", isCompatibleWith: "p4-4b"))
         XCTAssertFalse(PanelManager.physicalBoard("future", isCompatibleWith: "s3-185"))
     }
 
@@ -609,6 +614,30 @@ final class FirmwareUpdateTests: XCTestCase {
             chipConfirmed: false)
         XCTAssertEqual(mismatch.action, .blocked)
         XCTAssertTrue(mismatch.headline.contains("disagree"))
+    }
+
+    func testP4UpdateRequiresMatchingExactTargetAndChip() throws {
+        let bundle = try Self.bundle(version: "1.5.0", chips: ["esp32p4"])
+        let matching = FirmwareUpdatePlan.make(
+            bundle.availability(
+                forTarget: "p4-4b", chip: "esp32p4", panelVersion: "1.4.2"),
+            chipConfirmed: true)
+        XCTAssertEqual(matching.action, .update)
+        XCTAssertTrue(matching.canPush)
+
+        let noTarget = FirmwareUpdatePlan.make(
+            bundle.availability(
+                forTarget: nil, chip: "esp32p4", panelVersion: "1.4.2"),
+            chipConfirmed: false)
+        XCTAssertEqual(noTarget.action, .chooseImage)
+        XCTAssertFalse(noTarget.canPush)
+
+        let wrongChip = FirmwareUpdatePlan.make(
+            bundle.availability(
+                forTarget: "p4-4b", chip: "esp32s3", panelVersion: "1.4.2"),
+            chipConfirmed: false)
+        XCTAssertEqual(wrongChip.action, .blocked)
+        XCTAssertFalse(wrongChip.canPush)
     }
 
     func testConfirmedChipCarriesNoCaveat() throws {
@@ -816,7 +845,8 @@ final class FirmwareUpdateTests: XCTestCase {
         // reader that mixed two boards up could not pass.
         func parts(for chip: String) -> [(role: String, address: Int, payload: Data)] {
             [
-                ("bootloader", 0x0, Data([0xE9]) + Data("\(chip) boot\n".utf8)),
+                ("bootloader", chip == "esp32p4" ? 0x2000 : 0x0,
+                 Data([0xE9]) + Data("\(chip) boot\n".utf8)),
                 ("partitions", 0x8000, Data([0xAA, 0x50]) + Data("\(chip)\n".utf8)),
                 ("boot_app0", 0xE000, Data("ota \(chip)\n".utf8)),
             ]
@@ -824,6 +854,7 @@ final class FirmwareUpdateTests: XCTestCase {
         let exactTargets: [String] = {
             var s3Index = 0
             return chips.map { chip in
+                if chip == "esp32p4" { return "p4-4b" }
                 guard chip == "esp32s3" else { return "c6" }
                 defer { s3Index += 1 }
                 return s3Index == 0 ? "s3-175" : "s3-185"

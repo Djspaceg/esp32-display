@@ -15,11 +15,13 @@
 #include "../display_stream/control_queue.h"
 #include "../display_stream/device_protocol.h"
 #include "../display_stream/glyph_draw.h"
+#include "../display_stream/large_tile_protocol.h"
 #include "../display_stream/ota_policy.h"
 #include "../display_stream/panel_state.h"
 #include "../display_stream/tile_protocol.h"
 #include "../libraries/espdisp_board/src/battery_estimate.h"
 #include "../libraries/espdisp_board/src/board_config.h"
+#include "../libraries/espdisp_board/src/gt911_protocol.h"
 #include "../libraries/espdisp_board/src/motion_orientation.h"
 #include "../libraries/espdisp_board/src/panel_orientation.h"
 #include "../libraries/espdisp_board/src/touch_gesture.h"
@@ -1154,7 +1156,7 @@ int main() {
     CHECK(board::variantFromI2cProbe(false, 0) == Variant::TouchJd9853);
     CHECK(board::variantFromI2cProbe(false, 5) == Variant::TouchJd9853);
     CHECK(board::resolve(Variant::Unknown) == Variant::TouchJd9853);
-    CHECK(board::configFor(Variant::Unknown).driver == board::PanelDriver::Jd9853);
+    CHECK(board::configFor(Variant::Unknown).panel->driver == board::PanelDriver::Jd9853);
 
     // ...but resolve() must never disturb a verdict we do have.
     CHECK(board::resolve(Variant::LcdSt7789) == Variant::LcdSt7789);
@@ -1164,8 +1166,8 @@ int main() {
     const board::Config &jd = board::configFor(Variant::TouchJd9853);
     CHECK(st.variant == Variant::LcdSt7789);
     CHECK(jd.variant == Variant::TouchJd9853);
-    CHECK(st.driver == board::PanelDriver::St7789);
-    CHECK(jd.driver == board::PanelDriver::Jd9853);
+    CHECK(st.panel->driver == board::PanelDriver::St7789);
+    CHECK(jd.panel->driver == board::PanelDriver::Jd9853);
 
     // Pin tables, asserted so a copy-paste between rows cannot pass silently.
     CHECK(st.pinSclk == 7 && st.pinMosi == 6 && st.pinRst == 21 && st.pinBl == 22);
@@ -1215,8 +1217,8 @@ int main() {
 
     // Panel geometry is shared, which is exactly why the Mac side, the band
     // protocol, and the buffer sizing need no board awareness.
-    CHECK(st.colOffset == 34 && jd.colOffset == 34);
-    CHECK(st.invertColor && jd.invertColor);
+    CHECK(st.panel->colOffset == 34 && jd.panel->colOffset == 34);
+    CHECK(st.panel->invertColor && jd.panel->invertColor);
 
     // The stored CFGBOARD override: round-trips, and an unrecognised byte falls
     // back to auto-detection rather than pinning the board to a value this
@@ -1250,17 +1252,35 @@ int main() {
           Variant::TouchSt7789);
     CHECK(strcmp(board::variantToken(Variant::Unknown), "auto") == 0);
 
-    // Firmware-image identity is deliberately separate from the chip token and
-    // from the physical controller token. Both S3 variants compile for
-    // esp32s3, but they must never select one another's image.
+    // Firmware-family identity is deliberately separate from the chip token
+    // and physical profile. Every S3 profile reports the same family artifact.
     CHECK(strcmp(board::targetToken(Variant::LcdSt7789), "c6") == 0);
     CHECK(strcmp(board::targetToken(Variant::TouchJd9853), "c6") == 0);
-    CHECK(strcmp(board::targetToken(Variant::AmoledCo5300), "s3-175") == 0);
-    CHECK(strcmp(board::targetToken(Variant::LcdSt77916), "s3-185") == 0);
-    CHECK(strcmp(board::targetToken(Variant::TouchSt7789), "s3-154") == 0);
+    CHECK(strcmp(board::targetToken(Variant::AmoledCo5300), "s3") == 0);
+    CHECK(strcmp(board::targetToken(Variant::LcdSt77916), "s3") == 0);
+    CHECK(strcmp(board::targetToken(Variant::LcdGc9107), "s3") == 0);
+    CHECK(strcmp(board::targetToken(Variant::TouchSt7789), "s3") == 0);
     CHECK(strcmp(board::targetToken(Variant::Unknown), "unknown") == 0);
     CHECK(strcmp(board::targetToken(Variant::AmoledCo5300),
-                 board::targetToken(Variant::LcdSt77916)) != 0);
+                 board::targetToken(Variant::LcdSt77916)) == 0);
+
+    // Runtime S3 detection requires exactly one compatible candidate.
+    CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
+                                    false) == Variant::LcdGc9107);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, true, false,
+                                    false) == Variant::AmoledCo5300);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, true,
+                                    false) == Variant::LcdSt77916);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    true) == Variant::TouchSt7789);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false) == Variant::Unknown);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, true, true,
+                                    false) == Variant::Unknown);
+    CHECK(board::variantMatchesPlatform(
+        Variant::AmoledCo5300, board::Platform::Esp32S3));
+    CHECK(!board::variantMatchesPlatform(
+        Variant::TouchJd9853, board::Platform::Esp32S3));
 
     // Host tests compile without an IDF target, which is the C6 path: the
     // variant is Unknown until the boot probe says otherwise.
@@ -1269,11 +1289,11 @@ int main() {
     // The C6 boards on the new per-board fields: single-lane SPI with a D/C
     // line and a PWM backlight, 172x320, 80MHz - the pre-AMOLED world exactly.
     for (const board::Config *c : {&st, &jd}) {
-      CHECK(c->bus == board::PanelBus::Spi);
+      CHECK(c->panel->bus == board::PanelBus::Spi);
       CHECK(!c->isQspi());
-      CHECK(c->panelW == 172 && c->panelH == 320);
-      CHECK(c->pclkHz == 80 * 1000 * 1000);
-      CHECK(c->spiMode == 0);
+      CHECK(c->panel->width == 172 && c->panel->height == 320);
+      CHECK(c->panel->pixelClockHz == 80 * 1000 * 1000);
+      CHECK(c->panel->spiMode == 0);
       CHECK(c->pinData1 == board::NO_PIN && c->pinData2 == board::NO_PIN &&
             c->pinData3 == board::NO_PIN);
       CHECK(c->pinDc != board::NO_PIN);
@@ -1350,8 +1370,8 @@ int main() {
     const board::Config &am = board::configFor(Variant::AmoledCo5300);
 
     CHECK(am.variant == Variant::AmoledCo5300);
-    CHECK(am.driver == board::PanelDriver::Co5300);
-    CHECK(am.bus == board::PanelBus::Qspi);
+    CHECK(am.panel->driver == board::PanelDriver::Co5300);
+    CHECK(am.panel->bus == board::PanelBus::Qspi);
     CHECK(am.isQspi());
 
     // Waveshare's pin_config.h for the 1.75C, asserted pin by pin so a
@@ -1367,17 +1387,17 @@ int main() {
     CHECK(am.pinDc == board::NO_PIN);
     CHECK(!am.hasBacklightPin());
 
-    CHECK(am.panelW == 466 && am.panelH == 466);
-    CHECK(am.pclkHz == 40 * 1000 * 1000);
-    CHECK(am.colOffset == 6);
-    CHECK(!am.invertColor);
+    CHECK(am.panel->width == 466 && am.panel->height == 466);
+    CHECK(am.panel->pixelClockHz == 40 * 1000 * 1000);
+    CHECK(am.panel->colOffset == 6);
+    CHECK(!am.panel->invertColor);
     CHECK(!am.hasRgbLed());
 
     // Round glass: the idle card must keep inside the inscribed square. The
     // C6 panels are rectangular and keep their full-frame placement.
-    CHECK(am.roundDisplay);
-    CHECK(!board::configFor(Variant::LcdSt7789).roundDisplay);
-    CHECK(!board::configFor(Variant::TouchJd9853).roundDisplay);
+    CHECK(am.panel->roundDisplay);
+    CHECK(!board::configFor(Variant::LcdSt7789).panel->roundDisplay);
+    CHECK(!board::configFor(Variant::TouchJd9853).panel->roundDisplay);
 
     // CST9217 on its own I2C bus; reset shared with the panel, so touch
     // bring-up must never pulse it independently.
@@ -1413,7 +1433,7 @@ int main() {
 
     // The panel dimensions in the table produce a carryable band geometry -
     // the link between the board table and the wire format.
-    const Geometry g = {am.panelW, am.panelH};
+    const Geometry g = {am.panel->width, am.panel->height};
     CHECK(g.valid());
     CHECK(g.bandCount(false) == 466);
     CHECK(g.maxBandCount() <= MAX_BANDS);
@@ -1436,11 +1456,11 @@ int main() {
     const board::Config &lcd = board::configFor(Variant::LcdSt77916);
 
     CHECK(lcd.variant == Variant::LcdSt77916);
-    CHECK(lcd.driver == board::PanelDriver::St77916);
-    CHECK(lcd.bus == board::PanelBus::Qspi);
+    CHECK(lcd.panel->driver == board::PanelDriver::St77916);
+    CHECK(lcd.panel->bus == board::PanelBus::Qspi);
     CHECK(lcd.isQspi());
-    CHECK(lcd.panelW == 360 && lcd.panelH == 360);
-    CHECK(lcd.pclkHz == 80 * 1000 * 1000);
+    CHECK(lcd.panel->width == 360 && lcd.panel->height == 360);
+    CHECK(lcd.panel->pixelClockHz == 80 * 1000 * 1000);
     CHECK(lcd.pinSclk == 40);
     CHECK(lcd.pinMosi == 46);
     CHECK(lcd.pinData1 == 45 && lcd.pinData2 == 42 && lcd.pinData3 == 41);
@@ -1453,12 +1473,12 @@ int main() {
     CHECK(lcd.pinTouchInt == 4 && lcd.hasTouch());
     CHECK(lcd.power == board::PowerController::None && !lcd.hasBattery());
     CHECK(lcd.motion == board::MotionController::None && !lcd.hasMotion());
-    CHECK(lcd.colOffset == 0);
-    CHECK(lcd.invertColor);
-    CHECK(lcd.roundDisplay);
+    CHECK(lcd.panel->colOffset == 0);
+    CHECK(lcd.panel->invertColor);
+    CHECK(lcd.panel->roundDisplay);
     CHECK(lcd.hasExpanderReset());
 
-    const Geometry geometry = {lcd.panelW, lcd.panelH};
+    const Geometry geometry = {lcd.panel->width, lcd.panel->height};
     CHECK(geometry.valid());
     CHECK(geometry.bandCount(false) == 360);
     CHECK(geometry.maxBandCount() <= MAX_BANDS);
@@ -1467,7 +1487,7 @@ int main() {
           Variant::LcdSt77916);
     CHECK(board::variantFromName("st77916") == Variant::LcdSt77916);
     CHECK(strcmp(board::variantToken(Variant::LcdSt77916), "st77916") == 0);
-    CHECK(strcmp(board::targetToken(Variant::LcdSt77916), "s3-185") == 0);
+    CHECK(strcmp(board::targetToken(Variant::LcdSt77916), "s3") == 0);
   }
 
   // --- the S3 1.54-inch ST7789 touch board entry ------------------------
@@ -1476,11 +1496,11 @@ int main() {
     const board::Config &lcd = board::configFor(Variant::TouchSt7789);
 
     CHECK(lcd.variant == Variant::TouchSt7789);
-    CHECK(lcd.driver == board::PanelDriver::St7789);
-    CHECK(lcd.bus == board::PanelBus::Spi && !lcd.isQspi());
-    CHECK(lcd.panelW == 240 && lcd.panelH == 240);
-    CHECK(lcd.pclkHz == 40 * 1000 * 1000);
-    CHECK(lcd.spiMode == 3);
+    CHECK(lcd.panel->driver == board::PanelDriver::St7789);
+    CHECK(lcd.panel->bus == board::PanelBus::Spi && !lcd.isQspi());
+    CHECK(lcd.panel->width == 240 && lcd.panel->height == 240);
+    CHECK(lcd.panel->pixelClockHz == 40 * 1000 * 1000);
+    CHECK(lcd.panel->spiMode == 3);
     CHECK(lcd.pinSclk == 38 && lcd.pinMosi == 39);
     CHECK(lcd.pinData1 == board::NO_PIN && lcd.pinData2 == board::NO_PIN &&
           lcd.pinData3 == board::NO_PIN);
@@ -1502,12 +1522,12 @@ int main() {
     CHECK(lcd.pinBatteryEnable == 2 && lcd.pinChargeStatus == 3);
     CHECK(lcd.hasBattery());
 
-    CHECK(lcd.colOffset == 0 && lcd.rowOffset == 0);
-    CHECK(lcd.orientationOffset == 0);
-    CHECK(lcd.invertColor && !lcd.roundDisplay);
+    CHECK(lcd.panel->colOffset == 0 && lcd.panel->rowOffset == 0);
+    CHECK(lcd.panel->orientationOffset == 0);
+    CHECK(lcd.panel->invertColor && !lcd.panel->roundDisplay);
     CHECK(!lcd.hasExpanderReset());
 
-    const Geometry geometry = {lcd.panelW, lcd.panelH};
+    const Geometry geometry = {lcd.panel->width, lcd.panel->height};
     CHECK(geometry.valid());
     CHECK(tilesExactly(geometry, false));
     CHECK(tilesExactly(geometry, true));
@@ -1522,15 +1542,15 @@ int main() {
           Variant::TouchSt7789);
     CHECK(board::variantFromName("st7789-154") == Variant::TouchSt7789);
     CHECK(strcmp(board::variantToken(Variant::TouchSt7789), "st7789-154") == 0);
-    CHECK(strcmp(board::targetToken(Variant::TouchSt7789), "s3-154") == 0);
+    CHECK(strcmp(board::targetToken(Variant::TouchSt7789), "s3") == 0);
     CHECK(board::resolve(Variant::TouchSt7789) == Variant::TouchSt7789);
 
     // Adding a mode-3 panel must not change any shipped profile's bus mode.
-    CHECK(board::configFor(Variant::LcdSt7789).spiMode == 0);
-    CHECK(board::configFor(Variant::TouchJd9853).spiMode == 0);
-    CHECK(board::configFor(Variant::AmoledCo5300).spiMode == 0);
-    CHECK(board::configFor(Variant::LcdSt77916).spiMode == 0);
-    CHECK(board::configFor(Variant::LcdGc9107).spiMode == 0);
+    CHECK(board::configFor(Variant::LcdSt7789).panel->spiMode == 0);
+    CHECK(board::configFor(Variant::TouchJd9853).panel->spiMode == 0);
+    CHECK(board::configFor(Variant::AmoledCo5300).panel->spiMode == 0);
+    CHECK(board::configFor(Variant::LcdSt77916).panel->spiMode == 0);
+    CHECK(board::configFor(Variant::LcdGc9107).panel->spiMode == 0);
   }
 
   // --- the S3 0.85-inch GC9107 board entry --------------------------------
@@ -1539,9 +1559,9 @@ int main() {
     const board::Config &gc = board::configFor(Variant::LcdGc9107);
 
     CHECK(gc.variant == Variant::LcdGc9107);
-    CHECK(gc.driver == board::PanelDriver::Gc9107);
+    CHECK(gc.panel->driver == board::PanelDriver::Gc9107);
     // A single-lane SPI panel with a D/C line, unlike the QSPI S3 panels.
-    CHECK(gc.bus == board::PanelBus::Spi);
+    CHECK(gc.panel->bus == board::PanelBus::Spi);
     CHECK(!gc.isQspi());
     CHECK(gc.pinDc == 45);
 
@@ -1558,23 +1578,23 @@ int main() {
     CHECK(gc.pinRgbLed == 48 && gc.hasRgbLed());
 
     // 128x128 square glass at 40 MHz SPI.
-    CHECK(gc.panelW == 128 && gc.panelH == 128);
-    CHECK(gc.pclkHz == 40 * 1000 * 1000);
+    CHECK(gc.panel->width == 128 && gc.panel->height == 128);
+    CHECK(gc.panel->pixelClockHz == 40 * 1000 * 1000);
 
     // Controller RAM is 128x160: the visible glass starts at column 2, row 1.
-    CHECK(gc.colOffset == 2);
-    CHECK(gc.rowOffset == 1);
+    CHECK(gc.panel->colOffset == 2);
+    CHECK(gc.panel->rowOffset == 1);
 
     // Native orientation is two quarter turns; existing boards keep zero.
-    CHECK(gc.orientationOffset == 2);
-    CHECK(board::configFor(Variant::AmoledCo5300).orientationOffset == 0);
-    CHECK(board::configFor(Variant::LcdSt77916).orientationOffset == 0);
-    CHECK(board::configFor(Variant::LcdSt7789).orientationOffset == 0);
-    CHECK(board::configFor(Variant::TouchJd9853).orientationOffset == 0);
-    CHECK(board::configFor(Variant::AmoledCo5300).rowOffset == 0);
-    CHECK(board::configFor(Variant::LcdSt77916).rowOffset == 0);
-    CHECK(board::configFor(Variant::LcdSt7789).rowOffset == 0);
-    CHECK(board::configFor(Variant::TouchJd9853).rowOffset == 0);
+    CHECK(gc.panel->orientationOffset == 2);
+    CHECK(board::configFor(Variant::AmoledCo5300).panel->orientationOffset == 0);
+    CHECK(board::configFor(Variant::LcdSt77916).panel->orientationOffset == 0);
+    CHECK(board::configFor(Variant::LcdSt7789).panel->orientationOffset == 0);
+    CHECK(board::configFor(Variant::TouchJd9853).panel->orientationOffset == 0);
+    CHECK(board::configFor(Variant::AmoledCo5300).panel->rowOffset == 0);
+    CHECK(board::configFor(Variant::LcdSt77916).panel->rowOffset == 0);
+    CHECK(board::configFor(Variant::LcdSt7789).panel->rowOffset == 0);
+    CHECK(board::configFor(Variant::TouchJd9853).panel->rowOffset == 0);
 
     // The orientation composition panel_init.h performs: firmware rotation 0
     // lands on quadrant 2 (MADCTL MX|MY, no axis swap), which is Waveshare's
@@ -1582,21 +1602,21 @@ int main() {
     // follows: colOffset/rowOffset (2/1) exchange under an odd quadrant.
     {
       const uint8_t q0 = panelorient::quadrant(
-          (uint8_t)(0 + gc.orientationOffset), false);
+          (uint8_t)(0 + gc.panel->orientationOffset), false);
       CHECK(q0 == 2);
       CHECK(!panelorient::swapXY(q0));
       CHECK(panelorient::mirrorX(q0) && panelorient::mirrorY(q0));
       // A quarter turn from there is an odd quadrant: axes swap, so the 2/1
       // gap swaps to 1/2.
       const uint8_t q1 = panelorient::quadrant(
-          (uint8_t)(1 + gc.orientationOffset), false);
+          (uint8_t)(1 + gc.panel->orientationOffset), false);
       CHECK(q1 == 3);
       CHECK(panelorient::swapXY(q1));
     }
 
     // Square, not round: 128x128 still enables the square-panel quarter turns.
-    CHECK(!gc.roundDisplay);
-    CHECK(gc.invertColor);
+    CHECK(!gc.panel->roundDisplay);
+    CHECK(gc.panel->invertColor);
 
     // No touch and no motion at all.
     CHECK(gc.touch == board::TouchController::None);
@@ -1619,7 +1639,7 @@ int main() {
     // exactly, in both orientations - the link between the board table and the
     // protocol. (Tile streaming stays limited to the AmoledCo5300 elsewhere, so
     // this board uses the packed-band path.)
-    const Geometry g = {gc.panelW, gc.panelH};
+    const Geometry g = {gc.panel->width, gc.panel->height};
     CHECK(g.valid());
     CHECK(g.maxBandCount() <= MAX_BANDS);
     CHECK(tilesExactly(g, false));
@@ -1631,11 +1651,11 @@ int main() {
           Variant::LcdGc9107);
     CHECK(board::variantFromName("gc9107") == Variant::LcdGc9107);
     CHECK(strcmp(board::variantToken(Variant::LcdGc9107), "gc9107") == 0);
-    CHECK(strcmp(board::targetToken(Variant::LcdGc9107), "s3-085") == 0);
+    CHECK(strcmp(board::targetToken(Variant::LcdGc9107), "s3") == 0);
     CHECK(strcmp(board::targetToken(Variant::LcdGc9107),
-                 board::targetToken(Variant::AmoledCo5300)) != 0);
+                 board::targetToken(Variant::AmoledCo5300)) == 0);
     CHECK(strcmp(board::targetToken(Variant::LcdGc9107),
-                 board::targetToken(Variant::LcdSt77916)) != 0);
+                 board::targetToken(Variant::LcdSt77916)) == 0);
 
     // resolve() never lands on an S3 board from Unknown: an inconclusive C6
     // probe must fall back to a C6 board, and the S3 build never probes.
@@ -3700,9 +3720,9 @@ int main() {
     // same number out by hand (DeviceProtocol.Capabilities.roundDisplay).
     CHECK(deviceproto::CAP_ROUND_DISPLAY == 1u << 16);
     CHECK((deviceproto::CAP_ROUND_DISPLAY & deviceproto::CAP_TILE_STREAM) == 0);
-    CHECK(board::configFor(board::Variant::AmoledCo5300).roundDisplay);
-    CHECK(!board::configFor(board::Variant::LcdSt7789).roundDisplay);
-    CHECK(!board::configFor(board::Variant::TouchJd9853).roundDisplay);
+    CHECK(board::configFor(board::Variant::AmoledCo5300).panel->roundDisplay);
+    CHECK(!board::configFor(board::Variant::LcdSt7789).panel->roundDisplay);
+    CHECK(!board::configFor(board::Variant::TouchJd9853).panel->roundDisplay);
     // Half-res BC1 records. Separate from CAP_TILE_STREAM because tile
     // firmware predating codec 3 rejects it, and a rejected record takes its
     // whole datagram down - the sender must be able to tell the two apart.
@@ -3906,6 +3926,173 @@ int main() {
     CHECK(MAX_BANDS - 1 <= BAND_INDEX_VALUE_MASK);
     // The packed budget really holds a worst-case S3 row as one raw record.
     CHECK(HEADER_BYTES + RECORD_HEADER_BYTES + 932 <= MAX_PACKED_PACKET_BYTES);
+  }
+
+  // --- ETL1 large-tile wire format --------------------------------------
+  {
+    using namespace largetileproto;
+    const largetileproto::Geometry geometry = {720, 720};
+    CHECK(geometry.valid());
+    CHECK(geometry.tileCols() == 45);
+    CHECK(geometry.tileRows() == 45);
+    CHECK(geometry.tileCount() == 2025);
+    CHECK(deviceproto::CAP_LARGE_TILE_STREAM == (1u << 19));
+
+    // Hand-authored bytes shared only by specification with the Swift test:
+    // ETL1, frame 0x1234, three dirty tiles, landscape, then one raw record.
+    const uint8_t packet[] = {
+        'E','T','L','1', 0x34,0x12, 0x03,0x00, 0x01,0x00,
+        0xD0,0x07, 0x03,0x00, 0x04,0x00, 0xDE,0xAD,0xBE,0xEF};
+    largetileproto::Header header;
+    CHECK(parseHeader(packet, sizeof(packet), header));
+    CHECK(header.frameId == 0x1234 && header.dirtyTileCount == 3);
+    CHECK(header.landscape);
+    int records = 0;
+    uint16_t seenStart = 0;
+    uint8_t seenRun = 0;
+    Codec seenCodec = Codec::HalfBc1;
+    bool seenSpans = true;
+    size_t seenLength = 0;
+    uint8_t seenFirst = 0;
+    CHECK(forEachRecord(packet, sizeof(packet), [&](const Record &record) {
+      records++;
+      seenStart = record.startTile;
+      seenRun = record.runLength;
+      seenCodec = record.codec;
+      seenSpans = record.visibleSpans;
+      seenLength = record.payloadLength;
+      seenFirst = record.payload[0];
+      return true;
+    }));
+    CHECK(records == 1);
+    CHECK(seenStart == 2000 && seenRun == 3 && seenCodec == Codec::Raw);
+    CHECK(!seenSpans && seenLength == 4 && seenFirst == 0xDE);
+
+    std::vector<uint8_t> malformed(packet, packet + sizeof(packet));
+    malformed[9] = 1;
+    CHECK(!parseHeader(malformed.data(), malformed.size(), header));
+    malformed.assign(packet, packet + sizeof(packet));
+    malformed[13] = 0x80;
+    CHECK(!forEachRecord(malformed.data(), malformed.size(),
+                         [](const Record &) { return true; }));
+    CHECK(!forEachRecord(packet, sizeof(packet) - 1,
+                         [](const Record &) { return true; }));
+
+    largetileproto::Reassembler reassembler(geometry);
+    bool dropped = false;
+    largetileproto::Header one = {1, 3, false};
+    CHECK(reassembler.onRecord(one, 2000, 3, dropped) ==
+          Action::ApplyComplete);
+    CHECK(!dropped);
+
+    // A record may not overrun the header's promised dirty count, and fields
+    // that describe one frame must stay stable across all its datagrams.
+    largetileproto::Reassembler hostile(geometry);
+    largetileproto::Header two = {2, 2, false};
+    CHECK(hostile.onRecord(two, 0, 3, dropped) == Action::Reject);
+    CHECK(hostile.onRecord(two, 0, 1, dropped) == Action::Apply);
+    largetileproto::Header changedCount = {2, 3, false};
+    CHECK(hostile.onRecord(changedCount, 1, 1, dropped) == Action::Reject);
+    largetileproto::Header changedOrientation = {2, 2, true};
+    CHECK(hostile.onRecord(changedOrientation, 1, 1, dropped) ==
+          Action::Reject);
+    CHECK(hostile.onRecord(two, 1, 1, dropped) == Action::ApplyComplete);
+
+    // Payload validation is transactional with reassembly. A malformed record
+    // must not claim its tile: a corrected retry applies normally and only the
+    // subsequent valid tile completes the frame.
+    largetileproto::Reassembler transactional(geometry);
+    largetileproto::Header retry = {3, 2, false};
+    int validations = 0;
+    CHECK(transactional.onRecordIfValid(
+              retry, 30, 1, [&]() {
+                validations++;
+                return false;
+              }, dropped) == Action::Reject);
+    CHECK(validations == 1 && !dropped);
+    CHECK(transactional.onRecordIfValid(
+              retry, 30, 1, [&]() {
+                validations++;
+                return true;
+              }, dropped) == Action::Apply);
+    CHECK(transactional.onRecordIfValid(
+              retry, 31, 1, [&]() {
+                validations++;
+                return true;
+              }, dropped) == Action::ApplyComplete);
+    CHECK(validations == 3 && !dropped);
+
+    // One missing record cannot freeze received tiles forever. Completion
+    // wins immediately; an incomplete frame becomes drawable at the bounded
+    // deadline, and a later/key frame is adopted so it can heal missing tiles.
+    CHECK(largetileproto::pendingDrawReason(1039, 1000, 0, 0, true, 40) ==
+          largetileproto::DrawReason::None);
+    CHECK(largetileproto::pendingDrawReason(1040, 1000, 0, 0, true, 40) ==
+          largetileproto::DrawReason::Partial);
+    CHECK(largetileproto::pendingDrawReason(1001, 1000, 1, 0, true, 40) ==
+          largetileproto::DrawReason::Complete);
+    CHECK(largetileproto::pendingDrawReason(1100, 1000, 1, 0, false, 40) ==
+          largetileproto::DrawReason::None);
+    largetileproto::Reassembler healing(geometry);
+    largetileproto::Header lostFrame = {10, 2, false};
+    CHECK(healing.onRecord(lostFrame, 10, 1, dropped) == Action::Apply);
+    largetileproto::Header nextFrame = {11, 1, false};
+    CHECK(healing.onRecord(nextFrame, 20, 1, dropped) ==
+          Action::ApplyComplete);
+    CHECK(dropped);
+    largetileproto::Header keyframe = {12, geometry.tileCount(), false};
+    for (uint16_t row = 0; row < geometry.tileRows(); ++row) {
+      const uint16_t start = row * geometry.tileCols();
+      CHECK(healing.onRecord(keyframe, start,
+                             (uint8_t)geometry.tileCols(), dropped) ==
+            (row + 1 == geometry.tileRows() ? Action::ApplyComplete
+                                            : Action::Apply));
+    }
+  }
+
+  // --- GT911 polling report contract -------------------------------------
+  {
+    CHECK(gt911proto::ADDRESS_PRIMARY == 0x5D);
+    CHECK(gt911proto::ADDRESS_BACKUP == 0x14);
+    CHECK(gt911proto::REGISTER_STATUS == 0x814E);
+    CHECK(gt911proto::REGISTER_POINT1 == 0x814F);
+    const uint8_t point[8] = {1, 0x34, 0x02, 0x78, 0x01, 0, 0, 0};
+    bool pressed = false;
+    uint16_t x = 0, y = 0;
+    uint8_t points = 0;
+    CHECK(gt911proto::parseReport(0x81, point, sizeof(point), pressed,
+                                  x, y, points));
+    CHECK(pressed && points == 1 && x == 0x0234 && y == 0x0178);
+    CHECK(gt911proto::parseReport(0x80, nullptr, 0, pressed,
+                                  x, y, points));
+    CHECK(!pressed && points == 0);  // explicit release
+    CHECK(!gt911proto::parseReport(0x01, point, sizeof(point), pressed,
+                                   x, y, points));
+    CHECK(!gt911proto::parseReport(0x81, point, 4, pressed,
+                                   x, y, points));
+  }
+
+  // --- platform/panel/carrier composition for P4 -------------------------
+  {
+    const board::Config &p4 = board::configFor(board::Variant::P4_4B);
+    CHECK(p4.platform == &board::PLATFORM_ESP32_P4);
+    CHECK(p4.panel == &board::PANEL_ST7703_720X720);
+    CHECK(p4.platform->wifi == board::WifiTopology::HostedCoprocessor);
+    CHECK(p4.platform->identity == board::IdentitySource::EfuseBaseMac);
+    CHECK(p4.panel->bus == board::PanelBus::MipiDsi);
+    CHECK(board::platformSupportsPanel(board::PLATFORM_ESP32_P4,
+                                       board::PANEL_ST7703_720X720));
+    CHECK(board::platformSupportsPanel(board::PLATFORM_ESP32_P4,
+                                       board::PANEL_ST77916_360X360));
+    CHECK(!board::platformSupportsPanel(board::PLATFORM_ESP32_S3,
+                                        board::PANEL_ST7703_720X720));
+    CHECK(p4.panel->dsiDataLanes == 2 && p4.panel->dsiLaneMbps == 480);
+    CHECK(p4.pinRst == 27 && p4.pinBl == 26 && p4.pinBlEnable == 33);
+    CHECK(p4.pinTouchSda == 7 && p4.pinTouchScl == 8);
+    CHECK(strcmp(board::variantToken(p4.variant), "st7703-4b") == 0);
+    CHECK(strcmp(board::targetToken(p4.variant), "p4") == 0);
+    CHECK(strcmp(board::PLATFORM_ESP32_P4.chipToken,
+                 p4.platform->chipToken) == 0);
   }
 
   // --- glyph_draw: the on-device text rasterizer (glyph_draw.h)

@@ -61,6 +61,33 @@ final class UsbOnboardingTests: XCTestCase {
         XCTAssertTrue(plan.detail.contains("s3-175"))
     }
 
+    func testESP32P4RequiresAnExactTargetChoice() {
+        var request = ready(chip: "esp32p4")
+        request.bundle = EsptoolCommandTests.bundle(
+            chip: "esp32p4", bootloader: 0x2000, app: 0x10000,
+            target: "p4-4b")
+        request.target = nil
+        let plan = UsbOnboardingPlan.make(request)
+        XCTAssertEqual(plan.action, .chooseTarget)
+        XCTAssertFalse(plan.canStart)
+        XCTAssertTrue(plan.detail.contains("p4-4b"))
+    }
+
+    func testP44BUsesOnlyItsExactP4Image() {
+        var request = ready(chip: "esp32p4")
+        request.bundle = EsptoolCommandTests.bundle(
+            chip: "esp32p4", bootloader: 0x2000, app: 0x10000,
+            target: "p4-4b")
+        request.target = "p4-4b"
+        let plan = UsbOnboardingPlan.make(request)
+        XCTAssertEqual(plan.action, .flash)
+        XCTAssertTrue(plan.canStart)
+        XCTAssertTrue(plan.headline.contains("p4-4b"))
+
+        request.target = "s3-185"
+        XCTAssertEqual(UsbOnboardingPlan.make(request).action, .noImageForTarget)
+    }
+
     func testS3085UsesItsExactNonDoomImage() {
         var request = ready()
         request.bundle = EsptoolCommandTests.bundle(

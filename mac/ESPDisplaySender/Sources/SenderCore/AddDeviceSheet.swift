@@ -31,10 +31,12 @@ struct AddDeviceSheet: View {
     @State private var tool: UsbOnboarding.ToolAvailability = .missing(searched: [])
 
     @State private var bundle: FirmwareBundle?
+    @State private var bundledReleases: BundledFirmware.ReleaseSet?
     @State private var bundleLabel = ""
     @State private var bundleIsShipped = false
     @State private var bundleProblem: String?
     @State private var selectedTarget = ""
+    @State private var selectedProfile = ""
 
     /// Empty means the network is being typed in rather than chosen.
     @State private var savedSSID = ""
@@ -182,6 +184,16 @@ struct AddDeviceSheet: View {
     @ViewBuilder
     private var firmwareSection: some View {
         Section {
+            if !compatibleProfiles.isEmpty {
+                Picker("Hardware profile", selection: $selectedProfile) {
+                    Text("Choose…").tag("")
+                    ForEach(compatibleProfiles, id: \.self) { profile in
+                        Text(profile).tag(profile)
+                    }
+                }
+                .disabled(running)
+                .onChange(of: selectedProfile) { _, _ in preselectExactTarget() }
+            }
             if let bundle {
                 LabeledContent("Version", value: bundle.firmwareVersion)
                 LabeledContent("Built", value: bundle.builtAt)
@@ -210,7 +222,7 @@ struct AddDeviceSheet: View {
                     chooseFile()
                 }
                 .disabled(running)
-                if !bundleIsShipped, BundledFirmware.defaultBundleURL() != nil {
+                if !bundleIsShipped, BundledFirmware.catalogURL() != nil {
                     Button("Use the Bundled Firmware") { loadShippedBundle() }
                         .disabled(running)
                 }
@@ -382,7 +394,40 @@ struct AddDeviceSheet: View {
             .flatMap(\.targets))).sorted()
     }
 
+    private var compatibleProfiles: [String] {
+        guard let releases = bundledReleases, let chip = detection.chip else { return [] }
+        return releases.selections.values
+            .filter { $0.catalogEntry.chip == chip }
+            .flatMap { $0.catalogEntry.profiles }
+            .sorted()
+    }
+
     private func preselectExactTarget() {
+        if let releases = bundledReleases, let chip = detection.chip {
+            if let identity = manager.usbReleaseIdentity(for: port),
+               let selection = try? releases.select(
+                    family: identity.family, chip: chip,
+                    profile: identity.profile, partition: identity.partition) {
+                bundle = selection.bundle
+                bundleLabel = selection.url.lastPathComponent + " (bundled with the app)"
+                selectedTarget = selection.catalogEntry.family
+                selectedProfile = identity.profile ?? ""
+            } else if !selectedProfile.isEmpty,
+                      let selection = releases.selections.values.first(where: {
+                          $0.catalogEntry.chip == chip
+                            && $0.catalogEntry.profiles.contains(selectedProfile)
+                      }),
+                      let recovered = try? releases.selectForRecovery(
+                        family: selection.catalogEntry.family,
+                        profile: selectedProfile) {
+                bundle = recovered.bundle
+                bundleLabel = recovered.url.lastPathComponent + " (bundled with the app)"
+                selectedTarget = recovered.catalogEntry.family
+            } else {
+                bundle = nil
+                selectedTarget = ""
+            }
+        }
         let compatible = compatibleTargets
         guard !compatible.isEmpty else {
             selectedTarget = ""
@@ -392,8 +437,6 @@ struct AddDeviceSheet: View {
             selectedTarget = reported
         } else if compatible.contains(selectedTarget) {
             return
-        } else if detection.chip == "esp32c6", compatible.contains("c6") {
-            selectedTarget = "c6"
         } else {
             selectedTarget = ""
         }
@@ -505,19 +548,22 @@ struct AddDeviceSheet: View {
 
     private func loadShippedBundle() {
         switch BundledFirmware.load() {
-        case .ready(let shipped, let url):
-            bundle = shipped
-            bundleLabel = url.lastPathComponent + " (bundled with the app)"
+        case .ready(let releases):
+            bundledReleases = releases
+            bundle = nil
+            bundleLabel = FirmwareReleaseCatalog.fileName + " (bundled with the app)"
             bundleIsShipped = true
             bundleProblem = nil
             preselectExactTarget()
         case .unreadable(let path, let reason):
+            bundledReleases = nil
             bundle = nil
             bundleLabel = ""
             bundleIsShipped = false
             bundleProblem = "The firmware bundled with the app (\(path)) could not "
                 + "be read: \(reason)"
         case .none:
+            bundledReleases = nil
             bundle = nil
             bundleLabel = ""
             bundleIsShipped = false
@@ -535,6 +581,7 @@ struct AddDeviceSheet: View {
         detection = .notAttempted
         existing = .notChecked
         selectedTarget = ""
+        selectedProfile = ""
         work?.cancel()
         inspectionGeneration += 1
         let generation = inspectionGeneration
@@ -615,6 +662,7 @@ struct AddDeviceSheet: View {
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
+            bundledReleases = nil
             bundle = try FirmwareBundle.read(contentsOf: url)
             bundleLabel = url.lastPathComponent
             bundleIsShipped = false

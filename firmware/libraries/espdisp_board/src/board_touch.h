@@ -49,6 +49,7 @@
 
 #include <board_config.h>
 #include <board_io.h>
+#include <gt911_protocol.h>
 
 namespace boardtouch {
 
@@ -61,6 +62,15 @@ static const uint8_t AXS5106L_REG_TOUCH_DATA = 0x01;
 /// project needs one finger, and reading less would not make it faster in any
 /// way that matters at 400kHz.
 static const size_t AXS5106L_READ_BYTES = 14;
+
+static const uint8_t GT911_ADDR_PRIMARY = gt911proto::ADDRESS_PRIMARY;
+static const uint8_t GT911_ADDR_BACKUP = gt911proto::ADDRESS_BACKUP;
+static const uint16_t GT911_REG_PRODUCT_ID = gt911proto::REGISTER_PRODUCT_ID;
+static const uint16_t GT911_REG_STATUS = gt911proto::REGISTER_STATUS;
+static const uint16_t GT911_REG_POINT1 = gt911proto::REGISTER_POINT1;
+static const uint8_t GT911_STATUS_READY = 0x80;
+static const uint8_t GT911_STATUS_POINTS = 0x0F;
+static const size_t GT911_POINT_BYTES = 8;
 
 /// CST9217/CST9220 family: 16-bit big-endian register addresses, one I2C
 /// device address for both chips. MAX_TOUCHES is the family's own limit
@@ -114,9 +124,77 @@ inline int8_t activeInterruptPin = board::NO_PIN;
 inline bool levelFallbackLogged = false;
 inline bool timedFallbackLogged = false;
 inline uint32_t lastCst9217PollAt = 0;
+inline uint32_t lastGt911PollAt = 0;
+inline uint8_t gt911Address = 0;
 static const uint32_t CST9217_POLL_FALLBACK_MS = 20;
+static const uint32_t GT911_POLL_MS = 10;
 
 static void IRAM_ATTR onTouchInterrupt() { interruptFlag = true; }
+
+inline bool parseGt911Report(uint8_t status, const uint8_t *point,
+                             size_t pointLen, Sample &out) {
+  return gt911proto::parseReport(status, point, pointLen, out.pressed,
+                                 out.rawX, out.rawY, out.points);
+}
+
+inline bool gt911ReadReg(uint16_t reg, uint8_t *out, size_t len) {
+  Wire.beginTransmission(gt911Address);
+  Wire.write((uint8_t)(reg >> 8));
+  Wire.write((uint8_t)reg);
+  if (Wire.endTransmission() != 0) return false;
+  Wire.requestFrom(gt911Address, len);
+  if (Wire.available() != (int)len) return false;
+  Wire.readBytes(out, len);
+  return true;
+}
+
+inline bool gt911ClearStatus() {
+  Wire.beginTransmission(gt911Address);
+  Wire.write((uint8_t)(GT911_REG_STATUS >> 8));
+  Wire.write((uint8_t)GT911_REG_STATUS);
+  Wire.write((uint8_t)0);
+  return Wire.endTransmission() == 0;
+}
+
+inline bool initGt911(const board::Config &cfg, bool verbose) {
+  if (!Wire.begin(cfg.pinTouchSda, cfg.pinTouchScl, I2C_HZ)) return false;
+  for (uint8_t address : {GT911_ADDR_PRIMARY, GT911_ADDR_BACKUP}) {
+    Wire.beginTransmission(address);
+    if (Wire.endTransmission() == 0) {
+      gt911Address = address;
+      break;
+    }
+  }
+  if (gt911Address == 0) {
+    if (verbose) Serial.println("touch: ERROR no GT911 at 0x5D or 0x14");
+    return false;
+  }
+  uint8_t product[4] = {0};
+  if (!gt911ReadReg(GT911_REG_PRODUCT_ID, product, sizeof(product))) {
+    if (verbose) Serial.println("touch: ERROR GT911 product ID read failed");
+    return false;
+  }
+  if (verbose) {
+    Serial.printf("touch: GT911 ready (addr=0x%02X id=%c%c%c%c polling)\n",
+                  gt911Address, product[0], product[1], product[2], product[3]);
+  }
+  return true;
+}
+
+inline bool pollGt911(Sample &out) {
+  uint8_t status = 0;
+  if (!gt911ReadReg(GT911_REG_STATUS, &status, 1)) return false;
+  if ((status & GT911_STATUS_READY) == 0) return false;
+  uint8_t point[GT911_POINT_BYTES] = {0};
+  const bool needPoint = (status & GT911_STATUS_POINTS) != 0;
+  const bool readOk = !needPoint ||
+      gt911ReadReg(GT911_REG_POINT1, point, sizeof(point));
+  const bool parsed = readOk &&
+      parseGt911Report(status, needPoint ? point : nullptr,
+                       needPoint ? sizeof(point) : 0, out);
+  if (!gt911ClearStatus()) return false;
+  return parsed;
+}
 
 inline bool cst816ReadReg(uint8_t reg, uint8_t *out, size_t len) {
   Wire.beginTransmission(CST816_ADDR);
@@ -360,12 +438,21 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
   levelFallbackLogged = false;
   timedFallbackLogged = false;
   lastCst9217PollAt = 0;
+  lastGt911PollAt = 0;
+  gt911Address = 0;
   if (!cfg.hasTouch()) {
     if (verbose) Serial.printf("touch: not present on %s\n", cfg.name);
     return false;
   }
 
   activeInterruptPin = cfg.pinTouchInt;
+
+  if (cfg.touch == board::TouchController::Gt911) {
+    if (!initGt911(cfg, verbose)) return false;
+    activeController = board::TouchController::Gt911;
+    enabled = true;
+    return true;
+  }
 
   if (cfg.touch == board::TouchController::Cst816) {
     if (!initCst816(cfg, verbose)) return false;
@@ -442,6 +529,15 @@ inline bool available() { return enabled; }
 inline bool poll(Sample &out) {
   if (!enabled) {
     return false;
+  }
+
+  if (activeController == board::TouchController::Gt911) {
+    const uint32_t now = millis();
+    if ((uint32_t)(now - lastGt911PollAt) < GT911_POLL_MS) return false;
+    lastGt911PollAt = now;
+    const bool ok = pollGt911(out);
+    if (ok) pressed = out.pressed;
+    return ok;
   }
 
   // CST9217 INT is active-low and the report mailbox stays latched until ACK.

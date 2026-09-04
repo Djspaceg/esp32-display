@@ -21,75 +21,105 @@ import time
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 
-class Board(NamedTuple):
+class Platform(NamedTuple):
     key: str
+    chip: str
     fqbn: str
-    chip: str  # esptool/FQBN chip id; several board targets may share it
-    extra_flags: Tuple[str, ...]
-    blurb: str
+    bootloader_address: int
+    partition_csv: Optional[str] = None
+    extra_flags: Tuple[str, ...] = ()
 
 
-# The whole point of this tool: target build definitions live here instead of in
-# shell history. Keep them byte-identical to README.md "Getting started" - the
-# README is the manual fallback, so the two must not drift.
-BOARDS = {
-    "c6": Board(
-        key="c6",
-        fqbn="esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M",
-        chip="esp32c6",
-        extra_flags=(),
-        blurb='ESP32-C6 1.47" 172x320 - one binary serves both Waveshare variants',
-    ),
-    "s3-085": Board(
-        key="s3-085",
-        fqbn="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi",
-        chip="esp32s3",
-        extra_flags=("-DESPDISP_BOARD_S3_085",),
-        blurb="ESP32-S3-LCD-0.85 128x128 square GC9107 SPI LCD",
-    ),
-    "s3-154": Board(
-        key="s3-154",
-        fqbn="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
-        chip="esp32s3",
-        extra_flags=("-DESPDISP_BOARD_S3_154",),
-        blurb="ESP32-S3-Touch-LCD-1.54 240x240 square ST7789 SPI LCD",
-    ),
-    "s3-175": Board(
-        key="s3-175",
-        fqbn=(
-            "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,"
-            "PartitionScheme=custom"
-        ),
-        chip="esp32s3",
-        extra_flags=("-DESPDISP_DOOM_S3_175",),
-        blurb="ESP32-S3-Touch-AMOLED-1.75C 466x466 round AMOLED (needs PSRAM=opi)",
-    ),
-    "s3-185": Board(
-        key="s3-185",
-        fqbn="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi",
-        chip="esp32s3",
-        extra_flags=("-DESPDISP_BOARD_S3_185",),
-        blurb="ESP32-S3-Touch-LCD-1.85C 360x360 round ST77916 LCD",
-    ),
+PLATFORMS = {
+    "c6": Platform(
+        "c6", "esp32c6",
+        "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M", 0x0),
+    "s3": Platform(
+        "s3", "esp32s3",
+        "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi,"
+        "PartitionScheme=custom",
+        0x0, "partitions_s3.csv"),
+    "p4": Platform(
+        "p4", "esp32p4",
+        "esp32:esp32:esp32p4:USBMode=default,CDCOnBoot=default,"
+        "UploadMode=default,FlashSize=32M,PartitionScheme=custom,"
+        "PSRAM=enabled,ChipVariant=prev3",
+        0x2000, "partitions_p4_4b.csv", ("-DESPDISP_BOARD_P4_4B",)),
 }
 
-# Kept at the CLI boundary only. Manifests, payload maps, discovery, coverage,
-# and default builds always use canonical exact target names.
-BOARD_ALIASES = {"s3": "s3-175"}
+
+class Family(NamedTuple):
+    key: str
+    platform: str
+    profiles: Tuple[str, ...]
+    flash_sizes: Tuple[int, ...]
+    partition_scheme: str
+    hardware: Dict[str, Tuple[str, ...]]
+    blurb: str
+
+    @property
+    def platform_config(self) -> Platform:
+        return PLATFORMS[self.platform]
+
+    @property
+    def chip(self) -> str:
+        return self.platform_config.chip
+
+    @property
+    def fqbn(self) -> str:
+        return self.platform_config.fqbn
+
+    @property
+    def partition_csv(self) -> Optional[str]:
+        return self.platform_config.partition_csv
+
+    @property
+    def extra_flags(self) -> Tuple[str, ...]:
+        return self.platform_config.extra_flags
 
 
-def canonical_board_key(key: str) -> str:
-    return BOARD_ALIASES.get(key, key)
+FAMILIES = {
+    "c6": Family(
+        "c6", "c6", ("st7789", "jd9853"), (8 * 1024 * 1024,),
+        "default-8m", {
+            "st7789": ("ESP32-C6-LCD-1.47",),
+            "jd9853": ("ESP32-C6-Touch-LCD-1.47",),
+        },
+        'Universal ESP32-C6 1.47" display firmware'),
+    "s3": Family(
+        "s3", "s3",
+        ("gc9107", "st7789-154", "co5300", "st77916"),
+        (8 * 1024 * 1024, 16 * 1024 * 1024),
+        "universal-8m-ota", {
+            "gc9107": ("ESP32-S3-LCD-0.85",),
+            "st7789-154": ("ESP32-S3-Touch-LCD-1.54",),
+            "co5300": ("ESP32-S3-Touch-AMOLED-1.75C",),
+            "st77916": ("ESP32-S3-Touch-LCD-1.85C",),
+        },
+        "Universal ESP32-S3 display firmware"),
+    "p4": Family(
+        "p4", "p4", ("st7703-4b",), (32 * 1024 * 1024,),
+        "p4-32m-ota", {
+            "st7703-4b": ("ESP32-P4-WIFI6-Touch-LCD-4B",),
+        },
+        "Universal ESP32-P4 display firmware"),
+}
 
 
-def board_choices() -> List[str]:
-    return sorted(set(BOARDS) | set(BOARD_ALIASES))
+def family_choices() -> List[str]:
+    return sorted(FAMILIES)
 
 
-def bundle_board_keys(requested: Optional[List[str]]) -> List[str]:
-    """Canonical bundle targets, deduplicated without adding aliases by default."""
-    selected = requested or sorted(BOARDS)
-    return list(dict.fromkeys(canonical_board_key(key) for key in selected))
+def canonical_family_key(key: str) -> str:
+    return key
+
+
+def bundle_family_keys(requested: Optional[List[str]]) -> List[str]:
+    """One current bundle carries exactly one firmware family."""
+    selected = requested or []
+    if len(selected) != 1 or selected[0] not in FAMILIES:
+        raise Fail("bundle requires exactly one --family: c6, s3, or p4")
+    return selected
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -99,12 +129,16 @@ SKETCH_INO = os.path.join(SKETCH_DIR, "display_stream.ino")
 # identity module, not the .ino (which is now only setup/loop scheduling).
 FW_VERSION_SOURCE = os.path.join(SKETCH_DIR, "app_state.cpp")
 RELEASE_NOTES_PATH = os.path.join(REPO_ROOT, "release-notes.md")
+RELEASE_ROOT = os.path.join(REPO_ROOT, "firmware-releases")
+RELEASE_CATALOG_NAME = "manifest.json"
+RELEASE_CATALOG_SCHEMA = 1
 LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware", "libraries")
 DOOM_LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware")
 DOOM_PARTITIONS_CSV = os.path.join(REPO_ROOT, "firmware", "partitions_s3_doom.csv")
+P4_PARTITIONS_CSV = os.path.join(REPO_ROOT, "firmware", "partitions_p4_4b.csv")
 
-# All current targets use native USB CDC and enumerate here on macOS.
-PORT_GLOB = "/dev/cu.usbmodem*"
+# Native USB and CH343-style UART bridges both occur on supported carriers.
+PORT_GLOBS = ("/dev/cu.usbmodem*", "/dev/cu.usbserial*")
 
 BAUD = 115200
 CFG_PREFIXES = ("CFGOK", "CFGERR", "CFGINFO")
@@ -224,10 +258,12 @@ def detected_ports() -> List[PortInfo]:
 
 
 class NetworkPort(NamedTuple):
-    address: str  # IPv4 the responder answered with
-    hostname: str  # SRV target, e.g. "panel.local."
-    board: str  # the chip-level "board" TXT record, e.g. "esp32c6"
-    target: str  # exact firmware target, e.g. "s3-185", when advertised
+    address: str
+    hostname: str
+    board: str  # chip-level Arduino board token
+    target: str  # firmware family: c6, s3, or p4
+    profile: str  # runtime physical profile token
+    partition: str  # release partition compatibility token
 
 
 def parse_network_ports(payload: dict) -> List[NetworkPort]:
@@ -250,11 +286,14 @@ def parse_network_ports(payload: dict) -> List[NetworkPort]:
         props = port.get("properties") or {}
         board = (props.get("board") or "").strip().lower()
         target = (props.get("target") or "").strip().lower()
+        profile = (props.get("profile") or "").strip().lower()
+        partition = (props.get("partition") or "").strip().lower()
         hostname = (props.get("hostname") or "").strip().rstrip(".")
         address = (port.get("address") or "").strip()
         if not address and not hostname:
             continue
-        out.append(NetworkPort(address, hostname, board, target))
+        out.append(NetworkPort(
+            address, hostname, board, target, profile, partition))
     return out
 
 
@@ -276,53 +315,61 @@ def network_port_for_host(ports: List[NetworkPort], host: str) -> Optional[Netwo
     return None
 
 
-# What comparing --board against a discovered `board=` TXT record can conclude.
+# What comparing --family against discovered identity metadata can conclude.
 TARGET_OK = "ok"  # they agree
 TARGET_WRONG = "wrong"  # it advertises the other board this tool knows
 TARGET_UNKNOWN = "unknown"  # nothing to compare, or a board this tool cannot place
 
 
-def classify_ota_target(board: Board, advertised_target: str, advertised_chip: str) -> str:
-    """Compare exact target first, then use chip only when it is unambiguous.
-
-    An exact target is authoritative: a same-chip `s3-175`/`s3-185` mismatch is
-    still wrong. Without one, a chip can confirm only a target that is unique for
-    that chip; ESP32-S3 therefore stays unknown rather than being declared safe.
-    """
-    target = (advertised_target or "").strip().lower()
+def classify_ota_target(
+    family: Family,
+    advertised_family: str,
+    advertised_chip: str,
+    advertised_profile: str = "",
+    advertised_partition: str = "",
+) -> str:
+    """Require independent family, chip, profile, and partition evidence."""
+    family_token = (advertised_family or "").strip().lower()
     chip = (advertised_chip or "").strip().lower()
-    known_chips = {candidate.chip for candidate in BOARDS.values()}
-    if target:
-        if target != board.key:
-            return TARGET_WRONG
-        if not chip:
-            return TARGET_UNKNOWN
-        if chip == board.chip:
-            return TARGET_OK
-        return TARGET_WRONG if chip in known_chips else TARGET_UNKNOWN
-
-    if not chip:
-        return TARGET_UNKNOWN
-    if chip not in known_chips:
-        return TARGET_UNKNOWN
-    if chip != board.chip:
+    profile = (advertised_profile or "").strip().lower()
+    partition = (advertised_partition or "").strip().lower()
+    known_chips = {candidate.chip for candidate in FAMILIES.values()}
+    known_profiles = {
+        item for candidate in FAMILIES.values() for item in candidate.profiles
+    }
+    known_partitions = {
+        candidate.partition_scheme for candidate in FAMILIES.values()
+    }
+    if family_token and family_token != family.key:
         return TARGET_WRONG
-    matches = [candidate for candidate in BOARDS.values() if candidate.chip == chip]
-    return TARGET_OK if len(matches) == 1 else TARGET_UNKNOWN
+    if chip and chip != family.chip:
+        return TARGET_WRONG if chip in known_chips else TARGET_UNKNOWN
+    if profile and profile not in family.profiles:
+        return TARGET_WRONG if profile in known_profiles else TARGET_UNKNOWN
+    if partition and partition != family.partition_scheme:
+        return TARGET_WRONG if partition in known_partitions else TARGET_UNKNOWN
+    if (family_token == family.key and chip == family.chip and
+            profile in family.profiles and
+            partition == family.partition_scheme):
+        return TARGET_OK
+    return TARGET_UNKNOWN
 
 
 def board_key_for_fqbn(fqbn: str) -> Optional[str]:
-    """Map an FQBN only when exactly one target uses its chip id."""
+    """Map an Arduino FQBN to its one firmware family."""
     parts = fqbn.split(":")
     if len(parts) < 3:
         return None
-    board_id = parts[2].strip().lower()
-    matches = [board.key for board in BOARDS.values() if board_id == board.chip]
-    return matches[0] if len(matches) == 1 else None
+    chip = parts[2].strip().lower()
+    matches = [family for family in FAMILIES.values() if chip == family.chip]
+    return matches[0].key if len(matches) == 1 else None
 
 
 def candidate_ports() -> List[PortInfo]:
-    return [p for p in detected_ports() if fnmatch.fnmatch(p.address, PORT_GLOB)]
+    return [
+        p for p in detected_ports()
+        if any(fnmatch.fnmatch(p.address, pattern) for pattern in PORT_GLOBS)
+    ]
 
 
 def resolve_port(explicit: Optional[str]) -> PortInfo:
@@ -340,7 +387,7 @@ def resolve_port(explicit: Optional[str]) -> PortInfo:
             "no ESP32 serial port found (looked for %s).\n"
             "  Plug the board in over USB, or pass --port <device>.\n"
             "  `%s list` shows every port arduino-cli can see."
-            % (PORT_GLOB, os.path.basename(sys.argv[0]))
+            % (", ".join(PORT_GLOBS), os.path.basename(sys.argv[0]))
         )
     if len(ports) > 1:
         listing = "\n".join("    %s" % p.address for p in ports)
@@ -460,7 +507,7 @@ def bootloader_address_from_boards_txt(text: str, chip: str) -> Optional[int]:
         return None
     if len({value.lower() for value in found}) > 1:
         # Two different answers for one chip. Refusing to pick is the same stance
-        # resolve_board and fw_version_from_sketch take, and this one would put an
+        # resolve_family and fw_version_from_sketch take, and this one would put an
         # image at the wrong flash address.
         raise Fail(
             "boards.txt gives %s %d different bootloader addresses (%s)"
@@ -514,62 +561,29 @@ def probe_chip(address: str) -> Optional[str]:
 
 
 
-def resolve_board(explicit: Optional[str], port: Optional[PortInfo]) -> Board:
-    """Pick an exact board target, or refuse.
-
-    USB metadata and esptool can identify a chip, not the attached panel. A chip
-    mismatch is rejected by esptool, but two ESP32-S3 targets pass the same image
-    header check, so S3 always requires an explicit exact target.
-    """
+def resolve_family(explicit: Optional[str], port: Optional[PortInfo]) -> Family:
+    """Select one family from an explicit choice or verified chip identity."""
     if explicit:
-        board = BOARDS[canonical_board_key(explicit)]
-        # Free cross-check: if arduino-cli itself named a single, different
-        # board for this port, the user has almost certainly typed the wrong
-        # target. This costs no extra port access.
-        reported = canonical_board_key(port.board_keys[0]) if port and len(port.board_keys) == 1 else None
-        if reported and reported != board.key:
+        family = FAMILIES[explicit]
+        reported = port.board_keys[0] if port and len(port.board_keys) == 1 else None
+        if reported and reported != family.key:
             raise Fail(
-                "--board %s contradicts %s, which arduino-cli reports as %s.\n"
-                "  Re-run with --board %s, or with --port pointing at the other board.\n"
-                "  There is no flag to override this. If arduino-cli is the one that\n"
-                "  is wrong, the explicit commands in README.md \"Getting started\"\n"
-                "  do the same job with nothing in the way:\n"
-                "    arduino-cli compile -b %s --libraries %s .\n"
-                "    arduino-cli upload -b %s -p %s ."
-                % (
-                    board.key,
-                    port.address,
-                    reported,
-                    reported,
-                    board.fqbn,
-                    LIBRARIES_DIR,
-                    board.fqbn,
-                    port.address,
-                )
-            )
-        return board
-
+                "--family %s contradicts %s, which reports family %s"
+                % (family.key, port.address, reported))
+        return family
     if port is None:
-        raise Fail("--board is required here (one of: %s)" % ", ".join(BOARDS))
-
+        raise Fail("--family is required here (one of: %s)" % ", ".join(FAMILIES))
     if len(port.board_keys) == 1:
-        return BOARDS[canonical_board_key(port.board_keys[0])]
-
+        return FAMILIES[port.board_keys[0]]
     print("Probing %s for its chip type..." % port.address, flush=True)
     chip = probe_chip(port.address)
-    matches = [board for board in BOARDS.values() if board.chip == chip]
+    matches = [family for family in FAMILIES.values() if family.chip == chip]
     if len(matches) == 1:
-        print("Detected %s (%s)." % (chip, matches[0].key), flush=True)
+        print("Detected %s family %s." % (chip, matches[0].key), flush=True)
         return matches[0]
-    if len(matches) > 1:
-        raise Fail(
-            "%s is %s, which is used by multiple display boards.\n"
-            "  Re-run with --board %s; the chip alone cannot identify its panel."
-            % (port.address, chip, "|".join(board.key for board in matches)))
-
     raise Fail(
-        "could not determine which chip is on %s.\n"
-        "  Re-run with --board %s." % (port.address, "|".join(BOARDS)))
+        "could not determine the firmware family on %s; re-run with --family %s"
+        % (port.address, "|".join(FAMILIES)))
 
 
 # --------------------------------------------------------------------------
@@ -1129,11 +1143,10 @@ def git_provenance(repo_root: str = REPO_ROOT) -> Tuple[Optional[str], bool]:
     manifest says source_commit: null. run_capture already turns an OSError into
     a non-zero result, so a missing git needs no special case here.
 
-    `git status --porcelain` counts untracked files as dirty on purpose: an
-    untracked source file under firmware/ is compiled into the image like any
-    other, so it belongs in an honest answer about what these bytes came from.
-    Ignored files - wifi_config.h, build directories - do not appear and do not
-    count.
+    `git status --porcelain` counts untracked source files as dirty. Task reports
+    under `.agents/` and generated canonical output under `firmware-releases/`
+    are excluded because neither can affect compilation; every other untracked
+    file still makes provenance dirty.
     """
     head = run_capture(["git", "-C", repo_root, "rev-parse", "HEAD"], timeout=15.0)
     if head.returncode != 0:
@@ -1141,14 +1154,24 @@ def git_provenance(repo_root: str = REPO_ROOT) -> Tuple[Optional[str], bool]:
     commit = head.stdout.strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         return None, False
-    status = run_capture(["git", "-C", repo_root, "status", "--porcelain"], timeout=30.0)
+    status = run_capture(
+        ["git", "-C", repo_root, "status", "--porcelain", "--untracked-files=all"],
+        timeout=30.0)
     if status.returncode != 0:
         # The commit is known and the cleanliness is not. Claiming clean would be
         # the wrong way to be wrong, but so would refusing to bundle at all, so
         # this reports the commit and the safer of the two answers is the caller's
         # problem: bundle-info prints exactly what the manifest says.
         return commit, False
-    return commit, bool(status.stdout.strip())
+    relevant = []
+    for line in status.stdout.splitlines():
+        path = line[3:] if len(line) >= 4 else ""
+        if path == ".agents" or path.startswith(".agents/"):
+            continue
+        if path == "firmware-releases" or path.startswith("firmware-releases/"):
+            continue
+        relevant.append(line)
+    return commit, bool(relevant)
 
 
 def safe_json_key_display(value: str) -> str:
@@ -1909,6 +1932,184 @@ def describe_bundle(manifest: dict, full_hash: bool = False) -> List[str]:
     return lines
 
 
+def release_catalog_entry(
+    family: Family, version: str, artifact: str, data: bytes
+) -> dict:
+    return {
+        "latest_version": version,
+        "artifact": artifact.replace(os.sep, "/"),
+        "sha256": sha256_hex(data),
+        "bytes": len(data),
+        "chip": family.chip,
+        "profiles": list(family.profiles),
+        "hardware": {
+            profile: list(family.hardware[profile]) for profile in family.profiles
+        },
+        "compatibility": {
+            "flash_bytes": list(family.flash_sizes),
+            "partition_scheme": family.partition_scheme,
+            "bootloader_address": family.platform_config.bootloader_address,
+            "partitions_address": PARTITIONS_FLASH_ADDRESS,
+            "boot_app0_address": BOOT_APP0_FLASH_ADDRESS,
+            "app_address": APP_FLASH_ADDRESS,
+            "identity_required": ["family", "chip", "profile", "partition"],
+        },
+    }
+
+
+def release_catalog(version: str, output_root: str) -> dict:
+    families = {}
+    for key, family in FAMILIES.items():
+        relative = os.path.join(
+            key, "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX))
+        path = os.path.join(output_root, relative)
+        data = read_binary(path)
+        families[key] = release_catalog_entry(family, version, relative, data)
+    return {
+        "schema": RELEASE_CATALOG_SCHEMA,
+        "generated_at": utc_timestamp(),
+        "families": families,
+    }
+
+
+def validate_release_catalog(
+    catalog: dict, output_root: str, verify_files: bool = True
+) -> dict:
+    if not isinstance(catalog, dict):
+        raise Fail("release catalog must be a JSON object")
+    if set(catalog) != {"schema", "generated_at", "families"}:
+        raise Fail("release catalog has unexpected or missing top-level keys")
+    if catalog["schema"] != RELEASE_CATALOG_SCHEMA:
+        raise Fail("release catalog schema must be %d" % RELEASE_CATALOG_SCHEMA)
+    families = catalog["families"]
+    if not isinstance(families, dict) or set(families) != set(FAMILIES):
+        raise Fail("release catalog must list exactly c6, s3, and p4")
+    root = os.path.realpath(output_root)
+    required_entry = {
+        "latest_version", "artifact", "sha256", "bytes", "chip",
+        "profiles", "hardware", "compatibility",
+    }
+    required_compatibility = {
+        "flash_bytes", "partition_scheme", "bootloader_address",
+        "partitions_address", "boot_app0_address", "app_address",
+        "identity_required",
+    }
+    for key, family in FAMILIES.items():
+        entry = families[key]
+        if not isinstance(entry, dict) or set(entry) != required_entry:
+            raise Fail("release catalog family %s has unexpected or missing keys" % key)
+        version = entry["latest_version"]
+        if not isinstance(version, str) or parse_semver(version) is None:
+            raise Fail("release catalog family %s has a non-SemVer version" % key)
+        expected_name = "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX)
+        relative = entry["artifact"]
+        if not isinstance(relative, str) or relative != "%s/%s" % (key, expected_name):
+            raise Fail("release catalog family %s has a non-canonical artifact path" % key)
+        path = os.path.realpath(os.path.join(root, relative))
+        try:
+            contained = os.path.commonpath([root, path]) == root
+        except ValueError:
+            contained = False
+        if not contained:
+            raise Fail("release catalog family %s artifact escapes the release root" % key)
+        if entry["chip"] != family.chip:
+            raise Fail("release catalog family %s has the wrong chip" % key)
+        if entry["profiles"] != list(family.profiles):
+            raise Fail("release catalog family %s has incompatible profiles" % key)
+        hardware = entry["hardware"]
+        if not isinstance(hardware, dict) or set(hardware) != set(family.profiles):
+            raise Fail("release catalog family %s has incomplete hardware mappings" % key)
+        for profile in family.profiles:
+            if hardware[profile] != list(family.hardware[profile]):
+                raise Fail("release catalog family %s hardware mapping drifted" % key)
+        compatibility = entry["compatibility"]
+        if (not isinstance(compatibility, dict) or
+                set(compatibility) != required_compatibility):
+            raise Fail("release catalog family %s compatibility is incomplete" % key)
+        expected_compatibility = release_catalog_entry(
+            family, version, relative, b"x")["compatibility"]
+        if compatibility != expected_compatibility:
+            raise Fail("release catalog family %s compatibility does not match its build" % key)
+        if not is_whole_number(entry["bytes"]) or entry["bytes"] <= 0:
+            raise Fail("release catalog family %s has an invalid byte size" % key)
+        if (not isinstance(entry["sha256"], str) or
+                re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None):
+            raise Fail("release catalog family %s has an invalid sha256" % key)
+        if verify_files:
+            data = read_binary(path)
+            if len(data) != entry["bytes"]:
+                raise Fail("release catalog family %s byte size is stale" % key)
+            if sha256_hex(data) != entry["sha256"]:
+                raise Fail("release catalog family %s sha256 is stale" % key)
+            manifest, payloads, flash_payloads = unpack_bundle(data)
+            if (manifest.get("firmware_version") != version or
+                    set(payloads) != {key} or set(flash_payloads) != {key} or
+                    len(manifest.get("images") or []) != 1):
+                raise Fail("release catalog family %s bundle metadata disagrees" % key)
+            image = manifest["images"][0]
+            if (image.get("chip") != family.chip or
+                    image.get("targets") != [key] or
+                    image.get("profiles") != list(family.profiles) or
+                    image.get("flash_sizes") != list(family.flash_sizes) or
+                    image.get("partition") != family.partition_scheme):
+                raise Fail("release catalog family %s bundle identity disagrees" % key)
+            partition = flash_payloads[key].get(FLASH_ROLE_PARTITIONS)
+            if partition is None:
+                raise Fail("release catalog family %s bundle lacks partitions" % key)
+            _verify_partition_payload(family, partition)
+            _verify_app_payload(
+                family, partition, image.get("app_address"), image.get("bytes"))
+    return catalog
+
+
+def load_release_catalog(path: str, verify_files: bool = True) -> dict:
+    raw = read_binary(path)
+    duplicate = first_duplicate_json_member_name(raw)
+    try:
+        catalog = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise Fail("release catalog is not valid UTF-8 JSON: %s" % exc)
+    if duplicate is not None:
+        raise Fail("release catalog has duplicate key %s" %
+                   safe_json_key_display(duplicate))
+    return validate_release_catalog(
+        catalog, os.path.dirname(os.path.abspath(path)), verify_files=verify_files)
+
+
+def write_release_catalog(path: str, catalog: dict) -> None:
+    validate_release_catalog(
+        catalog, os.path.dirname(os.path.abspath(path)), verify_files=True)
+    write_file_atomically(path, encode_manifest(catalog) + b"\n")
+
+
+def cmd_release_info(args) -> int:
+    catalog = load_release_catalog(args.path, verify_files=True)
+    for key in FAMILIES:
+        print(catalog["families"][key]["artifact"])
+    return 0
+
+
+def cmd_release(args) -> int:
+    version, version_line = sketch_fw_version_declaration()
+    if parse_semver(version) is None:
+        raise Fail("firmware/display_stream/app_state.cpp:%d: %s" % (
+            version_line, RELEASE_REASON_FW_VERSION % quote_release_value(version)))
+    release_notes_for_version(RELEASE_NOTES_PATH, version)
+    output_root = os.path.abspath(args.output_root)
+    os.makedirs(output_root, exist_ok=True)
+    for key in FAMILIES:
+        directory = os.path.join(output_root, key)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(
+            directory, "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX))
+        cmd_bundle(type("BundleArgs", (), {"family": [key], "output": path})())
+    catalog = release_catalog(version, output_root)
+    catalog_path = os.path.join(output_root, RELEASE_CATALOG_NAME)
+    write_release_catalog(catalog_path, catalog)
+    print("\nWrote canonical release catalog %s" % catalog_path)
+    return 0
+
+
 # --------------------------------------------------------------------------
 # subcommands
 
@@ -1927,49 +2128,40 @@ def report_sizes(lines: List[str]) -> None:
         print(line)
 
 
-def compile_board(board: Board, output_dir: Optional[str] = None) -> List[str]:
+def compile_board(board: Family, output_dir: Optional[str] = None) -> List[str]:
     if not os.path.isdir(SKETCH_DIR):
         raise Fail("sketch directory not found: %s" % SKETCH_DIR)
 
     build_sketch_dir = SKETCH_DIR
     staged_root: Optional[str] = None
     cmd = [arduino_cli(), "compile", "-b", board.fqbn, "--libraries", LIBRARIES_DIR]
-    if board.key == "s3-175":
-        doom_metadata = os.path.join(DOOM_LIBRARIES_DIR, "doom", "library.properties")
-        if not os.path.isfile(doom_metadata):
-            raise Fail("Doom library metadata not found: %s" % doom_metadata)
-        if not os.path.isfile(DOOM_PARTITIONS_CSV):
-            raise Fail("Doom partition table not found: %s" % DOOM_PARTITIONS_CSV)
-        # Arduino's custom scheme only reads partitions.csv from the sketch
-        # directory. Stage a private sketch copy so c6/s3-185 can never inherit
-        # the Doom table and concurrent target builds cannot race over one file.
-        staged_root = tempfile.mkdtemp(prefix="espdisp-sketch-s3-175-")
+    if board.partition_csv:
+        partition_source = os.path.join(
+            REPO_ROOT, "firmware", board.partition_csv)
+        if not os.path.isfile(partition_source):
+            raise Fail("partition table not found: %s" % partition_source)
+        # Custom schemes read partitions.csv from the sketch. Every target gets
+        # a private copy so tables cannot leak between concurrent builds.
+        staged_root = tempfile.mkdtemp(prefix="espdisp-sketch-%s-" % board.key)
         build_sketch_dir = os.path.join(staged_root, "display_stream")
         shutil.copytree(
-            SKETCH_DIR,
-            build_sketch_dir,
+            SKETCH_DIR, build_sketch_dir,
             ignore=shutil.ignore_patterns("build", "partitions.csv"),
         )
-        shutil.copy2(
-            DOOM_PARTITIONS_CSV,
-            os.path.join(build_sketch_dir, "partitions.csv"),
-        )
-        # --libraries takes a directory CONTAINING libraries. Pointing it at
-        # firmware/doom would mis-detect doom/src as an old-format library and
-        # silently omit the platform/*.cpp hardware bridge.
-        cmd += ["--libraries", DOOM_LIBRARIES_DIR]
-        doom_flags = " ".join(board.extra_flags)
-        cmd += [
-            "--build-property", "compiler.c.extra_flags=%s" % doom_flags,
-            "--build-property", "compiler.cpp.extra_flags=%s" % doom_flags,
-        ]
+        shutil.copy2(partition_source,
+                     os.path.join(build_sketch_dir, "partitions.csv"))
     elif os.path.exists(os.path.join(SKETCH_DIR, "partitions.csv")):
         raise Fail(
             "unexpected firmware/display_stream/partitions.csv would override "
             "%s's standard partition scheme" % board.key
         )
-    elif board.extra_flags:
-        cmd += ["--build-property", "compiler.cpp.extra_flags=%s" % " ".join(board.extra_flags)]
+
+    if board.extra_flags:
+        flags = " ".join(board.extra_flags)
+        cmd += [
+            "--build-property", "compiler.c.extra_flags=%s" % flags,
+            "--build-property", "compiler.cpp.extra_flags=%s" % flags,
+        ]
     if output_dir:
         # Arduino's default sketch cache is shared by every compile of this
         # sketch, even when each caller has a distinct --output-dir. Concurrent
@@ -2043,7 +2235,7 @@ def read_binary(path: str) -> bytes:
 
 
 def collect_flash_parts(
-    board: Board, output_dir: str
+    board: Family, output_dir: str
 ) -> Tuple[List[dict], Dict[str, bytes]]:
     """The three extra payloads a blank board needs, with their flash addresses.
 
@@ -2052,10 +2244,17 @@ def collect_flash_parts(
     (platform.txt:346). Returns pre-offset manifest entries in write order and
     {role: bytes} - bundle_manifest fills the offsets in.
     """
+    bootloader_address = core_bootloader_address(board.chip)
+    expected_bootloader = PLATFORMS[board.platform].bootloader_address
+    if bootloader_address != expected_bootloader:
+        raise Fail(
+            "%s core bootloader address is 0x%x; target %s requires 0x%x"
+            % (board.chip, bootloader_address, board.key, expected_bootloader)
+        )
     sources = [
         (
             FLASH_ROLE_BOOTLOADER,
-            core_bootloader_address(board.chip),
+            bootloader_address,
             export_binary(output_dir, ".ino.bootloader.bin"),
         ),
         (
@@ -2203,82 +2402,37 @@ def discovered_network_ports(timeout: float) -> List[NetworkPort]:
         return []
 
 
-def ota_target_requires_exact_discovery(board: Board) -> bool:
-    """Whether chip identity alone cannot prove this exact OTA target."""
-    return len(board_keys_for_chip(board.chip)) > 1
+def ota_target_requires_exact_discovery(family: Family) -> bool:
+    return True
 
 
-def verify_ota_target(board: Board, host: str, timeout: float) -> None:
-    """Cross-check --board against what the panel says it is, if it can be found.
-
-    The USB path can reject a different chip through esptool, but neither USB
-    metadata nor an ESP image header distinguishes two targets on the same chip.
-    Network discovery can: new firmware advertises exact `target=` alongside the
-    chip-level `board=` record, so target is checked first and chip second.
-
-    A discovery miss remains a warning so pushing by IP across subnets keeps
-    working. A discovered exact-target contradiction always refuses.
-
-    UNVERIFIED: no panel has been discovered by this code. The parse is tested
-    against captured JSON, but that arduino-cli reports these properties for this
-    firmware's TXT records is read from mdns-discovery's source, not measured.
-    """
+def verify_ota_target(family: Family, host: str, timeout: float) -> None:
+    """Fail closed unless discovery supplies all independent identity fields."""
     print("Checking what %s says it is..." % host, flush=True)
     found = network_port_for_host(discovered_network_ports(timeout), host)
     if found is None:
-        if ota_target_requires_exact_discovery(board):
-            raise Fail(
-                "%s was not found with exact target metadata, so target %s cannot "
-                "be verified. Refusing an ESP32-S3 OTA push because its image "
-                "header cannot distinguish the attached display."
-                % (host, board.key)
-            )
-        print(
-            "  Not found by mDNS discovery, so --board %s is taken on trust."
-            % board.key
-        )
-        return
-
-    verdict = classify_ota_target(board, found.target, found.board)
-    if verdict == TARGET_WRONG:
-        advertised = "target=%s" % found.target if found.target else "board=%s" % found.board
-        if found.target:
-            suggestions = [canonical_board_key(found.target)]
-        else:
-            suggestions = board_keys_for_chip(found.board)
-        suggestion = "|".join(key for key in suggestions if key in BOARDS) or "<exact-target>"
         raise Fail(
-            "%s advertises %s, but --board %s selects target %s (%s).\n"
-            "  Refusing: chip-header validation cannot protect against a same-chip\n"
-            "  display-target mismatch. Re-run with --board %s."
-            % (host, advertised, board.key, board.key, board.chip, suggestion)
-        )
-    if verdict == TARGET_OK:
-        identity = "target=%s" % found.target if found.target else "board=%s" % found.board
-        print("  Confirmed: %s advertises %s." % (host, identity))
-    else:
-        if ota_target_requires_exact_discovery(board):
-            raise Fail(
-                "%s did not advertise matching exact target and chip metadata, "
-                "so %s cannot be verified. Refusing an ESP32-S3 OTA push because "
-                "both identities are required to select its display firmware."
-                % (host, board.key)
-            )
-        print(
-            "  Found %s, but target=%r and board=%r do not uniquely confirm %s.\n"
-            "  Continuing with the unique target for this chip."
-            % (host, found.target, found.board, board.key)
-        )
+            "%s was not found with family, chip, profile, and partition metadata; "
+            "refusing OTA" % host)
+    verdict = classify_ota_target(
+        family, found.target, found.board, found.profile, found.partition)
+    if verdict != TARGET_OK:
+        raise Fail(
+            "%s reports family=%r chip=%r profile=%r partition=%r; expected "
+            "family=%s chip=%s one of profiles=%s partition=%s"
+            % (host, found.target, found.board, found.profile, found.partition,
+               family.key, family.chip, ",".join(family.profiles),
+               family.partition_scheme))
+    print("  Confirmed family=%s chip=%s profile=%s partition=%s." %
+          (found.target, found.board, found.profile, found.partition))
 
 
 def board_keys_for_chip(chip: str) -> List[str]:
-    """All exact targets for an esptool/variant chip id."""
     token = (chip or "").strip().lower()
-    return [board.key for board in BOARDS.values() if board.chip == token]
+    return [family.key for family in FAMILIES.values() if family.chip == token]
 
 
 def board_key_for_chip(chip: str) -> Optional[str]:
-    """Map a chip only when it has exactly one known exact target."""
     matches = board_keys_for_chip(chip)
     return matches[0] if len(matches) == 1 else None
 
@@ -2776,67 +2930,29 @@ def cmd_tile_test(args) -> int:
 
 
 def cmd_compile(args) -> int:
-    board = resolve_board(args.board, None)
-    report_sizes(compile_board(board))
+    family = resolve_family(args.family, None)
+    report_sizes(compile_board(family))
     return 0
 
 
 def cmd_flash(args) -> int:
-    # Port first: with no board attached this is where the run should stop,
-    # before spending minutes on a compile.
     port = resolve_port(args.port)
-    board = resolve_board(args.board, port)
-    print("Target: %s (%s) on %s" % (board.key, board.fqbn, port.address), flush=True)
-
-    wad_path: Optional[str] = None
-    tool: Optional[str] = None
-    if board.key == "s3-175":
-        wad_path = _ensure_doom_wad()
-        if not wad_path:
-            raise Fail("cannot flash s3-175 without the verified doom1.wad")
-        _validate_doom_wad(wad_path, require_shareware=True)
-        tool = esptool_path()
-        if not tool:
-            raise Fail("esptool not found (install the esp32 Arduino core)")
-
-    out_dir = tempfile.mkdtemp(prefix="espdisp-flash-%s-" % board.key)
+    family = resolve_family(args.family, port)
+    print("Family: %s (%s) on %s" %
+          (family.key, family.fqbn, port.address), flush=True)
+    out_dir = tempfile.mkdtemp(prefix="espdisp-flash-%s-" % family.key)
     try:
-        lines = compile_board(board, output_dir=out_dir)
-        partition_path = export_binary(out_dir, ".ino.partitions.bin")
-        partition_blob = read_binary(partition_path)
-        _verify_partition_payload(board, partition_blob)
-        app_path = app_image(out_dir)
+        lines = compile_board(family, output_dir=out_dir)
+        partition_blob = read_binary(export_binary(out_dir, ".ino.partitions.bin"))
+        _verify_partition_payload(family, partition_blob)
         _verify_app_payload(
-            board, partition_blob, APP_FLASH_ADDRESS, os.path.getsize(app_path)
+            family, partition_blob, APP_FLASH_ADDRESS,
+            os.path.getsize(app_image(out_dir)))
+        run_streaming(
+            [arduino_cli(), "upload", "-b", family.fqbn, "-p", port.address,
+             "--input-dir", out_dir],
+            cwd=SKETCH_DIR,
         )
-        if board.key == "s3-175":
-            assert tool is not None and wad_path is not None
-            # One esptool transaction writes the partition table and its WAD
-            # payload together. A failed command is a failed flash, never a
-            # successful firmware upload followed by a silently missing WAD.
-            run_streaming([
-                tool,
-                "--chip", board.chip,
-                "--port", port.address,
-                "--baud", "921600",
-                "write_flash",
-                "0x%X" % core_bootloader_address(board.chip),
-                export_binary(out_dir, ".ino.bootloader.bin"),
-                "0x%X" % PARTITIONS_FLASH_ADDRESS,
-                partition_path,
-                "0x%X" % BOOT_APP0_FLASH_ADDRESS,
-                core_boot_app0(),
-                "0x%X" % APP_FLASH_ADDRESS,
-                app_path,
-                "0x%X" % _DOOM_WAD_PARTITION_OFFSET,
-                wad_path,
-            ])
-        else:
-            run_streaming(
-                [arduino_cli(), "upload", "-b", board.fqbn, "-p", port.address,
-                 "--input-dir", out_dir],
-                cwd=SKETCH_DIR,
-            )
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
     report_sizes(lines)
@@ -2879,41 +2995,39 @@ def _partition_entries(blob: bytes) -> List[Tuple[str, int, int, int, int]]:
     return entries
 
 
-def _verify_partition_payload(board: Board, blob: bytes) -> None:
+def _verify_partition_payload(family: Family, blob: bytes) -> None:
     entries = _partition_entries(blob)
     by_label = {entry[0]: entry[1:] for entry in entries}
-    doom_claims = [
-        entry for entry in entries
-        if entry[0] == "doom_wad" or (entry[1], entry[2]) == (0x42, 0x06)
-    ]
-    if board.key != "s3-175":
-        if doom_claims:
-            raise Fail("%s partition table incorrectly contains the Doom WAD" % board.key)
+    if family.key == "p4":
+        expected = {
+            "nvs": (0x01, 0x02, 0x009000, 0x005000),
+            "otadata": (0x01, 0x00, 0x00E000, 0x002000),
+            "app0": (0x00, 0x10, 0x010000, 0x800000),
+            "app1": (0x00, 0x11, 0x810000, 0x800000),
+        }
+    elif family.key == "s3":
+        expected = {
+            "nvs": (0x01, 0x02, 0x009000, 0x005000),
+            "otadata": (0x01, 0x00, 0x00E000, 0x002000),
+            "app0": (0x00, 0x10, 0x010000, 0x3F0000),
+            "app1": (0x00, 0x11, 0x400000, 0x3F0000),
+        }
+    else:
+        if any(entry[0] == "doom_wad" for entry in entries):
+            raise Fail("c6 partition table contains an incompatible payload")
         return
-
-    expected = {
-        "nvs": (0x01, 0x02, 0x009000, 0x005000),
-        "otadata": (0x01, 0x00, 0x00E000, 0x002000),
-        "app0": (0x00, 0x10, 0x010000, 0x5F0000),
-        "app1": (0x00, 0x11, 0x600000, 0x5F0000),
-        "doom_wad": (0x42, 0x06, _DOOM_WAD_PARTITION_OFFSET,
-                     _DOOM_WAD_PARTITION_SIZE),
-    }
-    if len(entries) != len(expected) or set(by_label) != set(expected):
-        raise Fail(
-            "s3-175 partition labels are %s, expected %s"
-            % (", ".join(sorted(by_label)), ", ".join(sorted(expected)))
-        )
+    if set(by_label) != set(expected):
+        raise Fail("%s partition labels are %s, expected %s" %
+                   (family.key, ", ".join(sorted(by_label)),
+                    ", ".join(sorted(expected))))
     for label, want in expected.items():
         if by_label[label] != want:
-            raise Fail(
-                "s3-175 partition %s is %r, expected %r"
-                % (label, by_label[label], want)
-            )
+            raise Fail("%s partition %s is %r, expected %r" %
+                       (family.key, label, by_label[label], want))
 
 
 def _verify_app_payload(
-    board: Board, partition_blob: bytes, app_address: int, app_bytes: int
+    board: Family, partition_blob: bytes, app_address: int, app_bytes: int
 ) -> None:
     app_partitions = [
         entry for entry in _partition_entries(partition_blob)
@@ -3016,7 +3130,7 @@ def _verify_installed_doom_partition(port_address: str, tool: str) -> None:
             "0xC00",
             path,
         ])
-        _verify_partition_payload(BOARDS["s3-175"], read_binary(path))
+        _verify_partition_payload(FAMILIES["s3-175"], read_binary(path))
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 
@@ -3026,20 +3140,16 @@ def cmd_ota(args) -> int:
     # after a multi-minute compile would be irritating.
     password = ota_password(args.password)
     tool = espota_path()
-    board = BOARDS[canonical_board_key(args.board)]
-    print("Target: %s (%s) over the air at %s" % (board.key, board.fqbn, args.host))
-    # Before the compile, so a wrong --board costs seconds instead of minutes.
-    if args.discovery_timeout > 0:
-        verify_ota_target(board, args.host, args.discovery_timeout)
-    elif ota_target_requires_exact_discovery(board):
-        raise Fail(
-            "--discovery-timeout cannot be disabled for %s: exact target metadata "
-            "is required before an ESP32-S3 OTA push" % board.key
-        )
+    family = FAMILIES[args.family]
+    print("Family: %s (%s) over the air at %s" %
+          (family.key, family.fqbn, args.host))
+    if args.discovery_timeout <= 0:
+        raise Fail("--discovery-timeout must be positive for family-safe OTA")
+    verify_ota_target(family, args.host, args.discovery_timeout)
 
     out_dir = tempfile.mkdtemp(prefix="espdisp-ota-")
     try:
-        lines = compile_board(board, output_dir=out_dir)
+        lines = compile_board(family, output_dir=out_dir)
         image = app_image(out_dir)
         print(
             "\nPushing %s (%d bytes) to %s:%d"
@@ -3066,10 +3176,12 @@ def cmd_bundle(args) -> int:
         raise Fail("firmware/display_stream/app_state.cpp:%d: %s" % (
             version_line, RELEASE_REASON_FW_VERSION % quote_release_value(version)))
     release_notes = release_notes_for_version(RELEASE_NOTES_PATH, version)
-    keys = bundle_board_keys(args.board)
-    boards = [BOARDS[key] for key in keys]
+    keys = bundle_family_keys(args.family)
+    boards = [FAMILIES[key] for key in keys]
+    family_key = keys[0]
     path = args.output or os.path.join(
-        os.getcwd(), "espdisp-firmware-%s%s" % (version, BUNDLE_SUFFIX)
+        os.getcwd(), "espdisp-%s-%s%s" %
+        (family_key, version, BUNDLE_SUFFIX)
     )
     commit, dirty = git_provenance()
     print("Firmware %s (FW_VERSION in %s)"
@@ -3092,27 +3204,14 @@ def cmd_bundle(args) -> int:
             partition_blob = part_payloads[FLASH_ROLE_PARTITIONS]
             _verify_partition_payload(board, partition_blob)
             _verify_app_payload(board, partition_blob, APP_FLASH_ADDRESS, len(blob))
-            if board.key == "s3-175":
-                wad_path = _ensure_doom_wad()
-                if not wad_path:
-                    raise Fail("cannot bundle s3-175 without the verified doom1.wad")
-                _validate_doom_wad(wad_path, require_shareware=True)
-                wad_blob = read_binary(wad_path)
-                parts.append(
-                    {
-                        "role": _DOOM_WAD_FLASH_ROLE,
-                        "address": _DOOM_WAD_PARTITION_OFFSET,
-                        "filename": os.path.basename(wad_path),
-                        "bytes": len(wad_blob),
-                        "sha256": sha256_hex(wad_blob),
-                    }
-                )
-                part_payloads[_DOOM_WAD_FLASH_ROLE] = wad_blob
             entries.append(
                 {
                     "board": board.key,
                     "targets": [board.key],
                     "chip": board.chip,
+                    "profiles": list(board.profiles),
+                    "flash_sizes": list(board.flash_sizes),
+                    "partition": board.partition_scheme,
                     "fqbn": board.fqbn,
                     "filename": os.path.basename(image),
                     "bytes": len(blob),
@@ -3145,21 +3244,8 @@ def cmd_bundle(args) -> int:
     for line in describe_bundle(manifest):
         print(line)
 
-    absent = [board for board in BOARDS.values() if board.key not in payloads]
-    if absent:
-        print(
-            "\nThis bundle covers %d of %d exact targets: nothing in it is for %s.\n"
-            "  The app can only install an image that claims the panel's exact target.\n"
-            "  Build without --board, or add %s, if those panels need this version too."
-            % (
-                len(payloads),
-                len(BOARDS),
-                " or ".join(board.key for board in absent),
-                " ".join("--board %s" % board.key for board in absent),
-            )
-        )
     print(
-        "\nHand this file to the Mac app (or to `%s bundle-info` first)."
+        "\nHand this family bundle to the Mac app (or inspect it with `%s bundle-info`)."
         % os.path.basename(sys.argv[0])
     )
     return 0
@@ -3167,81 +3253,25 @@ def cmd_bundle(args) -> int:
 
 def cmd_bundle_info(args) -> int:
     manifest, payloads, flash_payloads = read_bundle(args.path)
-    if args.require_all_targets:
-        missing = sorted(set(BOARDS).difference(payloads))
-        if missing:
-            raise Fail(
-                "%s is missing required exact target%s %s"
-                % (args.path, "s" if len(missing) != 1 else "", ", ".join(missing))
-            )
-        for target, roles in flash_payloads.items():
-            if target in BOARDS and FLASH_ROLE_PARTITIONS in roles:
-                partition_blob = roles[FLASH_ROLE_PARTITIONS]
-                _verify_partition_payload(BOARDS[target], partition_blob)
-                image = next(
-                    entry for entry in manifest.get("images", [])
-                    if target in entry.get("targets", [])
-                )
-                partition_parts = [
-                    part for part in image.get("flash_parts", [])
-                    if part.get("role") == FLASH_ROLE_PARTITIONS
-                ]
-                if len(partition_parts) != 1 or partition_parts[0].get("address") != PARTITIONS_FLASH_ADDRESS:
-                    raise Fail(
-                        "%s assigns %s's partition table to the wrong flash address"
-                        % (args.path, target)
-                    )
-                expected_addresses = {
-                    FLASH_ROLE_BOOTLOADER: core_bootloader_address(BOARDS[target].chip),
-                    FLASH_ROLE_PARTITIONS: PARTITIONS_FLASH_ADDRESS,
-                    FLASH_ROLE_BOOT_APP0: BOOT_APP0_FLASH_ADDRESS,
-                }
-                if target == "s3-175":
-                    expected_addresses[_DOOM_WAD_FLASH_ROLE] = _DOOM_WAD_PARTITION_OFFSET
-                actual_addresses = {
-                    part.get("role"): part.get("address")
-                    for part in image.get("flash_parts", [])
-                }
-                if actual_addresses != expected_addresses:
-                    raise Fail(
-                        "%s gives %s unexpected flash roles or addresses"
-                        % (args.path, target)
-                    )
-                _verify_app_payload(
-                    BOARDS[target], partition_blob,
-                    image.get("app_address"), image.get("bytes"),
-                )
-        doom_images = [
-            image for image in manifest.get("images", [])
-            if "s3-175" in image.get("targets", [])
-        ]
-        if len(doom_images) != 1:
-            raise Fail("%s has no unique s3-175 image" % args.path)
-        doom_parts = [
-            part for part in doom_images[0].get("flash_parts", [])
-            if part.get("role") == _DOOM_WAD_FLASH_ROLE
-        ]
-        wad_payload = flash_payloads.get("s3-175", {}).get(_DOOM_WAD_FLASH_ROLE)
-        if len(doom_parts) != 1 or wad_payload is None:
-            raise Fail("%s has no verified s3-175 Doom WAD payload" % args.path)
-        doom_part = doom_parts[0]
-        if (
-            doom_part.get("address") != _DOOM_WAD_PARTITION_OFFSET
-            or doom_part.get("bytes") != _DOOM_WAD_SIZE
-            or doom_part.get("sha256") != _DOOM_WAD_SHA256
-            or len(wad_payload) != _DOOM_WAD_SIZE
-            or sha256_hex(wad_payload) != _DOOM_WAD_SHA256
-        ):
-            raise Fail(
-                "%s has a non-canonical s3-175 Doom WAD address, size, or hash"
-                % args.path
-            )
-        for image in manifest.get("images", []):
-            if "s3-175" not in image.get("targets", []) and any(
-                part.get("role") == _DOOM_WAD_FLASH_ROLE
-                for part in image.get("flash_parts", [])
-            ):
-                raise Fail("%s assigns the Doom WAD to a non-s3-175 target" % args.path)
+    current = sorted(set(payloads).intersection(FAMILIES))
+    if manifest.get("format") == BUNDLE_FORMAT_V3 and current:
+        if len(current) != 1 or len(payloads) != 1 or len(manifest.get("images") or []) != 1:
+            raise Fail("current bundles must contain exactly one firmware family")
+        family = FAMILIES[current[0]]
+        roles = flash_payloads.get(family.key) or {}
+        partition_blob = roles.get(FLASH_ROLE_PARTITIONS)
+        if partition_blob is None:
+            raise Fail("%s carries no partition table" % args.path)
+        _verify_partition_payload(family, partition_blob)
+        image = manifest["images"][0]
+        if (image.get("targets") != [family.key] or
+                image.get("chip") != family.chip or
+                image.get("profiles") != list(family.profiles) or
+                image.get("flash_sizes") != list(family.flash_sizes) or
+                image.get("partition") != family.partition_scheme):
+            raise Fail("bundle family compatibility metadata does not match its payload")
+        _verify_app_payload(
+            family, partition_blob, image.get("app_address"), image.get("bytes"))
     size = os.path.getsize(args.path)
     print("%s" % args.path)
     print("  size:     %d bytes (%.1f MiB)" % (size, size / (1024.0 * 1024.0)))
@@ -3282,7 +3312,7 @@ def cmd_bundle_info(args) -> int:
             "that\n  has never been flashed. Rebuild it with `%s bundle` for that."
             % (manifest.get("format"), os.path.basename(sys.argv[0]))
         )
-    absent = [key for key in BOARDS if key not in payloads]
+    absent = [key for key in FAMILIES if key not in payloads]
     if absent:
         print(
             "Carries exact targets %s; missing %s. Other targets find nothing to install."
@@ -3317,9 +3347,13 @@ def cmd_set_password(args) -> int:
 
 def cmd_list(args) -> int:
     ports = detected_ports()
-    candidates = [p for p in ports if fnmatch.fnmatch(p.address, PORT_GLOB)]
+    candidates = [
+        p for p in ports
+        if any(fnmatch.fnmatch(p.address, pattern) for pattern in PORT_GLOBS)
+    ]
     if not candidates:
-        print("No candidate ESP32 ports (looked for %s)." % PORT_GLOB)
+        print("No candidate ESP32 ports (looked for %s)." %
+              ", ".join(PORT_GLOBS))
     else:
         print("Candidate ESP32 ports:")
         for port in candidates:
@@ -3355,9 +3389,9 @@ def cmd_config(args) -> int:
 
 
 def board_help() -> str:
-    lines = ["  %-7s %s" % (b.key, b.blurb) for b in BOARDS.values()]
-    lines.append("  %-7s compatibility alias for s3-175" % "s3")
-    return "\n".join(lines)
+    return "\n".join(
+        "  %-7s %s" % (family.key, family.blurb)
+        for family in FAMILIES.values())
 
 
 def cmd_flash_wad(args) -> int:
@@ -3378,7 +3412,7 @@ def cmd_flash_wad(args) -> int:
     wad_size = os.path.getsize(wad_path)
 
     port = resolve_port(args.port)
-    board = resolve_board(args.board, port)
+    board = resolve_family(args.board, port)
     if board.key != "s3-175":
         raise Fail("the Doom WAD partition exists only on exact target s3-175")
     tool = esptool_path()
@@ -3404,24 +3438,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="espdisp.py",
         description=__doc__,
-        epilog="boards:\n" + board_help(),
+        epilog="families:\n" + board_help(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    # New subcommands plug in as another add_parser block plus one entry in the
-    # board table if they need one.
+    # New subcommands plug in as another add_parser block plus one family entry.
     subs = parser.add_subparsers(dest="command", metavar="<command>")
 
-    p_compile = subs.add_parser("compile", help="build the firmware for one board")
-    p_compile.add_argument("--board", required=True, choices=board_choices())
+    p_compile = subs.add_parser("compile", help="build one firmware family")
+    p_compile.add_argument("--family", required=True, choices=family_choices())
     p_compile.set_defaults(func=cmd_compile)
 
-    p_flash = subs.add_parser("flash", help="build then upload over USB")
+    p_flash = subs.add_parser("flash", help="build then upload one family over USB")
     p_flash.add_argument(
-        "--board",
-        choices=board_choices(),
-        help="skip chip detection and build this exact target",
-    )
-    p_flash.add_argument("--port", help="serial device (default: the one %s match)" % PORT_GLOB)
+        "--family", choices=family_choices(),
+        help="family to build; otherwise derive it from the attached chip")
+    p_flash.add_argument(
+        "--port", help="serial device (default: the one matching %s)" %
+        ", ".join(PORT_GLOBS))
     p_flash.set_defaults(func=cmd_flash)
 
     p_ota = subs.add_parser(
@@ -3438,12 +3471,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ota.add_argument("host", help="panel address: an IP, or its mDNS name (panel.local)")
     p_ota.add_argument(
-        "--board",
-        required=True,
-        choices=board_choices(),
-        help="which exact target to build; s3 is an alias for s3-175. Required "
-        "because a chip-level network identity cannot distinguish same-chip panels",
-    )
+        "--family", required=True, choices=family_choices(),
+        help="firmware family; discovery must also confirm chip, profile, and partition")
     p_ota.add_argument("--password", help="OTA password (prefer $%s)" % OTA_PASSWORD_ENV)
     p_ota.add_argument(
         "--ota-port", type=int, default=OTA_PORT, help="panel OTA port (default %d)" % OTA_PORT
@@ -3458,24 +3487,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--discovery-timeout",
         type=float,
         default=5.0,
-        help="seconds to browse mDNS for exact target/chip metadata (default 5; "
-        "0 or less skips the check only for targets whose chip is unambiguous; "
-        "same-chip S3 targets refuse without exact discovery)",
+        help="seconds to require family/chip/profile/partition metadata (default 5)",
     )
     p_ota.set_defaults(func=cmd_ota)
 
     p_bundle = subs.add_parser(
         "bundle",
         help="compile and pack the firmware into one portable %s file" % BUNDLE_SUFFIX,
-        description="Build the firmware and write it into a single file the Mac "
-        "app can open later - on this machine or on another one, with no copy of "
-        "this repo and no arduino-cli in sight. The file carries, per exact "
-        "target, the application image plus the bootloader, partition table and "
-        "boot_app0 needed by a board that has never been flashed, each with its "
-        "flash address, and a manifest naming the firmware version, when it was "
-        "built, which commit it came from and the sha256 of every payload. Nothing "
-        "is pushed: `bundle` only writes the file, and `ota` is still the way to "
-        "push from here.",
+        description="Build exactly one family and write a portable bundle the Mac "
+        "app can verify later. The file carries one application image plus its "
+        "bootloader, partition table, and boot_app0. It never combines families.",
         epilog="The version is read out of the sketch (FW_VERSION in\n"
         "firmware/display_stream/app_state.cpp), never passed in, so the\n"
         "manifest cannot disagree with the images beside it.\n"
@@ -3483,18 +3504,26 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_bundle.add_argument(
-        "--board",
-        action="append",
-        choices=board_choices(),
-        help="build only this exact target; repeatable. s3 is an alias for s3-175. "
-        "Default is every canonical target exactly once",
-    )
+        "--family", required=True, action="append", choices=family_choices(),
+        help="build exactly one family artifact; repeated values are refused")
     p_bundle.add_argument(
         "--output",
-        help="where to write the bundle (default ./espdisp-firmware-<version>%s)"
+        help="where to write the bundle (default ./espdisp-<family>-<version>%s)"
         % BUNDLE_SUFFIX,
     )
     p_bundle.set_defaults(func=cmd_bundle)
+
+    p_release = subs.add_parser(
+        "release", help="build c6, s3, and p4 as independent canonical artifacts")
+    p_release.add_argument(
+        "--output-root", default=RELEASE_ROOT,
+        help="canonical release directory (default firmware-releases)")
+    p_release.set_defaults(func=cmd_release)
+
+    p_release_info = subs.add_parser(
+        "release-info", help="verify a canonical catalog and print its artifact paths")
+    p_release_info.add_argument("path", help="path to firmware-releases/manifest.json")
+    p_release_info.set_defaults(func=cmd_release_info)
 
     p_bundle_info = subs.add_parser(
         "bundle-info",
@@ -3503,11 +3532,6 @@ def build_parser() -> argparse.ArgumentParser:
         "and the sha256 of every payload) and print what it holds, including "
         "whether it can bring up a board that has never been flashed. Run this "
         "before handing a file to someone, and on a file someone handed you.",
-    )
-    p_bundle_info.add_argument(
-        "--require-all-targets",
-        action="store_true",
-        help="fail unless the bundle covers every canonical target known to this tool",
     )
     p_bundle_info.add_argument("path", help="the %s file to inspect" % BUNDLE_SUFFIX)
     p_bundle_info.set_defaults(func=cmd_bundle_info)
@@ -3594,23 +3618,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_config.add_argument("--timeout", type=float, default=6.0, help="reply timeout (s)")
     p_config.add_argument("words", nargs="+", metavar="CFG...")
     p_config.set_defaults(func=cmd_config)
-
-    p_wad = subs.add_parser(
-        "flash-wad",
-        help="write a doom1.wad file to the S3 board's WAD partition",
-        description="Writes a Doom WAD file to the dedicated s3-175 flash "
-        "partition. Exact target selection is required because s3-175 and "
-        "s3-185 share the same MCU. The verified shareware v1.9 WAD is "
-        "downloaded when no path is given.",
-    )
-    p_wad.add_argument("wad", nargs="?", default=None,
-                       help="path to WAD file (default: verified shareware doom1.wad)")
-    p_wad.add_argument(
-        "--board", required=True, choices=("s3", "s3-175"),
-        help="exact target confirmation; s3 is an alias for s3-175",
-    )
-    p_wad.add_argument("--port", help="serial device (default: autodetected)")
-    p_wad.set_defaults(func=cmd_flash_wad)
 
     return parser
 

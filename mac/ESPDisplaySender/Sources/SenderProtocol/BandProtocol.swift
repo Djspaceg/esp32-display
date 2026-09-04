@@ -82,7 +82,7 @@ public struct PanelGeometry: Hashable, Sendable {
     /// at well under a megabyte, so nothing here can ask for an absurd
     /// allocation. Both real panels pass - 172x320 and 466x466 - and so does a
     /// 480x480, which the firmware's own comment names as roadmap.
-    public var isStreamable: Bool {
+    public var isBandStreamable: Bool {
         guard width > 0, height > 0 else { return false }
         let budget = Self.maxPacketBytes - Self.headerBytes
         for landscape in [false, true] {
@@ -91,6 +91,19 @@ public struct PanelGeometry: Hashable, Sendable {
             else { return false }
         }
         return true
+    }
+
+    /// ETL1 can carry up to a 4096-tile grid with 16-bit tile indices.
+    public var isLargeTileStreamable: Bool {
+        // ETL1 is capability-gated, but mDNS metadata arrives before EINF. Keep
+        // the admission edge exact until another large panel target is added,
+        // so a hostile arbitrary resolution cannot expand frame allocation.
+        width == 720 && height == 720
+    }
+
+    /// Whether at least one negotiated frame transport can carry this panel.
+    public var isStreamable: Bool {
+        isBandStreamable || isLargeTileStreamable
     }
 
     /// The original 172x320 panel (T-Display S3).

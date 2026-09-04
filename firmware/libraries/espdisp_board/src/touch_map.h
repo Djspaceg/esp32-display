@@ -97,6 +97,14 @@ static const Calibration CST816_ON_ST7789_240 = {
     /* rawXMirrored */ false, /* rawYMirrored */ false,
     /* rotateClockwise */ true};
 
+/// Starting calibration for the 720x720 GT911 on the Waveshare 4B. The
+/// supported vendor path uses raw rotation-0 coordinates without swapping or
+/// mirroring; physical corner validation may refine the carrier profile.
+static const Calibration GT911_ON_ST7703_4B = {
+    /* panelShort */ 720, /* panelLong */ 720,
+    /* rawXMirrored */ false, /* rawYMirrored */ false,
+    /* rotateClockwise */ true};
+
 inline int16_t frameWidth(bool landscape, Calibration cal = AXS5106L_ON_C6) {
   return landscape ? cal.panelLong : cal.panelShort;
 }

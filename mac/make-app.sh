@@ -65,46 +65,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# The firmware the app ships with, built before Xcode runs so the build phase in
-# the project has something to embed and the signature covers it.
-#
-# WHY THE APP CARRIES FIRMWARE: a .espdispfw can only come from `espdisp.py
-# bundle`, so an Add Display sheet that asks the user for one asks them to open a
-# terminal - and adding a brand-new board is meant to work without that. Building
-# it here uses the CLI on the machine of whoever packages the app, which is a
-# different thing from requiring it of whoever uses the app.
-#
-# Reused only when it is a current format bundle covering every exact target.
-# The five canonical targets are c6, s3-085, s3-154, s3-175, and s3-185;
-# `bundle` with no --board writes all five and --require-all-targets enforces
-# that below. Compiling all five targets takes minutes, but reusing a legacy
-# bundle would silently omit a newer target (s3-085, s3-154, or s3-185) from
-# the installed app.
-# ESPDISP_REBUILD_FIRMWARE=1
-# forces a fresh one; ESPDISP_SKIP_FIRMWARE=1 packages without any, and the app
-# then asks for a file. A build failure remains a warning: the rest of the app
-# still works and a bundle can be chosen manually.
-FIRMWARE_DIR="$HERE/ESPDisplaySender/Resources"
-FIRMWARE="$FIRMWARE_DIR/espdisp-default.espdispfw"
-firmware_bundle_is_current() {
-  python3 "$HERE/../tools/espdisp.py" bundle-info --require-all-targets "$FIRMWARE" >/dev/null 2>&1
-}
-if [[ -n "${ESPDISP_SKIP_FIRMWARE:-}" ]]; then
-  echo "skipping the default firmware bundle (ESPDISP_SKIP_FIRMWARE is set)"
-elif [[ -f "$FIRMWARE" && -z "${ESPDISP_REBUILD_FIRMWARE:-}" ]] && firmware_bundle_is_current; then
-  echo "reusing $FIRMWARE ($(stat -f %z "$FIRMWARE") bytes)"
-  echo "  verified format 3 coverage: c6, s3-085, s3-154, s3-175, s3-185"
-  echo "  rebuild it with ESPDISP_REBUILD_FIRMWARE=1 $0"
-else
-  if [[ -f "$FIRMWARE" && -z "${ESPDISP_REBUILD_FIRMWARE:-}" ]]; then
-    echo "existing firmware bundle is stale or incomplete; rebuilding it"
+# Firmware is embedded directly from the committed canonical release store.
+# Packaging never rebuilds or duplicates it. The build phase validates the
+# catalog and copies its three artifacts; ESPDISP_SKIP_FIRMWARE packages the
+# documented no-resource fallback.
+CATALOG="$HERE/../firmware-releases/manifest.json"
+if [[ -z "${ESPDISP_SKIP_FIRMWARE:-}" ]]; then
+  if [[ ! -f "$CATALOG" ]]; then
+    echo "error: canonical firmware catalog is missing: $CATALOG" >&2
+    exit 1
   fi
-  echo "building the default firmware bundle (compiles five exact targets, minutes)"
-  mkdir -p "$FIRMWARE_DIR"
-  if ! python3 "$HERE/../tools/espdisp.py" bundle --output "$FIRMWARE"; then
-    echo "warning: could not build a firmware bundle; the app will ask for one" >&2
-    rm -f -- "$FIRMWARE"
-  fi
+  python3 "$HERE/../tools/espdisp.py" release-info "$CATALOG" >/dev/null
 fi
 
 xcodebuild \
