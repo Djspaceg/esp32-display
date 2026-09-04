@@ -275,14 +275,12 @@ final class UsbOnboardingAppTests: XCTestCase {
     /// file" rather than as an error.
     func testATestBundleShipsNoDefaultFirmwareAndThatIsNotAnError() {
         XCTAssertEqual(BundledFirmware.load(in: Bundle(for: Self.self)), .none)
-        XCTAssertNil(BundledFirmware.defaultBundleURL(in: Bundle(for: Self.self)))
+        XCTAssertNil(BundledFirmware.catalogURL(in: Bundle(for: Self.self)))
     }
 
-    /// The resource name is one string in one place, because make-app.sh writes it
-    /// and this reads it, and a rename that only happened on one side would ship an
-    /// app that quietly could not find its own firmware.
-    func testTheResourceNameIsWhatTheScriptInstalls() {
-        XCTAssertEqual(BundledFirmware.resourceName, "espdisp-default")
+    func testTheCatalogResourceNameIsWhatTheScriptInstalls() {
+        XCTAssertEqual(BundledFirmware.catalogResourceName, "manifest")
+        XCTAssertEqual(FirmwareReleaseCatalog.fileName, "manifest.json")
         XCTAssertEqual(FirmwareBundle.fileExtension, "espdispfw")
     }
 
@@ -294,8 +292,7 @@ final class UsbOnboardingAppTests: XCTestCase {
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appendingPathComponent(
-            BundledFirmware.resourceName + "." + FirmwareBundle.fileExtension)
+        let file = directory.appendingPathComponent(FirmwareReleaseCatalog.fileName)
         try Data("not a bundle".utf8).write(to: file)
         let bundle = try XCTUnwrap(Bundle(url: makeBundleWrapper(around: file)))
         guard case .unreadable(let path, let reason) = BundledFirmware.load(in: bundle)

@@ -24,6 +24,20 @@
 #endif
 #endif
 
+#if defined(ESP_PLATFORM)
+#include <esp_mac.h>
+#endif
+
+#if defined(__has_include)
+#if __has_include(<platform_config.h>)
+#include <platform_config.h>
+#else
+#include "../libraries/espdisp_board/src/platform_config.h"
+#endif
+#else
+#include <platform_config.h>
+#endif
+
 namespace chipidentity {
 
 /// The tokens, spelled once.
@@ -40,6 +54,7 @@ namespace chipidentity {
 /// expression to read from.
 static constexpr char TOKEN_ESP32C6[] = "esp32c6";
 static constexpr char TOKEN_ESP32S3[] = "esp32s3";
+static constexpr char TOKEN_ESP32P4[] = "esp32p4";
 
 /// What a build that cannot name its chip advertises.
 ///
@@ -64,6 +79,13 @@ constexpr bool sameToken(const char *a, const char *b) {
   return *a == *b;
 }
 
+static_assert(sameToken(board::PLATFORM_ESP32_C6.chipToken, TOKEN_ESP32C6),
+              "C6 PlatformConfig chip token drifted from chip identity");
+static_assert(sameToken(board::PLATFORM_ESP32_S3.chipToken, TOKEN_ESP32S3),
+              "S3 PlatformConfig chip token drifted from chip identity");
+static_assert(sameToken(board::PLATFORM_ESP32_P4.chipToken, TOKEN_ESP32P4),
+              "P4 PlatformConfig chip token drifted from chip identity");
+
 /// The ladder, with its inputs as arguments instead of as macros.
 ///
 /// Every rung is reachable from a host test this way, which is the reason for
@@ -77,13 +99,14 @@ constexpr bool sameToken(const char *a, const char *b) {
 /// flag is not, and they are ordered rather than exclusive so that a build
 /// somehow claiming both still answers with one token instead of nothing.
 constexpr const char *selectToken(const char *idfTarget, bool isEsp32C6,
-                                  bool isEsp32S3) {
+                                  bool isEsp32S3, bool isEsp32P4 = false) {
   // An empty string is treated as absent: a defined-but-blank CONFIG_IDF_TARGET
   // would otherwise be advertised as a chip named "", which reads to the app as
   // a definite mismatch with every image in a bundle rather than as ignorance.
   if (idfTarget != nullptr && idfTarget[0] != '\0') return idfTarget;
   if (isEsp32C6) return TOKEN_ESP32C6;
   if (isEsp32S3) return TOKEN_ESP32S3;
+  if (isEsp32P4) return TOKEN_ESP32P4;
   return TOKEN_UNKNOWN;
 }
 
@@ -124,10 +147,19 @@ constexpr bool buildTargetsEsp32S3() {
 #endif
 }
 
+/// Whether the IDF's per-chip flag for the P4 is set.
+constexpr bool buildTargetsEsp32P4() {
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+  return true;
+#else
+  return false;
+#endif
+}
+
 /// What this build says it is: the preprocessor's answers, handed to the ladder.
 constexpr const char *chipToken() {
   return selectToken(buildIdfTarget(), buildTargetsEsp32C6(),
-                     buildTargetsEsp32S3());
+                     buildTargetsEsp32S3(), buildTargetsEsp32P4());
 }
 
 // The two vocabularies checked against each other, on the target, at compile
@@ -145,6 +177,11 @@ static_assert(sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32C6),
 static_assert(sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32S3),
               "CONFIG_IDF_TARGET disagrees with TOKEN_ESP32S3: the advertised "
               "chip= token would no longer match tools/espdisp.py BOARDS.");
+#endif
+
+#if defined(CONFIG_IDF_TARGET) && defined(CONFIG_IDF_TARGET_ESP32P4)
+static_assert(sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32P4),
+              "CONFIG_IDF_TARGET disagrees with TOKEN_ESP32P4.");
 #endif
 
 // And the flag wiring itself, which is the part nothing else can reach. For a
@@ -165,10 +202,12 @@ static_assert(sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32S3),
 // anyway, which is the whole reason that rung comes first.
 #if defined(ESP_PLATFORM) && defined(CONFIG_IDF_TARGET)
 static_assert(!(sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32C6) ||
-                sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32S3)) ||
+                sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32S3) ||
+                sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32P4)) ||
                   sameToken(CONFIG_IDF_TARGET,
                             selectToken(nullptr, buildTargetsEsp32C6(),
-                                        buildTargetsEsp32S3())),
+                                        buildTargetsEsp32S3(),
+                                        buildTargetsEsp32P4())),
               "The CONFIG_IDF_TARGET_<CHIP> ladder does not agree with "
               "CONFIG_IDF_TARGET about which chip this is.");
 #endif
@@ -188,6 +227,18 @@ static_assert(!(sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32C6) ||
 static_assert(!sameToken(chipToken(), TOKEN_UNKNOWN),
               "This build cannot name its chip: sdkconfig.h did not reach "
               "chip_identity.h, so the panel would advertise chip=unknown.");
+#endif
+
+#if defined(ESP_PLATFORM)
+/// Read the stable hardware identity before networking starts. P4 has no local
+/// WiFi station interface, so it uses the factory base eFuse MAC; C6/S3 keep
+/// the station-MAC identity already shipped by this project.
+inline bool readDeviceId(uint8_t out[6]) {
+  if (board::COMPILED_PLATFORM.identity == board::IdentitySource::EfuseBaseMac) {
+    return esp_efuse_mac_get_default(out) == ESP_OK;
+  }
+  return esp_read_mac(out, ESP_MAC_WIFI_STA) == ESP_OK;
+}
 #endif
 
 }  // namespace chipidentity

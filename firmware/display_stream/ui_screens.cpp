@@ -7,6 +7,7 @@
 #include "esp_random.h"
 
 #include <board_power.h>
+#include <display_backend.h>
 
 #include "app_state.h"
 #include "control_apply.h"
@@ -146,7 +147,7 @@ void drawIdleScreen() {
   // r*(1 - 1/sqrt(2)) per edge, ~14.6% of the diameter. Rectangular panels
   // keep the original 4px margin exactly.
   int margin = 4;
-  if (bcfg->roundDisplay) {
+  if (bcfg->panel->roundDisplay) {
     int d = w < hgt ? w : hgt;
     margin += (int)(0.1465f * (float)d);
   }
@@ -175,7 +176,7 @@ void drawIdleScreen() {
   }
 
   dmaMarkQueued();
-  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, w, hgt, bufB) != ESP_OK) {
+  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
     dmaUnmarkFailed();
   }
@@ -237,7 +238,7 @@ void drawSurveyScreen() {
   }
 
   dmaMarkQueued();
-  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, w, hgt, bufB) != ESP_OK) {
+  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
     dmaUnmarkFailed();
   }
@@ -295,7 +296,7 @@ void showInfoBar(const char *text) {
   infoBarText[sizeof(infoBarText) - 1] = 0;
   infoBarScale = infoBarGlyphScale(infoBarText, w);
   const int lineH = 9 * infoBarScale;
-  panelstate::infoBarRowRange(w, hgt, bcfg->roundDisplay, lineH, infoBarY0,
+  panelstate::infoBarRowRange(w, hgt, bcfg->panel->roundDisplay, lineH, infoBarY0,
                               infoBarY1);
   infoBarUntil = millis() + INFO_BAR_MS;
 
@@ -309,7 +310,7 @@ void showInfoBar(const char *text) {
   drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
 
   dmaMarkQueued();
-  if (esp_lcd_panel_draw_bitmap(panel, 0, infoBarY0, w, infoBarY1,
+  if (boarddisplay::drawBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1,
                                 bufB + off) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
     dmaUnmarkFailed();
@@ -335,7 +336,7 @@ void clearInfoBarIfExpired() {
   size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
   memcpy(bufB + off, bufA + off, bytes);
   dmaMarkQueued();
-  if (esp_lcd_panel_draw_bitmap(panel, 0, infoBarY0, w, infoBarY1,
+  if (boarddisplay::drawBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1,
                                 bufB + off) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
     dmaUnmarkFailed();
@@ -367,7 +368,7 @@ void redrawInfoBarOverRun() {
       w, (int)strlen(infoBarText) * 6 * infoBarScale);
   drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
   dmaMarkQueued();
-  if (esp_lcd_panel_draw_bitmap(panel, 0, infoBarY0, w, infoBarY1,
+  if (boarddisplay::drawBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1,
                                 bufB + off) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
     dmaUnmarkFailed();
@@ -394,7 +395,7 @@ void drawOtaScreen(const char *headline, int percent) {
   // Round glass hides the framebuffer corners, so keep to the inscribed square
   // exactly as drawIdleScreen does.
   int margin = 4;
-  if (bcfg->roundDisplay) {
+  if (bcfg->panel->roundDisplay) {
     int d = w < hgt ? w : hgt;
     margin += (int)(0.1465f * (float)d);
   }
@@ -454,7 +455,7 @@ void drawOtaScreen(const char *headline, int percent) {
   }
 
   dmaMarkQueued();
-  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, w, hgt, bufB) != ESP_OK) {
+  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
     dmaUnmarkFailed();
   }

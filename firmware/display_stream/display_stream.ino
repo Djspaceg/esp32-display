@@ -108,7 +108,13 @@ void setup() {
   // A host that opens the CDC port but stops draining it would otherwise
   // block every Serial write and hang the whole loop task (observed as
   // total silence + frozen pipeline). Never wait on USB.
-  Serial.setTxTimeoutMs(0);
+#if !defined(CONFIG_IDF_TARGET_ESP32P4)
+  // setTxTimeoutMs is not exposed by the P4 UART-bridge Serial type. The SDK
+  // availability guard is separate from the platform policy deciding use.
+  if (board::COMPILED_PLATFORM.serial == board::SerialTransport::NativeUsbCdc) {
+    Serial.setTxTimeoutMs(0);
+  }
+#endif
   unsigned long start = millis();
   while (!Serial && millis() - start < 5000) {
     delay(50);
@@ -117,7 +123,10 @@ void setup() {
   Serial.printf("firmware %s, frame protocol %u, control protocol %u\n",
                 FW_VERSION, deviceproto::FRAME_PROTOCOL_VERSION,
                 deviceproto::CONTROL_PROTOCOL_VERSION);
-  esp_read_mac(deviceId, ESP_MAC_WIFI_STA);
+  if (!chipidentity::readDeviceId(deviceId)) {
+    Serial.println("FATAL: could not read stable chip identity");
+    while (true) delay(1000);
+  }
 
 #if defined(ESPDISP_DOOM_S3_175)
   // Consume before doing anything fallible so a missing/corrupt WAD or a Doom
@@ -169,16 +178,6 @@ void setup() {
     return;
   }
 #endif
-
-  bufA = (uint8_t *)heap_caps_malloc(FRAME_BYTES, FRAME_BUF_CAPS);
-  bufB = (uint8_t *)heap_caps_malloc(FRAME_BYTES, FRAME_BUF_CAPS);
-  if (!bufA || !bufB) {
-    Serial.println("FATAL: frame buffer alloc failed");
-    while (true) delay(1000);
-  }
-  // Undelivered bands must show black, not heap garbage.
-  memset(bufA, 0, FRAME_BYTES);
-  Serial.printf("buffers ok, free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
 
   // Load persisted settings before anything is drawn or the radio starts:
   // orientation and brightness must be known for the very first fill, and
@@ -261,54 +260,73 @@ void setup() {
     cfgName = defaultDeviceName();
   }
 
-  // Which board is this? Everything below depends on the answer, and this MUST
-  // come before any pin is configured: two of the C6 Touch board's panel pins
-  // are chip outputs on the other C6 board's map (see board_config.h
-  // resolve()), so guessing wrong means driving against live drivers. The probe
-  // only touches the shared I2C pins and touch reset, which are safe on both.
-  // Chips with exactly one supported board never probe at all.
+  // Resolve one physical profile before any panel GPIO or frame geometry is
+  // configured. A stored CFGBOARD value is accepted only inside this artifact's
+  // chip family. Automatic S3 detection requires exactly one candidate; an
+  // absent or ambiguous identity stays serial-only so CFGBOARD remains a safe
+  // recovery path instead of guessing a pin map.
   if (board::COMPILED_VARIANT != board::Variant::Unknown) {
     boardVariant = board::COMPILED_VARIANT;
   } else {
-    board::Variant forced = board::variantFromStored(boardOverride);
-    if (forced != board::Variant::Unknown) {
+    const board::Variant forced = board::variantFromStored(boardOverride);
+    if (forced != board::Variant::Unknown &&
+        board::variantMatchesPlatform(
+            forced, board::COMPILED_PLATFORM.platform)) {
       boardVariant = forced;
       Serial.printf("board: forced to %s by CFGBOARD\n",
                     board::variantToken(forced));
     } else {
+      if (forced != board::Variant::Unknown) {
+        Serial.printf("board: ignoring cross-family CFGBOARD value %s\n",
+                      board::variantToken(forced));
+      }
       boardVariant = boarddetect::probe();
     }
   }
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-  bcfg = &board::configFor(boardVariant);
-  Serial.printf("board: fixed at compile time: %s (target=%s)\n",
-                board::variantToken(boardVariant),
-                board::targetToken(boardVariant));
-#else
-  bcfg = &board::configFor(boardVariant);
-#endif
-  // A stored override written by an older firmware can name a board whose
-  // glass this binary was not sized for. The geometry is compiled in
-  // (buffers, band layout, mDNS), so refuse the override and re-probe rather
-  // than boot a 172x320 pipeline against a 466x466 table.
-  if (bcfg->panelW != PANEL_GEOMETRY.width ||
-      bcfg->panelH != PANEL_GEOMETRY.height) {
-    Serial.printf("board: ERROR %s is %ux%u but this binary is %ux%u - "
-                  "ignoring override, re-probing\n",
-                  board::variantToken(boardVariant), bcfg->panelW, bcfg->panelH,
-                  PANEL_GEOMETRY.width, PANEL_GEOMETRY.height);
-    boardVariant = boarddetect::probe();
-    bcfg = &board::configFor(boardVariant);
+  if (boardVariant == board::Variant::Unknown) {
+    Serial.println("board: FATAL no unique compatible profile; display, network, "
+                   "and streaming remain disabled");
+    Serial.println("board: use CFGBOARD <profile> over serial to recover");
+    while (true) {
+      handleSerialConfig();
+      delay(20);
+    }
   }
-  Serial.printf("board: %s\n", bcfg->name);
+  bcfg = &board::configFor(boardVariant);
+  if (!board::variantMatchesPlatform(
+          boardVariant, board::COMPILED_PLATFORM.platform)) {
+    Serial.println("board: FATAL resolved profile belongs to another family");
+    while (true) {
+      handleSerialConfig();
+      delay(20);
+    }
+  }
+  configurePanelGeometry(*bcfg);
+  if (!initializeFramePipeline()) {
+    Serial.println("FATAL: could not initialize runtime frame geometry");
+    while (true) delay(1000);
+  }
+  bufA = (uint8_t *)heap_caps_malloc(FRAME_BYTES, FRAME_BUF_CAPS);
+  bufB = (uint8_t *)heap_caps_malloc(FRAME_BYTES, FRAME_BUF_CAPS);
+  if (!bufA || !bufB) {
+    Serial.println("FATAL: frame buffer alloc failed");
+    while (true) delay(1000);
+  }
+  memset(bufA, 0, FRAME_BYTES);
+  Serial.printf("buffers ok, free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
+  Serial.printf("board: %s (family=%s profile=%s)\n", bcfg->name,
+                board::targetToken(boardVariant),
+                board::variantToken(boardVariant));
   Serial.printf("  driver=%s bus=%s %ux%u pclk=%luMHz\n",
-                bcfg->driver == board::PanelDriver::Co5300    ? "CO5300"
-                : bcfg->driver == board::PanelDriver::St77916 ? "ST77916"
-                : bcfg->driver == board::PanelDriver::Gc9107  ? "GC9107"
-                : bcfg->driver == board::PanelDriver::Jd9853  ? "JD9853"
-                                                               : "ST7789",
-                bcfg->isQspi() ? "qspi" : "spi", bcfg->panelW, bcfg->panelH,
-                (unsigned long)(bcfg->pclkHz / 1000000));
+                bcfg->panel->driver == board::PanelDriver::St7703    ? "ST7703"
+                : bcfg->panel->driver == board::PanelDriver::Co5300 ? "CO5300"
+                : bcfg->panel->driver == board::PanelDriver::St77916 ? "ST77916"
+                : bcfg->panel->driver == board::PanelDriver::Gc9107  ? "GC9107"
+                : bcfg->panel->driver == board::PanelDriver::Jd9853  ? "JD9853"
+                                                                    : "ST7789",
+                bcfg->isDsi() ? "mipi-dsi" : (bcfg->isQspi() ? "qspi" : "spi"),
+                bcfg->panel->width, bcfg->panel->height,
+                (unsigned long)(bcfg->panel->pixelClockHz / 1000000));
   Serial.printf("  sclk=%d d0/mosi=%d d1=%d d2=%d d3=%d cs=%d dc=%d rst=%d bl=%d boot=%d led=%d\n",
                 bcfg->pinSclk, bcfg->pinMosi, bcfg->pinData1, bcfg->pinData2,
                 bcfg->pinData3, bcfg->pinCs, bcfg->pinDc, bcfg->pinRst,
@@ -328,7 +346,7 @@ void setup() {
   }
 
   pinMode(bcfg->pinBootButton, INPUT_PULLUP);
-  if (bcfg->hasBacklightPin()) {
+  if (bcfg->hasBacklightPin() && !bcfg->isDsi()) {
     // A PWM backlight exists independently of the panel, so light it early -
     // the boot status fills are pointless over a dark backlight.
     pinMode(bcfg->pinBl, OUTPUT);
@@ -349,7 +367,9 @@ void setup() {
 
   // Touch, before WiFi: the capability bits mDNS advertises depend on whether
   // the controller answered, so this has to be settled before we announce.
-  touchCalibration = bcfg->variant == board::Variant::AmoledCo5300
+  touchCalibration = bcfg->variant == board::Variant::P4_4B
+      ? touchmap::GT911_ON_ST7703_4B
+      : bcfg->variant == board::Variant::AmoledCo5300
       ? touchmap::CST9217_ON_CO5300
       : bcfg->variant == board::Variant::LcdSt77916
           ? touchmap::CST816_ON_ST77916
@@ -372,6 +392,9 @@ void setup() {
   // mode() when entering STA, so setting it after has no effect on DHCP.
   WiFi.setHostname(cfgName.c_str());
 
+  if (bcfg->platform->wifi == board::WifiTopology::HostedCoprocessor) {
+    Serial.println("WiFi: starting ESP-Hosted link to the carrier C6 coprocessor");
+  }
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);  // rejoin on AP drop (default, but explicit)
   WiFi.setSleep(false);         // latency: don't doze between beacons

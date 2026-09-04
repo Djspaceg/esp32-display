@@ -16,7 +16,7 @@
 #include <board_config.h>
 #include <board_detect.h>
 #include <board_touch.h>
-#include <panel_init.h>
+#include <display_backend.h>
 #include <touch_map.h>
 
 static int16_t PANEL_W = 0;
@@ -64,7 +64,7 @@ static bool waitDma(uint32_t timeoutMs = 500) {
 
 static void push(int w, int h) {
   dmaInFlight = dmaInFlight + 1;
-  if (esp_lcd_panel_draw_bitmap(panel, 0, 0, w, h, fb) != ESP_OK) {
+  if (boarddisplay::drawBitmap(panel, *cfg, 0, 0, w, h, fb) != ESP_OK) {
     dmaInFlight = dmaInFlight - 1;
     Serial.println("  ERROR: draw_bitmap failed");
   }
@@ -76,7 +76,7 @@ static void push(int w, int h) {
 // the marker visibly lag a moving finger.
 static void pushRect(int x0, int y0, int w, int h, const uint8_t *buf) {
   dmaInFlight = dmaInFlight + 1;
-  if (esp_lcd_panel_draw_bitmap(panel, x0, y0, x0 + w, y0 + h, buf) != ESP_OK) {
+  if (boarddisplay::drawBitmap(panel, *cfg, x0, y0, x0 + w, y0 + h, buf) != ESP_OK) {
     dmaInFlight = dmaInFlight - 1;
   }
   waitDma();
@@ -164,7 +164,7 @@ static const char *orientName() {
 }
 
 static void enterTouchOrientation() {
-  boardpanel::applyOrientation(panel, *cfg, orientLandscape(), orientRotation());
+  boarddisplay::applyOrientation(panel, *cfg, orientLandscape(), orientRotation());
   int w = touchmap::frameWidth(orientLandscape(), touchCalibration);
   int h = touchmap::frameHeight(orientLandscape(), touchCalibration);
   drawCornerCard(w, h);
@@ -310,7 +310,9 @@ static void serviceTouchMode() {
 
 void setup() {
   Serial.begin(115200);
+#if !defined(CONFIG_IDF_TARGET_ESP32P4)
   Serial.setTxTimeoutMs(0);
+#endif
   unsigned long start = millis();
   while (!Serial && millis() - start < 6000) delay(50);
 
@@ -326,48 +328,55 @@ void setup() {
       ? board::COMPILED_VARIANT
       : boarddetect::probe();
   cfg = &board::configFor(variant);
-  touchCalibration = variant == board::Variant::AmoledCo5300
+  touchCalibration = variant == board::Variant::P4_4B
+      ? touchmap::GT911_ON_ST7703_4B
+      : variant == board::Variant::AmoledCo5300
       ? touchmap::CST9217_ON_CO5300
       : variant == board::Variant::LcdSt77916
           ? touchmap::CST816_ON_ST77916
           : variant == board::Variant::TouchSt7789
               ? touchmap::CST816_ON_ST7789_240
               : touchmap::AXS5106L_ON_C6;
-  PANEL_W = (int16_t)cfg->panelW;
-  PANEL_H = (int16_t)cfg->panelH;
-  SPI_HZ = cfg->pclkHz;
+  PANEL_W = (int16_t)cfg->panel->width;
+  PANEL_H = (int16_t)cfg->panel->height;
+  SPI_HZ = cfg->panel->pixelClockHz;
   FRAME_BYTES = (size_t)PANEL_W * PANEL_H * 2;
   Serial.printf("board: %s\n", cfg->name);
   Serial.printf("  driver=%s sclk=%d mosi=%d cs=%d dc=%d rst=%d bl=%d\n",
-                cfg->driver == board::PanelDriver::Gc9107 ? "GC9107"
-                : cfg->driver == board::PanelDriver::Co5300 ? "CO5300"
-                : cfg->driver == board::PanelDriver::St77916 ? "ST77916"
-                : cfg->driver == board::PanelDriver::Jd9853 ? "JD9853" : "ST7789",
+                cfg->panel->driver == board::PanelDriver::Gc9107 ? "GC9107"
+                : cfg->panel->driver == board::PanelDriver::Co5300 ? "CO5300"
+                : cfg->panel->driver == board::PanelDriver::St77916 ? "ST77916"
+                : cfg->panel->driver == board::PanelDriver::St7703 ? "ST7703"
+                : cfg->panel->driver == board::PanelDriver::Jd9853 ? "JD9853" : "ST7789",
                 cfg->pinSclk, cfg->pinMosi, cfg->pinCs, cfg->pinDc, cfg->pinRst,
                 cfg->pinBl);
   Serial.printf("  boot_button=%d rgb_led=%d gap=%u invert=%d\n",
-                cfg->pinBootButton, cfg->pinRgbLed, cfg->colOffset,
-                cfg->invertColor);
+                cfg->pinBootButton, cfg->pinRgbLed, cfg->panel->colOffset,
+                cfg->panel->invertColor);
 
-  fb = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_DMA);
+  const uint32_t frameCaps = cfg->platform->usePsramFrameBuffers
+      ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : MALLOC_CAP_DMA;
+  fb = (uint8_t *)heap_caps_malloc(FRAME_BYTES, frameCaps);
   if (!fb) {
     Serial.println("FATAL: framebuffer alloc failed");
     while (true) delay(1000);
   }
 
-  // PWM only exists on carrier profiles with a backlight pin.
-  if (cfg->hasBacklightPin()) {
+  // Brightness is driven through the backend so inverted P4 PWM and the
+  // carrier enable line follow the same path as the streaming firmware.
+  if (!cfg->isDsi() && cfg->hasBacklightPin()) {
     pinMode(cfg->pinBl, OUTPUT);
     analogWrite(cfg->pinBl, 128);
   }
 
-  if (!boardpanel::init(*cfg, SPI2_HOST, SPI_HZ, FRAME_BYTES, onTransDone,
-                        nullptr, nullptr, &panel)) {
+  if (!boarddisplay::init(*cfg, SPI2_HOST, FRAME_BYTES, onTransDone,
+                          nullptr, nullptr, &panel)) {
     Serial.println("FATAL: panel init failed");
     while (true) delay(1000);
   }
   Serial.printf("panel init OK at %lu Hz\n", (unsigned long)SPI_HZ);
-  boardpanel::applyOrientation(panel, *cfg, false /* portrait */,
+  if (cfg->isDsi()) boarddisplay::setBrightness(panel, *cfg, 128);
+  boarddisplay::applyOrientation(panel, *cfg, false /* portrait */,
                                0 /* rotation */);
 
   // Full-screen primaries. This is the colour-order and inversion check: if
@@ -393,19 +402,19 @@ void setup() {
   delay(2500);
 
   Serial.println("portrait, flipped 180 (same card, upside down):");
-  boardpanel::applyOrientation(panel, *cfg, false, 2 /* rotation: the 180 */);
+  boarddisplay::applyOrientation(panel, *cfg, false, 2 /* rotation: the 180 */);
   drawCornerCard(PANEL_W, PANEL_H);
   Serial.println("  expect: corners now TL=blue TR=green BL=red BR=white");
   delay(2500);
 
   Serial.println("landscape:");
-  boardpanel::applyOrientation(panel, *cfg, true /* landscape */,
+  boarddisplay::applyOrientation(panel, *cfg, true /* landscape */,
                                0 /* rotation */);
   drawCornerCard(PANEL_H, PANEL_W);
   delay(2500);
 
   // Back to portrait for the benchmark and the resting pattern.
-  boardpanel::applyOrientation(panel, *cfg, false, 0);
+  boarddisplay::applyOrientation(panel, *cfg, false, 0);
 
   // Full-frame push timing at this clock. This is the number the streaming
   // pipeline's fps ceiling comes from, so it is worth measuring per board

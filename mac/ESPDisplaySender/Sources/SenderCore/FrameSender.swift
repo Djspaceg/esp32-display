@@ -60,6 +60,9 @@ final class FrameSender {
     /// Off until the first EINF, during which the classic band format flows
     /// - the fallback every firmware accepts.
     private var _peerAcceptsTileStream = false
+    /// Whether the panel has advertised the unambiguous ETL1 large-tile
+    /// transport. It takes priority over every legacy frame format.
+    private var _peerAcceptsLargeTileStream = false
     /// Whether the panel has advertised `tileHalfRes` - it decodes codec 3.
     /// Off until the first EINF, and off forever for tile firmware that
     /// predates half-res, which is the point of asking: such a panel rejects
@@ -73,6 +76,10 @@ final class FrameSender {
     /// geometry can carry the tile protocol at all (every square panel can;
     /// this exists so a hostile mDNS geometry cannot reach tile arithmetic).
     private let tileGeometry: TileGeometry?
+    private let largeTileGeometry: LargeTileGeometry?
+    private var prevLargeTileFrame: [UInt8]?
+    private var prevLargeTileLandscape = false
+    private var lastLargeTileKeyframeAt = Date.distantPast
     /// Which tiles this panel can actually show. Built from
     /// `Capabilities.roundDisplay` on the first EINF; nil until then, which
     /// means "send everything" - the safe direction, since a tile sent
@@ -557,6 +564,8 @@ final class FrameSender {
         self.serviceEndpoint = nil
         self.geometry = geometry
         self.tileGeometry = Self.tileGeometry(for: geometry)
+        let large = LargeTileGeometry(width: geometry.width, height: geometry.height)
+        self.largeTileGeometry = large.isStreamable ? large : nil
         self.spacingBounds = Self.spacingBounds(for: geometry)
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
@@ -573,11 +582,89 @@ final class FrameSender {
         self.serviceEndpoint = endpoint
         self.geometry = geometry
         self.tileGeometry = Self.tileGeometry(for: geometry)
+        let large = LargeTileGeometry(width: geometry.width, height: geometry.height)
+        self.largeTileGeometry = large.isStreamable ? large : nil
         self.spacingBounds = Self.spacingBounds(for: geometry)
         self._spacingMicros = spacingMicros
         self.spacingInitial = spacingMicros
         self._adaptivePacing = adaptivePacing
         self.onDeviceEvent = onDeviceEvent
+    }
+
+    enum FrameTransport: Equatable {
+        case unavailable
+        case classicBands
+        case packedBands
+        case tileV1
+        case largeTiles
+    }
+
+    /// Select a wire format only from geometry plus advertised capability.
+    /// ETL1 is never inferred from a 720x720 shape, and legacy geometries keep
+    /// their existing bytes. A large-only geometry waits for EINF instead of
+    /// emitting an oversized legacy band datagram.
+    static func frameTransport(
+        for geometry: PanelGeometry,
+        capabilities: DeviceProtocol.Capabilities
+    ) -> FrameTransport {
+        if capabilities.contains(.largeTileStream) {
+            let large = LargeTileGeometry(width: geometry.width, height: geometry.height)
+            if large.isStreamable { return .largeTiles }
+        }
+        if capabilities.contains(.tileStream), tileGeometry(for: geometry) != nil {
+            return .tileV1
+        }
+        guard geometry.isBandStreamable else { return .unavailable }
+        return capabilities.contains(.compressedBands) ? .packedBands : .classicBands
+    }
+
+    static func transportChangeRequiresKeyframe(
+        from previous: FrameTransport, to next: FrameTransport
+    ) -> Bool {
+        previous != next
+    }
+
+    /// First-frame packet construction used by focused transport tests. It
+    /// deliberately calls the same protocol packers as the production paths.
+    static func firstFramePackets(
+        frameId: UInt16, pixels: [UInt8], geometry: PanelGeometry,
+        landscape: Bool = false,
+        capabilities: DeviceProtocol.Capabilities = []
+    ) -> [Data] {
+        precondition(pixels.count == geometry.frameBytes)
+        switch frameTransport(for: geometry, capabilities: capabilities) {
+        case .unavailable:
+            return []
+        case .largeTiles:
+            let large = LargeTileGeometry(width: geometry.width, height: geometry.height)
+            return LargeTilePacker.packets(
+                frameId: frameId, dirtyTiles: Array(0..<large.tileCount),
+                pixels: pixels, geometry: large, landscape: landscape,
+                policy: .losslessOnly)
+        case .tileV1:
+            let tiles = TileGeometry(width: geometry.width, height: geometry.height)
+            return TilePacker.packets(
+                frameId: frameId, dirtyTiles: Array(0..<tiles.tileCount),
+                pixels: pixels, geometry: tiles, landscape: landscape,
+                policy: .losslessOnly)
+        case .packedBands:
+            return BandPacker.packets(
+                frameId: frameId,
+                dirty: Array(0..<geometry.bandCount(landscape: landscape)),
+                pixels: pixels, geometry: geometry, landscape: landscape)
+        case .classicBands:
+            let dirty = Array(0..<geometry.bandCount(landscape: landscape))
+            return dirty.map { band in
+                var packet = BandProtocol.packetHeader(
+                    frameId: frameId, band: band, dirtyCount: dirty.count,
+                    landscape: landscape)
+                let start = geometry.bandOffset(index: band, landscape: landscape)
+                let length = geometry.bandPayloadBytes(
+                    index: band, landscape: landscape)
+                packet.append(contentsOf: pixels[start..<(start + length)])
+                return packet
+            }
+        }
     }
 
     /// The tile grid for a panel geometry, or nil when the tile protocol
@@ -747,13 +834,27 @@ final class FrameSender {
     private func handleInbound(_ data: Data) {
         if let info = DeviceProtocol.parseInfo(data) {
             lock.lock()
+            var previousCapabilities: DeviceProtocol.Capabilities = []
+            if _peerAcceptsPackedBands {
+                previousCapabilities.insert(.compressedBands)
+            }
+            if _peerAcceptsTileStream { previousCapabilities.insert(.tileStream) }
+            if _peerAcceptsLargeTileStream {
+                previousCapabilities.insert(.largeTileStream)
+            }
+            let previousTransport = Self.frameTransport(
+                for: geometry, capabilities: previousCapabilities)
             _deviceInfo = info
             _peerAcceptsPackedBands = info.capabilities.contains(.compressedBands)
             _peerAcceptsTileStream = info.capabilities.contains(.tileStream)
+            _peerAcceptsLargeTileStream =
+                info.capabilities.contains(.largeTileStream)
+                && largeTileGeometry != nil
             // Widens the pacing ceiling: a tile panel absorbs roughly an
             // order of magnitude fewer datagrams a second than the
             // band-derived bound assumes (see tileAbsorbablePacketsPerSecond).
-            pacingTileStream = _peerAcceptsTileStream && tileGeometry != nil
+            pacingTileStream = (_peerAcceptsTileStream && tileGeometry != nil)
+                || _peerAcceptsLargeTileStream
             _peerAcceptsHalfRes = info.capabilities.contains(.tileHalfRes)
                 && tileGeometry != nil
             _peerAcceptsVisibleSpans =
@@ -772,7 +873,12 @@ final class FrameSender {
             }
             _lastHeartbeatAt = Date()
             _deviceReplies &+= 1
+            let negotiatedTransport = Self.frameTransport(
+                for: geometry, capabilities: info.capabilities)
+            let transportChanged = Self.transportChangeRequiresKeyframe(
+                from: previousTransport, to: negotiatedTransport)
             lock.unlock()
+            if transportChanged { forceKeyframe() }
             onDeviceEvent?(.info(info))
             return
         }
@@ -1155,6 +1261,7 @@ final class FrameSender {
         sendQueue.async { [weak self] in
             self?.prevFrame = nil
             self?.prevTileFrame = nil
+            self?.prevLargeTileFrame = nil
         }
     }
 
@@ -1168,12 +1275,23 @@ final class FrameSender {
         guard let conn = connection else { return }
 
         lock.lock()
-        let tileStream = _peerAcceptsTileStream
+        var capabilities: DeviceProtocol.Capabilities = []
+        if _peerAcceptsPackedBands { capabilities.insert(.compressedBands) }
+        if _peerAcceptsTileStream { capabilities.insert(.tileStream) }
+        if _peerAcceptsLargeTileStream { capabilities.insert(.largeTileStream) }
         let halfRes = _peerAcceptsHalfRes
         let visibleSpans = _peerAcceptsVisibleSpans
         let mask = _tileMask
         lock.unlock()
-        if tileStream, let tiles = tileGeometry {
+        let transport = Self.frameTransport(
+            for: geometry, capabilities: capabilities)
+        if transport == .unavailable { return }
+        if transport == .largeTiles, let largeTiles = largeTileGeometry {
+            sendLargeTileFrame(pixels, landscape: landscape,
+                               tiles: largeTiles, conn: conn)
+            return
+        }
+        if transport == .tileV1, let tiles = tileGeometry {
             sendTileFrame(pixels, landscape: landscape, tiles: tiles,
                           mask: mask, halfRes: halfRes,
                           visibleSpans: visibleSpans, conn: conn)
@@ -1199,9 +1317,7 @@ final class FrameSender {
         let id = frameId
         frameId &+= 1
         let spacing = spacingMicros
-        lock.lock()
-        let packBands = _peerAcceptsPackedBands
-        lock.unlock()
+        let packBands = transport == .packedBands
 
         let packets: [Data]
         if packBands {
@@ -1244,6 +1360,58 @@ final class FrameSender {
         lock.lock()
         _currentLandscape = landscape
         lock.unlock()
+        lastSendAt = Date()
+    }
+
+    /// Send a frame over ETL1. The magic prefix keeps this path independent
+    /// from packed bands and tile v1 while preserving the same diff, codec,
+    /// pacing, and keyframe policies.
+    private func sendLargeTileFrame(
+        _ pixels: [UInt8], landscape: Bool, tiles: LargeTileGeometry,
+        conn: NWConnection
+    ) {
+        let keyframeDue = Date().timeIntervalSince(lastLargeTileKeyframeAt)
+            > keyframeInterval
+        let isKeyframe = prevLargeTileFrame == nil
+            || landscape != prevLargeTileLandscape || keyframeDue
+        let dirty: [Int]
+        if isKeyframe {
+            dirty = Array(0..<tiles.tileCount)
+            lastLargeTileKeyframeAt = Date()
+        } else {
+            dirty = LargeTileProtocol.dirtyTiles(
+                new: pixels, previous: prevLargeTileFrame!, geometry: tiles)
+        }
+        prevLargeTileFrame = pixels
+        prevLargeTileLandscape = landscape
+        bandsConsidered &+= UInt64(tiles.tileCount)
+        guard !dirty.isEmpty else { return }
+
+        let id = frameId
+        frameId &+= 1
+        let spacing = spacingMicros
+        lock.lock()
+        let policy = _tileLossyPolicy
+        lock.unlock()
+        var forceLossy = false
+        var forceHalf = false
+        if !isKeyframe {
+            let rungs = Self.degradationRungs(
+                dirtyTiles: dirty.count, spacingMicros: spacing,
+                policy: policy, halfResAvailable: true)
+            forceLossy = rungs.forceLossy
+            forceHalf = rungs.forceHalfRes
+        }
+        let packets = LargeTilePacker.packets(
+            frameId: id, dirtyTiles: dirty, pixels: pixels,
+            geometry: tiles, landscape: landscape, policy: policy,
+            forceLossy: forceLossy, forceHalfRes: forceHalf)
+        _ = sendPaced(packets, spacing: spacing, on: conn)
+        bandsSent &+= UInt64(dirty.count)
+        framesSent &+= 1
+        lastSentFrame = pixels
+        lastSentLandscape = landscape
+        lock.withLock { _currentLandscape = landscape }
         lastSendAt = Date()
     }
 
@@ -1454,6 +1622,7 @@ final class FrameSender {
             }
             self.prevFrame = nil  // full repaint, healing any lost bands
             self.prevTileFrame = nil  // and any lost tiles, same rule
+            self.prevLargeTileFrame = nil
             // This timer only fires after refreshInterval of no real frames,
             // which is proof the motion (and any budget pressure it carried)
             // has ended - so the repaint below heals a half-res screen back

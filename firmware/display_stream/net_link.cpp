@@ -82,6 +82,16 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
     portEXIT_CRITICAL(&controlMux);
     return;
   }
+  if (len >= 4 && memcmp(data, "ETL1", 4) == 0) {
+#if defined(ESPDISP_LARGE_TILE_STREAM)
+    if (largeTileStreamEnabled()) {
+      handleLargeTilePacket(data, len);
+      return;
+    }
+#endif
+    statBadLen++;
+    return;
+  }
   // Never parse a frame header before proving all six bytes are present.
   if (len < HEADER_BYTES) {
     statBadLen = statBadLen + 1;
@@ -150,7 +160,6 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
 //
 // Replies (heartbeat, EINF, EACK, EBAT, ETCH) go out through sendToSender so
 // each transport answers on its own socket.
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
 #include <lwip/sockets.h>
 
 static int rxSock = -1;
@@ -235,7 +244,7 @@ static void udpReceiveTask(void *) {
   }
 }
 
-bool startInboundTransport() {
+static bool startRawInboundTransport() {
   rxSock = lwip_socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
   if (rxSock < 0) return false;
   // Raise the socket's queued-byte cap (lwIP accounts SO_RCVBUF against
@@ -277,7 +286,7 @@ bool startInboundTransport() {
                                  rxCore) == pdPASS;
 }
 
-void sendToSender(const uint8_t *data, size_t len) {
+static void sendRawToSender(const uint8_t *data, size_t len) {
   if (rxSock < 0 || hbPort == 0) return;
   struct sockaddr_in to = {};
   to.sin_family = AF_INET;
@@ -285,20 +294,33 @@ void sendToSender(const uint8_t *data, size_t len) {
   to.sin_addr.s_addr = hbIp;  // stored exactly as recvfrom produced it
   lwip_sendto(rxSock, data, len, 0, (struct sockaddr *)&to, sizeof(to));
 }
-#else
+
 static void onPacket(AsyncUDPPacket packet) {
   handleInbound(packet.data(), packet.length(), (uint32_t)packet.remoteIP(),
                 packet.remotePort());
 }
 
-bool startInboundTransport() {
+static bool startAsyncInboundTransport() {
   if (!udp.listen(UDP_PORT)) return false;
   udp.onPacket(onPacket);
   return true;
 }
 
-void sendToSender(const uint8_t *data, size_t len) {
+static void sendAsyncToSender(const uint8_t *data, size_t len) {
   if (hbPort == 0) return;
   udp.writeTo(data, len, IPAddress(hbIp), hbPort);
 }
-#endif
+
+bool startInboundTransport() {
+  return board::COMPILED_PLATFORM.useRawLwipReceiveTask
+             ? startRawInboundTransport()
+             : startAsyncInboundTransport();
+}
+
+void sendToSender(const uint8_t *data, size_t len) {
+  if (board::COMPILED_PLATFORM.useRawLwipReceiveTask) {
+    sendRawToSender(data, len);
+  } else {
+    sendAsyncToSender(data, len);
+  }
+}

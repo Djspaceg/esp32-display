@@ -66,13 +66,14 @@ void applyPendingControl() {
                       command.value != 0, panelRotation);
         break;
       case deviceproto::ControlOpcode::Rotate:
-        if ((command.value & 1) != 0 && bcfg->panelW != bcfg->panelH) {
-          // Defense in depth behind the capability gate: CAP_ROTATE is not
-          // advertised on rectangular glass, so a well-behaved sender never
-          // sends 1 or 3 here - but one that does gets a NACK it can tell
-          // from packet loss, not silence.
+        if ((command.value & 1) != 0 &&
+            (bcfg->panel->width != bcfg->panel->height ||
+             !bcfg->panel->supportsCommandRotation)) {
+          // Defense in depth behind the capability gate: a panel without
+          // validated quarter turns never advertises CAP_ROTATE, so a
+          // well-behaved sender never sends 1 or 3 here.
           ackStatus = 1;
-          Serial.printf("network: rotate %ld refused (panel not square)\n",
+          Serial.printf("network: rotate %ld refused (panel backend unsupported)\n",
                         (long)command.value);
           break;
         }

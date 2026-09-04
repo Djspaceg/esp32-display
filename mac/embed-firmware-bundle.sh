@@ -1,50 +1,37 @@
 #!/bin/zsh
-# Copy the default firmware bundle into the app being built, if there is one.
-#
-# Run as a build phase, before Xcode signs the app, so the signature covers the
-# file. Copying it into an already-signed bundle afterwards would break the
-# signature and re-signing would have to reproduce the Apple Development identity
-# make-app.sh deliberately preserves.
-#
-# WHY THE APP CARRIES FIRMWARE AT ALL: a .espdispfw can only come from
-# `tools/espdisp.py bundle`, so a first-run flow that asks the user for one asks
-# them to open a terminal. Adding a brand-new board is supposed to work without
-# that. `mac/make-app.sh` builds the bundle and puts it where this finds it;
-# `BundledFirmware` in the app reads it back out of Resources.
-#
-# ABSENCE IS NOT AN ERROR, and that is the point of doing this in a script phase
-# rather than as a file reference in the project: bundles are gitignored build
-# output (a couple of megabytes that any checkout can rebuild), so a fresh clone
-# has none. A referenced-but-missing file fails the Xcode build with "Build input
-# file cannot be found"; this leaves a note in the log and exits 0, and the app's
-# Add Display sheet asks for a file instead.
+# Embed the canonical c6, s3, and p4 release resources before code signing.
 set -euo pipefail
 
-# The name the app looks for. One string in one place: BundledFirmware.resourceName
-# in Sources/SenderCore/BundledFirmware.swift is asserted against this spelling by
-# testTheResourceNameIsWhatTheScriptInstalls.
-BUNDLE_NAME="espdisp-default.espdispfw"
-
-# SRCROOT is the directory holding the xcodeproj (mac/ESPDisplaySender), so the
-# source and destination are both derived from Xcode's own environment rather than
-# from where this script happens to be.
-SOURCE="${SRCROOT:?SRCROOT is not set - this runs as an Xcode build phase}/Resources/$BUNDLE_NAME"
 DESTINATION_DIR="${CODESIGNING_FOLDER_PATH:?CODESIGNING_FOLDER_PATH is not set}/Contents/Resources"
-
-if [[ ! -f "$SOURCE" ]]; then
-  echo "note: no default firmware bundle at $SOURCE - the app will ask for one."
-  # Any stale copy from an earlier build goes too, so "no bundle here" cannot be
-  # answered by a bundle from three builds ago.
-  rm -f -- "$DESTINATION_DIR/$BUNDLE_NAME"
-  exit 0
-fi
+SOURCE_ROOT="${SRCROOT:?SRCROOT is not set}/../../firmware-releases"
+CATALOG="$SOURCE_ROOT/manifest.json"
+TOOL="$SRCROOT/../../tools/espdisp.py"
 
 mkdir -p "$DESTINATION_DIR"
-# ditto rather than cp: it is what the rest of this repo's packaging uses and it
-# replaces the destination wholesale rather than merging into it.
-ditto "$SOURCE" "$DESTINATION_DIR/$BUNDLE_NAME"
-# espdisp.py writes its output 0600, and ditto preserves the mode, which would ship
-# an app whose firmware only the person who packaged it can read. Resources are
-# world-readable like every other file in the bundle.
-chmod 644 "$DESTINATION_DIR/$BUNDLE_NAME"
-echo "embedded $(basename "$SOURCE") ($(stat -f %z "$SOURCE") bytes)"
+rm -f -- "$DESTINATION_DIR/manifest.json" "$DESTINATION_DIR"/*.espdispfw
+
+if [[ -n "${ESPDISP_SKIP_FIRMWARE:-}" ]]; then
+  echo "note: canonical firmware resources skipped (ESPDISP_SKIP_FIRMWARE is set)"
+  exit 0
+fi
+if [[ ! -f "$CATALOG" ]]; then
+  echo "error: canonical firmware catalog not found at $CATALOG" >&2
+  exit 1
+fi
+
+ARTIFACTS=("${(@f)$(python3 "$TOOL" release-info "$CATALOG")}")
+if [[ ${#ARTIFACTS[@]} -ne 3 ]]; then
+  echo "error: release catalog did not resolve exactly three family artifacts" >&2
+  exit 1
+fi
+
+ditto "$CATALOG" "$DESTINATION_DIR/manifest.json"
+chmod 644 "$DESTINATION_DIR/manifest.json"
+for relative in "${ARTIFACTS[@]}"; do
+  source="$SOURCE_ROOT/$relative"
+  destination="$DESTINATION_DIR/${relative:t}"
+  ditto "$source" "$destination"
+  chmod 644 "$destination"
+  echo "embedded ${relative:t} ($(stat -f %z "$source") bytes)"
+done
+echo "embedded canonical firmware catalog and c6/s3/p4 artifacts"

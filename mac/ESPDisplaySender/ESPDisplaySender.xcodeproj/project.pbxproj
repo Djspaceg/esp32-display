@@ -78,7 +78,7 @@
 				A00000000000000000000010 /* Sources */,
 				A00000000000000000000011 /* Frameworks */,
 				A00000000000000000000012 /* Resources */,
-				A00000000000000000000013 /* Embed default firmware bundle */,
+				A00000000000000000000013 /* Embed canonical firmware releases */,
 			);
 			buildRules = (
 			);
@@ -140,7 +140,7 @@
 		};
 /* End PBXResourcesBuildPhase section */
 /* Begin PBXShellScriptBuildPhase section */
-		A00000000000000000000013 /* Embed default firmware bundle */ = {
+		A00000000000000000000013 /* Embed canonical firmware releases */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -148,7 +148,7 @@
 			);
 			inputPaths = (
 			);
-			name = "Embed default firmware bundle";
+			name = "Embed canonical firmware releases";
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;

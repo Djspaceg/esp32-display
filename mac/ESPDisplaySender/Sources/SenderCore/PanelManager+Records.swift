@@ -22,6 +22,8 @@ extension PanelManager {
                 // S3 target and pass an OTA safety check on stale metadata.
                 panels[index].chip = nil
                 panels[index].target = nil
+                panels[index].profile = nil
+                panels[index].partition = nil
                 panels[index].geometry = nil
             }
         }
@@ -52,6 +54,16 @@ extension PanelManager {
             guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
             else { continue }
             panels[index].target = device.metadata.target
+        }
+        for device in devices where device.metadata.profile != nil {
+            guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
+            else { continue }
+            panels[index].profile = device.metadata.profile
+        }
+        for device in devices where device.metadata.partition != nil {
+            guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
+            else { continue }
+            panels[index].partition = device.metadata.partition
         }
         // The resolution takes the same treatment and for the same reason: a
         // second browse result without metadata must not erase a `res` that has

@@ -252,6 +252,21 @@ final class EsptoolCommandTests: XCTestCase {
         XCTAssertFalse(plan.contains { $0.role == "doom_wad" })
     }
 
+    func testExactTargetP44BPreservesItsBootloaderAndDualOTASlots() throws {
+        let bundle = Self.bundle(
+            chip: "esp32p4", bootloader: 0x2000, app: 0x10000,
+            target: "p4-4b")
+        let image = try XCTUnwrap(bundle.image(forTarget: "p4-4b"))
+        XCTAssertEqual(image.chip, "esp32p4")
+        XCTAssertEqual(image.targets, ["p4-4b"])
+        let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "p4-4b"))
+        XCTAssertEqual(
+            plan.map(\.role), ["bootloader", "partitions", "boot_app0", "app"])
+        XCTAssertEqual(plan.map(\.address), [0x2000, 0x8000, 0xE000, 0x10000])
+        XCTAssertNil(bundle.flashPlan(forTarget: "s3-185"))
+        XCTAssertEqual(bundle.image(forChip: "esp32p4")?.targets, ["p4-4b"])
+    }
+
     func testStagedFilenamesAreOrderedAndNamedAfterTheirRole() {
         XCTAssertEqual(
             EsptoolCommand.stagedFilename(index: 0, role: "bootloader"),
@@ -410,7 +425,9 @@ final class EsptoolCommandTests: XCTestCase {
     /// asserts it against hand-solved offsets, and these tests are about what the
     /// manifest MEANS once read. Building bytes here would duplicate that solver
     /// without testing anything this file is responsible for.
-    private static func partitionTable(appAddress: Int, doom: Bool) -> Data {
+    private static func partitionTable(
+        appAddress: Int, doom: Bool, p4: Bool = false
+    ) -> Data {
         var bytes = [UInt8](repeating: 0xFF, count: 3072)
         func writeU32(_ value: Int, at offset: Int) {
             bytes[offset] = UInt8(value & 0xFF)
@@ -441,6 +458,9 @@ final class EsptoolCommandTests: XCTestCase {
             writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x5F0000)
             writeEntry(3, "app1", 0x00, 0x11, 0x600000, 0x5F0000)
             writeEntry(4, "doom_wad", 0x42, 0x06, 0xBFF000, 0x401000)
+        } else if p4 {
+            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x800000)
+            writeEntry(3, "app1", 0x00, 0x11, 0x810000, 0x800000)
         } else {
             writeEntry(2, "app0", 0x00, 0x10, appAddress, 0x200000)
         }
@@ -466,7 +486,8 @@ final class EsptoolCommandTests: XCTestCase {
             ? "c6"
             : chip == "esp32s3" ? "s3-175" : chip)
         let hasDoom = target == "s3-175"
-        let partitionPayload = partitionTable(appAddress: app, doom: hasDoom)
+        let partitionPayload = partitionTable(
+            appAddress: app, doom: hasDoom, p4: target == "p4-4b")
         var parts: [(String, Int, Data)] = [
             ("bootloader", bootloader, Data("boot".utf8)),
             ("partitions", 0x8000, partitionPayload),

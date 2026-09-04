@@ -1,8 +1,8 @@
 # Doom Easter Egg
 
-A playable Doom shareware Episode 1 easter egg for the
-ESP32-S3-Touch-AMOLED-1.75C (`s3-175`) target. Triple-tap BOOT within 800 ms
-to start it. The same-chip `s3-185` target does not compile or expose Doom.
+A playable Doom shareware Episode 1 developer feature for the
+ESP32-S3-Touch-AMOLED-1.75C (`co5300` runtime profile). Triple-tap BOOT within
+800 ms to start it. Other S3 profiles do not compile or expose Doom.
 
 ## Play Doom
 
@@ -81,11 +81,11 @@ staging and UDP codec scratch.
 ## Firmware and WAD delivery
 
 `firmware/partitions_s3_doom.csv` is staged as `partitions.csv` only inside
-the `s3-175` build's private sketch copy. It provides equal `0x5F0000` OTA app
+a developer build for the CO5300 profile. It provides equal `0x5F0000` OTA app
 slots and a `0x401000` WAD partition at `0xBFF000`. The canonical
 4,196,020-byte shareware v1.9 IWAD fits with 2,380 bytes to spare.
 
-The CLI downloads the WAD only when an `s3-175` flash or bundle needs it, then
+The developer workflow downloads the WAD only when explicitly requested, then
 requires all of the following before writing or packaging it:
 
 * `IWAD` magic
@@ -93,27 +93,21 @@ requires all of the following before writing or packaging it:
 * SHA-256 `1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771`
 * fit within the declared partition
 
-A format-3 bundle carries the verified WAD as the `doom_wad` flash role only on
-`s3-175`. The Mac app's generic flash-plan reader verifies its hash and writes
-it in the same esptool operation as the bootloader, partition table, `boot_app0`,
-and application image. OTA updates replace only the application slot and leave
-the installed WAD partition intact.
+The Doom WAD is a developer-only payload for the S3 `co5300` runtime profile.
+It is not part of the canonical S3 release because the dedicated partition does
+not fit every supported S3 carrier. Development images must verify the WAD magic,
+size, hash, and partition capacity before any write.
 
-Preferred commands from the repository root:
+The canonical family commands build and flash the universal S3 release only:
 
 ```sh
-tools/espdisp.py compile --board s3-175
-tools/espdisp.py flash --board s3-175 --port /dev/cu.usbmodemXXXX
-tools/espdisp.py bundle
-tools/espdisp.py bundle-info --require-all-targets FILE.espdispfw
-tools/espdisp.py flash-wad --board s3-175 --port /dev/cu.usbmodemXXXX
+python3 tools/espdisp.py compile --family s3
+python3 tools/espdisp.py flash --family s3 --port /dev/cu.usbmodemXXXX
 ```
 
-`flash` writes the bootloader, custom partition table, OTA initializer,
-application, and verified WAD in one esptool transaction. `flash-wad` is only
-for a device that already has the `s3-175` partition table: it reads that table
-back from the device and requires the exact five-entry layout before writing.
-Both paths require an exact target selection and refuse `s3-185`.
+Use the manual development build below only on a recoverable CO5300-profile
+board. It is intentionally separate from `firmware-releases/` and from the
+macOS app's embedded resources.
 
 ## Manual compile
 
@@ -138,9 +132,9 @@ library and omits the recursive `platform/doom_hw_bridge.cpp` source.
 
 ## Hardware test checklist
 
-1. Use a recoverable `s3-175` device and USB, not OTA, for the first install.
-2. Verify the bundle lists `doom_wad` at `0xBFF000` only for `s3-175`.
-3. Flash through the app or `espdisp.py flash --board s3-175`.
+1. Use a recoverable CO5300-profile S3 device and USB, not OTA, for the first install.
+2. Confirm the development partition table contains `doom_wad` at `0xBFF000`.
+3. Flash only the listed development segments without whole-chip erase.
 4. After normal streaming starts, triple-tap BOOT and confirm one reboot into
    the splash and title/demo loop.
 5. Short-press BOOT and confirm the main menu opens from the title/demo.
@@ -152,8 +146,7 @@ library and omits the recursive `platform/doom_hw_bridge.cpp` source.
 8. Hold BOOT for three seconds; confirm a reboot and normal streaming recovery.
 9. Perform an OTA application update and confirm Doom still starts, proving the
    WAD partition was preserved.
-10. Confirm `s3-185` has no triple-tap activation and cannot be selected by
-    `flash-wad`.
+10. Confirm non-CO5300 S3 profiles have no triple-tap activation.
 
 ## Directory layout
 

@@ -1,6 +1,6 @@
 #include "app_state.h"
 
-#include <panel_init.h>
+#include <display_backend.h>
 
 #include "dma_gate.h"
 
@@ -16,7 +16,7 @@ String cfgPass;
 // resolving a hardcoded hostname. Default is unique per board
 // (espdisplay-XXXX from the MAC); changeable via CFGNAME over USB.
 String cfgName;
-const char *FW_VERSION = "1.4.2";
+const char *FW_VERSION = "1.5.0";
 uint8_t deviceId[6] = {0};
 
 // Reads the MAC straight from eFuse rather than via WiFi.macAddress(),
@@ -28,29 +28,23 @@ String defaultDeviceName() {
   return String(buf);
 }
 
-// ---- Board identity ---------------------------------------------------
-// On the C6, one binary serves both Waveshare 1.47" boards: the panel
-// controller and pin map differ, the 172x320 resolution does not. Detected at
-// boot, cached only when explicitly forced with CFGBOARD over USB. S3 geometry
-// is compile-time selected: the default is 1.75C/CO5300, while
-// ESPDISP_BOARD_S3_085, ESPDISP_BOARD_S3_154, and ESPDISP_BOARD_S3_185 select
-// their exact LCD profiles.
+// ---- Board identity and display geometry ------------------------------
+// C6 and S3 resolve a physical profile before any panel GPIO is driven. P4 is
+// currently fixed to its internal 4B carrier. The user-facing target remains
+// the chip family in every case.
 board::Variant boardVariant = board::COMPILED_VARIANT;
-const board::Config *bcfg = &board::configFor(board::COMPILED_VARIANT);
+const board::Config *bcfg = nullptr;
+bandproto::Geometry PANEL_GEOMETRY = {0, 0};
+int16_t PANEL_W = 0;
+int16_t PANEL_H = 0;
+size_t FRAME_BYTES = 0;
 
-// ---- Display geometry --------------------------------------------------
-// A per-binary compile-time fact, NOT a per-boot one: buffers, band layout,
-// and the mDNS advertisement are all sized from it. Reading it from
-// COMPILED_VARIANT is correct on every target because the C6 boards (the
-// only case where detection can change the variant at runtime) share their
-// resolution; setup() enforces that invariant against a stale CFGBOARD
-// override. Pins, panel driver, pixel clock, gap and inversion stay runtime
-// facts read from bcfg.
-const bandproto::Geometry PANEL_GEOMETRY = {
-    board::configFor(board::COMPILED_VARIANT).panelW,
-    board::configFor(board::COMPILED_VARIANT).panelH};
-const int16_t PANEL_W = (int16_t)PANEL_GEOMETRY.width;
-const int16_t PANEL_H = (int16_t)PANEL_GEOMETRY.height;
+void configurePanelGeometry(const board::Config &config) {
+  PANEL_GEOMETRY = {config.panel->width, config.panel->height};
+  PANEL_W = (int16_t)PANEL_GEOMETRY.width;
+  PANEL_H = (int16_t)PANEL_GEOMETRY.height;
+  FRAME_BYTES = PANEL_GEOMETRY.frameBytes();
+}
 
 esp_lcd_panel_handle_t panel = nullptr;
 
@@ -61,6 +55,10 @@ esp_lcd_panel_handle_t panel = nullptr;
 // explicitly rather than inherit it.
 bool tileStreamEnabled() {
   return bcfg->variant == board::Variant::AmoledCo5300;
+}
+
+bool largeTileStreamEnabled() {
+  return bcfg->variant == board::Variant::P4_4B;
 }
 
 // Whether the touch controller came up. Not simply "is this the Touch board":
@@ -81,7 +79,6 @@ touchmap::Calibration touchCalibration = touchmap::AXS5106L_ON_C6;
 bool batteryAvailable = false;
 
 const uint16_t UDP_PORT = 5568;
-const size_t FRAME_BYTES = PANEL_GEOMETRY.frameBytes();
 
 // Stats.
 volatile uint32_t statFramesShown = 0;
@@ -106,6 +103,6 @@ volatile uint32_t statDrawErrors = 0;
 // boardpanel::init so display_test exercises the identical path - a bring-up
 // test that constructs the panel its own way can pass while this is broken.
 bool initDisplay() {
-  return boardpanel::init(*bcfg, SPI2_HOST, bcfg->pclkHz, FRAME_BYTES,
-                          onColorTransDone, nullptr, nullptr, &panel);
+  return boarddisplay::init(*bcfg, SPI2_HOST, FRAME_BYTES,
+                            onColorTransDone, nullptr, nullptr, &panel);
 }

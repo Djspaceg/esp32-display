@@ -5,7 +5,7 @@
 #include <board_motion.h>
 #include <board_touch.h>
 #include <motion_orientation.h>
-#include <panel_init.h>
+#include <display_backend.h>
 
 #include "app_state.h"
 
@@ -44,7 +44,8 @@ bool madctlDirty = false;                 // panel config needs reapplying
 // assumed from the ST7789).
 void applyPanelConfig(bool landscape) {
   appliedPanelRotation = effectivePanelRotation();
-  boardpanel::applyOrientation(panel, *bcfg, landscape, appliedPanelRotation);
+  boarddisplay::applyOrientation(panel, *bcfg, landscape,
+                                 appliedPanelRotation);
   panelLandscape = landscape;
   madctlDirty = false;
 }
@@ -66,7 +67,7 @@ void serviceAutoRotation() {
   const motionorient::Calibration calibration = {
       bcfg->motionXAxis, bcfg->motionXSign,
       bcfg->motionYAxis, bcfg->motionYSign};
-  const bool square = bcfg->panelW == bcfg->panelH;
+  const bool square = bcfg->panel->width == bcfg->panel->height;
   if (!motionTracker.update(raw, calibration, now,
                             square && !boardtouch::isPressed())) {
     return;
@@ -88,6 +89,6 @@ void reportMotionDiagnostics() {
           motionTracker.candidate() == motionorient::INVALID_ROTATION
               ? -1 : (int)motionTracker.candidate(),
           automaticRotation, effectivePanelRotation(),
-          bcfg->panelW == bcfg->panelH);
+          bcfg->panel->width == bcfg->panel->height);
     }
 }

@@ -81,6 +81,13 @@ public struct FirmwareBundle: Equatable, Sendable {
         public let board: String
         /// The IDF chip token reported by esptool and the panel.
         public let chip: String
+        /// Runtime hardware profiles accepted by a current family artifact.
+        /// Historical bundles omit this metadata and read as an empty list.
+        public let profiles: [String]
+        /// Physical flash capacities this family artifact supports.
+        public let flashSizes: [Int]
+        /// Partition compatibility token reported independently by firmware.
+        public let partition: String?
         /// Exact firmware targets this one image can serve. A format-3 image may
         /// intentionally serve several targets when their bytes are identical.
         public let targets: [String]
@@ -115,10 +122,16 @@ public struct FirmwareBundle: Equatable, Sendable {
             sha256: String,
             appAddress: Int?,
             flashParts: [FlashPart],
-            targets: [String]? = nil
+            targets: [String]? = nil,
+            profiles: [String] = [],
+            flashSizes: [Int] = [],
+            partition: String? = nil
         ) {
             self.board = board
             self.chip = chip
+            self.profiles = profiles
+            self.flashSizes = flashSizes
+            self.partition = partition
             self.targets = targets
                 ?? FirmwareBundle.legacyTarget(forBoard: board).map { [$0] }
                 ?? []
@@ -154,7 +167,16 @@ public struct FirmwareBundle: Equatable, Sendable {
     /// `FlashPart` in the manifest - it is the OTA payload, and it is carried once.
     public static let appFlashRole = "app"
     private static let bootloaderFlashRole = "bootloader"
-    private static let bootloaderFlashAddress = 0x0
+    private static let bootloaderFlashAddresses: [String: Int] = [
+        "c6": 0x0,
+        "s3": 0x0,
+        "p4": 0x2000,
+        "s3-085": 0x0,
+        "s3-154": 0x0,
+        "s3-175": 0x0,
+        "s3-185": 0x0,
+        "p4-4b": 0x2000,
+    ]
     private static let partitionsFlashRole = "partitions"
     private static let partitionsFlashAddress = 0x8000
     private static let bootApp0FlashRole = "boot_app0"
@@ -168,10 +190,14 @@ public struct FirmwareBundle: Equatable, Sendable {
     /// hardware targets or claim a known target for the wrong chip.
     private static let currentTargetChips: [String: String] = [
         "c6": "esp32c6",
+        "s3": "esp32s3",
+        "p4": "esp32p4",
+        // Historical format-3 exact targets remain readable.
         "s3-085": "esp32s3",
         "s3-154": "esp32s3",
         "s3-175": "esp32s3",
         "s3-185": "esp32s3",
+        "p4-4b": "esp32p4",
     ]
 
     private struct PartitionEntry {
@@ -555,6 +581,12 @@ public struct FirmwareBundle: Equatable, Sendable {
                 for target in targets { flashPayloads[target] = roles }
             }
 
+            let profiles = try optionalStringArray(
+                entry["profiles"], key: "profiles", where: where_)
+            let flashSizes = try optionalIntegerArray(
+                entry["flash_sizes"], key: "flash_sizes", where: where_)
+            let partition = try optionalString(
+                entry["partition"], key: "partition", where: where_)
             images.append(Image(
                 board: board,
                 chip: chip,
@@ -565,7 +597,10 @@ public struct FirmwareBundle: Equatable, Sendable {
                 sha256: expected,
                 appAddress: appAddress,
                 flashParts: parts,
-                targets: targets))
+                targets: targets,
+                profiles: profiles,
+                flashSizes: flashSizes,
+                partition: partition))
         }
         guard cursor == total else {
             throw FirmwareBundleError.trailingBytes(total - cursor)
@@ -671,9 +706,11 @@ public struct FirmwareBundle: Equatable, Sendable {
             if image.targets.contains("s3-175") {
                 expectedRoles.insert(Self.doomWadFlashRole)
             }
-            guard Set(image.flashParts.map(\.role)) == expectedRoles,
+            guard let expectedBootloader =
+                    Self.bootloaderFlashAddresses[target],
+                  Set(image.flashParts.map(\.role)) == expectedRoles,
                   image.flashPart(role: Self.bootloaderFlashRole)?.address
-                    == Self.bootloaderFlashAddress,
+                    == expectedBootloader,
                   image.flashPart(role: Self.partitionsFlashRole)?.address
                     == Self.partitionsFlashAddress,
                   image.flashPart(role: Self.bootApp0FlashRole)?.address
@@ -760,8 +797,8 @@ public struct FirmwareBundle: Equatable, Sendable {
     }
 
     /// Chip tokens this bundle can serve, sorted so a message reads the same way
-    /// twice. `--board c6` alone writes a one-image bundle, which is a normal
-    /// file, so this can legitimately be shorter than the boards that exist.
+    /// twice. A one-family bundle is normal, so this can legitimately be shorter
+    /// for historical files opened manually.
     public var chips: [String] {
         Array(Set(images.map(\.chip))).sorted()
     }
@@ -987,7 +1024,7 @@ public struct FirmwareBundle: Equatable, Sendable {
 
     /// Scan only structural JSON tokens. JSONSerialization remains responsible
     /// for native UTF-8 and JSON validity before any result is acted on.
-    private static func firstDuplicateManifestKey(in raw: Data) -> String? {
+    static func firstDuplicateManifestKey(in raw: Data) -> String? {
         let bytes = Array(raw)
         var index = 0
         var candidate: String?
@@ -1136,7 +1173,7 @@ public struct FirmwareBundle: Equatable, Sendable {
         return nil
     }
 
-    private static func safeManifestKeyDisplay(_ value: String) -> String {
+    static func safeManifestKeyDisplay(_ value: String) -> String {
         value.unicodeScalars.map { scalar in
             let code = scalar.value
             if code >= 0x20, code <= 0x7E, code != 0x5C {
@@ -1214,6 +1251,62 @@ public struct FirmwareBundle: Equatable, Sendable {
                 where: owner, key: key, wanted: "a string")
         }
         return text
+    }
+
+    private static func optionalString(
+        _ value: Any?, key: String, where owner: String
+    ) throws -> String? {
+        guard let value else { return nil }
+        let text = try string(value, key: key, where: owner)
+        guard !text.isEmpty, text == text.trimmingCharacters(in: .whitespacesAndNewlines)
+        else {
+            throw FirmwareBundleError.fieldHasWrongType(
+                where: owner, key: key, wanted: "a nonempty token")
+        }
+        return text
+    }
+
+    private static func optionalStringArray(
+        _ value: Any?, key: String, where owner: String
+    ) throws -> [String] {
+        guard let value else { return [] }
+        guard let raw = value as? [Any], !raw.isEmpty else {
+            throw FirmwareBundleError.fieldHasWrongType(
+                where: owner, key: key, wanted: "a nonempty string list")
+        }
+        var result = [String]()
+        for item in raw {
+            let token = try string(item, key: key, where: owner)
+            guard !token.isEmpty,
+                  token == token.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !result.contains(token)
+            else {
+                throw FirmwareBundleError.fieldHasWrongType(
+                    where: owner, key: key, wanted: "unique nonempty tokens")
+            }
+            result.append(token)
+        }
+        return result
+    }
+
+    private static func optionalIntegerArray(
+        _ value: Any?, key: String, where owner: String
+    ) throws -> [Int] {
+        guard let value else { return [] }
+        guard let raw = value as? [Any], !raw.isEmpty else {
+            throw FirmwareBundleError.fieldHasWrongType(
+                where: owner, key: key, wanted: "a nonempty whole-number list")
+        }
+        var result = [Int]()
+        for item in raw {
+            let number = try integer(item, key: key, where: owner)
+            guard number > 0, !result.contains(number) else {
+                throw FirmwareBundleError.fieldHasWrongType(
+                    where: owner, key: key, wanted: "unique positive whole numbers")
+            }
+            result.append(number)
+        }
+        return result
     }
 
     /// A JSON number read as an integer, with `true`/`false` and any number

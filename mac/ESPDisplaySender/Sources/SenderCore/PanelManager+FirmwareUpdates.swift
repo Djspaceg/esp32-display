@@ -38,8 +38,10 @@ extension PanelManager {
         /// Live session address. Nil when OTA is unavailable but USB is safe.
         var address: String?
         let chip: String?
-        /// Exact firmware target captured from live discovery. Never persisted.
+        /// Firmware family plus independent runtime compatibility evidence.
         let target: String?
+        let profile: String?
+        let partition: String?
         let firmwareVersion: String
         /// A currently connected, positively identity-matched USB device.
         var usbDevice: WifiConfigUI.USBDeviceOption?
@@ -55,6 +57,7 @@ extension PanelManager {
         init(
             serviceName: String, displayName: String, hardwareID: String,
             address: String?, chip: String?, target: String? = nil,
+            profile: String? = nil, partition: String? = nil,
             firmwareVersion: String,
             usbDevice: WifiConfigUI.USBDeviceOption? = nil,
             usbPathGeneration: Int? = nil,
@@ -66,6 +69,8 @@ extension PanelManager {
             self.address = address
             self.chip = chip
             self.target = target
+            self.profile = profile
+            self.partition = partition
             self.firmwareVersion = firmwareVersion
             self.usbDevice = usbDevice
             self.usbPathGeneration = usbPathGeneration
@@ -185,6 +190,8 @@ extension PanelManager {
             address: address,
             chip: panel.chip,
             target: panel.target,
+            profile: panel.profile,
+            partition: panel.partition,
             firmwareVersion: version,
             usbDevice: usbDevice,
             usbPathGeneration: usbGeneration,
@@ -250,6 +257,12 @@ extension PanelManager {
         switch target {
         case "c6":
             return board == "st7789" || board == "jd9853"
+        case "s3":
+            return board == "gc9107" || board == "st7789-154"
+                || board == "co5300" || board == "st77916"
+        case "p4":
+            return board == "st7703-4b"
+        // Historical exact-target bundles remain readable for manual recovery.
         case "s3-085":
             return board == "gc9107"
         case "s3-154":
@@ -258,6 +271,8 @@ extension PanelManager {
             return board == "co5300"
         case "s3-185":
             return board == "st77916"
+        case "p4-4b":
+            return board == "st7703-4b"
         default:
             // A future app can teach this build the new composition. Treating an
             // unknown pair as compatible would turn missing knowledge into proof.
@@ -312,6 +327,8 @@ extension PanelManager {
         progress(.readingChip)
         var cfgTarget: String?
         var cfgBoard: String?
+        var cfgChip: String?
+        var cfgPartition: String?
         switch await probeUSBDevice(path, timeout: 3) {
         case .unavailable(let reason):
             return .failure(
@@ -329,6 +346,8 @@ extension PanelManager {
             }
             cfgTarget = identity.target
             cfgBoard = identity.board
+            cfgChip = identity.chip
+            cfgPartition = identity.partition
             if let liveTarget = target.target,
                let reportedTarget = identity.target,
                liveTarget != reportedTarget {
@@ -395,19 +414,10 @@ extension PanelManager {
                     + "\(detectedChip). Nothing was written.")
         }
         let exactTarget = cfgTarget ?? target.target
-            ?? (detectedChip == "esp32c6" ? "c6" : nil)
         guard let exactTarget else {
             return .failure(
-                "Exact firmware target unavailable",
-                "This \(detectedChip) board did not report an exact target through "
-                    + "CFGSHOW. Same-chip S3 display variants cannot be selected "
-                    + "safely without target metadata, so nothing was written.")
-        }
-        if detectedChip == "esp32s3", cfgTarget == nil {
-            return .failure(
-                "Exact firmware target unavailable",
-                "CFGSHOW did not report whether this S3 is s3-085, s3-154, "
-                    + "s3-175, or s3-185, so nothing was written.")
+                "Firmware family unavailable",
+                "CFGSHOW did not report a firmware family, so nothing was written.")
         }
         guard let selectedImage = bundle.image(forTarget: exactTarget) else {
             return .failure(
@@ -419,6 +429,17 @@ extension PanelManager {
                 "USB chip mismatch",
                 "The \(exactTarget) image is for \(selectedImage.chip), but esptool "
                     + "read \(detectedChip). Nothing was written.")
+        }
+        if !selectedImage.profiles.isEmpty {
+            guard cfgChip == detectedChip,
+                  let cfgBoard, selectedImage.profiles.contains(cfgBoard),
+                  let cfgPartition, cfgPartition == selectedImage.partition
+            else {
+                return .failure(
+                    "USB compatibility identity incomplete",
+                    "Current family firmware requires matching CFGSHOW family, chip, "
+                        + "profile, and partition metadata before a write. Nothing was written.")
+            }
         }
         guard usbPathGeneration(path) == expectedGeneration,
               usbDevices.contains(where: { $0.path == path && $0.isConnected })

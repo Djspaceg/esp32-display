@@ -366,12 +366,12 @@ everything after.
   `cd mac/ESPDisplaySender && swift test` (700),
   `python3 tools/test_espdisp.py` (465).
 - Both firmware targets compile per commit:
-  `python3 tools/espdisp.py compile --board s3` and `--board c6`.
+  `python3 tools/espdisp.py compile --family s3` and `--family c6`.
   **Gotcha**: the Arduino build cache at
   `~/Library/Caches/arduino/sketches/3ACEEEC36ECE6F4CDED0E2E4F0F2CD89` is
   shared across boards keyed by sketch path — `rm -rf` it between board
   switches or the link step fails with "relocations in generic ELF".
-- Flash: `python3 tools/espdisp.py flash --board s3 --port /dev/cu.usbmodemXXXX`
+- Flash: `python3 tools/espdisp.py flash --family s3 --port /dev/cu.usbmodemXXXX`
   (port re-enumerates between 101/1101 after reflashes — `ls /dev/cu.usbmodem*`).
   Board: `espdisplay-5594`, 192.168.1.180, `board=co5300`, OTA enabled
   (password in user's keychain; USB flash is the reliable path — OTA push had

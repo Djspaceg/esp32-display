@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-#include <panel_init.h>
+#include <display_backend.h>
 
 #include "app_state.h"
 #include "panel_state.h"
@@ -84,10 +84,12 @@ uint8_t currentBrightness() {
 // a powered-down one). Safe to call before the panel exists: the panel path
 // does nothing until initDisplay() has run.
 void driveBrightness(uint8_t level) {
-  if (bcfg->hasBacklightPin()) {
+  if (bcfg->isDsi() && panel != nullptr) {
+    boarddisplay::setBrightness(panel, *bcfg, level);
+  } else if (bcfg->hasBacklightPin()) {
     analogWrite(bcfg->pinBl, level);
   } else if (panel != nullptr) {
-    boardpanel::setPanelBrightness(panel, *bcfg, level);
+    boarddisplay::setBrightness(panel, *bcfg, level);
   }
 }
 

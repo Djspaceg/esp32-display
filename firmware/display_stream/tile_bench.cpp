@@ -6,6 +6,7 @@
 #include <esp_task_wdt.h>
 
 #include "app_state.h"
+#include <display_backend.h>
 #include "band_compress.h"
 #include "bc1.h"
 #include "dma_gate.h"
@@ -59,7 +60,7 @@ static void benchDrawRect(const char *label, int x, int y, int w, int h,
   int errors = 0;
   for (int i = 0; i < reps; i++) {
     dmaMarkQueued();
-    if (esp_lcd_panel_draw_bitmap(panel, x, y, x + w, y + h, benchStaging) !=
+    if (boarddisplay::drawBitmap(panel, *bcfg, x, y, x + w, y + h, benchStaging) !=
         ESP_OK) {
       dmaUnmarkFailed();
       errors++;
@@ -203,7 +204,7 @@ void runTileBench() {
     int errors = 0;
     for (int i = 0; i < reps; i++) {
       dmaMarkQueued();
-      if (esp_lcd_panel_draw_bitmap(panel, 200, 200, 216, 216, benchStaging) !=
+      if (boarddisplay::drawBitmap(panel, *bcfg, 200, 200, 216, 216, benchStaging) !=
           ESP_OK) {
         dmaUnmarkFailed();
         errors++;

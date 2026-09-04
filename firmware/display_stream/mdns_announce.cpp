@@ -4,7 +4,6 @@
 #include <ESPmDNS.h>
 
 #include "app_state.h"
-#include "chip_identity.h"
 #include "device_protocol.h"
 #include "ota_service.h"
 #include "telemetry.h"
@@ -32,8 +31,10 @@ void addMdnsService() {
   // sees it - no board is attached, so this rests on it being the same call the
   // records beside it go through, not on an observation.
   const char *caps = capsBuf, *res = resBuf, *proto = protoBuf;
-  const char *chip = chipidentity::chipToken();
+  const char *chip = bcfg->platform->chipToken;
   const char *target = board::targetToken(boardVariant);
+  const char *profile = board::variantToken(boardVariant);
+  const char *partition = bcfg->platform->partitionToken;
   MDNS.setInstanceName(cfgName);
   MDNS.addService("espdisp", "udp", UDP_PORT);
   MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
@@ -43,6 +44,8 @@ void addMdnsService() {
   MDNS.addServiceTxt("espdisp", "udp", "caps", caps);
   MDNS.addServiceTxt("espdisp", "udp", "chip", chip);
   MDNS.addServiceTxt("espdisp", "udp", "target", target);
+  MDNS.addServiceTxt("espdisp", "udp", "profile", profile);
+  MDNS.addServiceTxt("espdisp", "udp", "partition", partition);
   if (otaActive) {
     // _arduino._tcp is what espota/arduino-cli browse for. It is registered from
     // here rather than by ArduinoOTA itself (which is why setupOta calls
@@ -54,10 +57,11 @@ void addMdnsService() {
     // without this line OTA would silently stop being discoverable after the
     // first heal.
     MDNS.enableArduino(OTA_PORT, true /* auth required */);
-    // `enableArduino` supplies chip-level board metadata. Add the exact image
-    // target separately so OTA tooling can distinguish the two ESP32-S3 panels;
-    // their ESP image headers both say esp32s3 and cannot protect this boundary.
+    // `enableArduino` supplies chip-level board metadata. Add the independent
+    // family, runtime profile, and partition evidence used by update tooling.
     MDNS.addServiceTxt("arduino", "tcp", "target", target);
+    MDNS.addServiceTxt("arduino", "tcp", "profile", profile);
+    MDNS.addServiceTxt("arduino", "tcp", "partition", partition);
   }
 }
 

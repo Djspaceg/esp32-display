@@ -412,7 +412,7 @@ struct FirmwareUpdateSheet: View {
     }
 
     private var targetDescription: String {
-        target.target ?? (target.chip == "esp32c6" ? "c6 (derived from chip)" : "Not reported")
+        target.target ?? "Not reported"
     }
 
     @ViewBuilder
@@ -611,11 +611,11 @@ struct FirmwareUpdateSheet: View {
 
     // MARK: derived
 
-    /// Which exact target is under discussion. C6 is the sole safe chip-only
-    /// fallback because no second C6 target exists.
+    /// Which firmware family is under discussion. Missing family identity stays
+    /// missing; chip identity alone never selects an embedded artifact.
     private var effectiveTarget: String? {
-        if let exact = target.target, !exact.isEmpty { return exact }
-        return target.chip == "esp32c6" ? "c6" : nil
+        guard let family = target.target, !family.isEmpty else { return nil }
+        return family
     }
 
     private var chipIsConfirmed: Bool {
@@ -793,10 +793,17 @@ struct FirmwareUpdateSheet: View {
     private func loadBundledFirmwareIfAvailable() {
         guard bundle == nil else { return }
         switch BundledFirmware.load() {
-        case .ready(let bundled, let url):
-            bundle = bundled
-            bundleURL = url
-            readFailure = nil
+        case .ready(let releases):
+            do {
+                let selected = try releases.select(
+                    family: target.target, chip: target.chip,
+                    profile: target.profile, partition: target.partition)
+                bundle = selected.bundle
+                bundleURL = selected.url
+                readFailure = nil
+            } catch {
+                readFailure = error.localizedDescription
+            }
         case .unreadable(let path, let reason):
             readFailure = "The firmware bundled with the app (\(path)) could not "
                 + "be read: \(reason)"

@@ -28,24 +28,20 @@ String defaultDeviceName();
 extern board::Variant boardVariant;
 extern const board::Config *bcfg;
 
-/// The compile-time panel geometry, derived from the board table. A FUNCTION
-/// rather than a reference to PANEL_GEOMETRY so namespace-scope initializers
-/// in other translation units (whose order against app_state.cpp is
-/// unspecified) can use it safely: it reads only the constant-initialized
-/// board table.
-inline bandproto::Geometry compiledPanelGeometry() {
-  const board::Config &c = board::configFor(board::COMPILED_VARIANT);
-  return {c.panelW, c.panelH};
-}
-
-extern const bandproto::Geometry PANEL_GEOMETRY;
-extern const int16_t PANEL_W;
-extern const int16_t PANEL_H;
-extern const size_t FRAME_BYTES;
+/// Runtime panel geometry. setup() assigns these immediately after one physical
+/// profile has been resolved and before frame buffers or protocol state exist.
+extern bandproto::Geometry PANEL_GEOMETRY;
+extern int16_t PANEL_W;
+extern int16_t PANEL_H;
+extern size_t FRAME_BYTES;
+void configurePanelGeometry(const board::Config &config);
 extern const uint16_t UDP_PORT;
 
 extern esp_lcd_panel_handle_t panel;
 bool initDisplay();
+
+// Whether this board speaks the magic-prefixed large-tile protocol.
+bool largeTileStreamEnabled();
 
 // Whether this board speaks the tile-stream protocol instead of packed bands.
 bool tileStreamEnabled();

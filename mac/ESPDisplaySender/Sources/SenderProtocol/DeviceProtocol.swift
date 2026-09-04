@@ -109,6 +109,9 @@ public enum DeviceProtocol {
         /// BC1 palettes. Separate from `roundDisplay`: the latter describes
         /// glass shape, while this bit promises a decoder older firmware lacks.
         public static let tileVisibleSpans = Capabilities(rawValue: 1 << 18)
+        /// Accepts ETL1, the magic-prefixed large-tile format with 16-bit tile
+        /// indices used by panels whose grid exceeds tile v1's 10-bit field.
+        public static let largeTileStream = Capabilities(rawValue: 1 << 19)
     }
 
     public struct DeviceInfo: Equatable, Sendable {

@@ -131,6 +131,10 @@ enum Capability : uint32_t {
   // shared BC1 palette. Separate from CAP_ROUND_DISPLAY because that bit is a
   // shape fact; this one promises a decoder firmware built before it lacks.
   CAP_TILE_VISIBLE_SPANS = 1u << 18,
+  // Accepts magic-prefixed ETL1 packets with 16-bit tile indices. This is a
+  // separate, unambiguous format for large panels whose grid cannot fit tile
+  // v1's 10-bit index. P4-4B advertises this instead of packed bands/tile v1.
+  CAP_LARGE_TILE_STREAM = 1u << 19,
 };
 
 enum class ControlOpcode : uint8_t {

@@ -410,6 +410,31 @@ final class FirmwareBundleTests: XCTestCase {
                       "this fixture is only interesting if it contains the magic")
     }
 
+    func testFormatThreeReadsP44BWithItsExactAddresses() throws {
+        let p4 = Self.p4Spec
+        let bundle = try Self.readBundle(
+            version: "1.5.0", images: [p4], generation: FirmwareBundle.format)
+        XCTAssertEqual(bundle.targets, ["p4-4b"])
+        let image = try XCTUnwrap(bundle.image(forTarget: "p4-4b"))
+        XCTAssertEqual(image.chip, "esp32p4")
+        XCTAssertEqual(image.appAddress, 0x10000)
+        XCTAssertEqual(image.flashParts.map(\.address), [0x2000, 0x8000, 0xE000])
+        let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "p4-4b"))
+        XCTAssertEqual(plan.map(\.role), ["bootloader", "partitions", "boot_app0", "app"])
+        XCTAssertEqual(plan.map(\.address), [0x2000, 0x8000, 0xE000, 0x10000])
+
+        let wrongTarget = bundle.availability(
+            forTarget: "s3-185", chip: "esp32p4", panelVersion: "1.4.2")
+        guard case .noImageForTarget = wrongTarget else {
+            return XCTFail("P4 image accepted for wrong target: \(wrongTarget)")
+        }
+        let wrongChip = bundle.availability(
+            forTarget: "p4-4b", chip: "esp32s3", panelVersion: "1.4.2")
+        guard case .targetChipMismatch = wrongChip else {
+            return XCTFail("P4 image accepted for wrong chip: \(wrongChip)")
+        }
+    }
+
     func testLegacyS3AlwaysMapsToS3175AndNeverS3185() throws {
         for generation in [FirmwareBundle.formatV1, FirmwareBundle.formatV2] {
             let bundle = try Self.readBundle(
@@ -1735,6 +1760,52 @@ final class FirmwareBundleTests: XCTestCase {
                 payload: Data("ota \(tag)\n".utf8)),
         ]
     }
+
+    private static func p4PartitionTable() -> Data {
+        var bytes = [UInt8](repeating: 0xFF, count: 3072)
+        func writeU32(_ value: Int, _ offset: Int) {
+            for shift in stride(from: 0, through: 24, by: 8) {
+                bytes[offset + shift / 8] = UInt8((value >> shift) & 0xFF)
+            }
+        }
+        func entry(
+            _ index: Int, _ label: String, _ type: UInt8, _ subtype: UInt8,
+            _ address: Int, _ byteCount: Int
+        ) {
+            let offset = index * 32
+            bytes[offset] = 0xAA
+            bytes[offset + 1] = 0x50
+            bytes[offset + 2] = type
+            bytes[offset + 3] = subtype
+            writeU32(address, offset + 4)
+            writeU32(byteCount, offset + 8)
+            for index in (offset + 12)..<(offset + 32) { bytes[index] = 0 }
+            for (labelOffset, byte) in label.utf8.prefix(16).enumerated() {
+                bytes[offset + 12 + labelOffset] = byte
+            }
+        }
+        entry(0, "nvs", 0x01, 0x02, 0x9000, 0x5000)
+        entry(1, "otadata", 0x01, 0x00, 0xE000, 0x2000)
+        entry(2, "app0", 0x00, 0x10, 0x10000, 0x800000)
+        entry(3, "app1", 0x00, 0x11, 0x810000, 0x800000)
+        return Data(bytes)
+    }
+
+    private static let p4Spec = ImageSpec(
+        board: "p4-4b", chip: "esp32p4", payload: Data("p4 app".utf8),
+        flashParts: [
+            FlashPartSpec(
+                role: "bootloader", address: 0x2000,
+                filename: "display_stream.ino.bootloader.bin",
+                payload: Data([0xE9]) + Data("p4 bootloader\n".utf8)),
+            FlashPartSpec(
+                role: "partitions", address: 0x8000,
+                filename: "display_stream.ino.partitions.bin",
+                payload: p4PartitionTable()),
+            FlashPartSpec(
+                role: "boot_app0", address: 0xE000,
+                filename: "boot_app0.bin", payload: Data("p4 ota\n".utf8)),
+        ], targets: ["p4-4b"])
 
     private static let appFlashAddress = 0x10000
 

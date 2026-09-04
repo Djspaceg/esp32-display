@@ -38,10 +38,13 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// remembered from a previous run would risk pushing an image chosen from
     /// stale information. A panel has to be discovered to be pushed to anyway.
     var chip: String?
-    /// Exact firmware target from mDNS, such as `c6`, `s3-085`, `s3-154`,
-    /// `s3-175`, or `s3-185`.
+    /// Firmware release family from mDNS (`c6`, `s3`, or `p4`).
     /// Discovery-scoped and deliberately excluded from `PersistedPanel`.
     var target: String?
+    /// Runtime physical profile and partition evidence used with family/chip to
+    /// select embedded firmware. Both are discovery-scoped.
+    var profile: String?
+    var partition: String?
     /// What this panel says its screen is, from its `res` TXT record, or nil when
     /// it did not say or said something `PanelGeometry.isStreamable` refused.
     ///
