@@ -3286,12 +3286,14 @@ def cmd_bundle_info(args) -> int:
         for image in manifest.get("images") or []
         if isinstance(image, dict)
     )
+    kind = "family" if current else "target"
     print(
-        "\nVerified: %d image%s covering %d exact target%s%s, contiguous, every sha256 matches."
+        "\nVerified: %d image%s covering %d %s%s%s, contiguous, every sha256 matches."
         % (
             image_count,
             "" if image_count == 1 else "s",
             len(payloads),
+            kind,
             "" if len(payloads) == 1 else "s",
             "" if not extra else " plus %d flash part%s" % (extra, "" if extra == 1 else "s"),
         )
@@ -3313,9 +3315,9 @@ def cmd_bundle_info(args) -> int:
             % (manifest.get("format"), os.path.basename(sys.argv[0]))
         )
     absent = [key for key in FAMILIES if key not in payloads]
-    if absent:
+    if absent and not current:
         print(
-            "Carries exact targets %s; missing %s. Other targets find nothing to install."
+            "Carries historical targets %s; missing %s."
             % (", ".join(sorted(payloads)), ", ".join(sorted(absent)))
         )
     return 0
