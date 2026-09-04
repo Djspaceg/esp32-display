@@ -98,6 +98,7 @@ SKETCH_INO = os.path.join(SKETCH_DIR, "display_stream.ino")
 # Where FW_VERSION lives since the sketch was split into modules: the device
 # identity module, not the .ino (which is now only setup/loop scheduling).
 FW_VERSION_SOURCE = os.path.join(SKETCH_DIR, "app_state.cpp")
+RELEASE_NOTES_PATH = os.path.join(REPO_ROOT, "release-notes.md")
 LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware", "libraries")
 DOOM_LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware")
 DOOM_PARTITIONS_CSV = os.path.join(REPO_ROOT, "firmware", "partitions_s3_doom.csv")
@@ -860,23 +861,225 @@ FW_VERSION_RE = re.compile(
     r'^\s*(?:static\s+)?const\s+char\s*\*\s*FW_VERSION\s*=\s*"([^"\n]*)"\s*;',
     re.MULTILINE
 )
+SEMVER_IDENTIFIER_RE = r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-(" + SEMVER_IDENTIFIER_RE + r"(?:\." + SEMVER_IDENTIFIER_RE + r")*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+)
+
+# Release-note source reasons are deliberately finite and stable.
+RELEASE_REASON_TITLE = "expected exact title '# Release Notes'"
+RELEASE_REASON_NO_SECTIONS = "document contains no release sections"
+RELEASE_REASON_HEADING = "section heading must be exactly '## <SemVer 2.0.0>'"
+RELEASE_REASON_VERSION = "version %s is not SemVer 2.0.0"
+RELEASE_REASON_PRE_SECTION = "content appears before the first release section"
+RELEASE_REASON_ITEM_MARKER = "item must begin with '- '"
+RELEASE_REASON_ITEM_LENGTH = "item text must contain 1–280 Unicode scalars"
+RELEASE_REASON_FORBIDDEN = "item text contains forbidden scalar U+%04X"
+RELEASE_REASON_EDGE_WHITESPACE = "item text has forbidden leading or trailing whitespace"
+RELEASE_REASON_VERB = "item text must begin with Added, Changed, Fixed, or Removed"
+RELEASE_REASON_PUNCTUATION = "item text must end with '.', '!', or '?'"
+RELEASE_REASON_SECTION_COUNT = "section must contain 1–32 items"
+RELEASE_REASON_DUPLICATE = "duplicate version %s"
+RELEASE_REASON_ORDER = "version %s is not older than %s"
+RELEASE_REASON_MISSING = "no section exactly matching FW_VERSION %s"
+RELEASE_REASON_CR = "carriage return byte is not allowed"
+RELEASE_REASON_UTF8 = "not valid UTF-8"
+RELEASE_REASON_CANNOT_READ = "cannot read"
+RELEASE_REASON_FW_VERSION = "FW_VERSION %s is not SemVer 2.0.0"
+RELEASE_REASON_REQUESTED_VERSION = "requested FW_VERSION %s is not SemVer 2.0.0"
 
 
-def fw_version_from_sketch(text: str) -> str:
-    """Read FW_VERSION out of the sketch source.
+def quote_release_value(value: str) -> str:
+    """Render scalar content in a deterministic one-line quoted form."""
+    slash = chr(0x5C)
+    pieces = ["'"]
+    for scalar in value:
+        code = ord(scalar)
+        if 0x20 <= code <= 0x7E and scalar not in ("'", slash):
+            pieces.append(scalar)
+        elif scalar == "'":
+            pieces.append(slash + "'")
+        elif scalar == slash:
+            pieces.append(slash * 2)
+        elif code <= 0xFFFF:
+            pieces.append(slash + "u%04X" % code)
+        else:
+            scalar16 = code - 0x10000
+            pieces.append(slash + "u%04X" % (0xD800 + (scalar16 >> 10)))
+            pieces.append(slash + "u%04X" % (0xDC00 + (scalar16 & 0x3FF)))
+    return "".join(pieces) + "'"
 
-    Read rather than passed in as a flag, because the sketch is the single source
-    of truth: FW_VERSION is what EINF reports to the app, what the mDNS `fw` TXT
-    record advertises, and what prints at boot. A --version flag would be a
-    second place for it to be wrong, and a bundle whose manifest disagrees with
-    the image it carries is worse than no manifest at all - the app compares the
-    two to decide whether to offer an update.
 
-    Refuses on zero or two matches instead of picking, the same stance
-    resolve_board takes: a tool that guessed here would put the wrong number in
-    front of the user at the one moment they are deciding whether to flash.
-    """
-    found = FW_VERSION_RE.findall(text)
+def parse_semver(value: str):
+    """Return SemVer precedence parts, or None for a non-SemVer 2.0.0 value."""
+    if not isinstance(value, str):
+        return None
+    match = SEMVER_RE.fullmatch(value)
+    if not match:
+        return None
+    prerelease = tuple(match.group(4).split(".")) if match.group(4) else ()
+    return int(match.group(1)), int(match.group(2)), int(match.group(3)), prerelease
+
+
+def compare_semver(left: str, right: str) -> int:
+    """Compare SemVer precedence, deliberately ignoring build metadata."""
+    parsed_left, parsed_right = parse_semver(left), parse_semver(right)
+    if parsed_left is None or parsed_right is None:
+        raise ValueError("compare_semver needs valid SemVer values")
+    if parsed_left[:3] != parsed_right[:3]:
+        return -1 if parsed_left[:3] < parsed_right[:3] else 1
+    pre_left, pre_right = parsed_left[3], parsed_right[3]
+    if not pre_left or not pre_right:
+        if not pre_left and not pre_right:
+            return 0
+        return 1 if not pre_left else -1
+    for left_id, right_id in zip(pre_left, pre_right):
+        if left_id == right_id:
+            continue
+        left_numeric, right_numeric = left_id.isdigit(), right_id.isdigit()
+        if left_numeric and right_numeric:
+            return -1 if int(left_id) < int(right_id) else 1
+        if left_numeric != right_numeric:
+            return -1 if left_numeric else 1
+        return -1 if left_id < right_id else 1
+    if len(pre_left) == len(pre_right):
+        return 0
+    return -1 if len(pre_left) < len(pre_right) else 1
+
+
+def forbidden_item_scalar(code: int) -> bool:
+    return (
+        0x0000 <= code <= 0x001F
+        or 0x007F <= code <= 0x009F and code != 0x0085
+        or 0xD800 <= code <= 0xDFFF
+    )
+
+
+def protocol_whitespace_scalar(code: int) -> bool:
+    return (
+        0x0009 <= code <= 0x000D
+        or code in (0x0020, 0x0085, 0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000)
+        or 0x2000 <= code <= 0x200A
+    )
+
+
+def release_note_item_reason(item: str) -> Optional[str]:
+    """Return the common source/manifest item grammar failure, if any."""
+    if not isinstance(item, str):
+        return "item must be a string"
+    if not 1 <= len(item) <= 280:
+        return RELEASE_REASON_ITEM_LENGTH
+    for scalar in item:
+        if forbidden_item_scalar(ord(scalar)):
+            return RELEASE_REASON_FORBIDDEN % ord(scalar)
+    if protocol_whitespace_scalar(ord(item[0])) or protocol_whitespace_scalar(ord(item[-1])):
+        return RELEASE_REASON_EDGE_WHITESPACE
+    if not item.startswith(("Added ", "Changed ", "Fixed ", "Removed ")):
+        return RELEASE_REASON_VERB
+    if not item.endswith((".", "!", "?")):
+        return RELEASE_REASON_PUNCTUATION
+    return None
+
+
+def _release_source_error(path: str, line: int, section: Optional[str], reason: str) -> Fail:
+    return Fail("release notes %s:%d: section %s: %s" % (
+        path, line, section if section is not None else "none", reason))
+
+
+def _cr_section(raw_before_cr: bytes) -> Optional[str]:
+    section = None
+    for raw_line in raw_before_cr.split(b"\n"):
+        if raw_line.startswith(b"## "):
+            try:
+                label = raw_line[3:].decode("ascii")
+            except UnicodeDecodeError:
+                continue
+            if parse_semver(label) is not None:
+                section = label
+    return section
+
+
+def release_notes_for_version(path: str, version: str) -> List[str]:
+    """Read, fully validate, and select one LF-delimited Markdown release section."""
+    if parse_semver(version) is None:
+        raise Fail("release notes %s: %s" % (
+            path, RELEASE_REASON_REQUESTED_VERSION % quote_release_value(version)))
+    try:
+        with open(path, "rb") as source:
+            raw = source.read()
+    except OSError:
+        raise Fail("release notes %s: %s" % (path, RELEASE_REASON_CANNOT_READ))
+    cr_offset = raw.find(b"\r")
+    if cr_offset >= 0:
+        line = raw[:cr_offset].count(b"\n") + 1
+        raise _release_source_error(path, line, _cr_section(raw[:cr_offset]), RELEASE_REASON_CR)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        line = raw[:exc.start].count(b"\n") + 1
+        raise Fail("release notes %s: byte %d: line %d: %s" % (
+            path, exc.start, line, RELEASE_REASON_UTF8))
+
+    lines = text.split("\n")
+    if not lines or lines[0] != "# Release Notes":
+        raise _release_source_error(path, 1, None, RELEASE_REASON_TITLE)
+    sections, current = [], None
+    for line_number, line in enumerate(lines[1:], start=2):
+        if line == "":
+            continue
+        if line.startswith("## "):
+            label = line[3:]
+            if parse_semver(label) is None:
+                raise _release_source_error(
+                    path, line_number, current["label"] if current else None,
+                    RELEASE_REASON_VERSION % quote_release_value(label))
+            current = {"label": label, "line": line_number, "items": []}
+            sections.append(current)
+            continue
+        if line.startswith("#"):
+            raise _release_source_error(
+                path, line_number, current["label"] if current else None,
+                RELEASE_REASON_HEADING)
+        if current is None:
+            raise _release_source_error(path, line_number, None, RELEASE_REASON_PRE_SECTION)
+        if not line.startswith("- "):
+            raise _release_source_error(
+                path, line_number, current["label"], RELEASE_REASON_ITEM_MARKER)
+        item = line[2:]
+        reason = release_note_item_reason(item)
+        if reason:
+            raise _release_source_error(path, line_number, current["label"], reason)
+        current["items"].append(item)
+
+    if not sections:
+        raise _release_source_error(path, 1, None, RELEASE_REASON_NO_SECTIONS)
+    for section in sections:
+        if not 1 <= len(section["items"]) <= 32:
+            raise _release_source_error(
+                path, section["line"], section["label"], RELEASE_REASON_SECTION_COUNT)
+    seen = {}
+    for section in sections:
+        label = section["label"]
+        if label in seen:
+            raise Fail("release notes %s:%d,%d: %s" % (
+                path, seen[label]["line"], section["line"], RELEASE_REASON_DUPLICATE % label))
+        seen[label] = section
+    for newer, older in zip(sections, sections[1:]):
+        if compare_semver(older["label"], newer["label"]) >= 0:
+            raise Fail("release notes %s:%d,%d: %s" % (
+                path, newer["line"], older["line"],
+                RELEASE_REASON_ORDER % (older["label"], newer["label"])))
+    selected = seen.get(version)
+    if selected is None:
+        raise Fail("release notes %s: %s" % (path, RELEASE_REASON_MISSING % version))
+    return list(selected["items"])
+
+
+def fw_version_declaration(text: str) -> Tuple[str, int]:
+    """Read the sole FW_VERSION declaration and its one-based source line."""
+    found = list(FW_VERSION_RE.finditer(text))
     if not found:
         raise Fail(
             "could not find FW_VERSION in the sketch.\n"
@@ -886,20 +1089,30 @@ def fw_version_from_sketch(text: str) -> str:
     if len(found) > 1:
         raise Fail(
             "found %d FW_VERSION definitions in the sketch (%s); there must be exactly one"
-            % (len(found), ", ".join(repr(v) for v in found))
+            % (len(found), ", ".join(repr(match.group(1)) for match in found))
         )
-    if not found[0].strip():
+    version = found[0].group(1)
+    if not version.strip():
         raise Fail("FW_VERSION in the sketch is empty; a bundle needs a version to compare")
-    return found[0]
+    return version, text.count("\n", 0, found[0].start(1)) + 1
 
 
-def sketch_fw_version(path: str = FW_VERSION_SOURCE) -> str:
+def fw_version_from_sketch(text: str) -> str:
+    """Compatibility wrapper for callers that only need the version string."""
+    return fw_version_declaration(text)[0]
+
+
+def sketch_fw_version_declaration(path: str = FW_VERSION_SOURCE) -> Tuple[str, int]:
     try:
         with open(path, "r", encoding="utf-8") as fh:
             text = fh.read()
     except OSError as exc:
         raise Fail("cannot read %s: %s" % (path, exc.strerror or exc))
-    return fw_version_from_sketch(text)
+    return fw_version_declaration(text)
+
+
+def sketch_fw_version(path: str = FW_VERSION_SOURCE) -> str:
+    return sketch_fw_version_declaration(path)[0]
 
 
 def utc_timestamp() -> str:
@@ -938,10 +1151,190 @@ def git_provenance(repo_root: str = REPO_ROOT) -> Tuple[Optional[str], bool]:
     return commit, bool(status.stdout.strip())
 
 
+def safe_json_key_display(value: str) -> str:
+    """Render a decoded JSON key safely in a deterministic one-line error."""
+    slash = chr(0x5C)
+    pieces = []
+    for scalar in value:
+        code = ord(scalar)
+        if 0x20 <= code <= 0x7E and scalar != slash:
+            pieces.append(scalar)
+        elif scalar == slash:
+            pieces.append(slash * 2)
+        elif code <= 0xFFFF:
+            pieces.append(slash + "u%04X" % code)
+        else:
+            scalar16 = code - 0x10000
+            pieces.append(slash + "u%04X" % (0xD800 + (scalar16 >> 10)))
+            pieces.append(slash + "u%04X" % (0xDC00 + (scalar16 & 0x3FF)))
+    return "".join(pieces)
+
+
+def first_duplicate_json_member_name(raw: bytes) -> Optional[str]:
+    """Return a completed manifest's first duplicate semantic object key.
+
+    This bounded iterative structural scan intentionally does not validate JSON
+    values. Native decoding remains authoritative for malformed JSON and UTF-8;
+    any candidate becomes actionable only after that decoder succeeds.
+    """
+    index, length, candidate = 0, len(raw), None
+    frames = [{"kind": "root", "state": "value"}]
+
+    def skip_whitespace(position: int) -> int:
+        while position < length and raw[position] in b" \t\n\r":
+            position += 1
+        return position
+
+    def string_end(position: int) -> Optional[int]:
+        # `position` points at the opening quote. Quote/backslash state is the
+        # only lexical detail the structural walk needs to preserve.
+        position += 1
+        while position < length:
+            if raw[position] == 0x22:
+                return position + 1
+            if raw[position] == 0x5C:
+                position += 1
+                if position >= length:
+                    return None
+            position += 1
+        return None
+
+    def begin_value(frame: dict) -> bool:
+        nonlocal index
+        index = skip_whitespace(index)
+        if index >= length:
+            return False
+        token = raw[index]
+        frame["state"] = "after"
+        if token == 0x7B:  # {
+            frames.append({"kind": "object", "state": "key", "names": set()})
+            index += 1
+            return True
+        if token == 0x5B:  # [
+            frames.append({"kind": "array", "state": "value_or_end"})
+            index += 1
+            return True
+        if token == 0x22:
+            end = string_end(index)
+            if end is None:
+                return False
+            index = end
+            return True
+        if token in b",]}:":
+            return False
+        start = index
+        while index < length and raw[index] not in b" \t\n\r,]}":
+            index += 1
+        return index > start
+
+    while frames:
+        frame = frames[-1]
+        kind, state = frame["kind"], frame["state"]
+        if kind == "root":
+            if state == "value":
+                if not begin_value(frame):
+                    return None
+            else:
+                index = skip_whitespace(index)
+                return candidate if index == length else None
+            continue
+        if kind == "object":
+            if state == "key":
+                index = skip_whitespace(index)
+                if index >= length:
+                    return None
+                if raw[index] == 0x7D:  # }
+                    frames.pop()
+                    index += 1
+                    continue
+                if raw[index] != 0x22:
+                    return None
+                end = string_end(index)
+                if end is None:
+                    return None
+                try:
+                    name = json.loads(raw[index:end].decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    return None
+                if not isinstance(name, str):
+                    return None
+                if name in frame["names"] and candidate is None:
+                    candidate = name
+                frame["names"].add(name)
+                frame["state"] = "colon"
+                index = end
+                continue
+            if state == "colon":
+                index = skip_whitespace(index)
+                if index >= length or raw[index] != 0x3A:  # :
+                    return None
+                frame["state"] = "value"
+                index += 1
+                continue
+            if state == "value":
+                if not begin_value(frame):
+                    return None
+                continue
+            index = skip_whitespace(index)
+            if index >= length:
+                return None
+            if raw[index] == 0x2C:  # ,
+                frame["state"] = "key"
+                index += 1
+                continue
+            if raw[index] == 0x7D:  # }
+                frames.pop()
+                index += 1
+                continue
+            return None
+        if state == "value_or_end":
+            index = skip_whitespace(index)
+            if index >= length:
+                return None
+            if raw[index] == 0x5D:  # ]
+                frames.pop()
+                index += 1
+                continue
+            if not begin_value(frame):
+                return None
+            continue
+        index = skip_whitespace(index)
+        if index >= length:
+            return None
+        if raw[index] == 0x2C:  # ,
+            frame["state"] = "value_or_end"
+            index += 1
+            continue
+        if raw[index] == 0x5D:  # ]
+            frames.pop()
+            index += 1
+            continue
+        return None
+    return None
+
+
+def validated_manifest_release_notes(manifest: dict) -> Optional[List[str]]:
+    """Validate optional external metadata; absent remains legacy-compatible."""
+    if "release_notes" not in manifest:
+        return None
+    notes = manifest["release_notes"]
+    if not isinstance(notes, list) or not 1 <= len(notes) <= 32:
+        raise Fail("bundle manifest: release_notes: must be a list containing 1–32 items")
+    validated = []
+    for index, note in enumerate(notes):
+        reason = release_note_item_reason(note)
+        if reason:
+            raise Fail("bundle manifest: release_notes[%d]: %s" % (index, reason))
+        validated.append(note)
+    return validated
+
+
 def bundle_manifest(
     firmware_version: str,
     images: List[dict],
     built_at: str,
+    *,
+    release_notes: List[str],
     source_commit: Optional[str] = None,
     source_dirty: bool = False,
     tool: str = BUNDLE_TOOL,
@@ -970,6 +1363,9 @@ def bundle_manifest(
     three-target bundle (`test_bundle_manifest_offsets` drives payload sizes that
     force digit rollovers).
     """
+    notes = validated_manifest_release_notes({"release_notes": release_notes})
+    if notes is None:  # Current format-3 output is never a legacy manifest.
+        raise Fail("a format-3 bundle requires release_notes")
     if not images:
         raise Fail("a bundle needs at least one image")
     validate_target_claims(images, BUNDLE_FORMAT)
@@ -996,6 +1392,7 @@ def bundle_manifest(
         "source_commit": source_commit,
         "source_dirty": bool(source_dirty),
         "tool": tool,
+        "release_notes": notes,
         "images": prepared,
     }
     for _ in range(8):
@@ -1059,6 +1456,9 @@ def pack_bundle(
     magic = BUNDLE_MAGIC_BY_FORMAT.get(generation)
     if magic is None:
         raise Fail("cannot pack unsupported bundle format %r" % generation)
+    notes = validated_manifest_release_notes(manifest)
+    if generation == BUNDLE_FORMAT_V3 and notes is None:
+        raise Fail("bundle manifest: release_notes: required for format 3")
     targets_by_image = validate_target_claims(images, generation)
     if generation < BUNDLE_FORMAT_V3:
         seen_chips = set()
@@ -1220,10 +1620,14 @@ def unpack_bundle(
             "bundle claims a %d-byte manifest but only %d bytes follow the header; "
             "the file is truncated" % (length, len(data) - BUNDLE_HEADER_BYTES)
         )
+    raw_manifest = data[BUNDLE_HEADER_BYTES:end]
+    duplicate_key = first_duplicate_json_member_name(raw_manifest)
     try:
-        manifest = json.loads(data[BUNDLE_HEADER_BYTES:end].decode("utf-8"))
+        manifest = json.loads(raw_manifest.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise Fail("bundle manifest is not valid UTF-8 JSON: %s" % exc)
+    if duplicate_key is not None:
+        raise Fail("bundle manifest: duplicate key %s" % safe_json_key_display(duplicate_key))
     if not isinstance(manifest, dict):
         raise Fail(
             "bundle manifest is a %s, not a JSON object" % type(manifest).__name__
@@ -1246,6 +1650,7 @@ def unpack_bundle(
                 " and ".join(str(v) for v in sorted(BUNDLE_GENERATIONS.values())),
             )
         )
+    validated_manifest_release_notes(manifest)
     images = manifest["images"]
     if not isinstance(images, list) or not images:
         raise Fail("bundle manifest lists no images")
@@ -1440,11 +1845,18 @@ def describe_bundle(manifest: dict, full_hash: bool = False) -> List[str]:
         source = "%s%s" % (commit, " (dirty)" if manifest.get("source_dirty") else "")
     else:
         source = "unknown (not built from a git checkout)"
+    notes = manifest.get("release_notes")
+    note_line = (
+        "  release notes: %d item(s)" % len(notes)
+        if isinstance(notes, list)
+        else "  release notes: unavailable (legacy bundle)"
+    )
     lines = [
         "  version:  %s" % manifest.get("firmware_version"),
         "  built at: %s" % manifest.get("built_at"),
         "  source:   %s" % source,
         "  tool:     %s (format %s)" % (manifest.get("tool"), manifest.get("format")),
+        note_line,
     ]
     for image in manifest.get("images") or []:
         digest = str(image.get("sha256", ""))
@@ -2649,7 +3061,11 @@ def cmd_bundle(args) -> int:
     # Version first, before any compile: it is read from the sketch and can fail
     # instantly, and finding out after all target builds would be irritating.
     # Same ordering, and the same reason, as cmd_ota's password.
-    version = sketch_fw_version()
+    version, version_line = sketch_fw_version_declaration()
+    if parse_semver(version) is None:
+        raise Fail("firmware/display_stream/app_state.cpp:%d: %s" % (
+            version_line, RELEASE_REASON_FW_VERSION % quote_release_value(version)))
+    release_notes = release_notes_for_version(RELEASE_NOTES_PATH, version)
     keys = bundle_board_keys(args.board)
     boards = [BOARDS[key] for key in keys]
     path = args.output or os.path.join(
@@ -2717,7 +3133,9 @@ def cmd_bundle(args) -> int:
         for out_dir in out_dirs:
             shutil.rmtree(out_dir, ignore_errors=True)
 
-    manifest = bundle_manifest(version, entries, utc_timestamp(), commit, dirty)
+    manifest = bundle_manifest(
+        version, entries, utc_timestamp(), release_notes=release_notes,
+        source_commit=commit, source_dirty=dirty)
     data = pack_bundle(manifest, payloads, flash_payloads)
     write_file_atomically(path, data)
 

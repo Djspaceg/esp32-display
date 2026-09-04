@@ -38,7 +38,8 @@ let package = Package(
         .testTarget(
             name: "SenderProtocolTests",
             dependencies: ["SenderProtocol"],
-            path: "Tests/SenderProtocolTests"
+            path: "Tests/SenderProtocolTests",
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "SenderCoreTests",

@@ -279,6 +279,7 @@ final class UsbOnboardingTests: XCTestCase {
             format: full.format, firmwareVersion: full.firmwareVersion,
             builtAt: full.builtAt, sourceCommit: full.sourceCommit,
             sourceDirty: full.sourceDirty, tool: full.tool,
+            releaseNotes: nil,
             images: [stripped], payloads: full.payloads,
             flashPayloads: full.flashPayloads)
         XCTAssertEqual(UsbOnboardingPlan.make(request).action, .bundleIsOTAOnly)

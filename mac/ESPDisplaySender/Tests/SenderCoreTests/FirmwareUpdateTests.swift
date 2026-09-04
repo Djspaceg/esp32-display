@@ -424,6 +424,34 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertFalse(PanelManager.physicalBoard("future", isCompatibleWith: "s3-185"))
     }
 
+    func testReleaseNotesPresentationCopyAndOrdering() {
+        let available = FirmwareReleaseNotesPresentation.make(
+            version: "1.4.2", items: ["Added first item.", "Fixed second item."])
+        XCTAssertEqual(
+            available,
+            .available(version: "1.4.2", items: ["Added first item.", "Fixed second item."]))
+        XCTAssertEqual(
+            available.accessibilityLabel,
+            "Release notes for 1.4.2. Added first item. Fixed second item.")
+        XCTAssertNil(available.fallbackText)
+
+        let unavailable = FirmwareReleaseNotesPresentation.make(version: "1.4.2", items: nil)
+        XCTAssertEqual(unavailable, .unavailable)
+        XCTAssertEqual(
+            unavailable.fallbackText,
+            "Release notes are unavailable in this older firmware bundle.")
+        XCTAssertEqual(
+            unavailable.accessibilityLabel,
+            "Release notes unavailable. This older firmware bundle does not include release notes.")
+
+        let empty = FirmwareReleaseNotesPresentation.make(version: "1.4.2", items: [])
+        XCTAssertEqual(empty, .empty)
+        XCTAssertEqual(empty.fallbackText, "No release notes were included in this firmware bundle.")
+        XCTAssertEqual(
+            empty.accessibilityLabel,
+            "Release notes unavailable. No release notes were included in this firmware bundle.")
+    }
+
     // MARK: - what a bundle means for a panel
 
     /// The ordinary case, and the one sentence that has to be right: the version

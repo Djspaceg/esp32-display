@@ -499,6 +499,7 @@ final class EsptoolCommandTests: XCTestCase {
             sourceCommit: nil,
             sourceDirty: false,
             tool: "espdisp.py bundle",
+            releaseNotes: nil,
             images: [image],
             payloads: [target: appPayload],
             flashPayloads: [
@@ -518,6 +519,7 @@ final class EsptoolCommandTests: XCTestCase {
             sourceCommit: nil,
             sourceDirty: false,
             tool: "espdisp.py bundle",
+            releaseNotes: nil,
             images: [FirmwareBundle.Image(
                 board: "s3", chip: chip, fqbn: "esp32:esp32:\(chip)",
                 filename: "display_stream.ino.bin", offset: 0,

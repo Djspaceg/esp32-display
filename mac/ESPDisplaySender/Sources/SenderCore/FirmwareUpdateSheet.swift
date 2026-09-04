@@ -183,6 +183,40 @@ struct FirmwareUpdatePlan: Equatable {
     }
 }
 
+/// Pure copy and ordering for the release-note section of the update sheet.
+enum FirmwareReleaseNotesPresentation: Equatable {
+    case available(version: String, items: [String])
+    case unavailable
+    case empty
+
+    static func make(version: String, items: [String]?) -> FirmwareReleaseNotesPresentation {
+        guard let items else { return .unavailable }
+        return items.isEmpty ? .empty : .available(version: version, items: items)
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .available(let version, let items):
+            return "Release notes for \(version). \(items.joined(separator: " "))"
+        case .unavailable:
+            return "Release notes unavailable. This older firmware bundle does not include release notes."
+        case .empty:
+            return "Release notes unavailable. No release notes were included in this firmware bundle."
+        }
+    }
+
+    var fallbackText: String? {
+        switch self {
+        case .available:
+            return nil
+        case .unavailable:
+            return "Release notes are unavailable in this older firmware bundle."
+        case .empty:
+            return "No release notes were included in this firmware bundle."
+        }
+    }
+}
+
 /// Choose a `.espdispfw` file, see what it can do for this panel, and push it.
 ///
 /// In its own file because ManagerWindow.swift is already 1239 lines, and because
@@ -231,6 +265,7 @@ struct FirmwareUpdateSheet: View {
             transportSection
             bundleSection
             if let bundle {
+                releaseNotesSection(bundle)
                 verdictSection(bundle)
                 if selectedTransport == .wifi, plan(bundle).canPush {
                     passwordSection
@@ -414,6 +449,41 @@ struct FirmwareUpdateSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func releaseNotesSection(_ bundle: FirmwareBundle) -> some View {
+        let presentation = FirmwareReleaseNotesPresentation.make(
+            version: bundle.firmwareVersion, items: bundle.releaseNotes)
+        Section {
+            releaseNotesContent(presentation)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(presentation.accessibilityLabel)
+        } header: {
+            Text("Release notes").accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder
+    private func releaseNotesContent(_ presentation: FirmwareReleaseNotesPresentation) -> some View {
+        switch presentation {
+        case .available(_, let items):
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("•")
+                        Text(verbatim: item)
+                    }
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        case .unavailable, .empty:
+            Text(presentation.fallbackText ?? "")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

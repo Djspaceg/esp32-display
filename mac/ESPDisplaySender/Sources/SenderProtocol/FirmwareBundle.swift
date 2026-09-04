@@ -195,6 +195,8 @@ public struct FirmwareBundle: Equatable, Sendable {
     public let sourceDirty: Bool
     /// Which tool wrote the file, e.g. `espdisp.py bundle`.
     public let tool: String
+    /// Ordered release-note items, or nil when a legacy bundle has no key.
+    public let releaseNotes: [String]?
     /// The images, in manifest order, which is also payload order.
     public let images: [Image]
     /// The application payloads, keyed by exact firmware target. Verified
@@ -335,7 +337,16 @@ public struct FirmwareBundle: Equatable, Sendable {
             throw FirmwareBundleError.truncatedManifest(
                 claimed: manifestBytes, available: total - headerBytes)
         }
-        let manifest = try decodeManifest(data[(base + headerBytes)..<(base + manifestEnd)])
+        let rawManifest = Data(data[(base + headerBytes)..<(base + manifestEnd)])
+        let duplicateKey = firstDuplicateManifestKey(in: rawManifest)
+        let decodedManifest = try decodeManifest(rawManifest)
+        if let duplicateKey {
+            throw FirmwareBundleError.duplicateManifestKey(
+                safeManifestKeyDisplay(duplicateKey))
+        }
+        guard let manifest = decodedManifest as? [String: Any] else {
+            throw FirmwareBundleError.manifestNotAnObject
+        }
 
         let missing = manifestKeys.filter { manifest[$0] == nil }
         guard missing.isEmpty else {
@@ -349,6 +360,7 @@ public struct FirmwareBundle: Equatable, Sendable {
         guard format == generation else {
             throw FirmwareBundleError.unsupportedFormat(found: format, supported: generation)
         }
+        let releaseNotes = try releaseNotes(from: manifest)
         guard let rawImages = manifest["images"] as? [Any], !rawImages.isEmpty else {
             throw FirmwareBundleError.noImages
         }
@@ -577,6 +589,7 @@ public struct FirmwareBundle: Equatable, Sendable {
             // file over a field that decides nothing.
             sourceDirty: (manifest["source_dirty"] as? Bool) ?? false,
             tool: try string(manifest["tool"], key: "tool", where: "the manifest"),
+            releaseNotes: releaseNotes,
             images: images,
             payloads: payloads,
             flashPayloads: flashPayloads)
@@ -958,17 +971,241 @@ public struct FirmwareBundle: Equatable, Sendable {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func decodeManifest(_ slice: Data) throws -> [String: Any] {
-        let object: Any
+    private enum ManifestScanKind: Equatable {
+        case root, object, array
+    }
+
+    private enum ManifestScanState: Equatable {
+        case value, after, key, colon, valueOrEnd
+    }
+
+    private struct ManifestScanFrame {
+        var kind: ManifestScanKind
+        var state: ManifestScanState
+        var names = Set<String>()
+    }
+
+    /// Scan only structural JSON tokens. JSONSerialization remains responsible
+    /// for native UTF-8 and JSON validity before any result is acted on.
+    private static func firstDuplicateManifestKey(in raw: Data) -> String? {
+        let bytes = Array(raw)
+        var index = 0
+        var candidate: String?
+        var frames = [ManifestScanFrame(kind: .root, state: .value)]
+
+        func skipWhitespace(_ position: inout Int) {
+            while position < bytes.count,
+                  bytes[position] == 0x09 || bytes[position] == 0x0A
+                    || bytes[position] == 0x0D || bytes[position] == 0x20 {
+                position += 1
+            }
+        }
+
+        func stringEnd(_ position: Int) -> Int? {
+            var position = position + 1
+            while position < bytes.count {
+                if bytes[position] == 0x22 { return position + 1 }
+                if bytes[position] == 0x5C {
+                    position += 1
+                    if position >= bytes.count { return nil }
+                }
+                position += 1
+            }
+            return nil
+        }
+
+        func beginValue() -> Bool {
+            skipWhitespace(&index)
+            guard index < bytes.count else { return false }
+            let frameIndex = frames.count - 1
+            let token = bytes[index]
+            frames[frameIndex].state = .after
+            if token == 0x7B {
+                frames.append(ManifestScanFrame(kind: .object, state: .key))
+                index += 1
+                return true
+            }
+            if token == 0x5B {
+                frames.append(ManifestScanFrame(kind: .array, state: .valueOrEnd))
+                index += 1
+                return true
+            }
+            if token == 0x22 {
+                guard let end = stringEnd(index) else { return false }
+                index = end
+                return true
+            }
+            guard token != 0x2C, token != 0x5D, token != 0x7D, token != 0x3A
+            else { return false }
+            let start = index
+            while index < bytes.count,
+                  bytes[index] != 0x09, bytes[index] != 0x0A,
+                  bytes[index] != 0x0D, bytes[index] != 0x20,
+                  bytes[index] != 0x2C, bytes[index] != 0x5D, bytes[index] != 0x7D {
+                index += 1
+            }
+            return index > start
+        }
+
+        while !frames.isEmpty {
+            let frameIndex = frames.count - 1
+            let frame = frames[frameIndex]
+            if frame.kind == .root {
+                if frame.state == .value {
+                    guard beginValue() else { return nil }
+                } else {
+                    skipWhitespace(&index)
+                    return index == bytes.count ? candidate : nil
+                }
+                continue
+            }
+            if frame.kind == .object {
+                if frame.state == .key {
+                    skipWhitespace(&index)
+                    guard index < bytes.count else { return nil }
+                    if bytes[index] == 0x7D {
+                        frames.removeLast()
+                        index += 1
+                        continue
+                    }
+                    guard bytes[index] == 0x22, let end = stringEnd(index) else {
+                        return nil
+                    }
+                    let token = Data(bytes[index..<end])
+                    guard let name = try? JSONSerialization.jsonObject(
+                        with: token, options: [.fragmentsAllowed]) as? String
+                    else { return nil }
+                    if frames[frameIndex].names.contains(name), candidate == nil {
+                        candidate = name
+                    }
+                    frames[frameIndex].names.insert(name)
+                    frames[frameIndex].state = .colon
+                    index = end
+                    continue
+                }
+                if frame.state == .colon {
+                    skipWhitespace(&index)
+                    guard index < bytes.count, bytes[index] == 0x3A else { return nil }
+                    frames[frameIndex].state = .value
+                    index += 1
+                    continue
+                }
+                if frame.state == .value {
+                    guard beginValue() else { return nil }
+                    continue
+                }
+                skipWhitespace(&index)
+                guard index < bytes.count else { return nil }
+                if bytes[index] == 0x2C {
+                    frames[frameIndex].state = .key
+                    index += 1
+                    continue
+                }
+                if bytes[index] == 0x7D {
+                    frames.removeLast()
+                    index += 1
+                    continue
+                }
+                return nil
+            }
+            if frame.state == .valueOrEnd {
+                skipWhitespace(&index)
+                guard index < bytes.count else { return nil }
+                if bytes[index] == 0x5D {
+                    frames.removeLast()
+                    index += 1
+                    continue
+                }
+                guard beginValue() else { return nil }
+                continue
+            }
+            skipWhitespace(&index)
+            guard index < bytes.count else { return nil }
+            if bytes[index] == 0x2C {
+                frames[frameIndex].state = .valueOrEnd
+                index += 1
+                continue
+            }
+            if bytes[index] == 0x5D {
+                frames.removeLast()
+                index += 1
+                continue
+            }
+            return nil
+        }
+        return nil
+    }
+
+    private static func safeManifestKeyDisplay(_ value: String) -> String {
+        value.unicodeScalars.map { scalar in
+            let code = scalar.value
+            if code >= 0x20, code <= 0x7E, code != 0x5C {
+                return String(scalar)
+            }
+            if code == 0x5C { return "\\\\" }
+            if code <= 0xFFFF { return String(format: "\\u%04X", code) }
+            let scalar16 = code - 0x10000
+            return String(format: "\\u%04X\\u%04X",
+                          0xD800 + (scalar16 >> 10), 0xDC00 + (scalar16 & 0x3FF))
+        }.joined()
+    }
+
+    private static func releaseNotes(from manifest: [String: Any]) throws -> [String]? {
+        guard manifest.keys.contains("release_notes") else { return nil }
+        guard let notes = manifest["release_notes"] as? [Any], (1...32).contains(notes.count)
+        else {
+            throw FirmwareBundleError.invalidReleaseNotes(
+                reason: "must be a list containing 1–32 items")
+        }
+        return try notes.enumerated().map { index, rawNote in
+            guard let note = rawNote as? String else {
+                throw FirmwareBundleError.invalidReleaseNote(
+                    index: index, reason: "item must be a string")
+            }
+            if let reason = releaseNoteItemReason(note) {
+                throw FirmwareBundleError.invalidReleaseNote(index: index, reason: reason)
+            }
+            return note
+        }
+    }
+
+    private static func releaseNoteItemReason(_ note: String) -> String? {
+        let scalars = Array(note.unicodeScalars)
+        guard (1...280).contains(scalars.count) else {
+            return "item text must contain 1–280 Unicode scalars"
+        }
+        for scalar in scalars where forbiddenReleaseNoteScalar(scalar.value) {
+            return String(format: "item text contains forbidden scalar U+%04X", scalar.value)
+        }
+        guard let first = scalars.first, let last = scalars.last,
+              !releaseNoteWhitespaceScalar(first.value), !releaseNoteWhitespaceScalar(last.value)
+        else { return "item text has forbidden leading or trailing whitespace" }
+        guard note.hasPrefix("Added ") || note.hasPrefix("Changed ")
+                || note.hasPrefix("Fixed ") || note.hasPrefix("Removed ")
+        else { return "item text must begin with Added, Changed, Fixed, or Removed" }
+        guard note.hasSuffix(".") || note.hasSuffix("!") || note.hasSuffix("?")
+        else { return "item text must end with '.', '!', or '?'" }
+        return nil
+    }
+
+    private static func forbiddenReleaseNoteScalar(_ value: UInt32) -> Bool {
+        value <= 0x1F || (0x7F...0x9F).contains(value) && value != 0x85
+            || (0xD800...0xDFFF).contains(value)
+    }
+
+    private static func releaseNoteWhitespaceScalar(_ value: UInt32) -> Bool {
+        (0x09...0x0D).contains(value) || value == 0x20 || value == 0x85
+            || value == 0xA0 || value == 0x1680 || (0x2000...0x200A).contains(value)
+            || value == 0x2028 || value == 0x2029 || value == 0x202F
+            || value == 0x205F || value == 0x3000
+    }
+
+    static func decodeManifest(_ slice: Data) throws -> Any {
         do {
-            object = try JSONSerialization.jsonObject(with: Data(slice), options: [])
+            return try JSONSerialization.jsonObject(with: slice, options: [])
         } catch {
             throw FirmwareBundleError.manifestNotJSON(error.localizedDescription)
         }
-        guard let manifest = object as? [String: Any] else {
-            throw FirmwareBundleError.manifestNotAnObject
-        }
-        return manifest
     }
 
     private static func string(_ value: Any?, key: String, where owner: String) throws -> String {
@@ -1048,8 +1285,11 @@ public enum FirmwareBundleError: Error, LocalizedError, Equatable {
     case malformedLengthLine(found: String)
     case truncatedManifest(claimed: Int, available: Int)
     case manifestNotJSON(String)
+    case duplicateManifestKey(String)
     case manifestNotAnObject
     case manifestMissingKeys([String])
+    case invalidReleaseNotes(reason: String)
+    case invalidReleaseNote(index: Int, reason: String)
     case unsupportedFormat(found: Int, supported: Int)
     case noImages
     case imageNotAnObject(index: Int)
@@ -1107,10 +1347,16 @@ public enum FirmwareBundleError: Error, LocalizedError, Equatable {
                 + "bytes follow the header. The file is truncated."
         case .manifestNotJSON(let reason):
             return "The bundle's manifest is not valid UTF-8 JSON: \(reason)"
+        case .duplicateManifestKey(let key):
+            return "bundle manifest: duplicate key \(key)"
         case .manifestNotAnObject:
             return "The bundle's manifest is not a JSON object."
         case .manifestMissingKeys(let keys):
             return "The bundle's manifest is missing \(keys.joined(separator: ", "))."
+        case .invalidReleaseNotes(let reason):
+            return "bundle manifest: release_notes: \(reason)"
+        case .invalidReleaseNote(let index, let reason):
+            return "bundle manifest: release_notes[\(index)]: \(reason)"
         case .unsupportedFormat(let found, let supported):
             return "The bundle's manifest says format \(found), but its magic line "
                 + "means format \(supported). The file contradicts itself."

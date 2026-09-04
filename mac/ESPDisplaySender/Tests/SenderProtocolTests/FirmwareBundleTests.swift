@@ -228,6 +228,55 @@ final class FirmwareBundleTests: XCTestCase {
         XCTAssertFalse(bundle.canFlashBlankDevice(chip: "esp32c6"))
     }
 
+    func testReleaseNotesFixtureAndMetadataValidation() throws {
+        let fixtureURL = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "release-notes-from-espdisp-v3",
+                withExtension: "espdispfw", subdirectory: "Fixtures"))
+        let fixture = try FirmwareBundle.read(Data(contentsOf: fixtureURL))
+        XCTAssertEqual(fixture.firmwareVersion, "1.4.2")
+        XCTAssertEqual(
+            fixture.releaseNotes,
+            ["Added generic fixture metadata.", "Fixed generic fixture ordering."])
+
+        let current = try Self.readBundle(
+            version: "1.4.2", images: [Self.c6Spec], generation: FirmwareBundle.format)
+        XCTAssertEqual(current.releaseNotes, ["Added generic metadata."])
+
+        let legacy = Self.bundleBytes(
+            Self.manifest(images: [Self.c6Spec], generation: FirmwareBundle.format),
+            payloads: Self.area([Self.c6Spec], generation: FirmwareBundle.format),
+            magic: FirmwareBundle.magic,
+            mutate: { $0.removeValue(forKey: "release_notes") })
+        XCTAssertNil(try FirmwareBundle.read(legacy).releaseNotes,
+                     "field-free format-3 bundles remain legacy-compatible")
+
+        func malformed(_ value: Any, _ expected: FirmwareBundleError) {
+            let data = Self.bundleBytes(
+                Self.manifest(images: [Self.c6Spec], generation: FirmwareBundle.format),
+                payloads: Self.area([Self.c6Spec], generation: FirmwareBundle.format),
+                magic: FirmwareBundle.magic,
+                mutate: { $0["release_notes"] = value })
+            expect(expected, reading: data)
+        }
+        malformed(NSNull(), .invalidReleaseNotes(reason: "must be a list containing 1–32 items"))
+        malformed([], .invalidReleaseNotes(reason: "must be a list containing 1–32 items"))
+        malformed([7], .invalidReleaseNote(index: 0, reason: "item must be a string"))
+        malformed(["Added no terminal punctuation"], .invalidReleaseNote(
+            index: 0, reason: "item text must end with '.', '!', or '?'"))
+    }
+
+    func testDuplicateManifestKeysTakePrecedence() throws {
+        let raw = Data("[{\"nested\":{\"a\":1,\"a\":2}}]".utf8)
+        XCTAssertTrue(try FirmwareBundle.decodeManifest(raw) is [Any])
+        let data = FirmwareBundle.magic + Self.lengthLine(raw.count) + raw
+        expect(.duplicateManifestKey("a"), reading: data)
+
+        let escaped = Data(#"{"release_notes":null,"release_\u006eotes":[]}"#.utf8)
+        let duplicate = FirmwareBundle.magic + Self.lengthLine(escaped.count) + escaped
+        expect(.duplicateManifestKey("release_notes"), reading: duplicate)
+    }
+
     // MARK: - round trips
 
     func testTwoImageBundleRoundTrips() throws {
@@ -1383,8 +1432,11 @@ final class FirmwareBundleTests: XCTestCase {
             .malformedLengthLine(found: "abc"),
             .truncatedManifest(claimed: 900, available: 40),
             .manifestNotJSON("unexpected token"),
+            .duplicateManifestKey("release_notes"),
             .manifestNotAnObject,
             .manifestMissingKeys(["tool", "images"]),
+            .invalidReleaseNotes(reason: "must be a list containing 1–32 items"),
+            .invalidReleaseNote(index: 0, reason: "item must be a string"),
             .unsupportedFormat(found: 2, supported: 1),
             .noImages,
             .imageNotAnObject(index: 1),
@@ -1672,6 +1724,9 @@ final class FirmwareBundleTests: XCTestCase {
                 return entry
             },
         ]
+        if generation >= FirmwareBundle.format {
+            manifest["release_notes"] = ["Added generic metadata."]
+        }
         manifest = settle(manifest)
         return manifest
     }
