@@ -860,10 +860,17 @@ image may claim multiple byte-compatible targets, while each exact target may be
 claimed only once. Older apps reject a newer format they cannot validate rather
 than weakening its integrity checks.
 
-The version is read out of the sketch (`FW_VERSION` in
-`firmware/display_stream/display_stream.ino`) rather than passed in as a flag, so
-the manifest cannot claim a version its images do not have — the app compares that
+The version is read from `FW_VERSION` in
+`firmware/display_stream/app_state.cpp` rather than passed in as a flag, so the
+manifest cannot claim a version its images do not have — the app compares that
 number against what a panel reports to decide whether to offer an update.
+
+Before compiling, `bundle` validates the repository-root `release-notes.md` and
+selects the section matching that firmware version for current format-3 output.
+Current bundles carry validated ordered `release_notes` metadata. Readers accept
+an absent key from legacy bundles but reject a present malformed value;
+`bundle-info` reports only its availability or item count. The app presents the
+validated strings literally in the Update Firmware screen.
 
 `--board` narrows the file to one exact target. A bundle containing only `c6`
 has nothing to offer either S3 target. Bundles are gitignored

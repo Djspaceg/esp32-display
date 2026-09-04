@@ -772,6 +772,7 @@ def payload_bytes(*keys_and_blobs):
 
 
 SAMPLE_PAYLOADS = (("c6", FAKE_C6), ("s3-175", FAKE_S3))
+GENERIC_RELEASE_NOTES = ["Added generic bundle fixture metadata."]
 
 
 def sample_manifest(entries=None):
@@ -781,6 +782,7 @@ def sample_manifest(entries=None):
         "1.2.0",
         entries,
         "2026-01-02T03:04:05Z",
+        release_notes=GENERIC_RELEASE_NOTES,
         source_commit="a" * 40,
         source_dirty=False,
     )
@@ -1597,7 +1599,11 @@ def test_bundle_manifest_offsets():
     check_equal(manifest["source_commit"], "a" * 40, "provenance is carried")
     check_equal(manifest["source_dirty"], False, "and so is cleanliness")
     check_equal(manifest["tool"], "espdisp.py bundle", "who wrote it")
-    check_equal(sorted(manifest), sorted(espdisp.MANIFEST_KEYS), "no key is missing")
+    check_equal(
+        sorted(manifest), sorted(espdisp.MANIFEST_KEYS + ("release_notes",)),
+        "current writer adds release_notes to required manifest keys")
+    check_equal(manifest["release_notes"], GENERIC_RELEASE_NOTES,
+                "current writer preserves ordered release notes")
     for image in manifest["images"]:
         check_equal(
             sorted(image), sorted(espdisp.IMAGE_KEYS_V3), "no image key is missing")
@@ -1633,7 +1639,7 @@ def test_bundle_manifest_offsets():
     for size in (1, 9, 10, 99, 100, 617, 1024, 65536):
         blob = b"\xa5" * size
         one = espdisp.bundle_manifest(
-            "1.2.0", [image_entry("c6", blob)], "2026-01-02T03:04:05Z")
+            "1.2.0", [image_entry("c6", blob)], "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
         encoded = espdisp.encode_manifest(one)
         image = one["images"][0]
         check_equal(
@@ -1654,12 +1660,12 @@ def test_bundle_manifest_offsets():
     # way every hash still agreed with.
     entry = image_entry("c6", FAKE_C6)
     parts_before = [dict(part) for part in entry["flash_parts"]]
-    espdisp.bundle_manifest("1.2.0", [entry], "2026-01-02T03:04:05Z")
+    espdisp.bundle_manifest("1.2.0", [entry], "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
     check_equal(entry["flash_parts"], parts_before, "the caller's parts are untouched")
     check("offset" not in entry, "and the caller's image gained no offset")
 
     check_fails(
-        lambda: espdisp.bundle_manifest("1.2.0", [], "2026-01-02T03:04:05Z"),
+        lambda: espdisp.bundle_manifest("1.2.0", [], "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
         "at least one image",
         "a manifest with no images is refused")
     # This tool writes generation 2 only, so an image with nothing for a blank
@@ -1669,7 +1675,7 @@ def test_bundle_manifest_offsets():
             "1.2.0",
             [{k: v for k, v in image_entry("c6", FAKE_C6).items()
               if k != "flash_parts"}],
-            "2026-01-02T03:04:05Z"),
+            "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
         "carries no flash_parts",
         "an image with no flash parts at all is refused by the writer")
 
@@ -1677,19 +1683,19 @@ def test_bundle_manifest_offsets():
     check_fails(
         lambda: espdisp.bundle_manifest(
             "1.2.0", [dict(image_entry("c6", FAKE_C6), targets=[])],
-            "2026-01-02T03:04:05Z"),
+            "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
         "non-empty targets list",
         "format 3 rejects an empty targets list")
     check_fails(
         lambda: espdisp.bundle_manifest(
             "1.2.0", [dict(image_entry("c6", FAKE_C6), targets=["   "])],
-            "2026-01-02T03:04:05Z"),
+            "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
         "no usable target",
         "format 3 rejects a blank target string")
     check_fails(
         lambda: espdisp.bundle_manifest(
             "1.2.0", [dict(image_entry("c6", FAKE_C6), targets=["c6", "c6"])],
-            "2026-01-02T03:04:05Z"),
+            "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
         "lists target c6 twice",
         "one image cannot repeat an exact target")
 
@@ -1764,7 +1770,7 @@ def test_bundle_round_trip():
         "shared flash parts are also keyed by each exact target")
 
     one = espdisp.bundle_manifest(
-        "1.2.0", [image_entry("s3-175", FAKE_S3)], "2026-01-02T03:04:05Z")
+        "1.2.0", [image_entry("s3-175", FAKE_S3)], "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
     _, only, only_parts = espdisp.unpack_bundle(
         espdisp.pack_bundle(
             one, {"s3-175": FAKE_S3}, sample_flash_payloads("s3-175")))
@@ -1791,7 +1797,7 @@ def test_pack_bundle_refusals():
         entry = image_entry("c6", FAKE_C6)
         entry.update(changes)
         return espdisp.bundle_manifest(
-            "1.2.0", [entry], "2026-01-02T03:04:05Z")
+            "1.2.0", [entry], "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
 
     def one_image_with_parts(mutate):
         """A settled single-image manifest whose flash parts `mutate` rewrote."""
@@ -2113,7 +2119,7 @@ def test_unpack_bundle_refusals():
     # be reached.
     overrun = espdisp.bundle_manifest(
         "1.2.0", [dict(image_entry("c6", FAKE_C6), bytes=len(FAKE_C6) + 64)],
-        "2026-01-02T03:04:05Z")
+        "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
     check_fails(
         lambda: espdisp.unpack_bundle(
             handmade_bundle(espdisp.encode_manifest(overrun), FAKE_C6)),
@@ -2136,7 +2142,7 @@ def test_unpack_bundle_refusals():
     ]
     check_fails(
         lambda: espdisp.bundle_manifest(
-            "1.2.0", duplicate_target_entries, "2026-01-02T03:04:05Z"),
+            "1.2.0", duplicate_target_entries, "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
         "target s3-175 is claimed",
         "the same exact target claimed twice")
 
@@ -2786,6 +2792,145 @@ def test_describe_bundle():
         check(role not in older, "and it claims no %s" % role)
 
 
+def test_release_notes_source_and_manifest_contract():
+    """The bundle's authoring and external-metadata contracts agree exactly."""
+    def source_failure(raw, version, expected, label):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "release-notes.md")
+            with open(path, "wb") as source:
+                source.write(raw)
+            try:
+                espdisp.release_notes_for_version(path, version)
+            except espdisp.Fail as exc:
+                check_equal(str(exc), expected % path, label)
+            else:
+                check(False, "%s: did not refuse" % label)
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "release-notes.md")
+        document = (
+            b"# Release Notes\n\n## 2.0.0\n\n- Fixed a newer issue.\n\n"
+            b"## 1.4.2\n\n- Added generic selected metadata.\n"
+        )
+        with open(path, "wb") as source:
+            source.write(document)
+        check_equal(
+            espdisp.release_notes_for_version(path, "1.4.2"),
+            ["Added generic selected metadata."],
+            "release source selects exact current SemVer heading")
+    source_failure(
+        b"# Notes\n", "1.4.2",
+        "release notes %s:1: section none: expected exact title '# Release Notes'",
+        "source title diagnostic")
+    source_failure(
+        b"# Release Notes\n\n## 1.4.2\n\n- Added missing punctuation\n", "1.4.2",
+        "release notes %s:5: section 1.4.2: item text must end with '.', '!', or '?'",
+        "source item diagnostic")
+    source_failure(
+        b"# Release Notes\n\n## 1.4.2\r\n", "1.4.2",
+        "release notes %s:3: section 1.4.2: carriage return byte is not allowed",
+        "CR wins before decoding or grammar")
+    source_failure(
+        b"# Release Notes\n\xff", "1.4.2",
+        "release notes %s: byte 16: line 2: not valid UTF-8",
+        "UTF-8 diagnostic includes byte and LF line")
+    check_fails(
+        lambda: espdisp.release_notes_for_version("not opened", "bad\nversion"),
+        "requested FW_VERSION 'bad\\u000Aversion' is not SemVer 2.0.0",
+        "requested version is checked before source I/O")
+    check_equal(espdisp.compare_semver("1.0.0-alpha.1", "1.0.0-alpha.beta"), -1,
+                "SemVer prerelease numeric identifiers sort before text")
+    check_equal(espdisp.compare_semver("1.0.0+one", "1.0.0+two"), 0,
+                "SemVer build metadata does not affect precedence")
+    check_equal(espdisp.parse_semver("1.0.0-01"), None,
+                "SemVer numeric prerelease identifiers cannot have leading zeros")
+
+    check_fails(
+        lambda: espdisp.bundle_manifest(
+            "1.2.0", [image_entry("c6", FAKE_C6)], "2026-01-02T03:04:05Z",
+            release_notes=[]),
+        "release_notes: must be a list containing 1–32 items",
+        "writer requires nonempty release notes")
+    manifest = sample_manifest()
+    check_equal(
+        espdisp.validated_manifest_release_notes(manifest), GENERIC_RELEASE_NOTES,
+        "manifest validator preserves ordered metadata")
+    legacy = handmade_manifest([image_entry("c6", FAKE_C6)])
+    legacy_data = handmade_bundle(
+        espdisp.encode_manifest(legacy), payload_bytes(("c6", FAKE_C6)))
+    check_accepts(lambda: espdisp.unpack_bundle(legacy_data),
+                  "field-free format-3 bundle remains readable")
+    check_fails(
+        lambda: espdisp.unpack_bundle(handmade_bundle(b'{"a":1,"a":2}')),
+        "bundle manifest: duplicate key a",
+        "duplicate manifest keys win before required-field validation")
+    check_fails(
+        lambda: espdisp.unpack_bundle(handmade_bundle(b'{"release_notes":null,"release_\\u006eotes":[]}')),
+        "bundle manifest: duplicate key release_notes",
+        "escaped-equivalent release-note key is a duplicate")
+    check_fails(
+        lambda: espdisp.unpack_bundle(handmade_bundle(b'{"a":1,"a":')),
+        "bundle manifest is not valid UTF-8 JSON",
+        "native malformed JSON error wins over an incomplete duplicate scan")
+    fixture_app = b"fixture-app"
+    fixture_parts = {
+        "bootloader": b"fixture-boot",
+        "partitions": b"fixture-partitions",
+        "boot_app0": b"fixture-ota",
+    }
+    fixture_entries = [{
+        "board": "c6", "targets": ["c6"], "chip": "esp32c6",
+        "fqbn": "esp32:esp32:esp32c6", "filename": "fixture.bin",
+        "bytes": len(fixture_app), "sha256": espdisp.sha256_hex(fixture_app),
+        "app_address": 0x10000,
+        "flash_parts": [{
+            "role": role, "address": address, "filename": role + ".bin",
+            "bytes": len(fixture_parts[role]),
+            "sha256": espdisp.sha256_hex(fixture_parts[role]),
+        } for role, address in (
+            ("bootloader", 0), ("partitions", 0x8000), ("boot_app0", 0xE000))],
+    }]
+    fixture_manifest = espdisp.bundle_manifest(
+        "1.4.2", fixture_entries, "2026-01-02T03:04:05Z",
+        release_notes=["Added generic fixture metadata.", "Fixed generic fixture ordering."],
+        source_commit="a" * 40)
+    fixture_bytes = espdisp.pack_bundle(
+        fixture_manifest, {"c6": fixture_app}, {"c6": fixture_parts})
+    fixture_path = os.path.join(
+        espdisp.REPO_ROOT, "mac", "ESPDisplaySender", "Tests", "SenderProtocolTests",
+        "Fixtures", "release-notes-from-espdisp-v3.espdispfw")
+    with open(fixture_path, "rb") as fixture:
+        check_equal(fixture.read(), fixture_bytes,
+                    "committed Swift fixture matches Python format-3 serialization")
+
+    description = "\n".join(espdisp.describe_bundle(manifest))
+    check("release notes: 1 item(s)" in description,
+          "bundle-info description reports release-note count")
+    check(GENERIC_RELEASE_NOTES[0] not in description,
+          "bundle-info description never exposes release-note prose")
+
+
+def test_bundle_release_notes_preflight_order():
+    args = type("BundleArgs", (), {"board": None, "output": None})()
+    with unittest.mock.patch.object(
+        espdisp, "sketch_fw_version_declaration", return_value=("not-a-version", 7)), \
+         unittest.mock.patch.object(
+             espdisp, "bundle_board_keys", side_effect=AssertionError("board lookup ran")):
+        check_fails(
+            lambda: espdisp.cmd_bundle(args),
+            "firmware/display_stream/app_state.cpp:7: FW_VERSION 'not-a-version' is not SemVer 2.0.0",
+            "invalid FW_VERSION stops before board resolution")
+    with unittest.mock.patch.object(
+        espdisp, "sketch_fw_version_declaration", return_value=("1.4.2", 7)), \
+         unittest.mock.patch.object(
+             espdisp, "release_notes_for_version", side_effect=espdisp.Fail("source failed")), \
+         unittest.mock.patch.object(
+             espdisp, "bundle_board_keys", side_effect=AssertionError("board lookup ran")):
+        check_fails(
+            lambda: espdisp.cmd_bundle(args), "source failed",
+            "release-note preflight stops before board resolution")
+
+
 def main():
     test_board_table()
     test_argparse_board_targets()
@@ -2799,6 +2944,8 @@ def main():
     test_espota_command()
     test_app_image_picks_the_app_not_the_flash_image()
     test_fw_version_from_sketch()
+    test_release_notes_source_and_manifest_contract()
+    test_bundle_release_notes_preflight_order()
     test_bundle_length_line()
     test_bundle_layout_is_pinned()
     test_generation_one_layout_is_pinned_and_still_read()
