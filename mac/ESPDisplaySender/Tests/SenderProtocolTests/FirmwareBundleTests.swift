@@ -243,6 +243,20 @@ final class FirmwareBundleTests: XCTestCase {
             version: "1.4.2", images: [Self.c6Spec], generation: FirmwareBundle.format)
         XCTAssertEqual(current.releaseNotes, ["Added generic metadata."])
 
+        let interiorNotes = ["Added interior\u{0085}content.", "Fixed wrapped\u{2028}content?"]
+        let interior = Self.bundleBytes(
+            Self.manifest(images: [Self.c6Spec], generation: FirmwareBundle.format),
+            payloads: Self.area([Self.c6Spec], generation: FirmwareBundle.format),
+            magic: FirmwareBundle.magic,
+            mutate: { $0["release_notes"] = interiorNotes })
+        XCTAssertEqual(try FirmwareBundle.read(interior).releaseNotes, interiorNotes)
+
+        for generation in [FirmwareBundle.formatV1, FirmwareBundle.formatV2] {
+            XCTAssertNil(
+                try Self.readBundle(
+                    version: "1.4.2", images: [Self.c6Spec], generation: generation).releaseNotes,
+                "format \(generation) bundles without metadata remain legacy-compatible")
+        }
         let legacy = Self.bundleBytes(
             Self.manifest(images: [Self.c6Spec], generation: FirmwareBundle.format),
             payloads: Self.area([Self.c6Spec], generation: FirmwareBundle.format),
@@ -251,30 +265,94 @@ final class FirmwareBundleTests: XCTestCase {
         XCTAssertNil(try FirmwareBundle.read(legacy).releaseNotes,
                      "field-free format-3 bundles remain legacy-compatible")
 
-        func malformed(_ value: Any, _ expected: FirmwareBundleError) {
+        func malformed(_ value: Any, _ expected: FirmwareBundleError, _ label: String) {
             let data = Self.bundleBytes(
                 Self.manifest(images: [Self.c6Spec], generation: FirmwareBundle.format),
                 payloads: Self.area([Self.c6Spec], generation: FirmwareBundle.format),
                 magic: FirmwareBundle.magic,
                 mutate: { $0["release_notes"] = value })
-            expect(expected, reading: data)
+            expect(expected, reading: data, label)
         }
-        malformed(NSNull(), .invalidReleaseNotes(reason: "must be a list containing 1–32 items"))
-        malformed([], .invalidReleaseNotes(reason: "must be a list containing 1–32 items"))
-        malformed([7], .invalidReleaseNote(index: 0, reason: "item must be a string"))
-        malformed(["Added no terminal punctuation"], .invalidReleaseNote(
-            index: 0, reason: "item text must end with '.', '!', or '?'"))
+        let containerError = FirmwareBundleError.invalidReleaseNotes(
+            reason: "must be a list containing 1–32 items")
+        malformed(NSNull(), containerError, "null metadata")
+        malformed("Added valid text.", containerError, "string metadata")
+        malformed(["note": "Added valid text."], containerError, "object metadata")
+        malformed([] as [Any], containerError, "empty metadata")
+        malformed(Array(repeating: "Added valid text.", count: 33), containerError,
+                  "too many metadata items")
+        malformed([7], .invalidReleaseNote(index: 0, reason: "item must be a string"),
+                  "non-string item")
+        malformed([""], .invalidReleaseNote(
+            index: 0, reason: "item text must contain 1–280 Unicode scalars"),
+            "empty item")
+        malformed(["Added bad\u{0000}."], .invalidReleaseNote(
+            index: 0, reason: "item text contains forbidden scalar U+0000"),
+            "control scalar")
+        malformed([" Added valid text."], .invalidReleaseNote(
+            index: 0, reason: "item text has forbidden leading or trailing whitespace"),
+            "edge whitespace")
+        malformed(["Other valid text."], .invalidReleaseNote(
+            index: 0, reason: "item text must begin with Added, Changed, Fixed, or Removed"),
+            "required verb")
+        malformed(["Added missing punctuation"], .invalidReleaseNote(
+            index: 0, reason: "item text must end with '.', '!', or '?'"),
+            "terminal punctuation")
+        malformed(["Added " + String(repeating: "x", count: 274) + "."],
+                  .invalidReleaseNote(
+                    index: 0, reason: "item text must contain 1–280 Unicode scalars"),
+                  "scalar upper bound")
+
+        let unpaired = Self.bundleBytes(
+            manifestText: #"{"release_notes":["Added \ud800."]}"#, payloads: Data())
+        XCTAssertThrowsError(try FirmwareBundle.read(unpaired)) { error in
+            guard case .manifestNotJSON = error as? FirmwareBundleError else {
+                return XCTFail("wrong error for escaped unpaired surrogate: \(error)")
+            }
+        }
     }
 
     func testDuplicateManifestKeysTakePrecedence() throws {
-        let raw = Data("[{\"nested\":{\"a\":1,\"a\":2}}]".utf8)
-        XCTAssertTrue(try FirmwareBundle.decodeManifest(raw) is [Any])
-        let data = FirmwareBundle.magic + Self.lengthLine(raw.count) + raw
-        expect(.duplicateManifestKey("a"), reading: data)
+        func expectDuplicate(_ text: String, key: String, _ label: String) {
+            let expected = FirmwareBundleError.duplicateManifestKey(key)
+            expect(expected, reading: Self.bundleBytes(manifestText: text, payloads: Data()), label)
+            XCTAssertEqual(
+                expected.localizedDescription, "bundle manifest: duplicate key \(key)", label)
+        }
 
-        let escaped = Data(#"{"release_notes":null,"release_\u006eotes":[]}"#.utf8)
-        let duplicate = FirmwareBundle.magic + Self.lengthLine(escaped.count) + escaped
-        expect(.duplicateManifestKey("release_notes"), reading: duplicate)
+        let arrayRoot = Data("[{\"nested\":{\"a\":1,\"a\":2}}]".utf8)
+        XCTAssertTrue(try FirmwareBundle.decodeManifest(arrayRoot) is [Any])
+        let arrayData = FirmwareBundle.magic + Self.lengthLine(arrayRoot.count) + arrayRoot
+        expect(.duplicateManifestKey("a"), reading: arrayData,
+               "nested duplicates win before an array-root error")
+
+        expectDuplicate(
+            #"{"release_notes":null,"release_notes":["Added valid text."]}"#,
+            key: "release_notes", "null then valid release_notes")
+        expectDuplicate(
+            #"{"release_notes":["Added valid text."],"release_notes":null}"#,
+            key: "release_notes", "valid then null release_notes")
+        expectDuplicate(
+            #"{"release_notes":null,"release_\u006eotes":["Added valid text."]}"#,
+            key: "release_notes", "escape-equivalent release_notes")
+        expectDuplicate(
+            #"{"images":{"a":1,"a":2}}"#, key: "a", "nested image-object duplicate")
+        expectDuplicate(
+            #"{"line\n":1,"line\u000A":2}"#, key: #"line\u000A"#,
+            "control key diagnostic is safe")
+        expectDuplicate(
+            #"{"a\\b":1,"a\u005Cb":2}"#, key: #"a\\b"#,
+            "backslash key diagnostic is safe")
+        expectDuplicate(
+            #"{"\uD83D\uDE00":1,"\uD83D\uDE00":2}"#, key: #"\uD83D\uDE00"#,
+            "supplementary key diagnostic is safe")
+
+        let malformed = Self.bundleBytes(manifestText: #"{"a":truee,"a":2}"#, payloads: Data())
+        XCTAssertThrowsError(try FirmwareBundle.read(malformed)) { error in
+            guard case .manifestNotJSON = error as? FirmwareBundleError else {
+                return XCTFail("malformed JSON should win over duplicate: \(error)")
+            }
+        }
     }
 
     // MARK: - round trips
