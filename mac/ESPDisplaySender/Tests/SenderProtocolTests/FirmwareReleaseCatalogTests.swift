@@ -72,7 +72,7 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
         ]
         let flashes: [String: [Int]] = [
             "c6": [8 * 1024 * 1024],
-            "s3": [8 * 1024 * 1024, 16 * 1024 * 1024],
+            "s3": [8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024],
             "p4": [32 * 1024 * 1024],
         ]
         var families = [String: Any]()

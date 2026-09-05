@@ -77,7 +77,8 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
         let expected: [String: (chip: String, profiles: [String], flash: [Int], partition: String, boot: Int)] = [
             "c6": ("esp32c6", ["st7789", "jd9853"], [8 * 1024 * 1024], "default-8m", 0),
             "s3": ("esp32s3", ["gc9107", "st7789-154", "co5300", "st77916"],
-                   [8 * 1024 * 1024, 16 * 1024 * 1024], "universal-8m-ota", 0),
+                   [8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024],
+                   "universal-8m-ota", 0),
             "p4": ("esp32p4", ["st7703-4b"], [32 * 1024 * 1024], "p4-32m-ota", 0x2000),
         ]
         for family in requiredFamilies.sorted() {
