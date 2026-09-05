@@ -39,12 +39,11 @@ carriers. S3 accepts automatic detection only when exactly one compatible
 profile is found. Zero or multiple candidates leave display and networking
 disabled while serial `CFGBOARD` remains available as a recovery override.
 
-The S3 artifact uses the 8 MiB common-denominator dual-OTA layout. The Doom
-engine and CO5300 entry path are linked into the universal image but gated by
-the detected runtime profile. Its large WAD stays in the historical raw region
-above 8 MiB on 16 MiB CO5300 hardware, outside the common partition table, so
-normal uploads preserve an existing WAD without making the image unsafe for
-8 MiB carriers.
+The S3 artifact uses the 8 MiB common-denominator dual-OTA layout. Doom source
+remains available only in a separate developer/profile-gated build. Hardware
+smoke testing showed that linking Doom into the canonical image consumed enough
+internal RAM to make SPI DMA rotation repaint allocation fail, so canonical
+artifacts contain neither Doom code nor a WAD payload.
 
 P4 uses the Arduino `prev3` profile required by the attached revision-v1.3
 silicon. `Platform("p4")` contains only reusable chip/toolchain facts; the
@@ -128,7 +127,7 @@ under motion, and odd-orientation touch corners remain unverified.
 
 | Profile | Current evidence | Residual gap |
 | --- | --- | --- |
-| `co5300` | Runtime detection, frame counters, two rotations, brightness, power, and preserved WAD region on attached hardware | No independent visual observer for the latest image |
+| `co5300` | Runtime detection, frame counters, two rotations, brightness, and power on attached hardware | No independent visual observer for the latest image |
 | `gc9107` | Family compile and host profile tests | No attached carrier for current visible smoke testing |
 | `st7789-154` | Family compile and host profile tests | No attached carrier for current runtime testing |
 | `st77916` | Family compile and host profile tests | No attached carrier for current runtime testing |
