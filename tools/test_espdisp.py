@@ -1576,7 +1576,7 @@ def test_collect_flash_parts():
                 unittest.mock.patch.object(
                     espdisp, "core_bootloader_address", lambda chip: 0x0):
             entries, payloads = espdisp.collect_flash_parts(
-                espdisp.BOARDS["s3-175"], export)
+                espdisp.FAMILIES["s3"], export)
 
         check_equal(
             [entry["role"] for entry in entries],
@@ -1621,7 +1621,7 @@ def test_collect_flash_parts():
                     espdisp, "core_bootloader_address", lambda chip: 0x0):
             check_fails(
                 lambda: espdisp.collect_flash_parts(
-                    espdisp.BOARDS["s3-175"], export),
+                    espdisp.FAMILIES["s3"], export),
                 "is empty",
                 "a zero-byte binary in the export")
         # A missing one names the file rather than the role, because the fix is to
@@ -1632,7 +1632,7 @@ def test_collect_flash_parts():
                     espdisp, "core_bootloader_address", lambda chip: 0x0):
             check_fails(
                 lambda: espdisp.collect_flash_parts(
-                    espdisp.BOARDS["s3-175"], export),
+                    espdisp.FAMILIES["s3"], export),
                 "expected exactly one *.ino.partitions.bin",
                 "an export with no partition table in it")
     finally:
@@ -3264,10 +3264,10 @@ def test_release_notes_reader_vectors():
 
 def test_bundle_release_notes_preflight_barriers():
     """All declaration/source failures happen before bundle side effects."""
-    args = type("BundleArgs", (), {"board": None, "output": None})()
+    args = type("BundleArgs", (), {"family": ["c6"], "output": None})()
     blockers = [
         unittest.mock.patch.object(
-            espdisp, "bundle_board_keys", side_effect=AssertionError("board lookup ran")),
+            espdisp, "bundle_family_keys", side_effect=AssertionError("family lookup ran")),
         unittest.mock.patch.object(
             espdisp, "git_provenance", side_effect=AssertionError("provenance ran")),
         unittest.mock.patch.object(
@@ -3296,7 +3296,7 @@ def test_bundle_release_notes_preflight_barriers():
 
     blockers = [
         unittest.mock.patch.object(
-            espdisp, "bundle_board_keys", side_effect=AssertionError("board lookup ran")),
+            espdisp, "bundle_family_keys", side_effect=AssertionError("family lookup ran")),
         unittest.mock.patch.object(
             espdisp, "git_provenance", side_effect=AssertionError("provenance ran")),
         unittest.mock.patch.object(
@@ -3355,11 +3355,23 @@ def test_universal_family_catalog_and_cli():
         ("gc9107", "st7789-154", "co5300", "st77916"),
         "S3 maps all runtime profiles into one family")
     check_equal(espdisp.FAMILIES["p4"].profiles, ("st7703-4b",),
-                "P4 keeps its physical profile internal")
+                "P4 advertises its exact physical profile")
+    check_equal(espdisp.FAMILIES["p4"].build_target, "p4-4b",
+                "P4 family composes the exact 4B build target")
+    check_equal(espdisp.BUILD_TARGETS["p4-4b"].platform, "p4",
+                "the 4B build target references the reusable P4 platform")
+    check_equal(espdisp.BUILD_TARGETS["p4-4b"].required_profile,
+                None, "P4 release remains family-universal")
+    check("partition_csv" not in espdisp.Platform._fields and
+          "extra_flags" not in espdisp.Platform._fields,
+          "chip platforms contain no carrier selector or partition source")
     check_equal(espdisp.FAMILIES["s3"].partition_csv, "partitions_s3.csv",
                 "S3 uses the common 8 MiB partition layout")
-    check_equal(espdisp.FAMILIES["s3"].extra_flags, (),
-                "S3 family build has no profile selector")
+    check_equal(espdisp.FAMILIES["s3"].extra_flags,
+                ("-DESPDISP_DOOM_RUNTIME",),
+                "S3 family build enables profile-gated Doom source")
+    check_equal(espdisp.FAMILIES["s3"].extra_library_dirs, ("firmware",),
+                "S3 family build links the profile-gated Doom library")
     check_equal(espdisp.FAMILIES["p4"].extra_flags,
                 ("-DESPDISP_BOARD_P4_4B",),
                 "P4 retains its internal carrier selector")
@@ -3371,8 +3383,12 @@ def test_universal_family_catalog_and_cli():
 
     parser = espdisp.build_parser()
     for command in ("compile", "flash"):
-        args = parser.parse_args([command, "--family", "s3"])
+        argv = [command, "--family", "s3"]
+        args = parser.parse_args(argv)
         check_equal(args.family, "s3", "%s accepts the family" % command)
+    p4_flash = parser.parse_args(["flash", "--family", "p4"])
+    check_equal(p4_flash.family, "p4",
+                "P4 flash accepts the family release name")
     ota = parser.parse_args(["ota", "panel.local", "--family", "p4"])
     check_equal(ota.family, "p4", "OTA accepts P4 family")
     bundle = parser.parse_args(["bundle", "--family", "c6"])
@@ -3405,21 +3421,29 @@ def test_universal_family_catalog_and_cli():
         conflict = preprocess_board_config("ESPDISP_BOARD_P4_4B", selector)
         check(conflict.returncode != 0 and "exactly one compatible" in conflict.stderr,
               "P4 rejects conflicting selector %s" % selector)
+    doom_conflict = preprocess_board_config(
+        "ESPDISP_BOARD_P4_4B", "ESPDISP_DOOM_RUNTIME")
+    check(doom_conflict.returncode != 0 and
+          "must not enable the S3 Doom runtime" in doom_conflict.stderr,
+          "P4 rejects the S3-only runtime feature")
 
 
 def test_family_resolution_and_discovery():
     blank = espdisp.PortInfo("/dev/cu.usbmodem1", [], "unknown")
     known = espdisp.PortInfo("/dev/cu.usbmodem2", ["s3"], "S3")
+    known_p4 = espdisp.PortInfo("/dev/cu.usbmodem3", ["p4"], "P4 chip")
     check_equal(espdisp.resolve_family(None, known).key, "s3",
-                "enumerated family resolves")
+                "enumerated universal family resolves")
     check_equal(espdisp.resolve_family("p4", blank).key, "p4",
-                "explicit family resolves")
+                "explicit P4 family resolves")
+    check_equal(espdisp.resolve_family(None, known_p4).key, "p4",
+                "enumerated P4 family resolves")
     check_fails(lambda: espdisp.resolve_family("c6", known), "contradicts",
                 "explicit family contradiction")
     with unittest.mock.patch.object(espdisp, "probe_chip", return_value="esp32p4"), \
          unittest.mock.patch("sys.stdout", io.StringIO()):
         check_equal(espdisp.resolve_family(None, blank).key, "p4",
-                    "chip probe resolves P4 family")
+                    "P4 chip probe resolves its family release")
     with unittest.mock.patch.object(espdisp, "probe_chip", return_value=None), \
          unittest.mock.patch("sys.stdout", io.StringIO()):
         check_fails(lambda: espdisp.resolve_family(None, blank),
@@ -3574,6 +3598,7 @@ def main():
     test_fw_version_from_sketch()
     test_release_notes_source_and_manifest_contract()
     test_bundle_release_notes_preflight_order()
+    test_bundle_release_notes_preflight_barriers()
     test_release_notes_diagnostics_and_precedence()
     test_release_notes_reader_vectors()
     test_bundle_length_line()
@@ -3584,6 +3609,7 @@ def main():
     test_bootloader_address_from_boards_txt()
     test_core_lookups()
     test_export_binary()
+    test_collect_flash_parts()
     test_bundle_manifest_offsets()
     test_bundle_round_trip()
     test_pack_bundle_refusals()

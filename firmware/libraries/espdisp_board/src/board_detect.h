@@ -92,15 +92,15 @@ inline board::Variant probeS3(bool verbose = true,
   bool st77916 = false;
   bool st7789 = false;
   if (flashBytes > 8u * 1024u * 1024u) {
-    static const uint8_t coAddresses[] = {0x15, 0x34, 0x6A, 0x6B};
-    static const uint8_t st77916Addresses[] = {0x15, 0x20};
-    static const uint8_t st7789Addresses[] = {0x15, 0x6A, 0x6B};
-    co5300 = probeExpectedI2c(15, 14, coAddresses,
-                             sizeof(coAddresses), "co5300", verbose);
-    st77916 = probeExpectedI2c(11, 10, st77916Addresses,
-                              sizeof(st77916Addresses), "st77916", verbose);
-    st7789 = probeExpectedI2c(42, 41, st7789Addresses,
-                             sizeof(st7789Addresses), "st7789-154", verbose);
+    co5300 = probeExpectedI2c(
+        15, 14, board::S3_CO5300_PROBE_ADDRESSES,
+        sizeof(board::S3_CO5300_PROBE_ADDRESSES), "co5300", verbose);
+    st77916 = probeExpectedI2c(
+        11, 10, board::S3_ST77916_PROBE_ADDRESSES,
+        sizeof(board::S3_ST77916_PROBE_ADDRESSES), "st77916", verbose);
+    st7789 = probeExpectedI2c(
+        42, 41, board::S3_ST7789_154_PROBE_ADDRESSES,
+        sizeof(board::S3_ST7789_154_PROBE_ADDRESSES), "st7789-154", verbose);
   }
   const int candidates =
       (flashBytes > 0 && flashBytes <= 8u * 1024u * 1024u ? 1 : 0) +

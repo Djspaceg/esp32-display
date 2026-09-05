@@ -9,7 +9,7 @@
 #include "prefs_store.h"
 #include "ui_screens.h"
 
-#if defined(ESPDISP_DOOM_S3_175)
+#if defined(ESPDISP_DOOM_RUNTIME)
 #include <doom_mode.h>
 #endif
 
@@ -89,13 +89,14 @@ void handleButton() {
   } else if (!down && wasDown) {
     wasDown = false;
     if (!longFired && now - downAt >= DEBOUNCE_MS) {
-#if defined(ESPDISP_DOOM_S3_175)
+#if defined(ESPDISP_DOOM_RUNTIME)
       // Enter through a one-shot reboot rather than tearing down a live stream.
       // The next setup consumes the flag before starting networking, allocating
       // normal frame buffers, or subscribing loopTask to the watchdog, giving
       // Doom exclusive panel and PSRAM ownership. Any crash then boots normally
       // because the flag has already been removed.
-      if (doom_check_triple_tap(now, true)) {
+      if (boardVariant == board::Variant::AmoledCo5300 &&
+          doom_check_triple_tap(now, true)) {
         Preferences prefs;
         bool saved = prefs.begin("espdisp", false);
         if (saved) {

@@ -4,8 +4,9 @@
 // functions that doomgeneric_esp32s3.c calls. It reuses the board's existing
 // panel, touch, and I2C infrastructure rather than re-initializing them.
 //
-// Compiled only for the exact s3-175 target.
-#if defined(ESPDISP_DOOM_S3_175)
+// The universal S3 build links this bridge, but display_stream enters it only
+// after runtime detection has selected the CO5300 carrier.
+#if defined(ESPDISP_DOOM_RUNTIME)
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -15,6 +16,28 @@
 #include <board_config.h>
 #include <board_motion.h>
 #include <board_touch.h>
+
+#include "doom_mode.h"
+
+// The common S3 partition table intentionally fits 8 MiB carriers. On the
+// 16 MiB CO5300 carrier, preserve the historical WAD region above 8 MiB and
+// expose it as a read-only synthetic partition for zero-copy mapping.
+extern "C" const esp_partition_t* doom_raw_wad_partition(void) {
+    static const esp_partition_t partition = {
+        nullptr,
+        static_cast<esp_partition_type_t>(DOOM_WAD_PARTITION_TYPE),
+        static_cast<esp_partition_subtype_t>(DOOM_WAD_PARTITION_SUBTYPE),
+        DOOM_WAD_PARTITION_OFFSET,
+        DOOM_WAD_PARTITION_BYTES,
+        0x1000,
+        "doom_wad",
+        false,
+        true,
+    };
+    return ESP.getFlashChipSize() >=
+            DOOM_WAD_PARTITION_OFFSET + DOOM_WAD_PARTITION_BYTES
+        ? &partition : nullptr;
+}
 
 // --- Display bridge ---
 // The QSPI AMOLED (CO5300 466x466) is already initialized by the main firmware
@@ -50,7 +73,7 @@ extern "C" void doom_display_blit(const uint16_t* rgb565_buf, int width, int hei
 static bool imu_initialized = false;
 
 extern "C" void doom_imu_init(void) {
-    const board::Config& cfg = board::configFor(board::COMPILED_VARIANT);
+    const board::Config& cfg = board::configFor(board::Variant::AmoledCo5300);
     if (!boardmotion::init(cfg)) {
         Serial.println("[doom] FATAL: QMI8658 unavailable; restarting normally");
         Serial.flush();
@@ -96,7 +119,6 @@ extern "C" void doom_imu_read(float* pitch, float* roll) {
 // Extends the existing single-point touch reader to report two points and
 // gesture classification for Doom input.
 
-#include "doom_mode.h"
 #include "doom_touch_bridge.h"
 
 #include <touch_gesture.h>
@@ -174,7 +196,7 @@ static void doom_touch_reset_state(void) {
 extern "C" void doom_touch_init(void) {
     // Doom owns the controller for its isolated reboot session; initialize the
     // shared boardtouch state before any Doom input sampling begins.
-    const board::Config& cfg = board::configFor(board::COMPILED_VARIANT);
+    const board::Config& cfg = board::configFor(board::Variant::AmoledCo5300);
     bool available = boardtouch::init(cfg);
     if (!available) {
         Serial.println("[doom] FATAL: CST9217 unavailable; restarting normally");
@@ -272,4 +294,4 @@ extern "C" void doom_touch_poll(doom_touch_state_t* state) {
     s_pending_double_tap = false;
 }
 
-#endif  // ESPDISP_DOOM_S3_175
+#endif  // ESPDISP_DOOM_RUNTIME

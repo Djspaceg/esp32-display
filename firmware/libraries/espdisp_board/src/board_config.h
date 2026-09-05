@@ -76,16 +76,19 @@ enum class PowerController : uint8_t { None, Axp2101, BatteryAdc };
 /// Which inertial sensor supplies acceleration for automatic orientation.
 enum class MotionController : uint8_t { None, Qmi8658 };
 
-/// The variant fixed by a chip-family build before runtime detection.
+/// The variant fixed by an exact build target before runtime detection.
 /// C6 and S3 are family-universal, so both remain Unknown until their safe
 /// profile detector or an explicit CFGBOARD recovery override resolves one.
-/// P4 retains an internal carrier selector because its build profile differs,
-/// but the user-facing artifact and target token are still the p4 family.
+/// The p4-4b build target composes the P4 platform with one exact carrier;
+/// platform_config.h remains free of that carrier's selector and wiring.
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
 #if (defined(ESPDISP_BOARD_P4_4B) + defined(ESPDISP_BOARD_S3_085) + \
      defined(ESPDISP_BOARD_S3_154) + defined(ESPDISP_DOOM_S3_175) + \
      defined(ESPDISP_BOARD_S3_185)) != 1
 #error "ESP32-P4 builds require exactly one compatible internal carrier selector"
+#endif
+#if defined(ESPDISP_DOOM_RUNTIME)
+#error "ESP32-P4 builds must not enable the S3 Doom runtime"
 #endif
 #if defined(ESPDISP_BOARD_P4_4B)
 #define ESPDISP_PANEL_ST7703_720X720 1
@@ -105,7 +108,7 @@ static const Variant COMPILED_VARIANT = Variant::Unknown;
 #else
 #if defined(ESPDISP_BOARD_P4_4B) || defined(ESPDISP_BOARD_S3_085) || \
     defined(ESPDISP_BOARD_S3_154) || defined(ESPDISP_DOOM_S3_175) || \
-    defined(ESPDISP_BOARD_S3_185)
+    defined(ESPDISP_BOARD_S3_185) || defined(ESPDISP_DOOM_RUNTIME)
 #error "ESP32-C6 family builds must not use selectors from another family"
 #endif
 #define ESPDISP_PANEL_C6_RUNTIME 1
@@ -122,6 +125,14 @@ static const int8_t PIN_PROBE_SCL = 19;
 /// before probing so a touch chip held in reset cannot make a Touch board look
 /// like a non-touch one. Must equal CONFIG_TOUCH_JD9853.pinTouchRst.
 static const int8_t PIN_PROBE_TP_RST = 20;
+
+/// S3 profile signatures. These are pure carrier data so host tests can pin
+/// the exact address sets that board_detect.h probes before any panel pin is
+/// driven. In particular, CO5300 carries CST9217 at 0x5A, not CST816 at 0x15.
+static constexpr uint8_t S3_CO5300_PROBE_ADDRESSES[] = {
+    0x5A, 0x34, 0x6A, 0x6B};
+static constexpr uint8_t S3_ST77916_PROBE_ADDRESSES[] = {0x15, 0x20};
+static constexpr uint8_t S3_ST7789_154_PROBE_ADDRESSES[] = {0x15, 0x6A, 0x6B};
 
 /// Whether a platform can execute a panel profile. SPI/QSPI panel backends are
 /// platform-neutral; the MIPI-DSI SDK backend is currently available on P4.

@@ -8,10 +8,12 @@ screen-specific release artifact.
 
 ## Composition and ownership
 
-Firmware keeps platform, panel, and carrier facts separate:
+Firmware keeps platform, build-target, panel, and carrier facts separate:
 
-- `platform_config.h` owns chip, build profile, flash/partition identity,
-  memory, networking topology, serial transport, and device identity source.
+- `platform_config.h` owns chip runtime policy: memory, networking topology,
+  serial transport, stable identity source, and compatibility tokens.
+- `tools/espdisp.py` keeps chip/FQBN/silicon facts in `Platform` and exact
+  selector/partition/library composition in `BuildTarget`.
 - `panel_config.h` owns controller, bus, geometry, pixel/DSI timing, offsets,
   inversion, glass shape, and rotation support.
 - `board_config.h` composes a platform and panel with carrier wiring and
@@ -37,13 +39,18 @@ carriers. S3 accepts automatic detection only when exactly one compatible
 profile is found. Zero or multiple candidates leave display and networking
 disabled while serial `CFGBOARD` remains available as a recovery override.
 
-The S3 artifact uses the 8 MiB common-denominator dual-OTA layout. Profile-only
-payloads that do not fit every S3 carrier, including the large Doom WAD
-partition, are not part of canonical releases.
+The S3 artifact uses the 8 MiB common-denominator dual-OTA layout. The Doom
+engine and CO5300 entry path are linked into the universal image but gated by
+the detected runtime profile. Its large WAD stays in the historical raw region
+above 8 MiB on 16 MiB CO5300 hardware, outside the common partition table, so
+normal uploads preserve an existing WAD without making the image unsafe for
+8 MiB carriers.
 
 P4 uses the Arduino `prev3` profile required by the attached revision-v1.3
-silicon. Its internal 4B carrier selector is a build implementation detail, not
-a release family or filename.
+silicon. `Platform("p4")` contains only reusable chip/toolchain facts; the
+internal carrier composition owns `ESPDISP_BOARD_P4_4B` and the current
+partition source. Those internal keys are not release-family or filename
+suffixes.
 
 ## Runtime identity and selection
 
@@ -110,12 +117,21 @@ initialization was required to release the first draw buffer; GT911 point
 records begin at `0x814F`.
 
 Hosted networking remains blocked before association because Arduino-ESP32
-3.3.11 receives no response to `Req_GetCoprocessorFwVersion` from the factory
-C6. The coprocessor was not modified. ETL1 over WiFi, reachable mDNS, reconnect,
-OTA, tearing under motion, and odd-orientation touch corners remain unverified.
-The C6 coprocessor is not electrically accessible through the currently
-authorized development path, so its firmware version and compatibility remain
-blocked rather than awaited.
+3.3.11 (`esp_hosted` 2.12.11 and `esp_wifi_remote` 1.6.3) receives no response
+to `Req_GetCoprocessorFwVersion` from the factory C6. The C6 module exposes a
+separate 3.3 V UART on four programming pads; that programmer is not connected
+to this host, and the P4 UART cannot recover or identify the C6 image. No C6
+write was attempted. ETL1 over WiFi, reachable mDNS, reconnect, OTA, tearing
+under motion, and odd-orientation touch corners remain unverified.
+
+## S3 runtime evidence
+
+| Profile | Current evidence | Residual gap |
+| --- | --- | --- |
+| `co5300` | Runtime detection, frame counters, two rotations, brightness, power, and preserved WAD region on attached hardware | No independent visual observer for the latest image |
+| `gc9107` | Family compile and host profile tests | No attached carrier for current visible smoke testing |
+| `st7789-154` | Family compile and host profile tests | No attached carrier for current runtime testing |
+| `st77916` | Family compile and host profile tests | No attached carrier for current runtime testing |
 
 ## Extension rules
 

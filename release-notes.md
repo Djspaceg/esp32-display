@@ -5,6 +5,7 @@
 - Added family-universal c6, s3, and p4 firmware releases with runtime hardware-profile selection.
 - Added initial ESP32-P4 and Waveshare 4B MIPI-DSI and GT911 bring-up; hosted WiFi, streaming, and OTA remain blocked pending coprocessor compatibility validation.
 - Changed the macOS app to embed and safely select the canonical release catalog by family, chip, profile, and partition evidence.
+- Fixed the universal S3 image to preserve CO5300 Doom activation and its existing WAD storage region.
 - Fixed large-tile validation so malformed records cannot advance frame completion before a valid retry.
 
 ## 1.4.2
