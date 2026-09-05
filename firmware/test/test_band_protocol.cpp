@@ -1407,6 +1407,19 @@ int main() {
     CHECK(am.pinTouchInt == 11);
     CHECK(am.pinTouchRst == am.pinRst);
 
+    CHECK(sizeof(board::S3_CO5300_PROBE_ADDRESSES) == 4);
+    CHECK(board::S3_CO5300_PROBE_ADDRESSES[0] == 0x5A);
+    CHECK(board::S3_CO5300_PROBE_ADDRESSES[1] == 0x34);
+    CHECK(board::S3_CO5300_PROBE_ADDRESSES[2] == 0x6A);
+    CHECK(board::S3_CO5300_PROBE_ADDRESSES[3] == 0x6B);
+    CHECK(sizeof(board::S3_ST77916_PROBE_ADDRESSES) == 2);
+    CHECK(board::S3_ST77916_PROBE_ADDRESSES[0] == 0x15);
+    CHECK(board::S3_ST77916_PROBE_ADDRESSES[1] == 0x20);
+    CHECK(sizeof(board::S3_ST7789_154_PROBE_ADDRESSES) == 3);
+    CHECK(board::S3_ST7789_154_PROBE_ADDRESSES[0] == 0x15);
+    CHECK(board::S3_ST7789_154_PROBE_ADDRESSES[1] == 0x6A);
+    CHECK(board::S3_ST7789_154_PROBE_ADDRESSES[2] == 0x6B);
+
     // AXP2101 PMU: shares the touch I2C bus. The touch C6 also has battery
     // telemetry, but through its GPIO0 divider rather than this PMU path.
     CHECK(am.power == board::PowerController::Axp2101);

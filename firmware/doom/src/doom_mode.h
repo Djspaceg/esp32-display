@@ -55,7 +55,11 @@ void doom_request_exit(void);
 #define DOOM_RENDER_HEIGHT         200
 #define DOOM_TARGET_FPS            35    // Target frame rate
 
-// WAD partition type/subtype (must match partitions_s3_doom.csv)
+// WAD storage geometry retained by the universal S3 image. The canonical
+// partition table occupies only the first 8 MiB, so uploads preserve this raw
+// 16 MiB-carrier region even though it is no longer listed as a partition.
 #define DOOM_WAD_PARTITION_TYPE    0x42
 #define DOOM_WAD_PARTITION_SUBTYPE 0x06
+#define DOOM_WAD_PARTITION_OFFSET  0xBFF000U
+#define DOOM_WAD_PARTITION_BYTES   0x401000U
 #define DOOM_WAD_EXPECTED_BYTES    4196020U

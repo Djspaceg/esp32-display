@@ -16,6 +16,11 @@
 
 static const char* WAD_TAG = "doom_wad";
 
+// The universal S3 table omits storage above 8 MiB so it remains safe on the
+// GC9107 carrier. The CO5300 bridge exposes the historical 16 MiB WAD region
+// only after confirming the physical flash can contain it.
+extern const esp_partition_t* doom_raw_wad_partition(void);
+
 static const void* wad_mapped_ptr = NULL;
 static uint32_t wad_size = 0;
 static spi_flash_mmap_handle_t wad_map_handle;
@@ -33,6 +38,7 @@ static bool ensure_wad_mapped(void) {
         (esp_partition_type_t)DOOM_WAD_PARTITION_TYPE,
         (esp_partition_subtype_t)DOOM_WAD_PARTITION_SUBTYPE,
         NULL);
+    if (part == NULL) part = doom_raw_wad_partition();
 
     if (!part || part->size < 12) {
         ESP_LOGE(WAD_TAG, "WAD partition missing or too small");

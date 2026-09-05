@@ -393,7 +393,7 @@ void M_BindChatControls(unsigned int num_players)
 
 void M_ApplyPlatformDefaults(void)
 {
-#if defined(ESPDISP_DOOM_S3_175)
+#if defined(ESPDISP_DOOM_RUNTIME)
     // Doom has no default keyboard binding for either weapon-cycle direction.
     // The touch platform emits these for vertical gameplay swipes: swipe up
     // fires key_nextweapon, swipe down fires key_prevweapon. Both must be a

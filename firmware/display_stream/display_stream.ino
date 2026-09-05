@@ -76,8 +76,8 @@
 #include "ota_policy.h"
 #include "chip_identity.h"
 
-// Doom Easter Egg (exact s3-175 target only)
-#if defined(ESPDISP_DOOM_S3_175)
+// Doom remains a developer/profile-gated feature inside the universal S3 image.
+#if defined(ESPDISP_DOOM_RUNTIME)
 #include <doom_mode.h>
 #endif
 
@@ -128,10 +128,10 @@ void setup() {
     while (true) delay(1000);
   }
 
-#if defined(ESPDISP_DOOM_S3_175)
+#if defined(ESPDISP_DOOM_RUNTIME)
   // Consume before doing anything fallible so a missing/corrupt WAD or a Doom
-  // crash cannot create a reboot loop. This boot intentionally skips normal
-  // frame buffers, WiFi, mDNS, OTA, udprx, and loopTask watchdog enrollment.
+  // crash cannot create a reboot loop. Entry is deferred until runtime profile
+  // detection has proved this is the CO5300 carrier.
   Preferences doomPrefs;
   bool doomRequested = false;
   if (!doomPrefs.begin("espdisp", false)) {
@@ -146,36 +146,6 @@ void setup() {
       }
     }
     doomPrefs.end();
-  }
-  if (doomRequested) {
-    boardVariant = board::COMPILED_VARIANT;
-    bcfg = &board::configFor(boardVariant);
-    if (boardVariant != board::Variant::AmoledCo5300) {
-      Serial.println("doom: exact target check failed; returning to normal boot");
-      delay(50);
-      ESP.restart();
-      return;
-    }
-
-    panelRotation = 0;
-    panelManuallyOff = false;
-    displaySleeping = false;
-    userBlLevel = BL_HIGH;
-    pinMode(bcfg->pinBootButton, INPUT_PULLUP);
-    if (!initDisplay()) {
-      Serial.println("doom: display init failed; returning to normal boot");
-      delay(50);
-      ESP.restart();
-      return;
-    }
-    applyPanelConfig(false);
-    applyBacklight();
-    doom_enter();
-    Serial.println("doom: exited or unavailable; restarting normal firmware");
-    Serial.flush();
-    delay(50);
-    ESP.restart();
-    return;
   }
 #endif
 
@@ -302,6 +272,36 @@ void setup() {
     }
   }
   configurePanelGeometry(*bcfg);
+#if defined(ESPDISP_DOOM_RUNTIME)
+  if (doomRequested) {
+    if (boardVariant != board::Variant::AmoledCo5300) {
+      Serial.printf("doom: profile %s is not eligible; continuing normal boot\n",
+                    board::variantToken(boardVariant));
+    } else {
+      // This boot intentionally skips normal frame buffers, WiFi, mDNS, OTA,
+      // UDP receive, and loop-task watchdog enrollment.
+      panelRotation = 0;
+      panelManuallyOff = false;
+      displaySleeping = false;
+      userBlLevel = BL_HIGH;
+      pinMode(bcfg->pinBootButton, INPUT_PULLUP);
+      if (!initDisplay()) {
+        Serial.println("doom: display init failed; restarting normal firmware");
+        delay(50);
+        ESP.restart();
+        return;
+      }
+      applyPanelConfig(false);
+      applyBacklight();
+      doom_enter();
+      Serial.println("doom: exited or unavailable; restarting normal firmware");
+      Serial.flush();
+      delay(50);
+      ESP.restart();
+      return;
+    }
+  }
+#endif
   if (!initializeFramePipeline()) {
     Serial.println("FATAL: could not initialize runtime frame geometry");
     while (true) delay(1000);

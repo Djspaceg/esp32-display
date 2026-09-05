@@ -18,8 +18,8 @@ build, USB onboarding, OTA updates, and canonical precompiled releases.
 ## Firmware families
 
 Release families are exactly `c6`, `s3`, and `p4`. Every family is universal
-within its supported chip family. Product names and screen sizes are runtime
-profile mappings, not artifact names.
+within its currently supported chip-family profiles. Product names, panel names,
+and internal build-target keys are not release names.
 
 | Family | Chip | Runtime profiles | Canonical partition |
 | --- | --- | --- | --- |
@@ -28,12 +28,16 @@ profile mappings, not artifact names.
 | `p4` | `esp32p4` | `st7703-4b` | `p4-32m-ota` |
 
 The S3 image uses an 8 MiB common-denominator dual-OTA layout and contains all
-supported S3 panel, touch, power, and peripheral paths. It does not include
-profile-only payloads that cannot fit every supported S3 carrier.
+supported S3 panel, touch, power, peripheral, and runtime-gated Doom code. The
+WAD remains outside the common partition table and is used only on a detected
+16 MiB CO5300 carrier, so normal family uploads preserve an existing WAD while
+remaining safe for 8 MiB S3 hardware.
 
-P4 keeps platform, panel, and carrier configuration separate internally. The
-P4 platform owns chip/build/memory/network facts; the ST7703 panel profile owns
-MIPI timing; the carrier profile owns GPIOs, GT911, and backlight wiring.
+P4 keeps platform, internal build-target, panel, and carrier configuration
+separate. The P4 platform owns chip/toolchain/memory/network facts; the current
+internal composition owns its carrier selector and partition source; the ST7703
+panel profile owns MIPI timing; and the carrier profile owns GPIOs, GT911, and
+backlight wiring. The released artifact remains named only `p4`.
 
 See [firmware family architecture](docs/firmware-target-architecture.md).
 
@@ -46,8 +50,8 @@ Profile selection occurs before panel GPIO initialization.
   electrically safer profile.
 - S3 identifies the 8 MiB GC9107 carrier by flash capacity, then probes distinct
   I2C buses on 16 MiB carriers. Exactly one compatible candidate is required.
-- P4 currently has one supported carrier profile and still uses the same
-  platform/panel/carrier separation.
+- P4 currently has one compatible runtime profile. The internal carrier
+  selector remains a build implementation detail and the artifact is `p4`.
 
 Zero or multiple S3 candidates leave display, networking, and streaming
 disabled. Serial remains active so `CFGBOARD <profile>` can provide an explicit

@@ -22,12 +22,12 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 
 class Platform(NamedTuple):
+    """Chip/toolchain facts shared by every carrier using this processor."""
+
     key: str
     chip: str
     fqbn: str
     bootloader_address: int
-    partition_csv: Optional[str] = None
-    extra_flags: Tuple[str, ...] = ()
 
 
 PLATFORMS = {
@@ -38,19 +38,42 @@ PLATFORMS = {
         "s3", "esp32s3",
         "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi,"
         "PartitionScheme=custom",
-        0x0, "partitions_s3.csv"),
+        0x0),
     "p4": Platform(
         "p4", "esp32p4",
         "esp32:esp32:esp32p4:USBMode=default,CDCOnBoot=default,"
         "UploadMode=default,FlashSize=32M,PartitionScheme=custom,"
         "PSRAM=enabled,ChipVariant=prev3",
-        0x2000, "partitions_p4_4b.csv", ("-DESPDISP_BOARD_P4_4B",)),
+        0x2000),
+}
+
+
+class BuildTarget(NamedTuple):
+    """Exact compile composition layered on top of one chip platform."""
+
+    key: str
+    platform: str
+    partition_csv: Optional[str] = None
+    extra_flags: Tuple[str, ...] = ()
+    extra_library_dirs: Tuple[str, ...] = ()
+    required_profile: Optional[str] = None
+
+
+BUILD_TARGETS = {
+    "c6": BuildTarget("c6", "c6"),
+    "s3-universal": BuildTarget(
+        "s3-universal", "s3", "partitions_s3.csv",
+        ("-DESPDISP_DOOM_RUNTIME",), ("firmware",)),
+    "p4-4b": BuildTarget(
+        "p4-4b", "p4", "partitions_p4_4b.csv",
+        ("-DESPDISP_BOARD_P4_4B",)),
 }
 
 
 class Family(NamedTuple):
     key: str
     platform: str
+    build_target: str
     profiles: Tuple[str, ...]
     flash_sizes: Tuple[int, ...]
     partition_scheme: str
@@ -62,6 +85,10 @@ class Family(NamedTuple):
         return PLATFORMS[self.platform]
 
     @property
+    def build_config(self) -> BuildTarget:
+        return BUILD_TARGETS[self.build_target]
+
+    @property
     def chip(self) -> str:
         return self.platform_config.chip
 
@@ -71,23 +98,27 @@ class Family(NamedTuple):
 
     @property
     def partition_csv(self) -> Optional[str]:
-        return self.platform_config.partition_csv
+        return self.build_config.partition_csv
 
     @property
     def extra_flags(self) -> Tuple[str, ...]:
-        return self.platform_config.extra_flags
+        return self.build_config.extra_flags
+
+    @property
+    def extra_library_dirs(self) -> Tuple[str, ...]:
+        return self.build_config.extra_library_dirs
 
 
 FAMILIES = {
     "c6": Family(
-        "c6", "c6", ("st7789", "jd9853"), (8 * 1024 * 1024,),
+        "c6", "c6", "c6", ("st7789", "jd9853"), (8 * 1024 * 1024,),
         "default-8m", {
             "st7789": ("ESP32-C6-LCD-1.47",),
             "jd9853": ("ESP32-C6-Touch-LCD-1.47",),
         },
         'Universal ESP32-C6 1.47" display firmware'),
     "s3": Family(
-        "s3", "s3",
+        "s3", "s3", "s3-universal",
         ("gc9107", "st7789-154", "co5300", "st77916"),
         (8 * 1024 * 1024, 16 * 1024 * 1024),
         "universal-8m-ota", {
@@ -98,8 +129,8 @@ FAMILIES = {
         },
         "Universal ESP32-S3 display firmware"),
     "p4": Family(
-        "p4", "p4", ("st7703-4b",), (32 * 1024 * 1024,),
-        "p4-32m-ota", {
+        "p4", "p4", "p4-4b", ("st7703-4b",),
+        (32 * 1024 * 1024,), "p4-32m-ota", {
             "st7703-4b": ("ESP32-P4-WIFI6-Touch-LCD-4B",),
         },
         "Universal ESP32-P4 display firmware"),
@@ -561,8 +592,16 @@ def probe_chip(address: str) -> Optional[str]:
 
 
 
-def resolve_family(explicit: Optional[str], port: Optional[PortInfo]) -> Family:
-    """Select one family from an explicit choice or verified chip identity."""
+def _validate_flash_profile(family: Family, profile: Optional[str]) -> None:
+    """Validate optional recovery profile evidence without changing the family."""
+    if profile is not None and profile not in family.profiles:
+        raise Fail("profile %s is not supported by family %s" % (profile, family.key))
+
+
+def resolve_family(
+    explicit: Optional[str], port: Optional[PortInfo], profile: Optional[str] = None
+) -> Family:
+    """Select a family without inferring a compile-fixed carrier from its chip."""
     if explicit:
         family = FAMILIES[explicit]
         reported = port.board_keys[0] if port and len(port.board_keys) == 1 else None
@@ -570,17 +609,22 @@ def resolve_family(explicit: Optional[str], port: Optional[PortInfo]) -> Family:
             raise Fail(
                 "--family %s contradicts %s, which reports family %s"
                 % (family.key, port.address, reported))
+        _validate_flash_profile(family, profile)
         return family
     if port is None:
         raise Fail("--family is required here (one of: %s)" % ", ".join(FAMILIES))
     if len(port.board_keys) == 1:
-        return FAMILIES[port.board_keys[0]]
+        family = FAMILIES[port.board_keys[0]]
+        _validate_flash_profile(family, profile)
+        return family
     print("Probing %s for its chip type..." % port.address, flush=True)
     chip = probe_chip(port.address)
     matches = [family for family in FAMILIES.values() if family.chip == chip]
     if len(matches) == 1:
-        print("Detected %s family %s." % (chip, matches[0].key), flush=True)
-        return matches[0]
+        family = matches[0]
+        _validate_flash_profile(family, profile)
+        print("Detected %s family %s." % (chip, family.key), flush=True)
+        return family
     raise Fail(
         "could not determine the firmware family on %s; re-run with --family %s"
         % (port.address, "|".join(FAMILIES)))
@@ -2135,6 +2179,8 @@ def compile_board(board: Family, output_dir: Optional[str] = None) -> List[str]:
     build_sketch_dir = SKETCH_DIR
     staged_root: Optional[str] = None
     cmd = [arduino_cli(), "compile", "-b", board.fqbn, "--libraries", LIBRARIES_DIR]
+    for relative in board.extra_library_dirs:
+        cmd += ["--libraries", os.path.join(REPO_ROOT, relative)]
     if board.partition_csv:
         partition_source = os.path.join(
             REPO_ROOT, "firmware", board.partition_csv)
@@ -2930,14 +2976,14 @@ def cmd_tile_test(args) -> int:
 
 
 def cmd_compile(args) -> int:
-    family = resolve_family(args.family, None)
+    family = FAMILIES[args.family]
     report_sizes(compile_board(family))
     return 0
 
 
 def cmd_flash(args) -> int:
     port = resolve_port(args.port)
-    family = resolve_family(args.family, port)
+    family = resolve_family(args.family, port, args.profile)
     print("Family: %s (%s) on %s" %
           (family.key, family.fqbn, port.address), flush=True)
     out_dir = tempfile.mkdtemp(prefix="espdisp-flash-%s-" % family.key)
@@ -3454,6 +3500,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_flash.add_argument(
         "--family", choices=family_choices(),
         help="family to build; otherwise derive it from the attached chip")
+    p_flash.add_argument(
+        "--profile", choices=sorted({profile for family in FAMILIES.values()
+                                      for profile in family.profiles}),
+        help="optional physical-profile cross-check for recovery workflows")
     p_flash.add_argument(
         "--port", help="serial device (default: the one matching %s)" %
         ", ".join(PORT_GLOBS))

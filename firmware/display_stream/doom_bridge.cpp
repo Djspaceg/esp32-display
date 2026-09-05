@@ -11,13 +11,12 @@
 #include "dma_gate.h"
 
 
-// Expose the panel handle to the Doom Easter Egg display bridge. The build
-// define exists only on the 466x466 CO5300 target; the same-chip s3-185 image
-// neither links nor advertises this hardware-specific mode.
-#if defined(ESPDISP_DOOM_S3_175)
+// The universal S3 image links these symbols, but callers gate entry on the
+// runtime CO5300 profile so other S3 carriers never initialize Doom hardware.
+#if defined(ESPDISP_DOOM_RUNTIME)
 esp_lcd_panel_handle_t doom_get_panel_handle(void) { return panel; }
 #endif
-#if defined(ESPDISP_DOOM_S3_175)
+#if defined(ESPDISP_DOOM_RUNTIME)
 // The touch driver state is translation-unit-local inside Doom's hardware
 // bridge, so service it through that bridge rather than including board_touch.h
 // here and accidentally polling a separate disabled copy.

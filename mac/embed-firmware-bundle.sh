@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Embed the canonical c6, s3, and p4 release resources before code signing.
 set -euo pipefail
+setopt NULL_GLOB
 
 DESTINATION_DIR="${CODESIGNING_FOLDER_PATH:?CODESIGNING_FOLDER_PATH is not set}/Contents/Resources"
 SOURCE_ROOT="${SRCROOT:?SRCROOT is not set}/../../firmware-releases"

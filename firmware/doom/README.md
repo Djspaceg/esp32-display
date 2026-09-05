@@ -2,7 +2,8 @@
 
 A playable Doom shareware Episode 1 developer feature for the
 ESP32-S3-Touch-AMOLED-1.75C (`co5300` runtime profile). Triple-tap BOOT within
-800 ms to start it. Other S3 profiles do not compile or expose Doom.
+800 ms to start it. The universal S3 image links the implementation, but only a
+runtime-detected CO5300 profile exposes or enters it.
 
 ## Play Doom
 
@@ -41,8 +42,9 @@ Triple-tap BOOT
   → save one-shot `doomonce` request in NVS
   → restart
   → consume and remove request before normal setup
+  → detect and require the CO5300 runtime profile
   → initialize only the CO5300 panel, touch bus, and Doom PSRAM state
-  → validate and memory-map the WAD partition
+  → validate and memory-map the retained WAD storage region
   → run doomgeneric with blocking, completion-tracked panel DMA
   → BOOT 3-second hold exits
   → restart into normal streaming firmware
@@ -80,10 +82,16 @@ staging and UDP codec scratch.
 
 ## Firmware and WAD delivery
 
-`firmware/partitions_s3_doom.csv` is staged as `partitions.csv` only inside
-a developer build for the CO5300 profile. It provides equal `0x5F0000` OTA app
-slots and a `0x401000` WAD partition at `0xBFF000`. The canonical
-4,196,020-byte shareware v1.9 IWAD fits with 2,380 bytes to spare.
+`firmware/partitions_s3_doom.csv` is staged as `partitions.csv` only for the
+initial developer setup of a recoverable CO5300 carrier. It provides equal
+`0x5F0000` OTA app slots and a `0x401000` WAD partition at `0xBFF000`. The
+canonical 4,196,020-byte shareware v1.9 IWAD fits with 2,380 bytes to spare.
+
+The canonical universal S3 image uses the common 8 MiB partition table, links
+the runtime-gated Doom code, and treats `0xBFF000` as read-only WAD storage only
+after runtime detection has selected CO5300 and confirmed 16 MiB flash. Normal
+family uploads do not erase that region, so they preserve a WAD installed by
+the developer setup while remaining compatible with 8 MiB S3 carriers.
 
 The developer workflow downloads the WAD only when explicitly requested, then
 requires all of the following before writing or packaging it:
@@ -93,10 +101,10 @@ requires all of the following before writing or packaging it:
 * SHA-256 `1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771`
 * fit within the declared partition
 
-The Doom WAD is a developer-only payload for the S3 `co5300` runtime profile.
-It is not part of the canonical S3 release because the dedicated partition does
-not fit every supported S3 carrier. Development images must verify the WAD magic,
-size, hash, and partition capacity before any write.
+The Doom WAD is a developer-installed payload for the S3 `co5300` runtime
+profile. It is not embedded in the canonical S3 release because it does not fit
+every supported S3 carrier. Development images must verify WAD magic, size,
+hash, and storage capacity before any write.
 
 The canonical family commands build and flash the universal S3 release only:
 
@@ -120,8 +128,8 @@ arduino-cli compile \
   -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=custom" \
   --libraries ../libraries \
   --libraries .. \
-  --build-property "compiler.c.extra_flags=-DESPDISP_DOOM_S3_175" \
-  --build-property "compiler.cpp.extra_flags=-DESPDISP_DOOM_S3_175" \
+  --build-property "compiler.c.extra_flags=-DESPDISP_DOOM_RUNTIME" \
+  --build-property "compiler.cpp.extra_flags=-DESPDISP_DOOM_RUNTIME" \
   .
 rm partitions.csv
 ```
