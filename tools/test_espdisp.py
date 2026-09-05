@@ -3372,11 +3372,10 @@ def test_universal_family_catalog_and_cli():
           "chip platforms contain no carrier selector or partition source")
     check_equal(espdisp.FAMILIES["s3"].partition_csv, "partitions_s3.csv",
                 "S3 uses the common 8 MiB partition layout")
-    check_equal(espdisp.FAMILIES["s3"].extra_flags,
-                ("-DESPDISP_DOOM_RUNTIME",),
-                "S3 family build enables profile-gated Doom source")
-    check_equal(espdisp.FAMILIES["s3"].extra_library_dirs, ("firmware",),
-                "S3 family build links the profile-gated Doom library")
+    check_equal(espdisp.FAMILIES["s3"].extra_flags, (),
+                "canonical S3 does not link developer-only Doom code")
+    check_equal(espdisp.FAMILIES["s3"].extra_library_dirs, (),
+                "canonical S3 uses no developer-only library path")
     check_equal(espdisp.FAMILIES["p4"].extra_flags,
                 ("-DESPDISP_BOARD_P4_4B",),
                 "P4 retains its internal carrier selector")

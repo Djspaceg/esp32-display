@@ -63,9 +63,7 @@ class BuildTarget(NamedTuple):
 BUILD_TARGETS = {
     "c6": BuildTarget("c6", "c6"),
     "s3-universal": BuildTarget(
-        "s3-universal", "s3", partition_csv="partitions_s3.csv",
-        extra_flags=("-DESPDISP_DOOM_RUNTIME",),
-        extra_library_dirs=("firmware",)),
+        "s3-universal", "s3", partition_csv="partitions_s3.csv"),
     "p4-4b": BuildTarget(
         "p4-4b", "p4", partition_csv="partitions_p4_4b.csv",
         extra_flags=("-DESPDISP_BOARD_P4_4B",),
