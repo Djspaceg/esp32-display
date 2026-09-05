@@ -11,7 +11,7 @@
 # a plain script, invoked by path, no harness, no dependencies.
 #
 # What is worth testing here is what the tool decides, not what it runs. The
-# refusals are the point - resolve_board exists to refuse rather than guess a
+# refusals are the point - resolve_family exists to refuse rather than guess a
 # chip, classify_ota_target exists to refuse a push at the wrong panel, and
 # check_password_policy exists to refuse a password the firmware would not store.
 # Those guards were the only unguarded thing left in the change, and none of them
