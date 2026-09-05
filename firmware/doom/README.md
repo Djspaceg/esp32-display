@@ -1,9 +1,9 @@
 # Doom Easter Egg
 
 A playable Doom shareware Episode 1 developer feature for the
-ESP32-S3-Touch-AMOLED-1.75C (`co5300` runtime profile). Triple-tap BOOT within
-800 ms to start it. The universal S3 image links the implementation, but only a
-runtime-detected CO5300 profile exposes or enters it.
+ESP32-S3-Touch-AMOLED-1.75C (`co5300` runtime profile). It is not linked into
+the canonical S3 family artifact. Build it explicitly with
+`ESPDISP_DOOM_RUNTIME` only for recoverable CO5300 development hardware.
 
 ## Play Doom
 
@@ -87,11 +87,11 @@ initial developer setup of a recoverable CO5300 carrier. It provides equal
 `0x5F0000` OTA app slots and a `0x401000` WAD partition at `0xBFF000`. The
 canonical 4,196,020-byte shareware v1.9 IWAD fits with 2,380 bytes to spare.
 
-The canonical universal S3 image uses the common 8 MiB partition table, links
-the runtime-gated Doom code, and treats `0xBFF000` as read-only WAD storage only
-after runtime detection has selected CO5300 and confirmed 16 MiB flash. Normal
-family uploads do not erase that region, so they preserve a WAD installed by
-the developer setup while remaining compatible with 8 MiB S3 carriers.
+The canonical universal S3 image uses the common 8 MiB partition table and
+does not link Doom or include a WAD. A developer build may use the historical
+raw WAD region only after selecting CO5300 and confirming sufficient flash.
+This separation preserves internal RAM needed by the canonical streaming
+image's SPI DMA paths.
 
 The developer workflow downloads the WAD only when explicitly requested, then
 requires all of the following before writing or packaging it:

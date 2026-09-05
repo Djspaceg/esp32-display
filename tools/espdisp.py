@@ -57,16 +57,19 @@ class BuildTarget(NamedTuple):
     extra_flags: Tuple[str, ...] = ()
     extra_library_dirs: Tuple[str, ...] = ()
     required_profile: Optional[str] = None
+    fqbn_options: Tuple[str, ...] = ()
 
 
 BUILD_TARGETS = {
     "c6": BuildTarget("c6", "c6"),
     "s3-universal": BuildTarget(
-        "s3-universal", "s3", "partitions_s3.csv",
-        ("-DESPDISP_DOOM_RUNTIME",), ("firmware",)),
+        "s3-universal", "s3", partition_csv="partitions_s3.csv",
+        extra_flags=("-DESPDISP_DOOM_RUNTIME",),
+        extra_library_dirs=("firmware",)),
     "p4-4b": BuildTarget(
-        "p4-4b", "p4", "partitions_p4_4b.csv",
-        ("-DESPDISP_BOARD_P4_4B",)),
+        "p4-4b", "p4", partition_csv="partitions_p4_4b.csv",
+        extra_flags=("-DESPDISP_BOARD_P4_4B",),
+        required_profile="st7703-4b", fqbn_options=("UploadSpeed=460800",)),
 }
 
 
@@ -94,7 +97,10 @@ class Family(NamedTuple):
 
     @property
     def fqbn(self) -> str:
-        return self.platform_config.fqbn
+        options = self.build_config.fqbn_options
+        if not options:
+            return self.platform_config.fqbn
+        return "%s,%s" % (self.platform_config.fqbn, ",".join(options))
 
     @property
     def partition_csv(self) -> Optional[str]:
@@ -593,7 +599,12 @@ def probe_chip(address: str) -> Optional[str]:
 
 
 def _validate_flash_profile(family: Family, profile: Optional[str]) -> None:
-    """Validate optional recovery profile evidence without changing the family."""
+    """Require carrier evidence for compile-fixed artifacts before USB writes."""
+    required = family.build_config.required_profile
+    if required is not None and profile != required:
+        raise Fail(
+            "%s uses exact build target %s; re-run with --profile %s"
+            % (family.key, family.build_config.key, required))
     if profile is not None and profile not in family.profiles:
         raise Fail("profile %s is not supported by family %s" % (profile, family.key))
 

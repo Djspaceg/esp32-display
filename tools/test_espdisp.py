@@ -3361,7 +3361,12 @@ def test_universal_family_catalog_and_cli():
     check_equal(espdisp.BUILD_TARGETS["p4-4b"].platform, "p4",
                 "the 4B build target references the reusable P4 platform")
     check_equal(espdisp.BUILD_TARGETS["p4-4b"].required_profile,
-                None, "P4 release remains family-universal")
+                "st7703-4b", "P4 USB writes require exact carrier evidence")
+    check_equal(espdisp.BUILD_TARGETS["p4-4b"].fqbn_options,
+                ("UploadSpeed=460800",),
+                "the 4B target owns its reliable CH343 upload speed")
+    check("UploadSpeed" not in espdisp.PLATFORMS["p4"].fqbn,
+          "the reusable P4 platform has no 4B carrier upload option")
     check("partition_csv" not in espdisp.Platform._fields and
           "extra_flags" not in espdisp.Platform._fields,
           "chip platforms contain no carrier selector or partition source")
@@ -3386,9 +3391,10 @@ def test_universal_family_catalog_and_cli():
         argv = [command, "--family", "s3"]
         args = parser.parse_args(argv)
         check_equal(args.family, "s3", "%s accepts the family" % command)
-    p4_flash = parser.parse_args(["flash", "--family", "p4"])
-    check_equal(p4_flash.family, "p4",
-                "P4 flash accepts the family release name")
+    p4_flash = parser.parse_args([
+        "flash", "--family", "p4", "--profile", "st7703-4b"])
+    check_equal(p4_flash.profile, "st7703-4b",
+                "P4 flash accepts explicit 4B profile evidence")
     ota = parser.parse_args(["ota", "panel.local", "--family", "p4"])
     check_equal(ota.family, "p4", "OTA accepts P4 family")
     bundle = parser.parse_args(["bundle", "--family", "c6"])
@@ -3434,16 +3440,25 @@ def test_family_resolution_and_discovery():
     known_p4 = espdisp.PortInfo("/dev/cu.usbmodem3", ["p4"], "P4 chip")
     check_equal(espdisp.resolve_family(None, known).key, "s3",
                 "enumerated universal family resolves")
-    check_equal(espdisp.resolve_family("p4", blank).key, "p4",
-                "explicit P4 family resolves")
-    check_equal(espdisp.resolve_family(None, known_p4).key, "p4",
-                "enumerated P4 family resolves")
+    check_equal(
+        espdisp.resolve_family("p4", blank, "st7703-4b").key, "p4",
+        "explicit P4 family plus exact profile resolves")
+    check_fails(lambda: espdisp.resolve_family("p4", blank),
+                "--profile st7703-4b",
+                "explicit P4 family still requires carrier evidence")
+    check_fails(lambda: espdisp.resolve_family(None, known_p4),
+                "--profile st7703-4b",
+                "enumerated P4 chip does not select the 4B carrier")
     check_fails(lambda: espdisp.resolve_family("c6", known), "contradicts",
                 "explicit family contradiction")
     with unittest.mock.patch.object(espdisp, "probe_chip", return_value="esp32p4"), \
          unittest.mock.patch("sys.stdout", io.StringIO()):
-        check_equal(espdisp.resolve_family(None, blank).key, "p4",
-                    "P4 chip probe resolves its family release")
+        check_fails(lambda: espdisp.resolve_family(None, blank),
+                    "--profile st7703-4b",
+                    "P4 chip identity alone cannot select the 4B image")
+        check_equal(
+            espdisp.resolve_family(None, blank, "st7703-4b").key, "p4",
+            "P4 chip plus explicit exact profile resolves")
     with unittest.mock.patch.object(espdisp, "probe_chip", return_value=None), \
          unittest.mock.patch("sys.stdout", io.StringIO()):
         check_fails(lambda: espdisp.resolve_family(None, blank),

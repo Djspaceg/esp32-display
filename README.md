@@ -28,10 +28,10 @@ and internal build-target keys are not release names.
 | `p4` | `esp32p4` | `st7703-4b` | `p4-32m-ota` |
 
 The S3 image uses an 8 MiB common-denominator dual-OTA layout and contains all
-supported S3 panel, touch, power, peripheral, and runtime-gated Doom code. The
-WAD remains outside the common partition table and is used only on a detected
-16 MiB CO5300 carrier, so normal family uploads preserve an existing WAD while
-remaining safe for 8 MiB S3 hardware.
+supported S3 panel, touch, power, and peripheral paths. Doom remains a separate
+developer/profile-gated build because linking it into the canonical image
+consumed enough internal RAM to break SPI DMA rotation repaint on hardware. The
+canonical artifact and app resources contain neither Doom code nor a WAD.
 
 P4 keeps platform, internal build-target, panel, and carrier configuration
 separate. The P4 platform owns chip/toolchain/memory/network facts; the current
