@@ -46,10 +46,10 @@ internal RAM to make SPI DMA rotation repaint allocation fail, so canonical
 artifacts contain neither Doom code nor a WAD payload.
 
 P4 uses the Arduino `prev3` profile required by the attached revision-v1.3
-silicon. `Platform("p4")` contains only reusable chip/toolchain facts; the
-internal carrier composition owns `ESPDISP_BOARD_P4_4B` and the current
-partition source. Those internal keys are not release-family or filename
-suffixes.
+silicon. `Platform("p4")` contains only reusable chip/toolchain facts; exact
+build target `p4-4b` owns `ESPDISP_BOARD_P4_4B`, the 4B partition source, its
+reliable CH343 upload speed, and the requirement for explicit `st7703-4b`
+carrier evidence before USB writes.
 
 ## Runtime identity and selection
 
@@ -67,8 +67,9 @@ or stale size/hash metadata fail closed.
 
 Blank or recovery USB flows may not have runtime metadata. They require an
 explicit hardware-profile choice, then esptool independently verifies the chip
-and hardware MAC before writing. Flashing writes listed segments only; it does
-not erase the whole chip unless a user explicitly chooses that separate action.
+and hardware MAC before writing. P4 chip identity alone never selects the
+compile-fixed 4B carrier. Flashing writes listed segments only; it does not
+erase the whole chip unless a user explicitly chooses that separate action.
 
 ## Canonical release storage
 

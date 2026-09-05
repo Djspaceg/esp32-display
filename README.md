@@ -132,7 +132,8 @@ connected:
 
 ```sh
 python3 tools/espdisp.py flash --family s3 --port /dev/cu.usbmodem1101
-python3 tools/espdisp.py flash --family p4 --port /dev/cu.usbmodem5B901669681
+python3 tools/espdisp.py flash --family p4 --profile st7703-4b \
+  --port /dev/cu.usbmodem5B901669681
 ```
 
 The normal flash path writes only the bootloader, partition table, OTA
