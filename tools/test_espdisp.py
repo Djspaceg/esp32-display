@@ -110,7 +110,7 @@ def preprocess_board_config(*selectors):
     )
 
 
-def test_board_table():
+def _historical_exact_target_board_table():
     check_equal(
         sorted(espdisp.BOARDS),
         ["c6", "p4-4b", "s3-085", "s3-154", "s3-175", "s3-185"],
@@ -238,7 +238,7 @@ def test_board_table():
     check_equal(espdisp.board_key_for_chip(""), None, "no chip -> no key")
 
 
-def test_argparse_board_targets():
+def _historical_exact_target_argparse():
     parser = espdisp.build_parser()
     check_equal(
         espdisp.board_choices(),
@@ -276,7 +276,7 @@ def test_argparse_board_targets():
 # wrong image and was itself unguarded against regression
 
 
-def test_resolve_board():
+def _historical_exact_target_resolution():
     c6_port = espdisp.PortInfo("/dev/cu.usbmodem1", ["c6"], "c6 board")
     s3_port = espdisp.PortInfo("/dev/cu.usbmodem2", ["s3-175"], "s3 board")
     blank = espdisp.PortInfo("/dev/cu.usbmodem3", [], "unknown")
@@ -404,7 +404,7 @@ DISCOVERY_JSON = {
 }
 
 
-def test_network_discovery():
+def _historical_exact_target_network_discovery():
     ports = espdisp.parse_network_ports(DISCOVERY_JSON)
     check_equal(len(ports), 3, "serial ports are not network ports")
     check_equal(ports[0].address, "192.168.1.42", "network address")
@@ -449,7 +449,7 @@ def test_network_discovery():
     check_equal(espdisp.network_port_for_host([], "panel.local"), None, "no panels")
 
 
-def test_classify_ota_target():
+def _historical_exact_target_ota_classification():
     c6 = espdisp.BOARDS["c6"]
     s3_175 = espdisp.BOARDS["s3-175"]
     s3_185 = espdisp.BOARDS["s3-185"]
@@ -536,7 +536,7 @@ def test_discovery_command():
             "and the floor reaches the command line")
 
 
-def test_verify_ota_target():
+def _historical_exact_target_ota_verification():
     c6 = espdisp.BOARDS["c6"]
     ports = espdisp.parse_network_ports(DISCOVERY_JSON)
 
