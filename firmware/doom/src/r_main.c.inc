@@ -95,11 +95,11 @@ int*			viewangletox;
 // The xtoviewangleangle[] table maps a screen pixel
 // to the lowest viewangle that maps back to x ranges
 // from clipangle to -clipangle.
-angle_t			xtoviewangle[SCREENWIDTH+1];
+angle_t*		xtoviewangle;
 
-lighttable_t*		scalelight[LIGHTLEVELS][MAXLIGHTSCALE];
-lighttable_t*		scalelightfixed[MAXLIGHTSCALE];
-lighttable_t*		zlight[LIGHTLEVELS][MAXLIGHTZ];
+lighttable_t*		(*scalelight)[MAXLIGHTSCALE];
+lighttable_t**		scalelightfixed;
+lighttable_t*		(*zlight)[MAXLIGHTZ];
 
 // bumped light from gun blasts
 int			extralight;			

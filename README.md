@@ -24,14 +24,17 @@ and internal build-target keys are not release names.
 | Family | Chip | Runtime profiles | Canonical partition |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `gc9107`, `st7789-154`, `co5300`, `st77916` | `universal-8m-ota` |
+| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `co5300`, `st77916` | `universal-8m-ota` |
 | `p4` | `esp32p4` | `st7703-4b` | `p4-32m-ota` |
 
 The S3 image uses an 8 MiB common-denominator dual-OTA layout and contains all
-supported S3 panel, touch, power, and peripheral paths. Doom remains a separate
-developer/profile-gated build because linking it into the canonical image
-consumed enough internal RAM to break SPI DMA rotation repaint on hardware. The
-canonical artifact and app resources contain neither Doom code nor a WAD.
+supported S3 panel, touch, power, and peripheral paths, including the
+runtime-gated Doom easter egg for the CO5300 (`co5300`) profile. Doom's heavy
+renderer state and mutable engine tables allocate from PSRAM only when it
+starts, so normal streaming keeps the internal RAM its SPI DMA rotation repaint
+needs. The canonical artifact and app resources carry Doom code but no WAD; the
+WAD stays a developer-installed payload read from a raw flash region on the
+16/32 MiB CO5300 carrier.
 
 P4 keeps platform, internal build-target, panel, and carrier configuration
 separate. The P4 platform owns chip/toolchain/memory/network facts; the current
@@ -49,7 +52,10 @@ Profile selection occurs before panel GPIO initialization.
   `jd9853`; a silent bus selects `st7789`. An inconclusive C6 probe uses the
   electrically safer profile.
 - S3 identifies the 8 MiB GC9107 carrier by flash capacity, then probes distinct
-  I2C buses on 16 MiB carriers. Exactly one compatible candidate is required.
+  I2C buses on larger-flash carriers. The `st7789-130` profile uses the
+  QMI8658A at `0x6B` on GPIO47/48 and routes CFG commands through its CH343
+  UART bridge; existing S3 profiles retain native USB CDC. Exactly one
+  compatible candidate is required.
 - P4 currently has one compatible runtime profile. The internal carrier
   selector remains a build implementation detail and the artifact is `p4`.
 

@@ -258,8 +258,9 @@ extension PanelManager {
         case "c6":
             return board == "st7789" || board == "jd9853"
         case "s3":
-            return board == "gc9107" || board == "st7789-154"
-                || board == "co5300" || board == "st77916"
+            return board == "gc9107" || board == "st7789-130"
+                || board == "st7789-154" || board == "co5300"
+                || board == "st77916"
         case "p4":
             return board == "st7703-4b"
         // Historical exact-target bundles remain readable for manual recovery.

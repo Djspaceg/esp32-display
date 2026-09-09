@@ -39,7 +39,7 @@
 //
 // CHANGE THE TEXTURE OF A WALL SWITCH TO ITS OPPOSITE
 //
-switchlist_t alphSwitchList[] =
+const switchlist_t alphSwitchList[] =
 {
     // Doom shareware episode 1 switches
     {"SW1BRCOM",	"SW2BRCOM",	1},
@@ -90,9 +90,9 @@ switchlist_t alphSwitchList[] =
     {"\0",		"\0",		0}
 };
 
-int		switchlist[MAXSWITCHES * 2];
+int*		switchlist;
 int		numswitches;
-button_t        buttonlist[MAXBUTTONS];
+button_t*       buttonlist;
 
 //
 // P_InitSwitchList

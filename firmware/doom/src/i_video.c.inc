@@ -80,11 +80,11 @@ int usemouse = 0;
 #ifdef CMAP256
 
 boolean palette_changed;
-struct color colors[256];
+struct color* colors;
 
 #else  // CMAP256
 
-static struct color colors[256];
+static struct color* colors;
 
 
 #endif  // CMAP256

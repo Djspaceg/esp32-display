@@ -19,25 +19,10 @@
 
 #include "doom_mode.h"
 
-// The common S3 partition table intentionally fits 8 MiB carriers. On the
-// 16 MiB CO5300 carrier, preserve the historical WAD region above 8 MiB and
-// expose it as a read-only synthetic partition for zero-copy mapping.
-extern "C" const esp_partition_t* doom_raw_wad_partition(void) {
-    static const esp_partition_t partition = {
-        nullptr,
-        static_cast<esp_partition_type_t>(DOOM_WAD_PARTITION_TYPE),
-        static_cast<esp_partition_subtype_t>(DOOM_WAD_PARTITION_SUBTYPE),
-        DOOM_WAD_PARTITION_OFFSET,
-        DOOM_WAD_PARTITION_BYTES,
-        0x1000,
-        "doom_wad",
-        false,
-        true,
-    };
-    return ESP.getFlashChipSize() >=
-            DOOM_WAD_PARTITION_OFFSET + DOOM_WAD_PARTITION_BYTES
-        ? &partition : nullptr;
-}
+// The common S3 partition table intentionally fits 8 MiB carriers, so it omits
+// the WAD region above 8 MiB. On the 16 MiB CO5300 carrier that region is still
+// present in flash; the WAD mapper in w_file_esp32.c.inc maps it directly with
+// the public spi_flash_mmap API, so no partition entry is synthesized here.
 
 // --- Display bridge ---
 // The QSPI AMOLED (CO5300 466x466) is already initialized by the main firmware

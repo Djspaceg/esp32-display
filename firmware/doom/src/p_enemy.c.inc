@@ -1804,7 +1804,7 @@ A_CloseShotgun2
 
 
 
-mobj_t*		braintargets[32];
+mobj_t**	braintargets;
 int		numbraintargets;
 int		braintargeton = 0;
 

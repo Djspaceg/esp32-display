@@ -371,21 +371,27 @@ final class FirmwarePusherTests: XCTestCase {
     }
 
     /// Fails OPEN, on purpose, and that decision is pinned rather than left to be
-    /// discovered: this is hardening on a path no board can be attached to, so a
-    /// peer it cannot interpret is accepted. Refusing the unparseable would turn a
-    /// low-severity gap into a push that never starts.
-    func testAnUnreadablePeerIsAccepted() {
+    /// discovered: this is hardening on a path no board can be attached to. Only a
+    /// definite mismatch is refused - two parseable unequal IP addresses, or two
+    /// unequal names. Any relationship this path cannot pin down, including a
+    /// hostname weighed against a numeric IP it cannot resolve, is indeterminate
+    /// and accepted. Refusing the indeterminate would turn a low-severity gap into
+    /// a push that never starts.
+    func testAnIndeterminatePeerIsAccepted() {
         XCTAssertTrue(
             FirmwarePusher.sameHost(.init("panel.local"), as: "panel.local"),
             "a name matching by name is fine")
         XCTAssertTrue(
             FirmwarePusher.sameHost(.init("panel.LOCAL"), as: "panel.local"),
             "and case in a hostname is not a difference")
-        // A name against a numeric target cannot be resolved from here, so it is
-        // refused only because the two strings differ - the fail-open rule covers
-        // endpoint SHAPES it cannot read, not hosts it can read and tell apart.
-        XCTAssertFalse(
-            FirmwarePusher.sameHost(.init("panel.local"), as: "192.168.1.120"))
+        // A name against a numeric target is an indeterminate relationship: one
+        // side is a hostname, the other a numeric IP, and this path cannot resolve
+        // the name to compare them. The policy fails OPEN on that indeterminacy -
+        // only two parseable unequal IP addresses, or two unequal names, are
+        // definite mismatches worth refusing.
+        XCTAssertTrue(
+            FirmwarePusher.sameHost(.init("panel.local"), as: "192.168.1.120"),
+            "a hostname against a numeric IP is indeterminate and must fail open")
     }
 
     /// Not firmware, and it does not need to be: what is being checked is that

@@ -563,8 +563,8 @@ P_SpawnMobj
 //
 // P_RemoveMobj
 //
-mapthing_t	itemrespawnque[ITEMQUESIZE];
-int		itemrespawntime[ITEMQUESIZE];
+mapthing_t*	itemrespawnque;
+int*		itemrespawntime;
 int		iquehead;
 int		iquetail;
 

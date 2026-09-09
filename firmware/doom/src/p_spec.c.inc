@@ -77,7 +77,7 @@ typedef struct
 
 #define MAXANIMS                32
 
-extern anim_t	anims[MAXANIMS];
+extern anim_t*	anims;
 extern anim_t*	lastanim;
 
 //
@@ -93,7 +93,7 @@ extern anim_t*	lastanim;
 //  and end entry, in the order found in
 //  the WAD file.
 //
-animdef_t		animdefs[] =
+const animdef_t		animdefs[] =
 {
     {false,	"NUKAGE3",	"NUKAGE1",	8},
     {false,	"FWATER4",	"FWATER1",	8},
@@ -126,7 +126,7 @@ animdef_t		animdefs[] =
     {-1,        "",             "",             0},
 };
 
-anim_t		anims[MAXANIMS];
+anim_t*		anims;
 anim_t*		lastanim;
 
 
@@ -136,7 +136,7 @@ anim_t*		lastanim;
 #define MAXLINEANIMS            64
 
 extern  short	numlinespecials;
-extern  line_t*	linespeciallist[MAXLINEANIMS];
+extern  line_t**	linespeciallist;
 
 
 
@@ -1367,7 +1367,7 @@ int EV_DoDonut(line_t*	line)
 //  that spawn thinkers
 //
 short		numlinespecials;
-line_t*		linespeciallist[MAXLINEANIMS];
+line_t**	linespeciallist;
 
 
 // Parses command line parameters.

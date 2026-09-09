@@ -63,7 +63,9 @@ class BuildTarget(NamedTuple):
 BUILD_TARGETS = {
     "c6": BuildTarget("c6", "c6"),
     "s3-universal": BuildTarget(
-        "s3-universal", "s3", partition_csv="partitions_s3.csv"),
+        "s3-universal", "s3", partition_csv="partitions_s3.csv",
+        extra_flags=("-DESPDISP_DOOM_RUNTIME",),
+        extra_library_dirs=("firmware",)),
     "p4-4b": BuildTarget(
         "p4-4b", "p4", partition_csv="partitions_p4_4b.csv",
         extra_flags=("-DESPDISP_BOARD_P4_4B",),
@@ -123,10 +125,11 @@ FAMILIES = {
         'Universal ESP32-C6 1.47" display firmware'),
     "s3": Family(
         "s3", "s3", "s3-universal",
-        ("gc9107", "st7789-154", "co5300", "st77916"),
+        ("gc9107", "st7789-130", "st7789-154", "co5300", "st77916"),
         (8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024),
         "universal-8m-ota", {
             "gc9107": ("ESP32-S3-LCD-0.85",),
+            "st7789-130": ("ESP32-S3-LCD-1.3", "ESP32-S3-LCD-1.3-B", "ESP32-S3-LCD-1.3-C"),
             "st7789-154": ("ESP32-S3-Touch-LCD-1.54",),
             "co5300": ("ESP32-S3-Touch-AMOLED-1.75C",),
             "st77916": ("ESP32-S3-Touch-LCD-1.85C",),

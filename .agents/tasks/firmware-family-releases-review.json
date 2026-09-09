@@ -1,0 +1,7 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    "Dirty tracked handoff (confirmed, blocking): eight tracked files have unstaged modifications, and AddDeviceSheet.swift appeared during review. Preserve those changes in their intended commit or worktree and restore a clean tracked state before rerunning final review."
+  ],
+  "reviewDoc": "/Users/stepblk/Source/esp32-display/.agents/tasks/firmware-family-releases-review.md"
+}

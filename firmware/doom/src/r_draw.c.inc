@@ -60,14 +60,14 @@ int		scaledviewwidth;
 int		viewheight;
 int		viewwindowx;
 int		viewwindowy; 
-byte*		ylookup[MAXHEIGHT]; 
-int		columnofs[MAXWIDTH]; 
+byte**		ylookup;
+int*		columnofs;
 
 // Color tables for different players,
 //  translate a limited part to another
 //  (color ramps used for  suit colors).
 //
-byte		translations[3][256];	
+byte		(*translations)[256];
  
 // Backing buffer containing the bezel drawn around the screen and 
 // surrounding background.

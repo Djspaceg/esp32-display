@@ -1,9 +1,9 @@
 // Runtime profile detection performed before any panel GPIO is configured.
 //
 // C6 probes its shared discriminator bus. S3 uses the 8 MiB flash identity for
-// the GC9107 carrier and profile-specific I2C buses on 16 MiB hardware. S3
-// accepts exactly one candidate; zero or multiple candidates remain Unknown so
-// the firmware can stay serial-only until an operator uses CFGBOARD.
+// the GC9107 carrier and profile-specific I2C buses on larger-flash hardware.
+// S3 accepts exactly one candidate; zero or multiple candidates remain Unknown
+// so the firmware can stay serial-only until an operator uses CFGBOARD.
 #pragma once
 
 #include <Arduino.h>
@@ -91,6 +91,7 @@ inline board::Variant probeS3(bool verbose = true,
   bool co5300 = false;
   bool st77916 = false;
   bool st7789 = false;
+  bool st7789_130 = false;
   if (flashBytes > 8u * 1024u * 1024u) {
     co5300 = probeExpectedI2c(
         15, 14, board::S3_CO5300_PROBE_ADDRESSES,
@@ -101,13 +102,17 @@ inline board::Variant probeS3(bool verbose = true,
     st7789 = probeExpectedI2c(
         42, 41, board::S3_ST7789_154_PROBE_ADDRESSES,
         sizeof(board::S3_ST7789_154_PROBE_ADDRESSES), "st7789-154", verbose);
+    st7789_130 = probeExpectedI2c(
+        47, 48, board::S3_ST7789_130_PROBE_ADDRESSES,
+        sizeof(board::S3_ST7789_130_PROBE_ADDRESSES), "st7789-130", verbose);
   }
   const int candidates =
       (flashBytes > 0 && flashBytes <= 8u * 1024u * 1024u ? 1 : 0) +
-      (co5300 ? 1 : 0) + (st77916 ? 1 : 0) + (st7789 ? 1 : 0);
+      (co5300 ? 1 : 0) + (st77916 ? 1 : 0) + (st7789 ? 1 : 0) +
+      (st7789_130 ? 1 : 0);
   if (outCandidateCount != nullptr) *outCandidateCount = candidates;
   const board::Variant variant = board::variantFromS3Probe(
-      flashBytes, co5300, st77916, st7789);
+      flashBytes, co5300, st77916, st7789, st7789_130);
   if (verbose) {
     if (variant == board::Variant::Unknown) {
       Serial.printf("board: S3 detection found %d compatible profiles; "

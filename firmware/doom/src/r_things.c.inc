@@ -72,8 +72,8 @@ lighttable_t**	spritelights;
 
 // constant arrays
 //  used for psprite clipping and initializing clipping
-short		negonearray[SCREENWIDTH];
-short		screenheightarray[SCREENWIDTH];
+short*		negonearray;
+short*		screenheightarray;
 
 
 //
@@ -85,7 +85,7 @@ short		screenheightarray[SCREENWIDTH];
 spritedef_t*	sprites;
 int		numsprites;
 
-spriteframe_t	sprtemp[29];
+spriteframe_t*	sprtemp;
 int		maxframe;
 char*		spritename;
 
@@ -168,9 +168,9 @@ R_InstallSpriteLump
 //  letter/number appended.
 // The rotation character can be 0 to signify no rotations.
 //
-void R_InitSpriteDefs (char** namelist) 
+void R_InitSpriteDefs (char * const * namelist)
 { 
-    char**	check;
+    char * const *	check;
     int		i;
     int		l;
     int		frame;
@@ -200,7 +200,7 @@ void R_InitSpriteDefs (char** namelist)
     for (i=0 ; i<numsprites ; i++)
     {
 	spritename = DEH_String(namelist[i]);
-	memset (sprtemp,-1, sizeof(sprtemp));
+	memset (sprtemp,-1, 29 * sizeof(spriteframe_t));
 		
 	maxframe = -1;
 	
@@ -288,7 +288,7 @@ int		newvissprite;
 // R_InitSprites
 // Called at program start.
 //
-void R_InitSprites (char** namelist)
+void R_InitSprites (char * const * namelist)
 {
     int		i;
 	
@@ -832,8 +832,8 @@ void R_SortVisSprites (void)
 //
 // R_DrawSprite
 //
-static short		clipbot[SCREENWIDTH];
-static short		cliptop[SCREENWIDTH];
+static short*		clipbot;
+static short*		cliptop;
 void R_DrawSprite (vissprite_t* spr)
 {
     drawseg_t*		ds;

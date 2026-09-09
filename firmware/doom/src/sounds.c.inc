@@ -31,7 +31,7 @@
 #define MUSIC(name) \
     { name, 0, NULL, NULL }
 
-musicinfo_t S_music[] =
+static const musicinfo_t doom_initial_S_music[] =
 {
     MUSIC(NULL),
     MUSIC("e1m1"),
@@ -102,6 +102,11 @@ musicinfo_t S_music[] =
     MUSIC("dm2ttl"),
     MUSIC("dm2int") 
 };
+
+// Relocated to PSRAM at runtime (see doom_prepare_static_buffers).
+// .lumpnum/.data/.handle are written at runtime, so a mutable copy of the
+// const template above is allocated in PSRAM.
+musicinfo_t* S_music = NULL;
 
 
 //

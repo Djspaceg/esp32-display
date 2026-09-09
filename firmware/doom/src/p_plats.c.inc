@@ -35,7 +35,7 @@
 #include "sounds.h"
 
 
-plat_t*		activeplats[MAXPLATS];
+plat_t**	activeplats;
 
 
 

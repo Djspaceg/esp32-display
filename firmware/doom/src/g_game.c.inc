@@ -118,7 +118,7 @@ boolean         viewactive;
 int             deathmatch;           	// only if started as net death 
 boolean         netgame;                // only true if packets are broadcast 
 boolean         playeringame[MAXPLAYERS]; 
-player_t        players[MAXPLAYERS]; 
+player_t*        players;
 
 boolean         turbodetected[MAXPLAYERS];
  
@@ -147,7 +147,7 @@ int             testcontrols_mousespeed;
  
 wbstartstruct_t wminfo;               	// parms for world map / intermission 
  
-byte		consistancy[MAXPLAYERS][BACKUPTICS]; 
+byte		(*consistancy)[BACKUPTICS];
  
 #define MAXPLMOVE		(forwardmove[1]) 
  
@@ -195,7 +195,7 @@ static const struct
 #define NUMKEYS		256 
 #define MAX_JOY_BUTTONS 20
 
-static boolean  gamekeydown[NUMKEYS]; 
+static boolean* gamekeydown;
 static int      turnheld;		// for accelerative turning 
  
 static boolean  mousearray[MAX_MOUSE_BUTTONS + 1];
@@ -224,7 +224,7 @@ static char     savedescription[32];
  
 #define	BODYQUESIZE	32
 
-mobj_t*		bodyque[BODYQUESIZE]; 
+mobj_t**	bodyque;
 int		bodyqueslot; 
  
 int             vanilla_savegame_limit = 1;
@@ -659,7 +659,7 @@ void G_DoLoadLevel (void)
     
     // clear cmd building stuff
 
-    memset (gamekeydown, 0, sizeof(gamekeydown));
+    memset (gamekeydown, 0, NUMKEYS * sizeof(boolean));
     joyxmove = joyymove = joystrafemove = 0;
     mousex = mousey = 0;
     sendpause = sendsave = paused = false;
@@ -1301,7 +1301,7 @@ void G_ScreenShot (void)
 
 
 // DOOM Par Times
-int pars[4][10] = 
+const int pars[4][10] =
 { 
     {0}, 
     {0,30,75,120,90,165,180,180,30,165}, 
@@ -1310,7 +1310,7 @@ int pars[4][10] =
 }; 
 
 // DOOM II Par Times
-int cpars[32] =
+const int cpars[32] =
 {
     30,90,120,120,90,150,120,120,270,90,	//  1-10
     210,150,150,150,210,150,420,150,210,150,	// 11-20

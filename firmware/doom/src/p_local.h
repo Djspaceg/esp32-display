@@ -95,8 +95,8 @@ void	P_PlayerThink (player_t* player);
 // Time interval for item respawning.
 #define ITEMQUESIZE		128
 
-extern mapthing_t	itemrespawnque[ITEMQUESIZE];
-extern int		itemrespawntime[ITEMQUESIZE];
+extern mapthing_t*	itemrespawnque;
+extern int*		itemrespawntime;
 extern int		iquehead;
 extern int		iquetail;
 
@@ -154,7 +154,7 @@ typedef struct
 #define MAXINTERCEPTS_ORIGINAL 128
 #define MAXINTERCEPTS          (MAXINTERCEPTS_ORIGINAL + 61)
 
-extern intercept_t	intercepts[MAXINTERCEPTS];
+extern intercept_t*	intercepts;
 extern intercept_t*	intercept_p;
 
 typedef boolean (*traverser_t) (intercept_t *in);

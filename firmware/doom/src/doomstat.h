@@ -217,7 +217,7 @@ extern  gamestate_t     gamestate;
 
 
 // Bookkeeping on players - state.
-extern	player_t	players[MAXPLAYERS];
+extern	player_t*	players;
 
 // Alive? Disconnected?
 extern  boolean		playeringame[MAXPLAYERS];

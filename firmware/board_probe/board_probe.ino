@@ -10,7 +10,7 @@
 
 void setup() {
   Serial.begin(115200);
-#if !defined(CONFIG_IDF_TARGET_ESP32P4)
+#if !defined(CONFIG_IDF_TARGET_ESP32P4) && ARDUINO_USB_CDC_ON_BOOT
   Serial.setTxTimeoutMs(0);
 #endif
   unsigned long start = millis();
@@ -50,8 +50,12 @@ void setup() {
   Serial.printf("scan complete: %d devices; expected GT911 at 0x5D or 0x14\n",
                 found);
 #else
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  Serial.println("Scanning S3 profile discriminator buses");
+#else
   Serial.printf("Scanning C6 discriminator I2C on SDA=%d SCL=%d\n",
                 board::PIN_PROBE_SDA, board::PIN_PROBE_SCL);
+#endif
   int found = 0;
   board::Variant variant = boarddetect::probe(true, &found);
   const board::Config &cfg = board::configFor(variant);

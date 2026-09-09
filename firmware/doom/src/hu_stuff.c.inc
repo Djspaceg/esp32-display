@@ -85,13 +85,13 @@ char*	player_names[] =
 
 char			chat_char; // remove later.
 static player_t*	plr;
-patch_t*		hu_font[HU_FONTSIZE];
+patch_t**		hu_font;
 static hu_textline_t	w_title;
 boolean			chat_on;
 static hu_itext_t	w_chat;
 static boolean		always_off = false;
 static char		chat_dest[MAXPLAYERS];
-static hu_itext_t w_inputbuffer[MAXPLAYERS];
+static hu_itext_t* w_inputbuffer;
 
 static boolean		message_on;
 boolean			message_dontfuckwithme;
@@ -109,7 +109,7 @@ static boolean		headsupactive = false;
 // The actual names can be found in DStrings.h.
 //
 
-char*	mapnames[] =	// DOOM shareware/registered/retail (Ultimate) names.
+char* const	mapnames[] =	// DOOM shareware/registered/retail (Ultimate) names.
 {
 
     HUSTR_E1M1,
@@ -169,7 +169,7 @@ char*	mapnames[] =	// DOOM shareware/registered/retail (Ultimate) names.
 // the layout in the Vanilla executable, where it is possible to
 // overflow the end of one array into the next.
 
-char *mapnames_commercial[] =
+char * const mapnames_commercial[] =
 {
     // DOOM 2 map names.
 

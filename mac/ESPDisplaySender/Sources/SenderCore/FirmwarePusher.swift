@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 import SenderProtocol
@@ -8,6 +9,26 @@ import SenderProtocol
 /// the timeouts. It is a direct transcription of what `espota.py serve()` does,
 /// including the retry counts, because those counts are the only description
 /// anyone has of how patient a panel needs you to be.
+///
+/// THE WHOLE OTA TRANSPORT USES POSIX SOCKETS, not Network.framework, and that
+/// is the point of this file. The invitation and the authentication reply go out
+/// over a fresh connected `AF_INET`/`SOCK_DGRAM` socket per exchange (see
+/// `UDPExchange`), exactly as espota does; the panel's return TCP connection is
+/// now taken by an explicit `AF_INET`/`SOCK_STREAM` server (see `PanelTCPServer`)
+/// and its accepted socket, rather than an `NWListener`/`NWConnection`.
+///
+/// Both halves moved for the same reason. On the live network an `NWConnection`
+/// UDP invitation to a panel got no reply while a connected POSIX datagram from
+/// the same Mac to the same address and port received `AUTH <nonce>` immediately;
+/// separately, an `NWListener` accepting the panel's dial-back - tried with an
+/// implicit dual-stack bind, a fail-open peer filter, an explicit IPv4
+/// `requiredLocalEndpoint` and `.ready` gating - still ended in the panel logging
+/// `OTA_CONNECT_ERROR` and this side reporting that the panel never connected.
+/// The panel and the protocol were good in both cases, so the failing layer was
+/// Network.framework's readiness/interoperability. Mirroring espota.py's plain
+/// `socket(AF_INET, SOCK_STREAM); bind(('0.0.0.0', 0)); listen(1); accept()`
+/// removes that layer from the transfer path the same way it was removed from the
+/// handshake, without touching the protocol, the crypto or the update safety.
 ///
 /// THE DIRECTION IS THE SURPRISING PART. The host does not connect to the panel
 /// to send the image: it tells the panel a port over UDP and the panel dials
@@ -51,12 +72,24 @@ final class FirmwarePusher {
     enum Failure: Error, LocalizedError, Equatable {
         case couldNotListen(String)
         case noReplyToInvitation(attempts: Int)
+        /// The invitation could not be put on the wire at all: resolving the
+        /// address, opening the socket, connecting it to the panel, or the send
+        /// itself failed. Its own case, distinct from `noReplyToInvitation`,
+        /// because silence means "try again" and a local transport failure means
+        /// "something on this Mac stopped the datagram leaving" - a different
+        /// problem with a different fix. Carries the underlying POSIX error.
+        case invitationTransportFailed(reason: String)
         case panelRefusedInvitation(deviceText: String)
         case passwordRequired
         case legacyMD5Firmware
         case malformedChallenge(length: Int)
         case couldNotComputeResponse
         case noReplyToAuthentication
+        /// The authentication reply could not be put on the wire, the same local
+        /// transport failure as `invitationTransportFailed` but on the auth
+        /// socket. Kept apart from `noReplyToAuthentication`, which is the panel
+        /// staying silent, for the same reason the invitation cases are split.
+        case authenticationTransportFailed(reason: String)
         case authenticationFailed(deviceText: String)
         case panelNeverConnected(seconds: Int)
         case transferFailed(bytesSent: Int, of: Int, reason: String)
@@ -85,6 +118,11 @@ final class FirmwarePusher {
             case .noReplyToInvitation(let attempts):
                 return "The panel did not answer \(attempts) update invitations. "
                     + "Check that it is on this network and that OTA is enabled."
+            case .invitationTransportFailed(let reason):
+                return "This Mac could not send the update invitation over the "
+                    + "network: \(reason). Check this Mac's network connection "
+                    + "and that Local Network access is allowed for this app in "
+                    + "System Settings > Privacy & Security."
             case .panelRefusedInvitation(let text):
                 return "The panel refused the update: "
                     + "\(Self.quote(text, whenEmpty: "it replied with nothing"))"
@@ -103,6 +141,11 @@ final class FirmwarePusher {
                     + "Mac. This is a bug in the app rather than a wrong password."
             case .noReplyToAuthentication:
                 return "The panel did not answer the password."
+            case .authenticationTransportFailed(let reason):
+                return "This Mac could not send the password over the network: "
+                    + "\(reason). Check this Mac's network connection and that "
+                    + "Local Network access is allowed for this app in System "
+                    + "Settings > Privacy & Security."
             case .authenticationFailed(let text):
                 return "The panel rejected the password"
                     + (text == "Authentication Failed"
@@ -179,7 +222,23 @@ final class FirmwarePusher {
     /// regardless, so this changes the resolution and not the endpoints.
     static let progressByteInterval = 64 * 1024
 
-    private let queue = DispatchQueue(label: "espdisp.ota")
+    /// The serial queue the blocking TCP send/receive run on. Every `write`,
+    /// `poll` and `recv` on the accepted socket is dispatched here, one at a time:
+    /// the transfer is lock-step (send a chunk, then read its reply), so only one
+    /// blocking call is ever parked on this queue and the `poll` timeout bounds
+    /// how long that is. Kept apart from the accept and UDP queues so a parked
+    /// read cannot hold up anything else.
+    private let tcpQueue = DispatchQueue(label: "espdisp.ota.tcp")
+    /// A dedicated queue for the blocking `accept()` wait. The wait can sit for
+    /// the whole connect-back timeout, so it must not share a queue with the
+    /// transfer's reads.
+    private let acceptQueue = DispatchQueue(label: "espdisp.ota.accept")
+    /// A separate queue for the blocking POSIX UDP exchanges. Kept apart from the
+    /// TCP queues so a `poll`/`recv` that is parked waiting for a datagram cannot
+    /// hold up the return connection's machinery. The handshake is sequential
+    /// (invite, then auth), so one exchange blocks this queue at a time and the
+    /// `poll` timeout bounds how long that is.
+    private let udpQueue = DispatchQueue(label: "espdisp.ota.udp")
     /// Which port the invitation goes to. Always 3232 in the app; a parameter so
     /// a test can run the whole exchange against a fake panel on a loopback port
     /// of its own rather than binding the real one, which is a shared resource on
@@ -210,20 +269,18 @@ final class FirmwarePusher {
         progress: @escaping @Sendable (Progress) -> Void
     ) async throws {
         let md5 = EspotaProtocol.md5Hex(image)
-        let listener = try startListener()
-        defer { listener.cancel() }
-        let inbound = InboundConnection()
-        // THE HANDLER GOES ON BEFORE start(), and this is not a style choice:
-        // NWListener fails with EINVAL - "Invalid argument", which says nothing
-        // about the cause - if it is started without a newConnectionHandler. That
-        // was written the other way round here first, and every push would have
-        // died with "This Mac could not open a port"; FirmwarePusherTests is what
-        // found it, on loopback, with no panel.
-        listener.newConnectionHandler = { [queue] connection in
-            connection.start(queue: queue)
-            inbound.accept(connection, from: address)
-        }
-        let hostPort = try await assignedPort(of: listener)
+        // Open the listening socket BEFORE the invitation goes out. espota.py
+        // does the same: `socket(); bind(('0.0.0.0', 0)); listen(1)` and only
+        // then reads the kernel-assigned port to put in the line the panel dials
+        // back to. `PanelTCPServer.start()` returns fully bound and listening, so
+        // the port it hands back is one the panel can already connect to - there
+        // is no readiness to wait for the way there was with NWListener.
+        let server = try PanelTCPServer.start()
+        // Closed on every exit from here, including the throwing ones. It is
+        // closed again explicitly once `accept()` returns; `close()` is
+        // idempotent so the second call is a no-op.
+        defer { server.close() }
+        let hostPort = server.port
 
         let invitation = EspotaProtocol.invitationLine(
             hostPort: hostPort, imageBytes: image.count, md5Hex: md5)
@@ -242,60 +299,37 @@ final class FirmwarePusher {
         }
 
         progress(.waitingForPanel)
-        let connection = try await inbound.wait(
-            seconds: Self.connectBackTimeout, on: queue)
-        defer { connection.cancel() }
-        try await transfer(image, over: connection, progress: progress)
-    }
-
-    // MARK: - step 1: the listener
-
-    private func startListener() throws -> NWListener {
-        do {
-            // `.any` asks the system for an ephemeral port, which is then read
-            // back below. espota picks a random port itself and can therefore
-            // collide with something already bound; letting the system choose
-            // cannot.
-            return try NWListener(using: .tcp, on: .any)
-        } catch {
-            throw Failure.couldNotListen(error.localizedDescription)
-        }
-    }
-
-    /// Start the listener and wait for the port the system gave it.
-    ///
-    /// Polled rather than awaited through `stateUpdateHandler`, matching
-    /// FrameSender's readiness loop: `NWListener.port` is only populated once the
-    /// listener is ready, and the invitation cannot be composed without it.
-    /// Polling `state` too rather than capturing the failure from a handler keeps
-    /// this free of shared mutable state.
-    private func assignedPort(of listener: NWListener) async throws -> UInt16 {
-        listener.start(queue: queue)
-        let deadline = Date(timeIntervalSinceNow: 5)
-        while Date() < deadline {
-            if case .failed(let error) = listener.state {
-                throw Failure.couldNotListen(error.localizedDescription)
-            }
-            if let port = listener.port, port.rawValue != 0 {
-                return port.rawValue
-            }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        throw Failure.couldNotListen("the listener did not become ready")
+        let fd = try await server.accept(
+            from: address, timeout: Self.connectBackTimeout, on: acceptQueue)
+        // espota closes the server socket the moment it has the one connection it
+        // is waiting for; nothing else is going to dial back. The accepted socket
+        // is closed on every exit from here on.
+        server.close()
+        defer { close(fd) }
+        try await transfer(image, over: fd, progress: progress)
     }
 
     // MARK: - steps 2 and 3: invitation
 
     /// Send the invitation, retrying as espota does.
     ///
-    /// A fresh UDP connection per attempt, deliberately: the panel answers to the
-    /// source address and port of the datagram it received, and a connection that
-    /// has already timed out once may have been torn down. espota opens a new
-    /// socket each time round for the same reason.
+    /// A fresh connected POSIX datagram socket per attempt, deliberately: the
+    /// panel answers to the source address and port of the datagram it received,
+    /// and a socket that has already timed out once is closed and replaced.
+    /// espota opens a new socket each time round for the same reason.
     ///
-    /// Silence is retried; an answer, even a refusal, is not. A panel that said
-    /// something has heard us, and asking again would only produce the same
-    /// answer more slowly.
+    /// SILENCE AND AN UNREACHABLE REPLY ARE RETRIED; A LOCAL FAILURE IS NOT. A
+    /// receive timeout is the panel not having answered yet, and an ICMP
+    /// unreachable (ECONNREFUSED/EHOSTUNREACH/ENETUNREACH surfaced on the
+    /// connected socket) is the panel or a router saying nothing reached a
+    /// listener this time - both mean "no reply this attempt", and asking again
+    /// is the whole point of the ten attempts. A local transport failure - the
+    /// address would not resolve, the socket would not open, connect or send - is
+    /// not silence and is not retried: it would fail the same way ten times over
+    /// and then be reported as "the panel did not answer", which sends someone to
+    /// check the panel when the problem is on this Mac. It is thrown straight out
+    /// as its own error carrying the POSIX reason. An answer, even a refusal, is
+    /// not retried either: a panel that said something has heard us.
     private func invite(
         _ invitation: String,
         to address: String,
@@ -303,20 +337,23 @@ final class FirmwarePusher {
     ) async throws -> EspotaProtocol.InvitationReply {
         for attempt in 1...Self.invitationAttempts {
             progress(.inviting(attempt: attempt, of: Self.invitationAttempts))
-            let connection = udpConnection(to: address)
-            defer { connection.cancel() }
             do {
-                try await send(Data(invitation.utf8), over: connection)
-                let data = try await receiveDatagram(
-                    on: connection, timeout: Self.invitationTimeout)
+                let data = try await UDPExchange.perform(
+                    payload: Data(invitation.utf8), host: address, port: otaPort,
+                    timeout: Self.invitationTimeout, on: udpQueue)
                 return EspotaProtocol.parseInvitationReply(
                     String(decoding: data, as: UTF8.self))
-            } catch {
-                // Both a send failure and a timeout land here, and both mean the
-                // same thing at this stage: nothing came back. The distinction
-                // only matters if every attempt fails, and then the message is
-                // about the panel not answering either way.
+            } catch UDPExchange.TransportError.timedOut {
                 continue
+            } catch UDPExchange.TransportError.unreachable {
+                // An ICMP unreachable for this datagram: the panel's host or a
+                // router answered that nothing reached a listener. Like silence
+                // it means no reply this attempt, so it spends one invitation
+                // attempt and tries again rather than failing out as a local
+                // transport problem.
+                continue
+            } catch let UDPExchange.TransportError.failed(reason) {
+                throw Failure.invitationTransportFailed(reason: reason)
             }
         }
         throw Failure.noReplyToInvitation(attempts: Self.invitationAttempts)
@@ -349,20 +386,28 @@ final class FirmwarePusher {
             password: password, nonce: nonce, cnonce: cnonce)
         else { throw Failure.couldNotComputeResponse }
 
-        let connection = udpConnection(to: address)
-        defer { connection.cancel() }
+        // A fresh socket for the auth exchange, separate from the invitation's,
+        // matching espota/ArduinoOTA: the invitation socket has done its job and
+        // the panel replies to whichever source port this datagram comes from.
         let line = EspotaProtocol.authLine(cnonce: cnonce, response: response)
-        do {
-            try await send(Data(line.utf8), over: connection)
-        } catch {
-            throw Failure.noReplyToAuthentication
-        }
         let data: Data
         do {
-            data = try await receiveDatagram(
-                on: connection, timeout: Self.authTimeout)
-        } catch {
+            data = try await UDPExchange.perform(
+                payload: Data(line.utf8), host: address, port: otaPort,
+                timeout: Self.authTimeout, on: udpQueue)
+        } catch UDPExchange.TransportError.timedOut {
+            // The panel stayed silent. Distinct from the transport failure below,
+            // which is this Mac being unable to send at all.
             throw Failure.noReplyToAuthentication
+        } catch UDPExchange.TransportError.unreachable {
+            // An ICMP unreachable for the auth datagram is the panel not
+            // answering this exchange - the same observable outcome as silence.
+            // The auth reply is sent once and never retried (espota does not
+            // retry it), so this maps to the no-reply case rather than the local
+            // transport failure below.
+            throw Failure.noReplyToAuthentication
+        } catch let UDPExchange.TransportError.failed(reason) {
+            throw Failure.authenticationTransportFailed(reason: reason)
         }
         switch EspotaProtocol.parseAuthReply(String(decoding: data, as: UTF8.self)) {
         case .accepted:
@@ -380,7 +425,7 @@ final class FirmwarePusher {
     /// sending ahead would only fill buffers. `espota` is lock-step too.
     private func transfer(
         _ image: Data,
-        over connection: NWConnection,
+        over fd: Int32,
         progress: @escaping @Sendable (Progress) -> Void
     ) async throws {
         let total = image.count
@@ -404,7 +449,7 @@ final class FirmwarePusher {
             let end = min(index + EspotaProtocol.chunkBytes, image.endIndex)
             let chunk = Data(image[index..<end])
             do {
-                try await send(chunk, over: connection)
+                try await send(chunk, over: fd)
             } catch {
                 throw Failure.transferFailed(
                     bytesSent: sent, of: total, reason: error.localizedDescription)
@@ -423,7 +468,7 @@ final class FirmwarePusher {
             let reply: Reply
             do {
                 reply = try await receive(
-                    on: connection, maximum: Self.replyBytes,
+                    on: fd, maximum: Self.replyBytes,
                     timeout: Self.chunkTimeout)
             } catch {
                 throw Failure.transferFailed(
@@ -468,7 +513,7 @@ final class FirmwarePusher {
 
         progress(.finishing)
         try await awaitResult(
-            over: connection, tail: tail, panelHungUp: panelHungUp)
+            over: fd, tail: tail, panelHungUp: panelHungUp)
     }
 
     /// Wait for the `OK` the panel sends only after `Update.end()` succeeds.
@@ -497,7 +542,7 @@ final class FirmwarePusher {
     ///   - nothing but per-write counts, or nothing at all: unconfirmed, with a
     ///     message that says to check the version when it comes back.
     private func awaitResult(
-        over connection: NWConnection, tail initialTail: String,
+        over fd: Int32, tail initialTail: String,
         panelHungUp initiallyHungUp: Bool
     ) async throws {
         // Carries on from whatever the transfer loop had already read: see
@@ -513,7 +558,7 @@ final class FirmwarePusher {
                 let reply: Reply
                 do {
                     reply = try await receive(
-                        on: connection, maximum: Self.replyBytes,
+                        on: fd, maximum: Self.replyBytes,
                         timeout: Self.resultTimeout)
                 } catch {
                     // A timeout is not an answer. espota keeps trying too, and the
@@ -551,9 +596,9 @@ final class FirmwarePusher {
 
     // MARK: - who connected back
 
-    /// Whether an inbound connection came from the panel this push is for.
+    /// Whether an accepted peer came from the panel this push is for.
     ///
-    /// DELIBERATELY FAILS OPEN. An endpoint shape this cannot interpret is
+    /// DELIBERATELY FAILS OPEN. A peer address this cannot render numerically is
     /// accepted, not refused, and that asymmetry is the point: this is hardening
     /// on a path that cannot be verified from here without a panel, and the cost
     /// of a false negative is a push that never starts on somebody's desk. Only a
@@ -563,9 +608,26 @@ final class FirmwarePusher {
     /// is not an authorisation boundary. What it buys is that a stray connection
     /// on the LAN cannot take the transfer slot from the panel and turn a push
     /// into a hang.
-    static func connection(_ connection: NWConnection, isFrom address: String) -> Bool {
-        guard case .hostPort(let host, _) = connection.endpoint else { return true }
-        return sameHost(host, as: address)
+    ///
+    /// The peer sockaddr from `accept()` is rendered to a numeric string with
+    /// `getnameinfo(NI_NUMERICHOST)` - no DNS, no reverse lookup - and then run
+    /// through the same `sameHost` normalisation the listener always used, so the
+    /// zone-id, elided-IPv6 and IPv4-mapped cases stay covered by the existing
+    /// tests. A `getnameinfo` this cannot render is the fail-open case: accept.
+    static func peer(
+        _ storage: sockaddr_storage, length: socklen_t, isFrom address: String
+    ) -> Bool {
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        var storage = storage
+        let status = withUnsafePointer(to: &storage) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { addr in
+                getnameinfo(
+                    addr, length, &host, socklen_t(host.count),
+                    nil, 0, NI_NUMERICHOST)
+            }
+        }
+        guard status == 0 else { return true }
+        return sameHost(NWEndpoint.Host(String(cString: host)), as: address)
     }
 
     /// Compare a connection's host against the address the invitation went to.
@@ -584,13 +646,28 @@ final class FirmwarePusher {
         case .name(let value, _): peerText = value
         @unknown default: return true
         }
-        guard let peer = ipAddress(peerText), let target = ipAddress(address) else {
-            // A name on either side, or something unparseable. Compare what there
-            // is and, per the fail-open rule, only refuse a definite difference.
+        let peer = ipAddress(peerText)
+        let target = ipAddress(address)
+        switch (peer, target) {
+        case (let peer?, let target?):
+            // Both are addresses: this is the only case that can be a definite
+            // mismatch, so compare the raw addresses exactly. Zone ids and the
+            // IPv4-mapped form are already normalised away by `ipAddress`.
+            return peer.rawValue == target.rawValue
+        case (nil, nil):
+            // Neither is an address - two names, or two unparseable shapes.
+            // Compare bare host names case-insensitively.
             return bareHost(peerText).caseInsensitiveCompare(bareHost(address))
                 == .orderedSame
+        default:
+            // Exactly one side is an address and the other is a name or an
+            // unparseable shape - e.g. a reverse-resolved `silver-round.local`
+            // peer against a numeric `192.168.1.83` target. That cannot be told
+            // apart from here without resolving, so it is not a definite mismatch;
+            // per the fail-open rule, accept it. The listener is not an auth
+            // boundary, so accepting is the safe direction.
+            return true
         }
-        return peer.rawValue == target.rawValue
     }
 
     /// The host with any interface zone id removed. `IPv6Address` accepts a zone
@@ -610,50 +687,40 @@ final class FirmwarePusher {
 
     // MARK: - socket plumbing
 
-    private func udpConnection(to address: String) -> NWConnection {
-        let connection = NWConnection(
-            host: NWEndpoint.Host(address),
-            port: NWEndpoint.Port(rawValue: otaPort)!,
-            using: .udp)
-        connection.start(queue: queue)
-        return connection
-    }
-
-    private func send(_ data: Data, over connection: NWConnection) async throws {
+    /// Send the whole chunk, blocking on `tcpQueue`.
+    ///
+    /// `write` can return short - it wrote some of the buffer and the kernel's
+    /// send window is full - and that is not an error, so this loops until every
+    /// byte is gone the way espota's `connection.sendall` does. EINTR restarts the
+    /// write from where it stopped. The transfer is lock-step, so only one send is
+    /// ever queued on `tcpQueue` at a time.
+    private func send(_ data: Data, over fd: Int32) async throws {
         try await withCheckedThrowingContinuation { continuation in
-            let resumer = Resumer<Void>(continuation)
-            connection.send(content: data, completion: .contentProcessed { error in
-                if let error {
-                    resumer.finish(.failure(error))
-                } else {
-                    resumer.finish(.success(()))
-                }
-            })
+            tcpQueue.async {
+                continuation.resume(with: Result { try Self.writeAll(fd, data) })
+            }
         }
     }
 
-    /// One datagram, or a timeout.
-    ///
-    /// The timeout is a queued `asyncAfter` rather than a racing task on purpose:
-    /// a `TaskGroup` that cancels the loser still awaits it at the end of its
-    /// scope, and a continuation waiting on a socket that will never answer is not
-    /// cancellable, so that shape hangs. `Resumer` guarantees exactly one resume
-    /// whichever arrives first.
-    private func receiveDatagram(
-        on connection: NWConnection, timeout: Double
-    ) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            let resumer = Resumer<Data>(continuation)
-            queue.asyncAfter(deadline: .now() + timeout) {
-                resumer.finish(.failure(Failure.replyTimedOut(
-                    waitingFor: "waiting for a reply over UDP")))
-            }
-            connection.receiveMessage { data, _, _, error in
-                if let error {
-                    resumer.finish(.failure(error))
-                } else {
-                    resumer.finish(.success(data ?? Data()))
+    /// `write` the whole buffer, looping on partial writes and EINTR.
+    private static func writeAll(_ fd: Int32, _ data: Data) throws {
+        try data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress, raw.count > 0 else { return }
+            var offset = 0
+            while offset < raw.count {
+                let written = write(fd, base + offset, raw.count - offset)
+                if written < 0 {
+                    let code = errno
+                    if code == EINTR { continue }
+                    throw SocketError(reason: posixMessage(code))
                 }
+                // A zero-length `write` of a nonempty buffer is not defined to
+                // happen on a stream socket; treat it as a broken connection
+                // rather than spin.
+                if written == 0 {
+                    throw SocketError(reason: "the connection accepted no bytes")
+                }
+                offset += written
             }
         }
     }
@@ -673,120 +740,462 @@ final class FirmwarePusher {
         var text: String { String(decoding: data, as: UTF8.self) }
     }
 
-    /// Whatever has arrived on the TCP stream, up to `maximum` bytes.
+    /// Whatever has arrived on the TCP stream, up to `maximum` bytes, blocking on
+    /// `tcpQueue`.
     ///
-    /// `minimumIncompleteLength: 1` because the panel's replies are short and
-    /// unframed - a byte count with no terminator - so waiting for a full buffer
-    /// would wait forever.
+    /// `poll` carries the timeout the way it does in `UDPExchange`: a silent panel
+    /// ends the wait with `replyTimedOut` instead of parking the queue forever,
+    /// and there is no separate timer racing the read. One `recv` after the poll
+    /// takes whatever short reply is there - the panel's replies are unframed byte
+    /// counts, so waiting for a full buffer would wait forever.
+    ///
+    /// EOF IS CARRIED, NOT COLLAPSED INTO EMPTY DATA. `recv` returning 0 is the
+    /// panel's `client.stop()` and means the stream is over; `recv` returning
+    /// bytes is data with the stream still open. The two mean opposite things and
+    /// only the caller knows which it is looking at, so `isClosed` is reported
+    /// alongside the data rather than inferred from an empty buffer. Unlike the
+    /// old `NWConnection.receive`, a POSIX `recv` never returns data and EOF in
+    /// the same call - the close arrives as a subsequent zero-length read - which
+    /// the accumulating tail logic already handles.
     private func receive(
-        on connection: NWConnection, maximum: Int, timeout: Double
+        on fd: Int32, maximum: Int, timeout: Double
     ) async throws -> Reply {
         try await withCheckedThrowingContinuation { continuation in
-            let resumer = Resumer<Reply>(continuation)
-            queue.asyncAfter(deadline: .now() + timeout) {
-                resumer.finish(.failure(Failure.replyTimedOut(
-                    waitingFor: "acknowledging the data it had been sent")))
+            tcpQueue.async {
+                continuation.resume(with: Result {
+                    try Self.readReply(fd, maximum: maximum, timeout: timeout)
+                })
             }
-            connection.receive(
-                minimumIncompleteLength: 1, maximumLength: maximum
-            ) { data, _, isComplete, error in
-                if let error {
-                    resumer.finish(.failure(error))
-                } else {
-                    // Data and a close can arrive together, and the last thing
-                    // the panel says before `client.stop()` is exactly that case,
-                    // so both fields are always reported rather than one winning.
-                    resumer.finish(.success(Reply(
-                        data: data ?? Data(), isClosed: isComplete)))
+        }
+    }
+
+    /// The blocking read body: poll to the deadline, then one `recv`.
+    private static func readReply(
+        _ fd: Int32, maximum: Int, timeout: Double
+    ) throws -> Reply {
+        let deadline = DispatchTime.now() + timeout
+        var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        while true {
+            let now = DispatchTime.now()
+            if now >= deadline { throw timedOut }
+            let remaining = deadline.uptimeNanoseconds - now.uptimeNanoseconds
+            // Never below 1ms: poll treats a negative timeout as "wait forever",
+            // and the deadline guard above has already handled expiry.
+            let remainingMs = max(Int(remaining / 1_000_000), 1)
+            let ready = poll(&descriptor, 1, Int32(clamping: remainingMs))
+            if ready < 0 {
+                let code = errno
+                if code == EINTR { continue }
+                throw SocketError(reason: posixMessage(code))
+            }
+            if ready == 0 { throw timedOut }
+            break
+        }
+        var buffer = [UInt8](repeating: 0, count: maximum)
+        while true {
+            let received = recv(fd, &buffer, maximum, 0)
+            if received < 0 {
+                let code = errno
+                if code == EINTR { continue }
+                throw SocketError(reason: posixMessage(code))
+            }
+            // recv == 0 is EOF: the panel closed the stream, no bytes.
+            if received == 0 { return Reply(data: Data(), isClosed: true) }
+            return Reply(data: Data(buffer.prefix(received)), isClosed: false)
+        }
+    }
+
+    /// The read timeout, worded exactly as the old `NWConnection` path worded it
+    /// so the transfer and tail classification report it unchanged.
+    private static var timedOut: Failure {
+        .replyTimedOut(waitingFor: "acknowledging the data it had been sent")
+    }
+
+    /// A `errno` value as its localized system string, shared with the accept and
+    /// write paths.
+    fileprivate static func posixMessage(_ code: Int32) -> String {
+        String(cString: strerror(code))
+    }
+}
+
+/// A local socket failure carrying a POSIX message. The transfer loop wraps
+/// whatever `send`/`receive` throw into `transferFailed(reason:)` using
+/// `localizedDescription`, so this exists to give that reason the system's own
+/// wording for the errno rather than a Swift bridging string.
+private struct SocketError: Error, LocalizedError {
+    let reason: String
+    var errorDescription: String? { reason }
+}
+
+/// A POSIX IPv4 TCP server the panel dials back to, and the wait for it.
+///
+/// This is espota.py's listener transcribed with public Darwin/POSIX calls:
+/// `socket(AF_INET, SOCK_STREAM)`, `SO_REUSEADDR`, `bind(('0.0.0.0', 0))`,
+/// `listen(1)`, then `settimeout(10); accept()`. It replaces the `NWListener`
+/// that, on the live network, left the panel logging `OTA_CONNECT_ERROR` however
+/// its local endpoint and readiness were configured. Binding `AF_INET` directly
+/// also means the accepted peer is a plain IPv4 sockaddr rather than the
+/// dual-stack IPv4-mapped form, so the family the panel connects on is no longer
+/// in question.
+private final class PanelTCPServer: @unchecked Sendable {
+    /// The listening socket. IPv4, bound to `0.0.0.0` on a kernel-assigned port.
+    private let fd: Int32
+    /// The kernel-assigned port, read back with `getsockname`. Safe to advertise
+    /// synchronously: the socket is already listening when this type is created.
+    let port: UInt16
+    private let lock = NSLock()
+    private var isClosed = false
+
+    private init(fd: Int32, port: UInt16) {
+        self.fd = fd
+        self.port = port
+    }
+
+    /// Create the socket, bind to `0.0.0.0:0`, listen, and read back the port.
+    ///
+    /// Fully listening on return, so the caller can put the port in the invitation
+    /// at once - there is no readiness to poll for the way `NWListener` needed.
+    /// Any failing step closes the socket and throws `couldNotListen` with the
+    /// POSIX reason, matching the error the old listener path produced.
+    static func start() throws -> PanelTCPServer {
+        let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+        guard fd >= 0 else {
+            throw FirmwarePusher.Failure.couldNotListen(
+                FirmwarePusher.posixMessage(errno))
+        }
+        // The only option set, and the one espota sets: let the port be reused
+        // promptly across pushes rather than sit in TIME_WAIT. Safe - it does not
+        // widen who can connect - and a failure to set it is not worth aborting a
+        // push over, so it is best-effort.
+        var reuse: Int32 = 1
+        _ = setsockopt(
+            fd, SOL_SOCKET, SO_REUSEADDR, &reuse,
+            socklen_t(MemoryLayout<Int32>.size))
+
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = INADDR_ANY.bigEndian  // 0.0.0.0
+        address.sin_port = 0  // let the kernel choose the port
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { addr in
+                bind(fd, addr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0 else {
+            let code = errno
+            Darwin.close(fd)
+            throw FirmwarePusher.Failure.couldNotListen(
+                FirmwarePusher.posixMessage(code))
+        }
+        // Backlog of 1, as espota uses: exactly one panel is expected to dial
+        // back. A stray that arrives alongside it queues behind, and the accept
+        // loop rejects the stray without giving up the wait.
+        guard listen(fd, 1) == 0 else {
+            let code = errno
+            Darwin.close(fd)
+            throw FirmwarePusher.Failure.couldNotListen(
+                FirmwarePusher.posixMessage(code))
+        }
+
+        var actual = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &actual) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { addr in
+                getsockname(fd, addr, &length)
+            }
+        }
+        guard named == 0 else {
+            let code = errno
+            Darwin.close(fd)
+            throw FirmwarePusher.Failure.couldNotListen(
+                FirmwarePusher.posixMessage(code))
+        }
+        return PanelTCPServer(fd: fd, port: UInt16(bigEndian: actual.sin_port))
+    }
+
+    /// Close the listening socket. Idempotent: `push` defers a close and also
+    /// closes explicitly once `accept` has returned, so this runs twice.
+    func close() {
+        lock.lock()
+        let shouldClose = !isClosed
+        isClosed = true
+        lock.unlock()
+        if shouldClose { Darwin.close(fd) }
+    }
+
+    /// Wait for the panel's return connection, running the blocking `poll`/
+    /// `accept` loop on `queue` and handing the accepted fd back through a checked
+    /// continuation.
+    ///
+    /// `poll` carries the connect-back timeout, so a panel that never dials back
+    /// ends the wait with `panelNeverConnected` rather than parking the queue.
+    /// EINTR restarts the wait with the time that is left. A peer that is a
+    /// DEFINITE different address is closed and the wait CONTINUES on the
+    /// remaining budget - a stray on the LAN cannot consume the panel's one slot -
+    /// while anything indeterminate is accepted, per `FirmwarePusher.peer`'s
+    /// fail-open rule. The accepted fd is the caller's to close.
+    func accept(
+        from address: String, timeout: Double, on queue: DispatchQueue
+    ) async throws -> Int32 {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                continuation.resume(with: Result {
+                    try self.acceptLoop(from: address, timeout: timeout)
+                })
+            }
+        }
+    }
+
+    private func acceptLoop(from address: String, timeout: Double) throws -> Int32 {
+        let deadline = DispatchTime.now() + timeout
+        var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        while true {
+            let now = DispatchTime.now()
+            if now >= deadline { throw timedOut(timeout) }
+            let remaining = deadline.uptimeNanoseconds - now.uptimeNanoseconds
+            let remainingMs = max(Int(remaining / 1_000_000), 1)
+            let ready = poll(&descriptor, 1, Int32(clamping: remainingMs))
+            if ready < 0 {
+                let code = errno
+                if code == EINTR { continue }
+                // A hard poll failure on the listening socket is this Mac's
+                // listening side failing, not the panel being slow, so it is the
+                // same class of error as a bind that would not take.
+                throw FirmwarePusher.Failure.couldNotListen(
+                    FirmwarePusher.posixMessage(code))
+            }
+            if ready == 0 { throw timedOut(timeout) }
+
+            var storage = sockaddr_storage()
+            var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+            let client = withUnsafeMutablePointer(to: &storage) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { addr in
+                    Darwin.accept(fd, addr, &length)
                 }
             }
+            if client < 0 {
+                let code = errno
+                // EINTR is a signal; ECONNABORTED is a peer that hung up between
+                // the SYN and the accept. Neither is the panel and neither ends
+                // the wait - poll again on the time that is left.
+                if code == EINTR || code == ECONNABORTED { continue }
+                throw FirmwarePusher.Failure.couldNotListen(
+                    FirmwarePusher.posixMessage(code))
+            }
+            if FirmwarePusher.peer(storage, length: length, isFrom: address) {
+                return client
+            }
+            // A definite different address. Close it and keep waiting so the
+            // stray does not take the one transfer slot from the panel.
+            Darwin.close(client)
         }
+    }
+
+    private func timedOut(_ seconds: Double) -> FirmwarePusher.Failure {
+        .panelNeverConnected(seconds: Int(seconds))
     }
 }
 
-/// The connection the panel makes back to us, and the wait for it.
+/// One espota UDP round trip over a fresh connected POSIX datagram socket.
 ///
-/// Separate small class because the connection arrives on the listener's queue
-/// while the push is suspended waiting for it, and both sides need one lock and
-/// one resume.
-private final class InboundConnection: @unchecked Sendable {
-    private let lock = NSLock()
-    private var connection: NWConnection?
-    private var waiter: Resumer<NWConnection>?
-
-    /// Take this connection if it came from the panel being pushed to.
-    ///
-    /// THE LISTENER IS OPEN ON EVERY INTERFACE, because the panel dials back and
-    /// this side cannot know which route it will arrive by. Without this check the
-    /// first connection to arrive won that race, whoever it was: anything on the
-    /// LAN could take the firmware image, and the panel's own connection was then
-    /// cancelled as a stray so the push failed or hung. The image is not a secret
-    /// and espota is equally open, but espota is a command line typed by someone
-    /// who knows what it does and this is a button in a shipped app.
-    ///
-    /// A mismatch is cancelled and the wait continues, so a stray does not consume
-    /// the one slot. The address is the same one the invitation went to, which is
-    /// the live session's resolved address rather than the persisted one.
-    func accept(_ connection: NWConnection, from address: String) {
-        guard FirmwarePusher.connection(connection, isFrom: address) else {
-            connection.cancel()
-            return
-        }
-        lock.lock()
-        // Only the first connection is used, and a later one is dropped rather
-        // than left open: there is exactly one transfer to do, and anything else
-        // arriving on this port is a stray.
-        let isFirst = self.connection == nil
-        if isFirst { self.connection = connection }
-        let waiter = self.waiter
-        self.waiter = nil
-        let first = self.connection
-        lock.unlock()
-        if !isFirst { connection.cancel() }
-        if let waiter, let first { waiter.finish(.success(first)) }
+/// espota.py opens a new socket for the invitation and another for the auth
+/// reply, `connect`s it to the panel, sends one line and waits one timeout for
+/// one datagram. This mirrors that with public Darwin/POSIX calls rather than
+/// `NWConnection`, because on the live network the Network.framework UDP path did
+/// not interoperate with the panel - the invitation went out and nothing came
+/// back - while a connected `SOCK_DGRAM` socket from the same Mac to the same
+/// address and port got `AUTH <nonce>` at once. The panel and the invitation
+/// syntax were both fine; the datagram layer was the problem.
+///
+/// The socket is CONNECTED before the send on purpose: a connected datagram
+/// socket only delivers datagrams from the peer it is connected to, so the kernel
+/// does the source-address and source-port filtering that an unconnected socket
+/// would need `recvfrom` and a manual comparison to do. The reply can therefore
+/// only be the panel's.
+enum UDPExchange {
+    /// Why an exchange did not return a datagram.
+    enum TransportError: Error, Equatable {
+        /// `poll` ran out of time with nothing to read. The panel said nothing;
+        /// the caller decides whether that is worth retrying (the invitation
+        /// retries, the auth reply does not).
+        case timedOut
+        /// The connected socket surfaced an ICMP error while waiting for or
+        /// taking the reply: the panel's host answered "port unreachable"
+        /// (ECONNREFUSED), or a router answered "host unreachable"
+        /// (EHOSTUNREACH) or "network unreachable" (ENETUNREACH). A connected
+        /// datagram socket delivers these asynchronously through `poll`/`recv`
+        /// as the error from an earlier send. Like `timedOut` this means "no
+        /// reply from the panel this attempt", not "this Mac cannot send", so
+        /// the caller treats it the same as silence - the invitation spends one
+        /// attempt and tries again, the auth reply gives up without retrying -
+        /// rather than as a local transport failure. Carries the POSIX message.
+        case unreachable(reason: String)
+        /// A local step failed - resolve, socket, connect or send - carrying the
+        /// POSIX (or getaddrinfo) message. Never silence, so never retried as if
+        /// it were.
+        case failed(reason: String)
     }
 
-    func wait(seconds: Double, on queue: DispatchQueue) async throws -> NWConnection {
+    /// The maximum datagram taken in one read. The panel's replies are short
+    /// (`AUTH ` plus 64 hex, `OK`, or a refusal string), so a single MTU-sized
+    /// buffer holds any of them whole.
+    private static let receiveBufferBytes = 1500
+
+    /// Send `payload` to `host`:`port` and wait up to `timeout` seconds for one
+    /// reply datagram, running the blocking socket work on `queue`.
+    ///
+    /// The whole exchange - resolve, socket, connect, send, poll, recv - runs in
+    /// one block dispatched to `queue` and hands its result back through a checked
+    /// continuation. `poll` carries the timeout itself, so the block cannot park
+    /// indefinitely and there is no separate timer racing the recv.
+    static func perform(
+        payload: Data, host: String, port: UInt16, timeout: Double,
+        on queue: DispatchQueue
+    ) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
-            let resumer = Resumer<NWConnection>(continuation)
-            lock.lock()
-            if let connection {
-                lock.unlock()
-                resumer.finish(.success(connection))
-                return
-            }
-            waiter = resumer
-            lock.unlock()
-            queue.asyncAfter(deadline: .now() + seconds) {
-                resumer.finish(.failure(FirmwarePusher.Failure.panelNeverConnected(
-                    seconds: Int(seconds))))
+            queue.async {
+                continuation.resume(with: Result {
+                    try exchange(
+                        payload: payload, host: host, port: port, timeout: timeout)
+                })
             }
         }
     }
-}
 
-/// A continuation that can be resumed from two places and is resumed exactly
-/// once.
-///
-/// Every await in the pusher has a timeout that fires on a queue while a network
-/// callback may fire on another, and resuming a `CheckedContinuation` twice traps.
-private final class Resumer<T>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<T, Error>?
+    /// The blocking body. Every path closes the socket exactly once through the
+    /// `defer`, including the throwing ones.
+    private static func exchange(
+        payload: Data, host: String, port: UInt16, timeout: Double
+    ) throws -> Data {
+        var hints = addrinfo()
+        // Numeric host and numeric service only: the address handed in is the
+        // panel's live resolved address, so there is no name to look up and no
+        // reason to let getaddrinfo make a DNS query. AF_UNSPEC lets a numeric
+        // IPv4 literal resolve to AF_INET and a numeric IPv6 one to AF_INET6
+        // without either being forced.
+        hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_DGRAM
+        hints.ai_protocol = IPPROTO_UDP
 
-    init(_ continuation: CheckedContinuation<T, Error>) {
-        self.continuation = continuation
+        var info: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, String(port), &hints, &info)
+        guard status == 0, let resolved = info else {
+            throw TransportError.failed(
+                reason: String(cString: gai_strerror(status)))
+        }
+        defer { freeaddrinfo(info) }
+        guard let addr = resolved.pointee.ai_addr else {
+            throw TransportError.failed(reason: "the address could not be read")
+        }
+
+        let fd = socket(
+            resolved.pointee.ai_family,
+            resolved.pointee.ai_socktype,
+            resolved.pointee.ai_protocol)
+        guard fd >= 0 else {
+            throw TransportError.failed(reason: posixMessage(errno))
+        }
+        defer { close(fd) }
+
+        try connectSocket(fd, addr, resolved.pointee.ai_addrlen)
+        try sendDatagram(fd, payload)
+        return try receiveDatagram(fd, timeout: timeout)
     }
 
-    func finish(_ result: Result<T, Error>) {
-        lock.lock()
-        let continuation = self.continuation
-        self.continuation = nil
-        lock.unlock()
-        guard let continuation else { return }
-        switch result {
-        case .success(let value): continuation.resume(returning: value)
-        case .failure(let error): continuation.resume(throwing: error)
+    /// `connect`, retrying on EINTR. On a datagram socket this only records the
+    /// peer, so it returns at once, but a signal can still interrupt it.
+    private static func connectSocket(
+        _ fd: Int32, _ addr: UnsafePointer<sockaddr>, _ len: socklen_t
+    ) throws {
+        while true {
+            if connect(fd, addr, len) == 0 { return }
+            let code = errno
+            if code == EINTR { continue }
+            throw TransportError.failed(reason: posixMessage(code))
         }
+    }
+
+    /// `send` the whole datagram, retrying on EINTR. A short write on a datagram
+    /// socket is not a partial success - the datagram is atomic - so anything
+    /// other than the full length is a failure.
+    private static func sendDatagram(_ fd: Int32, _ payload: Data) throws {
+        let outcome: (sent: Int, code: Int32) = payload.withUnsafeBytes { raw in
+            while true {
+                let sent = send(fd, raw.baseAddress, raw.count, 0)
+                if sent < 0 && errno == EINTR { continue }
+                return (sent, errno)
+            }
+        }
+        if outcome.sent < 0 {
+            throw TransportError.failed(reason: posixMessage(outcome.code))
+        }
+        guard outcome.sent == payload.count else {
+            throw TransportError.failed(
+                reason: "only \(outcome.sent) of \(payload.count) bytes were sent")
+        }
+    }
+
+    /// Wait up to `timeout` for the socket to become readable, then take one
+    /// datagram. `poll` gets the timeout so a silent panel ends the wait instead
+    /// of hanging it; EINTR restarts the wait with the time that is left rather
+    /// than the whole budget again.
+    ///
+    /// A connected datagram socket also reports the ICMP errors the panel's host
+    /// or a router sends back for an earlier datagram, and they surface here on
+    /// `poll` or `recv` rather than on send. Those errno values are classified as
+    /// `.unreachable` (see `receiveError`) so the caller can treat them as "no
+    /// reply this attempt" rather than as a local transport failure; every other
+    /// errno stays `.failed`.
+    private static func receiveDatagram(_ fd: Int32, timeout: Double) throws -> Data {
+        let deadline = DispatchTime.now() + timeout
+        var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        while true {
+            let now = DispatchTime.now()
+            if now >= deadline { throw TransportError.timedOut }
+            let remaining = deadline.uptimeNanoseconds - now.uptimeNanoseconds
+            // Never below 1ms: poll treats a negative timeout as "wait forever",
+            // and the `now >= deadline` guard above has already handled expiry, so
+            // clamping up cannot turn a finished wait into an endless one.
+            let remainingMs = max(Int(remaining / 1_000_000), 1)
+            let ready = poll(&descriptor, 1, Int32(clamping: remainingMs))
+            if ready < 0 {
+                let code = errno
+                if code == EINTR { continue }
+                throw receiveError(code)
+            }
+            if ready == 0 { throw TransportError.timedOut }
+            break
+        }
+        var buffer = [UInt8](repeating: 0, count: receiveBufferBytes)
+        while true {
+            let received = recv(fd, &buffer, buffer.count, 0)
+            if received < 0 {
+                let code = errno
+                if code == EINTR { continue }
+                throw receiveError(code)
+            }
+            return Data(buffer.prefix(received))
+        }
+    }
+
+    /// Classify an errno seen on `poll`/`recv` of the connected socket. The three
+    /// unreachable codes are the ICMP errors the panel's host or a router returns
+    /// for a datagram that reached no listener - "no reply this attempt", not a
+    /// fault on this Mac - so they become `.unreachable`; anything else is a
+    /// genuine local failure and stays `.failed`.
+    private static func receiveError(_ code: Int32) -> TransportError {
+        switch code {
+        case ECONNREFUSED, EHOSTUNREACH, ENETUNREACH:
+            return .unreachable(reason: posixMessage(code))
+        default:
+            return .failed(reason: posixMessage(code))
+        }
+    }
+
+    /// A `errno` value as its localized system string. `strerror` is per-locale,
+    /// which is what makes these messages readable rather than a bare number.
+    private static func posixMessage(_ code: Int32) -> String {
+        String(cString: strerror(code))
     }
 }

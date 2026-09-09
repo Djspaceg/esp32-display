@@ -254,6 +254,7 @@ void setup() {
     }
   }
   if (boardVariant == board::Variant::Unknown) {
+    beginSerialRecovery();
     Serial.println("board: FATAL no unique compatible profile; display, network, "
                    "and streaming remain disabled");
     Serial.println("board: use CFGBOARD <profile> over serial to recover");
@@ -263,6 +264,7 @@ void setup() {
     }
   }
   bcfg = &board::configFor(boardVariant);
+  beginSerialConfig(*bcfg);
   if (!board::variantMatchesPlatform(
           boardVariant, board::COMPILED_PLATFORM.platform)) {
     Serial.println("board: FATAL resolved profile belongs to another family");
@@ -345,7 +347,9 @@ void setup() {
     updateSignalLed();  // red until WiFi is up
   }
 
-  pinMode(bcfg->pinBootButton, INPUT_PULLUP);
+  if (bcfg->hasBootButton()) {
+    pinMode(bcfg->pinBootButton, INPUT_PULLUP);
+  }
   if (bcfg->hasBacklightPin() && !bcfg->isDsi()) {
     // A PWM backlight exists independently of the panel, so light it early -
     // the boot status fills are pointless over a dark backlight.
