@@ -30,20 +30,25 @@ Its platform contains no ST7703 timing, GT911 behavior, or carrier GPIOs.
 | Family | Chip | Runtime profiles | Partition compatibility |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `gc9107`, `st7789-154`, `co5300`, `st77916` | `universal-8m-ota` |
+| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `co5300`, `st77916` | `universal-8m-ota` |
 | `p4` | `esp32p4` | `st7703-4b` | `p4-32m-ota` |
 
 C6 probes its shared I2C bus before panel GPIO initialization. S3 uses 8 MiB
-flash identity for the GC9107 carrier and distinct I2C buses on 16 MiB
-carriers. S3 accepts automatic detection only when exactly one compatible
-profile is found. Zero or multiple candidates leave display and networking
-disabled while serial `CFGBOARD` remains available as a recovery override.
+flash identity for the GC9107 carrier and distinct I2C buses on larger-flash
+carriers. The `st7789-130` carrier is identified by its QMI8658A at `0x6B` on
+GPIO47/48 and overrides the S3 platform's native-CDC default with its CH343
+UART bridge on GPIO44/43. S3 accepts automatic detection only when exactly one
+compatible profile is found. Zero or multiple candidates leave display and
+networking disabled while serial `CFGBOARD` remains available as a recovery
+override.
 
-The S3 artifact uses the 8 MiB common-denominator dual-OTA layout. Doom source
-remains available only in a separate developer/profile-gated build. Hardware
-smoke testing showed that linking Doom into the canonical image consumed enough
-internal RAM to make SPI DMA rotation repaint allocation fail, so canonical
-artifacts contain neither Doom code nor a WAD payload.
+The S3 artifact uses the 8 MiB common-denominator dual-OTA layout and links the
+Doom easter egg, runtime-gated to the `co5300` profile. An earlier attempt to
+link Doom failed because its static globals consumed the internal RAM SPI DMA
+rotation repaint needs; the engine's heavy renderer arrays and mutable tables
+now allocate from PSRAM only when Doom starts, so normal streaming keeps its
+internal-RAM headroom. Canonical artifacts contain Doom code but no WAD payload;
+the WAD is read from a raw flash region on the 16/32 MiB CO5300 carrier.
 
 P4 uses the Arduino `prev3` profile required by the attached revision-v1.3
 silicon. `Platform("p4")` contains only reusable chip/toolchain facts; exact
@@ -130,6 +135,7 @@ under motion, and odd-orientation touch corners remain unverified.
 | --- | --- | --- |
 | `co5300` | Runtime detection, frame counters, two rotations, brightness, and power on attached hardware | No independent visual observer for the latest image |
 | `gc9107` | Family compile and host profile tests | No attached carrier for current visible smoke testing |
+| `st7789-130` | Attached carrier chip/flash probe, unique QMI8658A detection on GPIO47/48, production `CFGSHOW` over CH343, motion initialization, and WiFi association | Visual RGB/offset/backlight/rotation, battery with an attached cell, and sustained streaming checks pending |
 | `st7789-154` | Family compile and host profile tests | No attached carrier for current runtime testing |
 | `st77916` | Family compile and host profile tests | No attached carrier for current runtime testing |
 

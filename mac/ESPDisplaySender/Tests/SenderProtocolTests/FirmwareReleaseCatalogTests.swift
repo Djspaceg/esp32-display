@@ -10,7 +10,7 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
             family: "s3", chip: "esp32s3", profile: "co5300",
             partition: "universal-8m-ota"))
         XCTAssertEqual(s3.family, "s3")
-        XCTAssertEqual(s3.profiles, ["gc9107", "st7789-154", "co5300", "st77916"])
+        XCTAssertEqual(s3.profiles, ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"])
     }
 
     func testSelectionFailsClosedForMissingOrContradictoryEvidence() throws {
@@ -63,7 +63,7 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
     private static func catalogData() throws -> Data {
         let profiles: [String: [String]] = [
             "c6": ["st7789", "jd9853"],
-            "s3": ["gc9107", "st7789-154", "co5300", "st77916"],
+            "s3": ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"],
             "p4": ["st7703-4b"],
         ]
         let chips = ["c6": "esp32c6", "s3": "esp32s3", "p4": "esp32p4"]

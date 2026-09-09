@@ -25,6 +25,7 @@ enum class PanelProfile : uint8_t {
   Gc9107_128x128,
   St7789_240x240,
   St7703_720x720,
+  St7789V2_240x240,
 };
 
 struct PanelConfig {
@@ -74,6 +75,10 @@ static constexpr PanelConfig PANEL_GC9107_128X128 = {
 static constexpr PanelConfig PANEL_ST7789_240X240 = {
     PanelProfile::St7789_240x240, PanelDriver::St7789, PanelBus::Spi,
     240, 240, 40000000, 3, 0, 0, 0, true, false, true,
+    0, 0, 0, 0, 0, 0, 0, 0};
+static constexpr PanelConfig PANEL_ST7789V2_240X240 = {
+    PanelProfile::St7789V2_240x240, PanelDriver::St7789, PanelBus::Spi,
+    240, 240, 40000000, 0, 0, 0, 0, true, false, true,
     0, 0, 0, 0, 0, 0, 0, 0};
 static constexpr PanelConfig PANEL_ST7703_720X720 = {
     PanelProfile::St7703_720x720, PanelDriver::St7703, PanelBus::MipiDsi,

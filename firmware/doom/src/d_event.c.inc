@@ -24,7 +24,7 @@
 
 #define MAXEVENTS 64
 
-static event_t events[MAXEVENTS];
+static event_t* events;
 static int eventhead;
 static int eventtail;
 

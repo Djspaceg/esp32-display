@@ -145,7 +145,124 @@ bool doom_prepare_static_buffers(void) {
                    sizeof(doom_initial_mobjinfo));
         }
     }
+    // Doom-only globals relocated from internal DRAM (.bss/COMMON) to PSRAM.
+    // calloc zero-inits to match BSS semantics; each runs before first read.
+    if (ticdata == NULL)
+        ticdata = (ticcmd_set_t*)heap_caps_calloc(BACKUPTICS, sizeof(*ticdata), caps);
+    if (columnofs == NULL)
+        columnofs = (int*)heap_caps_calloc(MAXWIDTH, sizeof(*columnofs), caps);
+    if (ylookup == NULL)
+        ylookup = (byte**)heap_caps_calloc(MAXHEIGHT, sizeof(*ylookup), caps);
+    if (translations == NULL)
+        translations = (byte(*)[256])heap_caps_calloc(3, sizeof(*translations), caps);
+    if (intercepts == NULL)
+        intercepts = (intercept_t*)heap_caps_calloc(MAXINTERCEPTS, sizeof(*intercepts), caps);
+    if (xtoviewangle == NULL)
+        xtoviewangle = (angle_t*)heap_caps_calloc(SCREENWIDTH + 1, sizeof(*xtoviewangle), caps);
+    if (itemrespawnque == NULL)
+        itemrespawnque = (mapthing_t*)heap_caps_calloc(ITEMQUESIZE, sizeof(*itemrespawnque), caps);
+    if (itemrespawntime == NULL)
+        itemrespawntime = (int*)heap_caps_calloc(ITEMQUESIZE, sizeof(*itemrespawntime), caps);
+    if (distscale == NULL)
+        distscale = (fixed_t*)heap_caps_calloc(SCREENWIDTH, sizeof(*distscale), caps);
+    if (players == NULL)
+        players = (player_t*)heap_caps_calloc(MAXPLAYERS, sizeof(*players), caps);
+    if (consistancy == NULL)
+        consistancy = (byte(*)[BACKUPTICS])heap_caps_calloc(MAXPLAYERS, sizeof(*consistancy), caps);
+    if (events == NULL)
+        events = (event_t*)heap_caps_calloc(MAXEVENTS, sizeof(*events), caps);
+    if (gamekeydown == NULL)
+        gamekeydown = (boolean*)heap_caps_calloc(NUMKEYS, sizeof(*gamekeydown), caps);
+    if (colors == NULL)
+        colors = (struct color*)heap_caps_calloc(256, sizeof(*colors), caps);
+    if (wadfile == NULL)
+        wadfile = (char*)heap_caps_calloc(1024, sizeof(*wadfile), caps);
+    if (mapdir == NULL)
+        mapdir = (char*)heap_caps_calloc(1024, sizeof(*mapdir), caps);
+    if (sprtemp == NULL)
+        sprtemp = (spriteframe_t*)heap_caps_calloc(29, sizeof(*sprtemp), caps);
+    if (yslope == NULL)
+        yslope = (fixed_t*)heap_caps_calloc(SCREENHEIGHT, sizeof(*yslope), caps);
+    if (spanstart == NULL)
+        spanstart = (int*)heap_caps_calloc(SCREENHEIGHT, sizeof(*spanstart), caps);
+    if (spanstop == NULL)
+        spanstop = (int*)heap_caps_calloc(SCREENHEIGHT, sizeof(*spanstop), caps);
+    if (cachedheight == NULL)
+        cachedheight = (fixed_t*)heap_caps_calloc(SCREENHEIGHT, sizeof(*cachedheight), caps);
+    if (cacheddistance == NULL)
+        cacheddistance = (fixed_t*)heap_caps_calloc(SCREENHEIGHT, sizeof(*cacheddistance), caps);
+    if (cachedxstep == NULL)
+        cachedxstep = (fixed_t*)heap_caps_calloc(SCREENHEIGHT, sizeof(*cachedxstep), caps);
+    if (cachedystep == NULL)
+        cachedystep = (fixed_t*)heap_caps_calloc(SCREENHEIGHT, sizeof(*cachedystep), caps);
+    if (floorclip == NULL)
+        floorclip = (short*)heap_caps_calloc(SCREENWIDTH, sizeof(*floorclip), caps);
+    if (ceilingclip == NULL)
+        ceilingclip = (short*)heap_caps_calloc(SCREENWIDTH, sizeof(*ceilingclip), caps);
+    if (negonearray == NULL)
+        negonearray = (short*)heap_caps_calloc(SCREENWIDTH, sizeof(*negonearray), caps);
+    if (screenheightarray == NULL)
+        screenheightarray = (short*)heap_caps_calloc(SCREENWIDTH, sizeof(*screenheightarray), caps);
+    if (clipbot == NULL)
+        clipbot = (short*)heap_caps_calloc(SCREENWIDTH, sizeof(*clipbot), caps);
+    if (cliptop == NULL)
+        cliptop = (short*)heap_caps_calloc(SCREENWIDTH, sizeof(*cliptop), caps);
+    if (anims == NULL)
+        anims = (anim_t*)heap_caps_calloc(MAXANIMS, sizeof(*anims), caps);
+    if (linespeciallist == NULL)
+        linespeciallist = (line_t**)heap_caps_calloc(MAXLINEANIMS, sizeof(*linespeciallist), caps);
+    if (switchlist == NULL)
+        switchlist = (int*)heap_caps_calloc(MAXSWITCHES * 2, sizeof(*switchlist), caps);
+    if (solidsegs == NULL)
+        solidsegs = (cliprange_t*)heap_caps_calloc(MAXSEGS, sizeof(*solidsegs), caps);
+    if (iwad_dirs == NULL)
+        iwad_dirs = (char**)heap_caps_calloc(MAX_IWAD_DIRS, sizeof(*iwad_dirs), caps);
+    if (zlight == NULL)
+        zlight = (lighttable_t*(*)[MAXLIGHTZ])heap_caps_calloc(LIGHTLEVELS, sizeof(*zlight), caps);
+    if (scalelight == NULL)
+        scalelight = (lighttable_t*(*)[MAXLIGHTSCALE])heap_caps_calloc(LIGHTLEVELS, sizeof(*scalelight), caps);
+    if (scalelightfixed == NULL)
+        scalelightfixed = (lighttable_t**)heap_caps_calloc(MAXLIGHTSCALE, sizeof(*scalelightfixed), caps);
+    if (buttonlist == NULL)
+        buttonlist = (button_t*)heap_caps_calloc(MAXBUTTONS, sizeof(*buttonlist), caps);
+    if (activeplats == NULL)
+        activeplats = (plat_t**)heap_caps_calloc(MAXPLATS, sizeof(*activeplats), caps);
+    if (bodyque == NULL)
+        bodyque = (mobj_t**)heap_caps_calloc(BODYQUESIZE, sizeof(*bodyque), caps);
+    if (braintargets == NULL)
+        braintargets = (mobj_t**)heap_caps_calloc(32, sizeof(*braintargets), caps);
+    if (hu_font == NULL)
+        hu_font = (patch_t**)heap_caps_calloc(HU_FONTSIZE, sizeof(*hu_font), caps);
+    if (activeceilings == NULL)
+        activeceilings = (ceiling_t**)heap_caps_calloc(MAXCEILINGS, sizeof(*activeceilings), caps);
+    if (w_inputbuffer == NULL)
+        w_inputbuffer = (hu_itext_t*)heap_caps_calloc(MAXPLAYERS, sizeof(*w_inputbuffer), caps);
+    // S_music: .lumpnum/.data/.handle are written at runtime; allocate a
+    // mutable PSRAM copy of the const template (matches states/mobjinfo).
+    if (S_music == NULL) {
+        S_music = (musicinfo_t*)heap_caps_malloc(sizeof(doom_initial_S_music), caps);
+        if (S_music != NULL) {
+            memcpy(S_music, doom_initial_S_music, sizeof(doom_initial_S_music));
+        }
+    }
+
     return visplanes != NULL && openings != NULL && viewangletox != NULL &&
            drawsegs != NULL && vissprites != NULL && captured_stats != NULL &&
-           states != NULL && mobjinfo != NULL;
+           states != NULL && mobjinfo != NULL &&
+           ticdata != NULL && columnofs != NULL && ylookup != NULL &&
+           translations != NULL && intercepts != NULL && xtoviewangle != NULL &&
+           itemrespawnque != NULL && itemrespawntime != NULL && distscale != NULL &&
+           players != NULL && consistancy != NULL && events != NULL &&
+           gamekeydown != NULL && colors != NULL && wadfile != NULL &&
+           mapdir != NULL && sprtemp != NULL && yslope != NULL &&
+           spanstart != NULL && spanstop != NULL && cachedheight != NULL &&
+           cacheddistance != NULL && cachedxstep != NULL && cachedystep != NULL &&
+           floorclip != NULL && ceilingclip != NULL && negonearray != NULL &&
+           screenheightarray != NULL && clipbot != NULL && cliptop != NULL &&
+           anims != NULL && linespeciallist != NULL && switchlist != NULL &&
+           solidsegs != NULL && iwad_dirs != NULL && zlight != NULL &&
+           scalelight != NULL && scalelightfixed != NULL && buttonlist != NULL &&
+           activeplats != NULL && bodyque != NULL && braintargets != NULL &&
+           S_music != NULL && hu_font != NULL && activeceilings != NULL &&
+           w_inputbuffer != NULL;
 }

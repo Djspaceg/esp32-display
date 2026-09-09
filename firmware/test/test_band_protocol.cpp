@@ -1266,17 +1266,17 @@ int main() {
 
     // Runtime S3 detection requires exactly one compatible candidate.
     CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
-                                    false) == Variant::LcdGc9107);
+                                    false, false) == Variant::LcdGc9107);
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, true, false,
-                                    false) == Variant::AmoledCo5300);
+                                    false, false) == Variant::AmoledCo5300);
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, true,
-                                    false) == Variant::LcdSt77916);
+                                    false, false) == Variant::LcdSt77916);
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
-                                    true) == Variant::TouchSt7789);
+                                    true, false) == Variant::TouchSt7789);
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
-                                    false) == Variant::Unknown);
+                                    false, false) == Variant::Unknown);
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, true, true,
-                                    false) == Variant::Unknown);
+                                    false, false) == Variant::Unknown);
     CHECK(board::variantMatchesPlatform(
         Variant::AmoledCo5300, board::Platform::Esp32S3));
     CHECK(!board::variantMatchesPlatform(

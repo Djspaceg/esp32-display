@@ -1,0 +1,13 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    "Critical — Hosted networking unavailable (confirmed): the P4 cannot associate through the factory C6, leaving mDNS, ETL1 over WiFi, reconnect, and OTA blocked. Establish a compatible, recoverable P4/C6 pairing and complete the network hardware matrix.",
+    "High — P4 platform aliases the 4B carrier (confirmed): Platform(\"p4\") owns the 4B selector and partition source, and the CLI chooses that compile-fixed carrier from chip identity alone. Move carrier facts to an exact profile/build layer and require explicit profile evidence until P4 is genuinely runtime-universal.",
+    "High — Canonical app resources missing (confirmed): the normal app build requires a catalog plus C6/S3/P4 artifacts, but the repository contains none of the current resources. Add and verify the canonical 1.5.0 release set, then run the default packaging path.",
+    "High — S3-175 Doom regression (confirmed): the universal S3 image omits the Doom selector, entry code, and partition, so triple-tap activation no longer works on the existing CO5300 target. Preserve the profile behavior or obtain an explicit acceptance-criteria change.",
+    "Medium — CO5300 detector uses the wrong touch address (confirmed): the detector probes 0x15 instead of the CST9217's 0x5A on GPIO15/14. Correct the signature and add focused address-set coverage.",
+    "Medium — S3 runtime evidence incomplete (confirmed): only CO5300 has current runtime telemetry, without an independent visual observer; the other three runtime-selected profiles have no current hardware evidence. Record visible smoke coverage where hardware exists and retain explicit residual gaps elsewhere.",
+    "Low — Dead Python safety tests (confirmed): several retained target, flash-part, and preflight tests are no longer invoked and contradict the active family model. Port or remove them and keep one executable P4 selection contract."
+  ],
+  "reviewDoc": "/Users/stepblk/Source/esp32-display/.agents/tasks/p4-4b-review.md"
+}

@@ -53,6 +53,8 @@ static const uint32_t DEBOUNCE_MS = 30;
 // long-press once more to flip back; this is the same tradeoff the two-step
 // 180 toggle already makes.
 void handleButton() {
+  if (bcfg == nullptr || !bcfg->hasBootButton()) return;
+
   static bool wasDown = false;
   static bool longFired = false;
   static bool extraLongFired = false;

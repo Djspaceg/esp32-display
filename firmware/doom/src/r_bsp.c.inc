@@ -82,7 +82,7 @@ typedef	struct
 
 // newend is one past the last valid seg
 cliprange_t*	newend;
-cliprange_t	solidsegs[MAXSEGS];
+cliprange_t*	solidsegs;
 
 
 
@@ -355,7 +355,7 @@ void R_AddLine (seg_t*	line)
 // Returns true
 //  if some part of the bbox might be visible.
 //
-int	checkcoord[12][4] =
+const int	checkcoord[12][4] =
 {
     {3,0,2,1},
     {3,0,2,0},

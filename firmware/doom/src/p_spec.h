@@ -243,7 +243,7 @@ typedef struct
  // 1 second, in ticks. 
 #define BUTTONTIME      35             
 
-extern button_t	buttonlist[MAXBUTTONS]; 
+extern button_t*	buttonlist;
 
 void
 P_ChangeSwitchTexture
@@ -303,7 +303,7 @@ typedef struct
 #define MAXPLATS		30
 
 
-extern plat_t*	activeplats[MAXPLATS];
+extern plat_t**	activeplats;
 
 void    T_PlatRaise(plat_t*	plat);
 
@@ -514,7 +514,7 @@ typedef struct
 #define CEILWAIT		150
 #define MAXCEILINGS		30
 
-extern ceiling_t*	activeceilings[MAXCEILINGS];
+extern ceiling_t**	activeceilings;
 
 int
 EV_DoCeiling

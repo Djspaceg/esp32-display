@@ -221,7 +221,7 @@ void F_Ticker (void)
 //
 
 #include "hu_stuff.h"
-extern	patch_t *hu_font[HU_FONTSIZE];
+extern	patch_t **hu_font;
 
 
 void F_TextWrite (void)
@@ -303,7 +303,7 @@ typedef struct
     mobjtype_t	type;
 } castinfo_t;
 
-castinfo_t	castorder[] = {
+const castinfo_t	castorder[] = {
     {CC_ZOMBIE, MT_POSSESSED},
     {CC_SHOTGUN, MT_SHOTGUY},
     {CC_HEAVY, MT_CHAINGUY},

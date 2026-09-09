@@ -1154,7 +1154,7 @@ typedef struct
 } state_t;
 
 extern state_t*	states;
-extern char *sprnames[];
+extern char * const sprnames[];
 
 typedef enum {
     MT_PLAYER,

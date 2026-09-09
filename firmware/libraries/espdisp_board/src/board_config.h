@@ -1,7 +1,7 @@
 // Which supported board this binary is running on, and every board fact that
 // follows from that.
 //
-// Seven board profiles are supported across the c6, s3, and p4 release
+// Eight board profiles are supported across the c6, s3, and p4 release
 // families. Each family has one artifact; runtime profile selection keeps the
 // physical panel/controller token independent from that family identity:
 //
@@ -15,6 +15,8 @@
 //                              IMU
 //   ESP32-S3-LCD-0.85          GC9107 128x128 over SPI, BOOT on GPIO0,
 //                              battery ADC and eight addressable RGB LEDs
+//   ESP32-S3-LCD-1.3           ST7789V2 240x240 over SPI, QMI8658A IMU on
+//                              I2C GPIO47/48, battery ADC and one RGB LED
 //   ESP32-S3-Touch-LCD-1.54    ST7789 240x240 over SPI, CST816 touch and
 //                              QMI8658 IMU on I2C GPIO42/41, battery ADC
 //   ESP32-S3-Touch-LCD-1.85C   ST77916 360x360 LCD over QSPI, CST816 touch
@@ -23,9 +25,9 @@
 // The C6 and S3 families choose a profile before any panel GPIO is driven.
 // C6 distinguishes its two profiles on one shared I2C bus. S3 first uses the
 // 8 MiB flash identity for GC9107, then probes profile-specific I2C buses on
-// 16 MiB hardware and accepts a result only when exactly one profile matches.
-// P4 currently has one supported carrier but retains the same platform/panel/
-// carrier separation internally.
+// larger-flash hardware and accepts a result only when exactly one profile
+// matches. P4 currently has one supported carrier but retains the same
+// platform/panel/carrier separation internally.
 //
 // Resolution is a panel-profile fact. The sketch derives frame geometry from
 // the Config's composed PanelConfig instead of a project-wide constant.
@@ -58,8 +60,9 @@ enum class Variant : uint8_t {
   AmoledCo5300 = 3,  // ESP32-S3-Touch-AMOLED-1.75C
   LcdSt77916 = 4,    // ESP32-S3-Touch-LCD-1.85C
   LcdGc9107 = 5,     // ESP32-S3-LCD-0.85
-  TouchSt7789 = 6,   // ESP32-S3-Touch-LCD-1.54
-  P4_4B = 7,          // ESP32-P4-WIFI6-Touch-LCD-4B
+  TouchSt7789 = 6,     // ESP32-S3-Touch-LCD-1.54
+  P4_4B = 7,            // ESP32-P4-WIFI6-Touch-LCD-4B
+  LcdSt7789_130 = 8,    // ESP32-S3-LCD-1.3
 };
 
 /// Which capacitive touch controller the board carries, so the sketch knows
@@ -133,6 +136,7 @@ static constexpr uint8_t S3_CO5300_PROBE_ADDRESSES[] = {
     0x5A, 0x34, 0x6A, 0x6B};
 static constexpr uint8_t S3_ST77916_PROBE_ADDRESSES[] = {0x15, 0x20};
 static constexpr uint8_t S3_ST7789_154_PROBE_ADDRESSES[] = {0x15, 0x6A, 0x6B};
+static constexpr uint8_t S3_ST7789_130_PROBE_ADDRESSES[] = {0x6B};
 
 /// Whether a platform can execute a panel profile. SPI/QSPI panel backends are
 /// platform-neutral; the MIPI-DSI SDK backend is currently available on P4.
@@ -247,7 +251,19 @@ struct Config {
   int8_t pinBlEnable;
   bool backlightInverted;
 
+  /// Optional UART bridge connected to this carrier's external USB port.
+  /// When absent, the platform's serial transport remains authoritative.
+  int8_t pinSerialRx = NO_PIN;
+  int8_t pinSerialTx = NO_PIN;
+
+  SerialTransport serialTransport() const {
+    return pinSerialRx != NO_PIN && pinSerialTx != NO_PIN
+               ? SerialTransport::UartBridge
+               : platform->serial;
+  }
+
   bool hasRgbLed() const { return pinRgbLed != NO_PIN; }
+  bool hasBootButton() const { return pinBootButton != NO_PIN; }
   bool hasTouch() const {
     if (touch == TouchController::None || pinTouchSda == NO_PIN ||
         pinTouchScl == NO_PIN) {
@@ -532,6 +548,50 @@ static const Config CONFIG_TOUCH_ST7789 = {
     /* backlightInverted */ false,
 };
 
+/// Waveshare ESP32-S3-LCD-1.3: 240x240 ST7789V2 over 4-wire SPI,
+/// QMI8658A on I2C GPIO47/48, a 2:1 battery divider on GPIO7, and one
+/// WS2812-compatible RGB LED on GPIO19. The schematic routes backlight PWM to
+/// GPIO20; Waveshare's Arduino demo confirms mode 0, 40 MHz, RGB order,
+/// inversion, and zero display offsets. The standard, case, and prism versions
+/// share this carrier; square-panel software rotation covers the prism mount.
+static const Config CONFIG_LCD_ST7789_130 = {
+    Variant::LcdSt7789_130,
+    "ESP32-S3-LCD-1.3 (ST7789V2)",
+    &PLATFORM_ESP32_S3,
+    &PANEL_ST7789V2_240X240,
+    /* sclk  */ 40,
+    /* mosi  */ 41,
+    /* data1 */ NO_PIN,
+    /* data2 */ NO_PIN,
+    /* data3 */ NO_PIN,
+    /* cs    */ 39,
+    /* dc    */ 38,
+    /* rst   */ 42,
+    /* bl    */ 20,
+    /* boot  */ NO_PIN,
+    /* led   */ 19,
+    TouchController::None,
+    /* touchSda */ 47,  // shared QMI8658A bus; this board has no touch
+    /* touchScl */ 48,
+    /* touchRst */ NO_PIN,
+    /* touchInt */ NO_PIN,
+    PowerController::BatteryAdc,
+    /* batteryAdc */ 7,
+    /* adcScale */ 2,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
+    MotionController::Qmi8658,
+    // Waveshare's examples consume the QMI8658 axes without remapping.
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
+    /* pinBlEnable */ NO_PIN,
+    /* backlightInverted */ false,
+    /* serialRx */ 44,
+    /* serialTx */ 43,
+};
+
 /// Waveshare ESP32-P4-WIFI6-Touch-LCD-4B: ST7703 720x720 over MIPI-DSI,
 /// GT911 polling touch, and an ESP32-C6 hosted-WiFi coprocessor. The P4
 /// platform and ST7703 panel remain reusable; this row owns only their exact
@@ -583,7 +643,8 @@ inline bool variantMatchesPlatform(Variant variant, Platform platform) {
       return variant == Variant::AmoledCo5300 ||
              variant == Variant::LcdSt77916 ||
              variant == Variant::LcdGc9107 ||
-             variant == Variant::TouchSt7789;
+             variant == Variant::TouchSt7789 ||
+             variant == Variant::LcdSt7789_130;
     case Platform::Esp32P4:
       return variant == Variant::P4_4B;
   }
@@ -591,19 +652,21 @@ inline bool variantMatchesPlatform(Variant variant, Platform platform) {
 }
 
 /// Resolve the S3 detector's independent profile signals. The 8 MiB carrier is
-/// identified by flash capacity; each 16 MiB profile has a distinct I2C bus.
-/// Exactly one candidate is required. No match and conflicting matches both
-/// remain Unknown so setup can stay serial-only until CFGBOARD supplies an
+/// identified by flash capacity; each larger-flash profile has a distinct I2C
+/// bus. Exactly one candidate is required. No match and conflicting matches
+/// both remain Unknown so setup can stay serial-only until CFGBOARD supplies an
 /// explicit recovery override.
 inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
-                                  bool st77916Bus, bool st7789Bus) {
+                                  bool st77916Bus, bool st7789Bus,
+                                  bool st7789_130Bus) {
   const bool gc9107 = flashBytes > 0 && flashBytes <= 8u * 1024u * 1024u;
-  const bool allow16MiBProfiles = flashBytes > 8u * 1024u * 1024u;
+  const bool allowLargerProfiles = flashBytes > 8u * 1024u * 1024u;
   const bool candidates[] = {
       gc9107,
-      allow16MiBProfiles && co5300Bus,
-      allow16MiBProfiles && st77916Bus,
-      allow16MiBProfiles && st7789Bus,
+      allowLargerProfiles && co5300Bus,
+      allowLargerProfiles && st77916Bus,
+      allowLargerProfiles && st7789Bus,
+      allowLargerProfiles && st7789_130Bus,
   };
   uint8_t count = 0;
   uint8_t selected = 0;
@@ -618,7 +681,9 @@ inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
     case 0: return Variant::LcdGc9107;
     case 1: return Variant::AmoledCo5300;
     case 2: return Variant::LcdSt77916;
-    default: return Variant::TouchSt7789;
+    case 3: return Variant::TouchSt7789;
+    case 4: return Variant::LcdSt7789_130;
+    default: return Variant::Unknown;
   }
 }
 
@@ -663,6 +728,8 @@ inline const Config &configFor(Variant variant) {
       return CONFIG_LCD_GC9107;
     case Variant::TouchSt7789:
       return CONFIG_TOUCH_ST7789;
+    case Variant::LcdSt7789_130:
+      return CONFIG_LCD_ST7789_130;
     case Variant::P4_4B:
       return CONFIG_P4_4B;
     default:
@@ -702,6 +769,7 @@ inline Variant variantFromStored(uint8_t raw) {
   if (raw == (uint8_t)Variant::LcdGc9107) return Variant::LcdGc9107;
   if (raw == (uint8_t)Variant::TouchSt7789) return Variant::TouchSt7789;
   if (raw == (uint8_t)Variant::P4_4B) return Variant::P4_4B;
+  if (raw == (uint8_t)Variant::LcdSt7789_130) return Variant::LcdSt7789_130;
   return Variant::Unknown;
 }
 
@@ -718,6 +786,7 @@ inline Variant variantFromName(const char *token) {
   if (strcmp(token, "st77916") == 0) return Variant::LcdSt77916;
   if (strcmp(token, "gc9107") == 0) return Variant::LcdGc9107;
   if (strcmp(token, "st7789-154") == 0) return Variant::TouchSt7789;
+  if (strcmp(token, "st7789-130") == 0) return Variant::LcdSt7789_130;
   if (strcmp(token, "st7703-4b") == 0) return Variant::P4_4B;
   return Variant::Unknown;
 }
@@ -737,6 +806,8 @@ inline const char *variantToken(Variant variant) {
       return "gc9107";
     case Variant::TouchSt7789:
       return "st7789-154";
+    case Variant::LcdSt7789_130:
+      return "st7789-130";
     case Variant::P4_4B:
       return "st7703-4b";
     default:
@@ -754,6 +825,7 @@ inline const char *targetToken(Variant variant) {
     case Variant::LcdSt77916:
     case Variant::LcdGc9107:
     case Variant::TouchSt7789:
+    case Variant::LcdSt7789_130:
       return "s3";
     case Variant::P4_4B:
       return "p4";

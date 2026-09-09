@@ -174,10 +174,12 @@ struct AddDeviceSheet: View {
         } header: {
             Text("Device")
         } footer: {
-            Text("The chip is read from the board. C6 has one exact firmware "
-                + "target and can be selected automatically; ESP32-S3 boards "
-                + "also require choosing the attached display target before "
-                + "anything is written.")
+            Text("The chip is read from the board. The C6 and S3 families each "
+                + "ship one universal image that serves every display in the "
+                + "family, so the chip picks it on its own. A P4 board shows its "
+                + "bundled image too, but its exact display target must be "
+                + "confirmed - from what the board reports or by choosing it - "
+                + "before anything is written.")
         }
     }
 
@@ -423,6 +425,25 @@ struct AddDeviceSheet: View {
                 bundle = recovered.bundle
                 bundleLabel = recovered.url.lastPathComponent + " (bundled with the app)"
                 selectedTarget = recovered.catalogEntry.family
+            } else if let selection = releases.selectForUniqueChip(chip) {
+                // Neither complete runtime identity nor an explicit profile was
+                // available - a blank or recovery board - but the detected chip
+                // alone names exactly one bundled family. Show and preselect its
+                // verified artifact so the board is flashable without first
+                // adopting firmware just to learn its identity.
+                bundle = selection.bundle
+                bundleLabel = selection.url.lastPathComponent + " (bundled with the app)"
+                if selection.catalogEntry.chip == "esp32p4" {
+                    // P4 alone must not fix its compile-fixed carrier target. The
+                    // artifact is shown, but the exact target stays gated on
+                    // complete identity or an explicit st7703-4b choice, so the
+                    // plan and onboarding still force that choice before a write.
+                    selectedTarget = ""
+                } else {
+                    // The universal C6 and S3 images serve every carrier in their
+                    // family, so the chip identifies the write on its own.
+                    selectedTarget = selection.catalogEntry.family
+                }
             } else {
                 bundle = nil
                 selectedTarget = ""

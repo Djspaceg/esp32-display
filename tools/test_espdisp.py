@@ -3352,7 +3352,7 @@ def test_universal_family_catalog_and_cli():
                 "C6 maps both runtime profiles")
     check_equal(
         espdisp.FAMILIES["s3"].profiles,
-        ("gc9107", "st7789-154", "co5300", "st77916"),
+        ("gc9107", "st7789-130", "st7789-154", "co5300", "st77916"),
         "S3 maps all runtime profiles into one family")
     check_equal(espdisp.FAMILIES["p4"].profiles, ("st7703-4b",),
                 "P4 advertises its exact physical profile")
@@ -3372,10 +3372,10 @@ def test_universal_family_catalog_and_cli():
           "chip platforms contain no carrier selector or partition source")
     check_equal(espdisp.FAMILIES["s3"].partition_csv, "partitions_s3.csv",
                 "S3 uses the common 8 MiB partition layout")
-    check_equal(espdisp.FAMILIES["s3"].extra_flags, (),
-                "canonical S3 does not link developer-only Doom code")
-    check_equal(espdisp.FAMILIES["s3"].extra_library_dirs, (),
-                "canonical S3 uses no developer-only library path")
+    check_equal(espdisp.FAMILIES["s3"].extra_flags, ("-DESPDISP_DOOM_RUNTIME",),
+                "canonical S3 links the runtime-gated Doom easter egg")
+    check_equal(espdisp.FAMILIES["s3"].extra_library_dirs, ("firmware",),
+                "canonical S3 includes the Doom library path")
     check_equal(espdisp.FAMILIES["p4"].extra_flags,
                 ("-DESPDISP_BOARD_P4_4B",),
                 "P4 retains its internal carrier selector")

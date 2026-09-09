@@ -20,6 +20,41 @@
 #include "tile_bench.h"
 
 
+static Stream *selectedConfigPort = &Serial;
+static Stream *replyConfigPort = &Serial;
+static Stream *recoveryConfigPort = nullptr;
+
+static Stream &configSerial() {
+  return *replyConfigPort;
+}
+
+void beginSerialConfig(const board::Config &cfg) {
+  recoveryConfigPort = nullptr;
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  if (cfg.serialTransport() == board::SerialTransport::UartBridge &&
+      cfg.pinSerialRx != board::NO_PIN && cfg.pinSerialTx != board::NO_PIN) {
+    Serial0.begin(115200, SERIAL_8N1, cfg.pinSerialRx, cfg.pinSerialTx);
+    selectedConfigPort = &Serial0;
+    replyConfigPort = selectedConfigPort;
+    return;
+  }
+#endif
+  selectedConfigPort = &Serial;
+  replyConfigPort = selectedConfigPort;
+}
+
+void beginSerialRecovery() {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  // The profile is unknown, so keep native CDC active for existing S3 boards
+  // and additionally service the 1.3-inch carrier's CH343 UART. Only CFGBOARD
+  // is accepted until a profile resolves; no panel or peripheral pin is driven.
+  Serial0.begin(115200, SERIAL_8N1,
+                board::CONFIG_LCD_ST7789_130.pinSerialRx,
+                board::CONFIG_LCD_ST7789_130.pinSerialTx);
+  recoveryConfigPort = &Serial0;
+  Serial0.println("board: profile unresolved; use CFGBOARD <profile>");
+#endif
+}
 // Serial configuration protocol (USB CDC), so credentials can change
 // without reflashing:
 //   CFGWIFI <base64 ssid> <base64 password>\n  -> save to NVS, reply
@@ -28,6 +63,12 @@
 //   CFGSHOW\n  -> CFGINFO ssid=... ip=... rssi=...
 // Base64 avoids every quoting hazard SSIDs and passwords can contain.
 static void processConfigLine(char *line) {
+  if (bcfg == nullptr && strncmp(line, "CFGBOARD ", 9) != 0) {
+    configSerial().println(
+        "CFGERR profile unresolved; use CFGBOARD <profile> or CFGBOARD auto");
+    return;
+  }
+
   if (strncmp(line, "CFGWIFI ", 8) == 0) {
     // CFGWIFI <b64 ssid> <b64 pass>  set both (empty pass = open network)
     // CFGWIFI <b64 ssid>             keep the password currently in use
@@ -47,18 +88,18 @@ static void processConfigLine(char *line) {
     size_t ssidLen = 0, passLen = 0;
     if (mbedtls_base64_decode(ssid, sizeof(ssid) - 1, &ssidLen,
                               (const unsigned char *)b64Ssid, strlen(b64Ssid)) != 0) {
-      Serial.println("CFGERR bad base64 ssid (max 32 bytes)");
+      configSerial().println("CFGERR bad base64 ssid (max 32 bytes)");
       return;
     }
     ssid[ssidLen] = 0;
     if (ssidLen == 0) {
-      Serial.println("CFGERR empty ssid");
+      configSerial().println("CFGERR empty ssid");
       return;
     }
     if (!keepPassword) {
       if (mbedtls_base64_decode(pass, sizeof(pass) - 1, &passLen,
                                 (const unsigned char *)b64Pass, strlen(b64Pass)) != 0) {
-        Serial.println("CFGERR bad base64 password (max 64 bytes)");
+        configSerial().println("CFGERR bad base64 password (max 64 bytes)");
         return;
       }
       pass[passLen] = 0;
@@ -73,9 +114,9 @@ static void processConfigLine(char *line) {
     prefs.putString("pass", keepPassword ? cfgPass : String((const char *)pass));
     prefs.end();
 
-    Serial.printf("CFGOK saved \"%s\"%s, restarting\n", (const char *)ssid,
+    configSerial().printf("CFGOK saved \"%s\"%s, restarting\n", (const char *)ssid,
                   keepPassword ? " (password kept)" : "");
-    Serial.flush();
+    configSerial().flush();
     delay(200);
     ESP.restart();
   } else if (strncmp(line, "CFGNAME ", 8) == 0) {
@@ -86,7 +127,7 @@ static void processConfigLine(char *line) {
     if (mbedtls_base64_decode(raw, sizeof(raw) - 1, &rawLen,
                               (const unsigned char *)(line + 8),
                               strlen(line + 8)) != 0) {
-      Serial.println("CFGERR bad base64");
+      configSerial().println("CFGERR bad base64");
       return;
     }
     raw[rawLen] = 0;
@@ -102,15 +143,15 @@ static void processConfigLine(char *line) {
     }
     clean[n] = 0;
     if (n == 0) {
-      Serial.println("CFGERR name has no hostname-safe characters");
+      configSerial().println("CFGERR name has no hostname-safe characters");
       return;
     }
     Preferences prefs;
     prefs.begin("espdisp", false);
     prefs.putString("name", clean);
     prefs.end();
-    Serial.printf("CFGOK name \"%s\", restarting\n", clean);
-    Serial.flush();
+    configSerial().printf("CFGOK name \"%s\", restarting\n", clean);
+    configSerial().flush();
     delay(200);
     ESP.restart();
   } else if (strncmp(line, "CFGFLIP ", 8) == 0) {
@@ -122,7 +163,7 @@ static void processConfigLine(char *line) {
     panelRotation = want != 0 ? 2 : 0;
     madctlDirty = true;
     saveDisplayPrefs();
-    Serial.printf("CFGOK flip180=%d rot=%u (saved; applies with next frame)\n",
+    configSerial().printf("CFGOK flip180=%d rot=%u (saved; applies with next frame)\n",
                   want != 0, panelRotation);
   } else if (strncmp(line, "CFGROT ", 7) == 0) {
     // Set the mounting rotation in clockwise quarter turns: CFGROT 0|1|2|3.
@@ -132,13 +173,13 @@ static void processConfigLine(char *line) {
     // PanelConfig.
     int want = atoi(line + 7);
     if (want < 0 || want > 3) {
-      Serial.println("CFGERR expected: CFGROT 0|1|2|3");
+      configSerial().println("CFGERR expected: CFGROT 0|1|2|3");
       return;
     }
     if ((want & 1) != 0 &&
         (bcfg->panel->width != bcfg->panel->height ||
          !bcfg->panel->supportsCommandRotation)) {
-      Serial.printf("CFGERR rotation %d unsupported by %s (%ux%u); "
+      configSerial().printf("CFGERR rotation %d unsupported by %s (%ux%u); "
                     "only 0 and 2 apply here\n",
                     want, bcfg->name, bcfg->panel->width,
                     bcfg->panel->height);
@@ -147,7 +188,7 @@ static void processConfigLine(char *line) {
     panelRotation = (uint8_t)want;
     madctlDirty = true;
     saveDisplayPrefs();
-    Serial.printf("CFGOK rot=%u (saved; applies with next frame)\n",
+    configSerial().printf("CFGOK rot=%u (saved; applies with next frame)\n",
                   panelRotation);
   } else if (strncmp(line, "CFGPOWER ", 9) == 0) {
     // Manual on/off without the network path: CFGPOWER 0|1. Mirrors the
@@ -156,13 +197,13 @@ static void processConfigLine(char *line) {
     // toggle from the app. Persisted, so it survives a reboot too.
     int want = atoi(line + 9);
     if (want != 0 && want != 1) {
-      Serial.println("CFGERR expected: CFGPOWER 0|1");
+      configSerial().println("CFGERR expected: CFGPOWER 0|1");
       return;
     }
     panelManuallyOff = want == 0;
     saveDisplayPrefs();
     applyBacklight();
-    Serial.printf("CFGOK pwr=%s (saved)\n", panelManuallyOff ? "off" : "on");
+    configSerial().printf("CFGOK pwr=%s (saved)\n", panelManuallyOff ? "off" : "on");
   } else if (strncmp(line, "CFGBOARD ", 9) == 0) {
     // Override C6 board auto-detection. Fixed S3 builds parse every profile
     // token for telemetry round-trips but reject overrides below.
@@ -174,12 +215,12 @@ static void processConfigLine(char *line) {
     board::Variant want = board::variantFromName(token);
     bool isAuto = strcmp(token, "auto") == 0;
     if (want == board::Variant::Unknown && !isAuto) {
-      Serial.println(
-          "CFGERR expected: CFGBOARD st7789|jd9853|gc9107|st7789-154|co5300|st77916|auto");
+      configSerial().println(
+          "CFGERR expected: CFGBOARD st7789|jd9853|gc9107|st7789-130|st7789-154|co5300|st77916|auto");
       return;
     }
     if (board::COMPILED_VARIANT != board::Variant::Unknown) {
-      Serial.printf("CFGERR profile is fixed internally for family %s (%s)\n",
+      configSerial().printf("CFGERR profile is fixed internally for family %s (%s)\n",
                     board::targetToken(board::COMPILED_VARIANT),
                     board::variantToken(board::COMPILED_VARIANT));
       return;
@@ -187,7 +228,7 @@ static void processConfigLine(char *line) {
     if (want != board::Variant::Unknown &&
         !board::variantMatchesPlatform(
             want, board::COMPILED_PLATFORM.platform)) {
-      Serial.printf("CFGERR profile %s is not compatible with family %s\n",
+      configSerial().printf("CFGERR profile %s is not compatible with family %s\n",
                     board::variantToken(want),
                     board::COMPILED_PLATFORM.chipToken);
       return;
@@ -196,8 +237,8 @@ static void processConfigLine(char *line) {
     prefs.begin("espdisp", false);
     prefs.putUChar("board", (uint8_t)want);
     prefs.end();
-    Serial.printf("CFGOK board=%s, restarting\n", board::variantToken(want));
-    Serial.flush();
+    configSerial().printf("CFGOK board=%s, restarting\n", board::variantToken(want));
+    configSerial().flush();
     delay(200);
     ESP.restart();
   } else if (strncmp(line, "CFGLED ", 7) == 0) {
@@ -206,19 +247,19 @@ static void processConfigLine(char *line) {
     // ask what color appears.
     int r, g, b;
     if (sscanf(line + 7, "%d %d %d", &r, &g, &b) != 3) {
-      Serial.println("CFGERR expected: CFGLED <r> <g> <b>");
+      configSerial().println("CFGERR expected: CFGLED <r> <g> <b>");
       return;
     }
     if (rgbLed == nullptr) {
       // Say so rather than accepting silently: on this board the command has
       // nothing to drive, and a bare CFGOK would look like the LED is broken.
-      Serial.printf("CFGERR no addressable LED on %s\n", bcfg->name);
+      configSerial().printf("CFGERR no addressable LED on %s\n", bcfg->name);
       return;
     }
     rgbLed->fill(rgbLed->Color(r & 0xFF, g & 0xFF, b & 0xFF));
     rgbLed->show();
     ledOverrideUntil = millis() + 10000;
-    Serial.printf("CFGOK led r=%d g=%d b=%d for 10s\n", r & 0xFF, g & 0xFF, b & 0xFF);
+    configSerial().printf("CFGOK led r=%d g=%d b=%d for 10s\n", r & 0xFF, g & 0xFF, b & 0xFF);
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   } else if (strcmp(line, "CFGBENCH") == 0) {
     // Tile-stream phase-0 measurements; see runTileBench above. Blocks the
@@ -261,7 +302,7 @@ static void processConfigLine(char *line) {
       // CFGINFO, like CFGSHOW's reply: the tooling only recognises CFGOK,
       // CFGERR and CFGINFO as replies (CFG_PREFIXES in espdisp.py), so a line
       // starting with anything else reads as no answer at all and times out.
-      Serial.printf("CFGINFO rxyield=%d partialms=%lu drawcap=%d rxprio=%u "
+      configSerial().printf("CFGINFO rxyield=%d partialms=%lu drawcap=%d rxprio=%u "
                     "loopprio=%u\n",
                     tuneRxDrainYieldEvery,
                     (unsigned long)tunePartialDrawMs, tuneDrawCallCap,
@@ -274,7 +315,7 @@ static void processConfigLine(char *line) {
     char name[16] = {0};
     int value = 0;
     if (sscanf(arg, "%15s %d", name, &value) != 2) {
-      Serial.println("CFGERR expected: CFGTUNE "
+      configSerial().println("CFGERR expected: CFGTUNE "
                      "<rxyield|partialms|drawcap|rxprio|loopprio> <n>");
       return;
     }
@@ -288,19 +329,19 @@ static void processConfigLine(char *line) {
       // Refused rather than ignored when the transport never started: a
       // silently absorbed knob would bias the measurement it exists for.
       if (rxTaskHandle == nullptr) {
-        Serial.println("CFGERR no receive task (transport not started)");
+        configSerial().println("CFGERR no receive task (transport not started)");
         return;
       }
       vTaskPrioritySet(rxTaskHandle, (UBaseType_t)value);
     } else if (strcmp(name, "loopprio") == 0 && value >= 1 && value <= 18) {
       vTaskPrioritySet(nullptr, (UBaseType_t)value);
     } else {
-      Serial.println("CFGERR bad knob or out of range (rxyield 1-256, "
+      configSerial().println("CFGERR bad knob or out of range (rxyield 1-256, "
                      "partialms 1-1000, drawcap 1-450, rxprio 1-18, "
                      "loopprio 1-18)");
       return;
     }
-    Serial.printf("CFGOK rxyield=%d partialms=%lu drawcap=%d rxprio=%u "
+    configSerial().printf("CFGOK rxyield=%d partialms=%lu drawcap=%d rxprio=%u "
                   "loopprio=%u (not persisted)\n",
                   tuneRxDrainYieldEvery, (unsigned long)tunePartialDrawMs,
                   tuneDrawCallCap,
@@ -317,15 +358,15 @@ static void processConfigLine(char *line) {
     const char *arg = line + 10;
     while (*arg == ' ') arg++;
     if (strcmp(arg, "0") != 0 && strcmp(arg, "1") != 0) {
-      Serial.println("CFGERR expected: CFGRXCORE <0|1>");
+      configSerial().println("CFGERR expected: CFGRXCORE <0|1>");
       return;
     }
     Preferences prefs;
     prefs.begin("espdisp", false);
     prefs.putUChar("rxcore", (uint8_t)(arg[0] - '0'));
     prefs.end();
-    Serial.printf("CFGOK rxcore=%c, restarting\n", arg[0]);
-    Serial.flush();
+    configSerial().printf("CFGOK rxcore=%c, restarting\n", arg[0]);
+    configSerial().flush();
     delay(200);
     ESP.restart();
 #endif
@@ -353,8 +394,8 @@ static void processConfigLine(char *line) {
       prefs.begin("espdisp", false);
       prefs.remove("otapw");
       prefs.end();
-      Serial.println("CFGOK ota password cleared (OTA off), restarting");
-      Serial.flush();
+      configSerial().println("CFGOK ota password cleared (OTA off), restarting");
+      configSerial().flush();
       delay(200);
       ESP.restart();
       return;
@@ -371,7 +412,7 @@ static void processConfigLine(char *line) {
                                                strlen(arg)) == 0;
     switch (otapolicy::verifyPassword(decoded, pw, pwLen)) {
       case otapolicy::Verdict::NotBase64:
-        Serial.println("CFGERR bad base64 password");
+        configSerial().println("CFGERR bad base64 password");
         return;
       case otapolicy::Verdict::EmbeddedNul:
         // Refused rather than stored: putString below would cut the password at
@@ -380,19 +421,19 @@ static void processConfigLine(char *line) {
         // never work end to end, and accepting it would leave the panel
         // listening with a secret shorter than the floor above promises.
         // otapolicy::verifyPassword documents the full chain.
-        Serial.println("CFGERR ota password must not contain a 0x00 byte "
+        configSerial().println("CFGERR ota password must not contain a 0x00 byte "
                        "(it would be stored truncated; try another)");
         return;
       case otapolicy::Verdict::TooShort:
         // Refused rather than accepted: this one password is the only thing
         // between the LAN and a firmware write, espota can be retried as fast
         // as the panel will answer, and a weak one is worse than no OTA at all.
-        Serial.printf("CFGERR ota password must be at least %u bytes "
+        configSerial().printf("CFGERR ota password must be at least %u bytes "
                       "(or: CFGOTAPW clear)\n",
                       (unsigned)otapolicy::PASSWORD_MIN_BYTES);
         return;
       case otapolicy::Verdict::TooLong:
-        Serial.printf("CFGERR ota password must be at most %u bytes\n",
+        configSerial().printf("CFGERR ota password must be at most %u bytes\n",
                       (unsigned)otapolicy::PASSWORD_MAX_BYTES);
         return;
       case otapolicy::Verdict::Accept:
@@ -403,9 +444,9 @@ static void processConfigLine(char *line) {
     prefs.putString("otapw", (const char *)pw);
     prefs.end();
     // The length, never the password - not even a prefix of it.
-    Serial.printf("CFGOK ota password set (%u bytes), restarting\n",
+    configSerial().printf("CFGOK ota password set (%u bytes), restarting\n",
                   (unsigned)pwLen);
-    Serial.flush();
+    configSerial().flush();
     delay(200);
     ESP.restart();
   } else if (strcmp(line, "CFGSHOW") == 0) {
@@ -426,7 +467,7 @@ static void processConfigLine(char *line) {
     // otapolicy::statusToken, tested on the host.
     // flip= stays (derived: rotation == 2) so anything parsing the old field
     // keeps reading the truth; rot= carries the full quarter-turn value.
-    Serial.printf(
+    configSerial().printf(
         "CFGINFO ssid64=%s name64=%s id=%02x%02x%02x%02x%02x%02x "
         "connected=%d ip=%s rssi=%d flip=%d rot=%u auto=%u effective=%u "
         "motion=%d bl=%s pwr=%s board=%s profile=%s target=%s chip=%s "
@@ -448,22 +489,37 @@ static void processConfigLine(char *line) {
   // Anything else on serial is ignored (a monitor typing away is harmless).
 }
 
-void handleSerialConfig() {
-  static char line[256];
-  static size_t lineLen = 0;
-  while (Serial.available() > 0) {
-    char c = (char)Serial.read();
+struct SerialConfigLineState {
+  char line[256] = {0};
+  size_t length = 0;
+};
+
+static void serviceSerialConfigPort(Stream &port, SerialConfigLineState &state) {
+  while (port.available() > 0) {
+    char c = (char)port.read();
     if (c == '\n' || c == '\r') {
-      if (lineLen > 0) {
-        line[lineLen] = 0;
-        lineLen = 0;
-        processConfigLine(line);
+      if (state.length > 0) {
+        state.line[state.length] = 0;
+        state.length = 0;
+        replyConfigPort = &port;
+        processConfigLine(state.line);
       }
-    } else if (lineLen < sizeof(line) - 1) {
-      line[lineLen++] = c;
+    } else if (state.length < sizeof(state.line) - 1) {
+      state.line[state.length++] = c;
     } else {
-      lineLen = 0;  // oversized garbage: reset
+      state.length = 0;  // oversized garbage: reset
     }
   }
+}
+
+void handleSerialConfig() {
+  static SerialConfigLineState selectedState;
+  static SerialConfigLineState recoveryState;
+  serviceSerialConfigPort(*selectedConfigPort, selectedState);
+  if (recoveryConfigPort != nullptr &&
+      recoveryConfigPort != selectedConfigPort) {
+    serviceSerialConfigPort(*recoveryConfigPort, recoveryState);
+  }
+  replyConfigPort = selectedConfigPort;
 }
 

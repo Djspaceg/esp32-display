@@ -168,7 +168,7 @@ extern int diskicon_readbytes;
 #ifdef CMAP256
 
 extern boolean palette_changed;
-extern struct color colors[256];
+extern struct color* colors;
 
 #endif  // CMAP256
 

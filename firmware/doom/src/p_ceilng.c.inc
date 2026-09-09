@@ -35,7 +35,7 @@
 //
 
 
-ceiling_t*	activeceilings[MAXCEILINGS];
+ceiling_t**	activeceilings;
 
 
 //
