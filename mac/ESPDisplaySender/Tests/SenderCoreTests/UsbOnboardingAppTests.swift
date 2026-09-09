@@ -301,6 +301,60 @@ final class UsbOnboardingAppTests: XCTestCase {
         XCTAssertFalse(reason.isEmpty)
     }
 
+    func testAUniqueC6ChipResolvesTheBundledFamilyWithoutFullIdentity() throws {
+        let releases = try Self.bundledReleaseSet()
+
+        let resolution = try releases.resolveUpdate(
+            family: nil, chip: "esp32c6", profile: nil, partition: nil)
+
+        guard case .familyFallback(let selection) = resolution else {
+            return XCTFail("a C6 chip-only match should use the universal-family fallback")
+        }
+        XCTAssertEqual(selection.catalogEntry.family, "c6")
+        XCTAssertEqual(resolution.canonicalTarget, "c6")
+        XCTAssertFalse(resolution.isExact)
+    }
+
+    func testALegacyS3ExactTargetStillFallsBackToTheUniversalBundledFamily() throws {
+        let releases = try Self.bundledReleaseSet()
+
+        let resolution = try releases.resolveUpdate(
+            family: "s3-175",
+            chip: "esp32s3",
+            profile: "co5300",
+            partition: "universal-8m-ota")
+
+        guard case .familyFallback(let selection) = resolution else {
+            return XCTFail("an S3 exact-target alias should still resolve the bundled s3 family")
+        }
+        XCTAssertEqual(selection.catalogEntry.family, "s3")
+        XCTAssertEqual(resolution.canonicalTarget, "s3")
+        XCTAssertFalse(resolution.isExact)
+    }
+
+    func testContradictoryEvidenceStillFailsInsteadOfFallingBack() throws {
+        let releases = try Self.bundledReleaseSet()
+
+        XCTAssertThrowsError(try releases.resolveUpdate(
+            family: "p4",
+            chip: "esp32s3",
+            profile: "co5300",
+            partition: "universal-8m-ota")) {
+                XCTAssertEqual(
+                    $0 as? FirmwareReleaseCatalogError,
+                    .chipMismatch(expected: "esp32p4", found: "esp32s3"))
+            }
+    }
+
+    func testP4ChipAloneDoesNotResolveAFallback() throws {
+        let releases = try Self.bundledReleaseSet()
+
+        XCTAssertThrowsError(try releases.resolveUpdate(
+            family: nil, chip: "esp32p4", profile: nil, partition: nil)) {
+                XCTAssertEqual($0 as? FirmwareReleaseCatalogError, .identityIncomplete)
+            }
+    }
+
     /// A minimal .bundle wrapper around one resource file, so `Bundle` can be asked
     /// for it the way `Bundle.main` is asked in the app.
     private func makeBundleWrapper(around file: URL) throws -> URL {
@@ -320,6 +374,35 @@ final class UsbOnboardingAppTests: XCTestCase {
             </dict></plist>
             """.utf8).write(to: wrapper.appendingPathComponent("Contents/Info.plist"))
         return wrapper
+    }
+
+    private static func bundledReleaseSet() throws -> BundledFirmware.ReleaseSet {
+        let root = repoRoot()
+        let catalogURL = root
+            .appendingPathComponent("firmware-releases", isDirectory: true)
+            .appendingPathComponent(FirmwareReleaseCatalog.fileName)
+        let catalog = try FirmwareReleaseCatalog.read(contentsOf: catalogURL)
+        var selections = [String: BundledFirmware.Selection]()
+        for family in ["c6", "s3", "p4"] {
+            let entry = try XCTUnwrap(catalog.families[family])
+            let url = root
+                .appendingPathComponent("firmware-releases", isDirectory: true)
+                .appendingPathComponent(entry.artifact)
+            let data = try Data(contentsOf: url)
+            let bundle = try catalog.bundle(for: entry, data: data)
+            selections[family] = BundledFirmware.Selection(
+                catalogEntry: entry, bundle: bundle, url: url)
+        }
+        return BundledFirmware.ReleaseSet(catalog: catalog, selections: selections)
+    }
+
+    private static func repoRoot() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
     }
 }
 
