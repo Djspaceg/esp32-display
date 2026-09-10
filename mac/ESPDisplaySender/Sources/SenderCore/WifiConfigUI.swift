@@ -75,7 +75,7 @@ enum WifiCredentialStore {
 
 /// WiFi and device-name configuration over the board's USB serial protocol.
 enum WifiConfigUI {
-    enum CommandResult {
+    enum CommandResult: Sendable {
         case success(String)
         case failure(String)
     }
@@ -88,7 +88,26 @@ enum WifiConfigUI {
         var message: String
     }
 
-    /// Stable identity returned by CFGSHOW for one board.
+    /// Live facts returned by one current CFGSHOW probe. None are persisted.
+    struct USBStatus: Equatable, Sendable {
+        var firmwareVersion: String?
+        var currentSSID: String?
+        var networkConnected: Bool?
+        var ipAddress: String?
+        var rssi: Int?
+        var flipped: Bool?
+        var rotation: Int?
+        var automaticRotation: Int?
+        var effectiveRotation: Int?
+        var motionAvailable: Bool?
+        var brightnessHigh: Bool?
+        var brightnessLevel: Int?
+        var manuallyOff: Bool?
+        var batteryPercent: Int?
+        var otaStatus: String?
+    }
+
+    /// Stable identity and live status returned by CFGSHOW for one board.
     struct USBIdentity: Equatable, Sendable {
         var name: String
         var hardwareID: String?
@@ -97,6 +116,7 @@ enum WifiConfigUI {
         var board: String?
         var chip: String?
         var partition: String?
+        var status: USBStatus?
 
         init(
             name: String,
@@ -104,7 +124,8 @@ enum WifiConfigUI {
             target: String? = nil,
             board: String? = nil,
             chip: String? = nil,
-            partition: String? = nil
+            partition: String? = nil,
+            status: USBStatus? = nil
         ) {
             self.name = name
             self.hardwareID = ConfigCommands.canonicalHardwareID(hardwareID)
@@ -112,6 +133,7 @@ enum WifiConfigUI {
             self.board = board
             self.chip = chip
             self.partition = partition
+            self.status = status
         }
     }
 
@@ -132,6 +154,8 @@ enum WifiConfigUI {
         var board: String?
         var chip: String?
         var partition: String?
+        var serialStatus: USBStatus?
+        var verifiedGeneration: Int?
         var isConnected: Bool
 
         init(
@@ -142,6 +166,8 @@ enum WifiConfigUI {
             board: String? = nil,
             chip: String? = nil,
             partition: String? = nil,
+            serialStatus: USBStatus? = nil,
+            verifiedGeneration: Int? = nil,
             isConnected: Bool = true
         ) {
             self.path = path
@@ -151,6 +177,8 @@ enum WifiConfigUI {
             self.board = board
             self.chip = chip
             self.partition = partition
+            self.serialStatus = serialStatus
+            self.verifiedGeneration = verifiedGeneration
             self.isConnected = isConnected
         }
 
@@ -182,6 +210,7 @@ enum WifiConfigUI {
     struct Confirmation: Equatable {
         var title: String
         var message: String
+        var restartsDisplay: Bool = false
     }
 
     private final class DialogCoordinator: NSObject {
@@ -255,7 +284,17 @@ enum WifiConfigUI {
         cfmakeraw(&tty)
         cfsetspeed(&tty, speed_t(B115200))
         tty.c_cflag |= tcflag_t(CLOCAL | CREAD)
+        // HUPCL drops DTR when the last descriptor closes, and on an ESP32 the
+        // DTR/RTS pair is wired to EN/BOOT - so a probe that opens, asks and
+        // closes reboots the board, and a board rebooted every refresh tick can
+        // never answer the next probe. cfmakeraw does not clear HUPCL, so clear
+        // it explicitly and drop both modem lines before any I/O. tools/espdisp.py
+        // talks to the same boards over the same ports without resetting them,
+        // which is the reference this matches.
+        tty.c_cflag &= ~tcflag_t(HUPCL)
         tcsetattr(fd, TCSANOW, &tty)
+        var modemLines: Int32 = TIOCM_DTR | TIOCM_RTS
+        _ = ioctl(fd, TIOCMBIC, &modemLines)
         return fd
     }
 
@@ -606,13 +645,59 @@ enum WifiConfigUI {
             else { return nil }
             return value
         }
+        func appendedToken(_ key: String) -> String? {
+            guard let value = ConfigCommands.lastField(key, from: info),
+                  !value.isEmpty,
+                  value == value.trimmingCharacters(in: .whitespacesAndNewlines)
+            else { return nil }
+            return value
+        }
+        func integer(_ key: String, appended: Bool = false) -> Int? {
+            Int(appended ? appendedToken(key) ?? "" : token(key) ?? "")
+        }
+        func boolean(_ key: String) -> Bool? {
+            switch token(key) {
+            case "0": return false
+            case "1": return true
+            default: return nil
+            }
+        }
+        let brightnessHigh: Bool?
+        switch token("bl=") {
+        case "high": brightnessHigh = true
+        case "low": brightnessHigh = false
+        default: brightnessHigh = nil
+        }
+        let manuallyOff: Bool?
+        switch token("pwr=") {
+        case "on": manuallyOff = false
+        case "off": manuallyOff = true
+        default: manuallyOff = nil
+        }
+        let status = USBStatus(
+            firmwareVersion: appendedToken("fw="),
+            currentSSID: ConfigCommands.decodeField("ssid64=", from: info),
+            networkConnected: boolean("connected="),
+            ipAddress: token("ip="),
+            rssi: integer("rssi="),
+            flipped: boolean("flip="),
+            rotation: integer("rot="),
+            automaticRotation: integer("auto="),
+            effectiveRotation: integer("effective="),
+            motionAvailable: boolean("motion="),
+            brightnessHigh: brightnessHigh,
+            brightnessLevel: integer("bllevel=", appended: true),
+            manuallyOff: manuallyOff,
+            batteryPercent: integer("bat="),
+            otaStatus: token("ota="))
         return USBIdentity(
             name: ConfigCommands.decodeField("name64=", from: info) ?? "",
             hardwareID: ConfigCommands.hardwareID(from: info),
             target: token("target="),
             board: token("board="),
             chip: token("chip="),
-            partition: token("partition="))
+            partition: token("partition="),
+            status: status)
     }
 
     /// Ask a port to identify itself. CFGSHOW answering at all is what proves
@@ -733,7 +818,8 @@ enum WifiConfigUI {
             return .success(Confirmation(
                 title: "Saved",
                 message: "The display is restarting and joining \"\(ssid)\"\(kept)."
-                    + keychainNote))
+                    + keychainNote,
+                restartsDisplay: true))
         case .failure(let reason):
             return .failure(ConfigFailure(
                 title: "Configuration failed", message: reason))

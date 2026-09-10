@@ -60,7 +60,7 @@ final class ControlAvailabilityTests: XCTestCase {
 
         XCTAssertEqual(
             manager.controlUnavailableReason("studio-display", capability: .brightness),
-            "No streaming session is connected to this display.")
+            "This control needs the display to be connected over WiFi.")
     }
 
     func testOfflinePanelHasAReason() {
@@ -71,7 +71,7 @@ final class ControlAvailabilityTests: XCTestCase {
 
         XCTAssertEqual(
             manager.controlUnavailableReason("studio-display", capability: .brightness),
-            "This display is offline.")
+            "The display is visible on WiFi but has not started a control session yet.")
     }
 
     func testStaleFirmwareHasAReason() {

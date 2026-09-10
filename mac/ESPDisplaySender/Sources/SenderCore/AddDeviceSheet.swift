@@ -407,12 +407,13 @@ struct AddDeviceSheet: View {
     private func preselectExactTarget() {
         if let releases = bundledReleases, let chip = detection.chip {
             if let identity = manager.usbReleaseIdentity(for: port),
-               let selection = try? releases.select(
+               let resolution = try? releases.resolveUpdate(
                     family: identity.family, chip: chip,
                     profile: identity.profile, partition: identity.partition) {
-                bundle = selection.bundle
-                bundleLabel = selection.url.lastPathComponent + " (bundled with the app)"
-                selectedTarget = selection.catalogEntry.family
+                bundle = resolution.selection.bundle
+                bundleLabel = resolution.selection.url.lastPathComponent
+                    + " (bundled with the app)"
+                selectedTarget = resolution.canonicalTarget
                 selectedProfile = identity.profile ?? ""
             } else if !selectedProfile.isEmpty,
                       let selection = releases.selections.values.first(where: {
@@ -425,25 +426,19 @@ struct AddDeviceSheet: View {
                 bundle = recovered.bundle
                 bundleLabel = recovered.url.lastPathComponent + " (bundled with the app)"
                 selectedTarget = recovered.catalogEntry.family
-            } else if let selection = releases.selectForUniqueChip(chip) {
+            } else if let resolution = try? releases.resolveUpdate(
+                family: manager.usbTarget(for: port),
+                chip: chip,
+                profile: nil,
+                partition: nil
+            ) {
                 // Neither complete runtime identity nor an explicit profile was
-                // available - a blank or recovery board - but the detected chip
-                // alone names exactly one bundled family. Show and preselect its
-                // verified artifact so the board is flashable without first
-                // adopting firmware just to learn its identity.
-                bundle = selection.bundle
-                bundleLabel = selection.url.lastPathComponent + " (bundled with the app)"
-                if selection.catalogEntry.chip == "esp32p4" {
-                    // P4 alone must not fix its compile-fixed carrier target. The
-                    // artifact is shown, but the exact target stays gated on
-                    // complete identity or an explicit st7703-4b choice, so the
-                    // plan and onboarding still force that choice before a write.
-                    selectedTarget = ""
-                } else {
-                    // The universal C6 and S3 images serve every carrier in their
-                    // family, so the chip identifies the write on its own.
-                    selectedTarget = selection.catalogEntry.family
-                }
+                // available, so fall back to the one bundled family that the
+                // detected chip alone can identify.
+                bundle = resolution.selection.bundle
+                bundleLabel = resolution.selection.url.lastPathComponent
+                    + " (bundled with the app)"
+                selectedTarget = resolution.canonicalTarget
             } else {
                 bundle = nil
                 selectedTarget = ""

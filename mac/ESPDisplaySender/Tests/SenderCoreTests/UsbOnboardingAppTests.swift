@@ -346,13 +346,18 @@ final class UsbOnboardingAppTests: XCTestCase {
             }
     }
 
-    func testP4ChipAloneDoesNotResolveAFallback() throws {
+    func testAUniqueP4ChipResolvesTheBundledFamilyWithoutFullIdentity() throws {
         let releases = try Self.bundledReleaseSet()
 
-        XCTAssertThrowsError(try releases.resolveUpdate(
-            family: nil, chip: "esp32p4", profile: nil, partition: nil)) {
-                XCTAssertEqual($0 as? FirmwareReleaseCatalogError, .identityIncomplete)
-            }
+        let resolution = try releases.resolveUpdate(
+            family: nil, chip: "esp32p4", profile: nil, partition: nil)
+
+        guard case .familyFallback(let selection) = resolution else {
+            return XCTFail("a P4 chip-only match should use the family fallback")
+        }
+        XCTAssertEqual(selection.catalogEntry.family, "p4")
+        XCTAssertEqual(resolution.canonicalTarget, "p4")
+        XCTAssertFalse(resolution.isExact)
     }
 
     /// A minimal .bundle wrapper around one resource file, so `Bundle` can be asked

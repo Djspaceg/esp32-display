@@ -17,7 +17,7 @@ struct FirmwareUpdatePlan: Equatable {
     /// What pushing this image would do, which decides the button's verb and how
     /// hard it is to reach.
     enum Action: Equatable {
-        /// The bundle is newer. The ordinary case.
+        /// The bundle is newer. The ordinary upgrade case.
         case update
         /// Same version. Allowed - reinstalling is a legitimate way to recover a
         /// panel that is behaving oddly - but named for what it is.
@@ -52,7 +52,7 @@ struct FirmwareUpdatePlan: Equatable {
     /// neither says "Update" for a downgrade.
     var verb: String {
         switch action {
-        case .update: return "Update"
+        case .update: return "Upgrade"
         case .reinstall: return "Reinstall"
         case .downgrade: return "Downgrade"
         case .uncertain: return "Push"
@@ -84,7 +84,7 @@ struct FirmwareUpdatePlan: Equatable {
         switch availability {
         case .updateAvailable(let image, let bundleVersion, let panelVersion):
             return FirmwareUpdatePlan(
-                headline: "Update to \(bundleVersion)",
+                headline: "Upgrade to \(bundleVersion)",
                 detail: "This panel is running \(panelVersion). The bundle's "
                     + "\(image.chip) image is \(bundleVersion)." + caveat,
                 action: .update)
@@ -157,6 +157,28 @@ struct FirmwareUpdatePlan: Equatable {
         }
     }
 
+    /// Firmware predating CFGSHOW's `fw=` field cannot be version-compared, but
+    /// a compatible image may still be installed over fully verified USB.
+    static func makeForUnknownPanelVersion(
+        _ compatibility: FirmwareUpdateAvailability,
+        bundleVersion: String,
+        chipConfirmed: Bool
+    ) -> FirmwareUpdatePlan {
+        guard let image = compatibility.image else {
+            return make(compatibility, chipConfirmed: chipConfirmed)
+        }
+        let caveat = chipConfirmed
+            ? ""
+            : " The exact target and independently reported chip must both match "
+                + "before this image can be sent."
+        return FirmwareUpdatePlan(
+            headline: "Running version not reported",
+            detail: "The installed firmware does not report its version over USB. "
+                + "The bundle's \(image.chip) image is \(bundleVersion). The app "
+                + "will re-verify the USB board before writing it." + caveat,
+            action: .uncertain)
+    }
+
     private static func describeTargets(_ targets: [String]) -> String {
         switch targets.count {
         case 0: return "no exact targets"
@@ -225,6 +247,7 @@ enum FirmwareReleaseNotesPresentation: Equatable {
 struct FirmwareUpdateSheet: View {
     @ObservedObject var manager: PanelManager
     @Environment(\.dismiss) private var dismiss
+    private let bundledFirmware: BundledFirmware.Availability
 
     @State private var target: PanelManager.FirmwareUpdateTarget
     @State private var selectedTransport: PanelManager.FirmwareUpdateTransport
@@ -234,24 +257,7 @@ struct FirmwareUpdateSheet: View {
     /// The file, once one has been read successfully.
     @State private var bundle: FirmwareBundle?
     @State private var bundleURL: URL?
-    /// The canonical family target the resolver chose for an automatically
-    /// loaded bundled artifact, tracked apart from `target.target` because a
-    /// unique-chip fallback settles on a family the panel never reported. Nil
-    /// once the user opens a file by hand, which reverts to the panel's raw
-    /// exact target and its historical exact-target behaviour.
-    @State private var autoCanonicalTarget: String?
-    /// True when that automatic selection came from the OTA-only family fallback
-    /// rather than strict complete-identity evidence. USB writing stays gated on
-    /// strict evidence, so this keeps a family target away from the USB path.
-    @State private var autoFallbackOTAOnly = false
-    /// The chip the resolver positively matched when it selected an automatically
-    /// loaded bundled artifact, tracked apart from `target.chip` for the same
-    /// reason as `autoCanonicalTarget`: mDNS can leave `target.chip` nil while the
-    /// hardware-ID-matched USB device names the chip, and that coalesced chip is
-    /// what resolved the bundle. This is chip evidence that selected a real image,
-    /// never an inference from the chosen image. Nil once the user opens a file by
-    /// hand, which reverts to the panel's raw reported chip.
-    @State private var autoConfirmedChip: String?
+    @State private var automaticIdentity: FirmwareReleaseCatalog.Identity?
     /// Why the file the user picked could not be used. Kept as a message rather
     /// than an error, because `FirmwareBundleError` already writes messages for
     /// exactly this reader and rewording them here would only make them worse.
@@ -270,8 +276,13 @@ struct FirmwareUpdateSheet: View {
     @State private var isPushing = false
     @State private var sheetIsVisible = false
 
-    init(manager: PanelManager, target: PanelManager.FirmwareUpdateTarget) {
+    init(
+        manager: PanelManager,
+        target: PanelManager.FirmwareUpdateTarget,
+        bundledFirmware: BundledFirmware.Availability? = nil
+    ) {
         self.manager = manager
+        self.bundledFirmware = bundledFirmware ?? BundledFirmware.load()
         _target = State(initialValue: target)
         _selectedTransport = State(
             initialValue: target.usbDevice != nil ? .usb : .wifi)
@@ -340,7 +351,9 @@ struct FirmwareUpdateSheet: View {
     private var panelSection: some View {
         Section("Panel") {
             LabeledContent("Display", value: target.displayName)
-            LabeledContent("Running", value: target.firmwareVersion)
+            LabeledContent(
+                "Running",
+                value: target.firmwareVersion ?? "Not reported over USB")
             LabeledContent("Chip", value: chipDescription)
             LabeledContent("Target", value: targetDescription)
             LabeledContent("Address", value: target.address ?? "Not available")
@@ -385,20 +398,24 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func applyRefreshedTarget() {
+        let canResolveAutomaticFirmware: Bool
         switch manager.firmwareUpdateReadiness(target.serviceName) {
         case .ready(let refreshed):
             target = refreshed
+            canResolveAutomaticFirmware = true
         case .notReady:
             target.address = nil
             target.usbDevice = nil
             target.usbPathGeneration = nil
             target.usbAllowsLegacyIdentity = false
+            canResolveAutomaticFirmware = false
         }
         if !target.transports.contains(selectedTransport),
            let fallback = target.transports.first {
             selectedTransport = fallback
         }
-        reresolveAutomaticFirmwareAfterRefresh()
+        reloadAutomaticFirmwareAfterRefresh(
+            canResolve: canResolveAutomaticFirmware)
     }
 
     private var transportSection: some View {
@@ -431,7 +448,7 @@ struct FirmwareUpdateSheet: View {
     }
 
     private var targetDescription: String {
-        target.target ?? "Not reported"
+        effectiveTarget ?? "Not reported"
     }
 
     @ViewBuilder
@@ -633,27 +650,17 @@ struct FirmwareUpdateSheet: View {
 
     // MARK: derived
 
-    /// Which firmware family is under discussion for availability, confirmation
-    /// text, and OTA payload selection. An automatically loaded bundled artifact
-    /// carries its resolved canonical family - which, for a unique-chip fallback,
-    /// the panel itself never reported. A manually opened file has no canonical
-    /// target and reverts to the panel's raw exact target, so chip identity alone
-    /// still never selects a hand-picked image.
+    /// Which firmware family is under discussion. A matched bundled selection
+    /// may canonicalize an otherwise incomplete runtime identity to the one
+    /// shipped family the detected chip uniquely identifies.
     private var effectiveTarget: String? {
-        if let autoCanonicalTarget { return autoCanonicalTarget }
+        if let family = automaticIdentity?.family { return family }
         guard let family = target.target, !family.isEmpty else { return nil }
         return family
     }
 
-    /// The chip identity in force for display, confirmation, availability, and
-    /// the OTA image-chip gate. An automatically loaded bundle carries the exact
-    /// chip evidence that resolved it - which may be the hardware-ID-matched USB
-    /// device's chip when mDNS left `target.chip` nil. A manually opened file has
-    /// no confirmed chip and reverts to the panel's raw reported chip, so chip
-    /// evidence alone still never selects a hand-picked image.
     private var effectiveChip: String? {
-        if let autoConfirmedChip { return autoConfirmedChip }
-        return target.chip
+        automaticIdentity?.chip ?? target.chip
     }
 
     private var chipIsConfirmed: Bool {
@@ -667,11 +674,20 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func plan(_ bundle: FirmwareBundle) -> FirmwareUpdatePlan {
-        FirmwareUpdatePlan.make(
+        if let panelVersion = target.firmwareVersion {
+            return FirmwareUpdatePlan.make(
+                bundle.availability(
+                    forTarget: effectiveTarget,
+                    chip: effectiveChip,
+                    panelVersion: panelVersion),
+                chipConfirmed: chipIsConfirmed)
+        }
+        return FirmwareUpdatePlan.makeForUnknownPanelVersion(
             bundle.availability(
                 forTarget: effectiveTarget,
                 chip: effectiveChip,
-                panelVersion: target.firmwareVersion),
+                panelVersion: bundle.firmwareVersion),
+            bundleVersion: bundle.firmwareVersion,
             chipConfirmed: chipIsConfirmed)
     }
 
@@ -788,10 +804,6 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func usbBundleCanWrite(_ bundle: FirmwareBundle) -> Bool {
-        // A unique-chip family fallback is OTA-only: its canonical target is a
-        // family the panel never reported, and flashFirmwareOverUSB's preflight
-        // still expects exact, current evidence. Never let it enable USB.
-        if autoFallbackOTAOnly { return false }
         if let exactTarget = effectiveTarget {
             return bundle.flashPlan(forTarget: exactTarget) != nil
         }
@@ -837,45 +849,27 @@ struct FirmwareUpdateSheet: View {
         resolveBundledFirmware()
     }
 
-    /// Resolve the app's bundled firmware against the current coalesced evidence
-    /// and adopt it as the automatic selection. Unlike
-    /// `loadBundledFirmwareIfAvailable`, this does not guard on `bundle == nil`,
-    /// so the USB-refresh path can re-resolve an existing automatic selection
-    /// against refreshed evidence; callers own the decision to overwrite.
     private func resolveBundledFirmware() {
-        switch BundledFirmware.load() {
+        switch bundledFirmware {
         case .ready(let releases):
             do {
-                // Fill only identity fields the live panel left empty from the
-                // already hardware-ID-matched USB device. Present mDNS evidence
-                // is kept as-is so a contradiction is never hidden - the resolver
-                // rethrows on it rather than falling back.
-                let usb = target.usbDevice
-                let resolvedChip = coalesceChip(target.chip, usb?.chip)
-                let resolution = try releases.resolveUpdate(
-                    family: coalesce(target.target, usb?.target),
-                    chip: resolvedChip,
-                    profile: target.profile,
-                    partition: coalesce(target.partition, usb?.partition))
-                bundle = resolution.selection.bundle
-                bundleURL = resolution.selection.url
-                autoCanonicalTarget = resolution.canonicalTarget
-                autoFallbackOTAOnly = !resolution.isExact
-                // The resolver positively matched this chip evidence when it
-                // chose the bundle, so it is safe to confirm - it may be the USB
-                // device's chip when mDNS left target.chip nil. It is never an
-                // inference from the selected image: only usable chip evidence
-                // that actually resolved a real image is kept.
-                autoConfirmedChip = confirmedChip(resolvedChip)
+                let selected = try releases.selectForUpdate(
+                    live: .init(
+                        family: target.target, chip: target.chip,
+                        profile: target.profile, partition: target.partition),
+                    usb: target.usbDevice.map {
+                        .init(
+                            family: $0.target, chip: $0.chip,
+                            profile: $0.board, partition: $0.partition)
+                    })
+                bundle = selected.selection.bundle
+                bundleURL = selected.selection.url
+                automaticIdentity = selected.identity
                 readFailure = nil
-                // A family fallback is OTA-only. If the sheet opened on USB but
-                // the fallback cannot write over USB, move to WiFi so the user
-                // can enter the OTA password and the button can enable.
-                if autoFallbackOTAOnly, selectedTransport == .usb,
-                   target.transports.contains(.wifi) {
-                    selectedTransport = .wifi
-                }
             } catch {
+                bundle = nil
+                bundleURL = nil
+                automaticIdentity = nil
                 readFailure = error.localizedDescription
             }
         case .unreadable(let path, let reason):
@@ -886,54 +880,14 @@ struct FirmwareUpdateSheet: View {
         }
     }
 
-    /// Re-align the automatic bundled selection with evidence after a USB
-    /// refresh. A manually opened file is left untouched. An existing automatic
-    /// selection is dropped and re-resolved so it never keeps a stale auto
-    /// target/chip, and a selection that never loaded because identity was
-    /// missing is retried now that the refreshed USB device may complete it.
-    private func reresolveAutomaticFirmwareAfterRefresh() {
-        // A hand-picked bundle stands regardless of USB evidence.
-        if bundle != nil, autoCanonicalTarget == nil { return }
-        // Drop any prior automatic selection so the resolver starts from the
-        // refreshed evidence rather than retaining a stale auto target/chip.
-        if autoCanonicalTarget != nil {
-            bundle = nil
-            bundleURL = nil
-            autoCanonicalTarget = nil
-            autoFallbackOTAOnly = false
-            autoConfirmedChip = nil
-        }
-        resolveBundledFirmware()
-    }
-
-    /// The live panel's value, or the USB device's when the panel left it empty.
-    private func coalesce(_ live: String?, _ usb: String?) -> String? {
-        if let live, !live.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return live
-        }
-        return usb
-    }
-
-    /// Like `coalesce`, but a panel that reported `unknown` counts as empty so a
-    /// matched USB device's chip can complete the identity.
-    private func coalesceChip(_ live: String?, _ usb: String?) -> String? {
-        if let live, !live.isEmpty, live != ServiceMetadata.unknownChip {
-            return live
-        }
-        if let usb, !usb.isEmpty, usb != ServiceMetadata.unknownChip {
-            return usb
-        }
-        return live
-    }
-
-    /// A chip value fit to confirm automatic selection: nil, empty, and the
-    /// `unknown` sentinel all mean "no chip evidence", so they never become a
-    /// confirmed chip even if they were passed to the resolver.
-    private func confirmedChip(_ chip: String?) -> String? {
-        guard let chip, !chip.isEmpty, chip != ServiceMetadata.unknownChip else {
-            return nil
-        }
-        return chip
+    private func reloadAutomaticFirmwareAfterRefresh(canResolve: Bool) {
+        // A manually opened file is independent of automatic resource selection.
+        if bundle != nil, automaticIdentity == nil { return }
+        bundle = nil
+        bundleURL = nil
+        automaticIdentity = nil
+        readFailure = nil
+        if canResolve { resolveBundledFirmware() }
     }
 
     /// The open panel, restricted to the one extension this app can read.
@@ -963,17 +917,12 @@ struct FirmwareUpdateSheet: View {
             bundleURL = url
             readFailure = nil
             updateFailure = nil
-            // A hand-picked file drops any automatic canonical target and
-            // confirmed chip and reverts to the panel's raw exact target and raw
-            // reported chip: exact target metadata, not image count or a chip-only
-            // fallback, chooses the image, and chip evidence alone never confirms
-            // a hand-picked bundle.
-            autoCanonicalTarget = nil
-            autoFallbackOTAOnly = false
-            autoConfirmedChip = nil
+            automaticIdentity = nil
+            // Exact target metadata, not image count, chooses an image.
         } catch {
             bundle = nil
             bundleURL = nil
+            automaticIdentity = nil
             readFailure = error.localizedDescription
         }
     }

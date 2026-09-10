@@ -42,7 +42,9 @@ extension PanelManager {
         let target: String?
         let profile: String?
         let partition: String?
-        let firmwareVersion: String
+        /// Nil for firmware that predates USB version reporting. That state may
+        /// update only over a fully verified USB path.
+        let firmwareVersion: String?
         /// A currently connected, positively identity-matched USB device.
         var usbDevice: WifiConfigUI.USBDeviceOption?
         /// Generation of that path when the sheet opened. A removal/reuse makes
@@ -58,7 +60,7 @@ extension PanelManager {
             serviceName: String, displayName: String, hardwareID: String,
             address: String?, chip: String?, target: String? = nil,
             profile: String? = nil, partition: String? = nil,
-            firmwareVersion: String,
+            firmwareVersion: String?,
             usbDevice: WifiConfigUI.USBDeviceOption? = nil,
             usbPathGeneration: Int? = nil,
             usbAllowsLegacyIdentity: Bool = false
@@ -124,63 +126,52 @@ extension PanelManager {
                 "This panel has not reported its hardware ID yet, so an update "
                     + "cannot be tied to the correct device.")
         }
-        guard let version = panel.firmwareVersion else {
-            return .notReady(
-                "This panel has not reported its firmware version yet, so there "
-                    + "is nothing to compare a bundle against.")
-        }
+        let verifiedUSBDevice = verifiedUSBDevice(for: serviceName)
+        let version =
+            panel.firmwareVersion
+                ?? verifiedUSBDevice?.serialStatus?.firmwareVersion
 
         let otaReason = controlUnavailableReason(serviceName, capability: .ota)
-        let address = otaReason == nil ? sessions[serviceName]?.resolvedAddress : nil
-
-        let expectedUSBID = ConfigCommands.canonicalHardwareID(
-            panel.usbHardwareID ?? hardwareID)
-        let stableMatches = usbDevices.filter { device in
-            device.isConnected && !device.path.isEmpty
-                && ConfigCommands.canonicalHardwareID(device.hardwareID)
-                    == expectedUSBID
-        }
-        var usbDevice = stableMatches.count == 1 ? stableMatches[0] : nil
-        var usbAllowsLegacyIdentity = false
-
-        // Legacy CFGSHOW has a name but no id=. Stable-ID matching remains the
-        // authority; only when it finds nothing may one current-session explicit
-        // path or one unique exact name match enter the read-only preflight.
-        if stableMatches.isEmpty {
-            if let explicit = explicitLegacyUSBSelections[serviceName],
-               explicit.generation == usbPathGeneration(explicit.path),
-               let candidate = usbDevices.first(where: {
-                   $0.path == explicit.path && $0.isConnected
-                       && $0.hardwareID == nil
-               }) {
-                usbDevice = candidate
-                usbAllowsLegacyIdentity = true
-            } else {
-                let nameMatches = usbDevices.filter {
-                    $0.isConnected && !$0.path.isEmpty && $0.hardwareID == nil
-                        && $0.name == panel.displayName
-                }
-                if nameMatches.count == 1 {
-                    usbDevice = nameMatches[0]
-                    usbAllowsLegacyIdentity = true
-                }
-            }
+        // Without a running version the sheet cannot honestly classify an OTA
+        // update. A complete USB match can still bootstrap current firmware
+        // because the board identity, target, chip and partition are rechecked
+        // before esptool writes anything.
+        let address =
+            version != nil && otaReason == nil
+            ? sessions[serviceName]?.resolvedAddress : nil
+        let usbDevice: WifiConfigUI.USBDeviceOption?
+        if let device = verifiedUSBDevice,
+           device.target?.isEmpty == false,
+           device.board?.isEmpty == false,
+           device.chip?.isEmpty == false,
+           device.partition?.isEmpty == false {
+            usbDevice = device
+        } else {
+            usbDevice = nil
         }
         let usbGeneration = usbDevice.map { usbPathGeneration($0.path) }
 
         guard address != nil || usbDevice != nil else {
+            if verifiedUSBDevice != nil {
+                return .notReady(
+                    "USB is connected, but the app cannot verify the board family, "
+                        + "chip, profile, and partition safely.")
+            }
+            if version == nil {
+                return .notReady(
+                    "This panel has not reported its firmware version yet, so "
+                        + "there is nothing to compare a bundle against.")
+            }
             if otaReason == nil {
                 return .notReady(
                     "This panel's live network address has not been resolved yet, "
                         + "and no connected USB device is positively matched to it.")
             }
-            if !usbDevices.isEmpty {
-                return .notReady(
-                    otaReason! + " A USB device is connected, but none reports "
-                        + "this display's hardware ID; refresh or select the correct "
-                        + "device under Connection.")
-            }
-            return .notReady(otaReason!)
+            return .notReady(
+                operationUnavailableReason(
+                    serviceName, operation: .firmwareUpdate)
+                    ?? otaReason
+                    ?? "Connect this display over USB or let it rejoin WiFi.")
         }
 
         return .ready(FirmwareUpdateTarget(
@@ -188,14 +179,14 @@ extension PanelManager {
             displayName: panel.displayName,
             hardwareID: hardwareID,
             address: address,
-            chip: panel.chip,
-            target: panel.target,
-            profile: panel.profile,
-            partition: panel.partition,
+            chip: panel.chip ?? usbDevice?.chip,
+            target: panel.target ?? usbDevice?.target,
+            profile: panel.profile ?? usbDevice?.board,
+            partition: panel.partition ?? usbDevice?.partition,
             firmwareVersion: version,
             usbDevice: usbDevice,
             usbPathGeneration: usbGeneration,
-            usbAllowsLegacyIdentity: usbAllowsLegacyIdentity))
+            usbAllowsLegacyIdentity: false))
     }
 
     func rememberedOTAPassword(for hardwareID: String) -> String? {

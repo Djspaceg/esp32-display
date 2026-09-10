@@ -5,6 +5,18 @@ import SenderProtocol
 enum BundledFirmware {
     static let catalogResourceName = "manifest"
 
+    enum UpdateIdentityError: Error, LocalizedError, Equatable {
+        case conflictingEvidence(
+            field: String, live: String, usb: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .conflictingEvidence(let field, let live, let usb):
+                return "Live \(field) identity \(live) conflicts with USB identity \(usb)."
+            }
+        }
+    }
+
     struct Selection: Equatable {
         let catalogEntry: FirmwareReleaseCatalog.Entry
         let bundle: FirmwareBundle
@@ -19,9 +31,9 @@ enum BundledFirmware {
         /// safe for both USB and OTA.
         case exact(Selection)
         /// Strict identity was incomplete, but the reported chip uniquely names
-        /// one universal C6/S3 image and no present family/profile/partition
-        /// evidence contradicts it. OTA only: the USB write path still demands
-        /// exact, current evidence and must not be handed a family target.
+        /// one bundled family image and no present family/profile/partition
+        /// evidence contradicts it. The write path still re-verifies the exact
+        /// target before any USB flash.
         case familyFallback(Selection)
 
         var selection: Selection {
@@ -44,6 +56,13 @@ enum BundledFirmware {
         }
     }
 
+    struct UpdateSelection: Equatable {
+        let resolution: UpdateResolution
+        let identity: FirmwareReleaseCatalog.Identity
+
+        var selection: Selection { resolution.selection }
+    }
+
     struct ReleaseSet: Equatable {
         let catalog: FirmwareReleaseCatalog
         let selections: [String: Selection]
@@ -57,6 +76,29 @@ enum BundledFirmware {
                 throw FirmwareReleaseCatalogError.bundleMetadataMismatch(entry.family)
             }
             return selection
+        }
+
+        func selectForUpdate(
+            live: FirmwareReleaseCatalog.Identity,
+            usb: FirmwareReleaseCatalog.Identity?
+        ) throws -> UpdateSelection {
+            let mergedIdentity = try FirmwareReleaseCatalog.Identity(
+                family: mergedFamily(live: live.family, usb: usb?.family),
+                chip: mergedChip(live: live.chip, usb: usb?.chip),
+                profile: merged(
+                    field: "profile", live: live.profile, usb: usb?.profile),
+                partition: merged(
+                    field: "partition", live: live.partition, usb: usb?.partition))
+            let resolution = try resolveUpdate(
+                family: mergedIdentity.family,
+                chip: mergedIdentity.chip,
+                profile: mergedIdentity.profile,
+                partition: mergedIdentity.partition)
+            return UpdateSelection(
+                resolution: resolution,
+                identity: canonicalIdentity(
+                    from: mergedIdentity,
+                    resolution: resolution))
         }
 
         /// Explicit recovery selection. Callers must present the profile choice
@@ -81,10 +123,8 @@ enum BundledFirmware {
         /// `select(...)`, which needs complete family/chip/profile/partition
         /// runtime identity, and than `selectForRecovery(...)`, which needs an
         /// explicit profile choice. Callers decide whether a chip-only match is
-        /// enough to also fix an exact write target: it is for the universal C6
-        /// and S3 families, whose one image serves every carrier, but not for a
-        /// compile-fixed carrier like P4, which stays target-gated on complete
-        /// identity or an explicit profile even when its artifact is shown.
+        /// enough to preselect a bundled family artifact. The write path still
+        /// re-verifies the exact target before any USB flash.
         func selectForUniqueChip(_ chip: String) -> Selection? {
             let matches = selections.values.filter { $0.catalogEntry.chip == chip }
             guard matches.count == 1 else { return nil }
@@ -94,24 +134,23 @@ enum BundledFirmware {
         /// Legacy family aliases a universal image still answers to, so a board
         /// that reports an old exact target instead of its family is not read as
         /// a contradiction. Canonical `c6`/`s3` and missing/empty are accepted
-        /// too; only the universal families appear here, so P4 never falls back.
+        /// too. Missing/empty family remains accepted separately.
         private static let universalFamilyAliases: [String: Set<String>] = [
             "c6": ["c6"],
+            "p4": ["p4"],
             "s3": ["s3", "s3-085", "s3-154", "s3-175", "s3-185"],
         ]
 
         /// Choose the update image for a panel: strict complete-identity
-        /// selection first, then a unique-chip universal (C6/S3) fallback only
+        /// selection first, then a unique-chip family fallback only
         /// when no present evidence contradicts it.
         ///
         /// Pure and evidence-only. Strict selection wins whenever it succeeds and
-        /// is reported as `.exact`. The fallback exists for the universal
-        /// families, whose single image serves every carrier, so a panel that has
-        /// not yet reported full runtime identity - the universal-release case
-        /// that left the Update Firmware modal disabled - can still be offered its
-        /// image over OTA. P4 is compile-fixed to one carrier and never falls
-        /// back. Any chip/family/profile/partition contradiction rethrows the
-        /// original strict error rather than papering over it with a fallback.
+        /// is reported as `.exact`. The fallback exists for any chip that maps
+        /// to exactly one bundled family, so a panel that has not yet reported
+        /// full runtime identity can still preselect its shipped family image.
+        /// Any chip/family/profile/partition contradiction rethrows the original
+        /// strict error rather than papering over it with a fallback.
         func resolveUpdate(
             family: String?, chip: String?, profile: String?, partition: String?
         ) throws -> UpdateResolution {
@@ -140,10 +179,75 @@ enum BundledFirmware {
             }
         }
 
+        private func canonicalIdentity(
+            from mergedIdentity: FirmwareReleaseCatalog.Identity,
+            resolution: UpdateResolution
+        ) -> FirmwareReleaseCatalog.Identity {
+            guard case .familyFallback(let selection) = resolution else {
+                return mergedIdentity
+            }
+            return .init(
+                family: selection.catalogEntry.family,
+                chip: mergedIdentity.chip ?? selection.catalogEntry.chip,
+                profile: mergedIdentity.profile,
+                partition: mergedIdentity.partition)
+        }
+
+        private func merged(
+            field: String, live: String?, usb: String?
+        ) throws -> String? {
+            let live = Self.usable(live)
+            let usb = Self.usable(usb)
+            if let live, let usb, live != usb {
+                throw UpdateIdentityError.conflictingEvidence(
+                    field: field, live: live, usb: usb)
+            }
+            return live ?? usb
+        }
+
+        private func mergedFamily(live: String?, usb: String?) throws -> String? {
+            let live = Self.usable(live)
+            let usb = Self.usable(usb)
+            if let live, let usb {
+                let liveCanonical = Self.canonicalFamily(live)
+                let usbCanonical = Self.canonicalFamily(usb)
+                if liveCanonical != usbCanonical {
+                    throw UpdateIdentityError.conflictingEvidence(
+                        field: "family", live: live, usb: usb)
+                }
+                return liveCanonical
+            }
+            return live ?? usb
+        }
+
+        private func mergedChip(live: String?, usb: String?) throws -> String? {
+            let live = usableChip(live)
+            let usb = usableChip(usb)
+            if let live, let usb, live != usb {
+                throw UpdateIdentityError.conflictingEvidence(
+                    field: "chip", live: live, usb: usb)
+            }
+            return live ?? usb
+        }
+
         private static func usable(_ value: String?) -> String? {
             guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !value.isEmpty
             else { return nil }
+            return value
+        }
+
+        private static func canonicalFamily(_ value: String) -> String {
+            for (family, aliases) in universalFamilyAliases where aliases.contains(value) {
+                return family
+            }
+            return value
+        }
+
+        private func usableChip(_ value: String?) -> String? {
+            guard let value = Self.usable(value), value != ServiceMetadata.unknownChip else {
+                return nil
+            }
             return value
         }
     }

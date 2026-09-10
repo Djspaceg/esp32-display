@@ -893,6 +893,27 @@ final class ConfigCommandsTests: XCTestCase {
         XCTAssertEqual(ConfigCommands.setName("panel-2"), "CFGNAME cGFuZWwtMg==")
     }
 
+    func testSerialControlBuildersMatchFirmwareGrammarAndBounds() {
+        XCTAssertEqual(ConfigCommands.setPower(true), "CFGPOWER 1")
+        XCTAssertEqual(ConfigCommands.setPower(false), "CFGPOWER 0")
+        XCTAssertEqual(ConfigCommands.setFlip(true), "CFGFLIP 1")
+        XCTAssertEqual(ConfigCommands.setFlip(false), "CFGFLIP 0")
+        XCTAssertEqual(ConfigCommands.setRotation(0), "CFGROT 0")
+        XCTAssertEqual(ConfigCommands.setRotation(3), "CFGROT 3")
+        XCTAssertNil(ConfigCommands.setRotation(-1))
+        XCTAssertNil(ConfigCommands.setRotation(4))
+        XCTAssertEqual(ConfigCommands.setBrightnessLevel(1), "CFGBRIGHT 1")
+        XCTAssertEqual(ConfigCommands.setBrightnessLevel(255), "CFGBRIGHT 255")
+        XCTAssertNil(ConfigCommands.setBrightnessLevel(0))
+        XCTAssertNil(ConfigCommands.setBrightnessLevel(256))
+    }
+
+    func testAppendedFieldUsesTheLastToken() {
+        let line = "CFGINFO ssid=guest fw=spoof bllevel=7 bllevel=128 fw=1.5.0"
+        XCTAssertEqual(ConfigCommands.lastField("bllevel=", from: line), "128")
+        XCTAssertEqual(ConfigCommands.lastField("fw=", from: line), "1.5.0")
+    }
+
     // Set and clear are two distinct commands, matching the firmware's
     // classifyArgument ordering: "clear" is recognised as the literal
     // before any base64 decode is attempted, so a builder that only ever

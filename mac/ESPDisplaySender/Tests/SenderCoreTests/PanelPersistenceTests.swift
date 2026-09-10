@@ -17,6 +17,7 @@ final class PanelPersistenceTests: XCTestCase {
         PanelSnapshot(
             serviceName: "studio-display",
             displayName: "Studio Display",
+            dateAdded: Date(timeIntervalSince1970: 1_690_000_000),
             hardwareID: "esp32c6-a1b2c3d4",
             address: "192.168.1.42",
             usbPort: "/dev/cu.usbserial-A1B2C3D4",
@@ -91,6 +92,7 @@ final class PanelPersistenceTests: XCTestCase {
 
         XCTAssertEqual(record.serviceName, "studio-display")
         XCTAssertEqual(record.displayName, "Studio Display")
+        XCTAssertEqual(record.dateAdded, Date(timeIntervalSince1970: 1_690_000_000))
         XCTAssertEqual(record.hardwareID, "esp32c6-a1b2c3d4")
         XCTAssertEqual(record.usbHardwareID, "288485a1b2c3")
         XCTAssertEqual(record.usbPort, "/dev/cu.usbserial-A1B2C3D4")
@@ -103,6 +105,7 @@ final class PanelPersistenceTests: XCTestCase {
 
         XCTAssertEqual(restored.serviceName, "studio-display")
         XCTAssertEqual(restored.displayName, "Studio Display")
+        XCTAssertEqual(restored.dateAdded, Date(timeIntervalSince1970: 1_690_000_000))
         XCTAssertEqual(restored.hardwareID, "esp32c6-a1b2c3d4")
         XCTAssertEqual(restored.usbHardwareID, "288485a1b2c3")
         XCTAssertEqual(restored.usbPort, "/dev/cu.usbserial-A1B2C3D4")
@@ -147,7 +150,7 @@ final class PanelPersistenceTests: XCTestCase {
                     "controlProtocolVersion", "sourceDescription", "lastError"] {
             XCTAssertFalse(json.contains("\"\(key)\""), "\(key) reached disk")
         }
-        for key in ["serviceName", "displayName", "hardwareID", "usbHardwareID",
+        for key in ["serviceName", "displayName", "dateAdded", "hardwareID", "usbHardwareID",
                     "usbPort", "address", "lastSeen"] {
             XCTAssertTrue(json.contains("\"\(key)\""), "\(key) missing from disk")
         }
@@ -201,6 +204,7 @@ final class PanelPersistenceTests: XCTestCase {
         let restored = try XCTUnwrap(records.first).snapshot
         XCTAssertEqual(restored.serviceName, "studio-display")
         XCTAssertEqual(restored.displayName, "Studio Display")
+        XCTAssertEqual(restored.dateAdded, restored.lastSeen)
         XCTAssertEqual(restored.hardwareID, "esp32c6-a1b2c3d4")
         XCTAssertNil(restored.usbHardwareID)
         XCTAssertEqual(restored.usbPort, "/dev/cu.usbserial-A1B2C3D4")
@@ -221,6 +225,7 @@ final class PanelPersistenceTests: XCTestCase {
         let restored = try XCTUnwrap(records.first).snapshot
         XCTAssertEqual(restored.serviceName, "travel-display")
         XCTAssertEqual(restored.displayName, "travel-display")
+        XCTAssertEqual(restored.dateAdded, .distantPast)
         XCTAssertNil(restored.hardwareID)
         XCTAssertNil(restored.usbHardwareID)
         XCTAssertNil(restored.usbPort)

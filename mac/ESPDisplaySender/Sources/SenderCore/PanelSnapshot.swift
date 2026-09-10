@@ -9,6 +9,12 @@ struct PanelSnapshot: Identifiable, Equatable {
 
     var serviceName: String
     var displayName: String
+    /// When this display record was created on this Mac. Unlike `lastSeen`, this
+    /// never changes when discovery drops out or the panel returns. The existing
+    /// ISO-8601 store writes whole seconds, so creation uses the same precision
+    /// and a save/reload cannot alter ordering.
+    var dateAdded: Date = Date(
+        timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
     var hardwareID: String?
     var address: String?
     var usbPort: String?
@@ -145,8 +151,51 @@ struct PanelSnapshot: Identifiable, Equatable {
     }
 
     var isOnline: Bool {
+        isOnline(asOf: Date())
+    }
+
+    func isOnline(asOf now: Date) -> Bool {
         guard let lastHeartbeatAt else { return false }
-        return Date().timeIntervalSince(lastHeartbeatAt) < 10
+        return now.timeIntervalSince(lastHeartbeatAt) < 10
+    }
+
+    func deviceListStatus(asOf now: Date) -> DeviceListStatus {
+        guard isOnline(asOf: now) else {
+            return discovered ? .connecting : .offline
+        }
+        if paused { return .paused }
+        return captureStatus.isStreaming ? .streaming : .connected
+    }
+
+    func deviceListSortValue(asOf now: Date) -> DeviceListSortValue {
+        DeviceListSortValue(
+            displayName: displayName,
+            stableIdentifier: id,
+            dateAdded: dateAdded,
+            status: deviceListStatus(asOf: now))
+    }
+
+    var sidebarStatusText: String {
+        sidebarStatusText(asOf: Date())
+    }
+
+    /// The complete status line shown under this panel's name in the sidebar.
+    ///
+    /// This projects the same five states used for status sorting, so the visible
+    /// vocabulary cannot drift from the ordering policy.
+    func sidebarStatusText(asOf now: Date) -> String {
+        switch deviceListStatus(asOf: now) {
+        case .streaming:
+            return String(format: "Online • %.1f fps", displayFPS)
+        case .connected:
+            return "Online • Not mirroring"
+        case .paused:
+            return "Paused"
+        case .connecting:
+            return "Connecting"
+        case .offline:
+            return "Offline"
+        }
     }
 
     var statusText: String {
@@ -242,4 +291,3 @@ extension String {
         return first.uppercased() + dropFirst()
     }
 }
-

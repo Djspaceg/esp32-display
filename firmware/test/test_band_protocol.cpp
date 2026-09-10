@@ -5,6 +5,8 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -18,7 +20,9 @@
 #include "../display_stream/large_tile_protocol.h"
 #include "../display_stream/ota_policy.h"
 #include "../display_stream/panel_state.h"
+#include "../display_stream/serial_config_protocol.h"
 #include "../display_stream/tile_protocol.h"
+#include "../display_stream/wifi_presets.h"
 #include "../libraries/espdisp_board/src/battery_estimate.h"
 #include "../libraries/espdisp_board/src/board_config.h"
 #include "../libraries/espdisp_board/src/gt911_protocol.h"
@@ -49,10 +53,325 @@ static Header hdr(uint16_t frame, uint16_t band, uint16_t dirty,
   return h;
 }
 
+static std::string readTextFile(const std::string &path) {
+  std::ifstream input(path);
+  return std::string(std::istreambuf_iterator<char>(input),
+                     std::istreambuf_iterator<char>());
+}
+
+static std::string firmwareSourcePath(const char *relative) {
+  std::string testFile = __FILE__;
+  const size_t slash = testFile.find_last_of('/');
+  const std::string testDir =
+      slash == std::string::npos ? "." : testFile.substr(0, slash);
+  return testDir + "/../display_stream/" + relative;
+}
+
 int main() {
   bool dropped;
 
+  // The serial configuration surface is user-facing protocol, but its Arduino
+  // dispatcher cannot run in this host binary. Keep a runtime contract check
+  // here so missing commands or readback fields fail before any hardware build.
+  {
+    const std::string source =
+        readTextFile(firmwareSourcePath("serial_config.cpp")) +
+        readTextFile(firmwareSourcePath("serial_config_protocol.h"));
+    CHECK(source.find("CFGBRIGHT") != std::string::npos);
+    CHECK(source.find("bllevel=") != std::string::npos);
+    CHECK(source.find("FW_VERSION") != std::string::npos);
+  }
+
+  // --- serial brightness grammar and CFGSHOW extension
+  {
+    uint8_t level = 77;
+    CHECK(serialcfg::parseBrightness("CFGBRIGHT 1", level));
+    CHECK(level == 1);
+    CHECK(serialcfg::parseBrightness("CFGBRIGHT 255", level));
+    CHECK(level == 255);
+    CHECK(serialcfg::parseBrightness("CFGBRIGHT 001", level));
+    CHECK(level == 1);
+
+    const char *invalid[] = {
+        "CFGBRIGHT",       "CFGBRIGHT ",   "CFGBRIGHT 0",
+        "CFGBRIGHT 256",   "CFGBRIGHT -1", "CFGBRIGHT +1",
+        "CFGBRIGHT 1 ",    "CFGBRIGHT 1x", "CFGBRIGHT 0x10",
+        "CFGBRIGHT 999999",
+    };
+    for (const char *line : invalid) {
+      level = 77;
+      CHECK(!serialcfg::parseBrightness(line, level));
+      CHECK(level == 77);
+    }
+    CHECK(serialcfg::hasBrightnessVerb("CFGBRIGHT"));
+    CHECK(serialcfg::hasBrightnessVerb("CFGBRIGHT 128"));
+    CHECK(!serialcfg::hasBrightnessVerb("CFGPOWER 1"));
+
+    char extension[64];
+    CHECK(serialcfg::formatShowExtension(
+              extension, sizeof(extension), 128, "1.5.0") > 0);
+    CHECK(strcmp(extension, " bllevel=128 fw=1.5.0") == 0);
+  }
+
   const Geometry G172 = GEOMETRY_172X320;
+
+  // --- approved WiFi preset command surface ------------------------------
+  {
+    using namespace wifipresets;
+
+    CHECK(commandKind("CFGWIFISET 1 VGVzdE5ldA== -") ==
+          CommandKind::Set);
+    CHECK(commandKind("CFGWIFICLEAR 10") == CommandKind::Clear);
+    CHECK(commandKind("CFGWIFIUSE 2") == CommandKind::Use);
+    CHECK(commandKind("CFGWIFISHOW") == CommandKind::ShowRoster);
+    CHECK(commandKind("CFGWIFISHOW 7") == CommandKind::ShowSlot);
+    CHECK(commandKind("CFGWIFI abc") == CommandKind::Unknown);
+    CHECK(commandKind("CFGWIFISETX 1 VGVzdA== -") == CommandKind::Unknown);
+    CHECK(commandKind(nullptr) == CommandKind::Unknown);
+
+    ParsedCommand parsed =
+        parseCommand("CFGWIFISET 10 VGVzdE5ldA== c3ludGhldGlj");
+    CHECK(parsed.kind == CommandKind::Set);
+    CHECK(parsed.error == CommandError::None);
+    CHECK(parsed.slot == 10);
+    CHECK(parsed.credentials.ssidLength == 7);
+    CHECK(memcmp(parsed.credentials.ssid, "TestNet", 7) == 0);
+    CHECK(parsed.credentials.passwordLength == 9);
+
+    parsed = parseCommand("CFGWIFISET 1 VGVzdE5ldA== -");
+    CHECK(parsed.error == CommandError::None);
+    CHECK(parsed.credentials.passwordLength == 0);
+
+    parsed = parseCommand("CFGWIFISET");
+    CHECK(parsed.error == CommandError::ExpectedSet);
+    parsed = parseCommand("CFGWIFISET 1 VGVzdE5ldA==");
+    CHECK(parsed.error == CommandError::ExpectedSet);
+    parsed = parseCommand("CFGWIFISET 1 VGVzdE5ldA== - extra");
+    CHECK(parsed.error == CommandError::ExpectedSet);
+
+    parsed = parseCommand("CFGWIFISET 0 VGVzdE5ldA== -");
+    CHECK(parsed.error == CommandError::SlotOutOfRange);
+    parsed = parseCommand("CFGWIFISET 11 VGVzdE5ldA== -");
+    CHECK(parsed.error == CommandError::SlotOutOfRange);
+    parsed = parseCommand("CFGWIFICLEAR 0");
+    CHECK(parsed.error == CommandError::SlotOutOfRange);
+    parsed = parseCommand("CFGWIFIUSE 11");
+    CHECK(parsed.error == CommandError::SlotOutOfRange);
+    parsed = parseCommand("CFGWIFISHOW nope");
+    CHECK(parsed.error == CommandError::SlotOutOfRange);
+
+    parsed = parseCommand("CFGWIFISET 1 !!!= -");
+    CHECK(parsed.error == CommandError::BadBase64Ssid);
+    parsed = parseCommand("CFGWIFISET 1 VGVzdE5ldA== !!!=");
+    CHECK(parsed.error == CommandError::BadBase64Password);
+    parsed = parseCommand("CFGWIFISET 1 VGVzdA -");
+    CHECK(parsed.error == CommandError::BadBase64Ssid);
+    parsed = parseCommand("CFGWIFISET 1 AB== -");
+    CHECK(parsed.error == CommandError::BadBase64Ssid);
+
+    parsed = parseCommand("CFGWIFISET 1 AA== -");
+    CHECK(parsed.error == CommandError::SsidLengthOrNul);
+    parsed = parseCommand("CFGWIFISET 1 VGVzdA== AA==");
+    CHECK(parsed.error == CommandError::PasswordLengthOrNul);
+
+    const std::string ssid33(44, 'Q');
+    parsed = parseCommand(
+        (std::string("CFGWIFISET 1 ") + ssid33 + " -").c_str());
+    CHECK(parsed.error == CommandError::SsidLengthOrNul);
+    const std::string password65 = std::string(87, 'Q') + "=";
+    parsed = parseCommand(
+        (std::string("CFGWIFISET 1 VGVzdA== ") + password65).c_str());
+    CHECK(parsed.error == CommandError::PasswordLengthOrNul);
+
+    const std::string maxSsid64 = std::string(43, 'Q') + "=";
+    const std::string maxPassword64 = std::string(86, 'Q') + "==";
+    const std::string maxCommand =
+        "CFGWIFISET 10 " + maxSsid64 + " " + maxPassword64;
+    CHECK(maxCommand.length() == 147);
+    CHECK(255 - maxCommand.length() == 108);
+    parsed = parseCommand(maxCommand.c_str());
+    CHECK(parsed.error == CommandError::None);
+    CHECK(parsed.credentials.ssidLength == 32);
+    CHECK(parsed.credentials.passwordLength == 64);
+
+    CHECK(slotMask(0) == 0);
+    CHECK(slotMask(1) == 0x001);
+    CHECK(slotMask(10) == 0x200);
+    CHECK(slotMask(11) == 0);
+    CHECK(slotMutationNeedsDirect(1, 1));
+    CHECK(slotMutationNeedsDirect(10, 10));
+    CHECK(!slotMutationNeedsDirect(1, 2));
+    CHECK(!slotMutationNeedsDirect(ACTIVE_DIRECT, 1));
+    uint8_t slots[10] = {};
+    CHECK(orderedSlots(0x225, slots, 10) == 4);
+    CHECK(slots[0] == 1 && slots[1] == 3 && slots[2] == 6 &&
+          slots[3] == 10);
+    CHECK(orderedSlots(0x3FF, slots, 3) == 10);
+    CHECK(slots[0] == 1 && slots[1] == 2 && slots[2] == 3);
+
+    CHECK(strcmp(commandErrorText(CommandError::ExpectedSet),
+                 "CFGERR expected: CFGWIFISET <1-10> <base64 ssid> <base64 "
+                 "password|->") == 0);
+    CHECK(strcmp(commandErrorText(CommandError::SlotOutOfRange),
+                 "CFGERR wifi slot out of range (1-10)") == 0);
+    CHECK(strcmp(commandErrorText(CommandError::BadBase64Ssid),
+                 "CFGERR bad base64 ssid") == 0);
+    CHECK(strcmp(commandErrorText(CommandError::BadBase64Password),
+                 "CFGERR bad base64 password") == 0);
+    CHECK(strcmp(commandErrorText(CommandError::SsidLengthOrNul),
+                 "CFGERR ssid must be 1..32 bytes and contain no 0x00") == 0);
+    CHECK(strcmp(commandErrorText(CommandError::PasswordLengthOrNul),
+                 "CFGERR password must be 0..64 bytes and contain no 0x00") ==
+          0);
+    CHECK(commandErrorText(CommandError::None) == nullptr);
+
+    char reply[192] = {};
+    CHECK(formatSavedReply(reply, sizeof(reply), 10, 32, true, 0));
+    CHECK(strcmp(reply,
+                 "CFGOK wifi slot=10 saved ssid_bytes=32 pass=set "
+                 "active=direct") == 0);
+    CHECK(formatSavedReply(reply, sizeof(reply), 2, 7, false, 9));
+    CHECK(strcmp(reply,
+                 "CFGOK wifi slot=2 saved ssid_bytes=7 pass=open active=9") ==
+          0);
+    CHECK(formatClearedReply(reply, sizeof(reply), 3, 0));
+    CHECK(strcmp(reply, "CFGOK wifi slot=3 cleared active=direct") == 0);
+    CHECK(formatClearedReply(reply, sizeof(reply), 3, 8));
+    CHECK(strcmp(reply, "CFGOK wifi slot=3 cleared active=8") == 0);
+    CHECK(formatSelectedReply(reply, sizeof(reply), 10));
+    CHECK(strcmp(reply, "CFGOK wifi slot=10 selected, restarting") == 0);
+    CHECK(formatRosterReply(reply, sizeof(reply), 0x225, 0, true));
+    CHECK(strcmp(reply,
+                 "CFGINFO wifi capacity=10 valid=0x225 active=direct "
+                 "mode=direct local=1") == 0);
+    CHECK(formatRosterReply(reply, sizeof(reply), 0x3FF, 10, false));
+    CHECK(strcmp(reply,
+                 "CFGINFO wifi capacity=10 valid=0x3ff active=10 mode=preset "
+                 "local=0") == 0);
+    CHECK(formatValidSlotReply(reply, sizeof(reply), 4, true, "VGVzdA==",
+                               false));
+    CHECK(strcmp(reply,
+                 "CFGINFO wifi slot=4 valid=1 active=1 ssid64=VGVzdA== "
+                 "pass=open") == 0);
+    CHECK(formatInvalidSlotReply(reply, sizeof(reply), 6));
+    CHECK(strcmp(reply, "CFGINFO wifi slot=6 valid=0 active=0") == 0);
+    CHECK(formatUnavailableReply(reply, sizeof(reply), 7));
+    CHECK(strcmp(reply, "CFGERR wifi slot=7 unavailable") == 0);
+    CHECK(formatSaveFailedReply(reply, sizeof(reply), 7));
+    CHECK(strcmp(reply, "CFGERR wifi slot=7 save failed") == 0);
+    CHECK(!formatRosterReply(reply, 8, 0, 0, true));
+  }
+
+  // --- WiFi preset records are whole, versioned, and corruption-checked ----
+  {
+    using namespace wifipresets;
+    Credentials credentials = {};
+    const uint8_t ssid[] = {'L', 'a', 'b', 0xC3, 0xA9};
+    const uint8_t password[] = {0x01, 0x7F, 0x80, 0xFF};
+    credentials.ssidLength = sizeof(ssid);
+    credentials.passwordLength = sizeof(password);
+    memcpy(credentials.ssid, ssid, sizeof(ssid));
+    memcpy(credentials.password, password, sizeof(password));
+
+    uint8_t record[RECORD_MAX_BYTES] = {};
+    const size_t recordLength =
+        encodeRecord(credentials, record, sizeof(record));
+    CHECK(recordLength == 16);
+    CHECK(crc32((const uint8_t *)"123456789", 9) == 0xCBF43926u);
+    CHECK(record[0] == RECORD_VERSION);
+    CHECK(record[1] == sizeof(ssid));
+    CHECK(record[2] == sizeof(password));
+    CHECK(readU32Le(record + recordLength - RECORD_CRC_BYTES) ==
+          crc32(record, recordLength - RECORD_CRC_BYTES));
+
+    Credentials decoded = {};
+    CHECK(decodeRecord(record, recordLength, decoded) == RecordStatus::Valid);
+    CHECK(decoded.ssidLength == sizeof(ssid));
+    CHECK(decoded.passwordLength == sizeof(password));
+    CHECK(memcmp(decoded.ssid, ssid, sizeof(ssid)) == 0);
+    CHECK(memcmp(decoded.password, password, sizeof(password)) == 0);
+
+    for (size_t length = 0; length < recordLength; ++length) {
+      Credentials untouched = {};
+      untouched.ssidLength = 9;
+      CHECK(decodeRecord(record, length, untouched) != RecordStatus::Valid);
+      CHECK(untouched.ssidLength == 9);
+    }
+
+    uint8_t hostile[RECORD_MAX_BYTES] = {};
+    memcpy(hostile, record, recordLength);
+    hostile[0] = RECORD_VERSION + 1;
+    CHECK(decodeRecord(hostile, recordLength, decoded) ==
+          RecordStatus::Version);
+
+    memcpy(hostile, record, recordLength);
+    hostile[3] ^= 0x01;
+    CHECK(decodeRecord(hostile, recordLength, decoded) == RecordStatus::Crc);
+
+    memcpy(hostile, record, recordLength);
+    hostile[1] = (uint8_t)(sizeof(ssid) + 1);
+    CHECK(decodeRecord(hostile, recordLength, decoded) == RecordStatus::Length);
+
+    memcpy(hostile, record, recordLength);
+    hostile[2] = (uint8_t)(sizeof(password) + 1);
+    CHECK(decodeRecord(hostile, recordLength, decoded) == RecordStatus::Length);
+
+    memcpy(hostile, record, recordLength);
+    hostile[3] = 0;
+    writeU32Le(hostile + recordLength - RECORD_CRC_BYTES,
+               crc32(hostile, recordLength - RECORD_CRC_BYTES));
+    CHECK(decodeRecord(hostile, recordLength, decoded) ==
+          RecordStatus::Credential);
+
+    // Length fields claim 96 payload bytes while the blob only contains one.
+    const uint8_t impossible[] = {RECORD_VERSION, 32, 64, 'x', 0, 0, 0, 0};
+    CHECK(decodeRecord(impossible, sizeof(impossible), decoded) ==
+          RecordStatus::Length);
+
+    Credentials maximum = {};
+    maximum.ssidLength = SSID_MAX_BYTES;
+    maximum.passwordLength = PASSWORD_MAX_BYTES;
+    memset(maximum.ssid, 'S', maximum.ssidLength);
+    memset(maximum.password, 'P', maximum.passwordLength);
+    CHECK(encodeRecord(maximum, record, sizeof(record)) == RECORD_MAX_BYTES);
+    CHECK(decodeRecord(record, sizeof(record), decoded) == RecordStatus::Valid);
+
+    maximum.ssid[31] = 0;
+    CHECK(encodeRecord(maximum, record, sizeof(record)) == 0);
+    maximum.ssid[31] = 'S';
+    maximum.password[63] = 0;
+    CHECK(encodeRecord(maximum, record, sizeof(record)) == 0);
+    CHECK(encodeRecord(credentials, nullptr, sizeof(record)) == 0);
+    CHECK(encodeRecord(credentials, record, recordLength - 1) == 0);
+    CHECK(decodeRecord(nullptr, recordLength, decoded) == RecordStatus::Length);
+  }
+
+  // --- active selection fails closed and mirroring only writes differences --
+  {
+    using namespace wifipresets;
+    CHECK(effectiveOrigin(3, true, true) == EffectiveOrigin::Preset);
+    CHECK(effectiveOrigin(3, false, true) == EffectiveOrigin::Legacy);
+    CHECK(effectiveOrigin(3, false, false) == EffectiveOrigin::Compiled);
+    CHECK(effectiveOrigin(0, true, true) == EffectiveOrigin::Legacy);
+    CHECK(effectiveOrigin(11, true, false) == EffectiveOrigin::Compiled);
+    CHECK(effectiveOrigin(ACTIVE_DIRECT, true, true) ==
+          EffectiveOrigin::Legacy);
+    CHECK(effectiveActiveSlot(7, true) == 7);
+    CHECK(effectiveActiveSlot(7, false) == 0);
+    CHECK(effectiveActiveSlot(ACTIVE_DIRECT, true) == 0);
+
+    Credentials credentials = {};
+    memcpy(credentials.ssid, "Lab", 3);
+    credentials.ssidLength = 3;
+    memcpy(credentials.password, "synthetic", 9);
+    credentials.passwordLength = 9;
+    CHECK(!mirrorNeeded(credentials, credentials.ssid, credentials.ssidLength,
+                        credentials.password, credentials.passwordLength));
+    CHECK(mirrorNeeded(credentials, (const uint8_t *)"Old", 3,
+                       credentials.password, credentials.passwordLength));
+    CHECK(mirrorNeeded(credentials, credentials.ssid, credentials.ssidLength,
+                       nullptr, 0));
+  }
 
   // Every band starts where the previous one ended, every packet fits the
   // budget, and the bands cover the frame exactly - the invariants that make

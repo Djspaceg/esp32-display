@@ -17,8 +17,8 @@ pacing). What remains falls into three themes:
 Items reference files and symbol names rather than line numbers where
 possible, since line numbers drift. Ordered roughly by value per unit of work.
 
-**Status:** everything below is implemented except real OTA (Deferred) and the
-`--port` half of the fps/pacing item, which is blocked on the firmware side.
+**Status:** everything below is implemented except the `--port` half of the
+fps/pacing item, which is blocked on the firmware side.
 Coverage went from 20 Swift tests and 140 host checks to 198 and 280.
 
 ## Tier 1 — Fix what actively misleads
@@ -75,12 +75,10 @@ Coverage went from 20 Swift tests and 140 host checks to 198 and 280.
     `usbPort`, address) and a runtime snapshot.
 
 - [x] **Remove the dead OTA button.**
-  `ManagerWindow.swift` gates "Install Firmware Update…" on
-  `panel.capabilities.contains(.ota)`, and `showOTANotice()` can only report
-  that no firmware bundle is installed. Firmware deliberately omits `CAP_OTA`
-  (`DEVICE_CAPABILITIES` = 0x6F), so it is unreachable against real hardware —
-  but `PanelManager.preview` unions `.ota` in, so the SwiftUI preview shows a
-  button that cannot work. Delete it until real OTA exists (see Deferred).
+  The original placeholder was correctly deleted while firmware omitted
+  `CAP_OTA`. Real OTA later landed in `6ccf587` and `2182a77`; the manager now
+  exposes Update Firmware only when a safe OTA or matched USB transport is
+  available (`mac/ESPDisplaySender/Sources/SenderCore/ManagerWindow.swift:998`).
 
 - [x] **Derive the mDNS `caps` TXT record from `DEVICE_CAPABILITIES`.**
   `display_stream.ino` hardcodes the literal `"0000006f"` in two places
@@ -184,13 +182,17 @@ Coverage went from 20 Swift tests and 140 host checks to 198 and 280.
 
 ## Deferred
 
-- [ ] **Real OTA firmware update.**
-  Not implemented anywhere on the device: no `esp_ota_*`, no `ArduinoOTA`, no
-  `Update.begin`, no partition-table work. USB is the only install and recovery
-  path. Doing it properly means a partition table, signed bundles, and
-  rollback, and it only pays off once panels are mounted somewhere awkward to
-  reach with a cable. Until then, keep the button deleted (Tier 1) rather than
-  advertising a capability that cannot work.
+- [x] **Real OTA firmware update.**
+  Implemented in `6ccf587`: the password-gated device listener activates at
+  `firmware/display_stream/ota_service.cpp:252`, and the CLI push path starts
+  in `tools/espdisp.py:3196`. Commit `2182a77` added the manager's Update
+  Firmware action
+  (`mac/ESPDisplaySender/Sources/SenderCore/ManagerWindow.swift:998`) and native
+  `espota` pusher. Every supported partition layout has OTA metadata and two app
+  slots, including the committed custom S3 and P4 layouts. No OTA push has been
+  performed on hardware, so this records an implemented code path, not
+  end-to-end validation. USB remains the recovery path; image signing, boot
+  health validation, and automatic rollback remain open.
 
 ## Unused protocol surface (context, not tasks)
 

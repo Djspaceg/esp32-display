@@ -2184,7 +2184,42 @@ def report_sizes(lines: List[str]) -> None:
         print(line)
 
 
+def validate_family_build_contract(board: Family) -> None:
+    """Refuse a canonical family target whose required composition is incomplete."""
+    if board.key != "s3":
+        return
+    if "-DESPDISP_DOOM_RUNTIME" not in board.extra_flags:
+        raise Fail(
+            "canonical S3 build requires -DESPDISP_DOOM_RUNTIME; refusing an "
+            "image with the profile-gated Doom entry path compiled out"
+        )
+    if "firmware" not in board.extra_library_dirs:
+        raise Fail(
+            "canonical S3 build requires the firmware library path; refusing an "
+            "image that cannot link the Doom source"
+        )
+
+
+S3_DOOM_APP_MARKERS = (
+    b"button: Doom requested; rebooting into isolated mode",
+    b"[doom] Display bridge ready (reusing existing panel)",
+)
+
+
+def validate_family_app_contract(board: Family, app: bytes) -> None:
+    """Refuse an exported canonical image that did not link its required feature."""
+    if board.key != "s3":
+        return
+    missing = [marker for marker in S3_DOOM_APP_MARKERS if marker not in app]
+    if missing:
+        raise Fail(
+            "canonical S3 application is missing linked Doom markers: %s"
+            % ", ".join(marker.decode("ascii") for marker in missing)
+        )
+
+
 def compile_board(board: Family, output_dir: Optional[str] = None) -> List[str]:
+    validate_family_build_contract(board)
     if not os.path.isdir(SKETCH_DIR):
         raise Fail("sketch directory not found: %s" % SKETCH_DIR)
 
@@ -2231,7 +2266,11 @@ def compile_board(board: Family, output_dir: Optional[str] = None) -> List[str]:
             "--output-dir", output_dir,
         ]
     try:
-        return run_streaming(cmd + ["."], cwd=build_sketch_dir)
+        lines = run_streaming(cmd + ["."], cwd=build_sketch_dir)
+        if output_dir:
+            validate_family_app_contract(
+                board, read_binary(app_image(output_dir)))
+        return lines
     finally:
         if staged_root:
             shutil.rmtree(staged_root, ignore_errors=True)
@@ -2993,27 +3032,96 @@ def cmd_compile(args) -> int:
     return 0
 
 
+def bundle_flash_plan(
+    image: dict, app: bytes, flash_payloads: Dict[str, bytes]
+) -> List[Tuple[int, str, bytes]]:
+    """Return the four verified bundle payloads in deterministic write order."""
+    parts = {
+        part["role"]: part
+        for part in image.get("flash_parts") or []
+        if isinstance(part, dict) and isinstance(part.get("role"), str)
+    }
+    writes = []
+    for role in REQUIRED_FLASH_ROLES:
+        part = parts.get(role)
+        payload = flash_payloads.get(role)
+        if part is None or payload is None:
+            raise Fail("canonical bundle carries no %s payload" % role)
+        writes.append((part["address"], role, payload))
+    writes.append((image["app_address"], "app", app))
+    clash = conflicting_flash_address(
+        [(address, role) for address, role, _ in writes])
+    if clash:
+        raise Fail(
+            "canonical bundle writes both %s and %s to flash address 0x%x"
+            % (clash[1], clash[2], clash[0]))
+    return writes
+
+
+def canonical_family_value(values: dict, family: Family):
+    """Return one family entry without leaking a KeyError to the CLI."""
+    if family.key not in values:
+        raise Fail("no canonical release for family %s" % family.key)
+    return values[family.key]
+
+
+def flash_canonical_release(
+    family: Family, port_address: str, catalog_path: Optional[str] = None
+) -> Tuple[str, str]:
+    """Verify and flash one family from the committed canonical release catalog."""
+    catalog_path = catalog_path or os.path.join(RELEASE_ROOT, RELEASE_CATALOG_NAME)
+    catalog = load_release_catalog(catalog_path, verify_files=True)
+    release_root = os.path.dirname(os.path.abspath(catalog_path))
+    entry = canonical_family_value(catalog["families"], family)
+    artifact = os.path.realpath(
+        os.path.join(release_root, entry["artifact"]))
+    data = read_binary(artifact)
+    if len(data) != entry["bytes"] or sha256_hex(data) != entry["sha256"]:
+        raise Fail(
+            "canonical %s artifact changed after catalog verification"
+            % family.key)
+    manifest, payloads, flash_payloads = unpack_bundle(data)
+    image = manifest["images"][0]
+    writes = bundle_flash_plan(
+        image,
+        canonical_family_value(payloads, family),
+        canonical_family_value(flash_payloads, family))
+
+    tool = esptool_path()
+    if not tool:
+        raise Fail("esptool not found (install the esp32 Arduino core)")
+    command = [tool]
+    if tool.endswith(".py"):
+        command = [sys.executable, tool]
+    command.extend([
+        "--chip", family.chip,
+        "--port", port_address,
+        "--baud", "921600",
+        "write_flash",
+    ])
+
+    directory = tempfile.mkdtemp(prefix="espdisp-flash-%s-" % family.key)
+    try:
+        for address, role, payload in writes:
+            path = os.path.join(directory, "%s.bin" % role)
+            with open(path, "wb") as out:
+                out.write(payload)
+            command.extend(["0x%X" % address, path])
+        run_streaming(command)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    return artifact, manifest["firmware_version"]
+
+
 def cmd_flash(args) -> int:
     port = resolve_port(args.port)
     family = resolve_family(args.family, port, args.profile)
     print("Family: %s (%s) on %s" %
           (family.key, family.fqbn, port.address), flush=True)
-    out_dir = tempfile.mkdtemp(prefix="espdisp-flash-%s-" % family.key)
-    try:
-        lines = compile_board(family, output_dir=out_dir)
-        partition_blob = read_binary(export_binary(out_dir, ".ino.partitions.bin"))
-        _verify_partition_payload(family, partition_blob)
-        _verify_app_payload(
-            family, partition_blob, APP_FLASH_ADDRESS,
-            os.path.getsize(app_image(out_dir)))
-        run_streaming(
-            [arduino_cli(), "upload", "-b", family.fqbn, "-p", port.address,
-             "--input-dir", out_dir],
-            cwd=SKETCH_DIR,
-        )
-    finally:
-        shutil.rmtree(out_dir, ignore_errors=True)
-    report_sizes(lines)
+    artifact, version = flash_canonical_release(family, port.address)
+    print(
+        "\nFlashed canonical %s release %s from %s"
+        % (family.key, version, artifact))
     return 0
 
 
@@ -3508,10 +3616,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_compile.add_argument("--family", required=True, choices=family_choices())
     p_compile.set_defaults(func=cmd_compile)
 
-    p_flash = subs.add_parser("flash", help="build then upload one family over USB")
+    p_flash = subs.add_parser(
+        "flash", help="flash one canonical family release over USB")
     p_flash.add_argument(
         "--family", choices=family_choices(),
-        help="family to build; otherwise derive it from the attached chip")
+        help="release family; otherwise derive it from the attached chip")
     p_flash.add_argument(
         "--profile", choices=sorted({profile for family in FAMILIES.values()
                                       for profile in family.profiles}),

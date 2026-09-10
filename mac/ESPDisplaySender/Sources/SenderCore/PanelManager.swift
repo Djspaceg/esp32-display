@@ -28,7 +28,7 @@ final class PanelManager: ObservableObject {
     @Published internal(set) var operationOutcome: OperationOutcome?
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []
-    /// Streaming settings shared by every panel.
+    /// Persisted app settings, including streaming policy and sidebar ordering.
     @Published private(set) var settings = SenderSettings()
     /// Live image of what the selected panel is being sent. Its own observable
     /// object so ten frames a second redraw one small view instead of the
@@ -106,6 +106,21 @@ final class PanelManager: ObservableObject {
     /// reports. Long enough to cover a coalesced drag plus a round trip, short
     /// enough that a lost command self-corrects while the user is still there.
     static let brightnessEchoGrace: TimeInterval = 1.5
+    /// Debounced USB brightness writes. A slider drag may produce dozens of
+    /// values; only the latest one should open a serial transaction.
+    var usbBrightnessTasks: [String: Task<Void, Never>] = [:]
+    var pendingUSBBrightness: [String: (command: String, path: String)] = [:]
+    var usbControlSender: @Sendable (
+        _ command: String, _ path: String, _ timeout: TimeInterval
+    ) -> WifiConfigUI.CommandResult = { command, path, timeout in
+        WifiConfigUI.sendCommand(command, port: path, timeout: timeout)
+    }
+    var usbControlReprobe: (@MainActor (
+        _ path: String, _ timeout: TimeInterval
+    ) async -> Void)?
+    /// Configuration setters restart the panel. Keep controls closed until a
+    /// fresh CFGSHOW response proves the serial endpoint is back.
+    var usbRestartingServices: Set<String> = []
 
     init(
         settings: SenderSettings? = nil,
@@ -125,7 +140,7 @@ final class PanelManager: ObservableObject {
         self.settings = (settings ?? loadedSettings.settings).validated
         panels = loaded.records
             .map(\.snapshot)
-            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        sortPanels()
         selectedServiceName = panels.first?.serviceName
         savedNetworkNames = WifiCredentialStore.savedNetworkNames()
         usbDevices = WifiConfigUI.candidatePorts().map {
@@ -136,13 +151,14 @@ final class PanelManager: ObservableObject {
                 + "from \(url?.path ?? "disk"): \(failure)")
         }
         if let failure = loadedSettings.failure {
-            report(.persistence, detail: "Streaming settings could not be read, so "
+            report(.persistence, detail: "App settings could not be read, so "
                 + "the defaults are in use: \(failure)")
         }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) {
             [weak self] _ in
             Task { @MainActor in
                 self?.refreshUSBPorts()
+                self?.sortPanels()
                 self?.objectWillChange.send()
             }
         }
@@ -196,7 +212,8 @@ final class PanelManager: ObservableObject {
         identifyUSBPorts(usbSerialPorts)
     }
 
-    /// Preview and test seam: no disk, no timers, no discovery.
+    /// Preview and test seam: no timers or discovery, and no disk unless a
+    /// settings URL is explicitly injected by a persistence test.
     ///
     /// Deliberately NOT wrapped in `#if DEBUG`, unlike the `#Preview` macros and
     /// `PanelManager.preview` further down. Tests are built in whichever
@@ -215,18 +232,22 @@ final class PanelManager: ObservableObject {
         previewPanels: [PanelSnapshot],
         savedNetworkNames: [String],
         usbSerialPorts: [String],
-        otaPasswords: OTAPasswordStoring = InMemoryOTAPasswordStore()
+        otaPasswords: OTAPasswordStoring = InMemoryOTAPasswordStore(),
+        settings: SenderSettings = SenderSettings(),
+        settingsPersistenceURL: URL? = nil
     ) {
         defaultDisplayName = ""
         // In memory by default, never the keychain: this initialiser is what the
         // SwiftUI previews and the tests use, and both run unsigned.
         self.otaPasswords = otaPasswords
         persistenceURL = nil
-        settingsURL = nil
+        settingsURL = settingsPersistenceURL
+        self.settings = settings.validated
         panels = previewPanels
+        sortPanels()
         self.savedNetworkNames = savedNetworkNames
         usbDevices = usbSerialPorts.map { WifiConfigUI.USBDeviceOption(path: $0) }
-        selectedServiceName = previewPanels.first?.serviceName
+        selectedServiceName = panels.first?.serviceName
     }
 
     deinit {
@@ -250,7 +271,10 @@ final class PanelManager: ObservableObject {
     func updateSettings(_ new: SenderSettings) {
         let validated = new.validated
         guard validated != settings else { return }
+        let sortOrderChanged =
+            validated.deviceListSortOrder != settings.deviceListSortOrder
         settings = validated
+        if sortOrderChanged { sortPanels() }
         for session in sessions.values {
             session.setFPS(validated.fps)
             session.applyPacing(
@@ -258,12 +282,25 @@ final class PanelManager: ObservableObject {
                 adaptive: validated.adaptivePacing)
             session.applyTileQuality(validated.tileQuality)
         }
+        saveSettings()
+    }
+
+    /// Change only sidebar ordering. This should not restart live capture the
+    /// way a frame-rate or pacing change does.
+    func updateDeviceListSortOrder(_ order: DeviceListSortOrder) {
+        guard settings.deviceListSortOrder != order else { return }
+        settings.deviceListSortOrder = order
+        sortPanels()
+        saveSettings()
+    }
+
+    private func saveSettings() {
         guard let settingsURL else { return }
         do {
-            try SettingsStore.save(validated, to: settingsURL)
+            try SettingsStore.save(settings, to: settingsURL)
             resolve(.persistence)
         } catch {
-            report(.persistence, detail: "Streaming settings could not be saved to "
+            report(.persistence, detail: "App settings could not be saved to "
                 + "\(settingsURL.path): \(error.localizedDescription)")
         }
     }
@@ -349,14 +386,20 @@ final class PanelManager: ObservableObject {
     ) {
         if let index = panels.firstIndex(where: { $0.serviceName == serviceName }) {
             change(&panels[index])
+            sortPanels()
         }
     }
 
     func sortPanels() {
-        panels.sort {
-            if $0.isOnline != $1.isOnline { return $0.isOnline }
-            return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        let now = Date()
+        let sorted = panels.sorted {
+            return DeviceListSorter.areInIncreasingOrder(
+                $0.deviceListSortValue(asOf: now),
+                $1.deviceListSortValue(asOf: now),
+                by: settings.deviceListSortOrder)
         }
+        guard sorted.map(\.id) != panels.map(\.id) else { return }
+        panels = sorted
     }
 
     func persistIfNeeded(force: Bool = false) {
@@ -445,4 +488,3 @@ extension PanelManager {
     }
 }
 #endif
-

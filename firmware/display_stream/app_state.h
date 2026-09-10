@@ -19,6 +19,8 @@
 // WiFi credentials and device name (NVS-backed; see prefs load in setup()).
 extern String cfgSsid;
 extern String cfgPass;
+extern uint8_t wifiCredentialPresetSlot;
+extern bool wifiLegacyMirrorPending;
 extern String cfgName;
 extern const char *FW_VERSION;
 extern uint8_t deviceId[6];

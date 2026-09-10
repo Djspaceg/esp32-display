@@ -10,6 +10,7 @@ import SenderProtocol
 extension PanelManager {
     func rename(_ newName: String, for serviceName: String) {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else { return }
+        guard requireOperation(.rename, for: serviceName, title: "Rename") else { return }
         switch WifiConfigUI.renameDevice(
             currentName: panel.displayName,
             newName: newName,
@@ -31,6 +32,7 @@ extension PanelManager {
             } else {
                 updatePanel(serviceName) { $0.displayName = appliedName }
             }
+            markUSBRestarting(appliedName)
             persistIfNeeded(force: true)
             operationOutcome = .success(
                 "Name saved",
@@ -58,6 +60,9 @@ extension PanelManager {
                 "Invalid OTA password", OTAPasswordPolicy.explain(verdict) ?? "")
             return
         }
+        guard requireOperation(
+            .otaPassword, for: serviceName, title: "OTA password")
+        else { return }
         switch WifiConfigUI.setOTAPassword(
             password,
             currentName: panel.displayName,
@@ -65,6 +70,7 @@ extension PanelManager {
             expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
         {
         case .success:
+            markUSBRestarting(serviceName)
             var keychainNote = ""
             if remember, let hardwareID = panel.hardwareID {
                 if let failure = setRememberedOTAPassword(password, for: hardwareID) {
@@ -88,12 +94,16 @@ extension PanelManager {
     /// sheet for a panel that no longer has OTA enabled at all.
     func clearOTAPassword(for serviceName: String) {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else { return }
+        guard requireOperation(
+            .otaPassword, for: serviceName, title: "OTA password")
+        else { return }
         switch WifiConfigUI.clearOTAPassword(
             currentName: panel.displayName,
             preferredPort: panel.usbPort,
             expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
         {
         case .success:
+            markUSBRestarting(serviceName)
             if let hardwareID = panel.hardwareID {
                 _ = setRememberedOTAPassword(nil, for: hardwareID)
             }
@@ -112,6 +122,9 @@ extension PanelManager {
                 "No network selected", "Select a saved WiFi network first.")
             return
         }
+        guard requireOperation(
+            .savedWiFi, for: serviceName, title: "WiFi configuration")
+        else { return }
         switch WifiConfigUI.applySavedNetwork(
             ssid,
             currentName: panel.displayName,
@@ -119,6 +132,7 @@ extension PanelManager {
             expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
         {
         case .success:
+            markUSBRestarting(serviceName)
             operationOutcome = .success(
                 "WiFi saved",
                 "The display is restarting and joining \"\(ssid)\". Streaming "
@@ -134,6 +148,9 @@ extension PanelManager {
                 "No display selected", "Select a display before configuring WiFi.")
             return
         }
+        guard requireOperation(
+            .savedWiFi, for: panel.serviceName, title: "WiFi configuration")
+        else { return }
         let result = WifiConfigUI.run(
             currentName: panel.displayName,
             expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID,
@@ -145,6 +162,9 @@ extension PanelManager {
         case .success(let confirmation):
             // nil means the user cancelled, which needs no announcement.
             if let confirmation {
+                if confirmation.restartsDisplay {
+                    markUSBRestarting(panel.serviceName)
+                }
                 operationOutcome = .success(confirmation.title, confirmation.message)
             }
         case .failure(let failure):

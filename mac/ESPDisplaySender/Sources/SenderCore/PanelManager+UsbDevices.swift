@@ -9,6 +9,15 @@ import SenderProtocol
 /// device is never applied after macOS reuses its path), and
 /// device-to-record association.
 extension PanelManager {
+    enum USBSerialState: Equatable {
+        case absent
+        case enumeratedUnverified
+        case verified(WifiConfigUI.USBDeviceOption)
+        case restarting
+        case mismatch
+        case ambiguous
+    }
+
     func stableHardwareID(of panel: PanelSnapshot) -> String? {
         ConfigCommands.canonicalHardwareID(panel.hardwareID)
             ?? ConfigCommands.canonicalHardwareID(panel.usbHardwareID)
@@ -66,6 +75,41 @@ extension PanelManager {
         }
         guard let saved = panel.usbPort, usbSerialPorts.contains(saved) else { return nil }
         return saved
+    }
+
+    /// Current-generation, identity-bound serial state for one durable record.
+    /// Paths and remembered assignments are only hints; CFGSHOW identity is the
+    /// proof that makes a normal control safe.
+    func usbSerialState(for serviceName: String) -> USBSerialState {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return .absent }
+        let connected = usbDevices.filter { $0.isConnected && !$0.path.isEmpty }
+        guard !connected.isEmpty else { return .absent }
+        guard let expectedID = stableHardwareID(of: panel) else {
+            return .enumeratedUnverified
+        }
+        let matches = connected.filter {
+            ConfigCommands.canonicalHardwareID($0.hardwareID) == expectedID
+        }
+        if matches.count > 1 { return .ambiguous }
+        if let match = matches.first {
+            if usbRestartingServices.contains(serviceName) { return .restarting }
+            guard match.verifiedGeneration == usbPathGeneration(match.path),
+                  match.serialStatus != nil
+            else { return .enumeratedUnverified }
+            return .verified(match)
+        }
+        if connected.contains(where: { $0.hardwareID != nil }) { return .mismatch }
+        if usbRestartingServices.contains(serviceName) { return .restarting }
+        return .enumeratedUnverified
+    }
+
+    func verifiedUSBDevice(
+        for serviceName: String
+    ) -> WifiConfigUI.USBDeviceOption? {
+        guard case .verified(let device) = usbSerialState(for: serviceName)
+        else { return nil }
+        return device
     }
 
     func usbPortOptions(for serviceName: String) -> [WifiConfigUI.USBDeviceOption] {
@@ -184,6 +228,10 @@ extension PanelManager {
         usbPathGenerations[path, default: 0] += 1
         usbProbeTasks[path]?.task.cancel()
         usbProbeTasks[path] = nil
+        if let index = usbDevices.firstIndex(where: { $0.path == path }) {
+            usbDevices[index].serialStatus = nil
+            usbDevices[index].verifiedGeneration = nil
+        }
         let expired = explicitLegacyUSBSelections.compactMap { service, selection in
             selection.path == path ? service : nil
         }
@@ -199,7 +247,9 @@ extension PanelManager {
         target: String? = nil,
         board: String? = nil,
         chip: String? = nil,
-        partition: String? = nil
+        partition: String? = nil,
+        serialStatus: WifiConfigUI.USBStatus? = nil,
+        verifiedGeneration: Int? = nil
     ) {
         guard let index = usbDevices.firstIndex(where: { $0.path == path }) else { return }
         let canonicalID = ConfigCommands.canonicalHardwareID(hardwareID)
@@ -210,6 +260,10 @@ extension PanelManager {
         if let board, !board.isEmpty { usbDevices[index].board = board }
         if let chip, !chip.isEmpty { usbDevices[index].chip = chip }
         if let partition, !partition.isEmpty { usbDevices[index].partition = partition }
+        if let serialStatus { usbDevices[index].serialStatus = serialStatus }
+        if let verifiedGeneration {
+            usbDevices[index].verifiedGeneration = verifiedGeneration
+        }
 
         guard let canonicalID else { return }
         var associationChanged = false
@@ -250,7 +304,75 @@ extension PanelManager {
                 }
             }
         }
+        if let status = serialStatus,
+           let panelIndex = panels.firstIndex(where: {
+               stableHardwareID(of: $0) == canonicalID
+           }) {
+            if let version = status.firmwareVersion, !version.isEmpty {
+                panels[panelIndex].firmwareVersion = version
+            }
+            panels[panelIndex].currentSSID =
+                status.currentSSID?.isEmpty == false ? status.currentSSID : nil
+            if let rssi = status.rssi { panels[panelIndex].rssi = rssi }
+            if let rotation = status.rotation {
+                panels[panelIndex].rotation = rotation
+                panels[panelIndex].flipped = rotation == 2
+            } else if let flipped = status.flipped {
+                panels[panelIndex].flipped = flipped
+                panels[panelIndex].rotation = flipped ? 2 : 0
+            }
+            if let level = status.brightnessLevel {
+                panels[panelIndex].brightness = level
+            }
+            if let high = status.brightnessHigh {
+                panels[panelIndex].brightnessHigh = high
+            }
+            if let manuallyOff = status.manuallyOff {
+                panels[panelIndex].manuallyOff = manuallyOff
+            }
+            if let target, !target.isEmpty { panels[panelIndex].target = target }
+            if let board, !board.isEmpty { panels[panelIndex].profile = board }
+            if let chip, !chip.isEmpty { panels[panelIndex].chip = chip }
+            if let partition, !partition.isEmpty {
+                panels[panelIndex].partition = partition
+            }
+        }
         if associationChanged { persistIfNeeded(force: true) }
+    }
+
+    func noteUSBIdentity(
+        path: String,
+        identity: WifiConfigUI.USBIdentity,
+        generation: Int
+    ) {
+        if let index = usbDevices.firstIndex(where: { $0.path == path }) {
+            // A current probe that omits id= must not inherit an older board's
+            // identity from this macOS path.
+            usbDevices[index].hardwareID = identity.hardwareID
+        }
+        noteUSBIdentity(
+            path: path,
+            name: identity.name,
+            hardwareID: identity.hardwareID,
+            target: identity.target,
+            board: identity.board,
+            chip: identity.chip,
+            partition: identity.partition,
+            serialStatus: identity.status,
+            verifiedGeneration: generation)
+        if identity.status != nil, let hardwareID = identity.hardwareID {
+            let matchingServices = panels.compactMap { panel in
+                stableHardwareID(of: panel) == hardwareID
+                    ? panel.serviceName : nil
+            }
+            for serviceName in matchingServices {
+                usbRestartingServices.remove(serviceName)
+            }
+        }
+    }
+
+    func markUSBRestarting(_ serviceName: String) {
+        usbRestartingServices.insert(serviceName)
     }
 
     /// Return one coalesced CFGSHOW probe for this path and publish its identity.
@@ -279,20 +401,15 @@ extension PanelManager {
         guard case .identified(let identity) = result else { return result }
         if let index = usbDevices.firstIndex(where: { $0.path == path }) {
             // A completed CFGSHOW probe is authoritative for discovery-scoped
-            // target metadata. Clear an older value when current firmware omits it.
+            // facts. Clear an older value when current firmware omits it.
             usbDevices[index].target = identity.target
             usbDevices[index].board = identity.board
             usbDevices[index].chip = identity.chip
             usbDevices[index].partition = identity.partition
+            usbDevices[index].serialStatus = nil
+            usbDevices[index].verifiedGeneration = nil
         }
-        noteUSBIdentity(
-            path: path,
-            name: identity.name,
-            hardwareID: identity.hardwareID,
-            target: identity.target,
-            board: identity.board,
-            chip: identity.chip,
-            partition: identity.partition)
+        noteUSBIdentity(path: path, identity: identity, generation: generation)
         return result
     }
 

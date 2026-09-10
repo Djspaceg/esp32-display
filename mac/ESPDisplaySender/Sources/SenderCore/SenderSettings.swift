@@ -1,9 +1,10 @@
 import Foundation
 import SenderProtocol
 
-/// Streaming settings that apply to every panel.
+/// App settings shared across panels and manager windows.
 ///
-/// These were command-line flags only, which made them unreachable in practice:
+/// The streaming values were command-line flags only, which made them
+/// unreachable in practice:
 /// the app normally runs as a LaunchAgent with a fixed argument list, so
 /// changing the frame rate meant editing a plist and reloading the agent.
 struct SenderSettings: Codable, Equatable {
@@ -42,6 +43,8 @@ struct SenderSettings: Codable, Equatable {
     /// Only meaningful for panels advertising tile streaming; band panels
     /// have no lossy codec and ignore it.
     var tileQuality: TileLossyPolicy = .auto
+    /// How the display sidebar is ordered.
+    var deviceListSortOrder: DeviceListSortOrder = .alphabetical
 
     /// Default capture rate; see `fps` for why this is a named constant
     /// rather than three repeated literals.
@@ -49,12 +52,14 @@ struct SenderSettings: Codable, Equatable {
 
     init(fps: Int = defaultFps, spacingMicros: UInt32 = 200,
          adaptivePacing: Bool = true,
-         identifySeconds: Int = 8, tileQuality: TileLossyPolicy = .auto) {
+         identifySeconds: Int = 8, tileQuality: TileLossyPolicy = .auto,
+         deviceListSortOrder: DeviceListSortOrder = .alphabetical) {
         self.fps = fps
         self.spacingMicros = spacingMicros
         self.adaptivePacing = adaptivePacing
         self.identifySeconds = identifySeconds
         self.tileQuality = tileQuality
+        self.deviceListSortOrder = deviceListSortOrder
     }
 
     /// Every field decodes independently with its default as the fallback,
@@ -70,6 +75,9 @@ struct SenderSettings: Codable, Equatable {
         identifySeconds = try c.decodeIfPresent(Int.self, forKey: .identifySeconds) ?? 8
         let quality = try? c.decodeIfPresent(TileLossyPolicy.self, forKey: .tileQuality)
         tileQuality = quality.flatMap { $0 } ?? .auto
+        let sortOrder = try? c.decodeIfPresent(
+            DeviceListSortOrder.self, forKey: .deviceListSortOrder)
+        deviceListSortOrder = sortOrder.flatMap { $0 } ?? .alphabetical
     }
 
     static let fpsRange = 5...60
@@ -89,7 +97,8 @@ struct SenderSettings: Codable, Equatable {
             identifySeconds: min(
                 max(identifySeconds, Self.identifyRange.lowerBound),
                 Self.identifyRange.upperBound),
-            tileQuality: tileQuality)
+            tileQuality: tileQuality,
+            deviceListSortOrder: deviceListSortOrder)
     }
 }
 
