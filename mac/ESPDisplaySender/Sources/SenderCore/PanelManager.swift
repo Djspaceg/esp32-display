@@ -411,11 +411,11 @@ final class PanelManager: ObservableObject {
             connectedViaUSB: verifiedUSBDevice(for: panel.serviceName) != nil)
     }
 
-    func sidebarStatusText(
+    func statusText(
         for panel: PanelSnapshot,
         asOf now: Date = Date()
     ) -> String {
-        panel.sidebarStatusText(
+        panel.statusText(
             asOf: now,
             connectedViaUSB: verifiedUSBDevice(for: panel.serviceName) != nil)
     }

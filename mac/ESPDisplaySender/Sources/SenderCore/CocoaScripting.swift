@@ -109,7 +109,7 @@ final class CocoaScriptingHandler {
             "displayName": panel.displayName,
             "selected": manager.selectedServiceName == panel.serviceName,
             "online": panel.isOnline,
-            "status": panel.statusText,
+            "status": manager.statusText(for: panel),
             "paused": panel.paused,
             "powerOn": !panel.manuallyOff,
             "brightness": panel.brightness,
