@@ -152,20 +152,21 @@ void setup() {
   // Load persisted settings before anything is drawn or the radio starts:
   // orientation and brightness must be known for the very first fill, and
   // the device name before WiFi latches its DHCP hostname.
-  bool ssidFromNvs = false;
+  const WifiCredentialLoadResult wifiLoad = loadEffectiveWifiCredentials(
+      WIFI_SSID, WIFI_PASSWORD, cfgSsid, cfgPass);
+  const bool ssidFromNvs = wifiLoad.ssidFromNvs;
+  wifiCredentialPresetSlot = wifiLoad.activeSlot;
+  wifiLegacyMirrorPending = wifiCredentialPresetSlot != 0;
   uint8_t boardOverride = 0;
   {
     Preferences prefs;
     prefs.begin("espdisp", true /* read-only */);
-    ssidFromNvs = prefs.isKey("ssid");
     // Operator override from CFGBOARD, 0 = auto-detect. Only an explicit
     // override is persisted; the auto-detected value deliberately is not. A
     // cached auto-detection would be sticky, and the one misdetection with
     // electrical consequences (a Touch board mistaken for a non-touch one)
     // would then survive every subsequent boot instead of being re-tested.
     boardOverride = prefs.getUChar("board", 0);
-    cfgSsid = prefs.getString("ssid", WIFI_SSID);
-    cfgPass = prefs.getString("pass", WIFI_PASSWORD);
     cfgName = prefs.getString("name", "");
     // Physical orientation and brightness are properties of how the board is
     // mounted, so they belong in flash - re-flipping after every reflash is
@@ -418,6 +419,8 @@ void setup() {
     }
   }
   if (WiFi.status() == WL_CONNECTED) {
+    wifiLegacyMirrorPending =
+        !mirrorEffectiveWifiToLegacyAfterConnection();
     Serial.printf("WiFi up: %s (dhcp hostname \"%s\")\n",
                   WiFi.localIP().toString().c_str(), WiFi.getHostname());
   }
@@ -586,7 +589,21 @@ void loop() {
   // WiFi association fully lost for over a minute: autoReconnect isn't
   // getting us back, reboot for a clean radio state.
   static uint32_t wifiDownSince = 0;
-  if (WiFi.status() == WL_CONNECTED) {
+  const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  static bool wifiWasConnected = wifiConnected;
+  static uint32_t lastWifiMirrorAttempt = 0;
+  if (wifiConnected && !wifiWasConnected) {
+    wifiLegacyMirrorPending = wifiCredentialPresetSlot != 0;
+  }
+  wifiWasConnected = wifiConnected;
+  if (wifiConnected && wifiLegacyMirrorPending &&
+      (lastWifiMirrorAttempt == 0 ||
+       millis() - lastWifiMirrorAttempt >= 5000)) {
+    lastWifiMirrorAttempt = millis();
+    wifiLegacyMirrorPending =
+        !mirrorEffectiveWifiToLegacyAfterConnection();
+  }
+  if (wifiConnected) {
     wifiDownSince = 0;
     // Deferred OTA start. setup()'s WiFi wait is bounded and falls through on
     // timeout, so a panel that associated a moment later would otherwise have no

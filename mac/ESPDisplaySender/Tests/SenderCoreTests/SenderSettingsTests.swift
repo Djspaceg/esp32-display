@@ -27,6 +27,7 @@ final class SenderSettingsTests: XCTestCase {
         XCTAssertTrue(settings.adaptivePacing)
         XCTAssertEqual(settings.identifySeconds, 8)
         XCTAssertEqual(settings.tileQuality, .auto)
+        XCTAssertEqual(settings.deviceListSortOrder, .alphabetical)
         XCTAssertEqual(settings, settings.validated, "defaults must be in range")
     }
 
@@ -42,6 +43,7 @@ final class SenderSettingsTests: XCTestCase {
         XCTAssertFalse(decoded.adaptivePacing)
         XCTAssertEqual(decoded.identifySeconds, 12)
         XCTAssertEqual(decoded.tileQuality, .auto)
+        XCTAssertEqual(decoded.deviceListSortOrder, .alphabetical)
         // An unrecognized quality string (a future build's value) falls back
         // rather than failing the whole file.
         let future = Data(#"{"fps": 25, "tileQuality": "halfRes"}"#.utf8)

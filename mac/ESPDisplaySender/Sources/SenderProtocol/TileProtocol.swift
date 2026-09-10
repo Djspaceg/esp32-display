@@ -537,10 +537,10 @@ public enum TileLossyPolicy: String, Codable, CaseIterable, Sendable {
 // MARK: - TilePacker
 
 /// Builds tile-stream datagrams: per merged run, every applicable codec is
-/// tried and the smallest wins subject to the lossy policy; runs whose
-/// record would not fit a datagram are split so a record never spans
-/// datagrams. Mirrors `BandPacker`'s greedy packing but with runs and a
-/// codec field instead of bands and a compressed flag.
+/// tried and the smallest wins subject to the lossy policy; runs split at
+/// tile boundaries to fill each datagram, and a record never spans datagrams.
+/// Mirrors `BandPacker`'s greedy packing but with splittable runs and a codec
+/// field instead of bands and a compressed flag.
 public enum TilePacker {
     /// Content-variance floor for BC1 under `.auto`: the sum over the three
     /// channels of per-channel population variance in 888 space (see
@@ -633,6 +633,9 @@ public enum TilePacker {
                     forceHalfRes: forceHalfRes,
                     visibleSpanMask: visibleSpanMask)
         }
+        prepared = coalesce(
+            prepared, pixels: pixels, geometry: geometry,
+            visibleSpanMask: visibleSpanMask)
 
         let budget = TileGeometry.maxPacketBytes
         let headerBytes = TileGeometry.headerBytes
@@ -663,21 +666,433 @@ public enum TilePacker {
             currentBytes = headerBytes
         }
 
-        for record in prepared {
-            let recordBytes = TileGeometry.recordHeaderBytes + record.payload.count
-            if currentBytes + recordBytes > budget {
+        for initial in prepared {
+            var record = initial
+            while true {
+                let recordBytes =
+                    TileGeometry.recordHeaderBytes + record.payload.count
+                let packingPayloadBytes: Int
+                switch record.codec {
+                case .bc1:
+                    packingPayloadBytes = record.runLength
+                        * BC1.encodedBytes(width: 16, height: 16)
+                case .halfBc1:
+                    packingPayloadBytes = record.runLength
+                        * BC1.encodedBytes(width: 8, height: 8)
+                case .raw, .rle565:
+                    packingPayloadBytes = record.payload.count
+                }
+                if currentBytes + TileGeometry.recordHeaderBytes
+                    + packingPayloadBytes <= budget {
+                    current.append(record)
+                    currentBytes += recordBytes
+                    break
+                }
+
+                let payloadBudget = budget - currentBytes
+                    - TileGeometry.recordHeaderBytes
+                if payloadBudget > 0,
+                   let split = split(
+                       record, maxPayloadBytes: payloadBudget,
+                       pixels: pixels, geometry: geometry,
+                       visibleSpanMask: visibleSpanMask) {
+                    current.append(split.prefix)
+                    currentBytes += TileGeometry.recordHeaderBytes
+                        + split.prefix.payload.count
+                    flush()
+                    record = split.suffix
+                    continue
+                }
+
+                precondition(
+                    !current.isEmpty,
+                    "a single tile record must fit an empty datagram")
                 flush()
             }
-            current.append(record)
-            currentBytes += recordBytes
         }
         flush()
         return packets
     }
 
-    /// Encode one run with the cheapest codec the policy admits; when even
-    /// the cheapest record would not fit an empty datagram, split the run
-    /// in half by tiles and recurse - a record never spans datagrams.
+    /// Restore the longest horizontal runs that already made the same codec
+    /// decision during preparation. This retains the old per-fragment codec
+    /// choices on mixed content while giving packet filling freedom to choose
+    /// better tile boundaries inside codec-stable regions.
+    private static func coalesce(
+        _ records: [PreparedRecord], pixels: [UInt8],
+        geometry: TileGeometry, visibleSpanMask: TileMask?
+    ) -> [PreparedRecord] {
+        var result = [PreparedRecord]()
+        var at = 0
+        while at < records.count {
+            var end = at + 1
+            var runLength = records[at].runLength
+            while end < records.count {
+                let previous = records[end - 1]
+                let next = records[end]
+                guard next.startTile == previous.startTile + previous.runLength,
+                      geometry.row(next.startTile)
+                        == geometry.row(records[at].startTile),
+                      next.codec == records[at].codec,
+                      next.visibleSpans == records[at].visibleSpans,
+                      runLength + next.runLength <= TileGeometry.maxRunTiles
+                else { break }
+                runLength += next.runLength
+                end += 1
+            }
+
+            if end == at + 1 {
+                result.append(records[at])
+            } else if !records[at].visibleSpans,
+                      records[at].codec != .rle565 {
+                let group = Array(records[at..<end])
+                let payload: [UInt8]
+                switch records[at].codec {
+                case .raw:
+                    payload = joinRows(
+                        group.map(\.payload),
+                        rowBytes: group.map {
+                            geometry.runPixelWidth(
+                                startTile: $0.startTile,
+                                runLength: $0.runLength) * 2
+                        },
+                        rows: geometry.rowHeight(
+                            geometry.row(records[at].startTile)))
+                case .bc1:
+                    payload = joinRows(
+                        group.map(\.payload),
+                        rowBytes: group.map {
+                            (geometry.runPixelWidth(
+                                startTile: $0.startTile,
+                                runLength: $0.runLength) + 3) / 4 * 8
+                        },
+                        rows: (geometry.rowHeight(
+                            geometry.row(records[at].startTile)) + 3) / 4)
+                case .halfBc1:
+                    payload = joinRows(
+                        group.map(\.payload),
+                        rowBytes: group.map {
+                            (TileProtocol.halfDim(
+                                geometry.runPixelWidth(
+                                    startTile: $0.startTile,
+                                    runLength: $0.runLength)) + 3) / 4 * 8
+                        },
+                        rows: (TileProtocol.halfDim(
+                            geometry.rowHeight(
+                                geometry.row(records[at].startTile))) + 3) / 4)
+                case .rle565:
+                    preconditionFailure("handled by the re-encoding path")
+                }
+                result.append(PreparedRecord(
+                    startTile: records[at].startTile, runLength: runLength,
+                    codec: records[at].codec, visibleSpans: false,
+                    payload: payload))
+            } else if let merged = encode(
+                startTile: records[at].startTile, runLength: runLength,
+                codec: records[at].codec,
+                preferVisibleSpans: records[at].visibleSpans,
+                pixels: pixels, geometry: geometry,
+                visibleSpanMask: visibleSpanMask
+            ) {
+                result.append(merged)
+            } else {
+                result.append(contentsOf: records[at..<end])
+            }
+            at = end
+        }
+        return result
+    }
+
+    /// Join adjacent left-to-right raster payloads by interleaving their
+    /// scanlines (or BC1 block rows).
+    private static func joinRows(
+        _ payloads: [[UInt8]], rowBytes: [Int], rows: Int
+    ) -> [UInt8] {
+        precondition(payloads.count == rowBytes.count)
+        for (payload, bytes) in zip(payloads, rowBytes) {
+            precondition(payload.count == bytes * rows)
+        }
+        var joined = [UInt8]()
+        joined.reserveCapacity(payloads.reduce(0) { $0 + $1.count })
+        for row in 0..<rows {
+            for (payload, bytes) in zip(payloads, rowBytes) {
+                let start = row * bytes
+                joined.append(contentsOf: payload[start..<(start + bytes)])
+            }
+        }
+        return joined
+    }
+
+    /// Split a prepared run at the largest tile boundary whose prefix fits
+    /// the current datagram. The codec selected for the merged run is retained
+    /// by both records; only their placement and payload partition change.
+    private static func split(
+        _ record: PreparedRecord, maxPayloadBytes: Int,
+        pixels: [UInt8], geometry: TileGeometry,
+        visibleSpanMask: TileMask?
+    ) -> (prefix: PreparedRecord, suffix: PreparedRecord)? {
+        guard record.runLength > 1 else { return nil }
+
+        var prefixLength: Int?
+        if record.codec != .rle565 {
+            for length in stride(
+                from: record.runLength - 1, through: 1, by: -1
+            ) {
+                let bytes: Int
+                switch record.codec {
+                case .raw:
+                    if record.visibleSpans, let mask = visibleSpanMask {
+                        bytes = rawPayloadBytes(
+                            startTile: record.startTile, runLength: length,
+                            geometry: geometry, mask: mask)
+                    } else {
+                        bytes = geometry.runRawBytes(
+                            startTile: record.startTile, runLength: length)
+                    }
+                case .bc1:
+                    // Match tools/espdisp.py's split rule: budget every tile
+                    // as a full 16x16 BC1 raster. Edge tiles only make the
+                    // resulting record smaller; they do not buy another tile.
+                    bytes = length * BC1.encodedBytes(width: 16, height: 16)
+                case .halfBc1:
+                    bytes = length * BC1.encodedBytes(width: 8, height: 8)
+                case .rle565:
+                    preconditionFailure("RLE payloads are sized by encoding")
+                }
+                if bytes <= maxPayloadBytes {
+                    prefixLength = length
+                    break
+                }
+            }
+        } else {
+            for length in stride(
+                from: record.runLength - 1, through: 1, by: -1
+            ) {
+                guard let prefix = encode(
+                    startTile: record.startTile, runLength: length,
+                    codec: record.codec,
+                    preferVisibleSpans: record.visibleSpans,
+                    pixels: pixels, geometry: geometry,
+                    visibleSpanMask: visibleSpanMask)
+                else { continue }
+                if prefix.payload.count <= maxPayloadBytes {
+                    prefixLength = length
+                    break
+                }
+            }
+        }
+
+        guard let prefixLength else { return nil }
+        let suffixLength = record.runLength - prefixLength
+        let suffixTile = record.startTile + prefixLength
+
+        if !record.visibleSpans, record.codec != .rle565 {
+            let payloads: (prefix: [UInt8], suffix: [UInt8])
+            switch record.codec {
+            case .raw:
+                let fullWidth = geometry.runPixelWidth(
+                    startTile: record.startTile, runLength: record.runLength)
+                let prefixWidth = geometry.runPixelWidth(
+                    startTile: record.startTile, runLength: prefixLength)
+                payloads = splitRows(
+                    record.payload, rowBytes: fullWidth * 2,
+                    prefixRowBytes: prefixWidth * 2,
+                    rows: geometry.rowHeight(geometry.row(record.startTile)))
+            case .bc1:
+                payloads = splitBC1(
+                    record.payload,
+                    width: geometry.runPixelWidth(
+                        startTile: record.startTile,
+                        runLength: record.runLength),
+                    prefixWidth: geometry.runPixelWidth(
+                        startTile: record.startTile, runLength: prefixLength),
+                    height: geometry.rowHeight(geometry.row(record.startTile)))
+            case .halfBc1:
+                payloads = splitBC1(
+                    record.payload,
+                    width: TileProtocol.halfDim(
+                        geometry.runPixelWidth(
+                            startTile: record.startTile,
+                            runLength: record.runLength)),
+                    prefixWidth: TileProtocol.halfDim(
+                        geometry.runPixelWidth(
+                            startTile: record.startTile,
+                            runLength: prefixLength)),
+                    height: TileProtocol.halfDim(
+                        geometry.rowHeight(geometry.row(record.startTile))))
+            case .rle565:
+                preconditionFailure("handled by the re-encoding path")
+            }
+            return (
+                PreparedRecord(
+                    startTile: record.startTile, runLength: prefixLength,
+                    codec: record.codec, visibleSpans: false,
+                    payload: payloads.prefix),
+                PreparedRecord(
+                    startTile: suffixTile, runLength: suffixLength,
+                    codec: record.codec, visibleSpans: false,
+                    payload: payloads.suffix)
+            )
+        }
+
+        guard let prefix = encode(
+                  startTile: record.startTile, runLength: prefixLength,
+                  codec: record.codec,
+                  preferVisibleSpans: record.visibleSpans,
+                  pixels: pixels, geometry: geometry,
+                  visibleSpanMask: visibleSpanMask),
+              let suffix = encode(
+                  startTile: suffixTile, runLength: suffixLength,
+                  codec: record.codec,
+                  preferVisibleSpans: record.visibleSpans,
+                  pixels: pixels, geometry: geometry,
+                  visibleSpanMask: visibleSpanMask)
+        else { return nil }
+        return (prefix, suffix)
+    }
+
+    /// Byte count of a raw fragment after optional visible-span clipping,
+    /// without copying any pixels while candidate split points are tested.
+    private static func rawPayloadBytes(
+        startTile: Int, runLength: Int,
+        geometry: TileGeometry, mask: TileMask
+    ) -> Int {
+        let x0 = geometry.col(startTile) * TileGeometry.tileDim
+        let width = geometry.runPixelWidth(
+            startTile: startTile, runLength: runLength)
+        let height = geometry.rowHeight(geometry.row(startTile))
+        var clipped = false
+        var visiblePixels = 0
+
+        for row in 0..<height {
+            var lower = x0 + width
+            var upper = x0
+            for tile in startTile..<(startTile + runLength) {
+                let tileX = geometry.col(tile) * TileGeometry.tileDim
+                let tileWidth = geometry.colWidth(geometry.col(tile))
+                let visible: Range<Int>
+                if let boundary = mask.boundaryRowSpans[tile] {
+                    visible = boundary[row]
+                } else if mask.isVisible(tile) {
+                    visible = tileX..<(tileX + tileWidth)
+                } else {
+                    continue
+                }
+                guard !visible.isEmpty else { continue }
+                lower = min(lower, visible.lowerBound)
+                upper = max(upper, visible.upperBound)
+            }
+            let span = lower < upper ? (lower - x0)..<(upper - x0) : 0..<0
+            if span != 0..<width { clipped = true }
+            visiblePixels += span.count
+        }
+
+        if clipped {
+            return height * TileProtocol.visibleSpanDescriptorBytes
+                + visiblePixels * 2
+        }
+        return geometry.runRawBytes(
+            startTile: startTile, runLength: runLength)
+    }
+
+    /// Split row-major bytes into left and right rasters without changing
+    /// their contents.
+    private static func splitRows(
+        _ payload: [UInt8], rowBytes: Int, prefixRowBytes: Int, rows: Int
+    ) -> (prefix: [UInt8], suffix: [UInt8]) {
+        precondition(payload.count == rowBytes * rows)
+        var prefix = [UInt8]()
+        var suffix = [UInt8]()
+        prefix.reserveCapacity(prefixRowBytes * rows)
+        suffix.reserveCapacity((rowBytes - prefixRowBytes) * rows)
+        for row in 0..<rows {
+            let at = row * rowBytes
+            prefix.append(contentsOf: payload[at..<(at + prefixRowBytes)])
+            suffix.append(contentsOf: payload[(at + prefixRowBytes)..<(at + rowBytes)])
+        }
+        return (prefix, suffix)
+    }
+
+    /// BC1 is row-major in 4x4 blocks. Tile boundaries are block-aligned, so
+    /// partitioning each block row preserves the exact encoded blocks.
+    private static func splitBC1(
+        _ payload: [UInt8], width: Int, prefixWidth: Int, height: Int
+    ) -> (prefix: [UInt8], suffix: [UInt8]) {
+        let blockColumns = (width + 3) / 4
+        let prefixColumns = (prefixWidth + 3) / 4
+        let blockRows = (height + 3) / 4
+        let rowBytes = blockColumns * 8
+        let prefixRowBytes = prefixColumns * 8
+        return splitRows(
+            payload, rowBytes: rowBytes,
+            prefixRowBytes: prefixRowBytes, rows: blockRows)
+    }
+
+    /// Rebuild a fragment using a codec already selected for its parent run.
+    /// A visible-span parent may yield an all-visible child; that child uses
+    /// the ordinary payload because there are no hidden pixels to omit.
+    private static func encode(
+        startTile: Int, runLength: Int, codec: TileProtocol.Codec,
+        preferVisibleSpans: Bool, pixels: [UInt8], geometry: TileGeometry,
+        visibleSpanMask: TileMask?
+    ) -> PreparedRecord? {
+        if preferVisibleSpans, let mask = visibleSpanMask,
+           let visible = TileProtocol.extractVisibleRun(
+               pixels: pixels, geometry: geometry, startTile: startTile,
+               runLength: runLength, mask: mask) {
+            let encoded: [UInt8]
+            switch codec {
+            case .raw:
+                encoded = visible.pixels
+            case .rle565:
+                guard let rle = RLE565.encode(visible.pixels[...]) else {
+                    return nil
+                }
+                encoded = rle
+            case .bc1, .halfBc1:
+                return nil
+            }
+            return PreparedRecord(
+                startTile: startTile, runLength: runLength, codec: codec,
+                visibleSpans: true,
+                payload: visible.payload(encodedPixels: encoded))
+        }
+
+        let raw = TileProtocol.extractRun(
+            pixels: pixels, geometry: geometry,
+            startTile: startTile, runLength: runLength)
+        let payload: [UInt8]?
+        switch codec {
+        case .raw:
+            payload = raw
+        case .rle565:
+            payload = RLE565.encode(raw[...])
+        case .bc1:
+            payload = BC1.encode(
+                raw[...],
+                width: geometry.runPixelWidth(
+                    startTile: startTile, runLength: runLength),
+                height: geometry.rowHeight(geometry.row(startTile)))
+        case .halfBc1:
+            let width = geometry.runPixelWidth(
+                startTile: startTile, runLength: runLength)
+            let height = geometry.rowHeight(geometry.row(startTile))
+            guard let small = TileProtocol.downsample(
+                raw[...], width: width, height: height)
+            else { return nil }
+            payload = BC1.encode(
+                small[...], width: TileProtocol.halfDim(width),
+                height: TileProtocol.halfDim(height))
+        }
+        guard let payload else { return nil }
+        return PreparedRecord(
+            startTile: startTile, runLength: runLength, codec: codec,
+            visibleSpans: false, payload: payload)
+    }
+
+    /// Encode one horizontal run with the existing recursive codec-selection
+    /// behavior. Packing later coalesces adjacent fragments only when these
+    /// decisions agree, then chooses current-datagram split points.
     private static func prepare(
         _ startTile: Int, _ runLength: Int,
         into prepared: inout [PreparedRecord],
@@ -796,8 +1211,6 @@ public enum TilePacker {
             prepared.append(best)
             return
         }
-        // Too big for any datagram: split by tiles. A single tile always
-        // fits (512 B raw at most), so the recursion terminates.
         let left = runLength / 2
         prepare(startTile, left, into: &prepared,
                 pixels: pixels, geometry: geometry,

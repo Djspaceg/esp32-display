@@ -10,6 +10,8 @@
 // wifi_config.h values are only the first-boot fallback.
 String cfgSsid;
 String cfgPass;
+uint8_t wifiCredentialPresetSlot = 0;
+bool wifiLegacyMirrorPending = false;
 
 // Device name: mDNS hostname + service instance name, so multiple panels
 // coexist and the Mac discovers them by browsing _espdisp._udp instead of

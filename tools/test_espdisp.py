@@ -16,6 +16,7 @@
 # check_password_policy exists to refuse a password the firmware would not store.
 # Those guards were the only unguarded thing left in the change, and none of them
 # need hardware to exercise.
+import argparse
 import io
 import json
 import os
@@ -83,12 +84,52 @@ def check_accepts(fn, what):
         print("FAIL: %s: raised %s" % (what, type(exc).__name__))
 
 
+def uncommented_source(source):
+    """Remove C/C++ comments so disabled code cannot satisfy source contracts."""
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", "", source)
+
+
+def defined_blocks(source, macro):
+    """Return simple `#if defined(MACRO)` blocks after comments are removed."""
+    source = uncommented_source(source)
+    return re.findall(
+        r"^[ \t]*#if[ \t]+defined\([ \t]*%s[ \t]*\)[ \t]*\n"
+        r"(.*?)^[ \t]*#endif[ \t]*$" % re.escape(macro),
+        source,
+        flags=re.DOTALL | re.MULTILINE,
+    )
+
+
+def braced_body(source, opening_brace):
+    """Return one C/C++ braced body and the index immediately after it."""
+    depth = 0
+    for index in range(opening_brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening_brace + 1:index], index + 1
+    return "", -1
+
+
+def function_body(source, signature):
+    """Return a C/C++ function body selected by a signature regex."""
+    source = uncommented_source(source)
+    function = re.search(signature + r"\s*\{", source)
+    if function is None:
+        return ""
+    body, _ = braced_body(source, function.end() - 1)
+    return body
+
+
 # --------------------------------------------------------------------------
 # the board table: these two strings are the reason the tool exists
 
 
-def preprocess_board_config(*selectors):
-    """Run the host preprocessor against one P4 selector combination."""
+def preprocess_board_config(*selectors, target="CONFIG_IDF_TARGET_ESP32P4"):
+    """Run the host preprocessor against one chip/selector combination."""
     compiler = os.environ.get("CXX") or shutil.which("c++")
     if not compiler:
         raise RuntimeError("C++ compiler not found")
@@ -96,7 +137,7 @@ def preprocess_board_config(*selectors):
         espdisp.REPO_ROOT, "firmware", "libraries", "espdisp_board", "src")
     command = [
         compiler, "-E", "-x", "c++", "-I", include_dir,
-        "-DCONFIG_IDF_TARGET_ESP32P4",
+        "-D%s" % target,
     ]
     command.extend("-D%s" % selector for selector in selectors)
     command.append("-")
@@ -3372,11 +3413,10 @@ def test_universal_family_catalog_and_cli():
           "chip platforms contain no carrier selector or partition source")
     check_equal(espdisp.FAMILIES["s3"].partition_csv, "partitions_s3.csv",
                 "S3 uses the common 8 MiB partition layout")
-    check_equal(espdisp.FAMILIES["s3"].extra_flags,
-                ("-DESPDISP_DOOM_RUNTIME",),
-                "S3 family build enables profile-gated Doom source")
+    check_equal(espdisp.FAMILIES["s3"].extra_flags, ("-DESPDISP_DOOM_RUNTIME",),
+                "canonical S3 links the runtime-gated Doom easter egg")
     check_equal(espdisp.FAMILIES["s3"].extra_library_dirs, ("firmware",),
-                "S3 family build links the profile-gated Doom library")
+                "canonical S3 includes the Doom library path")
     check_equal(espdisp.FAMILIES["p4"].extra_flags,
                 ("-DESPDISP_BOARD_P4_4B",),
                 "P4 retains its internal carrier selector")
@@ -3432,6 +3472,270 @@ def test_universal_family_catalog_and_cli():
     check(doom_conflict.returncode != 0 and
           "must not enable the S3 Doom runtime" in doom_conflict.stderr,
           "P4 rejects the S3-only runtime feature")
+
+
+def test_s3_doom_build_contract():
+    family = espdisp.FAMILIES["s3"]
+    target = espdisp.BUILD_TARGETS[family.build_target]
+    run_calls = []
+
+    def compile_with(build_target):
+        with unittest.mock.patch.dict(
+            espdisp.BUILD_TARGETS, {family.build_target: build_target}
+        ), unittest.mock.patch.object(
+            espdisp, "arduino_cli", return_value="/bin/arduino-cli"
+        ), unittest.mock.patch.object(
+            espdisp, "run_streaming",
+            side_effect=lambda command, cwd=None: run_calls.append((command, cwd)) or [],
+        ):
+            return espdisp.compile_board(family)
+
+    check_fails(
+        lambda: compile_with(target._replace(extra_flags=())),
+        "canonical S3 build requires -DESPDISP_DOOM_RUNTIME",
+        "canonical S3 refuses to compile without the Doom runtime define")
+    check_fails(
+        lambda: compile_with(target._replace(extra_library_dirs=())),
+        "canonical S3 build requires the firmware library path",
+        "canonical S3 refuses to compile without the Doom source path")
+    check_equal(
+        run_calls, [],
+        "an incomplete canonical S3 contract is rejected before Arduino runs")
+
+    check_accepts(
+        lambda: compile_with(target),
+        "the complete canonical S3 Doom contract reaches command construction")
+    check_equal(len(run_calls), 1, "the valid S3 contract invokes Arduino once")
+    if run_calls:
+        command = run_calls[0][0]
+        firmware_library = os.path.join(espdisp.REPO_ROOT, "firmware")
+        check(
+            any(
+                command[index:index + 2] == ["--libraries", firmware_library]
+                for index in range(len(command) - 1)
+            ),
+            "the S3 compile command includes the Doom library root")
+        check(
+            "compiler.c.extra_flags=-DESPDISP_DOOM_RUNTIME" in command,
+            "the S3 C compile receives the Doom runtime define")
+        check(
+            "compiler.cpp.extra_flags=-DESPDISP_DOOM_RUNTIME" in command,
+            "the S3 C++ compile receives the Doom runtime define")
+
+    def compile_export(app):
+        with tempfile.TemporaryDirectory() as output_dir:
+            def export(command, cwd=None):
+                with open(
+                    os.path.join(output_dir, "display_stream.ino.bin"), "wb"
+                ) as out:
+                    out.write(app)
+                return []
+
+            with unittest.mock.patch.object(
+                espdisp, "arduino_cli", return_value="/bin/arduino-cli"
+            ), unittest.mock.patch.object(
+                espdisp, "run_streaming", side_effect=export
+            ):
+                return espdisp.compile_board(family, output_dir=output_dir)
+
+    check_fails(
+        lambda: compile_export(espdisp.S3_DOOM_APP_MARKERS[1]),
+        "button: Doom requested",
+        "an exported S3 app without the BOOT entry path is refused")
+    check_fails(
+        lambda: compile_export(espdisp.S3_DOOM_APP_MARKERS[0]),
+        "[doom] Display bridge ready",
+        "an exported S3 app without linked Doom library code is refused")
+    check_accepts(
+        lambda: compile_export(b"\0".join(espdisp.S3_DOOM_APP_MARKERS)),
+        "an exported S3 app containing both linked Doom seams")
+
+    s3_gate = preprocess_board_config(
+        "ESPDISP_DOOM_RUNTIME", target="CONFIG_IDF_TARGET_ESP32S3")
+    check_equal(
+        s3_gate.returncode, 0,
+        "board_config accepts the Doom runtime only for the S3 family")
+    c6_gate = preprocess_board_config(
+        "ESPDISP_DOOM_RUNTIME", target="CONFIG_IDF_TARGET_ESP32C6")
+    check(
+        c6_gate.returncode != 0 and
+        "must not use selectors from another family" in c6_gate.stderr,
+        "board_config rejects the S3 Doom runtime on C6")
+
+    input_path = os.path.join(
+        espdisp.REPO_ROOT, "firmware", "display_stream", "input_button.cpp")
+    setup_path = os.path.join(
+        espdisp.REPO_ROOT, "firmware", "display_stream", "display_stream.ino")
+    wad_header_path = os.path.join(
+        espdisp.REPO_ROOT, "firmware", "doom", "src", "doom_mode.h")
+    wad_loader_path = os.path.join(
+        espdisp.REPO_ROOT, "firmware", "doom", "src", "platform",
+        "w_file_esp32.c.inc")
+    partition_path = os.path.join(
+        espdisp.REPO_ROOT, "firmware", "partitions_s3.csv")
+    with open(input_path, "r", encoding="utf-8") as source_file:
+        input_source = source_file.read()
+    with open(setup_path, "r", encoding="utf-8") as source_file:
+        setup_source = source_file.read()
+    with open(wad_header_path, "r", encoding="utf-8") as source_file:
+        wad_header = source_file.read()
+    with open(wad_loader_path, "r", encoding="utf-8") as source_file:
+        wad_loader = source_file.read()
+    with open(partition_path, "r", encoding="utf-8") as source_file:
+        partition_source = source_file.read()
+
+    handle_button = function_body(input_source, r"\bvoid\s+handleButton\s*\(\s*\)")
+    release_gate = re.search(
+        r"else\s+if\s*\(\s*!\s*down\s*&&\s*wasDown\s*\)\s*\{",
+        handle_button,
+    )
+    release_body, _ = (
+        braced_body(handle_button, release_gate.end() - 1)
+        if release_gate is not None else ("", -1)
+    )
+    debounce_gate = re.match(
+        r"\s*wasDown\s*=\s*false\s*;\s*"
+        r"if\s*\(\s*!\s*longFired\s*&&\s*now\s*-\s*downAt\s*>=\s*"
+        r"DEBOUNCE_MS\s*\)\s*\{",
+        release_body,
+    )
+    debounce_body, _ = (
+        braced_body(release_body, debounce_gate.end() - 1)
+        if debounce_gate is not None else ("", -1)
+    )
+    located_input_blocks = defined_blocks(
+        debounce_body, "ESPDISP_DOOM_RUNTIME")
+    input_contract = located_input_blocks[0] if located_input_blocks else ""
+    check(
+        re.match(
+            r"\s*if\s*\(\s*boardVariant\s*==\s*"
+            r"board::Variant::AmoledCo5300\s*&&\s*"
+            r"doom_check_triple_tap\s*\(\s*now\s*,\s*true\s*\)\s*\)\s*\{",
+            input_contract,
+        ) is not None and
+        re.search(
+            r"prefs\.putBool\s*\(\s*\"doomonce\"\s*,\s*true\s*\)",
+            input_contract,
+        ) is not None and
+        len(located_input_blocks) == 1 and
+        re.match(
+            r"\s*#if\s+defined\(\s*ESPDISP_DOOM_RUNTIME\s*\)",
+            debounce_body,
+        ) is not None,
+        "the guarded BOOT path requires CO5300 and persists the triple press")
+
+    setup_body = function_body(setup_source, r"\bvoid\s+setup\s*\(\s*\)")
+    located_setup = re.search(
+        r"configurePanelGeometry\s*\(\s*\*\s*bcfg\s*\)\s*;\s*"
+        r"#if\s+defined\(\s*ESPDISP_DOOM_RUNTIME\s*\)[ \t]*\n"
+        r"(.*?)^[ \t]*#endif[ \t]*$",
+        setup_body,
+        flags=re.DOTALL | re.MULTILINE,
+    )
+    setup_contract = located_setup.group(1) if located_setup is not None else ""
+    request_gate = re.search(
+        r"if\s*\(\s*doomRequested\s*\)\s*\{", setup_contract)
+    request_body, request_end = (
+        braced_body(setup_contract, request_gate.end() - 1)
+        if request_gate is not None else ("", -1)
+    )
+    profile_gate = re.search(
+        r"if\s*\(\s*boardVariant\s*!=\s*"
+        r"board::Variant::AmoledCo5300\s*\)\s*\{",
+        request_body,
+    )
+    ineligible_body, ineligible_end = (
+        braced_body(request_body, profile_gate.end() - 1)
+        if profile_gate is not None else ("", -1)
+    )
+    eligible_body = ""
+    if ineligible_end >= 0:
+        eligible_gate = re.match(
+            r"\s*else\s*\{", request_body[ineligible_end:])
+        if eligible_gate is not None:
+            eligible_open = ineligible_end + eligible_gate.end() - 1
+            eligible_body, _ = braced_body(request_body, eligible_open)
+    check(
+        located_setup is not None and request_end >= 0 and profile_gate is not None and
+        re.match(r"\s*if\s*\(\s*doomRequested\s*\)\s*\{", setup_contract) is not None and
+        re.search(r"\bdoom_enter\s*\(\s*\)\s*;", eligible_body) is not None and
+        "doom_enter" not in ineligible_body and
+        len(re.findall(r"\bdoom_enter\s*\(\s*\)\s*;", setup_contract)) == 1,
+        "guarded setup calls Doom only in the CO5300-eligible branch")
+
+    wad_header = uncommented_source(wad_header)
+    wad_loader = uncommented_source(wad_loader)
+    raw_mapper = function_body(
+        wad_loader,
+        r"\bstatic\s+bool\s+map_raw_wad_region\s*\([^)]*\)",
+    )
+    partition_gate = re.search(
+        r"if\s*\(\s*part\s*!=\s*NULL\s*\)\s*\{", wad_loader)
+    _, partition_end = (
+        braced_body(wad_loader, partition_gate.end() - 1)
+        if partition_gate is not None else ("", -1)
+    )
+    raw_body = ""
+    if partition_end >= 0:
+        raw_gate = re.match(r"\s*else\s*\{", wad_loader[partition_end:])
+        if raw_gate is not None:
+            raw_open = partition_end + raw_gate.end() - 1
+            raw_body, _ = braced_body(wad_loader, raw_open)
+    check(
+        re.search(
+            r"#define\s+DOOM_WAD_PARTITION_OFFSET\s+0xBFF000U\b",
+            wad_header,
+        ) is not None and
+        re.search(
+            r"#define\s+DOOM_WAD_PARTITION_BYTES\s+0x401000U\b",
+            wad_header,
+        ) is not None and
+        re.search(
+            r"^\s*if\s*\(\s*!\s*map_raw_wad_region\s*\(\s*"
+            r"&wad_mapped_ptr\s*,\s*&wad_map_handle\s*\)\s*\)\s*\{",
+            raw_body,
+        ) is not None and
+        re.match(
+            r"\s*uint32_t\s+physical_size\s*=\s*0\s*;",
+            raw_mapper,
+        ) is not None and
+        re.search(
+            r"if\s*\(\s*physical_size\s*<\s*DOOM_WAD_PARTITION_BYTES\s*\|\|\s*"
+            r"DOOM_WAD_PARTITION_OFFSET\s*>\s*physical_size\s*-\s*"
+            r"DOOM_WAD_PARTITION_BYTES\s*\)\s*\{",
+            raw_mapper,
+        ) is not None and
+        len(re.findall(r"\breturn\s+false\s*;", raw_mapper)) == 3 and
+        len(re.findall(r"\breturn\s+true\s*;", raw_mapper)) == 1 and
+        re.search(
+            r"err\s*=\s*spi_flash_mmap\s*\([^;]+;\s*"
+            r"if\s*\(\s*err\s*!=\s*ESP_OK\s*\)\s*\{[^{}]*"
+            r"return\s+false\s*;\s*\}\s*"
+            r"\*\s*out_ptr\s*=\s*\(const\s+uint8_t\s*\*\)\s*base\s*\+\s*"
+            r"delta\s*;\s*return\s+true\s*;\s*$",
+            raw_mapper,
+            flags=re.DOTALL,
+        ) is not None,
+        "the source contract retains the live raw WAD fallback and geometry")
+    check(
+        "doom_wad" not in partition_source,
+        "the common 8 MiB S3 partition table does not claim the external WAD")
+
+    catalog_path = os.path.join(
+        espdisp.RELEASE_ROOT, espdisp.RELEASE_CATALOG_NAME)
+    catalog = espdisp.load_release_catalog(catalog_path, verify_files=True)
+    artifact_path = os.path.join(
+        espdisp.RELEASE_ROOT, catalog["families"]["s3"]["artifact"])
+    manifest, payloads, flash_payloads = espdisp.read_bundle(artifact_path)
+    check(
+        all(marker in payloads["s3"] for marker in espdisp.S3_DOOM_APP_MARKERS),
+        "the tracked canonical S3 release snapshot contains both Doom seams")
+    check_equal(
+        manifest["images"][0]["partition"], "universal-8m-ota",
+        "the packaged S3 application keeps the common dual-OTA layout")
+    check(
+        "doom_wad" not in flash_payloads["s3"],
+        "the tracked canonical S3 release snapshot carries no WAD payload")
 
 
 def test_family_resolution_and_discovery():
@@ -3600,10 +3904,152 @@ def test_release_catalog_contract():
                     "duplicate key schema", "duplicate catalog member")
 
 
+def test_canonical_usb_flash_path():
+    family = espdisp.FAMILIES["s3"]
+    artifact = "/releases/s3/espdisp-s3-1.5.0.espdispfw"
+    args = argparse.Namespace(
+        port="/dev/cu.usbmodem1", family="s3", profile=None)
+    port = espdisp.PortInfo("/dev/cu.usbmodem1", ["s3"], "S3")
+    with unittest.mock.patch.object(
+            espdisp, "resolve_port", return_value=port), \
+         unittest.mock.patch.object(
+             espdisp, "resolve_family", return_value=family), \
+         unittest.mock.patch.object(
+             espdisp, "flash_canonical_release", create=True,
+             return_value=(artifact, "1.5.0")) as flash_release, \
+         unittest.mock.patch.object(
+             espdisp, "compile_board",
+             side_effect=AssertionError("flash must not compile local source")), \
+         unittest.mock.patch("sys.stdout", io.StringIO()):
+        check_equal(espdisp.cmd_flash(args), 0,
+                    "flash succeeds without compiling mutable source")
+    check_equal(
+        flash_release.call_args.args, (family, port.address),
+        "flash passes the resolved family and port to the release writer")
+
+    image = {
+        "app_address": 0x10000,
+        "flash_parts": [
+            {"role": espdisp.FLASH_ROLE_BOOTLOADER, "address": 0x0},
+            {"role": espdisp.FLASH_ROLE_PARTITIONS, "address": 0x8000},
+            {"role": espdisp.FLASH_ROLE_BOOT_APP0, "address": 0xE000},
+        ],
+    }
+    roles = {
+        espdisp.FLASH_ROLE_BOOTLOADER: b"boot",
+        espdisp.FLASH_ROLE_PARTITIONS: b"part",
+        espdisp.FLASH_ROLE_BOOT_APP0: b"ota",
+    }
+    plan = espdisp.bundle_flash_plan(image, b"application", roles)
+    check_equal(
+        [(address, role) for address, role, _ in plan],
+        [
+            (0x0, "bootloader"),
+            (0x8000, "partitions"),
+            (0xE000, "boot_app0"),
+            (0x10000, "app"),
+        ],
+        "canonical USB flash writes only the four release segments")
+    check_equal(
+        [payload for _, _, payload in plan],
+        [b"boot", b"part", b"ota", b"application"],
+        "canonical USB flash preserves verified bundle payloads")
+    check_fails(
+        lambda: espdisp.bundle_flash_plan(
+            image, b"application",
+            {key: value for key, value in roles.items()
+             if key != espdisp.FLASH_ROLE_PARTITIONS}),
+        "carries no partitions payload",
+        "canonical USB flash refuses an incomplete release bundle")
+
+    bundle_data = b"canonical bundle"
+    catalog = {
+        "families": {
+            "s3": {
+                "artifact": "s3/espdisp-s3-1.5.0.espdispfw",
+                "bytes": len(bundle_data),
+                "sha256": espdisp.sha256_hex(bundle_data),
+            },
+        },
+    }
+    manifest = {"firmware_version": "1.5.0", "images": [image]}
+    captured = []
+
+    def record_command(command, cwd=None, redact=None):
+        captured.append(command)
+        return []
+
+    with unittest.mock.patch.object(
+            espdisp, "load_release_catalog", return_value=catalog), \
+         unittest.mock.patch.object(
+             espdisp, "read_binary", return_value=bundle_data), \
+         unittest.mock.patch.object(
+             espdisp, "unpack_bundle",
+             return_value=(manifest, {"s3": b"application"}, {"s3": roles})), \
+         unittest.mock.patch.object(
+             espdisp, "esptool_path", return_value="/tools/esptool"), \
+         unittest.mock.patch.object(
+             espdisp, "run_streaming", side_effect=record_command):
+        artifact, version = espdisp.flash_canonical_release(
+            family, "/dev/cu.usbmodem1", "/releases/manifest.json")
+    check_equal(
+        artifact, "/releases/s3/espdisp-s3-1.5.0.espdispfw",
+        "flash resolves the family artifact through the canonical catalog")
+    check_equal(version, "1.5.0", "flash reports the bundle firmware version")
+    check_equal(len(captured), 1, "one esptool write performs the USB flash")
+    command = captured[0]
+    check_equal(
+        command[:8],
+        ["/tools/esptool", "--chip", "esp32s3", "--port",
+         "/dev/cu.usbmodem1", "--baud", "921600", "write_flash"],
+        "USB flash invokes esptool for the resolved chip and port")
+    check_equal(
+        command[8::2], ["0x0", "0x8000", "0xE000", "0x10000"],
+        "USB flash takes every address from the verified bundle")
+    check("erase_flash" not in command and "erase-flash" not in command,
+          "USB flash never requests a whole-chip erase")
+
+    with unittest.mock.patch.object(
+            espdisp, "load_release_catalog", return_value=catalog), \
+         unittest.mock.patch.object(
+             espdisp, "read_binary", return_value=b"replaced bundle"):
+        check_fails(
+            lambda: espdisp.flash_canonical_release(
+                family, "/dev/cu.usbmodem1", "/releases/manifest.json"),
+            "changed after catalog verification",
+            "flash refuses a bundle replaced after catalog validation")
+
+    with unittest.mock.patch.object(
+            espdisp, "load_release_catalog",
+            return_value={"families": {}}):
+        check_fails(
+            lambda: espdisp.flash_canonical_release(
+                family, "/dev/cu.usbmodem1", "/releases/manifest.json"),
+            "no canonical release for family s3",
+            "missing catalog family raises Fail rather than KeyError")
+
+    for payloads, family_flash_payloads, label in (
+            ({}, {"s3": roles}, "missing application family"),
+            ({"s3": b"application"}, {}, "missing flash-payload family")):
+        with unittest.mock.patch.object(
+                espdisp, "load_release_catalog", return_value=catalog), \
+             unittest.mock.patch.object(
+                 espdisp, "read_binary", return_value=bundle_data), \
+             unittest.mock.patch.object(
+                 espdisp, "unpack_bundle",
+                 return_value=(manifest, payloads, family_flash_payloads)):
+            check_fails(
+                lambda: espdisp.flash_canonical_release(
+                    family, "/dev/cu.usbmodem1", "/releases/manifest.json"),
+                "no canonical release for family s3",
+                "%s raises Fail rather than KeyError" % label)
+
 def main():
     test_universal_family_catalog_and_cli()
+    test_s3_doom_build_contract()
     test_family_resolution_and_discovery()
     test_release_catalog_contract()
+    test_canonical_usb_flash_path()
     test_p4_partition_contract()
     test_discovery_command()
     test_password_policy()

@@ -313,6 +313,28 @@ final class USBDeviceOptionTests: XCTestCase {
         XCTAssertEqual(identity.board, "st77916")
     }
 
+    func testCFGSHOWParsesLiveSerialFactsIncludingAppendedFields() {
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO ssid64=U3R1ZGlv name64=cm91bmQtcGFuZWw= "
+                + "id=288485555594 connected=1 ip=192.168.1.44 rssi=-61 "
+                + "flip=1 rot=2 auto=1 effective=3 motion=1 bl=low pwr=off "
+                + "board=st77916 profile=st77916 target=s3-185 chip=esp32s3 "
+                + "partition=8MB bat=72 ota=on ssid=Studio fw=spoof "
+                + "bllevel=37 fw=1.5.0")
+
+        XCTAssertEqual(identity.status?.firmwareVersion, "1.5.0")
+        XCTAssertEqual(identity.status?.currentSSID, "Studio")
+        XCTAssertEqual(identity.status?.networkConnected, true)
+        XCTAssertEqual(identity.status?.ipAddress, "192.168.1.44")
+        XCTAssertEqual(identity.status?.rssi, -61)
+        XCTAssertEqual(identity.status?.rotation, 2)
+        XCTAssertEqual(identity.status?.brightnessHigh, false)
+        XCTAssertEqual(identity.status?.brightnessLevel, 37)
+        XCTAssertEqual(identity.status?.manuallyOff, true)
+        XCTAssertEqual(identity.status?.batteryPercent, 72)
+        XCTAssertEqual(identity.status?.otaStatus, "on")
+    }
+
     func testUSBDeviceOptionCarriesExactTargetAndPhysicalBoard() {
         let device = WifiConfigUI.USBDeviceOption(
             path: "/dev/cu.usbmodem1101",

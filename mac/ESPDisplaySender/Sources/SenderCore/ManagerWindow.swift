@@ -42,7 +42,9 @@ struct ManagerView: View {
                     DisplayListFooter(
                         onAdd: { showingAddDevice = true },
                         onRemove: { pendingDeletion = manager.selectedPanel },
-                        canRemove: manager.selectedPanel != nil)
+                        canRemove: manager.selectedPanel != nil,
+                        sortOrder: manager.settings.deviceListSortOrder,
+                        onSortOrder: manager.updateDeviceListSortOrder)
                 }
                 .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
         } detail: {
@@ -130,6 +132,11 @@ struct ManagerView: View {
                                 Button(panel.paused ? "Resume" : "Pause") {
                                     manager.setPaused(!panel.paused, for: panel.serviceName)
                                 }
+                                .disabled(!manager.canPerform(
+                                    .streaming, for: panel.serviceName))
+                                .help(manager.operationUnavailableReason(
+                                    panel.serviceName, operation: .streaming)
+                                    ?? "Pause or resume streaming")
                             }
                     }
                 } header: {
@@ -190,6 +197,8 @@ private struct DisplayListFooter: View {
     let onAdd: () -> Void
     let onRemove: () -> Void
     let canRemove: Bool
+    let sortOrder: DeviceListSortOrder
+    let onSortOrder: (DeviceListSortOrder) -> Void
 
     var body: some View {
         HStack(spacing: 2) {
@@ -215,10 +224,44 @@ private struct DisplayListFooter: View {
             .accessibilityIdentifier("remove-display-record")
 
             Spacer(minLength: 0)
+
+            Menu {
+                ForEach(DeviceListSortOrder.allCases, id: \.self) { order in
+                    Button {
+                        onSortOrder(order)
+                    } label: {
+                        if order == sortOrder {
+                            Label(order.sidebarTitle, systemImage: "checkmark")
+                        } else {
+                            Text(order.sidebarTitle)
+                        }
+                    }
+                }
+            } label: {
+                Label(sortOrder.sidebarTitle, systemImage: "arrow.up.arrow.down")
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .controlSize(.small)
+            .fixedSize()
+            .help("Sort displays by \(sortOrder.sidebarTitle.lowercased())")
+            .accessibilityLabel("Sort displays")
+            .accessibilityValue(sortOrder.sidebarTitle)
+            .accessibilityIdentifier("display-list-sort-order")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+}
+
+private extension DeviceListSortOrder {
+    var sidebarTitle: String {
+        switch self {
+        case .alphabetical: return "Alphabetical"
+        case .dateAdded: return "Date Added"
+        case .status: return "Status"
+        }
     }
 }
 
@@ -268,19 +311,7 @@ private struct PanelRow: View {
                 Text(panel.displayName)
                     .fontWeight(.medium)
                     .lineLimit(1)
-                HStack(spacing: 5) {
-                    Text(panel.statusText)
-                    // Only a streaming session has a meaningful rate. Showing
-                    // one while nothing is being captured read as healthy when
-                    // it was not.
-                    if panel.isOnline && panel.captureStatus.isStreaming {
-                        Text("•")
-                        Text(String(format: "%.1f fps", panel.displayFPS))
-                    } else if panel.isOnline && !panel.paused {
-                        Text("•")
-                        Text("Not mirroring")
-                    }
-                }
+                Text(panel.sidebarStatusText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
@@ -388,7 +419,8 @@ private struct PanelDetailView: View {
                 Button("Rename", systemImage: "pencil") {
                     beginNameEdit()
                 }
-                .help("Rename this display")
+                .disabled(!manager.canPerform(.rename, for: panel.serviceName))
+                .help(operationHelp(.rename, "Rename this display"))
                 .popover(isPresented: $isEditingName, arrowEdge: .bottom) {
                     renamePopover
                 }
@@ -405,8 +437,10 @@ private struct PanelDetailView: View {
                 // icon, since neither "Pause" nor "Resume" has an obvious
                 // SF Symbol that means both without flipping per state.
                 .padding(.horizontal, 6)
-                .disabled(!panel.isOnline)
-                .help(panel.paused ? "Resume sending frames" : "Stop sending frames")
+                .disabled(!manager.canPerform(.streaming, for: panel.serviceName))
+                .help(operationHelp(
+                    .streaming,
+                    panel.paused ? "Resume sending frames" : "Stop sending frames"))
             }
             ToolbarItem(placement: .primaryAction) {
                 Button("Identify", systemImage: "light.beacon.max") {
@@ -646,9 +680,7 @@ private struct PanelDetailView: View {
                         "Turn the panel's display off without unplugging it. "
                             + "Persists across a reboot until turned back on."))
             }
-            if manager.canControl(panel.serviceName, capability: .brightnessLevel)
-                || panel.capabilities.contains(.brightnessLevel)
-            {
+            if manager.supportsBrightnessLevel(panel.serviceName) {
                 LabeledContent("Brightness") {
                     HStack(spacing: 10) {
                         // No `step:`. The range is 1...255, and a step made
@@ -686,9 +718,7 @@ private struct PanelDetailView: View {
                         .help(controlHelp(.brightness, "Set the panel backlight"))
                 }
             }
-            if manager.canControl(panel.serviceName, capability: .rotate)
-                || panel.capabilities.contains(.rotate)
-            {
+            if manager.supportsQuarterTurnRotation(panel.serviceName) {
                 // Square panels advertise quarter-turn rotation, so the
                 // orientation control becomes a four-way choice. Rectangular
                 // panels keep the 180 toggle below: their 90-degree case is
@@ -722,7 +752,8 @@ private struct PanelDetailView: View {
                         .help(controlHelp(.flip, "Rotate the image on the panel"))
                 }
             }
-            if panel.controlProtocolVersion != Int(DeviceProtocol.controlProtocolVersion) {
+            if panel.controlProtocolVersion != Int(DeviceProtocol.controlProtocolVersion),
+               manager.verifiedUSBDevice(for: panel.serviceName) == nil {
                 Text("Flash the current firmware to enable remote controls.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -750,12 +781,18 @@ private struct PanelDetailView: View {
                     Button("Apply") {
                         manager.applySavedNetwork(selectedSSID, to: panel.serviceName)
                     }
-                    .disabled(selectedSSID.isEmpty)
+                    .disabled(selectedSSID.isEmpty
+                        || !manager.canPerform(.savedWiFi, for: panel.serviceName))
+                    .help(operationHelp(.savedWiFi, "Apply this saved network"))
 
                     Button(manager.savedNetworkNames.isEmpty ? "Add…" : "Edit…") {
                         manager.configureUSB(
                             preferredSSID: selectedSSID.isEmpty ? nil : selectedSSID)
                     }
+                    .disabled(!manager.canPerform(
+                        .savedWiFi, for: panel.serviceName))
+                    .help(operationHelp(
+                        .savedWiFi, "Add or edit saved WiFi credentials"))
                 }
             }
         } header: {
@@ -911,16 +948,22 @@ private struct PanelDetailView: View {
                 "Control protocol",
                 value: panel.controlProtocolVersion.map(String.init) ?? "Not available")
             LabeledContent("Wireless updates") {
-                Text(panel.capabilities.contains(.ota) && panel.isOnline
+                Text(manager.canPerform(
+                    .wirelessFirmwareUpdate, for: panel.serviceName)
                     ? "Available now" : "Unavailable")
                     .foregroundStyle(
-                        panel.capabilities.contains(.ota) && panel.isOnline
+                        manager.canPerform(
+                            .wirelessFirmwareUpdate, for: panel.serviceName)
                             ? .primary : .secondary)
             }
             LabeledContent("OTA password") {
                 Button("Set…") {
                     beginOTAPasswordEdit()
                 }
+                .disabled(!manager.canPerform(
+                    .otaPassword, for: panel.serviceName))
+                .help(operationHelp(
+                    .otaPassword, "Enable or change wireless updates over USB"))
                 .popover(isPresented: $isEditingOTAPassword, arrowEdge: .bottom) {
                     otaPasswordPopover
                 }
@@ -1019,6 +1062,13 @@ private struct PanelDetailView: View {
     ) -> String {
         manager.controlUnavailableReason(panel.serviceName, capability: capability)
             ?? available
+    }
+
+    private func operationHelp(
+        _ operation: PanelManager.Operation, _ available: String
+    ) -> String {
+        manager.operationUnavailableReason(
+            panel.serviceName, operation: operation) ?? available
     }
 
     private var brightnessBounds: ClosedRange<Double> {

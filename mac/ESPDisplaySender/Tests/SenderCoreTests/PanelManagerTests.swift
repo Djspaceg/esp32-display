@@ -12,6 +12,51 @@ private let allControls = DeviceProtocol.Capabilities.brightness
     .union(.identify)
     .union(.restart)
 
+private final class BlockingUSBControlSender: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var active = 0
+    private var started = 0
+    private var released = false
+    private var maximumConcurrent = 0
+
+    func send(
+        _ command: String, _ path: String, _ timeout: TimeInterval
+    ) -> WifiConfigUI.CommandResult {
+        condition.lock()
+        active += 1
+        started += 1
+        maximumConcurrent = max(maximumConcurrent, active)
+        condition.broadcast()
+        while !released { condition.wait() }
+        active -= 1
+        condition.unlock()
+        return .success("CFGOK")
+    }
+
+    func waitForStarts(_ count: Int, timeout: TimeInterval) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while started < count {
+            if !condition.wait(until: deadline) { return false }
+        }
+        return true
+    }
+
+    func release() {
+        condition.lock()
+        released = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func observedMaximumConcurrent() -> Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return maximumConcurrent
+    }
+}
+
 /// Identity reconciliation and capability gating are the two places where the
 /// manager can quietly do the wrong thing: lose a panel's settings when the
 /// device renames itself, or send a control a panel cannot honour. Both were
@@ -164,6 +209,217 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertFalse(manager.canControl("studio-display", capability: .brightness))
     }
 
+    /// A current CFGSHOW identity match is a real control path even when the
+    /// panel has never joined WiFi during this app run. The old blanket gate
+    /// incorrectly treats the missing session as disabling every operation.
+    func testVerifiedUSBOnlyPanelCanUseItsUSBOperations() {
+        let path = "/dev/cu.usbmodem-test"
+        var panel = controllablePanel(
+            capabilities: .power.union(.flip).union(.rotate),
+            heartbeatAt: Date(timeIntervalSinceNow: -60))
+        panel.firmwareVersion = nil
+        panel.usbPort = path
+        panel.usbHardwareID = panel.hardwareID
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: ["Studio WiFi"],
+            usbSerialPorts: [path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO ssid64= name64=c3R1ZGlvLWRpc3BsYXk= "
+                + "id=020000123456 connected=0 ip=0.0.0.0 rssi=0 flip=0 "
+                + "rot=0 auto=0 effective=0 motion=1 bl=high pwr=on "
+                + "board=st77916 profile=st77916 target=s3-185 chip=esp32s3 "
+                + "partition=8MB bat=-1 ota=off ssid= bllevel=128 fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path,
+            identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        XCTAssertFalse(manager.selectedPanel?.isOnline == true)
+        XCTAssertEqual(manager.currentUSBPort(for: panel.serviceName), path)
+        XCTAssertTrue(
+            manager.canControl(panel.serviceName, capability: .power),
+            "power has a CFGPOWER path over verified USB")
+        XCTAssertTrue(
+            manager.canControl(panel.serviceName, capability: .flip),
+            "180-degree orientation has a CFGFLIP path over verified USB")
+        XCTAssertTrue(
+            manager.canControl(panel.serviceName, capability: .rotate),
+            "supported quarter-turn orientation has a CFGROT path over verified USB")
+        XCTAssertNotNil(
+            manager.currentUSBPort(for: panel.serviceName),
+            "saved WiFi can be applied through the verified serial path")
+        XCTAssertNotNil(
+            manager.currentUSBPort(for: panel.serviceName),
+            "rename can be sent through the verified serial path")
+        XCTAssertNotNil(
+            manager.currentUSBPort(for: panel.serviceName),
+            "OTA-password changes can be sent through the verified serial path")
+        if case .notReady(let reason) =
+            manager.firmwareUpdateReadiness(panel.serviceName)
+        {
+            XCTFail("verified cold USB should enter firmware update: \(reason)")
+        }
+    }
+
+    func testVerifiedOldFirmwareExplainsMissingUSBBrightness() {
+        let path = "/dev/cu.usbmodem-test"
+        var panel = controllablePanel(
+            capabilities: .power.union(.flip),
+            heartbeatAt: Date(timeIntervalSinceNow: -60))
+        panel.usbPort = path
+        panel.usbHardwareID = panel.hardwareID
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
+                + "flip=0 rot=0 bl=high pwr=on board=st77916 "
+                + "target=s3-185 chip=esp32s3 partition=8MB fw=1.4.0")
+        manager.noteUSBIdentity(
+            path: path, identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        XCTAssertFalse(
+            manager.canControl(
+                panel.serviceName, capability: .brightnessLevel))
+        XCTAssertEqual(
+            manager.controlUnavailableReason(
+                panel.serviceName, capability: .brightnessLevel),
+            "Brightness over USB needs firmware support that this display "
+                + "does not report.")
+        XCTAssertTrue(
+            manager.supportsBrightnessLevel(panel.serviceName),
+            "cold USB keeps the universal brightness row visible and disabled")
+    }
+
+    func testFreshProbeWithoutHardwareIDCannotInheritAnOldMatch() {
+        let path = "/dev/cu.usbmodem-test"
+        var panel = controllablePanel(capabilities: .power)
+        panel.usbPort = path
+        panel.usbHardwareID = panel.hardwareID
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let current = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
+                + "rot=0 pwr=on board=st77916 target=s3-185 chip=esp32s3 "
+                + "partition=8MB fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path, identity: current,
+            generation: manager.usbPathGeneration(path))
+        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .power))
+
+        let identityless = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=c3R1ZGlvLWRpc3BsYXk= rot=0 pwr=on "
+                + "board=st77916 target=s3-185 chip=esp32s3 partition=8MB "
+                + "fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path, identity: identityless,
+            generation: manager.usbPathGeneration(path))
+
+        XCTAssertFalse(manager.canControl(panel.serviceName, capability: .power))
+        XCTAssertEqual(
+            manager.controlUnavailableReason(
+                panel.serviceName, capability: .power),
+            "USB is connected, but the app has not verified this display's "
+                + "hardware ID yet.")
+    }
+
+    func testRestartingUSBHasItsOwnReasonUntilTheNextProbe() {
+        let path = "/dev/cu.usbmodem-test"
+        var panel = controllablePanel(capabilities: .power)
+        panel.usbPort = path
+        panel.usbHardwareID = panel.hardwareID
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
+                + "rot=0 pwr=on board=st77916 target=s3-185 chip=esp32s3 "
+                + "partition=8MB fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path, identity: identity,
+            generation: manager.usbPathGeneration(path))
+        manager.markUSBRestarting(panel.serviceName)
+
+        XCTAssertEqual(
+            manager.controlUnavailableReason(
+                panel.serviceName, capability: .power),
+            "The display is restarting; USB controls will return when it "
+                + "answers CFGSHOW.")
+
+        manager.usbDevices = []
+        XCTAssertEqual(
+            manager.usbSerialState(for: panel.serviceName), .absent,
+            "an unplugged display is no longer described as restarting")
+
+        manager.usbDevices = [
+            WifiConfigUI.USBDeviceOption(
+                path: path,
+                name: identity.name,
+                hardwareID: identity.hardwareID,
+                target: identity.target,
+                board: identity.board,
+                chip: identity.chip,
+                partition: identity.partition,
+                serialStatus: identity.status,
+                verifiedGeneration: manager.usbPathGeneration(path))
+        ]
+        manager.noteUSBIdentity(
+            path: path, identity: identity,
+            generation: manager.usbPathGeneration(path))
+        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .power))
+    }
+
+    func testBrightnessReplacementCannotOverlapABegunSerialWrite() async {
+        let path = "/dev/cu.usbmodem-test"
+        var panel = controllablePanel(
+            capabilities: .brightnessLevel,
+            heartbeatAt: Date(timeIntervalSinceNow: -60))
+        panel.usbPort = path
+        panel.usbHardwareID = panel.hardwareID
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
+                + "rot=0 bl=high bllevel=64 pwr=on board=st77916 "
+                + "target=s3-185 chip=esp32s3 partition=8MB fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path, identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        let sender = BlockingUSBControlSender()
+        manager.usbControlSender = { command, path, timeout in
+            sender.send(command, path, timeout)
+        }
+        manager.usbControlReprobe = { _, _ in }
+
+        manager.setBrightnessLevel(80, for: panel.serviceName)
+        let firstStarted = await Task.detached {
+            sender.waitForStarts(1, timeout: 2)
+        }.value
+        XCTAssertTrue(firstStarted)
+
+        manager.setBrightnessLevel(160, for: panel.serviceName)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(
+            sender.observedMaximumConcurrent(), 1,
+            "a replacement value must wait for the begun serial write")
+
+        sender.release()
+        let secondStarted = await Task.detached {
+            sender.waitForStarts(2, timeout: 2)
+        }.value
+        XCTAssertTrue(secondStarted)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+    }
+
     // MARK: firmware updates
 
     /// OTA gets its own refusal because the generic one is true and useless:
@@ -188,11 +444,10 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertFalse(manager.canControl("studio-display", capability: .ota))
         let reason = try XCTUnwrap(
             manager.controlUnavailableReason("studio-display", capability: .ota))
-        XCTAssertTrue(
-            reason.contains("tools/espdisp.py set-password"),
-            "the reason has to name the command that turns OTA on; got: \(reason)")
-        XCTAssertTrue(reason.contains("could not start listening"), "got: \(reason)")
-        XCTAssertTrue(reason.contains("CFGSHOW"), "got: \(reason)")
+        XCTAssertEqual(
+            reason,
+            "Wireless updating needs WiFi and an active OTA password. "
+                + "Connect over USB to set one.")
     }
 
     /// The generic wording is still what every other capability gets, so the OTA

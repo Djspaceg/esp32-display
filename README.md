@@ -142,6 +142,10 @@ python3 tools/espdisp.py flash --family p4 --profile st7703-4b \
   --port /dev/cu.usbmodem5B901669681
 ```
 
+`flash` verifies `firmware-releases/manifest.json` and writes the selected
+committed family artifact. It does not compile mutable local source; use
+`compile` or `bundle` explicitly for development builds.
+
 The normal flash path writes only the bootloader, partition table, OTA
 initializer, and application segments. It does not issue a whole-chip erase,
 change fuses/security settings, or rewrite calibration data.

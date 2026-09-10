@@ -47,7 +47,7 @@ extension PanelManager {
         print("[\(serviceName)] touch \(touch.gesture) -> \(action)")
         switch action {
         case .togglePause:
-            setPaused(!panel.paused, for: serviceName)
+            setPausedFromDevice(!panel.paused, for: serviceName)
         case .cycleSource(let forward):
             Task { @MainActor [weak self] in
                 await self?.cycleSource(forward: forward, for: serviceName)

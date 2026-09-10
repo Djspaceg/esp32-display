@@ -35,6 +35,24 @@ public enum ConfigCommands {
         "CFGNAME \(Data(name.utf8).base64EncodedString())"
     }
 
+    public static func setPower(_ on: Bool) -> String {
+        "CFGPOWER \(on ? 1 : 0)"
+    }
+
+    public static func setFlip(_ flipped: Bool) -> String {
+        "CFGFLIP \(flipped ? 1 : 0)"
+    }
+
+    public static func setRotation(_ rotation: Int) -> String? {
+        guard DeviceProtocol.rotationRange.contains(rotation) else { return nil }
+        return "CFGROT \(rotation)"
+    }
+
+    public static func setBrightnessLevel(_ level: Int) -> String? {
+        guard DeviceProtocol.brightnessLevelRange.contains(level) else { return nil }
+        return "CFGBRIGHT \(level)"
+    }
+
     /// `CFGOTAPW <b64 password>`: enable OTA with this password, replacing
     /// any password already stored. Mirrors `otapolicy::CLEAR_TOKEN`'s sibling
     /// path in display_stream.ino - the firmware classifies the literal
@@ -51,6 +69,17 @@ public enum ConfigCommands {
     /// Read one space-delimited `key=value` field from a CFGINFO reply.
     public static func field(_ key: String, from line: String) -> String? {
         for token in line.split(separator: " ", omittingEmptySubsequences: true) {
+            guard token.hasPrefix(key) else { continue }
+            return String(token.dropFirst(key.count))
+        }
+        return nil
+    }
+
+    /// Read an appended field from the right. CFGSHOW keeps a human-readable
+    /// `ssid=` field for compatibility, and SSIDs may contain text resembling
+    /// `key=value`; the real appended protocol field must win.
+    public static func lastField(_ key: String, from line: String) -> String? {
+        for token in line.split(separator: " ", omittingEmptySubsequences: true).reversed() {
             guard token.hasPrefix(key) else { continue }
             return String(token.dropFirst(key.count))
         }

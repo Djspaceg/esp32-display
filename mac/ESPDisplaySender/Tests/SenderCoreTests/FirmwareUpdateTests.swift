@@ -370,7 +370,10 @@ final class FirmwareUpdateTests: XCTestCase {
         guard case .notReady(let reason) =
             manager.firmwareUpdateReadiness("espdisplay")
         else { return XCTFail("a panel without CAP_OTA is not ready") }
-        XCTAssertTrue(reason.contains("set-password"), "got: \(reason)")
+        XCTAssertEqual(
+            reason,
+            "Wireless updating needs WiFi and an active OTA password. "
+                + "Connect over USB to set one.")
     }
 
     func testReadinessCarriesDiscoveryTargetWithoutPersistingIt() throws {
@@ -385,18 +388,85 @@ final class FirmwareUpdateTests: XCTestCase {
             previewPanels: [panel],
             savedNetworkNames: [],
             usbSerialPorts: ["/dev/cu.usbmodem-1"])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO ssid64= name64=ZXNwZGlzcGxheQ== id=020000123456 "
+                + "connected=0 ip=0.0.0.0 rssi=0 flip=0 rot=0 auto=0 "
+                + "effective=0 motion=1 bl=high pwr=on board=st77916 "
+                + "profile=st77916 target=s3-185 chip=esp32s3 partition=8MB "
+                + "bat=-1 ota=off ssid= bllevel=128 fw=1.5.0")
         manager.noteUSBIdentity(
             path: "/dev/cu.usbmodem-1",
-            name: "espdisplay",
-            hardwareID: "020000123456",
-            target: "s3-185",
-            board: "st77916")
+            identity: identity,
+            generation: manager.usbPathGeneration("/dev/cu.usbmodem-1"))
 
         guard case .ready(let target) = manager.firmwareUpdateReadiness("espdisplay")
         else { return XCTFail("the identity-matched USB target should be ready") }
         XCTAssertEqual(target.chip, "esp32s3")
         XCTAssertEqual(target.target, "s3-185")
         XCTAssertEqual(target.usbDevice?.target, "s3-185")
+    }
+
+    func testColdUSBReadinessRequiresCompleteCurrentMetadata() {
+        var panel = Self.panel(
+            serviceName: "espdisplay",
+            hardwareID: "020000123456",
+            capabilities: .restart)
+        panel.firmwareVersion = nil
+        panel.usbHardwareID = "020000123456"
+        let path = "/dev/cu.usbmodem-1"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let incomplete = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=ZXNwZGlzcGxheQ== id=020000123456 "
+                + "rot=0 pwr=on board=st77916 target=s3-185 chip=esp32s3 "
+                + "fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path, identity: incomplete,
+            generation: manager.usbPathGeneration(path))
+
+        guard case .notReady(let reason) =
+            manager.firmwareUpdateReadiness("espdisplay")
+        else { return XCTFail("missing partition evidence must disable USB update") }
+        XCTAssertEqual(
+            reason,
+            "USB is connected, but the app cannot verify the board family, "
+                + "chip, profile, and partition safely.")
+    }
+
+    func testColdUSBReadinessAllowsVersionBootstrapWithCompleteMetadata() {
+        var panel = Self.panel(
+            serviceName: "espdisplay",
+            hardwareID: "020000123456",
+            capabilities: .restart)
+        panel.firmwareVersion = nil
+        panel.usbHardwareID = "020000123456"
+        let path = "/dev/cu.usbmodem-1"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=ZXNwZGlzcGxheQ== id=020000123456 "
+                + "rot=0 pwr=on board=st77916 profile=st77916 "
+                + "target=s3-185 chip=esp32s3 partition=8MB")
+        manager.noteUSBIdentity(
+            path: path, identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        XCTAssertTrue(
+            manager.canPerform(.firmwareUpdate, for: "espdisplay"),
+            "complete verified USB metadata is enough to bootstrap current firmware")
+        guard case .ready(let target) =
+            manager.firmwareUpdateReadiness("espdisplay")
+        else {
+            return XCTFail(
+                "verified USB must permit installing firmware that adds version reporting")
+        }
+        XCTAssertEqual(target.transports, [.usb])
+        XCTAssertNil(target.firmwareVersion)
+        XCTAssertNil(target.address)
     }
 
     func testPhysicalBoardProfilesMatchOnlyTheirExactTargets() {
@@ -488,13 +558,14 @@ final class FirmwareUpdateTests: XCTestCase {
 
     /// The ordinary case, and the one sentence that has to be right: the version
     /// the panel is on and the version it would go to.
-    func testNewerBundleOffersAnUpdate() throws {
+    func testNewerBundleOffersAnUpgrade() throws {
         let plan = try Self.plan(bundleVersion: "1.3.0", panelVersion: "1.2.0")
 
         XCTAssertEqual(plan.action, .update)
-        XCTAssertEqual(plan.verb, "Update")
+        XCTAssertEqual(plan.verb, "Upgrade")
         XCTAssertTrue(plan.canPush)
         XCTAssertFalse(plan.isCautionary)
+        XCTAssertTrue(plan.headline.hasPrefix("Upgrade to"), "got: \(plan.headline)")
         XCTAssertTrue(plan.headline.contains("1.3.0"), "got: \(plan.headline)")
         XCTAssertTrue(plan.detail.contains("1.2.0"), "got: \(plan.detail)")
     }
@@ -505,6 +576,45 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertEqual(plan.action, .reinstall)
         XCTAssertEqual(plan.verb, "Reinstall")
         XCTAssertTrue(plan.canPush, "reinstalling is a legitimate recovery move")
+    }
+
+    func testUnknownRunningVersionOffersCautionaryUSBInstall() throws {
+        let bundle = try Self.bundle(version: "1.5.0", chips: ["esp32c6"])
+        let compatibility = bundle.availability(
+            forTarget: "c6",
+            chip: "esp32c6",
+            panelVersion: bundle.firmwareVersion)
+        let plan = FirmwareUpdatePlan.makeForUnknownPanelVersion(
+            compatibility,
+            bundleVersion: bundle.firmwareVersion,
+            chipConfirmed: true)
+
+        XCTAssertEqual(plan.action, .uncertain)
+        XCTAssertEqual(plan.verb, "Push")
+        XCTAssertTrue(plan.canPush)
+        XCTAssertTrue(plan.isCautionary)
+        XCTAssertEqual(plan.headline, "Running version not reported")
+        XCTAssertTrue(
+            plan.detail.contains("does not report its version over USB"),
+            "got: \(plan.detail)")
+    }
+
+    func testUnknownRunningVersionDoesNotBypassTargetMismatch() throws {
+        let bundle = try Self.bundle(version: "1.5.0", chips: ["esp32c6"])
+        let compatibility = bundle.availability(
+            forTarget: "s3-185",
+            chip: "esp32s3",
+            panelVersion: bundle.firmwareVersion)
+        let plan = FirmwareUpdatePlan.makeForUnknownPanelVersion(
+            compatibility,
+            bundleVersion: bundle.firmwareVersion,
+            chipConfirmed: false)
+
+        XCTAssertEqual(plan.action, .blocked)
+        XCTAssertFalse(plan.canPush)
+        XCTAssertTrue(
+            plan.headline.contains("Nothing in this bundle"),
+            "got: \(plan.headline)")
     }
 
     /// The case a boolean would get wrong. An older bundle is offered, because

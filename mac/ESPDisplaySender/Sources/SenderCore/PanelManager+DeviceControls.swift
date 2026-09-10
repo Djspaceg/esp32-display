@@ -9,64 +9,368 @@ import SenderProtocol
 /// including the brightness echo suppression that keeps a drag from
 /// fighting the device's own reports.
 extension PanelManager {
-    /// Why a control cannot be used right now, or nil when it can.
-    ///
-    /// The single source of truth for both the disabled state and the refusal
-    /// message, so the two can never disagree, and specific enough to show as a
-    /// tooltip on the disabled control rather than only as a message the user
-    /// can never actually trigger.
+    enum Operation: Equatable {
+        case brightness
+        case brightnessLevel
+        case flip
+        case rotate
+        case power
+        case identify
+        case restart
+        case savedWiFi
+        case rename
+        case otaPassword
+        case firmwareUpdate
+        case wirelessFirmwareUpdate
+        case streaming
+    }
+
+    enum OperationPath: Equatable {
+        case network
+        case usbSerial(String)
+        case usbBootloaderCandidate(String)
+    }
+
+    enum OperationAvailability: Equatable {
+        case available([OperationPath])
+        case unavailable(String)
+    }
+
+    private enum USBEvidence {
+        case verified
+        case brightness
+        case power
+        case orientation
+        case quarterTurn
+    }
+
+    private indirect enum OperationRequirement {
+        case networkControl(DeviceProtocol.Capabilities)
+        case liveNetworkSession
+        case usbSerial(USBEvidence)
+        case usbBootloader
+        case either([OperationRequirement])
+    }
+
+    /// One rule drives disabled state, help text, refusal, and dispatch.
+    func operationAvailability(
+        _ serviceName: String, operation: Operation
+    ) -> OperationAvailability {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
+            return .unavailable("This display is not known yet.")
+        }
+        let requirement = Self.requirement(for: operation)
+        let paths = availablePaths(
+            satisfying: requirement, serviceName: serviceName, panel: panel)
+        if !paths.isEmpty { return .available(paths) }
+        return .unavailable(
+            unavailableReason(
+                for: operation, requirement: requirement,
+                serviceName: serviceName, panel: panel))
+    }
+
+    func operationUnavailableReason(
+        _ serviceName: String, operation: Operation
+    ) -> String? {
+        guard case .unavailable(let reason) =
+            operationAvailability(serviceName, operation: operation)
+        else { return nil }
+        return reason
+    }
+
+    func canPerform(_ operation: Operation, for serviceName: String) -> Bool {
+        if case .available = operationAvailability(serviceName, operation: operation) {
+            return true
+        }
+        return false
+    }
+
     func controlUnavailableReason(
         _ serviceName: String, capability: DeviceProtocol.Capabilities
     ) -> String? {
-        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
-            return "This display is not known yet."
-        }
-        guard sessions[serviceName] != nil else {
-            return "No streaming session is connected to this display."
-        }
-        guard panel.isOnline else {
-            return "This display is offline."
-        }
-        // Firmware updates do not travel over the control protocol - espota is
-        // its own exchange on port 3232 - so it may look as though this rung
-        // should not apply to `.ota`. It does, and deliberately: what the
-        // capability BITS mean is only defined within a control-protocol
-        // generation, so on firmware from another lineage bit 4 is not
-        // necessarily OTA at all, and pushing two megabytes at a panel because a
-        // bit happened to be set is worse than sending someone to USB.
-        guard panel.controlProtocolVersion
-            == Int(DeviceProtocol.controlProtocolVersion)
-        else {
-            return "Flash the current firmware to enable remote controls."
-        }
-        guard panel.capabilities.contains(capability) else {
-            if capability == .ota { return Self.otaUnavailableReason }
-            return "This display does not report support for "
-                + "\(Self.describe(capability))."
-        }
-        return nil
+        operationUnavailableReason(
+            serviceName, operation: Self.operation(for: capability))
     }
 
-    /// Why a local streaming action such as pause/resume cannot run.
-    /// Unlike device controls, these actions do not have a capability bit or a
-    /// control-protocol version, but they still require a live session and a
-    /// recent heartbeat. Cocoa Scripting uses this instead of mutating an
-    /// offline snapshot and reporting success for a command sent nowhere.
     func streamingUnavailableReason(_ serviceName: String) -> String? {
-        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
-            return "This display is not known yet."
-        }
-        guard sessions[serviceName] != nil else {
-            return "No streaming session is connected to this display."
-        }
-        guard panel.isOnline else { return "This display is offline." }
-        return nil
+        operationUnavailableReason(serviceName, operation: .streaming)
     }
 
     func canControl(
         _ serviceName: String, capability: DeviceProtocol.Capabilities
     ) -> Bool {
         controlUnavailableReason(serviceName, capability: capability) == nil
+    }
+
+    func supportsBrightnessLevel(_ serviceName: String) -> Bool {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return false }
+        if panel.capabilities.contains(.brightnessLevel)
+            || verifiedUSBDevice(for: serviceName)?.serialStatus?.brightnessLevel != nil {
+            return true
+        }
+        // Keep the legacy high/low switch for firmware that advertises it over
+        // WiFi. A cold USB record has no capability packet, so show the exact
+        // row disabled with the serial-evidence reason instead of hiding it.
+        if panel.capabilities.contains(.brightness) { return false }
+        switch usbSerialState(for: serviceName) {
+        case .absent:
+            return false
+        case .enumeratedUnverified, .verified, .restarting, .mismatch, .ambiguous:
+            return true
+        }
+    }
+
+    func supportsQuarterTurnRotation(_ serviceName: String) -> Bool {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return false }
+        if panel.capabilities.contains(.rotate) { return true }
+        guard let board = verifiedUSBDevice(for: serviceName)?.board else { return false }
+        return Self.usbBoardSupportsQuarterTurns(board)
+    }
+
+    private static func requirement(for operation: Operation) -> OperationRequirement {
+        switch operation {
+        case .brightness:
+            return .networkControl(.brightness)
+        case .brightnessLevel:
+            return .either([
+                .networkControl(.brightnessLevel),
+                .usbSerial(.brightness),
+            ])
+        case .flip:
+            return .either([.networkControl(.flip), .usbSerial(.orientation)])
+        case .rotate:
+            return .either([.networkControl(.rotate), .usbSerial(.quarterTurn)])
+        case .power:
+            return .either([.networkControl(.power), .usbSerial(.power)])
+        case .identify:
+            return .networkControl(.identify)
+        case .restart:
+            return .networkControl(.restart)
+        case .savedWiFi, .rename, .otaPassword:
+            return .usbSerial(.verified)
+        case .firmwareUpdate:
+            return .either([.networkControl(.ota), .usbBootloader])
+        case .wirelessFirmwareUpdate:
+            return .networkControl(.ota)
+        case .streaming:
+            return .liveNetworkSession
+        }
+    }
+
+    private static func operation(
+        for capability: DeviceProtocol.Capabilities
+    ) -> Operation {
+        switch capability {
+        case .brightness: return .brightness
+        case .brightnessLevel: return .brightnessLevel
+        case .flip: return .flip
+        case .rotate: return .rotate
+        case .identify: return .identify
+        case .restart: return .restart
+        case .ota: return .wirelessFirmwareUpdate
+        case .power: return .power
+        default: return .streaming
+        }
+    }
+
+    private func availablePaths(
+        satisfying requirement: OperationRequirement,
+        serviceName: String,
+        panel: PanelSnapshot
+    ) -> [OperationPath] {
+        switch requirement {
+        case .networkControl(let capability):
+            guard networkControlReady(serviceName, panel: panel),
+                  panel.capabilities.contains(capability)
+            else { return [] }
+            return [.network]
+        case .liveNetworkSession:
+            guard sessions[serviceName] != nil, panel.isOnline else { return [] }
+            return [.network]
+        case .usbSerial(let evidence):
+            guard case .verified(let device) = usbSerialState(for: serviceName),
+                  usbDevice(device, reports: evidence)
+            else { return [] }
+            return [.usbSerial(device.path)]
+        case .usbBootloader:
+            guard case .verified(let device) = usbSerialState(for: serviceName),
+                  device.serialStatus != nil,
+                  device.target?.isEmpty == false,
+                  device.board?.isEmpty == false,
+                  device.chip?.isEmpty == false,
+                  device.partition?.isEmpty == false
+            else { return [] }
+            return [.usbBootloaderCandidate(device.path)]
+        case .either(let requirements):
+            return requirements.flatMap {
+                availablePaths(
+                    satisfying: $0, serviceName: serviceName, panel: panel)
+            }
+        }
+    }
+
+    private func networkControlReady(
+        _ serviceName: String, panel: PanelSnapshot
+    ) -> Bool {
+        sessions[serviceName] != nil
+            && panel.isOnline
+            && panel.controlProtocolVersion
+                == Int(DeviceProtocol.controlProtocolVersion)
+    }
+
+    private func usbDevice(
+        _ device: WifiConfigUI.USBDeviceOption, reports evidence: USBEvidence
+    ) -> Bool {
+        guard let status = device.serialStatus else { return false }
+        switch evidence {
+        case .verified:
+            return true
+        case .brightness:
+            return status.brightnessLevel != nil
+        case .power:
+            return status.manuallyOff != nil
+        case .orientation:
+            return status.rotation != nil || status.flipped != nil
+        case .quarterTurn:
+            return (status.rotation != nil || status.flipped != nil)
+                && device.board.map(Self.usbBoardSupportsQuarterTurns) == true
+        }
+    }
+
+    private static func usbBoardSupportsQuarterTurns(_ board: String) -> Bool {
+        ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"]
+            .contains(board)
+    }
+
+    private func unavailableReason(
+        for operation: Operation,
+        requirement: OperationRequirement,
+        serviceName: String,
+        panel: PanelSnapshot
+    ) -> String {
+        if operation == .streaming {
+            return "Streaming and pause require a live WiFi session."
+        }
+
+        if (operation == .brightness || operation == .brightnessLevel),
+           case .verified = usbSerialState(for: serviceName) {
+            return "Brightness over USB needs firmware support that this "
+                + "display does not report."
+        }
+
+        if operation == .firmwareUpdate,
+           case .verified(let device) = usbSerialState(for: serviceName) {
+            guard device.target?.isEmpty == false,
+                  device.board?.isEmpty == false,
+                  device.chip?.isEmpty == false,
+                  device.partition?.isEmpty == false
+            else {
+                return "USB is connected, but the app cannot verify the board "
+                    + "family, chip, profile, and partition safely."
+            }
+        }
+
+        if Self.includesUSB(requirement) {
+            switch usbSerialState(for: serviceName) {
+            case .enumeratedUnverified:
+                return "USB is connected, but the app has not verified this "
+                    + "display's hardware ID yet."
+            case .mismatch:
+                return "The connected USB device does not match this display."
+            case .ambiguous:
+                return "More than one USB device matches this display. Refresh "
+                    + "USB devices and choose the correct one."
+            case .restarting:
+                return "The display is restarting; USB controls will return when "
+                    + "it answers CFGSHOW."
+            case .verified(let device):
+                if operation == .brightness || operation == .brightnessLevel {
+                    return "Brightness over USB needs firmware support that this "
+                        + "display does not report."
+                }
+                if Self.includesUSBSerial(requirement),
+                   device.serialStatus != nil {
+                    return "This firmware does not report support for this control "
+                        + "over the available connection."
+                }
+            case .absent:
+                break
+            }
+        }
+
+        if Self.includesNetwork(requirement) {
+            if sessions[serviceName] != nil || panel.discovered {
+                if panel.isOnline,
+                   panel.controlProtocolVersion
+                    != Int(DeviceProtocol.controlProtocolVersion) {
+                    return "Flash the current firmware to enable remote controls."
+                }
+                if networkControlReady(serviceName, panel: panel),
+                   let capability = Self.networkCapability(in: requirement),
+                   !panel.capabilities.contains(capability) {
+                    if capability == .ota {
+                        return "Wireless updating needs WiFi and an active OTA "
+                            + "password. Connect over USB to set one."
+                    }
+                    return "This display does not report support for "
+                        + "\(Self.describe(capability))."
+                }
+                return "The display is visible on WiFi but has not started a "
+                    + "control session yet."
+            }
+            if !Self.includesUSB(requirement) {
+                if operation == .wirelessFirmwareUpdate {
+                    return "Wireless updating needs WiFi and an active OTA password. "
+                        + "Connect over USB to set one."
+                }
+                return "This control needs the display to be connected over WiFi."
+            }
+        }
+
+        if Self.includesUSB(requirement) && !Self.includesNetwork(requirement) {
+            return "Connect this display to this Mac over USB."
+        }
+        return "Connect this display over USB or let it rejoin WiFi."
+    }
+
+    private static func includesNetwork(_ requirement: OperationRequirement) -> Bool {
+        switch requirement {
+        case .networkControl, .liveNetworkSession: return true
+        case .either(let requirements): return requirements.contains(where: includesNetwork)
+        case .usbSerial, .usbBootloader: return false
+        }
+    }
+
+    private static func includesUSB(_ requirement: OperationRequirement) -> Bool {
+        switch requirement {
+        case .usbSerial, .usbBootloader: return true
+        case .either(let requirements): return requirements.contains(where: includesUSB)
+        case .networkControl, .liveNetworkSession: return false
+        }
+    }
+
+    private static func includesUSBSerial(
+        _ requirement: OperationRequirement
+    ) -> Bool {
+        switch requirement {
+        case .usbSerial: return true
+        case .either(let requirements):
+            return requirements.contains(where: includesUSBSerial)
+        case .networkControl, .liveNetworkSession, .usbBootloader: return false
+        }
+    }
+
+    private static func networkCapability(
+        in requirement: OperationRequirement
+    ) -> DeviceProtocol.Capabilities? {
+        switch requirement {
+        case .networkControl(let capability): return capability
+        case .either(let requirements):
+            return requirements.compactMap(networkCapability).first
+        case .liveNetworkSession, .usbSerial, .usbBootloader: return nil
+        }
     }
 
     private static func describe(_ capability: DeviceProtocol.Capabilities) -> String {
@@ -84,50 +388,117 @@ extension PanelManager {
         }
     }
 
-    /// Why a panel that is otherwise reachable does not offer firmware updates.
-    ///
-    /// Its own message because the generic one - "this display does not report
-    /// support for firmware updates" - is true and useless: OTA is off on every
-    /// panel until someone sets a password over USB, so the answer is always the
-    /// same and it is a thing the user can go and do.
-    ///
-    /// ONE MESSAGE FOR TWO CAUSES, and they are worth naming together. The bit is
-    /// advertised only while the panel is actually listening
-    /// (`otapolicy::advertisesCapability` keys on `Status::On` alone), so it is
-    /// absent both when no password is stored and when a password is stored but
-    /// OTA could not start - the WiFi radio was not up when setup ran. From out
-    /// here those are indistinguishable, and the panel's own `CFGSHOW` is where
-    /// the difference is visible, so the message says what to check rather than
-    /// asserting which one it is.
-    private static let otaUnavailableReason =
-        "Firmware updates are off until this panel has an OTA password. Set one "
-        + "over USB with tools/espdisp.py set-password, then let the panel rejoin "
-        + "WiFi. A panel that has a password but could not start listening does "
-        + "not advertise updates either - tools/espdisp.py config CFGSHOW says "
-        + "which."
-
-    /// Run a control action, refusing with an accurate reason if the display
-    /// cannot honour it. The UI disables these controls using the same check,
-    /// so the refusal is a backstop for a panel that went offline mid-click.
-    private func control(
-        _ serviceName: String,
-        capability: DeviceProtocol.Capabilities,
-        action: (DeviceSession) -> Void
-    ) {
-        if let reason = controlUnavailableReason(serviceName, capability: capability) {
+    @discardableResult
+    func requireOperation(
+        _ operation: Operation, for serviceName: String, title: String
+    ) -> Bool {
+        if let reason = operationUnavailableReason(serviceName, operation: operation) {
             operationOutcome = .failure(
-                "\(Self.describe(capability).capitalizedFirst) unavailable", reason)
+                "\(title) unavailable", reason)
+            return false
+        }
+        return true
+    }
+
+    private func preferredPath(
+        for operation: Operation, serviceName: String
+    ) -> OperationPath? {
+        switch operationAvailability(serviceName, operation: operation) {
+        case .available(let paths):
+            return paths.first
+        case .unavailable(let reason):
+            operationOutcome = .failure(
+                "\(Self.operationTitle(operation)) unavailable", reason)
+            return nil
+        }
+    }
+
+    private static func operationTitle(_ operation: Operation) -> String {
+        switch operation {
+        case .brightness, .brightnessLevel: return "Brightness"
+        case .flip, .rotate: return "Rotation"
+        case .power: return "Power control"
+        case .identify: return "Identify"
+        case .restart: return "Remote restart"
+        case .savedWiFi: return "WiFi configuration"
+        case .rename: return "Rename"
+        case .otaPassword: return "OTA password"
+        case .firmwareUpdate, .wirelessFirmwareUpdate: return "Firmware updates"
+        case .streaming: return "Streaming"
+        }
+    }
+
+    private func performUSBControl(
+        _ command: String,
+        path: String,
+        serviceName: String
+    ) async {
+        let generation = usbPathGeneration(path)
+        let sender = usbControlSender
+        let result = await Task.detached(priority: .utility) {
+            sender(command, path, 4)
+        }.value
+        guard generation == usbPathGeneration(path) else {
+            operationOutcome = .failure(
+                "USB control unavailable",
+                "The display is restarting; USB controls will return when it "
+                    + "answers CFGSHOW.")
             return
         }
-        guard let session = sessions[serviceName] else { return }
-        action(session)
+        switch result {
+        case .success:
+            await reprobeAfterUSBControl(path)
+        case .failure(let reason):
+            await reprobeAfterUSBControl(path)
+            operationOutcome = .failure("USB control failed", reason)
+        }
+    }
+
+    private func reprobeAfterUSBControl(_ path: String) async {
+        if let usbControlReprobe {
+            await usbControlReprobe(path, 3)
+        } else {
+            _ = await probeUSBDevice(path, timeout: 3)
+        }
+    }
+
+    private func queueUSBControl(
+        _ command: String,
+        path: String,
+        serviceName: String,
+        coalescingBrightness: Bool = false
+    ) {
+        if coalescingBrightness {
+            pendingUSBBrightness[serviceName] = (command, path)
+            guard usbBrightnessTasks[serviceName] == nil else { return }
+            let work = Task { @MainActor [weak self] in
+                guard let self else { return }
+                while true {
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    guard let pending = self.pendingUSBBrightness.removeValue(
+                        forKey: serviceName)
+                    else { break }
+                    await self.performUSBControl(
+                        pending.command, path: pending.path,
+                        serviceName: serviceName)
+                }
+                self.usbBrightnessTasks[serviceName] = nil
+            }
+            usbBrightnessTasks[serviceName] = work
+        } else {
+            Task { @MainActor [weak self] in
+                await self?.performUSBControl(
+                    command, path: path, serviceName: serviceName)
+            }
+        }
     }
 
     func setBrightness(high: Bool, for serviceName: String) {
-        control(serviceName, capability: .brightness) { session in
-            updatePanel(serviceName) { $0.brightnessHigh = high }
-            session.setBrightness(high: high)
-        }
+        guard preferredPath(for: .brightness, serviceName: serviceName) == .network,
+              let session = sessions[serviceName]
+        else { return }
+        updatePanel(serviceName) { $0.brightnessHigh = high }
+        session.setBrightness(high: high)
     }
 
     /// Set an exact backlight level on firmware that accepts one.
@@ -137,13 +508,25 @@ extension PanelManager {
     /// suppressed until it catches up, because they lag the drag and would
     /// otherwise fight the thumb.
     func setBrightnessLevel(_ level: Int, for serviceName: String) {
-        control(serviceName, capability: .brightnessLevel) { session in
-            let clamped = min(
-                max(level, DeviceProtocol.brightnessLevelRange.lowerBound),
-                DeviceProtocol.brightnessLevelRange.upperBound)
+        let clamped = min(
+            max(level, DeviceProtocol.brightnessLevelRange.lowerBound),
+            DeviceProtocol.brightnessLevelRange.upperBound)
+        guard let path = preferredPath(for: .brightnessLevel, serviceName: serviceName)
+        else { return }
+        switch path {
+        case .network:
+            guard let session = sessions[serviceName] else { return }
             updatePanel(serviceName) { $0.brightness = clamped }
             commandedBrightness[serviceName] = (level: clamped, at: Date())
             session.setBrightnessLevel(clamped)
+        case .usbSerial(let port):
+            guard let command = ConfigCommands.setBrightnessLevel(clamped) else { return }
+            updatePanel(serviceName) { $0.brightness = clamped }
+            queueUSBControl(
+                command, path: port, serviceName: serviceName,
+                coalescingBrightness: true)
+        case .usbBootloaderCandidate:
+            return
         }
     }
 
@@ -170,15 +553,22 @@ extension PanelManager {
     }
 
     func setFlip(_ flipped: Bool, for serviceName: String) {
-        control(serviceName, capability: .flip) { session in
-            updatePanel(serviceName) { panel in
-                panel.flipped = flipped
-                // The firmware treats flip as absolute (1 -> rotation 2,
-                // 0 -> upright), so mirror that locally too - the next
-                // acknowledgement confirms it either way.
-                panel.rotation = flipped ? 2 : 0
-            }
+        guard let path = preferredPath(for: .flip, serviceName: serviceName)
+        else { return }
+        updatePanel(serviceName) { panel in
+            panel.flipped = flipped
+            panel.rotation = flipped ? 2 : 0
+        }
+        switch path {
+        case .network:
+            guard let session = sessions[serviceName] else { return }
             session.setFlip(flipped)
+        case .usbSerial(let port):
+            queueUSBControl(
+                ConfigCommands.setFlip(flipped), path: port,
+                serviceName: serviceName)
+        case .usbBootloaderCandidate:
+            return
         }
     }
 
@@ -188,15 +578,24 @@ extension PanelManager {
     /// 90-degree case is the landscape mechanism, not MADCTL). `setFlip`
     /// stays alongside for those panels.
     func setRotation(_ rotation: Int, for serviceName: String) {
-        control(serviceName, capability: .rotate) { session in
-            let clamped = min(
-                max(rotation, DeviceProtocol.rotationRange.lowerBound),
-                DeviceProtocol.rotationRange.upperBound)
-            updatePanel(serviceName) { panel in
-                panel.rotation = clamped
-                panel.flipped = clamped == 2
-            }
+        let clamped = min(
+            max(rotation, DeviceProtocol.rotationRange.lowerBound),
+            DeviceProtocol.rotationRange.upperBound)
+        guard let path = preferredPath(for: .rotate, serviceName: serviceName)
+        else { return }
+        updatePanel(serviceName) { panel in
+            panel.rotation = clamped
+            panel.flipped = clamped == 2
+        }
+        switch path {
+        case .network:
+            guard let session = sessions[serviceName] else { return }
             session.setRotation(clamped)
+        case .usbSerial(let port):
+            guard let command = ConfigCommands.setRotation(clamped) else { return }
+            queueUSBControl(command, path: port, serviceName: serviceName)
+        case .usbBootloaderCandidate:
+            return
         }
     }
 
@@ -206,19 +605,35 @@ extension PanelManager {
     /// by the next drawn frame. Every board advertises `.power` (see
     /// `DeviceProtocol.Capabilities.power`), so this is never gated on chip.
     func setPower(_ on: Bool, for serviceName: String) {
-        control(serviceName, capability: .power) { session in
-            updatePanel(serviceName) { $0.manuallyOff = !on }
+        guard let path = preferredPath(for: .power, serviceName: serviceName)
+        else { return }
+        updatePanel(serviceName) { $0.manuallyOff = !on }
+        switch path {
+        case .network:
+            guard let session = sessions[serviceName] else { return }
             session.setPower(on)
+        case .usbSerial(let port):
+            queueUSBControl(
+                ConfigCommands.setPower(on), path: port,
+                serviceName: serviceName)
+        case .usbBootloaderCandidate:
+            return
         }
     }
 
     func identify(_ serviceName: String) {
+        guard preferredPath(for: .identify, serviceName: serviceName) == .network,
+              let session = sessions[serviceName]
+        else { return }
         let seconds = settings.identifySeconds
-        control(serviceName, capability: .identify) { $0.identify(seconds: seconds) }
+        session.identify(seconds: seconds)
     }
 
     func restart(_ serviceName: String) {
-        control(serviceName, capability: .restart) { $0.restartDevice() }
+        guard preferredPath(for: .restart, serviceName: serviceName) == .network,
+              let session = sessions[serviceName]
+        else { return }
+        session.restartDevice()
     }
 
 

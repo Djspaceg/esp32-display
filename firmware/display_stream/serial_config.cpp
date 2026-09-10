@@ -15,9 +15,12 @@
 #include "ota_policy.h"
 #include "ota_service.h"
 #include "prefs_store.h"
+#include "serial_config_protocol.h"
 #include "signal_led.h"
 #include "telemetry.h"
 #include "tile_bench.h"
+#include "ui_screens.h"
+#include "wifi_presets.h"
 
 
 static Stream *selectedConfigPort = &Serial;
@@ -69,6 +72,107 @@ static void processConfigLine(char *line) {
     return;
   }
 
+  const wifipresets::ParsedCommand wifiCommand =
+      wifipresets::parseCommand(line);
+  if (wifiCommand.kind != wifipresets::CommandKind::Unknown) {
+    if (wifiCommand.error != wifipresets::CommandError::None) {
+      configSerial().println(
+          wifipresets::commandErrorText(wifiCommand.error));
+      return;
+    }
+
+    char reply[192] = {};
+    switch (wifiCommand.kind) {
+      case wifipresets::CommandKind::Set: {
+        const WifiStoreResult result =
+            saveWifiPreset(wifiCommand.slot, wifiCommand.credentials);
+        if (result.status != WifiStoreStatus::Ok) {
+          wifipresets::formatSaveFailedReply(reply, sizeof(reply),
+                                             wifiCommand.slot);
+        } else {
+          wifipresets::formatSavedReply(
+              reply, sizeof(reply), wifiCommand.slot,
+              wifiCommand.credentials.ssidLength,
+              wifiCommand.credentials.passwordLength > 0, result.activeSlot);
+        }
+        configSerial().println(reply);
+        return;
+      }
+      case wifipresets::CommandKind::Clear: {
+        const WifiStoreResult result = clearWifiPreset(wifiCommand.slot);
+        if (result.status != WifiStoreStatus::Ok) {
+          wifipresets::formatSaveFailedReply(reply, sizeof(reply),
+                                             wifiCommand.slot);
+        } else {
+          wifipresets::formatClearedReply(reply, sizeof(reply),
+                                          wifiCommand.slot, result.activeSlot);
+        }
+        configSerial().println(reply);
+        return;
+      }
+      case wifipresets::CommandKind::Use: {
+        const WifiStoreStatus status = selectWifiPreset(wifiCommand.slot);
+        if (status == WifiStoreStatus::Unavailable) {
+          wifipresets::formatUnavailableReply(reply, sizeof(reply),
+                                              wifiCommand.slot);
+          configSerial().println(reply);
+          return;
+        }
+        if (status != WifiStoreStatus::Ok) {
+          wifipresets::formatSaveFailedReply(reply, sizeof(reply),
+                                             wifiCommand.slot);
+          configSerial().println(reply);
+          return;
+        }
+        showInfoBar("SWITCHING");
+        wifipresets::formatSelectedReply(reply, sizeof(reply),
+                                         wifiCommand.slot);
+        configSerial().println(reply);
+        configSerial().flush();
+        delay(200);
+        ESP.restart();
+        return;
+      }
+      case wifipresets::CommandKind::ShowRoster: {
+        const bool local =
+            bcfg->hasBootButton() || (bcfg->hasTouch() && touchAvailable);
+        wifipresets::formatRosterReply(
+            reply, sizeof(reply), validWifiPresetMask(),
+            activeWifiPresetSlot(), local);
+        configSerial().println(reply);
+        return;
+      }
+      case wifipresets::CommandKind::ShowSlot: {
+        wifipresets::Credentials credentials;
+        if (!loadWifiPreset(wifiCommand.slot, credentials)) {
+          wifipresets::formatInvalidSlotReply(reply, sizeof(reply),
+                                              wifiCommand.slot);
+          configSerial().println(reply);
+          return;
+        }
+        unsigned char ssid64[48];
+        size_t ssid64Length = 0;
+        if (mbedtls_base64_encode(
+                ssid64, sizeof(ssid64) - 1, &ssid64Length, credentials.ssid,
+                credentials.ssidLength) != 0) {
+          wifipresets::formatInvalidSlotReply(reply, sizeof(reply),
+                                              wifiCommand.slot);
+          configSerial().println(reply);
+          return;
+        }
+        ssid64[ssid64Length] = 0;
+        wifipresets::formatValidSlotReply(
+            reply, sizeof(reply), wifiCommand.slot,
+            activeWifiPresetSlot() == wifiCommand.slot,
+            (const char *)ssid64, credentials.passwordLength > 0);
+        configSerial().println(reply);
+        return;
+      }
+      case wifipresets::CommandKind::Unknown:
+        break;
+    }
+  }
+
   if (strncmp(line, "CFGWIFI ", 8) == 0) {
     // CFGWIFI <b64 ssid> <b64 pass>  set both (empty pass = open network)
     // CFGWIFI <b64 ssid>             keep the password currently in use
@@ -112,6 +216,7 @@ static void processConfigLine(char *line) {
     // from the compiled fallback) so "keep" means exactly "what works now"
     // regardless of where it came from.
     prefs.putString("pass", keepPassword ? cfgPass : String((const char *)pass));
+    prefs.putUChar("wfactive", wifipresets::ACTIVE_DIRECT);
     prefs.end();
 
     configSerial().printf("CFGOK saved \"%s\"%s, restarting\n", (const char *)ssid,
@@ -204,6 +309,16 @@ static void processConfigLine(char *line) {
     saveDisplayPrefs();
     applyBacklight();
     configSerial().printf("CFGOK pwr=%s (saved)\n", panelManuallyOff ? "off" : "on");
+  } else if (serialcfg::hasBrightnessVerb(line)) {
+    uint8_t level = 0;
+    if (!serialcfg::parseBrightness(line, level)) {
+      configSerial().println("CFGERR expected: CFGBRIGHT <1-255>");
+      return;
+    }
+    userBlLevel = level;
+    saveDisplayPrefs();
+    applyBacklight();
+    configSerial().printf("CFGOK bllevel=%u (saved)\n", (unsigned)userBlLevel);
   } else if (strncmp(line, "CFGBOARD ", 9) == 0) {
     // Override C6 board auto-detection. Fixed S3 builds parse every profile
     // token for telemetry round-trips but reject overrides below.
@@ -460,6 +575,9 @@ static void processConfigLine(char *line) {
     mbedtls_base64_encode(name64, sizeof(name64) - 1, &name64Len,
                           (const unsigned char *)cfgName.c_str(), cfgName.length());
     name64[name64Len] = 0;
+    char extension[64];
+    serialcfg::formatShowExtension(
+        extension, sizeof(extension), userBlLevel, FW_VERSION);
     // ota= is three-valued on purpose: "off" (no password stored), "pending" (a
     // password is stored but the radio was not ready when setup ran, so nothing
     // is listening yet), "on" (listening). Reporting only on/off would make a
@@ -471,7 +589,7 @@ static void processConfigLine(char *line) {
         "CFGINFO ssid64=%s name64=%s id=%02x%02x%02x%02x%02x%02x "
         "connected=%d ip=%s rssi=%d flip=%d rot=%u auto=%u effective=%u "
         "motion=%d bl=%s pwr=%s board=%s profile=%s target=%s chip=%s "
-        "partition=%s bat=%d ota=%s ssid=%s\n",
+        "partition=%s bat=%d ota=%s ssid=%s%s\n",
         (const char *)b64, (const char *)name64,
         deviceId[0], deviceId[1], deviceId[2],
         deviceId[3], deviceId[4], deviceId[5],
@@ -484,7 +602,7 @@ static void processConfigLine(char *line) {
         board::targetToken(boardVariant), bcfg->platform->chipToken,
         bcfg->platform->partitionToken,
         batteryPercentOrUnknown(),
-        otapolicy::statusToken(currentOtaStatus()), cfgSsid.c_str());
+        otapolicy::statusToken(currentOtaStatus()), cfgSsid.c_str(), extension);
   }
   // Anything else on serial is ignored (a monitor typing away is harmless).
 }
@@ -522,4 +640,3 @@ void handleSerialConfig() {
   }
   replyConfigPort = selectedConfigPort;
 }
-

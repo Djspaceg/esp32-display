@@ -13,6 +13,174 @@ import XCTest
 final class TileProtocolTests: XCTestCase {
     private let g466 = TileGeometry(width: 466, height: 466)
 
+    private struct PackedRecord {
+        let startTile: Int
+        let runLength: Int
+        let codec: Int
+        let visibleSpans: Bool
+        let payload: [UInt8]
+    }
+
+    private func deterministicFrame() -> [UInt8] {
+        var pixels = [UInt8](repeating: 0, count: g466.frameBytes)
+        var seed: UInt32 = 0xC0FFEE
+        for at in stride(from: 0, to: pixels.count, by: 2) {
+            seed = seed &* 1_664_525 &+ 1_013_904_223
+            pixels[at] = UInt8((seed >> 24) & 0xFF)
+            pixels[at + 1] = UInt8((seed >> 16) & 0xFF)
+        }
+        return pixels
+    }
+
+    private func packedRecords(
+        _ packets: [Data], dirtyCount: Int
+    ) -> [PackedRecord] {
+        var records = [PackedRecord]()
+        for packet in packets {
+            XCTAssertLessThanOrEqual(packet.count, TileGeometry.maxPacketBytes)
+            let bytes = [UInt8](packet)
+            XCTAssertGreaterThanOrEqual(bytes.count, TileGeometry.headerBytes)
+            guard bytes.count >= TileGeometry.headerBytes else { continue }
+            XCTAssertEqual(
+                Int(bytes[4]) | (Int(bytes[5] & 0x7F) << 8), dirtyCount)
+
+            let firstTile = Int(bytes[2]) | (Int(bytes[3] & 0x03) << 8)
+            var firstRecordTile: Int?
+            var at = TileGeometry.headerBytes
+            while at < bytes.count {
+                XCTAssertLessThanOrEqual(
+                    at + TileGeometry.recordHeaderBytes, bytes.count,
+                    "record header crossed a datagram boundary")
+                guard at + TileGeometry.recordHeaderBytes <= bytes.count else {
+                    break
+                }
+                let tileField = Int(bytes[at]) | (Int(bytes[at + 1]) << 8)
+                let lenField = Int(bytes[at + 2]) | (Int(bytes[at + 3]) << 8)
+                let startTile = tileField & 0x03FF
+                let runLength = ((tileField >> 10) & 0x1F) + 1
+                let payloadBytes = lenField & 0x3FFF
+                let payloadStart = at + TileGeometry.recordHeaderBytes
+                let payloadEnd = payloadStart + payloadBytes
+                XCTAssertLessThanOrEqual(
+                    payloadEnd, bytes.count,
+                    "record payload crossed a datagram boundary")
+                guard payloadEnd <= bytes.count else { break }
+
+                firstRecordTile = firstRecordTile ?? startTile
+                XCTAssertLessThanOrEqual(
+                    runLength, TileGeometry.maxRunTiles)
+                records.append(PackedRecord(
+                    startTile: startTile, runLength: runLength,
+                    codec: lenField >> TileProtocol.recordCodecShift,
+                    visibleSpans:
+                        tileField & Int(TileProtocol.recordVisibleSpansFlag) != 0,
+                    payload: Array(bytes[payloadStart..<payloadEnd])))
+                at = payloadEnd
+            }
+            XCTAssertEqual(at, bytes.count)
+            XCTAssertEqual(firstRecordTile, firstTile)
+        }
+        return records
+    }
+
+    private func writeDecoded(
+        _ decoded: [UInt8], startTile: Int, runLength: Int,
+        halfResolution: Bool, into frame: inout [UInt8]
+    ) {
+        let width = g466.runPixelWidth(
+            startTile: startTile, runLength: runLength)
+        let height = g466.rowHeight(g466.row(startTile))
+        let encodedWidth = halfResolution ? TileProtocol.halfDim(width) : width
+        let encodedHeight = halfResolution ? TileProtocol.halfDim(height) : height
+        XCTAssertEqual(decoded.count, encodedWidth * encodedHeight * 2)
+        guard decoded.count == encodedWidth * encodedHeight * 2 else { return }
+
+        let x0 = g466.col(startTile) * TileGeometry.tileDim
+        let y0 = g466.row(startTile) * TileGeometry.tileDim
+        for y in 0..<height {
+            let sourceY = halfResolution ? min(y / 2, encodedHeight - 1) : y
+            for x in 0..<width {
+                let sourceX = halfResolution ? min(x / 2, encodedWidth - 1) : x
+                let source = (sourceY * encodedWidth + sourceX) * 2
+                let target = ((y0 + y) * g466.width + x0 + x) * 2
+                frame[target] = decoded[source]
+                frame[target + 1] = decoded[source + 1]
+            }
+        }
+    }
+
+    private func decodedBc1Frame(
+        records: [PackedRecord], halfResolution: Bool
+    ) -> [UInt8] {
+        var frame = [UInt8](repeating: 0, count: g466.frameBytes)
+        for record in records {
+            let width = g466.runPixelWidth(
+                startTile: record.startTile, runLength: record.runLength)
+            let height = g466.rowHeight(g466.row(record.startTile))
+            let encodedWidth =
+                halfResolution ? TileProtocol.halfDim(width) : width
+            let encodedHeight =
+                halfResolution ? TileProtocol.halfDim(height) : height
+            guard let decoded = BC1.decode(
+                record.payload, width: encodedWidth, height: encodedHeight)
+            else {
+                XCTFail("BC1 record did not decode")
+                continue
+            }
+            writeDecoded(
+                decoded, startTile: record.startTile,
+                runLength: record.runLength,
+                halfResolution: halfResolution, into: &frame)
+        }
+        return frame
+    }
+
+    private func referenceBc1Frame(
+        pixels: [UInt8], dirtyTiles: [Int], halfResolution: Bool
+    ) -> [UInt8] {
+        var frame = [UInt8](repeating: 0, count: g466.frameBytes)
+        for run in TileProtocol.mergeRuns(
+            dirtyTiles: dirtyTiles, geometry: g466
+        ) {
+            let width = g466.runPixelWidth(
+                startTile: run.start, runLength: run.length)
+            let height = g466.rowHeight(g466.row(run.start))
+            let raw = TileProtocol.extractRun(
+                pixels: pixels, geometry: g466,
+                startTile: run.start, runLength: run.length)
+            let source: [UInt8]
+            let encodedWidth: Int
+            let encodedHeight: Int
+            if halfResolution {
+                guard let small = TileProtocol.downsample(
+                    raw[...], width: width, height: height)
+                else {
+                    XCTFail("reference downsample failed")
+                    continue
+                }
+                source = small
+                encodedWidth = TileProtocol.halfDim(width)
+                encodedHeight = TileProtocol.halfDim(height)
+            } else {
+                source = raw
+                encodedWidth = width
+                encodedHeight = height
+            }
+            guard let encoded = BC1.encode(
+                      source[...], width: encodedWidth, height: encodedHeight),
+                  let decoded = BC1.decode(
+                      encoded, width: encodedWidth, height: encodedHeight)
+            else {
+                XCTFail("reference BC1 round trip failed")
+                continue
+            }
+            writeDecoded(
+                decoded, startTile: run.start, runLength: run.length,
+                halfResolution: halfResolution, into: &frame)
+        }
+        return frame
+    }
+
     // MARK: - Grid geometry
 
     func testGridFor466Panel() {
@@ -286,6 +454,188 @@ final class TileProtocolTests: XCTestCase {
         }
         XCTAssertEqual(tilesCovered.sorted(), Array(0..<30))
         XCTAssertEqual(Set(tilesCovered).count, 30)
+    }
+
+    func testOversizeRleRunKeepsItsCodecWhenSplit() {
+        var pixels = [UInt8](repeating: 0, count: g466.frameBytes)
+        for pixel in 0..<(466 * 16) {
+            let value = UInt16(pixel / 2)
+            pixels[pixel * 2] = UInt8(value >> 8)
+            pixels[pixel * 2 + 1] = UInt8(value & 0xFF)
+        }
+
+        let packets = TilePacker.packets(
+            frameId: 4, dirtyTiles: Array(0..<30), pixels: pixels,
+            geometry: g466, landscape: false, policy: .losslessOnly)
+        XCTAssertGreaterThan(packets.count, 1)
+        let records = packedRecords(packets, dirtyCount: 30)
+        XCTAssertTrue(records.allSatisfy { $0.codec == 1 })
+        XCTAssertEqual(
+            records.flatMap {
+                Array($0.startTile..<($0.startTile + $0.runLength))
+            },
+            Array(0..<30))
+        for record in records {
+            let expected = TileProtocol.extractRun(
+                pixels: pixels, geometry: g466,
+                startTile: record.startTile, runLength: record.runLength)
+            XCTAssertEqual(
+                RLE565.decode(record.payload, expectedBytes: expected.count),
+                expected)
+        }
+    }
+
+    func testPacketFillingPreservesMixedRunCodecChoices() {
+        var pixels = [UInt8](repeating: 0, count: g466.frameBytes)
+        var seed: UInt32 = 7
+        for y in 0..<16 {
+            for x in 240..<466 {
+                seed = seed &* 1_664_525 &+ 1_013_904_223
+                let at = (y * 466 + x) * 2
+                pixels[at] = UInt8((seed >> 24) & 0xFF)
+                pixels[at + 1] = UInt8((seed >> 16) & 0xFF)
+            }
+        }
+
+        let packets = TilePacker.packets(
+            frameId: 5, dirtyTiles: Array(0..<30), pixels: pixels,
+            geometry: g466, landscape: false, policy: .aggressive)
+        let records = packedRecords(packets, dirtyCount: 30)
+        var codecByTile = [Int](repeating: -1, count: 30)
+        for record in records {
+            for tile in record.startTile..<(record.startTile + record.runLength) {
+                codecByTile[tile] = record.codec
+            }
+        }
+        XCTAssertEqual(Array(codecByTile[0..<15]), [Int](repeating: 1, count: 15))
+        XCTAssertEqual(Array(codecByTile[15..<30]), [Int](repeating: 2, count: 15))
+    }
+
+    func testRoundMaskFullFrameFillsCurrentDatagram() {
+        let mask = TileMask(geometry: g466, round: true)
+        let pixels = deterministicFrame()
+
+        let bc1 = TilePacker.packets(
+            frameId: 1, dirtyTiles: mask.visibleTiles, pixels: pixels,
+            geometry: g466, landscape: false, policy: .aggressive)
+        XCTAssertEqual(bc1.count, 65)
+        XCTAssertEqual(bc1.reduce(0) { $0 + $1.count }, 91_830)
+        let bc1Records = packedRecords(bc1, dirtyCount: 719)
+        XCTAssertEqual(bc1Records.count, 92)
+        XCTAssertTrue(bc1Records.allSatisfy { $0.codec == 2 })
+        XCTAssertTrue(bc1Records.allSatisfy { !$0.visibleSpans })
+        XCTAssertEqual(
+            bc1Records.flatMap {
+                Array($0.startTile..<($0.startTile + $0.runLength))
+            },
+            mask.visibleTiles)
+        XCTAssertEqual(
+            decodedBc1Frame(records: bc1Records, halfResolution: false),
+            referenceBc1Frame(
+                pixels: pixels, dirtyTiles: mask.visibleTiles,
+                halfResolution: false))
+
+        let half = TilePacker.packets(
+            frameId: 1, dirtyTiles: mask.visibleTiles, pixels: pixels,
+            geometry: g466, landscape: false, policy: .aggressive,
+            forceHalfRes: true)
+        XCTAssertEqual(half.count, 16)
+        XCTAssertEqual(half.reduce(0) { $0 + $1.count }, 23_120)
+        let halfRecords = packedRecords(half, dirtyCount: 719)
+        XCTAssertEqual(halfRecords.count, 44)
+        XCTAssertTrue(halfRecords.allSatisfy { $0.codec == 3 })
+        XCTAssertTrue(halfRecords.allSatisfy { !$0.visibleSpans })
+        XCTAssertEqual(
+            halfRecords.flatMap {
+                Array($0.startTile..<($0.startTile + $0.runLength))
+            },
+            mask.visibleTiles)
+        XCTAssertEqual(
+            decodedBc1Frame(records: halfRecords, halfResolution: true),
+            referenceBc1Frame(
+                pixels: pixels, dirtyTiles: mask.visibleTiles,
+                halfResolution: true))
+    }
+
+    func testVisibleSpanPackingCarriesOnlyVisiblePixels() {
+        let mask = TileMask(geometry: g466, round: true)
+        let pixels = deterministicFrame()
+        let packets = TilePacker.packets(
+            frameId: 2, dirtyTiles: mask.visibleTiles, pixels: pixels,
+            geometry: g466, landscape: false, policy: .losslessOnly,
+            visibleSpanMask: mask)
+        let records = packedRecords(packets, dirtyCount: 719)
+        var sawVisibleSpans = false
+        var covered = [Int]()
+
+        for record in records {
+            covered.append(
+                contentsOf:
+                    record.startTile..<(record.startTile + record.runLength))
+            XCTAssertTrue((0..<record.runLength).allSatisfy {
+                mask.isVisible(record.startTile + $0)
+            })
+            let visible = TileProtocol.extractVisibleRun(
+                pixels: pixels, geometry: g466,
+                startTile: record.startTile, runLength: record.runLength,
+                mask: mask)
+
+            if record.visibleSpans {
+                sawVisibleSpans = true
+                guard let visible else {
+                    XCTFail("span flag set for an unclipped record")
+                    continue
+                }
+                let descriptorBytes = visible.spans.count
+                    * TileProtocol.visibleSpanDescriptorBytes
+                XCTAssertGreaterThanOrEqual(
+                    record.payload.count, descriptorBytes)
+                guard record.payload.count >= descriptorBytes else { continue }
+
+                var spans = [Range<Int>]()
+                for row in 0..<visible.spans.count {
+                    let at = row * TileProtocol.visibleSpanDescriptorBytes
+                    let offset = Int(record.payload[at])
+                        | (Int(record.payload[at + 1]) << 8)
+                    let count = Int(record.payload[at + 2])
+                        | (Int(record.payload[at + 3]) << 8)
+                    spans.append(offset..<(offset + count))
+                }
+                XCTAssertEqual(spans, visible.spans)
+
+                let encoded = Array(record.payload[descriptorBytes...])
+                let decoded: [UInt8]?
+                switch record.codec {
+                case 0:
+                    decoded = encoded
+                case 1:
+                    decoded = RLE565.decode(
+                        encoded, expectedBytes: visible.pixels.count)
+                default:
+                    decoded = nil
+                }
+                XCTAssertEqual(decoded, visible.pixels)
+            } else {
+                XCTAssertNil(visible)
+                let raw = TileProtocol.extractRun(
+                    pixels: pixels, geometry: g466,
+                    startTile: record.startTile, runLength: record.runLength)
+                let decoded: [UInt8]?
+                switch record.codec {
+                case 0:
+                    decoded = record.payload
+                case 1:
+                    decoded = RLE565.decode(
+                        record.payload, expectedBytes: raw.count)
+                default:
+                    decoded = nil
+                }
+                XCTAssertEqual(decoded, raw)
+            }
+        }
+
+        XCTAssertTrue(sawVisibleSpans)
+        XCTAssertEqual(covered, mask.visibleTiles)
     }
 
     // MARK: - Lossy policy and the variance gate

@@ -62,8 +62,8 @@ final class DeviceBrowser {
     /// Turn browse results into devices: drop anything that is not a Bonjour
     /// service, parse the TXT records, and sort by name.
     ///
-    /// Pure, and the sort is part of it - the window's panel order comes from
-    /// here.
+    /// Pure, and sorted so callback input is deterministic. `PanelManager`
+    /// applies the user's remembered sidebar order to owned records.
     static func devices(from advertisements: [Advertisement]) -> [Device] {
         let devices = advertisements.compactMap { advertisement -> Device? in
             guard case .service(let name, _, _, _) = advertisement.endpoint else {

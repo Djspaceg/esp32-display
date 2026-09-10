@@ -340,6 +340,19 @@ extension PanelManager {
     }
 
     func setPaused(_ paused: Bool, for serviceName: String) {
+        guard requireOperation(.streaming, for: serviceName, title: "Streaming")
+        else { return }
+        applyPaused(paused, for: serviceName)
+    }
+
+    /// A touch event already arrived through the device session. Keep its local
+    /// toggle path separate from a UI/script request that still needs a live
+    /// availability check at dispatch time.
+    func setPausedFromDevice(_ paused: Bool, for serviceName: String) {
+        applyPaused(paused, for: serviceName)
+    }
+
+    private func applyPaused(_ paused: Bool, for serviceName: String) {
         sessions[serviceName]?.setPaused(paused)
         updatePanel(serviceName) { $0.paused = paused }
     }

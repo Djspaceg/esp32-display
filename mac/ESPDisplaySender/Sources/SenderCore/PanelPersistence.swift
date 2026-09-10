@@ -8,14 +8,18 @@ import SenderProtocol
 /// counters, brightness, flip, sleep, and pause state, plus the negotiated
 /// protocol versions and capability bits — is deliberately excluded, because
 /// restoring those from disk presents a reading taken minutes or weeks ago as
-/// if it were current. A field belongs here only if the user set it or if it is
-/// needed to recognise the same panel again.
+/// if it were current. A field belongs here only if the user set it, if it is
+/// needed to recognise the same panel again, or if it records the local record's
+/// own lifecycle.
 struct PersistedPanel: Codable, Equatable {
     /// Bonjour service name. Still the live routing key, so it is stored to
     /// reattach a record to a session before EINF arrives with the hardware ID.
     var serviceName: String
     /// Shown in the UI, set by the device's own name or by an explicit rename.
     var displayName: String
+    /// When the user added this record. Optional only so files from builds that
+    /// predate the field continue to decode.
+    var dateAdded: Date?
     /// Stable across renames and re-flashes; the real identity of the panel.
     var hardwareID: String?
     /// Stable identity of the USB device the user assigned. The serial path is
@@ -42,6 +46,9 @@ struct PersistedPanel: Codable, Equatable {
     init(snapshot: PanelSnapshot) {
         serviceName = snapshot.serviceName
         displayName = snapshot.displayName
+        dateAdded = Date(
+            timeIntervalSince1970:
+                snapshot.dateAdded.timeIntervalSince1970.rounded(.down))
         hardwareID = snapshot.hardwareID
         usbHardwareID = snapshot.usbHardwareID
         usbPort = snapshot.usbPort
@@ -60,6 +67,7 @@ struct PersistedPanel: Codable, Equatable {
         var panel = PanelSnapshot(
             serviceName: serviceName,
             displayName: displayName,
+            dateAdded: dateAdded ?? lastSeen ?? .distantPast,
             hardwareID: hardwareID,
             address: address,
             usbPort: usbPort,
