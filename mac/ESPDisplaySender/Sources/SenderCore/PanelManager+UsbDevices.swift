@@ -201,7 +201,12 @@ extension PanelManager {
     /// paths are identified automatically; the explicit refresh action below
     /// re-probes every connected device.
     func refreshUSBPorts() {
-        let paths = WifiConfigUI.candidatePorts()
+        let added = updateUSBPorts(WifiConfigUI.candidatePorts())
+        identifyUSBPorts(added)
+    }
+
+    @discardableResult
+    func updateUSBPorts(_ paths: [String]) -> [String] {
         let existing = Dictionary(
             usbDevices.map { ($0.path, $0) },
             uniquingKeysWith: { first, _ in first })
@@ -211,7 +216,8 @@ extension PanelManager {
         for path in added { usbPathGenerations[path, default: 0] += 1 }
         let refreshed = paths.map { existing[$0] ?? WifiConfigUI.USBDeviceOption(path: $0) }
         if refreshed != usbDevices { usbDevices = refreshed }
-        identifyUSBPorts(added)
+        if !removed.isEmpty { sortPanels() }
+        return added
     }
 
     func refreshUSBDevices() {
