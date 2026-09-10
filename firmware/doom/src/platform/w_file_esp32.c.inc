@@ -94,7 +94,7 @@ static bool ensure_wad_mapped(void) {
     const esp_partition_t* part = esp_partition_find_first(
         (esp_partition_type_t)DOOM_WAD_PARTITION_TYPE,
         (esp_partition_subtype_t)DOOM_WAD_PARTITION_SUBTYPE,
-        NULL);
+        "doom_wad");
 
     uint32_t mapped_size = 0;
     if (part != NULL) {

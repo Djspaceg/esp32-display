@@ -1,4 +1,4 @@
-// Unity build for the Doom engine on ESP32-S3.
+// Unity build for the Doom engine on supported ESP32 targets.
 // Compiles all engine + platform C source as one translation unit,
 // eliminating linker archive issues with Arduino's library system.
 // This file is the ONLY .c that needs to be compiled for the engine.
@@ -15,7 +15,7 @@
 
 // Platform stubs and bridge (order matters: stubs before engine)
 #include "platform/doom_esp32_stubs.c.inc"
-#include "platform/doomgeneric_esp32s3.c.inc"
+#include "platform/doomgeneric_esp32.c.inc"
 #include "platform/w_file_esp32.c.inc"
 
 // Network stub

@@ -14,7 +14,7 @@
 
 #include "platform/doom_splash.h"
 
-// From doomgeneric_esp32s3.c and the C engine unity build.
+// From the doomgeneric platform and the C engine unity build.
 extern "C" void push_key(unsigned char key, int pressed);
 
 // doomkeys.h contains only key-code macros, so no C declarations cross into
