@@ -1,6 +1,6 @@
 // Shared touch contract between the Doom platform layer and the hardware bridge.
 //
-// doomgeneric_esp32s3.c.inc (compiled as C, inside the unity build) and
+// doomgeneric_esp32.c.inc (compiled as C, inside the unity build) and
 // doom_hw_bridge.cpp (C++) both need the same touch-state layout and the same
 // gesture vocabulary. Declaring them once here -- rather than duplicating the
 // struct in each translation unit -- keeps the wire between the two halves from
@@ -48,9 +48,9 @@ typedef struct {
     bool double_tap;      // a double tap completed (use/open)
 } doom_touch_state_t;
 
-// Bring up the CST9217 touch controller for Doom. Restarts into the normal
-// firmware if the controller is unavailable, matching the one-shot isolated
-// reboot architecture -- Doom never limps on with half its input.
+// Bring up the selected profile's boardtouch controller for Doom. Restarts
+// into the normal firmware if it is unavailable, matching the one-shot
+// isolated reboot architecture -- Doom never limps on with half its input.
 void doom_touch_init(void);
 
 // Drain any controller reports and fold them into the pending state: preserve

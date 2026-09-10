@@ -68,7 +68,8 @@ BUILD_TARGETS = {
         extra_library_dirs=("firmware",)),
     "p4-4b": BuildTarget(
         "p4-4b", "p4", partition_csv="partitions_p4_4b.csv",
-        extra_flags=("-DESPDISP_BOARD_P4_4B",),
+        extra_flags=("-DESPDISP_BOARD_P4_4B", "-DESPDISP_DOOM_RUNTIME"),
+        extra_library_dirs=("firmware",),
         required_profile="st7703-4b", fqbn_options=("UploadSpeed=460800",)),
 }
 
@@ -3332,6 +3333,7 @@ def _verify_partition_payload(family: Family, blob: bytes) -> None:
             "otadata": (0x01, 0x00, 0x00E000, 0x002000),
             "app0": (0x00, 0x10, 0x010000, 0x800000),
             "app1": (0x00, 0x11, 0x810000, 0x800000),
+            "doom_wad": (0x42, 0x06, 0x1010000, 0x401000),
         }
     elif family.key == "s3":
         expected = {

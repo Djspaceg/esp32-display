@@ -109,7 +109,7 @@ music_module_t DG_music_module = {
 // --- Video ---
 // Video is handled by i_video.c (from doomgeneric) which calls DG_DrawFrame.
 // We do NOT stub video functions here -- i_video.c provides them.
-// DG_DrawFrame and DG_SetWindowTitle are in platform/doomgeneric_esp32s3.c.
+// DG_DrawFrame and DG_SetWindowTitle are in platform/doomgeneric_esp32.c.inc.
 
 // --- Network stubs ---
 void I_InitNetwork(void) {}
