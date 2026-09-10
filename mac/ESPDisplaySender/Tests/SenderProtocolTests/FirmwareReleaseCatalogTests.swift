@@ -41,7 +41,7 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
         XCTAssertEqual(Set(catalog.families.keys), ["c6", "s3", "p4"])
         let s3 = try catalog.entry(for: .init(
             family: "s3", chip: "esp32s3", profile: "co5300",
-            partition: "universal-8m-ota"))
+            partition: "universal-8m-doom-ota"))
         XCTAssertEqual(s3.family, "s3")
         XCTAssertEqual(s3.profiles, ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"])
     }
@@ -50,19 +50,19 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
         let catalog = try FirmwareReleaseCatalog.read(Self.catalogData())
         XCTAssertThrowsError(try catalog.entry(for: .init(
             family: "s3", chip: "esp32s3", profile: nil,
-            partition: "universal-8m-ota"))) {
+            partition: "universal-8m-doom-ota"))) {
             XCTAssertEqual($0 as? FirmwareReleaseCatalogError, .identityIncomplete)
         }
         XCTAssertThrowsError(try catalog.entry(for: .init(
             family: "s3", chip: "esp32p4", profile: "co5300",
-            partition: "universal-8m-ota"))) {
+            partition: "universal-8m-doom-ota"))) {
             XCTAssertEqual(
                 $0 as? FirmwareReleaseCatalogError,
                 .chipMismatch(expected: "esp32s3", found: "esp32p4"))
         }
         XCTAssertThrowsError(try catalog.entry(for: .init(
             family: "s3", chip: "esp32s3", profile: "st7703-4b",
-            partition: "universal-8m-ota")))
+            partition: "universal-8m-doom-ota")))
         XCTAssertThrowsError(try catalog.entry(for: .init(
             family: "s3", chip: "esp32s3", profile: "co5300",
             partition: "p4-32m-ota")))
@@ -103,7 +103,7 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
         ]
         let chips = ["c6": "esp32c6", "s3": "esp32s3", "p4": "esp32p4"]
         let partitions = [
-            "c6": "default-8m", "s3": "universal-8m-ota", "p4": "p4-32m-ota",
+            "c6": "default-8m", "s3": "universal-8m-doom-ota", "p4": "p4-32m-ota",
         ]
         let flashes: [String: [Int]] = [
             "c6": [8 * 1024 * 1024],
