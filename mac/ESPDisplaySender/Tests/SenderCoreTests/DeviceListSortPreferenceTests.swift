@@ -88,22 +88,28 @@ final class DeviceListSortApplicationTests: XCTestCase {
     func testPanelStatesMapToEveryStatusRank() {
         XCTAssertEqual(
             panel("Streaming", added: 0, heartbeatAge: 1, discovered: true,
-                  captureStatus: .streaming).deviceListStatus(asOf: now),
+                  captureStatus: .streaming).deviceListStatus(
+                    asOf: now, connectedViaUSB: true),
             .streaming)
         XCTAssertEqual(
             panel("Connected", added: 0, heartbeatAge: 1, discovered: true)
-                .deviceListStatus(asOf: now),
+                .deviceListStatus(asOf: now, connectedViaUSB: false),
             .connected)
         XCTAssertEqual(
             panel("Paused", added: 0, heartbeatAge: 1, discovered: true, paused: true)
-                .deviceListStatus(asOf: now),
+                .deviceListStatus(asOf: now, connectedViaUSB: true),
             .paused)
         XCTAssertEqual(
+            panel("USB", added: 0).deviceListStatus(
+                asOf: now, connectedViaUSB: true),
+            .connectedViaUSB)
+        XCTAssertEqual(
             panel("Connecting", added: 0, discovered: true)
-                .deviceListStatus(asOf: now),
+                .deviceListStatus(asOf: now, connectedViaUSB: false),
             .connecting)
         XCTAssertEqual(
-            panel("Offline", added: 0).deviceListStatus(asOf: now),
+            panel("Offline", added: 0).deviceListStatus(
+                asOf: now, connectedViaUSB: false),
             .offline)
     }
 
@@ -112,23 +118,154 @@ final class DeviceListSortApplicationTests: XCTestCase {
             panel(
                 "Streaming", added: 0, heartbeatAge: 1, discovered: true,
                 displayFPS: 42.1, captureStatus: .streaming
-            ).sidebarStatusText(asOf: now),
+            ).sidebarStatusText(asOf: now, connectedViaUSB: false),
             "Online • 42.1 fps")
         XCTAssertEqual(
             panel("Connected", added: 0, heartbeatAge: 1, discovered: true)
-                .sidebarStatusText(asOf: now),
+                .sidebarStatusText(asOf: now, connectedViaUSB: false),
             "Online • Not mirroring")
         XCTAssertEqual(
             panel("Paused", added: 0, heartbeatAge: 1, discovered: true, paused: true)
-                .sidebarStatusText(asOf: now),
+                .sidebarStatusText(asOf: now, connectedViaUSB: false),
             "Paused")
         XCTAssertEqual(
+            panel("USB", added: 0).sidebarStatusText(
+                asOf: now, connectedViaUSB: true),
+            "Connected via USB")
+        XCTAssertEqual(
             panel("Connecting", added: 0, discovered: true)
-                .sidebarStatusText(asOf: now),
+                .sidebarStatusText(asOf: now, connectedViaUSB: false),
             "Connecting")
         XCTAssertEqual(
-            panel("Offline", added: 0).sidebarStatusText(asOf: now),
+            panel("Offline", added: 0).sidebarStatusText(
+                asOf: now, connectedViaUSB: false),
             "Offline")
+    }
+
+    func testVerifiedUSBPanelDoesNotProjectOffline() throws {
+        let path = "/dev/cu.usbmodem-status"
+        let hardwareID = "020000123456"
+        var usbPanel = panel("USB Panel", added: 0)
+        usbPanel.hardwareID = hardwareID
+        usbPanel.usbHardwareID = hardwareID
+        usbPanel.usbPort = path
+        let manager = PanelManager(
+            previewPanels: [usbPanel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=VVNCIFBhbmVs id=\(hardwareID) "
+                + "connected=0 board=st77916 profile=st77916 "
+                + "target=s3-185 chip=esp32s3 partition=8MB fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path,
+            identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        let snapshot = try XCTUnwrap(manager.selectedPanel)
+        XCTAssertNotNil(manager.verifiedUSBDevice(for: snapshot.serviceName))
+        XCTAssertEqual(
+            manager.deviceListStatus(for: snapshot, asOf: now),
+            .connectedViaUSB)
+        XCTAssertEqual(
+            manager.sidebarStatusText(for: snapshot, asOf: now),
+            "Connected via USB")
+    }
+
+    func testUnverifiedUSBPanelStillProjectsOffline() throws {
+        let path = "/dev/cu.usbmodem-unverified"
+        var usbPanel = panel("USB Panel", added: 0)
+        usbPanel.hardwareID = "020000123456"
+        usbPanel.usbHardwareID = usbPanel.hardwareID
+        usbPanel.usbPort = path
+        let manager = PanelManager(
+            previewPanels: [usbPanel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+
+        let snapshot = try XCTUnwrap(manager.selectedPanel)
+        XCTAssertNil(manager.verifiedUSBDevice(for: snapshot.serviceName))
+        XCTAssertEqual(
+            manager.deviceListStatus(for: snapshot, asOf: now),
+            .offline)
+        XCTAssertEqual(
+            manager.sidebarStatusText(for: snapshot, asOf: now),
+            "Offline")
+    }
+
+    func testVerifiedUSBImmediatelyUsesItsStatusRank() throws {
+        let path = "/dev/cu.usbmodem-ranked"
+        let hardwareID = "020000123456"
+        var usbPanel = panel("Zulu USB", added: 0)
+        usbPanel.hardwareID = hardwareID
+        usbPanel.usbHardwareID = hardwareID
+        usbPanel.usbPort = path
+        var settings = SenderSettings()
+        settings.deviceListSortOrder = .status
+        let manager = PanelManager(
+            previewPanels: [
+                panel("Alpha Offline", added: 0),
+                usbPanel,
+                panel("Middle Connecting", added: 0, discovered: true),
+            ],
+            savedNetworkNames: [],
+            usbSerialPorts: [path],
+            settings: settings)
+        XCTAssertEqual(
+            manager.panels.map(\.displayName),
+            ["Middle Connecting", "Alpha Offline", "Zulu USB"])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=WnVsdSBVU0I= id=\(hardwareID) "
+                + "connected=0 board=st77916 profile=st77916 "
+                + "target=s3-185 chip=esp32s3 partition=8MB fw=1.5.0")
+
+        manager.noteUSBIdentity(
+            path: path,
+            identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        XCTAssertEqual(
+            manager.panels.map(\.displayName),
+            ["Zulu USB", "Middle Connecting", "Alpha Offline"])
+
+        let identityless = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=WnVsdSBVU0I= connected=0 "
+                + "board=st77916 profile=st77916 target=s3-185 "
+                + "chip=esp32s3 partition=8MB fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path,
+            identity: identityless,
+            generation: manager.usbPathGeneration(path))
+        XCTAssertEqual(
+            manager.panels.map(\.displayName),
+            ["Middle Connecting", "Alpha Offline", "Zulu USB"])
+
+        manager.noteUSBIdentity(
+            path: path,
+            identity: identity,
+            generation: manager.usbPathGeneration(path))
+        manager.markUSBRestarting(usbPanel.serviceName)
+        let restartingPanel = try XCTUnwrap(
+            manager.panels.first { $0.serviceName == usbPanel.serviceName })
+        XCTAssertEqual(
+            manager.deviceListStatus(for: restartingPanel, asOf: now),
+            .offline)
+        XCTAssertEqual(
+            manager.panels.map(\.displayName),
+            ["Middle Connecting", "Alpha Offline", "Zulu USB"])
+
+        manager.noteUSBIdentity(
+            path: path,
+            identity: identity,
+            generation: manager.usbPathGeneration(path))
+        let reverifiedPanel = try XCTUnwrap(
+            manager.panels.first { $0.serviceName == usbPanel.serviceName })
+        XCTAssertEqual(
+            manager.deviceListStatus(for: reverifiedPanel, asOf: now),
+            .connectedViaUSB)
+        XCTAssertEqual(
+            manager.panels.map(\.displayName),
+            ["Zulu USB", "Middle Connecting", "Alpha Offline"])
     }
 
     func testChangingPreferenceImmediatelyResortsPanels() {

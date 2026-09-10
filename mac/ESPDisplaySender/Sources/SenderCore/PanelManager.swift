@@ -394,12 +394,39 @@ final class PanelManager: ObservableObject {
         let now = Date()
         let sorted = panels.sorted {
             return DeviceListSorter.areInIncreasingOrder(
-                $0.deviceListSortValue(asOf: now),
-                $1.deviceListSortValue(asOf: now),
+                deviceListSortValue(for: $0, asOf: now),
+                deviceListSortValue(for: $1, asOf: now),
                 by: settings.deviceListSortOrder)
         }
         guard sorted.map(\.id) != panels.map(\.id) else { return }
         panels = sorted
+    }
+
+    func deviceListStatus(
+        for panel: PanelSnapshot,
+        asOf now: Date
+    ) -> DeviceListStatus {
+        panel.deviceListStatus(
+            asOf: now,
+            connectedViaUSB: verifiedUSBDevice(for: panel.serviceName) != nil)
+    }
+
+    func sidebarStatusText(
+        for panel: PanelSnapshot,
+        asOf now: Date = Date()
+    ) -> String {
+        panel.sidebarStatusText(
+            asOf: now,
+            connectedViaUSB: verifiedUSBDevice(for: panel.serviceName) != nil)
+    }
+
+    private func deviceListSortValue(
+        for panel: PanelSnapshot,
+        asOf now: Date
+    ) -> DeviceListSortValue {
+        panel.deviceListSortValue(
+            asOf: now,
+            connectedViaUSB: verifiedUSBDevice(for: panel.serviceName) != nil)
     }
 
     func persistIfNeeded(force: Bool = false) {

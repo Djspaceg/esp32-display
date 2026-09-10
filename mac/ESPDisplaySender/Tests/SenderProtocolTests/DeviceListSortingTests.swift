@@ -76,6 +76,7 @@ final class DeviceListSortingTests: XCTestCase {
             item("Zulu connected", id: "connected-z", status: .connected),
             item("Alpha connected", id: "connected-a", status: .connected),
             item("Paused", id: "paused", status: .paused),
+            item("USB", id: "usb", status: .connectedViaUSB),
             item("Connecting", id: "connecting", status: .connecting),
             item("Streaming", id: "streaming", status: .streaming),
         ]
@@ -86,9 +87,19 @@ final class DeviceListSortingTests: XCTestCase {
                 "streaming",
                 "connected-a", "connected-z",
                 "paused",
+                "usb",
                 "connecting",
                 "offline",
             ])
+    }
+
+    func testStatusRawValuesAreExplicitDisplayRanks() {
+        XCTAssertEqual(DeviceListStatus.streaming.rawValue, 0)
+        XCTAssertEqual(DeviceListStatus.connected.rawValue, 1)
+        XCTAssertEqual(DeviceListStatus.paused.rawValue, 2)
+        XCTAssertEqual(DeviceListStatus.connectedViaUSB.rawValue, 3)
+        XCTAssertEqual(DeviceListStatus.connecting.rawValue, 4)
+        XCTAssertEqual(DeviceListStatus.offline.rawValue, 5)
     }
 
     func testAllOrdersUseStableIdentifierAsFinalTieBreaker() {

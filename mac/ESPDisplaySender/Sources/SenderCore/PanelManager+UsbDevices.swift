@@ -217,6 +217,7 @@ extension PanelManager {
     func refreshUSBDevices() {
         refreshUSBPorts()
         for path in usbSerialPorts { invalidateUSBPath(path) }
+        sortPanels()
         identifyUSBPorts(usbSerialPorts)
     }
 
@@ -265,7 +266,10 @@ extension PanelManager {
             usbDevices[index].verifiedGeneration = verifiedGeneration
         }
 
-        guard let canonicalID else { return }
+        guard let canonicalID else {
+            sortPanels()
+            return
+        }
         var associationChanged = false
         for panelIndex in panels.indices {
             if panels[panelIndex].usbPort == path {
@@ -337,6 +341,7 @@ extension PanelManager {
                 panels[panelIndex].partition = partition
             }
         }
+        sortPanels()
         if associationChanged { persistIfNeeded(force: true) }
     }
 
@@ -365,14 +370,24 @@ extension PanelManager {
                 stableHardwareID(of: panel) == hardwareID
                     ? panel.serviceName : nil
             }
+            var restartStateChanged = false
             for serviceName in matchingServices {
-                usbRestartingServices.remove(serviceName)
+                if usbRestartingServices.remove(serviceName) != nil {
+                    restartStateChanged = true
+                }
+            }
+            if restartStateChanged {
+                objectWillChange.send()
+                sortPanels()
             }
         }
     }
 
     func markUSBRestarting(_ serviceName: String) {
+        guard !usbRestartingServices.contains(serviceName) else { return }
+        objectWillChange.send()
         usbRestartingServices.insert(serviceName)
+        sortPanels()
     }
 
     /// Return one coalesced CFGSHOW probe for this path and publish its identity.

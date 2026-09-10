@@ -12,11 +12,12 @@ public enum DeviceListSortOrder: String, CaseIterable, Codable, Hashable, Sendab
 /// Raw values are the display rank: immediately usable devices first, then
 /// progressively less available ones.
 public enum DeviceListStatus: Int, Codable, Hashable, Sendable {
-    case streaming
-    case connected
-    case paused
-    case connecting
-    case offline
+    case streaming = 0
+    case connected = 1
+    case paused = 2
+    case connectedViaUSB = 3
+    case connecting = 4
+    case offline = 5
 }
 
 /// The policy-only projection needed to order one device.
