@@ -96,6 +96,35 @@ final class CocoaScriptingHandlerTests: XCTestCase {
         XCTAssertEqual(status["brightness"] as? Int, 80)
     }
 
+    func testVerifiedUSBStatusMatchesManagerProjectionAndScripting() throws {
+        let path = "/dev/cu.usbmodem-script-status"
+        let hardwareID = "020000123456"
+        var snapshot = panel(online: false)
+        snapshot.hardwareID = hardwareID
+        snapshot.usbHardwareID = hardwareID
+        snapshot.usbPort = path
+        let (handler, manager, _) = subject(panels: [snapshot])
+        manager.updateUSBPorts([path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=U3R1ZGlv id=\(hardwareID) connected=0 "
+                + "board=st77916 profile=st77916 target=s3-185 "
+                + "chip=esp32s3 partition=8MB fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path,
+            identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        let panel = try XCTUnwrap(manager.panels.first)
+        XCTAssertEqual(
+            manager.statusText(for: panel),
+            "Connected via USB")
+        let status = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: Data(handler.displayStatus(panel.serviceName).utf8))
+                as? [String: Any])
+        XCTAssertEqual(status["status"] as? String, "Connected via USB")
+    }
+
     func testExactServiceNameWinsBeforeDisplayNameFallback() throws {
         let panels = [
             panel(service: "Studio", display: "Other"),

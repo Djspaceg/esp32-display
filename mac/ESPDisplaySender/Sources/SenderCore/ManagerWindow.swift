@@ -125,7 +125,7 @@ struct ManagerView: View {
                     ForEach(manager.panels) { panel in
                         PanelRow(
                             panel: panel,
-                            statusText: manager.sidebarStatusText(for: panel))
+                            statusText: manager.statusText(for: panel))
                             .tag(panel.serviceName)
                             .contextMenu {
                                 Button("Identify") { manager.identify(panel.serviceName) }
@@ -416,7 +416,7 @@ private struct PanelDetailView: View {
         // rather than a SwiftUI scene - measured, the window kept its own title
         // - so the title is driven from ManagerWindowController instead. One
         // owner per property, or they overwrite each other.
-        .navigationSubtitle(panel.statusText)
+        .navigationSubtitle(manager.statusText(for: panel))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("Rename", systemImage: "pencil") {

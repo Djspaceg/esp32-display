@@ -164,8 +164,9 @@ struct PanelSnapshot: Identifiable, Equatable {
         connectedViaUSB: Bool
     ) -> DeviceListStatus {
         guard isOnline(asOf: now) else {
+            if discovered { return .connecting }
             if connectedViaUSB { return .connectedViaUSB }
-            return discovered ? .connecting : .offline
+            return .offline
         }
         if paused { return .paused }
         return captureStatus.isStreaming ? .streaming : .connected
@@ -184,11 +185,11 @@ struct PanelSnapshot: Identifiable, Equatable {
                 connectedViaUSB: connectedViaUSB))
     }
 
-    /// The complete status line shown under this panel's name in the sidebar.
+    /// The complete user-facing status line for this panel.
     ///
     /// This projects the same six states used for status sorting, so the visible
     /// vocabulary cannot drift from the ordering policy.
-    func sidebarStatusText(
+    func statusText(
         asOf now: Date,
         connectedViaUSB: Bool
     ) -> String {
@@ -209,13 +210,6 @@ struct PanelSnapshot: Identifiable, Equatable {
         case .offline:
             return "Offline"
         }
-    }
-
-    var statusText: String {
-        if isOnline { return paused ? "Paused" : "Online" }
-        if discovered { return "Connecting"
-        }
-        return "Offline"
     }
 
     var signalDescription: String {

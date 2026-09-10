@@ -105,7 +105,7 @@ final class DeviceListSortApplicationTests: XCTestCase {
             .connectedViaUSB)
         XCTAssertEqual(
             panel("Connecting", added: 0, discovered: true)
-                .deviceListStatus(asOf: now, connectedViaUSB: false),
+                .deviceListStatus(asOf: now, connectedViaUSB: true),
             .connecting)
         XCTAssertEqual(
             panel("Offline", added: 0).deviceListStatus(
@@ -118,26 +118,26 @@ final class DeviceListSortApplicationTests: XCTestCase {
             panel(
                 "Streaming", added: 0, heartbeatAge: 1, discovered: true,
                 displayFPS: 42.1, captureStatus: .streaming
-            ).sidebarStatusText(asOf: now, connectedViaUSB: false),
+            ).statusText(asOf: now, connectedViaUSB: false),
             "Online • 42.1 fps")
         XCTAssertEqual(
             panel("Connected", added: 0, heartbeatAge: 1, discovered: true)
-                .sidebarStatusText(asOf: now, connectedViaUSB: false),
+                .statusText(asOf: now, connectedViaUSB: false),
             "Online • Not mirroring")
         XCTAssertEqual(
             panel("Paused", added: 0, heartbeatAge: 1, discovered: true, paused: true)
-                .sidebarStatusText(asOf: now, connectedViaUSB: false),
+                .statusText(asOf: now, connectedViaUSB: false),
             "Paused")
         XCTAssertEqual(
-            panel("USB", added: 0).sidebarStatusText(
+            panel("USB", added: 0).statusText(
                 asOf: now, connectedViaUSB: true),
             "Connected via USB")
         XCTAssertEqual(
             panel("Connecting", added: 0, discovered: true)
-                .sidebarStatusText(asOf: now, connectedViaUSB: false),
+                .statusText(asOf: now, connectedViaUSB: true),
             "Connecting")
         XCTAssertEqual(
-            panel("Offline", added: 0).sidebarStatusText(
+            panel("Offline", added: 0).statusText(
                 asOf: now, connectedViaUSB: false),
             "Offline")
     }
@@ -168,8 +168,44 @@ final class DeviceListSortApplicationTests: XCTestCase {
             manager.deviceListStatus(for: snapshot, asOf: now),
             .connectedViaUSB)
         XCTAssertEqual(
-            manager.sidebarStatusText(for: snapshot, asOf: now),
+            manager.statusText(for: snapshot, asOf: now),
             "Connected via USB")
+    }
+
+    func testOnlineWiFiWinsOverVerifiedUSBAtManagerProjection() throws {
+        let path = "/dev/cu.usbmodem-online-status"
+        let hardwareID = "020000123456"
+        var snapshot = panel(
+            "Online USB",
+            added: 0,
+            heartbeatAge: 1,
+            discovered: true,
+            displayFPS: 42.1,
+            captureStatus: .streaming)
+        snapshot.hardwareID = hardwareID
+        snapshot.usbHardwareID = hardwareID
+        snapshot.usbPort = path
+        let manager = PanelManager(
+            previewPanels: [snapshot],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=T25saW5lIFVTQg== id=\(hardwareID) connected=1 "
+                + "board=st77916 profile=st77916 target=s3-185 "
+                + "chip=esp32s3 partition=8MB fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path,
+            identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        let panel = try XCTUnwrap(manager.panels.first)
+        XCTAssertNotNil(manager.verifiedUSBDevice(for: panel.serviceName))
+        XCTAssertEqual(
+            manager.deviceListStatus(for: panel, asOf: now),
+            .streaming)
+        XCTAssertEqual(
+            manager.statusText(for: panel, asOf: now),
+            "Online • 42.1 fps")
     }
 
     func testUnverifiedUSBPanelStillProjectsOffline() throws {
@@ -189,7 +225,7 @@ final class DeviceListSortApplicationTests: XCTestCase {
             manager.deviceListStatus(for: snapshot, asOf: now),
             .offline)
         XCTAssertEqual(
-            manager.sidebarStatusText(for: snapshot, asOf: now),
+            manager.statusText(for: snapshot, asOf: now),
             "Offline")
     }
 

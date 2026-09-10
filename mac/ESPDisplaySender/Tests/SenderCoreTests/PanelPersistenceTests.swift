@@ -124,7 +124,11 @@ final class PanelPersistenceTests: XCTestCase {
 
         let restored = PersistedPanel(snapshot: snapshot).snapshot
         XCTAssertFalse(restored.isOnline)
-        XCTAssertEqual(restored.statusText, "Offline")
+        XCTAssertEqual(
+            restored.deviceListStatus(
+                asOf: Date(),
+                connectedViaUSB: false),
+            .offline)
     }
 
     // MARK: encoding
