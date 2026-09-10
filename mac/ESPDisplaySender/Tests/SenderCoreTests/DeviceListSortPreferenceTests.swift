@@ -266,6 +266,16 @@ final class DeviceListSortApplicationTests: XCTestCase {
         XCTAssertEqual(
             manager.panels.map(\.displayName),
             ["Zulu USB", "Middle Connecting", "Alpha Offline"])
+
+        manager.updateUSBPorts([])
+        let disconnectedPanel = try XCTUnwrap(
+            manager.panels.first { $0.serviceName == usbPanel.serviceName })
+        XCTAssertEqual(
+            manager.deviceListStatus(for: disconnectedPanel, asOf: now),
+            .offline)
+        XCTAssertEqual(
+            manager.panels.map(\.displayName),
+            ["Middle Connecting", "Alpha Offline", "Zulu USB"])
     }
 
     func testChangingPreferenceImmediatelyResortsPanels() {
