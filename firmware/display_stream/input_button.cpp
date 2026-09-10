@@ -117,11 +117,16 @@ void handleButton() {
       }
 #endif
       // Normal short-press: toggle backlight high/low
-      userBlLevel = blIsHigh() ? BL_LOW : BL_HIGH;
-      applyBacklight();
-      saveDisplayPrefs();
-      Serial.printf("button: short press -> backlight %s (saved)\n",
-                    blIsHigh() ? "high" : "low");
+      if (fixedBlLevel == 0) {
+        userBlLevel = blIsHigh() ? BL_LOW : BL_HIGH;
+        applyBacklight();
+        saveDisplayPrefs();
+        Serial.printf("button: short press -> backlight %s (saved)\n",
+                      blIsHigh() ? "high" : "low");
+      } else {
+        Serial.printf("button: short press ignored (backlight fixed at %u)\n",
+                      fixedBlLevel);
+      }
       // Two shorts inside DOUBLE_PRESS_MS toggle the signal survey, at any
       // time - streaming included, which is the point: a panel is surveyed
       // BECAUSE its stream is struggling, so the entry cannot depend on the
@@ -147,4 +152,3 @@ void handleButton() {
     }
   }
 }
-

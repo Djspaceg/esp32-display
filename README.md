@@ -159,7 +159,13 @@ python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGSHOW
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGBOARD co5300
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGPOWER 0
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGROT 2
+python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGMIRRORX 1
+python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGFIXEDBL 255
 ```
+
+`CFGMIRRORX` persists a left/right reflection for prism installations.
+`CFGFIXEDBL 1..255` locks every lit state at that level and stops advertising
+brightness controls; `CFGFIXEDBL 0` restores normal brightness behavior.
 
 WiFi and names use base64-safe helper flows in the app. OTA stays disabled until
 a password is stored:

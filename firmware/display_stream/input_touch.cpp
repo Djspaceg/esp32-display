@@ -111,6 +111,11 @@ void serviceTouch() {
   touchmap::Point p = touchmap::map(
       (int16_t)sample.rawX, (int16_t)sample.rawY, panelLandscape,
       appliedPanelRotation, touchCalibration);
+  if (panelMirrorX) {
+    p = touchmap::mirrorFrameX(
+        p, touchmap::swapsAxes(panelLandscape, appliedPanelRotation),
+        touchCalibration);
+  }
   touchgesture::Event event =
       touchTracker.onReport(sample.pressed, p.x, p.y, millis());
 
@@ -170,4 +175,3 @@ void serviceTouch() {
   }
   sendTouchEvent(event.gesture, event.startX, event.startY);
 }
-
