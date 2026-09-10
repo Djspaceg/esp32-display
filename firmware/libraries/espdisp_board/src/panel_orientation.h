@@ -42,4 +42,14 @@ inline bool mirrorX(uint8_t q) { return q == 1 || q == 2; }
 /// MADCTL MY.
 inline bool mirrorY(uint8_t q) { return q == 2 || q == 3; }
 
+/// Compose an installation-level framebuffer-X reflection with MADCTL. After
+/// an odd quadrant swaps axes, visible left/right is carried by MY instead.
+inline bool mirrorX(uint8_t q, bool installationMirrorX) {
+  return mirrorX(q) != (installationMirrorX && !swapXY(q));
+}
+
+inline bool mirrorY(uint8_t q, bool installationMirrorX) {
+  return mirrorY(q) != (installationMirrorX && swapXY(q));
+}
+
 }  // namespace panelorient

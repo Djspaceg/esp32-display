@@ -13,8 +13,9 @@ namespace panelstate {
 
 /// What the backlight PWM should be set to.
 ///
-/// Priority matters: a manual "off" beats a finger beats sleep beats idle
-/// beats the user's level.
+/// Priority matters. In normal mode a manual "off" beats a finger beats sleep
+/// beats idle beats the user's level. A fixed installation level replaces the
+/// touch/idle/user branches, while explicit power-off and host sleep stay dark.
 ///
 /// manuallyOff is the user's own standing instruction (ControlOpcode::Power),
 /// not a state the panel or the Mac arrives at on its own the way sleeping
@@ -33,8 +34,9 @@ namespace panelstate {
 /// contradicting the Mac's own idea of whether its displays are asleep.
 inline uint8_t backlightLevel(bool manuallyOff, bool sleeping, bool idle,
                               bool touchWake, uint8_t userLevel,
-                              uint8_t idleLevel) {
+                              uint8_t idleLevel, uint8_t fixedLevel = 0) {
   if (manuallyOff) return 0;
+  if (fixedLevel != 0) return sleeping ? 0 : fixedLevel;
   if (touchWake) return userLevel;
   if (sleeping) return 0;
   if (idle) return idleLevel;

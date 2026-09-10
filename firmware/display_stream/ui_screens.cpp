@@ -243,10 +243,9 @@ void drawSurveyScreen() {
     dmaUnmarkFailed();
   }
   lastSurveyDrawAt = millis();
-  // Full brightness whatever the idle/sleep state dimmed to: a meter being
-  // carried around the room must be readable at arm's length. Exiting the
-  // survey restores the state-driven level via applyBacklight().
-  driveBrightness(255);
+  // Full brightness unless this installation has an explicit fixed level.
+  // Exiting the survey restores the state-driven level via applyBacklight().
+  driveBrightness(fixedBlLevel != 0 ? fixedBlLevel : 255);
 }
 
 // What the quick info bar says by default: battery on a board that has one
@@ -462,4 +461,3 @@ void drawOtaScreen(const char *headline, int percent) {
   // Drain before returning: the caller is about to resume writing flash.
   waitForDmaIdle(500);
 }
-

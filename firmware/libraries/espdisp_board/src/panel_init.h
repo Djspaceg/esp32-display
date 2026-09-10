@@ -325,12 +325,15 @@ inline bool setPanelBrightness(esp_lcd_panel_handle_t panel,
 /// the place to do it.
 inline void applyOrientation(esp_lcd_panel_handle_t panel,
                              const board::Config &cfg, bool landscape,
-                             uint8_t rotation) {
+                             uint8_t rotation,
+                             bool installationMirrorX = false) {
   const uint8_t q = panelorient::quadrant(
       (uint8_t)(rotation + cfg.panel->orientationOffset), landscape);
   const bool swap = panelorient::swapXY(q);
   esp_lcd_panel_swap_xy(panel, swap);
-  esp_lcd_panel_mirror(panel, panelorient::mirrorX(q), panelorient::mirrorY(q));
+  esp_lcd_panel_mirror(panel,
+                       panelorient::mirrorX(q, installationMirrorX),
+                       panelorient::mirrorY(q, installationMirrorX));
   esp_lcd_panel_set_gap(panel,
                         swap ? cfg.panel->rowOffset : cfg.panel->colOffset,
                         swap ? cfg.panel->colOffset : cfg.panel->rowOffset);

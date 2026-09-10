@@ -28,7 +28,9 @@ void saveDisplayPrefs() {
   // mounting; the old key is left alone rather than deleted, so a downgrade
   // to older firmware also keeps the 180 the two encodings agree on.
   prefs.putUChar("rot", panelRotation);
+  prefs.putBool("mirrorx", panelMirrorX);
   prefs.putUChar("bllevel", userBlLevel);
+  prefs.putUChar("blfixed", fixedBlLevel);
   prefs.putBool("pwroff", panelManuallyOff);
   prefs.end();
 }
@@ -74,4 +76,3 @@ void saveIdleTextPrefsIfChanged() {
   Serial.printf("idle text saved to NVS (%u lines, %u bytes)\n",
                 (unsigned)snapshot.lineCount, (unsigned)n);
 }
-

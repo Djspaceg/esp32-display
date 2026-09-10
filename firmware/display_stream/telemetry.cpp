@@ -17,7 +17,6 @@
 
 // Capabilities every board has, whatever panel or peripherals it carries.
 static const uint32_t BASE_CAPABILITIES =
-    deviceproto::CAP_BRIGHTNESS | deviceproto::CAP_BRIGHTNESS_LEVEL |
     deviceproto::CAP_FLIP |
     deviceproto::CAP_IDENTIFY | deviceproto::CAP_RESTART |
     deviceproto::CAP_SLEEP_SYNC | deviceproto::CAP_TELEMETRY |
@@ -49,6 +48,10 @@ uint32_t deviceCapabilities() {
   // holds. It is a separate bit so a sender can tell this firmware from an
   // older build whose holds classified as nothing.
   return BASE_CAPABILITIES
+         | (fixedBlLevel == 0
+                ? (deviceproto::CAP_BRIGHTNESS |
+                   deviceproto::CAP_BRIGHTNESS_LEVEL)
+                : 0u)
          | (touchAvailable ? (deviceproto::CAP_TOUCH
                               | deviceproto::CAP_TOUCH_LONGPRESS)
                            : 0u)

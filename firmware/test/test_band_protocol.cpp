@@ -708,6 +708,17 @@ int main() {
     // ...and it wakes to the level the user chose, not to full blast.
     CHECK(panelstate::backlightLevel(false, true, true, true, 40, 10) == 40);
 
+    // A fixed installation level suppresses idle dimming and touch-wake
+    // variation, but host sleep and explicit power-off still go dark.
+    CHECK(panelstate::backlightLevel(false, false, false, false,
+                                     128, 10, 255) == 255);
+    CHECK(panelstate::backlightLevel(false, false, true, false,
+                                     128, 10, 255) == 255);
+    CHECK(panelstate::backlightLevel(false, true, false, true,
+                                     128, 10, 255) == 0);
+    CHECK(panelstate::backlightLevel(true, false, false, true,
+                                     128, 10, 255) == 0);
+
     // manuallyOff beats every one of those, including the finger. A user
     // who turned the panel off gave a standing instruction; a touch
     // answering "is this on?" would just turn it back on without asking,
@@ -985,6 +996,16 @@ int main() {
     CHECK(swapXY(1) && mirrorX(1) && !mirrorY(1));
     CHECK(!swapXY(2) && mirrorX(2) && mirrorY(2));
     CHECK(swapXY(3) && !mirrorX(3) && mirrorY(3));
+    // A prism reflection changes framebuffer handedness. On odd quadrants the
+    // axes are swapped, so visible left/right moves from MADCTL MX to MY.
+    CHECK(mirrorX(0, true) && !panelorient::mirrorY(0, true));
+    CHECK(mirrorX(1, true) && panelorient::mirrorY(1, true));
+    CHECK(!mirrorX(2, true) && panelorient::mirrorY(2, true));
+    CHECK(!mirrorX(3, true) && !panelorient::mirrorY(3, true));
+    for (uint8_t q = 0; q < 4; q++) {
+      CHECK(mirrorX(q, false) == mirrorX(q));
+      CHECK(panelorient::mirrorY(q, false) == mirrorY(q));
+    }
     // All four triples are distinct - a swapped pair of rows above would
     // otherwise still pass the per-row checks.
     for (uint8_t a = 0; a < 4; a++) {
@@ -1977,6 +1998,9 @@ int main() {
     // A point already inside is left exactly alone.
     CHECK(touchmap::clampToFrame({7, 9}, false).x == 7);
     CHECK(touchmap::clampToFrame({7, 9}, false).y == 9);
+    CHECK(touchmap::mirrorFrameX({7, 9}, false).x == SHORT - 1 - 7);
+    CHECK(touchmap::mirrorFrameX({7, 9}, false).y == 9);
+    CHECK(touchmap::mirrorFrameX({7, 9}, true).x == LONG - 1 - 7);
     // map() clamps, so even a wildly out-of-range report stays addressable.
     CHECK(touchmap::map(9999, 9999, false, 0).x >= 0);
     CHECK(touchmap::map(9999, 9999, false, 0).y <= LONG - 1);
