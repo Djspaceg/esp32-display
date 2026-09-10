@@ -499,6 +499,35 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertFalse(PanelManager.physicalBoard("future", isCompatibleWith: "s3-185"))
     }
 
+    func testUSBPartitionCompatibilityAllowsOnlyTheKnownS3FullFlashMigration() {
+        XCTAssertEqual(
+            PanelManager.usbPartitionCompatibility(
+                target: "s3", chip: "esp32s3",
+                reported: "universal-8m-doom-ota",
+                required: "universal-8m-doom-ota"),
+            .exact)
+        XCTAssertEqual(
+            PanelManager.usbPartitionCompatibility(
+                target: "s3", chip: "esp32s3",
+                reported: "universal-8m-ota",
+                required: "universal-8m-doom-ota"),
+            .fullFlashMigration(
+                from: "universal-8m-ota", to: "universal-8m-doom-ota"))
+        XCTAssertEqual(
+            PanelManager.usbPartitionCompatibility(
+                target: "s3", chip: "esp32s3",
+                reported: "universal-8m-doom-ota",
+                required: "universal-8m-ota"),
+            .incompatible,
+            "the migration is not reversible by policy")
+        XCTAssertEqual(
+            PanelManager.usbPartitionCompatibility(
+                target: "p4", chip: "esp32p4",
+                reported: "legacy-p4", required: "p4-32m-ota"),
+            .incompatible,
+            "an unrecognised layout mismatch remains fail closed")
+    }
+
     func testReleaseNotesPresentationCopyAndOrdering() throws {
         let fixtureURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

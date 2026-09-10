@@ -272,6 +272,26 @@ extension PanelManager {
         }
     }
 
+    enum USBPartitionCompatibility: Equatable, Sendable {
+        case exact
+        case fullFlashMigration(from: String, to: String)
+        case incompatible
+    }
+
+    /// A full USB write can replace a partition table, but only a migration
+    /// explicitly known to this app may relax the runtime partition-token check.
+    nonisolated static func usbPartitionCompatibility(
+        target: String, chip: String, reported: String, required: String
+    ) -> USBPartitionCompatibility {
+        if reported == required { return .exact }
+        if target == "s3", chip == "esp32s3",
+           reported == "universal-8m-ota",
+           required == "universal-8m-doom-ota" {
+            return .fullFlashMigration(from: reported, to: required)
+        }
+        return .incompatible
+    }
+
     /// Write a current bundle over USB after re-verifying every fact
     /// that makes the selected serial path safe. No whole-chip erase is issued,
     /// so NVS credentials, name, brightness, orientation and OTA password remain.
@@ -422,15 +442,27 @@ extension PanelManager {
                 "The \(exactTarget) image is for \(selectedImage.chip), but esptool "
                     + "read \(detectedChip). Nothing was written.")
         }
+        var partitionCompatibility = USBPartitionCompatibility.exact
         if !selectedImage.profiles.isEmpty {
             guard cfgChip == detectedChip,
                   let cfgBoard, selectedImage.profiles.contains(cfgBoard),
-                  let cfgPartition, cfgPartition == selectedImage.partition
+                  let cfgPartition,
+                  let requiredPartition = selectedImage.partition
             else {
                 return .failure(
                     "USB compatibility identity incomplete",
                     "Current family firmware requires matching CFGSHOW family, chip, "
                         + "profile, and partition metadata before a write. Nothing was written.")
+            }
+            partitionCompatibility = Self.usbPartitionCompatibility(
+                target: exactTarget, chip: detectedChip,
+                reported: cfgPartition, required: requiredPartition)
+            guard partitionCompatibility != .incompatible else {
+                return .failure(
+                    "USB partition mismatch",
+                    "The board reports partition layout \(cfgPartition), but this "
+                        + "firmware requires \(requiredPartition). This is not a "
+                        + "recognized full-USB migration, so nothing was written.")
             }
         }
         guard usbPathGeneration(path) == expectedGeneration,
@@ -458,6 +490,15 @@ extension PanelManager {
             return .failure("Flashing failed", error.localizedDescription)
         }
         refreshUSBPorts()
+        if case .fullFlashMigration(let oldLayout, let newLayout) =
+            partitionCompatibility {
+            return .success(
+                "Firmware written over USB",
+                "\(bundle.firmwareVersion) was written to \(target.displayName). "
+                    + "The board had the old \(oldLayout) layout, which needed a "
+                    + "full USB write; this installed \(newLayout) and its new "
+                    + "partition table without erasing saved settings.")
+        }
         return .success(
             "Firmware written over USB",
             "\(bundle.firmwareVersion) was written to \(target.displayName) "

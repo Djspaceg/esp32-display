@@ -84,31 +84,29 @@ staging and UDP codec scratch.
 
 ## Firmware and WAD delivery
 
-`firmware/partitions_s3_doom.csv` is staged as `partitions.csv` only for the
-initial developer setup of a recoverable CO5300 carrier. It provides equal
-`0x5F0000` OTA app slots and a `0x401000` WAD partition at `0xBFF000`. The
+The canonical universal S3 image uses `firmware/partitions_s3.csv`, which keeps
+dual OTA in exactly 8 MiB with two `0x1F0000` application slots and a `0x401000`
+WAD partition at `0x3FF000`. The WAD partition ends at the 8 MiB boundary. The
 canonical 4,196,020-byte shareware v1.9 IWAD fits with 2,380 bytes to spare.
 
-The canonical universal S3 image uses the common 8 MiB partition table and
-links Doom code but includes no WAD. At runtime the WAD loader falls back to the
-raw `0xBFF000` flash region, which the CO5300's 16/32 MiB flash makes available
-even under the 8 MiB partition table; a device only reaches Doom on the CO5300
-profile. Keeping the WAD out of the artifact preserves the common 8 MiB layout
-for every S3 carrier, and PSRAM-only Doom state preserves the internal RAM the
-canonical streaming image's SPI DMA paths need.
-
-The developer workflow downloads the WAD only when explicitly requested, then
-requires all of the following before writing or packaging it:
+Every canonical S3 and P4 bundle includes the WAD as a blank-device flash part.
+The bundle writer and both catalog readers require all of the following:
 
 * `IWAD` magic
 * exactly 4,196,020 bytes
 * SHA-256 `1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771`
-* fit within the declared partition
+* fit within the target's declared partition
 
-The Doom WAD is a developer-installed payload for the S3 `co5300` runtime
-profile. It is not embedded in the canonical S3 release because it does not fit
-every supported S3 carrier. Development images must verify WAD magic, size,
-hash, and storage capacity before any write.
+The partition address is read from the bundled partition table rather than
+hardcoded: S3 writes it at `0x3FF000`, while P4 writes it at `0x1010000`.
+`firmware/partitions_s3_doom.csv` remains available as a manual 16 MiB developer
+layout with larger `0x5F0000` application slots; it is not the canonical build.
+
+Changing from the former `universal-8m-ota` table to
+`universal-8m-doom-ota` requires one USB flash. OTA target validation refuses
+the old partition identity because an application-only OTA cannot install a
+partition table or WAD payload. Later application OTAs preserve the WAD
+partition.
 
 The canonical family commands build and flash the universal S3 release only:
 
@@ -117,9 +115,9 @@ python3 tools/espdisp.py compile --family s3
 python3 tools/espdisp.py flash --family s3 --port /dev/cu.usbmodemXXXX
 ```
 
-Use the manual development build below only on a recoverable CO5300-profile
-board. It is intentionally separate from `firmware-releases/` and from the
-macOS app's embedded resources.
+Use the manual development build below only when the larger 16 MiB application
+slots are specifically needed. It is intentionally separate from
+`firmware-releases/` and from the macOS app's embedded resources.
 
 ## Manual compile
 

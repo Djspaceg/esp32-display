@@ -30,7 +30,7 @@ static constexpr PlatformConfig PLATFORM_ESP32_C6 = {
     WifiTopology::Native, IdentitySource::WifiStationMac,
     SerialTransport::NativeUsbCdc};
 static constexpr PlatformConfig PLATFORM_ESP32_S3 = {
-    Platform::Esp32S3, "esp32s3", "universal-8m-ota", true, true,
+    Platform::Esp32S3, "esp32s3", "universal-8m-doom-ota", true, true,
     WifiTopology::Native, IdentitySource::WifiStationMac,
     SerialTransport::NativeUsbCdc};
 static constexpr PlatformConfig PLATFORM_ESP32_P4 = {

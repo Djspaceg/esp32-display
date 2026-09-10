@@ -4,13 +4,10 @@
 // zero-copy reads. This replaces doomgeneric's standard fopen/fread file
 // access with direct pointer arithmetic.
 //
-// Two mapping paths exist. When a real Doom partition (type 0x42, subtype
-// 0x06) is present in the partition table, we map it with esp_partition_mmap.
-// The universal S3 image instead omits that partition (its table stops at
-// 8 MiB so it stays safe on smaller carriers), yet the WAD image still lives
-// at DOOM_WAD_PARTITION_OFFSET on 16 MiB carriers. There we map the raw flash
-// region directly with the public spi_flash_mmap API after confirming the
-// physical flash actually contains it.
+// Canonical S3 and P4 images carry a real Doom partition (type 0x42, subtype
+// 0x06), which is mapped with esp_partition_mmap. The raw S3 mapping path
+// remains only for legacy developer images whose 16 MiB table omitted the
+// partition entry but wrote the WAD at DOOM_WAD_PARTITION_OFFSET.
 //
 // GPL-2.0 (part of the Doom engine integration)
 #include <string.h>
