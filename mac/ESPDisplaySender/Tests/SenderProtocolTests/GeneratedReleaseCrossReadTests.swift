@@ -18,6 +18,7 @@ final class GeneratedReleaseCrossReadTests: XCTestCase {
                 "firmware-releases/\(entry.artifact)"))
             let bundle = try catalog.bundle(for: entry, data: data)
             XCTAssertEqual(bundle.targets, [family])
+            XCTAssertEqual(bundle.firmwareBuild, entry.latestBuild)
             XCTAssertEqual(bundle.releaseNotes?.count, 10)
         }
     }

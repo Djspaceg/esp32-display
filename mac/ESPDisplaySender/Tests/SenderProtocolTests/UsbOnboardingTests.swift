@@ -304,6 +304,7 @@ final class UsbOnboardingTests: XCTestCase {
             flashParts: image.flashParts.filter { $0.role != "boot_app0" })
         request.bundle = FirmwareBundle(
             format: full.format, firmwareVersion: full.firmwareVersion,
+            firmwareBuild: full.firmwareBuild,
             builtAt: full.builtAt, sourceCommit: full.sourceCommit,
             sourceDirty: full.sourceDirty, tool: full.tool,
             releaseNotes: nil,

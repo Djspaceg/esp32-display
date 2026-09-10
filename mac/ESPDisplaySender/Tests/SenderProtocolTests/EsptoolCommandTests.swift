@@ -516,6 +516,7 @@ final class EsptoolCommandTests: XCTestCase {
         return FirmwareBundle(
             format: FirmwareBundle.format,
             firmwareVersion: version,
+            firmwareBuild: 192,
             builtAt: "2026-01-02T03:04:05Z",
             sourceCommit: nil,
             sourceDirty: false,
@@ -536,6 +537,7 @@ final class EsptoolCommandTests: XCTestCase {
         return FirmwareBundle(
             format: FirmwareBundle.formatV1,
             firmwareVersion: "1.1.0",
+            firmwareBuild: nil,
             builtAt: "2025-12-01T00:00:00Z",
             sourceCommit: nil,
             sourceDirty: false,
