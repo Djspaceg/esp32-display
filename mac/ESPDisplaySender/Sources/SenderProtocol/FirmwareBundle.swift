@@ -182,9 +182,19 @@ public struct FirmwareBundle: Equatable, Sendable {
     private static let bootApp0FlashRole = "boot_app0"
     private static let bootApp0FlashAddress = 0xE000
     private static let doomWadFlashRole = "doom_wad"
-    private static let doomWadAddress = 0xBFF000
     private static let doomWadPartitionBytes = 0x401000
     private static let doomWadBytes = 4_196_020
+    private static let targetRequiresDoomWad: [String: Bool] = [
+        "c6": false,
+        "s3": true,
+        "p4": true,
+        // Historical exact-target bundles retain their original policy.
+        "s3-085": true,
+        "s3-154": true,
+        "s3-175": true,
+        "s3-185": true,
+        "p4-4b": true,
+    ]
     /// Known exact target-to-chip ownership. Format-3 images may additionally
     /// claim unknown compatible aliases, but one image must never span two known
     /// hardware targets or claim a known target for the wrong chip.
@@ -206,6 +216,22 @@ public struct FirmwareBundle: Equatable, Sendable {
         let address: Int
         let byteCount: Int
     }
+
+    private enum DoomPartitionLayout {
+        case universalS3
+        case legacyS3
+        case p4
+    }
+
+    private static let doomPartitionLayoutByTarget: [String: DoomPartitionLayout] = [
+        "s3": .universalS3,
+        "s3-085": .universalS3,
+        "s3-154": .universalS3,
+        "s3-175": .legacyS3,
+        "s3-185": .universalS3,
+        "p4": .p4,
+        "p4-4b": .p4,
+    ]
 
     public let format: Int
     /// `FW_VERSION` as read out of the sketch the images were built from.
@@ -704,9 +730,16 @@ public struct FirmwareBundle: Equatable, Sendable {
         else { return nil }
 
         let currentTargets = Set(Self.currentTargetChips.keys)
-        if !currentTargets.isDisjoint(with: image.targets) {
+        let knownImageTargets = currentTargets.intersection(image.targets)
+        guard knownImageTargets.allSatisfy({
+            Self.targetRequiresDoomWad[$0] != nil
+        }) else { return nil }
+        let requiresDoomPayload = knownImageTargets.contains {
+            Self.targetRequiresDoomWad[$0] == true
+        }
+        if !knownImageTargets.isEmpty {
             var expectedRoles = Set(Self.requiredFlashRoles)
-            if image.targets.contains("s3-175") {
+            if requiresDoomPayload {
                 expectedRoles.insert(Self.doomWadFlashRole)
             }
             guard let expectedBootloader =
@@ -737,17 +770,16 @@ public struct FirmwareBundle: Equatable, Sendable {
             else { return nil }
         }
 
-        let requiresDoomPayload = image.targets.contains("s3-175")
         if requiresDoomPayload {
             guard let doomPart = image.flashPart(role: Self.doomWadFlashRole),
                   let partitionEntries,
-                  Self.isCanonicalDoomPartition(partitionEntries),
+                  Self.matchesDoomPartitionLayout(
+                    partitionEntries, targets: image.targets),
                   let doomEntry = partitionEntries[Self.doomWadFlashRole],
                   doomEntry.type == 0x42,
                   doomEntry.subtype == 0x06,
-                  doomEntry.address == Self.doomWadAddress,
                   doomEntry.byteCount == Self.doomWadPartitionBytes,
-                  doomPart.address == Self.doomWadAddress,
+                  doomPart.address == doomEntry.address,
                   doomPart.byteCount == Self.doomWadBytes,
                   let doomPayload = flashPayload(
                     forTarget: target, role: Self.doomWadFlashRole),
@@ -941,9 +973,11 @@ public struct FirmwareBundle: Equatable, Sendable {
         return true
     }
 
-    private static func isCanonicalDoomPartition(
-        _ entries: [String: PartitionEntry]
+    private static func matchesDoomPartitionLayout(
+        _ entries: [String: PartitionEntry], targets: [String]
     ) -> Bool {
+        let layouts = Set(targets.compactMap { doomPartitionLayoutByTarget[$0] })
+        guard layouts.count == 1, let layout = layouts.first else { return false }
         func matches(
             _ label: String, _ type: UInt8, _ subtype: UInt8,
             _ address: Int, _ byteCount: Int
@@ -952,14 +986,35 @@ public struct FirmwareBundle: Equatable, Sendable {
             return entry.type == type && entry.subtype == subtype
                 && entry.address == address && entry.byteCount == byteCount
         }
-        return entries.count == 5
-            && matches("nvs", 0x01, 0x02, 0x009000, 0x005000)
-            && matches("otadata", 0x01, 0x00, 0x00E000, 0x002000)
-            && matches("app0", 0x00, 0x10, 0x010000, 0x5F0000)
-            && matches("app1", 0x00, 0x11, 0x600000, 0x5F0000)
-            && matches(
-                doomWadFlashRole, 0x42, 0x06,
-                doomWadAddress, doomWadPartitionBytes)
+        guard entries.count == 5,
+              matches("nvs", 0x01, 0x02, 0x009000, 0x005000),
+              matches("otadata", 0x01, 0x00, 0x00E000, 0x002000)
+        else { return false }
+        switch layout {
+        case .universalS3:
+            return matches("app0", 0x00, 0x10, 0x010000, 0x1F0000)
+                && matches("app1", 0x00, 0x11, 0x200000, 0x1F0000)
+                && matches(
+                    doomWadFlashRole, 0x42, 0x06, 0x3FF000,
+                    doomWadPartitionBytes)
+        case .legacyS3:
+            return matches("app0", 0x00, 0x10, 0x010000, 0x5F0000)
+                && matches("app1", 0x00, 0x11, 0x600000, 0x5F0000)
+                && matches(
+                    doomWadFlashRole, 0x42, 0x06, 0xBFF000,
+                    doomWadPartitionBytes)
+        case .p4:
+            guard matches("app0", 0x00, 0x10, 0x010000, 0x800000),
+                  matches("app1", 0x00, 0x11, 0x810000, 0x800000),
+                  let wad = entries[doomWadFlashRole]
+            else { return false }
+            let app1End = 0x810000 + 0x800000
+            let flashLimit = 32 * 1024 * 1024
+            return wad.type == 0x42 && wad.subtype == 0x06
+                && wad.byteCount == doomWadPartitionBytes
+                && wad.address >= app1End
+                && wad.address <= flashLimit - doomWadPartitionBytes
+        }
     }
 
     static func legacyTarget(forBoard board: String) -> String? {

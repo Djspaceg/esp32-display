@@ -227,29 +227,28 @@ final class EsptoolCommandTests: XCTestCase {
         ])
     }
 
-    func testExactTargetS3085FlashesFromStandardNonDoomParts() throws {
-        // s3-085 shares the ESP32-S3 chip with the Doom-enabled s3-175 target,
-        // but uses the standard three blank-board parts plus the app with no
-        // partition-table WAD slot.
+    func testExactTargetS3085RefusesStandardNonDoomParts() throws {
         let bundle = Self.bundle(
             chip: "esp32s3", bootloader: 0x0, app: 0x10000, target: "s3-085")
-        let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "s3-085"))
-        XCTAssertEqual(
-            plan.map(\.role), ["bootloader", "partitions", "boot_app0", "app"])
-        XCTAssertEqual(plan.map(\.address), [0x0, 0x8000, 0xE000, 0x10000])
-        XCTAssertFalse(
-            plan.contains { $0.role == "doom_wad" },
-            "s3-085 is not a Doom target and carries no WAD")
+        XCTAssertNil(bundle.flashPlan(forTarget: "s3-085"))
     }
 
-    func testExactTargetS3154FlashesFromStandardNonDoomParts() throws {
+    func testExactTargetS3154RefusesStandardNonDoomParts() throws {
         let bundle = Self.bundle(
             chip: "esp32s3", bootloader: 0x0, app: 0x10000, target: "s3-154")
-        let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "s3-154"))
+        XCTAssertNil(bundle.flashPlan(forTarget: "s3-154"))
+    }
+
+    func testCurrentS3FlashesDualOTAAndItsTableAddressedDoomWAD() throws {
+        let bundle = Self.bundle(
+            chip: "esp32s3", bootloader: 0x0, app: 0x10000, target: "s3")
+        let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "s3"))
         XCTAssertEqual(
-            plan.map(\.role), ["bootloader", "partitions", "boot_app0", "app"])
-        XCTAssertEqual(plan.map(\.address), [0x0, 0x8000, 0xE000, 0x10000])
-        XCTAssertFalse(plan.contains { $0.role == "doom_wad" })
+            plan.map(\.role),
+            ["bootloader", "partitions", "boot_app0", "app", "doom_wad"])
+        XCTAssertEqual(
+            plan.map(\.address),
+            [0x0, 0x8000, 0xE000, 0x10000, 0x3FF000])
     }
 
     func testExactTargetP44BPreservesItsBootloaderAndDualOTASlots() throws {
@@ -261,8 +260,11 @@ final class EsptoolCommandTests: XCTestCase {
         XCTAssertEqual(image.targets, ["p4-4b"])
         let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "p4-4b"))
         XCTAssertEqual(
-            plan.map(\.role), ["bootloader", "partitions", "boot_app0", "app"])
-        XCTAssertEqual(plan.map(\.address), [0x2000, 0x8000, 0xE000, 0x10000])
+            plan.map(\.role),
+            ["bootloader", "partitions", "boot_app0", "app", "doom_wad"])
+        XCTAssertEqual(
+            plan.map(\.address),
+            [0x2000, 0x8000, 0xE000, 0x10000, 0x1010000])
         XCTAssertNil(bundle.flashPlan(forTarget: "s3-185"))
         XCTAssertEqual(bundle.image(forChip: "esp32p4")?.targets, ["p4-4b"])
     }
@@ -426,7 +428,7 @@ final class EsptoolCommandTests: XCTestCase {
     /// manifest MEANS once read. Building bytes here would duplicate that solver
     /// without testing anything this file is responsible for.
     private static func partitionTable(
-        appAddress: Int, doom: Bool, p4: Bool = false
+        appAddress: Int, doom: Bool, p4: Bool = false, canonicalS3: Bool = false
     ) -> Data {
         var bytes = [UInt8](repeating: 0xFF, count: 3072)
         func writeU32(_ value: Int, at offset: Int) {
@@ -454,13 +456,20 @@ final class EsptoolCommandTests: XCTestCase {
 
         writeEntry(0, "nvs", 0x01, 0x02, 0x9000, 0x5000)
         writeEntry(1, "otadata", 0x01, 0x00, 0xE000, 0x2000)
-        if doom {
+        if p4 {
+            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x800000)
+            writeEntry(3, "app1", 0x00, 0x11, 0x810000, 0x800000)
+            if doom {
+                writeEntry(4, "doom_wad", 0x42, 0x06, 0x1010000, 0x401000)
+            }
+        } else if canonicalS3 {
+            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x1F0000)
+            writeEntry(3, "app1", 0x00, 0x11, 0x200000, 0x1F0000)
+            writeEntry(4, "doom_wad", 0x42, 0x06, 0x3FF000, 0x401000)
+        } else if doom {
             writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x5F0000)
             writeEntry(3, "app1", 0x00, 0x11, 0x600000, 0x5F0000)
             writeEntry(4, "doom_wad", 0x42, 0x06, 0xBFF000, 0x401000)
-        } else if p4 {
-            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x800000)
-            writeEntry(3, "app1", 0x00, 0x11, 0x810000, 0x800000)
         } else {
             writeEntry(2, "app0", 0x00, 0x10, appAddress, 0x200000)
         }
@@ -485,16 +494,21 @@ final class EsptoolCommandTests: XCTestCase {
         let target = explicitTarget ?? (chip == "esp32c6"
             ? "c6"
             : chip == "esp32s3" ? "s3-175" : chip)
-        let hasDoom = target == "s3-175"
+        let hasDoom = target == "s3" || target == "s3-175" || target == "p4-4b"
+        let isP4 = target == "p4-4b"
+        let isCanonicalS3 = target == "s3"
         let partitionPayload = partitionTable(
-            appAddress: app, doom: hasDoom, p4: target == "p4-4b")
+            appAddress: app, doom: hasDoom, p4: isP4, canonicalS3: isCanonicalS3)
         var parts: [(String, Int, Data)] = [
             ("bootloader", bootloader, Data("boot".utf8)),
             ("partitions", 0x8000, partitionPayload),
             ("boot_app0", 0xe000, Data("otadata".utf8)),
         ]
         if hasDoom {
-            parts.append(("doom_wad", 0xBFF000, syntheticDoomWad))
+            parts.append((
+                "doom_wad",
+                isP4 ? 0x1010000 : isCanonicalS3 ? 0x3FF000 : 0xBFF000,
+                syntheticDoomWad))
         }
         let image = FirmwareBundle.Image(
             board: target,

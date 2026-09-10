@@ -441,10 +441,16 @@ final class FirmwareBundleTests: XCTestCase {
         let image = try XCTUnwrap(bundle.image(forTarget: "p4-4b"))
         XCTAssertEqual(image.chip, "esp32p4")
         XCTAssertEqual(image.appAddress, 0x10000)
-        XCTAssertEqual(image.flashParts.map(\.address), [0x2000, 0x8000, 0xE000])
+        XCTAssertEqual(
+            image.flashParts.map(\.address),
+            [0x2000, 0x8000, 0xE000, 0x1010000])
         let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "p4-4b"))
-        XCTAssertEqual(plan.map(\.role), ["bootloader", "partitions", "boot_app0", "app"])
-        XCTAssertEqual(plan.map(\.address), [0x2000, 0x8000, 0xE000, 0x10000])
+        XCTAssertEqual(
+            plan.map(\.role),
+            ["bootloader", "partitions", "boot_app0", "app", "doom_wad"])
+        XCTAssertEqual(
+            plan.map(\.address),
+            [0x2000, 0x8000, 0xE000, 0x10000, 0x1010000])
 
         let wrongTarget = bundle.availability(
             forTarget: "s3-185", chip: "esp32p4", panelVersion: "1.4.2")
@@ -456,6 +462,81 @@ final class FirmwareBundleTests: XCTestCase {
         guard case .targetChipMismatch = wrongChip else {
             return XCTFail("P4 image accepted for wrong chip: \(wrongChip)")
         }
+    }
+
+    func testFormatThreeReadsCurrentS3WithDualOTAAndDoomWAD() throws {
+        let bundle = try Self.readBundle(
+            version: "1.5.0", images: [Self.currentS3Spec],
+            generation: FirmwareBundle.format)
+        let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "s3"))
+        XCTAssertEqual(
+            plan.map(\.role),
+            ["bootloader", "partitions", "boot_app0", "app", "doom_wad"])
+        XCTAssertEqual(
+            plan.map(\.address),
+            [0x0, 0x8000, 0xE000, 0x10000, 0x3FF000])
+    }
+
+    func testCurrentS3RefusesAMissingDoomPayload() throws {
+        var missing = Self.currentS3Spec
+        missing.flashParts.removeLast()
+        let bundle = try Self.readBundle(
+            version: "1.5.0", images: [missing], generation: FirmwareBundle.format)
+        XCTAssertNil(bundle.flashPlan(forTarget: "s3"))
+    }
+
+    func testC6RefusesAStrayDoomPayload() throws {
+        var c6 = Self.c6Spec
+        c6.flashParts.append(FlashPartSpec(
+            role: "doom_wad", address: 0x3FF000,
+            filename: "doom1.wad", payload: Self.syntheticDoomWad))
+        let bundle = try Self.readBundle(
+            version: "1.5.0", images: [c6], generation: FirmwareBundle.format)
+        XCTAssertNil(bundle.flashPlan(forTarget: "c6"))
+    }
+
+    func testP4DoomAddressComesFromItsPartitionTable() throws {
+        let wadAddress = 0x1110000
+        var p4 = Self.p4Spec
+        p4.flashParts[1] = FlashPartSpec(
+            role: "partitions", address: 0x8000,
+            filename: "display_stream.ino.partitions.bin",
+            payload: Self.p4PartitionTable(wadAddress: wadAddress))
+        p4.flashParts[3] = FlashPartSpec(
+            role: "doom_wad", address: wadAddress,
+            filename: "doom1.wad", payload: Self.syntheticDoomWad)
+
+        let bundle = try Self.readBundle(
+            version: "1.5.0", images: [p4], generation: FirmwareBundle.format)
+        XCTAssertEqual(
+            bundle.flashPlan(forTarget: "p4-4b")?.last?.address,
+            wadAddress)
+    }
+
+    func testP4RefusesAMissingOrMisaddressedDoomPayload() throws {
+        var missing = Self.p4Spec
+        missing.flashParts.removeLast()
+        let missingBundle = try Self.readBundle(
+            version: "1.5.0", images: [missing], generation: FirmwareBundle.format)
+        XCTAssertNil(missingBundle.flashPlan(forTarget: "p4-4b"))
+
+        var misaddressed = Self.p4Spec
+        misaddressed.flashParts[3] = FlashPartSpec(
+            role: "doom_wad", address: 0xBFF000,
+            filename: "doom1.wad", payload: Self.syntheticDoomWad)
+        let misaddressedBundle = try Self.readBundle(
+            version: "1.5.0", images: [misaddressed], generation: FirmwareBundle.format)
+        XCTAssertNil(misaddressedBundle.flashPlan(forTarget: "p4-4b"))
+
+        var missingApp1 = Self.p4Spec
+        missingApp1.flashParts[1] = FlashPartSpec(
+            role: "partitions", address: 0x8000,
+            filename: "display_stream.ino.partitions.bin",
+            payload: Self.p4PartitionTable(includeApp1: false))
+        let missingApp1Bundle = try Self.readBundle(
+            version: "1.5.0", images: [missingApp1],
+            generation: FirmwareBundle.format)
+        XCTAssertNil(missingApp1Bundle.flashPlan(forTarget: "p4-4b"))
     }
 
     func testLegacyS3AlwaysMapsToS3175AndNeverS3185() throws {
@@ -510,9 +591,9 @@ final class FirmwareBundleTests: XCTestCase {
         XCTAssertFalse(bundle.canFlashBlankDevice(chip: "esp32s3"))
     }
 
-    /// All four ESP32-S3 targets share one chip, so none can be chosen by chip;
-    /// only the exact target selects an image. s3-085, s3-154, and s3-185 are
-    /// non-Doom targets and need only the standard blank-board flash parts.
+    /// All four historical ESP32-S3 targets share one chip, so none can be chosen
+    /// by chip. Their legacy fixtures remain readable, but every exact S3 target
+    /// now refuses a blank-device plan unless its partition and WAD are present.
     func testFormatThreeSelectsFourESP32S3ImagesByExactTarget() throws {
         let s3_085 = ImageSpec(
             board: "s3-085",
@@ -560,9 +641,11 @@ final class FirmwareBundleTests: XCTestCase {
         // The chip alone still resolves nothing, which is the same-chip refusal.
         XCTAssertNil(bundle.image(forChip: "esp32s3"))
         XCTAssertFalse(bundle.canFlashBlankDevice(chip: "esp32s3"))
-        // s3-085 is a standard (non-Doom) target: it carries only the three
-        // blank-board roles and no Doom WAD part (the full non-Doom flash-plan
-        // assembly against a real partition table is in EsptoolCommandTests).
+        for target in ["s3-085", "s3-154", "s3-175", "s3-185"] {
+            XCTAssertNil(
+                bundle.flashPlan(forTarget: target),
+                "\(target) must not flash without its required WAD layout")
+        }
         let s3_085Image = try XCTUnwrap(bundle.image(forTarget: "s3-085"))
         XCTAssertEqual(
             s3_085Image.flashParts.map(\.role),
@@ -1784,7 +1867,9 @@ final class FirmwareBundleTests: XCTestCase {
         ]
     }
 
-    private static func p4PartitionTable() -> Data {
+    private static func p4PartitionTable(
+        wadAddress: Int = 0x1010000, includeApp1: Bool = true
+    ) -> Data {
         var bytes = [UInt8](repeating: 0xFF, count: 3072)
         func writeU32(_ value: Int, _ offset: Int) {
             for shift in stride(from: 0, through: 24, by: 8) {
@@ -1810,9 +1895,53 @@ final class FirmwareBundleTests: XCTestCase {
         entry(0, "nvs", 0x01, 0x02, 0x9000, 0x5000)
         entry(1, "otadata", 0x01, 0x00, 0xE000, 0x2000)
         entry(2, "app0", 0x00, 0x10, 0x10000, 0x800000)
-        entry(3, "app1", 0x00, 0x11, 0x810000, 0x800000)
+        if includeApp1 {
+            entry(3, "app1", 0x00, 0x11, 0x810000, 0x800000)
+        }
+        entry(4, "doom_wad", 0x42, 0x06, wadAddress, 0x401000)
         return Data(bytes)
     }
+
+    private static func s3PartitionTable() -> Data {
+        var bytes = [UInt8](repeating: 0xFF, count: 3072)
+        func writeU32(_ value: Int, _ offset: Int) {
+            for shift in stride(from: 0, through: 24, by: 8) {
+                bytes[offset + shift / 8] = UInt8((value >> shift) & 0xFF)
+            }
+        }
+        func entry(
+            _ index: Int, _ label: String, _ type: UInt8, _ subtype: UInt8,
+            _ address: Int, _ byteCount: Int
+        ) {
+            let offset = index * 32
+            bytes[offset] = 0xAA
+            bytes[offset + 1] = 0x50
+            bytes[offset + 2] = type
+            bytes[offset + 3] = subtype
+            writeU32(address, offset + 4)
+            writeU32(byteCount, offset + 8)
+            for index in (offset + 12)..<(offset + 32) { bytes[index] = 0 }
+            for (labelOffset, byte) in label.utf8.prefix(16).enumerated() {
+                bytes[offset + 12 + labelOffset] = byte
+            }
+        }
+        entry(0, "nvs", 0x01, 0x02, 0x9000, 0x5000)
+        entry(1, "otadata", 0x01, 0x00, 0xE000, 0x2000)
+        entry(2, "app0", 0x00, 0x10, 0x10000, 0x1F0000)
+        entry(3, "app1", 0x00, 0x11, 0x200000, 0x1F0000)
+        entry(4, "doom_wad", 0x42, 0x06, 0x3FF000, 0x401000)
+        return Data(bytes)
+    }
+
+    private static let syntheticDoomWad: Data = {
+        var bytes = [UInt8](repeating: 0, count: 4_196_020)
+        bytes.replaceSubrange(0..<4, with: "IWAD".utf8)
+        bytes[4] = 1
+        bytes[8] = 12
+        bytes[12] = 28
+        bytes.replaceSubrange(20..<24, with: "TEST".utf8)
+        return Data(bytes)
+    }()
 
     private static let p4Spec = ImageSpec(
         board: "p4-4b", chip: "esp32p4", payload: Data("p4 app".utf8),
@@ -1828,7 +1957,29 @@ final class FirmwareBundleTests: XCTestCase {
             FlashPartSpec(
                 role: "boot_app0", address: 0xE000,
                 filename: "boot_app0.bin", payload: Data("p4 ota\n".utf8)),
+            FlashPartSpec(
+                role: "doom_wad", address: 0x1010000,
+                filename: "doom1.wad", payload: syntheticDoomWad),
         ], targets: ["p4-4b"])
+
+    private static let currentS3Spec = ImageSpec(
+        board: "s3", chip: "esp32s3", payload: Data("current s3 app".utf8),
+        flashParts: [
+            FlashPartSpec(
+                role: "bootloader", address: 0x0,
+                filename: "display_stream.ino.bootloader.bin",
+                payload: Data([0xE9]) + Data("s3 bootloader\n".utf8)),
+            FlashPartSpec(
+                role: "partitions", address: 0x8000,
+                filename: "display_stream.ino.partitions.bin",
+                payload: s3PartitionTable()),
+            FlashPartSpec(
+                role: "boot_app0", address: 0xE000,
+                filename: "boot_app0.bin", payload: Data("s3 ota\n".utf8)),
+            FlashPartSpec(
+                role: "doom_wad", address: 0x3FF000,
+                filename: "doom1.wad", payload: syntheticDoomWad),
+        ], targets: ["s3"])
 
     private static let appFlashAddress = 0x10000
 

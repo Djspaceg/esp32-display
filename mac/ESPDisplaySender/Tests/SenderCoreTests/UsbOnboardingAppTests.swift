@@ -322,7 +322,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             family: "s3-175",
             chip: "esp32s3",
             profile: "co5300",
-            partition: "universal-8m-ota")
+            partition: "universal-8m-doom-ota")
 
         guard case .familyFallback(let selection) = resolution else {
             return XCTFail("an S3 exact-target alias should still resolve the bundled s3 family")
@@ -339,7 +339,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             family: "p4",
             chip: "esp32s3",
             profile: "co5300",
-            partition: "universal-8m-ota")) {
+            partition: "universal-8m-doom-ota")) {
                 XCTAssertEqual(
                     $0 as? FirmwareReleaseCatalogError,
                     .chipMismatch(expected: "esp32p4", found: "esp32s3"))
