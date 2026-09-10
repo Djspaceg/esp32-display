@@ -3063,6 +3063,7 @@ def _verify_partition_payload(family: Family, blob: bytes) -> None:
             "otadata": (0x01, 0x00, 0x00E000, 0x002000),
             "app0": (0x00, 0x10, 0x010000, 0x800000),
             "app1": (0x00, 0x11, 0x810000, 0x800000),
+            "doom_wad": (0x42, 0x06, 0x1010000, 0x401000),
         }
     elif family.key == "s3":
         expected = {
