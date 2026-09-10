@@ -3,6 +3,39 @@ import XCTest
 @testable import SenderProtocol
 
 final class FirmwareReleaseCatalogTests: XCTestCase {
+    func testSchemaTwoReadsLatestBuild() throws {
+        let catalog = try FirmwareReleaseCatalog.read(
+            Self.catalogData(schema: 2, latestBuild: 192))
+        XCTAssertEqual(try XCTUnwrap(catalog.families["c6"]).latestBuild, 192)
+    }
+
+    func testSchemaOneReadsLatestBuildAsUnknown() throws {
+        let catalog = try FirmwareReleaseCatalog.read(Self.catalogData())
+        XCTAssertNil(try XCTUnwrap(catalog.families["c6"]).latestBuild)
+    }
+
+    func testSchemaTwoAcceptsBranchSuffixAndRejectsInvalidBuilds() throws {
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Self.catalogData(schema: 2, latestBuild: 192)
+            ) as? [String: Any])
+        var families = object["families"] as! [String: Any]
+        var c6 = families["c6"] as! [String: Any]
+        c6["artifact"] = "c6/espdisp-c6-1.5.0+192.g346728d.espdispfw"
+        families["c6"] = c6
+        object["families"] = families
+        XCTAssertNoThrow(try FirmwareReleaseCatalog.read(
+            JSONSerialization.data(withJSONObject: object)))
+
+        for invalid: Any in [0, -1, 4_294_967_296, true, 192.5] {
+            c6["latest_build"] = invalid
+            families["c6"] = c6
+            object["families"] = families
+            XCTAssertThrowsError(try FirmwareReleaseCatalog.read(
+                JSONSerialization.data(withJSONObject: object)), "\(invalid)")
+        }
+    }
+
     func testReadsExactlyThreeFamiliesAndSelectsWithIndependentEvidence() throws {
         let catalog = try FirmwareReleaseCatalog.read(Self.catalogData())
         XCTAssertEqual(Set(catalog.families.keys), ["c6", "s3", "p4"])
@@ -60,7 +93,9 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
         }
     }
 
-    private static func catalogData() throws -> Data {
+    private static func catalogData(
+        schema: Int = 1, latestBuild: UInt32? = nil
+    ) throws -> Data {
         let profiles: [String: [String]] = [
             "c6": ["st7789", "jd9853"],
             "s3": ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"],
@@ -80,9 +115,10 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
             let profileList = profiles[family]!
             var hardware = [String: [String]]()
             for profile in profileList { hardware[profile] = ["Fixture \(profile)"] }
-            families[family] = [
+            var entry: [String: Any] = [
                 "latest_version": "1.5.0",
-                "artifact": "\(family)/espdisp-\(family)-1.5.0.espdispfw",
+                "artifact": "\(family)/espdisp-\(family)-1.5.0"
+                    + (latestBuild.map { "+\($0)" } ?? "") + ".espdispfw",
                 "sha256": String(repeating: "a", count: 64),
                 "bytes": 123,
                 "chip": chips[family]!,
@@ -98,9 +134,11 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
                     "identity_required": ["family", "chip", "profile", "partition"],
                 ],
             ]
+            if let latestBuild { entry["latest_build"] = latestBuild }
+            families[family] = entry
         }
         return try JSONSerialization.data(withJSONObject: [
-            "schema": 1,
+            "schema": schema,
             "generated_at": "2026-01-02T03:04:05Z",
             "families": families,
         ])

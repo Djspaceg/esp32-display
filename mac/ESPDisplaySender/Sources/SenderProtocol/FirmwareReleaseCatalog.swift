@@ -16,6 +16,7 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
     public struct Entry: Equatable, Sendable {
         public let family: String
         public let latestVersion: String
+        public let latestBuild: UInt32?
         public let artifact: String
         public let sha256: String
         public let byteCount: Int
@@ -45,7 +46,8 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
     public let generatedAt: String
     public let families: [String: Entry]
 
-    public static let currentSchema = 1
+    public static let legacySchema = 1
+    public static let currentSchema = 2
     public static let requiredFamilies = Set(["c6", "s3", "p4"])
     public static let fileName = "manifest.json"
 
@@ -65,7 +67,7 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
         }
         try requireKeys(root, exactly: ["schema", "generated_at", "families"], at: "catalog")
         let schema = try integer(root["schema"], at: "catalog.schema")
-        guard schema == currentSchema else {
+        guard schema == legacySchema || schema == currentSchema else {
             throw FirmwareReleaseCatalogError.unsupportedSchema(schema)
         }
         let generatedAt = try token(root["generated_at"], at: "catalog.generated_at")
@@ -85,20 +87,29 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
             guard let raw = rawFamilies[family] as? [String: Any] else {
                 throw FirmwareReleaseCatalogError.invalidEntry(family)
             }
-            try requireKeys(
-                raw,
-                exactly: [
-                    "latest_version", "artifact", "sha256", "bytes", "chip",
-                    "profiles", "hardware", "compatibility",
-                ],
-                at: family)
+            var entryKeys: Set<String> = [
+                "latest_version", "artifact", "sha256", "bytes", "chip",
+                "profiles", "hardware", "compatibility",
+            ]
+            if schema == currentSchema { entryKeys.insert("latest_build") }
+            try requireKeys(raw, exactly: entryKeys, at: family)
             let version = try token(raw["latest_version"], at: "\(family).latest_version")
             guard SemVer(version) != nil else {
                 throw FirmwareReleaseCatalogError.invalidVersion(family, version)
             }
+            let build: UInt32?
+            if schema == currentSchema {
+                let value = try integer(raw["latest_build"], at: "\(family).latest_build")
+                guard value > 0, let exact = UInt32(exactly: value) else {
+                    throw FirmwareReleaseCatalogError.invalidField("\(family).latest_build")
+                }
+                build = exact
+            } else {
+                build = nil
+            }
             let artifact = try token(raw["artifact"], at: "\(family).artifact")
-            let expectedArtifact = "\(family)/espdisp-\(family)-\(version).espdispfw"
-            guard artifact == expectedArtifact,
+            guard artifactIsCanonical(
+                    artifact, family: family, version: version, build: build),
                   !artifact.hasPrefix("/"), !artifact.split(separator: "/").contains("..")
             else { throw FirmwareReleaseCatalogError.invalidArtifact(family) }
             let digest = try token(raw["sha256"], at: "\(family).sha256")
@@ -128,7 +139,8 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
                   compatibility.appAddress == 0x10000
             else { throw FirmwareReleaseCatalogError.invalidCompatibility(family) }
             families[family] = Entry(
-                family: family, latestVersion: version, artifact: artifact,
+                family: family, latestVersion: version, latestBuild: build,
+                artifact: artifact,
                 sha256: digest, byteCount: byteCount, chip: chip,
                 profiles: profiles, hardware: hardware,
                 compatibility: compatibility)
@@ -181,6 +193,7 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
         }
         let bundle = try FirmwareBundle.read(data)
         guard bundle.firmwareVersion == entry.latestVersion,
+              entry.latestBuild == nil || bundle.firmwareBuild == entry.latestBuild,
               bundle.images.count == 1,
               bundle.targets == [entry.family],
               let image = bundle.images.first,
@@ -234,6 +247,25 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
             appAddress: try integer(
                 raw["app_address"], at: "\(family).compatibility.app_address"),
             identityRequired: required)
+    }
+
+    private static func artifactIsCanonical(
+        _ artifact: String, family: String, version: String, build: UInt32?
+    ) -> Bool {
+        guard let build else {
+            return artifact == "\(family)/espdisp-\(family)-\(version).espdispfw"
+        }
+        let prefix = "\(family)/espdisp-\(family)-\(version)+\(build)"
+        guard artifact.hasPrefix(prefix) else { return false }
+        let suffix = String(artifact.dropFirst(prefix.count))
+        if suffix == ".espdispfw" { return true }
+        guard suffix.hasPrefix(".g"), suffix.hasSuffix(".espdispfw") else {
+            return false
+        }
+        let sha = suffix.dropFirst(2).dropLast(".espdispfw".count)
+        return sha.count == 7 && sha.allSatisfy {
+            $0.isASCII && ($0.isNumber || ("a"..."f").contains(String($0)))
+        }
     }
 
     private static func requireKeys(

@@ -210,6 +210,8 @@ public struct FirmwareBundle: Equatable, Sendable {
     public let format: Int
     /// `FW_VERSION` as read out of the sketch the images were built from.
     public let firmwareVersion: String
+    /// Positive uint32 build metadata, or nil for a legacy bundle.
+    public let firmwareBuild: UInt32?
     /// ISO 8601 UTC, `Z` suffix. Kept as the string the manifest carries rather
     /// than a `Date`: it is shown to a person, and a parse that failed would
     /// throw away information to gain nothing.
@@ -610,6 +612,7 @@ public struct FirmwareBundle: Equatable, Sendable {
             format: format,
             firmwareVersion: try string(
                 manifest["firmware_version"], key: "firmware_version", where: "the manifest"),
+            firmwareBuild: try optionalFirmwareBuild(manifest["firmware_build"]),
             builtAt: try string(manifest["built_at"], key: "built_at", where: "the manifest"),
             // JSON null is a real answer here - it means "not built from a git
             // checkout" - so it is read as nil rather than refused. Any other
@@ -1307,6 +1310,17 @@ public struct FirmwareBundle: Equatable, Sendable {
             result.append(number)
         }
         return result
+    }
+
+    private static func optionalFirmwareBuild(_ value: Any?) throws -> UInt32? {
+        guard let value else { return nil }
+        let number = try integer(value, key: "firmware_build", where: "the manifest")
+        guard number > 0, let build = UInt32(exactly: number) else {
+            throw FirmwareBundleError.fieldHasWrongType(
+                where: "the manifest", key: "firmware_build",
+                wanted: "a positive uint32 whole number")
+        }
+        return build
     }
 
     /// A JSON number read as an integer, with `true`/`false` and any number

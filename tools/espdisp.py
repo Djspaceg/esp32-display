@@ -173,7 +173,10 @@ FW_VERSION_SOURCE = os.path.join(SKETCH_DIR, "app_state.cpp")
 RELEASE_NOTES_PATH = os.path.join(REPO_ROOT, "release-notes.md")
 RELEASE_ROOT = os.path.join(REPO_ROOT, "firmware-releases")
 RELEASE_CATALOG_NAME = "manifest.json"
-RELEASE_CATALOG_SCHEMA = 1
+RELEASE_CATALOG_SCHEMA = 2
+RELEASE_CATALOG_LEGACY_SCHEMA = 1
+FIRMWARE_BUILD_MAX = (1 << 32) - 1
+FIRMWARE_RELEASE_REF_ENV = "ESPDISP_RELEASE_REF"
 LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware", "libraries")
 DOOM_LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware")
 DOOM_PARTITIONS_CSV = os.path.join(REPO_ROOT, "firmware", "partitions_s3_doom.csv")
@@ -267,6 +270,85 @@ def run_capture(cmd: List[str], timeout: float = 60.0) -> subprocess.CompletedPr
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return subprocess.CompletedProcess(cmd, 1, "", str(exc))
+
+
+class FirmwareBuild(NamedTuple):
+    number: int
+    branch_suffix: str
+
+
+def firmware_identity(version: str, build: int, branch_suffix: str = "") -> str:
+    return "%s+%d%s" % (version, build, branch_suffix)
+
+
+def git_firmware_release_ref(repo_root: str = REPO_ROOT) -> str:
+    """Resolve the canonical release ref without assuming a local branch name."""
+    override = os.environ.get(FIRMWARE_RELEASE_REF_ENV, "").strip()
+    if override:
+        verified = run_capture(
+            ["git", "-C", repo_root, "rev-parse", "--verify", "--quiet", override],
+            timeout=15.0,
+        )
+        if verified.returncode != 0:
+            raise Fail(
+                "firmware release ref %r from %s does not resolve"
+                % (override, FIRMWARE_RELEASE_REF_ENV)
+            )
+        return override
+
+    origin_head = run_capture(
+        ["git", "-C", repo_root, "symbolic-ref", "--quiet", "--short",
+         "refs/remotes/origin/HEAD"],
+        timeout=15.0)
+    ref = origin_head.stdout.strip()
+    if origin_head.returncode == 0 and ref:
+        return ref
+    raise Fail(
+        "cannot determine the firmware release branch; set %s or fetch origin/HEAD"
+        % FIRMWARE_RELEASE_REF_ENV
+    )
+
+
+def git_firmware_build(repo_root: str = REPO_ROOT) -> FirmwareBuild:
+    """Derive the authored build and append source provenance off release."""
+    shallow = run_capture(
+        ["git", "-C", repo_root, "rev-parse", "--is-shallow-repository"],
+        timeout=15.0)
+    shallow_state = shallow.stdout.strip().lower()
+    if shallow.returncode != 0 or shallow_state not in ("true", "false"):
+        raise Fail("cannot determine whether the git checkout is shallow")
+    if shallow_state == "true":
+        raise Fail("cannot derive a reliable firmware build from a shallow git checkout")
+
+    count = run_capture(
+        ["git", "-C", repo_root, "rev-list", "--count", "HEAD"], timeout=15.0)
+    raw_count = count.stdout.strip()
+    if count.returncode != 0 or not raw_count.isdigit():
+        raise Fail("cannot derive firmware build from `git rev-list --count HEAD`")
+    number = int(raw_count)
+    if not 1 <= number <= FIRMWARE_BUILD_MAX:
+        raise Fail(
+            "firmware build %d is outside the supported uint32 range 1..%d"
+            % (number, FIRMWARE_BUILD_MAX)
+        )
+
+    release_ref = git_firmware_release_ref(repo_root)
+    on_main = run_capture(
+        ["git", "-C", repo_root, "merge-base", "--is-ancestor",
+         "HEAD", release_ref],
+        timeout=15.0)
+    if on_main.returncode == 0:
+        return FirmwareBuild(number, "")
+    if on_main.returncode != 1:
+        raise Fail("cannot determine whether firmware HEAD is on %s" % release_ref)
+
+    short = run_capture(
+        ["git", "-C", repo_root, "rev-parse", "--short=7", "HEAD"],
+        timeout=15.0)
+    sha = short.stdout.strip().lower()
+    if short.returncode != 0 or re.fullmatch(r"[0-9a-f]{7}", sha) is None:
+        raise Fail("cannot derive the short git SHA for the firmware build")
+    return FirmwareBuild(number, ".g" + sha)
 
 
 # --------------------------------------------------------------------------
@@ -1425,8 +1507,23 @@ def validated_manifest_release_notes(manifest: dict) -> Optional[List[str]]:
     return validated
 
 
+def validated_manifest_firmware_build(manifest: dict) -> Optional[int]:
+    """Validate additive build metadata; absence remains legacy-compatible."""
+    if "firmware_build" not in manifest:
+        return None
+    build = manifest["firmware_build"]
+    if (not is_whole_number(build) or
+            not 1 <= build <= FIRMWARE_BUILD_MAX):
+        raise Fail(
+            "bundle manifest: firmware_build: must be a whole number from 1 to %d"
+            % FIRMWARE_BUILD_MAX
+        )
+    return build
+
+
 def bundle_manifest(
     firmware_version: str,
+    firmware_build: int,
     images: List[dict],
     built_at: str,
     *,
@@ -1459,6 +1556,8 @@ def bundle_manifest(
     three-target bundle (`test_bundle_manifest_offsets` drives payload sizes that
     force digit rollovers).
     """
+    build = validated_manifest_firmware_build({"firmware_build": firmware_build})
+    assert build is not None
     notes = validated_manifest_release_notes({"release_notes": release_notes})
     if notes is None:  # Current format-3 output is never a legacy manifest.
         raise Fail("a format-3 bundle requires release_notes")
@@ -1484,6 +1583,7 @@ def bundle_manifest(
     manifest = {
         "format": BUNDLE_FORMAT,
         "firmware_version": firmware_version,
+        "firmware_build": build,
         "built_at": built_at,
         "source_commit": source_commit,
         "source_dirty": bool(source_dirty),
@@ -1731,6 +1831,7 @@ def unpack_bundle(
     missing = [key for key in MANIFEST_KEYS if key not in manifest]
     if missing:
         raise Fail("bundle manifest is missing %s" % ", ".join(missing))
+    validated_manifest_firmware_build(manifest)
     # The magic and the manifest's own `format` have to agree. They are two
     # statements of the same fact, so a file where they differ is self-
     # contradictory whichever one is right, and guessing which to believe would
@@ -1947,8 +2048,15 @@ def describe_bundle(manifest: dict, full_hash: bool = False) -> List[str]:
         if isinstance(notes, list)
         else "  release notes: unavailable (legacy bundle)"
     )
+    version = manifest.get("firmware_version")
+    build = validated_manifest_firmware_build(manifest)
+    identity = (
+        firmware_identity(version, build)
+        if isinstance(version, str) and build is not None
+        else version
+    )
     lines = [
-        "  version:  %s" % manifest.get("firmware_version"),
+        "  version:  %s" % identity,
         "  built at: %s" % manifest.get("built_at"),
         "  source:   %s" % source,
         "  tool:     %s (format %s)" % (manifest.get("tool"), manifest.get("format")),
@@ -2006,10 +2114,11 @@ def describe_bundle(manifest: dict, full_hash: bool = False) -> List[str]:
 
 
 def release_catalog_entry(
-    family: Family, version: str, artifact: str, data: bytes
+    family: Family, version: str, build: int, artifact: str, data: bytes
 ) -> dict:
     return {
         "latest_version": version,
+        "latest_build": build,
         "artifact": artifact.replace(os.sep, "/"),
         "sha256": sha256_hex(data),
         "bytes": len(data),
@@ -2030,14 +2139,18 @@ def release_catalog_entry(
     }
 
 
-def release_catalog(version: str, output_root: str) -> dict:
+def release_catalog(
+    version: str, build: FirmwareBuild, output_root: str
+) -> dict:
     families = {}
+    identity = firmware_identity(version, build.number, build.branch_suffix)
     for key, family in FAMILIES.items():
         relative = os.path.join(
-            key, "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX))
+            key, "espdisp-%s-%s%s" % (key, identity, BUNDLE_SUFFIX))
         path = os.path.join(output_root, relative)
         data = read_binary(path)
-        families[key] = release_catalog_entry(family, version, relative, data)
+        families[key] = release_catalog_entry(
+            family, version, build.number, relative, data)
     return {
         "schema": RELEASE_CATALOG_SCHEMA,
         "generated_at": utc_timestamp(),
@@ -2052,8 +2165,13 @@ def validate_release_catalog(
         raise Fail("release catalog must be a JSON object")
     if set(catalog) != {"schema", "generated_at", "families"}:
         raise Fail("release catalog has unexpected or missing top-level keys")
-    if catalog["schema"] != RELEASE_CATALOG_SCHEMA:
-        raise Fail("release catalog schema must be %d" % RELEASE_CATALOG_SCHEMA)
+    schema = catalog["schema"]
+    if (not is_whole_number(schema) or
+            schema not in (RELEASE_CATALOG_LEGACY_SCHEMA, RELEASE_CATALOG_SCHEMA)):
+        raise Fail(
+            "release catalog schema must be %d or %d"
+            % (RELEASE_CATALOG_LEGACY_SCHEMA, RELEASE_CATALOG_SCHEMA)
+        )
     families = catalog["families"]
     if not isinstance(families, dict) or set(families) != set(FAMILIES):
         raise Fail("release catalog must list exactly c6, s3, and p4")
@@ -2062,6 +2180,8 @@ def validate_release_catalog(
         "latest_version", "artifact", "sha256", "bytes", "chip",
         "profiles", "hardware", "compatibility",
     }
+    if schema == RELEASE_CATALOG_SCHEMA:
+        required_entry.add("latest_build")
     required_compatibility = {
         "flash_bytes", "partition_scheme", "bootloader_address",
         "partitions_address", "boot_app0_address", "app_address",
@@ -2074,9 +2194,29 @@ def validate_release_catalog(
         version = entry["latest_version"]
         if not isinstance(version, str) or parse_semver(version) is None:
             raise Fail("release catalog family %s has a non-SemVer version" % key)
-        expected_name = "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX)
+        build = entry.get("latest_build")
+        if schema == RELEASE_CATALOG_SCHEMA:
+            if (not is_whole_number(build) or
+                    not 1 <= build <= FIRMWARE_BUILD_MAX):
+                raise Fail("release catalog family %s has an invalid build" % key)
+            expected_name = re.compile(
+                re.escape("espdisp-%s-%s+%d" % (key, version, build))
+                + r"(?:\.g[0-9a-f]{7})?"
+                + re.escape(BUNDLE_SUFFIX) + r"$"
+            )
+        else:
+            expected_name = "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX)
         relative = entry["artifact"]
-        if not isinstance(relative, str) or relative != "%s/%s" % (key, expected_name):
+        canonical = (
+            isinstance(relative, str)
+            and relative.startswith(key + "/")
+            and (
+                expected_name.fullmatch(relative[len(key) + 1:]) is not None
+                if schema == RELEASE_CATALOG_SCHEMA
+                else relative == "%s/%s" % (key, expected_name)
+            )
+        )
+        if not canonical:
             raise Fail("release catalog family %s has a non-canonical artifact path" % key)
         path = os.path.realpath(os.path.join(root, relative))
         try:
@@ -2100,7 +2240,7 @@ def validate_release_catalog(
                 set(compatibility) != required_compatibility):
             raise Fail("release catalog family %s compatibility is incomplete" % key)
         expected_compatibility = release_catalog_entry(
-            family, version, relative, b"x")["compatibility"]
+            family, version, build or 1, relative, b"x")["compatibility"]
         if compatibility != expected_compatibility:
             raise Fail("release catalog family %s compatibility does not match its build" % key)
         if not is_whole_number(entry["bytes"]) or entry["bytes"] <= 0:
@@ -2116,6 +2256,8 @@ def validate_release_catalog(
                 raise Fail("release catalog family %s sha256 is stale" % key)
             manifest, payloads, flash_payloads = unpack_bundle(data)
             if (manifest.get("firmware_version") != version or
+                    (schema == RELEASE_CATALOG_SCHEMA and
+                     validated_manifest_firmware_build(manifest) != build) or
                     set(payloads) != {key} or set(flash_payloads) != {key} or
                     len(manifest.get("images") or []) != 1):
                 raise Fail("release catalog family %s bundle metadata disagrees" % key)
@@ -2168,15 +2310,18 @@ def cmd_release(args) -> int:
         raise Fail("firmware/display_stream/app_state.cpp:%d: %s" % (
             version_line, RELEASE_REASON_FW_VERSION % quote_release_value(version)))
     release_notes_for_version(RELEASE_NOTES_PATH, version)
+    build = git_firmware_build()
+    identity = firmware_identity(version, build.number, build.branch_suffix)
     output_root = os.path.abspath(args.output_root)
     os.makedirs(output_root, exist_ok=True)
     for key in FAMILIES:
         directory = os.path.join(output_root, key)
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(
-            directory, "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX))
-        cmd_bundle(type("BundleArgs", (), {"family": [key], "output": path})())
-    catalog = release_catalog(version, output_root)
+            directory, "espdisp-%s-%s%s" % (key, identity, BUNDLE_SUFFIX))
+        cmd_bundle(type("BundleArgs", (), {
+            "family": [key], "output": path, "firmware_build": build})())
+    catalog = release_catalog(version, build, output_root)
     catalog_path = os.path.join(output_root, RELEASE_CATALOG_NAME)
     write_release_catalog(catalog_path, catalog)
     print("\nWrote canonical release catalog %s" % catalog_path)
@@ -3362,13 +3507,15 @@ def cmd_bundle(args) -> int:
     keys = bundle_family_keys(args.family)
     boards = [FAMILIES[key] for key in keys]
     family_key = keys[0]
+    build = getattr(args, "firmware_build", None) or git_firmware_build()
+    identity = firmware_identity(version, build.number, build.branch_suffix)
     path = args.output or os.path.join(
         os.getcwd(), "espdisp-%s-%s%s" %
-        (family_key, version, BUNDLE_SUFFIX)
+        (family_key, identity, BUNDLE_SUFFIX)
     )
     commit, dirty = git_provenance()
     print("Firmware %s (FW_VERSION in %s)"
-          % (version, os.path.relpath(FW_VERSION_SOURCE, REPO_ROOT)))
+          % (identity, os.path.relpath(FW_VERSION_SOURCE, REPO_ROOT)))
     print("Building: %s" % ", ".join(board.key for board in boards), flush=True)
 
     entries: List[dict] = []
@@ -3416,7 +3563,7 @@ def cmd_bundle(args) -> int:
             shutil.rmtree(out_dir, ignore_errors=True)
 
     manifest = bundle_manifest(
-        version, entries, utc_timestamp(), release_notes=release_notes,
+        version, build.number, entries, utc_timestamp(), release_notes=release_notes,
         source_commit=commit, source_dirty=dirty)
     data = pack_bundle(manifest, payloads, flash_payloads)
     write_file_atomically(path, data)

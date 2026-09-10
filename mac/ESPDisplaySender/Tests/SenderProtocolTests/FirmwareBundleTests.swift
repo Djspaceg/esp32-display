@@ -235,12 +235,14 @@ final class FirmwareBundleTests: XCTestCase {
                 withExtension: "espdispfw", subdirectory: "Fixtures"))
         let fixture = try FirmwareBundle.read(Data(contentsOf: fixtureURL))
         XCTAssertEqual(fixture.firmwareVersion, "1.4.2")
+        XCTAssertEqual(fixture.firmwareBuild, 192)
         XCTAssertEqual(
             fixture.releaseNotes,
             ["Added generic fixture metadata.", "Fixed generic fixture ordering."])
 
         let current = try Self.readBundle(
             version: "1.4.2", images: [Self.c6Spec], generation: FirmwareBundle.format)
+        XCTAssertEqual(current.firmwareBuild, 192)
         XCTAssertEqual(current.releaseNotes, ["Added generic metadata."])
 
         let interiorNotes = ["Added interior\u{0085}content.", "Fixed wrapped\u{2028}content?"]
@@ -264,6 +266,27 @@ final class FirmwareBundleTests: XCTestCase {
             mutate: { $0.removeValue(forKey: "release_notes") })
         XCTAssertNil(try FirmwareBundle.read(legacy).releaseNotes,
                      "field-free format-3 bundles remain legacy-compatible")
+        let buildless = Self.bundleBytes(
+            Self.manifest(images: [Self.c6Spec], generation: FirmwareBundle.format),
+            payloads: Self.area([Self.c6Spec], generation: FirmwareBundle.format),
+            magic: FirmwareBundle.magic,
+            mutate: { $0.removeValue(forKey: "firmware_build") })
+        XCTAssertNil(try FirmwareBundle.read(buildless).firmwareBuild,
+                     "format-3 bundles without build metadata remain readable")
+
+        for invalid: Any in [0, -1, 4_294_967_296, true, 192.5] {
+            let data = Self.bundleBytes(
+                Self.manifest(images: [Self.c6Spec], generation: FirmwareBundle.format),
+                payloads: Self.area([Self.c6Spec], generation: FirmwareBundle.format),
+                magic: FirmwareBundle.magic,
+                mutate: { $0["firmware_build"] = invalid })
+            XCTAssertThrowsError(try FirmwareBundle.read(data), "\(invalid)") {
+                guard case .fieldHasWrongType(
+                    where: "the manifest", key: "firmware_build", wanted: _)?
+                    = $0 as? FirmwareBundleError
+                else { return XCTFail("wrong error for \(invalid): \($0)") }
+            }
+        }
 
         func malformed(_ value: Any, _ expected: FirmwareBundleError, _ label: String) {
             let data = Self.bundleBytes(
@@ -1874,6 +1897,7 @@ final class FirmwareBundleTests: XCTestCase {
             },
         ]
         if generation >= FirmwareBundle.format {
+            manifest["firmware_build"] = 192
             manifest["release_notes"] = ["Added generic metadata."]
         }
         manifest = settle(manifest)

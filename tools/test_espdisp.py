@@ -902,6 +902,7 @@ def sample_manifest(entries=None):
         entries = [image_entry("c6", FAKE_C6), image_entry("s3-175", FAKE_S3)]
     return espdisp.bundle_manifest(
         "1.2.0",
+        192,
         entries,
         "2026-01-02T03:04:05Z",
         release_notes=GENERIC_RELEASE_NOTES,
@@ -1720,12 +1721,14 @@ def test_bundle_manifest_offsets():
     check_equal(second["chip"], "esp32s3", "and the other one")
     check_equal(manifest["format"], 3, "format generation")
     check_equal(manifest["firmware_version"], "1.2.0", "version as given")
+    check_equal(manifest["firmware_build"], 192, "build as given")
     check_equal(manifest["source_commit"], "a" * 40, "provenance is carried")
     check_equal(manifest["source_dirty"], False, "and so is cleanliness")
     check_equal(manifest["tool"], "espdisp.py bundle", "who wrote it")
     check_equal(
-        sorted(manifest), sorted(espdisp.MANIFEST_KEYS + ("release_notes",)),
-        "current writer adds release_notes to required manifest keys")
+        sorted(manifest),
+        sorted(espdisp.MANIFEST_KEYS + ("firmware_build", "release_notes")),
+        "current writer adds build and release notes to required manifest keys")
     check_equal(manifest["release_notes"], GENERIC_RELEASE_NOTES,
                 "current writer preserves ordered release notes")
     for image in manifest["images"]:
@@ -1763,7 +1766,8 @@ def test_bundle_manifest_offsets():
     for size in (1, 9, 10, 99, 100, 617, 1024, 65536):
         blob = b"\xa5" * size
         one = espdisp.bundle_manifest(
-            "1.2.0", [image_entry("c6", blob)], "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
+            "1.2.0", 192, [image_entry("c6", blob)],
+            "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
         encoded = espdisp.encode_manifest(one)
         image = one["images"][0]
         check_equal(
@@ -1784,12 +1788,16 @@ def test_bundle_manifest_offsets():
     # way every hash still agreed with.
     entry = image_entry("c6", FAKE_C6)
     parts_before = [dict(part) for part in entry["flash_parts"]]
-    espdisp.bundle_manifest("1.2.0", [entry], "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
+    espdisp.bundle_manifest(
+        "1.2.0", 192, [entry], "2026-01-02T03:04:05Z",
+        release_notes=GENERIC_RELEASE_NOTES)
     check_equal(entry["flash_parts"], parts_before, "the caller's parts are untouched")
     check("offset" not in entry, "and the caller's image gained no offset")
 
     check_fails(
-        lambda: espdisp.bundle_manifest("1.2.0", [], "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
+        lambda: espdisp.bundle_manifest(
+            "1.2.0", 192, [], "2026-01-02T03:04:05Z",
+            release_notes=GENERIC_RELEASE_NOTES),
         "at least one image",
         "a manifest with no images is refused")
     # This tool writes generation 2 only, so an image with nothing for a blank
@@ -1797,6 +1805,7 @@ def test_bundle_manifest_offsets():
     check_fails(
         lambda: espdisp.bundle_manifest(
             "1.2.0",
+            192,
             [{k: v for k, v in image_entry("c6", FAKE_C6).items()
               if k != "flash_parts"}],
             "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
@@ -1806,19 +1815,20 @@ def test_bundle_manifest_offsets():
 
     check_fails(
         lambda: espdisp.bundle_manifest(
-            "1.2.0", [dict(image_entry("c6", FAKE_C6), targets=[])],
+            "1.2.0", 192, [dict(image_entry("c6", FAKE_C6), targets=[])],
             "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
         "non-empty targets list",
         "format 3 rejects an empty targets list")
     check_fails(
         lambda: espdisp.bundle_manifest(
-            "1.2.0", [dict(image_entry("c6", FAKE_C6), targets=["   "])],
+            "1.2.0", 192, [dict(image_entry("c6", FAKE_C6), targets=["   "])],
             "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
         "no usable target",
         "format 3 rejects a blank target string")
     check_fails(
         lambda: espdisp.bundle_manifest(
-            "1.2.0", [dict(image_entry("c6", FAKE_C6), targets=["c6", "c6"])],
+            "1.2.0", 192,
+            [dict(image_entry("c6", FAKE_C6), targets=["c6", "c6"])],
             "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
         "lists target c6 twice",
         "one image cannot repeat an exact target")
@@ -1894,7 +1904,8 @@ def test_bundle_round_trip():
         "shared flash parts are also keyed by each exact target")
 
     one = espdisp.bundle_manifest(
-        "1.2.0", [image_entry("s3-175", FAKE_S3)], "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
+        "1.2.0", 192, [image_entry("s3-175", FAKE_S3)],
+        "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
     _, only, only_parts = espdisp.unpack_bundle(
         espdisp.pack_bundle(
             one, {"s3-175": FAKE_S3}, sample_flash_payloads("s3-175")))
@@ -1921,7 +1932,8 @@ def test_pack_bundle_refusals():
         entry = image_entry("c6", FAKE_C6)
         entry.update(changes)
         return espdisp.bundle_manifest(
-            "1.2.0", [entry], "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
+            "1.2.0", 192, [entry], "2026-01-02T03:04:05Z",
+            release_notes=GENERIC_RELEASE_NOTES)
 
     def one_image_with_parts(mutate):
         """A settled single-image manifest whose flash parts `mutate` rewrote."""
@@ -2242,7 +2254,8 @@ def test_unpack_bundle_refusals():
     # otherwise the contiguity check would fire first and this path would never
     # be reached.
     overrun = espdisp.bundle_manifest(
-        "1.2.0", [dict(image_entry("c6", FAKE_C6), bytes=len(FAKE_C6) + 64)],
+        "1.2.0", 192,
+        [dict(image_entry("c6", FAKE_C6), bytes=len(FAKE_C6) + 64)],
         "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES)
     check_fails(
         lambda: espdisp.unpack_bundle(
@@ -2266,7 +2279,8 @@ def test_unpack_bundle_refusals():
     ]
     check_fails(
         lambda: espdisp.bundle_manifest(
-            "1.2.0", duplicate_target_entries, "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
+            "1.2.0", 192, duplicate_target_entries,
+            "2026-01-02T03:04:05Z", release_notes=GENERIC_RELEASE_NOTES),
         "target s3-175 is claimed",
         "the same exact target claimed twice")
 
@@ -2614,6 +2628,108 @@ def test_git_provenance():
     check(
         commit is not None and re.fullmatch(r"[0-9a-f]{40}", commit),
         "the real repo resolves a commit: %r" % commit)
+
+
+def test_git_firmware_build():
+    calls = []
+
+    def done(code, out=""):
+        return subprocess.CompletedProcess([], code, out, "")
+
+    def stub(*results):
+        queue = list(results)
+
+        def run(cmd, timeout=None):
+            calls.append(cmd)
+            return queue.pop(0)
+
+        return run
+
+    with unittest.mock.patch.dict(os.environ, {}, clear=False), \
+            unittest.mock.patch.object(
+                espdisp, "run_capture",
+                stub(done(0, "false\n"), done(0, "192\n"),
+                     done(0, "origin/main\n"), done(0))):
+        check_equal(
+            espdisp.git_firmware_build("/repo"),
+            espdisp.FirmwareBuild(192, ""),
+            "release build uses commit count without a suffix")
+    check_equal(
+        calls[:4],
+        [
+            ["git", "-C", "/repo", "rev-parse", "--is-shallow-repository"],
+            ["git", "-C", "/repo", "rev-list", "--count", "HEAD"],
+            ["git", "-C", "/repo", "symbolic-ref", "--quiet", "--short",
+             "refs/remotes/origin/HEAD"],
+            ["git", "-C", "/repo", "merge-base", "--is-ancestor",
+             "HEAD", "origin/main"],
+        ],
+        "build derivation commands")
+
+    calls.clear()
+    with unittest.mock.patch.dict(
+            os.environ,
+            {espdisp.FIRMWARE_RELEASE_REF_ENV: "refs/remotes/upstream/release"},
+            clear=False), \
+            unittest.mock.patch.object(
+                espdisp, "run_capture",
+                stub(done(0, "false\n"), done(0, "194\n"),
+                     done(0, "feedface\n"), done(1), done(0, "346728d\n"))
+            ):
+        branch = espdisp.git_firmware_build("/repo")
+    check_equal(branch, espdisp.FirmwareBuild(194, ".g346728d"),
+                "branch build appends its short SHA")
+    check_equal(
+        espdisp.firmware_identity("1.5.0", branch.number, branch.branch_suffix),
+        "1.5.0+194.g346728d", "rendered branch identity")
+
+    for env, results, needle, label in [
+        ({}, (done(0, "true\n"),), "shallow git checkout",
+         "shallow clone is refused"),
+        ({}, (done(2),), "whether the git checkout is shallow",
+         "unknown shallow state"),
+        ({}, (done(0, "false\n"), done(1)), "git rev-list",
+         "missing build count"),
+        ({}, (done(0, "false\n"), done(0, "0\n")), "uint32 range",
+         "zero build count"),
+        ({}, (done(0, "false\n"),
+              done(0, str(espdisp.FIRMWARE_BUILD_MAX + 1))), "uint32 range",
+         "oversized build count"),
+        ({}, (done(0, "false\n"), done(0, "192\n"), done(1)),
+         "release branch", "missing origin HEAD"),
+        ({espdisp.FIRMWARE_RELEASE_REF_ENV: "refs/remotes/upstream/release"},
+         (done(0, "false\n"), done(0, "192\n"), done(1)),
+         "does not resolve", "invalid configured release ref"),
+        ({}, (done(0, "false\n"), done(0, "192\n"), done(0, "origin/main\n"),
+              done(2)), "origin/main", "unknown release relationship"),
+        ({}, (done(0, "false\n"), done(0, "194\n"), done(0, "origin/main\n"),
+              done(1), done(0, "not-sha\n")),
+         "short git SHA", "invalid branch SHA"),
+    ]:
+        with unittest.mock.patch.dict(os.environ, env, clear=False), \
+                unittest.mock.patch.object(espdisp, "run_capture", stub(*results)):
+            check_fails(
+                lambda: espdisp.git_firmware_build("/repo"),
+                needle, label)
+
+    try:
+        real = espdisp.git_firmware_build()
+    except espdisp.Fail as exc:
+        message = str(exc)
+        allowed = (
+            "shallow git checkout" in message or
+            "firmware release branch" in message
+        )
+        check(
+            allowed,
+            "real repo only skips for shallow history or an unknown release ref: %r"
+            % message)
+        if allowed:
+            print("note: skipping the real firmware-build check: %s"
+                  % message.splitlines()[0])
+    else:
+        check(1 <= real.number <= espdisp.FIRMWARE_BUILD_MAX,
+              "the real repository yields a uint32 build")
 
 
 def test_utc_timestamp():
@@ -2966,7 +3082,8 @@ def test_release_notes_source_and_manifest_contract():
 
     check_fails(
         lambda: espdisp.bundle_manifest(
-            "1.2.0", [image_entry("c6", FAKE_C6)], "2026-01-02T03:04:05Z",
+            "1.2.0", 192, [image_entry("c6", FAKE_C6)],
+            "2026-01-02T03:04:05Z",
             release_notes=[]),
         "release_notes: must be a list containing 1–32 items",
         "writer requires nonempty release notes")
@@ -2979,6 +3096,16 @@ def test_release_notes_source_and_manifest_contract():
         espdisp.encode_manifest(legacy), payload_bytes(("c6", FAKE_C6)))
     check_accepts(lambda: espdisp.unpack_bundle(legacy_data),
                   "field-free format-3 bundle remains readable")
+    for value in (0, -1, espdisp.FIRMWARE_BUILD_MAX + 1, True, 192.0):
+        invalid = handmade_manifest(
+            [image_entry("c6", FAKE_C6)], firmware_build=value)
+        check_fails(
+            lambda invalid=invalid: espdisp.unpack_bundle(
+                handmade_bundle(
+                    espdisp.encode_manifest(invalid),
+                    payload_bytes(("c6", FAKE_C6)))),
+            "firmware_build: must be a whole number",
+            "invalid firmware build %r" % value)
     check_fails(
         lambda: espdisp.unpack_bundle(handmade_bundle(b'{"a":1,"a":2}')),
         "bundle manifest: duplicate key a",
@@ -3010,7 +3137,7 @@ def test_release_notes_source_and_manifest_contract():
             ("bootloader", 0), ("partitions", 0x8000), ("boot_app0", 0xE000))],
     }]
     fixture_manifest = espdisp.bundle_manifest(
-        "1.4.2", fixture_entries, "2026-01-02T03:04:05Z",
+        "1.4.2", 192, fixture_entries, "2026-01-02T03:04:05Z",
         release_notes=["Added generic fixture metadata.", "Fixed generic fixture ordering."],
         source_commit="a" * 40)
     fixture_bytes = espdisp.pack_bundle(
@@ -3223,7 +3350,8 @@ def test_release_notes_reader_vectors():
 
     valid_notes = ["Added interior\u0085text.", "Fixed wrapped\u2028text?"]
     valid_manifest = espdisp.bundle_manifest(
-        "1.2.0", [image_entry("c6", FAKE_C6)], "2026-01-02T03:04:05Z",
+        "1.2.0", 192, [image_entry("c6", FAKE_C6)],
+        "2026-01-02T03:04:05Z",
         release_notes=valid_notes)
     valid_data = espdisp.pack_bundle(
         valid_manifest, {"c6": FAKE_C6}, sample_flash_payloads("c6"))
@@ -3826,18 +3954,28 @@ def test_family_resolution_and_discovery():
                     "partition", "incomplete discovery fails closed")
 
 
-def make_catalog_fixture(version="1.5.0"):
+def make_catalog_fixture(
+    version="1.5.0", schema=espdisp.RELEASE_CATALOG_SCHEMA, build=192
+):
     catalog = {
-        "schema": espdisp.RELEASE_CATALOG_SCHEMA,
+        "schema": schema,
         "generated_at": "2026-01-02T03:04:05Z",
         "families": {},
     }
     blobs = {}
     for key, family in espdisp.FAMILIES.items():
         blob = ("bundle-%s" % key).encode("ascii")
-        relative = "%s/espdisp-%s-%s.espdispfw" % (key, key, version)
-        catalog["families"][key] = espdisp.release_catalog_entry(
-            family, version, relative, blob)
+        identity = (
+            espdisp.firmware_identity(version, build)
+            if schema == espdisp.RELEASE_CATALOG_SCHEMA
+            else version
+        )
+        relative = "%s/espdisp-%s-%s.espdispfw" % (key, key, identity)
+        entry = espdisp.release_catalog_entry(
+            family, version, build, relative, blob)
+        if schema == espdisp.RELEASE_CATALOG_LEGACY_SCHEMA:
+            del entry["latest_build"]
+        catalog["families"][key] = entry
         blobs[key] = blob
     return catalog, blobs
 
@@ -3847,6 +3985,25 @@ def test_release_catalog_contract():
     check_accepts(
         lambda: espdisp.validate_release_catalog(catalog, "/tmp/releases", False),
         "strict three-family catalog")
+    parsed_schema_two = espdisp.validate_release_catalog(
+        catalog, "/tmp/releases", False)
+    check_equal(
+        parsed_schema_two["families"]["c6"].get("latest_build"), 192,
+        "schema-2 build is preserved")
+    schema_one, _ = make_catalog_fixture(
+        schema=espdisp.RELEASE_CATALOG_LEGACY_SCHEMA)
+    parsed_schema_one = espdisp.validate_release_catalog(
+        schema_one, "/tmp/releases", False)
+    check_equal(
+        parsed_schema_one["families"]["c6"].get("latest_build"), None,
+        "schema-1 build is unknown")
+    branch_catalog = json.loads(json.dumps(catalog))
+    branch_catalog["families"]["c6"]["artifact"] = (
+        "c6/espdisp-c6-1.5.0+192.g346728d.espdispfw")
+    check_accepts(
+        lambda: espdisp.validate_release_catalog(
+            branch_catalog, "/tmp/releases", False),
+        "schema-2 branch artifact suffix")
     check(espdisp.compare_semver("1.5.0", "1.4.9") > 0,
           "SemVer latest ordering")
     check(espdisp.compare_semver("1.5.0-rc.1", "1.5.0") < 0,
@@ -3889,7 +4046,8 @@ def test_release_catalog_contract():
             "partition": family.partition_scheme,
             "app_address": 0x10000, "bytes": len(data),
         }
-        return ({"firmware_version": "1.5.0", "images": [image]},
+        return ({"firmware_version": "1.5.0", "firmware_build": 192,
+                 "images": [image]},
                 {key: data}, {key: {espdisp.FLASH_ROLE_PARTITIONS: b"partition"}})
 
     with unittest.mock.patch.object(espdisp, "read_binary", side_effect=read_artifact), \
@@ -3909,6 +4067,13 @@ def test_release_catalog_contract():
         check_fails(
             lambda: espdisp.validate_release_catalog(stale, "/tmp/releases", True),
             "sha256 is stale", "stale artifact hash")
+        stale = json.loads(json.dumps(catalog))
+        stale["families"]["c6"]["latest_build"] = 193
+        stale["families"]["c6"]["artifact"] = (
+            "c6/espdisp-c6-1.5.0+193.espdispfw")
+        check_fails(
+            lambda: espdisp.validate_release_catalog(stale, "/tmp/releases", True),
+            "bundle metadata disagrees", "catalog and bundle build mismatch")
 
     with tempfile.TemporaryDirectory() as directory:
         path = os.path.join(directory, "manifest.json")
@@ -4121,6 +4286,7 @@ def main():
     test_unpack_bundle_refusals()
     test_bundle_file_round_trip()
     test_git_provenance()
+    test_git_firmware_build()
     test_utc_timestamp()
     test_tile_stream_wire()
     test_describe_bundle()
