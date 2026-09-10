@@ -3533,6 +3533,12 @@ def test_doom_partition_contracts():
         espdisp._doom_wad_partition(s3),
         (0x3FF000, 0x401000),
         "S3 WAD address comes from the partition table")
+    unknown_family = espdisp.FAMILIES["c6"]._replace(key="future")
+    check_fails(
+        lambda: espdisp._verify_partition_payload(
+            unknown_family, good[:4 * 32] + b"\xff" * 32),
+        "unrecognised firmware family future",
+        "an unrecognised family cannot inherit the C6 partition policy")
 
     with tempfile.TemporaryDirectory() as directory:
         wad_path = os.path.join(directory, "doom1.wad")
@@ -3578,6 +3584,15 @@ def test_doom_partition_contracts():
                 espdisp.FAMILIES["c6"], b"", c6_image, {"doom_wad": wad}),
             "must not carry a doom_wad",
             "C6 bundle with a stray WAD flash part")
+        check_accepts(
+            lambda: espdisp._verify_required_doom_flash_payload(
+                espdisp.FAMILIES["c6"], b"", {"flash_parts": None}, {}),
+            "a missing optional flash-part list is treated as empty")
+        check_fails(
+            lambda: espdisp._verify_required_doom_flash_payload(
+                espdisp.FAMILIES["c6"], b"", {"flash_parts": "invalid"}, {}),
+            "flash_parts must be a list",
+            "a malformed flash-part collection fails closed")
 
 
 def test_universal_family_catalog_and_cli():
@@ -3627,6 +3642,8 @@ def test_universal_family_catalog_and_cli():
     check_equal(espdisp.FAMILIES["p4"].extra_flags,
                 ("-DESPDISP_BOARD_P4_4B", "-DESPDISP_DOOM_RUNTIME"),
                 "P4 retains its carrier selector and links the Doom runtime")
+    check_equal(espdisp.FAMILIES["p4"].extra_library_dirs, ("firmware",),
+                "canonical P4 includes the Doom library path")
     check_equal(espdisp.board_key_for_chip("esp32c6"), "c6", "C6 chip to family")
     check_equal(espdisp.board_key_for_chip("esp32s3"), "s3", "S3 chip to family")
     check_equal(espdisp.board_key_for_chip("esp32p4"), "p4", "P4 chip to family")
@@ -3694,7 +3711,9 @@ def test_universal_family_catalog_and_cli():
 
 def test_s3_doom_build_contract():
     family = espdisp.FAMILIES["s3"]
+    p4_family = espdisp.FAMILIES["p4"]
     target = espdisp.BUILD_TARGETS[family.build_target]
+    p4_target = espdisp.BUILD_TARGETS[p4_family.build_target]
     run_calls = []
 
     def compile_with(build_target):
@@ -3719,6 +3738,23 @@ def test_s3_doom_build_contract():
     check_equal(
         run_calls, [],
         "an incomplete canonical S3 contract is rejected before Arduino runs")
+    with unittest.mock.patch.dict(
+        espdisp.BUILD_TARGETS,
+        {p4_family.build_target: p4_target._replace(extra_flags=(
+            "-DESPDISP_BOARD_P4_4B",))},
+    ):
+        check_fails(
+            lambda: espdisp.validate_family_build_contract(p4_family),
+            "canonical P4 build requires -DESPDISP_DOOM_RUNTIME",
+            "canonical P4 refuses a build without the Doom runtime define")
+    with unittest.mock.patch.dict(
+        espdisp.BUILD_TARGETS,
+        {p4_family.build_target: p4_target._replace(extra_library_dirs=())},
+    ):
+        check_fails(
+            lambda: espdisp.validate_family_build_contract(p4_family),
+            "canonical P4 build requires the firmware library path",
+            "canonical P4 refuses a build without the Doom source path")
 
     check_accepts(
         lambda: compile_with(target),
@@ -3757,16 +3793,21 @@ def test_s3_doom_build_contract():
                 return espdisp.compile_board(family, output_dir=output_dir)
 
     check_fails(
-        lambda: compile_export(espdisp.S3_DOOM_APP_MARKERS[1]),
+        lambda: compile_export(espdisp.DOOM_APP_MARKERS[1]),
         "button: Doom requested",
         "an exported S3 app without the BOOT entry path is refused")
     check_fails(
-        lambda: compile_export(espdisp.S3_DOOM_APP_MARKERS[0]),
+        lambda: compile_export(espdisp.DOOM_APP_MARKERS[0]),
         "[doom] Display bridge ready",
         "an exported S3 app without linked Doom library code is refused")
     check_accepts(
-        lambda: compile_export(b"\0".join(espdisp.S3_DOOM_APP_MARKERS)),
+        lambda: compile_export(b"\0".join(espdisp.DOOM_APP_MARKERS)),
         "an exported S3 app containing both linked Doom seams")
+    check_fails(
+        lambda: espdisp.validate_family_app_contract(
+            p4_family, b"application without Doom markers"),
+        "missing linked Doom markers",
+        "a Doom-required P4 app without linked Doom code is refused")
 
     s3_gate = preprocess_board_config(
         "ESPDISP_DOOM_RUNTIME", target="CONFIG_IDF_TARGET_ESP32S3")
@@ -3903,7 +3944,7 @@ def test_s3_doom_build_contract():
         espdisp.RELEASE_ROOT, catalog["families"]["s3"]["artifact"])
     manifest, payloads, flash_payloads = espdisp.read_bundle(artifact_path)
     check(
-        all(marker in payloads["s3"] for marker in espdisp.S3_DOOM_APP_MARKERS),
+        all(marker in payloads["s3"] for marker in espdisp.DOOM_APP_MARKERS),
         "the tracked canonical S3 release snapshot contains both Doom seams")
     check_equal(
         manifest["images"][0]["partition"], "universal-8m-doom-ota",
@@ -3970,10 +4011,14 @@ def test_family_resolution_and_discovery():
             (("s3", "", "co5300", "universal-8m-doom-ota"), "missing chip"),
             (("s3", "esp32s3", "", "universal-8m-doom-ota"), "missing profile"),
             (("s3", "esp32s3", "co5300", ""), "missing partition"),
-            (("s3", "esp32s3", "co5300", "universal-8m-ota"), "legacy partition"),
             (("s3", "esp32s3", "future", "universal-8m-doom-ota"), "unknown profile")):
         check_equal(espdisp.classify_ota_target(family, *values),
                     espdisp.TARGET_UNKNOWN, label)
+    check_equal(
+        espdisp.classify_ota_target(
+            family, "s3", "esp32s3", "co5300", "universal-8m-ota"),
+        espdisp.TARGET_OLD_LAYOUT,
+        "the previous S3 partition token is identified as an old layout")
     with unittest.mock.patch.object(
         espdisp, "discovered_network_ports", return_value=ports), \
          unittest.mock.patch("sys.stdout", io.StringIO()):
