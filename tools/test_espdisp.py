@@ -3406,6 +3406,11 @@ def test_universal_family_catalog_and_cli():
     check_equal(espdisp.BUILD_TARGETS["p4-4b"].fqbn_options,
                 ("UploadSpeed=460800",),
                 "the 4B target owns its reliable CH343 upload speed")
+    check_equal(espdisp.FAMILIES["p4"].upload_speed, "460800",
+                "P4 flashes at the target-pinned upload speed")
+    check_equal(espdisp.FAMILIES["s3"].upload_speed,
+                espdisp.DEFAULT_FLASH_BAUD,
+                "families without an UploadSpeed pin use the default flash baud")
     check("UploadSpeed" not in espdisp.PLATFORMS["p4"].fqbn,
           "the reusable P4 platform has no 4B carrier upload option")
     check("partition_csv" not in espdisp.Platform._fields and
@@ -3435,6 +3440,15 @@ def test_universal_family_catalog_and_cli():
         "flash", "--family", "p4", "--profile", "st7703-4b"])
     check_equal(p4_flash.profile, "st7703-4b",
                 "P4 flash accepts explicit 4B profile evidence")
+    with unittest.mock.patch("sys.stdout", io.StringIO()) as stdout:
+        try:
+            parser.parse_args(["flash", "--help"])
+        except SystemExit as exc:
+            check_equal(exc.code, 0, "flash help exits cleanly")
+        else:
+            check(False, "flash help did not exit")
+    check("required for p4" in stdout.getvalue(),
+          "flash help states that P4 requires explicit profile evidence")
     ota = parser.parse_args(["ota", "panel.local", "--family", "p4"])
     check_equal(ota.family, "p4", "OTA accepts P4 family")
     bundle = parser.parse_args(["bundle", "--family", "c6"])
@@ -3915,7 +3929,7 @@ def test_canonical_usb_flash_path():
          unittest.mock.patch.object(
              espdisp, "resolve_family", return_value=family), \
          unittest.mock.patch.object(
-             espdisp, "flash_canonical_release", create=True,
+             espdisp, "flash_canonical_release",
              return_value=(artifact, "1.5.0")) as flash_release, \
          unittest.mock.patch.object(
              espdisp, "compile_board",
@@ -4001,13 +4015,43 @@ def test_canonical_usb_flash_path():
     check_equal(
         command[:8],
         ["/tools/esptool", "--chip", "esp32s3", "--port",
-         "/dev/cu.usbmodem1", "--baud", "921600", "write_flash"],
+         "/dev/cu.usbmodem1", "--baud", family.upload_speed, "write_flash"],
         "USB flash invokes esptool for the resolved chip and port")
     check_equal(
         command[8::2], ["0x0", "0x8000", "0xE000", "0x10000"],
         "USB flash takes every address from the verified bundle")
     check("erase_flash" not in command and "erase-flash" not in command,
           "USB flash never requests a whole-chip erase")
+
+    p4_family = espdisp.FAMILIES["p4"]
+    p4_catalog = {
+        "families": {
+            "p4": {
+                "artifact": "p4/espdisp-p4-1.5.0.espdispfw",
+                "bytes": len(bundle_data),
+                "sha256": espdisp.sha256_hex(bundle_data),
+            },
+        },
+    }
+    captured = []
+    with unittest.mock.patch.object(
+            espdisp, "load_release_catalog", return_value=p4_catalog), \
+         unittest.mock.patch.object(
+             espdisp, "read_binary", return_value=bundle_data), \
+         unittest.mock.patch.object(
+             espdisp, "unpack_bundle",
+             return_value=(manifest, {"p4": b"application"}, {"p4": roles})), \
+         unittest.mock.patch.object(
+             espdisp, "esptool_path", return_value="/tools/esptool"), \
+         unittest.mock.patch.object(
+             espdisp, "run_streaming", side_effect=record_command):
+        espdisp.flash_canonical_release(
+            p4_family, "/dev/cu.usbmodem9", "/releases/manifest.json")
+    check_equal(
+        captured[0][:8],
+        ["/tools/esptool", "--chip", "esp32p4", "--port",
+         "/dev/cu.usbmodem9", "--baud", "460800", "write_flash"],
+        "USB flash honors the family UploadSpeed when the target pins one")
 
     with unittest.mock.patch.object(
             espdisp, "load_release_catalog", return_value=catalog), \

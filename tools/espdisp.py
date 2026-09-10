@@ -114,6 +114,10 @@ class Family(NamedTuple):
     def extra_library_dirs(self) -> Tuple[str, ...]:
         return self.build_config.extra_library_dirs
 
+    @property
+    def upload_speed(self) -> str:
+        return fqbn_option_value(self.fqbn, "UploadSpeed") or DEFAULT_FLASH_BAUD
+
 
 FAMILIES = {
     "c6": Family(
@@ -184,6 +188,7 @@ CFG_PREFIXES = ("CFGOK", "CFGERR", "CFGINFO")
 # OTA. 3232 is ArduinoOTA's default and what the firmware binds.
 OTA_PORT = 3232
 OTA_PASSWORD_ENV = "ESPDISP_OTA_PASSWORD"
+DEFAULT_FLASH_BAUD = "921600"
 # Both match otapolicy::PASSWORD_MIN_BYTES / PASSWORD_MAX_BYTES in the firmware,
 # and are counted in bytes for the same reason it does.
 OTA_PASSWORD_MIN = 8
@@ -196,6 +201,18 @@ class Fail(Exception):
 
 # --------------------------------------------------------------------------
 # process plumbing
+
+
+def fqbn_option_value(fqbn: str, key: str) -> Optional[str]:
+    """Return one FQBN option value, or None when that option is not pinned."""
+    parts = fqbn.split(":", 3)
+    if len(parts) != 4:
+        return None
+    for option in parts[3].split(","):
+        name, sep, value = option.partition("=")
+        if name == key and sep:
+            return value
+    return None
 
 
 def arduino_cli() -> str:
@@ -3096,7 +3113,7 @@ def flash_canonical_release(
     command.extend([
         "--chip", family.chip,
         "--port", port_address,
-        "--baud", "921600",
+        "--baud", family.upload_speed,
         "write_flash",
     ])
 
@@ -3624,7 +3641,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_flash.add_argument(
         "--profile", choices=sorted({profile for family in FAMILIES.values()
                                       for profile in family.profiles}),
-        help="optional physical-profile cross-check for recovery workflows")
+        help="physical-profile cross-check; required for p4 recovery workflows")
     p_flash.add_argument(
         "--port", help="serial device (default: the one matching %s)" %
         ", ".join(PORT_GLOBS))
