@@ -76,7 +76,7 @@
 #include "ota_policy.h"
 #include "chip_identity.h"
 
-// Doom remains a developer/profile-gated feature inside the universal S3 image.
+// Doom remains a developer/profile-gated feature inside supported family images.
 #if defined(ESPDISP_DOOM_RUNTIME)
 #include <doom_mode.h>
 #endif
@@ -281,7 +281,7 @@ void setup() {
   configurePanelGeometry(*bcfg);
 #if defined(ESPDISP_DOOM_RUNTIME)
   if (doomRequested) {
-    if (boardVariant != board::Variant::AmoledCo5300) {
+    if (!board::supportsDoom(boardVariant)) {
       Serial.printf("doom: profile %s is not eligible; continuing normal boot\n",
                     board::variantToken(boardVariant));
     } else {

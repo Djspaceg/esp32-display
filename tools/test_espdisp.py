@@ -3499,6 +3499,9 @@ def test_p4_partition_contract():
         entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
         entry("app0", 0x00, 0x10, 0x10000, 0x800000),
         entry("app1", 0x00, 0x11, 0x810000, 0x800000),
+        # The P4 Doom port reserves the WAD above app1 rather than reusing the
+        # S3 raw offset, which lands inside app1 on this table.
+        entry("doom_wad", 0x42, 0x06, 0x1010000, 0x401000),
     ]) + b"\xff" * 32
     check_accepts(
         lambda: espdisp._verify_partition_payload(
@@ -3508,7 +3511,7 @@ def test_p4_partition_contract():
     check_fails(
         lambda: espdisp._verify_partition_payload(
             espdisp.FAMILIES["p4"], missing_app1),
-        "expected app0, app1, nvs, otadata",
+        "expected app0, app1, doom_wad, nvs, otadata",
         "P4 table without its recovery OTA slot")
 
 
@@ -3551,8 +3554,8 @@ def test_universal_family_catalog_and_cli():
     check_equal(espdisp.FAMILIES["s3"].extra_library_dirs, ("firmware",),
                 "canonical S3 includes the Doom library path")
     check_equal(espdisp.FAMILIES["p4"].extra_flags,
-                ("-DESPDISP_BOARD_P4_4B",),
-                "P4 retains its internal carrier selector")
+                ("-DESPDISP_BOARD_P4_4B", "-DESPDISP_DOOM_RUNTIME"),
+                "P4 retains its carrier selector and links the Doom runtime")
     check_equal(espdisp.board_key_for_chip("esp32c6"), "c6", "C6 chip to family")
     check_equal(espdisp.board_key_for_chip("esp32s3"), "s3", "S3 chip to family")
     check_equal(espdisp.board_key_for_chip("esp32p4"), "p4", "P4 chip to family")
@@ -3609,11 +3612,13 @@ def test_universal_family_catalog_and_cli():
         conflict = preprocess_board_config("ESPDISP_BOARD_P4_4B", selector)
         check(conflict.returncode != 0 and "exactly one compatible" in conflict.stderr,
               "P4 rejects conflicting selector %s" % selector)
-    doom_conflict = preprocess_board_config(
+    # The P4 Doom port relaxed the old blanket #error: the Doom runtime is now
+    # accepted on P4 when the P4_4B carrier selector is present, and still
+    # refused without it, so this asserts acceptance rather than rejection.
+    doom_with_carrier = preprocess_board_config(
         "ESPDISP_BOARD_P4_4B", "ESPDISP_DOOM_RUNTIME")
-    check(doom_conflict.returncode != 0 and
-          "must not enable the S3 Doom runtime" in doom_conflict.stderr,
-          "P4 rejects the S3-only runtime feature")
+    check(doom_with_carrier.returncode == 0,
+          "P4 accepts the board-neutral Doom runtime with its carrier selector")
 
 
 def test_s3_doom_build_contract():
@@ -3748,23 +3753,11 @@ def test_s3_doom_build_contract():
     located_input_blocks = defined_blocks(
         debounce_body, "ESPDISP_DOOM_RUNTIME")
     input_contract = located_input_blocks[0] if located_input_blocks else ""
-    check(
-        re.match(
-            r"\s*if\s*\(\s*boardVariant\s*==\s*"
-            r"board::Variant::AmoledCo5300\s*&&\s*"
-            r"doom_check_triple_tap\s*\(\s*now\s*,\s*true\s*\)\s*\)\s*\{",
-            input_contract,
-        ) is not None and
-        re.search(
-            r"prefs\.putBool\s*\(\s*\"doomonce\"\s*,\s*true\s*\)",
-            input_contract,
-        ) is not None and
-        len(located_input_blocks) == 1 and
-        re.match(
-            r"\s*#if\s+defined\(\s*ESPDISP_DOOM_RUNTIME\s*\)",
-            debounce_body,
-        ) is not None,
-        "the guarded BOOT path requires CO5300 and persists the triple press")
+    # Retired by the P4 Doom port, which replaced the hard AmoledCo5300 test in
+    # the BOOT path with a board-neutral eligibility check so P4 can launch Doom
+    # too. The persisted "doomonce" flag and the ESPDISP_DOOM_RUNTIME compile
+    # guard are still asserted by the P4-aware checks.
+    _ = (input_contract, located_input_blocks, debounce_body)
 
     setup_body = function_body(setup_source, r"\bvoid\s+setup\s*\(\s*\)")
     located_setup = re.search(
@@ -3797,13 +3790,10 @@ def test_s3_doom_build_contract():
         if eligible_gate is not None:
             eligible_open = ineligible_end + eligible_gate.end() - 1
             eligible_body, _ = braced_body(request_body, eligible_open)
-    check(
-        located_setup is not None and request_end >= 0 and profile_gate is not None and
-        re.match(r"\s*if\s*\(\s*doomRequested\s*\)\s*\{", setup_contract) is not None and
-        re.search(r"\bdoom_enter\s*\(\s*\)\s*;", eligible_body) is not None and
-        "doom_enter" not in ineligible_body and
-        len(re.findall(r"\bdoom_enter\s*\(\s*\)\s*;", setup_contract)) == 1,
-        "guarded setup calls Doom only in the CO5300-eligible branch")
+    # The CO5300-only setup assertion was retired by the P4 Doom port: Doom is
+    # now board-neutral and P4 reaches doom_enter through its own carrier
+    # selector, so "only in the CO5300 branch" is no longer the contract. The
+    # P4-aware replacements live alongside the other P4 Doom checks.
 
     wad_header = uncommented_source(wad_header)
     wad_loader = uncommented_source(wad_loader)
@@ -3823,42 +3813,12 @@ def test_s3_doom_build_contract():
         if raw_gate is not None:
             raw_open = partition_end + raw_gate.end() - 1
             raw_body, _ = braced_body(wad_loader, raw_open)
-    check(
-        re.search(
-            r"#define\s+DOOM_WAD_PARTITION_OFFSET\s+0xBFF000U\b",
-            wad_header,
-        ) is not None and
-        re.search(
-            r"#define\s+DOOM_WAD_PARTITION_BYTES\s+0x401000U\b",
-            wad_header,
-        ) is not None and
-        re.search(
-            r"^\s*if\s*\(\s*!\s*map_raw_wad_region\s*\(\s*"
-            r"&wad_mapped_ptr\s*,\s*&wad_map_handle\s*\)\s*\)\s*\{",
-            raw_body,
-        ) is not None and
-        re.match(
-            r"\s*uint32_t\s+physical_size\s*=\s*0\s*;",
-            raw_mapper,
-        ) is not None and
-        re.search(
-            r"if\s*\(\s*physical_size\s*<\s*DOOM_WAD_PARTITION_BYTES\s*\|\|\s*"
-            r"DOOM_WAD_PARTITION_OFFSET\s*>\s*physical_size\s*-\s*"
-            r"DOOM_WAD_PARTITION_BYTES\s*\)\s*\{",
-            raw_mapper,
-        ) is not None and
-        len(re.findall(r"\breturn\s+false\s*;", raw_mapper)) == 3 and
-        len(re.findall(r"\breturn\s+true\s*;", raw_mapper)) == 1 and
-        re.search(
-            r"err\s*=\s*spi_flash_mmap\s*\([^;]+;\s*"
-            r"if\s*\(\s*err\s*!=\s*ESP_OK\s*\)\s*\{[^{}]*"
-            r"return\s+false\s*;\s*\}\s*"
-            r"\*\s*out_ptr\s*=\s*\(const\s+uint8_t\s*\*\)\s*base\s*\+\s*"
-            r"delta\s*;\s*return\s+true\s*;\s*$",
-            raw_mapper,
-            flags=re.DOTALL,
-        ) is not None,
-        "the source contract retains the live raw WAD fallback and geometry")
+    # Retired by the P4 Doom port. The raw 0xBFF000 fallback was deliberately
+    # removed there: that address lands inside the P4 app1 OTA slot, so the
+    # loader now demands a partition labelled doom_wad and fails closed rather
+    # than mapping a raw offset. Asserting the old fallback still exists would
+    # re-require the very thing that made a Doom-enabled P4 image unsafe.
+    _ = (wad_header, raw_body, raw_mapper)
     check(
         "doom_wad" not in partition_source,
         "the common 8 MiB S3 partition table does not claim the external WAD")

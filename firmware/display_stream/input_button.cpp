@@ -97,7 +97,7 @@ void handleButton() {
       // normal frame buffers, or subscribing loopTask to the watchdog, giving
       // Doom exclusive panel and PSRAM ownership. Any crash then boots normally
       // because the flag has already been removed.
-      if (boardVariant == board::Variant::AmoledCo5300 &&
+      if (board::supportsDoom(boardVariant) &&
           doom_check_triple_tap(now, true)) {
         Preferences prefs;
         bool saved = prefs.begin("espdisp", false);

@@ -34,7 +34,7 @@ static const uint8_t FONT_g[] = {0x08, 0x54, 0x54, 0x54, 0x3C};
 static const uint8_t FONT_dot[] = {0x00, 0x60, 0x60, 0x00, 0x00};
 
 // Draw a single character at scale factor into an RGB565 buffer
-static void draw_char(uint16_t* buf, int buf_w, int x, int y,
+static void draw_char(uint16_t* buf, int buf_w, int buf_h, int x, int y,
                       const uint8_t* glyph, int scale, uint16_t color) {
     for (int col = 0; col < 5; col++) {
         uint8_t bits = glyph[col];
@@ -45,7 +45,7 @@ static void draw_char(uint16_t* buf, int buf_w, int x, int y,
                     for (int sx = 0; sx < scale; sx++) {
                         int px = x + col * scale + sx;
                         int py = y + row * scale + sy;
-                        if (px >= 0 && px < buf_w && py >= 0 && py < buf_w) {
+                        if (px >= 0 && px < buf_w && py >= 0 && py < buf_h) {
                             buf[py * buf_w + px] = color;
                         }
                     }
@@ -55,20 +55,19 @@ static void draw_char(uint16_t* buf, int buf_w, int x, int y,
     }
 }
 
-/// Render the Doom splash screen into a 466x466 RGB565 buffer.
+/// Render the Doom splash screen into a full-panel RGB565 buffer.
 /// Call once, then blit to the display.
-static void render(uint16_t* buf) {
-    const int W = 466;
-
+static void render(uint16_t* buf, int width, int height) {
     // Black background
-    memset(buf, 0, W * W * sizeof(uint16_t));
+    memset(buf, 0, (size_t)width * (size_t)height * sizeof(uint16_t));
 
-    // "DOOM" in large letters (scale 12 = ~60px per letter, ~280px total)
-    const int scale = 12;
+    const int shortest = width < height ? width : height;
+    int scale = (shortest * 12) / 466;
+    if (scale < 1) scale = 1;
     const int char_w = 5 * scale + scale;  // 5 cols + 1 col spacing
     const int total_w = 4 * char_w - scale;  // 4 letters, no trailing space
-    const int x_start = (W - total_w) / 2;
-    const int y_doom = (W / 2) - (7 * scale) - 20;  // slightly above center
+    const int x_start = (width - total_w) / 2;
+    const int y_doom = (height / 2) - (7 * scale) - (20 * scale / 12);
 
     // Draw with gradient: top = yellow, middle = orange, bottom = red
     // We'll draw three passes with clipping to simulate a vertical gradient
@@ -78,7 +77,8 @@ static void render(uint16_t* buf) {
         int lx = x_start + li * char_w;
 
         // Bottom third: dark red
-        draw_char(buf, W, lx, y_doom, letters[li], scale, DOOM_RED);
+        draw_char(buf, width, height, lx, y_doom, letters[li], scale,
+                  DOOM_RED);
 
         // Middle third: overwrite top 2/3 with orange
         for (int col = 0; col < 5; col++) {
@@ -89,8 +89,9 @@ static void render(uint16_t* buf) {
                         for (int sx = 0; sx < scale; sx++) {
                             int px = lx + col * scale + sx;
                             int py = y_doom + row * scale + sy;
-                            if (px >= 0 && px < W && py >= 0 && py < W) {
-                                buf[py * W + px] = DOOM_ORANGE;
+                            if (px >= 0 && px < width &&
+                                py >= 0 && py < height) {
+                                buf[py * width + px] = DOOM_ORANGE;
                             }
                         }
                     }
@@ -107,8 +108,9 @@ static void render(uint16_t* buf) {
                         for (int sx = 0; sx < scale; sx++) {
                             int px = lx + col * scale + sx;
                             int py = y_doom + row * scale + sy;
-                            if (px >= 0 && px < W && py >= 0 && py < W) {
-                                buf[py * W + px] = DOOM_YELLOW;
+                            if (px >= 0 && px < width &&
+                                py >= 0 && py < height) {
+                                buf[py * width + px] = DOOM_YELLOW;
                             }
                         }
                     }
@@ -118,17 +120,18 @@ static void render(uint16_t* buf) {
     }
 
     // "Loading..." in smaller text below (scale 3)
-    const int sm_scale = 3;
+    int sm_scale = (shortest * 3) / 466;
+    if (sm_scale < 1) sm_scale = 1;
     const int sm_char_w = 5 * sm_scale + sm_scale;
     const uint8_t* loading[] = {FONT_L, FONT_a, FONT_d, FONT_i, FONT_n, FONT_g,
                                  FONT_dot, FONT_dot, FONT_dot};
     const int load_len = 9;
     const int load_total_w = load_len * sm_char_w - sm_scale;
-    const int load_x = (W - load_total_w) / 2;
-    const int load_y = y_doom + 7 * scale + 40;
+    const int load_x = (width - load_total_w) / 2;
+    const int load_y = y_doom + 7 * scale + (40 * scale / 12);
 
     for (int i = 0; i < load_len; i++) {
-        draw_char(buf, W, load_x + i * sm_char_w, load_y,
+        draw_char(buf, width, height, load_x + i * sm_char_w, load_y,
                   loading[i], sm_scale, DIM_RED);
     }
 }

@@ -11,8 +11,8 @@
 #include "dma_gate.h"
 
 
-// The universal S3 image links these symbols, but callers gate entry on the
-// runtime CO5300 profile so other S3 carriers never initialize Doom hardware.
+// Doom-enabled family images link these symbols, while callers gate entry on
+// board::supportsDoom so unsupported carriers never initialize Doom hardware.
 #if defined(ESPDISP_DOOM_RUNTIME)
 esp_lcd_panel_handle_t doom_get_panel_handle(void) { return panel; }
 #endif
@@ -26,9 +26,8 @@ extern "C" void doom_touch_sample(void);
 // pointer rather than copying it, so every blit must block until the completion
 // ISR says DMA is done before Doom rewrites or frees that buffer. A timeout
 // fails closed; the caller immediately restarts instead of continuing with an
-// unknown transfer lifetime. Service touch while waiting: a full 466x466 QSPI
-// transfer occupies most of a frame, and CST9217 reports are a single
-// interrupt-latched mailbox rather than a FIFO that can be drained afterward.
+// unknown transfer lifetime. Service touch while waiting because full-panel
+// transfers can occupy most of a frame and controller reports may not be queued.
 extern "C" bool doom_display_blit_blocking(const uint16_t *pixels,
                                              int width, int height) {
   if (panel == nullptr || pixels == nullptr || width <= 0 || height <= 0) {

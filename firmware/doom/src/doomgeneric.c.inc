@@ -6,7 +6,7 @@
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ESP_PLATFORM)
 // On ESP32, DG_ScreenBuffer is allocated in PSRAM by DG_Init()
-// (in doomgeneric_esp32s3.c). We just declare the extern here.
+// (in the ESP32 doomgeneric platform). We just declare the extern here.
 #else
 pixel_t* DG_ScreenBuffer = NULL;
 #endif
@@ -31,4 +31,3 @@ void doomgeneric_Create(int argc, char **argv)
 
 	D_DoomMain ();
 }
-
