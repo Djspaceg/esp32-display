@@ -1,11 +1,11 @@
 # Doom Easter Egg
 
 A playable Doom shareware Episode 1 easter egg for the
-ESP32-S3-Touch-AMOLED-1.75C (`co5300` runtime profile). It is linked into the
-canonical S3 family artifact through `ESPDISP_DOOM_RUNTIME` and stays gated at
-runtime to the CO5300; every other S3 profile ignores it. Its heavy renderer
-arrays and mutable engine tables allocate from PSRAM only when Doom starts, so
-the canonical streaming image keeps the internal RAM its SPI DMA paths need.
+ESP32-S3-Touch-AMOLED-1.75C (`co5300`) and
+ESP32-P4-WIFI6-Touch-LCD-4B (`st7703-4b`) profiles. It is linked into those
+family artifacts through `ESPDISP_DOOM_RUNTIME` and remains runtime-gated to
+the supported profiles. Heavy renderer arrays and mutable engine tables
+allocate from PSRAM only when Doom starts.
 
 ## Play Doom
 
@@ -21,11 +21,10 @@ the canonical streaming image keeps the internal RAM its SPI DMA paths need.
 5. To start Episode 1, select **New Game**, **Knee-Deep in the Dead**, and a
    difficulty. Use up/down swipes to highlight each choice and a short BOOT
    press or tap to select it.
-6. During play, tilt to move, drag to turn, tap to fire, double-tap to use or
-   open, touch with a second finger to run, and swipe vertically to cycle
-   weapons: swipe up for the next weapon and swipe down for the previous one. A
-   single tap waits up to 400 ms before firing so the firmware can distinguish
-   it from a double-tap.
+6. During play on the S3, tilt to move and drag anywhere to turn. On P4, drag
+   on the left half to move and on the right half to turn. Right-side taps,
+   double-taps, and vertical swipes fire, use/open, and cycle weapons. A second
+   finger enables run.
 7. Hold BOOT for 3 seconds to exit Doom. The panel restarts into the normal
    streaming firmware; release is not required once the threshold is reached.
 
@@ -44,9 +43,9 @@ Triple-tap BOOT
   → save one-shot `doomonce` request in NVS
   → restart
   → consume and remove request before normal setup
-  → detect and require the CO5300 runtime profile
-  → initialize only the CO5300 panel, touch bus, and Doom PSRAM state
-  → validate and memory-map the retained WAD storage region
+  → detect and require a supported runtime profile
+  → initialize its existing display backend, boardtouch path, and Doom PSRAM
+  → validate and memory-map the profile's WAD storage region
   → run doomgeneric with blocking, completion-tracked panel DMA
   → BOOT 3-second hold exits
   → restart into normal streaming firmware
@@ -75,9 +74,10 @@ staging and UDP codec scratch.
 | BOOT 3-second hold | Exit and restart normally |
 | Tilt forward/back during play | Move forward/backward |
 | Tilt left/right during play | Strafe left/right |
-| Touch drag during play | Turn |
-| Tap during play | Fire |
-| Double-tap during play | Use/open |
+| P4 left-half drag during play | Move/strafe |
+| Touch drag in the aim zone | Turn |
+| Tap in the aim zone | Fire |
+| Double-tap in the aim zone | Use/open |
 | Second finger during play | Run modifier |
 | Swipe up during play | Next weapon |
 | Swipe down during play | Previous weapon |
@@ -173,7 +173,7 @@ firmware/doom/
     ├── doom_config.h
     ├── doom_unity_build.c
     ├── platform/
-    │   ├── doomgeneric_esp32s3.c.inc
+    │   ├── doomgeneric_esp32.c.inc
     │   ├── w_file_esp32.c.inc
     │   ├── doom_hw_bridge.cpp
     │   ├── doom_esp32_stubs.c.inc

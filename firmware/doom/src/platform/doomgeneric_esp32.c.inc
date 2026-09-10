@@ -1,23 +1,19 @@
-// doomgeneric platform implementation for ESP32-S3-Touch-AMOLED-1.75C
+// Board-neutral doomgeneric platform implementation for ESP32 displays.
 //
 // Implements the 5 required doomgeneric functions:
 //   DG_Init       - init display, IMU, touch
-//   DG_DrawFrame  - scale 320x200 -> 466x466 (letterboxed, round-masked)
+//   DG_DrawFrame  - scale 320x200 into the selected panel geometry
 //   DG_SleepMs    - FreeRTOS vTaskDelay
 //   DG_GetTicksMs - esp_timer microseconds / 1000
 //   DG_PollInput  - sample hardware once per Doom input phase
 //   DG_GetKey     - dequeue one sampled Doom key event
 //
-// Display strategy for 466x466 square (round) AMOLED:
-//   Doom renders 320x200 (16:10). We scale to fill the 466px width:
-//   - Scaled height = 466 * (200/320) = 291px
-//   - Vertical centering: 87px black bar top and bottom
-//   - The round bezel naturally clips the corners
-//   - Status bar (bottom 32px of Doom's 200px) is fully visible
+// Doom's 320x200 surface is aspect-fit and centered in the selected panel.
+// Round panels additionally mask pixels outside their inscribed circle.
 //
-// Touch zones (on the 466x466 display):
-//   LEFT HALF (x < 233):  movement assist (reserved for future)
-//   RIGHT HALF (x >= 233): aim + combat
+// Touch zones:
+//   IMU boards: whole panel aims; tilt supplies movement
+//   Touch-only boards: left half moves, right half aims + fights
 //     - Horizontal drag: turn left/right
 //     - Tap: shoot
 //     - Double-tap: use/open
@@ -445,7 +441,7 @@ void DG_DrawFrame() {
     const int r2 = panel_radius * panel_radius;
 
     for (int dy = 0; dy < panel_h; dy++) {
-        // Scaling 466 rows is the longest stretch of a frame with no other
+        // Scaling panel rows is the longest stretch of a frame with no other
         // yield point. Draining touch a handful of times across it keeps a
         // fast down/move/release from falling entirely between two polls.
         if ((dy & 63) == 0) {
@@ -507,10 +503,8 @@ void DG_DrawFrame() {
 }
 
 void DG_SleepMs(uint32_t ms) {
-    // Sampling touch across the sleep, not just at poll time, is what keeps a
-    // quick CST9217 down/move/release from collapsing between Doom ticks: the
-    // interrupt-backed reports are drained here while Doom would otherwise be
-    // idle, and folded into the pending state the next poll consumes.
+    // Sampling touch across the sleep, not just at poll time, keeps a quick
+    // down/move/release from collapsing between Doom ticks.
     const uint32_t step = 4;  // ms between samples during the sleep
     uint32_t remaining = ms;
     while (remaining > step) {

@@ -4095,6 +4095,11 @@ int main() {
     CHECK(p4.x_offset == 0 && p4.y_offset == 135);
     CHECK(!p4.round_mask);
 
+    const doom_frame_layout_t wide =
+        doom_frame_layout_for_panel(800, 480, false);
+    CHECK(wide.scaled_width == 768 && wide.scaled_height == 480);
+    CHECK(wide.x_offset == 16 && wide.y_offset == 0);
+
     CHECK(doom_touch_zone_for_press(
               DOOM_CONTROLS_TOUCH_ONLY, 720, 100) ==
           DOOM_TOUCH_ZONE_MOVE);
