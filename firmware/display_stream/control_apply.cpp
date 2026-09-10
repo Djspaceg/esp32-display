@@ -43,12 +43,24 @@ void applyPendingControl() {
     uint8_t ackStatus = 0;
     switch (command.opcode) {
       case deviceproto::ControlOpcode::Brightness:
+        if (fixedBlLevel != 0) {
+          ackStatus = 1;
+          Serial.printf("network: backlight change refused (fixed at %u)\n",
+                        fixedBlLevel);
+          break;
+        }
         userBlLevel = command.value != 0 ? BL_HIGH : BL_LOW;
         saveDisplayPrefs();
         applyBacklight();
         Serial.printf("network: backlight %s (saved)\n", blIsHigh() ? "high" : "low");
         break;
       case deviceproto::ControlOpcode::BrightnessLevel:
+        if (fixedBlLevel != 0) {
+          ackStatus = 1;
+          Serial.printf("network: backlight level refused (fixed at %u)\n",
+                        fixedBlLevel);
+          break;
+        }
         userBlLevel = (uint8_t)command.value;
         saveDisplayPrefs();
         applyBacklight();
@@ -115,4 +127,3 @@ void applyPendingControl() {
     sendControlAck(duplicateAck);
   }
 }
-

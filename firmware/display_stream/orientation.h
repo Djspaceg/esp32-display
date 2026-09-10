@@ -8,6 +8,7 @@
 
 extern bool panelLandscape;       // current panel MADCTL state
 extern uint8_t panelRotation;     // user mounting rotation, quarter turns 0-3
+extern bool panelMirrorX;         // installation-level left/right reflection
 extern uint8_t automaticRotation; // gravity-derived correction, RAM-only
 extern uint8_t appliedPanelRotation;  // what MADCTL actually holds
 extern bool madctlDirty;          // panel config needs reapplying

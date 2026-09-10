@@ -212,6 +212,14 @@ inline Point clampToFrame(Point p, bool landscape,
   return p;
 }
 
+/// Reflect a mapped point across the framebuffer's X axis so an installation
+/// mirror keeps touch and pixels in the same coordinate space.
+inline Point mirrorFrameX(Point p, bool axesSwapped,
+                          Calibration cal = AXS5106L_ON_C6) {
+  p.x = (int16_t)(frameWidth(axesSwapped, cal) - 1 - p.x);
+  return p;
+}
+
 /// Raw controller coordinates straight to a clamped framebuffer point.
 ///
 /// The clamp is bounded by the quadrant's frame shape, not the landscape flag

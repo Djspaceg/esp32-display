@@ -42,14 +42,16 @@ inline esp_err_t drawBitmap(esp_lcd_panel_handle_t panel,
 
 inline void applyOrientation(esp_lcd_panel_handle_t panel,
                              const board::Config &cfg, bool landscape,
-                             uint8_t rotation) {
+                             uint8_t rotation,
+                             bool installationMirrorX = false) {
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
   if (cfg.isDsi()) {
     boardpaneldsi::applyOrientation(cfg, landscape, rotation);
     return;
   }
 #endif
-  boardpanel::applyOrientation(panel, cfg, landscape, rotation);
+  boardpanel::applyOrientation(panel, cfg, landscape, rotation,
+                               installationMirrorX);
 }
 
 inline bool setBrightness(esp_lcd_panel_handle_t panel,

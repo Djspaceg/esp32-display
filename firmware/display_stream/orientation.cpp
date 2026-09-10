@@ -27,6 +27,8 @@ bool panelLandscape = false;              // current panel MADCTL state
 // Rotate case in applyPendingControl and CFGROT); rectangular panels express
 // a physical quarter turn through the sender's landscape mechanism instead.
 uint8_t panelRotation = 0;
+// Optical installations can reverse handedness without rotating the panel.
+bool panelMirrorX = false;
 // Gravity-derived correction, RAM-only. `appliedPanelRotation` records the
 // effective value actually in MADCTL, so touch never gets ahead of a pending
 // DMA-gated orientation change.
@@ -45,7 +47,7 @@ bool madctlDirty = false;                 // panel config needs reapplying
 void applyPanelConfig(bool landscape) {
   appliedPanelRotation = effectivePanelRotation();
   boarddisplay::applyOrientation(panel, *bcfg, landscape,
-                                 appliedPanelRotation);
+                                 appliedPanelRotation, panelMirrorX);
   panelLandscape = landscape;
   madctlDirty = false;
 }

@@ -14,11 +14,18 @@ const uint8_t BL_LOW = 24;    // ~10%
 // and the sender can set any level. Keeping one value instead of a high/low
 // flag is what lets both live together without them disagreeing.
 uint8_t userBlLevel = BL_HIGH;
+// An installation can lock its lit brightness and stop advertising brightness
+// controls. Sleep and explicit power-off still turn the panel dark.
+uint8_t fixedBlLevel = 0;
+
+uint8_t configuredBrightness() {
+  return fixedBlLevel != 0 ? fixedBlLevel : userBlLevel;
+}
 
 // True when the level is nearer high than low, which is what the high/low
 // toggle and the reported flag mean now that any level is possible.
 bool blIsHigh() {
-  return panelstate::brightnessIsHigh(userBlLevel, BL_LOW);
+  return panelstate::brightnessIsHigh(configuredBrightness(), BL_LOW);
 }
 
 // ---- Status card & display sleep ----------------------------------------
@@ -75,7 +82,7 @@ bool touchWakeActive() {
 uint8_t currentBrightness() {
   return panelstate::backlightLevel(panelManuallyOff, displaySleeping,
                                     idleActive, touchWakeActive(), userBlLevel,
-                                    BL_IDLE);
+                                    BL_IDLE, fixedBlLevel);
 }
 
 // Push a raw level to whichever brightness sink this board has: PWM duty on
@@ -120,6 +127,7 @@ void updateIdentify() {
     applyBacklight();  // hand the pin back to the sleep/idle/user state machine
     return;
   }
+  if (fixedBlLevel != 0) return;
   if (now - identifyPhaseAt < IDENTIFY_BLINK_MS) return;
   identifyPhaseAt = now;
   identifyPhaseHigh = !identifyPhaseHigh;

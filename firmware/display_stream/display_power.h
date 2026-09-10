@@ -15,6 +15,9 @@ extern const uint8_t BL_IDLE;
 
 // The awake-and-driven backlight level, 1..255 (NVS-backed).
 extern uint8_t userBlLevel;
+// Zero means normal controls; 1..255 fixes every lit state at that level.
+extern uint8_t fixedBlLevel;
+uint8_t configuredBrightness();
 bool blIsHigh();
 
 // Status card & sleep state. lastSenderPacketAt is written by the network
