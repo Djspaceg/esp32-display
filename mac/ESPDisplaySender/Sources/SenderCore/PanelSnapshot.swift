@@ -159,38 +159,51 @@ struct PanelSnapshot: Identifiable, Equatable {
         return now.timeIntervalSince(lastHeartbeatAt) < 10
     }
 
-    func deviceListStatus(asOf now: Date) -> DeviceListStatus {
+    func deviceListStatus(
+        asOf now: Date,
+        connectedViaUSB: Bool
+    ) -> DeviceListStatus {
         guard isOnline(asOf: now) else {
+            if connectedViaUSB { return .connectedViaUSB }
             return discovered ? .connecting : .offline
         }
         if paused { return .paused }
         return captureStatus.isStreaming ? .streaming : .connected
     }
 
-    func deviceListSortValue(asOf now: Date) -> DeviceListSortValue {
+    func deviceListSortValue(
+        asOf now: Date,
+        connectedViaUSB: Bool
+    ) -> DeviceListSortValue {
         DeviceListSortValue(
             displayName: displayName,
             stableIdentifier: id,
             dateAdded: dateAdded,
-            status: deviceListStatus(asOf: now))
-    }
-
-    var sidebarStatusText: String {
-        sidebarStatusText(asOf: Date())
+            status: deviceListStatus(
+                asOf: now,
+                connectedViaUSB: connectedViaUSB))
     }
 
     /// The complete status line shown under this panel's name in the sidebar.
     ///
-    /// This projects the same five states used for status sorting, so the visible
+    /// This projects the same six states used for status sorting, so the visible
     /// vocabulary cannot drift from the ordering policy.
-    func sidebarStatusText(asOf now: Date) -> String {
-        switch deviceListStatus(asOf: now) {
+    func sidebarStatusText(
+        asOf now: Date,
+        connectedViaUSB: Bool
+    ) -> String {
+        switch deviceListStatus(
+            asOf: now,
+            connectedViaUSB: connectedViaUSB
+        ) {
         case .streaming:
             return String(format: "Online • %.1f fps", displayFPS)
         case .connected:
             return "Online • Not mirroring"
         case .paused:
             return "Paused"
+        case .connectedViaUSB:
+            return "Connected via USB"
         case .connecting:
             return "Connecting"
         case .offline:

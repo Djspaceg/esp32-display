@@ -123,7 +123,9 @@ struct ManagerView: View {
         List(selection: $manager.selectedServiceName) {
                 Section {
                     ForEach(manager.panels) { panel in
-                        PanelRow(panel: panel)
+                        PanelRow(
+                            panel: panel,
+                            statusText: manager.sidebarStatusText(for: panel))
                             .tag(panel.serviceName)
                             .contextMenu {
                                 Button("Identify") { manager.identify(panel.serviceName) }
@@ -301,6 +303,7 @@ private struct IssueBanner: View {
 
 private struct PanelRow: View {
     let panel: PanelSnapshot
+    let statusText: String
 
     var body: some View {
         HStack(spacing: 10) {
@@ -311,7 +314,7 @@ private struct PanelRow: View {
                 Text(panel.displayName)
                     .fontWeight(.medium)
                     .lineLimit(1)
-                Text(panel.sidebarStatusText)
+                Text(statusText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
