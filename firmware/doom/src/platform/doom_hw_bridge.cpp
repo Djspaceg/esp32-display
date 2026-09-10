@@ -1,11 +1,8 @@
-// Hardware bridge between Doom Easter Egg and the existing firmware drivers.
+// Hardware bridge between Doom and the existing firmware drivers.
 //
 // This file provides the doom_display_*, doom_imu_*, and doom_touch_*
-// functions that doomgeneric_esp32s3.c calls. It reuses the board's existing
+// functions that the doomgeneric platform calls. It reuses the board's existing
 // panel, touch, and I2C infrastructure rather than re-initializing them.
-//
-// The universal S3 build links this bridge, but display_stream enters it only
-// after runtime detection has selected the CO5300 carrier.
 #if defined(ESPDISP_DOOM_RUNTIME)
 
 #include <Arduino.h>
@@ -16,18 +13,19 @@
 #include <board_config.h>
 #include <board_motion.h>
 #include <board_touch.h>
+#include <touch_gesture.h>
+#include <touch_map.h>
 
 #include "doom_mode.h"
 
-// The common S3 partition table intentionally fits 8 MiB carriers, so it omits
-// the WAD region above 8 MiB. On the 16 MiB CO5300 carrier that region is still
-// present in flash; the WAD mapper in w_file_esp32.c.inc maps it directly with
-// the public spi_flash_mmap API, so no partition entry is synthesized here.
+// Settled by display_stream before Doom is entered.
+extern const board::Config* bcfg;
+extern int16_t PANEL_W;
+extern int16_t PANEL_H;
 
 // --- Display bridge ---
-// The QSPI AMOLED (CO5300 466x466) is already initialized by the main firmware
-// before Doom mode is entered. We reuse the panel handle. The panel accepts
-// RGB565 big-endian pixel data via esp_lcd_panel_draw_bitmap().
+// The selected panel is already initialized by display_stream. Frame submission
+// remains behind its boarddisplay facade so P4 uses the existing MIPI DSI path.
 
 // display_stream owns the panel completion ISR and exposes a blocking write.
 // Returning only after completion is required because Doom immediately reuses
@@ -36,9 +34,28 @@ extern "C" bool doom_display_blit_blocking(const uint16_t* pixels,
                                              int width, int height);
 
 extern "C" void doom_display_init(void) {
-    // Panel is already initialized by display_stream. AMOLED brightness is
-    // via panel command 0x51 (no backlight pin). Max brightness for Doom.
     Serial.println("[doom] Display bridge ready (reusing existing panel)");
+}
+
+extern "C" int doom_display_width(void) {
+    return PANEL_W;
+}
+
+extern "C" int doom_display_height(void) {
+    return PANEL_H;
+}
+
+extern "C" bool doom_display_round(void) {
+    return bcfg != nullptr && bcfg->panel != nullptr &&
+           bcfg->panel->roundDisplay;
+}
+
+extern "C" bool doom_motion_available(void) {
+    return bcfg != nullptr && bcfg->hasMotion();
+}
+
+extern "C" int doom_boot_pin(void) {
+    return bcfg != nullptr ? bcfg->pinBootButton : board::NO_PIN;
 }
 
 extern "C" void doom_display_blit(const uint16_t* rgb565_buf, int width, int height) {
@@ -58,8 +75,12 @@ extern "C" void doom_display_blit(const uint16_t* rgb565_buf, int width, int hei
 static bool imu_initialized = false;
 
 extern "C" void doom_imu_init(void) {
-    const board::Config& cfg = board::configFor(board::Variant::AmoledCo5300);
-    if (!boardmotion::init(cfg)) {
+    if (!doom_motion_available()) {
+        imu_initialized = false;
+        Serial.println("[doom] No IMU; touch-only movement enabled");
+        return;
+    }
+    if (!boardmotion::init(*bcfg)) {
         Serial.println("[doom] FATAL: QMI8658 unavailable; restarting normally");
         Serial.flush();
         delay(20);
@@ -100,14 +121,11 @@ extern "C" void doom_imu_read(float* pitch, float* roll) {
     *roll = atan2f(fay, faz) * 57.2958f;
 }
 
-// --- Touch bridge (CST9217 dual-point) ---
-// Extends the existing single-point touch reader to report two points and
-// gesture classification for Doom input.
+// --- Touch bridge ---
+// Consumes the selected boardtouch controller and keeps gesture classification
+// outside the engine.
 
 #include "doom_touch_bridge.h"
-
-#include <touch_gesture.h>
-#include <touch_map.h>
 
 // Doom runs at one fixed panel orientation regardless of what macOS would ask
 // for during normal streaming: portrait-upright, no mounting rotation. The
@@ -120,6 +138,8 @@ static const uint8_t DOOM_TOUCH_ROTATION = 0;
 // coordinates. Shared with the C6/normal-firmware touch path, so Doom and the
 // streaming panel agree on what a swipe is.
 static touchgesture::Tracker s_tracker;
+static touchmap::Calibration s_touch_calibration =
+    touchmap::CST9217_ON_CO5300;
 
 // Live contact state, surfaced to the platform layer on every poll.
 static bool s_pressed = false;
@@ -181,17 +201,24 @@ static void doom_touch_reset_state(void) {
 extern "C" void doom_touch_init(void) {
     // Doom owns the controller for its isolated reboot session; initialize the
     // shared boardtouch state before any Doom input sampling begins.
-    const board::Config& cfg = board::configFor(board::Variant::AmoledCo5300);
-    bool available = boardtouch::init(cfg);
+    if (bcfg == nullptr) {
+        Serial.println("[doom] FATAL: board profile unavailable");
+        ESP.restart();
+        while (true) delay(1000);
+    }
+    s_touch_calibration = bcfg->variant == board::Variant::P4_4B
+        ? touchmap::GT911_ON_ST7703_4B
+        : touchmap::CST9217_ON_CO5300;
+    bool available = boardtouch::init(*bcfg);
     if (!available) {
-        Serial.println("[doom] FATAL: CST9217 unavailable; restarting normally");
+        Serial.println("[doom] FATAL: touch unavailable; restarting normally");
         Serial.flush();
         delay(20);
         ESP.restart();
         while (true) delay(1000);
     }
     doom_touch_reset_state();
-    Serial.println("[doom] Touch bridge ready (CST9217, gesture tracker)");
+    Serial.println("[doom] Touch bridge ready (boardtouch, gesture tracker)");
 }
 
 extern "C" void doom_touch_sample(void) {
@@ -205,7 +232,7 @@ extern "C" void doom_touch_sample(void) {
         const uint32_t now = millis();
         const touchmap::Point p = touchmap::map(
             (int16_t)sample.rawX, (int16_t)sample.rawY, DOOM_TOUCH_LANDSCAPE,
-            DOOM_TOUCH_ROTATION, touchmap::CST9217_ON_CO5300);
+            DOOM_TOUCH_ROTATION, s_touch_calibration);
 
         const touchgesture::Event ev =
             s_tracker.onReport(sample.pressed, p.x, p.y, now);

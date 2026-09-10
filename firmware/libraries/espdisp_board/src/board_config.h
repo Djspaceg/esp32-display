@@ -65,6 +65,10 @@ enum class Variant : uint8_t {
   LcdSt7789_130 = 8,    // ESP32-S3-LCD-1.3
 };
 
+constexpr bool supportsDoom(Variant variant) {
+  return variant == Variant::AmoledCo5300 || variant == Variant::P4_4B;
+}
+
 /// Which capacitive touch controller the board carries, so the sketch knows
 /// which register protocol to speak. The pins alone cannot tell these apart.
 enum class TouchController : uint8_t { None, Axs5106l, Cst9217, Cst816, Gt911 };
@@ -90,8 +94,8 @@ enum class MotionController : uint8_t { None, Qmi8658 };
      defined(ESPDISP_BOARD_S3_185)) != 1
 #error "ESP32-P4 builds require exactly one compatible internal carrier selector"
 #endif
-#if defined(ESPDISP_DOOM_RUNTIME)
-#error "ESP32-P4 builds must not enable the S3 Doom runtime"
+#if defined(ESPDISP_DOOM_RUNTIME) && !defined(ESPDISP_BOARD_P4_4B)
+#error "ESP32-P4 Doom runtime requires the board-neutral P4 carrier selector"
 #endif
 #if defined(ESPDISP_BOARD_P4_4B)
 #define ESPDISP_PANEL_ST7703_720X720 1
