@@ -84,7 +84,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 profile: "jd9853", partition: complete.partition)),
             ("partition", .init(
                 family: complete.family, chip: complete.chip,
-                profile: complete.profile, partition: "universal-8m-ota")),
+                profile: complete.profile, partition: "universal-8m-doom-ota")),
         ]
 
         for (field, usb) in conflicts {
@@ -205,7 +205,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3-175",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-ota"),
+                partition: "universal-8m-doom-ota"),
             usb: nil)
 
         XCTAssertEqual(selected.selection.catalogEntry.family, "s3")
@@ -215,7 +215,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-ota"))
+                partition: "universal-8m-doom-ota"))
     }
 
     func testUpdatePreselectionAcceptsLegacyLiveS3AliasMatchedToCanonicalUSBFamily() throws {
@@ -226,12 +226,12 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3-175",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-ota"),
+                partition: "universal-8m-doom-ota"),
             usb: .init(
                 family: "s3",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-ota"))
+                partition: "universal-8m-doom-ota"))
 
         XCTAssertEqual(selected.selection.catalogEntry.family, "s3")
         XCTAssertEqual(
@@ -240,7 +240,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-ota"))
+                partition: "universal-8m-doom-ota"))
     }
 
     func testUpdatePreselectionStillRejectsGenuineCrossTransportFamilyConflicts() throws {
@@ -251,12 +251,12 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3-175",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-ota"),
+                partition: "universal-8m-doom-ota"),
             usb: .init(
                 family: "p4",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-ota"))) {
+                partition: "universal-8m-doom-ota"))) {
                     guard case let BundledFirmware.UpdateIdentityError
                         .conflictingEvidence(field, live, usb) = $0
                     else { return XCTFail("unexpected error \($0)") }

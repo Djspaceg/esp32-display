@@ -83,12 +83,13 @@ final class UsbOnboardingTests: XCTestCase {
         XCTAssertEqual(plan.action, .flash)
         XCTAssertTrue(plan.canStart)
         XCTAssertTrue(plan.headline.contains("p4-4b"))
+        XCTAssertTrue(plan.detail.contains("5 parts"))
 
         request.target = "s3-185"
         XCTAssertEqual(UsbOnboardingPlan.make(request).action, .noImageForTarget)
     }
 
-    func testS3085UsesItsExactNonDoomImage() {
+    func testS3085RefusesItsLegacyNonDoomImage() {
         var request = ready()
         request.bundle = EsptoolCommandTests.bundle(
             chip: "esp32s3", bootloader: 0x0, app: 0x10000,
@@ -96,10 +97,9 @@ final class UsbOnboardingTests: XCTestCase {
         request.target = "s3-085"
 
         let plan = UsbOnboardingPlan.make(request)
-        XCTAssertEqual(plan.action, .flash)
-        XCTAssertTrue(plan.canStart)
-        XCTAssertTrue(plan.headline.contains("s3-085"))
-        XCTAssertTrue(plan.detail.contains("4 parts"))
+        XCTAssertEqual(plan.action, .bundleIsOTAOnly)
+        XCTAssertFalse(plan.canStart)
+        XCTAssertTrue(plan.detail.contains("tools/espdisp.py bundle"))
     }
 
     func testS3085BundleRefusesAnotherSameChipTarget() {
@@ -114,7 +114,7 @@ final class UsbOnboardingTests: XCTestCase {
         XCTAssertFalse(plan.canStart)
     }
 
-    func testS3154UsesItsExactNonDoomImage() {
+    func testS3154RefusesItsLegacyNonDoomImage() {
         var request = ready()
         request.bundle = EsptoolCommandTests.bundle(
             chip: "esp32s3", bootloader: 0x0, app: 0x10000,
@@ -122,10 +122,9 @@ final class UsbOnboardingTests: XCTestCase {
         request.target = "s3-154"
 
         let plan = UsbOnboardingPlan.make(request)
-        XCTAssertEqual(plan.action, .flash)
-        XCTAssertTrue(plan.canStart)
-        XCTAssertTrue(plan.headline.contains("s3-154"))
-        XCTAssertTrue(plan.detail.contains("4 parts"))
+        XCTAssertEqual(plan.action, .bundleIsOTAOnly)
+        XCTAssertFalse(plan.canStart)
+        XCTAssertTrue(plan.detail.contains("tools/espdisp.py bundle"))
     }
 
     func testS3154BundleRefusesAnotherSameChipTarget() {

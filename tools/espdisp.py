@@ -81,6 +81,7 @@ class Family(NamedTuple):
     profiles: Tuple[str, ...]
     flash_sizes: Tuple[int, ...]
     partition_scheme: str
+    requires_doom_wad: bool
     hardware: Dict[str, Tuple[str, ...]]
     blurb: str
 
@@ -123,7 +124,7 @@ class Family(NamedTuple):
 FAMILIES = {
     "c6": Family(
         "c6", "c6", "c6", ("st7789", "jd9853"), (8 * 1024 * 1024,),
-        "default-8m", {
+        "default-8m", False, {
             "st7789": ("ESP32-C6-LCD-1.47",),
             "jd9853": ("ESP32-C6-Touch-LCD-1.47",),
         },
@@ -132,7 +133,7 @@ FAMILIES = {
         "s3", "s3", "s3-universal",
         ("gc9107", "st7789-130", "st7789-154", "co5300", "st77916"),
         (8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024),
-        "universal-8m-ota", {
+        "universal-8m-doom-ota", True, {
             "gc9107": ("ESP32-S3-LCD-0.85",),
             "st7789-130": ("ESP32-S3-LCD-1.3", "ESP32-S3-LCD-1.3-B", "ESP32-S3-LCD-1.3-C"),
             "st7789-154": ("ESP32-S3-Touch-LCD-1.54",),
@@ -142,7 +143,7 @@ FAMILIES = {
         "Universal ESP32-S3 display firmware"),
     "p4": Family(
         "p4", "p4", "p4-4b", ("st7703-4b",),
-        (32 * 1024 * 1024,), "p4-32m-ota", {
+        (32 * 1024 * 1024,), "p4-32m-ota", True, {
             "st7703-4b": ("ESP32-P4-WIFI6-Touch-LCD-4B",),
         },
         "Universal ESP32-P4 display firmware"),
@@ -2275,6 +2276,8 @@ def validate_release_catalog(
             _verify_partition_payload(family, partition)
             _verify_app_payload(
                 family, partition, image.get("app_address"), image.get("bytes"))
+            _verify_required_doom_flash_payload(
+                family, partition, image, flash_payloads[key])
     return catalog
 
 
@@ -3196,9 +3199,9 @@ def cmd_compile(args) -> int:
 
 
 def bundle_flash_plan(
-    image: dict, app: bytes, flash_payloads: Dict[str, bytes]
+    family: Family, image: dict, app: bytes, flash_payloads: Dict[str, bytes]
 ) -> List[Tuple[int, str, bytes]]:
-    """Return the four verified bundle payloads in deterministic write order."""
+    """Return every required bundle payload in deterministic write order."""
     parts = {
         part["role"]: part
         for part in image.get("flash_parts") or []
@@ -3211,6 +3214,12 @@ def bundle_flash_plan(
         if part is None or payload is None:
             raise Fail("canonical bundle carries no %s payload" % role)
         writes.append((part["address"], role, payload))
+    if family.requires_doom_wad:
+        part = parts.get(_DOOM_WAD_FLASH_ROLE)
+        payload = flash_payloads.get(_DOOM_WAD_FLASH_ROLE)
+        if part is None or payload is None:
+            raise Fail("canonical bundle carries no doom_wad payload")
+        writes.append((part["address"], _DOOM_WAD_FLASH_ROLE, payload))
     writes.append((image["app_address"], "app", app))
     clash = conflicting_flash_address(
         [(address, role) for address, role, _ in writes])
@@ -3218,7 +3227,7 @@ def bundle_flash_plan(
         raise Fail(
             "canonical bundle writes both %s and %s to flash address 0x%x"
             % (clash[1], clash[2], clash[0]))
-    return writes
+    return sorted(writes, key=lambda write: write[0])
 
 
 def canonical_family_value(values: dict, family: Family):
@@ -3246,7 +3255,7 @@ def flash_canonical_release(
     manifest, payloads, flash_payloads = unpack_bundle(data)
     image = manifest["images"][0]
     writes = bundle_flash_plan(
-        image,
+        family, image,
         canonical_family_value(payloads, family),
         canonical_family_value(flash_payloads, family))
 
@@ -3288,7 +3297,7 @@ def cmd_flash(args) -> int:
     return 0
 
 
-# WAD auto-download and flash for the Doom Easter Egg (s3-175 only).
+# WAD auto-download and flash for every canonical Doom-capable family.
 # The digest is the canonical shareware v1.9 IWAD (MD5
 # f0cefca49926d00903cf57551d901abe). Size plus SHA-256 is checked before any
 # bundle or raw write so a mirror change cannot silently reach a device.
@@ -3324,6 +3333,27 @@ def _partition_entries(blob: bytes) -> List[Tuple[str, int, int, int, int]]:
     return entries
 
 
+def _doom_wad_partition(blob: bytes) -> Tuple[int, int]:
+    matches = [
+        entry for entry in _partition_entries(blob)
+        if entry[0] == _DOOM_WAD_FLASH_ROLE
+    ]
+    if len(matches) != 1:
+        raise Fail("partition table must contain exactly one doom_wad entry")
+    _, part_type, subtype, address, size = matches[0]
+    if part_type != 0x42 or subtype != 0x06:
+        raise Fail(
+            "doom_wad partition has type/subtype 0x%02X/0x%02X, expected 0x42/0x06"
+            % (part_type, subtype)
+        )
+    if size != _DOOM_WAD_PARTITION_SIZE:
+        raise Fail(
+            "doom_wad partition is %d bytes, expected %d"
+            % (size, _DOOM_WAD_PARTITION_SIZE)
+        )
+    return address, size
+
+
 def _verify_partition_payload(family: Family, blob: bytes) -> None:
     entries = _partition_entries(blob)
     by_label = {entry[0]: entry[1:] for entry in entries}
@@ -3339,8 +3369,9 @@ def _verify_partition_payload(family: Family, blob: bytes) -> None:
         expected = {
             "nvs": (0x01, 0x02, 0x009000, 0x005000),
             "otadata": (0x01, 0x00, 0x00E000, 0x002000),
-            "app0": (0x00, 0x10, 0x010000, 0x3F0000),
-            "app1": (0x00, 0x11, 0x400000, 0x3F0000),
+            "app0": (0x00, 0x10, 0x010000, 0x1F0000),
+            "app1": (0x00, 0x11, 0x200000, 0x1F0000),
+            "doom_wad": (0x42, 0x06, 0x3FF000, 0x401000),
         }
     else:
         if any(entry[0] == "doom_wad" for entry in entries):
@@ -3400,6 +3431,67 @@ def _validate_doom_wad(path: str, require_shareware: bool = False) -> None:
                 "doom1.wad is not the verified shareware v1.9 image "
                 "(bytes=%d sha256=%s)" % (size, digest)
             )
+
+
+def _add_required_doom_wad_flash_part(
+    family: Family, partition_blob: bytes,
+    entries: List[dict], payloads: Dict[str, bytes],
+) -> None:
+    """Add the verified WAD required by a canonical family bundle."""
+    if not family.requires_doom_wad:
+        return
+    address, capacity = _doom_wad_partition(partition_blob)
+    wad_path = _ensure_doom_wad()
+    if wad_path is None:
+        raise Fail("%s bundle requires the verified doom1.wad payload" % family.key)
+    _validate_doom_wad(wad_path, require_shareware=True)
+    blob = read_binary(wad_path)
+    if len(blob) > capacity:
+        raise Fail(
+            "%s WAD is %d bytes but its partition holds %d"
+            % (family.key, len(blob), capacity)
+        )
+    if _DOOM_WAD_FLASH_ROLE in payloads:
+        raise Fail("%s bundle already contains a doom_wad payload" % family.key)
+    entries.append({
+        "role": _DOOM_WAD_FLASH_ROLE,
+        "address": address,
+        "filename": os.path.basename(wad_path),
+        "bytes": len(blob),
+        "sha256": sha256_hex(blob),
+    })
+    payloads[_DOOM_WAD_FLASH_ROLE] = blob
+
+
+def _verify_required_doom_flash_payload(
+    family: Family, partition_blob: bytes, image: dict,
+    flash_payloads: Dict[str, bytes],
+) -> None:
+    """Fail closed when a Doom-required family lacks the canonical WAD write."""
+    if not family.requires_doom_wad:
+        if (_DOOM_WAD_FLASH_ROLE in flash_payloads or any(
+                part.get("role") == _DOOM_WAD_FLASH_ROLE
+                for part in image.get("flash_parts", [])
+                if isinstance(part, dict))):
+            raise Fail("%s bundle must not carry a doom_wad flash part" % family.key)
+        return
+    address, capacity = _doom_wad_partition(partition_blob)
+    parts = [
+        part for part in image.get("flash_parts", [])
+        if part.get("role") == _DOOM_WAD_FLASH_ROLE
+    ]
+    payload = flash_payloads.get(_DOOM_WAD_FLASH_ROLE)
+    if len(parts) != 1 or payload is None:
+        raise Fail("%s bundle lacks its required doom_wad flash part" % family.key)
+    part = parts[0]
+    digest = sha256_hex(payload)
+    if (part.get("address") != address or
+            part.get("bytes") != len(payload) or
+            part.get("sha256") != digest):
+        raise Fail("%s doom_wad metadata does not match its partition/payload" % family.key)
+    if (len(payload) != _DOOM_WAD_SIZE or len(payload) > capacity or
+            digest != _DOOM_WAD_SHA256 or payload[:4] != b"IWAD"):
+        raise Fail("%s bundle does not carry the verified shareware doom1.wad" % family.key)
 
 
 def _ensure_doom_wad() -> Optional[str]:
@@ -3535,27 +3627,30 @@ def cmd_bundle(args) -> int:
             parts, part_payloads = collect_flash_parts(board, out_dir)
             partition_blob = part_payloads[FLASH_ROLE_PARTITIONS]
             _verify_partition_payload(board, partition_blob)
+            _add_required_doom_wad_flash_part(
+                board, partition_blob, parts, part_payloads)
             _verify_app_payload(board, partition_blob, APP_FLASH_ADDRESS, len(blob))
-            entries.append(
-                {
-                    "board": board.key,
-                    "targets": [board.key],
-                    "chip": board.chip,
-                    "profiles": list(board.profiles),
-                    "flash_sizes": list(board.flash_sizes),
-                    "partition": board.partition_scheme,
-                    "fqbn": board.fqbn,
-                    "filename": os.path.basename(image),
-                    "bytes": len(blob),
-                    "sha256": sha256_hex(blob),
-                    # Where the app goes over USB. In the manifest rather than in
-                    # the reader for the same reason as the bootloader address:
-                    # 0x10000 is what this repo's partition table says, and the
-                    # table travels in the same file, so the two cannot drift.
-                    "app_address": APP_FLASH_ADDRESS,
-                    "flash_parts": parts,
-                }
-            )
+            image_entry = {
+                "board": board.key,
+                "targets": [board.key],
+                "chip": board.chip,
+                "profiles": list(board.profiles),
+                "flash_sizes": list(board.flash_sizes),
+                "partition": board.partition_scheme,
+                "fqbn": board.fqbn,
+                "filename": os.path.basename(image),
+                "bytes": len(blob),
+                "sha256": sha256_hex(blob),
+                # Where the app goes over USB. In the manifest rather than in
+                # the reader for the same reason as the bootloader address:
+                # 0x10000 is what this repo's partition table says, and the
+                # table travels in the same file, so the two cannot drift.
+                "app_address": APP_FLASH_ADDRESS,
+                "flash_parts": parts,
+            }
+            _verify_required_doom_flash_payload(
+                board, partition_blob, image_entry, part_payloads)
+            entries.append(image_entry)
             payloads[board.key] = blob
             flash_payloads[board.key] = part_payloads
     finally:
@@ -3604,6 +3699,8 @@ def cmd_bundle_info(args) -> int:
             raise Fail("bundle family compatibility metadata does not match its payload")
         _verify_app_payload(
             family, partition_blob, image.get("app_address"), image.get("bytes"))
+        _verify_required_doom_flash_payload(
+            family, partition_blob, image, roles)
     size = os.path.getsize(args.path)
     print("%s" % args.path)
     print("  size:     %d bytes (%.1f MiB)" % (size, size / (1024.0 * 1024.0)))

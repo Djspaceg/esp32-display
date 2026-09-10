@@ -3487,8 +3487,8 @@ def test_bundle_release_notes_preflight_barriers():
             "release-note preflight blocks board, provenance, output, and compilation")
 
 
-def test_p4_partition_contract():
-    """P4 keeps equal dual OTA slots and the standard metadata addresses."""
+def test_doom_partition_contracts():
+    """Canonical Doom families package a verified WAD at their table address."""
     def entry(label, part_type, subtype, address, size):
         return struct.pack(
             "<HBBII16sI", 0x50AA, part_type, subtype, address, size,
@@ -3507,12 +3507,77 @@ def test_p4_partition_contract():
         lambda: espdisp._verify_partition_payload(
             espdisp.FAMILIES["p4"], good),
         "P4 dual-OTA partition table")
+    check_equal(
+        espdisp._doom_wad_partition(good),
+        (0x1010000, 0x401000),
+        "P4 WAD address comes from the partition table")
     missing_app1 = good[:3 * 32] + b"\xff" * 32
     check_fails(
         lambda: espdisp._verify_partition_payload(
             espdisp.FAMILIES["p4"], missing_app1),
         "expected app0, app1, doom_wad, nvs, otadata",
         "P4 table without its recovery OTA slot")
+
+    s3 = b"".join([
+        entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
+        entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
+        entry("app0", 0x00, 0x10, 0x10000, 0x1F0000),
+        entry("app1", 0x00, 0x11, 0x200000, 0x1F0000),
+        entry("doom_wad", 0x42, 0x06, 0x3FF000, 0x401000),
+    ]) + b"\xff" * 32
+    check_accepts(
+        lambda: espdisp._verify_partition_payload(
+            espdisp.FAMILIES["s3"], s3),
+        "S3 dual-OTA partition table fits the WAD in 8 MiB")
+    check_equal(
+        espdisp._doom_wad_partition(s3),
+        (0x3FF000, 0x401000),
+        "S3 WAD address comes from the partition table")
+
+    with tempfile.TemporaryDirectory() as directory:
+        wad_path = os.path.join(directory, "doom1.wad")
+        wad = b"IWAD" + b"\0" * (espdisp._DOOM_WAD_SIZE - 4)
+        with open(wad_path, "wb") as out:
+            out.write(wad)
+        with unittest.mock.patch.object(
+                espdisp, "_ensure_doom_wad", return_value=wad_path), \
+             unittest.mock.patch.object(
+                espdisp, "_DOOM_WAD_SHA256", espdisp.sha256_hex(wad)):
+            for family_key, table, address in (
+                    ("p4", good, 0x1010000),
+                    ("s3", s3, 0x3FF000)):
+                parts = []
+                payloads = {}
+                family = espdisp.FAMILIES[family_key]
+                espdisp._add_required_doom_wad_flash_part(
+                    family, table, parts, payloads)
+                image = {"flash_parts": parts}
+                check_accepts(
+                    lambda family=family, table=table, image=image, payloads=payloads:
+                        espdisp._verify_required_doom_flash_payload(
+                            family, table, image, payloads),
+                    "%s bundle carries the verified table-addressed WAD"
+                    % family_key.upper())
+                check_equal(
+                    [(part["role"], part["address"], part["bytes"])
+                     for part in parts],
+                    [("doom_wad", address, espdisp._DOOM_WAD_SIZE)],
+                    "%s WAD manifest entry uses its partition address and exact size"
+                    % family_key.upper())
+                check_equal(
+                    payloads["doom_wad"], wad,
+                    "%s bundle carries the WAD bytes" % family_key.upper())
+        c6_image = {"flash_parts": [{
+            "role": "doom_wad",
+            "address": 0x3FF000,
+            "bytes": len(wad),
+            "sha256": espdisp.sha256_hex(wad),
+        }]}
+        check_fails(
+            lambda: espdisp._verify_required_doom_flash_payload(
+                espdisp.FAMILIES["c6"], b"", c6_image, {"doom_wad": wad}),
+            "must not carry a doom_wad",
+            "C6 bundle with a stray WAD flash part")
 
 
 def test_universal_family_catalog_and_cli():
@@ -3528,6 +3593,12 @@ def test_universal_family_catalog_and_cli():
         "S3 maps all runtime profiles into one family")
     check_equal(espdisp.FAMILIES["p4"].profiles, ("st7703-4b",),
                 "P4 advertises its exact physical profile")
+    check(not espdisp.FAMILIES["c6"].requires_doom_wad,
+          "C6 explicitly prohibits the Doom WAD payload")
+    check(espdisp.FAMILIES["s3"].requires_doom_wad,
+          "S3 explicitly requires the Doom WAD payload")
+    check(espdisp.FAMILIES["p4"].requires_doom_wad,
+          "P4 explicitly requires the Doom WAD payload")
     check_equal(espdisp.FAMILIES["p4"].build_target, "p4-4b",
                 "P4 family composes the exact 4B build target")
     check_equal(espdisp.BUILD_TARGETS["p4-4b"].platform, "p4",
@@ -3548,7 +3619,7 @@ def test_universal_family_catalog_and_cli():
           "extra_flags" not in espdisp.Platform._fields,
           "chip platforms contain no carrier selector or partition source")
     check_equal(espdisp.FAMILIES["s3"].partition_csv, "partitions_s3.csv",
-                "S3 uses the common 8 MiB partition layout")
+                "S3 uses the 8 MiB dual-OTA Doom partition layout")
     check_equal(espdisp.FAMILIES["s3"].extra_flags, ("-DESPDISP_DOOM_RUNTIME",),
                 "canonical S3 links the runtime-gated Doom easter egg")
     check_equal(espdisp.FAMILIES["s3"].extra_library_dirs, ("firmware",),
@@ -3820,8 +3891,10 @@ def test_s3_doom_build_contract():
     # re-require the very thing that made a Doom-enabled P4 image unsafe.
     _ = (wad_header, raw_body, raw_mapper)
     check(
-        "doom_wad" not in partition_source,
-        "the common 8 MiB S3 partition table does not claim the external WAD")
+        "doom_wad" in partition_source and
+        "0x3FF000" in partition_source and
+        "0x401000" in partition_source,
+        "the canonical 8 MiB S3 table declares its exact WAD partition")
 
     catalog_path = os.path.join(
         espdisp.RELEASE_ROOT, espdisp.RELEASE_CATALOG_NAME)
@@ -3833,11 +3906,11 @@ def test_s3_doom_build_contract():
         all(marker in payloads["s3"] for marker in espdisp.S3_DOOM_APP_MARKERS),
         "the tracked canonical S3 release snapshot contains both Doom seams")
     check_equal(
-        manifest["images"][0]["partition"], "universal-8m-ota",
-        "the packaged S3 application keeps the common dual-OTA layout")
-    check(
-        "doom_wad" not in flash_payloads["s3"],
-        "the tracked canonical S3 release snapshot carries no WAD payload")
+        manifest["images"][0]["partition"], "universal-8m-doom-ota",
+        "the packaged S3 application identifies its dual-OTA Doom layout")
+    check_equal(
+        len(flash_payloads["s3"]["doom_wad"]), espdisp._DOOM_WAD_SIZE,
+        "the tracked canonical S3 release snapshot carries the exact WAD payload")
 
 
 def test_family_resolution_and_discovery():
@@ -3874,30 +3947,31 @@ def test_family_resolution_and_discovery():
         "address": "192.0.2.3", "protocol": "network",
         "properties": {
             "hostname": "panel.local.", "board": "esp32s3", "target": "s3",
-            "profile": "co5300", "partition": "universal-8m-ota",
+            "profile": "co5300", "partition": "universal-8m-doom-ota",
         }}}]}
     ports = espdisp.parse_network_ports(payload)
     check_equal(len(ports), 1, "one network panel parsed")
     check_equal(ports[0].profile, "co5300", "profile metadata parsed")
-    check_equal(ports[0].partition, "universal-8m-ota",
+    check_equal(ports[0].partition, "universal-8m-doom-ota",
                 "partition metadata parsed")
     family = espdisp.FAMILIES["s3"]
     check_equal(espdisp.classify_ota_target(
-        family, "s3", "esp32s3", "co5300", "universal-8m-ota"),
+        family, "s3", "esp32s3", "co5300", "universal-8m-doom-ota"),
         espdisp.TARGET_OK, "all independent S3 evidence agrees")
     for values, label in (
-            (("p4", "esp32s3", "co5300", "universal-8m-ota"), "wrong family"),
-            (("s3", "esp32p4", "co5300", "universal-8m-ota"), "wrong chip"),
-            (("s3", "esp32s3", "st7703-4b", "universal-8m-ota"), "wrong profile"),
+            (("p4", "esp32s3", "co5300", "universal-8m-doom-ota"), "wrong family"),
+            (("s3", "esp32p4", "co5300", "universal-8m-doom-ota"), "wrong chip"),
+            (("s3", "esp32s3", "st7703-4b", "universal-8m-doom-ota"), "wrong profile"),
             (("s3", "esp32s3", "co5300", "p4-32m-ota"), "wrong partition")):
         check_equal(espdisp.classify_ota_target(family, *values),
                     espdisp.TARGET_WRONG, label)
     for values, label in (
-            (("", "esp32s3", "co5300", "universal-8m-ota"), "missing family"),
-            (("s3", "", "co5300", "universal-8m-ota"), "missing chip"),
-            (("s3", "esp32s3", "", "universal-8m-ota"), "missing profile"),
+            (("", "esp32s3", "co5300", "universal-8m-doom-ota"), "missing family"),
+            (("s3", "", "co5300", "universal-8m-doom-ota"), "missing chip"),
+            (("s3", "esp32s3", "", "universal-8m-doom-ota"), "missing profile"),
             (("s3", "esp32s3", "co5300", ""), "missing partition"),
-            (("s3", "esp32s3", "future", "universal-8m-ota"), "unknown profile")):
+            (("s3", "esp32s3", "co5300", "universal-8m-ota"), "legacy partition"),
+            (("s3", "esp32s3", "future", "universal-8m-doom-ota"), "unknown profile")):
         check_equal(espdisp.classify_ota_target(family, *values),
                     espdisp.TARGET_UNKNOWN, label)
     with unittest.mock.patch.object(
@@ -4013,7 +4087,8 @@ def test_release_catalog_contract():
     with unittest.mock.patch.object(espdisp, "read_binary", side_effect=read_artifact), \
          unittest.mock.patch.object(espdisp, "unpack_bundle", side_effect=unpack_artifact), \
          unittest.mock.patch.object(espdisp, "_verify_partition_payload"), \
-         unittest.mock.patch.object(espdisp, "_verify_app_payload"):
+         unittest.mock.patch.object(espdisp, "_verify_app_payload"), \
+         unittest.mock.patch.object(espdisp, "_verify_required_doom_flash_payload"):
         check_accepts(
             lambda: espdisp.validate_release_catalog(catalog, "/tmp/releases", True),
             "catalog hashes, sizes, and bundle identities agree")
@@ -4072,14 +4147,17 @@ def test_canonical_usb_flash_path():
             {"role": espdisp.FLASH_ROLE_BOOTLOADER, "address": 0x0},
             {"role": espdisp.FLASH_ROLE_PARTITIONS, "address": 0x8000},
             {"role": espdisp.FLASH_ROLE_BOOT_APP0, "address": 0xE000},
+            {"role": "doom_wad", "address": 0x3FF000},
         ],
     }
     roles = {
         espdisp.FLASH_ROLE_BOOTLOADER: b"boot",
         espdisp.FLASH_ROLE_PARTITIONS: b"part",
         espdisp.FLASH_ROLE_BOOT_APP0: b"ota",
+        "doom_wad": b"wad",
     }
-    plan = espdisp.bundle_flash_plan(image, b"application", roles)
+    plan = espdisp.bundle_flash_plan(
+        family, image, b"application", roles)
     check_equal(
         [(address, role) for address, role, _ in plan],
         [
@@ -4087,19 +4165,26 @@ def test_canonical_usb_flash_path():
             (0x8000, "partitions"),
             (0xE000, "boot_app0"),
             (0x10000, "app"),
+            (0x3FF000, "doom_wad"),
         ],
-        "canonical USB flash writes only the four release segments")
+        "canonical S3 USB flash writes all five release segments")
     check_equal(
         [payload for _, _, payload in plan],
-        [b"boot", b"part", b"ota", b"application"],
+        [b"boot", b"part", b"ota", b"application", b"wad"],
         "canonical USB flash preserves verified bundle payloads")
     check_fails(
         lambda: espdisp.bundle_flash_plan(
-            image, b"application",
+            family, image, b"application",
             {key: value for key, value in roles.items()
              if key != espdisp.FLASH_ROLE_PARTITIONS}),
         "carries no partitions payload",
         "canonical USB flash refuses an incomplete release bundle")
+    check_fails(
+        lambda: espdisp.bundle_flash_plan(
+            family, image, b"application",
+            {key: value for key, value in roles.items() if key != "doom_wad"}),
+        "carries no doom_wad payload",
+        "canonical S3 USB flash refuses a release without its WAD")
 
     bundle_data = b"canonical bundle"
     catalog = {
@@ -4143,7 +4228,8 @@ def test_canonical_usb_flash_path():
          "/dev/cu.usbmodem1", "--baud", family.upload_speed, "write_flash"],
         "USB flash invokes esptool for the resolved chip and port")
     check_equal(
-        command[8::2], ["0x0", "0x8000", "0xE000", "0x10000"],
+        command[8::2],
+        ["0x0", "0x8000", "0xE000", "0x10000", "0x3FF000"],
         "USB flash takes every address from the verified bundle")
     check("erase_flash" not in command and "erase-flash" not in command,
           "USB flash never requests a whole-chip erase")
@@ -4219,7 +4305,7 @@ def main():
     test_family_resolution_and_discovery()
     test_release_catalog_contract()
     test_canonical_usb_flash_path()
-    test_p4_partition_contract()
+    test_doom_partition_contracts()
     test_discovery_command()
     test_password_policy()
     test_cfgotapw_line()

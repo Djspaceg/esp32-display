@@ -1,6 +1,9 @@
-# ESP32-S3 family: common dual-OTA layout fitting every supported 8/16 MiB carrier.
+# ESP32-S3 family: dual OTA plus the canonical Doom WAD in exactly 8 MiB.
+# Each application slot is 0x1F0000 (2,031,616 bytes). The 0xF000 gap before
+# doom_wad keeps the WAD partition ending exactly at the 8 MiB boundary.
 # Name,    Type, SubType, Offset,   Size,      Flags
 nvs,       data, nvs,     0x9000,   0x5000,
 otadata,   data, ota,     0xE000,   0x2000,
-app0,      app,  ota_0,   0x10000,  0x3F0000,
-app1,      app,  ota_1,   0x400000, 0x3F0000,
+app0,      app,  ota_0,   0x10000,  0x1F0000,
+app1,      app,  ota_1,   0x200000, 0x1F0000,
+doom_wad,  0x42, 0x06,    0x3FF000, 0x401000,
