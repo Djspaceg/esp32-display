@@ -3319,7 +3319,7 @@ def test_bundle_release_notes_preflight_barriers():
 
 
 def test_p4_partition_contract():
-    """P4 keeps equal dual OTA slots and the standard metadata addresses."""
+    """P4 keeps dual OTA slots and places Doom above app1."""
     def entry(label, part_type, subtype, address, size):
         return struct.pack(
             "<HBBII16sI", 0x50AA, part_type, subtype, address, size,
@@ -3330,16 +3330,17 @@ def test_p4_partition_contract():
         entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
         entry("app0", 0x00, 0x10, 0x10000, 0x800000),
         entry("app1", 0x00, 0x11, 0x810000, 0x800000),
+        entry("doom_wad", 0x42, 0x06, 0x1010000, 0x401000),
     ]) + b"\xff" * 32
     check_accepts(
         lambda: espdisp._verify_partition_payload(
             espdisp.FAMILIES["p4"], good),
         "P4 dual-OTA partition table")
-    missing_app1 = good[:3 * 32] + b"\xff" * 32
+    missing_app1 = good[:3 * 32] + good[4 * 32:5 * 32] + b"\xff" * 32
     check_fails(
         lambda: espdisp._verify_partition_payload(
             espdisp.FAMILIES["p4"], missing_app1),
-        "expected app0, app1, nvs, otadata",
+        "expected app0, app1, doom_wad, nvs, otadata",
         "P4 table without its recovery OTA slot")
 
 
