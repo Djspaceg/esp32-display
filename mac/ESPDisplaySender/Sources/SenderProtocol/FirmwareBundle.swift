@@ -184,16 +184,18 @@ public struct FirmwareBundle: Equatable, Sendable {
     private static let doomWadFlashRole = "doom_wad"
     private static let doomWadPartitionBytes = 0x401000
     private static let doomWadBytes = 4_196_020
+    private static let doomWadSHA256 =
+        "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771"
     private static let targetRequiresDoomWad: [String: Bool] = [
         "c6": false,
         "s3": true,
         "p4": true,
-        // Historical exact-target bundles retain their original policy.
-        "s3-085": true,
-        "s3-154": true,
-        "s3-175": true,
-        "s3-185": true,
-        "p4-4b": true,
+        // Historical exact-target bundles remain installable as originally built.
+        "s3-085": false,
+        "s3-154": false,
+        "s3-175": false,
+        "s3-185": false,
+        "p4-4b": false,
     ]
     /// Known exact target-to-chip ownership. Format-3 images may additionally
     /// claim unknown compatible aliases, but one image must never span two known
@@ -219,18 +221,12 @@ public struct FirmwareBundle: Equatable, Sendable {
 
     private enum DoomPartitionLayout {
         case universalS3
-        case legacyS3
         case p4
     }
 
     private static let doomPartitionLayoutByTarget: [String: DoomPartitionLayout] = [
         "s3": .universalS3,
-        "s3-085": .universalS3,
-        "s3-154": .universalS3,
-        "s3-175": .legacyS3,
-        "s3-185": .universalS3,
         "p4": .p4,
-        "p4-4b": .p4,
     ]
 
     public let format: Int
@@ -785,6 +781,7 @@ public struct FirmwareBundle: Equatable, Sendable {
                     forTarget: target, role: Self.doomWadFlashRole),
                   doomPayload.count == Self.doomWadBytes,
                   doomPart.sha256 == Self.sha256Hex(doomPayload),
+                  doomPart.sha256 == Self.doomWadSHA256,
                   Self.isStructurallyValidDoomWad(doomPayload)
             else { return nil }
         } else if image.flashPart(role: Self.doomWadFlashRole) != nil
@@ -997,23 +994,15 @@ public struct FirmwareBundle: Equatable, Sendable {
                 && matches(
                     doomWadFlashRole, 0x42, 0x06, 0x3FF000,
                     doomWadPartitionBytes)
-        case .legacyS3:
-            return matches("app0", 0x00, 0x10, 0x010000, 0x5F0000)
-                && matches("app1", 0x00, 0x11, 0x600000, 0x5F0000)
-                && matches(
-                    doomWadFlashRole, 0x42, 0x06, 0xBFF000,
-                    doomWadPartitionBytes)
         case .p4:
             guard matches("app0", 0x00, 0x10, 0x010000, 0x800000),
                   matches("app1", 0x00, 0x11, 0x810000, 0x800000),
                   let wad = entries[doomWadFlashRole]
             else { return false }
-            let app1End = 0x810000 + 0x800000
-            let flashLimit = 32 * 1024 * 1024
             return wad.type == 0x42 && wad.subtype == 0x06
                 && wad.byteCount == doomWadPartitionBytes
-                && wad.address >= app1End
-                && wad.address <= flashLimit - doomWadPartitionBytes
+                && wad.address % 0x1000 == 0
+                && wad.address == 0x1010000
         }
     }
 

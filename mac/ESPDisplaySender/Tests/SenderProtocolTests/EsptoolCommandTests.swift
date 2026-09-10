@@ -227,16 +227,16 @@ final class EsptoolCommandTests: XCTestCase {
         ])
     }
 
-    func testExactTargetS3085RefusesStandardNonDoomParts() throws {
+    func testExactTargetS3085PreservesStandardNonDoomParts() throws {
         let bundle = Self.bundle(
             chip: "esp32s3", bootloader: 0x0, app: 0x10000, target: "s3-085")
-        XCTAssertNil(bundle.flashPlan(forTarget: "s3-085"))
+        XCTAssertNotNil(bundle.flashPlan(forTarget: "s3-085"))
     }
 
-    func testExactTargetS3154RefusesStandardNonDoomParts() throws {
+    func testExactTargetS3154PreservesStandardNonDoomParts() throws {
         let bundle = Self.bundle(
             chip: "esp32s3", bootloader: 0x0, app: 0x10000, target: "s3-154")
-        XCTAssertNil(bundle.flashPlan(forTarget: "s3-154"))
+        XCTAssertNotNil(bundle.flashPlan(forTarget: "s3-154"))
     }
 
     func testCurrentS3FlashesDualOTAAndItsTableAddressedDoomWAD() throws {
@@ -261,12 +261,25 @@ final class EsptoolCommandTests: XCTestCase {
         let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "p4-4b"))
         XCTAssertEqual(
             plan.map(\.role),
+            ["bootloader", "partitions", "boot_app0", "app"])
+        XCTAssertEqual(
+            plan.map(\.address),
+            [0x2000, 0x8000, 0xE000, 0x10000])
+        XCTAssertNil(bundle.flashPlan(forTarget: "s3-185"))
+        XCTAssertEqual(bundle.image(forChip: "esp32p4")?.targets, ["p4-4b"])
+    }
+
+    func testCurrentP4FlashesDualOTAAndItsTableAddressedDoomWAD() throws {
+        let bundle = Self.bundle(
+            chip: "esp32p4", bootloader: 0x2000, app: 0x10000,
+            target: "p4")
+        let plan = try XCTUnwrap(bundle.flashPlan(forTarget: "p4"))
+        XCTAssertEqual(
+            plan.map(\.role),
             ["bootloader", "partitions", "boot_app0", "app", "doom_wad"])
         XCTAssertEqual(
             plan.map(\.address),
             [0x2000, 0x8000, 0xE000, 0x10000, 0x1010000])
-        XCTAssertNil(bundle.flashPlan(forTarget: "s3-185"))
-        XCTAssertEqual(bundle.image(forChip: "esp32p4")?.targets, ["p4-4b"])
     }
 
     func testStagedFilenamesAreOrderedAndNamedAfterTheirRole() {
@@ -466,25 +479,11 @@ final class EsptoolCommandTests: XCTestCase {
             writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x1F0000)
             writeEntry(3, "app1", 0x00, 0x11, 0x200000, 0x1F0000)
             writeEntry(4, "doom_wad", 0x42, 0x06, 0x3FF000, 0x401000)
-        } else if doom {
-            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x5F0000)
-            writeEntry(3, "app1", 0x00, 0x11, 0x600000, 0x5F0000)
-            writeEntry(4, "doom_wad", 0x42, 0x06, 0xBFF000, 0x401000)
         } else {
             writeEntry(2, "app0", 0x00, 0x10, appAddress, 0x200000)
         }
         return Data(bytes)
     }
-
-    private static let syntheticDoomWad: Data = {
-        var bytes = [UInt8](repeating: 0, count: 4_196_020)
-        bytes.replaceSubrange(0..<4, with: "IWAD".utf8)
-        bytes[4] = 1  // one directory entry
-        bytes[8] = 12  // directory starts immediately after the header
-        bytes[12] = 28  // zero-byte lump at the end of its directory entry
-        bytes.replaceSubrange(20..<24, with: "TEST".utf8)
-        return Data(bytes)
-    }()
 
     static func bundle(
         chip: String, bootloader: Int, app: Int, version: String = "1.2.0",
@@ -494,8 +493,8 @@ final class EsptoolCommandTests: XCTestCase {
         let target = explicitTarget ?? (chip == "esp32c6"
             ? "c6"
             : chip == "esp32s3" ? "s3-175" : chip)
-        let hasDoom = target == "s3" || target == "s3-175" || target == "p4-4b"
-        let isP4 = target == "p4-4b"
+        let hasDoom = target == "s3" || target == "p4"
+        let isP4 = target == "p4" || target == "p4-4b"
         let isCanonicalS3 = target == "s3"
         let partitionPayload = partitionTable(
             appAddress: app, doom: hasDoom, p4: isP4, canonicalS3: isCanonicalS3)
@@ -507,8 +506,8 @@ final class EsptoolCommandTests: XCTestCase {
         if hasDoom {
             parts.append((
                 "doom_wad",
-                isP4 ? 0x1010000 : isCanonicalS3 ? 0x3FF000 : 0xBFF000,
-                syntheticDoomWad))
+                isP4 ? 0x1010000 : 0x3FF000,
+                FirmwareBundleTests.canonicalDoomWad))
         }
         let image = FirmwareBundle.Image(
             board: target,
