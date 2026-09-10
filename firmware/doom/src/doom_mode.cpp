@@ -24,6 +24,10 @@ extern "C" void push_key(unsigned char key, int pressed);
 // From doom_hw_bridge.cpp
 extern "C" void doom_display_init(void);
 extern "C" void doom_display_blit(const uint16_t* buf, int w, int h);
+extern "C" int doom_display_width(void);
+extern "C" int doom_display_height(void);
+extern "C" bool doom_motion_available(void);
+extern "C" int doom_boot_pin(void);
 
 // doomgeneric entry points (C linkage)
 extern "C" {
@@ -98,10 +102,15 @@ void doom_enter(void) {
     }
 
     ESP_LOGI(TAG, "=== DOOM EASTER EGG ACTIVATED ===");
-    ESP_LOGI(TAG, "Panel rotation locked (IMU used for movement, not display rotation)");
+    ESP_LOGI(TAG, "Panel rotation locked for Doom");
     ESP_LOGI(TAG, "Controls:");
-    ESP_LOGI(TAG, "  Tilt device    = Move (forward/back/strafe)");
-    ESP_LOGI(TAG, "  Touch drag     = Turn/aim");
+    if (doom_motion_available()) {
+        ESP_LOGI(TAG, "  Tilt device    = Move (forward/back/strafe)");
+        ESP_LOGI(TAG, "  Touch drag     = Turn/aim");
+    } else {
+        ESP_LOGI(TAG, "  Left touch     = Move (forward/back/strafe)");
+        ESP_LOGI(TAG, "  Right touch    = Turn/aim + combat");
+    }
     ESP_LOGI(TAG, "  Tap            = Shoot");
     ESP_LOGI(TAG, "  Double-tap     = Use/Open");
     ESP_LOGI(TAG, "  2nd finger     = Run");
@@ -117,12 +126,14 @@ void doom_enter(void) {
     {
         doom_display_init();
 
-        // Allocate splash buffer in PSRAM (466*466*2 = 434KB)
-        uint16_t* splash = (uint16_t*)heap_caps_calloc(466 * 466, sizeof(uint16_t),
-                                                        MALLOC_CAP_SPIRAM);
+        const int panel_width = doom_display_width();
+        const int panel_height = doom_display_height();
+        uint16_t* splash = (uint16_t*)heap_caps_calloc(
+            (size_t)panel_width * (size_t)panel_height, sizeof(uint16_t),
+            MALLOC_CAP_SPIRAM);
         if (splash) {
-            doom_splash::render(splash);
-            doom_display_blit(splash, 466, 466);
+            doom_splash::render(splash, panel_width, panel_height);
+            doom_display_blit(splash, panel_width, panel_height);
             heap_caps_free(splash);
         }
     }
@@ -148,7 +159,9 @@ void doom_enter(void) {
             static uint32_t btn_down_at = 0;
             static bool btn_long_fired = false;
 
-            bool btn_down = (digitalRead(0) == LOW);  // GPIO0 = BOOT
+            const int boot_pin = doom_boot_pin();
+            bool btn_down =
+                boot_pin >= 0 && digitalRead(boot_pin) == LOW;
             uint32_t now = millis();
 
             if (btn_down && !btn_was_down) {

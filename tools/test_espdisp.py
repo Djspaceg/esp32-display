@@ -3378,8 +3378,10 @@ def test_universal_family_catalog_and_cli():
     check_equal(espdisp.FAMILIES["s3"].extra_library_dirs, ("firmware",),
                 "S3 family build links the profile-gated Doom library")
     check_equal(espdisp.FAMILIES["p4"].extra_flags,
-                ("-DESPDISP_BOARD_P4_4B",),
-                "P4 retains its internal carrier selector")
+                ("-DESPDISP_BOARD_P4_4B", "-DESPDISP_DOOM_RUNTIME"),
+                "P4 selects its carrier and board-neutral Doom runtime")
+    check_equal(espdisp.FAMILIES["p4"].extra_library_dirs, ("firmware",),
+                "P4 links the Doom library")
     check_equal(espdisp.board_key_for_chip("esp32c6"), "c6", "C6 chip to family")
     check_equal(espdisp.board_key_for_chip("esp32s3"), "s3", "S3 chip to family")
     check_equal(espdisp.board_key_for_chip("esp32p4"), "p4", "P4 chip to family")
@@ -3427,11 +3429,10 @@ def test_universal_family_catalog_and_cli():
         conflict = preprocess_board_config("ESPDISP_BOARD_P4_4B", selector)
         check(conflict.returncode != 0 and "exactly one compatible" in conflict.stderr,
               "P4 rejects conflicting selector %s" % selector)
-    doom_conflict = preprocess_board_config(
+    doom_enabled = preprocess_board_config(
         "ESPDISP_BOARD_P4_4B", "ESPDISP_DOOM_RUNTIME")
-    check(doom_conflict.returncode != 0 and
-          "must not enable the S3 Doom runtime" in doom_conflict.stderr,
-          "P4 rejects the S3-only runtime feature")
+    check_equal(doom_enabled.returncode, 0,
+                "P4 accepts the board-neutral Doom runtime")
 
 
 def test_family_resolution_and_discovery():

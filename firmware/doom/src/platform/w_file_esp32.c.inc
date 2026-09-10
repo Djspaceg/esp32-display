@@ -117,12 +117,19 @@ static bool ensure_wad_mapped(void) {
         mapped_size = part->size;
     } else {
         // No partition table entry: map the raw WAD region directly.
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+        // The S3 raw fallback overlaps P4's app1 OTA slot. P4 must find the
+        // dedicated partition above both 8 MiB application slots.
+        ESP_LOGE(WAD_TAG, "P4 Doom requires the doom_wad partition");
+        return false;
+#else
         if (!map_raw_wad_region(&wad_mapped_ptr, &wad_map_handle)) {
             wad_mapped_ptr = NULL;
             return false;
         }
         wad_mapped_via_partition = false;
         mapped_size = DOOM_WAD_PARTITION_BYTES;
+#endif
     }
 
     const uint8_t* header = (const uint8_t*)wad_mapped_ptr;

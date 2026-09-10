@@ -19,6 +19,7 @@
 #include "../display_stream/ota_policy.h"
 #include "../display_stream/panel_state.h"
 #include "../display_stream/tile_protocol.h"
+#include "../doom/src/platform/doom_runtime_policy.h"
 #include "../libraries/espdisp_board/src/battery_estimate.h"
 #include "../libraries/espdisp_board/src/board_config.h"
 #include "../libraries/espdisp_board/src/gt911_protocol.h"
@@ -4085,6 +4086,32 @@ int main() {
                                    x, y, points));
   }
 
+  // --- Doom runtime geometry and board-neutral touch policy --------------
+  {
+    const doom_frame_layout_t p4 =
+        doom_frame_layout_for_panel(720, 720, false);
+    CHECK(p4.panel_width == 720 && p4.panel_height == 720);
+    CHECK(p4.scaled_width == 720 && p4.scaled_height == 450);
+    CHECK(p4.x_offset == 0 && p4.y_offset == 135);
+    CHECK(!p4.round_mask);
+
+    CHECK(doom_touch_zone_for_press(
+              DOOM_CONTROLS_TOUCH_ONLY, 720, 100) ==
+          DOOM_TOUCH_ZONE_MOVE);
+    CHECK(doom_touch_zone_for_press(
+              DOOM_CONTROLS_TOUCH_ONLY, 720, 359) ==
+          DOOM_TOUCH_ZONE_MOVE);
+    CHECK(doom_touch_zone_for_press(
+              DOOM_CONTROLS_TOUCH_ONLY, 720, 360) ==
+          DOOM_TOUCH_ZONE_AIM);
+    CHECK(doom_touch_zone_for_press(
+              DOOM_CONTROLS_IMU_TOUCH, 466, 100) ==
+          DOOM_TOUCH_ZONE_AIM);
+    CHECK(doom_touch_axis_delta(100, 100, 24, 1) == 0);
+    CHECK(doom_touch_axis_delta(70, 100, 24, 1) == -1);
+    CHECK(doom_touch_axis_delta(130, 100, 24, 1) == 1);
+  }
+
   // --- platform/panel/carrier composition for P4 -------------------------
   {
     const board::Config &p4 = board::configFor(board::Variant::P4_4B);
@@ -4106,6 +4133,9 @@ int main() {
     CHECK(strcmp(board::targetToken(p4.variant), "p4") == 0);
     CHECK(strcmp(board::PLATFORM_ESP32_P4.chipToken,
                  p4.platform->chipToken) == 0);
+    CHECK(board::supportsDoom(board::Variant::P4_4B));
+    CHECK(board::supportsDoom(board::Variant::AmoledCo5300));
+    CHECK(!board::supportsDoom(board::Variant::TouchSt7789));
   }
 
   // --- glyph_draw: the on-device text rasterizer (glyph_draw.h)

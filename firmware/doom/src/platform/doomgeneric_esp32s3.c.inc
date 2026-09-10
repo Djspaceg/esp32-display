@@ -39,6 +39,7 @@
 #include "doom_config.h"
 #include "doomstat.h"
 #include "m_controls.h"
+#include "doom_runtime_policy.h"
 
 #include <string.h>
 #include <math.h>
@@ -51,6 +52,10 @@
 // Hardware bridge functions (defined in doom_hw_bridge.cpp)
 extern void doom_display_init(void);
 extern void doom_display_blit(const uint16_t* rgb565_buf, int width, int height);
+extern int doom_display_width(void);
+extern int doom_display_height(void);
+extern bool doom_display_round(void);
+extern bool doom_motion_available(void);
 extern void doom_imu_init(void);
 extern void doom_imu_read(float* pitch, float* roll);
 
@@ -60,19 +65,11 @@ extern void doom_imu_read(float* pitch, float* roll);
 
 static const char* GFX_TAG = "doom_gfx";
 
-// --- Display constants ---
-#define PANEL_SIZE       466
-#define PANEL_CENTER     (PANEL_SIZE / 2)  // 233
-#define PANEL_RADIUS     (PANEL_SIZE / 2)  // 233 (inscribed circle)
-
-// Scaled Doom frame dimensions (fill width, maintain aspect)
-#define SCALED_W         PANEL_SIZE         // 466
-#define SCALED_H         ((PANEL_SIZE * DOOM_RENDER_HEIGHT) / DOOM_RENDER_WIDTH)  // 291
-#define Y_OFFSET         ((PANEL_SIZE - SCALED_H) / 2)  // 87
-
 // --- Screen buffer ---
 pixel_t* DG_ScreenBuffer = NULL;
 static uint16_t* scaled_buffer = NULL;
+static doom_frame_layout_t frame_layout;
+static doom_control_scheme_t control_scheme = DOOM_CONTROLS_IMU_TOUCH;
 
 // --- Frame rate limiting ---
 #define TARGET_FRAME_MS  (1000 / DOOM_TARGET_FPS)  // ~28ms for 35fps
@@ -127,6 +124,7 @@ static uint32_t dg_fire_due_at = 0;
 // a weapon switch only inside the same 400ms window used for quick taps.
 #define TOUCH_TURN_DEADZONE_PX       12
 #define TOUCH_TURN_MAX_MOUSE_DELTA  160
+#define TOUCH_MOVE_DEADZONE_PX       24
 #define TOUCH_WEAPON_SWIPE_MAX_MS   400
 
 typedef enum {
@@ -166,6 +164,26 @@ static void dg_release_gameplay_keys(void) {
     dg_fire_pending = false;
 }
 
+static void dg_set_movement_keys(bool want_forward, bool want_back,
+                                 bool want_left, bool want_right) {
+    if (want_forward != key_forward_held) {
+        push_key(KEY_UPARROW, want_forward ? 1 : 0);
+        key_forward_held = want_forward;
+    }
+    if (want_back != key_back_held) {
+        push_key(KEY_DOWNARROW, want_back ? 1 : 0);
+        key_back_held = want_back;
+    }
+    if (want_left != key_strafe_l_held) {
+        push_key(KEY_STRAFE_L, want_left ? 1 : 0);
+        key_strafe_l_held = want_left;
+    }
+    if (want_right != key_strafe_r_held) {
+        push_key(KEY_STRAFE_R, want_right ? 1 : 0);
+        key_strafe_r_held = want_right;
+    }
+}
+
 static void dg_begin_gameplay_pulse(unsigned char key) {
     if (dg_pulse_key_held) {
         push_key(dg_pulse_key, 0);
@@ -192,14 +210,9 @@ static void dg_reset_touch_gesture(void) {
 
 static int dg_touch_joystick_mouse_dx(const doom_touch_state_t* touch) {
     if (!touch->pressed) return 0;
-    const int displacement = (int)touch->x - (int)touch->start_x;
-    const int absolute = displacement < 0 ? -displacement : displacement;
-    if (absolute <= TOUCH_TURN_DEADZONE_PX) return 0;
-    int magnitude = absolute - TOUCH_TURN_DEADZONE_PX;
-    if (magnitude > TOUCH_TURN_MAX_MOUSE_DELTA) {
-        magnitude = TOUCH_TURN_MAX_MOUSE_DELTA;
-    }
-    return displacement < 0 ? -magnitude : magnitude;
+    return doom_touch_axis_delta(
+        touch->x, touch->start_x, TOUCH_TURN_DEADZONE_PX,
+        TOUCH_TURN_MAX_MOUSE_DELTA);
 }
 
 static void process_imu_input(void) {
@@ -207,6 +220,7 @@ static void process_imu_input(void) {
         dg_release_gameplay_keys();
         return;
     }
+    if (control_scheme == DOOM_CONTROLS_TOUCH_ONLY) return;
 
     float pitch, roll;
     doom_imu_read(&pitch, &roll);
@@ -216,22 +230,7 @@ static void process_imu_input(void) {
     bool want_left = (roll < -IMU_STRAFE_TILT);
     bool want_right = (roll > IMU_STRAFE_TILT);
 
-    if (want_forward != key_forward_held) {
-        push_key(KEY_UPARROW, want_forward ? 1 : 0);
-        key_forward_held = want_forward;
-    }
-    if (want_back != key_back_held) {
-        push_key(KEY_DOWNARROW, want_back ? 1 : 0);
-        key_back_held = want_back;
-    }
-    if (want_left != key_strafe_l_held) {
-        push_key(KEY_STRAFE_L, want_left ? 1 : 0);
-        key_strafe_l_held = want_left;
-    }
-    if (want_right != key_strafe_r_held) {
-        push_key(KEY_STRAFE_R, want_right ? 1 : 0);
-        key_strafe_r_held = want_right;
-    }
+    dg_set_movement_keys(want_forward, want_back, want_left, want_right);
 }
 
 static void process_touch_input(void) {
@@ -332,38 +331,55 @@ static void process_touch_input(void) {
         key_run_held = touch.second_pressed;
     }
 
-    // A quick vertical gesture cycles weapons. Once a press is older than
-    // 400ms, vertical displacement is ignored so a deliberate joystick hold
-    // cannot become a weapon switch when the finger lifts.
-    const bool quick_weapon_gesture =
-        touch.press_duration_ms <= TOUCH_WEAPON_SWIPE_MAX_MS;
-    if (quick_weapon_gesture &&
-        touch.gesture == DOOM_TOUCH_GESTURE_SWIPE_UP) {
-        ESP_LOGI(GFX_TAG, "touch gameplay: swipe-up -> next weapon");
-        dg_begin_gameplay_pulse((unsigned char)key_nextweapon);
-    } else if (quick_weapon_gesture &&
-               touch.gesture == DOOM_TOUCH_GESTURE_SWIPE_DOWN) {
-        ESP_LOGI(GFX_TAG, "touch gameplay: swipe-down -> previous weapon");
-        dg_begin_gameplay_pulse((unsigned char)key_prevweapon);
+    const doom_touch_zone_t touch_zone = doom_touch_zone_for_press(
+        control_scheme, frame_layout.panel_width, touch.start_x);
+    if (control_scheme == DOOM_CONTROLS_TOUCH_ONLY &&
+        touch_zone == DOOM_TOUCH_ZONE_MOVE) {
+        const int move_x = touch.pressed
+            ? doom_touch_axis_delta(
+                  touch.x, touch.start_x, TOUCH_MOVE_DEADZONE_PX, 1)
+            : 0;
+        const int move_y = touch.pressed
+            ? doom_touch_axis_delta(
+                  touch.y, touch.start_y, TOUCH_MOVE_DEADZONE_PX, 1)
+            : 0;
+        dg_set_movement_keys(
+            move_y < 0, move_y > 0, move_x < 0, move_x > 0);
+    } else if (control_scheme == DOOM_CONTROLS_TOUCH_ONLY) {
+        dg_set_movement_keys(false, false, false, false);
     }
 
-    // Virtual joystick: the landing point is neutral. Holding farther left or
-    // right emits a larger native mouse delta every tic, so turn speed rises
-    // smoothly with displacement and remains steady when the finger stops.
-    dg_mouse_dx = dg_touch_joystick_mouse_dx(&touch);
+    if (touch_zone == DOOM_TOUCH_ZONE_AIM) {
+        // A quick vertical gesture cycles weapons. Once a press is older than
+        // 400ms, vertical displacement is ignored so a deliberate joystick
+        // hold cannot become a weapon switch when the finger lifts.
+        const bool quick_weapon_gesture =
+            touch.press_duration_ms <= TOUCH_WEAPON_SWIPE_MAX_MS;
+        if (quick_weapon_gesture &&
+            touch.gesture == DOOM_TOUCH_GESTURE_SWIPE_UP) {
+            ESP_LOGI(GFX_TAG, "touch gameplay: swipe-up -> next weapon");
+            dg_begin_gameplay_pulse((unsigned char)key_nextweapon);
+        } else if (quick_weapon_gesture &&
+                   touch.gesture == DOOM_TOUCH_GESTURE_SWIPE_DOWN) {
+            ESP_LOGI(GFX_TAG, "touch gameplay: swipe-down -> previous weapon");
+            dg_begin_gameplay_pulse((unsigned char)key_prevweapon);
+        }
 
-    // Fire/use from the tap classification. A swipe this poll is a weapon
-    // change, not a fire, so tap handling is skipped when one arrived.
-    if (!is_swipe) {
-        if (touch.double_tap) {
-            dg_fire_pending = false;
-            dg_begin_gameplay_pulse(KEY_USE);
-        } else if (touch.tap_detected) {
-            // The bridge reports the first release before it can know whether
-            // another tap will follow. Wait out that same classification window
-            // so a double-tap means Use without also firing once.
-            dg_fire_pending = true;
-            dg_fire_due_at = DG_GetTicksMs() + DOOM_DOUBLE_TAP_WINDOW_MS;
+        // Virtual joystick: the landing point is neutral. Holding farther left
+        // or right emits a larger native mouse delta every tic.
+        dg_mouse_dx = dg_touch_joystick_mouse_dx(&touch);
+
+        // Fire/use from the tap classification. A swipe this poll is a weapon
+        // change, not a fire, so tap handling is skipped when one arrived.
+        if (!is_swipe) {
+            if (touch.double_tap) {
+                dg_fire_pending = false;
+                dg_begin_gameplay_pulse(KEY_USE);
+            } else if (touch.tap_detected) {
+                dg_fire_pending = true;
+                dg_fire_due_at =
+                    DG_GetTicksMs() + DOOM_DOUBLE_TAP_WINDOW_MS;
+            }
         }
     }
 
@@ -375,9 +391,16 @@ static void process_touch_input(void) {
 // ==========================================================================
 
 void DG_Init() {
+    frame_layout = doom_frame_layout_for_panel(
+        doom_display_width(), doom_display_height(), doom_display_round());
+    control_scheme = doom_motion_available()
+        ? DOOM_CONTROLS_IMU_TOUCH
+        : DOOM_CONTROLS_TOUCH_ONLY;
     ESP_LOGI(GFX_TAG, "Initializing Doom Easter Egg...");
     ESP_LOGI(GFX_TAG, "  Render: %dx%d -> %dx%d (letterboxed, y_offset=%d)",
-             DOOM_RENDER_WIDTH, DOOM_RENDER_HEIGHT, SCALED_W, SCALED_H, Y_OFFSET);
+             DOOM_RENDER_WIDTH, DOOM_RENDER_HEIGHT,
+             frame_layout.scaled_width, frame_layout.scaled_height,
+             frame_layout.y_offset);
 
     // Allocate render buffer in PSRAM (320x200 x 4 bytes = 256KB)
     DG_ScreenBuffer = (pixel_t*)heap_caps_calloc(
@@ -385,9 +408,9 @@ void DG_Init() {
         MALLOC_CAP_SPIRAM);
     assert(DG_ScreenBuffer && "Failed to allocate DG_ScreenBuffer in PSRAM");
 
-    // Allocate scaled output buffer in PSRAM (466x466 x 2 bytes = 434KB)
+    // Allocate the full-panel RGB565 output buffer in PSRAM.
     scaled_buffer = (uint16_t*)heap_caps_calloc(
-        PANEL_SIZE * PANEL_SIZE, sizeof(uint16_t),
+        frame_layout.panel_width * frame_layout.panel_height, sizeof(uint16_t),
         MALLOC_CAP_SPIRAM);
     assert(scaled_buffer && "Failed to allocate scaled_buffer in PSRAM");
 
@@ -411,18 +434,17 @@ void DG_DrawFrame() {
     }
     last_frame_time = now;
 
-    // Convert XRGB8888 -> RGB565 and scale 320x200 -> 466x466
-    // Nearest-neighbor with letterboxing (87px black bars top/bottom)
+    // Convert XRGB8888 -> RGB565 and scale with nearest-neighbor letterboxing.
     const int src_w = DOOM_RENDER_WIDTH;
     const int src_h = DOOM_RENDER_HEIGHT;
+    const int panel_w = frame_layout.panel_width;
+    const int panel_h = frame_layout.panel_height;
+    const int panel_center_x = panel_w / 2;
+    const int panel_center_y = panel_h / 2;
+    const int panel_radius = (panel_w < panel_h ? panel_w : panel_h) / 2;
+    const int r2 = panel_radius * panel_radius;
 
-    // Pre-compute a round mask: skip pixels outside the inscribed circle
-    // to avoid wasting QSPI bandwidth on invisible pixels.
-    // The round mask check is: (dx*dx + dy*dy) <= radius*radius
-    // We check per-row whether the row is entirely outside the circle.
-    const int r2 = PANEL_RADIUS * PANEL_RADIUS;
-
-    for (int dy = 0; dy < PANEL_SIZE; dy++) {
+    for (int dy = 0; dy < panel_h; dy++) {
         // Scaling 466 rows is the longest stretch of a frame with no other
         // yield point. Draining touch a handful of times across it keeps a
         // fast down/move/release from falling entirely between two polls.
@@ -430,41 +452,45 @@ void DG_DrawFrame() {
             doom_touch_sample();
         }
 
-        uint16_t* dst_row = &scaled_buffer[dy * PANEL_SIZE];
-        int cy = dy - PANEL_CENTER;  // distance from center Y
-
-        // Quick check: if this row's closest point to center is outside circle, skip
-        if (cy * cy > r2) {
-            memset(dst_row, 0, PANEL_SIZE * sizeof(uint16_t));
-            continue;
+        uint16_t* dst_row = &scaled_buffer[dy * panel_w];
+        memset(dst_row, 0, panel_w * sizeof(uint16_t));
+        int x_start = 0;
+        int x_end = panel_w;
+        if (frame_layout.round_mask) {
+            int cy = dy - panel_center_y;
+            if (cy * cy > r2) {
+                memset(dst_row, 0, panel_w * sizeof(uint16_t));
+                continue;
+            }
+            int x_span = (int)sqrtf((float)(r2 - cy * cy));
+            x_start = panel_center_x - x_span;
+            x_end = panel_center_x + x_span;
+            if (x_start < 0) x_start = 0;
+            if (x_end > panel_w) x_end = panel_w;
         }
-
-        // Calculate X bounds for this row within the circle
-        int x_span = (int)sqrtf((float)(r2 - cy * cy));
-        int x_start = PANEL_CENTER - x_span;
-        int x_end = PANEL_CENTER + x_span;
-        if (x_start < 0) x_start = 0;
-        if (x_end > PANEL_SIZE) x_end = PANEL_SIZE;
-
-        // Black outside circle on this row
-        if (x_start > 0) memset(dst_row, 0, x_start * sizeof(uint16_t));
-        if (x_end < PANEL_SIZE) memset(&dst_row[x_end], 0, (PANEL_SIZE - x_end) * sizeof(uint16_t));
 
         // Is this row in the letterbox bar (above or below the Doom frame)?
-        if (dy < Y_OFFSET || dy >= (Y_OFFSET + SCALED_H)) {
-            // Black bar
-            memset(&dst_row[x_start], 0, (x_end - x_start) * sizeof(uint16_t));
+        if (dy < frame_layout.y_offset ||
+            dy >= frame_layout.y_offset + frame_layout.scaled_height) {
             continue;
         }
+        if (x_start < frame_layout.x_offset) {
+            x_start = frame_layout.x_offset;
+        }
+        const int content_x_end =
+            frame_layout.x_offset + frame_layout.scaled_width;
+        if (x_end > content_x_end) x_end = content_x_end;
 
         // Map this display row to a source row
-        int sy = ((dy - Y_OFFSET) * src_h) / SCALED_H;
+        int sy = ((dy - frame_layout.y_offset) * src_h) /
+                 frame_layout.scaled_height;
         if (sy >= src_h) sy = src_h - 1;
         pixel_t* src_row = &DG_ScreenBuffer[sy * src_w];
 
         // Scale and convert pixels within the circle
         for (int dx = x_start; dx < x_end; dx++) {
-            int sx = (dx * src_w) / SCALED_W;
+            int sx = ((dx - frame_layout.x_offset) * src_w) /
+                     frame_layout.scaled_width;
             if (sx >= src_w) sx = src_w - 1;
             pixel_t pixel = src_row[sx];
 
@@ -477,7 +503,7 @@ void DG_DrawFrame() {
         }
     }
 
-    doom_display_blit(scaled_buffer, PANEL_SIZE, PANEL_SIZE);
+    doom_display_blit(scaled_buffer, panel_w, panel_h);
 }
 
 void DG_SleepMs(uint32_t ms) {

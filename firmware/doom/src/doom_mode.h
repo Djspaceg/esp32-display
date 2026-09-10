@@ -1,11 +1,10 @@
-// Doom Easter Egg mode for ESP32-S3-Touch-AMOLED-1.75C
+// Doom mode for supported ESP32 display profiles.
 //
-// Activated by triple-tapping the BOOT button (GPIO0) within 800ms.
+// Activated by triple-tapping the selected profile's BOOT button within 800ms.
 // Runs alongside the normal display_stream firmware -- suspends streaming,
 // launches Doom, and returns to normal on BOOT long-press (3s).
 //
-// Only compiled into the S3 build (guarded by CONFIG_IDF_TARGET_ESP32S3).
-// The C6 binary is unaffected.
+// Compiled into family builds that define ESPDISP_DOOM_RUNTIME.
 #pragma once
 
 #include <stdint.h>
