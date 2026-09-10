@@ -190,6 +190,46 @@ static void processConfigLine(char *line) {
     saveDisplayPrefs();
     configSerial().printf("CFGOK rot=%u (saved; applies with next frame)\n",
                   panelRotation);
+  } else if (strncmp(line, "CFGMIRRORX ", 11) == 0) {
+    int want;
+    char extra;
+    if (sscanf(line + 11, "%d %c", &want, &extra) != 1 ||
+        (want != 0 && want != 1)) {
+      configSerial().println("CFGERR expected: CFGMIRRORX 0|1");
+      return;
+    }
+    if (bcfg->isDsi()) {
+      configSerial().println(
+          "CFGERR X-axis mirroring is not supported by this panel backend");
+      return;
+    }
+    panelMirrorX = want != 0;
+    madctlDirty = true;
+    saveDisplayPrefs();
+    configSerial().printf(
+        "CFGOK mirrorx=%d (saved; applies with next frame)\n", panelMirrorX);
+  } else if (strncmp(line, "CFGFIXEDBL ", 11) == 0) {
+    int want;
+    char extra;
+    if (sscanf(line + 11, "%d %c", &want, &extra) != 1 ||
+        want < 0 || want > 255) {
+      configSerial().println("CFGERR expected: CFGFIXEDBL 0|1..255");
+      return;
+    }
+    fixedBlLevel = (uint8_t)want;
+    saveDisplayPrefs();
+    applyBacklight();
+    if (fixedBlLevel == 0) {
+      configSerial().println(
+          "CFGOK blfixed=0 (normal brightness controls restored), restarting");
+    } else {
+      configSerial().printf(
+          "CFGOK blfixed=%u (brightness controls disabled), restarting\n",
+          fixedBlLevel);
+    }
+    configSerial().flush();
+    delay(200);
+    ESP.restart();
   } else if (strncmp(line, "CFGPOWER ", 9) == 0) {
     // Manual on/off without the network path: CFGPOWER 0|1. Mirrors the
     // Power control opcode exactly (same flag, same NVS key, same priority
@@ -469,17 +509,19 @@ static void processConfigLine(char *line) {
     // keeps reading the truth; rot= carries the full quarter-turn value.
     configSerial().printf(
         "CFGINFO ssid64=%s name64=%s id=%02x%02x%02x%02x%02x%02x "
-        "connected=%d ip=%s rssi=%d flip=%d rot=%u auto=%u effective=%u "
-        "motion=%d bl=%s pwr=%s board=%s profile=%s target=%s chip=%s "
-        "partition=%s bat=%d ota=%s ssid=%s\n",
+        "connected=%d ip=%s rssi=%d flip=%d rot=%u mirrorx=%d auto=%u "
+        "effective=%u motion=%d bl=%s bllevel=%u blfixed=%u pwr=%s "
+        "board=%s profile=%s target=%s chip=%s partition=%s bat=%d "
+        "ota=%s ssid=%s\n",
         (const char *)b64, (const char *)name64,
         deviceId[0], deviceId[1], deviceId[2],
         deviceId[3], deviceId[4], deviceId[5],
         WiFi.status() == WL_CONNECTED,
         WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(),
-        panelRotation == 2, panelRotation,
+        panelRotation == 2, panelRotation, panelMirrorX,
         automaticRotation, effectivePanelRotation(), motionAvailable,
-        blIsHigh() ? "high" : "low", panelManuallyOff ? "off" : "on",
+        blIsHigh() ? "high" : "low", configuredBrightness(), fixedBlLevel,
+        panelManuallyOff ? "off" : "on",
         board::variantToken(boardVariant), board::variantToken(boardVariant),
         board::targetToken(boardVariant), bcfg->platform->chipToken,
         bcfg->platform->partitionToken,
@@ -522,4 +564,3 @@ void handleSerialConfig() {
   }
   replyConfigPort = selectedConfigPort;
 }
-

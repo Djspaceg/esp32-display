@@ -181,6 +181,7 @@ void setup() {
     } else {
       panelRotation = prefs.getBool("flip", false) ? 2 : 0;
     }
+    panelMirrorX = prefs.getBool("mirrorx", false);
     // A panel a user turned off must stay off across a reboot - the whole
     // point of a standing instruction is that it survives the events that
     // would otherwise clear a transient one.
@@ -190,6 +191,7 @@ void setup() {
     userBlLevel = prefs.getUChar(
         "bllevel", prefs.getBool("blhigh", true) ? BL_HIGH : BL_LOW);
     if (userBlLevel == 0) userBlLevel = BL_HIGH;
+    fixedBlLevel = prefs.getUChar("blfixed", 0);
     // The screensaver template a sender pushed, restored so a reboot shows
     // the user's own card rather than falling back to the panel's built-in
     // one until the sender happens to reconnect and push again - the whole
@@ -221,8 +223,10 @@ void setup() {
   // sends you hunting for a config that is in fact saved.
   Serial.printf("WiFi credentials: \"%s\" (%s)\n", cfgSsid.c_str(),
                 ssidFromNvs ? "from NVS" : "compiled default");
-  Serial.printf("display prefs: rotation=%u backlight=%u (%s)\n", panelRotation,
-                userBlLevel, blIsHigh() ? "high" : "low");
+  Serial.printf(
+      "display prefs: rotation=%u mirrorX=%d backlight=%u (%s) fixed=%u\n",
+      panelRotation, panelMirrorX, userBlLevel,
+      blIsHigh() ? "high" : "low", fixedBlLevel);
   Serial.printf("idle text restored from NVS: %u lines\n",
                 (unsigned)idleText.lineCount);
 
