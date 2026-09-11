@@ -95,11 +95,15 @@ public enum EsptoolOutput {
     /// either. UNVERIFIED.
     ///
     /// So this looks for a number followed by `%` anywhere in the line, and the
-    /// progress UI shows esptool's own last line beside it. If the percentage is
-    /// never found the transfer still reports what the tool is saying, which is
-    /// the behaviour that does not depend on this guess being right.
+    /// progress UI shows esptool's own last line beside it. Modern esptool emits
+    /// decimal progress (for example `83.3%`), which is floored to the integer
+    /// progress model so the UI never reports bytes that have not yet been written.
+    /// If the percentage is never found the transfer still reports what the tool is
+    /// saying, which is the behaviour that does not depend on this guess being
+    /// right.
     public static func percentage(in line: String) -> Int? {
-        guard let regex = try? NSRegularExpression(pattern: "(\\d{1,3})[ \t]*%")
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?<![\\d.])(\\d{1,3}(?:\\.\\d+)?)[ \t]*%")
         else { return nil }
         let range = NSRange(line.startIndex..<line.endIndex, in: line)
         // The LAST percentage on the line, so a line that names a total and then a
@@ -107,9 +111,9 @@ public enum EsptoolOutput {
         let matches = regex.matches(in: line, range: range)
         guard let match = matches.last,
               let numberRange = Range(match.range(at: 1), in: line),
-              let value = Int(line[numberRange]), (0...100).contains(value)
+              let value = Double(line[numberRange]), (0...100).contains(value)
         else { return nil }
-        return value
+        return Int(value)
     }
 
     /// Whether a line is worth showing as status: esptool prints blank lines and

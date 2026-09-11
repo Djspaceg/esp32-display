@@ -128,6 +128,10 @@ final class EsptoolOutputTests: XCTestCase {
     func testTheLastPercentageOnALineWins() {
         XCTAssertEqual(
             EsptoolOutput.percentage(in: "part 1 of 100 % ... 42 %"), 42)
+        XCTAssertEqual(
+            EsptoolOutput.percentage(
+                in: "Writing at 0x001280ef [========================>   ] 83.3% 737280/885283 bytes..."),
+            83)
     }
 
     // MARK: - what went wrong
