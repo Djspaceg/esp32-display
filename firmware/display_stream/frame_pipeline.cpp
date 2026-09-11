@@ -632,10 +632,9 @@ static void serviceLargeTileDraw() {
     } else {
       statFramesPartial++;
     }
-    if (idleActive || displaySleeping || surveyActive) {
+    if (idleActive || displaySleeping) {
       idleActive = false;
       displaySleeping = false;
-      surveyActive = false;
       applyBacklight();
     }
   }
@@ -685,7 +684,10 @@ void serviceRotationRepaint() {
     bool orientationSettled = (bufLandscape == pendingLandscape);
     applyPanelConfig(bufLandscape);
     const char *repainted;
-    if (surveyActive) {
+    if (wifiSelectorActive) {
+      drawWifiSelectorScreen();
+      repainted = "WiFi selector";
+    } else if (surveyActive) {
       // The survey card must turn with the glass like everything else.
       // MADCTL only affects writes, so the pixels already on the panel keep
       // their old orientation until redrawn - redraw now rather than leaving
@@ -973,12 +975,11 @@ void serviceStreamDraw() {
         statFramesPartial = statFramesPartial + 1;
       }
       // A drawn frame implies the sender is present and the Mac's displays
-      // are awake, so leave both dimmed states - and the signal survey,
-      // which a resumed stream has just painted over anyway.
-      if (idleActive || displaySleeping || surveyActive) {
+      // are awake, so leave both dimmed states. On-device screens explicitly
+      // own the panel until the user exits them.
+      if (idleActive || displaySleeping) {
         idleActive = false;
         displaySleeping = false;
-        surveyActive = false;
         applyBacklight();
       }
     }

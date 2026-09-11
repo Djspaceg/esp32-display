@@ -13,6 +13,7 @@
 #include "../display_stream/band_compress.h"
 #include "../display_stream/band_protocol.h"
 #include "../display_stream/bc1.h"
+#include "../display_stream/button_press_model.h"
 #include "../display_stream/chip_identity.h"
 #include "../display_stream/control_queue.h"
 #include "../display_stream/device_protocol.h"
@@ -23,6 +24,7 @@
 #include "../display_stream/serial_config_protocol.h"
 #include "../display_stream/tile_protocol.h"
 #include "../display_stream/wifi_presets.h"
+#include "../display_stream/wifi_selector_model.h"
 #include "../doom/src/platform/doom_runtime_policy.h"
 #include "../libraries/espdisp_board/src/battery_estimate.h"
 #include "../libraries/espdisp_board/src/board_config.h"
@@ -261,6 +263,52 @@ int main() {
     CHECK(formatSaveFailedReply(reply, sizeof(reply), 7));
     CHECK(strcmp(reply, "CFGERR wifi slot=7 save failed") == 0);
     CHECK(!formatRosterReply(reply, 8, 0, 0, true));
+  }
+
+  // --- on-device WiFi selector model -------------------------------------
+  {
+    using namespace wifiselector;
+    const uint8_t slots[] = {2, 5, 10};
+    CHECK(initialIndex(slots, 3, 5) == 1);
+    CHECK(initialIndex(slots, 3, 7) == 0);
+    CHECK(initialIndex(nullptr, 0, 5) == 0);
+    CHECK(movedIndex(0, 3, 1) == 1);
+    CHECK(movedIndex(2, 3, 1) == 0);
+    CHECK(movedIndex(0, 3, -1) == 2);
+    CHECK(movedIndex(1, 3, 0) == 1);
+    CHECK(movedIndex(9, 0, 1) == 0);
+    CHECK(windowStart(0, 10, 8) == 0);
+    CHECK(windowStart(5, 10, 8) == 1);
+    CHECK(windowStart(9, 10, 8) == 2);
+    CHECK(windowStart(2, 3, 8) == 0);
+    CHECK(windowStart(2, 3, 0) == 0);
+
+    wifipresets::Credentials credentials;
+    const uint8_t ssid[] = {'L', 'a', 'b', 0xC3, 0xA9, ' ', 'W', 'i',
+                            'F', 'i'};
+    memcpy(credentials.ssid, ssid, sizeof(ssid));
+    credentials.ssidLength = sizeof(ssid);
+    char label[16];
+    CHECK(displaySsid(credentials, label, sizeof(label)) == sizeof(ssid));
+    CHECK(strcmp(label, "Lab?? WiFi") == 0);
+    char clipped[7];
+    CHECK(displaySsid(credentials, clipped, sizeof(clipped)) == 6);
+    CHECK(strcmp(clipped, "Lab...") == 0);
+    CHECK(displaySsid(credentials, nullptr, 0) == 0);
+  }
+
+  // --- BOOT short/double-press classifier --------------------------------
+  {
+    using namespace buttonpress;
+    DoublePressTracker tracker;
+    CHECK(tracker.record(100, 800) == ShortPressResult::Single);
+    CHECK(tracker.record(900, 800) == ShortPressResult::Double);
+    CHECK(tracker.record(1000, 800) == ShortPressResult::Single);
+    CHECK(tracker.record(1801, 800) == ShortPressResult::Single);
+    tracker.reset();
+    CHECK(tracker.record(UINT32_MAX - 100, 800) ==
+          ShortPressResult::Single);
+    CHECK(tracker.record(50, 800) == ShortPressResult::Double);
   }
 
   // --- WiFi preset records are whole, versioned, and corruption-checked ----

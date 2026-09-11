@@ -353,7 +353,7 @@ void setup() {
   }
 
   if (bcfg->hasBootButton()) {
-    pinMode(bcfg->pinBootButton, INPUT_PULLUP);
+    initializeButtonInput();
   }
   if (bcfg->hasBacklightPin() && !bcfg->isDsi()) {
     // A PWM backlight exists independently of the panel, so light it early -
@@ -505,7 +505,7 @@ void loop() {
   updateIdentify();
   serviceTouch();
   serviceAutoRotation();
-  if (dmaInFlight == 0) clearInfoBarIfExpired();
+  if (!wifiSelectorActive && dmaInFlight == 0) clearInfoBarIfExpired();
   static uint32_t lastIdleTextCheck = 0;
   if ((uint32_t)(millis() - lastIdleTextCheck) >= IDLE_TEXT_SAVE_INTERVAL_MS) {
     lastIdleTextCheck = millis();
@@ -524,7 +524,7 @@ void loop() {
   // Signal-survey refresh: a live meter that only updates on entry is a
   // photograph. Half a second tracks a walk around a room; skipped while
   // DMA is busy rather than gated, because a beat late is fine.
-  if (surveyActive && dmaInFlight == 0 &&
+  if (surveyActive && !wifiSelectorActive && dmaInFlight == 0 &&
       (uint32_t)(millis() - lastSurveyDrawAt) >= 500) {
     drawSurveyScreen();
   }
