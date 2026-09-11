@@ -167,7 +167,7 @@ void serviceTouch() {
         moveWifiSelector(-1);
         break;
       case touchgesture::Gesture::Tap:
-        activateWifiSelector();
+        handleWifiSelectorTap(event.startX, event.startY);
         break;
       default:
         break;
@@ -180,21 +180,24 @@ void serviceTouch() {
   // do not: they already have a job (whatever the sender's gesture preset
   // binds them to), and a bar popping up on every swipe would fight that
   // rather than complement it.
-  // A tap on the lit status card enters the signal survey; a tap on the
-  // survey leaves it. Handled before the info bar and before gesture
-  // forwarding: a survey tap is panel-local by definition (the whole point
-  // is that no Mac is nearby), so the sender never hears about it.
-  if (event.gesture == touchgesture::Gesture::Tap &&
-      (surveyActive || idleActive)) {
-    surveyActive = !surveyActive;
-    if (surveyActive) {
-      Serial.println("touch: signal survey on");
-      drawSurveyScreen();
-    } else {
-      Serial.println("touch: signal survey off");
-      applyBacklight();  // back to the state-driven level
-      if (idleActive) drawIdleScreen();
+  // A tap on the lit status card enters the signal survey. On the survey, the
+  // visible preset button opens the selector and a tap elsewhere exits.
+  // Handled before the info bar and before gesture forwarding: these taps are
+  // panel-local by definition, so the sender never hears about them.
+  if (event.gesture == touchgesture::Gesture::Tap && surveyActive) {
+    if (handleSurveyTap(event.startX, event.startY)) {
+      return;
     }
+    surveyActive = false;
+    Serial.println("touch: signal survey off");
+    applyBacklight();  // back to the state-driven level
+    if (idleActive) drawIdleScreen();
+    return;
+  }
+  if (event.gesture == touchgesture::Gesture::Tap && idleActive) {
+    surveyActive = true;
+    Serial.println("touch: signal survey on");
+    drawSurveyScreen();
     return;
   }
   if (event.gesture == touchgesture::Gesture::Tap) {
