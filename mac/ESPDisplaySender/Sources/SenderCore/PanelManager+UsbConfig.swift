@@ -142,6 +142,46 @@ extension PanelManager {
         }
     }
 
+    func wifiPresets(
+        for serviceName: String
+    ) async -> Result<WifiPresetSnapshot, WifiConfigUI.ConfigFailure> {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
+            return .failure(WifiConfigUI.ConfigFailure(
+                title: "Display not found",
+                message: "The selected display is no longer available."))
+        }
+        let currentName = panel.displayName
+        let preferredPort = panel.usbPort
+        let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
+        return await Task.detached(priority: .userInitiated) {
+            WifiConfigUI.wifiPresets(
+                currentName: currentName,
+                preferredPort: preferredPort,
+                expectedHardwareID: expectedHardwareID)
+        }.value
+    }
+
+    func syncWifiPresets(
+        _ desired: [String?],
+        for serviceName: String
+    ) async -> Result<WifiPresetSnapshot, WifiConfigUI.ConfigFailure> {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
+            return .failure(WifiConfigUI.ConfigFailure(
+                title: "Display not found",
+                message: "The selected display is no longer available."))
+        }
+        let currentName = panel.displayName
+        let preferredPort = panel.usbPort
+        let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
+        return await Task.detached(priority: .userInitiated) {
+            WifiConfigUI.syncWifiPresets(
+                desired,
+                currentName: currentName,
+                preferredPort: preferredPort,
+                expectedHardwareID: expectedHardwareID)
+        }.value
+    }
+
     func configureUSB(preferredSSID: String? = nil) {
         guard let panel = selectedPanel else {
             operationOutcome = .failure(
