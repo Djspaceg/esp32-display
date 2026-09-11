@@ -307,23 +307,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             "firmware-releases", isDirectory: true)
         let sourceCatalog = releaseRoot.appendingPathComponent(
             FirmwareReleaseCatalog.fileName)
-        var catalog = try XCTUnwrap(
-            JSONSerialization.jsonObject(
-                with: Data(contentsOf: sourceCatalog)
-            ) as? [String: Any])
-        var families = try XCTUnwrap(catalog["families"] as? [String: Any])
-        var s3 = try XCTUnwrap(families["s3"] as? [String: Any])
-        let historicalArtifact =
-            "s3/espdisp-s3-1.5.0+197.gfe13ee6.espdispfw"
-        let historicalURL = releaseRoot.appendingPathComponent(
-            historicalArtifact)
-        let historicalData = try Data(contentsOf: historicalURL)
-        s3["artifact"] = historicalArtifact
-        s3["bytes"] = historicalData.count
-        s3["sha256"] = FirmwareBundle.sha256Hex(historicalData)
-        s3["latest_build"] = 197
-        families["s3"] = s3
-        catalog["families"] = families
+        let catalog = try FirmwareReleaseCatalog.read(contentsOf: sourceCatalog)
 
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("espdisp-resources-" + UUID().uuidString)
@@ -332,19 +316,26 @@ final class UsbOnboardingAppTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let fixtureCatalog = directory.appendingPathComponent(
             FirmwareReleaseCatalog.fileName)
-        try JSONSerialization.data(withJSONObject: catalog)
-            .write(to: fixtureCatalog)
-        let artifactURLs = try families.values.map { raw -> URL in
-            let entry = try XCTUnwrap(raw as? [String: Any])
-            let artifact = try XCTUnwrap(entry["artifact"] as? String)
-            return releaseRoot.appendingPathComponent(artifact)
+        try Data(contentsOf: sourceCatalog).write(to: fixtureCatalog)
+        let artifactURLs = catalog.families.values.flatMap { entry in
+            entry.revisions.map {
+                releaseRoot.appendingPathComponent($0.artifact)
+            }
         }
         let bundle = try XCTUnwrap(Bundle(url: makeBundleWrapper(
             resources: [fixtureCatalog] + artifactURLs)))
 
-        if case .unreadable(let path, let reason) = BundledFirmware.load(in: bundle) {
-            XCTFail("one invalid historical revision poisoned \(path): \(reason)")
+        guard case .ready(let releases) = BundledFirmware.load(in: bundle) else {
+            return XCTFail("one invalid historical revision poisoned the catalog")
         }
+        let s3 = releases.revisions(for: "s3")
+        XCTAssertEqual(s3.count, 5)
+        XCTAssertEqual(
+            s3.filter { !$0.isAvailable }.map(\.revision.build),
+            [197])
+        XCTAssertNotNil(releases.selections["c6"])
+        XCTAssertNotNil(releases.selections["s3"])
+        XCTAssertNotNil(releases.selections["p4"])
     }
 
     func testAUniqueC6ChipResolvesTheBundledFamilyWithoutFullIdentity() throws {
