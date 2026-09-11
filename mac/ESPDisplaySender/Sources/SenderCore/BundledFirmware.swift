@@ -26,9 +26,11 @@ enum BundledFirmware {
 
     struct RevisionOption: Equatable, Identifiable {
         let revision: FirmwareReleaseCatalog.Revision
-        let selection: Selection
+        let selection: Selection?
+        let unavailableReason: String?
 
         var id: String { revision.artifact }
+        var isAvailable: Bool { selection != nil }
     }
 
     enum UpdateTransport: Equatable {
@@ -81,13 +83,21 @@ enum BundledFirmware {
         var selection: Selection { resolution.selection }
     }
 
+    struct FamilyResolution: Equatable {
+        let entry: FirmwareReleaseCatalog.Entry
+        let identity: FirmwareReleaseCatalog.Identity
+        let isExact: Bool
+
+        var canonicalTarget: String { entry.family }
+    }
+
     struct ReleaseSet: Equatable {
         let catalog: FirmwareReleaseCatalog
         let revisionOptions: [String: [RevisionOption]]
 
         var selections: [String: Selection] {
             revisionOptions.compactMapValues { options in
-                options.first?.selection
+                options.lazy.compactMap(\.selection).first
             }
         }
 
@@ -106,7 +116,8 @@ enum BundledFirmware {
             self.catalog = catalog
             self.revisionOptions = selections.mapValues { selection in
                 [RevisionOption(
-                    revision: selection.revision, selection: selection)]
+                    revision: selection.revision, selection: selection,
+                    unavailableReason: nil)]
             }
         }
 
@@ -150,6 +161,91 @@ enum BundledFirmware {
                     resolution: resolution))
         }
 
+        func resolveFamilyForUpdate(
+            live: FirmwareReleaseCatalog.Identity,
+            usb: FirmwareReleaseCatalog.Identity?,
+            transport: UpdateTransport
+        ) throws -> FamilyResolution {
+            let mergedIdentity = try FirmwareReleaseCatalog.Identity(
+                family: mergedFamily(live: live.family, usb: usb?.family),
+                chip: mergedChip(live: live.chip, usb: usb?.chip),
+                profile: merged(
+                    field: "profile", live: live.profile, usb: usb?.profile),
+                partition: merged(
+                    field: "partition", live: live.partition, usb: usb?.partition))
+            do {
+                let entry = try catalog.entry(for: mergedIdentity)
+                return FamilyResolution(
+                    entry: entry, identity: mergedIdentity, isExact: true)
+            } catch let strictError {
+                guard let chip = Self.usable(mergedIdentity.chip),
+                      let entry = entryForUniqueChip(chip),
+                      let accepted = Self.universalFamilyAliases[entry.family]
+                else { throw strictError }
+                if let family = Self.usable(mergedIdentity.family),
+                   !accepted.contains(family) {
+                    throw strictError
+                }
+                if let profile = Self.usable(mergedIdentity.profile),
+                   !entry.profiles.contains(profile) {
+                    throw strictError
+                }
+                if let partition = Self.usable(mergedIdentity.partition),
+                   partition != entry.compatibility.partitionScheme {
+                    guard transport == .usb,
+                          Self.usable(mergedIdentity.family) != nil,
+                          Self.usable(mergedIdentity.profile) != nil
+                    else { throw strictError }
+                }
+                return FamilyResolution(
+                    entry: entry,
+                    identity: .init(
+                        family: entry.family,
+                        chip: mergedIdentity.chip ?? entry.chip,
+                        profile: mergedIdentity.profile,
+                        partition: mergedIdentity.partition),
+                    isExact: false)
+            }
+        }
+
+        func resolveUnavailableFamilyForUpdate(
+            live: FirmwareReleaseCatalog.Identity,
+            usb: FirmwareReleaseCatalog.Identity?
+        ) throws -> FamilyResolution {
+            let mergedIdentity = try FirmwareReleaseCatalog.Identity(
+                family: mergedFamily(live: live.family, usb: usb?.family),
+                chip: mergedChip(live: live.chip, usb: usb?.chip),
+                profile: merged(
+                    field: "profile", live: live.profile, usb: usb?.profile),
+                partition: merged(
+                    field: "partition", live: live.partition, usb: usb?.partition))
+            let family = Self.usable(mergedIdentity.family)
+            let chip = usableChip(mergedIdentity.chip)
+            let profile = Self.usable(mergedIdentity.profile)
+            let matches = catalog.families.values.filter { entry in
+                guard selections[entry.family] == nil else { return false }
+                if let family {
+                    guard Self.universalFamilyAliases[entry.family]?
+                        .contains(family) == true
+                    else { return false }
+                }
+                if let chip, entry.chip != chip { return false }
+                if let profile, !entry.profiles.contains(profile) { return false }
+                return family != nil || chip != nil
+            }
+            guard matches.count == 1, let entry = matches.first else {
+                throw FirmwareReleaseCatalogError.identityIncomplete
+            }
+            return FamilyResolution(
+                entry: entry,
+                identity: .init(
+                    family: entry.family,
+                    chip: mergedIdentity.chip ?? entry.chip,
+                    profile: mergedIdentity.profile,
+                    partition: mergedIdentity.partition),
+                isExact: false)
+        }
+
         /// Explicit recovery selection. Callers must present the profile choice
         /// to the user before using this when runtime identity is unavailable.
         func selectForRecovery(family: String, profile: String) throws -> Selection {
@@ -176,6 +272,14 @@ enum BundledFirmware {
         /// re-verifies the exact target before any USB flash.
         func selectForUniqueChip(_ chip: String) -> Selection? {
             let matches = selections.values.filter { $0.catalogEntry.chip == chip }
+            guard matches.count == 1 else { return nil }
+            return matches.first
+        }
+
+        private func entryForUniqueChip(
+            _ chip: String
+        ) -> FirmwareReleaseCatalog.Entry? {
+            let matches = catalog.families.values.filter { $0.chip == chip }
             guard matches.count == 1 else { return nil }
             return matches.first
         }
@@ -209,7 +313,8 @@ enum BundledFirmware {
         ) throws -> UpdateResolution {
             do {
                 return .exact(try select(
-                    family: family, chip: chip, profile: profile, partition: partition))
+                    family: family, chip: chip,
+                    profile: profile, partition: partition))
             } catch let strictError {
                 guard let chip = Self.usable(chip),
                       let selection = selectForUniqueChip(chip),
@@ -364,14 +469,21 @@ enum BundledFirmware {
                         return .unreadable(
                             path: name, reason: "catalog artifact is missing")
                     }
-                    let data = try Data(contentsOf: url)
-                    let firmware = try catalog.bundle(
-                        for: revision, in: entry, data: data)
-                    options.append(RevisionOption(
-                        revision: revision,
-                        selection: Selection(
-                            catalogEntry: entry, revision: revision,
-                            bundle: firmware, url: url)))
+                    do {
+                        let data = try Data(contentsOf: url)
+                        let firmware = try catalog.bundle(
+                            for: revision, in: entry, data: data)
+                        options.append(RevisionOption(
+                            revision: revision,
+                            selection: Selection(
+                                catalogEntry: entry, revision: revision,
+                                bundle: firmware, url: url),
+                            unavailableReason: nil))
+                    } catch {
+                        options.append(RevisionOption(
+                            revision: revision, selection: nil,
+                            unavailableReason: error.localizedDescription))
+                    }
                 }
                 guard revisionOptions.updateValue(
                     options, forKey: entry.family) == nil

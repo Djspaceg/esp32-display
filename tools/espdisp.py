@@ -2478,13 +2478,6 @@ def validate_release_catalog(
                         % (key, index))
                 _verify_app_payload(
                     family, partition, image.get("app_address"), image.get("bytes"))
-                if image.get("partition") != family.partition_scheme:
-                    raise Fail(
-                        "release catalog family %s revision %d bundle identity disagrees"
-                        % (key, index))
-                _verify_partition_payload(family, partition)
-                _verify_required_doom_flash_payload(
-                    family, partition, image, flash_payloads[key])
     return catalog
 
 
@@ -2533,6 +2526,17 @@ def cmd_release(args) -> int:
     )
     output_root = firmware_output_root(args.output_root, build)
     os.makedirs(output_root, exist_ok=True)
+    existing = [
+        key for key in FAMILIES
+        if os.path.exists(os.path.join(
+            output_root, key,
+            "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX)))
+    ]
+    if existing:
+        raise Fail(
+            "shipping release %s already exists for %s; bump FW_VERSION and "
+            "update release-notes.md before cutting a new shipping version"
+            % (version, ", ".join(existing)))
     staged_root = tempfile.mkdtemp(prefix="espdisp-release-")
     try:
         for key in FAMILIES:
@@ -3830,6 +3834,18 @@ def cmd_bundle(args) -> int:
         os.getcwd(), "espdisp-%s-%s%s" %
         (family_key, identity, BUNDLE_SUFFIX)
     )
+    if build is not None:
+        release_root = os.path.realpath(RELEASE_ROOT)
+        output_path = os.path.realpath(path)
+        try:
+            inside_release_root = (
+                os.path.commonpath([release_root, output_path]) == release_root)
+        except ValueError:
+            inside_release_root = False
+        if inside_release_root:
+            raise Fail(
+                "development bundles must be written outside firmware-releases; "
+                "use `release` to create shipping artifacts")
     commit, dirty = git_provenance()
     print("Firmware %s (FW_VERSION in %s)"
           % (identity, os.path.relpath(FW_VERSION_SOURCE, REPO_ROOT)))

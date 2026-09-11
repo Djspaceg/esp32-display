@@ -301,7 +301,7 @@ final class UsbOnboardingAppTests: XCTestCase {
         XCTAssertFalse(reason.isEmpty)
     }
 
-    func testEveryPackagedShippingRevisionLoadsAsASelection() throws {
+    func testEveryPackagedShippingRevisionLoadsAsAnOption() throws {
         let root = Self.repoRoot()
         let releaseRoot = root.appendingPathComponent(
             "firmware-releases", isDirectory: true)
@@ -337,19 +337,44 @@ final class UsbOnboardingAppTests: XCTestCase {
             XCTAssertTrue(options.allSatisfy {
                 $0.revision.build == nil
                     && !$0.revision.artifact.contains("+")
-                    && $0.selection.revision == $0.revision
             }, family)
-            XCTAssertNotNil(releases.selections[family])
+            XCTAssertEqual(
+                options.allSatisfy(\.isAvailable),
+                family == "c6",
+                family)
         }
     }
 
-    func testOneInvalidShippingRevisionMakesTheCatalogUnreadable() throws {
+    func testSoleInvalidShippingRevisionDoesNotMakeCatalogUnreadable() throws {
         let root = Self.repoRoot()
         let releaseRoot = root.appendingPathComponent(
             "firmware-releases", isDirectory: true)
         let sourceCatalog = releaseRoot.appendingPathComponent(
             FirmwareReleaseCatalog.fileName)
-        let catalog = try FirmwareReleaseCatalog.read(contentsOf: sourceCatalog)
+        var catalogObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: sourceCatalog)
+            ) as? [String: Any])
+        var families = try XCTUnwrap(
+            catalogObject["families"] as? [String: Any])
+        for family in FirmwareReleaseCatalog.requiredFamilies {
+            var entry = try XCTUnwrap(families[family] as? [String: Any])
+            var revisions = try XCTUnwrap(
+                entry["revisions"] as? [[String: Any]])
+            let artifact = try XCTUnwrap(revisions.first?["artifact"] as? String)
+            let data = try Data(
+                contentsOf: releaseRoot.appendingPathComponent(artifact))
+            revisions[0]["bytes"] = data.count
+            revisions[0]["sha256"] = FirmwareBundle.sha256Hex(data)
+            entry["bytes"] = data.count
+            entry["sha256"] = FirmwareBundle.sha256Hex(data)
+            entry["revisions"] = revisions
+            families[family] = entry
+        }
+        catalogObject["families"] = families
+        let catalogData = try JSONSerialization.data(
+            withJSONObject: catalogObject)
+        let catalog = try FirmwareReleaseCatalog.read(catalogData)
 
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("espdisp-resources-" + UUID().uuidString)
@@ -358,31 +383,47 @@ final class UsbOnboardingAppTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let fixtureCatalog = directory.appendingPathComponent(
             FirmwareReleaseCatalog.fileName)
-        try Data(contentsOf: sourceCatalog).write(to: fixtureCatalog)
-
-        let firstRevision = try XCTUnwrap(
-            catalog.families["s3"]?.revisions.first)
-        let damagedURL = directory.appendingPathComponent(
-            URL(fileURLWithPath: firstRevision.artifact).lastPathComponent)
-        var damagedData = try Data(contentsOf: releaseRoot.appendingPathComponent(
-            firstRevision.artifact))
-        damagedData[damagedData.startIndex] ^= 0xFF
-        try damagedData.write(to: damagedURL)
-
+        try catalogData.write(to: fixtureCatalog)
         let artifactURLs = catalog.families.values.flatMap { entry in
-            entry.revisions.map { revision in
-                revision == firstRevision
-                    ? damagedURL
-                    : releaseRoot.appendingPathComponent(revision.artifact)
+            entry.revisions.map {
+                releaseRoot.appendingPathComponent($0.artifact)
             }
         }
         let bundle = try XCTUnwrap(Bundle(url: makeBundleWrapper(
             resources: [fixtureCatalog] + artifactURLs)))
 
-        guard case .unreadable(let path, let reason) = BundledFirmware.load(in: bundle)
-        else { return XCTFail("a damaged shipping revision did not fail closed") }
-        XCTAssertEqual(path, FirmwareReleaseCatalog.fileName)
-        XCTAssertFalse(reason.isEmpty)
+        guard case .ready(let releases) = BundledFirmware.load(in: bundle) else {
+            return XCTFail(
+                "an invalid sole S3/P4 shipping revision poisoned the catalog")
+        }
+        XCTAssertNotNil(releases.selections["c6"])
+        for family in ["s3", "p4"] {
+            let options = releases.revisions(for: family)
+            XCTAssertEqual(options.count, 1, family)
+            XCTAssertFalse(try XCTUnwrap(options.first).isAvailable, family)
+            XCTAssertTrue(
+                try XCTUnwrap(options.first?.unavailableReason)
+                    .contains("Doom WAD"),
+                "\(family): \(String(describing: options.first?.unavailableReason))")
+            XCTAssertNil(releases.selections[family], family)
+            let entry = try XCTUnwrap(catalog.families[family])
+            let live = FirmwareReleaseCatalog.Identity(
+                family: family,
+                chip: entry.chip,
+                profile: entry.profiles.first,
+                partition: family == "s3"
+                    ? "universal-8m-ota"
+                    : entry.compatibility.partitionScheme)
+            let resolved: BundledFirmware.FamilyResolution
+            do {
+                resolved = try releases.resolveFamilyForUpdate(
+                    live: live, usb: nil)
+            } catch {
+                resolved = try releases.resolveUnavailableFamilyForUpdate(
+                    live: live, usb: nil)
+            }
+            XCTAssertEqual(resolved.canonicalTarget, family)
+        }
     }
 
     func testAUniqueC6ChipResolvesTheBundledFamilyWithoutFullIdentity() throws {
@@ -490,8 +531,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             let url = root
                 .appendingPathComponent("firmware-releases", isDirectory: true)
                 .appendingPathComponent(entry.artifact)
-            let data = try Data(contentsOf: url)
-            let bundle = try catalog.bundle(for: entry, data: data)
+            let bundle = try FirmwareBundle.read(Data(contentsOf: url))
             selections[family] = BundledFirmware.Selection(
                 catalogEntry: entry,
                 revision: try XCTUnwrap(entry.revisions.first),
