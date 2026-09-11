@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Embed the canonical c6, s3, and p4 release resources before code signing.
+# Embed every revision carried by the canonical release catalog before signing.
 set -euo pipefail
 setopt NULL_GLOB
 
@@ -21,8 +21,8 @@ if [[ ! -f "$CATALOG" ]]; then
 fi
 
 ARTIFACTS=("${(@f)$(python3 "$TOOL" release-info "$CATALOG")}")
-if [[ ${#ARTIFACTS[@]} -ne 3 ]]; then
-  echo "error: release catalog did not resolve exactly three family artifacts" >&2
+if [[ ${#ARTIFACTS[@]} -eq 0 ]]; then
+  echo "error: release catalog did not resolve any firmware artifacts" >&2
   exit 1
 fi
 
@@ -35,4 +35,4 @@ for relative in "${ARTIFACTS[@]}"; do
   chmod 644 "$destination"
   echo "embedded ${relative:t} ($(stat -f %z "$source") bytes)"
 done
-echo "embedded canonical firmware catalog and c6/s3/p4 artifacts"
+echo "embedded canonical firmware catalog and ${#ARTIFACTS[@]} revision artifacts"

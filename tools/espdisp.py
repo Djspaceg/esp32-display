@@ -176,8 +176,10 @@ RELEASE_NOTES_PATH = os.path.join(REPO_ROOT, "release-notes.md")
 RELEASE_ROOT = os.path.join(REPO_ROOT, "firmware-releases")
 DEV_ROOT = os.path.join(REPO_ROOT, "firmware-dev")
 RELEASE_CATALOG_NAME = "manifest.json"
-RELEASE_CATALOG_SCHEMA = 2
+RELEASE_CATALOG_SCHEMA = 3
+RELEASE_CATALOG_SINGLE_SCHEMA = 2
 RELEASE_CATALOG_LEGACY_SCHEMA = 1
+RELEASE_CATALOG_REVISION_LIMIT = 5
 FIRMWARE_BUILD_MAX = (1 << 32) - 1
 FIRMWARE_RELEASE_REF_ENV = "ESPDISP_RELEASE_REF"
 LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware", "libraries")
@@ -2146,10 +2148,23 @@ def describe_bundle(manifest: dict, full_hash: bool = False) -> List[str]:
     return lines
 
 
-def release_catalog_entry(
-    family: Family, version: str, build: int, artifact: str, data: bytes
+def release_catalog_revision(
+    version: str, build: int, artifact: str, data: bytes
 ) -> dict:
     return {
+        "version": version,
+        "build": build,
+        "artifact": artifact.replace(os.sep, "/"),
+        "sha256": sha256_hex(data),
+        "bytes": len(data),
+    }
+
+
+def release_catalog_entry(
+    family: Family, version: str, build: int, artifact: str, data: bytes,
+    revisions: Optional[List[dict]] = None,
+) -> dict:
+    entry = {
         "latest_version": version,
         "latest_build": build,
         "artifact": artifact.replace(os.sep, "/"),
@@ -2170,6 +2185,47 @@ def release_catalog_entry(
             "identity_required": ["family", "chip", "profile", "partition"],
         },
     }
+    if revisions is not None:
+        entry["revisions"] = revisions
+    return entry
+
+
+def release_catalog_revisions(output_root: str, key: str) -> List[dict]:
+    """Return the newest committed generations without pruning older files."""
+    family = FAMILIES[key]
+    directory = os.path.join(output_root, key)
+    candidates = []
+    pattern = os.path.join(directory, "espdisp-%s-*%s" % (key, BUNDLE_SUFFIX))
+    for path in sorted(glob.glob(pattern)):
+        data = read_binary(path)
+        manifest, payloads, _ = unpack_bundle(data)
+        version = manifest.get("firmware_version")
+        build = validated_manifest_firmware_build(manifest)
+        if parse_semver(version) is None or build is None:
+            continue
+        relative = os.path.relpath(path, output_root)
+        revision = release_catalog_revision(
+            version, build, relative, data)
+        validate_release_revision_shape(revision, key, "%s candidate" % key)
+        if set(payloads) != {key} or len(manifest.get("images") or []) != 1:
+            raise Fail("%s is not a single-family %s release" % (path, key))
+        image = manifest["images"][0]
+        if (image.get("targets") != [key] or
+                image.get("chip") != family.chip or
+                image.get("profiles") != list(family.profiles) or
+                image.get("flash_sizes") != list(family.flash_sizes)):
+            raise Fail("%s family identity does not match %s" % (path, key))
+        candidates.append(revision)
+    candidates.sort(key=lambda revision: revision["build"], reverse=True)
+    builds = [revision["build"] for revision in candidates]
+    if len(builds) != len(set(builds)):
+        raise Fail("release catalog family %s has duplicate build generations" % key)
+    if len(candidates) < RELEASE_CATALOG_REVISION_LIMIT:
+        raise Fail(
+            "release catalog family %s has only %d build generations; expected %d"
+            % (key, len(candidates), RELEASE_CATALOG_REVISION_LIMIT)
+        )
+    return candidates[:RELEASE_CATALOG_REVISION_LIMIT]
 
 
 def release_catalog(
@@ -2182,13 +2238,58 @@ def release_catalog(
             key, "espdisp-%s-%s%s" % (key, identity, BUNDLE_SUFFIX))
         path = os.path.join(output_root, relative)
         data = read_binary(path)
+        revisions = release_catalog_revisions(output_root, key)
+        if revisions[0] != release_catalog_revision(
+                version, build.number, relative, data):
+            raise Fail(
+                "new %s release is not the newest retained revision" % key)
         families[key] = release_catalog_entry(
-            family, version, build.number, relative, data)
+            family, version, build.number, relative, data, revisions=revisions)
     return {
         "schema": RELEASE_CATALOG_SCHEMA,
         "generated_at": utc_timestamp(),
         "families": families,
     }
+
+
+def release_artifact_is_canonical(
+    relative: object, key: str, version: str, build: Optional[int]
+) -> bool:
+    if not isinstance(relative, str) or not relative.startswith(key + "/"):
+        return False
+    filename = relative[len(key) + 1:]
+    if build is None:
+        return filename == "espdisp-%s-%s%s" % (
+            key, version, BUNDLE_SUFFIX)
+    expected_name = re.compile(
+        re.escape("espdisp-%s-%s+%d" % (key, version, build))
+        + r"(?:\.g[0-9a-f]{7})?"
+        + re.escape(BUNDLE_SUFFIX) + r"$"
+    )
+    return expected_name.fullmatch(filename) is not None
+
+
+def validate_release_revision_shape(
+    revision: object, key: str, owner: str
+) -> dict:
+    required = {"version", "build", "artifact", "sha256", "bytes"}
+    if not isinstance(revision, dict) or set(revision) != required:
+        raise Fail("%s has unexpected or missing keys" % owner)
+    version = revision["version"]
+    if not isinstance(version, str) or parse_semver(version) is None:
+        raise Fail("%s has a non-SemVer version" % owner)
+    build = revision["build"]
+    if not is_whole_number(build) or not 1 <= build <= FIRMWARE_BUILD_MAX:
+        raise Fail("%s has an invalid build" % owner)
+    if not release_artifact_is_canonical(
+            revision["artifact"], key, version, build):
+        raise Fail("%s has a non-canonical artifact path" % owner)
+    if not is_whole_number(revision["bytes"]) or revision["bytes"] <= 0:
+        raise Fail("%s has an invalid byte size" % owner)
+    if (not isinstance(revision["sha256"], str) or
+            re.fullmatch(r"[0-9a-f]{64}", revision["sha256"]) is None):
+        raise Fail("%s has an invalid sha256" % owner)
+    return revision
 
 
 def validate_release_catalog(
@@ -2200,10 +2301,17 @@ def validate_release_catalog(
         raise Fail("release catalog has unexpected or missing top-level keys")
     schema = catalog["schema"]
     if (not is_whole_number(schema) or
-            schema not in (RELEASE_CATALOG_LEGACY_SCHEMA, RELEASE_CATALOG_SCHEMA)):
+            schema not in (
+                RELEASE_CATALOG_LEGACY_SCHEMA,
+                RELEASE_CATALOG_SINGLE_SCHEMA,
+                RELEASE_CATALOG_SCHEMA)):
         raise Fail(
-            "release catalog schema must be %d or %d"
-            % (RELEASE_CATALOG_LEGACY_SCHEMA, RELEASE_CATALOG_SCHEMA)
+            "release catalog schema must be %d, %d, or %d"
+            % (
+                RELEASE_CATALOG_LEGACY_SCHEMA,
+                RELEASE_CATALOG_SINGLE_SCHEMA,
+                RELEASE_CATALOG_SCHEMA,
+            )
         )
     families = catalog["families"]
     if not isinstance(families, dict) or set(families) != set(FAMILIES):
@@ -2213,8 +2321,10 @@ def validate_release_catalog(
         "latest_version", "artifact", "sha256", "bytes", "chip",
         "profiles", "hardware", "compatibility",
     }
-    if schema == RELEASE_CATALOG_SCHEMA:
+    if schema >= RELEASE_CATALOG_SINGLE_SCHEMA:
         required_entry.add("latest_build")
+    if schema == RELEASE_CATALOG_SCHEMA:
+        required_entry.add("revisions")
     required_compatibility = {
         "flash_bytes", "partition_scheme", "bootloader_address",
         "partitions_address", "boot_app0_address", "app_address",
@@ -2228,36 +2338,50 @@ def validate_release_catalog(
         if not isinstance(version, str) or parse_semver(version) is None:
             raise Fail("release catalog family %s has a non-SemVer version" % key)
         build = entry.get("latest_build")
-        if schema == RELEASE_CATALOG_SCHEMA:
+        if schema >= RELEASE_CATALOG_SINGLE_SCHEMA:
             if (not is_whole_number(build) or
                     not 1 <= build <= FIRMWARE_BUILD_MAX):
                 raise Fail("release catalog family %s has an invalid build" % key)
-            expected_name = re.compile(
-                re.escape("espdisp-%s-%s+%d" % (key, version, build))
-                + r"(?:\.g[0-9a-f]{7})?"
-                + re.escape(BUNDLE_SUFFIX) + r"$"
-            )
         else:
-            expected_name = "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX)
+            build = None
         relative = entry["artifact"]
-        canonical = (
-            isinstance(relative, str)
-            and relative.startswith(key + "/")
-            and (
-                expected_name.fullmatch(relative[len(key) + 1:]) is not None
-                if schema == RELEASE_CATALOG_SCHEMA
-                else relative == "%s/%s" % (key, expected_name)
-            )
-        )
-        if not canonical:
+        if not release_artifact_is_canonical(relative, key, version, build):
             raise Fail("release catalog family %s has a non-canonical artifact path" % key)
-        path = os.path.realpath(os.path.join(root, relative))
-        try:
-            contained = os.path.commonpath([root, path]) == root
-        except ValueError:
-            contained = False
-        if not contained:
-            raise Fail("release catalog family %s artifact escapes the release root" % key)
+        latest_revision = {
+            "version": version,
+            "build": build,
+            "artifact": relative,
+            "sha256": entry["sha256"],
+            "bytes": entry["bytes"],
+        }
+        if schema == RELEASE_CATALOG_SCHEMA:
+            revisions = entry["revisions"]
+            if (not isinstance(revisions, list) or
+                    len(revisions) != RELEASE_CATALOG_REVISION_LIMIT):
+                raise Fail(
+                    "release catalog family %s must carry exactly %d revisions"
+                    % (key, RELEASE_CATALOG_REVISION_LIMIT)
+                )
+            revisions = [
+                validate_release_revision_shape(
+                    revision, key, "release catalog family %s revision %d" % (
+                        key, index))
+                for index, revision in enumerate(revisions)
+            ]
+            if revisions[0] != latest_revision:
+                raise Fail(
+                    "release catalog family %s latest aliases do not match revision 0"
+                    % key)
+            builds = [revision["build"] for revision in revisions]
+            artifacts = [revision["artifact"] for revision in revisions]
+            if (len(set(builds)) != len(builds) or
+                    len(set(artifacts)) != len(artifacts) or
+                    any(left <= right for left, right in zip(builds, builds[1:]))):
+                raise Fail(
+                    "release catalog family %s revisions are not unique and newest first"
+                    % key)
+        else:
+            revisions = [latest_revision]
         if entry["chip"] != family.chip:
             raise Fail("release catalog family %s has the wrong chip" % key)
         if entry["profiles"] != list(family.profiles):
@@ -2282,33 +2406,59 @@ def validate_release_catalog(
                 re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None):
             raise Fail("release catalog family %s has an invalid sha256" % key)
         if verify_files:
-            data = read_binary(path)
-            if len(data) != entry["bytes"]:
-                raise Fail("release catalog family %s byte size is stale" % key)
-            if sha256_hex(data) != entry["sha256"]:
-                raise Fail("release catalog family %s sha256 is stale" % key)
-            manifest, payloads, flash_payloads = unpack_bundle(data)
-            if (manifest.get("firmware_version") != version or
-                    (schema == RELEASE_CATALOG_SCHEMA and
-                     validated_manifest_firmware_build(manifest) != build) or
-                    set(payloads) != {key} or set(flash_payloads) != {key} or
-                    len(manifest.get("images") or []) != 1):
-                raise Fail("release catalog family %s bundle metadata disagrees" % key)
-            image = manifest["images"][0]
-            if (image.get("chip") != family.chip or
-                    image.get("targets") != [key] or
-                    image.get("profiles") != list(family.profiles) or
-                    image.get("flash_sizes") != list(family.flash_sizes) or
-                    image.get("partition") != family.partition_scheme):
-                raise Fail("release catalog family %s bundle identity disagrees" % key)
-            partition = flash_payloads[key].get(FLASH_ROLE_PARTITIONS)
-            if partition is None:
-                raise Fail("release catalog family %s bundle lacks partitions" % key)
-            _verify_partition_payload(family, partition)
-            _verify_app_payload(
-                family, partition, image.get("app_address"), image.get("bytes"))
-            _verify_required_doom_flash_payload(
-                family, partition, image, flash_payloads[key])
+            for index, revision in enumerate(revisions):
+                path = os.path.realpath(os.path.join(root, revision["artifact"]))
+                try:
+                    contained = os.path.commonpath([root, path]) == root
+                except ValueError:
+                    contained = False
+                if not contained:
+                    raise Fail(
+                        "release catalog family %s artifact escapes the release root"
+                        % key)
+                data = read_binary(path)
+                if len(data) != revision["bytes"]:
+                    raise Fail(
+                        "release catalog family %s revision %d byte size is stale"
+                        % (key, index))
+                if sha256_hex(data) != revision["sha256"]:
+                    raise Fail(
+                        "release catalog family %s revision %d sha256 is stale"
+                        % (key, index))
+                manifest, payloads, flash_payloads = unpack_bundle(data)
+                if (manifest.get("firmware_version") != revision["version"] or
+                        (revision["build"] is not None and
+                         validated_manifest_firmware_build(manifest)
+                            != revision["build"]) or
+                        set(payloads) != {key} or
+                        set(flash_payloads) != {key} or
+                        len(manifest.get("images") or []) != 1):
+                    raise Fail(
+                        "release catalog family %s revision %d bundle metadata disagrees"
+                        % (key, index))
+                image = manifest["images"][0]
+                if (image.get("chip") != family.chip or
+                        image.get("targets") != [key] or
+                        image.get("profiles") != list(family.profiles) or
+                        image.get("flash_sizes") != list(family.flash_sizes)):
+                    raise Fail(
+                        "release catalog family %s revision %d bundle identity disagrees"
+                        % (key, index))
+                partition = flash_payloads[key].get(FLASH_ROLE_PARTITIONS)
+                if partition is None:
+                    raise Fail(
+                        "release catalog family %s revision %d bundle lacks partitions"
+                        % (key, index))
+                _verify_app_payload(
+                    family, partition, image.get("app_address"), image.get("bytes"))
+                if index == 0:
+                    if image.get("partition") != family.partition_scheme:
+                        raise Fail(
+                            "release catalog family %s latest bundle identity disagrees"
+                            % key)
+                    _verify_partition_payload(family, partition)
+                    _verify_required_doom_flash_payload(
+                        family, partition, image, flash_payloads[key])
     return catalog
 
 
@@ -2335,7 +2485,10 @@ def write_release_catalog(path: str, catalog: dict) -> None:
 def cmd_release_info(args) -> int:
     catalog = load_release_catalog(args.path, verify_files=True)
     for key in FAMILIES:
-        print(catalog["families"][key]["artifact"])
+        entry = catalog["families"][key]
+        revisions = entry.get("revisions") or [entry]
+        for revision in revisions:
+            print(revision["artifact"])
     return 0
 
 
@@ -2349,13 +2502,24 @@ def cmd_release(args) -> int:
     identity = firmware_identity(version, build.number, build.branch_suffix)
     output_root = firmware_output_root(args.output_root, build)
     os.makedirs(output_root, exist_ok=True)
-    for key in FAMILIES:
-        directory = os.path.join(output_root, key)
-        os.makedirs(directory, exist_ok=True)
-        path = os.path.join(
-            directory, "espdisp-%s-%s%s" % (key, identity, BUNDLE_SUFFIX))
-        cmd_bundle(type("BundleArgs", (), {
-            "family": [key], "output": path, "firmware_build": build})())
+    staged_root = tempfile.mkdtemp(prefix="espdisp-release-")
+    try:
+        for key in FAMILIES:
+            path = os.path.join(
+                staged_root, "espdisp-%s-%s%s" % (
+                    key, identity, BUNDLE_SUFFIX))
+            cmd_bundle(type("BundleArgs", (), {
+                "family": [key], "output": path, "firmware_build": build})())
+        for key in FAMILIES:
+            directory = os.path.join(output_root, key)
+            os.makedirs(directory, exist_ok=True)
+            filename = "espdisp-%s-%s%s" % (
+                key, identity, BUNDLE_SUFFIX)
+            write_file_atomically(
+                os.path.join(directory, filename),
+                read_binary(os.path.join(staged_root, filename)))
+    finally:
+        shutil.rmtree(staged_root, ignore_errors=True)
     catalog = release_catalog(version, build, output_root)
     catalog_path = os.path.join(output_root, RELEASE_CATALOG_NAME)
     write_release_catalog(catalog_path, catalog)

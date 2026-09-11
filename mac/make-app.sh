@@ -67,8 +67,8 @@ trap cleanup EXIT INT TERM
 
 # Firmware is embedded directly from the committed canonical release store.
 # Packaging never rebuilds or duplicates it. The build phase validates the
-# catalog and copies its three artifacts; ESPDISP_SKIP_FIRMWARE packages the
-# documented no-resource fallback.
+# catalog and copies every revision it carries; ESPDISP_SKIP_FIRMWARE packages
+# the documented no-resource fallback.
 CATALOG="$HERE/../firmware-releases/manifest.json"
 if [[ -z "${ESPDISP_SKIP_FIRMWARE:-}" ]]; then
   if [[ ! -f "$CATALOG" ]]; then

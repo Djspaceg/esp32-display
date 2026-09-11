@@ -277,6 +277,8 @@ struct FirmwareUpdateSheet: View {
     @State private var bundle: FirmwareBundle?
     @State private var bundleURL: URL?
     @State private var automaticIdentity: FirmwareReleaseCatalog.Identity?
+    @State private var revisionOptions = [BundledFirmware.RevisionOption]()
+    @State private var selectedRevisionArtifact = ""
     /// Why the file the user picked could not be used. Kept as a message rather
     /// than an error, because `FirmwareBundleError` already writes messages for
     /// exactly this reader and rewording them here would only make them worse.
@@ -479,6 +481,32 @@ struct FirmwareUpdateSheet: View {
                 LabeledContent("Version", value: bundle.firmwareVersion)
                 LabeledContent("Built", value: bundle.builtAt)
                 LabeledContent("Source", value: sourceDescription(bundle))
+                if !revisionOptions.isEmpty {
+                    Picker("Revision", selection: Binding(
+                        get: { selectedRevisionArtifact },
+                        set: { selectBundledRevision($0) }
+                    )) {
+                        ForEach(revisionOptions) { option in
+                            Text(revisionTitle(option))
+                                .tag(option.revision.artifact)
+                                .disabled(!option.isAvailable)
+                        }
+                    }
+                    .disabled(isPushing)
+                    ForEach(revisionOptions.filter { !$0.isAvailable }) { option in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label(
+                                "\(revisionIdentity(option.revision)) unavailable",
+                                systemImage: "exclamationmark.triangle.fill")
+                                .font(.callout)
+                                .foregroundStyle(.orange)
+                            Text(option.unavailableReason ?? "Validation failed.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
                 ForEach(bundle.images, id: \.offset) { image in
                     LabeledContent(image.targets.joined(separator: ", "),
                                    value: imageDescription(image))
@@ -694,10 +722,9 @@ struct FirmwareUpdateSheet: View {
         automaticIdentity?.chip ?? target.chip
     }
 
-    private var chipIsConfirmed: Bool {
+    private func chipIsConfirmed(for bundle: FirmwareBundle) -> Bool {
         guard let chip = effectiveChip,
-              let exactTarget = effectiveTarget,
-              let bundle
+              let exactTarget = effectiveTarget
         else { return false }
         return !chip.isEmpty
             && chip != ServiceMetadata.unknownChip
@@ -711,7 +738,7 @@ struct FirmwareUpdateSheet: View {
                     forTarget: effectiveTarget,
                     chip: effectiveChip,
                     panelVersion: panelVersion),
-                chipConfirmed: chipIsConfirmed)
+                chipConfirmed: chipIsConfirmed(for: bundle))
         }
         return FirmwareUpdatePlan.makeForUnknownPanelVersion(
             bundle.availability(
@@ -719,7 +746,7 @@ struct FirmwareUpdateSheet: View {
                 chip: effectiveChip,
                 panelVersion: bundle.firmwareVersion),
             bundleVersion: bundle.firmwareVersion,
-            chipConfirmed: chipIsConfirmed)
+            chipConfirmed: chipIsConfirmed(for: bundle))
     }
 
     private func plan(_ bundle: FirmwareBundle?) -> FirmwareUpdatePlan? {
@@ -900,7 +927,7 @@ struct FirmwareUpdateSheet: View {
         resolveBundledFirmware()
     }
 
-    private func resolveBundledFirmware() {
+    private func resolveBundledFirmware(preferredArtifact: String? = nil) {
         switch bundledFirmware {
         case .ready(let releases):
             do {
@@ -914,14 +941,26 @@ struct FirmwareUpdateSheet: View {
                             profile: $0.board, partition: $0.partition)
                     },
                     transport: selectedTransport == .usb ? .usb : .ota)
-                bundle = selected.selection.bundle
-                bundleURL = selected.selection.url
+                let options = releases.revisions(
+                    for: selected.resolution.canonicalTarget)
+                let preferred = preferredArtifact.flatMap { artifact in
+                    options.first {
+                        $0.revision.artifact == artifact
+                    }?.selection
+                }
+                let selection = preferred ?? selected.selection
+                bundle = selection.bundle
+                bundleURL = selection.url
                 automaticIdentity = selected.identity
+                revisionOptions = options
+                selectedRevisionArtifact = selection.revision.artifact
                 readFailure = nil
             } catch {
                 bundle = nil
                 bundleURL = nil
                 automaticIdentity = nil
+                revisionOptions = []
+                selectedRevisionArtifact = ""
                 readFailure = error.localizedDescription
             }
         case .unreadable(let path, let reason):
@@ -935,20 +974,53 @@ struct FirmwareUpdateSheet: View {
     private func reloadAutomaticFirmwareAfterRefresh(canResolve: Bool) {
         // A manually opened file is independent of automatic resource selection.
         if bundle != nil, automaticIdentity == nil { return }
+        let preferredArtifact = selectedRevisionArtifact
         bundle = nil
         bundleURL = nil
         automaticIdentity = nil
+        revisionOptions = []
+        selectedRevisionArtifact = ""
         readFailure = nil
-        if canResolve { resolveBundledFirmware() }
+        if canResolve {
+            resolveBundledFirmware(preferredArtifact: preferredArtifact)
+        }
+    }
+
+    private func selectBundledRevision(_ artifact: String) {
+        guard let selection = revisionOptions.first(where: {
+            $0.revision.artifact == artifact
+        })?.selection else { return }
+        selectedRevisionArtifact = artifact
+        bundle = selection.bundle
+        bundleURL = selection.url
+        readFailure = nil
+        updateFailure = nil
+    }
+
+    private func revisionTitle(_ option: BundledFirmware.RevisionOption) -> String {
+        guard let selection = option.selection else {
+            return "\(revisionIdentity(option.revision)) - Unavailable"
+        }
+        return "\(revisionIdentity(option.revision)) - \(plan(selection.bundle).verb)"
+    }
+
+    private func revisionIdentity(
+        _ revision: FirmwareReleaseCatalog.Revision
+    ) -> String {
+        guard let build = revision.build else { return revision.version }
+        return "\(revision.version) (build \(build))"
     }
 
     private func reloadAutomaticFirmwareForSelectedTransport() {
         if bundle != nil, automaticIdentity == nil { return }
+        let preferredArtifact = selectedRevisionArtifact
         bundle = nil
         bundleURL = nil
         automaticIdentity = nil
+        revisionOptions = []
+        selectedRevisionArtifact = ""
         readFailure = nil
-        resolveBundledFirmware()
+        resolveBundledFirmware(preferredArtifact: preferredArtifact)
     }
 
     /// The open panel, restricted to the one extension this app can read.
@@ -979,11 +1051,15 @@ struct FirmwareUpdateSheet: View {
             readFailure = nil
             updateFailure = nil
             automaticIdentity = nil
+            revisionOptions = []
+            selectedRevisionArtifact = ""
             // Exact target metadata, not image count, chooses an image.
         } catch {
             bundle = nil
             bundleURL = nil
             automaticIdentity = nil
+            revisionOptions = []
+            selectedRevisionArtifact = ""
             readFailure = error.localizedDescription
         }
     }

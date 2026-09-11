@@ -301,6 +301,52 @@ final class UsbOnboardingAppTests: XCTestCase {
         XCTAssertFalse(reason.isEmpty)
     }
 
+    func testAnInvalidHistoricalRevisionDoesNotMakeWholeCatalogUnreadable() throws {
+        let root = Self.repoRoot()
+        let releaseRoot = root.appendingPathComponent(
+            "firmware-releases", isDirectory: true)
+        let sourceCatalog = releaseRoot.appendingPathComponent(
+            FirmwareReleaseCatalog.fileName)
+        var catalog = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: sourceCatalog)
+            ) as? [String: Any])
+        var families = try XCTUnwrap(catalog["families"] as? [String: Any])
+        var s3 = try XCTUnwrap(families["s3"] as? [String: Any])
+        let historicalArtifact =
+            "s3/espdisp-s3-1.5.0+197.gfe13ee6.espdispfw"
+        let historicalURL = releaseRoot.appendingPathComponent(
+            historicalArtifact)
+        let historicalData = try Data(contentsOf: historicalURL)
+        s3["artifact"] = historicalArtifact
+        s3["bytes"] = historicalData.count
+        s3["sha256"] = FirmwareBundle.sha256Hex(historicalData)
+        s3["latest_build"] = 197
+        families["s3"] = s3
+        catalog["families"] = families
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("espdisp-resources-" + UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixtureCatalog = directory.appendingPathComponent(
+            FirmwareReleaseCatalog.fileName)
+        try JSONSerialization.data(withJSONObject: catalog)
+            .write(to: fixtureCatalog)
+        let artifactURLs = try families.values.map { raw -> URL in
+            let entry = try XCTUnwrap(raw as? [String: Any])
+            let artifact = try XCTUnwrap(entry["artifact"] as? String)
+            return releaseRoot.appendingPathComponent(artifact)
+        }
+        let bundle = try XCTUnwrap(Bundle(url: makeBundleWrapper(
+            resources: [fixtureCatalog] + artifactURLs)))
+
+        if case .unreadable(let path, let reason) = BundledFirmware.load(in: bundle) {
+            XCTFail("one invalid historical revision poisoned \(path): \(reason)")
+        }
+    }
+
     func testAUniqueC6ChipResolvesTheBundledFamilyWithoutFullIdentity() throws {
         let releases = try Self.bundledReleaseSet()
 
@@ -367,13 +413,22 @@ final class UsbOnboardingAppTests: XCTestCase {
     /// A minimal .bundle wrapper around one resource file, so `Bundle` can be asked
     /// for it the way `Bundle.main` is asked in the app.
     private func makeBundleWrapper(around file: URL) throws -> URL {
-        let wrapper = file.deletingLastPathComponent()
+        try makeBundleWrapper(resources: [file])
+    }
+
+    private func makeBundleWrapper(resources files: [URL]) throws -> URL {
+        guard let first = files.first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let wrapper = first.deletingLastPathComponent()
             .appendingPathComponent("Fixture.bundle")
         let resources = wrapper.appendingPathComponent("Contents/Resources")
         try FileManager.default.createDirectory(
             at: resources, withIntermediateDirectories: true)
-        try FileManager.default.copyItem(
-            at: file, to: resources.appendingPathComponent(file.lastPathComponent))
+        for file in files {
+            try FileManager.default.copyItem(
+                at: file, to: resources.appendingPathComponent(file.lastPathComponent))
+        }
         try Data("""
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
@@ -400,12 +455,14 @@ final class UsbOnboardingAppTests: XCTestCase {
             let data = try Data(contentsOf: url)
             let bundle = try catalog.bundle(for: entry, data: data)
             selections[family] = BundledFirmware.Selection(
-                catalogEntry: entry, bundle: bundle, url: url)
+                catalogEntry: entry,
+                revision: try XCTUnwrap(entry.revisions.first),
+                bundle: bundle, url: url)
         }
         return BundledFirmware.ReleaseSet(catalog: catalog, selections: selections)
     }
 
-    private static func repoRoot() -> URL {
+    fileprivate static func repoRoot() -> URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
