@@ -3,6 +3,7 @@
 import argparse
 import base64
 import fnmatch
+import functools
 import getpass
 import glob
 import hashlib
@@ -179,7 +180,6 @@ RELEASE_CATALOG_NAME = "manifest.json"
 RELEASE_CATALOG_SCHEMA = 3
 RELEASE_CATALOG_SINGLE_SCHEMA = 2
 RELEASE_CATALOG_LEGACY_SCHEMA = 1
-RELEASE_CATALOG_REVISION_LIMIT = 5
 FIRMWARE_BUILD_MAX = (1 << 32) - 1
 FIRMWARE_RELEASE_REF_ENV = "ESPDISP_RELEASE_REF"
 LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware", "libraries")
@@ -1558,7 +1558,7 @@ def validated_manifest_firmware_build(manifest: dict) -> Optional[int]:
 
 def bundle_manifest(
     firmware_version: str,
-    firmware_build: int,
+    firmware_build: Optional[int],
     images: List[dict],
     built_at: str,
     *,
@@ -1591,8 +1591,10 @@ def bundle_manifest(
     three-target bundle (`test_bundle_manifest_offsets` drives payload sizes that
     force digit rollovers).
     """
-    build = validated_manifest_firmware_build({"firmware_build": firmware_build})
-    assert build is not None
+    build = None
+    if firmware_build is not None:
+        build = validated_manifest_firmware_build(
+            {"firmware_build": firmware_build})
     notes = validated_manifest_release_notes({"release_notes": release_notes})
     if notes is None:  # Current format-3 output is never a legacy manifest.
         raise Fail("a format-3 bundle requires release_notes")
@@ -1618,7 +1620,6 @@ def bundle_manifest(
     manifest = {
         "format": BUNDLE_FORMAT,
         "firmware_version": firmware_version,
-        "firmware_build": build,
         "built_at": built_at,
         "source_commit": source_commit,
         "source_dirty": bool(source_dirty),
@@ -1626,6 +1627,8 @@ def bundle_manifest(
         "release_notes": notes,
         "images": prepared,
     }
+    if build is not None:
+        manifest["firmware_build"] = build
     for _ in range(8):
         length = len(encode_manifest(manifest))
         cursor = BUNDLE_HEADER_BYTES + length
@@ -2149,11 +2152,10 @@ def describe_bundle(manifest: dict, full_hash: bool = False) -> List[str]:
 
 
 def release_catalog_revision(
-    version: str, build: int, artifact: str, data: bytes
+    version: str, artifact: str, data: bytes
 ) -> dict:
     return {
         "version": version,
-        "build": build,
         "artifact": artifact.replace(os.sep, "/"),
         "sha256": sha256_hex(data),
         "bytes": len(data),
@@ -2161,12 +2163,12 @@ def release_catalog_revision(
 
 
 def release_catalog_entry(
-    family: Family, version: str, build: int, artifact: str, data: bytes,
+    family: Family, version: str, build: Optional[int],
+    artifact: str, data: bytes,
     revisions: Optional[List[dict]] = None,
 ) -> dict:
     entry = {
         "latest_version": version,
-        "latest_build": build,
         "artifact": artifact.replace(os.sep, "/"),
         "sha256": sha256_hex(data),
         "bytes": len(data),
@@ -2185,27 +2187,34 @@ def release_catalog_entry(
             "identity_required": ["family", "chip", "profile", "partition"],
         },
     }
+    if build is not None:
+        entry["latest_build"] = build
     if revisions is not None:
         entry["revisions"] = revisions
     return entry
 
 
 def release_catalog_revisions(output_root: str, key: str) -> List[dict]:
-    """Return the newest committed generations without pruning older files."""
+    """Return every bare-version shipping release, newest first."""
     family = FAMILIES[key]
     directory = os.path.join(output_root, key)
     candidates = []
     pattern = os.path.join(directory, "espdisp-%s-*%s" % (key, BUNDLE_SUFFIX))
     for path in sorted(glob.glob(pattern)):
+        filename = os.path.basename(path)
+        prefix = "espdisp-%s-" % key
+        filename_version = filename[len(prefix):-len(BUNDLE_SUFFIX)]
+        if parse_semver(filename_version) is None or "+" in filename_version:
+            continue
         data = read_binary(path)
         manifest, payloads, _ = unpack_bundle(data)
         version = manifest.get("firmware_version")
         build = validated_manifest_firmware_build(manifest)
-        if parse_semver(version) is None or build is None:
+        if (parse_semver(version) is None or
+                "+" in version or build is not None):
             continue
         relative = os.path.relpath(path, output_root)
-        revision = release_catalog_revision(
-            version, build, relative, data)
+        revision = release_catalog_revision(version, relative, data)
         validate_release_revision_shape(revision, key, "%s candidate" % key)
         if set(payloads) != {key} or len(manifest.get("images") or []) != 1:
             raise Fail("%s is not a single-family %s release" % (path, key))
@@ -2216,19 +2225,41 @@ def release_catalog_revisions(output_root: str, key: str) -> List[dict]:
                 image.get("flash_sizes") != list(family.flash_sizes)):
             raise Fail("%s family identity does not match %s" % (path, key))
         candidates.append(revision)
-    candidates.sort(key=lambda revision: revision["build"], reverse=True)
-    builds = [revision["build"] for revision in candidates]
-    if len(builds) != len(set(builds)):
-        raise Fail("release catalog family %s has duplicate build generations" % key)
-    if len(candidates) < RELEASE_CATALOG_REVISION_LIMIT:
+    candidates.sort(
+        key=functools.cmp_to_key(
+            lambda left, right: compare_semver(
+                right["version"], left["version"])))
+    versions = [revision["version"] for revision in candidates]
+    if len(versions) != len(set(versions)):
+        raise Fail("release catalog family %s has duplicate shipping versions" % key)
+    if not candidates:
         raise Fail(
-            "release catalog family %s has only %d build generations; expected %d"
-            % (key, len(candidates), RELEASE_CATALOG_REVISION_LIMIT)
+            "release catalog family %s has no shipping versions" % key
         )
-    return candidates[:RELEASE_CATALOG_REVISION_LIMIT]
+    return candidates
 
 
-def release_catalog(
+def release_catalog(version: str, output_root: str) -> dict:
+    families = {}
+    for key, family in FAMILIES.items():
+        relative = os.path.join(
+            key, "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX))
+        path = os.path.join(output_root, relative)
+        data = read_binary(path)
+        revisions = release_catalog_revisions(output_root, key)
+        if revisions[0] != release_catalog_revision(version, relative, data):
+            raise Fail(
+                "new %s shipping release is not the newest retained version" % key)
+        families[key] = release_catalog_entry(
+            family, version, None, relative, data, revisions=revisions)
+    return {
+        "schema": RELEASE_CATALOG_SCHEMA,
+        "generated_at": utc_timestamp(),
+        "families": families,
+    }
+
+
+def development_release_catalog(
     version: str, build: FirmwareBuild, output_root: str
 ) -> dict:
     families = {}
@@ -2238,15 +2269,10 @@ def release_catalog(
             key, "espdisp-%s-%s%s" % (key, identity, BUNDLE_SUFFIX))
         path = os.path.join(output_root, relative)
         data = read_binary(path)
-        revisions = release_catalog_revisions(output_root, key)
-        if revisions[0] != release_catalog_revision(
-                version, build.number, relative, data):
-            raise Fail(
-                "new %s release is not the newest retained revision" % key)
         families[key] = release_catalog_entry(
-            family, version, build.number, relative, data, revisions=revisions)
+            family, version, build.number, relative, data)
     return {
-        "schema": RELEASE_CATALOG_SCHEMA,
+        "schema": RELEASE_CATALOG_SINGLE_SCHEMA,
         "generated_at": utc_timestamp(),
         "families": families,
     }
@@ -2272,17 +2298,15 @@ def release_artifact_is_canonical(
 def validate_release_revision_shape(
     revision: object, key: str, owner: str
 ) -> dict:
-    required = {"version", "build", "artifact", "sha256", "bytes"}
+    required = {"version", "artifact", "sha256", "bytes"}
     if not isinstance(revision, dict) or set(revision) != required:
         raise Fail("%s has unexpected or missing keys" % owner)
     version = revision["version"]
-    if not isinstance(version, str) or parse_semver(version) is None:
+    if (not isinstance(version, str) or parse_semver(version) is None or
+            "+" in version):
         raise Fail("%s has a non-SemVer version" % owner)
-    build = revision["build"]
-    if not is_whole_number(build) or not 1 <= build <= FIRMWARE_BUILD_MAX:
-        raise Fail("%s has an invalid build" % owner)
     if not release_artifact_is_canonical(
-            revision["artifact"], key, version, build):
+            revision["artifact"], key, version, None):
         raise Fail("%s has a non-canonical artifact path" % owner)
     if not is_whole_number(revision["bytes"]) or revision["bytes"] <= 0:
         raise Fail("%s has an invalid byte size" % owner)
@@ -2321,7 +2345,7 @@ def validate_release_catalog(
         "latest_version", "artifact", "sha256", "bytes", "chip",
         "profiles", "hardware", "compatibility",
     }
-    if schema >= RELEASE_CATALOG_SINGLE_SCHEMA:
+    if schema == RELEASE_CATALOG_SINGLE_SCHEMA:
         required_entry.add("latest_build")
     if schema == RELEASE_CATALOG_SCHEMA:
         required_entry.add("revisions")
@@ -2335,10 +2359,11 @@ def validate_release_catalog(
         if not isinstance(entry, dict) or set(entry) != required_entry:
             raise Fail("release catalog family %s has unexpected or missing keys" % key)
         version = entry["latest_version"]
-        if not isinstance(version, str) or parse_semver(version) is None:
+        if (not isinstance(version, str) or parse_semver(version) is None or
+                (schema == RELEASE_CATALOG_SCHEMA and "+" in version)):
             raise Fail("release catalog family %s has a non-SemVer version" % key)
         build = entry.get("latest_build")
-        if schema >= RELEASE_CATALOG_SINGLE_SCHEMA:
+        if schema == RELEASE_CATALOG_SINGLE_SCHEMA:
             if (not is_whole_number(build) or
                     not 1 <= build <= FIRMWARE_BUILD_MAX):
                 raise Fail("release catalog family %s has an invalid build" % key)
@@ -2349,18 +2374,18 @@ def validate_release_catalog(
             raise Fail("release catalog family %s has a non-canonical artifact path" % key)
         latest_revision = {
             "version": version,
-            "build": build,
             "artifact": relative,
             "sha256": entry["sha256"],
             "bytes": entry["bytes"],
         }
+        if build is not None:
+            latest_revision["build"] = build
         if schema == RELEASE_CATALOG_SCHEMA:
             revisions = entry["revisions"]
-            if (not isinstance(revisions, list) or
-                    len(revisions) != RELEASE_CATALOG_REVISION_LIMIT):
+            if not isinstance(revisions, list) or not revisions:
                 raise Fail(
-                    "release catalog family %s must carry exactly %d revisions"
-                    % (key, RELEASE_CATALOG_REVISION_LIMIT)
+                    "release catalog family %s must carry shipping revisions"
+                    % key
                 )
             revisions = [
                 validate_release_revision_shape(
@@ -2372,11 +2397,13 @@ def validate_release_catalog(
                 raise Fail(
                     "release catalog family %s latest aliases do not match revision 0"
                     % key)
-            builds = [revision["build"] for revision in revisions]
+            versions = [revision["version"] for revision in revisions]
             artifacts = [revision["artifact"] for revision in revisions]
-            if (len(set(builds)) != len(builds) or
+            if (len(set(versions)) != len(versions) or
                     len(set(artifacts)) != len(artifacts) or
-                    any(left <= right for left, right in zip(builds, builds[1:]))):
+                    any(
+                        compare_semver(left, right) <= 0
+                        for left, right in zip(versions, versions[1:]))):
                 raise Fail(
                     "release catalog family %s revisions are not unique and newest first"
                     % key)
@@ -2397,7 +2424,7 @@ def validate_release_catalog(
                 set(compatibility) != required_compatibility):
             raise Fail("release catalog family %s compatibility is incomplete" % key)
         expected_compatibility = release_catalog_entry(
-            family, version, build or 1, relative, b"x")["compatibility"]
+            family, version, build, relative, b"x")["compatibility"]
         if compatibility != expected_compatibility:
             raise Fail("release catalog family %s compatibility does not match its build" % key)
         if not is_whole_number(entry["bytes"]) or entry["bytes"] <= 0:
@@ -2426,10 +2453,10 @@ def validate_release_catalog(
                         "release catalog family %s revision %d sha256 is stale"
                         % (key, index))
                 manifest, payloads, flash_payloads = unpack_bundle(data)
+                expected_build = revision.get("build")
                 if (manifest.get("firmware_version") != revision["version"] or
-                        (revision["build"] is not None and
-                         validated_manifest_firmware_build(manifest)
-                            != revision["build"]) or
+                        validated_manifest_firmware_build(manifest)
+                            != expected_build or
                         set(payloads) != {key} or
                         set(flash_payloads) != {key} or
                         len(manifest.get("images") or []) != 1):
@@ -2451,14 +2478,13 @@ def validate_release_catalog(
                         % (key, index))
                 _verify_app_payload(
                     family, partition, image.get("app_address"), image.get("bytes"))
-                if index == 0:
-                    if image.get("partition") != family.partition_scheme:
-                        raise Fail(
-                            "release catalog family %s latest bundle identity disagrees"
-                            % key)
-                    _verify_partition_payload(family, partition)
-                    _verify_required_doom_flash_payload(
-                        family, partition, image, flash_payloads[key])
+                if image.get("partition") != family.partition_scheme:
+                    raise Fail(
+                        "release catalog family %s revision %d bundle identity disagrees"
+                        % (key, index))
+                _verify_partition_payload(family, partition)
+                _verify_required_doom_flash_payload(
+                    family, partition, image, flash_payloads[key])
     return catalog
 
 
@@ -2498,8 +2524,13 @@ def cmd_release(args) -> int:
         raise Fail("firmware/display_stream/app_state.cpp:%d: %s" % (
             version_line, RELEASE_REASON_FW_VERSION % quote_release_value(version)))
     release_notes_for_version(RELEASE_NOTES_PATH, version)
-    build = git_firmware_build()
-    identity = firmware_identity(version, build.number, build.branch_suffix)
+    shipping = bool(getattr(args, "shipping", False))
+    build = None if shipping else git_firmware_build()
+    identity = (
+        version
+        if build is None
+        else firmware_identity(version, build.number, build.branch_suffix)
+    )
     output_root = firmware_output_root(args.output_root, build)
     os.makedirs(output_root, exist_ok=True)
     staged_root = tempfile.mkdtemp(prefix="espdisp-release-")
@@ -2508,8 +2539,12 @@ def cmd_release(args) -> int:
             path = os.path.join(
                 staged_root, "espdisp-%s-%s%s" % (
                     key, identity, BUNDLE_SUFFIX))
-            cmd_bundle(type("BundleArgs", (), {
-                "family": [key], "output": path, "firmware_build": build})())
+            bundle_args = {
+                "family": [key], "output": path, "shipping": shipping,
+            }
+            if build is not None:
+                bundle_args["firmware_build"] = build
+            cmd_bundle(type("BundleArgs", (), bundle_args)())
         for key in FAMILIES:
             directory = os.path.join(output_root, key)
             os.makedirs(directory, exist_ok=True)
@@ -2520,7 +2555,11 @@ def cmd_release(args) -> int:
                 read_binary(os.path.join(staged_root, filename)))
     finally:
         shutil.rmtree(staged_root, ignore_errors=True)
-    catalog = release_catalog(version, build, output_root)
+    catalog = (
+        release_catalog(version, output_root)
+        if shipping
+        else development_release_catalog(version, build, output_root)
+    )
     catalog_path = os.path.join(output_root, RELEASE_CATALOG_NAME)
     write_release_catalog(catalog_path, catalog)
     print("\nWrote firmware catalog %s" % catalog_path)
@@ -3779,8 +3818,14 @@ def cmd_bundle(args) -> int:
     keys = bundle_family_keys(args.family)
     boards = [FAMILIES[key] for key in keys]
     family_key = keys[0]
-    build = getattr(args, "firmware_build", None) or git_firmware_build()
-    identity = firmware_identity(version, build.number, build.branch_suffix)
+    shipping = bool(getattr(args, "shipping", False))
+    build = None if shipping else (
+        getattr(args, "firmware_build", None) or git_firmware_build())
+    identity = (
+        version
+        if build is None
+        else firmware_identity(version, build.number, build.branch_suffix)
+    )
     path = args.output or os.path.join(
         os.getcwd(), "espdisp-%s-%s%s" %
         (family_key, identity, BUNDLE_SUFFIX)
@@ -3838,7 +3883,8 @@ def cmd_bundle(args) -> int:
             shutil.rmtree(out_dir, ignore_errors=True)
 
     manifest = bundle_manifest(
-        version, build.number, entries, utc_timestamp(), release_notes=release_notes,
+        version, build.number if build is not None else None,
+        entries, utc_timestamp(), release_notes=release_notes,
         source_commit=commit, source_dirty=dirty)
     data = pack_bundle(manifest, payloads, flash_payloads)
     write_file_atomically(path, data)
@@ -4092,6 +4138,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_release.add_argument(
         "--output-root",
         help="artifact directory (default firmware-dev for build-numbered firmware)")
+    p_release.add_argument(
+        "--shipping", action="store_true",
+        help="write bare-version shipping artifacts and a schema-3 catalog "
+        "to firmware-releases")
     p_release.set_defaults(func=cmd_release)
 
     p_release_info = subs.add_parser(

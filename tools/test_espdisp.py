@@ -1731,6 +1731,19 @@ def test_bundle_manifest_offsets():
         "current writer adds build and release notes to required manifest keys")
     check_equal(manifest["release_notes"], GENERIC_RELEASE_NOTES,
                 "current writer preserves ordered release notes")
+    shipping = espdisp.bundle_manifest(
+        "1.2.0", None, [image_entry("c6", FAKE_C6)],
+        "2026-01-02T03:04:05Z",
+        release_notes=GENERIC_RELEASE_NOTES,
+        source_commit="a" * 40,
+        source_dirty=False)
+    check(
+        "firmware_build" not in shipping,
+        "shipping bundles omit dev build metadata")
+    check_equal(
+        sorted(shipping),
+        sorted(espdisp.MANIFEST_KEYS + ("release_notes",)),
+        "shipping writer adds no build key")
     for image in manifest["images"]:
         check_equal(
             sorted(image), sorted(espdisp.IMAGE_KEYS_V3), "no image key is missing")
@@ -4067,7 +4080,8 @@ def test_family_resolution_and_discovery():
 
 
 def make_catalog_fixture(
-    version="1.5.0", schema=espdisp.RELEASE_CATALOG_SINGLE_SCHEMA, build=192
+    version="1.5.0", schema=espdisp.RELEASE_CATALOG_SINGLE_SCHEMA, build=192,
+    shipping_versions=None,
 ):
     catalog = {
         "schema": schema,
@@ -4079,25 +4093,23 @@ def make_catalog_fixture(
         blob = ("bundle-%s" % key).encode("ascii")
         identity = (
             espdisp.firmware_identity(version, build)
-            if schema >= espdisp.RELEASE_CATALOG_SINGLE_SCHEMA
-            else version
-        )
+            if schema == espdisp.RELEASE_CATALOG_SINGLE_SCHEMA
+            else version)
         relative = "%s/espdisp-%s-%s.espdispfw" % (key, key, identity)
         entry = espdisp.release_catalog_entry(
-            family, version, build, relative, blob)
+            family, version,
+            build if schema == espdisp.RELEASE_CATALOG_SINGLE_SCHEMA else None,
+            relative, blob)
         if schema == espdisp.RELEASE_CATALOG_SCHEMA:
+            versions = shipping_versions or [version, "1.4.2"]
             entry["revisions"] = [
                 espdisp.release_catalog_revision(
-                    version, revision_build,
+                    revision_version,
                     "%s/espdisp-%s-%s.espdispfw" % (
-                        key, key,
-                        espdisp.firmware_identity(version, revision_build)),
+                        key, key, revision_version),
                     blob)
-                for revision_build in range(
-                    build, build - espdisp.RELEASE_CATALOG_REVISION_LIMIT, -1)
+                for revision_version in versions
             ]
-        if schema == espdisp.RELEASE_CATALOG_LEGACY_SCHEMA:
-            del entry["latest_build"]
         catalog["families"][key] = entry
         blobs[key] = blob
     return catalog, blobs
@@ -4119,13 +4131,15 @@ def test_release_catalog_contract():
         schema_three, "/tmp/releases", False)
     check_equal(
         len(parsed_schema_three["families"]["c6"]["revisions"]),
-        espdisp.RELEASE_CATALOG_REVISION_LIMIT,
-        "schema-3 carries five revisions")
+        2,
+        "schema-3 carries every shipping version without a fixed count")
+    check(
+        "latest_build" not in parsed_schema_three["families"]["c6"],
+        "schema-3 has no dev build alias")
     check_equal(
         parsed_schema_three["families"]["c6"]["revisions"][0],
         {
             "version": parsed_schema_three["families"]["c6"]["latest_version"],
-            "build": parsed_schema_three["families"]["c6"]["latest_build"],
             "artifact": parsed_schema_three["families"]["c6"]["artifact"],
             "sha256": parsed_schema_three["families"]["c6"]["sha256"],
             "bytes": parsed_schema_three["families"]["c6"]["bytes"],
@@ -4133,11 +4147,19 @@ def test_release_catalog_contract():
         "schema-3 latest aliases match revision zero")
     bad_schema_three = json.loads(json.dumps(schema_three))
     revisions = bad_schema_three["families"]["c6"]["revisions"]
-    revisions[1], revisions[2] = revisions[2], revisions[1]
+    revisions[1]["version"] = "1.6.0"
+    revisions[1]["artifact"] = "c6/espdisp-c6-1.6.0.espdispfw"
     check_fails(
         lambda: espdisp.validate_release_catalog(
             bad_schema_three, "/tmp/releases", False),
         "newest first", "schema-3 revisions must be ordered")
+    build_numbered = json.loads(json.dumps(schema_three))
+    build_numbered["families"]["c6"]["revisions"][0]["build"] = 192
+    check_fails(
+        lambda: espdisp.validate_release_catalog(
+            build_numbered, "/tmp/releases", False),
+        "unexpected or missing keys",
+        "schema-3 revisions reject dev build metadata")
     schema_one, _ = make_catalog_fixture(
         schema=espdisp.RELEASE_CATALOG_LEGACY_SCHEMA)
     parsed_schema_one = espdisp.validate_release_catalog(
@@ -4230,6 +4252,97 @@ def test_release_catalog_contract():
             out.write(b'{"schema":1,"schema":1,"generated_at":"x","families":{}}')
         check_fails(lambda: espdisp.load_release_catalog(path, False),
                     "duplicate key schema", "duplicate catalog member")
+
+
+def test_release_writes_only_bare_shipping_bundles():
+    with tempfile.TemporaryDirectory() as directory:
+        existing = os.path.join(
+            directory, "c6", "espdisp-c6-1.5.0+192.gabcdef0.espdispfw")
+        os.makedirs(os.path.dirname(existing), exist_ok=True)
+        with open(existing, "wb") as out:
+            out.write(b"existing dev build")
+        bundle_calls = []
+
+        def fake_bundle(args):
+            bundle_calls.append(args)
+            with open(args.output, "wb") as out:
+                out.write(("shipping-" + args.family[0]).encode("ascii"))
+            return 0
+
+        fake_catalog = {
+            "schema": espdisp.RELEASE_CATALOG_SCHEMA,
+            "generated_at": "2026-01-02T03:04:05Z",
+            "families": {},
+        }
+        args = argparse.Namespace(output_root=directory)
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle", side_effect=fake_bundle), \
+             unittest.mock.patch.object(
+                 espdisp, "release_catalog", return_value=fake_catalog) as catalog, \
+             unittest.mock.patch.object(espdisp, "write_release_catalog"):
+            check_equal(espdisp.cmd_release(args), 0, "shipping release succeeds")
+
+        check_equal(
+            [os.path.basename(call.output) for call in bundle_calls],
+            ["espdisp-c6-1.5.0.espdispfw",
+             "espdisp-s3-1.5.0.espdispfw",
+             "espdisp-p4-1.5.0.espdispfw"],
+            "release builds only bare-version artifact names")
+        check(
+            all(call.shipping and not hasattr(call, "firmware_build")
+                for call in bundle_calls),
+            "release asks bundle writer for shipping metadata only")
+        check_equal(
+            catalog.call_args.args, ("1.5.0", directory),
+            "catalog scans all retained shipping versions")
+        check(
+            os.path.isfile(existing),
+            "release leaves an already committed dev artifact untouched")
+
+
+def test_release_catalog_ignores_build_numbered_artifacts_before_reading():
+    family = espdisp.FAMILIES["c6"]
+    root = "/tmp/releases"
+    shipping = os.path.join(
+        root, "c6", "espdisp-c6-1.5.0.espdispfw")
+    dev = os.path.join(
+        root, "c6", "espdisp-c6-1.5.0+197.gfe13ee6.espdispfw")
+    data = b"shipping bundle"
+    manifest = {
+        "firmware_version": "1.5.0",
+        "images": [{
+            "chip": family.chip,
+            "targets": ["c6"],
+            "profiles": list(family.profiles),
+            "flash_sizes": list(family.flash_sizes),
+        }],
+    }
+
+    def read_shipping_only(path):
+        if path == dev:
+            raise AssertionError("dev artifact was read")
+        return data
+
+    with unittest.mock.patch.object(
+            espdisp.glob, "glob", return_value=[dev, shipping]), \
+         unittest.mock.patch.object(
+             espdisp, "read_binary", side_effect=read_shipping_only), \
+         unittest.mock.patch.object(
+             espdisp, "unpack_bundle",
+             return_value=(manifest, {"c6": b"app"}, {})):
+        revisions = espdisp.release_catalog_revisions(root, "c6")
+
+    check_equal(
+        revisions,
+        [espdisp.release_catalog_revision(
+            "1.5.0", "c6/espdisp-c6-1.5.0.espdispfw", data)],
+        "catalog discovery ignores build-numbered artifacts before reading")
 
 
 def test_canonical_usb_flash_path():
@@ -4419,6 +4532,8 @@ def main():
     test_s3_doom_build_contract()
     test_family_resolution_and_discovery()
     test_release_catalog_contract()
+    test_release_writes_only_bare_shipping_bundles()
+    test_release_catalog_ignores_build_numbered_artifacts_before_reading()
     test_canonical_usb_flash_path()
     test_doom_partition_contracts()
     test_discovery_command()

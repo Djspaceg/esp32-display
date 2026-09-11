@@ -301,7 +301,7 @@ final class UsbOnboardingAppTests: XCTestCase {
         XCTAssertFalse(reason.isEmpty)
     }
 
-    func testAnInvalidHistoricalRevisionDoesNotMakeWholeCatalogUnreadable() throws {
+    func testEveryPackagedShippingRevisionLoadsAsASelection() throws {
         let root = Self.repoRoot()
         let releaseRoot = root.appendingPathComponent(
             "firmware-releases", isDirectory: true)
@@ -326,16 +326,63 @@ final class UsbOnboardingAppTests: XCTestCase {
             resources: [fixtureCatalog] + artifactURLs)))
 
         guard case .ready(let releases) = BundledFirmware.load(in: bundle) else {
-            return XCTFail("one invalid historical revision poisoned the catalog")
+            return XCTFail("the shipping catalog did not load")
         }
-        let s3 = releases.revisions(for: "s3")
-        XCTAssertEqual(s3.count, 5)
-        XCTAssertEqual(
-            s3.filter { !$0.isAvailable }.map(\.revision.build),
-            [197])
-        XCTAssertNotNil(releases.selections["c6"])
-        XCTAssertNotNil(releases.selections["s3"])
-        XCTAssertNotNil(releases.selections["p4"])
+        for family in FirmwareReleaseCatalog.requiredFamilies {
+            let options = releases.revisions(for: family)
+            XCTAssertEqual(
+                options.count,
+                catalog.families[family]?.revisions.count,
+                family)
+            XCTAssertTrue(options.allSatisfy {
+                $0.revision.build == nil
+                    && !$0.revision.artifact.contains("+")
+                    && $0.selection.revision == $0.revision
+            }, family)
+            XCTAssertNotNil(releases.selections[family])
+        }
+    }
+
+    func testOneInvalidShippingRevisionMakesTheCatalogUnreadable() throws {
+        let root = Self.repoRoot()
+        let releaseRoot = root.appendingPathComponent(
+            "firmware-releases", isDirectory: true)
+        let sourceCatalog = releaseRoot.appendingPathComponent(
+            FirmwareReleaseCatalog.fileName)
+        let catalog = try FirmwareReleaseCatalog.read(contentsOf: sourceCatalog)
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("espdisp-resources-" + UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixtureCatalog = directory.appendingPathComponent(
+            FirmwareReleaseCatalog.fileName)
+        try Data(contentsOf: sourceCatalog).write(to: fixtureCatalog)
+
+        let firstRevision = try XCTUnwrap(
+            catalog.families["s3"]?.revisions.first)
+        let damagedURL = directory.appendingPathComponent(
+            URL(fileURLWithPath: firstRevision.artifact).lastPathComponent)
+        var damagedData = try Data(contentsOf: releaseRoot.appendingPathComponent(
+            firstRevision.artifact))
+        damagedData[damagedData.startIndex] ^= 0xFF
+        try damagedData.write(to: damagedURL)
+
+        let artifactURLs = catalog.families.values.flatMap { entry in
+            entry.revisions.map { revision in
+                revision == firstRevision
+                    ? damagedURL
+                    : releaseRoot.appendingPathComponent(revision.artifact)
+            }
+        }
+        let bundle = try XCTUnwrap(Bundle(url: makeBundleWrapper(
+            resources: [fixtureCatalog] + artifactURLs)))
+
+        guard case .unreadable(let path, let reason) = BundledFirmware.load(in: bundle)
+        else { return XCTFail("a damaged shipping revision did not fail closed") }
+        XCTAssertEqual(path, FirmwareReleaseCatalog.fileName)
+        XCTAssertFalse(reason.isEmpty)
     }
 
     func testAUniqueC6ChipResolvesTheBundledFamilyWithoutFullIdentity() throws {

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Embed every revision carried by the canonical release catalog before signing.
+# Embed every shipping revision carried by the release catalog before signing.
 set -euo pipefail
 setopt NULL_GLOB
 
@@ -35,4 +35,4 @@ for relative in "${ARTIFACTS[@]}"; do
   chmod 644 "$destination"
   echo "embedded ${relative:t} ($(stat -f %z "$source") bytes)"
 done
-echo "embedded canonical firmware catalog and ${#ARTIFACTS[@]} revision artifacts"
+echo "embedded canonical firmware catalog and ${#ARTIFACTS[@]} shipping artifacts"

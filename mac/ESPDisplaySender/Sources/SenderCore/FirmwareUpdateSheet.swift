@@ -205,6 +205,24 @@ struct FirmwareUpdatePlan: Equatable {
     }
 }
 
+/// Pure row text for the bundled revision picker, kept outside the view so the
+/// exact labels can be checked against the committed release catalog headlessly.
+enum FirmwareRevisionPresentation {
+    static func title(
+        revision: FirmwareReleaseCatalog.Revision,
+        plan: FirmwareUpdatePlan
+    ) -> String {
+        "\(identity(revision)) - \(plan.verb)"
+    }
+
+    private static func identity(
+        _ revision: FirmwareReleaseCatalog.Revision
+    ) -> String {
+        guard let build = revision.build else { return revision.version }
+        return "\(revision.version) (build \(build))"
+    }
+}
+
 /// Pure copy and ordering for the release-note section of the update sheet.
 enum FirmwareReleaseNotesPresentation: Equatable {
     case available(version: String, items: [String])
@@ -489,23 +507,9 @@ struct FirmwareUpdateSheet: View {
                         ForEach(revisionOptions) { option in
                             Text(revisionTitle(option))
                                 .tag(option.revision.artifact)
-                                .disabled(!option.isAvailable)
                         }
                     }
                     .disabled(isPushing)
-                    ForEach(revisionOptions.filter { !$0.isAvailable }) { option in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Label(
-                                "\(revisionIdentity(option.revision)) unavailable",
-                                systemImage: "exclamationmark.triangle.fill")
-                                .font(.callout)
-                                .foregroundStyle(.orange)
-                            Text(option.unavailableReason ?? "Validation failed.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
                 }
                 ForEach(bundle.images, id: \.offset) { image in
                     LabeledContent(image.targets.joined(separator: ", "),
@@ -987,9 +991,10 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func selectBundledRevision(_ artifact: String) {
-        guard let selection = revisionOptions.first(where: {
+        guard let option = revisionOptions.first(where: {
             $0.revision.artifact == artifact
-        })?.selection else { return }
+        }) else { return }
+        let selection = option.selection
         selectedRevisionArtifact = artifact
         bundle = selection.bundle
         bundleURL = selection.url
@@ -998,17 +1003,9 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func revisionTitle(_ option: BundledFirmware.RevisionOption) -> String {
-        guard let selection = option.selection else {
-            return "\(revisionIdentity(option.revision)) - Unavailable"
-        }
-        return "\(revisionIdentity(option.revision)) - \(plan(selection.bundle).verb)"
-    }
-
-    private func revisionIdentity(
-        _ revision: FirmwareReleaseCatalog.Revision
-    ) -> String {
-        guard let build = revision.build else { return revision.version }
-        return "\(revision.version) (build \(build))"
+        FirmwareRevisionPresentation.title(
+            revision: option.revision,
+            plan: plan(option.selection.bundle))
     }
 
     private func reloadAutomaticFirmwareForSelectedTransport() {
