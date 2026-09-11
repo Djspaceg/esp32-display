@@ -265,6 +265,11 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
               image.flashPart(role: "boot_app0")?.address
                 == entry.compatibility.bootApp0Address
         else { throw FirmwareReleaseCatalogError.bundleMetadataMismatch(entry.family) }
+        if ["s3", "p4"].contains(entry.family),
+           image.flashPart(role: "doom_wad") == nil {
+            throw FirmwareReleaseCatalogError.revisionMissingPayload(
+                family: entry.family, role: "doom_wad")
+        }
         guard partition == entry.compatibility.partitionScheme else {
             throw FirmwareReleaseCatalogError.revisionPartitionMismatch(
                 family: entry.family,
@@ -272,11 +277,6 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
                 found: partition)
         }
         guard bundle.flashPlan(forTarget: entry.family) != nil else {
-            if ["s3", "p4"].contains(entry.family),
-               image.flashPart(role: "doom_wad") == nil {
-                throw FirmwareReleaseCatalogError.revisionMissingPayload(
-                    family: entry.family, role: "doom_wad")
-            }
             throw FirmwareReleaseCatalogError.bundleMetadataMismatch(entry.family)
         }
         return bundle
@@ -539,6 +539,9 @@ public enum FirmwareReleaseCatalogError: Error, LocalizedError, Equatable {
         case .revisionPartitionMismatch(let family, let expected, let found):
             return "\(family) revision uses partition layout \(found); current validation requires \(expected)."
         case .revisionMissingPayload(let family, let role):
+            if role == "doom_wad" {
+                return "\(family) revision is missing the required Doom WAD (doom_wad) payload."
+            }
             return "\(family) revision does not carry the required \(role) payload."
         }
     }

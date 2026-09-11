@@ -215,6 +215,28 @@ enum FirmwareRevisionPresentation {
         "\(identity(revision)) - \(plan.verb)"
     }
 
+    static func unavailableTitle(
+        revision: FirmwareReleaseCatalog.Revision,
+        panelVersion: String?
+    ) -> String {
+        let verb = directionVerb(
+            revision: revision, panelVersion: panelVersion)
+        return "\(identity(revision)) - \(verb) - Unavailable"
+    }
+
+    private static func directionVerb(
+        revision: FirmwareReleaseCatalog.Revision,
+        panelVersion: String?
+    ) -> String {
+        guard let panelVersion else { return "Push" }
+        switch FirmwareVersion.compare(revision.version, to: panelVersion) {
+        case .newer: return "Upgrade"
+        case .same: return "Reinstall"
+        case .older: return "Downgrade"
+        case .incomparable: return "Push"
+        }
+    }
+
     private static func identity(
         _ revision: FirmwareReleaseCatalog.Revision
     ) -> String {
@@ -499,18 +521,11 @@ struct FirmwareUpdateSheet: View {
                 LabeledContent("Version", value: bundle.firmwareVersion)
                 LabeledContent("Built", value: bundle.builtAt)
                 LabeledContent("Source", value: sourceDescription(bundle))
-                if !revisionOptions.isEmpty {
-                    Picker("Revision", selection: Binding(
-                        get: { selectedRevisionArtifact },
-                        set: { selectBundledRevision($0) }
-                    )) {
-                        ForEach(revisionOptions) { option in
-                            Text(revisionTitle(option))
-                                .tag(option.revision.artifact)
-                        }
-                    }
-                    .disabled(isPushing)
-                }
+            }
+            if !revisionOptions.isEmpty {
+                revisionPicker
+            }
+            if let bundle {
                 ForEach(bundle.images, id: \.offset) { image in
                     LabeledContent(image.targets.joined(separator: ", "),
                                    value: imageDescription(image))
@@ -525,7 +540,7 @@ struct FirmwareUpdateSheet: View {
                         .font(.callout)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
-                } else {
+                } else if revisionOptions.isEmpty {
                     // Plain prose rather than markdown: these strings are built
                     // by concatenation, which selects Text's String initialiser,
                     // and that one does not parse markdown - backticks would show
@@ -536,6 +551,34 @@ struct FirmwareUpdateSheet: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var revisionPicker: some View {
+        Picker("Revision", selection: Binding(
+            get: { selectedRevisionArtifact },
+            set: { selectBundledRevision($0) }
+        )) {
+            ForEach(revisionOptions) { option in
+                Text(revisionTitle(option))
+                    .tag(option.revision.artifact)
+                    .disabled(!option.isAvailable)
+            }
+        }
+        .disabled(isPushing)
+        ForEach(revisionOptions.filter { !$0.isAvailable }) { option in
+            VStack(alignment: .leading, spacing: 3) {
+                Label(
+                    "\(option.revision.version) unavailable",
+                    systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                Text(option.unavailableReason ?? "Validation failed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -935,29 +978,40 @@ struct FirmwareUpdateSheet: View {
         switch bundledFirmware {
         case .ready(let releases):
             do {
-                let selected = try releases.selectForUpdate(
-                    live: .init(
-                        family: target.target, chip: target.chip,
-                        profile: target.profile, partition: target.partition),
-                    usb: target.usbDevice.map {
-                        .init(
-                            family: $0.target, chip: $0.chip,
-                            profile: $0.board, partition: $0.partition)
-                    },
-                    transport: selectedTransport == .usb ? .usb : .ota)
+                let live = FirmwareReleaseCatalog.Identity(
+                    family: target.target, chip: target.chip,
+                    profile: target.profile, partition: target.partition)
+                let usb = target.usbDevice.map {
+                    FirmwareReleaseCatalog.Identity(
+                        family: $0.target, chip: $0.chip,
+                        profile: $0.board, partition: $0.partition)
+                }
+                let resolved: BundledFirmware.FamilyResolution
+                do {
+                    resolved = try releases.resolveFamilyForUpdate(
+                        live: live,
+                        usb: usb,
+                        transport: selectedTransport == .usb ? .usb : .ota)
+                } catch {
+                    resolved = try releases.resolveUnavailableFamilyForUpdate(
+                        live: live, usb: usb)
+                }
                 let options = releases.revisions(
-                    for: selected.resolution.canonicalTarget)
+                    for: resolved.canonicalTarget)
                 let preferred = preferredArtifact.flatMap { artifact in
                     options.first {
                         $0.revision.artifact == artifact
                     }?.selection
                 }
-                let selection = preferred ?? selected.selection
-                bundle = selection.bundle
-                bundleURL = selection.url
-                automaticIdentity = selected.identity
+                let selection = preferred
+                    ?? options.lazy.compactMap(\.selection).first
+                bundle = selection?.bundle
+                bundleURL = selection?.url
+                automaticIdentity = resolved.identity
                 revisionOptions = options
-                selectedRevisionArtifact = selection.revision.artifact
+                selectedRevisionArtifact = selection?.revision.artifact
+                    ?? options.first?.revision.artifact
+                    ?? ""
                 readFailure = nil
             } catch {
                 bundle = nil
@@ -991,10 +1045,9 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func selectBundledRevision(_ artifact: String) {
-        guard let option = revisionOptions.first(where: {
+        guard let selection = revisionOptions.first(where: {
             $0.revision.artifact == artifact
-        }) else { return }
-        let selection = option.selection
+        })?.selection else { return }
         selectedRevisionArtifact = artifact
         bundle = selection.bundle
         bundleURL = selection.url
@@ -1003,9 +1056,14 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func revisionTitle(_ option: BundledFirmware.RevisionOption) -> String {
-        FirmwareRevisionPresentation.title(
+        guard let selection = option.selection else {
+            return FirmwareRevisionPresentation.unavailableTitle(
+                revision: option.revision,
+                panelVersion: target.firmwareVersion)
+        }
+        return FirmwareRevisionPresentation.title(
             revision: option.revision,
-            plan: plan(option.selection.bundle))
+            plan: plan(selection.bundle))
     }
 
     private func reloadAutomaticFirmwareForSelectedTransport() {

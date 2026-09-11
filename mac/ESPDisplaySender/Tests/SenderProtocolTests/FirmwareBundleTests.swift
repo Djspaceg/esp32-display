@@ -2036,14 +2036,8 @@ final class FirmwareBundleTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let catalogURL = root.appendingPathComponent("firmware-releases/manifest.json")
-        let catalog = try! FirmwareReleaseCatalog.read(contentsOf: catalogURL)
-        let entry = catalog.families["p4"]!
-        let artifactURL = root.appendingPathComponent(
-            "firmware-releases/\(entry.artifact)")
-        let bundle = try! catalog.bundle(
-            for: entry, data: Data(contentsOf: artifactURL))
-        return bundle.flashPayload(forTarget: "p4", role: "doom_wad")!
+        return try! Data(contentsOf: root.appendingPathComponent(
+            "firmware/doom/doom1.wad"))
     }()
 
     private static let p4Spec = ImageSpec(
