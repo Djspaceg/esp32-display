@@ -278,6 +278,62 @@ extension PanelManager {
         case incompatible
     }
 
+    enum USBCompatibilityIdentityIssue: Equatable, Sendable {
+        case missingChip(expected: String)
+        case chipMismatch(reported: String, expected: String)
+        case missingProfile(accepted: [String])
+        case profileMismatch(reported: String, accepted: [String])
+        case missingPartition
+        case bundlePartitionMissing
+
+        var message: String {
+            switch self {
+            case .missingChip(let expected):
+                return "CFGSHOW did not report a chip; this bundle requires \(expected)."
+            case .chipMismatch(let reported, let expected):
+                return "CFGSHOW reported chip \(reported), but this bundle requires \(expected)."
+            case .missingProfile(let accepted):
+                return "CFGSHOW did not report a board profile; this bundle accepts "
+                    + "\(accepted.joined(separator: ", "))."
+            case .profileMismatch(let reported, let accepted):
+                return "CFGSHOW reported board profile \(reported), but this bundle accepts "
+                    + "\(accepted.joined(separator: ", "))."
+            case .missingPartition:
+                return "CFGSHOW did not report the board's partition layout."
+            case .bundlePartitionMissing:
+                return "The selected current-family image does not declare its required "
+                    + "partition layout."
+            }
+        }
+    }
+
+    nonisolated static func usbCompatibilityIdentityIssue(
+        reportedChip: String?,
+        reportedProfile: String?,
+        reportedPartition: String?,
+        expectedChip: String,
+        acceptedProfiles: [String],
+        requiredPartition: String?
+    ) -> USBCompatibilityIdentityIssue? {
+        guard !acceptedProfiles.isEmpty else { return nil }
+        guard let reportedChip else {
+            return .missingChip(expected: expectedChip)
+        }
+        guard reportedChip == expectedChip else {
+            return .chipMismatch(reported: reportedChip, expected: expectedChip)
+        }
+        guard let reportedProfile else {
+            return .missingProfile(accepted: acceptedProfiles)
+        }
+        guard acceptedProfiles.contains(reportedProfile) else {
+            return .profileMismatch(
+                reported: reportedProfile, accepted: acceptedProfiles)
+        }
+        guard reportedPartition != nil else { return .missingPartition }
+        guard requiredPartition != nil else { return .bundlePartitionMissing }
+        return nil
+    }
+
     /// A full USB write can replace a partition table, but only a migration
     /// explicitly known to this app may relax the runtime partition-token check.
     nonisolated static func usbPartitionCompatibility(
@@ -369,6 +425,46 @@ extension PanelManager {
                         + "reports \(reportedTarget). Nothing was written.")
             }
         }
+        if let exactTarget = cfgTarget ?? target.target,
+           let selectedImage = bundle.image(forTarget: exactTarget),
+           let firstIssue = Self.usbCompatibilityIdentityIssue(
+               reportedChip: cfgChip,
+               reportedProfile: cfgBoard,
+               reportedPartition: cfgPartition,
+               expectedChip: selectedImage.chip,
+               acceptedProfiles: selectedImage.profiles,
+               requiredPartition: selectedImage.partition
+           ) {
+            print(
+                "USB firmware compatibility probe incomplete: "
+                    + "\(firstIssue.message) Retrying CFGSHOW.")
+            switch await probeUSBDevice(path, timeout: 3) {
+            case .unavailable(let reason):
+                print("USB firmware compatibility retry failed: \(reason)")
+            case .identified(let identity):
+                let reportedID = ConfigCommands.canonicalHardwareID(identity.hardwareID)
+                guard reportedID == expectedID
+                        || (reportedID == nil && target.usbAllowsLegacyIdentity)
+                else {
+                    return .failure(
+                        "USB device mismatch",
+                        "The device at \(path) did not report \(target.hardwareID), "
+                            + "so nothing was written.")
+                }
+                if let liveTarget = target.target,
+                   let reportedTarget = identity.target,
+                   liveTarget != reportedTarget {
+                    return .failure(
+                        "USB target mismatch",
+                        "The live panel reports target \(liveTarget), but CFGSHOW now "
+                            + "reports \(reportedTarget). Nothing was written.")
+                }
+                cfgTarget = identity.target
+                cfgBoard = identity.board
+                cfgChip = identity.chip
+                cfgPartition = identity.partition
+            }
+        }
         guard usbPathGeneration(path) == expectedGeneration else {
             return .failure(
                 "USB device changed",
@@ -444,15 +540,25 @@ extension PanelManager {
         }
         var partitionCompatibility = USBPartitionCompatibility.exact
         if !selectedImage.profiles.isEmpty {
-            guard cfgChip == detectedChip,
-                  let cfgBoard, selectedImage.profiles.contains(cfgBoard),
-                  let cfgPartition,
+            if let issue = Self.usbCompatibilityIdentityIssue(
+                reportedChip: cfgChip,
+                reportedProfile: cfgBoard,
+                reportedPartition: cfgPartition,
+                expectedChip: detectedChip,
+                acceptedProfiles: selectedImage.profiles,
+                requiredPartition: selectedImage.partition
+            ) {
+                return .failure(
+                    "USB compatibility identity mismatch",
+                    issue.message + " Nothing was written.")
+            }
+            guard let cfgPartition,
                   let requiredPartition = selectedImage.partition
             else {
                 return .failure(
-                    "USB compatibility identity incomplete",
-                    "Current family firmware requires matching CFGSHOW family, chip, "
-                        + "profile, and partition metadata before a write. Nothing was written.")
+                    "USB compatibility identity mismatch",
+                    "The partition identity could not be retained after validation. "
+                        + "Nothing was written.")
             }
             partitionCompatibility = Self.usbPartitionCompatibility(
                 target: exactTarget, chip: detectedChip,

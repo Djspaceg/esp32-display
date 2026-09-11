@@ -528,6 +528,46 @@ final class FirmwareUpdateTests: XCTestCase {
             "an unrecognised layout mismatch remains fail closed")
     }
 
+    func testUSBCompatibilityIdentityNamesTheExactFailedField() {
+        let profiles = ["co5300", "st77916"]
+        let requiredPartition = "universal-8m-doom-ota"
+        func issue(
+            chip: String? = "esp32s3",
+            profile: String? = "st77916",
+            partition: String? = "universal-8m-doom-ota",
+            required: String? = requiredPartition
+        ) -> PanelManager.USBCompatibilityIdentityIssue? {
+            PanelManager.usbCompatibilityIdentityIssue(
+                reportedChip: chip,
+                reportedProfile: profile,
+                reportedPartition: partition,
+                expectedChip: "esp32s3",
+                acceptedProfiles: profiles,
+                requiredPartition: required)
+        }
+
+        XCTAssertNil(issue())
+        XCTAssertEqual(issue(chip: nil), .missingChip(expected: "esp32s3"))
+        XCTAssertEqual(
+            issue(chip: "esp32c6"),
+            .chipMismatch(reported: "esp32c6", expected: "esp32s3"))
+        XCTAssertEqual(issue(profile: nil), .missingProfile(accepted: profiles))
+        XCTAssertEqual(
+            issue(profile: "gc9107"),
+            .profileMismatch(reported: "gc9107", accepted: profiles))
+        XCTAssertEqual(issue(partition: nil), .missingPartition)
+        XCTAssertEqual(issue(required: nil), .bundlePartitionMissing)
+        XCTAssertNil(
+            PanelManager.usbCompatibilityIdentityIssue(
+                reportedChip: nil,
+                reportedProfile: nil,
+                reportedPartition: nil,
+                expectedChip: "esp32s3",
+                acceptedProfiles: [],
+                requiredPartition: nil),
+            "legacy images without profile metadata keep their existing path")
+    }
+
     func testReleaseNotesPresentationCopyAndOrdering() throws {
         let fixtureURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

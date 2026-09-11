@@ -95,6 +95,15 @@ void serviceTouch() {
   // is not.
   touchgesture::Event held = touchTracker.tick(millis());
   if (held.gesture != touchgesture::Gesture::None && !touchConsumed) {
+    if (held.gesture == touchgesture::Gesture::LongPress &&
+        wifiSelectorActive) {
+      closeWifiSelector();
+      return;
+    }
+    if (held.gesture == touchgesture::Gesture::LongPress && surveyActive) {
+      openWifiSelector();
+      return;
+    }
     sendTouchEvent(held.gesture, held.startX, held.startY);
   }
 
@@ -145,6 +154,24 @@ void serviceTouch() {
     touchConsumed = false;
   }
   if (event.gesture == touchgesture::Gesture::None || consumed) {
+    return;
+  }
+  if (wifiSelectorActive) {
+    switch (event.gesture) {
+      case touchgesture::Gesture::SwipeUp:
+      case touchgesture::Gesture::SwipeLeft:
+        moveWifiSelector(1);
+        break;
+      case touchgesture::Gesture::SwipeDown:
+      case touchgesture::Gesture::SwipeRight:
+        moveWifiSelector(-1);
+        break;
+      case touchgesture::Gesture::Tap:
+        activateWifiSelector();
+        break;
+      default:
+        break;
+    }
     return;
   }
   // A plain tap on a lit panel shows the quick info bar, independent of and
