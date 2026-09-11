@@ -51,26 +51,6 @@ bool IRAM_ATTR onColorTransDone(esp_lcd_panel_io_handle_t,
 }
 
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-
-// Spin until fewer than `level` DMA transfers are queued. The tile draw
-// path's staging reuse gate: with two staging buffers alternating and the
-// panel's 2-deep transaction queue, dmaInFlight < 2 means the only transfer
-// possibly in flight is the OTHER buffer's, so writing this one is safe. A
-// spin, not delay(2)-polling, because the wait is tens of microseconds and
-// quantizing it to milliseconds would put a floor under the frame rate.
-bool spinUntilDmaBelow(int32_t level, uint32_t maxUs) {
-  uint32_t start = micros();
-  while (dmaInFlight >= level) {
-    if ((uint32_t)(micros() - start) > maxUs) {
-      statDrawErrors = statDrawErrors + 1;
-      dmaInFlight = 0;  // same reclaim as the loop's stall failsafe
-      return false;
-    }
-  }
-  return true;
-}
-#endif
 // Wait for queued strip DMA to finish, bounded.
 //
 // Two callers, and the second is the reason this exists. Reusing bufB needs the
@@ -93,4 +73,3 @@ void waitForDmaIdle(uint32_t maxMs) {
     dmaInFlight = 0;
   }
 }
-
