@@ -268,6 +268,74 @@ int main() {
   // --- on-device WiFi selector model -------------------------------------
   {
     using namespace wifiselector;
+    const std::string touchSource =
+        readTextFile(firmwareSourcePath("input_touch.cpp"));
+    CHECK(touchSource.find(
+              "handleWifiSelectorTap(event.startX, event.startY)") !=
+          std::string::npos);
+
+    const Rect surveyButton = surveyPresetButton(360, 360, true);
+    CHECK(surveyButton.x == 56);
+    CHECK(surveyButton.y == 264);
+    CHECK(surveyButton.width == 248);
+    CHECK(surveyButton.height == 40);
+    CHECK(surveyButton.contains(180, 284));
+    CHECK(!surveyButton.contains(180, 263));
+
+    const SelectorLayout roundLayout =
+        selectorLayout(360, 360, true, 10, 5);
+    CHECK(roundLayout.visibleCount == 3);
+    CHECK(roundLayout.firstVisible == 4);
+    CHECK(roundLayout.back.contains(80, 70));
+    CHECK(roundLayout.previous.contains(80, 284));
+    CHECK(roundLayout.next.contains(145, 284));
+    CHECK(roundLayout.connect.contains(245, 284));
+    CHECK(selectorHitTest(roundLayout, 10, 80, 70).target ==
+          HitTarget::Back);
+    CHECK(selectorHitTest(roundLayout, 10, 80, 284).target ==
+          HitTarget::Previous);
+    CHECK(selectorHitTest(roundLayout, 10, 145, 284).target ==
+          HitTarget::Next);
+    CHECK(selectorHitTest(roundLayout, 10, 245, 284).target ==
+          HitTarget::Connect);
+    const Rect firstRow = roundLayout.rowRect(0);
+    const Hit firstRowHit = selectorHitTest(
+        roundLayout, 10, firstRow.x + 5, firstRow.y + firstRow.height / 2);
+    CHECK(firstRowHit.target == HitTarget::Row);
+    CHECK(firstRowHit.rowIndex == 4);
+    CHECK(selectorHitTest(roundLayout, 10, 180, 100).target ==
+          HitTarget::None);
+
+    const SelectorLayout narrowLayout =
+        selectorLayout(172, 320, false, 10, 9);
+    CHECK(narrowLayout.visibleCount == 5);
+    CHECK(narrowLayout.firstVisible == 5);
+    CHECK(narrowLayout.rowRect(4).y + narrowLayout.rowRect(4).height <=
+          narrowLayout.previous.y);
+
+    const SelectorLayout landscapeLayout =
+        selectorLayout(320, 172, false, 10, 9);
+    CHECK(landscapeLayout.visibleCount == 4);
+    CHECK(landscapeLayout.firstVisible == 6);
+    CHECK(landscapeLayout.rowRect(3).y +
+              landscapeLayout.rowRect(3).height <=
+          landscapeLayout.previous.y);
+
+    const SelectorLayout largeLayout =
+        selectorLayout(466, 466, true, 10, 9);
+    CHECK(largeLayout.visibleCount == 4);
+    CHECK(largeLayout.firstVisible == 6);
+    CHECK(largeLayout.rowRect(3).y + largeLayout.rowRect(3).height <=
+          largeLayout.previous.y);
+
+    const Rect tinySurveyButton = surveyPresetButton(128, 128, false);
+    const SelectorLayout tinyLayout =
+        selectorLayout(128, 128, false, 10, 9);
+    CHECK(tinySurveyButton.y == 100);
+    CHECK(tinyLayout.visibleCount == 2);
+    CHECK(tinyLayout.rowRect(1).y + tinyLayout.rowRect(1).height <=
+          tinyLayout.previous.y);
+
     const uint8_t slots[] = {2, 5, 10};
     CHECK(initialIndex(slots, 3, 5) == 1);
     CHECK(initialIndex(slots, 3, 7) == 0);
