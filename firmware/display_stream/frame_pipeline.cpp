@@ -15,6 +15,7 @@
 #include "display_power.h"
 #include "dma_gate.h"
 #include "orientation.h"
+#include "panel_transfer.h"
 #include "panel_state.h"
 #include "tile_protocol.h"
 #include "ui_screens.h"
@@ -24,15 +25,13 @@ using namespace bandproto;
 
 // ---- Buffers -----------------------------------------------------------
 // bufA: persistent assembled frame, written by the UDP callback per band.
-// bufB: DMA staging - dirty strips are memcpy'd here before queueing, so
-//       SPI DMA never reads memory the network path is writing.
+// bufB: draw snapshot/composition buffer. It may live in PSRAM; S3 panel
+//       writes pass through panel_transfer's bounded internal DMA staging.
 //
 // Where they live is a per-chip fact. The C6's 110KB frames fit internal
 // DMA-capable SRAM (and the C6 has no PSRAM anyway). A 466x466 frame is
 // 434KB - two of them cannot fit the S3's 512KB SRAM, so they go to the
-// stacked PSRAM, which the S3's GDMA can read. UNVERIFIED on hardware:
-// sustained QSPI-from-PSRAM throughput and any alignment constraints need
-// measuring on a real 1.75C before this is trusted.
+// stacked PSRAM. S3 panel DMA never reads those PSRAM buffers directly.
 const uint32_t FRAME_BUF_CAPS =
     board::COMPILED_PLATFORM.usePsramFrameBuffers
         ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
@@ -78,13 +77,6 @@ static uint8_t tileScratch[TILE_RUN_MAX_BYTES] __attribute__((aligned(4)));
 // buys an obviously correct loop.
 static const size_t TILE_HALF_MAX_BYTES = (size_t)240 * 8 * 2;
 static uint8_t tileHalfScratch[TILE_HALF_MAX_BYTES] __attribute__((aligned(4)));
-// DMA staging for the draw path, double-buffered: the next run's rows are
-// gathered into one buffer while the previous run's transfer drains from
-// the other. Internal SRAM instead of the band path's full-frame PSRAM
-// bufB: phase 0 measured 340+ MB/s strided SRAM<->PSRAM against 22.3 MB/s
-// PSRAM->PSRAM (docs/tile-stream-plan.md section 11), and it keeps DMA
-// reads off PSRAM entirely.
-uint8_t tileStaging[2][TILE_RUN_MAX_BYTES] __attribute__((aligned(4)));
 static tileproto::Reassembler *tileReassembler = nullptr;
 // Tiles applied to bufA but not yet drawn. Accumulates across frames like
 // pendingDrawBitmap does (per-tile recency); guarded by drawMux.
@@ -124,7 +116,7 @@ static volatile bool tileDrainPending = false;
 // mutexed - the receive task never touches them.
 static uint32_t tdPasses = 0;       // draw passes actually taken
 static uint32_t tdCalls = 0;        // draw_bitmap calls issued
-static uint32_t tdSpinUs = 0;       // spinUntilDmaBelow, waiting on the queue
+static uint32_t tdSpinUs = 0;       // waiting for a reusable staging buffer
 static uint32_t tdGatherUs = 0;     // strided bufA -> staging memcpys
 static uint32_t tdQueueUs = 0;      // draw_bitmap itself (queues, returns)
 static uint32_t tdBarUs = 0;        // info-bar redraw over dirty rows
@@ -649,11 +641,10 @@ void fillPanel(uint16_t rgb565) {
     bufB[i] = hi;
     bufB[i + 1] = lo;
   }
-  dmaMarkQueued();  // its completion fires onColorTransDone
-  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, PANEL_W, PANEL_H, bufB) != ESP_OK) {
-    dmaUnmarkFailed();
+  if (queuePanelBitmap(panel, *bcfg, 0, 0, PANEL_W, PANEL_H, bufB) != ESP_OK) {
+    statDrawErrors = statDrawErrors + 1;
   }
-  delay(30);  // let DMA finish before bufB is reused
+  waitForDmaIdle(500);
 }
 // Reapply a pending user/motion rotation and repaint the whole screen from
 // what is already cached. Body and reasoning moved verbatim from loop().
@@ -815,12 +806,11 @@ void serviceStreamDraw() {
     const int bandRows = PANEL_GEOMETRY.rowsPerBand(landscape);
     const uint16_t totalBands = PANEL_GEOMETRY.bandCount(landscape);
 
-    // Coalesce runs of contiguous dirty bands into single DMA transfers.
-    // Contiguous bands are contiguous in memory, so a run needs just one
-    // memcpy to staging and one draw_bitmap. Staging (bufB) keeps DMA reads
-    // off the buffer the network task writes. The last band may be short
-    // (bandOffset of the end marker would overshoot the frame), so a run
-    // that reaches the end sizes itself against the frame instead.
+    // Coalesce runs of contiguous dirty bands. bufB snapshots each run away
+    // from the network task; queuePanelBitmap then copies it through bounded
+    // internal DMA staging on S3. The last band may be short (bandOffset of
+    // the end marker would overshoot the frame), so a run that reaches the
+    // end sizes itself against the frame instead.
     bool drewAny = false;
     forEachRun(bands, totalBands, [&](int runStart, int runEnd) {
       size_t off = PANEL_GEOMETRY.bandOffset((uint16_t)runStart, landscape);
@@ -831,15 +821,10 @@ void serviceStreamDraw() {
       int yEnd = runEnd * bandRows;
       if (yEnd > frameRows) yEnd = frameRows;
       memcpy(bufB + off, bufA + off, bytes);
-      dmaMarkQueued();
-      // Queues async; blocks briefly only if the 2-deep transaction queue
-      // is full. A failed queue never fires the completion callback, so
-      // roll the counter back to avoid a permanent wedge.
-      esp_err_t err = boarddisplay::drawBitmap(
+      esp_err_t err = queuePanelBitmap(
           panel, *bcfg, 0, runStart * bandRows, drawWidth, yEnd, bufB + off);
       if (err != ESP_OK) {
         statDrawErrors = statDrawErrors + 1;
-        dmaUnmarkFailed();
       } else {
         drewAny = true;
         // This run just overwrote the panel's pixels for its own row range
@@ -861,13 +846,11 @@ void serviceStreamDraw() {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
     // Tile runs (CAP_TILE_STREAM): merged horizontal rects, each one strided
     // gather from bufA into internal-SRAM staging then one clipped
-    // draw_bitmap. Staging instead of bufB for the reasons at tileStaging's
-    // declaration; double-buffered so the next run's gather overlaps the
-    // previous run's transfer. Runs never cross a tile-row (forEachRowRun),
-    // and run merging is what keeps the ~150 us fixed per-call cost paid
-    // per REGION, not per tile.
+    // draw_bitmap. The shared panel-transfer staging is double-buffered so
+    // the next run's gather overlaps the previous run's transfer. Runs never
+    // cross a tile-row (forEachRowRun), and run merging is what keeps the
+    // ~150 us fixed per-call cost paid per REGION, not per tile.
     {
-      static int tileStagingIdx = 0;
       int tileDrawCalls = 0;
       bool tileDeferred = false;
       tileproto::forEachRowRun(tiles, TILE_GEOMETRY, [&](uint16_t row,
@@ -894,13 +877,22 @@ void serviceStreamDraw() {
         if (x1 > (int)TILE_GEOMETRY.width) x1 = TILE_GEOMETRY.width;
         const int w = x1 - x0;
         const int hgt = TILE_GEOMETRY.rowHeight(row);
-        // Reusing a staging buffer requires its previous transfer done:
-        // two buffers alternating against the 2-deep queue means
-        // dmaInFlight < 2 leaves only the OTHER buffer possibly in flight.
         const uint32_t tSpin = micros();
-        spinUntilDmaBelow(2, 500000);
+        uint8_t *source = acquirePanelTransferStaging(500000);
         const uint32_t tGather = micros();
         tdSpinUs += tGather - tSpin;
+        if (source == nullptr) {
+          statDrawErrors = statDrawErrors + 1;
+          portENTER_CRITICAL(&drawMux);
+          for (uint16_t c = colStart; c < colEnd; c++) {
+            const uint16_t t =
+                (uint16_t)(row * TILE_GEOMETRY.tileCols() + c);
+            pendingTileBitmap[t >> 3] |= (uint8_t)(1 << (t & 7));
+          }
+          portEXIT_CRITICAL(&drawMux);
+          tileDeferred = true;
+          return;
+        }
         // Every run stages into internal SRAM, INCLUDING full-width ones whose
         // rows are already contiguous in bufA and could in principle be handed
         // to DMA in place. Phase 12 tried exactly that, on the reasoning that
@@ -920,10 +912,8 @@ void serviceStreamDraw() {
         // shared with the receive task's writes, while a strided SRAM copy runs
         // at 340+ MB/s and leaves the transfer reading fast memory uncontended.
         // Paying 4.2 ms to make the other 4.4 ms cheap, and to leave the radio
-        // its bandwidth. That is what tileStaging's declaration means by "keeps
-        // DMA reads off PSRAM entirely" - the load-bearing clause.
-        uint8_t *source = tileStaging[tileStagingIdx];
-        tileStagingIdx ^= 1;
+        // its bandwidth. Internal staging keeps DMA reads off PSRAM entirely -
+        // the load-bearing clause.
         for (int r = 0; r < hgt; r++) {
           memcpy(source + (size_t)r * w * 2,
                  bufA + ((size_t)(y0 + r) * drawWidth + x0) * 2,
@@ -939,6 +929,7 @@ void serviceStreamDraw() {
           statDrawErrors = statDrawErrors + 1;
           dmaUnmarkFailed();
         } else {
+          commitPanelTransferStaging();
           drewAny = true;
           tileDrawCalls++;
           tdCalls = tdCalls + 1;

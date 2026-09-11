@@ -11,12 +11,14 @@
 // against the log.
 
 #include <Arduino.h>
+#include <esp_attr.h>
 #include <esp_heap_caps.h>
 
 #include <board_config.h>
 #include <board_detect.h>
 #include <board_touch.h>
 #include <display_backend.h>
+#include <panel_transfer_plan.h>
 #include <touch_map.h>
 
 static int16_t PANEL_W = 0;
@@ -40,6 +42,9 @@ static touchmap::Calibration touchCalibration = touchmap::AXS5106L_ON_C6;
 static esp_lcd_panel_handle_t panel = nullptr;
 static uint8_t *fb = nullptr;
 static volatile int32_t dmaInFlight = 0;
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+DMA_ATTR static uint8_t dmaStaging[paneltransfer::STAGING_BYTES];
+#endif
 
 static bool IRAM_ATTR onTransDone(esp_lcd_panel_io_handle_t,
                                   esp_lcd_panel_io_event_data_t *, void *) {
@@ -62,24 +67,50 @@ static bool waitDma(uint32_t timeoutMs = 500) {
   return true;
 }
 
-static void push(int w, int h) {
+static bool pushDirect(int x0, int y0, int x1, int y1,
+                       const uint8_t *pixels) {
   dmaInFlight = dmaInFlight + 1;
-  if (boarddisplay::drawBitmap(panel, *cfg, 0, 0, w, h, fb) != ESP_OK) {
+  if (boarddisplay::drawBitmap(panel, *cfg, x0, y0, x1, y1, pixels) !=
+      ESP_OK) {
     dmaInFlight = dmaInFlight - 1;
+    return false;
+  }
+  return waitDma();
+}
+
+static bool pushPackedRect(int x0, int y0, int w, int h,
+                           const uint8_t *pixels) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  for (int rowOffset = 0; rowOffset < h;) {
+    paneltransfer::ChunkPlan chunk;
+    if (!paneltransfer::planChunk(y0, y0 + h, w,
+                                  paneltransfer::STAGING_BYTES, rowOffset,
+                                  chunk)) {
+      return false;
+    }
+    memcpy(dmaStaging, pixels + chunk.sourceOffset, chunk.byteCount);
+    if (!pushDirect(x0, chunk.y0, x0 + w, chunk.y1, dmaStaging)) {
+      return false;
+    }
+    rowOffset += chunk.y1 - chunk.y0;
+  }
+  return true;
+#else
+  return pushDirect(x0, y0, x0 + w, y0 + h, pixels);
+#endif
+}
+
+static void push(int w, int h) {
+  if (!pushPackedRect(0, 0, w, h, fb)) {
     Serial.println("  ERROR: draw_bitmap failed");
   }
-  waitDma();
 }
 
 // Push a sub-rectangle from a caller-supplied buffer. Touch feedback uses this
 // rather than redrawing the whole frame: a full push is ~13ms, which would make
 // the marker visibly lag a moving finger.
 static void pushRect(int x0, int y0, int w, int h, const uint8_t *buf) {
-  dmaInFlight = dmaInFlight + 1;
-  if (boarddisplay::drawBitmap(panel, *cfg, x0, y0, x0 + w, y0 + h, buf) != ESP_OK) {
-    dmaInFlight = dmaInFlight - 1;
-  }
-  waitDma();
+  pushPackedRect(x0, y0, w, h, buf);
 }
 
 static void fill(int w, int h, uint16_t color) {

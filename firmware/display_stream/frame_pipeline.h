@@ -2,11 +2,14 @@
 // (network task), and the draw pass (loop task). Owns drawMux and the
 // pending-band/tile bitmaps; the buffer-ownership invariant is unchanged
 // from the monolith: the receive path writes bufA, the draw path reads bufA
-// and writes bufB / the tile staging buffers.
+// and writes bufB. S3 panel transfers then pass through bounded internal DMA
+// staging (panel_transfer.h).
 #pragma once
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include <panel_transfer_plan.h>
 
 #include "band_protocol.h"
 
@@ -37,10 +40,9 @@ void handleLargeTilePacket(const uint8_t *data, size_t len);
 void handleTilePacket(const uint8_t *data, size_t len);
 
 // Sized for the widest run any roadmap square panel can produce (30 tiles x
-// 16 px x 16 rows); the 466 panel's widest is 14,912 B. Also the size of
-// the CFGBENCH staging buffer these are shared with (tile_bench.cpp).
-constexpr size_t TILE_RUN_MAX_BYTES = (size_t)480 * 16 * 2;
-extern uint8_t tileStaging[2][TILE_RUN_MAX_BYTES];
+// 16 px x 16 rows); the 466 panel's widest is 14,912 B. Decode scratch and
+// panel DMA staging intentionally share the same established upper bound.
+constexpr size_t TILE_RUN_MAX_BYTES = paneltransfer::STAGING_BYTES;
 
 // CFGTUNE knobs (serial_config.cpp); see their definitions for the
 // measurement discipline they exist for.
