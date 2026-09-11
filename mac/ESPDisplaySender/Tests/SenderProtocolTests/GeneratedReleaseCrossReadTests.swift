@@ -14,12 +14,19 @@ final class GeneratedReleaseCrossReadTests: XCTestCase {
         let catalog = try FirmwareReleaseCatalog.read(contentsOf: catalogURL)
         for family in ["c6", "s3", "p4"] {
             let entry = try XCTUnwrap(catalog.families[family])
-            let data = try Data(contentsOf: root.appendingPathComponent(
-                "firmware-releases/\(entry.artifact)"))
-            let bundle = try catalog.bundle(for: entry, data: data)
-            XCTAssertEqual(bundle.targets, [family])
-            XCTAssertEqual(bundle.firmwareBuild, entry.latestBuild)
-            XCTAssertEqual(bundle.releaseNotes?.count, 10)
+            XCTAssertFalse(entry.revisions.isEmpty)
+            XCTAssertNil(entry.latestBuild)
+            for revision in entry.revisions {
+                let data = try Data(contentsOf: root.appendingPathComponent(
+                    "firmware-releases/\(revision.artifact)"))
+                let bundle = try catalog.bundle(
+                    for: revision, in: entry, data: data)
+                XCTAssertEqual(bundle.targets, [family])
+                XCTAssertEqual(bundle.firmwareVersion, revision.version)
+                XCTAssertNil(bundle.firmwareBuild)
+                XCTAssertFalse(revision.artifact.contains("+"))
+                XCTAssertEqual(bundle.releaseNotes?.count, 10)
+            }
         }
     }
 }

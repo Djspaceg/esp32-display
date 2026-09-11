@@ -8,25 +8,50 @@ import XCTest
 
 @MainActor
 final class BundledFirmwareSelectionTests: XCTestCase {
-    func testEveryManifestRevisionIsOfferedWithoutPoisoningValidSelections() throws {
+    func testEveryShippingRevisionIsOfferedAsASelection() throws {
         let releases = try Self.releaseSet()
 
         for family in FirmwareReleaseCatalog.requiredFamilies.sorted() {
             let options = releases.revisions(for: family)
-            XCTAssertEqual(options.count, 5, family)
+            XCTAssertEqual(
+                options.count,
+                releases.catalog.families[family]?.revisions.count,
+                family)
+            XCTAssertFalse(options.isEmpty, family)
             XCTAssertEqual(
                 options.map(\.revision.artifact),
                 releases.catalog.families[family]?.revisions.map(\.artifact))
-            XCTAssertNotNil(options.first?.selection, family)
+            XCTAssertTrue(options.allSatisfy {
+                $0.revision.build == nil
+                    && !$0.revision.artifact.contains("+")
+                    && $0.selection.revision == $0.revision
+            }, family)
+            XCTAssertEqual(
+                releases.selections[family],
+                options.first?.selection,
+                family)
         }
-        XCTAssertTrue(releases.revisions(for: "c6").allSatisfy(\.isAvailable))
-        for family in ["s3", "p4"] {
-            let unavailable = releases.revisions(for: family).filter {
-                !$0.isAvailable
+    }
+
+    func testShippingRevisionRowsRenderDirectionLabelsHeadlessly() throws {
+        let releases = try Self.releaseSet()
+
+        for family in FirmwareReleaseCatalog.requiredFamilies.sorted() {
+            let entry = try XCTUnwrap(releases.catalog.families[family])
+            let rows = releases.revisions(for: family).map { option in
+                let bundle = option.selection.bundle
+                let plan = FirmwareUpdatePlan.make(
+                    bundle.availability(
+                        forTarget: family,
+                        chip: entry.chip,
+                        panelVersion: "1.5.0"),
+                    chipConfirmed: true)
+                return FirmwareRevisionPresentation.title(
+                    revision: option.revision, plan: plan)
             }
-            XCTAssertEqual(unavailable.map(\.revision.build), [197], family)
-            XCTAssertFalse(
-                try XCTUnwrap(unavailable.first?.unavailableReason).isEmpty)
+
+            XCTAssertEqual(rows.count, entry.revisions.count, family)
+            XCTAssertTrue(rows.contains("1.5.0 - Reinstall"), "\(family): \(rows)")
         }
     }
 
@@ -483,23 +508,16 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 FirmwareReleaseCatalog.fileName))
         var options = [String: [BundledFirmware.RevisionOption]]()
         for entry in catalog.families.values {
-            options[entry.family] = entry.revisions.map { revision in
+            options[entry.family] = try entry.revisions.map { revision in
                 let url = releaseRoot.appendingPathComponent(revision.artifact)
-                do {
-                    let bundle = try catalog.bundle(
-                        for: revision, in: entry,
-                        data: Data(contentsOf: url))
-                    let selection = BundledFirmware.Selection(
-                        catalogEntry: entry, revision: revision,
-                        bundle: bundle, url: url)
-                    return BundledFirmware.RevisionOption(
-                        revision: revision, selection: selection,
-                        unavailableReason: nil)
-                } catch {
-                    return BundledFirmware.RevisionOption(
-                        revision: revision, selection: nil,
-                        unavailableReason: error.localizedDescription)
-                }
+                let bundle = try catalog.bundle(
+                    for: revision, in: entry,
+                    data: Data(contentsOf: url))
+                let selection = BundledFirmware.Selection(
+                    catalogEntry: entry, revision: revision,
+                    bundle: bundle, url: url)
+                return BundledFirmware.RevisionOption(
+                    revision: revision, selection: selection)
             }
         }
         return .init(catalog: catalog, revisionOptions: options)

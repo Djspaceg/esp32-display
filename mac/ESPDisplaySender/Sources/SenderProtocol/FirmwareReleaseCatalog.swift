@@ -60,7 +60,6 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
     public static let legacySchema = 1
     public static let singleRevisionSchema = 2
     public static let currentSchema = 3
-    public static let revisionLimit = 5
     public static let requiredFamilies = Set(["c6", "s3", "p4"])
     public static let fileName = "manifest.json"
 
@@ -104,15 +103,17 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
                 "latest_version", "artifact", "sha256", "bytes", "chip",
                 "profiles", "hardware", "compatibility",
             ]
-            if schema >= singleRevisionSchema { entryKeys.insert("latest_build") }
+            if schema == singleRevisionSchema { entryKeys.insert("latest_build") }
             if schema == currentSchema { entryKeys.insert("revisions") }
             try requireKeys(raw, exactly: entryKeys, at: family)
             let version = try token(raw["latest_version"], at: "\(family).latest_version")
-            guard SemVer(version) != nil else {
+            guard SemVer(version) != nil,
+                  schema != currentSchema || !version.contains("+")
+            else {
                 throw FirmwareReleaseCatalogError.invalidVersion(family, version)
             }
             let build: UInt32?
-            if schema >= singleRevisionSchema {
+            if schema == singleRevisionSchema {
                 let value = try integer(raw["latest_build"], at: "\(family).latest_build")
                 guard value > 0, let exact = UInt32(exactly: value) else {
                     throw FirmwareReleaseCatalogError.invalidField("\(family).latest_build")
@@ -138,7 +139,7 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
             let revisions: [Revision]
             if schema == currentSchema {
                 guard let rawRevisions = raw["revisions"] as? [Any],
-                      rawRevisions.count == revisionLimit
+                      !rawRevisions.isEmpty
                 else {
                     throw FirmwareReleaseCatalogError.invalidRevisions(family)
                 }
@@ -148,12 +149,12 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
                 }
                 guard revisions.first == latestRevision,
                       Set(revisions.map(\.artifact)).count == revisions.count,
-                      Set(revisions.compactMap(\.build)).count == revisions.count,
+                      Set(revisions.map(\.version)).count == revisions.count,
                       zip(revisions, revisions.dropFirst()).allSatisfy({ pair in
-                          guard let left = pair.0.build, let right = pair.1.build else {
-                              return false
-                          }
-                          return left > right
+                          guard let left = SemVer(pair.0.version),
+                                let right = SemVer(pair.1.version)
+                          else { return false }
+                          return left.isNewer(than: right)
                       })
                 else {
                     throw FirmwareReleaseCatalogError.invalidRevisions(family)
@@ -247,7 +248,7 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
         }
         let bundle = try FirmwareBundle.read(data)
         guard bundle.firmwareVersion == revision.version,
-              revision.build == nil || bundle.firmwareBuild == revision.build,
+              bundle.firmwareBuild == revision.build,
               bundle.images.count == 1,
               bundle.targets == [entry.family],
               let image = bundle.images.first,
@@ -288,19 +289,15 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
             throw FirmwareReleaseCatalogError.invalidRevisions(family)
         }
         try requireKeys(
-            raw, exactly: ["version", "build", "artifact", "sha256", "bytes"],
+            raw, exactly: ["version", "artifact", "sha256", "bytes"],
             at: owner)
         let version = try token(raw["version"], at: "\(owner).version")
-        guard SemVer(version) != nil else {
+        guard SemVer(version) != nil, !version.contains("+") else {
             throw FirmwareReleaseCatalogError.invalidVersion(family, version)
-        }
-        let buildValue = try integer(raw["build"], at: "\(owner).build")
-        guard buildValue > 0, let build = UInt32(exactly: buildValue) else {
-            throw FirmwareReleaseCatalogError.invalidField("\(owner).build")
         }
         let artifact = try token(raw["artifact"], at: "\(owner).artifact")
         guard artifactIsCanonical(
-                artifact, family: family, version: version, build: build),
+                artifact, family: family, version: version, build: nil),
               !artifact.hasPrefix("/"), !artifact.split(separator: "/").contains("..")
         else { throw FirmwareReleaseCatalogError.invalidArtifact(family) }
         let digest = try token(raw["sha256"], at: "\(owner).sha256")
@@ -314,7 +311,7 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
             throw FirmwareReleaseCatalogError.invalidSize(family)
         }
         return Revision(
-            version: version, build: build, artifact: artifact,
+            version: version, build: nil, artifact: artifact,
             sha256: digest, byteCount: byteCount)
     }
 
@@ -460,6 +457,27 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
                 prerelease = []
             }
         }
+
+        func isNewer(than other: SemVer) -> Bool {
+            if core != other.core {
+                return other.core.lexicographicallyPrecedes(core)
+            }
+            if prerelease.isEmpty || other.prerelease.isEmpty {
+                return prerelease.isEmpty && !other.prerelease.isEmpty
+            }
+            for (left, right) in zip(prerelease, other.prerelease) {
+                if left == right { continue }
+                let leftNumber = Int(left)
+                let rightNumber = Int(right)
+                switch (leftNumber, rightNumber) {
+                case let (.some(a), .some(b)): return a > b
+                case (.some, .none): return false
+                case (.none, .some): return true
+                case (.none, .none): return left > right
+                }
+            }
+            return prerelease.count > other.prerelease.count
+        }
     }
 }
 
@@ -507,7 +525,7 @@ public enum FirmwareReleaseCatalogError: Error, LocalizedError, Equatable {
         case .invalidHash(let family): return "\(family) has an invalid SHA-256."
         case .invalidSize(let family): return "\(family) has an invalid byte count."
         case .invalidRevisions(let family):
-            return "\(family) must carry five unique revisions, newest first."
+            return "\(family) must carry unique shipping revisions, newest first."
         case .invalidHardware(let family): return "\(family) has incomplete hardware mappings."
         case .invalidCompatibility(let family): return "\(family) has invalid compatibility metadata."
         case .identityIncomplete: return "Family, chip, profile, and partition identity are required."

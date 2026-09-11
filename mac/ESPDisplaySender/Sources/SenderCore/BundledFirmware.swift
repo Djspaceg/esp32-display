@@ -26,11 +26,9 @@ enum BundledFirmware {
 
     struct RevisionOption: Equatable, Identifiable {
         let revision: FirmwareReleaseCatalog.Revision
-        let selection: Selection?
-        let unavailableReason: String?
+        let selection: Selection
 
         var id: String { revision.artifact }
-        var isAvailable: Bool { selection != nil }
     }
 
     enum UpdateTransport: Equatable {
@@ -89,7 +87,7 @@ enum BundledFirmware {
 
         var selections: [String: Selection] {
             revisionOptions.compactMapValues { options in
-                options.lazy.compactMap(\.selection).first
+                options.first?.selection
             }
         }
 
@@ -108,8 +106,7 @@ enum BundledFirmware {
             self.catalog = catalog
             self.revisionOptions = selections.mapValues { selection in
                 [RevisionOption(
-                    revision: selection.revision, selection: selection,
-                    unavailableReason: nil)]
+                    revision: selection.revision, selection: selection)]
             }
         }
 
@@ -367,21 +364,14 @@ enum BundledFirmware {
                         return .unreadable(
                             path: name, reason: "catalog artifact is missing")
                     }
-                    do {
-                        let data = try Data(contentsOf: url)
-                        let firmware = try catalog.bundle(
-                            for: revision, in: entry, data: data)
-                        options.append(RevisionOption(
-                            revision: revision,
-                            selection: Selection(
-                                catalogEntry: entry, revision: revision,
-                                bundle: firmware, url: url),
-                            unavailableReason: nil))
-                    } catch {
-                        options.append(RevisionOption(
-                            revision: revision, selection: nil,
-                            unavailableReason: error.localizedDescription))
-                    }
+                    let data = try Data(contentsOf: url)
+                    let firmware = try catalog.bundle(
+                        for: revision, in: entry, data: data)
+                    options.append(RevisionOption(
+                        revision: revision,
+                        selection: Selection(
+                            catalogEntry: entry, revision: revision,
+                            bundle: firmware, url: url)))
                 }
                 guard revisionOptions.updateValue(
                     options, forKey: entry.family) == nil
