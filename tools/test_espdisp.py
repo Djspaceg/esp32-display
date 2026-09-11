@@ -4067,7 +4067,7 @@ def test_family_resolution_and_discovery():
 
 
 def make_catalog_fixture(
-    version="1.5.0", schema=espdisp.RELEASE_CATALOG_SCHEMA, build=192
+    version="1.5.0", schema=espdisp.RELEASE_CATALOG_SINGLE_SCHEMA, build=192
 ):
     catalog = {
         "schema": schema,
@@ -4079,12 +4079,23 @@ def make_catalog_fixture(
         blob = ("bundle-%s" % key).encode("ascii")
         identity = (
             espdisp.firmware_identity(version, build)
-            if schema == espdisp.RELEASE_CATALOG_SCHEMA
+            if schema >= espdisp.RELEASE_CATALOG_SINGLE_SCHEMA
             else version
         )
         relative = "%s/espdisp-%s-%s.espdispfw" % (key, key, identity)
         entry = espdisp.release_catalog_entry(
             family, version, build, relative, blob)
+        if schema == espdisp.RELEASE_CATALOG_SCHEMA:
+            entry["revisions"] = [
+                espdisp.release_catalog_revision(
+                    version, revision_build,
+                    "%s/espdisp-%s-%s.espdispfw" % (
+                        key, key,
+                        espdisp.firmware_identity(version, revision_build)),
+                    blob)
+                for revision_build in range(
+                    build, build - espdisp.RELEASE_CATALOG_REVISION_LIMIT, -1)
+            ]
         if schema == espdisp.RELEASE_CATALOG_LEGACY_SCHEMA:
             del entry["latest_build"]
         catalog["families"][key] = entry
@@ -4102,6 +4113,31 @@ def test_release_catalog_contract():
     check_equal(
         parsed_schema_two["families"]["c6"].get("latest_build"), 192,
         "schema-2 build is preserved")
+    schema_three, _ = make_catalog_fixture(
+        schema=espdisp.RELEASE_CATALOG_SCHEMA)
+    parsed_schema_three = espdisp.validate_release_catalog(
+        schema_three, "/tmp/releases", False)
+    check_equal(
+        len(parsed_schema_three["families"]["c6"]["revisions"]),
+        espdisp.RELEASE_CATALOG_REVISION_LIMIT,
+        "schema-3 carries five revisions")
+    check_equal(
+        parsed_schema_three["families"]["c6"]["revisions"][0],
+        {
+            "version": parsed_schema_three["families"]["c6"]["latest_version"],
+            "build": parsed_schema_three["families"]["c6"]["latest_build"],
+            "artifact": parsed_schema_three["families"]["c6"]["artifact"],
+            "sha256": parsed_schema_three["families"]["c6"]["sha256"],
+            "bytes": parsed_schema_three["families"]["c6"]["bytes"],
+        },
+        "schema-3 latest aliases match revision zero")
+    bad_schema_three = json.loads(json.dumps(schema_three))
+    revisions = bad_schema_three["families"]["c6"]["revisions"]
+    revisions[1], revisions[2] = revisions[2], revisions[1]
+    check_fails(
+        lambda: espdisp.validate_release_catalog(
+            bad_schema_three, "/tmp/releases", False),
+        "newest first", "schema-3 revisions must be ordered")
     schema_one, _ = make_catalog_fixture(
         schema=espdisp.RELEASE_CATALOG_LEGACY_SCHEMA)
     parsed_schema_one = espdisp.validate_release_catalog(

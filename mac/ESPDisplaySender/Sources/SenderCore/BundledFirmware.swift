@@ -19,8 +19,18 @@ enum BundledFirmware {
 
     struct Selection: Equatable {
         let catalogEntry: FirmwareReleaseCatalog.Entry
+        let revision: FirmwareReleaseCatalog.Revision
         let bundle: FirmwareBundle
         let url: URL
+    }
+
+    struct RevisionOption: Equatable, Identifiable {
+        let revision: FirmwareReleaseCatalog.Revision
+        let selection: Selection?
+        let unavailableReason: String?
+
+        var id: String { revision.artifact }
+        var isAvailable: Bool { selection != nil }
     }
 
     enum UpdateTransport: Equatable {
@@ -75,7 +85,33 @@ enum BundledFirmware {
 
     struct ReleaseSet: Equatable {
         let catalog: FirmwareReleaseCatalog
-        let selections: [String: Selection]
+        let revisionOptions: [String: [RevisionOption]]
+
+        var selections: [String: Selection] {
+            revisionOptions.compactMapValues { options in
+                options.lazy.compactMap(\.selection).first
+            }
+        }
+
+        init(
+            catalog: FirmwareReleaseCatalog,
+            revisionOptions: [String: [RevisionOption]]
+        ) {
+            self.catalog = catalog
+            self.revisionOptions = revisionOptions
+        }
+
+        init(
+            catalog: FirmwareReleaseCatalog,
+            selections: [String: Selection]
+        ) {
+            self.catalog = catalog
+            self.revisionOptions = selections.mapValues { selection in
+                [RevisionOption(
+                    revision: selection.revision, selection: selection,
+                    unavailableReason: nil)]
+            }
+        }
 
         func select(
             family: String?, chip: String?, profile: String?, partition: String?
@@ -86,6 +122,10 @@ enum BundledFirmware {
                 throw FirmwareReleaseCatalogError.bundleMetadataMismatch(entry.family)
             }
             return selection
+        }
+
+        func revisions(for family: String) -> [RevisionOption] {
+            revisionOptions[family] ?? []
         }
 
         func selectForUpdate(
@@ -302,8 +342,10 @@ enum BundledFirmware {
             let firmwareFiles = files.filter {
                 $0.pathExtension == FirmwareBundle.fileExtension
             }
-            let expectedNames = Set(catalog.families.values.map {
-                URL(fileURLWithPath: $0.artifact).lastPathComponent
+            let expectedNames = Set(catalog.families.values.flatMap {
+                $0.revisions.map {
+                    URL(fileURLWithPath: $0.artifact).lastPathComponent
+                }
             })
             guard firmwareFiles.count == expectedNames.count,
                   Set(firmwareFiles.map(\.lastPathComponent)) == expectedNames
@@ -313,23 +355,44 @@ enum BundledFirmware {
                     reason: "embedded firmware resources do not exactly match the catalog")
             }
 
-            var selections = [String: Selection]()
+            var revisionOptions = [String: [RevisionOption]]()
             for entry in catalog.families.values {
-                let name = URL(fileURLWithPath: entry.artifact).lastPathComponent
-                guard let url = firmwareFiles.first(where: { $0.lastPathComponent == name })
-                else {
-                    return .unreadable(path: name, reason: "catalog artifact is missing")
+                var options = [RevisionOption]()
+                for revision in entry.revisions {
+                    let name = URL(
+                        fileURLWithPath: revision.artifact).lastPathComponent
+                    guard let url = firmwareFiles.first(where: {
+                        $0.lastPathComponent == name
+                    }) else {
+                        return .unreadable(
+                            path: name, reason: "catalog artifact is missing")
+                    }
+                    do {
+                        let data = try Data(contentsOf: url)
+                        let firmware = try catalog.bundle(
+                            for: revision, in: entry, data: data)
+                        options.append(RevisionOption(
+                            revision: revision,
+                            selection: Selection(
+                                catalogEntry: entry, revision: revision,
+                                bundle: firmware, url: url),
+                            unavailableReason: nil))
+                    } catch {
+                        options.append(RevisionOption(
+                            revision: revision, selection: nil,
+                            unavailableReason: error.localizedDescription))
+                    }
                 }
-                let data = try Data(contentsOf: url)
-                let firmware = try catalog.bundle(for: entry, data: data)
-                guard selections.updateValue(
-                    Selection(catalogEntry: entry, bundle: firmware, url: url),
-                    forKey: entry.family) == nil
+                guard revisionOptions.updateValue(
+                    options, forKey: entry.family) == nil
                 else {
-                    return .unreadable(path: name, reason: "duplicate family resource")
+                    return .unreadable(
+                        path: catalogURL.lastPathComponent,
+                        reason: "duplicate family resources")
                 }
             }
-            return .ready(ReleaseSet(catalog: catalog, selections: selections))
+            return .ready(ReleaseSet(
+                catalog: catalog, revisionOptions: revisionOptions))
         } catch {
             return .unreadable(
                 path: catalogURL.lastPathComponent,

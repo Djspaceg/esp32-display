@@ -8,6 +8,28 @@ import XCTest
 
 @MainActor
 final class BundledFirmwareSelectionTests: XCTestCase {
+    func testEveryManifestRevisionIsOfferedWithoutPoisoningValidSelections() throws {
+        let releases = try Self.releaseSet()
+
+        for family in FirmwareReleaseCatalog.requiredFamilies.sorted() {
+            let options = releases.revisions(for: family)
+            XCTAssertEqual(options.count, 5, family)
+            XCTAssertEqual(
+                options.map(\.revision.artifact),
+                releases.catalog.families[family]?.revisions.map(\.artifact))
+            XCTAssertNotNil(options.first?.selection, family)
+        }
+        XCTAssertTrue(releases.revisions(for: "c6").allSatisfy(\.isAvailable))
+        for family in ["s3", "p4"] {
+            let unavailable = releases.revisions(for: family).filter {
+                !$0.isAvailable
+            }
+            XCTAssertEqual(unavailable.map(\.revision.build), [197], family)
+            XCTAssertFalse(
+                try XCTUnwrap(unavailable.first?.unavailableReason).isEmpty)
+        }
+    }
+
     func testUpdatePreselectionUsesCompleteRuntimeIdentityFromMDNSOrMatchedUSB() throws {
         let releases = try Self.releaseSet()
 
@@ -459,15 +481,28 @@ final class BundledFirmwareSelectionTests: XCTestCase {
         let catalog = try FirmwareReleaseCatalog.read(
             contentsOf: releaseRoot.appendingPathComponent(
                 FirmwareReleaseCatalog.fileName))
-        var selections = [String: BundledFirmware.Selection]()
+        var options = [String: [BundledFirmware.RevisionOption]]()
         for entry in catalog.families.values {
-            let url = releaseRoot.appendingPathComponent(entry.artifact)
-            let bundle = try catalog.bundle(
-                for: entry, data: Data(contentsOf: url))
-            selections[entry.family] = .init(
-                catalogEntry: entry, bundle: bundle, url: url)
+            options[entry.family] = entry.revisions.map { revision in
+                let url = releaseRoot.appendingPathComponent(revision.artifact)
+                do {
+                    let bundle = try catalog.bundle(
+                        for: revision, in: entry,
+                        data: Data(contentsOf: url))
+                    let selection = BundledFirmware.Selection(
+                        catalogEntry: entry, revision: revision,
+                        bundle: bundle, url: url)
+                    return BundledFirmware.RevisionOption(
+                        revision: revision, selection: selection,
+                        unavailableReason: nil)
+                } catch {
+                    return BundledFirmware.RevisionOption(
+                        revision: revision, selection: nil,
+                        unavailableReason: error.localizedDescription)
+                }
+            }
         }
-        return .init(catalog: catalog, selections: selections)
+        return .init(catalog: catalog, revisionOptions: options)
     }
 
     private static func releaseSetForResolution(
