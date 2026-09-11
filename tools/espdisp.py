@@ -174,6 +174,7 @@ SKETCH_INO = os.path.join(SKETCH_DIR, "display_stream.ino")
 FW_VERSION_SOURCE = os.path.join(SKETCH_DIR, "app_state.cpp")
 RELEASE_NOTES_PATH = os.path.join(REPO_ROOT, "release-notes.md")
 RELEASE_ROOT = os.path.join(REPO_ROOT, "firmware-releases")
+DEV_ROOT = os.path.join(REPO_ROOT, "firmware-dev")
 RELEASE_CATALOG_NAME = "manifest.json"
 RELEASE_CATALOG_SCHEMA = 2
 RELEASE_CATALOG_LEGACY_SCHEMA = 1
@@ -281,6 +282,26 @@ class FirmwareBuild(NamedTuple):
 
 def firmware_identity(version: str, build: int, branch_suffix: str = "") -> str:
     return "%s+%d%s" % (version, build, branch_suffix)
+
+
+def firmware_output_root(
+    requested: Optional[str], build: Optional[FirmwareBuild]
+) -> str:
+    output_root = os.path.abspath(
+        requested or (DEV_ROOT if build is not None else RELEASE_ROOT))
+    if build is not None:
+        release_root = os.path.realpath(RELEASE_ROOT)
+        candidate = os.path.realpath(output_root)
+        try:
+            inside_release_root = (
+                os.path.commonpath([release_root, candidate]) == release_root)
+        except ValueError:
+            inside_release_root = False
+        if inside_release_root:
+            raise Fail(
+                "build-numbered firmware belongs in firmware-dev, not "
+                "firmware-releases; omit --output-root to use the development root")
+    return output_root
 
 
 def git_firmware_release_ref(repo_root: str = REPO_ROOT) -> str:
@@ -1308,9 +1329,9 @@ def git_provenance(repo_root: str = REPO_ROOT) -> Tuple[Optional[str], bool]:
     a non-zero result, so a missing git needs no special case here.
 
     `git status --porcelain` counts untracked source files as dirty. Task reports
-    under `.agents/` and generated canonical output under `firmware-releases/`
-    are excluded because neither can affect compilation; every other untracked
-    file still makes provenance dirty.
+    under `.agents/` and generated firmware output under `firmware-releases/`
+    or `firmware-dev/` are excluded because neither can affect compilation;
+    every other untracked file still makes provenance dirty.
     """
     head = run_capture(["git", "-C", repo_root, "rev-parse", "HEAD"], timeout=15.0)
     if head.returncode != 0:
@@ -1332,7 +1353,10 @@ def git_provenance(repo_root: str = REPO_ROOT) -> Tuple[Optional[str], bool]:
         path = line[3:] if len(line) >= 4 else ""
         if path == ".agents" or path.startswith(".agents/"):
             continue
-        if path == "firmware-releases" or path.startswith("firmware-releases/"):
+        if any(
+            path == root or path.startswith(root + "/")
+            for root in ("firmware-releases", "firmware-dev")
+        ):
             continue
         relevant.append(line)
     return commit, bool(relevant)
@@ -2323,7 +2347,7 @@ def cmd_release(args) -> int:
     release_notes_for_version(RELEASE_NOTES_PATH, version)
     build = git_firmware_build()
     identity = firmware_identity(version, build.number, build.branch_suffix)
-    output_root = os.path.abspath(args.output_root)
+    output_root = firmware_output_root(args.output_root, build)
     os.makedirs(output_root, exist_ok=True)
     for key in FAMILIES:
         directory = os.path.join(output_root, key)
@@ -2335,7 +2359,7 @@ def cmd_release(args) -> int:
     catalog = release_catalog(version, build, output_root)
     catalog_path = os.path.join(output_root, RELEASE_CATALOG_NAME)
     write_release_catalog(catalog_path, catalog)
-    print("\nWrote canonical release catalog %s" % catalog_path)
+    print("\nWrote firmware catalog %s" % catalog_path)
     return 0
 
 
@@ -3900,10 +3924,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_bundle.set_defaults(func=cmd_bundle)
 
     p_release = subs.add_parser(
-        "release", help="build c6, s3, and p4 as independent canonical artifacts")
+        "release", help="build c6, s3, and p4 artifacts with a catalog")
     p_release.add_argument(
-        "--output-root", default=RELEASE_ROOT,
-        help="canonical release directory (default firmware-releases)")
+        "--output-root",
+        help="artifact directory (default firmware-dev for build-numbered firmware)")
     p_release.set_defaults(func=cmd_release)
 
     p_release_info = subs.add_parser(

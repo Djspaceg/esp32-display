@@ -2603,6 +2603,13 @@ def test_git_provenance():
         espdisp, "run_capture", stub(head, done(0, "?? firmware/display_stream/new.h\n"))
     ):
         check_equal(espdisp.git_provenance("/repo")[1], True, "an untracked file is dirty")
+    with unittest.mock.patch.object(
+        espdisp, "run_capture",
+        stub(head, done(0, "?? firmware-dev/manifest.json\n"))
+    ):
+        check_equal(
+            espdisp.git_provenance("/repo")[1], False,
+            "generated development firmware does not dirty provenance")
 
     # No git, no .git, or a git that failed: null provenance rather than a
     # refusal, so an exported copy of this tool can still write a bundle.
@@ -3673,8 +3680,8 @@ def test_universal_family_catalog_and_cli():
     bundle = parser.parse_args(["bundle", "--family", "c6"])
     check_equal(bundle.family, ["c6"], "bundle requires one family")
     release = parser.parse_args(["release"])
-    check_equal(release.output_root, espdisp.RELEASE_ROOT,
-                "release defaults to canonical root")
+    check_equal(release.output_root, None,
+                "release defers its output root until build identity is known")
     for argv in (
             ["compile", "--board", "s3-175"],
             ["bundle"],
@@ -3707,6 +3714,32 @@ def test_universal_family_catalog_and_cli():
         "ESPDISP_BOARD_P4_4B", "ESPDISP_DOOM_RUNTIME")
     check(doom_with_carrier.returncode == 0,
           "P4 accepts the board-neutral Doom runtime with its carrier selector")
+
+
+def test_firmware_output_root():
+    build = espdisp.FirmwareBuild(213, ".gabcdef0")
+    check_equal(
+        espdisp.firmware_output_root(None, build),
+        espdisp.DEV_ROOT,
+        "build-numbered firmware defaults to the ignored development root")
+    check_equal(
+        espdisp.firmware_output_root(None, None),
+        espdisp.RELEASE_ROOT,
+        "bare shipping firmware defaults to the canonical release root")
+    with tempfile.TemporaryDirectory() as directory:
+        check_equal(
+            espdisp.firmware_output_root(directory, build),
+            os.path.abspath(directory),
+            "an explicit non-release output root remains available")
+    check_fails(
+        lambda: espdisp.firmware_output_root(espdisp.RELEASE_ROOT, build),
+        "build-numbered firmware belongs in firmware-dev",
+        "a development build cannot replace the committed release catalog")
+    check_fails(
+        lambda: espdisp.firmware_output_root(
+            os.path.join(espdisp.RELEASE_ROOT, "scratch"), build),
+        "build-numbered firmware belongs in firmware-dev",
+        "a development build cannot nest output under the release root")
 
 
 def test_s3_doom_build_contract():
@@ -4345,6 +4378,7 @@ def test_canonical_usb_flash_path():
                 "%s raises Fail rather than KeyError" % label)
 
 def main():
+    test_firmware_output_root()
     test_universal_family_catalog_and_cli()
     test_s3_doom_build_contract()
     test_family_resolution_and_discovery()

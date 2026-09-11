@@ -80,8 +80,12 @@ python3 tools/espdisp.py compile --family c6
 python3 tools/espdisp.py compile --family s3
 python3 tools/espdisp.py compile --family p4
 python3 tools/espdisp.py bundle --family s3
-python3 tools/espdisp.py release --output-root firmware-releases
+python3 tools/espdisp.py release
 ```
+
+`release` currently produces build-numbered development artifacts, so its
+default output is the ignored `firmware-dev/` root. Bare shipping versions
+remain committed under `firmware-releases/`; a numbered build is refused there.
 
 `mac/embed-firmware-bundle.sh` validates the canonical catalog and copies its
 three artifacts into the app before signing. `mac/make-app.sh` never compiles or

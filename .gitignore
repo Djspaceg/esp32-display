@@ -20,6 +20,8 @@ tools/__pycache__/
 # default. The .partial suffix is the sibling temp file the atomic write uses.
 *.espdispfw
 *.espdispfw.*.partial
+# Build-numbered firmware and its local catalog are reproducible dev output.
+/firmware-dev/
 # Canonical family release artifacts are source-controlled release inputs.
 !firmware-releases/
 !firmware-releases/**/
