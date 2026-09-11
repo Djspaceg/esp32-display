@@ -352,6 +352,7 @@ private struct PanelDetailView: View {
     /// Keep only actual picker changes here so a delayed device-reported SSID
     /// can replace that fallback without overwriting a deliberate user choice.
     @State private var explicitlySelectedSSID: String?
+    @State private var showingWifiPresets = false
     @State private var editedIdleText = ""
     @State private var isEditingOTAPassword = false
     @State private var otaPassword = ""
@@ -484,6 +485,9 @@ private struct PanelDetailView: View {
         }
         .sheet(item: $updateTarget) { target in
             FirmwareUpdateSheet(manager: manager, target: target)
+        }
+        .sheet(isPresented: $showingWifiPresets) {
+            WifiPresetSheet(manager: manager, panel: panel)
         }
     }
 
@@ -798,11 +802,21 @@ private struct PanelDetailView: View {
                         .savedWiFi, "Add or edit saved WiFi credentials"))
                 }
             }
+            LabeledContent("On-device picker") {
+                Button("Manage Presets...") {
+                    showingWifiPresets = true
+                }
+                .disabled(!manager.canPerform(.savedWiFi, for: panel.serviceName))
+                .help(operationHelp(
+                    .savedWiFi,
+                    "Choose which saved networks appear on this display's signal screen"))
+            }
         } header: {
             Text("Network Connection")
         } footer: {
             Text("WiFi credentials are stored in your login Keychain and applied "
-                + "to this physical display over its current USB connection.")
+                + "to this physical display over its current USB connection. "
+                + "Device presets can be selected later from the signal screen.")
         }
     }
 

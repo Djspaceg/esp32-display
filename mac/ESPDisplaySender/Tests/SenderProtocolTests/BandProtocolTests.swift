@@ -856,6 +856,59 @@ final class ConfigCommandsTests: XCTestCase {
             String(data: Data(base64Encoded: String(arg))!, encoding: .utf8), "p ss")
     }
 
+    func testSavedWifiCanPopulateDevicePresetSlot() {
+        let cmd = ConfigCommands.setWifiPreset(
+            slot: 1, ssid: "TestNet", password: "synthetic")
+        XCTAssertEqual(
+            cmd,
+            "CFGWIFISET 1 VGVzdE5ldA== c3ludGhldGlj",
+            "The app must emit the device's preset-slot command, not only legacy CFGWIFI.")
+    }
+
+    func testWifiPresetCommandsMatchDeviceSurface() {
+        XCTAssertEqual(
+            ConfigCommands.setWifiPreset(slot: 10, ssid: "Cafe", password: ""),
+            "CFGWIFISET 10 Q2FmZQ== -")
+        XCTAssertEqual(ConfigCommands.clearWifiPreset(slot: 4), "CFGWIFICLEAR 4")
+        XCTAssertEqual(ConfigCommands.useWifiPreset(slot: 2), "CFGWIFIUSE 2")
+        XCTAssertEqual(ConfigCommands.showWifiPreset(slot: 7), "CFGWIFISHOW 7")
+        XCTAssertEqual(ConfigCommands.showWifiPresets, "CFGWIFISHOW")
+        XCTAssertNil(ConfigCommands.setWifiPreset(slot: 0, ssid: "Cafe", password: ""))
+        XCTAssertNil(ConfigCommands.setWifiPreset(slot: 1, ssid: "", password: ""))
+        XCTAssertNil(ConfigCommands.setWifiPreset(
+            slot: 1, ssid: String(repeating: "s", count: 33), password: ""))
+        XCTAssertNil(ConfigCommands.setWifiPreset(
+            slot: 1, ssid: "Cafe", password: String(repeating: "p", count: 65)))
+        XCTAssertNil(ConfigCommands.clearWifiPreset(slot: 11))
+    }
+
+    func testWifiPresetRepliesParseWithoutPasswordMaterial() throws {
+        let roster = try XCTUnwrap(ConfigCommands.wifiPresetRoster(
+            from: "CFGINFO wifi capacity=10 valid=0x205 active=3 mode=preset local=1"))
+        XCTAssertEqual(roster.capacity, 10)
+        XCTAssertEqual(roster.validSlots, [1, 3, 10])
+        XCTAssertEqual(roster.activeSlot, 3)
+        XCTAssertTrue(roster.localSelectorAvailable)
+
+        let direct = try XCTUnwrap(ConfigCommands.wifiPresetRoster(
+            from: "CFGINFO wifi capacity=10 valid=0x000 active=direct mode=direct local=0"))
+        XCTAssertEqual(direct.activeSlot, nil)
+        XCTAssertFalse(direct.localSelectorAvailable)
+
+        let slot = try XCTUnwrap(ConfigCommands.wifiPresetSlot(
+            from: "CFGINFO wifi slot=10 valid=1 active=1 "
+                + "ssid64=U3RlcGhlbnMgTWFub3I= pass=set"))
+        XCTAssertEqual(slot.slot, 10)
+        XCTAssertEqual(slot.ssid, "Stephens Manor")
+        XCTAssertTrue(slot.hasPassword)
+        XCTAssertTrue(slot.active)
+
+        XCTAssertNil(ConfigCommands.wifiPresetRoster(
+            from: "CFGINFO wifi capacity=10 valid=0x001 active=2 mode=preset local=1"))
+        XCTAssertNil(ConfigCommands.wifiPresetSlot(
+            from: "CFGINFO wifi slot=1 valid=0 active=0"))
+    }
+
     // Unicode and emoji survive because everything is bytes.
     func testUnicodeSsidRoundTrips() {
         let ssid = "café 📺"
