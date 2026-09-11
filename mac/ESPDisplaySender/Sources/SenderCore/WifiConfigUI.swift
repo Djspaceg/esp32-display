@@ -3,7 +3,7 @@ import Foundation
 import Security
 import SenderProtocol
 
-struct SavedWiFiCredential: Equatable {
+struct SavedWiFiCredential: Equatable, Sendable {
     let ssid: String
     let password: String
 }
@@ -83,7 +83,7 @@ enum WifiConfigUI {
     /// Why a configuration action could not proceed, as data rather than a
     /// modal. Keeping the reason separate from its presentation is what lets
     /// the port-selection rules below be tested without hardware.
-    struct ConfigFailure: Error, Equatable {
+    struct ConfigFailure: Error, Equatable, Sendable {
         var title: String
         var message: String
     }
@@ -544,6 +544,47 @@ enum WifiConfigUI {
         case .failure(let reason):
             return .failure(ConfigFailure(title: "Configuration failed", message: reason))
         }
+    }
+
+    static func wifiPresets(
+        currentName: String,
+        preferredPort: String? = nil,
+        expectedHardwareID: String? = nil
+    ) -> Result<WifiPresetSnapshot, ConfigFailure> {
+        let port: String
+        switch matchingPort(
+            for: currentName, expectedHardwareID: expectedHardwareID,
+            preferredPort: preferredPort)
+        {
+        case .success(let resolved): port = resolved
+        case .failure(let failure): return .failure(failure)
+        }
+        return readWifiPresets(port: port)
+    }
+
+    static func syncWifiPresets(
+        _ desired: [String?],
+        currentName: String,
+        preferredPort: String? = nil,
+        expectedHardwareID: String? = nil
+    ) -> Result<WifiPresetSnapshot, ConfigFailure> {
+        var credentials: [String: SavedWiFiCredential] = [:]
+        for ssid in Set(desired.compactMap { $0 }) {
+            if let credential = WifiCredentialStore.credential(for: ssid) {
+                credentials[ssid] = credential
+            }
+        }
+
+        let port: String
+        switch matchingPort(
+            for: currentName, expectedHardwareID: expectedHardwareID,
+            preferredPort: preferredPort)
+        {
+        case .success(let resolved): port = resolved
+        case .failure(let failure): return .failure(failure)
+        }
+        return syncWifiPresets(
+            desired, credentials: credentials, port: port)
     }
 
     /// Set a panel's OTA password over USB. The panel restarts on success -

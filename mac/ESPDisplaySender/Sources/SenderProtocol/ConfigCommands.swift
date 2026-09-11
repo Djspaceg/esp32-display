@@ -4,6 +4,40 @@ import Foundation
 /// base64-encoded, which keeps spaces, emoji, and any other bytes safe in a
 /// space-delimited line.
 public enum ConfigCommands {
+    public static let wifiPresetSlotRange = 1...10
+
+    public struct WiFiPresetRoster: Equatable, Sendable {
+        public var capacity: Int
+        public var validSlots: Set<Int>
+        public var activeSlot: Int?
+        public var localSelectorAvailable: Bool
+
+        public init(
+            capacity: Int,
+            validSlots: Set<Int>,
+            activeSlot: Int?,
+            localSelectorAvailable: Bool
+        ) {
+            self.capacity = capacity
+            self.validSlots = validSlots
+            self.activeSlot = activeSlot
+            self.localSelectorAvailable = localSelectorAvailable
+        }
+    }
+
+    public struct WiFiPresetSlot: Equatable, Sendable {
+        public var slot: Int
+        public var ssid: String
+        public var hasPassword: Bool
+        public var active: Bool
+
+        public init(slot: Int, ssid: String, hasPassword: Bool, active: Bool) {
+            self.slot = slot
+            self.ssid = ssid
+            self.hasPassword = hasPassword
+            self.active = active
+        }
+    }
 
     /// What to do with the WiFi password when saving credentials.
     public enum PasswordChange: Equatable, Sendable {
@@ -29,6 +63,99 @@ public enum ConfigCommands {
         case .set(let value):
             return "CFGWIFI \(s) \(Data(value.utf8).base64EncodedString())"
         }
+    }
+
+    /// Store one complete credential in a device-side picker slot.
+    public static func setWifiPreset(
+        slot: Int, ssid: String, password: String
+    ) -> String? {
+        guard wifiPresetSlotRange.contains(slot),
+              !ssid.isEmpty,
+              ssid.utf8.count <= 32,
+              password.utf8.count <= 64,
+              !ssid.contains("\0"),
+              !password.contains("\0")
+        else { return nil }
+        let encodedSSID = Data(ssid.utf8).base64EncodedString()
+        let encodedPassword = password.isEmpty
+            ? "-"
+            : Data(password.utf8).base64EncodedString()
+        return "CFGWIFISET \(slot) \(encodedSSID) \(encodedPassword)"
+    }
+
+    public static func clearWifiPreset(slot: Int) -> String? {
+        guard wifiPresetSlotRange.contains(slot) else { return nil }
+        return "CFGWIFICLEAR \(slot)"
+    }
+
+    public static func useWifiPreset(slot: Int) -> String? {
+        guard wifiPresetSlotRange.contains(slot) else { return nil }
+        return "CFGWIFIUSE \(slot)"
+    }
+
+    public static func showWifiPreset(slot: Int) -> String? {
+        guard wifiPresetSlotRange.contains(slot) else { return nil }
+        return "CFGWIFISHOW \(slot)"
+    }
+
+    public static let showWifiPresets = "CFGWIFISHOW"
+
+    public static func wifiPresetRoster(from line: String) -> WiFiPresetRoster? {
+        guard line.hasPrefix("CFGINFO wifi "),
+              let capacityText = field("capacity=", from: line),
+              let capacity = Int(capacityText),
+              capacity == wifiPresetSlotRange.count,
+              let validText = field("valid=", from: line),
+              validText.hasPrefix("0x"),
+              let validMask = Int(validText.dropFirst(2), radix: 16),
+              validMask >= 0,
+              validMask < (1 << capacity),
+              let localText = field("local=", from: line),
+              localText == "0" || localText == "1",
+              let activeText = field("active=", from: line)
+        else { return nil }
+
+        let activeSlot: Int?
+        if activeText == "direct" {
+            activeSlot = nil
+        } else if let parsed = Int(activeText), wifiPresetSlotRange.contains(parsed) {
+            activeSlot = parsed
+        } else {
+            return nil
+        }
+
+        var validSlots = Set<Int>()
+        for slot in wifiPresetSlotRange where validMask & (1 << (slot - 1)) != 0 {
+            validSlots.insert(slot)
+        }
+        if let activeSlot, !validSlots.contains(activeSlot) { return nil }
+        return WiFiPresetRoster(
+            capacity: capacity,
+            validSlots: validSlots,
+            activeSlot: activeSlot,
+            localSelectorAvailable: localText == "1")
+    }
+
+    public static func wifiPresetSlot(from line: String) -> WiFiPresetSlot? {
+        guard line.hasPrefix("CFGINFO wifi "),
+              let slotText = field("slot=", from: line),
+              let slot = Int(slotText),
+              wifiPresetSlotRange.contains(slot),
+              field("valid=", from: line) == "1",
+              let activeText = field("active=", from: line),
+              activeText == "0" || activeText == "1",
+              let passwordText = field("pass=", from: line),
+              passwordText == "open" || passwordText == "set",
+              let ssid = decodeField("ssid64=", from: line),
+              !ssid.isEmpty,
+              ssid.utf8.count <= 32,
+              !ssid.contains("\0")
+        else { return nil }
+        return WiFiPresetSlot(
+            slot: slot,
+            ssid: ssid,
+            hasPassword: passwordText == "set",
+            active: activeText == "1")
     }
 
     public static func setName(_ name: String) -> String {
