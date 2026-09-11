@@ -94,11 +94,17 @@ duplicate JSON member names.
 A current `.espdispfw` contains one family only. Historical multi-target bundles
 remain readable but current writers never produce one.
 
-Generate all three independent artifacts and the catalog:
+Generate all three build-numbered development artifacts and their local catalog:
 
 ```sh
-python3 tools/espdisp.py release --output-root firmware-releases
+python3 tools/espdisp.py release
 ```
+
+This writes under the ignored `firmware-dev/` root. Build-numbered firmware is
+never allowed under `firmware-releases/`, so a development run cannot replace
+the committed shipping catalog with paths to ignored artifacts. Shipping cuts
+use bare versions under `firmware-releases/` after the user bumps `FW_VERSION`;
+the current build-numbered writer is development-only.
 
 Inspect each artifact independently:
 
@@ -257,6 +263,7 @@ in odd orientations remain unverified.
 | `firmware/test/` | Hardware-free ASan/UBSan host tests |
 | `tools/espdisp.py` | Build, release, inspect, flash, OTA, and serial CLI |
 | `tools/test_espdisp.py` | Python source/parser/writer/catalog tests |
+| `firmware-dev/` | Ignored build-numbered artifacts and local catalog |
 | `firmware-releases/` | Canonical committed family artifacts and catalog |
 | `mac/ESPDisplaySender/` | Native app, protocol readers, and Swift tests |
 | `docs/firmware-target-architecture.md` | Family selection and extension rules |

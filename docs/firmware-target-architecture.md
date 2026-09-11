@@ -91,11 +91,14 @@ firmware-releases/s3/espdisp-s3-1.5.0.espdispfw
 firmware-releases/p4/espdisp-p4-1.5.0.espdispfw
 ```
 
-`tools/espdisp.py release --output-root firmware-releases` builds the three
-files independently and writes the catalog last. Catalog parsing rejects
-duplicate JSON members, extra/missing families or fields, invalid SemVer,
-non-canonical or escaping paths, incompatible chip/profile/partition metadata,
-and stale file size/hash data.
+`tools/espdisp.py release` builds the three current build-numbered development
+files independently under the ignored `firmware-dev/` root and writes their
+local catalog last. It refuses to put numbered output anywhere under
+`firmware-releases/`. Bare-version shipping artifacts and their committed
+catalog remain in `firmware-releases/`. Catalog parsing rejects duplicate JSON
+members, extra/missing families or fields, invalid SemVer, non-canonical or
+escaping paths, incompatible chip/profile/partition metadata, and stale file
+size/hash data.
 
 The macOS build copies the catalog and its three referenced files directly from
 this directory before signing. It does not build firmware or maintain a second
