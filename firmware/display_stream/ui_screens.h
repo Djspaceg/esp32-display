@@ -3,6 +3,8 @@
 // remains the network path's always-current framebuffer.
 #pragma once
 
+#include <stdint.h>
+
 // Idle/status card (composed over the last frame; repositions against
 // burn-in).
 void drawIdleScreen();
@@ -10,16 +12,18 @@ void drawIdleScreen();
 // Signal survey: a live full-brightness RSSI meter (BOOT double-press or a
 // tap on the idle card).
 void drawSurveyScreen();
+bool handleSurveyTap(int16_t x, int16_t y);
 
-// Saved WiFi preset selector. Entered by holding BOOT (or touch) from the
-// signal survey. While active it owns the panel; streaming continues to fill
-// bufA but cannot overwrite the selector.
+// Saved WiFi preset selector. Entered through the visible survey button or by
+// holding BOOT/touch. While active it owns the panel; streaming continues to
+// fill bufA but cannot overwrite the selector.
 extern bool wifiSelectorActive;
 void openWifiSelector();
 void closeWifiSelector();
 void moveWifiSelector(int direction);
 void activateWifiSelector();
 void drawWifiSelectorScreen();
+void handleWifiSelectorTap(int16_t x, int16_t y);
 
 // Quick info bar: a status line across the top of a lit panel for a couple
 // of seconds after a plain tap. The row range it currently covers is public
