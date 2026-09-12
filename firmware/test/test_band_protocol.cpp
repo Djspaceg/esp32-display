@@ -4,6 +4,7 @@
 #include <array>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -30,6 +31,7 @@
 #include "../libraries/espdisp_board/src/board_config.h"
 #include "../libraries/espdisp_board/src/gt911_protocol.h"
 #include "../libraries/espdisp_board/src/motion_orientation.h"
+#include "../libraries/espdisp_board/src/panel_transfer_plan.h"
 #include "../libraries/espdisp_board/src/panel_orientation.h"
 #include "../libraries/espdisp_board/src/touch_gesture.h"
 #include "../libraries/espdisp_board/src/touch_map.h"
@@ -72,6 +74,75 @@ static std::string firmwareSourcePath(const char *relative) {
 
 int main() {
   bool dropped;
+
+  // --- bounded S3 panel DMA staging --------------------------------------
+  {
+    constexpr size_t stagingBytes = paneltransfer::STAGING_BYTES;
+    constexpr size_t st77916FrameBytes = (size_t)360 * 360 * 2;
+    // The observation's highest aggregate internal-free reading is already an
+    // upper bound on its largest INTERNAL|DMA block. The old direct PSRAM
+    // transfer therefore cannot allocate its full-frame private bounce buffer.
+    constexpr size_t observedInternalFreeUpperBound = 134556;
+    const size_t oldPrivateDmaRequest = st77916FrameBytes;
+    if (getenv("ESPDISP_TEST_OLD_SPI_DMA") != nullptr) {
+      printf("RED: old S3 policy requests %zu private DMA bytes with at most "
+             "%zu internal bytes free\n",
+             oldPrivateDmaRequest, observedInternalFreeUpperBound);
+      CHECK(oldPrivateDmaRequest <= observedInternalFreeUpperBound);
+    }
+    CHECK(oldPrivateDmaRequest > observedInternalFreeUpperBound);
+
+    struct Case {
+      int width;
+      int height;
+      int expectedChunks;
+    };
+    const Case cases[] = {
+        {128, 128, 3},
+        {240, 240, 8},
+        {360, 360, 18},
+        {466, 466, 30},
+    };
+    for (const Case &test : cases) {
+      int rowOffset = 0;
+      int chunks = 0;
+      size_t totalBytes = 0;
+      size_t largestChunk = 0;
+      while (rowOffset < test.height) {
+        paneltransfer::ChunkPlan chunk;
+        CHECK(paneltransfer::planChunk(0, test.height, test.width,
+                                       stagingBytes, rowOffset, chunk));
+        CHECK(chunk.y0 == rowOffset);
+        CHECK(chunk.y1 > chunk.y0);
+        CHECK(chunk.sourceOffset == totalBytes);
+        CHECK(chunk.byteCount <= stagingBytes);
+        if (chunk.byteCount > largestChunk) largestChunk = chunk.byteCount;
+        rowOffset += chunk.y1 - chunk.y0;
+        totalBytes += chunk.byteCount;
+        chunks++;
+      }
+      CHECK(chunks == test.expectedChunks);
+      CHECK(rowOffset == test.height);
+      CHECK(totalBytes ==
+            (size_t)test.width * test.height *
+                paneltransfer::BYTES_PER_PIXEL);
+      CHECK(largestChunk <= stagingBytes);
+    }
+
+    paneltransfer::ChunkPlan invalid;
+    CHECK(!paneltransfer::planChunk(0, 10, 0, stagingBytes, 0, invalid));
+    CHECK(!paneltransfer::planChunk(0, 10, 8000, stagingBytes, 0, invalid));
+    CHECK(!paneltransfer::planChunk(10, 10, 360, stagingBytes, 0, invalid));
+    CHECK(!paneltransfer::planChunk(0, 10, 360, stagingBytes, 10, invalid));
+
+    paneltransfer::ChunkPlan partial;
+    CHECK(paneltransfer::planChunk(37, 67, 360, stagingBytes, 0, partial));
+    CHECK(partial.y0 == 37 && partial.y1 == 58);
+    CHECK(partial.sourceOffset == 0);
+    CHECK(paneltransfer::planChunk(37, 67, 360, stagingBytes, 21, partial));
+    CHECK(partial.y0 == 58 && partial.y1 == 67);
+    CHECK(partial.sourceOffset == (size_t)21 * 360 * 2);
+  }
 
   // The serial configuration surface is user-facing protocol, but its Arduino
   // dispatcher cannot run in this host binary. Keep a runtime contract check

@@ -7,7 +7,6 @@
 #include "esp_random.h"
 
 #include <board_power.h>
-#include <display_backend.h>
 
 #include "app_state.h"
 #include "control_apply.h"
@@ -17,6 +16,7 @@
 #include "frame_pipeline.h"
 #include "glyph_draw.h"
 #include "orientation.h"
+#include "panel_transfer.h"
 #include "panel_state.h"
 #include "prefs_store.h"
 #include "telemetry.h"
@@ -177,10 +177,8 @@ void drawIdleScreen() {
     drawOutlinedText(bufB, w, hgt, x, y + i * lineH, lines[i], scale);
   }
 
-  dmaMarkQueued();
-  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
+  if (queuePanelBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaUnmarkFailed();
   }
   lastIdleDrawAt = millis();
 }
@@ -372,11 +370,8 @@ void drawWifiSelectorScreen() {
                     wifiSelectorCount > 0);
   }
 
-  dmaMarkQueued();
-  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, width, height, bufB) !=
-      ESP_OK) {
+  if (queuePanelBitmap(panel, *bcfg, 0, 0, width, height, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaUnmarkFailed();
   }
   driveBrightness(fixedBlLevel != 0 ? fixedBlLevel : 255);
 }
@@ -560,10 +555,8 @@ void drawSurveyScreen() {
                   touchAvailable ? "WIFI PRESETS" : "HOLD BOOT: PRESETS",
                   touchAvailable);
 
-  dmaMarkQueued();
-  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
+  if (queuePanelBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaUnmarkFailed();
   }
   lastSurveyDrawAt = millis();
   // Full brightness unless this installation has an explicit fixed level.
@@ -631,11 +624,9 @@ void showInfoBar(const char *text) {
       w, (int)strlen(infoBarText) * 6 * infoBarScale);
   drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
 
-  dmaMarkQueued();
-  if (boarddisplay::drawBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1,
-                                bufB + off) != ESP_OK) {
+  if (queuePanelBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1, bufB + off) !=
+      ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaUnmarkFailed();
   }
 }
 
@@ -657,11 +648,9 @@ void clearInfoBarIfExpired() {
   size_t off = (size_t)infoBarY0 * rowBytes;
   size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
   memcpy(bufB + off, bufA + off, bytes);
-  dmaMarkQueued();
-  if (boarddisplay::drawBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1,
-                                bufB + off) != ESP_OK) {
+  if (queuePanelBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1, bufB + off) !=
+      ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaUnmarkFailed();
   }
 }
 
@@ -689,11 +678,9 @@ void redrawInfoBarOverRun() {
   int textX = panelstate::centeredX(
       w, (int)strlen(infoBarText) * 6 * infoBarScale);
   drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
-  dmaMarkQueued();
-  if (boarddisplay::drawBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1,
-                                bufB + off) != ESP_OK) {
+  if (queuePanelBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1, bufB + off) !=
+      ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaUnmarkFailed();
   }
 }
 
@@ -776,10 +763,8 @@ void drawOtaScreen(const char *headline, int percent) {
     }
   }
 
-  dmaMarkQueued();
-  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
+  if (queuePanelBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
-    dmaUnmarkFailed();
   }
   // Drain before returning: the caller is about to resume writing flash.
   waitForDmaIdle(500);

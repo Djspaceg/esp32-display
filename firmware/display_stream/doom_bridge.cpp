@@ -7,8 +7,8 @@
 #include "esp_lcd_panel_ops.h"
 
 #include "app_state.h"
-#include <display_backend.h>
 #include "dma_gate.h"
+#include "panel_transfer.h"
 
 
 // Doom-enabled family images link these symbols, while callers gate entry on
@@ -41,9 +41,7 @@ extern "C" bool doom_display_blit_blocking(const uint16_t *pixels,
   doom_touch_sample();
   if (dmaInFlight != 0) return false;
 
-  dmaMarkQueued();
-  if (boarddisplay::drawBitmap(panel, *bcfg, 0, 0, width, height, pixels) != ESP_OK) {
-    dmaUnmarkFailed();
+  if (queuePanelBitmap(panel, *bcfg, 0, 0, width, height, pixels) != ESP_OK) {
     return false;
   }
 
