@@ -305,7 +305,8 @@ final class UsbOnboardingAppTests: XCTestCase {
         let releases = try Self.bundledReleaseSet()
 
         let resolution = try releases.resolveUpdate(
-            family: nil, chip: "esp32c6", profile: nil, partition: nil)
+            family: nil, chip: "esp32c6", profile: nil, partition: nil,
+            transport: .usb)
 
         guard case .familyFallback(let selection) = resolution else {
             return XCTFail("a C6 chip-only match should use the universal-family fallback")
@@ -322,7 +323,8 @@ final class UsbOnboardingAppTests: XCTestCase {
             family: "s3-175",
             chip: "esp32s3",
             profile: "co5300",
-            partition: "universal-8m-doom-ota")
+            partition: "universal-8m-doom-ota",
+            transport: .usb)
 
         guard case .familyFallback(let selection) = resolution else {
             return XCTFail("an S3 exact-target alias should still resolve the bundled s3 family")
@@ -339,7 +341,8 @@ final class UsbOnboardingAppTests: XCTestCase {
             family: "p4",
             chip: "esp32s3",
             profile: "co5300",
-            partition: "universal-8m-doom-ota")) {
+            partition: "universal-8m-doom-ota",
+            transport: .usb)) {
                 XCTAssertEqual(
                     $0 as? FirmwareReleaseCatalogError,
                     .chipMismatch(expected: "esp32p4", found: "esp32s3"))
@@ -350,7 +353,8 @@ final class UsbOnboardingAppTests: XCTestCase {
         let releases = try Self.bundledReleaseSet()
 
         let resolution = try releases.resolveUpdate(
-            family: nil, chip: "esp32p4", profile: nil, partition: nil)
+            family: nil, chip: "esp32p4", profile: nil, partition: nil,
+            transport: .usb)
 
         guard case .familyFallback(let selection) = resolution else {
             return XCTFail("a P4 chip-only match should use the family fallback")
