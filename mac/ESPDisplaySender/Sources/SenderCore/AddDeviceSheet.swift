@@ -273,6 +273,20 @@ struct AddDeviceSheet: View {
 
     private var verdictSection: some View {
         Section("What this will do") {
+            if let migration = usbPartitionMigration {
+                Label(
+                    "Partition table rewrite",
+                    systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.orange)
+                Text(
+                    "This USB flash will rewrite the partition table from "
+                        + "\(migration.from) to \(migration.to). The replacement "
+                        + "table and app are written together.")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             VStack(alignment: .leading, spacing: 6) {
                 Text(plan.headline)
                     .fontWeight(.medium)
@@ -409,7 +423,8 @@ struct AddDeviceSheet: View {
             if let identity = manager.usbReleaseIdentity(for: port),
                let resolution = try? releases.resolveUpdate(
                     family: identity.family, chip: chip,
-                    profile: identity.profile, partition: identity.partition) {
+                    profile: identity.profile, partition: identity.partition,
+                    transport: .usb) {
                 bundle = resolution.selection.bundle
                 bundleLabel = resolution.selection.url.lastPathComponent
                     + " (bundled with the app)"
@@ -430,7 +445,8 @@ struct AddDeviceSheet: View {
                 family: manager.usbTarget(for: port),
                 chip: chip,
                 profile: nil,
-                partition: nil
+                partition: nil,
+                transport: .usb
             ) {
                 // Neither complete runtime identity nor an explicit profile was
                 // available, so fall back to the one bundled family that the
@@ -534,13 +550,29 @@ struct AddDeviceSheet: View {
     }
 
     private var confirmationMessage: String {
-        var message = "Everything the board needs is written at the addresses the "
+        var message = ""
+        if let migration = usbPartitionMigration {
+            message = "This USB flash rewrites the partition table from "
+                + "\(migration.from) to \(migration.to). "
+        }
+        message += "Everything the board needs is written at the addresses the "
             + "bundle carries, which replaces whatever firmware is on it now."
         if eraseAll {
             message += " The whole chip is erased first, so any network or name "
                 + "already saved on it is lost."
         }
         return message
+    }
+
+    private var usbPartitionMigration: USBPartitionMigrationNotice? {
+        guard effectiveMode == .flashAndConfigure,
+              let current = manager.usbReleaseIdentity(for: port)?.partition,
+              let required = bundle?
+                .image(forTarget: selectedTarget)?
+                .partition,
+              current != required
+        else { return nil }
+        return USBPartitionMigrationNotice(from: current, to: required)
     }
 
     // MARK: - actions

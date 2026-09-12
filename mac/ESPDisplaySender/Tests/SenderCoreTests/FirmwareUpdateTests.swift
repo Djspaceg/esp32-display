@@ -499,33 +499,50 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertFalse(PanelManager.physicalBoard("future", isCompatibleWith: "s3-185"))
     }
 
-    func testUSBPartitionCompatibilityAllowsOnlyTheKnownS3FullFlashMigration() {
+    func testUSBPartitionCompatibilityTreatsAnyMismatchAsAFullFlashMigration() {
         XCTAssertEqual(
             PanelManager.usbPartitionCompatibility(
-                target: "s3", chip: "esp32s3",
                 reported: "universal-8m-doom-ota",
                 required: "universal-8m-doom-ota"),
             .exact)
         XCTAssertEqual(
             PanelManager.usbPartitionCompatibility(
-                target: "s3", chip: "esp32s3",
                 reported: "universal-8m-ota",
                 required: "universal-8m-doom-ota"),
             .fullFlashMigration(
                 from: "universal-8m-ota", to: "universal-8m-doom-ota"))
         XCTAssertEqual(
             PanelManager.usbPartitionCompatibility(
-                target: "s3", chip: "esp32s3",
                 reported: "universal-8m-doom-ota",
                 required: "universal-8m-ota"),
-            .incompatible,
-            "the migration is not reversible by policy")
+            .fullFlashMigration(
+                from: "universal-8m-doom-ota", to: "universal-8m-ota"))
         XCTAssertEqual(
             PanelManager.usbPartitionCompatibility(
-                target: "p4", chip: "esp32p4",
-                reported: "legacy-p4", required: "p4-32m-ota"),
-            .incompatible,
-            "an unrecognised layout mismatch remains fail closed")
+                reported: "p4-32m-ota", required: "p4-32m-doom-ota"),
+            .fullFlashMigration(
+                from: "p4-32m-ota", to: "p4-32m-doom-ota"))
+    }
+
+    func testUSBPartitionMigrationWarningNamesBothSchemesAndTheTableRewrite() {
+        let notice = USBPartitionMigrationNotice(
+            from: "universal-8m-ota",
+            to: "universal-8m-doom-ota")
+
+        XCTAssertEqual(
+            notice.planDetail,
+            "This USB flash will rewrite the partition table from "
+                + "universal-8m-ota to universal-8m-doom-ota. It writes the "
+                + "bootloader, partition table, boot_app0 and app together "
+                + "without erasing saved settings.")
+        XCTAssertEqual(
+            notice.confirmationMessage,
+            "This USB flash rewrites the partition table from universal-8m-ota "
+                + "to universal-8m-doom-ota. The bootloader, partition table, "
+                + "boot_app0 and app will be written together after the board's "
+                + "hardware ID, chip and MAC are re-verified. No whole-chip erase "
+                + "is performed, so saved WiFi, name, settings and OTA password "
+                + "remain.")
     }
 
     func testUSBCompatibilityIdentityNamesTheExactFailedField() {

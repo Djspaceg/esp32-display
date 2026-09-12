@@ -23,6 +23,11 @@ enum BundledFirmware {
         let url: URL
     }
 
+    enum UpdateTransport: Equatable {
+        case ota
+        case usb
+    }
+
     /// How an automatic update image was chosen, which decides whether the
     /// selection may also drive a USB write or only an OTA push.
     enum UpdateResolution: Equatable {
@@ -35,10 +40,15 @@ enum BundledFirmware {
         /// evidence contradicts it. The write path still re-verifies the exact
         /// target before any USB flash.
         case familyFallback(Selection)
+        /// Complete family, chip, and profile identity matched, but a full USB
+        /// flash must replace the board's current partition table with the
+        /// selected bundle's layout.
+        case partitionMigration(Selection, from: String, to: String)
 
         var selection: Selection {
             switch self {
-            case .exact(let selection), .familyFallback(let selection):
+            case .exact(let selection), .familyFallback(let selection),
+                 .partitionMigration(let selection, _, _):
                 return selection
             }
         }
@@ -80,7 +90,8 @@ enum BundledFirmware {
 
         func selectForUpdate(
             live: FirmwareReleaseCatalog.Identity,
-            usb: FirmwareReleaseCatalog.Identity?
+            usb: FirmwareReleaseCatalog.Identity?,
+            transport: UpdateTransport
         ) throws -> UpdateSelection {
             let mergedIdentity = try FirmwareReleaseCatalog.Identity(
                 family: mergedFamily(live: live.family, usb: usb?.family),
@@ -93,7 +104,8 @@ enum BundledFirmware {
                 family: mergedIdentity.family,
                 chip: mergedIdentity.chip,
                 profile: mergedIdentity.profile,
-                partition: mergedIdentity.partition)
+                partition: mergedIdentity.partition,
+                transport: transport)
             return UpdateSelection(
                 resolution: resolution,
                 identity: canonicalIdentity(
@@ -150,9 +162,13 @@ enum BundledFirmware {
         /// to exactly one bundled family, so a panel that has not yet reported
         /// full runtime identity can still preselect its shipped family image.
         /// Any chip/family/profile/partition contradiction rethrows the original
-        /// strict error rather than papering over it with a fallback.
+        /// strict error rather than papering over it with a fallback. USB is the
+        /// sole exception for complete matching identity whose partition token
+        /// differs, because that path writes the replacement table and app
+        /// together; OTA keeps the strict partition error.
         func resolveUpdate(
-            family: String?, chip: String?, profile: String?, partition: String?
+            family: String?, chip: String?, profile: String?, partition: String?,
+            transport: UpdateTransport
         ) throws -> UpdateResolution {
             do {
                 return .exact(try select(
@@ -173,7 +189,14 @@ enum BundledFirmware {
                 }
                 if let partition = Self.usable(partition),
                    partition != entry.compatibility.partitionScheme {
-                    throw strictError
+                    guard transport == .usb,
+                          Self.usable(family) != nil,
+                          Self.usable(profile) != nil
+                    else { throw strictError }
+                    return .partitionMigration(
+                        selection,
+                        from: partition,
+                        to: entry.compatibility.partitionScheme)
                 }
                 return .familyFallback(selection)
             }
@@ -183,8 +206,14 @@ enum BundledFirmware {
             from mergedIdentity: FirmwareReleaseCatalog.Identity,
             resolution: UpdateResolution
         ) -> FirmwareReleaseCatalog.Identity {
-            guard case .familyFallback(let selection) = resolution else {
+            let selection: Selection
+            switch resolution {
+            case .exact:
                 return mergedIdentity
+            case .familyFallback(let fallback):
+                selection = fallback
+            case .partitionMigration(let migration, _, _):
+                selection = migration
             }
             return .init(
                 family: selection.catalogEntry.family,
