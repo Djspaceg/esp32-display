@@ -11,6 +11,7 @@
 #include "bc1.h"
 #include "dma_gate.h"
 #include "frame_pipeline.h"
+#include "panel_transfer.h"
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 // ---- CFGBENCH: tile-stream phase-0 measurements (S3 only) ----------------
@@ -28,7 +29,7 @@ static const size_t BENCH_RUN_BYTES = (size_t)BENCH_RUN_W * BENCH_RUN_H * 2;
 // Shared with the tile draw path's staging: same size by construction, same
 // task (both run from loopTask), and the bench drains DMA around every use,
 // so the two can never race. Saves 15 KB of internal SRAM.
-static uint8_t *const benchStaging = tileStaging[0];
+static uint8_t *const benchStaging = panelTransferStaging[0];
 static_assert(BENCH_RUN_BYTES == TILE_RUN_MAX_BYTES,
               "bench and tile staging must stay the same size to share");
 

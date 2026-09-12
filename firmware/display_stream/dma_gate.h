@@ -19,10 +19,5 @@ void dmaUnmarkFailed();
 bool onColorTransDone(esp_lcd_panel_io_handle_t,
                       esp_lcd_panel_io_event_data_t *, void *);
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-// Spin until fewer than `level` DMA transfers are queued (tile staging gate).
-bool spinUntilDmaBelow(int32_t level, uint32_t maxUs);
-#endif
-
 // Wait for queued strip DMA to finish, bounded; reclaims on timeout.
 void waitForDmaIdle(uint32_t maxMs);
