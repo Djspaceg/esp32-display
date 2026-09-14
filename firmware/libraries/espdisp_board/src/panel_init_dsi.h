@@ -16,22 +16,22 @@
 
 namespace boardpaneldsi {
 
-static esp_lcd_dsi_bus_handle_t dsiBus = nullptr;
-static esp_lcd_panel_io_handle_t dbiIo = nullptr;
-static esp_ldo_channel_handle_t phyPower = nullptr;
-static esp_lcd_panel_io_color_trans_done_cb_t completion = nullptr;
-static void *completionContext = nullptr;
-static uint8_t *staging[2] = {nullptr, nullptr};
-static volatile bool stagingBusy[2] = {false, false};
-static uint8_t queue[2] = {0, 0};
-static volatile uint8_t queueHead = 0;
-static volatile uint8_t queueCount = 0;
-static portMUX_TYPE queueMux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t orientationQuadrant = 0;
-static uint16_t panelWidth = 0;
-static uint16_t panelHeight = 0;
-static int8_t backlightPin = board::NO_PIN;
-static int8_t backlightEnablePin = board::NO_PIN;
+inline esp_lcd_dsi_bus_handle_t dsiBus = nullptr;
+inline esp_lcd_panel_io_handle_t dbiIo = nullptr;
+inline esp_ldo_channel_handle_t phyPower = nullptr;
+inline esp_lcd_panel_io_color_trans_done_cb_t completion = nullptr;
+inline void *completionContext = nullptr;
+inline uint8_t *staging[2] = {nullptr, nullptr};
+inline volatile bool stagingBusy[2] = {false, false};
+inline uint8_t queue[2] = {0, 0};
+inline volatile uint8_t queueHead = 0;
+inline volatile uint8_t queueCount = 0;
+inline portMUX_TYPE queueMux = portMUX_INITIALIZER_UNLOCKED;
+inline uint8_t orientationQuadrant = 0;
+inline uint16_t panelWidth = 0;
+inline uint16_t panelHeight = 0;
+inline int8_t backlightPin = board::NO_PIN;
+inline int8_t backlightEnablePin = board::NO_PIN;
 
 static bool IRAM_ATTR onColorDone(esp_lcd_panel_handle_t,
                                   esp_lcd_dpi_panel_event_data_t *, void *) {
