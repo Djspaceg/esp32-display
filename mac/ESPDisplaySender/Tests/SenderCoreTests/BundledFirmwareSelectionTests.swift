@@ -25,19 +25,14 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 $0.revision.build == nil
                     && !$0.revision.artifact.contains("+")
             }, family)
-            if family == "c6" {
-                XCTAssertEqual(
-                    releases.selections[family],
-                    options.first?.selection,
-                    family)
-                XCTAssertTrue(options.allSatisfy(\.isAvailable), family)
-            } else {
-                XCTAssertNil(releases.selections[family], family)
-                XCTAssertTrue(options.allSatisfy { !$0.isAvailable }, family)
-                XCTAssertTrue(options.allSatisfy {
-                    $0.unavailableReason?.contains("Doom WAD") == true
-                }, family)
-            }
+            XCTAssertEqual(
+                releases.selections[family],
+                options.first?.selection,
+                family)
+            XCTAssertTrue(options.allSatisfy(\.isAvailable), family)
+            XCTAssertTrue(options.allSatisfy {
+                $0.unavailableReason == nil
+            }, family)
         }
     }
 
@@ -63,8 +58,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
             }
 
             XCTAssertEqual(rows.count, entry.revisions.count, family)
-            let suffix = family == "c6" ? "" : " - Unavailable"
-            XCTAssertEqual(rows, ["1.5.0 - Reinstall\(suffix)"], family)
+            XCTAssertEqual(rows, ["1.5.0 - Reinstall"], family)
         }
     }
 

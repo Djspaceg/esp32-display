@@ -23,8 +23,11 @@ final class ShippingRevisionIsolationTests: XCTestCase {
         for entry in catalog.families.values {
             for revision in entry.revisions {
                 let filename = URL(fileURLWithPath: revision.artifact).lastPathComponent
-                let data = try Data(contentsOf: releaseRoot.appendingPathComponent(
+                var data = try Data(contentsOf: releaseRoot.appendingPathComponent(
                     revision.artifact))
+                if entry.family != "c6" {
+                    data[data.index(before: data.endIndex)] ^= 0x01
+                }
                 try data.write(to: resources.appendingPathComponent(filename))
             }
         }
@@ -51,10 +54,8 @@ final class ShippingRevisionIsolationTests: XCTestCase {
             XCTAssertFalse(option.isAvailable, family)
             XCTAssertNil(option.selection, family)
             XCTAssertTrue(
-                try XCTUnwrap(option.unavailableReason).contains("Doom WAD"),
-                "\(family): \(String(describing: option.unavailableReason))")
-            XCTAssertTrue(
-                try XCTUnwrap(option.unavailableReason).contains("doom_wad"),
+                try XCTUnwrap(option.unavailableReason)
+                    .contains("artifact hash does not match"),
                 "\(family): \(String(describing: option.unavailableReason))")
             XCTAssertNil(releases.selections[family], family)
         }
