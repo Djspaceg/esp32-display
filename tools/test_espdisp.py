@@ -1731,6 +1731,19 @@ def test_bundle_manifest_offsets():
         "current writer adds build and release notes to required manifest keys")
     check_equal(manifest["release_notes"], GENERIC_RELEASE_NOTES,
                 "current writer preserves ordered release notes")
+    shipping = espdisp.bundle_manifest(
+        "1.2.0", None, [image_entry("c6", FAKE_C6)],
+        "2026-01-02T03:04:05Z",
+        release_notes=GENERIC_RELEASE_NOTES,
+        source_commit="a" * 40,
+        source_dirty=False)
+    check(
+        "firmware_build" not in shipping,
+        "shipping bundles omit dev build metadata")
+    check_equal(
+        sorted(shipping),
+        sorted(espdisp.MANIFEST_KEYS + ("release_notes",)),
+        "shipping writer adds no build key")
     for image in manifest["images"]:
         check_equal(
             sorted(image), sorted(espdisp.IMAGE_KEYS_V3), "no image key is missing")
@@ -3682,6 +3695,8 @@ def test_universal_family_catalog_and_cli():
     release = parser.parse_args(["release"])
     check_equal(release.output_root, None,
                 "release defers its output root until build identity is known")
+    check_equal(release.shipping, False,
+                "release defaults to development artifacts")
     for argv in (
             ["compile", "--board", "s3-175"],
             ["bundle"],
@@ -3973,18 +3988,26 @@ def test_s3_doom_build_contract():
     catalog_path = os.path.join(
         espdisp.RELEASE_ROOT, espdisp.RELEASE_CATALOG_NAME)
     catalog = espdisp.load_release_catalog(catalog_path, verify_files=True)
-    artifact_path = os.path.join(
-        espdisp.RELEASE_ROOT, catalog["families"]["s3"]["artifact"])
-    manifest, payloads, flash_payloads = espdisp.read_bundle(artifact_path)
-    check(
-        all(marker in payloads["s3"] for marker in espdisp.DOOM_APP_MARKERS),
-        "the tracked canonical S3 release snapshot contains both Doom seams")
-    check_equal(
-        manifest["images"][0]["partition"], "universal-8m-doom-ota",
-        "the packaged S3 application identifies its dual-OTA Doom layout")
-    check_equal(
-        len(flash_payloads["s3"]["doom_wad"]), espdisp._DOOM_WAD_SIZE,
-        "the tracked canonical S3 release snapshot carries the exact WAD payload")
+    for key in ("s3", "p4"):
+        family = espdisp.FAMILIES[key]
+        for revision in catalog["families"][key]["revisions"]:
+            artifact_path = os.path.join(
+                espdisp.RELEASE_ROOT, revision["artifact"])
+            manifest, payloads, flash_payloads = espdisp.unpack_bundle(
+                espdisp.read_binary(artifact_path))
+            image = manifest["images"][0]
+            wad = flash_payloads[key].get("doom_wad")
+            satisfies_doom_contract = (
+                all(marker in payloads[key] for marker in espdisp.DOOM_APP_MARKERS)
+                and image.get("partition") == family.partition_scheme
+                and wad is not None
+                and len(wad) == espdisp._DOOM_WAD_SIZE
+            )
+            check(
+                satisfies_doom_contract,
+                "%s shipping revision %s carries the Doom runtime, "
+                "doom_wad partition, and WAD payload"
+                % (key, revision["version"]))
 
 
 def test_family_resolution_and_discovery():
@@ -4067,7 +4090,8 @@ def test_family_resolution_and_discovery():
 
 
 def make_catalog_fixture(
-    version="1.5.0", schema=espdisp.RELEASE_CATALOG_SCHEMA, build=192
+    version="1.5.0", schema=espdisp.RELEASE_CATALOG_SINGLE_SCHEMA, build=192,
+    shipping_versions=None,
 ):
     catalog = {
         "schema": schema,
@@ -4079,14 +4103,23 @@ def make_catalog_fixture(
         blob = ("bundle-%s" % key).encode("ascii")
         identity = (
             espdisp.firmware_identity(version, build)
-            if schema == espdisp.RELEASE_CATALOG_SCHEMA
-            else version
-        )
+            if schema == espdisp.RELEASE_CATALOG_SINGLE_SCHEMA
+            else version)
         relative = "%s/espdisp-%s-%s.espdispfw" % (key, key, identity)
         entry = espdisp.release_catalog_entry(
-            family, version, build, relative, blob)
-        if schema == espdisp.RELEASE_CATALOG_LEGACY_SCHEMA:
-            del entry["latest_build"]
+            family, version,
+            build if schema == espdisp.RELEASE_CATALOG_SINGLE_SCHEMA else None,
+            relative, blob)
+        if schema == espdisp.RELEASE_CATALOG_SCHEMA:
+            versions = shipping_versions or [version, "1.4.2"]
+            entry["revisions"] = [
+                espdisp.release_catalog_revision(
+                    revision_version,
+                    "%s/espdisp-%s-%s.espdispfw" % (
+                        key, key, revision_version),
+                    blob)
+                for revision_version in versions
+            ]
         catalog["families"][key] = entry
         blobs[key] = blob
     return catalog, blobs
@@ -4102,6 +4135,41 @@ def test_release_catalog_contract():
     check_equal(
         parsed_schema_two["families"]["c6"].get("latest_build"), 192,
         "schema-2 build is preserved")
+    schema_three, _ = make_catalog_fixture(
+        schema=espdisp.RELEASE_CATALOG_SCHEMA)
+    parsed_schema_three = espdisp.validate_release_catalog(
+        schema_three, "/tmp/releases", False)
+    check_equal(
+        len(parsed_schema_three["families"]["c6"]["revisions"]),
+        2,
+        "schema-3 carries every shipping version without a fixed count")
+    check(
+        "latest_build" not in parsed_schema_three["families"]["c6"],
+        "schema-3 has no dev build alias")
+    check_equal(
+        parsed_schema_three["families"]["c6"]["revisions"][0],
+        {
+            "version": parsed_schema_three["families"]["c6"]["latest_version"],
+            "artifact": parsed_schema_three["families"]["c6"]["artifact"],
+            "sha256": parsed_schema_three["families"]["c6"]["sha256"],
+            "bytes": parsed_schema_three["families"]["c6"]["bytes"],
+        },
+        "schema-3 latest aliases match revision zero")
+    bad_schema_three = json.loads(json.dumps(schema_three))
+    revisions = bad_schema_three["families"]["c6"]["revisions"]
+    revisions[1]["version"] = "1.6.0"
+    revisions[1]["artifact"] = "c6/espdisp-c6-1.6.0.espdispfw"
+    check_fails(
+        lambda: espdisp.validate_release_catalog(
+            bad_schema_three, "/tmp/releases", False),
+        "newest first", "schema-3 revisions must be ordered")
+    build_numbered = json.loads(json.dumps(schema_three))
+    build_numbered["families"]["c6"]["revisions"][0]["build"] = 192
+    check_fails(
+        lambda: espdisp.validate_release_catalog(
+            build_numbered, "/tmp/releases", False),
+        "unexpected or missing keys",
+        "schema-3 revisions reject dev build metadata")
     schema_one, _ = make_catalog_fixture(
         schema=espdisp.RELEASE_CATALOG_LEGACY_SCHEMA)
     parsed_schema_one = espdisp.validate_release_catalog(
@@ -4188,12 +4256,367 @@ def test_release_catalog_contract():
             lambda: espdisp.validate_release_catalog(stale, "/tmp/releases", True),
             "bundle metadata disagrees", "catalog and bundle build mismatch")
 
+    historical, historical_blobs = make_catalog_fixture(
+        schema=espdisp.RELEASE_CATALOG_SCHEMA,
+        shipping_versions=["1.5.0"])
+
+    def read_historical(path):
+        for key in historical_blobs:
+            if ("espdisp-%s-" % key) in path:
+                return historical_blobs[key]
+        raise AssertionError("unexpected path %s" % path)
+
+    def unpack_historical(data):
+        key = next(
+            key for key, blob in historical_blobs.items() if blob == data)
+        family = espdisp.FAMILIES[key]
+        partition = (
+            "universal-8m-ota" if key == "s3"
+            else "p4-32m-ota-without-doom" if key == "p4"
+            else family.partition_scheme)
+        image = {
+            "chip": family.chip, "targets": [key],
+            "profiles": list(family.profiles),
+            "flash_sizes": list(family.flash_sizes),
+            "partition": partition,
+            "app_address": 0x10000, "bytes": len(data),
+        }
+        return (
+            {"firmware_version": "1.5.0", "images": [image]},
+            {key: data},
+            {key: {espdisp.FLASH_ROLE_PARTITIONS: b"old partition"}})
+
+    with unittest.mock.patch.object(
+            espdisp, "read_binary", side_effect=read_historical), \
+         unittest.mock.patch.object(
+             espdisp, "unpack_bundle", side_effect=unpack_historical), \
+         unittest.mock.patch.object(espdisp, "_verify_app_payload"), \
+         unittest.mock.patch.object(
+             espdisp, "_verify_partition_payload",
+             side_effect=AssertionError("historical layout was eagerly rejected")), \
+         unittest.mock.patch.object(
+             espdisp, "_verify_required_doom_flash_payload",
+             side_effect=AssertionError("historical WAD was eagerly required")):
+        check_accepts(
+            lambda: espdisp.validate_release_catalog(
+                historical, "/tmp/releases", True),
+            "catalog validation carries historical shipping layouts lazily")
+
     with tempfile.TemporaryDirectory() as directory:
         path = os.path.join(directory, "manifest.json")
         with open(path, "wb") as out:
             out.write(b'{"schema":1,"schema":1,"generated_at":"x","families":{}}')
         check_fails(lambda: espdisp.load_release_catalog(path, False),
                     "duplicate key schema", "duplicate catalog member")
+
+
+def test_release_writes_only_bare_shipping_bundles():
+    with tempfile.TemporaryDirectory() as directory:
+        existing = os.path.join(
+            directory, "c6", "espdisp-c6-1.5.0+192.gabcdef0.espdispfw")
+        os.makedirs(os.path.dirname(existing), exist_ok=True)
+        with open(existing, "wb") as out:
+            out.write(b"existing dev build")
+        bundle_calls = []
+
+        def fake_bundle(args):
+            bundle_calls.append(args)
+            with open(args.output, "wb") as out:
+                out.write(("shipping-" + args.family[0]).encode("ascii"))
+            return 0
+
+        fake_catalog = {
+            "schema": espdisp.RELEASE_CATALOG_SCHEMA,
+            "generated_at": "2026-01-02T03:04:05Z",
+            "families": {},
+        }
+        args = argparse.Namespace(output_root=directory, shipping=True)
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle", side_effect=fake_bundle), \
+             unittest.mock.patch.object(
+                 espdisp, "release_catalog", return_value=fake_catalog) as catalog, \
+             unittest.mock.patch.object(espdisp, "write_release_catalog"):
+            check_equal(espdisp.cmd_release(args), 0, "shipping release succeeds")
+
+        check_equal(
+            [os.path.basename(call.output) for call in bundle_calls],
+            ["espdisp-c6-1.5.0.espdispfw",
+             "espdisp-s3-1.5.0.espdispfw",
+             "espdisp-p4-1.5.0.espdispfw"],
+            "release builds only bare-version artifact names")
+        check(
+            all(call.shipping and not hasattr(call, "firmware_build")
+                for call in bundle_calls),
+            "release asks bundle writer for shipping metadata only")
+        check_equal(
+            catalog.call_args.args, ("1.5.0", directory),
+            "catalog scans all retained shipping versions")
+        check(
+            os.path.isfile(existing),
+            "release leaves an already committed dev artifact untouched")
+
+
+def test_release_defaults_to_build_numbered_dev_bundles():
+    with tempfile.TemporaryDirectory() as directory:
+        build = espdisp.FirmwareBuild(999, ".gabcdef0")
+        bundle_calls = []
+
+        def fake_bundle(args):
+            bundle_calls.append(args)
+            with open(args.output, "wb") as out:
+                out.write(("development-" + args.family[0]).encode("ascii"))
+            return 0
+
+        fake_catalog = {
+            "schema": espdisp.RELEASE_CATALOG_SINGLE_SCHEMA,
+            "generated_at": "2026-01-02T03:04:05Z",
+            "families": {},
+        }
+        args = argparse.Namespace(output_root=None, shipping=False)
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "git_firmware_build", return_value=build), \
+             unittest.mock.patch.object(
+                 espdisp, "firmware_output_root",
+                 return_value=directory) as output_root, \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle", side_effect=fake_bundle), \
+             unittest.mock.patch.object(
+                 espdisp, "development_release_catalog",
+                 return_value=fake_catalog) as catalog, \
+             unittest.mock.patch.object(espdisp, "write_release_catalog"):
+            check_equal(
+                espdisp.cmd_release(args), 0,
+                "default release writes development artifacts")
+
+        check_equal(
+            output_root.call_args.args, (None, build),
+            "default release resolves through the development output root")
+        check_equal(
+            [os.path.basename(call.output) for call in bundle_calls],
+            ["espdisp-c6-1.5.0+999.gabcdef0.espdispfw",
+             "espdisp-s3-1.5.0+999.gabcdef0.espdispfw",
+             "espdisp-p4-1.5.0+999.gabcdef0.espdispfw"],
+            "default release keeps build identity in development filenames")
+        check(
+            all(
+                not call.shipping and call.firmware_build == build
+                for call in bundle_calls
+            ),
+            "default release passes build metadata to every bundle")
+        check_equal(
+            catalog.call_args.args, ("1.5.0", build, directory),
+            "development catalog stays schema-2 and build-numbered")
+
+
+def test_release_refuses_to_overwrite_a_shipping_version():
+    with tempfile.TemporaryDirectory() as directory:
+        existing = os.path.join(
+            directory, "s3", "espdisp-s3-1.5.0.espdispfw")
+        os.makedirs(os.path.dirname(existing), exist_ok=True)
+        with open(existing, "wb") as out:
+            out.write(b"existing shipping release")
+        args = argparse.Namespace(output_root=directory, shipping=True)
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle",
+                 side_effect=AssertionError("existing release was rebuilt")):
+            check_fails(
+                lambda: espdisp.cmd_release(args),
+                "shipping release 1.5.0 already exists for s3; "
+                "bump FW_VERSION and update release-notes.md",
+                "release never overwrites an existing shipping version")
+        with open(existing, "rb") as source:
+            check_equal(
+                source.read(), b"existing shipping release",
+                "release leaves the existing shipping bytes untouched")
+
+
+def test_release_regenerates_only_with_exact_version_confirmation():
+    common_patches = (
+        unittest.mock.patch.object(
+            espdisp, "sketch_fw_version_declaration",
+            return_value=("1.5.0", 21)),
+        unittest.mock.patch.object(
+            espdisp, "release_notes_for_version",
+            return_value=GENERIC_RELEASE_NOTES),
+    )
+    with common_patches[0], common_patches[1], \
+         unittest.mock.patch.object(
+             espdisp, "git_firmware_build",
+             side_effect=AssertionError("invalid regeneration reached git")):
+        check_fails(
+            lambda: espdisp.cmd_release(argparse.Namespace(
+                output_root=None, shipping=False,
+                regenerate_existing="1.5.0")),
+            "--regenerate-existing requires --shipping",
+            "same-version regeneration is shipping-only")
+
+    with tempfile.TemporaryDirectory() as directory:
+        args = argparse.Namespace(
+            output_root=directory, shipping=True,
+            regenerate_existing="1.4.9")
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle",
+                 side_effect=AssertionError("mismatched version was rebuilt")):
+            check_fails(
+                lambda: espdisp.cmd_release(args),
+                "--regenerate-existing 1.4.9 does not match FW_VERSION 1.5.0",
+                "same-version regeneration confirms the exact version")
+
+    with tempfile.TemporaryDirectory() as directory:
+        args = argparse.Namespace(
+            output_root=directory, shipping=True,
+            regenerate_existing="1.5.0")
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle",
+                 side_effect=AssertionError("missing release was rebuilt")):
+            check_fails(
+                lambda: espdisp.cmd_release(args),
+                "shipping release 1.5.0 does not exist; "
+                "omit --regenerate-existing",
+                "same-version regeneration requires an existing release")
+
+    with tempfile.TemporaryDirectory() as directory:
+        existing = os.path.join(
+            directory, "s3", "espdisp-s3-1.5.0.espdispfw")
+        os.makedirs(os.path.dirname(existing), exist_ok=True)
+        with open(existing, "wb") as out:
+            out.write(b"old shipping release")
+        bundle_calls = []
+
+        def fake_bundle(args):
+            bundle_calls.append(args)
+            with open(args.output, "wb") as out:
+                out.write(("regenerated-" + args.family[0]).encode("ascii"))
+            return 0
+
+        fake_catalog = {
+            "schema": espdisp.RELEASE_CATALOG_SCHEMA,
+            "generated_at": "2026-01-02T03:04:05Z",
+            "families": {},
+        }
+        args = argparse.Namespace(
+            output_root=directory, shipping=True,
+            regenerate_existing="1.5.0")
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle", side_effect=fake_bundle), \
+             unittest.mock.patch.object(
+                 espdisp, "release_catalog", return_value=fake_catalog), \
+             unittest.mock.patch.object(espdisp, "write_release_catalog"):
+            check_equal(
+                espdisp.cmd_release(args), 0,
+                "confirmed same-version shipping regeneration succeeds")
+
+        check_equal(
+            [os.path.basename(call.output) for call in bundle_calls],
+            ["espdisp-c6-1.5.0.espdispfw",
+             "espdisp-s3-1.5.0.espdispfw",
+             "espdisp-p4-1.5.0.espdispfw"],
+            "same-version regeneration keeps bare shipping names")
+        with open(existing, "rb") as source:
+            check_equal(
+                source.read(), b"regenerated-s3",
+                "confirmed regeneration replaces existing shipping bytes")
+
+
+def test_dev_bundle_output_stays_outside_release_store():
+    output = os.path.join(
+        espdisp.RELEASE_ROOT, "c6",
+        "espdisp-c6-1.5.0+999.gabcdef0.espdispfw")
+    args = argparse.Namespace(family=["c6"], output=output)
+    with unittest.mock.patch.object(
+            espdisp, "sketch_fw_version_declaration",
+            return_value=("1.5.0", 21)), \
+         unittest.mock.patch.object(
+             espdisp, "release_notes_for_version",
+             return_value=GENERIC_RELEASE_NOTES), \
+         unittest.mock.patch.object(
+             espdisp, "git_firmware_build",
+             return_value=espdisp.FirmwareBuild(999, ".gabcdef0")), \
+         unittest.mock.patch.object(
+             espdisp, "git_provenance",
+             side_effect=AssertionError("dev output refusal ran too late")), \
+         unittest.mock.patch.object(
+             espdisp, "compile_board",
+             side_effect=AssertionError("dev output refusal compiled firmware")):
+        check_fails(
+            lambda: espdisp.cmd_bundle(args),
+            "development bundles must be written outside firmware-releases",
+            "dev bundles cannot be written into the committed release store")
+
+
+def test_release_catalog_ignores_build_numbered_artifacts_before_reading():
+    family = espdisp.FAMILIES["c6"]
+    root = "/tmp/releases"
+    shipping = os.path.join(
+        root, "c6", "espdisp-c6-1.5.0.espdispfw")
+    dev = os.path.join(
+        root, "c6", "espdisp-c6-1.5.0+197.gfe13ee6.espdispfw")
+    data = b"shipping bundle"
+    manifest = {
+        "firmware_version": "1.5.0",
+        "images": [{
+            "chip": family.chip,
+            "targets": ["c6"],
+            "profiles": list(family.profiles),
+            "flash_sizes": list(family.flash_sizes),
+        }],
+    }
+
+    def read_shipping_only(path):
+        if path == dev:
+            raise AssertionError("dev artifact was read")
+        return data
+
+    with unittest.mock.patch.object(
+            espdisp.glob, "glob", return_value=[dev, shipping]), \
+         unittest.mock.patch.object(
+             espdisp, "read_binary", side_effect=read_shipping_only), \
+         unittest.mock.patch.object(
+             espdisp, "unpack_bundle",
+             return_value=(manifest, {"c6": b"app"}, {})):
+        revisions = espdisp.release_catalog_revisions(root, "c6")
+
+    check_equal(
+        revisions,
+        [espdisp.release_catalog_revision(
+            "1.5.0", "c6/espdisp-c6-1.5.0.espdispfw", data)],
+        "catalog discovery ignores build-numbered artifacts before reading")
 
 
 def test_canonical_usb_flash_path():
@@ -4383,6 +4806,12 @@ def main():
     test_s3_doom_build_contract()
     test_family_resolution_and_discovery()
     test_release_catalog_contract()
+    test_release_writes_only_bare_shipping_bundles()
+    test_release_defaults_to_build_numbered_dev_bundles()
+    test_release_refuses_to_overwrite_a_shipping_version()
+    test_release_regenerates_only_with_exact_version_confirmation()
+    test_dev_bundle_output_stays_outside_release_store()
+    test_release_catalog_ignores_build_numbered_artifacts_before_reading()
     test_canonical_usb_flash_path()
     test_doom_partition_contracts()
     test_discovery_command()
