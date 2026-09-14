@@ -436,18 +436,81 @@ int main() {
     CHECK(displaySsid(credentials, nullptr, 0) == 0);
   }
 
-  // --- BOOT short/double-press classifier --------------------------------
+  // --- BOOT short/double-press effects -----------------------------------
   {
     using namespace buttonpress;
     DoublePressTracker tracker;
-    CHECK(tracker.record(100, 800) == ShortPressResult::Single);
-    CHECK(tracker.record(900, 800) == ShortPressResult::Double);
-    CHECK(tracker.record(1000, 800) == ShortPressResult::Single);
-    CHECK(tracker.record(1801, 800) == ShortPressResult::Single);
-    tracker.reset();
-    CHECK(tracker.record(UINT32_MAX - 100, 800) ==
-          ShortPressResult::Single);
-    CHECK(tracker.record(50, 800) == ShortPressResult::Double);
+    bool high = true;
+    bool originalHigh = high;
+    int commits = 0;
+    int doubles = 0;
+    auto apply = [&](const ShortPressDecision &decision) {
+      for (uint8_t i = 0; i < decision.count; ++i) {
+        switch (decision.effects[i]) {
+          case ShortPressEffect::Preview:
+            originalHigh = high;
+            high = !high;
+            break;
+          case ShortPressEffect::Commit:
+            commits++;
+            break;
+          case ShortPressEffect::Revert:
+            high = originalHigh;
+            break;
+          case ShortPressEffect::Double:
+            doubles++;
+            break;
+        }
+      }
+    };
+
+    apply(tracker.record(100, 800, true));
+    apply(tracker.record(900, 800, true));
+    CHECK(commits == 0);
+    CHECK(high);
+    CHECK(doubles == 1);
+
+    apply(tracker.record(1000, 800, true));
+    apply(tracker.resolve(1800, 800));
+    CHECK(commits == 0);
+    apply(tracker.resolve(1801, 800));
+    CHECK(commits == 1);
+    CHECK(!high);
+
+    tracker.flush();
+    high = true;
+    originalHigh = high;
+    commits = 0;
+    doubles = 0;
+    apply(tracker.record(UINT32_MAX - 100, 800, true));
+    apply(tracker.record(50, 800, true));
+    CHECK(commits == 0);
+    CHECK(high);
+    CHECK(doubles == 1);
+
+    tracker.flush();
+    high = true;
+    originalHigh = high;
+    commits = 0;
+    doubles = 0;
+    apply(tracker.record(2000, 800, false));
+    apply(tracker.record(2100, 800, false));
+    CHECK(commits == 0);
+    CHECK(high);
+    CHECK(doubles == 1);
+
+    tracker.flush();
+    high = true;
+    originalHigh = high;
+    commits = 0;
+    doubles = 0;
+    apply(tracker.record(3000, 800, true));
+    apply(tracker.record(3801, 800, true));
+    CHECK(commits == 1);
+    CHECK(high);
+    CHECK(doubles == 0);
+    apply(tracker.flush());
+    CHECK(commits == 2);
   }
 
   // --- WiFi preset records are whole, versioned, and corruption-checked ----

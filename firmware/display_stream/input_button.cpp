@@ -33,9 +33,10 @@ static const uint32_t EXTRA_LONG_PRESS_MS = 3000;
 // Two short presses within this window toggle the signal survey - the one
 // panel-side action that must be reachable MID-STREAM (its whole job is
 // walking an actively-failing panel to better air), so it cannot live on the
-// idle card, and all three single-press tiers are taken. The two presses'
-// backlight toggles cancel each other, so the double-press costs nothing but
-// a blink - which doubles as feedback.
+// idle card, and all three single-press tiers are taken. The first release
+// previews its backlight toggle immediately; the second restores the original
+// level, so the double-press costs nothing but a blink - which doubles as
+// feedback. A lone preview is persisted after this window closes.
 static const uint32_t DOUBLE_PRESS_MS = 800;
 static const uint32_t DEBOUNCE_MS = 30;
 
@@ -55,6 +56,7 @@ static volatile bool haveBootEdge = false;
 static gpio_num_t bootButtonPin = GPIO_NUM_NC;
 static portMUX_TYPE bootButtonMux = portMUX_INITIALIZER_UNLOCKED;
 static buttonpress::DoublePressTracker shortPressTracker;
+static uint8_t shortPressPreviewOriginalBlLevel = 0;
 
 static uint32_t buttonClockMs() {
   return (uint32_t)xTaskGetTickCount() * (uint32_t)portTICK_PERIOD_MS;
@@ -124,6 +126,36 @@ static void setSignalSurvey(bool active) {
   }
 }
 
+static void applyShortPressDecision(
+    const buttonpress::ShortPressDecision &decision) {
+  for (uint8_t i = 0; i < decision.count; ++i) {
+    switch (decision.effects[i]) {
+      case buttonpress::ShortPressEffect::Preview:
+        shortPressPreviewOriginalBlLevel = userBlLevel;
+        userBlLevel = blIsHigh() ? BL_LOW : BL_HIGH;
+        applyBacklight();
+        Serial.printf("button: short press -> backlight %s (save pending)\n",
+                      blIsHigh() ? "high" : "low");
+        break;
+      case buttonpress::ShortPressEffect::Commit:
+        saveDisplayPrefs();
+        Serial.printf("button: short press -> backlight %s (saved)\n",
+                      blIsHigh() ? "high" : "low");
+        break;
+      case buttonpress::ShortPressEffect::Revert:
+        userBlLevel = shortPressPreviewOriginalBlLevel;
+        applyBacklight();
+        Serial.printf(
+            "button: double press -> backlight %s restored (not saved)\n",
+            blIsHigh() ? "high" : "low");
+        break;
+      case buttonpress::ShortPressEffect::Double:
+        setSignalSurvey(!surveyActive);
+        break;
+    }
+  }
+}
+
 static void handleShortRelease(uint32_t releasedAt) {
 #if defined(ESPDISP_DOOM_RUNTIME)
   // Enter through a one-shot reboot rather than tearing down a live stream.
@@ -151,21 +183,13 @@ static void handleShortRelease(uint32_t releasedAt) {
   }
 #endif
 
-  if (fixedBlLevel == 0) {
-    userBlLevel = blIsHigh() ? BL_LOW : BL_HIGH;
-    applyBacklight();
-    saveDisplayPrefs();
-    Serial.printf("button: short press -> backlight %s (saved)\n",
-                  blIsHigh() ? "high" : "low");
-  } else {
+  const bool previewEnabled = fixedBlLevel == 0;
+  if (!previewEnabled) {
     Serial.printf("button: short press ignored (backlight fixed at %u)\n",
                   fixedBlLevel);
   }
-
-  if (shortPressTracker.record(releasedAt, DOUBLE_PRESS_MS) ==
-      buttonpress::ShortPressResult::Double) {
-    setSignalSurvey(!surveyActive);
-  }
+  applyShortPressDecision(
+      shortPressTracker.record(releasedAt, DOUBLE_PRESS_MS, previewEnabled));
 }
 
 // Process queued BOOT edges: short press toggles backlight, long press (fires
@@ -196,7 +220,7 @@ void handleButton() {
     longFired = true;
     if (surveyActive) {
       selectorEntryHold = true;
-      shortPressTracker.reset();
+      applyShortPressDecision(shortPressTracker.flush());
       openWifiSelector();
       return;
     }
@@ -270,21 +294,25 @@ void handleButton() {
     }
   }
 
-  if (!wasDown) return;
-  const uint32_t heldMs = buttonClockMs() - downAt;
-  if (selectorEntryHold) return;
-  if (wifiSelectorActive) {
-    if (!longFired && heldMs >= LONG_PRESS_MS) {
-      longFired = true;
-      activateWifiSelector();
+  if (wasDown) {
+    const uint32_t heldMs = buttonClockMs() - downAt;
+    if (!selectorEntryHold) {
+      if (wifiSelectorActive) {
+        if (!longFired && heldMs >= LONG_PRESS_MS) {
+          longFired = true;
+          activateWifiSelector();
+        }
+      } else {
+        if (!longFired && heldMs >= LONG_PRESS_MS) {
+          fireLongPress();
+        }
+        if (!selectorEntryHold && longFired && !extraLongFired &&
+            heldMs >= EXTRA_LONG_PRESS_MS) {
+          fireExtraLongPress();
+        }
+      }
     }
-    return;
   }
-  if (!longFired && heldMs >= LONG_PRESS_MS) {
-    fireLongPress();
-  }
-  if (!selectorEntryHold && longFired && !extraLongFired &&
-      heldMs >= EXTRA_LONG_PRESS_MS) {
-    fireExtraLongPress();
-  }
+  applyShortPressDecision(
+      shortPressTracker.resolve(buttonClockMs(), DOUBLE_PRESS_MS));
 }
