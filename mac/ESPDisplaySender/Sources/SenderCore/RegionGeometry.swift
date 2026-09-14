@@ -118,4 +118,17 @@ extension RegionSpec {
             return abs(size.width - width) < 1 && abs(size.height - height) < 1
         }
     }
+
+    /// Whether this region has the shape the panel advertises.
+    ///
+    /// A stored region can predate discovery of `res` and therefore carry the
+    /// 172x320 fallback shape. Reusing that rectangle after the panel has said it
+    /// is square would bypass the geometry-aware starting path and lock every
+    /// subsequent marquee drag to the stale aspect.
+    func matchesAspect(of geometry: PanelGeometry) -> Bool {
+        guard width > 0, height > 0 else { return false }
+        let panel = Self.panelSize(
+            geometry: geometry, scale: 1, landscape: isLandscape)
+        return abs(width / height - panel.width / panel.height) < 0.001
+    }
 }
