@@ -25,17 +25,17 @@ final class GeneratedReleaseCrossReadTests: XCTestCase {
                 XCTAssertNil(bundle.firmwareBuild)
                 XCTAssertFalse(revision.artifact.contains("+"))
                 XCTAssertEqual(bundle.releaseNotes?.count, 10)
+                let verified = try catalog.bundle(
+                    for: revision, in: entry, data: data)
                 if family == "c6" {
-                    XCTAssertNoThrow(try catalog.bundle(
-                        for: revision, in: entry, data: data))
+                    XCTAssertNil(
+                        try XCTUnwrap(verified.images.first)
+                            .flashPart(role: "doom_wad"))
                 } else {
-                    XCTAssertThrowsError(try catalog.bundle(
-                        for: revision, in: entry, data: data)) {
-                            XCTAssertEqual(
-                                $0 as? FirmwareReleaseCatalogError,
-                                .revisionMissingPayload(
-                                    family: family, role: "doom_wad"))
-                        }
+                    XCTAssertEqual(
+                        try XCTUnwrap(verified.images.first)
+                            .flashPart(role: "doom_wad")?.byteCount,
+                        4_196_020)
                 }
             }
         }

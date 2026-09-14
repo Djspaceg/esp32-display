@@ -338,10 +338,7 @@ final class UsbOnboardingAppTests: XCTestCase {
                 $0.revision.build == nil
                     && !$0.revision.artifact.contains("+")
             }, family)
-            XCTAssertEqual(
-                options.allSatisfy(\.isAvailable),
-                family == "c6",
-                family)
+            XCTAssertTrue(options.allSatisfy(\.isAvailable), family)
         }
     }
 
@@ -351,29 +348,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             "firmware-releases", isDirectory: true)
         let sourceCatalog = releaseRoot.appendingPathComponent(
             FirmwareReleaseCatalog.fileName)
-        var catalogObject = try XCTUnwrap(
-            JSONSerialization.jsonObject(
-                with: Data(contentsOf: sourceCatalog)
-            ) as? [String: Any])
-        var families = try XCTUnwrap(
-            catalogObject["families"] as? [String: Any])
-        for family in FirmwareReleaseCatalog.requiredFamilies {
-            var entry = try XCTUnwrap(families[family] as? [String: Any])
-            var revisions = try XCTUnwrap(
-                entry["revisions"] as? [[String: Any]])
-            let artifact = try XCTUnwrap(revisions.first?["artifact"] as? String)
-            let data = try Data(
-                contentsOf: releaseRoot.appendingPathComponent(artifact))
-            revisions[0]["bytes"] = data.count
-            revisions[0]["sha256"] = FirmwareBundle.sha256Hex(data)
-            entry["bytes"] = data.count
-            entry["sha256"] = FirmwareBundle.sha256Hex(data)
-            entry["revisions"] = revisions
-            families[family] = entry
-        }
-        catalogObject["families"] = families
-        let catalogData = try JSONSerialization.data(
-            withJSONObject: catalogObject)
+        let catalogData = try Data(contentsOf: sourceCatalog)
         let catalog = try FirmwareReleaseCatalog.read(catalogData)
 
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -384,9 +359,18 @@ final class UsbOnboardingAppTests: XCTestCase {
         let fixtureCatalog = directory.appendingPathComponent(
             FirmwareReleaseCatalog.fileName)
         try catalogData.write(to: fixtureCatalog)
-        let artifactURLs = catalog.families.values.flatMap { entry in
-            entry.revisions.map {
-                releaseRoot.appendingPathComponent($0.artifact)
+        var artifactURLs = [URL]()
+        for entry in catalog.families.values {
+            for revision in entry.revisions {
+                var data = try Data(contentsOf: releaseRoot.appendingPathComponent(
+                    revision.artifact))
+                if entry.family != "c6" {
+                    data[data.index(before: data.endIndex)] ^= 0x01
+                }
+                let url = directory.appendingPathComponent(
+                    URL(fileURLWithPath: revision.artifact).lastPathComponent)
+                try data.write(to: url)
+                artifactURLs.append(url)
             }
         }
         let bundle = try XCTUnwrap(Bundle(url: makeBundleWrapper(
@@ -403,7 +387,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             XCTAssertFalse(try XCTUnwrap(options.first).isAvailable, family)
             XCTAssertTrue(
                 try XCTUnwrap(options.first?.unavailableReason)
-                    .contains("Doom WAD"),
+                    .contains("artifact hash does not match"),
                 "\(family): \(String(describing: options.first?.unavailableReason))")
             XCTAssertNil(releases.selections[family], family)
             let entry = try XCTUnwrap(catalog.families[family])
