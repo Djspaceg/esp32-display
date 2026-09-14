@@ -2518,6 +2518,14 @@ def cmd_release(args) -> int:
             version_line, RELEASE_REASON_FW_VERSION % quote_release_value(version)))
     release_notes_for_version(RELEASE_NOTES_PATH, version)
     shipping = bool(getattr(args, "shipping", False))
+    regenerate_existing = getattr(args, "regenerate_existing", None)
+    if regenerate_existing is not None:
+        if not shipping:
+            raise Fail("--regenerate-existing requires --shipping")
+        if regenerate_existing != version:
+            raise Fail(
+                "--regenerate-existing %s does not match FW_VERSION %s"
+                % (regenerate_existing, version))
     build = None if shipping else git_firmware_build()
     identity = (
         version
@@ -2532,10 +2540,18 @@ def cmd_release(args) -> int:
             output_root, key,
             "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX)))
     ]
-    if existing:
+    if existing and regenerate_existing is None:
         raise Fail(
             "shipping release %s already exists for %s; bump FW_VERSION and "
             "update release-notes.md before cutting a new shipping version"
+            % (version, ", ".join(existing)))
+    if regenerate_existing is not None and not existing:
+        raise Fail(
+            "shipping release %s does not exist; omit --regenerate-existing "
+            "to cut it for the first time" % version)
+    if regenerate_existing is not None:
+        print(
+            "Regenerating existing shipping release %s for %s"
             % (version, ", ".join(existing)))
     staged_root = tempfile.mkdtemp(prefix="espdisp-release-")
     try:
@@ -4158,6 +4174,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--shipping", action="store_true",
         help="write bare-version shipping artifacts and a schema-3 catalog "
         "to firmware-releases")
+    p_release.add_argument(
+        "--regenerate-existing", metavar="VERSION",
+        help="with --shipping, replace an existing bare-version release only "
+        "when VERSION exactly matches FW_VERSION")
     p_release.set_defaults(func=cmd_release)
 
     p_release_info = subs.add_parser(
