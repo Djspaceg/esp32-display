@@ -33,7 +33,6 @@ import espdisp  # noqa: E402
 
 checks = 0
 failures = 0
-known_outstanding = 0
 
 
 def check(condition, what):
@@ -83,20 +82,6 @@ def check_accepts(fn, what):
     except Exception as exc:  # noqa: BLE001
         failures += 1
         print("FAIL: %s: raised %s" % (what, type(exc).__name__))
-
-
-def check_or_known_outstanding(condition, known_gap, what, reason):
-    """Keep a required contract visible when only a named reserved fix is blocked."""
-    global checks, failures, known_outstanding
-    checks += 1
-    if condition:
-        return
-    if known_gap:
-        known_outstanding += 1
-        print("XFAIL: %s: %s" % (what, reason))
-        return
-    failures += 1
-    print("FAIL: %s" % what)
 
 
 def uncommented_source(source):
@@ -4018,24 +4003,11 @@ def test_s3_doom_build_contract():
                 and wad is not None
                 and len(wad) == espdisp._DOOM_WAD_SIZE
             )
-            known_artifact = (
-                "%s/espdisp-%s-1.5.0.espdispfw" % (key, key))
-            known_gap = (
-                revision["artifact"] == known_artifact
-                and revision["version"] == "1.5.0"
-                and wad is None
-            )
-            check_or_known_outstanding(
+            check(
                 satisfies_doom_contract,
-                known_gap,
                 "%s shipping revision %s carries the Doom runtime, "
                 "doom_wad partition, and WAD payload"
-                % (key, revision["version"]),
-                "committed %s predates the Doom partition layout and cannot "
-                "be re-cut without an FW_VERSION bump and release-notes.md "
-                "prose, both reserved to the user" % os.path.basename(
-                    revision["artifact"]),
-            )
+                % (key, revision["version"]))
 
 
 def test_family_resolution_and_discovery():
@@ -4476,6 +4448,112 @@ def test_release_refuses_to_overwrite_a_shipping_version():
                 "release leaves the existing shipping bytes untouched")
 
 
+def test_release_regenerates_only_with_exact_version_confirmation():
+    common_patches = (
+        unittest.mock.patch.object(
+            espdisp, "sketch_fw_version_declaration",
+            return_value=("1.5.0", 21)),
+        unittest.mock.patch.object(
+            espdisp, "release_notes_for_version",
+            return_value=GENERIC_RELEASE_NOTES),
+    )
+    with common_patches[0], common_patches[1], \
+         unittest.mock.patch.object(
+             espdisp, "git_firmware_build",
+             side_effect=AssertionError("invalid regeneration reached git")):
+        check_fails(
+            lambda: espdisp.cmd_release(argparse.Namespace(
+                output_root=None, shipping=False,
+                regenerate_existing="1.5.0")),
+            "--regenerate-existing requires --shipping",
+            "same-version regeneration is shipping-only")
+
+    with tempfile.TemporaryDirectory() as directory:
+        args = argparse.Namespace(
+            output_root=directory, shipping=True,
+            regenerate_existing="1.4.9")
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle",
+                 side_effect=AssertionError("mismatched version was rebuilt")):
+            check_fails(
+                lambda: espdisp.cmd_release(args),
+                "--regenerate-existing 1.4.9 does not match FW_VERSION 1.5.0",
+                "same-version regeneration confirms the exact version")
+
+    with tempfile.TemporaryDirectory() as directory:
+        args = argparse.Namespace(
+            output_root=directory, shipping=True,
+            regenerate_existing="1.5.0")
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle",
+                 side_effect=AssertionError("missing release was rebuilt")):
+            check_fails(
+                lambda: espdisp.cmd_release(args),
+                "shipping release 1.5.0 does not exist; "
+                "omit --regenerate-existing",
+                "same-version regeneration requires an existing release")
+
+    with tempfile.TemporaryDirectory() as directory:
+        existing = os.path.join(
+            directory, "s3", "espdisp-s3-1.5.0.espdispfw")
+        os.makedirs(os.path.dirname(existing), exist_ok=True)
+        with open(existing, "wb") as out:
+            out.write(b"old shipping release")
+        bundle_calls = []
+
+        def fake_bundle(args):
+            bundle_calls.append(args)
+            with open(args.output, "wb") as out:
+                out.write(("regenerated-" + args.family[0]).encode("ascii"))
+            return 0
+
+        fake_catalog = {
+            "schema": espdisp.RELEASE_CATALOG_SCHEMA,
+            "generated_at": "2026-01-02T03:04:05Z",
+            "families": {},
+        }
+        args = argparse.Namespace(
+            output_root=directory, shipping=True,
+            regenerate_existing="1.5.0")
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle", side_effect=fake_bundle), \
+             unittest.mock.patch.object(
+                 espdisp, "release_catalog", return_value=fake_catalog), \
+             unittest.mock.patch.object(espdisp, "write_release_catalog"):
+            check_equal(
+                espdisp.cmd_release(args), 0,
+                "confirmed same-version shipping regeneration succeeds")
+
+        check_equal(
+            [os.path.basename(call.output) for call in bundle_calls],
+            ["espdisp-c6-1.5.0.espdispfw",
+             "espdisp-s3-1.5.0.espdispfw",
+             "espdisp-p4-1.5.0.espdispfw"],
+            "same-version regeneration keeps bare shipping names")
+        with open(existing, "rb") as source:
+            check_equal(
+                source.read(), b"regenerated-s3",
+                "confirmed regeneration replaces existing shipping bytes")
+
+
 def test_dev_bundle_output_stays_outside_release_store():
     output = os.path.join(
         espdisp.RELEASE_ROOT, "c6",
@@ -4731,6 +4809,7 @@ def main():
     test_release_writes_only_bare_shipping_bundles()
     test_release_defaults_to_build_numbered_dev_bundles()
     test_release_refuses_to_overwrite_a_shipping_version()
+    test_release_regenerates_only_with_exact_version_confirmation()
     test_dev_bundle_output_stays_outside_release_store()
     test_release_catalog_ignores_build_numbered_artifacts_before_reading()
     test_canonical_usb_flash_path()
@@ -4769,12 +4848,7 @@ def main():
     if failures:
         print("FAILED: %d of %d checks" % (failures, checks))
         return 1
-    if known_outstanding:
-        print(
-            "OK: %d checks passed (%d known outstanding)"
-            % (checks, known_outstanding))
-    else:
-        print("OK: %d checks passed" % checks)
+    print("OK: %d checks passed" % checks)
     return 0
 
 

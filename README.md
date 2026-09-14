@@ -146,7 +146,15 @@ This writes under the ignored `firmware-dev/` root. Build-numbered firmware is
 never allowed under `firmware-releases/`, so a development run cannot replace
 the committed shipping catalog with paths to ignored artifacts. Shipping cuts
 use bare versions under `firmware-releases/` after the user bumps `FW_VERSION`;
-the current build-numbered writer is development-only.
+the current build-numbered writer is development-only. An intentional rebuild
+of an existing shipping version must confirm that exact version:
+
+```sh
+python3 tools/espdisp.py release --shipping --regenerate-existing 1.5.0
+```
+
+Without that confirmation, `release --shipping` refuses to replace committed
+shipping artifacts.
 
 Inspect each artifact independently:
 
