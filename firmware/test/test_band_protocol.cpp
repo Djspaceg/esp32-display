@@ -2316,6 +2316,7 @@ int main() {
   // --- automatic cardinal orientation ------------------------------------
   {
     using motionorient::Calibration;
+    using motionorient::AutomaticMode;
     const Calibration identity = {0, 1, 1, 1};
     CHECK(motionorient::INVALID_ROTATION == 0xFF);
     CHECK(motionorient::ENTER_MIN == 5325);
@@ -2323,6 +2324,10 @@ int main() {
     CHECK(motionorient::ENTER_DOMINANCE == 1229);
     CHECK(motionorient::HOLD_DOMINANCE == 819);
     CHECK(motionorient::DWELL_MS == 500);
+    CHECK(motionorient::automaticModeForPanel(466, 466) ==
+          AutomaticMode::FourWay);
+    CHECK(motionorient::automaticModeForPanel(172, 320) ==
+          AutomaticMode::FlipOnly);
 
     static const uint8_t composition[4][4] = {
         {0, 1, 2, 3}, {1, 2, 3, 0}, {2, 3, 0, 1}, {3, 0, 1, 2}};
@@ -2342,13 +2347,37 @@ int main() {
     CHECK(motionorient::cardinalFor(-8192, 0) == 1);
     CHECK(motionorient::cardinalFor(0, -8192) == 2);
     CHECK(motionorient::cardinalFor(8192, 0) == 3);
-    CHECK(motionorient::classify(upright, identity, 2) == 0);
-    CHECK(motionorient::classify(left, identity, 0) == 1);
-    CHECK(motionorient::classify(upsideDown, identity, 0) == 2);
-    CHECK(motionorient::classify(right, identity, 0) == 3);
+    CHECK(motionorient::classify(
+              upright, identity, 2, AutomaticMode::FourWay) == 0);
+    CHECK(motionorient::classify(
+              left, identity, 0, AutomaticMode::FourWay) == 1);
+    CHECK(motionorient::classify(
+              upsideDown, identity, 0, AutomaticMode::FourWay) == 2);
+    CHECK(motionorient::classify(
+              right, identity, 0, AutomaticMode::FourWay) == 3);
+
+    // A rectangular panel's automatic correction is flip-only. Side gravity
+    // must not select a quarter turn. It invalidates the sample until gravity
+    // settles into an upright or upside-down bucket.
+    CHECK(motionorient::classify(
+              left, identity, 0, AutomaticMode::FlipOnly) ==
+          motionorient::INVALID_ROTATION);
+    CHECK(motionorient::classify(
+              right, identity, 0, AutomaticMode::FlipOnly) ==
+          motionorient::INVALID_ROTATION);
+    CHECK(motionorient::classify(
+              upright, identity, 2, AutomaticMode::FlipOnly) == 0);
+    CHECK(motionorient::classify(
+              upsideDown, identity, 0, AutomaticMode::FlipOnly) == 2);
+
+    // The app's manual mounting choice is the base rotation. Automatic
+    // correction composes on top instead of replacing that choice.
+    CHECK(motionorient::compose(1, 0) == 1);
+    CHECK(motionorient::compose(1, 2) == 3);
 
     const Calibration swapped = {1, -1, 0, 1};
-    CHECK(motionorient::classify(right, swapped, 2) == 0);
+    CHECK(motionorient::classify(
+              right, swapped, 2, AutomaticMode::FourWay) == 0);
 
     const int16_t faceUp[3] = {0, 0, 8192};
     const int16_t belowEntry[3] = {5324, 0, 0};
@@ -2356,74 +2385,114 @@ int main() {
     const int16_t diagonal[3] = {5325, 5325, 0};
     const int16_t belowEntryDominance[3] = {5325, 4097, 0};
     const int16_t atEntryDominance[3] = {5325, 4096, 0};
-    CHECK(motionorient::classify(faceUp, identity, 0) ==
+    CHECK(motionorient::classify(
+              faceUp, identity, 0, AutomaticMode::FourWay) ==
           motionorient::INVALID_ROTATION);
-    CHECK(motionorient::classify(belowEntry, identity, 0) ==
+    CHECK(motionorient::classify(
+              belowEntry, identity, 0, AutomaticMode::FourWay) ==
           motionorient::INVALID_ROTATION);
-    CHECK(motionorient::classify(atEntry, identity, 0) == 3);
-    CHECK(motionorient::classify(diagonal, identity, 0) ==
+    CHECK(motionorient::classify(
+              atEntry, identity, 0, AutomaticMode::FourWay) == 3);
+    CHECK(motionorient::classify(
+              diagonal, identity, 0, AutomaticMode::FourWay) ==
           motionorient::INVALID_ROTATION);
-    CHECK(motionorient::classify(belowEntryDominance, identity, 2) ==
+    CHECK(motionorient::classify(
+              belowEntryDominance, identity, 2, AutomaticMode::FourWay) ==
           motionorient::INVALID_ROTATION);
-    CHECK(motionorient::classify(atEntryDominance, identity, 2) == 3);
+    CHECK(motionorient::classify(
+              atEntryDominance, identity, 2, AutomaticMode::FourWay) == 3);
 
     const int16_t hold0[3] = {0, 4505, 0};
     const int16_t hold1[3] = {-4505, 0, 0};
     const int16_t hold2[3] = {0, -4505, 0};
     const int16_t hold3[3] = {4505, 0, 0};
-    CHECK(motionorient::classify(hold0, identity, 0) == 0);
-    CHECK(motionorient::classify(hold1, identity, 1) == 1);
-    CHECK(motionorient::classify(hold2, identity, 2) == 2);
-    CHECK(motionorient::classify(hold3, identity, 3) == 3);
+    CHECK(motionorient::classify(
+              hold0, identity, 0, AutomaticMode::FourWay) == 0);
+    CHECK(motionorient::classify(
+              hold1, identity, 1, AutomaticMode::FourWay) == 1);
+    CHECK(motionorient::classify(
+              hold2, identity, 2, AutomaticMode::FourWay) == 2);
+    CHECK(motionorient::classify(
+              hold3, identity, 3, AutomaticMode::FourWay) == 3);
     const int16_t belowHold[3] = {0, 4504, 0};
     const int16_t atHoldDominance[3] = {5324, 4505, 0};
     const int16_t belowHoldDominance[3] = {5323, 4505, 0};
-    CHECK(motionorient::classify(belowHold, identity, 0) ==
+    CHECK(motionorient::classify(
+              belowHold, identity, 0, AutomaticMode::FourWay) ==
           motionorient::INVALID_ROTATION);
-    CHECK(motionorient::classify(atHoldDominance, identity, 0) == 0);
-    CHECK(motionorient::classify(belowHoldDominance, identity, 0) ==
+    CHECK(motionorient::classify(
+              atHoldDominance, identity, 0, AutomaticMode::FourWay) == 0);
+    CHECK(motionorient::classify(
+              belowHoldDominance, identity, 0, AutomaticMode::FourWay) ==
           motionorient::INVALID_ROTATION);
-    CHECK(motionorient::classify(upsideDown, identity, 0) == 2);
+    CHECK(motionorient::classify(
+              upsideDown, identity, 0, AutomaticMode::FourWay) == 2);
 
     motionorient::Tracker dwell;
-    CHECK(!dwell.update(left, identity, 1000));
+    CHECK(!dwell.update(left, identity, AutomaticMode::FourWay, 1000));
     CHECK(dwell.candidate() == 1 && dwell.rotation() == 0);
-    CHECK(!dwell.update(left, identity, 1499));
-    CHECK(dwell.update(left, identity, 1500));
+    CHECK(!dwell.update(left, identity, AutomaticMode::FourWay, 1499));
+    CHECK(dwell.update(left, identity, AutomaticMode::FourWay, 1500));
     CHECK(dwell.rotation() == 1);
     CHECK(dwell.candidate() == motionorient::INVALID_ROTATION);
-    CHECK(!dwell.update(left, identity, 1501));
+    CHECK(!dwell.update(left, identity, AutomaticMode::FourWay, 1501));
     CHECK(dwell.candidate() == motionorient::INVALID_ROTATION);
 
     motionorient::Tracker rejected;
-    CHECK(!rejected.update(left, identity, 0));
-    CHECK(!rejected.update(faceUp, identity, 499));
+    CHECK(!rejected.update(left, identity, AutomaticMode::FourWay, 0));
+    CHECK(!rejected.update(faceUp, identity, AutomaticMode::FourWay, 499));
     CHECK(rejected.candidate() == motionorient::INVALID_ROTATION);
-    CHECK(!rejected.update(left, identity, 500));
-    CHECK(!rejected.update(left, identity, 999));
-    CHECK(rejected.update(left, identity, 1000));
+    CHECK(!rejected.update(left, identity, AutomaticMode::FourWay, 500));
+    CHECK(!rejected.update(left, identity, AutomaticMode::FourWay, 999));
+    CHECK(rejected.update(left, identity, AutomaticMode::FourWay, 1000));
 
     motionorient::Tracker changed;
-    CHECK(!changed.update(left, identity, 0));
-    CHECK(changed.update(left, identity, 500));
-    CHECK(!changed.update(upsideDown, identity, 501));
-    CHECK(!changed.update(upsideDown, identity, 1000));
-    CHECK(changed.update(upsideDown, identity, 1001));
+    CHECK(!changed.update(left, identity, AutomaticMode::FourWay, 0));
+    CHECK(changed.update(left, identity, AutomaticMode::FourWay, 500));
+    CHECK(!changed.update(
+        upsideDown, identity, AutomaticMode::FourWay, 501));
+    CHECK(!changed.update(
+        upsideDown, identity, AutomaticMode::FourWay, 1000));
+    CHECK(changed.update(
+        upsideDown, identity, AutomaticMode::FourWay, 1001));
     CHECK(changed.rotation() == 2);
 
+    motionorient::Tracker flipOnly;
+    CHECK(!flipOnly.update(left, identity, AutomaticMode::FlipOnly, 0));
+    CHECK(flipOnly.rotation() == 0);
+    CHECK(flipOnly.candidate() == motionorient::INVALID_ROTATION);
+    CHECK(!flipOnly.update(
+        upsideDown, identity, AutomaticMode::FlipOnly, 100));
+    CHECK(!flipOnly.update(
+        upsideDown, identity, AutomaticMode::FlipOnly, 599));
+    CHECK(flipOnly.update(
+        upsideDown, identity, AutomaticMode::FlipOnly, 600));
+    CHECK(flipOnly.rotation() == 2);
+    CHECK(!flipOnly.update(right, identity, AutomaticMode::FlipOnly, 700));
+    CHECK(flipOnly.rotation() == 2);
+    CHECK(flipOnly.candidate() == motionorient::INVALID_ROTATION);
+
     motionorient::Tracker touchBlocked;
-    CHECK(!touchBlocked.update(left, identity, 1000));
-    CHECK(!touchBlocked.update(left, identity, 1500, false));
+    CHECK(!touchBlocked.update(
+        left, identity, AutomaticMode::FourWay, 1000));
+    CHECK(!touchBlocked.update(
+        left, identity, AutomaticMode::FourWay, 1500, false));
     CHECK(touchBlocked.rotation() == 0);
     CHECK(touchBlocked.candidate() == motionorient::INVALID_ROTATION);
-    CHECK(!touchBlocked.update(left, identity, 1501));
-    CHECK(!touchBlocked.update(left, identity, 2000));
-    CHECK(touchBlocked.update(left, identity, 2001));
+    CHECK(!touchBlocked.update(
+        left, identity, AutomaticMode::FourWay, 1501));
+    CHECK(!touchBlocked.update(
+        left, identity, AutomaticMode::FourWay, 2000));
+    CHECK(touchBlocked.update(
+        left, identity, AutomaticMode::FourWay, 2001));
 
     motionorient::Tracker rollover;
-    CHECK(!rollover.update(left, identity, 0xFFFFFF00u));
-    CHECK(!rollover.update(left, identity, 0x000000F3u));
-    CHECK(rollover.update(left, identity, 0x000000F4u));
+    CHECK(!rollover.update(
+        left, identity, AutomaticMode::FourWay, 0xFFFFFF00u));
+    CHECK(!rollover.update(
+        left, identity, AutomaticMode::FourWay, 0x000000F3u));
+    CHECK(rollover.update(
+        left, identity, AutomaticMode::FourWay, 0x000000F4u));
     CHECK(rollover.rotation() == 1);
   }
 
@@ -4725,6 +4794,7 @@ int main() {
     CHECK(!board::platformSupportsPanel(board::PLATFORM_ESP32_S3,
                                         board::PANEL_ST7703_720X720));
     CHECK(p4.panel->dsiDataLanes == 2 && p4.panel->dsiLaneMbps == 480);
+    CHECK(p4.panel->supportsCommandRotation);
     CHECK(p4.pinRst == 27 && p4.pinBl == 26 && p4.pinBlEnable == 33);
     CHECK(p4.pinTouchSda == 7 && p4.pinTouchScl == 8);
     CHECK(strcmp(board::variantToken(p4.variant), "st7703-4b") == 0);
