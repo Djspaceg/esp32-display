@@ -275,7 +275,6 @@ extension PanelManager {
     enum USBPartitionCompatibility: Equatable, Sendable {
         case exact
         case fullFlashMigration(from: String, to: String)
-        case incompatible
     }
 
     enum USBCompatibilityIdentityIssue: Equatable, Sendable {
@@ -334,18 +333,14 @@ extension PanelManager {
         return nil
     }
 
-    /// A full USB write can replace a partition table, but only a migration
-    /// explicitly known to this app may relax the runtime partition-token check.
+    /// A full USB write replaces the partition table and application together,
+    /// so a layout mismatch is a migration after family, chip, and profile have
+    /// already been verified by the caller.
     nonisolated static func usbPartitionCompatibility(
-        target: String, chip: String, reported: String, required: String
+        reported: String, required: String
     ) -> USBPartitionCompatibility {
         if reported == required { return .exact }
-        if target == "s3", chip == "esp32s3",
-           reported == "universal-8m-ota",
-           required == "universal-8m-doom-ota" {
-            return .fullFlashMigration(from: reported, to: required)
-        }
-        return .incompatible
+        return .fullFlashMigration(from: reported, to: required)
     }
 
     /// Write a current bundle over USB after re-verifying every fact
@@ -561,15 +556,7 @@ extension PanelManager {
                         + "Nothing was written.")
             }
             partitionCompatibility = Self.usbPartitionCompatibility(
-                target: exactTarget, chip: detectedChip,
                 reported: cfgPartition, required: requiredPartition)
-            guard partitionCompatibility != .incompatible else {
-                return .failure(
-                    "USB partition mismatch",
-                    "The board reports partition layout \(cfgPartition), but this "
-                        + "firmware requires \(requiredPartition). This is not a "
-                        + "recognized full-USB migration, so nothing was written.")
-            }
         }
         guard usbPathGeneration(path) == expectedGeneration,
               usbDevices.contains(where: { $0.path == path && $0.isConnected })

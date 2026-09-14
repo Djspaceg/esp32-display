@@ -39,7 +39,8 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 }
 
                 do {
-                    let selected = try releases.selectForUpdate(live: live, usb: usb)
+                    let selected = try releases.selectForUpdate(
+                        live: live, usb: usb, transport: .ota)
                     XCTAssertEqual(selected.selection.catalogEntry.family, family)
                     XCTAssertEqual(selected.identity, complete)
                 } catch {
@@ -62,6 +63,122 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 XCTAssertEqual(selected.catalogEntry.family, family)
             }
         }
+    }
+
+    func testPreDoomS3IdentityResolvesForUSBUpdate() throws {
+        let releases = try Self.releaseSetForResolution()
+        let identity = FirmwareReleaseCatalog.Identity(
+            family: "s3",
+            chip: "esp32s3",
+            profile: "co5300",
+            partition: "universal-8m-ota")
+
+        let selected = try releases.selectForUpdate(
+            live: identity,
+            usb: nil,
+            transport: .usb)
+
+        XCTAssertEqual(selected.resolution.canonicalTarget, "s3")
+        XCTAssertEqual(
+            selected.resolution,
+            .partitionMigration(
+                selected.selection,
+                from: "universal-8m-ota",
+                to: "universal-8m-doom-ota"))
+        XCTAssertEqual(
+            selected.selection.catalogEntry.compatibility.partitionScheme,
+            "universal-8m-doom-ota")
+        XCTAssertEqual(selected.identity, identity)
+    }
+
+    func testPreDoomS3IdentityStillFailsStrictOTASelection() throws {
+        let releases = try Self.releaseSetForResolution()
+        let identity = FirmwareReleaseCatalog.Identity(
+            family: "s3",
+            chip: "esp32s3",
+            profile: "co5300",
+            partition: "universal-8m-ota")
+
+        XCTAssertThrowsError(try releases.selectForUpdate(
+            live: identity,
+            usb: nil,
+            transport: .ota
+        )) {
+            XCTAssertEqual(
+                $0 as? FirmwareReleaseCatalogError,
+                .partitionMismatch(
+                    expected: "universal-8m-doom-ota",
+                    found: "universal-8m-ota"))
+        }
+    }
+
+    func testUSBPartitionMigrationStillRequiresFamilyChipAndProfile() throws {
+        let releases = try Self.releaseSetForResolution()
+        let invalid: [(FirmwareReleaseCatalog.Identity, FirmwareReleaseCatalogError)] = [
+            (
+                .init(
+                    family: nil,
+                    chip: "esp32s3",
+                    profile: "co5300",
+                    partition: "universal-8m-ota"),
+                .identityIncomplete
+            ),
+            (
+                .init(
+                    family: "s3",
+                    chip: "esp32p4",
+                    profile: "co5300",
+                    partition: "universal-8m-ota"),
+                .chipMismatch(expected: "esp32s3", found: "esp32p4")
+            ),
+            (
+                .init(
+                    family: "s3",
+                    chip: "esp32s3",
+                    profile: nil,
+                    partition: "universal-8m-ota"),
+                .identityIncomplete
+            ),
+            (
+                .init(
+                    family: "s3",
+                    chip: "esp32s3",
+                    profile: "st7703-4b",
+                    partition: "universal-8m-ota"),
+                .profileMismatch(family: "s3", found: "st7703-4b")
+            ),
+        ]
+
+        for (identity, expectedError) in invalid {
+            XCTAssertThrowsError(try releases.selectForUpdate(
+                live: identity,
+                usb: nil,
+                transport: .usb
+            )) {
+                XCTAssertEqual($0 as? FirmwareReleaseCatalogError, expectedError)
+            }
+        }
+    }
+
+    func testP4PartitionMismatchAlsoResolvesForUSBUpdate() throws {
+        let releases = try Self.releaseSetForResolution(
+            p4PartitionScheme: "future-p4-layout")
+
+        let selected = try releases.selectForUpdate(
+            live: .init(
+                family: "p4",
+                chip: "esp32p4",
+                profile: "st7703-4b",
+                partition: "p4-32m-ota"),
+            usb: nil,
+            transport: .usb)
+
+        XCTAssertEqual(
+            selected.resolution,
+            .partitionMigration(
+                selected.selection,
+                from: "p4-32m-ota",
+                to: "future-p4-layout"))
     }
 
     func testUpdatePreselectionRejectsEveryCrossTransportConflict() throws {
@@ -89,7 +206,8 @@ final class BundledFirmwareSelectionTests: XCTestCase {
 
         for (field, usb) in conflicts {
             XCTAssertThrowsError(
-                try releases.selectForUpdate(live: complete, usb: usb),
+                try releases.selectForUpdate(
+                    live: complete, usb: usb, transport: .ota),
                 "conflicting \(field) evidence must fail closed"
             ) {
                 guard case let BundledFirmware.UpdateIdentityError.conflictingEvidence(
@@ -109,7 +227,8 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 profile: nil, partition: nil),
             usb: .init(
                 family: "c6", chip: "esp32c6",
-                profile: nil, partition: "default-8m"))
+                profile: nil, partition: "default-8m"),
+            transport: .usb)
 
         XCTAssertEqual(selected.selection.catalogEntry.family, "c6")
         XCTAssertEqual(
@@ -124,7 +243,8 @@ final class BundledFirmwareSelectionTests: XCTestCase {
             live: .init(
                 family: "c6", chip: ServiceMetadata.unknownChip,
                 profile: "st7789", partition: "default-8m"),
-            usb: nil))
+            usb: nil,
+            transport: .ota))
     }
 
     func testUpdatePreselectionUsesMatchedUSBChipWhenLiveChipIsUnknown() throws {
@@ -141,7 +261,8 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 chip: ServiceMetadata.unknownChip,
                 profile: "st7789",
                 partition: "default-8m"),
-            usb: complete)
+            usb: complete,
+            transport: .usb)
 
         XCTAssertEqual(selected.selection.catalogEntry.family, "c6")
         XCTAssertEqual(selected.identity, complete)
@@ -160,7 +281,8 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: nil,
                 chip: "esp32c6",
                 profile: nil,
-                partition: nil))
+                partition: nil),
+            transport: .usb)
 
         XCTAssertEqual(selected.selection.catalogEntry.family, "c6")
         XCTAssertEqual(
@@ -185,7 +307,8 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: nil,
                 chip: "esp32p4",
                 profile: nil,
-                partition: nil))
+                partition: nil),
+            transport: .usb)
 
         XCTAssertEqual(selected.selection.catalogEntry.family, "p4")
         XCTAssertEqual(
@@ -206,7 +329,8 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 chip: "esp32s3",
                 profile: "co5300",
                 partition: "universal-8m-doom-ota"),
-            usb: nil)
+            usb: nil,
+            transport: .ota)
 
         XCTAssertEqual(selected.selection.catalogEntry.family, "s3")
         XCTAssertEqual(
@@ -231,7 +355,8 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-doom-ota"))
+                partition: "universal-8m-doom-ota"),
+            transport: .usb)
 
         XCTAssertEqual(selected.selection.catalogEntry.family, "s3")
         XCTAssertEqual(
@@ -256,7 +381,8 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "p4",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-doom-ota"))) {
+                partition: "universal-8m-doom-ota"),
+            transport: .usb)) {
                     guard case let BundledFirmware.UpdateIdentityError
                         .conflictingEvidence(field, live, usb) = $0
                     else { return XCTFail("unexpected error \($0)") }
@@ -341,6 +467,60 @@ final class BundledFirmwareSelectionTests: XCTestCase {
             selections[entry.family] = .init(
                 catalogEntry: entry, bundle: bundle, url: url)
         }
+        return .init(catalog: catalog, selections: selections)
+    }
+
+    private static func releaseSetForResolution(
+        p4PartitionScheme: String? = nil
+    ) throws -> BundledFirmware.ReleaseSet {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let releaseRoot = root.appendingPathComponent("firmware-releases")
+        var catalog = try FirmwareReleaseCatalog.read(
+            contentsOf: releaseRoot.appendingPathComponent(
+                FirmwareReleaseCatalog.fileName))
+        if let p4PartitionScheme, let p4 = catalog.families["p4"] {
+            var families = catalog.families
+            families["p4"] = .init(
+                family: p4.family,
+                latestVersion: p4.latestVersion,
+                latestBuild: p4.latestBuild,
+                artifact: p4.artifact,
+                sha256: p4.sha256,
+                byteCount: p4.byteCount,
+                chip: p4.chip,
+                profiles: p4.profiles,
+                hardware: p4.hardware,
+                compatibility: .init(
+                    flashBytes: p4.compatibility.flashBytes,
+                    partitionScheme: p4PartitionScheme,
+                    bootloaderAddress: p4.compatibility.bootloaderAddress,
+                    partitionsAddress: p4.compatibility.partitionsAddress,
+                    bootApp0Address: p4.compatibility.bootApp0Address,
+                    appAddress: p4.compatibility.appAddress,
+                    identityRequired: p4.compatibility.identityRequired))
+            catalog = .init(
+                schema: catalog.schema,
+                generatedAt: catalog.generatedAt,
+                families: families)
+        }
+        let fixtureURL = root
+            .appendingPathComponent("mac/ESPDisplaySender/Tests/SenderProtocolTests")
+            .appendingPathComponent("Fixtures/release-notes-from-espdisp-v3.espdispfw")
+        let fixture = try FirmwareBundle.read(contentsOf: fixtureURL)
+        let selections = Dictionary(uniqueKeysWithValues: catalog.families.values.map {
+            (
+                $0.family,
+                BundledFirmware.Selection(
+                    catalogEntry: $0,
+                    bundle: fixture,
+                    url: releaseRoot.appendingPathComponent($0.artifact))
+            )
+        })
         return .init(catalog: catalog, selections: selections)
     }
 }
