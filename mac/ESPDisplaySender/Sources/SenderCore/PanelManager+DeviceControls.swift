@@ -124,9 +124,12 @@ extension PanelManager {
     func supportsQuarterTurnRotation(_ serviceName: String) -> Bool {
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return false }
-        if panel.capabilities.contains(.rotate) { return true }
-        guard let board = verifiedUSBDevice(for: serviceName)?.board else { return false }
-        return Self.usbBoardSupportsQuarterTurns(board)
+        if let geometry = panel.geometry, geometry.width != geometry.height {
+            return false
+        }
+        if panel.capabilities.contains(.rotate), panel.geometry != nil { return true }
+        guard let device = verifiedUSBDevice(for: serviceName) else { return false }
+        return usbDevice(device, reports: .quarterTurn)
     }
 
     private static func requirement(for operation: Operation) -> OperationRequirement {
@@ -182,6 +185,11 @@ extension PanelManager {
     ) -> [OperationPath] {
         switch requirement {
         case .networkControl(let capability):
+            if capability == .rotate {
+                guard let geometry = panel.geometry,
+                      geometry.width == geometry.height
+                else { return [] }
+            }
             guard networkControlReady(serviceName, panel: panel),
                   panel.capabilities.contains(capability)
             else { return [] }
@@ -235,6 +243,7 @@ extension PanelManager {
             return status.rotation != nil || status.flipped != nil
         case .quarterTurn:
             return (status.rotation != nil || status.flipped != nil)
+                && status.capabilities?.contains(.rotate) == true
                 && device.board.map(Self.usbBoardSupportsQuarterTurns) == true
         }
     }

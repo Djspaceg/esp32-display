@@ -91,6 +91,9 @@ enum WifiConfigUI {
     /// Live facts returned by one current CFGSHOW probe. None are persisted.
     struct USBStatus: Equatable, Sendable {
         var firmwareVersion: String?
+        /// The same capability bitset EINF and mDNS report. nil means firmware
+        /// predates USB capability reporting, so optional controls fail closed.
+        var capabilities: DeviceProtocol.Capabilities?
         var currentSSID: String?
         var networkConnected: Bool?
         var ipAddress: String?
@@ -696,6 +699,25 @@ enum WifiConfigUI {
         func integer(_ key: String, appended: Bool = false) -> Int? {
             Int(appended ? appendedToken(key) ?? "" : token(key) ?? "")
         }
+        func capabilities(_ value: String?) -> DeviceProtocol.Capabilities? {
+            guard let value,
+                  value.count == 8,
+                  value.allSatisfy(\.isHexDigit),
+                  let bits = UInt32(value, radix: 16)
+            else { return nil }
+            return DeviceProtocol.Capabilities(rawValue: bits)
+        }
+        func appendedCapabilities() -> DeviceProtocol.Capabilities? {
+            guard let ssid = ConfigCommands.decodeField("ssid64=", from: info),
+                  let ssidRange = info.range(of: " ssid=\(ssid)")
+            else { return nil }
+            let extensionTokens = info[ssidRange.upperBound...].split(
+                separator: " ", omittingEmptySubsequences: true)
+            guard let field = extensionTokens.first,
+                  field.hasPrefix("caps=")
+            else { return nil }
+            return capabilities(String(field.dropFirst("caps=".count)))
+        }
         func boolean(_ key: String) -> Bool? {
             switch token(key) {
             case "0": return false
@@ -717,6 +739,7 @@ enum WifiConfigUI {
         }
         let status = USBStatus(
             firmwareVersion: appendedToken("fw="),
+            capabilities: appendedCapabilities(),
             currentSSID: ConfigCommands.decodeField("ssid64=", from: info),
             networkConnected: boolean("connected="),
             ipAddress: token("ip="),
