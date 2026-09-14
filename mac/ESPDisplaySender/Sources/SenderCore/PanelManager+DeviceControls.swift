@@ -240,7 +240,10 @@ extension PanelManager {
     }
 
     private static func usbBoardSupportsQuarterTurns(_ board: String) -> Bool {
-        ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"]
+        [
+            "gc9107", "st7789-130", "st7789-154", "co5300",
+            "st77916", "st7703-4b",
+        ]
             .contains(board)
     }
 

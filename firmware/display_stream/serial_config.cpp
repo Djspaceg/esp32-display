@@ -274,7 +274,7 @@ static void processConfigLine(char *line) {
     // Set the mounting rotation in clockwise quarter turns: CFGROT 0|1|2|3.
     // Quarter turns (1 and 3) require a square panel whose backend has passed
     // physical transform validation. Rectangular panels use sender landscape;
-    // an unvalidated backend such as P4 DSI fails closed until enabled in its
+    // a backend without validated quarter turns fails closed through its
     // PanelConfig.
     int want = atoi(line + 7);
     if (want < 0 || want > 3) {

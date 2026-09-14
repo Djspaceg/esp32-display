@@ -262,6 +262,30 @@ final class PanelManagerTests: XCTestCase {
         }
     }
 
+    func testP4OffersQuarterTurnOrientationOverVerifiedUSB() {
+        let path = "/dev/cu.usbmodem-p4"
+        var panel = controllablePanel(
+            capabilities: .power.union(.flip),
+            heartbeatAt: Date(timeIntervalSinceNow: -60))
+        panel.usbPort = path
+        panel.usbHardwareID = panel.hardwareID
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
+                + "connected=0 rot=0 pwr=on board=st7703-4b profile=st7703-4b "
+                + "target=p4 chip=esp32p4 partition=p4-32m-ota fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path,
+            identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        XCTAssertTrue(manager.supportsQuarterTurnRotation(panel.serviceName))
+        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .rotate))
+    }
+
     func testVerifiedOldFirmwareExplainsMissingUSBBrightness() {
         let path = "/dev/cu.usbmodem-test"
         var panel = controllablePanel(
