@@ -612,6 +612,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 artifact: p4.artifact,
                 sha256: p4.sha256,
                 byteCount: p4.byteCount,
+                revisions: p4.revisions,
                 chip: p4.chip,
                 profiles: p4.profiles,
                 hardware: p4.hardware,
@@ -632,11 +633,13 @@ final class BundledFirmwareSelectionTests: XCTestCase {
             .appendingPathComponent("mac/ESPDisplaySender/Tests/SenderProtocolTests")
             .appendingPathComponent("Fixtures/release-notes-from-espdisp-v3.espdispfw")
         let fixture = try FirmwareBundle.read(contentsOf: fixtureURL)
-        let selections = Dictionary(uniqueKeysWithValues: catalog.families.values.map {
-            (
+        let selections = Dictionary(uniqueKeysWithValues: try catalog.families.values.map {
+            let revision = try XCTUnwrap($0.revisions.first)
+            return (
                 $0.family,
                 BundledFirmware.Selection(
                     catalogEntry: $0,
+                    revision: revision,
                     bundle: fixture,
                     url: releaseRoot.appendingPathComponent($0.artifact))
             )

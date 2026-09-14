@@ -417,7 +417,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             let resolved: BundledFirmware.FamilyResolution
             do {
                 resolved = try releases.resolveFamilyForUpdate(
-                    live: live, usb: nil)
+                    live: live, usb: nil, transport: .ota)
             } catch {
                 resolved = try releases.resolveUnavailableFamilyForUpdate(
                     live: live, usb: nil)

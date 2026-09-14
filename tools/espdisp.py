@@ -2528,7 +2528,7 @@ def cmd_release(args) -> int:
     os.makedirs(output_root, exist_ok=True)
     existing = [
         key for key in FAMILIES
-        if os.path.exists(os.path.join(
+        if shipping and os.path.exists(os.path.join(
             output_root, key,
             "espdisp-%s-%s%s" % (key, version, BUNDLE_SUFFIX)))
     ]

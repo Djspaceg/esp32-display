@@ -3710,6 +3710,8 @@ def test_universal_family_catalog_and_cli():
     release = parser.parse_args(["release"])
     check_equal(release.output_root, None,
                 "release defers its output root until build identity is known")
+    check_equal(release.shipping, False,
+                "release defaults to development artifacts")
     for argv in (
             ["compile", "--board", "s3-175"],
             ["bundle"],
@@ -4356,7 +4358,7 @@ def test_release_writes_only_bare_shipping_bundles():
             "generated_at": "2026-01-02T03:04:05Z",
             "families": {},
         }
-        args = argparse.Namespace(output_root=directory)
+        args = argparse.Namespace(output_root=directory, shipping=True)
         with unittest.mock.patch.object(
                 espdisp, "sketch_fw_version_declaration",
                 return_value=("1.5.0", 21)), \
@@ -4388,6 +4390,64 @@ def test_release_writes_only_bare_shipping_bundles():
             "release leaves an already committed dev artifact untouched")
 
 
+def test_release_defaults_to_build_numbered_dev_bundles():
+    with tempfile.TemporaryDirectory() as directory:
+        build = espdisp.FirmwareBuild(999, ".gabcdef0")
+        bundle_calls = []
+
+        def fake_bundle(args):
+            bundle_calls.append(args)
+            with open(args.output, "wb") as out:
+                out.write(("development-" + args.family[0]).encode("ascii"))
+            return 0
+
+        fake_catalog = {
+            "schema": espdisp.RELEASE_CATALOG_SINGLE_SCHEMA,
+            "generated_at": "2026-01-02T03:04:05Z",
+            "families": {},
+        }
+        args = argparse.Namespace(output_root=None, shipping=False)
+        with unittest.mock.patch.object(
+                espdisp, "sketch_fw_version_declaration",
+                return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "release_notes_for_version",
+                 return_value=GENERIC_RELEASE_NOTES), \
+             unittest.mock.patch.object(
+                 espdisp, "git_firmware_build", return_value=build), \
+             unittest.mock.patch.object(
+                 espdisp, "firmware_output_root",
+                 return_value=directory) as output_root, \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle", side_effect=fake_bundle), \
+             unittest.mock.patch.object(
+                 espdisp, "development_release_catalog",
+                 return_value=fake_catalog) as catalog, \
+             unittest.mock.patch.object(espdisp, "write_release_catalog"):
+            check_equal(
+                espdisp.cmd_release(args), 0,
+                "default release writes development artifacts")
+
+        check_equal(
+            output_root.call_args.args, (None, build),
+            "default release resolves through the development output root")
+        check_equal(
+            [os.path.basename(call.output) for call in bundle_calls],
+            ["espdisp-c6-1.5.0+999.gabcdef0.espdispfw",
+             "espdisp-s3-1.5.0+999.gabcdef0.espdispfw",
+             "espdisp-p4-1.5.0+999.gabcdef0.espdispfw"],
+            "default release keeps build identity in development filenames")
+        check(
+            all(
+                not call.shipping and call.firmware_build == build
+                for call in bundle_calls
+            ),
+            "default release passes build metadata to every bundle")
+        check_equal(
+            catalog.call_args.args, ("1.5.0", build, directory),
+            "development catalog stays schema-2 and build-numbered")
+
+
 def test_release_refuses_to_overwrite_a_shipping_version():
     with tempfile.TemporaryDirectory() as directory:
         existing = os.path.join(
@@ -4395,7 +4455,7 @@ def test_release_refuses_to_overwrite_a_shipping_version():
         os.makedirs(os.path.dirname(existing), exist_ok=True)
         with open(existing, "wb") as out:
             out.write(b"existing shipping release")
-        args = argparse.Namespace(output_root=directory)
+        args = argparse.Namespace(output_root=directory, shipping=True)
         with unittest.mock.patch.object(
                 espdisp, "sketch_fw_version_declaration",
                 return_value=("1.5.0", 21)), \
@@ -4669,6 +4729,7 @@ def main():
     test_family_resolution_and_discovery()
     test_release_catalog_contract()
     test_release_writes_only_bare_shipping_bundles()
+    test_release_defaults_to_build_numbered_dev_bundles()
     test_release_refuses_to_overwrite_a_shipping_version()
     test_dev_bundle_output_stays_outside_release_store()
     test_release_catalog_ignores_build_numbered_artifacts_before_reading()
