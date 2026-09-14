@@ -44,6 +44,48 @@ backlight wiring. The released artifact remains named only `p4`.
 
 See [firmware family architecture](docs/firmware-target-architecture.md).
 
+## Supported boards
+
+Every board this firmware runs on, and what each one supports. "Square" is a
+functional property, not cosmetic: it decides whether the IMU can drive all four
+orientations or only a 180-degree flip.
+
+| Runtime profile | Board | Chip | Panel | Resolution | Diagonal | Square | IMU | Automatic orientation | Orientations in the app |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `st7789` | [ESP32-C6-LCD-1.47](https://www.waveshare.com/esp32-c6-lcd-1.47.htm) | `esp32c6` | ST7789 | 172x320 | 1.47" | No | No | None | 0/180 |
+| `jd9853` | [ESP32-C6-Touch-LCD-1.47](https://www.waveshare.com/esp32-c6-touch-lcd-1.47.htm) | `esp32c6` | JD9853 | 172x320 | 1.47" | No | Yes | Flip only (0/180) | 0/180 |
+| `gc9107` | [ESP32-S3-LCD-0.85](https://www.waveshare.com/esp32-s3-lcd-0.85.htm) | `esp32s3` | GC9107 | 128x128 | 0.85" | Yes | No | None | 0/90/180/270 |
+| `st7789-130` | [ESP32-S3-LCD-1.3](https://www.waveshare.com/esp32-s3-lcd-1.3.htm) | `esp32s3` | ST7789V2 | 240x240 | 1.3" | Yes | Yes | Four-way | 0/90/180/270 |
+| `st7789-154` | [ESP32-S3-LCD-1.54](https://www.waveshare.com/esp32-s3-lcd-1.54.htm) | `esp32s3` | ST7789 | 240x240 | 1.54" | Yes | Yes | Four-way | 0/90/180/270 |
+| `co5300` | [ESP32-S3-Touch-AMOLED-1.75C](https://www.waveshare.com/esp32-s3-touch-amoled-1.75c.htm) | `esp32s3` | CO5300 (AMOLED) | 466x466 | 1.75" | Yes | Yes | Four-way | 0/90/180/270 |
+| `st77916` | [ESP32-S3-Touch-LCD-1.85C](https://www.waveshare.com/esp32-s3-touch-lcd-1.85c.htm) | `esp32s3` | ST77916 (round) | 360x360 | 1.85" | Yes | No | None | 0/90/180/270 |
+| `st7703-4b` | [ESP32-P4-WIFI6-Touch-LCD-4B](https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-4b.htm) | `esp32p4` | ST7703 (MIPI-DSI) | 720x720 | 4" | Yes | No | None | 0/90/180/270 |
+
+Orientation rules behind the last three columns:
+
+- A square panel with an IMU auto-rotates through all four cardinal
+  orientations.
+- A non-square panel with an IMU auto-flips between 0 and 180 only. A
+  quarter-turn is never applied automatically, because the quarter-turn
+  framebuffer geometry for non-square panels is intentionally unsupported.
+  Side-pointing gravity holds the last stable 0 or 180 rather than guessing a
+  nearest edge, and only a settled up/down reading commits a change.
+- A board with no IMU never rotates on its own, but its orientation is still
+  selectable from the macOS app.
+- A manual choice is never overwritten. Effective rotation is
+  `(manual + automatic) mod 4`: the app writes the saved rotation, gravity moves
+  only a volatile correction on top of it.
+
+Axis calibration is not uniform. Only `co5300` has field-verified accelerometer
+axes (X=+1, Y=-1). `st7789-130`, `st7789-154`, and `jd9853` use the vendor
+example's identity axes and have not had a six-position calibration run, so their
+automatic orientation may be correctly shaped but wrongly signed until it does.
+
+Board identity, pin maps, and panel geometry are declared in
+[`firmware/libraries/espdisp_board/src/board_config.h`](firmware/libraries/espdisp_board/src/board_config.h)
+and [`panel_config.h`](firmware/libraries/espdisp_board/src/panel_config.h);
+those files are the source of truth if this table drifts.
+
 ## Runtime profile selection
 
 Profile selection occurs before panel GPIO initialization.
