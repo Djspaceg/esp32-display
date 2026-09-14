@@ -19,12 +19,32 @@
 // The 480-pixel allowance also preserves the tile benchmark's established
 // staging shape.
 constexpr size_t PANEL_TRANSFER_STAGE_BYTES = paneltransfer::STAGING_BYTES;
-extern uint8_t panelTransferStaging[2][PANEL_TRANSFER_STAGE_BYTES];
+extern uint8_t
+    panelTransferStaging[paneltransfer::STAGING_SLOT_COUNT]
+                        [PANEL_TRANSFER_STAGE_BYTES];
 
-// Acquires the next safe staging buffer. Call commitPanelTransferStaging only
-// after a transfer using the returned buffer was successfully queued.
-uint8_t *acquirePanelTransferStaging(uint32_t maxUs);
-void commitPanelTransferStaging();
+struct PanelTransferStaging {
+  uint8_t *pixels;
+  uint8_t slot;
+};
+
+// Reserves a free slot before returning its pointer. A timeout leaves all
+// ownership unchanged.
+bool acquirePanelTransferStaging(uint32_t maxUs, PanelTransferStaging &out);
+
+// Releases a reservation that was never submitted to hardware.
+bool releasePanelTransferStagingReservation(
+    const PanelTransferStaging &staging);
+
+// Registers the reserved slot in callback order before submitting it to
+// hardware. A failed submission rolls the reservation back because hardware
+// never accepted it.
+esp_err_t queuePanelTransferStaging(
+    esp_lcd_panel_handle_t panel, const board::Config &cfg, int x0, int y0,
+    int x1, int y1, const PanelTransferStaging &staging);
+
+// ISR context: releases exactly the oldest successfully queued slot.
+void completePanelTransferStagingFromIsr();
 #endif
 
 esp_err_t queuePanelBitmap(esp_lcd_panel_handle_t panel,
