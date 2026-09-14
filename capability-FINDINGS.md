@@ -41,6 +41,9 @@ Post-change:
 - The tool and full Swift lanes retained the same dangling-manifest baseline
   failure. This change does not repair or alter that separate branch issue.
 - Focused Swift contract tests passed.
+- A signed universal Release app built successfully without being launched.
+- Build-numbered C6, S3, and P4 bundles were generated from the committed fix.
+  The S3 and P4 bundles each retain the 4,196,020-byte `doom_wad`.
 
 One intermediate focused rerun reused a Swift module cache through a moved
 symlink and crashed before tests with duplicate module-cache paths. The next
@@ -69,6 +72,11 @@ No board or `/dev/cu.*` path was touched. Hardware is still required to confirm:
 All generated trees are under `/Users/stepblk/Source`, beside the main checkout.
 The accidentally in-worktree Swift tree was moved to
 `/Users/stepblk/Source/esp32-display-rot-capability-swift-scratch-accidental`.
+The release tool's first interrupted temp tree was moved from macOS's default
+temporary directory to
+`/Users/stepblk/Source/esp32-display-rot-capability-release-temp-escaped`;
+the successful rerun forced `TMPDIR` to
+`/Users/stepblk/Source/esp32-display-rot-capability-release-tmp`.
 
 The environment refused this cleanup command and it was not retried:
 
