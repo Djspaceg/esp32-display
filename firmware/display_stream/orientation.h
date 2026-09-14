@@ -16,7 +16,7 @@ extern bool madctlDirty;          // panel config needs reapplying
 uint8_t effectivePanelRotation();
 void applyPanelConfig(bool landscape);
 
-// QMI8658 auto-rotation: four-way on square panels, flip-only otherwise.
+// QMI8658 auto-rotation (square panels only; see orientation.cpp).
 extern bool motionAvailable;
 void serviceAutoRotation();
 void reportMotionDiagnostics();

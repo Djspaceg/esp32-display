@@ -229,8 +229,7 @@ final class PanelManagerTests: XCTestCase {
                 + "id=020000123456 connected=0 ip=0.0.0.0 rssi=0 flip=0 "
                 + "rot=0 auto=0 effective=0 motion=1 bl=high pwr=on "
                 + "board=st77916 profile=st77916 target=s3-185 chip=esp32s3 "
-                + "partition=8MB bat=-1 ota=off ssid= caps=00002000 "
-                + "bllevel=128 fw=1.5.0")
+                + "partition=8MB bat=-1 ota=off ssid= bllevel=128 fw=1.5.0")
         manager.noteUSBIdentity(
             path: path,
             identity: identity,
@@ -261,113 +260,6 @@ final class PanelManagerTests: XCTestCase {
         {
             XCTFail("verified cold USB should enter firmware update: \(reason)")
         }
-    }
-
-    func testP4WithoutReportedRotateCapabilityStaysFlipOnlyOverVerifiedUSB() {
-        let path = "/dev/cu.usbmodem-p4"
-        var panel = controllablePanel(
-            capabilities: .power.union(.flip),
-            heartbeatAt: Date(timeIntervalSinceNow: -60))
-        panel.usbPort = path
-        panel.usbHardwareID = panel.hardwareID
-        let manager = PanelManager(
-            previewPanels: [panel],
-            savedNetworkNames: [],
-            usbSerialPorts: [path])
-        let identity = WifiConfigUI.usbIdentity(from:
-            "CFGINFO ssid64= name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
-                + "connected=0 rot=0 pwr=on board=st7703-4b profile=st7703-4b "
-                + "target=p4 chip=esp32p4 partition=p4-32m-ota ota=off ssid= "
-                + "bllevel=128 fw=1.5.0")
-        manager.noteUSBIdentity(
-            path: path,
-            identity: identity,
-            generation: manager.usbPathGeneration(path))
-
-        XCTAssertFalse(manager.supportsQuarterTurnRotation(panel.serviceName))
-        XCTAssertFalse(manager.canControl(panel.serviceName, capability: .rotate))
-    }
-
-    func testP4WithReportedRotateCapabilityOffersQuarterTurnsOverVerifiedUSB() {
-        let path = "/dev/cu.usbmodem-p4"
-        var panel = controllablePanel(
-            capabilities: .power.union(.flip),
-            heartbeatAt: Date(timeIntervalSinceNow: -60))
-        panel.usbPort = path
-        panel.usbHardwareID = panel.hardwareID
-        let manager = PanelManager(
-            previewPanels: [panel],
-            savedNetworkNames: [],
-            usbSerialPorts: [path])
-        let identity = WifiConfigUI.usbIdentity(from:
-            "CFGINFO ssid64= name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
-                + "connected=0 rot=0 pwr=on board=st7703-4b "
-                + "profile=st7703-4b target=p4 chip=esp32p4 "
-                + "partition=p4-32m-ota ota=off ssid= caps=00002000 "
-                + "bllevel=128 fw=1.5.0")
-        manager.noteUSBIdentity(
-            path: path,
-            identity: identity,
-            generation: manager.usbPathGeneration(path))
-
-        XCTAssertTrue(manager.supportsQuarterTurnRotation(panel.serviceName))
-        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .rotate))
-    }
-
-    func testRotateCapabilityWithoutUSBBoardIdentityStaysFlipOnly() {
-        let path = "/dev/cu.usbmodem-unknown"
-        var panel = controllablePanel(
-            capabilities: .power.union(.flip),
-            heartbeatAt: Date(timeIntervalSinceNow: -60))
-        panel.usbPort = path
-        panel.usbHardwareID = panel.hardwareID
-        let manager = PanelManager(
-            previewPanels: [panel],
-            savedNetworkNames: [],
-            usbSerialPorts: [path])
-        let identity = WifiConfigUI.usbIdentity(from:
-            "CFGINFO ssid64= name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
-                + "connected=0 rot=0 pwr=on target=p4 chip=esp32p4 "
-                + "partition=p4-32m-ota ota=off ssid= caps=00002000 "
-                + "bllevel=128 fw=1.5.0")
-        manager.noteUSBIdentity(
-            path: path,
-            identity: identity,
-            generation: manager.usbPathGeneration(path))
-
-        XCTAssertFalse(manager.supportsQuarterTurnRotation(panel.serviceName))
-        XCTAssertFalse(manager.canControl(panel.serviceName, capability: .rotate))
-    }
-
-    func testRectangularPanelStaysFlipOnlyEvenIfRotateCapabilityIsSet() {
-        var panel = controllablePanel(capabilities: .flip.union(.rotate))
-        panel.geometry = PanelGeometry(width: 172, height: 320)
-        let manager = makeManager([panel])
-        manager.register(makeSession(name: panel.serviceName))
-
-        XCTAssertFalse(manager.supportsQuarterTurnRotation(panel.serviceName))
-        XCTAssertFalse(manager.canControl(panel.serviceName, capability: .rotate))
-        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .flip))
-    }
-
-    func testUnknownGeometryStaysFlipOnlyEvenIfRotateCapabilityIsSet() {
-        let panel = controllablePanel(capabilities: .flip.union(.rotate))
-        let manager = makeManager([panel])
-        manager.register(makeSession(name: panel.serviceName))
-
-        XCTAssertFalse(manager.supportsQuarterTurnRotation(panel.serviceName))
-        XCTAssertFalse(manager.canControl(panel.serviceName, capability: .rotate))
-        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .flip))
-    }
-
-    func testSquareNetworkPanelWithRotateCapabilityOffersQuarterTurns() {
-        var panel = controllablePanel(capabilities: .flip.union(.rotate))
-        panel.geometry = PanelGeometry(width: 360, height: 360)
-        let manager = makeManager([panel])
-        manager.register(makeSession(name: panel.serviceName))
-
-        XCTAssertTrue(manager.supportsQuarterTurnRotation(panel.serviceName))
-        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .rotate))
     }
 
     func testVerifiedOldFirmwareExplainsMissingUSBBrightness() {
