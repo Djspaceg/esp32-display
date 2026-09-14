@@ -23,12 +23,14 @@ final class CocoaScriptingHandlerTests: XCTestCase {
         service: String = "panel-a",
         display: String = "Studio",
         online: Bool = true,
-        capabilities: DeviceProtocol.Capabilities? = nil
+        capabilities: DeviceProtocol.Capabilities? = nil,
+        geometry: PanelGeometry? = PanelGeometry(width: 360, height: 360)
     ) -> PanelSnapshot {
         PanelSnapshot(
             serviceName: service,
             displayName: display,
             lastHeartbeatAt: online ? Date() : nil,
+            geometry: geometry,
             controlProtocolVersion: Int(DeviceProtocol.controlProtocolVersion),
             capabilitiesRaw: (capabilities ?? controls).rawValue,
             brightness: 80)
