@@ -19,6 +19,15 @@ struct Calibration {
   int8_t panelYSign;
 };
 
+enum class AutomaticMode : uint8_t {
+  FourWay,
+  FlipOnly,
+};
+
+inline AutomaticMode automaticModeForPanel(uint16_t width, uint16_t height) {
+  return width == height ? AutomaticMode::FourWay : AutomaticMode::FlipOnly;
+}
+
 inline int32_t magnitude(int32_t value) { return value < 0 ? -value : value; }
 
 inline int32_t calibratedAxis(const int16_t raw[3], uint8_t axis, int8_t sign) {
@@ -44,7 +53,7 @@ inline int32_t stableProjection(uint8_t rotation, int32_t panelX,
 }
 
 inline uint8_t classify(const int16_t raw[3], const Calibration &calibration,
-                        uint8_t stableRotation) {
+                        uint8_t stableRotation, AutomaticMode mode) {
   const int32_t x = calibratedAxis(
       raw, calibration.panelXAxis, calibration.panelXSign);
   const int32_t y = calibratedAxis(
@@ -63,7 +72,11 @@ inline uint8_t classify(const int16_t raw[3], const Calibration &calibration,
   if ((ax < ENTER_MIN && ay < ENTER_MIN) || dominance < ENTER_DOMINANCE) {
     return INVALID_ROTATION;  // face-up/down, moving, or too close to diagonal
   }
-  return cardinalFor(x, y);
+  const uint8_t cardinal = cardinalFor(x, y);
+  if (mode == AutomaticMode::FlipOnly && (cardinal & 1) != 0) {
+    return INVALID_ROTATION;
+  }
+  return cardinal;
 }
 
 inline uint8_t compose(uint8_t manualRotation, uint8_t automaticRotation) {
@@ -76,14 +89,14 @@ class Tracker {
   uint8_t candidate() const { return candidate_; }
 
   bool update(const int16_t raw[3], const Calibration &calibration,
-              uint32_t nowMs, bool allowCommit = true) {
+              AutomaticMode mode, uint32_t nowMs, bool allowCommit = true) {
     if (!allowCommit) {
       candidate_ = INVALID_ROTATION;
       candidateSince_ = nowMs;
       return false;
     }
 
-    const uint8_t next = classify(raw, calibration, stable_);
+    const uint8_t next = classify(raw, calibration, stable_, mode);
     if (next == INVALID_ROTATION || next == stable_) {
       candidate_ = INVALID_ROTATION;
       candidateSince_ = nowMs;
