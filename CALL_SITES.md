@@ -34,12 +34,20 @@ Every reader of `PanelConfig.supportsCommandRotation`:
 The resulting app path:
 
 - `mac/ESPDisplaySender/Sources/SenderCore/PanelManager+DeviceControls.swift`
-  - `supportsQuarterTurnRotation` uses network `CAP_ROTATE` or verified USB board evidence.
-  - `usbDevice(..., reports: .quarterTurn)` calls `usbBoardSupportsQuarterTurns`.
+  - `supportsQuarterTurnRotation` requires known square geometry for network
+    `CAP_ROTATE`, or the complete verified USB gate below.
+  - `usbDevice(..., reports: .quarterTurn)` requires a rotation status field,
+    USB-reported `CAP_ROTATE`, and `usbBoardSupportsQuarterTurns`.
   - `ManagerWindow` shows the existing four-way picker when `supportsQuarterTurnRotation` is true.
   - `setRotation` sends network `Rotate` or USB `CFGROT`.
+- `mac/ESPDisplaySender/Sources/SenderCore/WifiConfigUI.swift`
+  - `usbIdentity` parses the additive CFGSHOW `caps=` bitset only after the exact
+    `ssid64`/`ssid` boundary; absent, spoof-like, or malformed values remain nil.
 - `mac/ESPDisplaySender/Tests/SenderCoreTests/PanelManagerTests.swift`
-  - Verifies `st7703-4b` exposes quarter-turn orientation over verified USB.
+  - Verifies `st7703-4b` stays flip-only without USB-reported `CAP_ROTATE` and
+    exposes quarter turns only when the capability is present.
+- `mac/ESPDisplaySender/Tests/SenderCoreTests/WifiConfigTests.swift`
+  - Verifies valid, absent, and malformed CFGSHOW capability values.
 
 ## Profile Impact
 

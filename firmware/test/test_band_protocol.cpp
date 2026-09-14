@@ -183,8 +183,11 @@ int main() {
 
     char extension[64];
     CHECK(serialcfg::formatShowExtension(
-              extension, sizeof(extension), 128, "1.5.0") > 0);
-    CHECK(strcmp(extension, " bllevel=128 fw=1.5.0") == 0);
+              extension, sizeof(extension), deviceproto::CAP_ROTATE,
+              128, "1.5.0") > 0);
+    CHECK(strcmp(
+              extension,
+              " caps=00002000 bllevel=128 fw=1.5.0") == 0);
   }
 
   const Geometry G172 = GEOMETRY_172X320;

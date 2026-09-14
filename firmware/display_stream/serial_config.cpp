@@ -617,7 +617,8 @@ static void processConfigLine(char *line) {
     name64[name64Len] = 0;
     char extension[64];
     serialcfg::formatShowExtension(
-        extension, sizeof(extension), userBlLevel, FW_VERSION);
+        extension, sizeof(extension), deviceCapabilities(), userBlLevel,
+        FW_VERSION);
     // ota= is three-valued on purpose: "off" (no password stored), "pending" (a
     // password is stored but the radio was not ready when setup ran, so nothing
     // is listening yet), "on" (listening). Reporting only on/off would make a
@@ -625,10 +626,12 @@ static void processConfigLine(char *line) {
     // otapolicy::statusToken, tested on the host.
     // flip= stays (derived: rotation == 2) so anything parsing the old field
     // keeps reading the truth; rot= carries the full quarter-turn value.
+    // The extension appends the same caps bitset EINF and mDNS report, so a USB
+    // sender can distinguish installed command support from board identity.
     configSerial().printf(
         "CFGINFO ssid64=%s name64=%s id=%02x%02x%02x%02x%02x%02x "
         // mirrorx= and blfixed= come from the prism/fixed-backlight work;
-        // bllevel= and fw= are appended by formatShowExtension above, so they
+        // caps=, bllevel= and fw= are appended by formatShowExtension above, so they
         // are deliberately NOT repeated here - a duplicated key in CFGINFO
         // would make the field ambiguous to every parser reading it.
         "connected=%d ip=%s rssi=%d flip=%d rot=%u mirrorx=%d auto=%u "
