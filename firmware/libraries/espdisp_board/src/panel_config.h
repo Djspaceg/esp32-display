@@ -82,7 +82,7 @@ static constexpr PanelConfig PANEL_ST7789V2_240X240 = {
     0, 0, 0, 0, 0, 0, 0, 0};
 static constexpr PanelConfig PANEL_ST7703_720X720 = {
     PanelProfile::St7703_720x720, PanelDriver::St7703, PanelBus::MipiDsi,
-    720, 720, 38000000, 0, 0, 0, 0, false, false, false,
+    720, 720, 38000000, 0, 0, 0, 0, false, false, true,
     2, 480, 50, 20, 50, 20, 4, 20};
 
 }  // namespace board
