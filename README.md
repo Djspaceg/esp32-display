@@ -59,7 +59,7 @@ orientations or only a 180-degree flip.
 | `st7789-154` | [ESP32-S3-LCD-1.54](https://www.waveshare.com/esp32-s3-lcd-1.54.htm) | `esp32s3` | ST7789 | 240x240 | 1.54" | Yes | Yes | Four-way | 0/90/180/270 |
 | `co5300` | [ESP32-S3-Touch-AMOLED-1.75C](https://www.waveshare.com/esp32-s3-touch-amoled-1.75c.htm) | `esp32s3` | CO5300 (AMOLED) | 466x466 | 1.75" | Yes | Yes | Four-way | 0/90/180/270 |
 | `st77916` | [ESP32-S3-Touch-LCD-1.85C](https://www.waveshare.com/esp32-s3-touch-lcd-1.85c.htm) | `esp32s3` | ST77916 (round) | 360x360 | 1.85" | Yes | No | None | 0/90/180/270 |
-| `st7703-4b` | [ESP32-P4-WIFI6-Touch-LCD-4B](https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-4b.htm) | `esp32p4` | ST7703 (MIPI-DSI) | 720x720 | 4" | Yes | Yes | None (no IMU) | 0/90/180/270 |
+| `st7703-4b` | [ESP32-P4-WIFI6-Touch-LCD-4B](https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-4b.htm) | `esp32p4` | ST7703 (MIPI-DSI) | 720x720 | 4" | Yes | No | None | 0/90/180/270 |
 
 Orientation rules behind the last three columns:
 
