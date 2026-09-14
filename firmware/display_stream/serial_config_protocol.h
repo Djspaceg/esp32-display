@@ -31,11 +31,10 @@ inline bool parseBrightness(const char *line, uint8_t &level) {
 }
 
 inline int formatShowExtension(char *output, size_t outputSize,
-                               uint32_t capabilities, uint8_t brightnessLevel,
+                               uint8_t brightnessLevel,
                                const char *firmwareVersion) {
-  return snprintf(output, outputSize, " caps=%08lx bllevel=%u fw=%s",
-                  (unsigned long)capabilities, (unsigned)brightnessLevel,
-                  firmwareVersion);
+  return snprintf(output, outputSize, " bllevel=%u fw=%s",
+                  (unsigned)brightnessLevel, firmwareVersion);
 }
 
 }  // namespace serialcfg

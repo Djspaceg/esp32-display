@@ -12,9 +12,8 @@
 
 // QMI8658 state. Automatic correction is intentionally transient: the user's
 // mounting rotation remains the only value persisted or reported to the Mac.
-// Square panels accept all four gravity cardinals. Rectangular panels accept
-// only upright/upside-down, holding the last stable flip while gravity points
-// at either side.
+// Only square panels apply it; the rectangular C6 is sampled for diagnostics
+// but stays on its sender-defined geometry until that protocol is redesigned.
 bool motionAvailable = false;
 static motionorient::Tracker motionTracker;
 static boardmotion::Sample lastMotionSample = {0, 0, 0};
@@ -24,9 +23,9 @@ static uint32_t lastMotionPollAt = 0;
 bool panelLandscape = false;              // current panel MADCTL state
 // The user's mounting rotation, clockwise quarter turns 0-3. Supersedes the
 // old flip180 bool: rotation 2 IS the old flip, and the BOOT long press still
-// steps by 2. Quarter-turn availability remains a panel-backend capability;
-// automatic rotation is independently restricted to flips on rectangular
-// glass.
+// steps by 2. Values 1 and 3 are only accepted on square glass (see the
+// Rotate case in applyPendingControl and CFGROT); rectangular panels express
+// a physical quarter turn through the sender's landscape mechanism instead.
 uint8_t panelRotation = 0;
 // Optical installations can reverse handedness without rotating the panel.
 bool panelMirrorX = false;
@@ -70,11 +69,9 @@ void serviceAutoRotation() {
   const motionorient::Calibration calibration = {
       bcfg->motionXAxis, bcfg->motionXSign,
       bcfg->motionYAxis, bcfg->motionYSign};
-  const motionorient::AutomaticMode mode =
-      motionorient::automaticModeForPanel(bcfg->panel->width,
-                                          bcfg->panel->height);
-  if (!motionTracker.update(raw, calibration, mode, now,
-                            !boardtouch::isPressed())) {
+  const bool square = bcfg->panel->width == bcfg->panel->height;
+  if (!motionTracker.update(raw, calibration, now,
+                            square && !boardtouch::isPressed())) {
     return;
   }
 
@@ -88,12 +85,12 @@ void serviceAutoRotation() {
 void reportMotionDiagnostics() {
     if (motionAvailable && motionSampleValid) {
       Serial.printf(
-          "motion: raw=%d,%d,%d candidate=%d auto=%u effective=%u mode=%s\n",
+          "motion: raw=%d,%d,%d candidate=%d auto=%u effective=%u apply=%d\n",
           (int)lastMotionSample.x, (int)lastMotionSample.y,
           (int)lastMotionSample.z,
           motionTracker.candidate() == motionorient::INVALID_ROTATION
               ? -1 : (int)motionTracker.candidate(),
           automaticRotation, effectivePanelRotation(),
-          bcfg->panel->width == bcfg->panel->height ? "four-way" : "flip-only");
+          bcfg->panel->width == bcfg->panel->height);
     }
 }

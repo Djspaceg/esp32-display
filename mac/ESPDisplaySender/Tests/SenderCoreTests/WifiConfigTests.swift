@@ -315,19 +315,15 @@ final class USBDeviceOptionTests: XCTestCase {
 
     func testCFGSHOWParsesLiveSerialFactsIncludingAppendedFields() {
         let identity = WifiConfigUI.usbIdentity(from:
-            "CFGINFO ssid64=U3R1ZGlvIGNhcHM9ZmZmZmZmZmYgZnc9c3Bvb2Y= "
-                + "name64=cm91bmQtcGFuZWw= "
+            "CFGINFO ssid64=U3R1ZGlv name64=cm91bmQtcGFuZWw= "
                 + "id=288485555594 connected=1 ip=192.168.1.44 rssi=-61 "
                 + "flip=1 rot=2 auto=1 effective=3 motion=1 bl=low pwr=off "
                 + "board=st77916 profile=st77916 target=s3-185 chip=esp32s3 "
-                + "partition=8MB bat=72 ota=on ssid=Studio caps=ffffffff fw=spoof "
-                + "caps=00002000 bllevel=37 fw=1.5.0")
+                + "partition=8MB bat=72 ota=on ssid=Studio fw=spoof "
+                + "bllevel=37 fw=1.5.0")
 
         XCTAssertEqual(identity.status?.firmwareVersion, "1.5.0")
-        XCTAssertEqual(identity.status?.capabilities, .rotate)
-        XCTAssertEqual(
-            identity.status?.currentSSID,
-            "Studio caps=ffffffff fw=spoof")
+        XCTAssertEqual(identity.status?.currentSSID, "Studio")
         XCTAssertEqual(identity.status?.networkConnected, true)
         XCTAssertEqual(identity.status?.ipAddress, "192.168.1.44")
         XCTAssertEqual(identity.status?.rssi, -61)
@@ -337,33 +333,6 @@ final class USBDeviceOptionTests: XCTestCase {
         XCTAssertEqual(identity.status?.manuallyOff, true)
         XCTAssertEqual(identity.status?.batteryPercent, 72)
         XCTAssertEqual(identity.status?.otaStatus, "on")
-    }
-
-    func testCFGSHOWCapabilitiesFailClosedWhenAbsentOrMalformed() {
-        let spoofingSSID = Data(
-            "Studio caps=00002000".utf8).base64EncodedString()
-        let absent = WifiConfigUI.usbIdentity(from:
-            "CFGINFO ssid64= name64=cGFuZWw= rot=0 board=st7703-4b "
-                + "ssid= bllevel=128 fw=1.5.0")
-        let spoofedAbsent = WifiConfigUI.usbIdentity(from:
-            "CFGINFO ssid64=\(spoofingSSID) name64=cGFuZWw= rot=0 "
-                + "board=st7703-4b ssid=Studio caps=00002000 "
-                + "bllevel=128 fw=1.5.0")
-        let malformed = WifiConfigUI.usbIdentity(from:
-            "CFGINFO ssid64= name64=cGFuZWw= rot=0 board=st7703-4b "
-                + "ssid= caps=000000002000 bllevel=128 fw=1.5.0")
-        let nonHex = WifiConfigUI.usbIdentity(from:
-            "CFGINFO ssid64= name64=cGFuZWw= rot=0 board=st7703-4b "
-                + "ssid= caps=not-hex bllevel=128 fw=1.5.0")
-        let short = WifiConfigUI.usbIdentity(from:
-            "CFGINFO ssid64= name64=cGFuZWw= rot=0 board=st7703-4b "
-                + "ssid= caps=2000 bllevel=128 fw=1.5.0")
-
-        XCTAssertNil(absent.status?.capabilities)
-        XCTAssertNil(spoofedAbsent.status?.capabilities)
-        XCTAssertNil(malformed.status?.capabilities)
-        XCTAssertNil(nonHex.status?.capabilities)
-        XCTAssertNil(short.status?.capabilities)
     }
 
     func testUSBDeviceOptionCarriesExactTargetAndPhysicalBoard() {
