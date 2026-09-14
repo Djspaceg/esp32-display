@@ -239,6 +239,25 @@ enum FirmwareReleaseNotesPresentation: Equatable {
     }
 }
 
+struct USBPartitionMigrationNotice: Equatable {
+    let from: String
+    let to: String
+
+    var planDetail: String {
+        "This USB flash will rewrite the partition table from \(from) to \(to). "
+            + "It writes the bootloader, partition table, boot_app0 and app "
+            + "together without erasing saved settings."
+    }
+
+    var confirmationMessage: String {
+        "This USB flash rewrites the partition table from \(from) to \(to). "
+            + "The bootloader, partition table, boot_app0 and app will be written "
+            + "together after the board's hardware ID, chip and MAC are re-verified. "
+            + "No whole-chip erase is performed, so saved WiFi, name, settings "
+            + "and OTA password remain."
+    }
+}
+
 /// Choose a `.espdispfw` file, see what it can do for this panel, and push it.
 ///
 /// In its own file because ManagerWindow.swift is already 1239 lines, and because
@@ -329,6 +348,7 @@ struct FirmwareUpdateSheet: View {
             passwordProblem = nil
             otaProgress = nil
             usbProgress = nil
+            reloadAutomaticFirmwareForSelectedTransport()
         }
         // A firmware write is at least as consequential as a restart, so the
         // confirmation is at least as deliberate as the restart one in
@@ -337,7 +357,7 @@ struct FirmwareUpdateSheet: View {
         .confirmationDialog(
             confirmationTitle, isPresented: $confirmPush, titleVisibility: .visible
         ) {
-            Button(confirmationVerb, role: plan(bundle)?.isCautionary == true
+            Button(confirmationVerb, role: confirmationIsDestructive
                 ? .destructive : nil) {
                 startPush()
             }
@@ -528,6 +548,17 @@ struct FirmwareUpdateSheet: View {
         let plan = plan(bundle)
         let usbWillDetect = selectedTransport == .usb && effectiveTarget == nil
         Section("What this would do") {
+            if let migration = usbPartitionMigration(bundle) {
+                Label(
+                    "Partition table rewrite",
+                    systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.orange)
+                Text(migration.planDetail)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             VStack(alignment: .leading, spacing: 6) {
                 Text(usbWillDetect
                     ? "Verify the USB board, then choose its image"
@@ -734,6 +765,11 @@ struct FirmwareUpdateSheet: View {
         return plan(bundle).verb
     }
 
+    private var confirmationIsDestructive: Bool {
+        guard let bundle else { return false }
+        return plan(bundle).isCautionary || usbPartitionMigration(bundle) != nil
+    }
+
     private var confirmationMessage: String {
         guard let bundle else { return "" }
         switch selectedTransport {
@@ -744,6 +780,9 @@ struct FirmwareUpdateSheet: View {
             return "\(byteCount(image.byteCount)) will be written to the panel's "
                 + "inactive firmware slot, and it will restart onto it."
         case .usb:
+            if let migration = usbPartitionMigration(bundle) {
+                return migration.confirmationMessage
+            }
             let bytes = effectiveTarget.flatMap { bundle.flashPlan(forTarget: $0) }
                 .map { $0.reduce(0) { $0 + $1.payload.count } }
             let amount = bytes.map { "\(byteCount($0)) in the bundle" }
@@ -752,6 +791,18 @@ struct FirmwareUpdateSheet: View {
                 + "ID, chip and MAC are re-verified. No whole-chip erase is "
                 + "performed, so saved WiFi, name, settings and OTA password remain."
         }
+    }
+
+    private func usbPartitionMigration(
+        _ bundle: FirmwareBundle
+    ) -> USBPartitionMigrationNotice? {
+        guard selectedTransport == .usb,
+              let exactTarget = effectiveTarget,
+              let reported = target.usbDevice?.partition ?? target.partition,
+              let required = bundle.image(forTarget: exactTarget)?.partition,
+              reported != required
+        else { return nil }
+        return USBPartitionMigrationNotice(from: reported, to: required)
     }
 
     private var progressFraction: Double? {
@@ -861,7 +912,8 @@ struct FirmwareUpdateSheet: View {
                         .init(
                             family: $0.target, chip: $0.chip,
                             profile: $0.board, partition: $0.partition)
-                    })
+                    },
+                    transport: selectedTransport == .usb ? .usb : .ota)
                 bundle = selected.selection.bundle
                 bundleURL = selected.selection.url
                 automaticIdentity = selected.identity
@@ -888,6 +940,15 @@ struct FirmwareUpdateSheet: View {
         automaticIdentity = nil
         readFailure = nil
         if canResolve { resolveBundledFirmware() }
+    }
+
+    private func reloadAutomaticFirmwareForSelectedTransport() {
+        if bundle != nil, automaticIdentity == nil { return }
+        bundle = nil
+        bundleURL = nil
+        automaticIdentity = nil
+        readFailure = nil
+        resolveBundledFirmware()
     }
 
     /// The open panel, restricted to the one extension this app can read.
