@@ -3,6 +3,70 @@ import XCTest
 @testable import SenderProtocol
 
 final class FirmwareReleaseCatalogTests: XCTestCase {
+    func testSchemaThreeReadsShippingRevisionsAndPinsLatestAliases() throws {
+        let catalog = try FirmwareReleaseCatalog.read(
+            Self.catalogData(
+                schema: 3,
+                revisionVersions: ["1.5.0", "1.4.2"]))
+        let entry = try XCTUnwrap(catalog.families["s3"])
+        XCTAssertEqual(entry.revisions.map(\.version), ["1.5.0", "1.4.2"])
+        XCTAssertTrue(entry.revisions.allSatisfy { $0.build == nil })
+        XCTAssertEqual(entry.revisions.first?.artifact, entry.artifact)
+        XCTAssertEqual(entry.revisions.first?.sha256, entry.sha256)
+        XCTAssertEqual(entry.revisions.first?.byteCount, entry.byteCount)
+        XCTAssertEqual(entry.revisions.first?.version, entry.latestVersion)
+        XCTAssertEqual(entry.revisions.first?.build, entry.latestBuild)
+    }
+
+    func testSchemaThreeRejectsMissingRevisionsAndNonDescendingVersions() throws {
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Self.catalogData(
+                    schema: 3,
+                    revisionVersions: ["1.5.0", "1.4.2"])
+            ) as? [String: Any])
+        var families = object["families"] as! [String: Any]
+        var c6 = families["c6"] as! [String: Any]
+        c6.removeValue(forKey: "revisions")
+        families["c6"] = c6
+        object["families"] = families
+        XCTAssertThrowsError(try FirmwareReleaseCatalog.read(
+            JSONSerialization.data(withJSONObject: object)))
+
+        object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Self.catalogData(
+                    schema: 3,
+                    revisionVersions: ["1.4.2", "1.5.0"])
+            ) as? [String: Any])
+        XCTAssertThrowsError(try FirmwareReleaseCatalog.read(
+            JSONSerialization.data(withJSONObject: object))) {
+            XCTAssertEqual(
+                $0 as? FirmwareReleaseCatalogError,
+                .invalidRevisions("c6"))
+        }
+
+        object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Self.catalogData(
+                    schema: 3,
+                    revisionVersions: ["1.5.0", "1.4.2"])
+            ) as? [String: Any])
+        families = object["families"] as! [String: Any]
+        c6 = families["c6"] as! [String: Any]
+        var revisions = c6["revisions"] as! [[String: Any]]
+        revisions[0]["build"] = 192
+        c6["revisions"] = revisions
+        families["c6"] = c6
+        object["families"] = families
+        XCTAssertThrowsError(try FirmwareReleaseCatalog.read(
+            JSONSerialization.data(withJSONObject: object))) {
+            XCTAssertEqual(
+                $0 as? FirmwareReleaseCatalogError,
+                .invalidKeys("c6.revisions[0]"))
+        }
+    }
+
     func testSchemaTwoReadsLatestBuild() throws {
         let catalog = try FirmwareReleaseCatalog.read(
             Self.catalogData(schema: 2, latestBuild: 192))
@@ -94,7 +158,8 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
     }
 
     private static func catalogData(
-        schema: Int = 1, latestBuild: UInt32? = nil
+        schema: Int = 1, latestBuild: UInt32? = nil,
+        revisionVersions: [String]? = nil
     ) throws -> Data {
         let profiles: [String: [String]] = [
             "c6": ["st7789", "jd9853"],
@@ -134,7 +199,19 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
                     "identity_required": ["family", "chip", "profile", "partition"],
                 ],
             ]
-            if let latestBuild { entry["latest_build"] = latestBuild }
+            if schema == 2, let latestBuild {
+                entry["latest_build"] = latestBuild
+            }
+            if let revisionVersions {
+                entry["revisions"] = revisionVersions.map { version in
+                    [
+                        "version": version,
+                        "artifact": "\(family)/espdisp-\(family)-\(version).espdispfw",
+                        "sha256": String(repeating: "a", count: 64),
+                        "bytes": 123,
+                    ] as [String: Any]
+                }
+            }
             families[family] = entry
         }
         return try JSONSerialization.data(withJSONObject: [

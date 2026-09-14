@@ -3,7 +3,7 @@ import XCTest
 @testable import SenderProtocol
 
 final class GeneratedReleaseCrossReadTests: XCTestCase {
-    func testCanonicalGeneratedFamiliesCrossReadInSwift() throws {
+    func testShippingCatalogCrossReadsWithPerRevisionValidation() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -14,12 +14,30 @@ final class GeneratedReleaseCrossReadTests: XCTestCase {
         let catalog = try FirmwareReleaseCatalog.read(contentsOf: catalogURL)
         for family in ["c6", "s3", "p4"] {
             let entry = try XCTUnwrap(catalog.families[family])
-            let data = try Data(contentsOf: root.appendingPathComponent(
-                "firmware-releases/\(entry.artifact)"))
-            let bundle = try catalog.bundle(for: entry, data: data)
-            XCTAssertEqual(bundle.targets, [family])
-            XCTAssertEqual(bundle.firmwareBuild, entry.latestBuild)
-            XCTAssertEqual(bundle.releaseNotes?.count, 10)
+            XCTAssertFalse(entry.revisions.isEmpty)
+            XCTAssertNil(entry.latestBuild)
+            for revision in entry.revisions {
+                let data = try Data(contentsOf: root.appendingPathComponent(
+                    "firmware-releases/\(revision.artifact)"))
+                let bundle = try FirmwareBundle.read(data)
+                XCTAssertEqual(bundle.targets, [family])
+                XCTAssertEqual(bundle.firmwareVersion, revision.version)
+                XCTAssertNil(bundle.firmwareBuild)
+                XCTAssertFalse(revision.artifact.contains("+"))
+                XCTAssertEqual(bundle.releaseNotes?.count, 10)
+                let verified = try catalog.bundle(
+                    for: revision, in: entry, data: data)
+                if family == "c6" {
+                    XCTAssertNil(
+                        try XCTUnwrap(verified.images.first)
+                            .flashPart(role: "doom_wad"))
+                } else {
+                    XCTAssertEqual(
+                        try XCTUnwrap(verified.images.first)
+                            .flashPart(role: "doom_wad")?.byteCount,
+                        4_196_020)
+                }
+            }
         }
     }
 }

@@ -301,6 +301,115 @@ final class UsbOnboardingAppTests: XCTestCase {
         XCTAssertFalse(reason.isEmpty)
     }
 
+    func testEveryPackagedShippingRevisionLoadsAsAnOption() throws {
+        let root = Self.repoRoot()
+        let releaseRoot = root.appendingPathComponent(
+            "firmware-releases", isDirectory: true)
+        let sourceCatalog = releaseRoot.appendingPathComponent(
+            FirmwareReleaseCatalog.fileName)
+        let catalog = try FirmwareReleaseCatalog.read(contentsOf: sourceCatalog)
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("espdisp-resources-" + UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixtureCatalog = directory.appendingPathComponent(
+            FirmwareReleaseCatalog.fileName)
+        try Data(contentsOf: sourceCatalog).write(to: fixtureCatalog)
+        let artifactURLs = catalog.families.values.flatMap { entry in
+            entry.revisions.map {
+                releaseRoot.appendingPathComponent($0.artifact)
+            }
+        }
+        let bundle = try XCTUnwrap(Bundle(url: makeBundleWrapper(
+            resources: [fixtureCatalog] + artifactURLs)))
+
+        guard case .ready(let releases) = BundledFirmware.load(in: bundle) else {
+            return XCTFail("the shipping catalog did not load")
+        }
+        for family in FirmwareReleaseCatalog.requiredFamilies {
+            let options = releases.revisions(for: family)
+            XCTAssertEqual(
+                options.count,
+                catalog.families[family]?.revisions.count,
+                family)
+            XCTAssertTrue(options.allSatisfy {
+                $0.revision.build == nil
+                    && !$0.revision.artifact.contains("+")
+            }, family)
+            XCTAssertTrue(options.allSatisfy(\.isAvailable), family)
+        }
+    }
+
+    func testSoleInvalidShippingRevisionDoesNotMakeCatalogUnreadable() throws {
+        let root = Self.repoRoot()
+        let releaseRoot = root.appendingPathComponent(
+            "firmware-releases", isDirectory: true)
+        let sourceCatalog = releaseRoot.appendingPathComponent(
+            FirmwareReleaseCatalog.fileName)
+        let catalogData = try Data(contentsOf: sourceCatalog)
+        let catalog = try FirmwareReleaseCatalog.read(catalogData)
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("espdisp-resources-" + UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixtureCatalog = directory.appendingPathComponent(
+            FirmwareReleaseCatalog.fileName)
+        try catalogData.write(to: fixtureCatalog)
+        var artifactURLs = [URL]()
+        for entry in catalog.families.values {
+            for revision in entry.revisions {
+                var data = try Data(contentsOf: releaseRoot.appendingPathComponent(
+                    revision.artifact))
+                if entry.family != "c6" {
+                    data[data.index(before: data.endIndex)] ^= 0x01
+                }
+                let url = directory.appendingPathComponent(
+                    URL(fileURLWithPath: revision.artifact).lastPathComponent)
+                try data.write(to: url)
+                artifactURLs.append(url)
+            }
+        }
+        let bundle = try XCTUnwrap(Bundle(url: makeBundleWrapper(
+            resources: [fixtureCatalog] + artifactURLs)))
+
+        guard case .ready(let releases) = BundledFirmware.load(in: bundle) else {
+            return XCTFail(
+                "an invalid sole S3/P4 shipping revision poisoned the catalog")
+        }
+        XCTAssertNotNil(releases.selections["c6"])
+        for family in ["s3", "p4"] {
+            let options = releases.revisions(for: family)
+            XCTAssertEqual(options.count, 1, family)
+            XCTAssertFalse(try XCTUnwrap(options.first).isAvailable, family)
+            XCTAssertTrue(
+                try XCTUnwrap(options.first?.unavailableReason)
+                    .contains("artifact hash does not match"),
+                "\(family): \(String(describing: options.first?.unavailableReason))")
+            XCTAssertNil(releases.selections[family], family)
+            let entry = try XCTUnwrap(catalog.families[family])
+            let live = FirmwareReleaseCatalog.Identity(
+                family: family,
+                chip: entry.chip,
+                profile: entry.profiles.first,
+                partition: family == "s3"
+                    ? "universal-8m-ota"
+                    : entry.compatibility.partitionScheme)
+            let resolved: BundledFirmware.FamilyResolution
+            do {
+                resolved = try releases.resolveFamilyForUpdate(
+                    live: live, usb: nil, transport: .ota)
+            } catch {
+                resolved = try releases.resolveUnavailableFamilyForUpdate(
+                    live: live, usb: nil)
+            }
+            XCTAssertEqual(resolved.canonicalTarget, family)
+        }
+    }
+
     func testAUniqueC6ChipResolvesTheBundledFamilyWithoutFullIdentity() throws {
         let releases = try Self.bundledReleaseSet()
 
@@ -367,13 +476,22 @@ final class UsbOnboardingAppTests: XCTestCase {
     /// A minimal .bundle wrapper around one resource file, so `Bundle` can be asked
     /// for it the way `Bundle.main` is asked in the app.
     private func makeBundleWrapper(around file: URL) throws -> URL {
-        let wrapper = file.deletingLastPathComponent()
+        try makeBundleWrapper(resources: [file])
+    }
+
+    private func makeBundleWrapper(resources files: [URL]) throws -> URL {
+        guard let first = files.first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let wrapper = first.deletingLastPathComponent()
             .appendingPathComponent("Fixture.bundle")
         let resources = wrapper.appendingPathComponent("Contents/Resources")
         try FileManager.default.createDirectory(
             at: resources, withIntermediateDirectories: true)
-        try FileManager.default.copyItem(
-            at: file, to: resources.appendingPathComponent(file.lastPathComponent))
+        for file in files {
+            try FileManager.default.copyItem(
+                at: file, to: resources.appendingPathComponent(file.lastPathComponent))
+        }
         try Data("""
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
@@ -397,15 +515,16 @@ final class UsbOnboardingAppTests: XCTestCase {
             let url = root
                 .appendingPathComponent("firmware-releases", isDirectory: true)
                 .appendingPathComponent(entry.artifact)
-            let data = try Data(contentsOf: url)
-            let bundle = try catalog.bundle(for: entry, data: data)
+            let bundle = try FirmwareBundle.read(Data(contentsOf: url))
             selections[family] = BundledFirmware.Selection(
-                catalogEntry: entry, bundle: bundle, url: url)
+                catalogEntry: entry,
+                revision: try XCTUnwrap(entry.revisions.first),
+                bundle: bundle, url: url)
         }
         return BundledFirmware.ReleaseSet(catalog: catalog, selections: selections)
     }
 
-    private static func repoRoot() -> URL {
+    fileprivate static func repoRoot() -> URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
