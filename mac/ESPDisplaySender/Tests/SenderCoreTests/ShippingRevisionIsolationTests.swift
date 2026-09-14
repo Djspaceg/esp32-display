@@ -10,9 +10,7 @@ final class ShippingRevisionIsolationTests: XCTestCase {
             .appendingPathComponent("firmware-releases", isDirectory: true)
         let sourceCatalog = try Data(contentsOf: releaseRoot.appendingPathComponent(
             FirmwareReleaseCatalog.fileName))
-        var catalog = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: sourceCatalog) as? [String: Any])
-        var families = try XCTUnwrap(catalog["families"] as? [String: Any])
+        let catalog = try FirmwareReleaseCatalog.read(sourceCatalog)
 
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("espdisp-shipping-isolation-" + UUID().uuidString)
@@ -22,24 +20,15 @@ final class ShippingRevisionIsolationTests: XCTestCase {
             at: resources, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        for family in FirmwareReleaseCatalog.requiredFamilies.sorted() {
-            var entry = try XCTUnwrap(families[family] as? [String: Any])
-            let filename = "espdisp-\(family)-1.5.0.espdispfw"
-            let data = try Data(contentsOf: releaseRoot
-                .appendingPathComponent(family, isDirectory: true)
-                .appendingPathComponent(filename))
-            entry.removeValue(forKey: "latest_build")
-            entry["artifact"] = "\(family)/\(filename)"
-            entry["bytes"] = data.count
-            entry["sha256"] = FirmwareBundle.sha256Hex(data)
-            families[family] = entry
-            try data.write(to: resources.appendingPathComponent(filename))
+        for entry in catalog.families.values {
+            for revision in entry.revisions {
+                let filename = URL(fileURLWithPath: revision.artifact).lastPathComponent
+                let data = try Data(contentsOf: releaseRoot.appendingPathComponent(
+                    revision.artifact))
+                try data.write(to: resources.appendingPathComponent(filename))
+            }
         }
-        catalog["schema"] = FirmwareReleaseCatalog.legacySchema
-        catalog["families"] = families
-        let catalogData = try JSONSerialization.data(
-            withJSONObject: catalog, options: [.sortedKeys])
-        try catalogData.write(to: resources.appendingPathComponent(
+        try sourceCatalog.write(to: resources.appendingPathComponent(
             FirmwareReleaseCatalog.fileName))
         try Data("""
             <?xml version="1.0" encoding="UTF-8"?>
@@ -56,6 +45,19 @@ final class ShippingRevisionIsolationTests: XCTestCase {
             return XCTFail("one invalid shipping revision hid the entire catalog")
         }
         XCTAssertNotNil(releases.selections["c6"])
+        for family in ["s3", "p4"] {
+            let options = releases.revisions(for: family)
+            let option = try XCTUnwrap(options.only)
+            XCTAssertFalse(option.isAvailable, family)
+            XCTAssertNil(option.selection, family)
+            XCTAssertTrue(
+                try XCTUnwrap(option.unavailableReason).contains("Doom WAD"),
+                "\(family): \(String(describing: option.unavailableReason))")
+            XCTAssertTrue(
+                try XCTUnwrap(option.unavailableReason).contains("doom_wad"),
+                "\(family): \(String(describing: option.unavailableReason))")
+            XCTAssertNil(releases.selections[family], family)
+        }
     }
 
     private static func repoRoot() -> URL {
@@ -65,5 +67,11 @@ final class ShippingRevisionIsolationTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
+    }
+}
+
+private extension Collection {
+    var only: Element? {
+        count == 1 ? first : nil
     }
 }
