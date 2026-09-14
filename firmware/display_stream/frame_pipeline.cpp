@@ -613,8 +613,7 @@ static void serviceLargeTileDraw() {
                                      y0 + height, largeDrawStage) != ESP_OK) {
           dmaUnmarkFailed();
           statDrawErrors++;
-        } else {
-          waitForDmaIdle(500);
+        } else if (waitForDmaIdle(500)) {
           drew = true;
         }
       });
@@ -837,8 +836,7 @@ void serviceStreamDraw() {
         if (infoBarActive() &&
             panelstate::rowRangeOverlaps(runStart * bandRows, yEnd, infoBarY0,
                                         infoBarY1)) {
-          waitForDmaIdle(200);
-          redrawInfoBarOverRun();
+          if (waitForDmaIdle(200)) redrawInfoBarOverRun();
         }
       }
     });
@@ -878,10 +876,12 @@ void serviceStreamDraw() {
         const int w = x1 - x0;
         const int hgt = TILE_GEOMETRY.rowHeight(row);
         const uint32_t tSpin = micros();
-        uint8_t *source = acquirePanelTransferStaging(500000);
+        PanelTransferStaging staging;
+        const bool acquired =
+            acquirePanelTransferStaging(500000, staging);
         const uint32_t tGather = micros();
         tdSpinUs += tGather - tSpin;
-        if (source == nullptr) {
+        if (!acquired) {
           statDrawErrors = statDrawErrors + 1;
           portENTER_CRITICAL(&drawMux);
           for (uint16_t c = colStart; c < colEnd; c++) {
@@ -915,21 +915,18 @@ void serviceStreamDraw() {
         // its bandwidth. Internal staging keeps DMA reads off PSRAM entirely -
         // the load-bearing clause.
         for (int r = 0; r < hgt; r++) {
-          memcpy(source + (size_t)r * w * 2,
+          memcpy(staging.pixels + (size_t)r * w * 2,
                  bufA + ((size_t)(y0 + r) * drawWidth + x0) * 2,
                  (size_t)w * 2);
         }
         const uint32_t tQueue = micros();
         tdGatherUs += tQueue - tGather;
-        dmaMarkQueued();
-        esp_err_t err = boarddisplay::drawBitmap(panel, *bcfg, x0, y0, x0 + w,
-                                                  y0 + hgt, source);
+        esp_err_t err = queuePanelTransferStaging(
+            panel, *bcfg, x0, y0, x0 + w, y0 + hgt, staging);
         tdQueueUs += micros() - tQueue;
         if (err != ESP_OK) {
           statDrawErrors = statDrawErrors + 1;
-          dmaUnmarkFailed();
         } else {
-          commitPanelTransferStaging();
           drewAny = true;
           tileDrawCalls++;
           tdCalls = tdCalls + 1;
@@ -939,8 +936,7 @@ void serviceStreamDraw() {
               panelstate::rowRangeOverlaps(y0, y0 + hgt, infoBarY0,
                                            infoBarY1)) {
             const uint32_t tBar = micros();
-            waitForDmaIdle(200);
-            redrawInfoBarOverRun();
+            if (waitForDmaIdle(200)) redrawInfoBarOverRun();
             tdBarUs += micros() - tBar;
           }
         }

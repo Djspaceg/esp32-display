@@ -10,6 +10,7 @@
 
 #include "dma_gate.h"
 
+#if !defined(CONFIG_IDF_TARGET_ESP32S3)
 static esp_err_t queueDirect(esp_lcd_panel_handle_t panel,
                              const board::Config &cfg, int x0, int y0, int x1,
                              int y1, const void *pixels) {
@@ -19,20 +20,87 @@ static esp_err_t queueDirect(esp_lcd_panel_handle_t panel,
   if (err != ESP_OK) dmaUnmarkFailed();
   return err;
 }
+#endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-DMA_ATTR uint8_t panelTransferStaging[2][PANEL_TRANSFER_STAGE_BYTES];
-static int nextStagingIndex = 0;
+DMA_ATTR uint8_t
+    panelTransferStaging[paneltransfer::STAGING_SLOT_COUNT]
+                        [PANEL_TRANSFER_STAGE_BYTES];
+static volatile paneltransfer::StagingOwnership stagingOwnership = {
+    0,
+    {paneltransfer::NO_STAGING_SLOT, paneltransfer::NO_STAGING_SLOT},
+    0,
+    0,
+    0,
+};
+static portMUX_TYPE stagingOwnershipMux = portMUX_INITIALIZER_UNLOCKED;
 
-uint8_t *acquirePanelTransferStaging(uint32_t maxUs) {
+bool acquirePanelTransferStaging(uint32_t maxUs, PanelTransferStaging &out) {
+  out.pixels = nullptr;
+  out.slot = paneltransfer::NO_STAGING_SLOT;
   const uint32_t startedAt = micros();
-  while (dmaInFlight >= 2) {
-    if ((uint32_t)(micros() - startedAt) > maxUs) return nullptr;
+  while (true) {
+    uint8_t slot = paneltransfer::NO_STAGING_SLOT;
+    portENTER_CRITICAL(&stagingOwnershipMux);
+    const bool reserved =
+        paneltransfer::reserveStagingSlot(stagingOwnership, slot);
+    portEXIT_CRITICAL(&stagingOwnershipMux);
+    if (reserved) {
+      out.pixels = panelTransferStaging[slot];
+      out.slot = slot;
+      return true;
+    }
+    if ((uint32_t)(micros() - startedAt) > maxUs) return false;
   }
-  return panelTransferStaging[nextStagingIndex];
 }
 
-void commitPanelTransferStaging() { nextStagingIndex ^= 1; }
+bool releasePanelTransferStagingReservation(
+    const PanelTransferStaging &staging) {
+  if (staging.slot >= paneltransfer::STAGING_SLOT_COUNT ||
+      staging.pixels != panelTransferStaging[staging.slot]) {
+    return false;
+  }
+  portENTER_CRITICAL(&stagingOwnershipMux);
+  const bool released = paneltransfer::cancelReservedStagingSlot(
+      stagingOwnership, staging.slot);
+  portEXIT_CRITICAL(&stagingOwnershipMux);
+  return released;
+}
+
+esp_err_t queuePanelTransferStaging(
+    esp_lcd_panel_handle_t panel, const board::Config &cfg, int x0, int y0,
+    int x1, int y1, const PanelTransferStaging &staging) {
+  if (staging.slot >= paneltransfer::STAGING_SLOT_COUNT ||
+      staging.pixels != panelTransferStaging[staging.slot]) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  portENTER_CRITICAL(&stagingOwnershipMux);
+  const bool queued =
+      paneltransfer::queueStagingSlot(stagingOwnership, staging.slot);
+  if (!queued) {
+    paneltransfer::cancelReservedStagingSlot(stagingOwnership, staging.slot);
+  }
+  portEXIT_CRITICAL(&stagingOwnershipMux);
+  if (!queued) return ESP_ERR_INVALID_STATE;
+
+  dmaMarkQueued();
+  const esp_err_t err = boarddisplay::drawBitmap(
+      panel, cfg, x0, y0, x1, y1, staging.pixels);
+  if (err != ESP_OK) {
+    dmaUnmarkFailed();
+    portENTER_CRITICAL(&stagingOwnershipMux);
+    paneltransfer::rollbackQueuedStagingSlot(stagingOwnership, staging.slot);
+    portEXIT_CRITICAL(&stagingOwnershipMux);
+  }
+  return err;
+}
+
+void IRAM_ATTR completePanelTransferStagingFromIsr() {
+  portENTER_CRITICAL_ISR(&stagingOwnershipMux);
+  paneltransfer::completeQueuedStagingSlot(stagingOwnership);
+  portEXIT_CRITICAL_ISR(&stagingOwnershipMux);
+}
 
 static const char *sourceTier(const void *pixels) {
   if (esp_ptr_external_ram(pixels)) return "psram";
@@ -76,19 +144,18 @@ esp_err_t queuePanelBitmap(esp_lcd_panel_handle_t panel,
       return ESP_ERR_INVALID_SIZE;
     }
 
-    uint8_t *staging = acquirePanelTransferStaging(500000);
-    if (staging == nullptr) {
+    PanelTransferStaging staging;
+    if (!acquirePanelTransferStaging(500000, staging)) {
       logFailure(ESP_ERR_TIMEOUT, chunk.byteCount, pixels);
       return ESP_ERR_TIMEOUT;
     }
-    memcpy(staging, source + chunk.sourceOffset, chunk.byteCount);
-    const esp_err_t err =
-        queueDirect(panel, cfg, x0, chunk.y0, x1, chunk.y1, staging);
+    memcpy(staging.pixels, source + chunk.sourceOffset, chunk.byteCount);
+    const esp_err_t err = queuePanelTransferStaging(
+        panel, cfg, x0, chunk.y0, x1, chunk.y1, staging);
     if (err != ESP_OK) {
       logFailure(err, chunk.byteCount, pixels);
       return err;
     }
-    commitPanelTransferStaging();
     rowOffset += chunk.y1 - chunk.y0;
   }
   return ESP_OK;
