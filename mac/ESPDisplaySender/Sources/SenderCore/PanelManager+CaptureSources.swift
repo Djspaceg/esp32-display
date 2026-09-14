@@ -78,7 +78,11 @@ extension PanelManager {
         // back a source that was not a region at all.
         sourceBeforeRegion = panel?.source
         let existing = panel?.source.region
-        guard let region = existing
+        let reusable = existing.flatMap { region -> RegionSpec? in
+            guard let geometry = panel?.geometry else { return region }
+            return region.matchesAspect(of: geometry) ? region : nil
+        }
+        guard let region = reusable
             ?? Self.startingRegion(geometry: panel?.geometry) else {
             operationOutcome = .failure(
                 "No display available",

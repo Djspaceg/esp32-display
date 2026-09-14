@@ -47,6 +47,40 @@ final class RegionPresetTests: XCTestCase {
         XCTAssertEqual(scaled, CGSize(width: 932, height: 932))
     }
 
+    func testSavedRegionsMatchingEveryShippingProfileAreReusable() {
+        let profiles: [(String, PanelGeometry)] = [
+            ("c6 st7789", PanelGeometry(width: 172, height: 320)),
+            ("c6 jd9853", PanelGeometry(width: 172, height: 320)),
+            ("s3 gc9107", PanelGeometry(width: 128, height: 128)),
+            ("s3 st7789-130", PanelGeometry(width: 240, height: 240)),
+            ("s3 st7789-154", PanelGeometry(width: 240, height: 240)),
+            ("s3 co5300", PanelGeometry(width: 466, height: 466)),
+            ("s3 st77916", PanelGeometry(width: 360, height: 360)),
+            ("p4 st7703-4b", PanelGeometry(width: 720, height: 720)),
+        ]
+
+        for (profile, geometry) in profiles {
+            for landscape in [false, true] {
+                let panel = RegionSpec.panelSize(
+                    geometry: geometry, scale: 1, landscape: landscape)
+                let saved = RegionSpec(
+                    display: "S", x: 20, y: 30,
+                    width: panel.width * 1.5, height: panel.height * 1.5)
+                XCTAssertTrue(
+                    saved.matchesAspect(of: geometry),
+                    "\(profile) \(landscape ? "landscape" : "portrait")")
+            }
+        }
+
+        let fallback = RegionSpec(
+            display: "S", x: 0, y: 0, width: 172, height: 320)
+        for (profile, geometry) in profiles where geometry.width == geometry.height {
+            XCTAssertFalse(
+                fallback.matchesAspect(of: geometry),
+                "\(profile) must reject a saved fallback rectangle")
+        }
+    }
+
     func testCenteredRegionIsCentered() {
         let region = RegionSpec.centered(
             on: "S", geometry: nil, scale: 1, landscape: false, in: displaySize)

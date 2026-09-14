@@ -37,6 +37,44 @@ final class OfflineSourceSelectionTests: XCTestCase {
         }
     }
 
+    func testAdvertised720SquareReshapesASavedFallbackRectangle() throws {
+        try requireScreen()
+        let screen = try XCTUnwrap(DisplayCapture.preferredScreen())
+        let savedFallback = RegionSpec.centered(
+            on: screen.name, geometry: nil, scale: 1, landscape: false,
+            in: screen.size)
+        var panel = PanelSnapshot(serviceName: "teeny", displayName: "teeny")
+        panel.geometry = PanelGeometry(width: 720, height: 720)
+        panel.source = .region(savedFallback)
+        let manager = PanelManager(
+            previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
+
+        manager.chooseRegion(for: "teeny")
+        defer { manager.finishChoosingRegion() }
+
+        let selectorRegion = try XCTUnwrap(manager.regionSelector.region)
+        XCTAssertEqual(selectorRegion.width, selectorRegion.height, accuracy: 0.001)
+    }
+
+    func testNoAdvertisedGeometryKeepsThe172x320Fallback() throws {
+        try requireScreen()
+        let screen = try XCTUnwrap(DisplayCapture.preferredScreen())
+        let savedFallback = RegionSpec.centered(
+            on: screen.name, geometry: nil, scale: 1, landscape: false,
+            in: screen.size)
+        var panel = PanelSnapshot(serviceName: "teeny", displayName: "teeny")
+        panel.source = .region(savedFallback)
+        let manager = PanelManager(
+            previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
+
+        manager.chooseRegion(for: "teeny")
+        defer { manager.finishChoosingRegion() }
+
+        let selectorRegion = try XCTUnwrap(manager.regionSelector.region)
+        XCTAssertEqual(selectorRegion.width, 172, accuracy: 0.001)
+        XCTAssertEqual(selectorRegion.height, 320, accuracy: 0.001)
+    }
+
     func testRegionCanBeChosenWhileOffline() throws {
         try requireScreen()
         let manager = offlineManager()
