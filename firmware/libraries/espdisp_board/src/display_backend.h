@@ -62,4 +62,10 @@ inline bool setBrightness(esp_lcd_panel_handle_t panel,
   return boardpanel::setPanelBrightness(panel, cfg, level);
 }
 
+inline esp_err_t setDisplayEnabled(esp_lcd_panel_handle_t panel,
+                                   const board::Config &, bool enabled) {
+  if (panel == nullptr) return ESP_ERR_INVALID_ARG;
+  return esp_lcd_panel_disp_on_off(panel, enabled);
+}
+
 }  // namespace boarddisplay

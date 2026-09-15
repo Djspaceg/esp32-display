@@ -100,14 +100,23 @@ enum WifiConfigUI {
         var rssi: Int?
         var flipped: Bool?
         var rotation: Int?
+        var automaticRotationEnabled: Bool?
         var automaticRotation: Int?
         var effectiveRotation: Int?
         var motionAvailable: Bool?
         var brightnessHigh: Bool?
         var brightnessLevel: Int?
+        var brightnessLevels: BrightnessLevels?
         var manuallyOff: Bool?
         var batteryPercent: Int?
         var otaStatus: String?
+    }
+
+    struct BrightnessLevels: Equatable, Sendable {
+        var low: Int
+        var high: Int
+        var idle: Int
+        var survey: Int
     }
 
     /// Stable identity and live status returned by CFGSHOW for one board.
@@ -737,6 +746,21 @@ enum WifiConfigUI {
         case "off": manuallyOff = true
         default: manuallyOff = nil
         }
+        let brightnessLevels: BrightnessLevels?
+        if let low = integer("bllow="),
+           let high = integer("blhigh="),
+           let idle = integer("blidle="),
+           let survey = integer("blsurvey="),
+           DeviceProtocol.brightnessLevelRange.contains(low),
+           DeviceProtocol.brightnessLevelRange.contains(high),
+           DeviceProtocol.brightnessLevelRange.contains(idle),
+           DeviceProtocol.brightnessLevelRange.contains(survey),
+           low < high {
+            brightnessLevels = BrightnessLevels(
+                low: low, high: high, idle: idle, survey: survey)
+        } else {
+            brightnessLevels = nil
+        }
         let status = USBStatus(
             firmwareVersion: appendedToken("fw="),
             capabilities: appendedCapabilities(),
@@ -746,11 +770,13 @@ enum WifiConfigUI {
             rssi: integer("rssi="),
             flipped: boolean("flip="),
             rotation: integer("rot="),
+            automaticRotationEnabled: boolean("autorot="),
             automaticRotation: integer("auto="),
             effectiveRotation: integer("effective="),
             motionAvailable: boolean("motion="),
             brightnessHigh: brightnessHigh,
             brightnessLevel: integer("bllevel=", appended: true),
+            brightnessLevels: brightnessLevels,
             manuallyOff: manuallyOff,
             batteryPercent: integer("bat="),
             otaStatus: token("ota="))

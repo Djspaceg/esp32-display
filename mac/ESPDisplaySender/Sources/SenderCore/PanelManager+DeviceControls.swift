@@ -12,8 +12,10 @@ extension PanelManager {
     enum Operation: Equatable {
         case brightness
         case brightnessLevel
+        case brightnessLevels
         case flip
         case rotate
+        case automaticRotation
         case power
         case identify
         case restart
@@ -42,6 +44,8 @@ extension PanelManager {
         case power
         case orientation
         case quarterTurn
+        case automaticRotation
+        case brightnessLevels
     }
 
     private indirect enum OperationRequirement {
@@ -141,10 +145,14 @@ extension PanelManager {
                 .networkControl(.brightnessLevel),
                 .usbSerial(.brightness),
             ])
+        case .brightnessLevels:
+            return .usbSerial(.brightnessLevels)
         case .flip:
             return .either([.networkControl(.flip), .usbSerial(.orientation)])
         case .rotate:
             return .either([.networkControl(.rotate), .usbSerial(.quarterTurn)])
+        case .automaticRotation:
+            return .usbSerial(.automaticRotation)
         case .power:
             return .either([.networkControl(.power), .usbSerial(.power)])
         case .identify:
@@ -245,6 +253,12 @@ extension PanelManager {
             return (status.rotation != nil || status.flipped != nil)
                 && status.capabilities?.contains(.rotate) == true
                 && device.board.map(Self.usbBoardSupportsQuarterTurns) == true
+        case .automaticRotation:
+            return status.motionAvailable == true
+                && status.automaticRotationEnabled != nil
+                && status.effectiveRotation != nil
+        case .brightnessLevels:
+            return status.brightnessLevels != nil
         }
     }
 
@@ -297,6 +311,14 @@ extension PanelManager {
                 if operation == .brightness || operation == .brightnessLevel {
                     return "Brightness over USB needs firmware support that this "
                         + "display does not report."
+                }
+                if operation == .automaticRotation {
+                    return "Automatic orientation needs a motion sensor and "
+                        + "current firmware support over USB."
+                }
+                if operation == .brightnessLevels {
+                    return "Brightness presets need current firmware support "
+                        + "over USB."
                 }
                 if Self.includesUSBSerial(requirement),
                    device.serialStatus != nil {
@@ -423,8 +445,9 @@ extension PanelManager {
 
     private static func operationTitle(_ operation: Operation) -> String {
         switch operation {
-        case .brightness, .brightnessLevel: return "Brightness"
+        case .brightness, .brightnessLevel, .brightnessLevels: return "Brightness"
         case .flip, .rotate: return "Rotation"
+        case .automaticRotation: return "Automatic orientation"
         case .power: return "Power control"
         case .identify: return "Identify"
         case .restart: return "Remote restart"
@@ -605,6 +628,54 @@ extension PanelManager {
         case .usbBootloaderCandidate:
             return
         }
+    }
+
+    func automaticRotationStatus(
+        _ serviceName: String
+    ) -> WifiConfigUI.USBStatus? {
+        guard let status = verifiedUSBDevice(for: serviceName)?.serialStatus,
+              status.motionAvailable == true,
+              status.automaticRotationEnabled != nil,
+              status.effectiveRotation != nil
+        else { return nil }
+        return status
+    }
+
+    func setAutomaticRotation(_ enabled: Bool, for serviceName: String) {
+        guard case .usbSerial(let port) =
+            preferredPath(for: .automaticRotation, serviceName: serviceName)
+        else { return }
+        if let index = usbDevices.firstIndex(where: { $0.path == port }),
+           var status = usbDevices[index].serialStatus {
+            status.automaticRotationEnabled = enabled
+            usbDevices[index].serialStatus = status
+        }
+        queueUSBControl(
+            ConfigCommands.setAutomaticRotation(enabled), path: port,
+            serviceName: serviceName)
+    }
+
+    func brightnessLevels(
+        _ serviceName: String
+    ) -> WifiConfigUI.BrightnessLevels? {
+        verifiedUSBDevice(for: serviceName)?.serialStatus?.brightnessLevels
+    }
+
+    func setBrightnessLevels(
+        _ levels: WifiConfigUI.BrightnessLevels, for serviceName: String
+    ) {
+        guard case .usbSerial(let port) =
+            preferredPath(for: .brightnessLevels, serviceName: serviceName),
+              let command = ConfigCommands.setBrightnessLevels(
+                  low: levels.low, high: levels.high,
+                  idle: levels.idle, survey: levels.survey)
+        else { return }
+        if let index = usbDevices.firstIndex(where: { $0.path == port }),
+           var status = usbDevices[index].serialStatus {
+            status.brightnessLevels = levels
+            usbDevices[index].serialStatus = status
+        }
+        queueUSBControl(command, path: port, serviceName: serviceName)
     }
 
     /// Turn the panel's display on or off, as a standing instruction the panel

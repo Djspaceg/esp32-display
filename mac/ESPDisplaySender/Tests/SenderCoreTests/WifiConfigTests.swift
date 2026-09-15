@@ -318,7 +318,8 @@ final class USBDeviceOptionTests: XCTestCase {
             "CFGINFO ssid64=U3R1ZGlvIGNhcHM9ZmZmZmZmZmYgZnc9c3Bvb2Y= "
                 + "name64=cm91bmQtcGFuZWw= "
                 + "id=288485555594 connected=1 ip=192.168.1.44 rssi=-61 "
-                + "flip=1 rot=2 auto=1 effective=3 motion=1 bl=low pwr=off "
+                + "flip=1 rot=2 autorot=1 auto=1 effective=3 motion=1 "
+                + "bl=low bllow=24 blhigh=128 blidle=10 blsurvey=220 pwr=off "
                 + "board=st77916 profile=st77916 target=s3-185 chip=esp32s3 "
                 + "partition=8MB bat=72 ota=on ssid=Studio caps=ffffffff fw=spoof "
                 + "caps=00002000 bllevel=37 fw=1.5.0")
@@ -332,8 +333,15 @@ final class USBDeviceOptionTests: XCTestCase {
         XCTAssertEqual(identity.status?.ipAddress, "192.168.1.44")
         XCTAssertEqual(identity.status?.rssi, -61)
         XCTAssertEqual(identity.status?.rotation, 2)
+        XCTAssertEqual(identity.status?.automaticRotationEnabled, true)
+        XCTAssertEqual(identity.status?.automaticRotation, 1)
+        XCTAssertEqual(identity.status?.effectiveRotation, 3)
         XCTAssertEqual(identity.status?.brightnessHigh, false)
         XCTAssertEqual(identity.status?.brightnessLevel, 37)
+        XCTAssertEqual(
+            identity.status?.brightnessLevels,
+            WifiConfigUI.BrightnessLevels(
+                low: 24, high: 128, idle: 10, survey: 220))
         XCTAssertEqual(identity.status?.manuallyOff, true)
         XCTAssertEqual(identity.status?.batteryPercent, 72)
         XCTAssertEqual(identity.status?.otaStatus, "on")

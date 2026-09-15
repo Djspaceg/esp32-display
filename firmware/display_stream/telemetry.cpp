@@ -218,11 +218,15 @@ void sendControlAck(const deviceproto::ControlCommand &command,
 void reportBatteryLine() {
     // Its own line, and only where a battery telemetry source exists.
     if (batteryReadingCurrent()) {
-      Serial.printf("battery: %d%% %s %umV present=%d vbus=%d\n",
-                    batteryPercentOrUnknown(),
-                    batteryChargeWord(lastBattery.charge),
-                    (unsigned)lastBattery.millivolts, lastBattery.present,
-                    lastBattery.externalPower);
+      if (!lastBattery.present) {
+        Serial.printf("battery: absent vbus=%d\n", lastBattery.externalPower);
+      } else {
+        Serial.printf("battery: %d%% %s %umV present=1 vbus=%d\n",
+                      batteryPercentOrUnknown(),
+                      batteryChargeWord(lastBattery.charge),
+                      (unsigned)lastBattery.millivolts,
+                      lastBattery.externalPower);
+      }
     } else if (batteryAvailable && batteryReadingValid) {
       // The source answered once and has stopped. Said out loud rather than
       // silently repeating the last percentage, because this line is where a

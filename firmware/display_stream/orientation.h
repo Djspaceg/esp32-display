@@ -9,11 +9,13 @@
 extern bool panelLandscape;       // current panel MADCTL state
 extern uint8_t panelRotation;     // user mounting rotation, quarter turns 0-3
 extern bool panelMirrorX;         // installation-level left/right reflection
+extern bool automaticRotationEnabled;  // persisted gravity correction setting
 extern uint8_t automaticRotation; // gravity-derived correction, RAM-only
 extern uint8_t appliedPanelRotation;  // what MADCTL actually holds
 extern bool madctlDirty;          // panel config needs reapplying
 
-uint8_t effectivePanelRotation();
+uint8_t desiredPanelRotation();
+void setAutomaticRotationEnabled(bool enabled);
 void applyPanelConfig(bool landscape);
 
 // QMI8658 auto-rotation: four-way on square panels, flip-only otherwise.

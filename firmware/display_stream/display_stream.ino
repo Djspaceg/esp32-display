@@ -183,10 +183,16 @@ void setup() {
       panelRotation = prefs.getBool("flip", false) ? 2 : 0;
     }
     panelMirrorX = prefs.getBool("mirrorx", false);
+    automaticRotationEnabled = prefs.getBool("autorot", true);
     // A panel a user turned off must stay off across a reboot - the whole
     // point of a standing instruction is that it survives the events that
     // would otherwise clear a transient one.
     panelManuallyOff = prefs.getBool("pwroff", false);
+    setBrightnessLevels(
+        prefs.getUChar("bllow", BL_LOW),
+        prefs.getUChar("blhigh", BL_HIGH),
+        prefs.getUChar("blidle", BL_IDLE),
+        prefs.getUChar("blsurvey", BL_SURVEY));
     // Migrate the old high/low flag: devices flashed before continuous
     // brightness have "blhigh" and no "bllevel".
     userBlLevel = prefs.getUChar(
@@ -225,9 +231,11 @@ void setup() {
   Serial.printf("WiFi credentials: \"%s\" (%s)\n", cfgSsid.c_str(),
                 ssidFromNvs ? "from NVS" : "compiled default");
   Serial.printf(
-      "display prefs: rotation=%u mirrorX=%d backlight=%u (%s) fixed=%u\n",
-      panelRotation, panelMirrorX, userBlLevel,
-      blIsHigh() ? "high" : "low", fixedBlLevel);
+      "display prefs: rotation=%u auto=%d mirrorX=%d backlight=%u (%s) "
+      "levels=%u/%u/%u/%u fixed=%u\n",
+      panelRotation, automaticRotationEnabled, panelMirrorX, userBlLevel,
+      blIsHigh() ? "high" : "low", BL_LOW, BL_HIGH, BL_IDLE, BL_SURVEY,
+      fixedBlLevel);
   Serial.printf("idle text restored from NVS: %u lines\n",
                 (unsigned)idleText.lineCount);
 
