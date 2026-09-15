@@ -1,0 +1,172 @@
+schema = 1
+key = "s3-touch-lcd-154"
+catalog_order = 30
+name = "ESP32-S3-Touch-LCD-1.54 (ST7789)"
+hardware = ["ESP32-S3-Touch-LCD-1.54"]
+
+[migration]
+firmware_config = "legacy"
+config_symbol = "CONFIG_TOUCH_ST7789"
+
+[identity]
+target = "s3"
+chip = "esp32s3"
+profile = "st7789-154"
+partition = "universal-8m-doom-ota"
+variant = "TouchSt7789"
+variant_value = 6
+legacy_targets = ["s3-154"]
+
+[family]
+platform_key = "s3"
+build_target = "s3-universal"
+fqbn = "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi,PartitionScheme=custom"
+partition_csv = "partitions_s3.csv"
+extra_flags = ["-DESPDISP_DOOM_RUNTIME"]
+extra_library_dirs = ["firmware"]
+fqbn_options = []
+flash_bytes = [8388608, 16777216, 33554432]
+common_layout_bytes = 8388608
+requires_doom_wad = true
+bootloader_address = 0
+partitions_address = 32768
+boot_app0_address = 57344
+app_address = 65536
+blurb = "Universal ESP32-S3 display firmware"
+
+[platform]
+use_psram_frame_buffers = true
+use_raw_lwip_receive_task = true
+wifi = "native"
+identity_source = "wifi_station_mac"
+serial = "native_usb_cdc"
+
+[capacity]
+minimum_flash_bytes = 16777216
+
+[panel]
+symbol = "PANEL_ST7789_240X240"
+profile = "St7789_240x240"
+driver = "St7789"
+bus = "spi"
+width = 240
+height = 240
+pixel_clock_hz = 40000000
+spi_mode = 3
+col_offset = 0
+row_offset = 0
+orientation_offset = 0
+invert_color = true
+round_display = false
+supports_command_rotation = true
+color_order = "rgb"
+data_endian = "big"
+pixel_depth = 16
+dsi_data_lanes = 0
+dsi_lane_mbps = 0
+hsync_back_porch = 0
+hsync_pulse_width = 0
+hsync_front_porch = 0
+vsync_back_porch = 0
+vsync_pulse_width = 0
+vsync_front_porch = 0
+
+[carrier]
+pin_sclk = 38
+pin_mosi = 39
+pin_data1 = -1
+pin_data2 = -1
+pin_data3 = -1
+pin_cs = 21
+pin_dc = 45
+pin_rst = 40
+pin_bl = 46
+pin_boot = 0
+pin_rgb_led = -1
+
+[touch]
+controller = "cst816"
+sda = 42
+scl = 41
+reset = 47
+interrupt = 48
+addresses = [21]
+panel_short = 240
+panel_long = 240
+raw_x_mirrored = false
+raw_y_mirrored = false
+rotate_clockwise = true
+
+[led]
+channel_order = "rgb"
+pixel_count = 0
+
+[gesture]
+swipe_min_px = 24
+tap_max_move_px = 12
+tap_max_ms = 400
+long_press_ms = 600
+press_max_ms = 10000
+
+[orientation]
+offsets = [[0, 0], [0, 0], [0, 0], [0, 0]]
+mirror_x_supported = true
+quarter_turns = [0, 1, 2, 3]
+
+[motion]
+controller = "qmi8658"
+address = 107
+x_axis = 0
+x_sign = 1
+y_axis = 1
+y_sign = 1
+
+[reset]
+expander = "none"
+expander_address = 0
+panel_output = 0
+touch_output = 0
+
+[backlight]
+kind = "pwm"
+enable_pin = -1
+inverted = false
+
+[power]
+controller = "battery_adc"
+battery_adc = 1
+battery_adc_scale = 3
+battery_enable = 2
+charge_status = 3
+axp_address = 0
+
+[serial]
+transport = "native_usb_cdc"
+bridge = "none"
+rx = -1
+tx = -1
+
+[capabilities]
+doom = false
+
+[compile]
+selector = ""
+macros = []
+
+[detection]
+order = 40
+resolution = "exactly_one"
+no_match = "unknown"
+kind = "i2c_any_ack"
+flash_min_exclusive = 8388608
+flash_max_inclusive = 0
+sda = 42
+scl = 41
+frequency_hz = 100000
+scan_first = 0
+scan_last = 0
+addresses = [21, 106, 107]
+reset_pin = -1
+reset_low_ms = 0
+reset_release_wait_ms = 0
+release = "always"

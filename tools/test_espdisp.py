@@ -17,6 +17,7 @@
 # Those guards were the only unguarded thing left in the change, and none of them
 # need hardware to exercise.
 import argparse
+import copy
 import io
 import json
 import os
@@ -26,9 +27,11 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import board_descriptor  # noqa: E402
 import espdisp  # noqa: E402
 
 checks = 0
@@ -45,6 +48,20 @@ def check(condition, what):
 
 def check_equal(got, want, what):
     check(got == want, "%s: got %r, want %r" % (what, got, want))
+
+
+def check_call_equal(fn, want, what):
+    global checks, failures
+    checks += 1
+    try:
+        got = fn()
+    except Exception as exc:  # noqa: BLE001 - report all contract failures
+        failures += 1
+        print("FAIL: %s: raised %s" % (what, type(exc).__name__))
+        return
+    if got != want:
+        failures += 1
+        print("FAIL: %s: got %r, want %r" % (what, got, want))
 
 
 def check_fails(fn, needle, what):
@@ -82,6 +99,25 @@ def check_accepts(fn, what):
     except Exception as exc:  # noqa: BLE001
         failures += 1
         print("FAIL: %s: raised %s" % (what, type(exc).__name__))
+
+
+def check_descriptor_fails(descriptors, needle, what):
+    global checks, failures
+    checks += 1
+    try:
+        board_descriptor.validate_descriptors(descriptors)
+    except board_descriptor.DescriptorError as exc:
+        if needle not in str(exc):
+            failures += 1
+            print("FAIL: %s: message %r lacks %r" % (what, str(exc), needle))
+        return
+    except Exception as exc:  # noqa: BLE001
+        failures += 1
+        print("FAIL: %s: raised %s instead of DescriptorError" %
+              (what, type(exc).__name__))
+        return
+    failures += 1
+    print("FAIL: %s: did not refuse" % what)
 
 
 def uncommented_source(source):
@@ -3615,6 +3651,99 @@ def test_doom_partition_contracts():
             "a malformed flash-part collection fails closed")
 
 
+def test_board_descriptor_validator():
+    descriptors = board_descriptor.load_repository_descriptors(
+        espdisp.REPO_ROOT)
+    schema_path = os.path.join(espdisp.REPO_ROOT, "boards", "schema-v1.json")
+    with open(schema_path, encoding="utf-8") as source:
+        schema = json.load(source)
+    check_equal(
+        schema["properties"]["schema"]["const"], 1,
+        "checked-in descriptor schema matches schema version 1",
+    )
+    check_equal(
+        set(schema["required"]),
+        {
+            "schema", "key", "catalog_order", "name", "hardware",
+            "migration", "identity", "family", "platform", "capacity",
+            "panel", "carrier", "touch", "led", "gesture",
+            "orientation", "motion", "reset", "backlight", "power",
+            "serial", "capabilities", "compile", "detection",
+        },
+        "schema requires every descriptor section",
+    )
+    check_equal(len(descriptors), 8, "all current boards have descriptors")
+    check_equal(
+        sorted(
+            descriptor["identity"]["profile"]
+            for descriptor in descriptors
+            if descriptor["migration"]["firmware_config"] == "generated"
+        ),
+        ["co5300", "jd9853", "st7703-4b"],
+        "one board per family uses generated firmware config",
+    )
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors(descriptors),
+        "repository descriptors pass validation",
+    )
+    check(
+        espdisp.generate_board_descriptors.write_outputs(
+            espdisp.REPO_ROOT, check=True),
+        "committed generated board files are current",
+    )
+
+    missing = copy.deepcopy(descriptors[0])
+    del missing["panel"]["pixel_depth"]
+    check_descriptor_fails(
+        [missing],
+        "missing required field panel.pixel_depth",
+        "missing required descriptor field",
+    )
+
+    malformed = copy.deepcopy(descriptors[0])
+    malformed["detection"]["adressess"] = [0x20]
+    check_descriptor_fails(
+        [malformed],
+        "unknown field detection.adressess",
+        "unknown descriptor fields are refused",
+    )
+
+    duplicate_probe = copy.deepcopy(descriptors[0])
+    duplicate_probe["key"] = "duplicate-probe"
+    duplicate_probe["name"] = "Duplicate probe fixture"
+    duplicate_probe["identity"]["profile"] = "duplicate-probe"
+    duplicate_probe["identity"]["variant"] = "DuplicateProbe"
+    duplicate_probe["identity"]["variant_value"] = 250
+    duplicate_probe["migration"]["config_symbol"] = "CONFIG_DUPLICATE_PROBE"
+    duplicate_probe["catalog_order"] = 250
+    duplicate_probe["detection"]["order"] = 250
+    check_descriptor_fails(
+        [descriptors[0], duplicate_probe],
+        "duplicate probe signature",
+        "two boards cannot claim the same detection evidence",
+    )
+
+    capacity_conflict = copy.deepcopy(descriptors[0])
+    capacity_conflict["capacity"]["minimum_flash_bytes"] = 4 * 1024 * 1024
+    check_descriptor_fails(
+        [capacity_conflict],
+        "capacity conflict",
+        "board smaller than the family layout is refused",
+    )
+
+    duplicate_identity = copy.deepcopy(descriptors[0])
+    duplicate_identity["key"] = "duplicate-identity"
+    duplicate_identity["name"] = "Duplicate identity fixture"
+    duplicate_identity["identity"]["variant"] = "DuplicateIdentity"
+    duplicate_identity["identity"]["variant_value"] = 251
+    duplicate_identity["catalog_order"] = 251
+    check_descriptor_fails(
+        [descriptors[0], duplicate_identity],
+        "identity already claimed",
+        "two boards cannot claim the same four-field identity",
+    )
+
+
 def test_universal_family_catalog_and_cli():
     check_equal(sorted(espdisp.FAMILIES), ["c6", "p4", "s3"],
                 "release catalog exposes exactly three families")
@@ -4800,8 +4929,1103 @@ def test_canonical_usb_flash_path():
                 "no canonical release for family s3",
                 "%s raises Fail rather than KeyError" % label)
 
+
+class BootstrapFakeStream(io.StringIO):
+    def __init__(self, tty=True):
+        super().__init__()
+        self.tty = tty
+
+    def isatty(self):
+        return self.tty
+
+
+class BootstrapFakePrompter:
+    def __init__(self, answers):
+        self.answers = {
+            key: list(value) if isinstance(value, (list, tuple)) else [value]
+            for key, value in answers.items()
+        }
+
+    def ask(self, key, text, default=None, choices=None, allow_empty=False):
+        del text, choices, allow_empty
+        values = self.answers.get(key)
+        if not values:
+            if default is not None:
+                return default
+            raise EOFError("no scripted answer for %s" % key)
+        value = values.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def confirm(self, key, text):
+        value = self.ask(key, text)
+        return str(value).strip().lower() in ("y", "yes", "true", "1")
+
+    def pause(self, key, text):
+        self.ask(key, text, default="")
+
+
+class BootstrapFakeTransport:
+    def __init__(self, malformed=False, timeout=False):
+        self.commands = []
+        self.malformed = malformed
+        self.timeout = timeout
+        self.imu_samples = iter([
+            {"x": 16000, "y": 100, "z": -50},
+            {"x": -16000, "y": -80, "z": 40},
+            {"x": 60, "y": 15900, "z": 120},
+            {"x": -40, "y": -16100, "z": -90},
+        ])
+        self.touch_samples = iter([
+            {"x": 165, "y": 8},
+            {"x": 8, "y": 10},
+            {"x": 163, "y": 310},
+            {"x": 10, "y": 309},
+        ])
+
+    def request(self, command, timeout=5.0):
+        del timeout
+        self.commands.append(command)
+        if self.timeout:
+            raise TimeoutError("synthetic timeout")
+        if self.malformed:
+            return "not a response object"
+        words = command.split()
+        payload = None
+        if words[0] == "INFO":
+            payload = {
+                "chip": "esp32c6", "revision": 1, "flash_bytes": 8388608,
+                "psram_bytes": 0, "base_mac": "02:00:00:00:00:01",
+            }
+        elif words[0] == "I2C_SCAN":
+            if words[-2:] == ["18", "19"]:
+                payload = {"addresses": [0x63, 0x6B]}
+            else:
+                payload = {"addresses": []}
+        elif words[0] == "I2C_READ":
+            address = int(words[-4], 0)
+            if address == 0x63:
+                payload = {"data": "510600"}
+            elif address == 0x6B:
+                payload = {"data": "05"}
+            else:
+                payload = {"data": ""}
+        elif words[0] == "GPIO_WATCH":
+            payload = {"pin": 9, "from": 1, "to": 0}
+        elif words[0] == "IMU_READ":
+            payload = next(self.imu_samples)
+        elif words[0] == "TOUCH_READ":
+            payload = next(self.touch_samples)
+        elif words[0] == "ADC_READ":
+            payload = {"raw": 1696, "millivolts": 1367}
+        elif words[0] in {
+                "PANEL_CONFIG", "PANEL_FILL", "PANEL_EDGES", "PANEL_GLYPH",
+                "BACKLIGHT", "BACKLIGHT_ENABLE", "TOUCH_CONFIG", "IMU_CONFIG"}:
+            payload = {"status": "ok"}
+        elif words[0] == "PANEL_READ_ID":
+            payload = {"supported": False, "data": ""}
+        else:
+            raise AssertionError("unexpected synthetic command %r" % command)
+        return "BOOTOK " + json.dumps(payload, separators=(",", ":"))
+
+
+BOOTSTRAP_DRIVE_COMMANDS = {
+    "I2C_SCAN", "I2C_READ", "IMU_CONFIG", "IMU_READ", "PANEL_CONFIG",
+    "PANEL_READ_ID", "PANEL_FILL", "PANEL_EDGES", "PANEL_GLYPH",
+    "BACKLIGHT", "BACKLIGHT_ENABLE", "TOUCH_CONFIG", "TOUCH_READ",
+}
+
+
+class BootstrapConsentGuardTransport(BootstrapFakeTransport):
+    def request(self, command, timeout=5.0):
+        words = command.split()
+        if words and words[0] in BOOTSTRAP_DRIVE_COMMANDS:
+            if len(words) < 2 or words[1] != "CONFIRM":
+                raise AssertionError(
+                    "drive command lacks literal CONFIRM: %s" % command)
+        return super().request(command, timeout)
+
+
+class BootstrapS3Transport(BootstrapConsentGuardTransport):
+    def request(self, command, timeout=5.0):
+        words = command.split()
+        if words[0] == "INFO":
+            self.commands.append(command)
+            payload = {
+                "chip": "esp32s3", "revision": 1, "flash_bytes": 16777216,
+                "psram_bytes": 8388608, "base_mac": "02:00:00:00:00:03",
+            }
+            return "BOOTOK " + json.dumps(payload, separators=(",", ":"))
+        if words[0] == "I2C_SCAN":
+            self.commands.append(command)
+            pair = tuple(int(value, 0) for value in words[-2:])
+            payload = {"addresses": [0x30] if pair == (42, 41) else []}
+            return "BOOTOK " + json.dumps(payload, separators=(",", ":"))
+        if words[0] == "GPIO_WATCH":
+            self.commands.append(command)
+            return 'BOOTOK {"pin":0,"from":1,"to":0}'
+        return super().request(command, timeout)
+
+
+class BootstrapAmoledTransport(BootstrapConsentGuardTransport):
+    def __init__(self):
+        super().__init__()
+        self.panel_ready = False
+
+    def request(self, command, timeout=5.0):
+        words = command.split()
+        if words[0] == "INFO":
+            self.commands.append(command)
+            payload = {
+                "chip": "esp32s3", "revision": 1, "flash_bytes": 16777216,
+                "psram_bytes": 8388608, "base_mac": "02:00:00:00:00:04",
+            }
+            return "BOOTOK " + json.dumps(payload, separators=(",", ":"))
+        if words[0] == "I2C_SCAN":
+            self.commands.append(command)
+            pair = tuple(int(value, 0) for value in words[-2:])
+            addresses = [0x34, 0x5A, 0x6B] if pair == (15, 14) else []
+            return "BOOTOK " + json.dumps(
+                {"addresses": addresses}, separators=(",", ":"))
+        if words[0] == "PANEL_CONFIG":
+            self.commands.append(command)
+            self.panel_ready = True
+            return 'BOOTOK {"status":"ok"}'
+        if words[0] == "BACKLIGHT" and not self.panel_ready:
+            self.commands.append(command)
+            return 'BOOTERR {"error":"panel is not configured"}'
+        return super().request(command, timeout)
+
+
+def committed_descriptor(key):
+    return next(
+        item for item in board_descriptor.load_repository_descriptors(
+            espdisp.REPO_ROOT)
+        if item["key"] == key
+    )
+
+
+def imu_samples_for_descriptor(descriptor, gravity=16000):
+    motion = descriptor["motion"]
+
+    def raw(panel_axis, panel_sign):
+        vector = [0, 0, 0]
+        raw_sign = motion[panel_sign]
+        vector[motion[panel_axis]] = gravity * raw_sign
+        return tuple(vector)
+
+    right = raw("x_axis", "x_sign")
+    bottom = raw("y_axis", "y_sign")
+    return [
+        ("right_edge", right),
+        ("left_edge", tuple(-value for value in right)),
+        ("top_edge", tuple(-value for value in bottom)),
+        ("bottom_edge", bottom),
+    ]
+
+
+def without_toml_tables(text, tables):
+    pattern = re.compile(
+        r"(?ms)^\[(%s)\]\s*$.*?(?=^\[|\Z)"
+        % "|".join(re.escape(table) for table in sorted(tables)))
+    return pattern.sub("", text)
+
+
+def independently_select_descriptor(descriptors, flash_bytes, scans, failures=()):
+    failed = set(failures)
+    matches = []
+    for descriptor in sorted(
+            descriptors, key=lambda item: item["detection"]["order"]):
+        detection = descriptor["detection"]
+        minimum = detection["flash_min_exclusive"]
+        maximum = detection["flash_max_inclusive"]
+        if minimum and flash_bytes <= minimum:
+            continue
+        if maximum and flash_bytes > maximum:
+            continue
+        kind = detection["kind"]
+        matched = kind in ("always", "flash_range")
+        if kind.startswith("i2c_"):
+            pair = (detection["sda"], detection["scl"])
+            if pair in failed:
+                matched = kind == "i2c_any_ack_or_start_failure"
+            elif pair in scans:
+                responders = scans[pair]
+                if detection["addresses"]:
+                    ack_count = sum(
+                        address in detection["addresses"]
+                        for address in responders)
+                else:
+                    ack_count = sum(
+                        detection["scan_first"] <= address
+                        <= detection["scan_last"]
+                        for address in responders)
+                if kind == "i2c_no_ack":
+                    matched = ack_count == 0
+                else:
+                    matched = ack_count > 0
+        if matched:
+            matches.append(descriptor)
+    resolution = descriptors[0]["detection"]["resolution"]
+    if resolution == "exactly_one":
+        return matches[0]["key"] if len(matches) == 1 else None
+    return matches[0]["key"] if matches else None
+
+
+def bootstrap_success_answers():
+    return {
+        "consent.discovery_i2c": "yes",
+        "buttons.ready": "",
+        "consent.imu": "yes",
+        "imu.right_edge": "",
+        "imu.left_edge": "",
+        "imu.top_edge": "",
+        "imu.bottom_edge": "",
+        "consent.panel_config": "yes",
+        "consent.touch": "yes",
+        "touch.top_left": "",
+        "touch.top_right": "",
+        "touch.bottom_left": "",
+        "touch.bottom_right": "",
+        "consent.color": "yes",
+        "color.red": "red",
+        "consent.inversion": "yes",
+        "color.black": "black",
+        "consent.offsets": "yes",
+        "offsets.0": "none",
+        "offsets.1": "none",
+        "offsets.2": "none",
+        "offsets.3": "none",
+        "consent.mirror": "yes",
+        "mirror.reading": "normal",
+        "consent.backlight.low": "yes",
+        "consent.backlight.high": "yes",
+        "backlight.change": "brighter",
+        "battery.multimeter": "4.10",
+    }
+
+
+def test_bootstrap_solvers_and_derivations():
+    for key in ("s3-touch-lcd-154", "s3-touch-amoled-175c"):
+        descriptor = committed_descriptor(key)
+        solved = espdisp.solve_imu_mapping(
+            imu_samples_for_descriptor(descriptor))
+        check_equal(
+            solved,
+            {
+                "x_axis": descriptor["motion"]["x_axis"],
+                "x_sign": descriptor["motion"]["x_sign"],
+                "y_axis": descriptor["motion"]["y_axis"],
+                "y_sign": descriptor["motion"]["y_sign"],
+            },
+            "%s IMU mapping round-trips the firmware gravity convention" % key,
+        )
+    check_fails(
+        lambda: espdisp.solve_imu_mapping([
+            ("right_edge", (16000, 0, 0)),
+            ("left_edge", (15000, 0, 0)),
+            ("top_edge", (0, 16000, 0)),
+            ("bottom_edge", (0, -16000, 0)),
+        ]),
+        "inconsistent",
+        "an inconsistent IMU sequence is rejected",
+    )
+    check_fails(
+        lambda: espdisp.solve_imu_mapping([
+            ("right_edge", (16000, 15000, 0)),
+            ("left_edge", (-16000, 15000, 0)),
+            ("top_edge", (15000, -16000, 0)),
+            ("bottom_edge", (15000, 16000, 0)),
+        ]),
+        "isolate one gravity axis",
+        "two active gravity axes in every IMU pose are rejected",
+    )
+
+    touch = espdisp.solve_touch_calibration(
+        [
+            ("top_left", (8, 8), (165, 8)),
+            ("top_right", (163, 8), (8, 10)),
+            ("bottom_left", (8, 311), (163, 310)),
+            ("bottom_right", (163, 311), (10, 309)),
+        ],
+        172,
+        320,
+    )
+    check_equal(touch["swap_xy"], False, "touch solver keeps unswapped axes")
+    check_equal(touch["invert_x"], True, "touch solver finds mirrored raw X")
+    check_equal(touch["invert_y"], False, "touch solver keeps raw Y")
+    check(abs(touch["x_offset"]) <= 10 and abs(touch["y_offset"]) <= 10,
+          "touch solver derives small edge offsets")
+
+    for descriptor in board_descriptor.load_repository_descriptors(
+            espdisp.REPO_ROOT):
+        panel = descriptor["panel"]
+        check_call_equal(
+            lambda panel=panel: espdisp.derive_color_order(
+                "red", panel["color_order"]),
+            panel["color_order"],
+            "%s correct red observation retains committed color order"
+            % descriptor["key"],
+        )
+        check_call_equal(
+            lambda panel=panel: espdisp.derive_inversion(
+                "black", panel["invert_color"]),
+            panel["invert_color"],
+            "%s correct black observation retains committed inversion"
+            % descriptor["key"],
+        )
+    gc9107 = committed_descriptor("s3-lcd-085")
+    check_call_equal(
+        lambda: espdisp.derive_color_order(
+            "blue", gc9107["panel"]["color_order"]),
+        "rgb",
+        "a swapped GC9107 observation toggles the applied BGR order",
+    )
+    inverted = committed_descriptor("c6-touch-lcd-147")
+    check_call_equal(
+        lambda: espdisp.derive_inversion(
+            "white", inverted["panel"]["invert_color"]),
+        False,
+        "a white black-level observation toggles the applied inversion",
+    )
+    check_equal(espdisp.derive_mirror_x("normal"), False,
+                "readable glyph needs no mirror correction")
+    check_equal(espdisp.derive_mirror_x("backwards"), True,
+                "backwards glyph needs mirror correction")
+    check_equal(
+        espdisp.solve_orientation_offsets(
+            ["left:6", "top:4", "right:6", "bottom:4"]),
+        [[6, 0], [0, 4], [-6, 0], [0, -4]],
+        "edge observations solve per-orientation offsets",
+    )
+
+
+def test_bootstrap_full_synthetic_session():
+    with tempfile.TemporaryDirectory() as tmp:
+        output = os.path.join(tmp, "synthetic-s3.toml")
+        stream = BootstrapFakeStream(tty=True)
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            result = espdisp.run_bootstrap_session(
+                transport=BootstrapS3Transport(),
+                prompter=BootstrapFakePrompter(bootstrap_success_answers()),
+                stream=stream,
+                repo_root=espdisp.REPO_ROOT,
+                name="synthetic-s3",
+                candidate_key="s3-lcd-130",
+                confirmed_chip="esp32s3",
+                output_path=output,
+            )
+        check_equal(result.path, output, "bootstrap reports the draft path")
+        check(os.path.isfile(output), "bootstrap writes a complete draft")
+        with open(output, "rb") as source:
+            draft = tomllib.load(source)
+        descriptors = board_descriptor.load_repository_descriptors(
+            espdisp.REPO_ROOT)
+        draft["_source"] = output
+        check_accepts(
+            lambda: board_descriptor.validate_descriptors(descriptors + [draft]),
+            "synthetic bootstrap descriptor passes repository validation",
+        )
+        check_equal(draft["motion"]["controller"], "none",
+                    "unmeasured IMU wiring is emitted inert")
+        check_equal(draft["touch"]["controller"], "none",
+                    "unmeasured touch wiring is emitted inert")
+        check_equal(draft["touch"]["sda"], -1,
+                    "unmeasured touch SDA is emitted inert")
+        check_equal(draft["carrier"]["pin_rgb_led"], -1,
+                    "unmeasured RGB LED wiring is emitted inert")
+        check_equal(draft["serial"]["rx"], -1,
+                    "unmeasured serial RX wiring is emitted inert")
+        check_equal(draft["panel"]["color_order"], "rgb",
+                    "full bootstrap retains the applied RGB order")
+        check_equal(draft["panel"]["invert_color"], True,
+                    "full bootstrap retains the applied inversion")
+        family = [
+            item for item in descriptors
+            if item["identity"]["target"] == "s3"
+        ] + [draft]
+        check_equal(
+            independently_select_descriptor(
+                family, 16777216, {(42, 41): [0x30]}),
+            "synthetic-s3",
+            "emitted detection evidence selects the draft at boot",
+        )
+        check("\x1b[" in stream.getvalue(),
+              "interactive TTY transcript contains ANSI color")
+        check("validate -> regenerate -> compile -> flash -> confirm bring-up"
+              in stream.getvalue(),
+              "final summary prints the human closing loop")
+
+        no_color_stream = BootstrapFakeStream(tty=True)
+        with unittest.mock.patch.dict(
+                os.environ, {"NO_COLOR": "1"}, clear=True):
+            second = os.path.join(tmp, "synthetic-s3-no-color.toml")
+            espdisp.run_bootstrap_session(
+                transport=BootstrapS3Transport(),
+                prompter=BootstrapFakePrompter(bootstrap_success_answers()),
+                stream=no_color_stream,
+                repo_root=espdisp.REPO_ROOT,
+                name="synthetic-s3-no-color",
+                candidate_key="s3-lcd-130",
+                confirmed_chip="esp32s3",
+                output_path=second,
+            )
+        check("\x1b[" not in no_color_stream.getvalue(),
+              "full NO_COLOR transcript contains no ANSI escapes")
+
+
+def flatten_bootstrap_descriptor(value, prefix=""):
+    out = {}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child = key if not prefix else prefix + "." + key
+            out.update(flatten_bootstrap_descriptor(item, child))
+    else:
+        out[prefix] = value
+    return out
+
+
+def test_bootstrap_retune_is_section_scoped():
+    path = os.path.join(espdisp.REPO_ROOT, "boards", "c6-touch-lcd-147.toml")
+    with open(path, encoding="utf-8") as source:
+        original = source.read()
+    cases = {
+        "imu": {
+            "updates": {
+                "x_axis": 2, "x_sign": -1, "y_axis": 0, "y_sign": -1},
+            "tables": {"motion"},
+        },
+        "touch": {
+            "updates": {
+                "raw_x_mirrored": False, "raw_y_mirrored": True},
+            "tables": {"touch"},
+        },
+        "color": {
+            "updates": {"color_order": "bgr", "invert_color": False},
+            "tables": {"panel"},
+        },
+        "offsets": {
+            "updates": {
+                "col_offset": 35, "row_offset": 1,
+                "offsets": [[35, 1], [1, 35], [35, 1], [1, 35]],
+            },
+            "tables": {"panel", "orientation"},
+        },
+        "backlight": {
+            "updates": {"inverted": True, "enable_pin": -1},
+            "tables": {"backlight"},
+        },
+        "buttons": {
+            "updates": {"pin_boot": 8},
+            "tables": {"carrier"},
+        },
+    }
+    for section, case in cases.items():
+        updated = espdisp.retune_descriptor_text(
+            original, section, case["updates"], ["synthetic retune evidence"])
+        check_equal(
+            without_toml_tables(updated, case["tables"]),
+            without_toml_tables(original, case["tables"]),
+            "--retune %s preserves every byte outside its target table(s)"
+            % section,
+        )
+        check(
+            "synthetic retune evidence" in updated,
+            "--retune %s records evidence beside the changed table" % section,
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copytree(
+            os.path.join(espdisp.REPO_ROOT, "boards"),
+            os.path.join(tmp, "boards"),
+        )
+        retune_path = os.path.join(tmp, "boards", "c6-touch-lcd-147.toml")
+        with open(retune_path, "rb") as source:
+            before_descriptor = tomllib.load(source)
+        before_mode = os.stat(retune_path).st_mode & 0o777
+        transport = BootstrapFakeTransport()
+        transport.imu_samples = iter([
+            {"x": 10, "y": 20, "z": 16000},
+            {"x": -10, "y": -20, "z": -16000},
+            {"x": -15900, "y": 30, "z": 40},
+            {"x": 16100, "y": -20, "z": -30},
+        ])
+        answers = bootstrap_success_answers()
+        answers["retune.write"] = "yes"
+        espdisp.run_retune_session(
+            transport=transport,
+            prompter=BootstrapFakePrompter(answers),
+            stream=BootstrapFakeStream(tty=False),
+            repo_root=tmp,
+            board_key="c6-touch-lcd-147",
+            section="imu",
+            confirmed_chip="esp32c6",
+        )
+        with open(retune_path, "rb") as source:
+            after_descriptor = tomllib.load(source)
+        before_flat = flatten_bootstrap_descriptor(before_descriptor)
+        after_flat = flatten_bootstrap_descriptor(after_descriptor)
+        changed = {
+            key for key in before_flat if before_flat[key] != after_flat[key]
+        }
+        check_equal(
+            changed,
+            {
+                "motion.x_axis", "motion.y_axis",
+            },
+            "scripted --retune imu changes only motion calibration fields",
+        )
+        check_equal(
+            os.stat(retune_path).st_mode & 0o777,
+            before_mode,
+            "atomic retune preserves descriptor file permissions",
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copytree(
+            os.path.join(espdisp.REPO_ROOT, "boards"),
+            os.path.join(tmp, "boards"),
+        )
+        answers = bootstrap_success_answers()
+        answers["retune.write"] = "yes"
+        check_fails(
+            lambda: espdisp.run_retune_session(
+                transport=BootstrapConsentGuardTransport(),
+                prompter=BootstrapFakePrompter(answers),
+                stream=BootstrapFakeStream(tty=False),
+                repo_root=tmp,
+                board_key="c6-lcd-147",
+                section="color",
+                confirmed_chip="esp32c6",
+            ),
+            "contradicts observed evidence",
+            "wrong-carrier color retune is refused before panel drive",
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copytree(
+            os.path.join(espdisp.REPO_ROOT, "boards"),
+            os.path.join(tmp, "boards"),
+        )
+        path = os.path.join(
+            tmp, "boards", "s3-touch-amoled-175c.toml")
+        answers = bootstrap_success_answers()
+        answers["retune.write"] = "yes"
+        transport = BootstrapAmoledTransport()
+        check_fails(
+            lambda: espdisp.run_retune_session(
+                transport=transport,
+                prompter=BootstrapFakePrompter(answers),
+                stream=BootstrapFakeStream(tty=False),
+                repo_root=tmp,
+                board_key="s3-touch-amoled-175c",
+                section="backlight",
+                confirmed_chip="esp32s3",
+            ),
+            "cannot safely initialize",
+            "panel-command AMOLED backlight retune fails before brightness",
+        )
+        check(
+            not any(command.startswith("BACKLIGHT ")
+                    for command in transport.commands),
+            "unsafe AMOLED retune sends no brightness command",
+        )
+        with open(path, encoding="utf-8") as source:
+            unchanged = source.read()
+        with open(
+            os.path.join(
+                espdisp.REPO_ROOT, "boards", "s3-touch-amoled-175c.toml"),
+            encoding="utf-8",
+        ) as source:
+            original = source.read()
+        check_equal(
+            unchanged, original,
+            "refused AMOLED backlight retune preserves every descriptor byte",
+        )
+
+
+def test_bootstrap_refusals_and_color_controls():
+    check_fails(
+        lambda: espdisp.require_confirmed_bootstrap_chip(None),
+        "esptool",
+        "bootstrap refuses an unconfirmed chip family",
+    )
+    check_fails(
+        lambda: espdisp.parse_bootstrap_response("garbage"),
+        "malformed",
+        "malformed device response is refused",
+    )
+    check_fails(
+        lambda: espdisp.bootstrap_request(
+            BootstrapFakeTransport(timeout=True), "INFO", 0.01),
+        "timeout",
+        "device timeout is a named refusal",
+    )
+
+    malformed_info = BootstrapFakeTransport()
+    original_request = malformed_info.request
+
+    def request_with_bad_info(command, timeout=5.0):
+        if command == "INFO":
+            return 'BOOTOK {"chip":"esp32c6","revision":"one"}'
+        return original_request(command, timeout)
+
+    malformed_info.request = request_with_bad_info
+    with tempfile.TemporaryDirectory() as tmp:
+        check_fails(
+            lambda: espdisp.run_bootstrap_session(
+                transport=malformed_info,
+                prompter=BootstrapFakePrompter(bootstrap_success_answers()),
+                stream=BootstrapFakeStream(),
+                repo_root=espdisp.REPO_ROOT,
+                name="bad-info",
+                candidate_key="c6-touch-lcd-147",
+                confirmed_chip="esp32c6",
+                output_path=os.path.join(tmp, "bad-info.toml"),
+            ),
+            "malformed bootstrap INFO",
+            "malformed device identity facts are refused",
+        )
+
+    answers = bootstrap_success_answers()
+    answers["consent.discovery_i2c"] = "no"
+    transport = BootstrapFakeTransport()
+    with tempfile.TemporaryDirectory() as tmp:
+        check_fails(
+            lambda: espdisp.run_bootstrap_session(
+                transport=transport,
+                prompter=BootstrapFakePrompter(answers),
+                stream=BootstrapFakeStream(),
+                repo_root=espdisp.REPO_ROOT,
+                name="declined-first-drive",
+                candidate_key="c6-touch-lcd-147",
+                confirmed_chip="esp32c6",
+                output_path=os.path.join(tmp, "declined-first-drive.toml"),
+            ),
+            "consent declined",
+            "declining the first drive consent aborts the session",
+        )
+        check(
+            not any(command.split()[0] in BOOTSTRAP_DRIVE_COMMANDS
+                    for command in transport.commands),
+            "declined first consent sends no electrically driving command",
+        )
+
+    answers = bootstrap_success_answers()
+    answers["consent.panel_config"] = "no"
+    transport = BootstrapFakeTransport()
+    with tempfile.TemporaryDirectory() as tmp:
+        check_fails(
+            lambda: espdisp.run_bootstrap_session(
+                transport=transport,
+                prompter=BootstrapFakePrompter(answers),
+                stream=BootstrapFakeStream(),
+                repo_root=espdisp.REPO_ROOT,
+                name="declined-drive",
+                candidate_key="c6-touch-lcd-147",
+                confirmed_chip="esp32c6",
+                output_path=os.path.join(tmp, "declined-drive.toml"),
+            ),
+            "declined",
+            "declining panel consent aborts before any display drive",
+        )
+        check(not any(command.startswith("PANEL_")
+                      for command in transport.commands),
+              "declined consent sends no panel command")
+        check(not os.listdir(tmp), "declined session leaves no partial draft")
+
+    aborted = bootstrap_success_answers()
+    aborted["buttons.ready"] = EOFError("synthetic abort")
+    with tempfile.TemporaryDirectory() as tmp:
+        check_fails(
+            lambda: espdisp.run_bootstrap_session(
+                transport=BootstrapFakeTransport(),
+                prompter=BootstrapFakePrompter(aborted),
+                stream=BootstrapFakeStream(),
+                repo_root=espdisp.REPO_ROOT,
+                name="aborted",
+                candidate_key="c6-touch-lcd-147",
+                confirmed_chip="esp32c6",
+                output_path=os.path.join(tmp, "aborted.toml"),
+            ),
+            "aborted",
+            "aborted prompt is reported without a traceback",
+        )
+        check(not os.listdir(tmp), "aborted session leaves no partial draft")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "existing.toml")
+        with open(path, "w", encoding="utf-8") as output:
+            output.write("original\n")
+        answers = bootstrap_success_answers()
+        answers["overwrite"] = "no"
+        check_fails(
+            lambda: espdisp.run_bootstrap_session(
+                transport=BootstrapS3Transport(),
+                prompter=BootstrapFakePrompter(answers),
+                stream=BootstrapFakeStream(),
+                repo_root=espdisp.REPO_ROOT,
+                name="existing",
+                candidate_key="s3-lcd-130",
+                confirmed_chip="esp32s3",
+                output_path=path,
+            ),
+            "overwrite declined",
+            "an existing descriptor requires explicit overwrite confirmation",
+        )
+        with open(path, encoding="utf-8") as source:
+            check_equal(source.read(), "original\n",
+                        "declined overwrite preserves the original file")
+
+    tty = BootstrapFakeStream(tty=True)
+    espdisp.BootstrapConsole(tty, {}).fact("visible")
+    check("\x1b[" in tty.getvalue(), "TTY output uses color")
+    no_color = BootstrapFakeStream(tty=True)
+    espdisp.BootstrapConsole(no_color, {"NO_COLOR": "1"}).fact("plain")
+    check("\x1b[" not in no_color.getvalue(), "NO_COLOR disables ANSI color")
+    pipe = BootstrapFakeStream(tty=False)
+    espdisp.BootstrapConsole(pipe, {}).fact("plain")
+    check("\x1b[" not in pipe.getvalue(), "non-TTY output disables ANSI color")
+
+    parser = espdisp.build_parser()
+    bootstrap = parser.parse_args([
+        "bootstrap", "--port", "/dev/fake", "--name", "new-board",
+        "--candidate", "c6-touch-lcd-147",
+    ])
+    check_equal(bootstrap.name, "new-board", "bootstrap parser accepts a draft name")
+    retune = parser.parse_args([
+        "bootstrap", "--port", "/dev/fake", "--retune", "c6-touch-lcd-147",
+        "--section", "imu",
+    ])
+    check_equal(retune.section, "imu", "bootstrap parser accepts section retuning")
+
+    swapped = espdisp.solve_touch_calibration(
+        [
+            ("top_left", (8, 8), (8, 165)),
+            ("top_right", (163, 8), (10, 8)),
+            ("bottom_left", (8, 311), (310, 163)),
+            ("bottom_right", (163, 311), (309, 10)),
+        ],
+        172,
+        320,
+    )
+    check_equal(swapped["swap_xy"], True,
+                "touch solver reports swapped raw axes explicitly")
+
+    candidates = board_descriptor.load_repository_descriptors(espdisp.REPO_ROOT)
+    s3 = [
+        item for item in candidates
+        if item["identity"]["target"] == "s3"
+    ]
+    selected, safe = espdisp.bootstrap._choose_candidate(
+        s3, {}, set(), 8388608, None,
+        BootstrapFakePrompter({}),
+    )
+    check_equal(selected["key"], "s3-lcd-085",
+                "flash-only S3 candidate selection is automatic")
+    check_equal([item["key"] for item in safe], ["s3-lcd-085"],
+                "automatic candidate resolution narrows the drive safety set")
+
+    p4 = [
+        item for item in candidates
+        if item["identity"]["target"] == "p4"
+    ]
+    selected, safe = espdisp.bootstrap._choose_candidate(
+        p4, {}, set(), 33554432, None,
+        BootstrapFakePrompter({}),
+    )
+    check_equal(selected["key"], "p4-wifi6-touch-lcd-4b",
+                "the sole P4 always-match candidate is automatic")
+    check_equal(len(safe), 1, "P4 automatic selection has one safety candidate")
+
+    c6 = [
+        item for item in candidates
+        if item["identity"]["target"] == "c6"
+    ]
+    selected, safe = espdisp.bootstrap._choose_candidate(
+        c6, {}, {(18, 19)}, 8388608, None,
+        BootstrapFakePrompter({}),
+    )
+    check_equal(selected["key"], "c6-touch-lcd-147",
+                "safe I2C start-failure evidence follows the declared rule")
+    check_equal(len(safe), 1,
+                "start-failure resolution narrows the drive safety set")
+
+    check_fails(
+        lambda: espdisp._bootstrap_call(
+            espdisp.bootstrap._choose_candidate,
+            c6,
+            {(18, 19): [0x63, 0x6B]},
+            set(),
+            8388608,
+            "c6-lcd-147",
+            BootstrapFakePrompter({}),
+        ),
+        "contradicts observed evidence",
+        "--candidate cannot select a descriptor contradicted by bus evidence",
+    )
+
+    selected, safe = espdisp.bootstrap._choose_candidate(
+        s3, {}, set(), 16777216, "s3-touch-amoled-175c",
+        BootstrapFakePrompter({}),
+    )
+    check_equal(
+        selected["key"], "s3-touch-amoled-175c",
+        "an evidence-compatible requested candidate remains selectable",
+    )
+    check_equal(
+        {item["key"] for item in safe},
+        {
+            "s3-lcd-130", "s3-touch-lcd-154",
+            "s3-touch-amoled-175c", "s3-touch-lcd-185c",
+        },
+        "a requested candidate retains every still-plausible S3 descriptor",
+    )
+
+    c6_touch = next(
+        item for item in c6 if item["key"] == "c6-touch-lcd-147")
+    check_fails(
+        lambda: espdisp._bootstrap_call(
+            espdisp.bootstrap._descriptor_from_evidence,
+            candidates,
+            c6_touch,
+            "shadowed-c6",
+            "esp32c6",
+            8388608,
+            {(18, 19): [0x63, 0x6B]},
+            set(),
+            [],
+            9,
+            True,
+            None,
+            None,
+            "rgb",
+            True,
+            copy.deepcopy(c6_touch["orientation"]["offsets"]),
+            False,
+            None,
+            False,
+            None,
+            None,
+        ),
+        "unreachable",
+        "first-match reachability is checked before a draft is emitted",
+    )
+
+    check_fails(
+        lambda: espdisp._bootstrap_call(
+            espdisp.bootstrap._ensure_safe_drive,
+            s3, [2], "synthetic display"),
+        "power.battery_enable",
+        "ambiguous candidates forbid every known input or power-rail pin",
+    )
+
+    cst = next(
+        signature for signature in espdisp.bootstrap.CONTROLLER_SIGNATURES
+        if signature.name == "cst9217"
+    )
+    check(
+        espdisp.bootstrap._signature_accepts(
+            cst, bytes([0x00, 0x00, 0x17, 0x92])),
+        "CST9217 signature reads the four-byte chip-info layout",
+    )
+
+    warning_stream = BootstrapFakeStream(tty=False)
+    espdisp.bootstrap._drive_warning(
+        espdisp.BootstrapConsole(warning_stream, {}), p4[0])
+    check("GPIO33 BL_ENABLE=LOW then HIGH" in warning_stream.getvalue(),
+          "P4 consent warning states the exact enable transition")
+
+    swapped_transport = BootstrapFakeTransport()
+    swapped_transport.touch_samples = iter([
+        {"x": 8, "y": 165},
+        {"x": 10, "y": 8},
+        {"x": 310, "y": 163},
+        {"x": 309, "y": 10},
+    ])
+    with tempfile.TemporaryDirectory() as tmp:
+        output = os.path.join(tmp, "swapped-touch.toml")
+        check_fails(
+            lambda: espdisp.run_bootstrap_session(
+                transport=swapped_transport,
+                prompter=BootstrapFakePrompter(bootstrap_success_answers()),
+                stream=BootstrapFakeStream(),
+                repo_root=espdisp.REPO_ROOT,
+                name="swapped-touch",
+                candidate_key="c6-touch-lcd-147",
+                confirmed_chip="esp32c6",
+                output_path=output,
+            ),
+            "cannot represent swapped raw touch axes",
+            "unrepresentable touch calibration is refused instead of guessed",
+        )
+        check(not os.path.exists(output),
+              "swapped touch refusal leaves no partial descriptor")
+
+    hostile = BootstrapFakeTransport()
+
+    def hostile_response(command, timeout=5.0):
+        del command, timeout
+        return {"data": "abc\x1b[31m\nactive = true"}
+
+    hostile.request = hostile_response
+    check_fails(
+        lambda: espdisp.bootstrap_request(hostile, "PANEL_READ_ID CONFIRM"),
+        "device response text",
+        "device-controlled control characters are rejected at the boundary",
+    )
+    check_fails(
+        lambda: espdisp._bootstrap_call(
+            espdisp.bootstrap.render_descriptor,
+            committed_descriptor("c6-lcd-147"),
+            {"panel.driver": ["safe\nactive = true"]},
+        ),
+        "comment",
+        "rendered descriptor comments cannot inject TOML assignments",
+    )
+
+    for reading in ("0", "-1", "nan", "inf", "1e308", "1e309"):
+        check_fails(
+            lambda reading=reading: espdisp._bootstrap_call(
+                espdisp.bootstrap._derive_battery_scale, reading, 1367),
+            "battery",
+            "battery measurement %r is refused cleanly" % reading,
+        )
+    check_fails(
+        lambda: espdisp._bootstrap_call(
+            espdisp.bootstrap._derive_battery_scale, "400.0", 1000),
+        "1..255",
+        "battery scale outside the runtime range is refused",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        output = os.path.join(tmp, "unreachable-c6.toml")
+        check_fails(
+            lambda: espdisp.run_bootstrap_session(
+                transport=BootstrapConsentGuardTransport(),
+                prompter=BootstrapFakePrompter(bootstrap_success_answers()),
+                stream=BootstrapFakeStream(),
+                repo_root=espdisp.REPO_ROOT,
+                name="unreachable-c6",
+                candidate_key="c6-touch-lcd-147",
+                confirmed_chip="esp32c6",
+                output_path=output,
+            ),
+            "unreachable",
+            "a C6 draft shadowed by the earlier first-match rule is refused",
+        )
+        check(not os.path.exists(output),
+              "unreachable detection refusal writes no descriptor")
+
+
+def test_bootstrap_firmware_safety_contract():
+    with tempfile.TemporaryDirectory() as tmp:
+        source_path = os.path.join(tmp, "bootstrap_protocol_test.cpp")
+        binary = os.path.join(tmp, "bootstrap_protocol_test")
+        with open(source_path, "w", encoding="utf-8") as output:
+            output.write(r'''
+#include "firmware/board_bootstrap/bootstrap_protocol.h"
+using namespace bootstrapproto;
+int main() {
+  const char *drives[] = {
+      "I2C_SCAN", "I2C_READ", "IMU_CONFIG", "IMU_READ", "PANEL_CONFIG",
+      "PANEL_READ_ID", "PANEL_FILL", "PANEL_EDGES", "PANEL_GLYPH",
+      "BACKLIGHT", "BACKLIGHT_ENABLE", "TOUCH_CONFIG", "TOUCH_READ"};
+  for (const char *command : drives) {
+    if (commandAuthorized(command, nullptr)) return 1;
+    if (commandAuthorized(command, "confirm")) return 2;
+    if (!commandAuthorized(command, "CONFIRM")) return 3;
+  }
+  if (!commandAuthorized("INFO", nullptr)) return 4;
+  I2cReadArgs read = {};
+  if (!parseI2cReadArgs("18", "19", "0x6b", "0xff", "1", "6", read))
+    return 5;
+  if (parseI2cReadArgs("18", "19", "0x78", "0", "1", "1", read))
+    return 6;
+  if (parseI2cReadArgs("18", "19", "0x6b", "0x100", "1", "1", read))
+    return 7;
+  if (parseI2cReadArgs("18", "19", "0x6b", "0", "3", "1", read))
+    return 8;
+  TouchConfigArgs touch = {};
+  if (!parseTouchConfigArgs(
+          "cst816", "42", "41", "0x15", "47", "48", "0", "0", "0",
+          touch))
+    return 9;
+  if (parseTouchConfigArgs(
+          "unknown", "42", "41", "0x15", "47", "48", "0", "0", "0",
+          touch))
+    return 10;
+  if (parseTouchConfigArgs(
+          "cst816", "42", "41", "0x115", "47", "48", "0", "0", "0",
+          touch))
+    return 11;
+  if (parseTouchConfigArgs(
+          "cst816", "42", "41", "0x15", "47", "48", "257", "288", "0",
+          touch))
+    return 12;
+  const char *badEdges[] = {"x=2147483647", "y=10"};
+  PanelEdgesArgs edges = {};
+  if (parsePanelEdgesArgs(badEdges, 2, 172, 320, edges)) return 13;
+  return 0;
+}
+''')
+        compiled = subprocess.run(
+            [
+                "g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                "-I", espdisp.REPO_ROOT, source_path, "-o", binary,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        check(
+            compiled.returncode == 0,
+            "bootstrap protocol parser contract compiles: %s"
+            % compiled.stderr.strip(),
+        )
+        if compiled.returncode == 0:
+            executed = subprocess.run(
+                [binary], capture_output=True, text=True, check=False)
+            check_equal(
+                executed.returncode, 0,
+                "bootstrap protocol rejects unconfirmed and malformed drives",
+            )
+
+    events = []
+
+    class MustNotOpen:
+        def __init__(self, address):
+            events.append(("open", address))
+
+    args = argparse.Namespace(
+        port="/dev/fake", retune=None, section=None, name="safe",
+        candidate="c6-lcd-147", timeout=1.0)
+    with unittest.mock.patch.object(
+            espdisp, "resolve_port",
+            return_value=espdisp.PortInfo("/dev/fake", [], "fake")), \
+         unittest.mock.patch.object(
+             espdisp, "probe_chip", side_effect=lambda address:
+             events.append(("probe", address)) or None), \
+         unittest.mock.patch.object(
+             espdisp, "SerialBootstrapTransport", MustNotOpen):
+        check_fails(
+            lambda: espdisp.cmd_bootstrap(args),
+            "esptool",
+            "bootstrap command refuses before serial when chip confirmation fails",
+        )
+    check_equal(events, [("probe", "/dev/fake")],
+                "esptool confirmation happens before the serial transport opens")
+
+
 def main():
+    test_bootstrap_solvers_and_derivations()
+    test_bootstrap_full_synthetic_session()
+    test_bootstrap_retune_is_section_scoped()
+    test_bootstrap_refusals_and_color_controls()
+    test_bootstrap_firmware_safety_contract()
     test_firmware_output_root()
+    test_board_descriptor_validator()
     test_universal_family_catalog_and_cli()
     test_s3_doom_build_contract()
     test_family_resolution_and_discovery()

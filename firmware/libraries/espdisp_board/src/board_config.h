@@ -34,12 +34,13 @@
 //
 // This header is deliberately hardware-free (pure data plus arithmetic) so it
 // is unit tested on the host alongside band_protocol.h and panel_state.h. The
-// I2C probe that feeds detectVariant lives in the sketch, because it needs Wire.
+// board_detect.h executes the generated electrical plan because it needs Wire.
 #pragma once
 
 #include <stdint.h>
 #include <string.h>
 
+#include "board_detection.h"
 #include "panel_config.h"
 #include "platform_config.h"
 
@@ -53,21 +54,9 @@ static const int8_t NO_PIN = -1;
 /// Unknown is the pre-detection state and the result of parsing a stored value
 /// that no longer maps to a variant. It is never a usable configuration - see
 /// resolve().
-enum class Variant : uint8_t {
-  Unknown = 0,
-  LcdSt7789 = 1,     // ESP32-C6-LCD-1.47 (non-touch)
-  TouchJd9853 = 2,   // ESP32-C6-Touch-LCD-1.47
-  AmoledCo5300 = 3,  // ESP32-S3-Touch-AMOLED-1.75C
-  LcdSt77916 = 4,    // ESP32-S3-Touch-LCD-1.85C
-  LcdGc9107 = 5,     // ESP32-S3-LCD-0.85
-  TouchSt7789 = 6,     // ESP32-S3-Touch-LCD-1.54
-  P4_4B = 7,            // ESP32-P4-WIFI6-Touch-LCD-4B
-  LcdSt7789_130 = 8,    // ESP32-S3-LCD-1.3
-};
-
-constexpr bool supportsDoom(Variant variant) {
-  return variant == Variant::AmoledCo5300 || variant == Variant::P4_4B;
-}
+#include "generated_board_variants.h"
+#include "generated_board_identity.h"
+#include "generated_board_detection.h"
 
 /// Which capacitive touch controller the board carries, so the sketch knows
 /// which register protocol to speak. The pins alone cannot tell these apart.
@@ -98,9 +87,7 @@ enum class MotionController : uint8_t { None, Qmi8658 };
 #error "ESP32-P4 Doom runtime requires the board-neutral P4 carrier selector"
 #endif
 #if defined(ESPDISP_BOARD_P4_4B)
-#define ESPDISP_PANEL_ST7703_720X720 1
-#define ESPDISP_LARGE_TILE_STREAM 1
-static const Variant COMPILED_VARIANT = Variant::P4_4B;
+#include "generated_p4_compile.h"
 #else
 #error "The selected carrier is not compatible with ESP32-P4"
 #endif
@@ -124,23 +111,14 @@ static const Variant COMPILED_VARIANT = Variant::Unknown;
 
 /// The shared I2C bus that C6 boot-time detection probes. Same pins on both
 /// C6 boards; only the Touch variant has anything answering on it. Meaningless
-/// on the S3, where COMPILED_VARIANT preempts detection entirely.
-static const int8_t PIN_PROBE_SDA = 18;
-static const int8_t PIN_PROBE_SCL = 19;
+/// on the S3, whose generated plan uses four different buses.
+static const int8_t PIN_PROBE_SDA = GENERATED_C6_PROBES[0].sda;
+static const int8_t PIN_PROBE_SCL = GENERATED_C6_PROBES[0].scl;
 /// Touch controller reset, as used by *detection*, which necessarily runs before
 /// the variant is known and so cannot read it out of the table below. Released
 /// before probing so a touch chip held in reset cannot make a Touch board look
 /// like a non-touch one. Must equal CONFIG_TOUCH_JD9853.pinTouchRst.
-static const int8_t PIN_PROBE_TP_RST = 20;
-
-/// S3 profile signatures. These are pure carrier data so host tests can pin
-/// the exact address sets that board_detect.h probes before any panel pin is
-/// driven. In particular, CO5300 carries CST9217 at 0x5A, not CST816 at 0x15.
-static constexpr uint8_t S3_CO5300_PROBE_ADDRESSES[] = {
-    0x5A, 0x34, 0x6A, 0x6B};
-static constexpr uint8_t S3_ST77916_PROBE_ADDRESSES[] = {0x15, 0x20};
-static constexpr uint8_t S3_ST7789_154_PROBE_ADDRESSES[] = {0x15, 0x6A, 0x6B};
-static constexpr uint8_t S3_ST7789_130_PROBE_ADDRESSES[] = {0x6B};
+static const int8_t PIN_PROBE_TP_RST = GENERATED_C6_PROBES[0].resetPin;
 
 /// Whether a platform can execute a panel profile. SPI/QSPI panel backends are
 /// platform-neutral; the MIPI-DSI SDK backend is currently available on P4.
@@ -151,9 +129,9 @@ constexpr bool platformSupportsPanel(const PlatformConfig &platform,
          platform.platform == Platform::Esp32P4;
 }
 
-/// Everything that differs between the boards. The sketch reads this and holds
-/// no board conditionals of its own, so adding a variant is a new table entry
-/// rather than a hunt for scattered `if (touch)` branches.
+/// The carrier composition consumed after detection. Controller implementations
+/// may still branch on capabilities, but board facts belong in descriptor-backed
+/// rows rather than scattered profile tests.
 struct Config {
   Variant variant;
   const char *name;
@@ -310,6 +288,8 @@ struct Config {
   bool hasBacklightPin() const { return pinBl != NO_PIN; }
 };
 
+#include "generated_board_configs.h"
+
 /// ESP32-C6-LCD-1.47: ST7789, addressable LED, BOOT on GPIO9.
 static const Config CONFIG_LCD_ST7789 = {
     Variant::LcdSt7789,
@@ -340,97 +320,6 @@ static const Config CONFIG_LCD_ST7789 = {
     MotionController::None,
     /* motion X */ 0, 1,
     /* motion Y */ 1, 1,
-    /* panelResetExio */ 0,
-    /* touchResetExio */ 0,
-    /* pinBlEnable */ NO_PIN,
-    /* backlightInverted */ false,
-};
-
-/// ESP32-C6-Touch-LCD-1.47: JD9853, no addressable LED, BOOT on GPIO9.
-///
-/// Pin map and panel settings follow Waveshare's own ESP-IDF BSP for this board
-/// (80MHz pclk, RGB element order, INVON), which uses the same esp_lcd API this
-/// firmware does.
-static const Config CONFIG_TOUCH_JD9853 = {
-    Variant::TouchJd9853,
-    "ESP32-C6-Touch-LCD-1.47 (JD9853)",
-    &PLATFORM_ESP32_C6,
-    &PANEL_JD9853_172X320,
-    /* sclk  */ 1,
-    /* mosi  */ 2,
-    /* data1 */ NO_PIN,
-    /* data2 */ NO_PIN,
-    /* data3 */ NO_PIN,
-    /* cs    */ 14,
-    /* dc    */ 15,
-    /* rst   */ 22,
-    /* bl    */ 23,
-    // GPIO9, not the GPIO8 Waveshare's pinout table states. Measured: with both
-    // candidates held INPUT_PULLUP, pressing BOOT drives GPIO9 low every time
-    // and GPIO8 never moves. See the note above the struct.
-    /* boot  */ 9,
-    /* led   */ NO_PIN,
-    TouchController::Axs5106l,
-    /* touchSda */ 18,  // the shared detection bus
-    /* touchScl */ 19,
-    /* touchRst */ 20,
-    /* touchInt */ 21,
-    // ETA6098 charger STAT is LED-only, but the cell rail reaches ADC1_CH0
-    // through a 200k/100k divider, so voltage and an estimated level are real
-    // while charge state is reported as unknown.
-    PowerController::BatteryAdc,
-    /* batteryAdc */ 0,
-    /* adcScale */ 3,
-    /* batteryEnable */ NO_PIN,
-    /* chargeStatus */ NO_PIN,
-    MotionController::Qmi8658,
-    // Waveshare's board examples leave the QMI8658 geometry at identity.
-    /* motion X */ 0, 1,
-    /* motion Y */ 1, 1,
-    /* panelResetExio */ 0,
-    /* touchResetExio */ 0,
-    /* pinBlEnable */ NO_PIN,
-    /* backlightInverted */ false,
-};
-
-/// ESP32-S3-Touch-AMOLED-1.75C: CO5300 466x466 AMOLED over QSPI,
-/// CST9217 touch and AXP2101 PMU. The measured board shares panel and touch
-/// reset on GPIO2.
-static const Config CONFIG_AMOLED_CO5300 = {
-    Variant::AmoledCo5300,
-    "ESP32-S3-Touch-AMOLED-1.75C (CO5300)",
-    &PLATFORM_ESP32_S3,
-    &PANEL_CO5300_466X466,
-    /* sclk  */ 38,
-    /* mosi  */ 4,
-    /* data1 */ 5,
-    /* data2 */ 6,
-    /* data3 */ 7,
-    /* cs    */ 12,
-    /* dc    */ NO_PIN,
-    /* rst   */ 2,
-    /* bl    */ NO_PIN,
-    /* boot  */ 0,
-    /* led   */ NO_PIN,
-    TouchController::Cst9217,
-    /* touchSda */ 15,
-    /* touchScl */ 14,
-    /* touchRst */ 2,
-    /* touchInt */ 11,
-    PowerController::Axp2101,
-    /* batteryAdc */ NO_PIN,
-    /* adcScale */ 0,
-    /* batteryEnable */ NO_PIN,
-    /* chargeStatus */ NO_PIN,
-    MotionController::Qmi8658,
-    // Identity was Waveshare's unverified example geometry, and on this
-    // board it classified one opposite edge-down pair 180 degrees off (the
-    // other pair correct) - the signature of exactly one inverted axis.
-    // Y sign flipped per that field observation; the signal-survey screen
-    // is the quick way to re-verify all four edge-down positions, and if
-    // the OTHER pair ever reads inverted, the fix is the X sign instead.
-    /* motion X */ 0, 1,
-    /* motion Y */ 1, -1,
     /* panelResetExio */ 0,
     /* touchResetExio */ 0,
     /* pinBlEnable */ NO_PIN,
@@ -596,63 +485,27 @@ static const Config CONFIG_LCD_ST7789_130 = {
     /* serialTx */ 43,
 };
 
-/// Waveshare ESP32-P4-WIFI6-Touch-LCD-4B: ST7703 720x720 over MIPI-DSI,
-/// GT911 polling touch, and an ESP32-C6 hosted-WiFi coprocessor. The P4
-/// platform and ST7703 panel remain reusable; this row owns only their exact
-/// carrier composition and wiring.
-static const Config CONFIG_P4_4B = {
-    Variant::P4_4B,
-    "ESP32-P4-WIFI6-Touch-LCD-4B (ST7703)",
-    &PLATFORM_ESP32_P4,
-    &PANEL_ST7703_720X720,
-    /* sclk */ NO_PIN,
-    /* mosi */ NO_PIN,
-    /* data1 */ NO_PIN,
-    /* data2 */ NO_PIN,
-    /* data3 */ NO_PIN,
-    /* cs */ NO_PIN,
-    /* dc */ NO_PIN,
-    /* rst */ 27,
-    /* bl */ 26,
-    /* boot */ 35,
-    /* led */ NO_PIN,
-    TouchController::Gt911,
-    /* touchSda */ 7,
-    /* touchScl */ 8,
-    /* touchRst */ NO_PIN,
-    /* touchInt */ NO_PIN,
-    PowerController::None,
-    /* batteryAdc */ NO_PIN,
-    /* adcScale */ 0,
-    /* batteryEnable */ NO_PIN,
-    /* chargeStatus */ NO_PIN,
-    MotionController::None,
-    /* motion X */ 0, 1,
-    /* motion Y */ 1, 1,
-    /* panelResetExio */ 0,
-    /* touchResetExio */ 0,
-    /* pinBlEnable */ 33,
-    /* backlightInverted */ true,
-};
+#include "generated_board_config_lookup.h"
 
 /// Whether a physical profile belongs to a platform family. This is used both
 /// for CFGBOARD recovery overrides and for detection results, so neither path
 /// can make a family artifact drive another chip family's pin map.
 inline bool variantMatchesPlatform(Variant variant, Platform platform) {
-  switch (platform) {
-    case Platform::Esp32C6:
-      return variant == Variant::LcdSt7789 ||
-             variant == Variant::TouchJd9853;
-    case Platform::Esp32S3:
-      return variant == Variant::AmoledCo5300 ||
-             variant == Variant::LcdSt77916 ||
-             variant == Variant::LcdGc9107 ||
-             variant == Variant::TouchSt7789 ||
-             variant == Variant::LcdSt7789_130;
-    case Platform::Esp32P4:
-      return variant == Variant::P4_4B;
-  }
-  return false;
+  const GeneratedBoardIdentity *identity = generatedIdentity(variant);
+  return identity != nullptr && identity->platform == platform;
+}
+
+struct DetectionResult {
+  Variant variant;
+  uint8_t matchedCandidates;
+};
+
+inline DetectionResult detectFromEvidence(
+    Platform platform, uint32_t flashBytes,
+    const boarddetectmodel::ProbeEvidence *evidence, size_t evidenceCount) {
+  const boarddetectmodel::Evaluation result = boarddetectmodel::evaluate(
+      detectionPlanForPlatform(platform), flashBytes, evidence, evidenceCount);
+  return {(Variant)result.variantValue, result.matchedCandidates};
 }
 
 /// Resolve the S3 detector's independent profile signals. The 8 MiB carrier is
@@ -663,39 +516,25 @@ inline bool variantMatchesPlatform(Variant variant, Platform platform) {
 inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
                                   bool st77916Bus, bool st7789Bus,
                                   bool st7789_130Bus) {
-  const bool gc9107 = flashBytes > 0 && flashBytes <= 8u * 1024u * 1024u;
-  const bool allowLargerProfiles = flashBytes > 8u * 1024u * 1024u;
-  const bool candidates[] = {
-      gc9107,
-      allowLargerProfiles && co5300Bus,
-      allowLargerProfiles && st77916Bus,
-      allowLargerProfiles && st7789Bus,
-      allowLargerProfiles && st7789_130Bus,
+  const boarddetectmodel::ProbeEvidence evidence[] = {
+      {boarddetectmodel::ProbeStatus::Started, (uint8_t)(co5300Bus ? 1 : 0)},
+      {boarddetectmodel::ProbeStatus::Started, (uint8_t)(st77916Bus ? 1 : 0)},
+      {boarddetectmodel::ProbeStatus::Started, (uint8_t)(st7789Bus ? 1 : 0)},
+      {boarddetectmodel::ProbeStatus::Started,
+       (uint8_t)(st7789_130Bus ? 1 : 0)},
   };
-  uint8_t count = 0;
-  uint8_t selected = 0;
-  for (uint8_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
-    if (candidates[i]) {
-      ++count;
-      selected = i;
-    }
-  }
-  if (count != 1) return Variant::Unknown;
-  switch (selected) {
-    case 0: return Variant::LcdGc9107;
-    case 1: return Variant::AmoledCo5300;
-    case 2: return Variant::LcdSt77916;
-    case 3: return Variant::TouchSt7789;
-    case 4: return Variant::LcdSt7789_130;
-    default: return Variant::Unknown;
-  }
+  return detectFromEvidence(
+             Platform::Esp32S3, flashBytes, evidence,
+             sizeof(evidence) / sizeof(evidence[0]))
+      .variant;
 }
 
 /// Map a possibly-Unknown C6 variant onto the electrically safer C6 profile.
 ///
 /// Unknown resolves to the C6 Touch board on purpose; it can only arise on the
-/// C6, because the S3 build pins COMPILED_VARIANT. Both C6 misdetections leave
-/// the panel dark, because the SPI pins differ - but they are not equally
+/// C6 when this fallback is used; unresolved S3 detection is handled as
+/// serial-only recovery before configFor(). Both C6 misdetections leave the
+/// panel dark, because the SPI pins differ - but they are not equally
 /// clean electrically:
 ///
 ///   Touch board treated as non-touch  -> SPI clock and data land on GPIO7 and
@@ -721,24 +560,8 @@ inline Variant resolve(Variant variant) {
 
 /// The board table for a variant. Unknown resolves per resolve().
 inline const Config &configFor(Variant variant) {
-  switch (resolve(variant)) {
-    case Variant::LcdSt7789:
-      return CONFIG_LCD_ST7789;
-    case Variant::AmoledCo5300:
-      return CONFIG_AMOLED_CO5300;
-    case Variant::LcdSt77916:
-      return CONFIG_LCD_ST77916;
-    case Variant::LcdGc9107:
-      return CONFIG_LCD_GC9107;
-    case Variant::TouchSt7789:
-      return CONFIG_TOUCH_ST7789;
-    case Variant::LcdSt7789_130:
-      return CONFIG_LCD_ST7789_130;
-    case Variant::P4_4B:
-      return CONFIG_P4_4B;
-    default:
-      return CONFIG_TOUCH_JD9853;
-  }
+  const Config *config = generatedConfigFor(resolve(variant));
+  return config == nullptr ? CONFIG_TOUCH_JD9853 : *config;
 }
 
 /// Decide the C6 variant from an I2C scan of PIN_PROBE_SDA/SCL.
@@ -754,10 +577,14 @@ inline const Config &configFor(Variant variant) {
 /// not be driven tells us nothing about which board this is, and per resolve()
 /// "nothing known" must mean Touch.
 inline Variant variantFromI2cProbe(bool probeSucceeded, int deviceCount) {
-  if (!probeSucceeded) {
-    return Variant::TouchJd9853;
-  }
-  return deviceCount > 0 ? Variant::TouchJd9853 : Variant::LcdSt7789;
+  const boarddetectmodel::ProbeEvidence evidence = {
+      probeSucceeded ? boarddetectmodel::ProbeStatus::Started
+                     : boarddetectmodel::ProbeStatus::StartFailed,
+      (uint8_t)(deviceCount > 255 ? 255 : (deviceCount < 0 ? 0 : deviceCount)),
+  };
+  return detectFromEvidence(
+             Platform::Esp32C6, 8u * 1024u * 1024u, &evidence, 1)
+      .variant;
 }
 
 /// Parse a variant previously cached in NVS.
@@ -766,15 +593,8 @@ inline Variant variantFromI2cProbe(bool probeSucceeded, int deviceCount) {
 /// future firmware with more variants) so the caller re-probes instead of
 /// trusting a value it cannot interpret.
 inline Variant variantFromStored(uint8_t raw) {
-  if (raw == (uint8_t)Variant::LcdSt7789) return Variant::LcdSt7789;
-  if (raw == (uint8_t)Variant::TouchJd9853) return Variant::TouchJd9853;
-  if (raw == (uint8_t)Variant::AmoledCo5300) return Variant::AmoledCo5300;
-  if (raw == (uint8_t)Variant::LcdSt77916) return Variant::LcdSt77916;
-  if (raw == (uint8_t)Variant::LcdGc9107) return Variant::LcdGc9107;
-  if (raw == (uint8_t)Variant::TouchSt7789) return Variant::TouchSt7789;
-  if (raw == (uint8_t)Variant::P4_4B) return Variant::P4_4B;
-  if (raw == (uint8_t)Variant::LcdSt7789_130) return Variant::LcdSt7789_130;
-  return Variant::Unknown;
+  const Variant variant = (Variant)raw;
+  return generatedIdentity(variant) == nullptr ? Variant::Unknown : variant;
 }
 
 /// Parse an operator override (CFGBOARD over USB serial).
@@ -784,58 +604,22 @@ inline Variant variantFromStored(uint8_t raw) {
 /// the board to a guess.
 inline Variant variantFromName(const char *token) {
   if (token == nullptr) return Variant::Unknown;
-  if (strcmp(token, "st7789") == 0) return Variant::LcdSt7789;
-  if (strcmp(token, "jd9853") == 0) return Variant::TouchJd9853;
-  if (strcmp(token, "co5300") == 0) return Variant::AmoledCo5300;
-  if (strcmp(token, "st77916") == 0) return Variant::LcdSt77916;
-  if (strcmp(token, "gc9107") == 0) return Variant::LcdGc9107;
-  if (strcmp(token, "st7789-154") == 0) return Variant::TouchSt7789;
-  if (strcmp(token, "st7789-130") == 0) return Variant::LcdSt7789_130;
-  if (strcmp(token, "st7703-4b") == 0) return Variant::P4_4B;
+  for (const auto &identity : GENERATED_BOARD_IDENTITIES) {
+    if (strcmp(token, identity.profile) == 0) return identity.variant;
+  }
   return Variant::Unknown;
 }
 
 /// Short stable token for a variant, for CFGSHOW/telemetry and NVS debugging.
 inline const char *variantToken(Variant variant) {
-  switch (variant) {
-    case Variant::LcdSt7789:
-      return "st7789";
-    case Variant::TouchJd9853:
-      return "jd9853";
-    case Variant::AmoledCo5300:
-      return "co5300";
-    case Variant::LcdSt77916:
-      return "st77916";
-    case Variant::LcdGc9107:
-      return "gc9107";
-    case Variant::TouchSt7789:
-      return "st7789-154";
-    case Variant::LcdSt7789_130:
-      return "st7789-130";
-    case Variant::P4_4B:
-      return "st7703-4b";
-    default:
-      return "auto";
-  }
+  const GeneratedBoardIdentity *identity = generatedIdentity(variant);
+  return identity == nullptr ? "auto" : identity->profile;
 }
 
 /// Stable user-facing firmware family, distinct from the physical profile.
 inline const char *targetToken(Variant variant) {
-  switch (variant) {
-    case Variant::LcdSt7789:
-    case Variant::TouchJd9853:
-      return "c6";
-    case Variant::AmoledCo5300:
-    case Variant::LcdSt77916:
-    case Variant::LcdGc9107:
-    case Variant::TouchSt7789:
-    case Variant::LcdSt7789_130:
-      return "s3";
-    case Variant::P4_4B:
-      return "p4";
-    default:
-      return "unknown";
-  }
+  const GeneratedBoardIdentity *identity = generatedIdentity(variant);
+  return identity == nullptr ? "unknown" : identity->target;
 }
 
 }  // namespace board

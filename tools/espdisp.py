@@ -21,6 +21,11 @@ import termios
 import time
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
+import board_descriptor
+import espdisp_bootstrap as bootstrap
+import generate_board_descriptors
+import generated_board_catalog
+
 
 class Platform(NamedTuple):
     """Chip/toolchain facts shared by every carrier using this processor."""
@@ -32,20 +37,8 @@ class Platform(NamedTuple):
 
 
 PLATFORMS = {
-    "c6": Platform(
-        "c6", "esp32c6",
-        "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M", 0x0),
-    "s3": Platform(
-        "s3", "esp32s3",
-        "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi,"
-        "PartitionScheme=custom",
-        0x0),
-    "p4": Platform(
-        "p4", "esp32p4",
-        "esp32:esp32:esp32p4:USBMode=default,CDCOnBoot=default,"
-        "UploadMode=default,FlashSize=32M,PartitionScheme=custom,"
-        "PSRAM=enabled,ChipVariant=prev3",
-        0x2000),
+    key: Platform(**value)
+    for key, value in generated_board_catalog.PLATFORMS.items()
 }
 
 
@@ -62,16 +55,8 @@ class BuildTarget(NamedTuple):
 
 
 BUILD_TARGETS = {
-    "c6": BuildTarget("c6", "c6"),
-    "s3-universal": BuildTarget(
-        "s3-universal", "s3", partition_csv="partitions_s3.csv",
-        extra_flags=("-DESPDISP_DOOM_RUNTIME",),
-        extra_library_dirs=("firmware",)),
-    "p4-4b": BuildTarget(
-        "p4-4b", "p4", partition_csv="partitions_p4_4b.csv",
-        extra_flags=("-DESPDISP_BOARD_P4_4B", "-DESPDISP_DOOM_RUNTIME"),
-        extra_library_dirs=("firmware",),
-        required_profile="st7703-4b", fqbn_options=("UploadSpeed=460800",)),
+    key: BuildTarget(**value)
+    for key, value in generated_board_catalog.BUILD_TARGETS.items()
 }
 
 
@@ -123,31 +108,8 @@ class Family(NamedTuple):
 
 
 FAMILIES = {
-    "c6": Family(
-        "c6", "c6", "c6", ("st7789", "jd9853"), (8 * 1024 * 1024,),
-        "default-8m", False, {
-            "st7789": ("ESP32-C6-LCD-1.47",),
-            "jd9853": ("ESP32-C6-Touch-LCD-1.47",),
-        },
-        'Universal ESP32-C6 1.47" display firmware'),
-    "s3": Family(
-        "s3", "s3", "s3-universal",
-        ("gc9107", "st7789-130", "st7789-154", "co5300", "st77916"),
-        (8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024),
-        "universal-8m-doom-ota", True, {
-            "gc9107": ("ESP32-S3-LCD-0.85",),
-            "st7789-130": ("ESP32-S3-LCD-1.3", "ESP32-S3-LCD-1.3-B", "ESP32-S3-LCD-1.3-C"),
-            "st7789-154": ("ESP32-S3-Touch-LCD-1.54",),
-            "co5300": ("ESP32-S3-Touch-AMOLED-1.75C",),
-            "st77916": ("ESP32-S3-Touch-LCD-1.85C",),
-        },
-        "Universal ESP32-S3 display firmware"),
-    "p4": Family(
-        "p4", "p4", "p4-4b", ("st7703-4b",),
-        (32 * 1024 * 1024,), "p4-32m-ota", True, {
-            "st7703-4b": ("ESP32-P4-WIFI6-Touch-LCD-4B",),
-        },
-        "Universal ESP32-P4 display firmware"),
+    key: Family(**value)
+    for key, value in generated_board_catalog.FAMILIES.items()
 }
 
 
@@ -205,6 +167,80 @@ OTA_PASSWORD_MAX = 64
 
 class Fail(Exception):
     """A condition the user can act on: reported as one line, never a traceback."""
+
+
+BootstrapConsole = bootstrap.BootstrapConsole
+
+
+def _bootstrap_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except bootstrap.BootstrapFailure as exc:
+        raise Fail(str(exc)) from exc
+
+
+def parse_bootstrap_response(line: str) -> Dict[str, object]:
+    return _bootstrap_call(bootstrap.parse_bootstrap_response, line)
+
+
+def bootstrap_request(transport, command: str, timeout: float = 5.0):
+    return _bootstrap_call(bootstrap.bootstrap_request, transport, command, timeout)
+
+
+def require_confirmed_bootstrap_chip(chip: Optional[str]) -> str:
+    return _bootstrap_call(bootstrap.require_confirmed_bootstrap_chip, chip)
+
+
+def solve_imu_mapping(samples):
+    return _bootstrap_call(bootstrap.solve_imu_mapping, samples)
+
+
+def solve_touch_calibration(taps, width: int, height: int):
+    return _bootstrap_call(
+        bootstrap.solve_touch_calibration, taps, width, height)
+
+
+def derive_color_order(answer: str, applied: str) -> str:
+    return _bootstrap_call(bootstrap.derive_color_order, answer, applied)
+
+
+def derive_inversion(answer: str, applied: bool) -> bool:
+    return _bootstrap_call(bootstrap.derive_inversion, answer, applied)
+
+
+def derive_mirror_x(answer: str) -> bool:
+    return _bootstrap_call(bootstrap.derive_mirror_x, answer)
+
+
+def solve_orientation_offsets(answers):
+    return _bootstrap_call(bootstrap.solve_orientation_offsets, answers)
+
+
+def retune_descriptor_text(text, section, updates, evidence):
+    return _bootstrap_call(
+        bootstrap.retune_descriptor_text, text, section, updates, evidence)
+
+
+def run_bootstrap_session(**kwargs):
+    return _bootstrap_call(bootstrap.run_bootstrap_session, **kwargs)
+
+
+def run_retune_session(**kwargs):
+    return _bootstrap_call(bootstrap.run_retune_session, **kwargs)
+
+
+def ensure_generated_board_files() -> None:
+    """Refuse builds and release operations when committed generated data is stale."""
+    try:
+        current = generate_board_descriptors.write_outputs(
+            REPO_ROOT, check=True)
+    except board_descriptor.DescriptorError as exc:
+        raise Fail("board descriptor validation failed: %s" % exc) from exc
+    if not current:
+        raise Fail(
+            "generated board files are stale; run "
+            "python3 tools/generate_board_descriptors.py"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -835,6 +871,95 @@ def send_config_line(address: str, line: str, timeout: float) -> str:
         raise Fail("no CFG reply from %s within %.1fs" % (address, timeout))
     finally:
         os.close(fd)
+
+
+class SerialBootstrapTransport:
+    """Persistent line transport for firmware/board_bootstrap."""
+
+    def __init__(self, address: str):
+        self.address = address
+        self.fd = open_serial(address)
+        self.buffer = b""
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def request(self, command: str, timeout: float = 5.0):
+        if self.fd is None:
+            raise OSError("bootstrap transport is closed")
+        os.write(self.fd, (command + "\n").encode("ascii"))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([self.fd], [], [], 0.2)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self.fd, 1024)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                continue
+            self.buffer += chunk
+            while b"\n" in self.buffer:
+                raw, self.buffer = self.buffer.split(b"\n", 1)
+                line = raw.strip().decode("utf-8", errors="replace")
+                if line.startswith(("BOOTOK ", "BOOTERR ")):
+                    return line
+        raise TimeoutError(
+            "no bootstrap reply from %s within %.1fs" % (self.address, timeout)
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        del exc_type, exc, traceback
+        self.close()
+
+
+class InteractiveBootstrapPrompter:
+    def __init__(self, console: BootstrapConsole):
+        self.console = console
+
+    def ask(
+        self, key: str, text: str, default=None, choices=None, allow_empty=False
+    ) -> str:
+        del key
+        while True:
+            self.console.prompt(text)
+            suffix = " [%s]" % default if default not in (None, "") else ""
+            value = input("  >%s " % suffix).strip()
+            if not value and default is not None:
+                value = str(default)
+            if not value and allow_empty:
+                return ""
+            if not value:
+                self.console.warning("A value is required; Ctrl-C aborts safely.")
+                continue
+            if choices and value not in choices:
+                self.console.warning(
+                    "Choose one of: %s" % ", ".join(str(item) for item in choices)
+                )
+                continue
+            return value
+
+    def confirm(self, key: str, text: str) -> bool:
+        del key
+        while True:
+            self.console.prompt(text + " [y/N]")
+            value = input("  > ").strip().lower()
+            if value in ("y", "yes"):
+                return True
+            if value in ("", "n", "no"):
+                return False
+            self.console.warning("Answer y or n; Ctrl-C aborts safely.")
+
+    def pause(self, key: str, text: str) -> None:
+        del key
+        self.console.prompt(text)
+        input("  > press Enter ")
 
 
 # --------------------------------------------------------------------------
@@ -4072,6 +4197,54 @@ def cmd_config(args) -> int:
     return 0 if reply.startswith(("CFGOK", "CFGINFO")) else 1
 
 
+def cmd_bootstrap(args) -> int:
+    port = resolve_port(args.port)
+    confirmed_chip = probe_chip(port.address)
+    require_confirmed_bootstrap_chip(confirmed_chip)
+    console = BootstrapConsole(sys.stdout)
+    prompter = InteractiveBootstrapPrompter(console)
+    with SerialBootstrapTransport(port.address) as transport:
+        if args.retune:
+            if not args.section:
+                raise Fail("--retune requires --section %s" %
+                           "|".join(bootstrap.RETUNE_SECTIONS))
+            if args.name or args.candidate:
+                raise Fail("--retune cannot be combined with --name or --candidate")
+            run_retune_session(
+                transport=transport,
+                prompter=prompter,
+                stream=sys.stdout,
+                repo_root=REPO_ROOT,
+                board_key=args.retune,
+                section=args.section,
+                confirmed_chip=confirmed_chip,
+                timeout=args.timeout,
+            )
+            return 0
+
+        if args.section:
+            raise Fail("--section is valid only with --retune")
+        name = args.name or prompter.ask(
+            "board.name",
+            "New descriptor key (lowercase letters, digits, and hyphens):",
+        )
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) is None:
+            raise Fail(
+                "descriptor key must use lowercase letters, digits, and hyphens"
+            )
+        run_bootstrap_session(
+            transport=transport,
+            prompter=prompter,
+            stream=sys.stdout,
+            repo_root=REPO_ROOT,
+            name=name,
+            candidate_key=args.candidate,
+            confirmed_chip=confirmed_chip,
+            timeout=args.timeout,
+        )
+    return 0
+
+
 # --------------------------------------------------------------------------
 
 
@@ -4279,6 +4452,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_config.add_argument("words", nargs="+", metavar="CFG...")
     p_config.set_defaults(func=cmd_config)
 
+    p_bootstrap = subs.add_parser(
+        "bootstrap",
+        help="interactively discover a carrier and draft or retune its descriptor",
+        description="Drive the scan-only board_bootstrap firmware over serial. "
+        "esptool must independently confirm the chip before the serial session "
+        "opens. Every GPIO/display drive is named and confirmed separately.",
+    )
+    p_bootstrap.add_argument(
+        "--port", help="serial device (default: the one matching %s)" %
+        ", ".join(PORT_GLOBS))
+    p_bootstrap.add_argument(
+        "--name", help="new boards/<name>.toml key (prompted when omitted)")
+    p_bootstrap.add_argument(
+        "--candidate",
+        choices=sorted(
+            descriptor["key"]
+            for descriptor in board_descriptor.load_repository_descriptors(REPO_ROOT)
+        ),
+        help="candidate descriptor whose panel wiring may be driven after consent",
+    )
+    p_bootstrap.add_argument(
+        "--retune", metavar="BOARD",
+        help="retune one section of an existing descriptor")
+    p_bootstrap.add_argument(
+        "--section", choices=bootstrap.RETUNE_SECTIONS,
+        help="section to retune: imu, touch, color, offsets, backlight, or buttons")
+    p_bootstrap.add_argument(
+        "--timeout", type=float, default=5.0,
+        help="seconds to wait for each bootstrap firmware reply (default 5)")
+    p_bootstrap.set_defaults(func=cmd_bootstrap)
+
     return parser
 
 
@@ -4289,12 +4493,20 @@ def main(argv: List[str]) -> int:
         parser.print_help()
         return 2
     try:
+        if args.command != "bootstrap":
+            ensure_generated_board_files()
         return args.func(args)
     except Fail as exc:
-        print("espdisp: %s" % exc, file=sys.stderr)
+        if args.command == "bootstrap":
+            BootstrapConsole(sys.stderr).error(str(exc))
+        else:
+            print("espdisp: %s" % exc, file=sys.stderr)
         return 2
     except KeyboardInterrupt:
-        print("\nespdisp: interrupted", file=sys.stderr)
+        if args.command == "bootstrap":
+            BootstrapConsole(sys.stderr).error("interrupted; no partial draft written")
+        else:
+            print("\nespdisp: interrupted", file=sys.stderr)
         return 130
 
 

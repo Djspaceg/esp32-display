@@ -1,0 +1,510 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://espdisplay.local/schemas/board-descriptor-v1.json",
+  "title": "ESPDisplay board descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "key",
+    "catalog_order",
+    "name",
+    "hardware",
+    "migration",
+    "identity",
+    "family",
+    "platform",
+    "capacity",
+    "panel",
+    "carrier",
+    "touch",
+    "led",
+    "gesture",
+    "orientation",
+    "motion",
+    "reset",
+    "backlight",
+    "power",
+    "serial",
+    "capabilities",
+    "compile",
+    "detection"
+  ],
+  "properties": {
+    "schema": {"const": 1},
+    "key": {"type": "string", "minLength": 1},
+    "catalog_order": {"type": "integer", "minimum": 0},
+    "name": {"type": "string", "minLength": 1},
+    "hardware": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["firmware_config", "config_symbol"],
+      "properties": {
+        "firmware_config": {"enum": ["generated", "legacy"]},
+        "config_symbol": {"type": "string", "minLength": 1}
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "chip",
+        "profile",
+        "partition",
+        "variant",
+        "variant_value",
+        "legacy_targets"
+      ],
+      "properties": {
+        "target": {"enum": ["c6", "s3", "p4"]},
+        "chip": {"type": "string", "minLength": 1},
+        "profile": {"type": "string", "minLength": 1},
+        "partition": {"type": "string", "minLength": 1},
+        "variant": {"type": "string", "minLength": 1},
+        "variant_value": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "legacy_targets": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "family": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform_key",
+        "build_target",
+        "fqbn",
+        "partition_csv",
+        "extra_flags",
+        "extra_library_dirs",
+        "fqbn_options",
+        "flash_bytes",
+        "common_layout_bytes",
+        "requires_doom_wad",
+        "bootloader_address",
+        "partitions_address",
+        "boot_app0_address",
+        "app_address",
+        "blurb"
+      ],
+      "properties": {
+        "platform_key": {"type": "string", "minLength": 1},
+        "build_target": {"type": "string", "minLength": 1},
+        "fqbn": {"type": "string", "minLength": 1},
+        "partition_csv": {"type": "string"},
+        "extra_flags": {"$ref": "#/$defs/stringArray"},
+        "extra_library_dirs": {"$ref": "#/$defs/stringArray"},
+        "fqbn_options": {"$ref": "#/$defs/stringArray"},
+        "flash_bytes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1}
+        },
+        "common_layout_bytes": {"type": "integer", "minimum": 1},
+        "requires_doom_wad": {"type": "boolean"},
+        "bootloader_address": {"type": "integer", "minimum": 0},
+        "partitions_address": {"type": "integer", "minimum": 0},
+        "boot_app0_address": {"type": "integer", "minimum": 0},
+        "app_address": {"type": "integer", "minimum": 0},
+        "blurb": {"type": "string", "minLength": 1}
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "use_psram_frame_buffers",
+        "use_raw_lwip_receive_task",
+        "wifi",
+        "identity_source",
+        "serial"
+      ],
+      "properties": {
+        "use_psram_frame_buffers": {"type": "boolean"},
+        "use_raw_lwip_receive_task": {"type": "boolean"},
+        "wifi": {"enum": ["native", "hosted_coprocessor"]},
+        "identity_source": {
+          "enum": ["wifi_station_mac", "efuse_base_mac"]
+        },
+        "serial": {"enum": ["native_usb_cdc", "uart_bridge"]}
+      }
+    },
+    "capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum_flash_bytes"],
+      "properties": {
+        "minimum_flash_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "panel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "symbol",
+        "profile",
+        "driver",
+        "bus",
+        "width",
+        "height",
+        "pixel_clock_hz",
+        "spi_mode",
+        "col_offset",
+        "row_offset",
+        "orientation_offset",
+        "invert_color",
+        "round_display",
+        "supports_command_rotation",
+        "color_order",
+        "data_endian",
+        "pixel_depth",
+        "dsi_data_lanes",
+        "dsi_lane_mbps",
+        "hsync_back_porch",
+        "hsync_pulse_width",
+        "hsync_front_porch",
+        "vsync_back_porch",
+        "vsync_pulse_width",
+        "vsync_front_porch"
+      ],
+      "properties": {
+        "symbol": {"type": "string", "minLength": 1},
+        "profile": {"type": "string", "minLength": 1},
+        "driver": {"type": "string", "minLength": 1},
+        "bus": {"enum": ["spi", "qspi", "mipi_dsi"]},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "pixel_clock_hz": {"type": "integer", "minimum": 1},
+        "spi_mode": {"type": "integer", "minimum": 0, "maximum": 3},
+        "col_offset": {"type": "integer"},
+        "row_offset": {"type": "integer"},
+        "orientation_offset": {"type": "integer"},
+        "invert_color": {"type": "boolean"},
+        "round_display": {"type": "boolean"},
+        "supports_command_rotation": {"type": "boolean"},
+        "color_order": {"enum": ["rgb", "bgr"]},
+        "data_endian": {"enum": ["big", "little"]},
+        "pixel_depth": {"const": 16},
+        "dsi_data_lanes": {"type": "integer", "minimum": 0},
+        "dsi_lane_mbps": {"type": "integer", "minimum": 0},
+        "hsync_back_porch": {"type": "integer", "minimum": 0},
+        "hsync_pulse_width": {"type": "integer", "minimum": 0},
+        "hsync_front_porch": {"type": "integer", "minimum": 0},
+        "vsync_back_porch": {"type": "integer", "minimum": 0},
+        "vsync_pulse_width": {"type": "integer", "minimum": 0},
+        "vsync_front_porch": {"type": "integer", "minimum": 0}
+      }
+    },
+    "carrier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pin_sclk",
+        "pin_mosi",
+        "pin_data1",
+        "pin_data2",
+        "pin_data3",
+        "pin_cs",
+        "pin_dc",
+        "pin_rst",
+        "pin_bl",
+        "pin_boot",
+        "pin_rgb_led"
+      ],
+      "properties": {
+        "pin_sclk": {"$ref": "#/$defs/pin"},
+        "pin_mosi": {"$ref": "#/$defs/pin"},
+        "pin_data1": {"$ref": "#/$defs/pin"},
+        "pin_data2": {"$ref": "#/$defs/pin"},
+        "pin_data3": {"$ref": "#/$defs/pin"},
+        "pin_cs": {"$ref": "#/$defs/pin"},
+        "pin_dc": {"$ref": "#/$defs/pin"},
+        "pin_rst": {"$ref": "#/$defs/pin"},
+        "pin_bl": {"$ref": "#/$defs/pin"},
+        "pin_boot": {"$ref": "#/$defs/pin"},
+        "pin_rgb_led": {"$ref": "#/$defs/pin"}
+      }
+    },
+    "touch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller",
+        "sda",
+        "scl",
+        "reset",
+        "interrupt",
+        "addresses",
+        "panel_short",
+        "panel_long",
+        "raw_x_mirrored",
+        "raw_y_mirrored",
+        "rotate_clockwise"
+      ],
+      "properties": {
+        "controller": {
+          "enum": ["none", "axs5106l", "cst9217", "cst816", "gt911"]
+        },
+        "sda": {"$ref": "#/$defs/pin"},
+        "scl": {"$ref": "#/$defs/pin"},
+        "reset": {"$ref": "#/$defs/pin"},
+        "interrupt": {"$ref": "#/$defs/pin"},
+        "addresses": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 8,
+            "maximum": 119
+          }
+        },
+        "panel_short": {"type": "integer", "minimum": 0},
+        "panel_long": {"type": "integer", "minimum": 0},
+        "raw_x_mirrored": {"type": "boolean"},
+        "raw_y_mirrored": {"type": "boolean"},
+        "rotate_clockwise": {"type": "boolean"}
+      }
+    },
+    "led": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel_order", "pixel_count"],
+      "properties": {
+        "channel_order": {
+          "enum": ["rgb", "rbg", "grb", "gbr", "brg", "bgr"]
+        },
+        "pixel_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "gesture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "swipe_min_px",
+        "tap_max_move_px",
+        "tap_max_ms",
+        "long_press_ms",
+        "press_max_ms"
+      ],
+      "properties": {
+        "swipe_min_px": {"type": "integer", "minimum": 0},
+        "tap_max_move_px": {"type": "integer", "minimum": 0},
+        "tap_max_ms": {"type": "integer", "minimum": 0},
+        "long_press_ms": {"type": "integer", "minimum": 0},
+        "press_max_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "orientation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offsets", "mirror_x_supported", "quarter_turns"],
+      "properties": {
+        "offsets": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {"type": "integer"}
+          }
+        },
+        "mirror_x_supported": {"type": "boolean"},
+        "quarter_turns": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          }
+        }
+      }
+    },
+    "motion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller",
+        "address",
+        "x_axis",
+        "x_sign",
+        "y_axis",
+        "y_sign"
+      ],
+      "properties": {
+        "controller": {"enum": ["none", "qmi8658"]},
+        "address": {"type": "integer", "minimum": 0, "maximum": 127},
+        "x_axis": {"type": "integer", "minimum": 0, "maximum": 2},
+        "x_sign": {"enum": [-1, 1]},
+        "y_axis": {"type": "integer", "minimum": 0, "maximum": 2},
+        "y_sign": {"enum": [-1, 1]}
+      }
+    },
+    "reset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expander",
+        "expander_address",
+        "panel_output",
+        "touch_output"
+      ],
+      "properties": {
+        "expander": {"enum": ["none", "tca9554"]},
+        "expander_address": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        },
+        "panel_output": {"type": "integer", "minimum": 0},
+        "touch_output": {"type": "integer", "minimum": 0}
+      }
+    },
+    "backlight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "enable_pin", "inverted"],
+      "properties": {
+        "kind": {"enum": ["none", "pwm", "panel_command", "dsi_pwm"]},
+        "enable_pin": {"$ref": "#/$defs/pin"},
+        "inverted": {"type": "boolean"}
+      }
+    },
+    "power": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller",
+        "battery_adc",
+        "battery_adc_scale",
+        "battery_enable",
+        "charge_status",
+        "axp_address"
+      ],
+      "properties": {
+        "controller": {"enum": ["none", "axp2101", "battery_adc"]},
+        "battery_adc": {"$ref": "#/$defs/pin"},
+        "battery_adc_scale": {"type": "integer", "minimum": 0},
+        "battery_enable": {"$ref": "#/$defs/pin"},
+        "charge_status": {"$ref": "#/$defs/pin"},
+        "axp_address": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        }
+      }
+    },
+    "serial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transport", "bridge", "rx", "tx"],
+      "properties": {
+        "transport": {"enum": ["native_usb_cdc", "uart_bridge"]},
+        "bridge": {"enum": ["none", "ch343"]},
+        "rx": {"$ref": "#/$defs/pin"},
+        "tx": {"$ref": "#/$defs/pin"}
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["doom"],
+      "properties": {
+        "doom": {"type": "boolean"}
+      }
+    },
+    "compile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "macros"],
+      "properties": {
+        "selector": {"type": "string"},
+        "macros": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "detection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order",
+        "resolution",
+        "no_match",
+        "kind",
+        "flash_min_exclusive",
+        "flash_max_inclusive",
+        "sda",
+        "scl",
+        "frequency_hz",
+        "scan_first",
+        "scan_last",
+        "addresses",
+        "reset_pin",
+        "reset_low_ms",
+        "reset_release_wait_ms",
+        "release"
+      ],
+      "properties": {
+        "order": {"type": "integer", "minimum": 0},
+        "resolution": {"enum": ["first_match", "exactly_one"]},
+        "no_match": {"const": "unknown"},
+        "kind": {
+          "enum": [
+            "always",
+            "flash_range",
+            "i2c_any_ack",
+            "i2c_no_ack",
+            "i2c_any_ack_or_start_failure"
+          ]
+        },
+        "flash_min_exclusive": {"type": "integer", "minimum": 0},
+        "flash_max_inclusive": {"type": "integer", "minimum": 0},
+        "sda": {"$ref": "#/$defs/pin"},
+        "scl": {"$ref": "#/$defs/pin"},
+        "frequency_hz": {"type": "integer", "minimum": 0},
+        "scan_first": {"type": "integer", "minimum": 0, "maximum": 119},
+        "scan_last": {"type": "integer", "minimum": 0, "maximum": 119},
+        "addresses": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 8,
+            "maximum": 119
+          }
+        },
+        "reset_pin": {"$ref": "#/$defs/pin"},
+        "reset_low_ms": {"type": "integer", "minimum": 0},
+        "reset_release_wait_ms": {"type": "integer", "minimum": 0},
+        "release": {"enum": ["never", "always", "on_success_no_ack"]}
+      }
+    }
+  },
+  "$defs": {
+    "pin": {"type": "integer", "minimum": -1, "maximum": 127},
+    "stringArray": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

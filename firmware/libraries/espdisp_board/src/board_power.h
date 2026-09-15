@@ -151,9 +151,9 @@ inline bool setRegisterBits(uint8_t reg, uint8_t bits) {
 /// CAP_BATTERY, so a failed source means no advertised battery rather than a
 /// promise of readings that never arrive.
 ///
-/// Brings up Wire itself. Nothing else does on this board: the S3 build pins
-/// board::COMPILED_VARIANT so boarddetect::probe() never runs, and
-/// boardtouch::init() returns early for the CST9217 before touching Wire.
+/// Brings up Wire itself. S3 detection closes and floats each probe bus before
+/// profile-dependent initialization, and boardtouch::init() may run before or
+/// after this on the same selected bus.
 ///
 /// NEVER drives cfg.pinTouchRst, and there is no pinMode or digitalWrite
 /// anywhere in this file for that reason. On the 1.75C that line IS the panel

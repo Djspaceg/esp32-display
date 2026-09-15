@@ -1,0 +1,172 @@
+schema = 1
+key = "c6-lcd-147"
+catalog_order = 10
+name = "ESP32-C6-LCD-1.47 (ST7789)"
+hardware = ["ESP32-C6-LCD-1.47"]
+
+[migration]
+firmware_config = "legacy"
+config_symbol = "CONFIG_LCD_ST7789"
+
+[identity]
+target = "c6"
+chip = "esp32c6"
+profile = "st7789"
+partition = "default-8m"
+variant = "LcdSt7789"
+variant_value = 1
+legacy_targets = []
+
+[family]
+platform_key = "c6"
+build_target = "c6"
+fqbn = "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M"
+partition_csv = ""
+extra_flags = []
+extra_library_dirs = []
+fqbn_options = []
+flash_bytes = [8388608]
+common_layout_bytes = 8388608
+requires_doom_wad = false
+bootloader_address = 0
+partitions_address = 32768
+boot_app0_address = 57344
+app_address = 65536
+blurb = "Universal ESP32-C6 1.47\" display firmware"
+
+[platform]
+use_psram_frame_buffers = false
+use_raw_lwip_receive_task = false
+wifi = "native"
+identity_source = "wifi_station_mac"
+serial = "native_usb_cdc"
+
+[capacity]
+minimum_flash_bytes = 8388608
+
+[panel]
+symbol = "PANEL_ST7789_172X320"
+profile = "St7789_172x320"
+driver = "St7789"
+bus = "spi"
+width = 172
+height = 320
+pixel_clock_hz = 80000000
+spi_mode = 0
+col_offset = 34
+row_offset = 0
+orientation_offset = 0
+invert_color = true
+round_display = false
+supports_command_rotation = true
+color_order = "rgb"
+data_endian = "big"
+pixel_depth = 16
+dsi_data_lanes = 0
+dsi_lane_mbps = 0
+hsync_back_porch = 0
+hsync_pulse_width = 0
+hsync_front_porch = 0
+vsync_back_porch = 0
+vsync_pulse_width = 0
+vsync_front_porch = 0
+
+[carrier]
+pin_sclk = 7
+pin_mosi = 6
+pin_data1 = -1
+pin_data2 = -1
+pin_data3 = -1
+pin_cs = 14
+pin_dc = 15
+pin_rst = 21
+pin_bl = 22
+pin_boot = 9
+pin_rgb_led = 8
+
+[touch]
+controller = "none"
+sda = -1
+scl = -1
+reset = -1
+interrupt = -1
+addresses = []
+panel_short = 172
+panel_long = 320
+raw_x_mirrored = false
+raw_y_mirrored = false
+rotate_clockwise = true
+
+[led]
+channel_order = "rgb"
+pixel_count = 1
+
+[gesture]
+swipe_min_px = 24
+tap_max_move_px = 12
+tap_max_ms = 400
+long_press_ms = 600
+press_max_ms = 10000
+
+[orientation]
+offsets = [[34, 0], [0, 34], [34, 0], [0, 34]]
+mirror_x_supported = true
+quarter_turns = [0, 2]
+
+[motion]
+controller = "none"
+address = 0
+x_axis = 0
+x_sign = 1
+y_axis = 1
+y_sign = 1
+
+[reset]
+expander = "none"
+expander_address = 0
+panel_output = 0
+touch_output = 0
+
+[backlight]
+kind = "pwm"
+enable_pin = -1
+inverted = false
+
+[power]
+controller = "none"
+battery_adc = -1
+battery_adc_scale = 0
+battery_enable = -1
+charge_status = -1
+axp_address = 0
+
+[serial]
+transport = "native_usb_cdc"
+bridge = "none"
+rx = -1
+tx = -1
+
+[capabilities]
+doom = false
+
+[compile]
+selector = ""
+macros = []
+
+[detection]
+order = 20
+resolution = "first_match"
+no_match = "unknown"
+kind = "i2c_no_ack"
+flash_min_exclusive = 0
+flash_max_inclusive = 0
+sda = 18
+scl = 19
+frequency_hz = 100000
+scan_first = 8
+scan_last = 119
+addresses = []
+reset_pin = 20
+reset_low_ms = 20
+reset_release_wait_ms = 100
+release = "on_success_no_ack"

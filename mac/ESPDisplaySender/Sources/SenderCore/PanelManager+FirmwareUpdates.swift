@@ -245,31 +245,7 @@ extension PanelManager {
     nonisolated static func physicalBoard(
         _ board: String, isCompatibleWith target: String
     ) -> Bool {
-        switch target {
-        case "c6":
-            return board == "st7789" || board == "jd9853"
-        case "s3":
-            return board == "gc9107" || board == "st7789-130"
-                || board == "st7789-154" || board == "co5300"
-                || board == "st77916"
-        case "p4":
-            return board == "st7703-4b"
-        // Historical exact-target bundles remain readable for manual recovery.
-        case "s3-085":
-            return board == "gc9107"
-        case "s3-154":
-            return board == "st7789-154"
-        case "s3-175":
-            return board == "co5300"
-        case "s3-185":
-            return board == "st77916"
-        case "p4-4b":
-            return board == "st7703-4b"
-        default:
-            // A future app can teach this build the new composition. Treating an
-            // unknown pair as compatible would turn missing knowledge into proof.
-            return false
-        }
+        GeneratedBoardCatalog.profilesByTarget[target]?.contains(board) == true
     }
 
     enum USBPartitionCompatibility: Equatable, Sendable {
