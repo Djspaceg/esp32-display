@@ -116,10 +116,10 @@ quarter_turns = [0, 1, 2, 3]
 [motion]
 controller = "qmi8658"
 address = 107
-x_axis = 0
-x_sign = 1
-y_axis = 1
-y_sign = -1
+x_axis = 1
+x_sign = -1
+y_axis = 0
+y_sign = 1
 
 [reset]
 expander = "none"
