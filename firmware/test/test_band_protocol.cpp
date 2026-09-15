@@ -2022,12 +2022,28 @@ int main() {
     CHECK(am.hasBattery());
     CHECK(am.pinTouchSda != board::NO_PIN && am.pinTouchScl != board::NO_PIN);
     CHECK(am.motion == board::MotionController::Qmi8658);
-    CHECK(am.motionXAxis == 0 && am.motionXSign == 1);
-    // Y sign is -1 from field calibration: identity classified one opposite
-    // edge-down pair 180 degrees off on this board (see the note in
-    // board_config.h). Pinned so the calibration cannot silently revert.
-    CHECK(am.motionYAxis == 1 && am.motionYSign == -1);
+    CHECK(am.motionXAxis == 1 && am.motionXSign == -1);
+    // The field calibration keeps the proven swapped in-plane axes and negates
+    // both signs to correct the observed 180-degree room-frame error.
+    CHECK(am.motionYAxis == 0 && am.motionYSign == 1);
     CHECK(am.hasMotion());
+    // Captured during the first half of the continuous diagnostics run while
+    // the user held the board vertical with the cable hanging down. The user
+    // confirmed by eye that the old mapping held the picture top at 6 o'clock;
+    // the corrected calibration shifts that pose's automatic correction by 2.
+    const int16_t confirmedCo5300CableDown[3] = {1759, 8396, -644};
+    const motionorient::Calibration co5300Calibration = {
+        am.motionXAxis, am.motionXSign, am.motionYAxis, am.motionYSign};
+    CHECK(motionorient::classify(
+              confirmedCo5300CableDown, co5300Calibration, 0,
+              motionorient::AutomaticMode::FourWay) == 1);
+    // Captured at the midpoint of the same run after the user turned the board
+    // one quarter turn clockwise. The user confirmed by eye that the corrected
+    // mapping keeps the picture top at 12 o'clock in this pose as well.
+    const int16_t confirmedCo5300Clockwise[3] = {1556, -7683, -716};
+    CHECK(motionorient::classify(
+              confirmedCo5300Clockwise, co5300Calibration, 0,
+              motionorient::AutomaticMode::FourWay) == 3);
     CHECK(!board::configFor(Variant::LcdSt7789).hasBattery());
     CHECK(board::configFor(Variant::TouchJd9853).hasBattery());
 
