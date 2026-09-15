@@ -60,7 +60,7 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
     public static let legacySchema = 1
     public static let singleRevisionSchema = 2
     public static let currentSchema = 3
-    public static let requiredFamilies = Set(["c6", "s3", "p4"])
+    public static let requiredFamilies = GeneratedBoardCatalog.requiredFamilies
     public static let fileName = "manifest.json"
 
     public static func read(_ data: Data) throws -> FirmwareReleaseCatalog {
@@ -88,13 +88,7 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
         else { throw FirmwareReleaseCatalogError.incompleteFamilies }
 
         var families = [String: Entry]()
-        let expected: [String: (chip: String, profiles: [String], flash: [Int], partition: String, boot: Int)] = [
-            "c6": ("esp32c6", ["st7789", "jd9853"], [8 * 1024 * 1024], "default-8m", 0),
-            "s3": ("esp32s3", ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"],
-                   [8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024],
-                   "universal-8m-doom-ota", 0),
-            "p4": ("esp32p4", ["st7703-4b"], [32 * 1024 * 1024], "p4-32m-ota", 0x2000),
-        ]
+        let expected = GeneratedBoardCatalog.expected
         for family in requiredFamilies.sorted() {
             guard let raw = rawFamilies[family] as? [String: Any] else {
                 throw FirmwareReleaseCatalogError.invalidEntry(family)
@@ -175,9 +169,9 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
             let compatibility = try parseCompatibility(raw["compatibility"], family: family)
             guard let required = expected[family], chip == required.chip,
                   profiles == required.profiles,
-                  compatibility.flashBytes == required.flash,
+                  compatibility.flashBytes == required.flashBytes,
                   compatibility.partitionScheme == required.partition,
-                  compatibility.bootloaderAddress == required.boot,
+                  compatibility.bootloaderAddress == required.bootloaderAddress,
                   compatibility.partitionsAddress == 0x8000,
                   compatibility.bootApp0Address == 0xE000,
                   compatibility.appAddress == 0x10000

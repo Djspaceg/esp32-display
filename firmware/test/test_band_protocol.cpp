@@ -27,6 +27,7 @@
 #include "../display_stream/wifi_presets.h"
 #include "../display_stream/wifi_selector_model.h"
 #include "../doom/src/platform/doom_runtime_policy.h"
+#include "../board_bootstrap/bootstrap_protocol.h"
 #include "../libraries/espdisp_board/src/battery_estimate.h"
 #include "../libraries/espdisp_board/src/board_config.h"
 #include "../libraries/espdisp_board/src/gt911_protocol.h"
@@ -74,6 +75,94 @@ static std::string firmwareSourcePath(const char *relative) {
 
 int main() {
   bool dropped;
+
+  // --- board-bootstrap command authorization and strict parsing ----------
+  {
+    using namespace bootstrapproto;
+    const char *driveCommands[] = {
+        "I2C_SCAN",        "I2C_READ",       "IMU_CONFIG",
+        "IMU_READ",        "PANEL_CONFIG",   "PANEL_READ_ID",
+        "PANEL_FILL",      "PANEL_EDGES",    "PANEL_GLYPH",
+        "BACKLIGHT",       "BACKLIGHT_ENABLE",
+        "TOUCH_CONFIG",    "TOUCH_READ",
+    };
+    for (const char *command : driveCommands) {
+      CHECK(!commandAuthorized(command, nullptr));
+      CHECK(!commandAuthorized(command, "confirm"));
+      CHECK(!commandAuthorized(command, "CONFIRMx"));
+      CHECK(commandAuthorized(command, "CONFIRM"));
+    }
+    CHECK(commandAuthorized("INFO", nullptr));
+    CHECK(commandAuthorized("GPIO_WATCH", nullptr));
+    CHECK(commandAuthorized("ADC_READ", nullptr));
+
+    long parsed = 77;
+    CHECK(parseBoundedLong("0x77", 0x08, 0x77, parsed));
+    CHECK(parsed == 0x77);
+    CHECK(!parseBoundedLong("0x78", 0x08, 0x77, parsed));
+    CHECK(!parseBoundedLong("-1", 0, 127, parsed));
+    CHECK(!parseBoundedLong("12x", 0, 127, parsed));
+    CHECK(!parseBoundedLong("999999999999999999999999", 0, 127, parsed));
+
+    I2cReadArgs read = {};
+    CHECK(parseI2cReadArgs(
+        "18", "19", "0x6b", "0xff", "1", "6", read));
+    CHECK(read.sda == 18 && read.scl == 19 && read.address == 0x6b);
+    CHECK(read.reg == 0xff && read.regWidth == 1 && read.length == 6);
+    CHECK(parseI2cReadArgs(
+        "18", "19", "0x6b", "0xffff", "2", "32", read));
+    CHECK(!parseI2cReadArgs(
+        "18", "19", "0x78", "0", "1", "1", read));
+    CHECK(!parseI2cReadArgs(
+        "18", "19", "0x6b", "0x100", "1", "1", read));
+    CHECK(!parseI2cReadArgs(
+        "18", "19", "0x6b", "0x10000", "2", "1", read));
+    CHECK(!parseI2cReadArgs(
+        "18", "19", "0x6b", "0", "3", "1", read));
+    CHECK(!parseI2cReadArgs(
+        "18", "18", "0x6b", "0", "1", "1", read));
+
+    TouchConfigArgs touch = {};
+    CHECK(parseTouchConfigArgs(
+        "cst816", "42", "41", "0x15", "47", "48", "0", "0", "0",
+        touch));
+    CHECK(touch.controller == TouchController::Cst816);
+    CHECK(!parseTouchConfigArgs(
+        "unknown", "42", "41", "0x15", "47", "48", "0", "0", "0",
+        touch));
+    CHECK(!parseTouchConfigArgs(
+        "cst816", "42", "41", "0x115", "47", "48", "0", "0", "0",
+        touch));
+    CHECK(!parseTouchConfigArgs(
+        "cst816", "42", "41", "0x15", "128", "48", "0", "0", "0",
+        touch));
+    CHECK(!parseTouchConfigArgs(
+        "cst816", "42", "41", "0x15", "47", "48", "257", "288", "0",
+        touch));
+    CHECK(!parseTouchConfigArgs(
+        "cst816", "42", "41", "0x15", "47", "48", "0", "0", "2",
+        touch));
+
+    TouchReadArgs touchRead = {};
+    CHECK(parseTouchReadArgs(
+        "gt911", "7", "8", "0x5d", touchRead));
+    CHECK(!parseTouchReadArgs(
+        "gt911", "7", "8", "0x15d", touchRead));
+    CHECK(!parseTouchReadArgs(
+        "none", "7", "8", "0x5d", touchRead));
+
+    const char *orientation[] = {"orientation=3"};
+    PanelEdgesArgs edges = {};
+    CHECK(parsePanelEdgesArgs(orientation, 1, 172, 320, edges));
+    CHECK(edges.orientation == 3 && !edges.hasMarker);
+    const char *marker[] = {"marker=top_left", "x=8", "y=10"};
+    CHECK(parsePanelEdgesArgs(marker, 3, 172, 320, edges));
+    CHECK(edges.hasMarker && edges.markerX == 8 && edges.markerY == 10);
+    const char *overflow[] = {"x=2147483647", "y=10"};
+    CHECK(!parsePanelEdgesArgs(overflow, 2, 172, 320, edges));
+    const char *partial[] = {"x=8"};
+    CHECK(!parsePanelEdgesArgs(partial, 1, 172, 320, edges));
+  }
 
   // --- bounded S3 panel DMA staging --------------------------------------
   {
@@ -1735,6 +1824,39 @@ int main() {
   // --- board variant detection: one binary, two boards ---------------------
   {
     using board::Variant;
+    using boarddetectmodel::ProbeEvidence;
+    using boarddetectmodel::ProbeRelease;
+    using boarddetectmodel::ProbeStatus;
+    using boarddetectmodel::ResolutionPolicy;
+
+    // The generated plans carry the electrical procedure; the shared evaluator
+    // sees only flash capacity and probe evidence.
+    const auto &c6Plan =
+        board::detectionPlanForPlatform(board::Platform::Esp32C6);
+    CHECK(c6Plan.resolution == ResolutionPolicy::FirstMatch);
+    CHECK(c6Plan.probeCount == 1);
+    CHECK(c6Plan.probes[0].sda == 18 && c6Plan.probes[0].scl == 19);
+    CHECK(c6Plan.probes[0].frequencyHz == 100000);
+    CHECK(c6Plan.probes[0].scanFirst == 0x08 &&
+          c6Plan.probes[0].scanLast == 0x77);
+    CHECK(c6Plan.probes[0].resetPin == 20);
+    CHECK(c6Plan.probes[0].resetLowMs == 20);
+    CHECK(c6Plan.probes[0].resetReleaseWaitMs == 100);
+    CHECK(c6Plan.probes[0].release == ProbeRelease::OnSuccessNoAck);
+
+    ProbeEvidence c6Evidence[] = {{ProbeStatus::Started, 1}};
+    auto detected = board::detectFromEvidence(
+        board::Platform::Esp32C6, 8u * 1024u * 1024u, c6Evidence, 1);
+    CHECK(detected.variant == Variant::TouchJd9853);
+    CHECK(detected.matchedCandidates == 1);
+    c6Evidence[0] = {ProbeStatus::Started, 0};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32C6, 8u * 1024u * 1024u, c6Evidence, 1);
+    CHECK(detected.variant == Variant::LcdSt7789);
+    c6Evidence[0] = {ProbeStatus::StartFailed, 0};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32C6, 8u * 1024u * 1024u, c6Evidence, 1);
+    CHECK(detected.variant == Variant::TouchJd9853);
 
     // The discriminator: the Touch board carries an AXS5106L touch controller
     // and a QMI8658A IMU on the shared I2C bus (observed at 0x63 and 0x6B);
@@ -1871,6 +1993,58 @@ int main() {
                                     false, false) == Variant::Unknown);
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, true, true,
                                     false, false) == Variant::Unknown);
+
+    const auto &s3Plan =
+        board::detectionPlanForPlatform(board::Platform::Esp32S3);
+    CHECK(s3Plan.resolution == ResolutionPolicy::ExactlyOne);
+    CHECK(board::GENERATED_MAX_PROBE_COUNT >= s3Plan.probeCount);
+    CHECK(s3Plan.probeCount == 4);
+    CHECK(s3Plan.probes[0].sda == 15 && s3Plan.probes[0].scl == 14);
+    CHECK(s3Plan.probes[0].addresses[0] == 0x5A);
+    CHECK(s3Plan.probes[0].addresses[1] == 0x34);
+    CHECK(s3Plan.probes[0].addresses[2] == 0x6A);
+    CHECK(s3Plan.probes[0].addresses[3] == 0x6B);
+    CHECK(s3Plan.probes[1].sda == 11 && s3Plan.probes[1].scl == 10);
+    CHECK(s3Plan.probes[1].addresses[0] == 0x15);
+    CHECK(s3Plan.probes[1].addresses[1] == 0x20);
+    CHECK(s3Plan.probes[2].sda == 42 && s3Plan.probes[2].scl == 41);
+    CHECK(s3Plan.probes[2].addresses[0] == 0x15);
+    CHECK(s3Plan.probes[2].addresses[1] == 0x6A);
+    CHECK(s3Plan.probes[2].addresses[2] == 0x6B);
+    CHECK(s3Plan.probes[3].sda == 47 && s3Plan.probes[3].scl == 48);
+    CHECK(s3Plan.probes[3].addresses[0] == 0x6B);
+    for (uint8_t i = 0; i < s3Plan.probeCount; ++i) {
+      CHECK(s3Plan.probes[i].frequencyHz == 100000);
+      CHECK(s3Plan.probes[i].release == ProbeRelease::Always);
+    }
+
+    ProbeEvidence s3Evidence[4] = {};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 4);
+    CHECK(detected.variant == Variant::LcdGc9107);
+    CHECK(detected.matchedCandidates == 1);
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 4);
+    CHECK(detected.variant == Variant::Unknown);
+    CHECK(detected.matchedCandidates == 0);
+    s3Evidence[0] = {ProbeStatus::Started, 1};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 4);
+    CHECK(detected.variant == Variant::AmoledCo5300);
+    s3Evidence[1] = {ProbeStatus::Started, 1};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 4);
+    CHECK(detected.variant == Variant::Unknown);
+    CHECK(detected.matchedCandidates == 2);
+
+    const auto &p4Plan =
+        board::detectionPlanForPlatform(board::Platform::Esp32P4);
+    CHECK(p4Plan.probeCount == 0);
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32P4, 32u * 1024u * 1024u, nullptr, 0);
+    CHECK(detected.variant == Variant::P4_4B);
+    CHECK(detected.matchedCandidates == 1);
+
     CHECK(board::variantMatchesPlatform(
         Variant::AmoledCo5300, board::Platform::Esp32S3));
     CHECK(!board::variantMatchesPlatform(
@@ -2001,18 +2175,20 @@ int main() {
     CHECK(am.pinTouchInt == 11);
     CHECK(am.pinTouchRst == am.pinRst);
 
-    CHECK(sizeof(board::S3_CO5300_PROBE_ADDRESSES) == 4);
-    CHECK(board::S3_CO5300_PROBE_ADDRESSES[0] == 0x5A);
-    CHECK(board::S3_CO5300_PROBE_ADDRESSES[1] == 0x34);
-    CHECK(board::S3_CO5300_PROBE_ADDRESSES[2] == 0x6A);
-    CHECK(board::S3_CO5300_PROBE_ADDRESSES[3] == 0x6B);
-    CHECK(sizeof(board::S3_ST77916_PROBE_ADDRESSES) == 2);
-    CHECK(board::S3_ST77916_PROBE_ADDRESSES[0] == 0x15);
-    CHECK(board::S3_ST77916_PROBE_ADDRESSES[1] == 0x20);
-    CHECK(sizeof(board::S3_ST7789_154_PROBE_ADDRESSES) == 3);
-    CHECK(board::S3_ST7789_154_PROBE_ADDRESSES[0] == 0x15);
-    CHECK(board::S3_ST7789_154_PROBE_ADDRESSES[1] == 0x6A);
-    CHECK(board::S3_ST7789_154_PROBE_ADDRESSES[2] == 0x6B);
+    const auto &generatedS3Plan =
+        board::detectionPlanForPlatform(board::Platform::Esp32S3);
+    CHECK(generatedS3Plan.probes[0].addressCount == 4);
+    CHECK(generatedS3Plan.probes[0].addresses[0] == 0x5A);
+    CHECK(generatedS3Plan.probes[0].addresses[1] == 0x34);
+    CHECK(generatedS3Plan.probes[0].addresses[2] == 0x6A);
+    CHECK(generatedS3Plan.probes[0].addresses[3] == 0x6B);
+    CHECK(generatedS3Plan.probes[1].addressCount == 2);
+    CHECK(generatedS3Plan.probes[1].addresses[0] == 0x15);
+    CHECK(generatedS3Plan.probes[1].addresses[1] == 0x20);
+    CHECK(generatedS3Plan.probes[2].addressCount == 3);
+    CHECK(generatedS3Plan.probes[2].addresses[0] == 0x15);
+    CHECK(generatedS3Plan.probes[2].addresses[1] == 0x6A);
+    CHECK(generatedS3Plan.probes[2].addresses[2] == 0x6B);
 
     // AXP2101 PMU: shares the touch I2C bus. The touch C6 also has battery
     // telemetry, but through its GPIO0 divider rather than this PMU path.

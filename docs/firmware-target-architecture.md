@@ -10,14 +10,17 @@ screen-specific release artifact.
 
 Firmware keeps platform, build-target, panel, and carrier facts separate:
 
-- `platform_config.h` owns chip runtime policy: memory, networking topology,
-  serial transport, stable identity source, and compatibility tokens.
-- `tools/espdisp.py` keeps chip/FQBN/silicon facts in `Platform` and exact
-  selector/partition/library composition in `BuildTarget`.
-- `panel_config.h` owns controller, bus, geometry, pixel/DSI timing, offsets,
-  inversion, glass shape, and rotation support.
-- `board_config.h` composes a platform and panel with carrier wiring and
-  peripherals. `board::Variant` is the runtime physical profile.
+- `boards/*.toml` is the authoritative expression of those facts; see
+  `docs/adr-board-descriptors.md`.
+- generated `platform_config.h` inputs own chip runtime policy: memory,
+  networking topology, serial transport, stable identity source, and
+  compatibility tokens.
+- generated `tools/espdisp.py` inputs keep chip/FQBN/silicon facts in
+  `Platform` and selector/partition/library composition in `BuildTarget`.
+- generated and legacy `panel_config.h` rows own controller, bus, geometry,
+  pixel/DSI timing, offsets, inversion, glass shape, and rotation support.
+- generated and legacy `board_config.h` rows compose a platform and panel with
+  carrier wiring and peripherals. `board::Variant` is the runtime profile.
 - `targetToken()` reports only the release family. `variantToken()` reports the
   physical profile. `chipToken` and `partitionToken` provide independent
   compatibility evidence.
@@ -43,12 +46,8 @@ networking disabled while serial `CFGBOARD` remains available as a recovery
 override.
 
 The S3 artifact uses the 8 MiB common-denominator dual-OTA layout and links the
-Doom easter egg, runtime-gated to the `co5300` profile. An earlier attempt to
-link Doom failed because its static globals consumed the internal RAM SPI DMA
-rotation repaint needs; the engine's heavy renderer arrays and mutable tables
-now allocate from PSRAM only when Doom starts, so normal streaming keeps its
-internal-RAM headroom. Canonical artifacts contain Doom code but no WAD payload;
-the WAD is read from a raw flash region on the 16/32 MiB CO5300 carrier.
+Doom easter egg, runtime-gated to the `co5300` profile. Its canonical bundle
+also carries the WAD for the layout's `doom_wad` partition.
 
 P4 uses the Arduino `prev3` profile required by the attached revision-v1.3
 silicon. `Platform("p4")` contains only reusable chip/toolchain facts; exact
@@ -145,14 +144,15 @@ under motion, and odd-orientation touch corners remain unverified.
 ## Extension rules
 
 1. Add platform facts only to `platform_config.h`, panel facts only to
-   `panel_config.h`, and carrier wiring only to `board_config.h`.
+   `panel_config.h`, and carrier wiring only to `board_config.h`, expressed
+   through one `boards/*.toml` descriptor.
 2. Add a runtime profile to an existing family only when it can be identified
    before conflicting pins are driven and the universal artifact fits every
    supported flash/memory budget.
 3. Return `Unknown` on absent or ambiguous evidence. Keep `CFGBOARD` as an
    explicit recovery override; never choose a profile by resolution.
-4. Add profile mappings to both release-catalog implementations and cover every
-   conflict pair in host and Swift tests.
+4. Regenerate descriptor outputs and cover every conflict pair in host and
+   Swift tests. Do not hand-add parallel profile mappings.
 5. If a future chip family needs incompatible build or partition facts, add a
    new family only through an explicit release-format decision. Do not encode a
    product or screen size into a release family.
@@ -163,6 +163,7 @@ Before publishing:
 
 - run `bash firmware/test/run_tests.sh`;
 - run `python3 tools/test_espdisp.py`;
+- run `python3 tools/generate_board_descriptors.py --check`;
 - run full Swift tests in `mac/ESPDisplaySender`;
 - compile `--family c6`, `--family s3`, and `--family p4`;
 - generate the canonical release and inspect every artifact independently with

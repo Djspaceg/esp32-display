@@ -19,117 +19,140 @@ inline const char *knownC6DeviceHint(uint8_t address) {
   return "";
 }
 
-inline board::Variant probeC6(bool verbose = true,
-                              int *outFoundCount = nullptr) {
-  pinMode(board::PIN_PROBE_TP_RST, OUTPUT);
-  digitalWrite(board::PIN_PROBE_TP_RST, LOW);
-  delay(20);
-  digitalWrite(board::PIN_PROBE_TP_RST, HIGH);
-  delay(100);
-
-  const bool busOk = Wire.begin(
-      board::PIN_PROBE_SDA, board::PIN_PROBE_SCL, 100000);
-  int found = 0;
-  if (busOk) {
-    for (uint8_t address = 0x08; address < 0x78; ++address) {
-      Wire.beginTransmission(address);
-      if (Wire.endTransmission() == 0) {
-        ++found;
-        if (verbose) {
-          Serial.printf("board: I2C device at 0x%02X%s\n", address,
-                        knownC6DeviceHint(address));
-        }
-      }
+inline const char *probeProfile(
+    const boarddetectmodel::FamilyDetectionPlan &family, uint8_t probeIndex) {
+  for (uint8_t i = 0; i < family.candidateCount; ++i) {
+    if (family.candidates[i].probeIndex == probeIndex) {
+      return board::variantToken(
+          (board::Variant)family.candidates[i].variantValue);
     }
-  } else if (verbose) {
-    Serial.println("board: WARN C6 discriminator bus would not start");
   }
-
-  const board::Variant variant =
-      board::variantFromI2cProbe(busOk, found);
-  if (variant == board::Variant::LcdSt7789) {
-    Wire.end();
-    pinMode(board::PIN_PROBE_SDA, INPUT);
-    pinMode(board::PIN_PROBE_SCL, INPUT);
-    pinMode(board::PIN_PROBE_TP_RST, INPUT);
-  }
-  if (outFoundCount != nullptr) *outFoundCount = found;
-  if (verbose) {
-    Serial.printf("board: C6 probe found %d device(s) -> %s\n", found,
-                  board::configFor(variant).name);
-  }
-  return variant;
+  return "unknown";
 }
 
-inline bool probeExpectedI2c(int8_t sda, int8_t scl,
-                             const uint8_t *addresses, size_t addressCount,
-                             const char *profile, bool verbose) {
-  bool matched = false;
-  if (Wire.begin(sda, scl, 100000)) {
-    for (size_t i = 0; i < addressCount; ++i) {
-      Wire.beginTransmission(addresses[i]);
-      if (Wire.endTransmission() == 0) {
-        matched = true;
-        if (verbose) {
-          Serial.printf("board: S3 %s signal at 0x%02X on SDA=%d SCL=%d\n",
-                        profile, addresses[i], sda, scl);
-        }
+inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
+    const boarddetectmodel::I2cProbePlan &plan, const char *target,
+    const char *profile, bool verbose) {
+  using boarddetectmodel::ProbeEvidence;
+  using boarddetectmodel::ProbeRelease;
+  using boarddetectmodel::ProbeStatus;
+
+  if (plan.resetPin != board::NO_PIN) {
+    pinMode(plan.resetPin, OUTPUT);
+    digitalWrite(plan.resetPin, LOW);
+    delay(plan.resetLowMs);
+    digitalWrite(plan.resetPin, HIGH);
+    delay(plan.resetReleaseWaitMs);
+  }
+
+  const bool busOk = Wire.begin(plan.sda, plan.scl, plan.frequencyHz);
+  uint8_t found = 0;
+  if (!busOk) {
+    if (verbose) {
+      Serial.printf("board: WARN %s %s probe bus would not start\n",
+                    target, profile);
+    }
+  } else if (plan.addressCount > 0) {
+    for (uint8_t i = 0; i < plan.addressCount; ++i) {
+      const uint8_t address = plan.addresses[i];
+      Wire.beginTransmission(address);
+      if (Wire.endTransmission() != 0) continue;
+      ++found;
+      if (verbose) {
+        Serial.printf(
+            "board: %s %s signal at 0x%02X on SDA=%d SCL=%d\n",
+            target, profile, address, plan.sda, plan.scl);
       }
     }
-    Wire.end();
-  } else if (verbose) {
-    Serial.printf("board: WARN S3 %s probe bus would not start\n", profile);
+  } else {
+    for (uint8_t address = plan.scanFirst; address <= plan.scanLast;
+         ++address) {
+      Wire.beginTransmission(address);
+      if (Wire.endTransmission() != 0) continue;
+      ++found;
+      if (verbose) {
+        Serial.printf("board: I2C device at 0x%02X%s\n", address,
+                      knownC6DeviceHint(address));
+      }
+    }
   }
-  pinMode(sda, INPUT);
-  pinMode(scl, INPUT);
-  return matched;
+
+  const bool release =
+      plan.release == ProbeRelease::Always ||
+      (plan.release == ProbeRelease::OnSuccessNoAck && busOk && found == 0);
+  if (release) {
+    if (busOk) Wire.end();
+    pinMode(plan.sda, INPUT);
+    pinMode(plan.scl, INPUT);
+    if (plan.resetPin != board::NO_PIN) pinMode(plan.resetPin, INPUT);
+  }
+  return {
+      busOk ? ProbeStatus::Started : ProbeStatus::StartFailed,
+      found,
+  };
+}
+
+inline board::Variant probeC6(bool verbose = true,
+                              int *outFoundCount = nullptr) {
+  const auto &plan =
+      board::detectionPlanForPlatform(board::Platform::Esp32C6);
+  boarddetectmodel::ProbeEvidence evidence = collectI2cEvidence(
+      plan.probes[0], "C6", probeProfile(plan, 0), verbose);
+  const board::DetectionResult result = board::detectFromEvidence(
+      board::Platform::Esp32C6, 0, &evidence, 1);
+  if (outFoundCount != nullptr) *outFoundCount = evidence.ackCount;
+  if (verbose) {
+    Serial.printf("board: C6 probe found %u device(s) -> %s\n",
+                  (unsigned)evidence.ackCount,
+                  board::configFor(result.variant).name);
+  }
+  return result.variant;
 }
 
 inline board::Variant probeS3(bool verbose = true,
                               int *outCandidateCount = nullptr) {
   const uint32_t flashBytes = ESP.getFlashChipSize();
-  bool co5300 = false;
-  bool st77916 = false;
-  bool st7789 = false;
-  bool st7789_130 = false;
-  if (flashBytes > 8u * 1024u * 1024u) {
-    co5300 = probeExpectedI2c(
-        15, 14, board::S3_CO5300_PROBE_ADDRESSES,
-        sizeof(board::S3_CO5300_PROBE_ADDRESSES), "co5300", verbose);
-    st77916 = probeExpectedI2c(
-        11, 10, board::S3_ST77916_PROBE_ADDRESSES,
-        sizeof(board::S3_ST77916_PROBE_ADDRESSES), "st77916", verbose);
-    st7789 = probeExpectedI2c(
-        42, 41, board::S3_ST7789_154_PROBE_ADDRESSES,
-        sizeof(board::S3_ST7789_154_PROBE_ADDRESSES), "st7789-154", verbose);
-    st7789_130 = probeExpectedI2c(
-        47, 48, board::S3_ST7789_130_PROBE_ADDRESSES,
-        sizeof(board::S3_ST7789_130_PROBE_ADDRESSES), "st7789-130", verbose);
+  const auto &plan =
+      board::detectionPlanForPlatform(board::Platform::Esp32S3);
+  boarddetectmodel::ProbeEvidence
+      evidence[board::GENERATED_MAX_PROBE_COUNT] = {};
+  for (uint8_t i = 0; i < plan.probeCount; ++i) {
+    const auto &probe = plan.probes[i];
+    if (!boarddetectmodel::flashMatches(
+            flashBytes, probe.flashMinExclusive,
+            probe.flashMaxInclusive)) {
+      continue;
+    }
+    evidence[i] = collectI2cEvidence(
+        probe, "S3", probeProfile(plan, i), verbose);
   }
-  const int candidates =
-      (flashBytes > 0 && flashBytes <= 8u * 1024u * 1024u ? 1 : 0) +
-      (co5300 ? 1 : 0) + (st77916 ? 1 : 0) + (st7789 ? 1 : 0) +
-      (st7789_130 ? 1 : 0);
-  if (outCandidateCount != nullptr) *outCandidateCount = candidates;
-  const board::Variant variant = board::variantFromS3Probe(
-      flashBytes, co5300, st77916, st7789, st7789_130);
+  const board::DetectionResult result = board::detectFromEvidence(
+      board::Platform::Esp32S3, flashBytes, evidence, plan.probeCount);
+  if (outCandidateCount != nullptr) {
+    *outCandidateCount = result.matchedCandidates;
+  }
   if (verbose) {
-    if (variant == board::Variant::Unknown) {
+    if (result.variant == board::Variant::Unknown) {
       Serial.printf("board: S3 detection found %d compatible profiles; "
-                    "serial-only until CFGBOARD resolves one\n", candidates);
+                    "serial-only until CFGBOARD resolves one\n",
+                    result.matchedCandidates);
     } else {
       Serial.printf("board: S3 detection -> %s\n",
-                    board::configFor(variant).name);
+                    board::configFor(result.variant).name);
     }
   }
-  return variant;
+  return result.variant;
 }
 
 inline board::Variant probe(bool verbose = true,
                             int *outFoundCount = nullptr) {
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
-  if (outFoundCount != nullptr) *outFoundCount = 1;
-  return board::Variant::P4_4B;
+  const board::DetectionResult result = board::detectFromEvidence(
+      board::Platform::Esp32P4, ESP.getFlashChipSize(), nullptr, 0);
+  if (outFoundCount != nullptr) {
+    *outFoundCount = result.matchedCandidates;
+  }
+  return result.variant;
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
   return probeS3(verbose, outFoundCount);
 #else

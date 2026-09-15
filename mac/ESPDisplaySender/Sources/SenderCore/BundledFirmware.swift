@@ -288,11 +288,8 @@ enum BundledFirmware {
         /// that reports an old exact target instead of its family is not read as
         /// a contradiction. Canonical `c6`/`s3` and missing/empty are accepted
         /// too. Missing/empty family remains accepted separately.
-        private static let universalFamilyAliases: [String: Set<String>] = [
-            "c6": ["c6"],
-            "p4": ["p4"],
-            "s3": ["s3", "s3-085", "s3-154", "s3-175", "s3-185"],
-        ]
+        private static let universalFamilyAliases =
+            GeneratedBoardCatalog.universalFamilyAliases
 
         /// Choose the update image for a panel: strict complete-identity
         /// selection first, then a unique-chip family fallback only

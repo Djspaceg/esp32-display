@@ -25,18 +25,7 @@ struct PlatformConfig {
   SerialTransport serial;
 };
 
-static constexpr PlatformConfig PLATFORM_ESP32_C6 = {
-    Platform::Esp32C6, "esp32c6", "default-8m", false, false,
-    WifiTopology::Native, IdentitySource::WifiStationMac,
-    SerialTransport::NativeUsbCdc};
-static constexpr PlatformConfig PLATFORM_ESP32_S3 = {
-    Platform::Esp32S3, "esp32s3", "universal-8m-doom-ota", true, true,
-    WifiTopology::Native, IdentitySource::WifiStationMac,
-    SerialTransport::NativeUsbCdc};
-static constexpr PlatformConfig PLATFORM_ESP32_P4 = {
-    Platform::Esp32P4, "esp32p4", "p4-32m-ota", true, true,
-    WifiTopology::HostedCoprocessor, IdentitySource::EfuseBaseMac,
-    SerialTransport::UartBridge};
+#include "generated_platform_config.h"
 
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
 static constexpr const PlatformConfig &COMPILED_PLATFORM = PLATFORM_ESP32_P4;
