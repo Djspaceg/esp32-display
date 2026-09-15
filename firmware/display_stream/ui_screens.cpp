@@ -274,7 +274,7 @@ static void drawWifiControl(int width, int height,
 
 void drawWifiSelectorScreen() {
   if (!wifiSelectorActive || bufB == nullptr || panel == nullptr) return;
-  waitForDmaIdle(200);
+  if (!waitForDmaIdle(200)) return;
 
   const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
@@ -406,7 +406,7 @@ void closeWifiSelector() {
   wifiSelectorActive = false;
   wifiSelectorMessage = nullptr;
   Serial.println("wifi selector: closed");
-  waitForDmaIdle(200);
+  if (!waitForDmaIdle(200)) return;
   drawSurveyScreen();
 }
 
@@ -508,8 +508,7 @@ void drawSurveyScreen() {
   // Entry is user-driven and should be visible immediately. Once surveyActive
   // is set no new stream DMA is queued, so waiting drains only the pass that
   // was already in flight when BOOT was pressed.
-  waitForDmaIdle(200);
-  if (dmaInFlight != 0) return;
+  if (!waitForDmaIdle(200)) return;
   const int w = bufLandscape ? PANEL_H : PANEL_W;
   const int hgt = bufLandscape ? PANEL_W : PANEL_H;
   const bool connected = WiFi.status() == WL_CONNECTED;
@@ -615,7 +614,7 @@ void showInfoBar(const char *text) {
                               infoBarY1);
   infoBarUntil = millis() + INFO_BAR_MS;
 
-  waitForDmaIdle(200);  // bufB may still be feeding a previous transfer
+  if (!waitForDmaIdle(200)) return;
   size_t rowBytes = (size_t)w * 2;
   size_t off = (size_t)infoBarY0 * rowBytes;
   size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
@@ -643,7 +642,7 @@ void clearInfoBarIfExpired() {
   infoBarUntil = 0;
   if (bufB == nullptr || panel == nullptr) return;
   const int w = bufLandscape ? PANEL_H : PANEL_W;
-  waitForDmaIdle(200);
+  if (!waitForDmaIdle(200)) return;
   size_t rowBytes = (size_t)w * 2;
   size_t off = (size_t)infoBarY0 * rowBytes;
   size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
@@ -697,7 +696,7 @@ void drawOtaScreen(const char *headline, int percent) {
   if (bufB == nullptr || panel == nullptr) {
     return;
   }
-  waitForDmaIdle(200);  // bufB may still be feeding the previous transfer
+  if (!waitForDmaIdle(200)) return;
 
   const int w = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int hgt = PANEL_GEOMETRY.frameHeight(panelLandscape);

@@ -2,15 +2,23 @@
 
 #include <Arduino.h>
 
+#if defined(ESPDISP_HOST_PANEL_TRANSFER_TEST)
+extern volatile uint32_t statDrawErrors;
+#else
 #include "app_state.h"
+#endif
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#include "panel_transfer.h"
+#endif
 
 volatile int32_t dmaInFlight = 0;  // queued strip draws not yet completed
 uint32_t dmaQueuedAt = 0;          // for DMA-stall detection
 // dmaInFlight is incremented by tasks and decremented by the SPI ISR, and a
 // task-side read-modify-write interrupted by the ISR between its load and
 // store silently discards the ISR's decrement - the counter then sits above
-// zero with nothing in flight until the 500 ms stall failsafe reclaims it,
-// and the panel draws NOTHING for that half second. Measured live on the
+// zero with nothing in flight. The old 500 ms stall failsafe forced the
+// counter to zero, but elapsed time cannot prove a DMA source is reusable.
+// Measured live on the
 // 466x466 panel under real streaming: drawerr climbing ~1/s with
 // gateblocked ~2000 per 5 s window - 4-5 wedges of ~450 blocked-millisecond
 // iterations each, exactly the failsafe's 500 ms - costing ~40% of draw
@@ -47,29 +55,26 @@ bool IRAM_ATTR onColorTransDone(esp_lcd_panel_io_handle_t,
     dmaInFlight = dmaInFlight - 1;
   }
   portEXIT_CRITICAL_ISR(&dmaCountMux);
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  completePanelTransferStagingFromIsr();
+#endif
   return false;
 }
 
 
-// Wait for queued strip DMA to finish, bounded.
-//
-// Two callers, and the second is the reason this exists. Reusing bufB needs the
-// previous transfer done (fillPanel achieves that with a flat delay(30)); an OTA
-// write needs it for a sharper reason: on the S3 the frame buffers live in PSRAM,
-// which shares its SPI controller with the flash the update is writing, and the
-// cache goes down for the duration of an erase. A transfer still in flight when
-// that happens is a hazard, so the progress screen drains before handing control
-// back to the updater. UNVERIFIED on hardware (no board attached while this was
-// written): written to be safe rather than measured.
-void waitForDmaIdle(uint32_t maxMs) {
+// Wait for queued strip DMA to finish, bounded. A timeout is an error report,
+// never evidence that hardware released its source.
+bool waitForDmaIdle(uint32_t maxMs) {
   uint32_t start = millis();
   while (dmaInFlight != 0 && millis() - start < maxMs) {
     delay(2);
   }
   if (dmaInFlight != 0) {
-    // The same reclaim the loop's DMA-stall failsafe does: a lost completion
-    // callback must not wedge the panel forever.
     statDrawErrors = statDrawErrors + 1;
-    dmaInFlight = 0;
+    Serial.printf(
+        "display: DMA completion timeout; ownership retained in_flight=%ld\n",
+        (long)dmaInFlight);
+    return false;
   }
+  return true;
 }

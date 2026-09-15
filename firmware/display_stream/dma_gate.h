@@ -19,5 +19,6 @@ void dmaUnmarkFailed();
 bool onColorTransDone(esp_lcd_panel_io_handle_t,
                       esp_lcd_panel_io_event_data_t *, void *);
 
-// Wait for queued strip DMA to finish, bounded; reclaims on timeout.
-void waitForDmaIdle(uint32_t maxMs);
+// Wait for queued strip DMA to finish. A timeout reports failure without
+// changing ownership; only completion callbacks retire successful queues.
+bool waitForDmaIdle(uint32_t maxMs);
