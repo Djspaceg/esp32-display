@@ -4,6 +4,40 @@
 
 namespace buttonpress {
 
+enum class HoldTier : uint8_t {
+  Short,
+  Long,
+  ExtraLong,
+};
+
+enum class Action : uint8_t {
+  None,
+  Short,
+  Rotate,
+  Power,
+};
+
+inline HoldTier holdTier(uint32_t heldMs, uint32_t longPressMs,
+                         uint32_t extraLongPressMs) {
+  if (heldMs >= extraLongPressMs) return HoldTier::ExtraLong;
+  if (heldMs >= longPressMs) return HoldTier::Long;
+  return HoldTier::Short;
+}
+
+inline Action normalAction(uint32_t heldMs, bool released,
+                           uint32_t debounceMs, uint32_t longPressMs,
+                           uint32_t extraLongPressMs) {
+  switch (holdTier(heldMs, longPressMs, extraLongPressMs)) {
+    case HoldTier::ExtraLong:
+      return Action::Power;
+    case HoldTier::Long:
+      return released ? Action::Rotate : Action::None;
+    case HoldTier::Short:
+      return released && heldMs >= debounceMs ? Action::Short : Action::None;
+  }
+  return Action::None;
+}
+
 enum class ShortPressEffect : uint8_t {
   Preview,
   Commit,

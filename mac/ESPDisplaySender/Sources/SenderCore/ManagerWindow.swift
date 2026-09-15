@@ -725,6 +725,60 @@ private struct PanelDetailView: View {
                         .help(controlHelp(.brightness, "Set the panel backlight"))
                 }
             }
+            if let levels = manager.brightnessLevels(panel.serviceName) {
+                LabeledContent("Low brightness") {
+                    HStack(spacing: 8) {
+                        Text("\(levels.low)")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .frame(width: 28, alignment: .trailing)
+                        Stepper(
+                            "Low brightness",
+                            value: brightnessPreset(\.low),
+                            in: 1...max(1, levels.high - 1))
+                            .labelsHidden()
+                    }
+                }
+                LabeledContent("High brightness") {
+                    HStack(spacing: 8) {
+                        Text("\(levels.high)")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .frame(width: 28, alignment: .trailing)
+                        Stepper(
+                            "High brightness",
+                            value: brightnessPreset(\.high),
+                            in: min(255, levels.low + 1)...255)
+                            .labelsHidden()
+                    }
+                }
+                LabeledContent("Idle brightness") {
+                    HStack(spacing: 8) {
+                        Text("\(levels.idle)")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .frame(width: 28, alignment: .trailing)
+                        Stepper(
+                            "Idle brightness",
+                            value: brightnessPreset(\.idle),
+                            in: DeviceProtocol.brightnessLevelRange)
+                            .labelsHidden()
+                    }
+                }
+                LabeledContent("Survey brightness") {
+                    HStack(spacing: 8) {
+                        Text("\(levels.survey)")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .frame(width: 28, alignment: .trailing)
+                        Stepper(
+                            "Survey brightness",
+                            value: brightnessPreset(\.survey),
+                            in: DeviceProtocol.brightnessLevelRange)
+                            .labelsHidden()
+                    }
+                }
+            }
             if manager.supportsQuarterTurnRotation(panel.serviceName) {
                 // Square panels advertise quarter-turn rotation, so the
                 // orientation control becomes a four-way choice. Rectangular
@@ -758,6 +812,30 @@ private struct PanelDetailView: View {
                         .disabled(!manager.canControl(panel.serviceName, capability: .flip))
                         .help(controlHelp(.flip, "Rotate the image on the panel"))
                 }
+            }
+            if let status = manager.automaticRotationStatus(panel.serviceName),
+               let enabled = status.automaticRotationEnabled,
+               let effective = status.effectiveRotation {
+                LabeledContent("Automatic orientation") {
+                    Toggle("Automatic orientation", isOn: Binding(
+                        get: { enabled },
+                        set: {
+                            manager.setAutomaticRotation(
+                                $0, for: panel.serviceName)
+                        }))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .fixedSize()
+                        .disabled(
+                            !manager.canPerform(
+                                .automaticRotation, for: panel.serviceName))
+                        .help(operationHelp(
+                            .automaticRotation,
+                            "Use the motion sensor to keep the image upright."))
+                }
+                LabeledContent(
+                    "Effective rotation",
+                    value: "\(effective * 90)°")
             }
             if panel.controlProtocolVersion != Int(DeviceProtocol.controlProtocolVersion),
                manager.verifiedUSBDevice(for: panel.serviceName) == nil {
@@ -1109,6 +1187,21 @@ private struct PanelDetailView: View {
         let upper = DeviceProtocol.brightnessLevelRange.upperBound
         let clamped = min(max(panel.brightness, 0), upper)
         return Int((Double(clamped) / Double(upper) * 100).rounded())
+    }
+
+    private func brightnessPreset(
+        _ keyPath: WritableKeyPath<WifiConfigUI.BrightnessLevels, Int>
+    ) -> Binding<Int> {
+        Binding(
+            get: {
+                manager.brightnessLevels(panel.serviceName)?[keyPath: keyPath] ?? 1
+            },
+            set: {
+                guard var levels = manager.brightnessLevels(panel.serviceName)
+                else { return }
+                levels[keyPath: keyPath] = $0
+                manager.setBrightnessLevels(levels, for: panel.serviceName)
+            })
     }
 
     private func beginNameEdit() {

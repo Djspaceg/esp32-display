@@ -175,9 +175,24 @@ public enum ConfigCommands {
         return "CFGROT \(rotation)"
     }
 
+    public static func setAutomaticRotation(_ enabled: Bool) -> String {
+        "CFGAUTOROT \(enabled ? 1 : 0)"
+    }
+
     public static func setBrightnessLevel(_ level: Int) -> String? {
         guard DeviceProtocol.brightnessLevelRange.contains(level) else { return nil }
         return "CFGBRIGHT \(level)"
+    }
+
+    public static func setBrightnessLevels(
+        low: Int, high: Int, idle: Int, survey: Int
+    ) -> String? {
+        let range = DeviceProtocol.brightnessLevelRange
+        guard range.contains(low), range.contains(high),
+              range.contains(idle), range.contains(survey),
+              low < high
+        else { return nil }
+        return "CFGBRIGHTLEVELS \(low) \(high) \(idle) \(survey)"
     }
 
     /// `CFGOTAPW <b64 password>`: enable OTA with this password, replacing

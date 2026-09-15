@@ -215,9 +215,18 @@ python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGSHOW
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGBOARD co5300
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGPOWER 0
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGROT 2
+python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGAUTOROT 1
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGMIRRORX 1
+python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 \
+  CFGBRIGHTLEVELS 24 128 10 255
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGFIXEDBL 255
 ```
+
+`CFGAUTOROT 0|1` persists motion-based orientation; `CFGSHOW` reports both
+`auto=` (the current motion correction) and `effective=` (the rotation actually
+applied after composing it with `rot=`). `CFGBRIGHTLEVELS low high idle survey`
+persists the four runtime brightness presets, each from 1 through 255, with
+`low < high`.
 
 `CFGMIRRORX` persists a left/right reflection for prism installations.
 `CFGFIXEDBL 1..255` locks every lit state at that level and stops advertising
