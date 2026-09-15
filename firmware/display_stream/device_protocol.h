@@ -444,6 +444,11 @@ inline bool validChargeState(uint8_t raw) {
 inline size_t writeBattery(uint8_t out[BATTERY_PACKET_BYTES], uint8_t flags,
                            uint8_t percent, ChargeState state,
                            uint16_t millivolts) {
+  if ((flags & BATTERY_FLAG_PRESENT) == 0) {
+    percent = BATTERY_PERCENT_UNKNOWN;
+    state = ChargeState::Unknown;
+    millivolts = 0;
+  }
   memcpy(out, "EBAT", 4);
   out[4] = BATTERY_VERSION;
   out[5] = flags;

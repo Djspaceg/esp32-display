@@ -687,6 +687,20 @@ final class DeviceProtocolTests: XCTestCase {
         XCTAssertEqual(battery?.state, .unknown)
     }
 
+    func testAbsentBatteryDiscardsLegacyChargeAndVoltageFields() {
+        let packet = Data([
+            0x45, 0x42, 0x41, 0x54, 0x01, 0x02,
+            0x5D, 0x03, 0xF5, 0x1F, 0x00, 0x00,
+        ])
+        let battery = DeviceProtocol.parseBattery(packet)
+        XCTAssertNotNil(battery)
+        XCTAssertTrue(battery?.present == false)
+        XCTAssertTrue(battery?.externalPower == true)
+        XCTAssertNil(battery?.percent)
+        XCTAssertEqual(battery?.state, .unknown)
+        XCTAssertNil(battery?.millivolts)
+    }
+
     func testParseBatteryAcceptsEveryChargeState() {
         for state in DeviceProtocol.ChargeState.allCases {
             var packet = Data("EBAT".utf8)
@@ -955,10 +969,22 @@ final class ConfigCommandsTests: XCTestCase {
         XCTAssertEqual(ConfigCommands.setRotation(3), "CFGROT 3")
         XCTAssertNil(ConfigCommands.setRotation(-1))
         XCTAssertNil(ConfigCommands.setRotation(4))
+        XCTAssertEqual(
+            ConfigCommands.setAutomaticRotation(true), "CFGAUTOROT 1")
+        XCTAssertEqual(
+            ConfigCommands.setAutomaticRotation(false), "CFGAUTOROT 0")
         XCTAssertEqual(ConfigCommands.setBrightnessLevel(1), "CFGBRIGHT 1")
         XCTAssertEqual(ConfigCommands.setBrightnessLevel(255), "CFGBRIGHT 255")
         XCTAssertNil(ConfigCommands.setBrightnessLevel(0))
         XCTAssertNil(ConfigCommands.setBrightnessLevel(256))
+        XCTAssertEqual(
+            ConfigCommands.setBrightnessLevels(
+                low: 24, high: 128, idle: 10, survey: 255),
+            "CFGBRIGHTLEVELS 24 128 10 255")
+        XCTAssertNil(ConfigCommands.setBrightnessLevels(
+            low: 128, high: 24, idle: 10, survey: 255))
+        XCTAssertNil(ConfigCommands.setBrightnessLevels(
+            low: 0, high: 128, idle: 10, survey: 255))
     }
 
     func testAppendedFieldUsesTheLastToken() {

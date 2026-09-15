@@ -373,7 +373,7 @@ void drawWifiSelectorScreen() {
   if (queuePanelBitmap(panel, *bcfg, 0, 0, width, height, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
   }
-  driveBrightness(fixedBlLevel != 0 ? fixedBlLevel : 255);
+  driveBrightness(fixedBlLevel != 0 ? fixedBlLevel : BL_SURVEY);
 }
 
 void openWifiSelector() {
@@ -561,7 +561,7 @@ void drawSurveyScreen() {
   lastSurveyDrawAt = millis();
   // Full brightness unless this installation has an explicit fixed level.
   // Exiting the survey restores the state-driven level via applyBacklight().
-  driveBrightness(fixedBlLevel != 0 ? fixedBlLevel : 255);
+  driveBrightness(fixedBlLevel != 0 ? fixedBlLevel : BL_SURVEY);
 }
 
 // What the quick info bar says by default: battery on a board that has one
