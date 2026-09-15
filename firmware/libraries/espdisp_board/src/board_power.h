@@ -290,6 +290,15 @@ inline bool read(Reading &out) {
   reading.externalPower = (status1 & STATUS1_VBUS_GOOD) != 0 &&
                           (status2 & STATUS2_VBUS_NOT_IN) == 0;
 
+  if (!reading.present) {
+    reading.charge = Charge::Unknown;
+    reading.millivolts = 0;
+    reading.percentKnown = false;
+    reading.percent = 0;
+    out = reading;
+    return true;
+  }
+
   switch ((status2 >> 5) & 0x07) {
     case 0:
       reading.charge = Charge::Standby;
@@ -316,16 +325,14 @@ inline bool read(Reading &out) {
 
   reading.percentKnown = false;
   reading.percent = 0;
-  if (reading.present) {
-    uint8_t percent = 0;
-    if (!readRegister(REG_BAT_PERCENT, percent)) return false;
-    // Above 100 is not a percentage. The gauge reports 0xFF before it has
-    // settled, and treating that as "full" would be the worst possible way to
-    // be wrong about a battery.
-    if (percent <= 100) {
-      reading.percentKnown = true;
-      reading.percent = percent;
-    }
+  uint8_t percent = 0;
+  if (!readRegister(REG_BAT_PERCENT, percent)) return false;
+  // Above 100 is not a percentage. The gauge reports 0xFF before it has
+  // settled, and treating that as "full" would be the worst possible way to
+  // be wrong about a battery.
+  if (percent <= 100) {
+    reading.percentKnown = true;
+    reading.percent = percent;
   }
 
   out = reading;

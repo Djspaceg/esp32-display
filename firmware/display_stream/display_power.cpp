@@ -7,8 +7,22 @@
 #include "app_state.h"
 #include "panel_state.h"
 
-const uint8_t BL_HIGH = 128;  // 50%, Waveshare's recommended ceiling
-const uint8_t BL_LOW = 24;    // ~10%
+uint8_t BL_HIGH = 128;   // 50%, Waveshare's recommended ceiling
+uint8_t BL_LOW = 24;     // ~10%
+uint8_t BL_IDLE = 10;
+uint8_t BL_SURVEY = 255;
+
+bool setBrightnessLevels(uint8_t low, uint8_t high, uint8_t idle,
+                         uint8_t survey) {
+  if (low == 0 || high == 0 || idle == 0 || survey == 0 || low >= high) {
+    return false;
+  }
+  BL_LOW = low;
+  BL_HIGH = high;
+  BL_IDLE = idle;
+  BL_SURVEY = survey;
+  return true;
+}
 // The backlight level to use when awake and being driven, 1..255. This is the
 // single source of truth: the BOOT button steps it between BL_LOW and BL_HIGH,
 // and the sender can set any level. Keeping one value instead of a high/low
@@ -37,7 +51,6 @@ bool blIsHigh() {
 // Backlight off is driven by the Mac's own display/system sleep ("ESLP").
 const uint32_t SENDER_GONE_MS = 45000;
 const uint32_t IDLE_REPOSITION_MS = 30000;
-const uint8_t BL_IDLE = 10;
 bool idleActive = false;
 volatile uint32_t lastSenderPacketAt = 0;  // any packet, incl. keepalive
 uint32_t lastIdleDrawAt = 0;
@@ -86,10 +99,9 @@ uint8_t currentBrightness() {
 }
 
 // Push a raw level to whichever brightness sink this board has: PWM duty on
-// the backlight pin, or the panel's own 0x51 command on the AMOLED (which
-// has no backlight - each pixel emits, and level 0 means a black panel, not
-// a powered-down one). Safe to call before the panel exists: the panel path
-// does nothing until initDisplay() has run.
+// the backlight pin, or the panel's own 0x51 command on the AMOLED. Safe to
+// call before the panel exists: the panel path does nothing until
+// initDisplay() has run.
 void driveBrightness(uint8_t level) {
   if (bcfg->isDsi() && panel != nullptr) {
     boarddisplay::setBrightness(panel, *bcfg, level);
@@ -100,10 +112,33 @@ void driveBrightness(uint8_t level) {
   }
 }
 
-// Drive the brightness to whatever the current state calls for. Every place
-// that used to repeat the sleep/idle/high/low ternary now goes through here,
-// so the sink can no longer disagree with what is reported over the network.
-void applyBacklight() { driveBrightness(currentBrightness()); }
+// Panel init leaves scanout enabled. Track only successfully applied
+// transitions so a failed command is retried on the next state update.
+static bool panelDisplayEnabled = true;
+
+// Drive both the panel's DISPON/DISPOFF state and its brightness. Manual power
+// and host sleep use the driver's real display command; touch wake temporarily
+// turns a sleeping panel back on, preserving the existing ten-second peek.
+void applyBacklight() {
+  const bool shouldEnable = panelstate::displayShouldBeEnabled(
+      panelManuallyOff, displaySleeping, touchWakeActive());
+  if (panel != nullptr && shouldEnable != panelDisplayEnabled) {
+    if (!shouldEnable) driveBrightness(0);
+    const esp_err_t err =
+        boarddisplay::setDisplayEnabled(panel, *bcfg, shouldEnable);
+    if (err == ESP_OK) {
+      panelDisplayEnabled = shouldEnable;
+      Serial.printf("display: panel command %s\n",
+                    shouldEnable ? "on" : "off");
+    } else {
+      Serial.printf("display: panel command %s failed err=%d\n",
+                    shouldEnable ? "on" : "off", (int)err);
+    }
+    if (shouldEnable) driveBrightness(currentBrightness());
+    return;
+  }
+  driveBrightness(currentBrightness());
+}
 
 // ---- Identify ----------------------------------------------------------
 // "Which panel is this?" must work on both boards, and only one of them has an

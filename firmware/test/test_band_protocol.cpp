@@ -144,6 +144,24 @@ int main() {
     CHECK(partial.sourceOffset == (size_t)21 * 360 * 2);
   }
 
+  // An absent cell cannot have a meaningful percent, charge phase, or voltage.
+  // This is deliberately before the source-contract checks below so the red
+  // run demonstrates the old runtime serializer producing the wrong fields,
+  // rather than merely reporting that the new command names do not exist yet.
+  {
+    uint8_t packet[deviceproto::BATTERY_PACKET_BYTES] = {0};
+    CHECK(deviceproto::writeBattery(
+              packet, deviceproto::BATTERY_FLAG_EXTERNAL_POWER, 93,
+              deviceproto::ChargeState::Standby, 8181) == 12);
+    deviceproto::BatteryStatus parsed;
+    CHECK(deviceproto::parseBattery(packet, sizeof(packet), parsed));
+    CHECK(!parsed.present);
+    CHECK(parsed.externalPower);
+    CHECK(parsed.percent == deviceproto::BATTERY_PERCENT_UNKNOWN);
+    CHECK(parsed.state == deviceproto::ChargeState::Unknown);
+    CHECK(parsed.millivolts == 0);
+  }
+
   // The serial configuration surface is user-facing protocol, but its Arduino
   // dispatcher cannot run in this host binary. Keep a runtime contract check
   // here so missing commands or readback fields fail before any hardware build.
@@ -153,7 +171,28 @@ int main() {
         readTextFile(firmwareSourcePath("serial_config_protocol.h"));
     CHECK(source.find("CFGBRIGHT") != std::string::npos);
     CHECK(source.find("bllevel=") != std::string::npos);
+    CHECK(source.find("CFGAUTOROT ") != std::string::npos);
+    CHECK(source.find("autorot=") != std::string::npos);
+    CHECK(source.find("CFGBRIGHTLEVELS ") != std::string::npos);
+    CHECK(source.find("bllow=") != std::string::npos);
+    CHECK(source.find("blhigh=") != std::string::npos);
+    CHECK(source.find("blidle=") != std::string::npos);
+    CHECK(source.find("blsurvey=") != std::string::npos);
+    CHECK(source.find(
+              "automaticRotationEnabled, automaticRotation, "
+              "appliedPanelRotation") != std::string::npos);
     CHECK(source.find("FW_VERSION") != std::string::npos);
+  }
+
+  // Power-off must reach the panel driver, and a three-second power hold must
+  // not run the 600 ms rotation action first.
+  {
+    const std::string power =
+        readTextFile(firmwareSourcePath("display_power.cpp"));
+    const std::string button =
+        readTextFile(firmwareSourcePath("input_button.cpp"));
+    CHECK(power.find("setDisplayEnabled") != std::string::npos);
+    CHECK(button.find("COMPOUNDS RATHER THAN REPLACES") == std::string::npos);
   }
 
   // --- serial brightness grammar and CFGSHOW extension
@@ -180,6 +219,33 @@ int main() {
     CHECK(serialcfg::hasBrightnessVerb("CFGBRIGHT"));
     CHECK(serialcfg::hasBrightnessVerb("CFGBRIGHT 128"));
     CHECK(!serialcfg::hasBrightnessVerb("CFGPOWER 1"));
+
+    serialcfg::BrightnessLevels levels = {1, 2, 3, 4};
+    CHECK(serialcfg::parseBrightnessLevels(
+        "CFGBRIGHTLEVELS 24 128 10 255", levels));
+    CHECK(levels.low == 24);
+    CHECK(levels.high == 128);
+    CHECK(levels.idle == 10);
+    CHECK(levels.survey == 255);
+    const char *invalidLevels[] = {
+        "CFGBRIGHTLEVELS",
+        "CFGBRIGHTLEVELS ",
+        "CFGBRIGHTLEVELS 0 128 10 255",
+        "CFGBRIGHTLEVELS 24 256 10 255",
+        "CFGBRIGHTLEVELS 128 24 10 255",
+        "CFGBRIGHTLEVELS 24 24 10 255",
+        "CFGBRIGHTLEVELS +24 128 10 255",
+        "CFGBRIGHTLEVELS 24  128 10 255",
+        "CFGBRIGHTLEVELS 24 128 10 255 ",
+        "CFGBRIGHTLEVELS 24 128 10 255x",
+        "CFGBRIGHTLEVELS 24 128 10",
+    };
+    for (const char *line : invalidLevels) {
+      levels = {1, 2, 3, 4};
+      CHECK(!serialcfg::parseBrightnessLevels(line, levels));
+      CHECK(levels.low == 1 && levels.high == 2 &&
+            levels.idle == 3 && levels.survey == 4);
+    }
 
     char extension[64];
     CHECK(serialcfg::formatShowExtension(
@@ -442,6 +508,16 @@ int main() {
   // --- BOOT short/double-press effects -----------------------------------
   {
     using namespace buttonpress;
+    CHECK(normalAction(19, true, 20, 600, 3000) == Action::None);
+    CHECK(normalAction(20, true, 20, 600, 3000) == Action::Short);
+    CHECK(normalAction(599, false, 20, 600, 3000) == Action::None);
+    CHECK(normalAction(600, false, 20, 600, 3000) == Action::None);
+    CHECK(normalAction(2999, false, 20, 600, 3000) == Action::None);
+    CHECK(normalAction(600, true, 20, 600, 3000) == Action::Rotate);
+    CHECK(normalAction(2999, true, 20, 600, 3000) == Action::Rotate);
+    CHECK(normalAction(3000, false, 20, 600, 3000) == Action::Power);
+    CHECK(normalAction(3000, true, 20, 600, 3000) == Action::Power);
+
     DoublePressTracker tracker;
     bool high = true;
     bool originalHigh = high;
@@ -1306,6 +1382,12 @@ int main() {
       CHECK(panelstate::backlightLevel(true, (bits & 1) != 0, (bits & 2) != 0,
                                        (bits & 4) != 0, 200, 5) == 0);
     }
+
+    CHECK(panelstate::displayShouldBeEnabled(false, false, false));
+    CHECK(!panelstate::displayShouldBeEnabled(true, false, false));
+    CHECK(!panelstate::displayShouldBeEnabled(false, true, false));
+    CHECK(panelstate::displayShouldBeEnabled(false, true, true));
+    CHECK(!panelstate::displayShouldBeEnabled(true, true, true));
   }
 
   // --- the high/low flag is derived, so it cannot disagree with the level
@@ -2455,6 +2537,9 @@ int main() {
     CHECK(dwell.rotation() == 1);
     CHECK(dwell.candidate() == motionorient::INVALID_ROTATION);
     CHECK(!dwell.update(left, identity, AutomaticMode::FourWay, 1501));
+    CHECK(dwell.candidate() == motionorient::INVALID_ROTATION);
+    dwell.reset(2000);
+    CHECK(dwell.rotation() == 0);
     CHECK(dwell.candidate() == motionorient::INVALID_ROTATION);
 
     motionorient::Tracker rejected;

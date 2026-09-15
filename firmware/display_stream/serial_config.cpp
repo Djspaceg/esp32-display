@@ -295,6 +295,24 @@ static void processConfigLine(char *line) {
     saveDisplayPrefs();
     configSerial().printf("CFGOK rot=%u (saved; applies with next frame)\n",
                   panelRotation);
+  } else if (strncmp(line, "CFGAUTOROT ", 11) == 0) {
+    int want;
+    char extra;
+    if (sscanf(line + 11, "%d %c", &want, &extra) != 1 ||
+        (want != 0 && want != 1)) {
+      configSerial().println("CFGERR expected: CFGAUTOROT 0|1");
+      return;
+    }
+    if (!motionAvailable) {
+      configSerial().println(
+          "CFGERR automatic rotation is unavailable on this board");
+      return;
+    }
+    setAutomaticRotationEnabled(want != 0);
+    saveDisplayPrefs();
+    configSerial().printf(
+        "CFGOK autorot=%d auto=%u effective=%u (saved; applies with next frame)\n",
+        automaticRotationEnabled, automaticRotation, appliedPanelRotation);
   } else if (strncmp(line, "CFGMIRRORX ", 11) == 0) {
     int want;
     char extra;
@@ -349,6 +367,31 @@ static void processConfigLine(char *line) {
     saveDisplayPrefs();
     applyBacklight();
     configSerial().printf("CFGOK pwr=%s (saved)\n", panelManuallyOff ? "off" : "on");
+  } else if (strncmp(line, "CFGBRIGHTLEVELS", 15) == 0) {
+    serialcfg::BrightnessLevels levels;
+    if (!serialcfg::parseBrightnessLevels(line, levels)) {
+      configSerial().println(
+          "CFGERR expected: CFGBRIGHTLEVELS <low 1-254> <high 2-255> "
+          "<idle 1-255> <survey 1-255>, with low < high");
+      return;
+    }
+    const uint8_t oldLow = BL_LOW;
+    const uint8_t oldHigh = BL_HIGH;
+    const bool selectedLow = userBlLevel == oldLow;
+    const bool selectedHigh = userBlLevel == oldHigh;
+    setBrightnessLevels(
+        levels.low, levels.high, levels.idle, levels.survey);
+    if (selectedLow) userBlLevel = BL_LOW;
+    if (selectedHigh) userBlLevel = BL_HIGH;
+    saveDisplayPrefs();
+    if (surveyActive) {
+      driveBrightness(fixedBlLevel != 0 ? fixedBlLevel : BL_SURVEY);
+    } else {
+      applyBacklight();
+    }
+    configSerial().printf(
+        "CFGOK bllow=%u blhigh=%u blidle=%u blsurvey=%u (saved)\n",
+        BL_LOW, BL_HIGH, BL_IDLE, BL_SURVEY);
   } else if (serialcfg::hasBrightnessVerb(line)) {
     uint8_t level = 0;
     if (!serialcfg::parseBrightness(line, level)) {
@@ -634,8 +677,9 @@ static void processConfigLine(char *line) {
         // caps=, bllevel= and fw= are appended by formatShowExtension above, so they
         // are deliberately NOT repeated here - a duplicated key in CFGINFO
         // would make the field ambiguous to every parser reading it.
-        "connected=%d ip=%s rssi=%d flip=%d rot=%u mirrorx=%d auto=%u "
-        "effective=%u motion=%d bl=%s blfixed=%u pwr=%s "
+        "connected=%d ip=%s rssi=%d flip=%d rot=%u mirrorx=%d autorot=%d "
+        "auto=%u effective=%u motion=%d bl=%s blfixed=%u "
+        "bllow=%u blhigh=%u blidle=%u blsurvey=%u pwr=%s "
         "board=%s profile=%s target=%s chip=%s partition=%s bat=%d "
         "ota=%s ssid=%s%s\n",
         (const char *)b64, (const char *)name64,
@@ -644,8 +688,9 @@ static void processConfigLine(char *line) {
         WiFi.status() == WL_CONNECTED,
         WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(),
         panelRotation == 2, panelRotation, panelMirrorX,
-        automaticRotation, effectivePanelRotation(), motionAvailable,
-        blIsHigh() ? "high" : "low", fixedBlLevel,
+        automaticRotationEnabled, automaticRotation, appliedPanelRotation,
+        motionAvailable, blIsHigh() ? "high" : "low", fixedBlLevel,
+        BL_LOW, BL_HIGH, BL_IDLE, BL_SURVEY,
         panelManuallyOff ? "off" : "on",
         board::variantToken(boardVariant), board::variantToken(boardVariant),
         board::targetToken(boardVariant), bcfg->platform->chipToken,

@@ -222,8 +222,13 @@ void saveDisplayPrefs() {
   // to older firmware also keeps the 180 the two encodings agree on.
   prefs.putUChar("rot", panelRotation);
   prefs.putBool("mirrorx", panelMirrorX);
+  prefs.putBool("autorot", automaticRotationEnabled);
   prefs.putUChar("bllevel", userBlLevel);
   prefs.putUChar("blfixed", fixedBlLevel);
+  prefs.putUChar("bllow", BL_LOW);
+  prefs.putUChar("blhigh", BL_HIGH);
+  prefs.putUChar("blidle", BL_IDLE);
+  prefs.putUChar("blsurvey", BL_SURVEY);
   prefs.putBool("pwroff", panelManuallyOff);
   prefs.end();
 }

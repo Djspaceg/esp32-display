@@ -8,10 +8,13 @@
 
 #include <stdint.h>
 
-// Backlight levels (BL_IDLE is the dimmed status-card level).
-extern const uint8_t BL_HIGH;
-extern const uint8_t BL_LOW;
-extern const uint8_t BL_IDLE;
+// Per-board brightness presets (NVS-backed).
+extern uint8_t BL_HIGH;
+extern uint8_t BL_LOW;
+extern uint8_t BL_IDLE;
+extern uint8_t BL_SURVEY;
+bool setBrightnessLevels(uint8_t low, uint8_t high, uint8_t idle,
+                         uint8_t survey);
 
 // The awake-and-driven backlight level, 1..255 (NVS-backed).
 extern uint8_t userBlLevel;

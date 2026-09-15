@@ -30,15 +30,25 @@ bool panelLandscape = false;              // current panel MADCTL state
 uint8_t panelRotation = 0;
 // Optical installations can reverse handedness without rotating the panel.
 bool panelMirrorX = false;
+// User-selectable and persisted. The correction itself remains transient.
+bool automaticRotationEnabled = true;
 // Gravity-derived correction, RAM-only. `appliedPanelRotation` records the
 // effective value actually in MADCTL, so touch never gets ahead of a pending
 // DMA-gated orientation change.
 uint8_t automaticRotation = 0;
 uint8_t appliedPanelRotation = 0;
 
-uint8_t effectivePanelRotation() {
+uint8_t desiredPanelRotation() {
   return motionorient::compose(panelRotation, automaticRotation);
 }
+
+void setAutomaticRotationEnabled(bool enabled) {
+  automaticRotationEnabled = enabled;
+  automaticRotation = 0;
+  motionTracker.reset(millis());
+  madctlDirty = true;
+}
+
 bool madctlDirty = false;                 // panel config needs reapplying
 // Apply orientation + the user's mounting rotation, then record what the panel
 // now holds. The MADCTL/gap arithmetic itself is in
@@ -46,7 +56,7 @@ bool madctlDirty = false;                 // panel config needs reapplying
 // both boards (verified against Waveshare's own example for the JD9853, not
 // assumed from the ST7789).
 void applyPanelConfig(bool landscape) {
-  appliedPanelRotation = effectivePanelRotation();
+  appliedPanelRotation = desiredPanelRotation();
   boarddisplay::applyOrientation(panel, *bcfg, landscape,
                                  appliedPanelRotation, panelMirrorX);
   panelLandscape = landscape;
@@ -56,7 +66,7 @@ void applyPanelConfig(bool landscape) {
 // pure classifier has held it for 500ms. A live press resets the candidate so
 // one gesture cannot begin under one coordinate transform and end under another.
 void serviceAutoRotation() {
-  if (!motionAvailable) return;
+  if (!motionAvailable || !automaticRotationEnabled) return;
   const uint32_t now = millis();
   if ((uint32_t)(now - lastMotionPollAt) < 100) return;
   lastMotionPollAt = now;
@@ -80,11 +90,12 @@ void serviceAutoRotation() {
 
   automaticRotation = motionTracker.rotation();
   madctlDirty = true;
-  Serial.printf("motion: auto=%u manual=%u effective=%u\n",
-                automaticRotation, panelRotation, effectivePanelRotation());
+  Serial.printf("motion: auto=%u manual=%u target=%u applied=%u\n",
+                automaticRotation, panelRotation, desiredPanelRotation(),
+                appliedPanelRotation);
 }
 // The motion half of loop()'s 5-second serial report: raw sample, candidate,
-// and the composed rotation actually applied.
+// and the rotation actually applied.
 void reportMotionDiagnostics() {
     if (motionAvailable && motionSampleValid) {
       Serial.printf(
@@ -93,7 +104,11 @@ void reportMotionDiagnostics() {
           (int)lastMotionSample.z,
           motionTracker.candidate() == motionorient::INVALID_ROTATION
               ? -1 : (int)motionTracker.candidate(),
-          automaticRotation, effectivePanelRotation(),
-          bcfg->panel->width == bcfg->panel->height ? "four-way" : "flip-only");
+          automaticRotation, appliedPanelRotation,
+          automaticRotationEnabled
+              ? (bcfg->panel->width == bcfg->panel->height
+                     ? "four-way"
+                     : "flip-only")
+              : "off");
     }
 }

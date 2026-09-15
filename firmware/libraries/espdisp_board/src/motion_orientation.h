@@ -88,6 +88,12 @@ class Tracker {
   uint8_t rotation() const { return stable_; }
   uint8_t candidate() const { return candidate_; }
 
+  void reset(uint32_t nowMs = 0) {
+    stable_ = 0;
+    candidate_ = INVALID_ROTATION;
+    candidateSince_ = nowMs;
+  }
+
   bool update(const int16_t raw[3], const Calibration &calibration,
               AutomaticMode mode, uint32_t nowMs, bool allowCommit = true) {
     if (!allowCommit) {

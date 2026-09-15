@@ -424,8 +424,17 @@ public enum DeviceProtocol {
               let state = ChargeState(rawValue: bytes[7])
         else { return nil }
         let millivolts = UInt16(bytes[8]) | (UInt16(bytes[9]) << 8)
+        let present = bytes[5] & batteryFlagPresent != 0
+        if !present {
+            return BatteryStatus(
+                present: false,
+                externalPower: bytes[5] & batteryFlagExternalPower != 0,
+                percent: nil,
+                state: .unknown,
+                millivolts: nil)
+        }
         return BatteryStatus(
-            present: bytes[5] & batteryFlagPresent != 0,
+            present: true,
             externalPower: bytes[5] & batteryFlagExternalPower != 0,
             percent: bytes[6] == batteryPercentUnknown ? nil : bytes[6],
             state: state,

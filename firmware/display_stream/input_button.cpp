@@ -192,21 +192,14 @@ static void handleShortRelease(uint32_t releasedAt) {
       shortPressTracker.record(releasedAt, DOUBLE_PRESS_MS, previewEnabled));
 }
 
-// Process queued BOOT edges: short press toggles backlight, long press (fires
-// while still held) flips the display 180 degrees, and an extra-long press
-// (also fires while held, past the long-press point) toggles the manual
+// Process queued BOOT edges: short press toggles backlight, a completed long
+// press flips the display 180 degrees, and an extra-long press toggles manual
 // display off/on. Capturing the edges outside the render loop is load-bearing:
 // a full S3 tile pass can otherwise begin and end between two polls.
-//
-// COMPOUNDS RATHER THAN REPLACES the long-press flip: holding past
-// EXTRA_LONG_PRESS_MS also toggles power, on top of whatever the long press
-// already did at LONG_PRESS_MS, because the long press fires immediately
-// while held rather than waiting to see how long the button is down for -
-// changing that would need release-time semantics for the rotation action,
-// a bigger change than adding a third tier justifies. A user who only wants
-// the power toggle and not the flip can press long enough for power and then
-// long-press once more to flip back; this is the same tradeoff the two-step
-// 180 toggle already makes.
+// Normal-mode rotation waits for release, so crossing the three-second power
+// threshold cannot visibly rotate the picture first. Survey-selector holds
+// keep their immediate behavior because they are a separate mode and never
+// fall through to the power action.
 void handleButton() {
   if (bcfg == nullptr || !bcfg->hasBootButton()) return;
 
@@ -275,23 +268,21 @@ void handleButton() {
       continue;
     }
 
-    if (!longFired && heldMs >= LONG_PRESS_MS) {
-      fireLongPress();
-    }
-    if (selectorEntryHold) {
-      wasDown = false;
-      longFired = false;
-      extraLongFired = false;
-      selectorEntryHold = false;
-      continue;
-    }
-    if (longFired && !extraLongFired && heldMs >= EXTRA_LONG_PRESS_MS) {
-      fireExtraLongPress();
+    switch (buttonpress::normalAction(
+        heldMs, true, DEBOUNCE_MS, LONG_PRESS_MS, EXTRA_LONG_PRESS_MS)) {
+      case buttonpress::Action::Power:
+        if (!extraLongFired) fireExtraLongPress();
+        break;
+      case buttonpress::Action::Rotate:
+        if (!longFired) fireLongPress();
+        break;
+      case buttonpress::Action::Short:
+        handleShortRelease(edge.atMs);
+        break;
+      case buttonpress::Action::None:
+        break;
     }
     wasDown = false;
-    if (!longFired && heldMs >= DEBOUNCE_MS) {
-      handleShortRelease(edge.atMs);
-    }
   }
 
   if (wasDown) {
@@ -302,12 +293,15 @@ void handleButton() {
           longFired = true;
           activateWifiSelector();
         }
-      } else {
+      } else if (surveyActive) {
         if (!longFired && heldMs >= LONG_PRESS_MS) {
           fireLongPress();
         }
-        if (!selectorEntryHold && longFired && !extraLongFired &&
-            heldMs >= EXTRA_LONG_PRESS_MS) {
+      } else {
+        if (!extraLongFired &&
+            buttonpress::normalAction(
+                heldMs, false, DEBOUNCE_MS, LONG_PRESS_MS,
+                EXTRA_LONG_PRESS_MS) == buttonpress::Action::Power) {
           fireExtraLongPress();
         }
       }

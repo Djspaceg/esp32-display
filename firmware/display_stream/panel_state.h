@@ -43,6 +43,11 @@ inline uint8_t backlightLevel(bool manuallyOff, bool sleeping, bool idle,
   return userLevel;
 }
 
+inline bool displayShouldBeEnabled(bool manuallyOff, bool sleeping,
+                                   bool touchWake) {
+  return !manuallyOff && (!sleeping || touchWake);
+}
+
 /// Bit 0 of the reported flags: whether the level counts as "high".
 ///
 /// With any level now reachable the flag has to be derived rather than stored,
