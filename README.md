@@ -77,14 +77,14 @@ Orientation rules behind the last three columns:
   only a volatile correction on top of it.
 
 Axis calibration is not uniform. Only `co5300` has field-verified accelerometer
-axes (X=+1, Y=-1). `st7789-130`, `st7789-154`, and `jd9853` use the vendor
-example's identity axes and have not had a six-position calibration run, so their
-automatic orientation may be correctly shaped but wrongly signed until it does.
+axes (panel X = raw Y with sign -1, panel Y = raw X with sign +1).
+`st7789-130`, `st7789-154`, and `jd9853` use the vendor example's identity axes
+and have not had a six-position calibration run, so their automatic orientation
+may be correctly shaped but wrongly signed until it does.
 
-Board identity, pin maps, and panel geometry are declared in
-[`firmware/libraries/espdisp_board/src/board_config.h`](firmware/libraries/espdisp_board/src/board_config.h)
-and [`panel_config.h`](firmware/libraries/espdisp_board/src/panel_config.h);
-those files are the source of truth if this table drifts.
+Board identity, pin maps, panel geometry, and motion mappings are declared in
+[`boards/*.toml`](boards/); those descriptors are the source of truth if this
+table or generated firmware data drifts.
 
 ## Runtime profile selection
 
