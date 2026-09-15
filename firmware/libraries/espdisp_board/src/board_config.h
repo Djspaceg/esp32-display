@@ -423,14 +423,10 @@ static const Config CONFIG_AMOLED_CO5300 = {
     /* batteryEnable */ NO_PIN,
     /* chargeStatus */ NO_PIN,
     MotionController::Qmi8658,
-    // Identity was Waveshare's unverified example geometry, and on this
-    // board it classified one opposite edge-down pair 180 degrees off (the
-    // other pair correct) - the signature of exactly one inverted axis.
-    // Y sign flipped per that field observation; the signal-survey screen
-    // is the quick way to re-verify all four edge-down positions, and if
-    // the OTHER pair ever reads inverted, the fix is the X sign instead.
-    /* motion X */ 0, 1,
-    /* motion Y */ 1, -1,
+    // Field calibration: swapped raw axes preserve room-frame tracking, and
+    // negating both signs corrects the measured uniform 180-degree offset.
+    /* motion X */ 1, -1,
+    /* motion Y */ 0, 1,
     /* panelResetExio */ 0,
     /* touchResetExio */ 0,
     /* pinBlEnable */ NO_PIN,
