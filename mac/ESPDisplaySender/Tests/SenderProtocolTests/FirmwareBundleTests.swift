@@ -477,6 +477,13 @@ final class FirmwareBundleTests: XCTestCase {
             [0x2000, 0x8000, 0xE000, 0x10000, 0x1010000])
     }
 
+    func testCanonicalDoomFixtureComesFromCommittedP4Bundle() {
+        XCTAssertEqual(Self.canonicalDoomWad.count, 4_196_020)
+        XCTAssertEqual(
+            FirmwareBundle.sha256Hex(Self.canonicalDoomWad),
+            "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771")
+    }
+
     func testFormatThreeReadsCurrentS3WithDualOTAAndDoomWAD() throws {
         let bundle = try Self.readBundle(
             version: "1.5.0", images: [Self.currentS3Spec],
@@ -2036,8 +2043,23 @@ final class FirmwareBundleTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        return try! Data(contentsOf: root.appendingPathComponent(
-            "firmware/doom/doom1.wad"))
+        let releases = root.appendingPathComponent("firmware-releases")
+        let manifestData = try! Data(
+            contentsOf: releases.appendingPathComponent("manifest.json"))
+        let manifest = try! JSONSerialization.jsonObject(with: manifestData)
+        guard let rootObject = manifest as? [String: Any],
+              let families = rootObject["families"] as? [String: Any],
+              let p4 = families["p4"] as? [String: Any],
+              let artifact = p4["artifact"] as? String
+        else {
+            fatalError("shipping manifest has no P4 artifact")
+        }
+        let bundle = try! FirmwareBundle.read(
+            contentsOf: releases.appendingPathComponent(artifact))
+        guard let wad = bundle.flashPayload(forTarget: "p4", role: "doom_wad") else {
+            fatalError("shipping P4 bundle has no Doom WAD")
+        }
+        return wad
     }()
 
     private static let p4Spec = ImageSpec(
