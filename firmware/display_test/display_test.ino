@@ -42,24 +42,27 @@ static touchmap::Calibration touchCalibration = touchmap::AXS5106L_ON_C6;
 static esp_lcd_panel_handle_t panel = nullptr;
 static uint8_t *fb = nullptr;
 static volatile int32_t dmaInFlight = 0;
+static portMUX_TYPE dmaMux = portMUX_INITIALIZER_UNLOCKED;
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 DMA_ATTR static uint8_t dmaStaging[paneltransfer::STAGING_BYTES];
 #endif
 
 static bool IRAM_ATTR onTransDone(esp_lcd_panel_io_handle_t,
                                   esp_lcd_panel_io_event_data_t *, void *) {
+  portENTER_CRITICAL_ISR(&dmaMux);
   if (dmaInFlight > 0) dmaInFlight = dmaInFlight - 1;
+  portEXIT_CRITICAL_ISR(&dmaMux);
   return false;
 }
 
-// Wait for queued transfers to land before touching the buffer again. Bounded,
-// because a wedged DMA should report itself rather than hang the test.
+// Wait for queued transfers to land before touching the buffer again. A
+// timeout reports the wedge but never converts elapsed time into ownership
+// release.
 static bool waitDma(uint32_t timeoutMs = 500) {
   uint32_t start = millis();
   while (dmaInFlight != 0) {
     if (millis() - start > timeoutMs) {
-      Serial.println("  WARN: DMA completion timeout");
-      dmaInFlight = 0;
+      Serial.println("  ERROR: DMA completion timeout; ownership retained");
       return false;
     }
     delay(1);
@@ -69,10 +72,15 @@ static bool waitDma(uint32_t timeoutMs = 500) {
 
 static bool pushDirect(int x0, int y0, int x1, int y1,
                        const uint8_t *pixels) {
+  if (!waitDma()) return false;
+  portENTER_CRITICAL(&dmaMux);
   dmaInFlight = dmaInFlight + 1;
+  portEXIT_CRITICAL(&dmaMux);
   if (boarddisplay::drawBitmap(panel, *cfg, x0, y0, x1, y1, pixels) !=
       ESP_OK) {
+    portENTER_CRITICAL(&dmaMux);
     dmaInFlight = dmaInFlight - 1;
+    portEXIT_CRITICAL(&dmaMux);
     return false;
   }
   return waitDma();
@@ -88,6 +96,7 @@ static bool pushPackedRect(int x0, int y0, int w, int h,
                                   chunk)) {
       return false;
     }
+    if (!waitDma()) return false;
     memcpy(dmaStaging, pixels + chunk.sourceOffset, chunk.byteCount);
     if (!pushDirect(x0, chunk.y0, x0 + w, chunk.y1, dmaStaging)) {
       return false;

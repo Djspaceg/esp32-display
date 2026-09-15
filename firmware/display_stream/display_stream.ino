@@ -582,12 +582,20 @@ void loop() {
     Serial.println("sender back - status card off");
   }
 
-  // DMA-stall failsafe: strips take ~14ms worst case at 80MHz. If completion
-  // callbacks haven't drained the counter after 500ms, they're lost -
-  // reclaim rather than wedge forever.
+  // DMA-stall monitor: elapsed time cannot prove hardware released a source.
+  // Keep ownership intact and report the stall once; subsequent draws fail
+  // closed until the completion callback arrives.
+  static bool dmaStallReported = false;
   if (dmaInFlight != 0 && millis() - dmaQueuedAt > 500) {
-    statDrawErrors = statDrawErrors + 1;
-    dmaInFlight = 0;
+    if (!dmaStallReported) {
+      statDrawErrors = statDrawErrors + 1;
+      Serial.printf(
+          "display: DMA stalled >500ms; ownership retained in_flight=%ld\n",
+          (long)dmaInFlight);
+      dmaStallReported = true;
+    }
+  } else if (dmaInFlight == 0) {
+    dmaStallReported = false;
   }
 
   // WiFi association fully lost for over a minute: autoReconnect isn't

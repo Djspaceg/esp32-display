@@ -26,10 +26,6 @@
 static const int BENCH_RUN_W = 480;  // 30 tiles x 16 px, the max wire run
 static const int BENCH_RUN_H = 16;
 static const size_t BENCH_RUN_BYTES = (size_t)BENCH_RUN_W * BENCH_RUN_H * 2;
-// Shared with the tile draw path's staging: same size by construction, same
-// task (both run from loopTask), and the bench drains DMA around every use,
-// so the two can never race. Saves 15 KB of internal SRAM.
-static uint8_t *const benchStaging = panelTransferStaging[0];
 static_assert(BENCH_RUN_BYTES == TILE_RUN_MAX_BYTES,
               "bench and tile staging must stay the same size to share");
 
@@ -39,31 +35,42 @@ static bool benchSpinDmaIdle(uint32_t maxUs) {
   uint32_t start = micros();
   while (dmaInFlight != 0) {
     if ((uint32_t)(micros() - start) > maxUs) {
-      dmaInFlight = 0;  // same reclaim as the loop()'s stall failsafe
       statDrawErrors = statDrawErrors + 1;
+      Serial.printf(
+          "bench: DMA completion timeout; ownership retained in_flight=%ld\n",
+          (long)dmaInFlight);
       return false;
     }
   }
   return true;
 }
 
+static bool prepareBenchRect(int x, int y, int w, int h) {
+  for (uint8_t i = 0; i < paneltransfer::STAGING_SLOT_COUNT; ++i) {
+    PanelTransferStaging staging;
+    if (!acquirePanelTransferStaging(500000, staging)) return false;
+    for (int r = 0; r < h; r++) {
+      memcpy(staging.pixels + (size_t)r * w * 2,
+             bufA + ((size_t)(y + r) * PANEL_W + x) * 2, (size_t)w * 2);
+    }
+    if (!releasePanelTransferStagingReservation(staging)) return false;
+  }
+  return true;
+}
+
 // One timed rect-draw pass: `reps` draws of w x h at (x,y), each serialized
-// (issue, then wait for completion), sourcing benchStaging. Staging is filled
-// from bufA first so the draws are visually invisible.
+// (issue, then wait for completion). Both slots are filled from bufA first so
+// the draws are visually invisible.
 static void benchDrawRect(const char *label, int x, int y, int w, int h,
                           int reps) {
-  for (int r = 0; r < h; r++) {
-    memcpy(benchStaging + (size_t)r * w * 2,
-           bufA + ((size_t)(y + r) * PANEL_W + x) * 2, (size_t)w * 2);
-  }
-  benchSpinDmaIdle(500000);
+  if (!prepareBenchRect(x, y, w, h)) return;
   uint32_t t0 = micros();
   int errors = 0;
   for (int i = 0; i < reps; i++) {
-    dmaMarkQueued();
-    if (boarddisplay::drawBitmap(panel, *bcfg, x, y, x + w, y + h, benchStaging) !=
-        ESP_OK) {
-      dmaUnmarkFailed();
+    PanelTransferStaging staging;
+    if (!acquirePanelTransferStaging(500000, staging) ||
+        queuePanelTransferStaging(panel, *bcfg, x, y, x + w, y + h,
+                                  staging) != ESP_OK) {
       errors++;
       continue;
     }
@@ -83,6 +90,14 @@ void runTileBench() {
   }
   Serial.println("bench: starting (S3 tile-stream phase 0)");
   esp_task_wdt_reset();
+
+  PanelTransferStaging cpuStaging;
+  if (!acquirePanelTransferStaging(500000, cpuStaging)) {
+    statDrawErrors = statDrawErrors + 1;
+    Serial.println("bench: no free staging slot");
+    return;
+  }
+  uint8_t *const benchStaging = cpuStaging.pixels;
 
   // Inputs live in internal SRAM (static/stack), like the real receive path's
   // scratch will. Fill deterministically, mid-entropy so RLE gets a realistic
@@ -186,6 +201,12 @@ void runTileBench() {
   }
   esp_task_wdt_reset();
 
+  if (!releasePanelTransferStagingReservation(cpuStaging)) {
+    statDrawErrors = statDrawErrors + 1;
+    Serial.println("bench: failed to release CPU staging reservation");
+    return;
+  }
+
   // (c) Draw-call overhead: serialized rect draws of the three shapes the
   // tile draw path produces. Content is copied from bufA, so nothing visible
   // changes on the glass.
@@ -200,14 +221,14 @@ void runTileBench() {
   // throughput bound as opposed to the per-call latency above.
   {
     const int reps = 200;
-    benchSpinDmaIdle(500000);
+    if (!prepareBenchRect(200, 200, 16, 16)) return;
     uint32_t t0 = micros();
     int errors = 0;
     for (int i = 0; i < reps; i++) {
-      dmaMarkQueued();
-      if (boarddisplay::drawBitmap(panel, *bcfg, 200, 200, 216, 216, benchStaging) !=
-          ESP_OK) {
-        dmaUnmarkFailed();
+      PanelTransferStaging staging;
+      if (!acquirePanelTransferStaging(500000, staging) ||
+          queuePanelTransferStaging(panel, *bcfg, 200, 200, 216, 216,
+                                    staging) != ESP_OK) {
         errors++;
       }
     }
