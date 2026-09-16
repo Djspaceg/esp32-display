@@ -41,6 +41,7 @@ bool externalPowerForDisplay();
 /// "off", or "unknown". Nothing parses this line, so unlike the panel and the
 /// wire it can be honest today.
 const char *externalPowerWord();
+const char *externalPowerWord(axp2101::External external);
 
 int batteryPercentOrUnknown();
 panelstate::Charge toChargeWord(boardpower::Charge charge);
