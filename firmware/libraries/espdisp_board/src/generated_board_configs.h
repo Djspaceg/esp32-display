@@ -41,6 +41,6 @@ static constexpr Config CONFIG_AMOLED_CO5300 = {
     5, 6, 7, 12, -1, 2,
     -1, 0, -1, TouchController::Cst9217, 15, 14,
     2, 11, PowerController::Axp2101, -1, 0, -1,
-    -1, MotionController::Qmi8658, 1, -1, 0, 1,
+    -1, MotionController::Qmi8658, 1, -1, 0, -1,
     0, 0, -1, false, -1, -1
 };

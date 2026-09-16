@@ -2282,27 +2282,58 @@ int main() {
     CHECK(am.pinTouchSda != board::NO_PIN && am.pinTouchScl != board::NO_PIN);
     CHECK(am.motion == board::MotionController::Qmi8658);
     CHECK(am.motionXAxis == 1 && am.motionXSign == -1);
-    // The field calibration keeps the proven swapped in-plane axes and negates
-    // both signs to correct the observed 180-degree room-frame error.
-    CHECK(am.motionYAxis == 0 && am.motionYSign == 1);
+    // The descriptor swaps the in-plane axes, so panel X is read from chip Y and
+    // panel Y from chip X. Both signs are negative: X was already proven in the
+    // field, and Y was corrected after a four-position eye check found the two
+    // cable-horizontal poses upside down while the two cable-vertical poses were
+    // right. That is a Y-only error, so only y_sign moved.
+    CHECK(am.motionYAxis == 0 && am.motionYSign == -1);
     CHECK(am.hasMotion());
-    // Captured during the first half of the continuous diagnostics run while
-    // the user held the board vertical with the cable hanging down. The user
-    // confirmed by eye that the old mapping held the picture top at 6 o'clock;
-    // the corrected calibration shifts that pose's automatic correction by 2.
+    // Captured during the continuous diagnostics run while the user held the
+    // board vertical with the cable hanging down, and confirmed correct by eye.
     const int16_t confirmedCo5300CableDown[3] = {1759, 8396, -644};
     const motionorient::Calibration co5300Calibration = {
         am.motionXAxis, am.motionXSign, am.motionYAxis, am.motionYSign};
     CHECK(motionorient::classify(
               confirmedCo5300CableDown, co5300Calibration, 0,
               motionorient::AutomaticMode::FourWay) == 1);
-    // Captured at the midpoint of the same run after the user turned the board
-    // one quarter turn clockwise. The user confirmed by eye that the corrected
-    // mapping keeps the picture top at 12 o'clock in this pose as well.
+    // Captured later in the same run with the board rotated in-plane, and also
+    // confirmed correct by eye. The two vectors are a half turn apart, not the
+    // quarter turn an earlier version of this comment claimed: chip Y reverses
+    // sign between them while chip X barely moves.
     const int16_t confirmedCo5300Clockwise[3] = {1556, -7683, -716};
     CHECK(motionorient::classify(
               confirmedCo5300Clockwise, co5300Calibration, 0,
               motionorient::AutomaticMode::FourWay) == 3);
+    // Both captured vectors are chip-Y dominant, so after the axis swap both
+    // land in cardinalFor's panel-X branch and neither one constrains y_sign at
+    // all. That is exactly how a wrong y_sign reached a panel once already. The
+    // two cases below are chip-X dominant, so they exercise the panel-Y branch
+    // and pin y_sign. They are derived from the committed calibration rather
+    // than captured from hardware; their job is to make a single-sign inversion
+    // fail here instead of on the user's screen.
+    const int16_t derivedCo5300ChipXPositive[3] = {8000, 500, -600};
+    CHECK(motionorient::classify(
+              derivedCo5300ChipXPositive, co5300Calibration, 0,
+              motionorient::AutomaticMode::FourWay) == 2);
+    const int16_t derivedCo5300ChipXNegative[3] = {-8000, 500, -600};
+    CHECK(motionorient::classify(
+              derivedCo5300ChipXNegative, co5300Calibration, 0,
+              motionorient::AutomaticMode::FourWay) == 0);
+    // And a chip-Y dominant pair pins x_sign the same way, so neither sign can
+    // be flipped in isolation without a red test.
+    const motionorient::Calibration co5300XSignFlipped = {
+        am.motionXAxis, (int8_t)-am.motionXSign, am.motionYAxis,
+        am.motionYSign};
+    CHECK(motionorient::classify(
+              confirmedCo5300CableDown, co5300XSignFlipped, 0,
+              motionorient::AutomaticMode::FourWay) == 3);
+    const motionorient::Calibration co5300YSignFlipped = {
+        am.motionXAxis, am.motionXSign, am.motionYAxis,
+        (int8_t)-am.motionYSign};
+    CHECK(motionorient::classify(
+              derivedCo5300ChipXPositive, co5300YSignFlipped, 0,
+              motionorient::AutomaticMode::FourWay) == 0);
     CHECK(!board::configFor(Variant::LcdSt7789).hasBattery());
     CHECK(board::configFor(Variant::TouchJd9853).hasBattery());
 

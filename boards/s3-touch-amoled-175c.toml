@@ -119,7 +119,7 @@ address = 107
 x_axis = 1
 x_sign = -1
 y_axis = 0
-y_sign = 1
+y_sign = -1
 
 [reset]
 expander = "none"
