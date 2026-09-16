@@ -99,12 +99,23 @@ using namespace bandproto;
 #include "ota_service.h"
 #include "prefs_store.h"
 #include "serial_config.h"
+#include "serial_out.h"
 #include "signal_led.h"
 #include "telemetry.h"
 #include "ui_screens.h"
 
 void setup() {
+  // Size the TX ring deliberately, BEFORE begin(), which is the only point it
+  // can be changed. Left unset, HWCDC installs a 256-byte ring, and the CFGSHOW
+  // identity reply is longer than that: a raw capture showed it cut at exactly
+  // byte 256 with the tail and its newline abandoned, which is what made the
+  // next telemetry line look spliced onto the reply. serial_line.h now also
+  // refuses to hand the transport more than it has room for, so this size
+  // governs throughput rather than correctness - but the longest line should
+  // still fit in one pass. Kept well clear of serialout::LINE_BYTES.
+  Serial.setTxBufferSize(2048);
   Serial.begin(115200);
+  serialout::begin();
   // A host that opens the CDC port but stops draining it would otherwise
   // block every Serial write and hang the whole loop task (observed as
   // total silence + frozen pipeline). Never wait on USB.
@@ -778,7 +789,12 @@ void loop() {
   static uint32_t lastReport = 0;
   if (millis() - lastReport >= 5000) {
     lastReport = millis();
-    Serial.printf("frames=%lu dropped=%lu partial=%lu packets=%lu badlen=%lu drawerr=%lu heap=%lu rssi=%d\n",
+    // One guard over the whole group so this multi-line report cannot be split
+    // by a config reply landing between its lines. Recursive, so the callees
+    // below may take it again.
+    serialout::LineGuard reportGuard;
+    serialout::printfLine(Serial,
+                  "frames=%lu dropped=%lu partial=%lu packets=%lu badlen=%lu drawerr=%lu heap=%lu rssi=%d",
                   (unsigned long)statFramesShown, (unsigned long)statFramesDropped,
                   (unsigned long)statFramesPartial, (unsigned long)statPackets,
                   (unsigned long)statBadLen, (unsigned long)statDrawErrors,
