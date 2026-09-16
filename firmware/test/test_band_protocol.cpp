@@ -5262,9 +5262,16 @@ int main() {
     CHECK(strcmp(board::targetToken(p4.variant), "p4") == 0);
     CHECK(strcmp(board::PLATFORM_ESP32_P4.chipToken,
                  p4.platform->chipToken) == 0);
+    // Doom ships on every board that can run it, so the only boards without it
+    // are the C6 pair, which cannot. Any S3 or P4 variant asserting false here
+    // means a descriptor lost its capability flag.
     CHECK(board::supportsDoom(board::Variant::P4_4B));
     CHECK(board::supportsDoom(board::Variant::AmoledCo5300));
-    CHECK(!board::supportsDoom(board::Variant::TouchSt7789));
+    CHECK(board::supportsDoom(board::Variant::TouchSt7789));
+    CHECK(board::supportsDoom(board::Variant::LcdSt77916));
+    CHECK(board::supportsDoom(board::Variant::LcdGc9107));
+    CHECK(board::supportsDoom(board::Variant::LcdSt7789_130));
+    CHECK(!board::supportsDoom(board::Variant::TouchJd9853));
   }
 
   // --- glyph_draw: the on-device text rasterizer (glyph_draw.h)
