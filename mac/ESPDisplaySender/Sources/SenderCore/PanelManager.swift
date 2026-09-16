@@ -121,6 +121,21 @@ final class PanelManager: ObservableObject {
     /// Configuration setters restart the panel. Keep controls closed until a
     /// fresh CFGSHOW response proves the serial endpoint is back.
     var usbRestartingServices: Set<String> = []
+    /// Keychain lookup for the automatic preset sync, injectable because the
+    /// tests and previews run unsigned and have no Keychain to read.
+    var wifiCredentialLookup: @Sendable (String) -> SavedWiFiCredential? = { ssid in
+        WifiCredentialStore.credential(for: ssid)
+    }
+    /// One automatic preset sync in flight per board, keyed by hardware ID
+    /// rather than by service name: the sync writes to a physical board.
+    var wifiPresetSyncTasks: [String: Task<Void, Never>] = [:]
+    /// What was last successfully copied to each board. A reprobe after any USB
+    /// control re-enters the sync path, so without this a brightness change
+    /// would rewrite ten slots.
+    var syncedWifiPresetSignatures: [String: String] = [:]
+    /// The last completed sync per board, so the UI can say what did not fit
+    /// without re-reading the display.
+    var wifiPresetSyncReports: [String: WifiPresetSyncReport] = [:]
 
     init(
         settings: SenderSettings? = nil,

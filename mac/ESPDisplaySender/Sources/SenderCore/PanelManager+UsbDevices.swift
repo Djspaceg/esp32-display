@@ -288,6 +288,13 @@ extension PanelManager {
         usbProbeTasks[path]?.task.cancel()
         usbProbeTasks[path] = nil
         if let index = usbDevices.firstIndex(where: { $0.path == path }) {
+            // Unplugged or renumbered: the next time this board is verified it
+            // is a fresh USB connection, and the user asked for a copy on every
+            // connection. Its presets may also have been changed elsewhere
+            // while it was away.
+            if let hardwareID = usbDevices[index].hardwareID {
+                forgetWifiPresetSync(hardwareID: hardwareID)
+            }
             usbDevices[index].serialStatus = nil
             usbDevices[index].verifiedGeneration = nil
         }
@@ -438,6 +445,14 @@ extension PanelManager {
                 objectWillChange.send()
                 sortPanels()
             }
+            // A board that just answered CFGSHOW at this generation is a board
+            // whose presets can be brought up to date. This is the "on USB
+            // connect" trigger: every path to a verified serial endpoint -
+            // first enumeration, explicit refresh, reprobe after a control -
+            // arrives here, and the signature check makes the repeat ones free.
+            for serviceName in matchingServices {
+                syncWifiPresetsIfNeeded(for: serviceName)
+            }
         }
     }
 
@@ -516,7 +531,11 @@ extension PanelManager {
     }
 
     func refreshSavedNetworks() {
-        savedNetworkNames = WifiCredentialStore.savedNetworkNames()
+        let updated = WifiCredentialStore.savedNetworkNames()
+        guard updated != savedNetworkNames else { return }
+        savedNetworkNames = updated
+        // The app's own collection changed. Every board still attached gets it.
+        syncWifiPresetsToAttachedDevices()
     }
 
     /// Ask the device over USB which network it is actually on, and record

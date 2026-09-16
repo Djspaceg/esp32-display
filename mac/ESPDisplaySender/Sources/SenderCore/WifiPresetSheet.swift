@@ -22,8 +22,22 @@ struct WifiPresetSheet: View {
             } header: {
                 Text("Device Slots")
             } footer: {
-                Text("Choose from credentials saved in the app's login Keychain. "
-                    + "A network can occupy only one device slot.")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Only the first 10 access points are selectable from "
+                        + "the device.")
+                    Text("Saved networks are copied here automatically, in "
+                        + "alphabetical order, whenever this display is "
+                        + "connected by USB. Choose from credentials saved in "
+                        + "the app's login Keychain; a network can occupy only "
+                        + "one device slot. The slot the display is currently "
+                        + "joined through is left alone, so a sync never "
+                        + "restarts it.")
+                    if let omitted = manager.wifiPresetSyncReport(
+                        for: panel.serviceName)?.omitted, !omitted.isEmpty {
+                        Text("Beyond the first 10, these saved networks are not "
+                            + "on the display: " + omitted.joined(separator: ", "))
+                    }
+                }
             }
 
             if let snapshot {
@@ -120,6 +134,11 @@ struct WifiPresetSheet: View {
                 }
                 .labelsHidden()
                 .frame(maxWidth: 330)
+                // The active slot is not editable here for the same reason the
+                // automatic sync will not write it: replacing the credential
+                // the display is joined through leaves it rejoining a network
+                // that is no longer in that slot, and it reboots on the way.
+                .disabled(snapshot?.activeSlot == slot)
 
                 if snapshot?.activeSlot == slot {
                     Label("Active", systemImage: "checkmark.circle.fill")
@@ -172,7 +191,9 @@ struct WifiPresetSheet: View {
         failure = nil
         confirmation = nil
         defer { isBusy = false }
-        switch await manager.syncWifiPresets(slots, for: panel.serviceName) {
+        switch await manager.syncWifiPresets(
+            slots, protectedSlot: snapshot?.activeSlot, for: panel.serviceName)
+        {
         case .success(let updated):
             snapshot = updated
             slots = ConfigCommands.wifiPresetSlotRange.map {

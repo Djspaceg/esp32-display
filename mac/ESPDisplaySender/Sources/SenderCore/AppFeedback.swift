@@ -32,12 +32,14 @@ enum AppIssue: String, CaseIterable, Sendable {
     case screenRecording
     case deviceConfig
     case persistence
+    case wifiPresetSync
 
     var title: String {
         switch self {
         case .screenRecording: return "Screen Recording permission needed"
         case .deviceConfig: return "Per-display source file ignored"
         case .persistence: return "Display settings could not be saved"
+        case .wifiPresetSync: return "WiFi presets could not be copied"
         }
     }
 }
