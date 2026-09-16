@@ -147,7 +147,7 @@ rx = 44
 tx = 43
 
 [capabilities]
-doom = false
+doom = true
 
 [compile]
 selector = ""
