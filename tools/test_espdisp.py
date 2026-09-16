@@ -4139,6 +4139,90 @@ def test_s3_doom_build_contract():
                 % (key, revision["version"]))
 
 
+def test_compile_wifi_config_staging():
+    family = espdisp.FAMILIES["c6"]
+
+    def snapshot(directory):
+        files = {}
+        for root, _, names in os.walk(directory):
+            for name in names:
+                path = os.path.join(root, name)
+                relative = os.path.relpath(path, directory)
+                with open(path, "rb") as source:
+                    files[relative] = source.read()
+        return files
+
+    def compile_from(sketch_dir):
+        observed = {}
+
+        def inspect_compile(command, cwd=None):
+            observed["command"] = command
+            observed["cwd"] = cwd
+            with open(
+                os.path.join(cwd, "wifi_config.h"), "r", encoding="utf-8"
+            ) as source:
+                observed["wifi_config"] = source.read()
+            return []
+
+        output = io.StringIO()
+        with unittest.mock.patch.object(
+            espdisp, "SKETCH_DIR", sketch_dir
+        ), unittest.mock.patch.object(
+            espdisp, "arduino_cli", return_value="/bin/arduino-cli"
+        ), unittest.mock.patch.object(
+            espdisp, "run_streaming", side_effect=inspect_compile
+        ), unittest.mock.patch(
+            "sys.stdout", output
+        ):
+            espdisp.compile_board(family)
+        return observed, output.getvalue()
+
+    with tempfile.TemporaryDirectory() as directory:
+        sketch_dir = os.path.join(directory, "display_stream")
+        os.makedirs(sketch_dir)
+        with open(
+            os.path.join(sketch_dir, "display_stream.ino"),
+            "w", encoding="utf-8"
+        ) as sketch:
+            sketch.write("void setup() {}\nvoid loop() {}\n")
+
+        before = snapshot(sketch_dir)
+        observed, output = compile_from(sketch_dir)
+        check_equal(
+            observed["wifi_config"], espdisp.EMPTY_WIFI_CONFIG,
+            "an absent local WiFi header compiles with empty staged defaults")
+        check(
+            "compiling without local WiFi defaults" in output,
+            "the no-default fallback is visible in build output")
+        check_equal(
+            snapshot(sketch_dir), before,
+            "a build without local WiFi defaults leaves the source tree unchanged")
+        check(
+            not os.path.exists(observed["cwd"]),
+            "the temporary sketch is removed after the build")
+
+        local_config = (
+            '#pragma once\n#define WIFI_SSID "local-test-ssid"\n'
+            '#define WIFI_PASSWORD "local-test-password"\n'
+        )
+        with open(
+            os.path.join(sketch_dir, "wifi_config.h"),
+            "w", encoding="utf-8"
+        ) as config:
+            config.write(local_config)
+        before = snapshot(sketch_dir)
+        observed, output = compile_from(sketch_dir)
+        check_equal(
+            observed["wifi_config"], local_config,
+            "a present local WiFi header supplies the staged compile defaults")
+        check(
+            "compiling without local WiFi defaults" not in output,
+            "a build with local defaults does not print the fallback warning")
+        check_equal(
+            snapshot(sketch_dir), before,
+            "a build with local WiFi defaults leaves the source tree unchanged")
+
+
 def test_family_resolution_and_discovery():
     blank = espdisp.PortInfo("/dev/cu.usbmodem1", [], "unknown")
     known = espdisp.PortInfo("/dev/cu.usbmodem2", ["s3"], "S3")
@@ -6572,6 +6656,7 @@ def main():
     test_firmware_output_root()
     test_board_descriptor_validator()
     test_universal_family_catalog_and_cli()
+    test_compile_wifi_config_staging()
     test_s3_doom_build_contract()
     test_family_resolution_and_discovery()
     test_release_catalog_contract()

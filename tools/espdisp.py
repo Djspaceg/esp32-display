@@ -2842,6 +2842,13 @@ DOOM_APP_MARKERS = (
     b"[doom] Display bridge ready (reusing existing panel)",
 )
 
+EMPTY_WIFI_CONFIG = """\
+#pragma once
+
+#define WIFI_SSID ""
+#define WIFI_PASSWORD ""
+"""
+
 
 def validate_family_app_contract(board: Family, app: bytes) -> None:
     """Refuse an exported canonical image that did not link its required feature."""
@@ -2863,31 +2870,42 @@ def compile_board(board: Family, output_dir: Optional[str] = None) -> List[str]:
     if not os.path.isdir(SKETCH_DIR):
         raise Fail("sketch directory not found: %s" % SKETCH_DIR)
 
-    build_sketch_dir = SKETCH_DIR
-    staged_root: Optional[str] = None
     cmd = [arduino_cli(), "compile", "-b", board.fqbn, "--libraries", LIBRARIES_DIR]
     for relative in board.extra_library_dirs:
         cmd += ["--libraries", os.path.join(REPO_ROOT, relative)]
+    partition_source: Optional[str] = None
     if board.partition_csv:
         partition_source = os.path.join(
             REPO_ROOT, "firmware", board.partition_csv)
         if not os.path.isfile(partition_source):
             raise Fail("partition table not found: %s" % partition_source)
-        # Custom schemes read partitions.csv from the sketch. Every target gets
-        # a private copy so tables cannot leak between concurrent builds.
-        staged_root = tempfile.mkdtemp(prefix="espdisp-sketch-%s-" % board.key)
-        build_sketch_dir = os.path.join(staged_root, "display_stream")
-        shutil.copytree(
-            SKETCH_DIR, build_sketch_dir,
-            ignore=shutil.ignore_patterns("build", "partitions.csv"),
-        )
-        shutil.copy2(partition_source,
-                     os.path.join(build_sketch_dir, "partitions.csv"))
     elif os.path.exists(os.path.join(SKETCH_DIR, "partitions.csv")):
         raise Fail(
             "unexpected firmware/display_stream/partitions.csv would override "
             "%s's standard partition scheme" % board.key
         )
+
+    # Build every family from a private sketch copy. Besides isolating custom
+    # partition tables, this lets a clean clone compile without creating the
+    # gitignored local WiFi defaults file in the source tree.
+    staged_root = tempfile.mkdtemp(prefix="espdisp-sketch-%s-" % board.key)
+    build_sketch_dir = os.path.join(staged_root, "display_stream")
+    shutil.copytree(
+        SKETCH_DIR, build_sketch_dir,
+        ignore=shutil.ignore_patterns("build", "partitions.csv"),
+    )
+    if partition_source:
+        shutil.copy2(partition_source,
+                     os.path.join(build_sketch_dir, "partitions.csv"))
+    wifi_config = os.path.join(build_sketch_dir, "wifi_config.h")
+    if not os.path.isfile(wifi_config):
+        print(
+            "WiFi defaults: no local wifi_config.h; compiling without local "
+            "WiFi defaults (stored NVS credentials remain authoritative)",
+            flush=True,
+        )
+        with open(wifi_config, "w", encoding="utf-8") as out:
+            out.write(EMPTY_WIFI_CONFIG)
 
     if board.extra_flags:
         flags = " ".join(board.extra_flags)
@@ -2912,8 +2930,7 @@ def compile_board(board: Family, output_dir: Optional[str] = None) -> List[str]:
                 board, read_binary(app_image(output_dir)))
         return lines
     finally:
-        if staged_root:
-            shutil.rmtree(staged_root, ignore_errors=True)
+        shutil.rmtree(staged_root, ignore_errors=True)
 
 
 def app_image(output_dir: str) -> str:
