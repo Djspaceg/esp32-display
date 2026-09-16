@@ -26,6 +26,7 @@
 #include "../display_stream/tile_protocol.h"
 #include "../display_stream/wifi_presets.h"
 #include "../display_stream/wifi_selector_model.h"
+#include "../display_stream/wifi_supervisor.h"
 #include "../doom/src/platform/doom_runtime_policy.h"
 #include "../board_bootstrap/bootstrap_protocol.h"
 #include "../libraries/espdisp_board/src/axp2101_status.h"
@@ -91,6 +92,81 @@ static std::string firmwareSourcePath(const char *relative) {
 
 int main() {
   bool dropped;
+
+  // --- WiFi recovery: unreachable APs back off without rebooting ----------
+  {
+    using namespace wifisupervisor;
+    Supervisor supervisor;
+    std::vector<uint32_t> retries;
+    std::vector<uint32_t> retryDelays;
+    for (uint32_t now = 0; now <= 300000; now += 1000) {
+      const Decision decision =
+          supervisor.update(now, LinkState::NetworkUnavailable);
+      CHECK(!decision.restart);
+      if (decision.reconnect) {
+        retries.push_back(now);
+        retryDelays.push_back(decision.nextRetryMs);
+      }
+    }
+    CHECK(retries.size() == 7);
+    CHECK(retries[0] == 5000);
+    CHECK(retries[1] == 15000);
+    CHECK(retries[2] == 35000);
+    CHECK(retries[3] == 75000);
+    CHECK(retries[4] == 135000);
+    CHECK(retries[5] == 195000);
+    CHECK(retries[6] == 255000);
+    CHECK(retryDelays[0] == 10000);
+    CHECK(retryDelays[1] == 20000);
+    CHECK(retryDelays[2] == 40000);
+    CHECK(retryDelays[3] == MAX_RETRY_MS);
+    CHECK(retryDelays[6] == MAX_RETRY_MS);
+
+    CHECK(!supervisor.update(301000, LinkState::Connected).reconnect);
+    CHECK(!supervisor.update(302000, LinkState::NetworkUnavailable).reconnect);
+    CHECK(!supervisor.update(306999, LinkState::NetworkUnavailable).reconnect);
+    const Decision retry =
+        supervisor.update(307000, LinkState::NetworkUnavailable);
+    CHECK(retry.reconnect);
+    supervisor.noteReconnectResult(307000, true);
+    CHECK(!supervisor.update(400000, LinkState::NetworkUnavailable).restart);
+  }
+
+  // --- WiFi recovery: radio faults retain a one-shot reboot watchdog -------
+  {
+    using namespace wifisupervisor;
+    Supervisor wedged;
+    CHECK(!wedged.update(1000, LinkState::RadioUnresponsive).restart);
+    CHECK(!wedged.update(60999, LinkState::RadioUnresponsive).restart);
+    CHECK(wedged.update(61000, LinkState::RadioUnresponsive).restart);
+    CHECK(wedged.restartAlreadyAttempted());
+    for (uint32_t now = 62000; now <= 300000; now += 1000) {
+      CHECK(!wedged.update(now, LinkState::RadioUnresponsive).restart);
+    }
+
+    Supervisor afterRestart(true);
+    bool retried = false;
+    for (uint32_t now = 0; now <= 300000; now += 1000) {
+      const Decision decision =
+          afterRestart.update(now, LinkState::RadioUnresponsive);
+      CHECK(!decision.restart);
+      retried = retried || decision.reconnect;
+    }
+    CHECK(retried);
+    CHECK(afterRestart.noteHealthyFrame());
+    CHECK(!afterRestart.restartAlreadyAttempted());
+    CHECK(!afterRestart.update(301000, LinkState::Connected).restart);
+    CHECK(!afterRestart.update(302000, LinkState::RadioUnresponsive).restart);
+    CHECK(afterRestart.update(362000, LinkState::RadioUnresponsive).restart);
+    CHECK(!afterRestart.requestRadioRestart());
+
+    Supervisor rejectedCommand;
+    CHECK(!rejectedCommand.update(0, LinkState::NetworkUnavailable).restart);
+    CHECK(rejectedCommand.update(5000, LinkState::NetworkUnavailable).reconnect);
+    rejectedCommand.noteReconnectResult(5000, false);
+    CHECK(!rejectedCommand.update(64999, LinkState::NetworkUnavailable).restart);
+    CHECK(rejectedCommand.update(65000, LinkState::NetworkUnavailable).restart);
+  }
 
   // --- board-bootstrap command authorization and strict parsing ----------
   {
