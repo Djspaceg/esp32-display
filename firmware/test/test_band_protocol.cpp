@@ -1859,6 +1859,41 @@ int main() {
       CHECK(mirrorX(r) == !mirrorX(q));
       CHECK(mirrorY(r) == !mirrorY(q));
     }
+
+    const panelorient::WindowGap squareWindow[] = {
+        panelorient::windowGap(240, 240, 240, 320, 0, 0, 0),
+        panelorient::windowGap(240, 240, 240, 320, 0, 0, 1),
+        panelorient::windowGap(240, 240, 240, 320, 0, 0, 2),
+        panelorient::windowGap(240, 240, 240, 320, 0, 0, 3),
+    };
+    CHECK_EQ(squareWindow[0].x, 0);
+    CHECK_EQ(squareWindow[0].y, 0);
+    CHECK_EQ(squareWindow[1].x, 80);
+    CHECK_EQ(squareWindow[1].y, 0);
+    CHECK_EQ(squareWindow[2].x, 0);
+    CHECK_EQ(squareWindow[2].y, 80);
+    CHECK_EQ(squareWindow[3].x, 0);
+    CHECK_EQ(squareWindow[3].y, 0);
+
+    const panelorient::WindowGap centeredWindow[] = {
+        panelorient::windowGap(172, 320, 240, 320, 34, 0, 0),
+        panelorient::windowGap(172, 320, 240, 320, 34, 0, 1),
+        panelorient::windowGap(172, 320, 240, 320, 34, 0, 2),
+        panelorient::windowGap(172, 320, 240, 320, 34, 0, 3),
+    };
+    CHECK_EQ(centeredWindow[0].x, 34);
+    CHECK_EQ(centeredWindow[0].y, 0);
+    CHECK_EQ(centeredWindow[1].x, 0);
+    CHECK_EQ(centeredWindow[1].y, 34);
+    CHECK_EQ(centeredWindow[2].x, 34);
+    CHECK_EQ(centeredWindow[2].y, 0);
+    CHECK_EQ(centeredWindow[3].x, 0);
+    CHECK_EQ(centeredWindow[3].y, 34);
+
+    const panelorient::WindowGap unverifiedWindow =
+        panelorient::windowGap(128, 128, 0, 0, 2, 1, 2);
+    CHECK_EQ(unverifiedWindow.x, 2);
+    CHECK_EQ(unverifiedWindow.y, 1);
   }
 
   // --- control admission: the sender repeats every command three times, so
@@ -2565,6 +2600,8 @@ int main() {
     CHECK(lcd.hasBattery());
 
     CHECK(lcd.panel->colOffset == 0 && lcd.panel->rowOffset == 0);
+    CHECK(lcd.panel->memoryWidth == 240 &&
+          lcd.panel->memoryHeight == 320);
     CHECK(lcd.panel->orientationOffset == 0);
     CHECK(lcd.panel->invertColor && !lcd.panel->roundDisplay);
     CHECK(!lcd.hasExpanderReset());

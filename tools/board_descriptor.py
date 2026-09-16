@@ -57,6 +57,8 @@ REQUIRED_FIELDS = (
     "panel.bus",
     "panel.width",
     "panel.height",
+    "panel.memory_width",
+    "panel.memory_height",
     "panel.pixel_clock_hz",
     "panel.spi_mode",
     "panel.col_offset",
@@ -551,6 +553,36 @@ def validate_descriptors(
         _expect_identifier(descriptor, "panel.symbol")
         _expect_identifier(descriptor, "panel.profile")
         _expect_identifier(descriptor, "panel.driver")
+        panel_width = _expect_int_range(
+            descriptor, "panel.width", 1, 65535)
+        panel_height = _expect_int_range(
+            descriptor, "panel.height", 1, 65535)
+        memory_width = _expect_int_range(
+            descriptor, "panel.memory_width", 0, 65535)
+        memory_height = _expect_int_range(
+            descriptor, "panel.memory_height", 0, 65535)
+        col_offset = _expect_int_range(
+            descriptor, "panel.col_offset", 0, 255)
+        row_offset = _expect_int_range(
+            descriptor, "panel.row_offset", 0, 255)
+        _expect_int_range(
+            descriptor, "panel.orientation_offset", 0, 3)
+        if (memory_width == 0) != (memory_height == 0):
+            raise DescriptorError(
+                "%s: panel memory extents must both be known or both be 0"
+                % source
+            )
+        if memory_width != 0:
+            if panel_width + col_offset > memory_width:
+                raise DescriptorError(
+                    "%s: panel width plus col_offset exceeds memory_width"
+                    % source
+                )
+            if panel_height + row_offset > memory_height:
+                raise DescriptorError(
+                    "%s: panel height plus row_offset exceeds memory_height"
+                    % source
+                )
         _expect_choice(
             descriptor, "touch.controller", TOUCH_CONTROLLERS)
         _expect_choice(
