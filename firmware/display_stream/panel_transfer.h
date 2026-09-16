@@ -43,7 +43,16 @@ esp_err_t queuePanelTransferStaging(
     esp_lcd_panel_handle_t panel, const board::Config &cfg, int x0, int y0,
     int x1, int y1, const PanelTransferStaging &staging);
 
-// ISR context: releases exactly the oldest successfully queued slot.
+// Records a transfer that shares the completion callback but owns no staging
+// buffer (a direct draw), so its completion pops a marker and releases no
+// staging buffer. Any transfer submitted outside queuePanelTransferStaging
+// that will fire on_color_trans_done MUST call this first, in submission
+// order, or the shared completion callback will attribute its completion to a
+// staging buffer that is still in use.
+void notePanelTransferDirectQueued();
+
+// ISR context: releases exactly the oldest successfully queued staging slot,
+// or nothing when the oldest outstanding transfer was a direct draw.
 void completePanelTransferStagingFromIsr();
 #endif
 

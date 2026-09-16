@@ -28,7 +28,8 @@ DMA_ATTR uint8_t
                         [PANEL_TRANSFER_STAGE_BYTES];
 static volatile paneltransfer::StagingOwnership stagingOwnership = {
     0,
-    {paneltransfer::NO_STAGING_SLOT, paneltransfer::NO_STAGING_SLOT},
+    {paneltransfer::NO_STAGING_SLOT, paneltransfer::NO_STAGING_SLOT,
+     paneltransfer::NO_STAGING_SLOT, paneltransfer::NO_STAGING_SLOT},
     0,
     0,
     0,
@@ -94,6 +95,12 @@ esp_err_t queuePanelTransferStaging(
     portEXIT_CRITICAL(&stagingOwnershipMux);
   }
   return err;
+}
+
+void notePanelTransferDirectQueued() {
+  portENTER_CRITICAL(&stagingOwnershipMux);
+  paneltransfer::queueDirectTransfer(stagingOwnership);
+  portEXIT_CRITICAL(&stagingOwnershipMux);
 }
 
 void IRAM_ATTR completePanelTransferStagingFromIsr() {

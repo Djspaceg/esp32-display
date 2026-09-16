@@ -26,7 +26,8 @@ static void check(bool condition, const char *message) {
 int main() {
   volatile paneltransfer::StagingOwnership model = {
       0,
-      {paneltransfer::NO_STAGING_SLOT, paneltransfer::NO_STAGING_SLOT},
+      {paneltransfer::NO_STAGING_SLOT, paneltransfer::NO_STAGING_SLOT,
+       paneltransfer::NO_STAGING_SLOT, paneltransfer::NO_STAGING_SLOT},
       0,
       0,
       0,

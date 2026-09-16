@@ -12,6 +12,21 @@ constexpr size_t STAGING_BYTES = (size_t)480 * 16 * BYTES_PER_PIXEL;
 constexpr uint8_t STAGING_SLOT_COUNT = 2;
 constexpr uint8_t NO_STAGING_SLOT = 0xFF;
 
+// The completion FIFO records every in-flight transfer that will fire the
+// shared color-trans-done callback, in submission order - staged transfers as
+// their slot index and non-staged transfers as NO_STAGING_SLOT. The panel IO
+// completes transfers in submission order, so the head is always the oldest
+// outstanding transfer; a completion releases a staging buffer only when the
+// head it pops is a staging slot. This is why a non-staged transfer's
+// completion can no longer hand back a staging buffer whose own DMA is still
+// running: its FIFO entry is a marker, not a slot.
+//
+// Cap headroom beyond STAGING_SLOT_COUNT covers a non-staged transfer queued
+// alongside both staging buffers plus the one entry pushed just before its
+// (possibly blocking) submit call, which the panel IO's trans_queue_depth
+// bounds well under this.
+constexpr uint8_t TRANSFER_QUEUE_CAP = STAGING_SLOT_COUNT + 2;
+
 struct ChunkPlan {
   int y0;
   int y1;
@@ -21,7 +36,7 @@ struct ChunkPlan {
 
 struct StagingOwnership {
   volatile uint8_t busyMask;
-  volatile uint8_t queuedSlots[STAGING_SLOT_COUNT];
+  volatile uint8_t queuedSlots[TRANSFER_QUEUE_CAP];
   volatile uint8_t queueHead;
   volatile uint8_t queueCount;
   volatile uint8_t nextSlot;
@@ -31,7 +46,7 @@ inline bool stagingSlotQueued(const volatile StagingOwnership &state,
                               uint8_t slot) {
   for (uint8_t i = 0; i < state.queueCount; ++i) {
     const uint8_t index =
-        (uint8_t)((state.queueHead + i) % STAGING_SLOT_COUNT);
+        (uint8_t)((state.queueHead + i) % TRANSFER_QUEUE_CAP);
     if (state.queuedSlots[index] == slot) return true;
   }
   return false;
@@ -55,13 +70,26 @@ inline bool reserveStagingSlot(volatile StagingOwnership &state,
 inline bool queueStagingSlot(volatile StagingOwnership &state, uint8_t slot) {
   if (slot >= STAGING_SLOT_COUNT ||
       (state.busyMask & (uint8_t)(1U << slot)) == 0 ||
-      state.queueCount >= STAGING_SLOT_COUNT ||
+      state.queueCount >= TRANSFER_QUEUE_CAP ||
       stagingSlotQueued(state, slot)) {
     return false;
   }
   const uint8_t tail =
-      (uint8_t)((state.queueHead + state.queueCount) % STAGING_SLOT_COUNT);
+      (uint8_t)((state.queueHead + state.queueCount) % TRANSFER_QUEUE_CAP);
   state.queuedSlots[tail] = slot;
+  state.queueCount = (uint8_t)(state.queueCount + 1);
+  return true;
+}
+
+// Record a transfer that will fire the shared completion callback but does not
+// own a staging buffer (a direct draw). Its FIFO entry is a marker, so the
+// completion that pops it releases no staging buffer while keeping the FIFO's
+// submission order aligned with the hardware's in-order completions.
+inline bool queueDirectTransfer(volatile StagingOwnership &state) {
+  if (state.queueCount >= TRANSFER_QUEUE_CAP) return false;
+  const uint8_t tail =
+      (uint8_t)((state.queueHead + state.queueCount) % TRANSFER_QUEUE_CAP);
+  state.queuedSlots[tail] = NO_STAGING_SLOT;
   state.queueCount = (uint8_t)(state.queueCount + 1);
   return true;
 }
@@ -82,7 +110,7 @@ inline bool rollbackQueuedStagingSlot(volatile StagingOwnership &state,
   uint8_t offset = NO_STAGING_SLOT;
   for (uint8_t i = 0; i < state.queueCount; ++i) {
     const uint8_t index =
-        (uint8_t)((state.queueHead + i) % STAGING_SLOT_COUNT);
+        (uint8_t)((state.queueHead + i) % TRANSFER_QUEUE_CAP);
     if (state.queuedSlots[index] == slot) {
       offset = i;
       break;
@@ -92,14 +120,14 @@ inline bool rollbackQueuedStagingSlot(volatile StagingOwnership &state,
 
   for (uint8_t i = offset; i + 1 < state.queueCount; ++i) {
     const uint8_t destination =
-        (uint8_t)((state.queueHead + i) % STAGING_SLOT_COUNT);
+        (uint8_t)((state.queueHead + i) % TRANSFER_QUEUE_CAP);
     const uint8_t source =
-        (uint8_t)((state.queueHead + i + 1) % STAGING_SLOT_COUNT);
+        (uint8_t)((state.queueHead + i + 1) % TRANSFER_QUEUE_CAP);
     state.queuedSlots[destination] = state.queuedSlots[source];
   }
   const uint8_t tail =
       (uint8_t)((state.queueHead + state.queueCount - 1) %
-                STAGING_SLOT_COUNT);
+                TRANSFER_QUEUE_CAP);
   state.queuedSlots[tail] = NO_STAGING_SLOT;
   state.queueCount = (uint8_t)(state.queueCount - 1);
   state.busyMask =
@@ -107,14 +135,20 @@ inline bool rollbackQueuedStagingSlot(volatile StagingOwnership &state,
   return true;
 }
 
+// Pop the oldest outstanding transfer. Returns the staging slot it freed, or
+// NO_STAGING_SLOT when the completing transfer was a non-staged marker (or the
+// FIFO was empty) - in which case no staging buffer is released. The busy bit
+// is cleared only for a real slot, so a non-staged completion cannot free a
+// staging buffer whose transfer is still outstanding.
 inline uint8_t completeQueuedStagingSlot(
     volatile StagingOwnership &state) {
   if (state.queueCount == 0) return NO_STAGING_SLOT;
   const uint8_t slot = state.queuedSlots[state.queueHead];
   state.queuedSlots[state.queueHead] = NO_STAGING_SLOT;
   state.queueHead =
-      (uint8_t)((state.queueHead + 1) % STAGING_SLOT_COUNT);
+      (uint8_t)((state.queueHead + 1) % TRANSFER_QUEUE_CAP);
   state.queueCount = (uint8_t)(state.queueCount - 1);
+  if (slot >= STAGING_SLOT_COUNT) return NO_STAGING_SLOT;
   state.busyMask =
       (uint8_t)(state.busyMask & (uint8_t)~(uint8_t)(1U << slot));
   return slot;
