@@ -16,6 +16,7 @@
 #include "ota_service.h"
 #include "prefs_store.h"
 #include "serial_config_protocol.h"
+#include "serial_out.h"
 #include "signal_led.h"
 #include "telemetry.h"
 #include "tile_bench.h"
@@ -27,8 +28,13 @@ static Stream *selectedConfigPort = &Serial;
 static Stream *replyConfigPort = &Serial;
 static Stream *recoveryConfigPort = nullptr;
 
-static Stream &configSerial() {
-  return *replyConfigPort;
+// Returns a whole-line writer rather than the raw Stream. Every reply below is
+// a complete line, and the identity reply was being truncated at the transport's
+// ring size with its newline lost; routing all of them through LineSerial makes
+// each one arrive whole or not at all. Returned by value so no call site here
+// had to change. See serial_line.h for the capture that diagnosed it.
+static serialout::LineSerial configSerial() {
+  return serialout::LineSerial(*replyConfigPort);
 }
 
 void beginSerialConfig(const board::Config &cfg) {
@@ -55,7 +61,7 @@ void beginSerialRecovery() {
                 board::CONFIG_LCD_ST7789_130.pinSerialRx,
                 board::CONFIG_LCD_ST7789_130.pinSerialTx);
   recoveryConfigPort = &Serial0;
-  Serial0.println("board: profile unresolved; use CFGBOARD <profile>");
+  serialout::line(Serial0, "board: profile unresolved; use CFGBOARD <profile>");
 #endif
 }
 // Serial configuration protocol (USB CDC), so credentials can change
