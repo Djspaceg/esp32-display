@@ -208,8 +208,8 @@ bool externalPowerForDisplay() {
   return lastBattery.external == axp2101::External::Present;
 }
 
-const char *externalPowerWord() {
-  switch (lastBattery.external) {
+const char *externalPowerWord(axp2101::External external) {
+  switch (external) {
     case axp2101::External::Present:
       return "on";
     case axp2101::External::Absent:
@@ -217,6 +217,10 @@ const char *externalPowerWord() {
     default:
       return "unknown";
   }
+}
+
+const char *externalPowerWord() {
+  return externalPowerWord(lastBattery.external);
 }
 
 // Battery percentage for CFGSHOW, or -1 when there is no telemetry source, no

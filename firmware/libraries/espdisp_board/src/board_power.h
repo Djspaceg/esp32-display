@@ -259,6 +259,20 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
 
 inline bool available() { return enabled; }
 
+/// Read STATUS1 and STATUS2 raw, without interpreting them.
+///
+/// Exists so the external-power question can be settled from what the part
+/// actually reports rather than from what this file concludes. Returns false on
+/// any board that is not on the AXP2101 path, so a caller cannot mistake
+/// untouched zeros for a reading of zero.
+inline bool readRawStatus(uint8_t &status1, uint8_t &status2) {
+  if (!enabled || activeController != board::PowerController::Axp2101) {
+    return false;
+  }
+  if (!readRegister(REG_STATUS1, status1)) return false;
+  return readRegister(REG_STATUS2, status2);
+}
+
 /// Sample the active battery telemetry source. Returns false when no source is
 /// enabled or a transaction failed, so a caller never reports a half-populated
 /// reading as fact.

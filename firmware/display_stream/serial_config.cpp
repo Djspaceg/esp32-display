@@ -464,6 +464,31 @@ static void processConfigLine(char *line) {
     rgbLed->show();
     ledOverrideUntil = millis() + 10000;
     configSerial().printf("CFGOK led r=%d g=%d b=%d for 10s\n", r & 0xFF, g & 0xFF, b & 0xFF);
+  } else if (strcmp(line, "CFGPMU") == 0) {
+    // Dump the power chip's status registers raw, next to what this firmware
+    // concluded from them. Read-only, and the only way to tell "VBUS is not
+    // good" apart from "VBUS is good but this code decided otherwise" without
+    // guessing. Prints on any board so the reply is never silence, and says so
+    // when the board has no such registers to read.
+    uint8_t status1 = 0;
+    uint8_t status2 = 0;
+    if (!boardpower::readRawStatus(status1, status2)) {
+      configSerial().printf("CFGINFO pmu=none reason=%s\n",
+                            boardpower::available() ? "not-axp2101"
+                                                    : "no-battery-path");
+    } else {
+      boardpower::Reading reading = {};
+      const bool read = boardpower::read(reading);
+      configSerial().printf(
+          "CFGINFO pmu=axp2101 status1=0x%02X status2=0x%02X "
+          "s1.vbusgood=%d s1.batpresent=%d s2.bit3=%d s2.chargedir=%u "
+          "concluded.vbus=%s concluded.present=%d concluded.mv=%u read=%d\n",
+          status1, status2, (status1 & axp2101::STATUS1_VBUS_GOOD) ? 1 : 0,
+          (status1 & axp2101::STATUS1_BATTERY_PRESENT) ? 1 : 0,
+          (status2 & 0x08) ? 1 : 0, (unsigned)((status2 >> 5) & 0x03),
+          externalPowerWord(reading.external), reading.present ? 1 : 0,
+          reading.millivolts, read ? 1 : 0);
+    }
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   } else if (strcmp(line, "CFGBENCH") == 0) {
     // Tile-stream phase-0 measurements; see runTileBench above. Blocks the
