@@ -34,6 +34,8 @@ struct PanelConfig {
   PanelBus bus;
   uint16_t width;
   uint16_t height;
+  uint16_t memoryWidth;
+  uint16_t memoryHeight;
   uint32_t pixelClockHz;
   uint8_t spiMode;
   uint8_t colOffset;
@@ -51,25 +53,4 @@ struct PanelConfig {
   uint16_t vsyncPulseWidth;
   uint16_t vsyncFrontPorch;
 };
-
-static constexpr PanelConfig PANEL_ST7789_172X320 = {
-    PanelProfile::St7789_172x320, PanelDriver::St7789, PanelBus::Spi,
-    172, 320, 80000000, 0, 34, 0, 0, true, false, true,
-    0, 0, 0, 0, 0, 0, 0, 0};
-static constexpr PanelConfig PANEL_ST77916_360X360 = {
-    PanelProfile::St77916_360x360, PanelDriver::St77916, PanelBus::Qspi,
-    360, 360, 80000000, 0, 0, 0, 0, true, true, true,
-    0, 0, 0, 0, 0, 0, 0, 0};
-static constexpr PanelConfig PANEL_GC9107_128X128 = {
-    PanelProfile::Gc9107_128x128, PanelDriver::Gc9107, PanelBus::Spi,
-    128, 128, 40000000, 0, 2, 1, 2, true, false, true,
-    0, 0, 0, 0, 0, 0, 0, 0};
-static constexpr PanelConfig PANEL_ST7789_240X240 = {
-    PanelProfile::St7789_240x240, PanelDriver::St7789, PanelBus::Spi,
-    240, 240, 40000000, 3, 0, 0, 0, true, false, true,
-    0, 0, 0, 0, 0, 0, 0, 0};
-static constexpr PanelConfig PANEL_ST7789V2_240X240 = {
-    PanelProfile::St7789V2_240x240, PanelDriver::St7789, PanelBus::Spi,
-    240, 240, 40000000, 0, 0, 0, 0, true, false, true,
-    0, 0, 0, 0, 0, 0, 0, 0};
 }  // namespace board

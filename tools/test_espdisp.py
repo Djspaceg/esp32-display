@@ -3700,6 +3700,22 @@ def test_board_descriptor_validator():
         "missing required descriptor field",
     )
 
+    one_sided_memory = copy.deepcopy(descriptors[0])
+    one_sided_memory["panel"]["memory_height"] = 0
+    check_descriptor_fails(
+        [one_sided_memory],
+        "panel memory extents must both be known or both be 0",
+        "one-sided panel memory extent",
+    )
+
+    undersized_memory = copy.deepcopy(descriptors[0])
+    undersized_memory["panel"]["memory_width"] = 200
+    check_descriptor_fails(
+        [undersized_memory],
+        "panel width plus col_offset exceeds memory_width",
+        "panel window outside controller memory",
+    )
+
     malformed = copy.deepcopy(descriptors[0])
     malformed["detection"]["adressess"] = [0x20]
     check_descriptor_fails(

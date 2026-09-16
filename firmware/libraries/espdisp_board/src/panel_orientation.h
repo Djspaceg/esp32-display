@@ -52,4 +52,37 @@ inline bool mirrorY(uint8_t q, bool installationMirrorX) {
   return mirrorY(q) != (installationMirrorX && swapXY(q));
 }
 
+struct WindowGap {
+  uint16_t x;
+  uint16_t y;
+};
+
+inline uint16_t axisWindowGap(uint16_t nearOffset, uint16_t visibleExtent,
+                              uint16_t memoryExtent, bool mirrored) {
+  if (!mirrored || memoryExtent == 0 || visibleExtent > memoryExtent ||
+      nearOffset > memoryExtent - visibleExtent) {
+    return nearOffset;
+  }
+  return (uint16_t)(memoryExtent - visibleExtent - nearOffset);
+}
+
+inline WindowGap windowGap(uint16_t width, uint16_t height,
+                           uint16_t memoryWidth, uint16_t memoryHeight,
+                           uint16_t colOffset, uint16_t rowOffset, uint8_t q,
+                           bool installationMirrorX = false) {
+  const bool swap = swapXY(q);
+  const uint16_t xVisible = swap ? height : width;
+  const uint16_t yVisible = swap ? width : height;
+  const uint16_t xMemory = swap ? memoryHeight : memoryWidth;
+  const uint16_t yMemory = swap ? memoryWidth : memoryHeight;
+  const uint16_t xNear = swap ? rowOffset : colOffset;
+  const uint16_t yNear = swap ? colOffset : rowOffset;
+  return {
+      axisWindowGap(xNear, xVisible, xMemory,
+                    mirrorX(q, installationMirrorX)),
+      axisWindowGap(yNear, yVisible, yMemory,
+                    mirrorY(q, installationMirrorX)),
+  };
+}
+
 }  // namespace panelorient

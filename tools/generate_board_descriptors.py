@@ -196,7 +196,8 @@ def _panel_initializer(descriptor: Dict[str, Any]) -> str:
     return (
         "static constexpr PanelConfig %(symbol)s = {\n"
         "    PanelProfile::%(profile)s, PanelDriver::%(driver)s, %(bus)s,\n"
-        "    %(width)d, %(height)d, %(pixel_clock_hz)d, %(spi_mode)d, "
+        "    %(width)d, %(height)d, %(memory_width)d, %(memory_height)d,\n"
+        "    %(pixel_clock_hz)d, %(spi_mode)d, "
         "%(col_offset)d, %(row_offset)d, %(orientation_offset)d,\n"
         "    %(invert)s, %(round)s, %(rotation)s,\n"
         "    %(dsi_data_lanes)d, %(dsi_lane_mbps)d, "
@@ -264,7 +265,7 @@ def render_configs(descriptors: Sequence[Dict[str, Any]]) -> str:
         if descriptor["migration"]["firmware_config"] == "generated"
     ]
     lines = [HEADER, "#pragma once\n\n"]
-    for descriptor in generated:
+    for descriptor in descriptors:
         lines.append(_panel_initializer(descriptor))
     lines.append("\n")
     for descriptor in generated:

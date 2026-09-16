@@ -160,6 +160,8 @@
         "bus",
         "width",
         "height",
+        "memory_width",
+        "memory_height",
         "pixel_clock_hz",
         "spi_mode",
         "col_offset",
@@ -187,11 +189,21 @@
         "bus": {"enum": ["spi", "qspi", "mipi_dsi"]},
         "width": {"type": "integer", "minimum": 1},
         "height": {"type": "integer", "minimum": 1},
+        "memory_width": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Controller frame-memory width; 0 means unverified."
+        },
+        "memory_height": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Controller frame-memory height; 0 means unverified."
+        },
         "pixel_clock_hz": {"type": "integer", "minimum": 1},
         "spi_mode": {"type": "integer", "minimum": 0, "maximum": 3},
-        "col_offset": {"type": "integer"},
-        "row_offset": {"type": "integer"},
-        "orientation_offset": {"type": "integer"},
+        "col_offset": {"type": "integer", "minimum": 0, "maximum": 255},
+        "row_offset": {"type": "integer", "minimum": 0, "maximum": 255},
+        "orientation_offset": {"type": "integer", "minimum": 0, "maximum": 3},
         "invert_color": {"type": "boolean"},
         "round_display": {"type": "boolean"},
         "supports_command_rotation": {"type": "boolean"},

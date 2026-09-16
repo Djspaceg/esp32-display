@@ -309,20 +309,6 @@ inline bool setPanelBrightness(esp_lcd_panel_handle_t panel,
 /// rectangular panels a quarter turn is what the sender-driven landscape
 /// mechanism already expresses.
 ///
-/// The centring gap follows the axis swap: colOffset sits on the x axis for
-/// even quadrants and moves to the y axis for odd ones, exactly as it always
-/// did for landscape. On the 1.47" panels the gap axis is symmetric within
-/// the 240-wide controller RAM, so mirroring does not move it. This mapping
-/// matches the rotation/gap matrix in Waveshare's own ESP-IDF example for
-/// the JD9853 board, and was verified (not assumed) to hold on the ST7789
-/// too.
-///
-/// On the square CO5300 the two orientations address the same buffer shape,
-/// so the landscape half of this matrix is inert there; the rotation path is
-/// what matters. Whether its 6px gap survives MADCTL mirroring unmoved is
-/// NOT yet verified on hardware - if a rotated 1.75C shows a 6px fringe on
-/// one edge, the gap likely needs re-deriving per mirror state, and this is
-/// the place to do it.
 inline void applyOrientation(esp_lcd_panel_handle_t panel,
                              const board::Config &cfg, bool landscape,
                              uint8_t rotation,
@@ -334,9 +320,11 @@ inline void applyOrientation(esp_lcd_panel_handle_t panel,
   esp_lcd_panel_mirror(panel,
                        panelorient::mirrorX(q, installationMirrorX),
                        panelorient::mirrorY(q, installationMirrorX));
-  esp_lcd_panel_set_gap(panel,
-                        swap ? cfg.panel->rowOffset : cfg.panel->colOffset,
-                        swap ? cfg.panel->colOffset : cfg.panel->rowOffset);
+  const panelorient::WindowGap gap = panelorient::windowGap(
+      cfg.panel->width, cfg.panel->height, cfg.panel->memoryWidth,
+      cfg.panel->memoryHeight, cfg.panel->colOffset, cfg.panel->rowOffset, q,
+      installationMirrorX);
+  esp_lcd_panel_set_gap(panel, gap.x, gap.y);
 }
 
 }  // namespace boardpanel
