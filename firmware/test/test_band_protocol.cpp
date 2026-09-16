@@ -2309,6 +2309,16 @@ int main() {
     CHECK_EQ(am.motionYAxis, 0);
     CHECK_EQ(am.motionYSign, 1);
     CHECK(am.hasMotion());
+    // The 1.54's mapping is the vendor's identity axes, and unlike the round
+    // panel's it is correct as shipped: the user checked all four cable
+    // positions on hardware and every one rendered up-is-up. Pinned so the
+    // numbers cannot drift on a guess, since nothing else would catch it.
+    const board::Config &touch154 = board::configFor(board::Variant::TouchSt7789);
+    CHECK_EQ(touch154.motionXAxis, 0);
+    CHECK_EQ(touch154.motionXSign, 1);
+    CHECK_EQ(touch154.motionYAxis, 1);
+    CHECK_EQ(touch154.motionYSign, 1);
+    CHECK(touch154.hasMotion());
     // Captured during the continuous diagnostics run while the user held the
     // board vertical with the cable hanging down.
     const int16_t confirmedCo5300CableDown[3] = {1759, 8396, -644};
