@@ -577,6 +577,7 @@ enum WifiConfigUI {
     static func syncWifiPresets(
         _ desired: [String?],
         currentName: String,
+        protectedSlot: Int? = nil,
         preferredPort: String? = nil,
         expectedHardwareID: String? = nil
     ) -> Result<WifiPresetSnapshot, ConfigFailure> {
@@ -596,7 +597,8 @@ enum WifiConfigUI {
         case .failure(let failure): return .failure(failure)
         }
         return syncWifiPresets(
-            desired, credentials: credentials, port: port)
+            desired, credentials: credentials, port: port,
+            protectedSlot: protectedSlot)
     }
 
     /// Set a panel's OTA password over USB. The panel restarts on success -

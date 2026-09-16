@@ -161,8 +161,15 @@ extension PanelManager {
         }.value
     }
 
+    /// Apply an explicit slot collection from the preset sheet.
+    ///
+    /// `protectedSlot` carries the slot the display is currently joined
+    /// through. It is passed rather than inferred so that the sheet's own view
+    /// of which slot is active - the one it shows as Active and refuses to let
+    /// the user edit - is the same one the write refuses to touch.
     func syncWifiPresets(
         _ desired: [String?],
+        protectedSlot: Int? = nil,
         for serviceName: String
     ) async -> Result<WifiPresetSnapshot, WifiConfigUI.ConfigFailure> {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
@@ -173,13 +180,21 @@ extension PanelManager {
         let currentName = panel.displayName
         let preferredPort = panel.usbPort
         let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
-        return await Task.detached(priority: .userInitiated) {
+        let result = await Task.detached(priority: .userInitiated) {
             WifiConfigUI.syncWifiPresets(
                 desired,
                 currentName: currentName,
+                protectedSlot: protectedSlot,
                 preferredPort: preferredPort,
                 expectedHardwareID: expectedHardwareID)
         }.value
+        // A hand-edited collection is now what the board holds, which is not
+        // what the automatic sync last recorded. Forget the signature so the
+        // next verified probe reconciles the board with the saved collection.
+        if let hardwareID = stableHardwareID(of: panel) {
+            forgetWifiPresetSync(hardwareID: hardwareID)
+        }
+        return result
     }
 
     func configureUSB(preferredSSID: String? = nil) {

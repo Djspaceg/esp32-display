@@ -894,7 +894,10 @@ private struct PanelDetailView: View {
         } footer: {
             Text("WiFi credentials are stored in your login Keychain and applied "
                 + "to this physical display over its current USB connection. "
-                + "Device presets can be selected later from the signal screen.")
+                + "Saved networks are copied to the display automatically "
+                + "whenever it is connected by USB, in alphabetical order. "
+                + "Only the first 10 access points are selectable from the "
+                + "device.")
         }
     }
 
