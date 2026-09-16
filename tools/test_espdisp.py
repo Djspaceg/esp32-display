@@ -4930,6 +4930,551 @@ def test_canonical_usb_flash_path():
                 "%s raises Fail rather than KeyError" % label)
 
 
+def _partition_entry(label, part_type, subtype, address, size):
+    return struct.pack(
+        "<HBBII16sI", 0x50AA, part_type, subtype, address, size,
+        label.encode("ascii").ljust(16, b"\0"), 0)
+
+
+# A real C6 table, because the build-and-flash path verifies the partition
+# payload it is about to write rather than trusting the manifest beside it. C6 is
+# the family with no WAD, so this is the smallest honest fixture.
+C6_PARTITION_TABLE = b"".join([
+    _partition_entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
+    _partition_entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
+    _partition_entry("app0", 0x00, 0x10, 0x10000, 0x1F0000),
+    _partition_entry("app1", 0x00, 0x11, 0x200000, 0x1F0000),
+]) + b"\xff" * 32
+
+
+def fresh_c6_bundle(app=b"\xe9c6 working-tree app"):
+    """The bytes a `flash --build` of the C6 family would leave on disk."""
+    family = espdisp.FAMILIES["c6"]
+    roles = {
+        espdisp.FLASH_ROLE_BOOTLOADER: b"\xe9c6 bootloader\n",
+        espdisp.FLASH_ROLE_PARTITIONS: C6_PARTITION_TABLE,
+        espdisp.FLASH_ROLE_BOOT_APP0: b"ota c6\n",
+    }
+    addresses = {
+        espdisp.FLASH_ROLE_BOOTLOADER: 0x0,
+        espdisp.FLASH_ROLE_PARTITIONS: 0x8000,
+        espdisp.FLASH_ROLE_BOOT_APP0: 0xE000,
+    }
+    parts = [
+        {
+            "role": role,
+            "address": addresses[role],
+            "filename": "%s.bin" % role,
+            "bytes": len(roles[role]),
+            "sha256": espdisp.sha256_hex(roles[role]),
+        }
+        for role in espdisp.REQUIRED_FLASH_ROLES
+    ]
+    image = {
+        "board": "c6",
+        "targets": ["c6"],
+        "chip": family.chip,
+        "profiles": list(family.profiles),
+        "flash_sizes": list(family.flash_sizes),
+        "partition": family.partition_scheme,
+        "fqbn": family.fqbn,
+        "filename": "display_stream.ino.bin",
+        "bytes": len(app),
+        "sha256": espdisp.sha256_hex(app),
+        "app_address": 0x10000,
+        "flash_parts": parts,
+    }
+    manifest = espdisp.bundle_manifest(
+        "1.5.0", 999, [image], "2026-01-02T03:04:05Z",
+        release_notes=GENERIC_RELEASE_NOTES,
+        source_commit="b" * 40, source_dirty=True)
+    return app, espdisp.pack_bundle(manifest, {"c6": app}, {"c6": roles})
+
+
+def test_flash_build_writes_one_dev_family():
+    """`flash --build` is the single step from a working-tree edit to a board.
+
+    Three things are worth pinning, and none of them need hardware: it builds one
+    family and only one, what it retains lands in the development store and never
+    in the committed release store, and it re-reads the attached board after the
+    build and refuses to write an image that board disagrees with.
+    """
+    family = espdisp.FAMILIES["c6"]
+    app, data = fresh_c6_bundle()
+    build = espdisp.FirmwareBuild(999, ".gabcdef0")
+    filename = "espdisp-c6-1.5.0+999.gabcdef0.espdispfw"
+
+    # -- one family per invocation, the same contract `bundle` already enforces.
+    check_fails(
+        lambda: espdisp.build_dev_bundle(["c6", "s3"]),
+        "bundle requires exactly one --family",
+        "a build-and-flash cannot combine two families")
+    check_fails(
+        lambda: espdisp.build_dev_bundle([]),
+        "bundle requires exactly one --family",
+        "a build-and-flash needs a family to build")
+    parsed = espdisp.build_parser().parse_args(
+        ["flash", "--build", "--family", "c6", "--family", "s3"])
+    check(
+        isinstance(parsed.family, str),
+        "flash carries exactly one family per invocation, never a list")
+
+    # -- the retained artifact goes to firmware-dev.
+    def fake_bundle(args):
+        bundle_calls.append(args)
+        espdisp.write_file_atomically(args.output, data)
+        return 0
+
+    def record_command(command, cwd=None, redact=None):
+        captured.append(command)
+        return []
+
+    port = espdisp.PortInfo("/dev/cu.usbmodem1", ["c6"], "C6 dev board")
+    with tempfile.TemporaryDirectory() as dev_root:
+        bundle_calls = []
+        captured = []
+        args = argparse.Namespace(
+            port="/dev/cu.usbmodem1", family="c6", profile=None,
+            build=True, output_root=None, full_write=False)
+        # The ordinary case: only the application changed, so only the
+        # application is written.
+        with unittest.mock.patch.object(espdisp, "DEV_ROOT", dev_root), \
+             unittest.mock.patch.object(
+                 espdisp, "git_firmware_build", return_value=build), \
+             unittest.mock.patch.object(
+                 espdisp, "sketch_fw_version_declaration",
+                 return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle", side_effect=fake_bundle), \
+             unittest.mock.patch.object(
+                 espdisp, "resolve_port", return_value=port), \
+             unittest.mock.patch.object(
+                 espdisp, "probe_chip", return_value="esp32c6"), \
+             unittest.mock.patch.object(
+                 espdisp, "esptool_path", return_value="/tools/esptool"), \
+             unittest.mock.patch.object(
+                 espdisp, "verify_flash_subcommand", return_value="verify-flash"), \
+             unittest.mock.patch.object(
+                 espdisp, "part_matches_device",
+                 side_effect=lambda _f, _p, _s, address, _b: address != 0x10000), \
+             unittest.mock.patch.object(
+                 espdisp, "run_streaming", side_effect=record_command), \
+             unittest.mock.patch("sys.stdout", io.StringIO()) as out:
+            check_equal(
+                espdisp.cmd_flash(args), 0,
+                "flash --build builds one family and writes that build")
+        report = out.getvalue()
+
+        check_equal(
+            [(call.family, call.shipping, call.firmware_build)
+             for call in bundle_calls],
+            [(["c6"], False, build)],
+            "flash --build asks for exactly one non-shipping family bundle")
+        artifact = bundle_calls[0].output
+        check_equal(
+            artifact, os.path.join(dev_root, "c6", filename),
+            "the retained artifact lands under firmware-dev, keyed by family")
+        check(
+            os.path.isfile(artifact),
+            "flash --build leaves the artifact on disk rather than discarding it")
+        check(
+            not os.path.realpath(artifact).startswith(
+                os.path.realpath(espdisp.RELEASE_ROOT) + os.sep),
+            "flash --build never writes into firmware-releases")
+
+        check_equal(len(captured), 1, "one esptool write performs the USB flash")
+        check_equal(
+            captured[0][:8],
+            ["/tools/esptool", "--chip", "esp32c6", "--port",
+             "/dev/cu.usbmodem1", "--baud", family.upload_speed, "write_flash"],
+            "the fresh build is written by the same esptool path as a release")
+        check_equal(
+            captured[0][8::2], ["0x10000"],
+            "an unchanged board takes the app alone, at the bundle's address")
+        check(
+            "erase_flash" not in captured[0] and "erase-flash" not in captured[0],
+            "flash --build never requests a whole-chip erase")
+        check(
+            filename in report and "Flashed development c6 build 1.5.0+999" in report,
+            "flash --build reports the identity and artifact it wrote")
+        check(
+            "Verified before writing" in report and "esp32c6" in report,
+            "flash --build reports its own verification result")
+        check(
+            report.count(espdisp.FLASH_SKIP_PROVEN) == 3
+            and "skipped bootloader" in report
+            and "skipped partitions" in report
+            and "skipped boot_app0" in report,
+            "flash --build names every skipped part and the proof for it")
+        check(
+            "wrote   app" in report and "0x10000" in report,
+            "flash --build names the part it did write and where")
+
+    # -- firmware-releases stays refused, through the guard release already uses.
+    with unittest.mock.patch.object(
+            espdisp, "git_firmware_build", return_value=build), \
+         unittest.mock.patch.object(
+             espdisp, "cmd_bundle",
+             side_effect=AssertionError("release-store refusal built firmware")):
+        check_fails(
+            lambda: espdisp.build_dev_bundle(
+                ["c6"], os.path.join(espdisp.RELEASE_ROOT, "c6")),
+            "build-numbered firmware belongs in firmware-dev, not "
+            "firmware-releases",
+            "a build-and-flash cannot retain its artifact in the release store")
+    check_fails(
+        lambda: espdisp.cmd_flash(argparse.Namespace(
+            port=None, family="c6", profile=None, build=False,
+            output_root="/tmp/elsewhere", full_write=False)),
+        "--output-root only applies to `flash --build`",
+        "an output root without --build is refused rather than ignored")
+    check_fails(
+        lambda: espdisp.cmd_flash(argparse.Namespace(
+            port=None, family="c6", profile=None, build=False,
+            output_root=None, full_write=True)),
+        "--full-write only applies to `flash --build`",
+        "a full-write request against the canonical flash is refused, not ignored")
+
+    # -- the attached board is read again after the build, and disagreement is
+    #    refused before anything is written.
+    swapped = espdisp.PortInfo("/dev/cu.usbmodem1", ["s3"], "S3 board")
+    with tempfile.TemporaryDirectory() as dev_root:
+        bundle_calls = []
+        with unittest.mock.patch.object(espdisp, "DEV_ROOT", dev_root), \
+             unittest.mock.patch.object(
+                 espdisp, "git_firmware_build", return_value=build), \
+             unittest.mock.patch.object(
+                 espdisp, "sketch_fw_version_declaration",
+                 return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle", side_effect=fake_bundle), \
+             unittest.mock.patch.object(
+                 espdisp, "resolve_port", side_effect=[port, swapped]), \
+             unittest.mock.patch.object(
+                 espdisp, "run_streaming",
+                 side_effect=AssertionError("mismatched board was written")), \
+             unittest.mock.patch("sys.stdout", io.StringIO()):
+            check_fails(
+                lambda: espdisp.cmd_flash(argparse.Namespace(
+                    port="/dev/cu.usbmodem1", family="c6", profile=None,
+                    build=True, output_root=None, full_write=False)),
+                "--family c6 contradicts /dev/cu.usbmodem1, which reports "
+                "family s3",
+                "a board swapped during the build is refused, not written")
+        check_equal(
+            len(bundle_calls), 1,
+            "the mismatch is caught after the build and before the write")
+
+    unlabelled = espdisp.PortInfo("/dev/cu.usbmodem1", [], "unknown board")
+    with tempfile.TemporaryDirectory() as dev_root:
+        bundle_calls = []
+        with unittest.mock.patch.object(espdisp, "DEV_ROOT", dev_root), \
+             unittest.mock.patch.object(
+                 espdisp, "git_firmware_build", return_value=build), \
+             unittest.mock.patch.object(
+                 espdisp, "sketch_fw_version_declaration",
+                 return_value=("1.5.0", 21)), \
+             unittest.mock.patch.object(
+                 espdisp, "cmd_bundle", side_effect=fake_bundle), \
+             unittest.mock.patch.object(
+                 espdisp, "resolve_port", return_value=unlabelled), \
+             unittest.mock.patch.object(
+                 espdisp, "probe_chip", return_value="esp32s3"), \
+             unittest.mock.patch.object(
+                 espdisp, "run_streaming",
+                 side_effect=AssertionError("wrong chip was written")), \
+             unittest.mock.patch("sys.stdout", io.StringIO()):
+            check_fails(
+                lambda: espdisp.cmd_flash(argparse.Namespace(
+                    port="/dev/cu.usbmodem1", family="c6", profile=None,
+                    build=True, output_root=None, full_write=False)),
+                "reports chip esp32s3, but the c6 image needs esp32c6",
+                "a re-probed chip that disagrees with the image is refused")
+
+    # -- and the artifact itself is re-verified against the family it will reach.
+    manifest, payloads, flash_payloads = espdisp.unpack_bundle(data)
+    check_equal(
+        espdisp.verify_bundle_family_identity(
+            family, "fresh.espdispfw", manifest, payloads, flash_payloads),
+        manifest["images"][0],
+        "a matching fresh build verifies and yields its single image")
+    wrong_chip = copy.deepcopy(manifest)
+    wrong_chip["images"][0]["chip"] = "esp32s3"
+    check_fails(
+        lambda: espdisp.verify_bundle_family_identity(
+            family, "fresh.espdispfw", wrong_chip, payloads, flash_payloads),
+        "bundle family compatibility metadata does not match its payload",
+        "a built image whose chip disagrees with the board is refused")
+    check_fails(
+        lambda: espdisp.verify_bundle_family_identity(
+            espdisp.FAMILIES["s3"], "fresh.espdispfw", manifest, payloads,
+            flash_payloads),
+        "current bundles must contain exactly one firmware family",
+        "a c6 artifact cannot be written to a board resolved as s3")
+    check_fails(
+        lambda: espdisp.verify_bundle_family_identity(
+            family, "fresh.espdispfw", manifest, payloads,
+            {"c6": {role: blob for role, blob in flash_payloads["c6"].items()
+                    if role != espdisp.FLASH_ROLE_PARTITIONS}}),
+        "fresh.espdispfw carries no partition table",
+        "a built artifact with no partition table is refused before the write")
+
+
+def test_differential_flash_skip_decision():
+    """A part is skipped only on proof, and a layout change forfeits all proof.
+
+    The measured cost of the old behaviour was the 4,196,020-byte WAD rewritten
+    at 1313 kbit/s when only the application had changed, so what matters here is
+    which parts the plan keeps, and that every skip has evidence behind it.
+    """
+    family = espdisp.FAMILIES["s3"]
+    app = b"\xe9s3 app"
+    wad = b"IWAD" + b"\0" * 64
+    writes = [
+        (0x0, espdisp.FLASH_ROLE_BOOTLOADER, b"\xe9boot"),
+        (0x8000, espdisp.FLASH_ROLE_PARTITIONS, C6_PARTITION_TABLE),
+        (0xE000, espdisp.FLASH_ROLE_BOOT_APP0, b"ota"),
+        (0x10000, "app", app),
+        (0x3FF000, "doom_wad", wad),
+    ]
+
+    def plan(matches, full_write=False, subcommand="verify-flash",
+             expect_no_probe=False):
+        """Run the decision against a device whose regions match `matches`."""
+        probed = []
+
+        def fake_match(_family, _port, _sub, address, payload):
+            probed.append(address)
+            return matches(address, payload)
+
+        capability = (
+            {"side_effect": AssertionError("the device was consulted at all")}
+            if expect_no_probe else {"return_value": subcommand}
+        )
+        with unittest.mock.patch.object(
+                espdisp, "verify_flash_subcommand", **capability), \
+             unittest.mock.patch.object(
+                 espdisp, "part_matches_device", side_effect=fake_match):
+            kept, skipped, reason = espdisp.differential_flash_plan(
+                family, "/dev/cu.usbmodem1", writes, full_write=full_write)
+        return kept, skipped, reason, probed
+
+    # -- identical parts skipped, the differing one written.
+    kept, skipped, reason, probed = plan(lambda address, _p: address != 0x10000)
+    check_equal(
+        [role for _, role, _ in kept], ["app"],
+        "only the app changed, so the app alone is written")
+    check_equal(
+        skipped,
+        [(espdisp.FLASH_ROLE_BOOTLOADER, espdisp.FLASH_SKIP_PROVEN),
+         (espdisp.FLASH_ROLE_PARTITIONS, espdisp.FLASH_SKIP_PROVEN),
+         (espdisp.FLASH_ROLE_BOOT_APP0, espdisp.FLASH_SKIP_PROVEN),
+         ("doom_wad", espdisp.FLASH_SKIP_PROVEN)],
+        "every skipped part is named with the proof that allowed the skip")
+    check_equal(reason, None, "an ordinary differential flash has no full-write reason")
+    check_equal(
+        probed[0], 0x8000,
+        "the partition table is proven first, before any other part is trusted")
+    check_equal(
+        sorted(set(probed)), [0x0, 0x8000, 0xE000, 0x10000, 0x3FF000],
+        "every part is checked against the device rather than assumed")
+
+    # -- a differing part is written even when everything around it matches.
+    kept, skipped, reason, _ = plan(lambda address, _p: address != 0x3FF000)
+    check_equal(
+        [role for _, role, _ in kept], ["doom_wad"],
+        "a WAD that does not match the device is written, not skipped")
+    check(
+        (espdisp.FLASH_ROLE_PARTITIONS, espdisp.FLASH_SKIP_PROVEN) in skipped
+        and reason is None,
+        "one differing part does not force the rest to be rewritten")
+
+    # -- nothing differs at all: nothing is written.
+    kept, skipped, reason, _ = plan(lambda _a, _p: True)
+    check_equal(kept, [], "a board already holding this build takes no write")
+    check_equal(
+        len(skipped), len(writes),
+        "and every part is reported as skipped on proof")
+
+    # -- a differing partition table changes the layout, so nothing may be skipped.
+    kept, skipped, reason, probed = plan(lambda address, _p: address != 0x8000)
+    check_equal(
+        kept, writes,
+        "a differing partition table forces every part to be written")
+    check_equal(
+        skipped, [],
+        "a layout change means no part is skipped on the strength of the old one")
+    check_equal(
+        reason, espdisp.FLASH_FULL_WRITE_LAYOUT,
+        "the full write states that the flash layout is changing")
+    check_equal(
+        probed, [0x8000],
+        "once the layout is known to differ, no other region is consulted")
+
+    # -- the override is honoured, and costs no device round trips at all.
+    kept, skipped, reason, probed = plan(
+        lambda _a, _p: True, full_write=True, expect_no_probe=True)
+    check_equal(kept, writes, "--full-write writes every part")
+    check_equal(skipped, [], "--full-write skips nothing")
+    check_equal(
+        reason, espdisp.FLASH_FULL_WRITE_FORCED,
+        "--full-write says that it was asked for rather than inferred")
+    check_equal(
+        probed, [],
+        "--full-write never asks the device what it holds")
+
+    # -- an esptool that cannot verify proves nothing, so everything is written.
+    kept, skipped, reason, probed = plan(lambda _a, _p: True, subcommand=None)
+    check_equal(
+        (kept, skipped, reason, probed),
+        (writes, [], espdisp.FLASH_FULL_WRITE_NO_VERIFY, []),
+        "without a verify subcommand nothing is skipped on an assumption")
+
+    # -- a bundle with no single partition-table write is refused, not guessed at.
+    with unittest.mock.patch.object(
+            espdisp, "verify_flash_subcommand", return_value="verify-flash"), \
+         unittest.mock.patch.object(
+             espdisp, "part_matches_device",
+             side_effect=AssertionError("layout-less plan probed the device")):
+        check_fails(
+            lambda: espdisp.differential_flash_plan(
+                family, "/dev/cu.usbmodem1",
+                [write for write in writes
+                 if write[1] != espdisp.FLASH_ROLE_PARTITIONS]),
+            "a differential flash needs exactly one partition-table write",
+            "a plan with no partition table cannot decide what to skip")
+
+    # -- and the writer honours the plan: only kept parts reach esptool.
+    image = {
+        "app_address": 0x10000,
+        "flash_parts": [
+            {"role": role, "address": address}
+            for address, role, _ in writes if role != "app"
+        ],
+    }
+    roles = {role: payload for _, role, payload in writes if role != "app"}
+    captured = []
+    with unittest.mock.patch.object(
+            espdisp, "esptool_path", return_value="/tools/esptool"), \
+         unittest.mock.patch.object(
+             espdisp, "verify_flash_subcommand", return_value="verify-flash"), \
+         unittest.mock.patch.object(
+             espdisp, "part_matches_device",
+             side_effect=lambda _f, _p, _s, address, _b: address != 0x10000), \
+         unittest.mock.patch.object(
+             espdisp, "run_streaming",
+             side_effect=lambda command, cwd=None, redact=None: captured.append(
+                 command)):
+        written, skipped, reason = espdisp.write_bundle_over_usb(
+            family, "/dev/cu.usbmodem1", image, app, roles, differential=True)
+    check_equal(
+        [role for _, role, _ in written], ["app"],
+        "the writer writes only what the plan kept")
+    check_equal(
+        captured[0][8::2], ["0x10000"],
+        "and hands esptool that part alone")
+    check_equal(
+        len(skipped), 4,
+        "while still reporting the four parts it proved it could skip")
+
+    captured = []
+    with unittest.mock.patch.object(
+            espdisp, "esptool_path", return_value="/tools/esptool"), \
+         unittest.mock.patch.object(
+             espdisp, "verify_flash_subcommand", return_value="verify-flash"), \
+         unittest.mock.patch.object(
+             espdisp, "part_matches_device", return_value=True), \
+         unittest.mock.patch.object(
+             espdisp, "run_streaming",
+             side_effect=AssertionError("nothing to write still invoked esptool")):
+        written, skipped, reason = espdisp.write_bundle_over_usb(
+            family, "/dev/cu.usbmodem1", image, app, roles, differential=True)
+    check_equal(
+        (written, len(skipped), reason), ([], 5, None),
+        "an entirely unchanged board is not written to at all")
+
+    # -- the canonical recovery flash stays unconditional.
+    captured = []
+    with unittest.mock.patch.object(
+            espdisp, "esptool_path", return_value="/tools/esptool"), \
+         unittest.mock.patch.object(
+             espdisp, "verify_flash_subcommand",
+             side_effect=AssertionError("canonical flash consulted the device")), \
+         unittest.mock.patch.object(
+             espdisp, "run_streaming",
+             side_effect=lambda command, cwd=None, redact=None: captured.append(
+                 command)):
+        written, skipped, reason = espdisp.write_bundle_over_usb(
+            family, "/dev/cu.usbmodem1", image, app, roles)
+    check_equal(
+        captured[0][8::2], ["0x0", "0x8000", "0xE000", "0x10000", "0x3FF000"],
+        "the canonical release flash still writes every part unconditionally")
+    check_equal(
+        (len(written), skipped, reason), (5, [], None),
+        "and reports no skips, because it made no skip decision")
+
+
+def test_part_match_proof_is_exit_code_only():
+    """Only a clean esptool exit counts as proof that a region is identical."""
+    family = espdisp.FAMILIES["c6"]
+    seen = []
+
+    def fake_capture(command, timeout=60.0):
+        seen.append((list(command), timeout))
+        return subprocess.CompletedProcess(command, exit_code, "", "")
+
+    for exit_code, expected, what in (
+            (0, True, "a clean exit proves the region is identical"),
+            (1, False, "a mismatch is not proof and the part is written"),
+            (2, False, "an esptool that could not connect proves nothing")):
+        seen = []
+        with unittest.mock.patch.object(
+                espdisp, "esptool_path", return_value="/tools/esptool"), \
+             unittest.mock.patch.object(
+                 espdisp, "run_capture", side_effect=fake_capture):
+            check_equal(
+                espdisp.part_matches_device(
+                    family, "/dev/cu.usbmodem1", "verify-flash",
+                    0x10000, b"payload"),
+                expected, what)
+        command, timeout = seen[0]
+        check_equal(
+            command[:8],
+            ["/tools/esptool", "--chip", "esp32c6", "--port",
+             "/dev/cu.usbmodem1", "--baud", family.upload_speed, "verify-flash"],
+            "the verify runs against the same chip, port and baud as the write")
+        check_equal(
+            command[8], "0x10000",
+            "and against the address the bundle declares for that part")
+        check_equal(
+            timeout, espdisp.VERIFY_FLASH_TIMEOUT,
+            "a verify is given its own timeout, not the default capture one")
+
+    # The subcommand is probed with --help, which involves no serial port.
+    probes = []
+
+    def fake_help(command, timeout=60.0):
+        probes.append(command)
+        return subprocess.CompletedProcess(
+            command, 0 if command[1] == available else 1, "", "")
+
+    for available, expected in (
+            ("verify-flash", "verify-flash"),
+            ("verify_flash", "verify_flash"),
+            (None, None)):
+        probes = []
+        with unittest.mock.patch.object(
+                espdisp, "esptool_path", return_value="/tools/esptool"), \
+             unittest.mock.patch.object(
+                 espdisp, "run_capture", side_effect=fake_help):
+            check_equal(
+                espdisp.verify_flash_subcommand(), expected,
+                "the verify subcommand this esptool has is %r" % expected)
+        check(
+            all("--help" in probe and "--port" not in probe for probe in probes),
+            "the capability probe never opens a serial port")
+
+
 class BootstrapFakeStream(io.StringIO):
     def __init__(self, tty=True):
         super().__init__()
@@ -6037,6 +6582,9 @@ def main():
     test_dev_bundle_output_stays_outside_release_store()
     test_release_catalog_ignores_build_numbered_artifacts_before_reading()
     test_canonical_usb_flash_path()
+    test_flash_build_writes_one_dev_family()
+    test_differential_flash_skip_decision()
+    test_part_match_proof_is_exit_code_only()
     test_doom_partition_contracts()
     test_discovery_command()
     test_password_policy()

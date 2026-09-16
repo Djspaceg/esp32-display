@@ -3717,6 +3717,159 @@ def canonical_family_value(values: dict, family: Family):
     return values[family.key]
 
 
+def esptool_invocation(
+    family: Family, port_address: str, subcommand: str
+) -> List[str]:
+    """One esptool command line for this family and port, chip pinned."""
+    tool = esptool_path()
+    if not tool:
+        raise Fail("esptool not found (install the esp32 Arduino core)")
+    command = [tool]
+    if tool.endswith(".py"):
+        command = [sys.executable, tool]
+    command.extend([
+        "--chip", family.chip,
+        "--port", port_address,
+        "--baud", family.upload_speed,
+        subcommand,
+    ])
+    return command
+
+
+# Skipping a part is only ever allowed on proof, so these are the three things
+# the tool can honestly say about a part it did not write, and the two reasons it
+# can give for writing all of them.
+FLASH_SKIP_PROVEN = "byte-identical on the device (esptool verify)"
+FLASH_FULL_WRITE_FORCED = "--full-write was requested"
+FLASH_FULL_WRITE_LAYOUT = (
+    "the partition table on the device differs, so the flash layout is changing "
+    "and no other part can be trusted to still be where it was")
+FLASH_FULL_WRITE_NO_VERIFY = (
+    "this esptool has no verify subcommand, so nothing could be proven identical")
+# A verify is a connect plus a digest the device computes over the region, not a
+# read-back, so this is generous for a connect and mean next to a 4 MiB write.
+VERIFY_FLASH_TIMEOUT = 180.0
+
+
+def verify_flash_subcommand() -> Optional[str]:
+    """Which verify subcommand this esptool has, probed without touching a board.
+
+    esptool 5 renamed the underscore commands and only keeps them as deprecated
+    aliases; esptool 4 has the underscore form alone. `--help` answers this with
+    no serial port involved, so the differential path never spends a board
+    connect - or a wrong-guess failure that would look like a difference -
+    finding out which name to use.
+    """
+    tool = esptool_path()
+    if not tool:
+        raise Fail("esptool not found (install the esp32 Arduino core)")
+    prefix = [sys.executable, tool] if tool.endswith(".py") else [tool]
+    for subcommand in ("verify-flash", "verify_flash"):
+        probe = run_capture(prefix + [subcommand, "--help"], timeout=60.0)
+        if probe.returncode == 0:
+            return subcommand
+    return None
+
+
+def part_matches_device(
+    family: Family, port_address: str, subcommand: str,
+    address: int, payload: bytes,
+) -> bool:
+    """Whether one flash region already holds exactly these bytes.
+
+    Only a clean exit counts as proof. An esptool that could not connect, does
+    not understand the region, or reports any difference all mean "not proven
+    identical", and the caller writes the part. Nothing here decides on the
+    grounds that a part *should* be unchanged.
+    """
+    directory = tempfile.mkdtemp(prefix="espdisp-verify-%s-" % family.key)
+    try:
+        path = os.path.join(directory, "region.bin")
+        with open(path, "wb") as out:
+            out.write(payload)
+        command = esptool_invocation(family, port_address, subcommand)
+        command.extend(["0x%X" % address, path])
+        return run_capture(command, timeout=VERIFY_FLASH_TIMEOUT).returncode == 0
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def differential_flash_plan(
+    family: Family, port_address: str,
+    writes: List[Tuple[int, str, bytes]], full_write: bool = False,
+) -> Tuple[List[Tuple[int, str, bytes]], List[Tuple[str, str]], Optional[str]]:
+    """Split a bundle's writes into what must be written and what provably need not be.
+
+    Returns (writes, skipped, full_write_reason). The application is the part
+    that normally changes, so the ordinary outcome is that it is the only thing
+    written and the 4 MiB WAD, the bootloader, the partition table and the boot
+    selector are all skipped on proof.
+
+    The partition table is checked first and gates everything else: if it
+    differs, the flash layout is changing, so every other part's address means
+    something different from what it meant when the device was last written and
+    no previous-layout evidence may be used to skip anything.
+    """
+    if full_write:
+        return list(writes), [], FLASH_FULL_WRITE_FORCED
+    subcommand = verify_flash_subcommand()
+    if subcommand is None:
+        return list(writes), [], FLASH_FULL_WRITE_NO_VERIFY
+    layout = [write for write in writes if write[1] == FLASH_ROLE_PARTITIONS]
+    if len(layout) != 1:
+        raise Fail(
+            "a differential flash needs exactly one partition-table write, found %d"
+            % len(layout))
+    if not part_matches_device(
+            family, port_address, subcommand, layout[0][0], layout[0][2]):
+        return list(writes), [], FLASH_FULL_WRITE_LAYOUT
+    kept: List[Tuple[int, str, bytes]] = []
+    skipped: List[Tuple[str, str]] = []
+    for address, role, payload in writes:
+        if role == FLASH_ROLE_PARTITIONS or part_matches_device(
+                family, port_address, subcommand, address, payload):
+            skipped.append((role, FLASH_SKIP_PROVEN))
+        else:
+            kept.append((address, role, payload))
+    return kept, skipped, None
+
+
+def write_bundle_over_usb(
+    family: Family, port_address: str, image: dict, app: bytes,
+    flash_payloads: Dict[str, bytes],
+    differential: bool = False, full_write: bool = False,
+) -> Tuple[List[Tuple[int, str, bytes]], List[Tuple[str, str]], Optional[str]]:
+    """Write one verified bundle's segments over USB, in bundle-declared order.
+
+    Every USB write in this tool comes through here, so a canonical release and
+    a freshly built development artifact reach a board by the same command, the
+    same address list, and the same never-erase-the-whole-chip behaviour. The
+    canonical recovery flash stays unconditional; only the build-then-flash path
+    asks the device what it already holds.
+    """
+    writes = bundle_flash_plan(family, image, app, flash_payloads)
+    skipped: List[Tuple[str, str]] = []
+    full_write_reason: Optional[str] = None
+    if differential:
+        writes, skipped, full_write_reason = differential_flash_plan(
+            family, port_address, writes, full_write=full_write)
+    if not writes:
+        return writes, skipped, full_write_reason
+
+    command = esptool_invocation(family, port_address, "write_flash")
+    directory = tempfile.mkdtemp(prefix="espdisp-flash-%s-" % family.key)
+    try:
+        for address, role, payload in writes:
+            path = os.path.join(directory, "%s.bin" % role)
+            with open(path, "wb") as out:
+                out.write(payload)
+            command.extend(["0x%X" % address, path])
+        run_streaming(command)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    return writes, skipped, full_write_reason
+
+
 def flash_canonical_release(
     family: Family, port_address: str, catalog_path: Optional[str] = None
 ) -> Tuple[str, str]:
@@ -3734,42 +3887,144 @@ def flash_canonical_release(
             % family.key)
     manifest, payloads, flash_payloads = unpack_bundle(data)
     image = manifest["images"][0]
-    writes = bundle_flash_plan(
-        family, image,
+    write_bundle_over_usb(
+        family, port_address, image,
         canonical_family_value(payloads, family),
         canonical_family_value(flash_payloads, family))
-
-    tool = esptool_path()
-    if not tool:
-        raise Fail("esptool not found (install the esp32 Arduino core)")
-    command = [tool]
-    if tool.endswith(".py"):
-        command = [sys.executable, tool]
-    command.extend([
-        "--chip", family.chip,
-        "--port", port_address,
-        "--baud", family.upload_speed,
-        "write_flash",
-    ])
-
-    directory = tempfile.mkdtemp(prefix="espdisp-flash-%s-" % family.key)
-    try:
-        for address, role, payload in writes:
-            path = os.path.join(directory, "%s.bin" % role)
-            with open(path, "wb") as out:
-                out.write(payload)
-            command.extend(["0x%X" % address, path])
-        run_streaming(command)
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
     return artifact, manifest["firmware_version"]
 
 
+def build_dev_bundle(
+    requested_families: Optional[List[str]], output_root: Optional[str] = None
+) -> Tuple[str, str]:
+    """Build exactly one family into the development store and retain the artifact.
+
+    `compile` leaves nothing behind, so a one-line descriptor edit used to need a
+    whole three-family `release` before it could reach a board. This keeps the
+    build: same single-family contract as `bundle`, same bundle writer, and the
+    same firmware-releases refusal as `release`, because what it writes is
+    build-numbered and build-numbered firmware belongs in firmware-dev.
+    """
+    key = bundle_family_keys(requested_families)[0]
+    build = git_firmware_build()
+    # Unchanged guard, deliberately reused rather than restated: a build-numbered
+    # artifact inside firmware-releases is refused here before anything is made.
+    root = firmware_output_root(output_root, build)
+    version, version_line = sketch_fw_version_declaration()
+    if parse_semver(version) is None:
+        raise Fail("firmware/display_stream/app_state.cpp:%d: %s" % (
+            version_line, RELEASE_REASON_FW_VERSION % quote_release_value(version)))
+    identity = firmware_identity(version, build.number, build.branch_suffix)
+    directory = os.path.join(root, key)
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(
+        directory, "espdisp-%s-%s%s" % (key, identity, BUNDLE_SUFFIX))
+    cmd_bundle(type("BundleArgs", (), {
+        "family": [key],
+        "output": path,
+        "shipping": False,
+        "firmware_build": build,
+    })())
+    return path, identity
+
+
+def confirm_attached_board(
+    family: Family, requested_port: Optional[str], profile: Optional[str]
+) -> PortInfo:
+    """Re-read the attached board and refuse when it is not what was built for.
+
+    A compile takes minutes, and the board on the other end of the cable at the
+    end of one is not necessarily the board that was there at the start. So the
+    port is enumerated again and the chip is probed again: family and profile
+    through the same `resolve_family` the canonical flash path uses, then the
+    chip esptool itself reports.
+    """
+    port = resolve_port(requested_port)
+    confirmed = resolve_family(family.key, port, profile)
+    if confirmed.key != family.key:
+        raise Fail(
+            "%s now resolves to family %s, not the %s image that was built"
+            % (port.address, confirmed.key, family.key))
+    chip = probe_chip(port.address)
+    if chip is not None and chip != family.chip:
+        raise Fail(
+            "%s reports chip %s, but the %s image needs %s; refusing to write"
+            % (port.address, chip, family.key, family.chip))
+    return port
+
+
+class FlashOutcome(NamedTuple):
+    artifact: str
+    identity: str
+    port: PortInfo
+    written: List[Tuple[int, str, bytes]]
+    skipped: List[Tuple[str, str]]
+    full_write_reason: Optional[str]
+
+
+def flash_fresh_build(
+    family: Family, requested_port: Optional[str], profile: Optional[str],
+    output_root: Optional[str] = None, full_write: bool = False,
+) -> FlashOutcome:
+    """Build one family, then flash exactly that artifact to the attached board."""
+    artifact, identity = build_dev_bundle([family.key], output_root)
+    # Read what actually landed on disk rather than trusting what was just in
+    # memory, and verify it as a stranger's file: this is the same check
+    # `bundle-info` performs, against the family about to be written.
+    data = read_binary(artifact)
+    manifest, payloads, flash_payloads = unpack_bundle(data)
+    image = verify_bundle_family_identity(
+        family, artifact, manifest, payloads, flash_payloads)
+    port = confirm_attached_board(family, requested_port, profile)
+    written, skipped, full_write_reason = write_bundle_over_usb(
+        family, port.address, image,
+        payloads[family.key], flash_payloads[family.key],
+        differential=True, full_write=full_write)
+    return FlashOutcome(
+        artifact, identity, port, written, skipped, full_write_reason)
+
+
+def report_flash_outcome(family: Family, outcome: FlashOutcome) -> None:
+    """Say what was written, what was skipped, and on what evidence."""
+    print(
+        "\nFlashed development %s build %s from %s"
+        % (family.key, outcome.identity, outcome.artifact))
+    if outcome.full_write_reason is not None:
+        print("  every part written: %s" % outcome.full_write_reason)
+    for role, reason in outcome.skipped:
+        print("  skipped %-11s %s" % (role, reason))
+    for address, role, payload in outcome.written:
+        print("  wrote   %-11s 0x%X, %d bytes" % (role, address, len(payload)))
+    if not outcome.written:
+        print("  wrote   nothing; the board already holds every part of this build")
+    print(
+        "Verified before writing: every bundle sha256 matched and the payloads "
+        "are contiguous, the %s partition table matches this repo and the app "
+        "fits its partition, and %s re-read as family %s chip %s."
+        % (family.key, outcome.port.address, family.key, family.chip))
+
+
 def cmd_flash(args) -> int:
+    build_first = bool(getattr(args, "build", False))
+    output_root = getattr(args, "output_root", None)
+    full_write = bool(getattr(args, "full_write", False))
+    if output_root is not None and not build_first:
+        raise Fail("--output-root only applies to `flash --build`")
+    if full_write and not build_first:
+        # Not silently ignored: the canonical recovery flash already writes every
+        # part unconditionally, and a user asking for that here has misread which
+        # path skips anything.
+        raise Fail(
+            "--full-write only applies to `flash --build`; the canonical "
+            "release flash always writes every part")
     port = resolve_port(args.port)
     family = resolve_family(args.family, port, args.profile)
     print("Family: %s (%s) on %s" %
           (family.key, family.fqbn, port.address), flush=True)
+    if build_first:
+        report_flash_outcome(family, flash_fresh_build(
+            family, args.port, args.profile, output_root, full_write))
+        return 0
     artifact, version = flash_canonical_release(family, port.address)
     print(
         "\nFlashed canonical %s release %s from %s"
@@ -4149,29 +4404,47 @@ def cmd_bundle(args) -> int:
     return 0
 
 
+def verify_bundle_family_identity(
+    family: Family, label: str, manifest: dict,
+    payloads: Dict[str, bytes], flash_payloads: Dict[str, Dict[str, bytes]],
+) -> dict:
+    """Check one bundle's identity metadata against the family it claims, and
+    return its single image.
+
+    Shared by `bundle-info` and by the build-then-flash path, so an image can
+    never be written to a board whose family, chip, profile set or partition
+    scheme disagrees with the manifest travelling beside it.
+    """
+    if (len(payloads) != 1 or len(manifest.get("images") or []) != 1 or
+            set(payloads) != {family.key}):
+        raise Fail("current bundles must contain exactly one firmware family")
+    roles = flash_payloads.get(family.key) or {}
+    partition_blob = roles.get(FLASH_ROLE_PARTITIONS)
+    if partition_blob is None:
+        raise Fail("%s carries no partition table" % label)
+    _verify_partition_payload(family, partition_blob)
+    image = manifest["images"][0]
+    if (image.get("targets") != [family.key] or
+            image.get("chip") != family.chip or
+            image.get("profiles") != list(family.profiles) or
+            image.get("flash_sizes") != list(family.flash_sizes) or
+            image.get("partition") != family.partition_scheme):
+        raise Fail("bundle family compatibility metadata does not match its payload")
+    _verify_app_payload(
+        family, partition_blob, image.get("app_address"), image.get("bytes"))
+    _verify_required_doom_flash_payload(
+        family, partition_blob, image, roles)
+    return image
+
+
 def cmd_bundle_info(args) -> int:
     manifest, payloads, flash_payloads = read_bundle(args.path)
     current = sorted(set(payloads).intersection(FAMILIES))
     if manifest.get("format") == BUNDLE_FORMAT_V3 and current:
-        if len(current) != 1 or len(payloads) != 1 or len(manifest.get("images") or []) != 1:
+        if len(current) != 1:
             raise Fail("current bundles must contain exactly one firmware family")
-        family = FAMILIES[current[0]]
-        roles = flash_payloads.get(family.key) or {}
-        partition_blob = roles.get(FLASH_ROLE_PARTITIONS)
-        if partition_blob is None:
-            raise Fail("%s carries no partition table" % args.path)
-        _verify_partition_payload(family, partition_blob)
-        image = manifest["images"][0]
-        if (image.get("targets") != [family.key] or
-                image.get("chip") != family.chip or
-                image.get("profiles") != list(family.profiles) or
-                image.get("flash_sizes") != list(family.flash_sizes) or
-                image.get("partition") != family.partition_scheme):
-            raise Fail("bundle family compatibility metadata does not match its payload")
-        _verify_app_payload(
-            family, partition_blob, image.get("app_address"), image.get("bytes"))
-        _verify_required_doom_flash_payload(
-            family, partition_blob, image, roles)
+        verify_bundle_family_identity(
+            FAMILIES[current[0]], args.path, manifest, payloads, flash_payloads)
     size = os.path.getsize(args.path)
     print("%s" % args.path)
     print("  size:     %d bytes (%.1f MiB)" % (size, size / (1024.0 * 1024.0)))
@@ -4360,7 +4633,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_compile.set_defaults(func=cmd_compile)
 
     p_flash = subs.add_parser(
-        "flash", help="flash one canonical family release over USB")
+        "flash",
+        help="flash one canonical family release over USB, or --build to flash "
+             "the working tree",
+        description="Write one firmware family to an attached board over USB. "
+        "By default the bytes come from the committed canonical release "
+        "catalog. With --build, this builds exactly that one family from the "
+        "working tree first, retains the artifact under firmware-dev, and "
+        "flashes that: one family, one build, no three-family release. It then "
+        "writes only the parts the device does not already hold, proving each "
+        "skip with esptool rather than assuming it. Either way the attached "
+        "board is re-read - family, chip, profile, partition - and a write that "
+        "does not match the image is refused.",
+        epilog="--build writes a build-numbered development artifact, so it\n"
+        "never writes into firmware-releases; use `release --shipping` for\n"
+        "shipping bytes. A differing partition table changes the layout, so it\n"
+        "is always treated as a full write.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p_flash.add_argument(
         "--family", choices=family_choices(),
         help="release family; otherwise derive it from the attached chip")
@@ -4371,6 +4661,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_flash.add_argument(
         "--port", help="serial device (default: the one matching %s)" %
         ", ".join(PORT_GLOBS))
+    p_flash.add_argument(
+        "--build", action="store_true",
+        help="build this one family from the working tree and flash that "
+             "build instead of the canonical release")
+    p_flash.add_argument(
+        "--output-root",
+        help="with --build, where to retain the artifact "
+             "(default firmware-dev; firmware-releases is refused)")
+    p_flash.add_argument(
+        "--full-write", action="store_true",
+        help="with --build, write every part without asking the device what it "
+             "holds; use when the device's contents may not be what they claim")
     p_flash.set_defaults(func=cmd_flash)
 
     p_ota = subs.add_parser(
