@@ -35,6 +35,7 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <esp_attr.h>
 #include <esp_mac.h>
 #include <esp_task_wdt.h>
 #include <mbedtls/base64.h>
@@ -75,6 +76,7 @@
 #include "control_queue.h"
 #include "ota_policy.h"
 #include "chip_identity.h"
+#include "wifi_supervisor.h"
 
 // Doom remains a developer/profile-gated feature inside supported family images.
 #if defined(ESPDISP_DOOM_RUNTIME)
@@ -103,6 +105,35 @@ using namespace bandproto;
 #include "signal_led.h"
 #include "telemetry.h"
 #include "ui_screens.h"
+
+namespace {
+
+constexpr uint32_t WIFI_RESTART_COOKIE = 0x57494649;
+
+struct WifiRestartCookie {
+  uint32_t value;
+  uint32_t inverse;
+};
+
+RTC_NOINIT_ATTR WifiRestartCookie wifiRestartCookie;
+wifisupervisor::Supervisor wifiSupervisor;
+
+bool wifiRestartAlreadyAttempted() {
+  return wifiRestartCookie.value == WIFI_RESTART_COOKIE &&
+         wifiRestartCookie.inverse == ~WIFI_RESTART_COOKIE;
+}
+
+void markWifiRestartAttempted() {
+  wifiRestartCookie.value = WIFI_RESTART_COOKIE;
+  wifiRestartCookie.inverse = ~WIFI_RESTART_COOKIE;
+}
+
+void clearWifiRestartAttempted() {
+  wifiRestartCookie.value = 0;
+  wifiRestartCookie.inverse = 0;
+}
+
+}  // namespace
 
 void setup() {
   // Size the TX ring deliberately, BEFORE begin(), which is the only point it
@@ -134,6 +165,7 @@ void setup() {
   Serial.printf("firmware %s, frame protocol %u, control protocol %u\n",
                 FW_VERSION, deviceproto::FRAME_PROTOCOL_VERSION,
                 deviceproto::CONTROL_PROTOCOL_VERSION);
+  wifiSupervisor.begin(wifiRestartAlreadyAttempted());
   if (!chipidentity::readDeviceId(deviceId)) {
     Serial.println("FATAL: could not read stable chip identity");
     while (true) delay(1000);
@@ -424,7 +456,7 @@ void setup() {
     Serial.println("WiFi: starting ESP-Hosted link to the carrier C6 coprocessor");
   }
   WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);  // rejoin on AP drop (default, but explicit)
+  WiFi.setAutoReconnect(false);  // the loop owns the bounded retry backoff
   WiFi.setSleep(false);         // latency: don't doze between beacons
   WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
   // Bounded wait that keeps servicing serial config: with wrong credentials
@@ -617,10 +649,12 @@ void loop() {
     dmaStallReported = false;
   }
 
-  // WiFi association fully lost for over a minute: autoReconnect isn't
-  // getting us back, reboot for a clean radio state.
-  static uint32_t wifiDownSince = 0;
-  const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  // A missing AP or rejected credential is normal. Keep serial configuration
+  // and the status card alive while retrying with a bounded backoff. A stopped
+  // WiFi layer or a reconnect command the driver rejects is different, so it
+  // retains a one-shot reboot watchdog.
+  const wl_status_t wifiStatus = WiFi.status();
+  const bool wifiConnected = wifiStatus == WL_CONNECTED;
   static bool wifiWasConnected = wifiConnected;
   static uint32_t lastWifiMirrorAttempt = 0;
   if (wifiConnected && !wifiWasConnected) {
@@ -635,7 +669,6 @@ void loop() {
         !mirrorEffectiveWifiToLegacyAfterConnection();
   }
   if (wifiConnected) {
-    wifiDownSince = 0;
     // Deferred OTA start. setup()'s WiFi wait is bounded and falls through on
     // timeout, so a panel that associated a moment later would otherwise have no
     // OTA until its next reboot. Cheap to leave here: the call is a flag test
@@ -643,13 +676,36 @@ void loop() {
     if (startOtaIfConfigured()) {
       addMdnsService();  // caps TXT and _arduino._tcp were announced without OTA
     }
-  } else if (wifiDownSince == 0) {
-    wifiDownSince = millis();
-  } else if (millis() - wifiDownSince > 60000) {
-    Serial.println("WiFi down >60s, restarting");
+  }
+  const wifisupervisor::LinkState wifiLinkState =
+      wifiConnected
+          ? wifisupervisor::LinkState::Connected
+          : wifiStatus == WL_STOPPED || wifiStatus == WL_NO_SHIELD
+                ? wifisupervisor::LinkState::RadioUnresponsive
+                : wifisupervisor::LinkState::NetworkUnavailable;
+  const wifisupervisor::Decision wifiDecision =
+      wifiSupervisor.update(millis(), wifiLinkState);
+  if (wifiDecision.reconnect) {
+    Serial.printf("WiFi down; retrying (next in %lus)\n",
+                  (unsigned long)(wifiDecision.nextRetryMs / 1000));
+    wifiSupervisor.noteReconnectResult(millis(), WiFi.reconnect());
+  }
+  if (wifiDecision.restart) {
+    markWifiRestartAttempted();
+    Serial.println("WiFi radio unavailable >60s; restarting once");
     Serial.flush();
     delay(100);
     ESP.restart();
+    return;
+  }
+
+  static uint32_t lastHealthyFrame = 0;
+  if (statFramesShown != lastHealthyFrame) {
+    lastHealthyFrame = statFramesShown;
+    if (wifiSupervisor.noteHealthyFrame()) {
+      clearWifiRestartAttempted();
+      Serial.println("WiFi recovery watchdog re-armed after a complete frame");
+    }
   }
 
   // Silent-but-associated failsafe: the heal below needs packets flowing to
@@ -713,10 +769,16 @@ void loop() {
       healStartedAt = millis();
     } else if (starving && healStage == 1 &&
                millis() - healStartedAt > 30000) {
-      Serial.println("link heal: reconnect insufficient, restarting");
-      Serial.flush();
-      delay(100);
-      ESP.restart();
+      if (wifiSupervisor.requestRadioRestart()) {
+        markWifiRestartAttempted();
+        Serial.println("link heal: reconnect insufficient, restarting once");
+        Serial.flush();
+        delay(100);
+        ESP.restart();
+        return;
+      }
+      Serial.println("link heal: restart already attempted; staying online");
+      healStage = 2;
     }
   }
 
