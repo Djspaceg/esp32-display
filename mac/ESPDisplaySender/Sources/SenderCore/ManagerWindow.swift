@@ -1133,12 +1133,22 @@ private struct PanelDetailView: View {
             // Not marked destructive: it opens a sheet rather than doing
             // anything, and the sheet has its own confirmation naming the
             // direction - update, reinstall or downgrade.
+            // Deliberately NOT disabled when an update cannot proceed. A greyed
+            // button explains nothing, and a tooltip is invisible until someone
+            // hovers it: the reason is shown as text under the button, and
+            // pressing it reports the same sentence through the outcome alert.
             Button("Update Firmware…") {
                 updateTarget = manager.beginFirmwareUpdate(panel.serviceName)
             }
-            .disabled(!manager.canBeginFirmwareUpdate(panel.serviceName))
             .help(manager.firmwareUpdateUnavailableReason(panel.serviceName)
                 ?? "Update this display over WiFi or a matched USB connection")
+            if let reason =
+                manager.firmwareUpdateUnavailableReason(panel.serviceName) {
+                Text(reason)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Button("Restart Display…", role: .destructive) {
                 confirmRestart = true
             }

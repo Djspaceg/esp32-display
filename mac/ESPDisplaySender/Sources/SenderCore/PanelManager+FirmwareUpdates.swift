@@ -115,44 +115,41 @@ extension PanelManager {
     }
 
     /// Gather every currently safe transport. OTA uses only the live session's
-    /// resolved address; USB uses only one connected device whose reported ID
-    /// matches this panel. A remembered IP or serial path is never enough.
+    /// resolved address. USB uses one connected device on its own terms: it must
+    /// name its family, chip, profile, partition and hardware ID itself, and a
+    /// record with no identity of its own borrows the device's, because that
+    /// reported identity is exactly what esptool is checked against before a
+    /// write. A remembered IP or serial path is never enough.
     func firmwareUpdateReadiness(_ serviceName: String) -> FirmwareUpdateReadiness {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
             return .notReady("This display is not known yet.")
         }
-        guard let hardwareID = stableHardwareID(of: panel) else {
+        let usbCandidate = usbUpdateDevice(for: serviceName)
+        let usbDevice = usbCandidate.flatMap {
+            Self.usbDeviceIdentifiesItselfForFlashing($0) ? $0 : nil
+        }
+        guard let hardwareID = stableHardwareID(of: panel)
+                ?? usbDevice?.hardwareID
+        else {
             return .notReady(
                 "This panel has not reported its hardware ID yet, so an update "
                     + "cannot be tied to the correct device.")
         }
-        let verifiedUSBDevice = verifiedUSBDevice(for: serviceName)
         let version =
-            panel.firmwareVersion
-                ?? verifiedUSBDevice?.serialStatus?.firmwareVersion
+            panel.firmwareVersion ?? usbCandidate?.serialStatus?.firmwareVersion
 
         let otaReason = controlUnavailableReason(serviceName, capability: .ota)
         // Without a running version the sheet cannot honestly classify an OTA
-        // update. A complete USB match can still bootstrap current firmware
-        // because the board identity, target, chip and partition are rechecked
-        // before esptool writes anything.
+        // update. A self-identified USB device can still install any selected
+        // version because the board identity, target, chip and partition are
+        // rechecked before esptool writes anything.
         let address =
             version != nil && otaReason == nil
             ? sessions[serviceName]?.resolvedAddress : nil
-        let usbDevice: WifiConfigUI.USBDeviceOption?
-        if let device = verifiedUSBDevice,
-           device.target?.isEmpty == false,
-           device.board?.isEmpty == false,
-           device.chip?.isEmpty == false,
-           device.partition?.isEmpty == false {
-            usbDevice = device
-        } else {
-            usbDevice = nil
-        }
         let usbGeneration = usbDevice.map { usbPathGeneration($0.path) }
 
         guard address != nil || usbDevice != nil else {
-            if verifiedUSBDevice != nil {
+            if usbCandidate != nil {
                 return .notReady(
                     "USB is connected, but the app cannot verify the board family, "
                         + "chip, profile, and partition safely.")

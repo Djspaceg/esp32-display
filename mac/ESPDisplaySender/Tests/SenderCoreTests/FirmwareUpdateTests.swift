@@ -469,6 +469,190 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertNil(target.address)
     }
 
+    // MARK: - a self-identifying USB board is flashable on its own terms
+
+    /// The board that provoked this rule: attached over USB, saying everything
+    /// about itself, and previously unflashable because nothing had completed a
+    /// CFGSHOW status probe for that path, so `verifiedUSBDevice(for:)` was nil
+    /// and the control went grey. A bootloader write does not need the live
+    /// runtime status a runtime control needs - the identity is read again over
+    /// serial and independently out of esptool before anything is written - so
+    /// the device's own report is enough to offer the update.
+    func testEnumeratedUSBDeviceWithFullSelfReportIsOffered() {
+        var panel = Self.panel(
+            serviceName: "espdisplay",
+            hardwareID: "a4cb8fdb3c24",
+            capabilities: .restart)
+        panel.firmwareVersion = nil
+        let path = "/dev/cu.usbmodem-1"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        // No serialStatus and no verifiedGeneration: enumerated and identified,
+        // never status-probed. This is what the setup sheet's inspection leaves
+        // behind, and what the user's attached 1.85 looked like.
+        manager.noteUSBIdentity(
+            path: path,
+            name: "espdisplay",
+            hardwareID: "a4cb8fdb3c24",
+            target: "s3",
+            board: "st77916",
+            chip: "esp32s3",
+            partition: "universal-8m-doom-ota")
+        XCTAssertNil(
+            manager.verifiedUSBDevice(for: "espdisplay"),
+            "the old rule's precondition must still be absent, or this proves nothing")
+
+        XCTAssertNil(manager.firmwareUpdateUnavailableReason("espdisplay"))
+        guard case .ready(let target) =
+            manager.firmwareUpdateReadiness("espdisplay")
+        else { return XCTFail("a fully self-identified USB board must be flashable") }
+        XCTAssertEqual(target.transports, [.usb])
+        XCTAssertEqual(target.hardwareID, "a4cb8fdb3c24")
+        XCTAssertEqual(target.usbDevice?.path, path)
+        XCTAssertEqual(target.usbPathGeneration, manager.usbPathGeneration(path))
+        XCTAssertFalse(
+            target.usbAllowsLegacyIdentity,
+            "esptool's MAC must still be required to equal the reported ID")
+        XCTAssertTrue(
+            manager.canPerform(.firmwareUpdate, for: "espdisplay"),
+            "the button gate and the readiness rule must agree")
+    }
+
+    /// The version the device reports is what the plan is labelled against, so
+    /// upgrade, reinstall and downgrade stay meaningful for a USB-only board
+    /// whose record never learned a version from discovery.
+    func testUSBOnlyReadinessLabelsAgainstTheVersionTheDeviceReports() throws {
+        var panel = Self.panel(
+            serviceName: "espdisplay",
+            hardwareID: "a4cb8fdb3c24",
+            capabilities: .restart)
+        panel.firmwareVersion = nil
+        let path = "/dev/cu.usbmodem-1"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO name64=ZXNwZGlzcGxheQ== id=a4cb8fdb3c24 rot=0 pwr=on "
+                + "board=st77916 profile=st77916 target=s3 chip=esp32s3 "
+                + "partition=universal-8m-doom-ota fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path, identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        guard case .ready(let target) =
+            manager.firmwareUpdateReadiness("espdisplay")
+        else { return XCTFail("a self-identified USB board must be flashable") }
+        // The device said fw=1.5.0 and nothing else did, so this is the number
+        // every revision in the sheet is compared against.
+        XCTAssertEqual(target.firmwareVersion, "1.5.0")
+        let installed = try XCTUnwrap(target.firmwareVersion)
+        XCTAssertEqual(FirmwareVersion.compare("1.6.0", to: installed), .newer)
+        XCTAssertEqual(FirmwareVersion.compare("1.5.0", to: installed), .same)
+        XCTAssertEqual(FirmwareVersion.compare("1.4.0", to: installed), .older)
+    }
+
+    /// The safety half of the same rule. A device that will not say what it is
+    /// stays refused, and the refusal is a sentence the window can print rather
+    /// than a dead button: `firmwareUpdateUnavailableReason` returns it, and
+    /// pressing the control reports the same words through the outcome alert.
+    func testIncompletelyIdentifiedUSBDeviceIsRefusedWithAVisibleReason() {
+        var panel = Self.panel(
+            serviceName: "espdisplay",
+            hardwareID: "a4cb8fdb3c24",
+            capabilities: .restart)
+        panel.firmwareVersion = nil
+        let path = "/dev/cu.usbmodem-1"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        // Everything but the partition, which is what the pre-write check
+        // compares esptool's flash layout against.
+        manager.noteUSBIdentity(
+            path: path,
+            name: "espdisplay",
+            hardwareID: "a4cb8fdb3c24",
+            target: "s3",
+            board: "st77916",
+            chip: "esp32s3")
+
+        let expected = "USB is connected, but the app cannot verify the board "
+            + "family, chip, profile, and partition safely."
+        XCTAssertEqual(
+            manager.firmwareUpdateReadiness("espdisplay"), .notReady(expected))
+        XCTAssertEqual(
+            manager.firmwareUpdateUnavailableReason("espdisplay"), expected,
+            "the reason must be readable in the UI, not swallowed by a grey button")
+        XCTAssertNil(manager.beginFirmwareUpdate("espdisplay"))
+        XCTAssertEqual(
+            manager.operationOutcome,
+            .failure("Firmware updates unavailable", expected),
+            "pressing the control must report the same sentence")
+        XCTAssertFalse(manager.canPerform(.firmwareUpdate, for: "espdisplay"))
+    }
+
+    /// A board with no identity of its own is never a write target, however
+    /// complete the rest of its report is: there would be nothing for esptool's
+    /// MAC to be checked against.
+    func testUSBDeviceWithoutAHardwareIDIsRefused() {
+        var panel = Self.panel(
+            serviceName: "espdisplay",
+            hardwareID: "a4cb8fdb3c24",
+            capabilities: .restart)
+        panel.firmwareVersion = nil
+        panel.usbPort = "/dev/cu.usbmodem-1"
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-1"])
+        manager.noteUSBIdentity(
+            path: "/dev/cu.usbmodem-1",
+            name: "espdisplay",
+            hardwareID: nil,
+            target: "s3",
+            board: "st77916",
+            chip: "esp32s3",
+            partition: "universal-8m-doom-ota")
+
+        // Not even a candidate: it cannot be tied to this record, and it could
+        // not be offered on its own terms either.
+        XCTAssertNil(manager.usbUpdateDevice(for: "espdisplay"))
+        XCTAssertNil(manager.usbFlashDevice(for: "espdisplay"))
+        XCTAssertNotNil(
+            manager.firmwareUpdateUnavailableReason("espdisplay"),
+            "and the refusal is still a sentence, not a grey button")
+    }
+
+    /// Two boards answering to one identity is ambiguity, not a target.
+    func testTwoUSBDevicesClaimingOneIdentityAreRefused() {
+        var panel = Self.panel(
+            serviceName: "espdisplay",
+            hardwareID: "a4cb8fdb3c24",
+            capabilities: .restart)
+        panel.firmwareVersion = nil
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: ["/dev/cu.usbmodem-1", "/dev/cu.usbmodem-2"])
+        for path in ["/dev/cu.usbmodem-1", "/dev/cu.usbmodem-2"] {
+            manager.noteUSBIdentity(
+                path: path,
+                name: "espdisplay",
+                hardwareID: "a4cb8fdb3c24",
+                target: "s3",
+                board: "st77916",
+                chip: "esp32s3",
+                partition: "universal-8m-doom-ota")
+        }
+
+        XCTAssertNil(manager.usbUpdateDevice(for: "espdisplay"))
+        guard case .notReady = manager.firmwareUpdateReadiness("espdisplay")
+        else { return XCTFail("two boards claiming one identity is not a target") }
+    }
+
     func testPhysicalBoardProfilesMatchOnlyTheirExactTargets() {
         XCTAssertTrue(PanelManager.physicalBoard("st7789", isCompatibleWith: "c6"))
         XCTAssertTrue(PanelManager.physicalBoard("jd9853", isCompatibleWith: "c6"))

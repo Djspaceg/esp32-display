@@ -211,12 +211,10 @@ extension PanelManager {
             else { return [] }
             return [.usbSerial(device.path)]
         case .usbBootloader:
-            guard case .verified(let device) = usbSerialState(for: serviceName),
-                  device.serialStatus != nil,
-                  device.target?.isEmpty == false,
-                  device.board?.isEmpty == false,
-                  device.chip?.isEmpty == false,
-                  device.partition?.isEmpty == false
+            // A bootloader write needs the device's own reported identity, not
+            // the live CFGSHOW status a runtime control needs: everything it is
+            // checked against is read again right before esptool writes.
+            guard let device = usbFlashDevice(for: serviceName)
             else { return [] }
             return [.usbBootloaderCandidate(device.path)]
         case .either(let requirements):
@@ -283,15 +281,10 @@ extension PanelManager {
         }
 
         if operation == .firmwareUpdate,
-           case .verified(let device) = usbSerialState(for: serviceName) {
-            guard device.target?.isEmpty == false,
-                  device.board?.isEmpty == false,
-                  device.chip?.isEmpty == false,
-                  device.partition?.isEmpty == false
-            else {
-                return "USB is connected, but the app cannot verify the board "
-                    + "family, chip, profile, and partition safely."
-            }
+           let device = usbUpdateDevice(for: serviceName),
+           !Self.usbDeviceIdentifiesItselfForFlashing(device) {
+            return "USB is connected, but the app cannot verify the board "
+                + "family, chip, profile, and partition safely."
         }
 
         if Self.includesUSB(requirement) {

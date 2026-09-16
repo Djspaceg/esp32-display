@@ -112,6 +112,58 @@ extension PanelManager {
         return device
     }
 
+    /// The connected USB device a write for this record would go to, whether or
+    /// not it has said enough about itself to be written yet.
+    ///
+    /// This is deliberately weaker than `usbSerialState`: a bootloader write
+    /// does not need the live CFGSHOW status a runtime control needs, because
+    /// the board's identity is read again over serial and then independently
+    /// out of esptool before anything is written. What it does need is a device
+    /// that is unambiguously this record's - either it reports this record's
+    /// hardware ID, or the record has no identity of its own and this is the
+    /// device its explicit assignment points at.
+    func usbUpdateDevice(
+        for serviceName: String
+    ) -> WifiConfigUI.USBDeviceOption? {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return nil }
+        let connected = usbDevices.filter { $0.isConnected && !$0.path.isEmpty }
+        if let expectedID = stableHardwareID(of: panel) {
+            let matches = connected.filter {
+                ConfigCommands.canonicalHardwareID($0.hardwareID) == expectedID
+            }
+            // Two boards claiming one identity is not a write target.
+            return matches.count == 1 ? matches.first : nil
+        }
+        guard let path = currentUSBPort(for: serviceName), path != "Ambiguous"
+        else { return nil }
+        return connected.first { $0.path == path }
+    }
+
+    /// A USB device that is flashable on its own terms: it named its firmware
+    /// family, chip, physical profile, partition layout, and its own six-byte
+    /// hardware ID. That reported identity is what the preflight and esptool are
+    /// checked against immediately before a write, so a board that does not
+    /// fully identify itself is still refused here.
+    func usbFlashDevice(
+        for serviceName: String
+    ) -> WifiConfigUI.USBDeviceOption? {
+        guard let device = usbUpdateDevice(for: serviceName),
+              Self.usbDeviceIdentifiesItselfForFlashing(device)
+        else { return nil }
+        return device
+    }
+
+    nonisolated static func usbDeviceIdentifiesItselfForFlashing(
+        _ device: WifiConfigUI.USBDeviceOption
+    ) -> Bool {
+        device.hardwareID?.isEmpty == false
+            && device.target?.isEmpty == false
+            && device.board?.isEmpty == false
+            && device.chip?.isEmpty == false
+            && device.partition?.isEmpty == false
+    }
+
     func usbPortOptions(for serviceName: String) -> [WifiConfigUI.USBDeviceOption] {
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return usbDevices }
