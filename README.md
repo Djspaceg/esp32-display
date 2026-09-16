@@ -76,11 +76,15 @@ Orientation rules behind the last three columns:
   `(manual + automatic) mod 4`: the app writes the saved rotation, gravity moves
   only a volatile correction on top of it.
 
-Axis calibration is not uniform. Only `co5300` has field-verified accelerometer
-axes (panel X = raw Y with sign -1, panel Y = raw X with sign +1).
-`st7789-130`, `st7789-154`, and `jd9853` use the vendor example's identity axes
-and have not had a six-position calibration run, so their automatic orientation
-may be correctly shaped but wrongly signed until it does.
+Axis calibration is not uniform. Two profiles are field-verified, each checked in
+all four cable positions on real hardware: `co5300` (panel X = raw Y, panel Y =
+raw X, neither negated) and `st7789-154` (the vendor's identity axes, confirmed
+correct as shipped rather than assumed). `st7789-130` and `jd9853` still use the
+vendor example's identity axes with no calibration run behind them, so their
+automatic orientation may be correctly shaped but wrongly signed until one is
+done. Two positions is not a calibration: a single inverted sign leaves one
+opposite pair correct and only the other pair wrong, which is how a wrong
+mapping survived several confirmations here.
 
 Board identity, pin maps, panel geometry, and motion mappings are declared in
 [`boards/*.toml`](boards/); those descriptors are the source of truth if this
