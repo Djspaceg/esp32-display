@@ -138,7 +138,14 @@ void sendBatteryStatus() {
 
   uint8_t flags = 0;
   if (reading.present) flags |= deviceproto::BATTERY_FLAG_PRESENT;
-  if (reading.externalPower) flags |= deviceproto::BATTERY_FLAG_EXTERNAL_POWER;
+  // Only Present sets the flag. Unknown and Absent both leave it clear, which
+  // is what every firmware before this one did for both cases, so no receiver
+  // sees a change in meaning. Carrying the third value would need EBAT flags
+  // bit 2, and the packet's command and protocol surface is not this change's
+  // to widen; the reserved bytes and the free flag bit are there for it.
+  if (reading.external == axp2101::External::Present) {
+    flags |= deviceproto::BATTERY_FLAG_EXTERNAL_POWER;
+  }
   deviceproto::ChargeState state = deviceproto::ChargeState::Unknown;
   switch (reading.charge) {
     case boardpower::Charge::Charging:
@@ -197,6 +204,21 @@ bool batteryReadingCurrent() {
          deviceproto::batteryReadingCurrent(millis(), lastBatteryAt);
 }
 
+bool externalPowerForDisplay() {
+  return lastBattery.external == axp2101::External::Present;
+}
+
+const char *externalPowerWord() {
+  switch (lastBattery.external) {
+    case axp2101::External::Present:
+      return "on";
+    case axp2101::External::Absent:
+      return "off";
+    default:
+      return "unknown";
+  }
+}
+
 // Battery percentage for CFGSHOW, or -1 when there is no telemetry source, no
 // cell, no settled estimate/gauge reading, or nothing recent enough to report. Negative rather
 // than 0 so "we do not know" can never be read as "empty".
@@ -219,13 +241,13 @@ void reportBatteryLine() {
     // Its own line, and only where a battery telemetry source exists.
     if (batteryReadingCurrent()) {
       if (!lastBattery.present) {
-        Serial.printf("battery: absent vbus=%d\n", lastBattery.externalPower);
+        Serial.printf("battery: absent vbus=%s\n", externalPowerWord());
       } else {
-        Serial.printf("battery: %d%% %s %umV present=1 vbus=%d\n",
+        Serial.printf("battery: %d%% %s %umV present=1 vbus=%s\n",
                       batteryPercentOrUnknown(),
                       batteryChargeWord(lastBattery.charge),
                       (unsigned)lastBattery.millivolts,
-                      lastBattery.externalPower);
+                      externalPowerWord());
       }
     } else if (batteryAvailable && batteryReadingValid) {
       // The source answered once and has stopped. Said out loud rather than

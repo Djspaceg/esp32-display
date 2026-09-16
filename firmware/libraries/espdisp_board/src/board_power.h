@@ -10,6 +10,11 @@
 // its charge state remains unknown; the two S3 ADC boards report Charging only
 // while their active-low status input is asserted.
 //
+// EXTERNAL POWER IS THREE-VALUED, not a bool, because only the AXP2101 boards
+// can answer the question at all. An ADC-divider board has no external-power
+// sense, so it reports Unknown rather than the Absent it used to claim; see
+// Reading::external and axp2101_status.h.
+//
 // Every entry point is a no-op unless the board table says this board has a
 // battery telemetry path (`board::Config::hasBattery()`). That keeps boards
 // without telemetry from sampling an unconnected ADC or entering the AXP2101
@@ -46,6 +51,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include <axp2101_status.h>
 #include <board_config.h>
 #include <battery_estimate.h>
 
@@ -55,7 +61,8 @@ static const uint8_t I2C_ADDR = 0x34;
 
 // STATUS1: bit5 VBUS good, bit3 battery present.
 static const uint8_t REG_STATUS1 = 0x00;
-// STATUS2: bits 7:5 charge status, bit3 part of the VBUS-in test below.
+// STATUS2: bits 6:5 battery current direction, bit3 VINDPM status. What those
+// bits mean, and the decode taken from them, live in axp2101_status.h.
 static const uint8_t REG_STATUS2 = 0x01;
 // ADC_CHANNEL_CTRL: bit0 enables the battery voltage channel.
 static const uint8_t REG_ADC_CHANNEL_CTRL = 0x30;
@@ -69,10 +76,12 @@ static const uint8_t REG_BAT_DET_CTRL = 0x68;
 // deviceproto::BATTERY_PERCENT_UNKNOWN on the wire.
 static const uint8_t REG_BAT_PERCENT = 0xA4;
 
-static const uint8_t STATUS1_VBUS_GOOD = 1u << 5;
-static const uint8_t STATUS1_BATTERY_PRESENT = 1u << 3;
-static const uint8_t STATUS2_VBUS_NOT_IN = 1u << 3;
 static const uint8_t ADC_EN_BATTERY_VOLTAGE = 1u << 0;
+
+/// How many ADC conversions one reading is chosen from. Eight is what the old
+/// averaging path took, kept so this change is a change of method and not of
+/// sampling time, and it is comfortably under batteryestimate::MAX_SAMPLES.
+static const uint8_t SAMPLE_COUNT = 8;
 static const uint8_t BAT_DET_EN = 1u << 0;
 
 /// Bus speed. Matches boardtouch::I2C_HZ deliberately: the PMU and the touch
@@ -88,7 +97,13 @@ enum class Charge : uint8_t { Unknown, Charging, Discharging, Standby };
 /// One reading from the active battery telemetry source.
 struct Reading {
   bool present;         ///< a battery is attached
-  bool externalPower;   ///< USB/VBUS is supplying the board
+  /// Whether external power is supplying the board, or that this board has no
+  /// way to know. It is not a bool on purpose: the ADC-divider boards have no
+  /// external-power sense at all, and the field used to be set to false for
+  /// them, which reports "nothing is plugged in" as a measured fact when the
+  /// truth is that nothing measured it. Charge state has always been allowed to
+  /// say Unknown for exactly this reason; external power now can too.
+  axp2101::External external;
   bool percentKnown;    ///< false when the gauge has no opinion
   uint8_t percent;      ///< 0-100, meaningless unless percentKnown
   Charge charge;
@@ -236,7 +251,7 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
   if (verbose) {
     Serial.printf("power: AXP2101 ready (status1=0x%02X, battery %s, sda=%d scl=%d)\n",
                   status1,
-                  (status1 & STATUS1_BATTERY_PRESENT) ? "present" : "absent",
+                  axp2101::batteryPresent(status1) ? "present" : "absent",
                   cfg.pinTouchSda, cfg.pinTouchScl);
   }
   return true;
@@ -251,20 +266,30 @@ inline bool read(Reading &out) {
   if (!enabled) return false;
 
   if (activeController == board::PowerController::BatteryAdc) {
-    // Average several calibrated millivolt reads; the 100nF capacitor on the
-    // divider suppresses noise, and averaging removes the remaining ADC jitter.
-    uint32_t dividedMillivolts = 0;
-    for (uint8_t i = 0; i < 8; i++) {
-      dividedMillivolts += (uint32_t)analogReadMilliVolts(activeAdcPin);
+    // Take a batch of calibrated millivolt reads and let selectCellMillivolts
+    // pick from them. This used to average eight raw reads, which is how a
+    // healthy cell got reported as absent: the 1.85 inch divider intermittently
+    // returns 0, and a mean lets those zeros drag the result under the presence
+    // threshold without leaving any trace that they were glitches. A median of
+    // the samples that could physically be a cell throws an outlier out instead
+    // of blending it in. See battery_estimate.h for the full reasoning.
+    uint16_t cellSamples[SAMPLE_COUNT];
+    for (uint8_t i = 0; i < SAMPLE_COUNT; i++) {
+      uint32_t cellMillivolts =
+          (uint32_t)analogReadMilliVolts(activeAdcPin) * activeAdcScale;
+      if (cellMillivolts > UINT16_MAX) cellMillivolts = UINT16_MAX;
+      cellSamples[i] = (uint16_t)cellMillivolts;
     }
-    dividedMillivolts /= 8;
-    uint32_t cellMillivolts = dividedMillivolts * activeAdcScale;
-    if (cellMillivolts > UINT16_MAX) cellMillivolts = UINT16_MAX;
+    const batteryestimate::Selection selected =
+        batteryestimate::selectCellMillivolts(cellSamples, SAMPLE_COUNT);
 
     Reading reading = {};
-    reading.millivolts = (uint16_t)cellMillivolts;
+    reading.millivolts = selected.millivolts;
     reading.present = batteryestimate::cellPresent(reading.millivolts);
-    reading.externalPower = false;  // no reliable external-power signal
+    // No external-power sense exists on this board: the charger's status output
+    // drives an LED and reaches no processor pin. Saying so beats the false
+    // that used to sit here, which a consumer could not tell from a measurement.
+    reading.external = axp2101::External::Unknown;
     reading.charge = activeChargeStatus != board::NO_PIN &&
                              digitalRead(activeChargeStatus) == LOW
                          ? Charge::Charging
@@ -283,12 +308,8 @@ inline bool read(Reading &out) {
   if (!readRegister(REG_STATUS2, status2)) return false;
 
   Reading reading;
-  reading.present = (status1 & STATUS1_BATTERY_PRESENT) != 0;
-  // Two registers agreeing, which is how the vendor library tests it: VBUS is
-  // supplying the board when STATUS1 says the input is good AND STATUS2 does
-  // not say otherwise.
-  reading.externalPower = (status1 & STATUS1_VBUS_GOOD) != 0 &&
-                          (status2 & STATUS2_VBUS_NOT_IN) == 0;
+  reading.present = axp2101::batteryPresent(status1);
+  reading.external = axp2101::externalFromStatus(status1, status2);
 
   if (!reading.present) {
     reading.charge = Charge::Unknown;
@@ -299,19 +320,20 @@ inline bool read(Reading &out) {
     return true;
   }
 
-  switch ((status2 >> 5) & 0x07) {
-    case 0:
+  switch (axp2101::chargeDirection(status2)) {
+    case axp2101::DIRECTION_STANDBY:
       reading.charge = Charge::Standby;
       break;
-    case 1:
+    case axp2101::DIRECTION_CHARGING:
       reading.charge = Charge::Charging;
       break;
-    case 2:
+    case axp2101::DIRECTION_DISCHARGING:
       reading.charge = Charge::Discharging;
       break;
     default:
-      // The part documents three states in these bits; anything else is a
-      // value this reader does not know, and saying so beats guessing.
+      // Three of the four codes these two bits can carry are documented;
+      // the fourth is a value this reader does not know, and saying so beats
+      // guessing.
       reading.charge = Charge::Unknown;
       break;
   }
