@@ -28,6 +28,7 @@
 #include "../display_stream/wifi_selector_model.h"
 #include "../doom/src/platform/doom_runtime_policy.h"
 #include "../board_bootstrap/bootstrap_protocol.h"
+#include "../libraries/espdisp_board/src/axp2101_status.h"
 #include "../libraries/espdisp_board/src/battery_estimate.h"
 #include "../libraries/espdisp_board/src/board_config.h"
 #include "../libraries/espdisp_board/src/gt911_protocol.h"
@@ -2686,6 +2687,51 @@ int main() {
     // Degenerate inputs must not read off the end of the buffer.
     CHECK(batteryestimate::selectCellMillivolts(nullptr, 4).millivolts == 0);
     CHECK(!batteryestimate::selectCellMillivolts(oneGlitch, 0).plausible);
+
+    // THE AXP2101 STATUS DECODE, which nothing tested until now. The bench
+    // symptom was a board plugged in, running off USB, reporting "63%
+    // discharging 3844mV present=1 vbus=0". The cables were fine; the decode
+    // was not.
+    //
+    // VBUS good and no VINDPM is the easy case and was never in doubt.
+    CHECK_EQ((int)axp2101::externalFromStatus(axp2101::STATUS1_VBUS_GOOD, 0x00),
+             (int)axp2101::External::Present);
+
+    // VBUS good WITH VINDPM asserted is the case that was wrong. VINDPM means
+    // the charger is throttling its input current because the supply has sagged
+    // to the management threshold - which can only happen while something is
+    // feeding the board. External power is present, emphatically so.
+    CHECK_EQ((int)axp2101::externalFromStatus(axp2101::STATUS1_VBUS_GOOD,
+                                              axp2101::STATUS2_VINDPM),
+             (int)axp2101::External::Present);
+
+    // VBUS not good is the only thing that makes external power absent, with or
+    // without VINDPM. STATUS1 bit 5 is the whole answer.
+    CHECK_EQ((int)axp2101::externalFromStatus(0x00, 0x00),
+             (int)axp2101::External::Absent);
+    CHECK_EQ((int)axp2101::externalFromStatus(0x00, axp2101::STATUS2_VINDPM),
+             (int)axp2101::External::Absent);
+
+    // Battery presence is STATUS1 bit 3 and was always right; pinned so a
+    // future edit to the bit constants cannot quietly move it.
+    CHECK(axp2101::batteryPresent(axp2101::STATUS1_BATTERY_PRESENT));
+    CHECK(!axp2101::batteryPresent(axp2101::STATUS1_VBUS_GOOD));
+
+    // Current direction is TWO bits, 6:5. Masking three pulls in bit 7, which
+    // belongs to something else, so a standby cell with bit 7 set decoded as 4
+    // and reported Unknown instead of Standby.
+    CHECK_EQ(axp2101::chargeDirection(0x00), axp2101::DIRECTION_STANDBY);
+    CHECK_EQ(axp2101::chargeDirection(0x20), axp2101::DIRECTION_CHARGING);
+    CHECK_EQ(axp2101::chargeDirection(0x40), axp2101::DIRECTION_DISCHARGING);
+    CHECK_EQ(axp2101::chargeDirection(0x80), axp2101::DIRECTION_STANDBY);
+    CHECK_EQ(axp2101::chargeDirection(0xA0), axp2101::DIRECTION_CHARGING);
+    CHECK_EQ(axp2101::chargeDirection(0xFF), 3);
+
+    // Unknown is a distinct value from Absent, and neither is zero-or-nonzero
+    // interchangeable with the other. This is the whole reason External is not
+    // a bool: a board that cannot answer must not answer "no".
+    CHECK((int)axp2101::External::Unknown != (int)axp2101::External::Absent);
+    CHECK((int)axp2101::External::Unknown != (int)axp2101::External::Present);
 
     static const CurvePoint expected[] = {
         {3300, 0}, {3500, 5}, {3600, 10}, {3700, 20}, {3750, 35},

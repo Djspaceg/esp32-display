@@ -99,7 +99,7 @@ void drawIdleScreen() {
     // this line used to say less than the protocol and the Mac app already
     // know about this reading.
     panelstate::formatBatteryLine(
-        lineBattery, sizeof(lineBattery), lastBattery.externalPower,
+        lineBattery, sizeof(lineBattery), externalPowerForDisplay(),
         lastBattery.present, lastBattery.percentKnown, lastBattery.percent,
         toChargeWord(lastBattery.charge));
   }
@@ -578,7 +578,7 @@ const char *defaultInfoBarText() {
   static char text[24];
   if (panelstate::shouldShowBatteryLine(bcfg->hasBattery(),
                                        batteryReadingCurrent())) {
-    panelstate::formatBatteryLine(text, sizeof(text), lastBattery.externalPower,
+    panelstate::formatBatteryLine(text, sizeof(text), externalPowerForDisplay(),
                                   lastBattery.present, lastBattery.percentKnown,
                                   lastBattery.percent,
                                   toChargeWord(lastBattery.charge));
