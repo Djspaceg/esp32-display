@@ -7,6 +7,7 @@ import functools
 import getpass
 import glob
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -21,10 +22,79 @@ import termios
 import time
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
-import board_descriptor
-import espdisp_bootstrap as bootstrap
-import generate_board_descriptors
 import generated_board_catalog
+
+# Everything that parses boards/*.toml needs tomllib, which is 3.11+ stdlib,
+# and the Xcode "Embed canonical firmware releases" phase runs this tool under
+# whatever bare `python3` resolves to in Xcode's environment - /usr/bin/python3,
+# still 3.9 on current macOS. So the descriptor modules are imported on first
+# use rather than at module scope: release-info reads a JSON catalog and must
+# not need a TOML parser to embed firmware into the app.
+_LAZY_DESCRIPTOR_MODULES = {
+    "board_descriptor": "board_descriptor",
+    "bootstrap": "espdisp_bootstrap",
+    "generate_board_descriptors": "generate_board_descriptors",
+}
+
+
+def _descriptor_module(name: str):
+    """Import one descriptor module on first use and cache it as a global."""
+    module = globals().get(name)
+    if module is None:
+        try:
+            module = importlib.import_module(_LAZY_DESCRIPTOR_MODULES[name])
+        except ModuleNotFoundError as exc:
+            if exc.name != "tomllib":
+                raise
+            # One actionable line instead of an import traceback: the commands
+            # that parse descriptors genuinely need a newer interpreter.
+            raise Fail(
+                "this command parses boards/*.toml, which needs Python 3.11 or "
+                "newer for tomllib; %s is %d.%d" % (
+                    sys.executable, sys.version_info[0], sys.version_info[1])
+            ) from exc
+        globals()[name] = module
+    return module
+
+
+def __getattr__(name: str):
+    """Expose the lazily imported descriptor modules as module attributes.
+
+    PEP 562, so `espdisp.bootstrap` and `espdisp.generate_board_descriptors`
+    keep working for callers and tests without importing tomllib up front.
+    """
+    if name in _LAZY_DESCRIPTOR_MODULES:
+        return _descriptor_module(name)
+    if name == "BootstrapConsole":
+        return _descriptor_module("bootstrap").BootstrapConsole
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))
+
+
+class _LazyChoices:
+    """argparse `choices` resolved on first use.
+
+    argparse only tests membership or iterates a choice list when it validates
+    a value or formats that subcommand's help, so descriptor-derived choices can
+    stay unloaded on an interpreter that has no tomllib.
+    """
+
+    def __init__(self, resolve):
+        self._resolve = resolve
+        self._values: Optional[List[str]] = None
+
+    def _loaded(self) -> List[str]:
+        if self._values is None:
+            self._values = list(self._resolve())
+        return self._values
+
+    def __contains__(self, value) -> bool:
+        return value in self._loaded()
+
+    def __iter__(self):
+        return iter(self._loaded())
+
+    def __len__(self) -> int:
+        return len(self._loaded())
 
 
 class Platform(NamedTuple):
@@ -169,72 +239,90 @@ class Fail(Exception):
     """A condition the user can act on: reported as one line, never a traceback."""
 
 
-BootstrapConsole = bootstrap.BootstrapConsole
-
-
 def _bootstrap_call(fn, *args, **kwargs):
+    """Run one bootstrap helper and translate its failure into a Fail.
+
+    Callers inside this module name the helper as a string, because resolving
+    `bootstrap.something` here would import the module - and tomllib with it -
+    before anyone asked for a descriptor. A caller that already holds the bound
+    function may pass it directly.
+    """
+    module = _descriptor_module("bootstrap")
+    target = getattr(module, fn) if isinstance(fn, str) else fn
     try:
-        return fn(*args, **kwargs)
-    except bootstrap.BootstrapFailure as exc:
+        return target(*args, **kwargs)
+    except module.BootstrapFailure as exc:
         raise Fail(str(exc)) from exc
 
 
 def parse_bootstrap_response(line: str) -> Dict[str, object]:
-    return _bootstrap_call(bootstrap.parse_bootstrap_response, line)
+    return _bootstrap_call("parse_bootstrap_response", line)
 
 
 def bootstrap_request(transport, command: str, timeout: float = 5.0):
-    return _bootstrap_call(bootstrap.bootstrap_request, transport, command, timeout)
+    return _bootstrap_call("bootstrap_request", transport, command, timeout)
 
 
 def require_confirmed_bootstrap_chip(chip: Optional[str]) -> str:
-    return _bootstrap_call(bootstrap.require_confirmed_bootstrap_chip, chip)
+    return _bootstrap_call("require_confirmed_bootstrap_chip", chip)
 
 
 def solve_imu_mapping(samples):
-    return _bootstrap_call(bootstrap.solve_imu_mapping, samples)
+    return _bootstrap_call("solve_imu_mapping", samples)
 
 
 def solve_touch_calibration(taps, width: int, height: int):
-    return _bootstrap_call(
-        bootstrap.solve_touch_calibration, taps, width, height)
+    return _bootstrap_call("solve_touch_calibration", taps, width, height)
 
 
 def derive_color_order(answer: str, applied: str) -> str:
-    return _bootstrap_call(bootstrap.derive_color_order, answer, applied)
+    return _bootstrap_call("derive_color_order", answer, applied)
 
 
 def derive_inversion(answer: str, applied: bool) -> bool:
-    return _bootstrap_call(bootstrap.derive_inversion, answer, applied)
+    return _bootstrap_call("derive_inversion", answer, applied)
 
 
 def derive_mirror_x(answer: str) -> bool:
-    return _bootstrap_call(bootstrap.derive_mirror_x, answer)
+    return _bootstrap_call("derive_mirror_x", answer)
 
 
 def solve_orientation_offsets(answers):
-    return _bootstrap_call(bootstrap.solve_orientation_offsets, answers)
+    return _bootstrap_call("solve_orientation_offsets", answers)
 
 
 def retune_descriptor_text(text, section, updates, evidence):
     return _bootstrap_call(
-        bootstrap.retune_descriptor_text, text, section, updates, evidence)
+        "retune_descriptor_text", text, section, updates, evidence)
 
 
 def run_bootstrap_session(**kwargs):
-    return _bootstrap_call(bootstrap.run_bootstrap_session, **kwargs)
+    return _bootstrap_call("run_bootstrap_session", **kwargs)
 
 
 def run_retune_session(**kwargs):
-    return _bootstrap_call(bootstrap.run_retune_session, **kwargs)
+    return _bootstrap_call("run_retune_session", **kwargs)
+
+
+# Commands that turn boards/*.toml into something written to a board, a bundle,
+# or the release store. Only these re-validate the committed generated catalogs,
+# and only these need a Python with tomllib. Everything else here reads a JSON
+# catalog, a packed bundle, or a serial port and stays runnable on 3.9.
+DESCRIPTOR_DERIVED_COMMANDS = frozenset({
+    "compile",
+    "flash",
+    "ota",
+    "bundle",
+    "release",
+})
 
 
 def ensure_generated_board_files() -> None:
     """Refuse builds and release operations when committed generated data is stale."""
+    generator = _descriptor_module("generate_board_descriptors")
     try:
-        current = generate_board_descriptors.write_outputs(
-            REPO_ROOT, check=True)
-    except board_descriptor.DescriptorError as exc:
+        current = generator.write_outputs(REPO_ROOT, check=True)
+    except _descriptor_module("board_descriptor").DescriptorError as exc:
         raise Fail("board descriptor validation failed: %s" % exc) from exc
     if not current:
         raise Fail(
@@ -920,7 +1008,9 @@ class SerialBootstrapTransport:
 
 
 class InteractiveBootstrapPrompter:
-    def __init__(self, console: BootstrapConsole):
+    # Quoted: BootstrapConsole lives in the lazily imported bootstrap module,
+    # so the annotation must not be evaluated when this class is defined.
+    def __init__(self, console: "BootstrapConsole"):
         self.console = console
 
     def ask(
@@ -4201,7 +4291,8 @@ def cmd_bootstrap(args) -> int:
     port = resolve_port(args.port)
     confirmed_chip = probe_chip(port.address)
     require_confirmed_bootstrap_chip(confirmed_chip)
-    console = BootstrapConsole(sys.stdout)
+    bootstrap = _descriptor_module("bootstrap")
+    console = bootstrap.BootstrapConsole(sys.stdout)
     prompter = InteractiveBootstrapPrompter(console)
     with SerialBootstrapTransport(port.address) as transport:
         if args.retune:
@@ -4464,19 +4555,28 @@ def build_parser() -> argparse.ArgumentParser:
         ", ".join(PORT_GLOBS))
     p_bootstrap.add_argument(
         "--name", help="new boards/<name>.toml key (prompted when omitted)")
+    # An explicit metavar on both descriptor-derived choice lists is what keeps
+    # them lazy: argparse formats an action's metavar from its choices while the
+    # argument is being added, and would load the TOML descriptors right there.
     p_bootstrap.add_argument(
         "--candidate",
-        choices=sorted(
+        metavar="BOARD",
+        choices=_LazyChoices(lambda: sorted(
             descriptor["key"]
-            for descriptor in board_descriptor.load_repository_descriptors(REPO_ROOT)
-        ),
-        help="candidate descriptor whose panel wiring may be driven after consent",
+            for descriptor in _descriptor_module(
+                "board_descriptor").load_repository_descriptors(REPO_ROOT)
+        )),
+        help="candidate descriptor whose panel wiring may be driven after "
+             "consent (one of: %(choices)s)",
     )
     p_bootstrap.add_argument(
         "--retune", metavar="BOARD",
         help="retune one section of an existing descriptor")
     p_bootstrap.add_argument(
-        "--section", choices=bootstrap.RETUNE_SECTIONS,
+        "--section",
+        metavar="SECTION",
+        choices=_LazyChoices(
+            lambda: _descriptor_module("bootstrap").RETUNE_SECTIONS),
         help="section to retune: imu, touch, color, offsets, backlight, or buttons")
     p_bootstrap.add_argument(
         "--timeout", type=float, default=5.0,
@@ -4488,23 +4588,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: List[str]) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except Fail as exc:
+        # Descriptor-derived choices resolve while arguments are validated or
+        # help is formatted, so an unsupported interpreter is reported here too.
+        print("espdisp: %s" % exc, file=sys.stderr)
+        return 2
     if not getattr(args, "func", None):
         parser.print_help()
         return 2
     try:
-        if args.command != "bootstrap":
+        if args.command in DESCRIPTOR_DERIVED_COMMANDS:
             ensure_generated_board_files()
         return args.func(args)
     except Fail as exc:
         if args.command == "bootstrap":
-            BootstrapConsole(sys.stderr).error(str(exc))
+            _descriptor_module("bootstrap").BootstrapConsole(
+                sys.stderr).error(str(exc))
         else:
             print("espdisp: %s" % exc, file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         if args.command == "bootstrap":
-            BootstrapConsole(sys.stderr).error("interrupted; no partial draft written")
+            _descriptor_module("bootstrap").BootstrapConsole(sys.stderr).error(
+                "interrupted; no partial draft written")
         else:
             print("\nespdisp: interrupted", file=sys.stderr)
         return 130
