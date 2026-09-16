@@ -133,9 +133,17 @@ enable_pin = -1
 inverted = false
 
 [power]
-controller = "none"
-battery_adc = -1
-battery_adc_scale = 0
+# GPIO8 is the battery sense, through the same 3:1 divider the other
+# divider boards use. Confirmed on attached hardware at 3750 mV / 35 percent.
+# The divider intermittently returns 0; batteryestimate::selectCellMillivolts
+# filters those out by taking the median of the plausible samples, so a run of
+# zeros no longer reports a healthy pack as absent.
+# GPIO8 is ADC1_CH7, the WiFi-safe ADC unit, and is otherwise unused here.
+# No enable line and no charge-status net exist on this design, so charge state
+# stays honestly unknown.
+controller = "battery_adc"
+battery_adc = 8
+battery_adc_scale = 3
 battery_enable = -1
 charge_status = -1
 axp_address = 0

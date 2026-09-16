@@ -49,6 +49,21 @@ static int checks = 0;
     }                                                            \
   } while (0)
 
+// Same as CHECK but prints both values on failure. Worth having for numeric
+// assertions: "millivolts == 3750" alone does not say whether the code returned
+// 937 or 3749, and that difference is usually the whole diagnosis.
+#define CHECK_EQ(actual, expected)                                          \
+  do {                                                                      \
+    checks++;                                                               \
+    const long long checkActual = (long long)(actual);                      \
+    const long long checkExpected = (long long)(expected);                  \
+    if (checkActual != checkExpected) {                                     \
+      printf("FAIL %s:%d: %s == %s (got %lld, wanted %lld)\n", __FILE__,    \
+             __LINE__, #actual, #expected, checkActual, checkExpected);     \
+      return 1;                                                            \
+    }                                                                       \
+  } while (0)
+
 static Header hdr(uint16_t frame, uint16_t band, uint16_t dirty,
                   bool landscape = false) {
   Header h;
@@ -2281,59 +2296,68 @@ int main() {
     CHECK(am.hasBattery());
     CHECK(am.pinTouchSda != board::NO_PIN && am.pinTouchScl != board::NO_PIN);
     CHECK(am.motion == board::MotionController::Qmi8658);
-    CHECK(am.motionXAxis == 1 && am.motionXSign == -1);
-    // The descriptor swaps the in-plane axes, so panel X is read from chip Y and
-    // panel Y from chip X. Both signs are negative: X was already proven in the
-    // field, and Y was corrected after a four-position eye check found the two
-    // cable-horizontal poses upside down while the two cable-vertical poses were
-    // right. That is a Y-only error, so only y_sign moved.
-    CHECK(am.motionYAxis == 0 && am.motionYSign == -1);
+    // Both in-plane signs are positive. The descriptor swaps the axes, so panel
+    // X is read from chip Y and panel Y from chip X, but neither is negated.
+    // This mapping was confirmed on the board in all four cable positions - 6,
+    // 3, 12 and 9 o'clock all reading up-is-up - which is the check that the
+    // earlier two-position confirmations kept missing. An earlier revision of
+    // this test asserted both signs negative, derived from arithmetic on the two
+    // captured vectors below; the four-position hardware check overrode it.
+    CHECK_EQ(am.motionXAxis, 1);
+    CHECK_EQ(am.motionXSign, 1);
+    CHECK_EQ(am.motionYAxis, 0);
+    CHECK_EQ(am.motionYSign, 1);
     CHECK(am.hasMotion());
     // Captured during the continuous diagnostics run while the user held the
-    // board vertical with the cable hanging down, and confirmed correct by eye.
+    // board vertical with the cable hanging down.
     const int16_t confirmedCo5300CableDown[3] = {1759, 8396, -644};
     const motionorient::Calibration co5300Calibration = {
         am.motionXAxis, am.motionXSign, am.motionYAxis, am.motionYSign};
-    CHECK(motionorient::classify(
-              confirmedCo5300CableDown, co5300Calibration, 0,
-              motionorient::AutomaticMode::FourWay) == 1);
-    // Captured later in the same run with the board rotated in-plane, and also
-    // confirmed correct by eye. The two vectors are a half turn apart, not the
-    // quarter turn an earlier version of this comment claimed: chip Y reverses
-    // sign between them while chip X barely moves.
+    CHECK_EQ(motionorient::classify(confirmedCo5300CableDown, co5300Calibration,
+                                    0, motionorient::AutomaticMode::FourWay),
+             3);
+    // Captured later in the same run with the board rotated in-plane. The two
+    // vectors are a HALF turn apart, not the quarter turn an earlier version of
+    // this comment claimed: chip Y reverses sign between them while chip X
+    // barely moves. That mislabelling is why the pair only ever covered the two
+    // poses that were already correct, letting a sign error through twice.
     const int16_t confirmedCo5300Clockwise[3] = {1556, -7683, -716};
-    CHECK(motionorient::classify(
-              confirmedCo5300Clockwise, co5300Calibration, 0,
-              motionorient::AutomaticMode::FourWay) == 3);
+    CHECK_EQ(motionorient::classify(confirmedCo5300Clockwise, co5300Calibration,
+                                    0, motionorient::AutomaticMode::FourWay),
+             1);
     // Both captured vectors are chip-Y dominant, so after the axis swap both
     // land in cardinalFor's panel-X branch and neither one constrains y_sign at
-    // all. That is exactly how a wrong y_sign reached a panel once already. The
-    // two cases below are chip-X dominant, so they exercise the panel-Y branch
-    // and pin y_sign. They are derived from the committed calibration rather
-    // than captured from hardware; their job is to make a single-sign inversion
-    // fail here instead of on the user's screen.
+    // all. That is exactly how a wrong y_sign reached a panel. The two cases
+    // below are chip-X dominant, so they exercise the panel-Y branch and pin
+    // y_sign. They are derived from the committed calibration rather than
+    // captured from hardware; their job is to make a single-sign inversion fail
+    // here instead of on the user's screen.
     const int16_t derivedCo5300ChipXPositive[3] = {8000, 500, -600};
-    CHECK(motionorient::classify(
-              derivedCo5300ChipXPositive, co5300Calibration, 0,
-              motionorient::AutomaticMode::FourWay) == 2);
+    CHECK_EQ(motionorient::classify(derivedCo5300ChipXPositive,
+                                    co5300Calibration, 0,
+                                    motionorient::AutomaticMode::FourWay),
+             0);
     const int16_t derivedCo5300ChipXNegative[3] = {-8000, 500, -600};
-    CHECK(motionorient::classify(
-              derivedCo5300ChipXNegative, co5300Calibration, 0,
-              motionorient::AutomaticMode::FourWay) == 0);
-    // And a chip-Y dominant pair pins x_sign the same way, so neither sign can
+    CHECK_EQ(motionorient::classify(derivedCo5300ChipXNegative,
+                                    co5300Calibration, 0,
+                                    motionorient::AutomaticMode::FourWay),
+             2);
+    // And the chip-Y dominant pair pins x_sign the same way, so neither sign can
     // be flipped in isolation without a red test.
     const motionorient::Calibration co5300XSignFlipped = {
         am.motionXAxis, (int8_t)-am.motionXSign, am.motionYAxis,
         am.motionYSign};
-    CHECK(motionorient::classify(
-              confirmedCo5300CableDown, co5300XSignFlipped, 0,
-              motionorient::AutomaticMode::FourWay) == 3);
+    CHECK_EQ(motionorient::classify(confirmedCo5300CableDown,
+                                    co5300XSignFlipped, 0,
+                                    motionorient::AutomaticMode::FourWay),
+             1);
     const motionorient::Calibration co5300YSignFlipped = {
         am.motionXAxis, am.motionXSign, am.motionYAxis,
         (int8_t)-am.motionYSign};
-    CHECK(motionorient::classify(
-              derivedCo5300ChipXPositive, co5300YSignFlipped, 0,
-              motionorient::AutomaticMode::FourWay) == 0);
+    CHECK_EQ(motionorient::classify(derivedCo5300ChipXPositive,
+                                    co5300YSignFlipped, 0,
+                                    motionorient::AutomaticMode::FourWay),
+             2);
     CHECK(!board::configFor(Variant::LcdSt7789).hasBattery());
     CHECK(board::configFor(Variant::TouchJd9853).hasBattery());
 
@@ -2384,7 +2408,25 @@ int main() {
     CHECK(lcd.pinTouchSda == 11 && lcd.pinTouchScl == 10);
     CHECK(lcd.pinTouchRst == board::NO_PIN && lcd.touchResetExio == 1);
     CHECK(lcd.pinTouchInt == 4 && lcd.hasTouch());
-    CHECK(lcd.power == board::PowerController::None && !lcd.hasBattery());
+    // GPIO8 is the battery sense on this board, through the same 3:1 divider the
+    // other divider boards use. It reads a live 3750 mV / 35 percent pack on
+    // attached hardware. An earlier session sampled a run of this divider's
+    // intermittent zeros, concluded the pin was dead and reverted the
+    // declaration; selectCellMillivolts is what makes those zeros harmless, so
+    // the declaration stands.
+    //
+    // GPIO8 is ADC1_CH7 on the S3. ADC1 is the WiFi-safe unit, and the pin is
+    // otherwise unused in this board's map, so there is no contention to explain
+    // the zeros - they are a property of the divider, not of the assignment.
+    CHECK_EQ((int)lcd.power, (int)board::PowerController::BatteryAdc);
+    CHECK(lcd.hasBattery());
+    CHECK_EQ(lcd.pinBatteryAdc, 8);
+    CHECK_EQ(lcd.batteryAdcScale, 3);
+    // No enable line and no charge-status net on this design. Nothing carries
+    // charge state to a processor pin, so it stays honestly unknown rather than
+    // being inferred - the same posture the C6 takes.
+    CHECK_EQ(lcd.pinBatteryEnable, (int)board::NO_PIN);
+    CHECK_EQ(lcd.pinChargeStatus, (int)board::NO_PIN);
     CHECK(lcd.motion == board::MotionController::None && !lcd.hasMotion());
     CHECK(lcd.panel->colOffset == 0);
     CHECK(lcd.panel->invertColor);
@@ -2583,6 +2625,67 @@ int main() {
     CHECK(!batteryestimate::cellPresent(2499));
     CHECK(batteryestimate::cellPresent(2500));
     CHECK(batteryestimate::cellPresent(2501));
+
+    // The plausibility window is narrower than presence on purpose: presence
+    // must stay permissive so a flat cell is not called absent, while
+    // plausibility decides whether one sample can be trusted as the voltage.
+    CHECK(batteryestimate::PLAUSIBLE_MIN_MILLIVOLTS == 3000);
+    CHECK(batteryestimate::PLAUSIBLE_MAX_MILLIVOLTS == 4300);
+    CHECK(!batteryestimate::cellPlausible(2999));
+    CHECK(batteryestimate::cellPlausible(3000));
+    CHECK(batteryestimate::cellPlausible(4300));
+    CHECK(!batteryestimate::cellPlausible(4301));
+    // A deeply discharged cell is present but its reading is not trustworthy
+    // as a voltage; the two predicates must disagree there.
+    CHECK(batteryestimate::cellPresent(2800));
+    CHECK(!batteryestimate::cellPlausible(2800));
+
+    // The 1.85 inch divider intermittently returns 0. These are cell
+    // millivolts, already scaled by the 3:1 divider, from a healthy 3750 mV
+    // pack: the good samples read 3750 and the glitched ones read 0.
+    //
+    // A mean lets the zeros outvote the real cell. Six zeros out of eight
+    // averages to 937 mV, which is below PRESENT_MILLIVOLTS, so the board
+    // reports "absent 0mV" while a working battery is attached - the exact
+    // bench symptom this replaces. Filtering to plausible samples and taking
+    // their median ignores the zeros entirely.
+    const uint16_t glitchDominated[8] = {0, 0, 3750, 0, 0, 3750, 0, 0};
+    batteryestimate::Selection dominated =
+        batteryestimate::selectCellMillivolts(glitchDominated, 8);
+    CHECK_EQ(dominated.plausibleCount, 2);
+    CHECK(dominated.plausible);
+    CHECK_EQ(dominated.millivolts, 3750);
+    CHECK(batteryestimate::cellPresent(dominated.millivolts));
+
+    // Even a single zero corrupts a mean badly enough to move the reported
+    // percentage: seven good samples plus one zero average to 3281 mV, which
+    // the curve reads as 10 percent instead of 35.
+    const uint16_t oneGlitch[8] = {3750, 3750, 3750, 0, 3750, 3750, 3750, 3750};
+    batteryestimate::Selection single =
+        batteryestimate::selectCellMillivolts(oneGlitch, 8);
+    CHECK_EQ(single.plausibleCount, 7);
+    CHECK_EQ(single.millivolts, 3750);
+    CHECK_EQ(batteryestimate::percentFromMillivolts(single.millivolts), 35);
+
+    // A high outlier must lose the vote too, not just a low one.
+    const uint16_t highOutlier[5] = {3800, 3810, 9999, 3790, 3805};
+    batteryestimate::Selection outlier =
+        batteryestimate::selectCellMillivolts(highOutlier, 5);
+    CHECK_EQ(outlier.plausibleCount, 4);
+    CHECK(outlier.millivolts >= 3790 && outlier.millivolts <= 3810);
+
+    // Genuinely nothing there: no sample is plausible, so presence must still
+    // come out false rather than being rescued by the filter.
+    const uint16_t nothingAttached[6] = {0, 0, 0, 12, 0, 0};
+    batteryestimate::Selection absent =
+        batteryestimate::selectCellMillivolts(nothingAttached, 6);
+    CHECK(!absent.plausible);
+    CHECK_EQ(absent.plausibleCount, 0);
+    CHECK(!batteryestimate::cellPresent(absent.millivolts));
+
+    // Degenerate inputs must not read off the end of the buffer.
+    CHECK(batteryestimate::selectCellMillivolts(nullptr, 4).millivolts == 0);
+    CHECK(!batteryestimate::selectCellMillivolts(oneGlitch, 0).plausible);
 
     static const CurvePoint expected[] = {
         {3300, 0}, {3500, 5}, {3600, 10}, {3700, 20}, {3750, 35},

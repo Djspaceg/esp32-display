@@ -80,13 +80,40 @@ inline Selection selectCellMillivolts(const uint16_t *cellSamples,
   if (cellSamples == nullptr || count == 0) return out;
   if (count > MAX_SAMPLES) count = MAX_SAMPLES;
 
-  uint32_t total = 0;
+  uint16_t kept[MAX_SAMPLES];
+  size_t keptCount = 0;
   for (size_t i = 0; i < count; i++) {
-    total += cellSamples[i];
-    if (cellPlausible(cellSamples[i])) out.plausibleCount++;
+    if (cellPlausible(cellSamples[i])) {
+      kept[keptCount++] = cellSamples[i];
+      out.plausibleCount++;
+    }
   }
-  out.plausible = out.plausibleCount > 0;
-  out.millivolts = (uint16_t)(total / count);
+  out.plausible = keptCount > 0;
+
+  // Nothing looked like a cell, so report the median of what was actually
+  // measured. That keeps a genuinely absent input reading low enough for
+  // cellPresent to call it absent, instead of inventing a voltage.
+  if (keptCount == 0) {
+    for (size_t i = 0; i < count; i++) kept[i] = cellSamples[i];
+    keptCount = count;
+  }
+
+  // Insertion sort. keptCount is at most MAX_SAMPLES, so this is a handful of
+  // comparisons and needs no allocation.
+  for (size_t i = 1; i < keptCount; i++) {
+    const uint16_t value = kept[i];
+    size_t j = i;
+    while (j > 0 && kept[j - 1] > value) {
+      kept[j] = kept[j - 1];
+      j--;
+    }
+    kept[j] = value;
+  }
+
+  // Upper middle for an even count. Which side is picked does not matter for
+  // noise around a real voltage, and taking one element rather than averaging
+  // the middle two keeps the result a value the ADC genuinely reported.
+  out.millivolts = kept[keptCount / 2];
   return out;
 }
 
