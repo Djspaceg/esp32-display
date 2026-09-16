@@ -349,9 +349,21 @@ static const Config CONFIG_LCD_ST77916 = {
     /* touchScl */ 10,
     /* touchRst */ NO_PIN,
     /* touchInt */ 4,
-    PowerController::None,
-    /* batteryAdc */ NO_PIN,
-    /* adcScale */ 0,
+    // GPIO8 is the battery sense, through the same 3:1 divider the other
+    // divider boards use. Confirmed on attached hardware at 3750 mV / 35
+    // percent. The divider intermittently returns 0, and an earlier session
+    // sampled a run of those zeros, concluded the pin was dead and reverted
+    // this declaration; batteryestimate::selectCellMillivolts is what makes
+    // them harmless, by taking the median of the samples that could physically
+    // be a cell. GPIO8 is ADC1_CH7, the WiFi-safe ADC unit, and is otherwise
+    // unused in this pin map, so the zeros are a property of the divider rather
+    // than of the assignment.
+    //
+    // No enable line and no charge-status net exist on this design, so charge
+    // state stays honestly unknown - the same posture the C6 takes.
+    PowerController::BatteryAdc,
+    /* batteryAdc */ 8,
+    /* adcScale */ 3,
     /* batteryEnable */ NO_PIN,
     /* chargeStatus */ NO_PIN,
     MotionController::None,
