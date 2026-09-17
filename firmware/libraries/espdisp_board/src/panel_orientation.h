@@ -66,22 +66,33 @@ inline uint16_t axisWindowGap(uint16_t nearOffset, uint16_t visibleExtent,
   return (uint16_t)(memoryExtent - visibleExtent - nearOffset);
 }
 
+/// Where the visible window sits inside the controller's own memory.
+///
+/// The gap is expressed in the CONTROLLER's column/row space, not in the rotated
+/// screen space, so it is NOT swapped when MADCTL swaps the axes: the rotation
+/// setting changes how the controller scans its memory, not where that memory
+/// begins. An earlier version swapped the extents and offsets alongside the axes,
+/// which measured a 240-wide window against the 320-tall extent in the odd
+/// quarter turns and put 80 pixels of offset on the wrong axis.
+///
+/// FIELD-VERIFIED on the square 1.54-inch panel (white-cube-154, S3): with the
+/// cable in the two positions whose rotation swaps the axes, the old rule drew
+/// the image as an off-centre rectangle, while the two non-swapping positions
+/// were a correct 240x240. The sender was ruled out at the same time from the
+/// board's own counters - frames advancing with partial=0, badlen=0, drawerr=0
+/// while the picture was wrong, so a correctly sized frame was being misplaced.
 inline WindowGap windowGap(uint16_t width, uint16_t height,
                            uint16_t memoryWidth, uint16_t memoryHeight,
                            uint16_t colOffset, uint16_t rowOffset, uint8_t q,
                            bool installationMirrorX = false) {
-  const bool swap = swapXY(q);
-  const uint16_t xVisible = swap ? height : width;
-  const uint16_t yVisible = swap ? width : height;
-  const uint16_t xMemory = swap ? memoryHeight : memoryWidth;
-  const uint16_t yMemory = swap ? memoryWidth : memoryHeight;
-  const uint16_t xNear = swap ? rowOffset : colOffset;
-  const uint16_t yNear = swap ? colOffset : rowOffset;
+  // The row window sits at the far end of memory only for the 180 flip: rows
+  // mirrored AND axes not swapped. Under a swap it starts at the near end.
+  const bool rowAtFarEnd =
+      mirrorY(q, installationMirrorX) && !swapXY(q);
   return {
-      axisWindowGap(xNear, xVisible, xMemory,
+      axisWindowGap(colOffset, width, memoryWidth,
                     mirrorX(q, installationMirrorX)),
-      axisWindowGap(yNear, yVisible, yMemory,
-                    mirrorY(q, installationMirrorX)),
+      axisWindowGap(rowOffset, height, memoryHeight, rowAtFarEnd),
   };
 }
 

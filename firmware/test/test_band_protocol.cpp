@@ -1871,9 +1871,24 @@ int main() {
         panelorient::windowGap(240, 240, 240, 320, 0, 0, 2),
         panelorient::windowGap(240, 240, 240, 320, 0, 0, 3),
     };
+    // FIELD-VERIFIED on the square 1.54-inch panel (white-cube-154, S3), by the
+    // user's own eyes on the glass in all four cable positions: the two cable
+    // positions whose rotation SWAPS the axes rendered the image as a rectangle
+    // sitting off-centre, and the two that do not swap rendered a correct
+    // 240x240. The board's own counters ruled the sender out at the same time -
+    // frames advancing with partial=0, badlen=0 and drawerr=0 while the picture
+    // was wrong, so a correctly sized frame was being placed wrongly.
+    //
+    // So the window gap lives in the CONTROLLER's own column/row space and must
+    // NOT be swapped when MADCTL swaps the axes: a 240x240 window inside 240x320
+    // of memory needs its 80-row offset on the row axis, and only for the 180
+    // flip, where the rows are mirrored and the axes are not swapped. Swapping
+    // the extents alongside the axes measured the 240-wide window against the
+    // 320-tall extent in the odd quarter turns, which is exactly the 80 pixels
+    // that went astray there.
     CHECK_EQ(squareWindow[0].x, 0);
     CHECK_EQ(squareWindow[0].y, 0);
-    CHECK_EQ(squareWindow[1].x, 80);
+    CHECK_EQ(squareWindow[1].x, 0);
     CHECK_EQ(squareWindow[1].y, 0);
     CHECK_EQ(squareWindow[2].x, 0);
     CHECK_EQ(squareWindow[2].y, 80);
@@ -1886,14 +1901,15 @@ int main() {
         panelorient::windowGap(172, 320, 240, 320, 34, 0, 2),
         panelorient::windowGap(172, 320, 240, 320, 34, 0, 3),
     };
-    CHECK_EQ(centeredWindow[0].x, 34);
-    CHECK_EQ(centeredWindow[0].y, 0);
-    CHECK_EQ(centeredWindow[1].x, 0);
-    CHECK_EQ(centeredWindow[1].y, 34);
-    CHECK_EQ(centeredWindow[2].x, 34);
-    CHECK_EQ(centeredWindow[2].y, 0);
-    CHECK_EQ(centeredWindow[3].x, 0);
-    CHECK_EQ(centeredWindow[3].y, 34);
+    // 172 columns centred in 240 with 34 either side, and 320 rows filling the
+    // 320 available. In controller space that is a column gap of 34 and a row gap
+    // of 0 in every rotation - the mirrored case computes 240-172-34, the same 34,
+    // because the window is symmetric. NOT VERIFIED on hardware: this is the
+    // 1.47-inch C6 geometry and no C6 has been attached.
+    for (int i = 0; i < 4; i++) {
+      CHECK_EQ(centeredWindow[i].x, 34);
+      CHECK_EQ(centeredWindow[i].y, 0);
+    }
 
     const panelorient::WindowGap unverifiedWindow =
         panelorient::windowGap(128, 128, 0, 0, 2, 1, 2);
