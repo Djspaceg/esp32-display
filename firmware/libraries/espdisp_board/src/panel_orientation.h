@@ -57,42 +57,41 @@ struct WindowGap {
   uint16_t y;
 };
 
-inline uint16_t axisWindowGap(uint16_t nearOffset, uint16_t visibleExtent,
-                              uint16_t memoryExtent, bool mirrored) {
-  if (!mirrored || memoryExtent == 0 || visibleExtent > memoryExtent ||
-      nearOffset > memoryExtent - visibleExtent) {
-    return nearOffset;
-  }
-  return (uint16_t)(memoryExtent - visibleExtent - nearOffset);
-}
-
-/// Where the visible window sits inside the controller's own memory.
+/// The centring offsets to hand the driver, which are the panel's OWN offsets
+/// with nothing derived from them: colOffset sits on the x axis for even
+/// quadrants and moves to the y axis for odd ones, exactly as it always did for
+/// landscape. This mapping matches the rotation/gap matrix in Waveshare's own
+/// ESP-IDF example for the JD9853 board, and held on the ST7789 too.
 ///
-/// The gap is expressed in the CONTROLLER's column/row space, not in the rotated
-/// screen space, so it is NOT swapped when MADCTL swaps the axes: the rotation
-/// setting changes how the controller scans its memory, not where that memory
-/// begins. An earlier version swapped the extents and offsets alongside the axes,
-/// which measured a 240-wide window against the 320-tall extent in the odd
-/// quarter turns and put 80 pixels of offset on the wrong axis.
+/// DO NOT REINTRODUCE MEMORY-EXTENT ARITHMETIC HERE. A previous version computed
+/// a "far edge" gap from memoryWidth/memoryHeight whenever a rotation mirrored an
+/// address axis. On the square 1.54-inch panel - 240x240 visible inside 240x320
+/// of controller RAM, with both of its own offsets zero and its descriptor's
+/// per-rotation offsets table all zeros - that fabricated an 80-pixel gap out of
+/// the 320, and the panel drew the image shifted with the right third of the glass
+/// blank. Two successive attempts to pick the right rule by elimination each
+/// failed on some other rotation, because the panel wants no gap at all in any
+/// rotation and any nonzero value is wrong. The extents remain in the descriptor
+/// for validation; they are deliberately not an input to this.
 ///
-/// FIELD-VERIFIED on the square 1.54-inch panel (white-cube-154, S3): with the
-/// cable in the two positions whose rotation swaps the axes, the old rule drew
-/// the image as an off-centre rectangle, while the two non-swapping positions
-/// were a correct 240x240. The sender was ruled out at the same time from the
-/// board's own counters - frames advancing with partial=0, badlen=0, drawerr=0
-/// while the picture was wrong, so a correctly sized frame was being misplaced.
+/// Field evidence: with the original pass-through the panel rendered correctly in
+/// all four cable positions; with the derived gap it rendered a shifted rectangle
+/// in the two positions whose rotation swaps the axes. The sender was ruled out
+/// from the board's own counters - frames advancing with partial=0, badlen=0 and
+/// drawerr=0 while the picture was wrong.
 inline WindowGap windowGap(uint16_t width, uint16_t height,
                            uint16_t memoryWidth, uint16_t memoryHeight,
                            uint16_t colOffset, uint16_t rowOffset, uint8_t q,
                            bool installationMirrorX = false) {
-  // The row window sits at the far end of memory only for the 180 flip: rows
-  // mirrored AND axes not swapped. Under a swap it starts at the near end.
-  const bool rowAtFarEnd =
-      mirrorY(q, installationMirrorX) && !swapXY(q);
+  (void)width;
+  (void)height;
+  (void)memoryWidth;
+  (void)memoryHeight;
+  (void)installationMirrorX;
+  const bool swap = swapXY(q);
   return {
-      axisWindowGap(colOffset, width, memoryWidth,
-                    mirrorX(q, installationMirrorX)),
-      axisWindowGap(rowOffset, height, memoryHeight, rowAtFarEnd),
+      swap ? rowOffset : colOffset,
+      swap ? colOffset : rowOffset,
   };
 }
 
