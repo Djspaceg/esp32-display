@@ -79,30 +79,41 @@ inline uint16_t axisWindowGap(uint16_t nearOffset, uint16_t visibleExtent,
 /// things that place the image are the window the draw call passes (always the
 /// full panel) and this gap.
 ///
-/// The offset follows the MIRROR BIT OF ITS OWN AXIS and nothing else. When the
-/// row axis is mirrored, row address 0 addresses the far end of memory, so the
-/// visible 240 rows become addresses 80..319 and the window must start 80 rows
-/// in. When it is not mirrored they are 0..239 and the offset is zero. The
-/// column axis here has memory equal to glass, so its offset stays put either
-/// way.
+/// WHAT THE PANEL ACTUALLY DID, one quadrant at a time on white-cube-154. Each
+/// row is an observation on the glass, not a derivation:
 ///
-/// DO NOT MAKE THIS DEPEND ON THE AXIS SWAP. Two earlier rules did, each derived
-/// by elimination rather than from the memory window, and each fitted three
-/// rotations and failed the fourth: one swapped the extents and offsets along
-/// with the axes (an 80 appeared on the column in the odd quarter turns), and one
-/// applied the offset only for the 180 flip. Field evidence on white-cube-154:
-/// with no offset anywhere the image was truncated in the two ADJACENT cable
-/// positions that mirror rows, which is quadrants 2 and 3 - exactly the pair this
-/// rule offsets and neither earlier rule did.
+///   q  swapped  mirrorY  row gap tried  result
+///   0  no       no       0              TRUNCATED
+///   1  yes      no       0              correct
+///   2  no       yes      80             correct
+///   3  yes      yes      80             correct
+///
+/// q0 and q1 were both given 0 and only q1 was correct, so the gap alone does not
+/// decide it and the axis swap matters. Among the UNSWAPPED quadrants, 80 was
+/// correct and 0 was truncated - so unswapped wants the far end whether or not the
+/// rows are mirrored. Among the SWAPPED quadrants both values tried were correct,
+/// which is consistent with the swap moving this offset onto the column axis where
+/// memory equals glass and it cannot matter; that is NOT established, only
+/// unfalsified, so the swapped quadrants keep the exact values already seen
+/// working rather than being tidied into a prettier rule.
+///
+/// This is why the earlier attempts kept failing: both tied the offset to the axis
+/// swap alone, or to the row mirror alone, and each fitted three quadrants and
+/// missed the fourth. There is no single-bit rule here.
 inline WindowGap windowGap(uint16_t width, uint16_t height,
                            uint16_t memoryWidth, uint16_t memoryHeight,
                            uint16_t colOffset, uint16_t rowOffset, uint8_t q,
                            bool installationMirrorX = false) {
+  // The row window sits at the far end of memory unless the axes are swapped and
+  // the rows are not mirrored. Read off the panel one quadrant at a time rather
+  // than derived, because the swapped quadrants turned out not to behave like the
+  // unswapped ones - see the table above the function.
+  const bool rowAtFarEnd =
+      !swapXY(q) || mirrorY(q, installationMirrorX);
   return {
       axisWindowGap(colOffset, width, memoryWidth,
                     mirrorX(q, installationMirrorX)),
-      axisWindowGap(rowOffset, height, memoryHeight,
-                    mirrorY(q, installationMirrorX)),
+      axisWindowGap(rowOffset, height, memoryHeight, rowAtFarEnd),
   };
 }
 

@@ -1871,18 +1871,15 @@ int main() {
         panelorient::windowGap(240, 240, 240, 320, 0, 0, 2),
         panelorient::windowGap(240, 240, 240, 320, 0, 0, 3),
     };
-    // THE OFFSET FOLLOWS THE ROW-MIRROR BIT, from the memory window rather than
-    // from elimination: 240x240 of glass over 240x320 of RAM, so the visible rows
-    // are addresses 0..239 unmirrored and 80..319 mirrored. mirrorY is set for
-    // quadrants 2 and 3, so those two need 80 and the other two need none. The
-    // column axis has memory equal to glass, so it never moves.
-    //
-    // FIELD EVIDENCE on white-cube-154: with no offset anywhere the image was
-    // truncated in exactly the two ADJACENT cable positions that mirror rows.
-    // Two earlier rules tied this to the axis swap instead and each fitted three
-    // rotations and failed the fourth - do not reintroduce that.
+    // PER-QUADRANT, read off white-cube-154 one position at a time rather than
+    // derived. q0 and q1 were both given 0 and only q1 rendered correctly, so the
+    // gap alone does not decide it: the unswapped quadrants want the far end of
+    // memory whether or not the rows are mirrored, and the swapped ones rendered
+    // correctly with every value tried. The swapped values here are the exact ones
+    // observed working, not a tidier rule - do not "simplify" them without putting
+    // the panel back on the bench.
     CHECK_EQ(squareWindow[0].x, 0);
-    CHECK_EQ(squareWindow[0].y, 0);
+    CHECK_EQ(squareWindow[0].y, 80);
     CHECK_EQ(squareWindow[1].x, 0);
     CHECK_EQ(squareWindow[1].y, 0);
     CHECK_EQ(squareWindow[2].x, 0);
