@@ -331,6 +331,17 @@ inline void applyOrientation(esp_lcd_panel_handle_t panel,
   // at a time. Four rounds of that got the placement rule wrong three times. This
   // is a log line and deliberately NOT a new config command - the command surface
   // is a compatibility contract and this is a diagnostic.
+  //
+  // ONLY ON CHANGE. applyOrientation sits in the render path, and printing every
+  // call floods the serial link and starves frames: the first version of this cost
+  // 177 dropped frames in 634, against 2 to 12 on the builds either side of it. A
+  // diagnostic that perturbs what it measures is worse than none.
+  static uint8_t lastQ = 0xFF;
+  static uint16_t lastGapX = 0xFFFF, lastGapY = 0xFFFF;
+  if (q == lastQ && gap.x == lastGapX && gap.y == lastGapY) return;
+  lastQ = q;
+  lastGapX = gap.x;
+  lastGapY = gap.y;
   Serial.printf(
       "place: q=%u rot=%u landscape=%u swap=%u mx=%u my=%u gap=%u,%u "
       "glass=%ux%u mem=%ux%u near=%u,%u\n",
