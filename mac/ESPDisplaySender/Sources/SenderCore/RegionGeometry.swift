@@ -131,4 +131,21 @@ extension RegionSpec {
             geometry: geometry, scale: 1, landscape: isLandscape)
         return abs(width / height - panel.width / panel.height) < 0.001
     }
+
+    /// Replace a stale fallback-shaped region with the panel's reported shape,
+    /// preserving both its preset scale and the content under its centre.
+    func realigned(to geometry: PanelGeometry) -> RegionSpec {
+        guard !matchesAspect(of: geometry) else { return self }
+        let scale = matchingScale(geometry: nil) ?? 1
+        let size = Self.panelSize(
+            geometry: geometry, scale: scale, landscape: isLandscape)
+        let centerX = x + width / 2
+        let centerY = y + height / 2
+        return RegionSpec(
+            display: display,
+            x: centerX - size.width / 2,
+            y: centerY - size.height / 2,
+            width: size.width,
+            height: size.height)
+    }
 }

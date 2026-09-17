@@ -656,9 +656,12 @@ void loop() {
   const wl_status_t wifiStatus = WiFi.status();
   const bool wifiConnected = wifiStatus == WL_CONNECTED;
   static bool wifiWasConnected = wifiConnected;
+  const bool wifiConnectionRestored =
+      wifisupervisor::connectionRestored(wifiWasConnected, wifiConnected);
   static uint32_t lastWifiMirrorAttempt = 0;
-  if (wifiConnected && !wifiWasConnected) {
+  if (wifiConnectionRestored) {
     wifiLegacyMirrorPending = wifiCredentialPresetSlot != 0;
+    restartMdnsService();
   }
   wifiWasConnected = wifiConnected;
   if (wifiConnected && wifiLegacyMirrorPending &&
@@ -779,27 +782,6 @@ void loop() {
       }
       Serial.println("link heal: restart already attempted; staying online");
       healStage = 2;
-    }
-  }
-
-  // After a heal reconnect completes, re-announce mDNS so the Mac's
-  // re-resolution finds us. MDNS.end() below is mdns_free(): it drops every
-  // registration, OTA's _arduino._tcp included, which is why addMdnsService()
-  // owns that registration rather than ArduinoOTA - re-announcing here restores
-  // OTA discovery with it. ArduinoOTA's own UDP socket is untouched by any of
-  // this, so the listener never stops; only its advertisement would have.
-  static bool mdnsRestartPending = false;
-  static uint8_t lastHealStage = 0;
-  if (healStage == 1 && lastHealStage == 0) {
-    mdnsRestartPending = true;
-  }
-  lastHealStage = healStage;
-  if (mdnsRestartPending && WiFi.status() == WL_CONNECTED) {
-    mdnsRestartPending = false;
-    MDNS.end();
-    if (MDNS.begin(cfgName.c_str())) {
-      addMdnsService();
-      Serial.printf("mDNS re-announced, IP %s\n", WiFi.localIP().toString().c_str());
     }
   }
 

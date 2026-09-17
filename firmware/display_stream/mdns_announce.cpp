@@ -65,3 +65,13 @@ void addMdnsService() {
   }
 }
 
+bool restartMdnsService() {
+  MDNS.end();
+  if (!MDNS.begin(cfgName.c_str())) {
+    Serial.println("WARN: mDNS failed to restart after WiFi reconnect");
+    return false;
+  }
+  addMdnsService();
+  Serial.printf("mDNS re-announced, IP %s\n", WiFi.localIP().toString().c_str());
+  return true;
+}

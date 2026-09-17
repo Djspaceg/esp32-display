@@ -63,6 +63,35 @@ final class DiscoveryMetadataTests: XCTestCase {
         XCTAssertEqual(devices[0].geometry.frameBytes, 466 * 466 * 2)
     }
 
+    func testAdvertisedGeometryRealignsAStoredFallbackRegion() throws {
+        let stale = RegionSpec(
+            display: "Studio", x: 493, y: 817, width: 172, height: 320)
+        var panel = PanelSnapshot(
+            serviceName: "white-cube", displayName: "white-cube")
+        panel.source = .region(stale)
+        let manager = PanelManager(
+            previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
+
+        manager.noteDiscovery([
+            DeviceBrowser.Device(
+                name: "white-cube",
+                endpoint: service("white-cube"),
+                metadata: ServiceMetadata(txtRecords: ["res": "240x240"]))
+        ])
+
+        let corrected = try XCTUnwrap(manager.panels[0].source.region)
+        XCTAssertEqual(corrected.width, 240, accuracy: 0.001)
+        XCTAssertEqual(corrected.height, 240, accuracy: 0.001)
+        XCTAssertEqual(
+            corrected.x + corrected.width / 2,
+            stale.x + stale.width / 2,
+            accuracy: 0.001)
+        XCTAssertEqual(
+            corrected.y + corrected.height / 2,
+            stale.y + stale.height / 2,
+            accuracy: 0.001)
+    }
+
     func testAnImplausibleResolutionFallsBackToTheDefault() {
         // Falls back rather than propagating: a geometry drives band arithmetic
         // and frame allocation, so the failure mode of believing this would be a

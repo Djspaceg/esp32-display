@@ -20,6 +20,10 @@ struct Decision {
   uint32_t nextRetryMs = 0;
 };
 
+inline bool connectionRestored(bool wasConnected, bool isConnected) {
+  return isConnected && !wasConnected;
+}
+
 class Supervisor {
  public:
   explicit Supervisor(bool restartAlreadyAttempted = false) {

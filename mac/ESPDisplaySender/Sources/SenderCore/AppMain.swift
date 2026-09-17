@@ -453,12 +453,13 @@ public enum ESPDisplaySenderApp {
                 id: UUID = UUID(),
                 name: String,
                 sender: FrameSender,
+                source: DeviceSession.Source? = nil,
                 allowUnowned: Bool = false,
                 provisional: Bool = false
             ) {
                 let session = DeviceSession(
                     id: id,
-                    name: name, sender: sender, source: sourceFor(name),
+                    name: name, sender: sender, source: source ?? sourceFor(name),
                     picker: picker, fps: streaming.fps,
                     onStatus: { status in
                         Task { @MainActor in
@@ -523,6 +524,7 @@ public enum ESPDisplaySenderApp {
                 let browser = DeviceBrowser { devices in
                     Task { @MainActor in
                         panelManager.noteDiscovery(devices)
+                        let currentSources = panelManager.persistedSources()
                         for device in devices
                             where panelManager.shouldLaunchDiscoveredService(device.name)
                                 && !registry.shouldSkip(device.name)
@@ -544,6 +546,8 @@ public enum ESPDisplaySenderApp {
                                                 sessionID: sessionID)
                                         }
                                     }),
+                                source: currentSources[device.name]?
+                                    .sessionSource(defaultDisplay: opts.displayName),
                                 provisional: true)
                         }
                     }

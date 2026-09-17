@@ -11,6 +11,7 @@ import SenderProtocol
 extension PanelManager {
     func noteDiscovery(_ devices: [DeviceBrowser.Device]) {
         let visible = Set(devices.map(\.name))
+        var correctedRegion = false
         unownedServiceNames.formIntersection(visible)
         for index in panels.indices {
             let isVisible = visible.contains(panels[index].serviceName)
@@ -71,7 +72,20 @@ extension PanelManager {
         for device in devices where device.metadata.geometry != nil {
             guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
             else { continue }
-            panels[index].geometry = device.metadata.geometry
+            guard let geometry = device.metadata.geometry else { continue }
+            panels[index].geometry = geometry
+            if let region = panels[index].source.region,
+               !region.matchesAspect(of: geometry) {
+                let aligned = region.realigned(to: geometry)
+                panels[index].source = .region(aligned)
+                panels[index].sourceDescription = PanelSource.region(aligned).label
+                sessions[device.name]?.useRegion(aligned)
+                correctedRegion = true
+            }
+        }
+        if correctedRegion {
+            refreshPreviewDriver()
+            persistIfNeeded(force: true)
         }
         sortPanels()
         if selectedServiceName == nil {

@@ -96,6 +96,11 @@ int main() {
   // --- WiFi recovery: unreachable APs back off without rebooting ----------
   {
     using namespace wifisupervisor;
+    CHECK(!connectionRestored(false, false));
+    CHECK(connectionRestored(false, true));
+    CHECK(!connectionRestored(true, true));
+    CHECK(!connectionRestored(true, false));
+
     Supervisor supervisor;
     std::vector<uint32_t> retries;
     std::vector<uint32_t> retryDelays;
