@@ -325,6 +325,22 @@ inline void applyOrientation(esp_lcd_panel_handle_t panel,
       cfg.panel->memoryHeight, cfg.panel->colOffset, cfg.panel->rowOffset, q,
       installationMirrorX);
   esp_lcd_panel_set_gap(panel, gap.x, gap.y);
+  // Report what was actually programmed, because nothing else could: the panel
+  // has no readback and the driver is told no resolution, so which quadrant got
+  // which gap was previously only inferrable from looking at the glass one flash
+  // at a time. Four rounds of that got the placement rule wrong three times. This
+  // is a log line and deliberately NOT a new config command - the command surface
+  // is a compatibility contract and this is a diagnostic.
+  Serial.printf(
+      "place: q=%u rot=%u landscape=%u swap=%u mx=%u my=%u gap=%u,%u "
+      "glass=%ux%u mem=%ux%u near=%u,%u\n",
+      (unsigned)q, (unsigned)rotation, (unsigned)landscape, (unsigned)swap,
+      (unsigned)panelorient::mirrorX(q, installationMirrorX),
+      (unsigned)panelorient::mirrorY(q, installationMirrorX),
+      (unsigned)gap.x, (unsigned)gap.y,
+      (unsigned)cfg.panel->width, (unsigned)cfg.panel->height,
+      (unsigned)cfg.panel->memoryWidth, (unsigned)cfg.panel->memoryHeight,
+      (unsigned)cfg.panel->colOffset, (unsigned)cfg.panel->rowOffset);
 }
 
 }  // namespace boardpanel
