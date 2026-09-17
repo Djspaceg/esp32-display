@@ -57,41 +57,52 @@ struct WindowGap {
   uint16_t y;
 };
 
-/// The centring offsets to hand the driver, which are the panel's OWN offsets
-/// with nothing derived from them: colOffset sits on the x axis for even
-/// quadrants and moves to the y axis for odd ones, exactly as it always did for
-/// landscape. This mapping matches the rotation/gap matrix in Waveshare's own
-/// ESP-IDF example for the JD9853 board, and held on the ST7789 too.
+/// One axis of the window offset. Unmirrored, the visible span starts at the
+/// panel's own near offset. Mirrored, address 0 is the far end of memory, so the
+/// same span starts memoryExtent - visibleExtent - nearOffset in. Degenerate or
+/// unknown extents (a panel whose memory equals its glass, or one whose extents
+/// were never measured and read zero) fall back to the near offset unchanged.
+inline uint16_t axisWindowGap(uint16_t nearOffset, uint16_t visibleExtent,
+                              uint16_t memoryExtent, bool mirrored) {
+  if (!mirrored || memoryExtent == 0 || visibleExtent > memoryExtent ||
+      nearOffset > memoryExtent - visibleExtent) {
+    return nearOffset;
+  }
+  return (uint16_t)(memoryExtent - visibleExtent - nearOffset);
+}
+
+/// Where the visible window sits inside the controller's own memory.
 ///
-/// DO NOT REINTRODUCE MEMORY-EXTENT ARITHMETIC HERE. A previous version computed
-/// a "far edge" gap from memoryWidth/memoryHeight whenever a rotation mirrored an
-/// address axis. On the square 1.54-inch panel - 240x240 visible inside 240x320
-/// of controller RAM, with both of its own offsets zero and its descriptor's
-/// per-rotation offsets table all zeros - that fabricated an 80-pixel gap out of
-/// the 320, and the panel drew the image shifted with the right third of the glass
-/// blank. Two successive attempts to pick the right rule by elimination each
-/// failed on some other rotation, because the panel wants no gap at all in any
-/// rotation and any nonzero value is wrong. The extents remain in the descriptor
-/// for validation; they are deliberately not an input to this.
+/// This panel family shows a FIXED window of a larger memory: the 1.54-inch
+/// ST7789 is 240x240 of glass over 240x320 of RAM, and the driver is told no
+/// resolution at all - esp_lcd_panel_dev_config_t carries none - so the only
+/// things that place the image are the window the draw call passes (always the
+/// full panel) and this gap.
 ///
-/// Field evidence: with the original pass-through the panel rendered correctly in
-/// all four cable positions; with the derived gap it rendered a shifted rectangle
-/// in the two positions whose rotation swaps the axes. The sender was ruled out
-/// from the board's own counters - frames advancing with partial=0, badlen=0 and
-/// drawerr=0 while the picture was wrong.
+/// The offset follows the MIRROR BIT OF ITS OWN AXIS and nothing else. When the
+/// row axis is mirrored, row address 0 addresses the far end of memory, so the
+/// visible 240 rows become addresses 80..319 and the window must start 80 rows
+/// in. When it is not mirrored they are 0..239 and the offset is zero. The
+/// column axis here has memory equal to glass, so its offset stays put either
+/// way.
+///
+/// DO NOT MAKE THIS DEPEND ON THE AXIS SWAP. Two earlier rules did, each derived
+/// by elimination rather than from the memory window, and each fitted three
+/// rotations and failed the fourth: one swapped the extents and offsets along
+/// with the axes (an 80 appeared on the column in the odd quarter turns), and one
+/// applied the offset only for the 180 flip. Field evidence on white-cube-154:
+/// with no offset anywhere the image was truncated in the two ADJACENT cable
+/// positions that mirror rows, which is quadrants 2 and 3 - exactly the pair this
+/// rule offsets and neither earlier rule did.
 inline WindowGap windowGap(uint16_t width, uint16_t height,
                            uint16_t memoryWidth, uint16_t memoryHeight,
                            uint16_t colOffset, uint16_t rowOffset, uint8_t q,
                            bool installationMirrorX = false) {
-  (void)width;
-  (void)height;
-  (void)memoryWidth;
-  (void)memoryHeight;
-  (void)installationMirrorX;
-  const bool swap = swapXY(q);
   return {
-      swap ? rowOffset : colOffset,
-      swap ? colOffset : rowOffset,
+      axisWindowGap(colOffset, width, memoryWidth,
+                    mirrorX(q, installationMirrorX)),
+      axisWindowGap(rowOffset, height, memoryHeight,
+                    mirrorY(q, installationMirrorX)),
   };
 }
 

@@ -1871,22 +1871,24 @@ int main() {
         panelorient::windowGap(240, 240, 240, 320, 0, 0, 2),
         panelorient::windowGap(240, 240, 240, 320, 0, 0, 3),
     };
-    // THIS PANEL WANTS NO GAP IN ANY ROTATION, which is field evidence and not a
-    // derivation: its own descriptor sets both offsets to zero and lists all four
-    // per-rotation offsets as zero, and with those offsets passed straight through
-    // it rendered correctly in all four cable positions. When a "far edge" gap was
-    // instead derived from its 240x320 controller RAM, it drew the image shifted
-    // with the right third of the glass blank, in the two positions whose rotation
-    // swaps the axes.
+    // THE OFFSET FOLLOWS THE ROW-MIRROR BIT, from the memory window rather than
+    // from elimination: 240x240 of glass over 240x320 of RAM, so the visible rows
+    // are addresses 0..239 unmirrored and 80..319 mirrored. mirrorY is set for
+    // quadrants 2 and 3, so those two need 80 and the other two need none. The
+    // column axis has memory equal to glass, so it never moves.
     //
-    // So every one of these is zero, and a nonzero value here is that regression
-    // returning. Do not relax this to fit a new derived rule: two attempts to pick
-    // the right one by elimination each failed on some other rotation, because the
-    // panel wants no gap at all and every nonzero value is wrong.
-    for (int i = 0; i < 4; i++) {
-      CHECK_EQ(squareWindow[i].x, 0);
-      CHECK_EQ(squareWindow[i].y, 0);
-    }
+    // FIELD EVIDENCE on white-cube-154: with no offset anywhere the image was
+    // truncated in exactly the two ADJACENT cable positions that mirror rows.
+    // Two earlier rules tied this to the axis swap instead and each fitted three
+    // rotations and failed the fourth - do not reintroduce that.
+    CHECK_EQ(squareWindow[0].x, 0);
+    CHECK_EQ(squareWindow[0].y, 0);
+    CHECK_EQ(squareWindow[1].x, 0);
+    CHECK_EQ(squareWindow[1].y, 0);
+    CHECK_EQ(squareWindow[2].x, 0);
+    CHECK_EQ(squareWindow[2].y, 80);
+    CHECK_EQ(squareWindow[3].x, 0);
+    CHECK_EQ(squareWindow[3].y, 80);
 
     const panelorient::WindowGap centeredWindow[] = {
         panelorient::windowGap(172, 320, 240, 320, 34, 0, 0),
@@ -1894,20 +1896,14 @@ int main() {
         panelorient::windowGap(172, 320, 240, 320, 34, 0, 2),
         panelorient::windowGap(172, 320, 240, 320, 34, 0, 3),
     };
-    // The 1.47-inch C6 geometry, back to the mapping that shipped before the
-    // derived gap: the panel's own 34-column offset rides the x axis in the even
-    // quadrants and moves to the y axis in the odd ones, which is what the
-    // landscape path always did and what Waveshare's own JD9853 example does.
-    // NOT VERIFIED on hardware - no C6 has been attached - but it is the behaviour
-    // that was in the field, rather than a new guess.
-    CHECK_EQ(centeredWindow[0].x, 34);
-    CHECK_EQ(centeredWindow[0].y, 0);
-    CHECK_EQ(centeredWindow[1].x, 0);
-    CHECK_EQ(centeredWindow[1].y, 34);
-    CHECK_EQ(centeredWindow[2].x, 34);
-    CHECK_EQ(centeredWindow[2].y, 0);
-    CHECK_EQ(centeredWindow[3].x, 0);
-    CHECK_EQ(centeredWindow[3].y, 34);
+    // The 1.47-inch C6 geometry: 172 columns centred in 240 with 34 either side,
+    // and 320 rows filling the 320 available. The column offset is symmetric, so
+    // 240-172-34 is the same 34 mirrored or not, and the row span fills memory so
+    // its offset is always zero. NOT VERIFIED on hardware - no C6 attached.
+    for (int i = 0; i < 4; i++) {
+      CHECK_EQ(centeredWindow[i].x, 34);
+      CHECK_EQ(centeredWindow[i].y, 0);
+    }
 
     const panelorient::WindowGap unverifiedWindow =
         panelorient::windowGap(128, 128, 0, 0, 2, 1, 2);
