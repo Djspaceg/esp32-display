@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ESPmDNS.h>
+#include <WiFi.h>
 
 #include "app_state.h"
 #include "device_protocol.h"
