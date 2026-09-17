@@ -79,41 +79,42 @@ inline uint16_t axisWindowGap(uint16_t nearOffset, uint16_t visibleExtent,
 /// things that place the image are the window the draw call passes (always the
 /// full panel) and this gap.
 ///
-/// WHAT THE PANEL ACTUALLY DID, one quadrant at a time on white-cube-154. Each
-/// row is an observation on the glass, not a derivation:
+/// THE VISIBLE WINDOW IS BOTTOM-ALIGNED IN MEMORY, IN EVERY QUADRANT. The glass
+/// occupies row addresses 80..319 of the 320 available, whatever the rotation and
+/// whatever the mirror bits, so the row offset is unconditional.
 ///
-///   q  swapped  mirrorY  row gap tried  result
-///   0  no       no       0              TRUNCATED
-///   1  yes      no       0              correct
-///   2  no       yes      80             correct
-///   3  yes      yes      80             correct
+/// Observed on white-cube-154 with the board's own placement log, one cable
+/// position at a time. Note the quadrant is NOT the rotation: the sender streams
+/// with the landscape flag set, so q = rotation + 1, and reading the reported
+/// rotation as the quadrant is what made three earlier attempts fit three
+/// positions and miss the fourth.
 ///
-/// q0 and q1 were both given 0 and only q1 was correct, so the gap alone does not
-/// decide it and the axis swap matters. Among the UNSWAPPED quadrants, 80 was
-/// correct and 0 was truncated - so unswapped wants the far end whether or not the
-/// rows are mirrored. Among the SWAPPED quadrants both values tried were correct,
-/// which is consistent with the swap moving this offset onto the column axis where
-/// memory equals glass and it cannot matter; that is NOT established, only
-/// unfalsified, so the swapped quadrants keep the exact values already seen
-/// working rather than being tidied into a prettier rule.
+///   cable  rotation  q  row gap given  result
+///   12     0         1  0              TRUNCATED
+///   3      1         2  80             correct
+///   6      2         3  80             correct
+///   9      3         0  80             correct
 ///
-/// This is why the earlier attempts kept failing: both tied the offset to the axis
-/// swap alone, or to the row mirror alone, and each fitted three quadrants and
-/// missed the fourth. There is no single-bit rule here.
+/// Every quadrant that received 80 was correct and the only one that received 0
+/// was truncated. So there is no MADCTL bit in this at all - not the axis swap,
+/// not the row mirror, not the 180 flip. Each of those was tried, each produced a
+/// zero in some quadrant, and that quadrant was always the broken one.
+///
+/// The column axis is separate and does still follow its mirror bit: here memory
+/// equals glass so it never moves, and on the 172x320 C6 panel the 34-column
+/// offset is symmetric within 240 and comes out the same either way.
 inline WindowGap windowGap(uint16_t width, uint16_t height,
                            uint16_t memoryWidth, uint16_t memoryHeight,
                            uint16_t colOffset, uint16_t rowOffset, uint8_t q,
                            bool installationMirrorX = false) {
-  // The row window sits at the far end of memory unless the axes are swapped and
-  // the rows are not mirrored. Read off the panel one quadrant at a time rather
-  // than derived, because the swapped quadrants turned out not to behave like the
-  // unswapped ones - see the table above the function.
-  const bool rowAtFarEnd =
-      !swapXY(q) || mirrorY(q, installationMirrorX);
+  // The row window is at the far end of memory in EVERY quadrant. Not derived
+  // from the MADCTL bits - see the table above - and deliberately not conditional
+  // on any of them, because every rule that made it conditional produced a zero
+  // in some quadrant and that quadrant was always the truncated one.
   return {
       axisWindowGap(colOffset, width, memoryWidth,
                     mirrorX(q, installationMirrorX)),
-      axisWindowGap(rowOffset, height, memoryHeight, rowAtFarEnd),
+      axisWindowGap(rowOffset, height, memoryHeight, true),
   };
 }
 

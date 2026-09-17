@@ -1871,21 +1871,18 @@ int main() {
         panelorient::windowGap(240, 240, 240, 320, 0, 0, 2),
         panelorient::windowGap(240, 240, 240, 320, 0, 0, 3),
     };
-    // PER-QUADRANT, read off white-cube-154 one position at a time rather than
-    // derived. q0 and q1 were both given 0 and only q1 rendered correctly, so the
-    // gap alone does not decide it: the unswapped quadrants want the far end of
-    // memory whether or not the rows are mirrored, and the swapped ones rendered
-    // correctly with every value tried. The swapped values here are the exact ones
-    // observed working, not a tidier rule - do not "simplify" them without putting
-    // the panel back on the bench.
-    CHECK_EQ(squareWindow[0].x, 0);
-    CHECK_EQ(squareWindow[0].y, 80);
-    CHECK_EQ(squareWindow[1].x, 0);
-    CHECK_EQ(squareWindow[1].y, 0);
-    CHECK_EQ(squareWindow[2].x, 0);
-    CHECK_EQ(squareWindow[2].y, 80);
-    CHECK_EQ(squareWindow[3].x, 0);
-    CHECK_EQ(squareWindow[3].y, 80);
+    // BOTTOM-ALIGNED IN MEMORY IN EVERY QUADRANT: the glass is row addresses
+    // 80..319 of the 320 available, whatever the rotation or mirror bits, so all
+    // four carry 80. Observed on white-cube-154 from the board's own placement
+    // log, one cable position at a time - and note the quadrant is NOT the
+    // rotation, because the sender streams landscape so q = rotation + 1. Reading
+    // the reported rotation as the quadrant is what made three earlier rules fit
+    // three positions and miss the fourth. Every quadrant given 80 was correct;
+    // the single quadrant given 0 was the truncated one.
+    for (int i = 0; i < 4; i++) {
+      CHECK_EQ(squareWindow[i].x, 0);
+      CHECK_EQ(squareWindow[i].y, 80);
+    }
 
     const panelorient::WindowGap centeredWindow[] = {
         panelorient::windowGap(172, 320, 240, 320, 34, 0, 0),
