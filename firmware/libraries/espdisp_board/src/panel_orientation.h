@@ -79,42 +79,52 @@ inline uint16_t axisWindowGap(uint16_t nearOffset, uint16_t visibleExtent,
 /// things that place the image are the window the draw call passes (always the
 /// full panel) and this gap.
 ///
-/// THE VISIBLE WINDOW IS BOTTOM-ALIGNED IN MEMORY, IN EVERY QUADRANT. The glass
-/// occupies row addresses 80..319 of the 320 available, whatever the rotation and
-/// whatever the mirror bits, so the row offset is unconditional.
+/// THE GLASS IS TOP-ALIGNED IN MEMORY, so the offset is the panel's OWN near
+/// offset and nothing is derived from the memory extents. On the 1.54-inch panel
+/// both of its offsets are zero and its descriptor lists all four per-rotation
+/// offsets as zero, so the gap is (0,0) in every quadrant.
 ///
-/// Observed on white-cube-154 with the board's own placement log, one cable
-/// position at a time. Note the quadrant is NOT the rotation: the sender streams
-/// with the landscape flag set, so q = rotation + 1, and reading the reported
-/// rotation as the quadrant is what made three earlier attempts fit three
-/// positions and miss the fourth.
+/// HOW THAT WAS ESTABLISHED, from the failure signature rather than by fitting:
+/// with a row gap of 80 the driver addresses rows 80..319, but the visible window
+/// is rows 0..239. So 80 rows of the image fall off the bottom into memory the
+/// glass never shows, 160 rows land in the lower part of the glass, and the top 80
+/// rows are never written at all - which showed up as an image TRUNCATED at the
+/// top with a stale, non-updating strip above it. Truncation means content lost,
+/// not content moved: a shift would have kept all 240 rows.
 ///
-///   cable  rotation  q  row gap given  result
-///   12     0         1  0              TRUNCATED
-///   3      1         2  80             correct
-///   6      2         3  80             correct
-///   9      3         0  80             correct
+/// The memory extents stay in the descriptor for validation and are deliberately
+/// NOT an input here. Every rule that derived an offset from them put a nonzero
+/// value into some quadrant, and that quadrant was always the broken one.
 ///
-/// Every quadrant that received 80 was correct and the only one that received 0
-/// was truncated. So there is no MADCTL bit in this at all - not the axis swap,
-/// not the row mirror, not the 180 flip. Each of those was tried, each produced a
-/// zero in some quadrant, and that quadrant was always the broken one.
+/// A WARNING FOR ANYONE RE-DERIVING THIS. Several rules were fitted here before
+/// the board could report anything, and all were wrong, because the picture also
+/// depended on the sender's capture source: this panel's app record had the WHOLE
+/// 3456x2234 display as its source instead of a 240x240 region, so a non-square
+/// capture was being fitted onto square glass and the result changed with
+/// rotation. Any bench result from before that was corrected is untrustworthy.
 ///
-/// The column axis is separate and does still follow its mirror bit: here memory
-/// equals glass so it never moves, and on the 172x320 C6 panel the 34-column
-/// offset is symmetric within 240 and comes out the same either way.
+/// The board now logs what it programmed (see applyOrientation), and driving
+/// CFGROT 0..3 over one open serial port reports the quadrant per rotation. Note
+/// q = rotation + 1, because the sender streams with the landscape flag set;
+/// reading the reported rotation as the quadrant is what made the earlier attempts
+/// each fit three cable positions and miss the fourth.
 inline WindowGap windowGap(uint16_t width, uint16_t height,
                            uint16_t memoryWidth, uint16_t memoryHeight,
                            uint16_t colOffset, uint16_t rowOffset, uint8_t q,
                            bool installationMirrorX = false) {
-  // The row window is at the far end of memory in EVERY quadrant. Not derived
-  // from the MADCTL bits - see the table above - and deliberately not conditional
-  // on any of them, because every rule that made it conditional produced a zero
-  // in some quadrant and that quadrant was always the truncated one.
+  // The visible window is top-aligned, so hand the driver the panel's own near
+  // offsets and derive nothing from the memory extents. colOffset rides the x axis
+  // and rowOffset the y axis, swapping with the axes exactly as the landscape path
+  // always did.
+  (void)width;
+  (void)height;
+  (void)memoryWidth;
+  (void)memoryHeight;
+  (void)installationMirrorX;
+  const bool swap = swapXY(q);
   return {
-      axisWindowGap(colOffset, width, memoryWidth,
-                    mirrorX(q, installationMirrorX)),
-      axisWindowGap(rowOffset, height, memoryHeight, true),
+      swap ? rowOffset : colOffset,
+      swap ? colOffset : rowOffset,
   };
 }
 

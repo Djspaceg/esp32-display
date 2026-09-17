@@ -1871,17 +1871,23 @@ int main() {
         panelorient::windowGap(240, 240, 240, 320, 0, 0, 2),
         panelorient::windowGap(240, 240, 240, 320, 0, 0, 3),
     };
-    // BOTTOM-ALIGNED IN MEMORY IN EVERY QUADRANT: the glass is row addresses
-    // 80..319 of the 320 available, whatever the rotation or mirror bits, so all
-    // four carry 80. Observed on white-cube-154 from the board's own placement
-    // log, one cable position at a time - and note the quadrant is NOT the
-    // rotation, because the sender streams landscape so q = rotation + 1. Reading
-    // the reported rotation as the quadrant is what made three earlier rules fit
-    // three positions and miss the fourth. Every quadrant given 80 was correct;
-    // the single quadrant given 0 was the truncated one.
+    // ZERO IN EVERY QUADRANT. The glass is top-aligned in memory - rows 0..239 of
+    // the 320 - so the panel's own offsets go straight through and nothing is
+    // derived from the memory extents. This panel's descriptor sets both offsets to
+    // zero and lists all four per-rotation offsets as zero.
+    //
+    // The failure signature that settled it: with a row gap of 80 the driver
+    // addresses rows 80..319, so 80 rows of image fall off the bottom into memory
+    // the glass never shows and the top 80 rows are never written - an image
+    // TRUNCATED at the top with a stale strip above it. Truncation is content lost,
+    // not content moved; a shift would have kept all 240 rows.
+    //
+    // A nonzero value here is that regression returning. Do not derive one from the
+    // extents: every rule that did put a nonzero into some quadrant, and that
+    // quadrant was always the broken one.
     for (int i = 0; i < 4; i++) {
       CHECK_EQ(squareWindow[i].x, 0);
-      CHECK_EQ(squareWindow[i].y, 80);
+      CHECK_EQ(squareWindow[i].y, 0);
     }
 
     const panelorient::WindowGap centeredWindow[] = {
@@ -1890,14 +1896,18 @@ int main() {
         panelorient::windowGap(172, 320, 240, 320, 34, 0, 2),
         panelorient::windowGap(172, 320, 240, 320, 34, 0, 3),
     };
-    // The 1.47-inch C6 geometry: 172 columns centred in 240 with 34 either side,
-    // and 320 rows filling the 320 available. The column offset is symmetric, so
-    // 240-172-34 is the same 34 mirrored or not, and the row span fills memory so
-    // its offset is always zero. NOT VERIFIED on hardware - no C6 attached.
-    for (int i = 0; i < 4; i++) {
-      CHECK_EQ(centeredWindow[i].x, 34);
-      CHECK_EQ(centeredWindow[i].y, 0);
-    }
+    // The 1.47-inch C6 geometry, on the same pass-through: its own 34-column offset
+    // rides the x axis in the even quadrants and moves to the y axis in the odd
+    // ones, which is what the landscape path always did and what Waveshare's own
+    // JD9853 example does. NOT VERIFIED on hardware - no C6 has been attached.
+    CHECK_EQ(centeredWindow[0].x, 34);
+    CHECK_EQ(centeredWindow[0].y, 0);
+    CHECK_EQ(centeredWindow[1].x, 0);
+    CHECK_EQ(centeredWindow[1].y, 34);
+    CHECK_EQ(centeredWindow[2].x, 34);
+    CHECK_EQ(centeredWindow[2].y, 0);
+    CHECK_EQ(centeredWindow[3].x, 0);
+    CHECK_EQ(centeredWindow[3].y, 34);
 
     const panelorient::WindowGap unverifiedWindow =
         panelorient::windowGap(128, 128, 0, 0, 2, 1, 2);
