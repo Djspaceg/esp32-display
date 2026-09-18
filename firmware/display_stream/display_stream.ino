@@ -446,6 +446,7 @@ void setup() {
   // verdict. Rectangular C6 panels are read but never automatically rotated;
   // their host raster geometry cannot represent odd firmware-only quadrants.
   motionAvailable = boardmotion::init(*bcfg);
+  boardmotion::dumpState(*bcfg);
   // The device name doubles as the DHCP hostname (option 12), so the router
   // lists this board by name instead of "esp32c6-XXXXXX". This MUST precede
   // WiFi.mode(): the core latches the hostname onto the STA netif inside

@@ -144,6 +144,43 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
   return false;
 }
 
+// One-shot dump of everything that decides what a sample means, printed once at
+// init. Added because three successive theories about why this sensor returned
+// implausible values were each wrong: the identity read succeeds, the config
+// readback passes, and the samples still cannot be gravity, so the remaining
+// unknowns are the control bank and the raw bytes before this file interprets
+// them. Guessing at those cost a day; reading them costs one flash.
+inline void dumpState(const board::Config &cfg) {
+  if (!cfg.hasMotion()) return;
+  uint8_t ctrl[10] = {0};
+  for (uint8_t i = 0; i < sizeof(ctrl); i++) {
+    readRegisters((uint8_t)(0x00 + i), &ctrl[i], 1);
+  }
+  Serial.print("motion-dump: reg00..09 =");
+  for (uint8_t i = 0; i < sizeof(ctrl); i++) Serial.printf(" %02X", ctrl[i]);
+  Serial.println();
+
+  // Status and the whole output block, including temperature and the timestamp
+  // that says whether the part is producing new data at all.
+  uint8_t status[4] = {0};
+  readRegisters(0x2D, status, sizeof(status));
+  Serial.printf("motion-dump: statusint/status0/status1 = %02X %02X %02X\n",
+                status[0], status[1], status[2]);
+  for (uint8_t pass = 0; pass < 3; pass++) {
+    uint8_t block[10] = {0};
+    if (!readRegisters(0x30, block, sizeof(block))) {
+      Serial.println("motion-dump: read of 0x30..0x39 failed");
+      break;
+    }
+    Serial.printf(
+        "motion-dump: ts=%02X%02X%02X temp=%02X%02X ax=%02X%02X ay=%02X%02X "
+        "az=%02X%02X\n",
+        block[2], block[1], block[0], block[4], block[3], block[6], block[5],
+        block[8], block[7], block[9], block[9]);
+    delay(120);
+  }
+}
+
 inline bool available() { return enabled; }
 
 inline bool read(Sample &out) {
