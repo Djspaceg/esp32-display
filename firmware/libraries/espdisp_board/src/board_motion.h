@@ -17,6 +17,12 @@ static const uint8_t REG_ACCEL_X_LOW = 0x35;
 static const uint8_t REG_RESET = 0x60;
 static const uint8_t WHO_AM_I = 0x05;
 static const uint32_t I2C_HZ = 400000;
+// The old 20ms was marginal: the part ACKs while still settling, so the config
+// writes that followed could be dropped without any error. Waveshare's own board
+// packages wait far longer than this.
+static const uint32_t RESET_SETTLE_MS = 60;
+static const uint32_t CONFIG_SETTLE_MS = 20;
+static const uint8_t CONFIG_ATTEMPTS = 3;
 
 struct Sample {
   int16_t x;
@@ -61,14 +67,24 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     return false;
   }
 
-  // QMI8658 soft reset used by both Waveshare board support packages. Wait
-  // conservatively, then configure normal mode with self-test bits clear:
-  // CTRL1 address auto-increment, CTRL2 +/-4g at 1kHz, CTRL7 accelerometer only.
+  // QMI8658 soft reset used by both Waveshare board support packages. The reset
+  // also clears CTRL1, CTRL2 and CTRL7, and the part keeps ACKing while it is
+  // still settling - so a config write issued too early is accepted on the wire
+  // and silently dropped, leaving the accelerometer DISABLED with its output
+  // registers holding constant undefined values. That failure looks like a
+  // working sensor: the identity read succeeds, this function logs "ready", and
+  // the samples are stable rather than noisy, which is why it read as a rotation
+  // fault instead of an init fault. It survives a chip reset because this board
+  // carries a battery, so nothing here ever power-cycles the sensor.
+  //
+  // Hence: wait properly after the reset, read the configuration back rather than
+  // trusting the ACK, and refuse to report ready on a sample that cannot be
+  // gravity.
   if (!writeRegister(REG_RESET, 0xB0)) {
     if (verbose) Serial.println("motion: ERROR reset write failed");
     return false;
   }
-  delay(20);
+  delay(RESET_SETTLE_MS);
 
   uint8_t identity = 0;
   if (!readRegisters(REG_WHO_AM_I, &identity, 1) || identity != WHO_AM_I) {
@@ -78,20 +94,44 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     }
     return false;
   }
-  bool ok = writeRegister(REG_CTRL1, 0x60);
-  ok = writeRegister(REG_CTRL2, 0x13) && ok;
-  ok = writeRegister(REG_CTRL7, 0x01) && ok;
-  if (!ok) {
-    if (verbose) Serial.println("motion: ERROR configuration write failed");
-    return false;
+
+  // CTRL1 address auto-increment, CTRL2 +/-4g at 1kHz, CTRL7 accelerometer only.
+  for (uint8_t attempt = 1; attempt <= CONFIG_ATTEMPTS; attempt++) {
+    bool ok = writeRegister(REG_CTRL1, 0x60);
+    ok = writeRegister(REG_CTRL2, 0x13) && ok;
+    ok = writeRegister(REG_CTRL7, 0x01) && ok;
+    if (!ok) {
+      if (verbose) Serial.println("motion: ERROR configuration write failed");
+      return false;
+    }
+    delay(CONFIG_SETTLE_MS);
+
+    // Read the two registers that decide whether samples mean anything, because
+    // the ACK above does not prove they stuck.
+    uint8_t ctrl2 = 0, ctrl7 = 0;
+    const bool readback = readRegisters(REG_CTRL2, &ctrl2, 1) &&
+                          readRegisters(REG_CTRL7, &ctrl7, 1);
+    if (readback && ctrl2 == 0x13 && (ctrl7 & 0x01) != 0) {
+      enabled = true;
+      if (verbose) {
+        Serial.printf(
+            "motion: QMI8658 ready at 0x%02X (sda=%d scl=%d, +/-4g, attempt %u)\n",
+            I2C_ADDR, cfg.pinTouchSda, cfg.pinTouchScl, (unsigned)attempt);
+      }
+      return true;
+    }
+    if (verbose) {
+      Serial.printf(
+          "motion: configuration did not stick (ctrl2=0x%02X ctrl7=0x%02X), "
+          "retrying %u of %u\n",
+          ctrl2, ctrl7, (unsigned)attempt, (unsigned)CONFIG_ATTEMPTS);
+    }
+    delay(RESET_SETTLE_MS);
   }
-  delay(10);
-  enabled = true;
   if (verbose) {
-    Serial.printf("motion: QMI8658 ready at 0x%02X (sda=%d scl=%d, +/-4g)\n",
-                  I2C_ADDR, cfg.pinTouchSda, cfg.pinTouchScl);
+    Serial.println("motion: ERROR QMI8658 would not accept its configuration");
   }
-  return true;
+  return false;
 }
 
 inline bool available() { return enabled; }
