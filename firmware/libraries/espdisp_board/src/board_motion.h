@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <math.h>
 
 #include <board_config.h>
 
@@ -50,6 +51,26 @@ inline bool readRegisters(uint8_t reg, uint8_t *out, size_t len) {
   if (Wire.available() != (int)len) return false;
   Wire.readBytes(out, len);
   return true;
+}
+
+// Whether a sample could be gravity at rest. At +/-4g the scale is 8192 counts
+// per g, so a stationary board reads about 8192 total however it is oriented. A
+// generous band still rejects the failure seen in the field: one channel pegged
+// at the int16 floor puts the total near 4.6g, and a dead-silent channel set puts
+// it near zero.
+inline bool read(Sample &out);
+
+inline bool plausibleSample() {
+  Sample s;
+  for (uint8_t i = 0; i < 4; i++) {
+    if (read(s)) {
+      const float mag = sqrtf((float)s.x * s.x + (float)s.y * s.y +
+                              (float)s.z * s.z);
+      if (mag > 2048.0f && mag < 20480.0f) return true;
+    }
+    delay(30);
+  }
+  return false;
 }
 
 inline bool init(const board::Config &cfg, bool verbose = true) {
@@ -122,13 +143,35 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     // Byte order is checked too: a set BE bit silently corrupts every sample.
     if (readback && (ctrl1 & 0x20) == 0 && ctrl2 == 0x13 &&
         (ctrl7 & 0x01) != 0) {
+      // The configuration being right does not mean the samples are. A channel
+      // can come up saturated - AX reading a constant 0x8000 with a total
+      // magnitude of 4.6g at rest was observed on white-cube-154 - and the soft
+      // reset above does not clear it. Cycling the accelerometer off and on
+      // powers its analog front end down, which the reset does not, so try that
+      // before accepting a reading that cannot be gravity.
       enabled = true;
+      if (plausibleSample()) {
+        if (verbose) {
+          Serial.printf(
+              "motion: QMI8658 ready at 0x%02X (sda=%d scl=%d, +/-4g, attempt %u)\n",
+              I2C_ADDR, cfg.pinTouchSda, cfg.pinTouchScl, (unsigned)attempt);
+        }
+        return true;
+      }
+      enabled = false;
       if (verbose) {
         Serial.printf(
-            "motion: QMI8658 ready at 0x%02X (sda=%d scl=%d, +/-4g, attempt %u)\n",
-            I2C_ADDR, cfg.pinTouchSda, cfg.pinTouchScl, (unsigned)attempt);
+            "motion: sample cannot be gravity, cycling the accelerometer "
+            "(attempt %u of %u)\n",
+            (unsigned)attempt, (unsigned)CONFIG_ATTEMPTS);
       }
-      return true;
+      writeRegister(REG_CTRL7, 0x00);
+      delay(CONFIG_SETTLE_MS);
+      writeRegister(REG_CTRL1, 0x01);  // sensorDisable: power the front end down
+      delay(RESET_SETTLE_MS);
+      writeRegister(REG_CTRL1, 0x40);
+      delay(CONFIG_SETTLE_MS);
+      continue;
     }
     if (verbose) {
       Serial.printf(
@@ -138,8 +181,17 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     }
     delay(RESET_SETTLE_MS);
   }
+  // Leave the part configured and sampling even though we are giving up on it.
+  // Reporting unavailable is about not feeding a bad channel to the orientation
+  // classifier; it is not a reason to hand back a powered-down sensor, and a
+  // later reader or a replacement board should find it in a working state.
+  writeRegister(REG_CTRL1, 0x40);
+  writeRegister(REG_CTRL2, 0x13);
+  writeRegister(REG_CTRL7, 0x01);
   if (verbose) {
-    Serial.println("motion: ERROR QMI8658 would not accept its configuration");
+    Serial.println(
+        "motion: ERROR accelerometer never produced a plausible sample; "
+        "automatic orientation is off and manual rotation still works");
   }
   return false;
 }
