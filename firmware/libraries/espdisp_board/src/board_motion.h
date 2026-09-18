@@ -95,9 +95,16 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     return false;
   }
 
-  // CTRL1 address auto-increment, CTRL2 +/-4g at 1kHz, CTRL7 accelerometer only.
+  // CTRL1 = 0x40: address auto-increment ONLY. Bit 5 is BE, big-endian output,
+  // and read() below decodes little-endian, so BE must stay clear. It used to be
+  // set (CTRL1 = 0x60), which byte-swapped every sample: one axis pegged at
+  // 0x8000 while the others jittered at plausible-looking magnitudes. That bug
+  // hid behind the settle-time bug above - whenever this write was dropped, BE
+  // kept its default 0 and the decode was accidentally correct, which is why
+  // orientation worked on some boots and not others.
+  // CTRL2 +/-4g at 1kHz, CTRL7 accelerometer only.
   for (uint8_t attempt = 1; attempt <= CONFIG_ATTEMPTS; attempt++) {
-    bool ok = writeRegister(REG_CTRL1, 0x60);
+    bool ok = writeRegister(REG_CTRL1, 0x40);
     ok = writeRegister(REG_CTRL2, 0x13) && ok;
     ok = writeRegister(REG_CTRL7, 0x01) && ok;
     if (!ok) {
@@ -108,10 +115,13 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
 
     // Read the two registers that decide whether samples mean anything, because
     // the ACK above does not prove they stuck.
-    uint8_t ctrl2 = 0, ctrl7 = 0;
-    const bool readback = readRegisters(REG_CTRL2, &ctrl2, 1) &&
+    uint8_t ctrl1 = 0, ctrl2 = 0, ctrl7 = 0;
+    const bool readback = readRegisters(REG_CTRL1, &ctrl1, 1) &&
+                          readRegisters(REG_CTRL2, &ctrl2, 1) &&
                           readRegisters(REG_CTRL7, &ctrl7, 1);
-    if (readback && ctrl2 == 0x13 && (ctrl7 & 0x01) != 0) {
+    // Byte order is checked too: a set BE bit silently corrupts every sample.
+    if (readback && (ctrl1 & 0x20) == 0 && ctrl2 == 0x13 &&
+        (ctrl7 & 0x01) != 0) {
       enabled = true;
       if (verbose) {
         Serial.printf(
@@ -122,9 +132,9 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     }
     if (verbose) {
       Serial.printf(
-          "motion: configuration did not stick (ctrl2=0x%02X ctrl7=0x%02X), "
-          "retrying %u of %u\n",
-          ctrl2, ctrl7, (unsigned)attempt, (unsigned)CONFIG_ATTEMPTS);
+          "motion: configuration did not stick (ctrl1=0x%02X ctrl2=0x%02X "
+          "ctrl7=0x%02X), retrying %u of %u\n",
+          ctrl1, ctrl2, ctrl7, (unsigned)attempt, (unsigned)CONFIG_ATTEMPTS);
     }
     delay(RESET_SETTLE_MS);
   }
