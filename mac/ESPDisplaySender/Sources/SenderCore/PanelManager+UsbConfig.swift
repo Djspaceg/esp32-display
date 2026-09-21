@@ -433,7 +433,8 @@ extension PanelManager {
                 ? " The credential is saved in your Keychain."
                 : " The board was configured, but Keychain storage failed."
         case .openNetwork:
-            keychainNote = WifiCredentialStore.save(ssid: request.ssid, password: "")
+            keychainNote = WifiCredentialStore.save(
+                ssid: request.ssid, password: "", isOpenNetwork: true)
                 ? " The open network is saved in your Keychain."
                 : " The board was configured, but Keychain storage failed."
         case .keepCurrent:

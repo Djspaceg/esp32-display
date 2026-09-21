@@ -260,7 +260,8 @@ final class WifiPresetSyncTests: XCTestCase {
             + Array(repeating: nil, count: 7)
         let credentials = [
             "New": SavedWiFiCredential(ssid: "New", password: "synthetic"),
-            "Cafe": SavedWiFiCredential(ssid: "Cafe", password: ""),
+            "Cafe": SavedWiFiCredential(
+                ssid: "Cafe", password: "", isOpenNetwork: true),
         ]
 
         let result = WifiConfigUI.syncWifiPresets(
@@ -417,6 +418,40 @@ final class WifiPresetSyncTests: XCTestCase {
 
         XCTAssertEqual(report.snapshot.slots[1]?.ssid, "alpha")
         XCTAssertEqual(report.unusable.sorted(), ["No Credential", tooLong].sorted())
+    }
+
+    func testAutomaticSyncDoesNotWriteAnEmptyPasswordAsAnOpenPreset() throws {
+        let device = FakePresetDevice(slots: [:])
+
+        let report = try resultValue(WifiConfigUI.syncSavedWifiPresets(
+            savedSSIDs: ["Office"],
+            credentials: [
+                "Office": SavedWiFiCredential(ssid: "Office", password: "")
+            ],
+            port: "/dev/fake",
+            send: { command, _, _ in device.send(command) }))
+
+        XCTAssertEqual(report.unusable, ["Office"])
+        XCTAssertFalse(
+            device.mutations.contains("CFGWIFISET 1 T2ZmaWNl -"),
+            "an empty password must not become an open-network command: "
+                + "\(device.mutations)")
+    }
+
+    func testAutomaticSyncWritesAnExplicitOpenNetwork() throws {
+        let device = FakePresetDevice(slots: [:])
+
+        let report = try resultValue(WifiConfigUI.syncSavedWifiPresets(
+            savedSSIDs: ["Guest"],
+            credentials: [
+                "Guest": SavedWiFiCredential(
+                    ssid: "Guest", password: "", isOpenNetwork: true)
+            ],
+            port: "/dev/fake",
+            send: { command, _, _ in device.send(command) }))
+
+        XCTAssertTrue(report.unusable.isEmpty)
+        XCTAssertEqual(device.mutations, ["CFGWIFISET 1 R3Vlc3Q= -"])
     }
 
     // MARK: the manager's automatic trigger

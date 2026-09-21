@@ -372,7 +372,10 @@ struct AddDeviceSheet: View {
         guard let saved = manager.savedWifiCredential(for: savedSSID) else {
             return .incomplete
         }
-        return .ready(saved.password.isEmpty ? .openNetwork : .set(saved.password))
+        guard let password = saved.presetPassword else {
+            return .incomplete
+        }
+        return .ready(saved.isOpenNetwork ? .openNetwork : .set(password))
     }
 
     private var requiresFirmwareForStableIdentity: Bool {
