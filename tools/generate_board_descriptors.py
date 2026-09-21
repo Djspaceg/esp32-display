@@ -549,6 +549,16 @@ def render_swift_catalog(
                     % (_q(legacy), _q(descriptor["identity"]["profile"]))
                 )
     lines.append("    ]\n\n")
+    lines.append("    public static let geometryByProfile: [String: PanelGeometry] = [\n")
+    for target in ("c6", "s3", "p4"):
+        for descriptor in grouped[target]:
+            profile = descriptor["identity"]["profile"]
+            panel = descriptor["panel"]
+            lines.append(
+                "        %s: PanelGeometry(width: %d, height: %d),\n"
+                % (_q(profile), panel["width"], panel["height"])
+            )
+    lines.append("    ]\n\n")
     lines.append("    public static let universalFamilyAliases: [String: Set<String>] = [\n")
     for target in ("c6", "s3", "p4"):
         aliases = {target}

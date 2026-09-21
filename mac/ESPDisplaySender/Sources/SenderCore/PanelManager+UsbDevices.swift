@@ -406,6 +406,20 @@ extension PanelManager {
                 panels[panelIndex].partition = partition
             }
         }
+        if let panelIndex = panels.firstIndex(where: {
+            stableHardwareID(of: $0) == canonicalID
+        }), let board, let geometry = GeneratedBoardCatalog.geometryByProfile[board] {
+            panels[panelIndex].geometry = geometry
+            if let region = panels[panelIndex].source.region,
+               !region.matchesAspect(of: geometry) {
+                let aligned = region.realigned(to: geometry)
+                panels[panelIndex].source = .region(aligned)
+                panels[panelIndex].sourceDescription = PanelSource.region(aligned).label
+                sessions[panels[panelIndex].serviceName]?.useRegion(aligned)
+                refreshPreviewDriver()
+                persistIfNeeded(force: true)
+            }
+        }
         sortPanels()
         if associationChanged { persistIfNeeded(force: true) }
     }

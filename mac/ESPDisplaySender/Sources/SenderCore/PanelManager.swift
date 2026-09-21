@@ -184,8 +184,9 @@ final class PanelManager: ObservableObject {
             self.apply(region, to: target)
             // A hand-dragged size usually matches no preset; the highlight has
             // to follow the rectangle or it lies within one drag.
-            self.regionSelector.activeScale = region.matchingScale(
-                geometry: self.geometry(of: target))
+            self.regionSelector.activeScale = self.geometry(of: target).flatMap {
+                region.matchingScale(geometry: $0)
+            }
         }
         regionSelector.onConfirm = { [weak self] in
             self?.finishChoosingRegion()

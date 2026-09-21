@@ -71,27 +71,32 @@ extension PanelManager {
     /// what arrives, which is only useful if it is already streaming.
     func chooseRegion(for serviceName: String) {
         selectedServiceName = serviceName
-        regionTarget = serviceName
 
         let panel = panels.first { $0.serviceName == serviceName }
+        guard let geometry = panel?.geometry else {
+            operationOutcome = .failure(
+                "Panel size unknown",
+                "Connect this display over USB or wait for its network advertisement "
+                    + "to report a usable resolution before choosing a region.")
+            return
+        }
+        regionTarget = serviceName
         // Remembered whole, not just the rectangle: Escape has to be able to put
         // back a source that was not a region at all.
         sourceBeforeRegion = panel?.source
         let existing = panel?.source.region
         let reusable = existing.flatMap { region -> RegionSpec? in
-            guard let geometry = panel?.geometry else { return region }
             return region.matchesAspect(of: geometry) ? region : nil
         }
         guard let region = reusable
-            ?? Self.startingRegion(geometry: panel?.geometry) else {
+            ?? Self.startingRegion(geometry: geometry) else {
             operationOutcome = .failure(
                 "No display available",
                 "macOS reported no screen to draw a region on.")
             return
         }
         apply(region, to: serviceName)
-        regionSelector.activeScale = region.matchingScale(
-            geometry: panel?.geometry)
+        regionSelector.activeScale = region.matchingScale(geometry: geometry)
         regionSelector.show(region)
     }
 
@@ -132,8 +137,9 @@ extension PanelManager {
 
     /// Resize the region to a preset multiple of the panel, keeping its centre.
     func setRegionScale(_ scale: Int, for serviceName: String) {
-        transformRegion(for: serviceName) { region, geometry, size in
-            region.scaled(to: scale, geometry: geometry, in: size)
+        guard let geometry = geometry(of: serviceName) else { return }
+        transformRegion(for: serviceName) { region, _, size in
+            return region.scaled(to: scale, geometry: geometry, in: size)
         }
     }
 
@@ -169,8 +175,9 @@ extension PanelManager {
         // Only nudge the marquee if it is the thing being looked at; moving a
         // hidden window would be wasted work.
         if regionSelector.isVisible, regionTarget == serviceName {
-            regionSelector.activeScale = updated.matchingScale(
-                geometry: geometry(of: serviceName))
+            regionSelector.activeScale = geometry(of: serviceName).flatMap {
+                updated.matchingScale(geometry: $0)
+            }
             regionSelector.apply(updated)
         }
     }
@@ -195,7 +202,7 @@ extension PanelManager {
 
     /// A sensible first rectangle: 2x the panel, centred on the focused screen.
     /// 2x rather than 1x so it is big enough to see and grab.
-    private static func startingRegion(geometry: PanelGeometry?) -> RegionSpec? {
+    private static func startingRegion(geometry: PanelGeometry) -> RegionSpec? {
         guard let screen = DisplayCapture.preferredScreen() else { return nil }
         return RegionSpec.centered(
             on: screen.name, geometry: geometry, scale: 2, landscape: false,

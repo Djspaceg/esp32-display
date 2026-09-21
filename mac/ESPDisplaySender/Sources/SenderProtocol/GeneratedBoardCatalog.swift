@@ -29,6 +29,17 @@ public enum GeneratedBoardCatalog {
         "s3-185": Set(["st77916"]),
     ]
 
+    public static let geometryByProfile: [String: PanelGeometry] = [
+        "st7789": PanelGeometry(width: 172, height: 320),
+        "jd9853": PanelGeometry(width: 172, height: 320),
+        "gc9107": PanelGeometry(width: 128, height: 128),
+        "st7789-130": PanelGeometry(width: 240, height: 240),
+        "st7789-154": PanelGeometry(width: 240, height: 240),
+        "co5300": PanelGeometry(width: 466, height: 466),
+        "st77916": PanelGeometry(width: 360, height: 360),
+        "st7703-4b": PanelGeometry(width: 720, height: 720),
+    ]
+
     public static let universalFamilyAliases: [String: Set<String>] = [
         "c6": Set(["c6"]),
         "s3": Set(["s3", "s3-085", "s3-154", "s3-175", "s3-185"]),

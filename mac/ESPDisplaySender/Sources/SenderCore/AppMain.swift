@@ -308,12 +308,17 @@ public enum ESPDisplaySenderApp {
             print("discovering devices (_espdisp._udp) ...")
             while true {
                 if let device = await discoverFirstDevice(timeoutSeconds: 8) {
+                    guard let geometry = device.geometry else {
+                        print("discovered device \"\(device.name)\" has no usable resolution"
+                            + " - waiting for a size advertisement")
+                        continue
+                    }
                     print("using device \"\(device.name)\""
-                        + " (\(device.geometry.width)x\(device.geometry.height))")
+                        + " (\(geometry.width)x\(geometry.height))")
                     return FrameSender(endpoint: device.endpoint,
                                        spacingMicros: opts.spacingMicros,
                                        adaptivePacing: opts.adaptivePacing,
-                                       geometry: device.geometry)
+                                       geometry: geometry)
                 }
                 print("no devices found yet - still browsing ...")
             }
@@ -529,6 +534,13 @@ public enum ESPDisplaySenderApp {
                             where panelManager.shouldLaunchDiscoveredService(device.name)
                                 && !registry.shouldSkip(device.name)
                         {
+                            guard let geometry = panelManager.geometry(of: device.name)
+                                ?? device.geometry
+                            else {
+                                print("not streaming discovered device \"\(device.name)\""
+                                    + " because its panel size is unknown")
+                                continue
+                            }
                             let sessionID = UUID()
                             print("probing discovered device \"\(device.name)\"")
                             launchSession(
@@ -538,7 +550,7 @@ public enum ESPDisplaySenderApp {
                                     endpoint: device.endpoint,
                                     spacingMicros: streaming.spacingMicros,
                                     adaptivePacing: streaming.adaptivePacing,
-                                    geometry: device.geometry,
+                                    geometry: geometry,
                                     onDeviceEvent: { event in
                                         Task { @MainActor in
                                             panelManager.update(
