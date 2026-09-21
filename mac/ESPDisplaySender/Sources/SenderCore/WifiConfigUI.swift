@@ -6,12 +6,34 @@ import SenderProtocol
 struct SavedWiFiCredential: Equatable, Sendable {
     let ssid: String
     let password: String
+    /// An empty password is valid only when the user explicitly saved this as
+    /// an open network. An unmarked empty Keychain item cannot prove that.
+    let isOpenNetwork: Bool
+
+    init(ssid: String, password: String, isOpenNetwork: Bool = false) {
+        self.ssid = ssid
+        self.password = password
+        self.isOpenNetwork = isOpenNetwork
+    }
+
+    /// The password form accepted by a device-side preset, or nil when the
+    /// saved item cannot safely describe a credential.
+    var presetPassword: String? {
+        if isOpenNetwork {
+            return password.isEmpty ? "" : nil
+        }
+        return password.isEmpty ? nil : password
+    }
 }
 
 /// App-managed WiFi credentials. Passwords never enter panel persistence or
 /// UserDefaults; each SSID is a generic-password item in the login Keychain.
 enum WifiCredentialStore {
     private static let service = "com.espdisplay.sender.wifi"
+    /// Generic-password data alone cannot distinguish an intentionally open
+    /// network from a zero-byte credential. Keep the intent in a separate
+    /// Keychain attribute so empty data is never silently treated as open.
+    private static let openNetworkMarker = Data("open-network-v1".utf8)
 
     static func savedNetworkNames() -> [String] {
         let query: [String: Any] = [
@@ -42,18 +64,28 @@ enum WifiCredentialStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: ssid,
             kSecReturnData as String: true,
+            kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
+              let item = result as? [String: Any],
+              let data = item[kSecValueData as String] as? Data,
               let password = String(data: data, encoding: .utf8)
         else { return nil }
-        return SavedWiFiCredential(ssid: ssid, password: password)
+        let isOpenNetwork = password.isEmpty
+            && item[kSecAttrGeneric as String] as? Data == openNetworkMarker
+        return SavedWiFiCredential(
+            ssid: ssid, password: password, isOpenNetwork: isOpenNetwork)
     }
 
     @discardableResult
-    static func save(ssid: String, password: String) -> Bool {
+    static func save(
+        ssid: String, password: String, isOpenNetwork: Bool = false
+    ) -> Bool {
+        guard isOpenNetwork ? password.isEmpty : !password.isEmpty else {
+            return false
+        }
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -61,6 +93,7 @@ enum WifiCredentialStore {
         ]
         let values: [String: Any] = [
             kSecValueData as String: Data(password.utf8),
+            kSecAttrGeneric as String: isOpenNetwork ? openNetworkMarker : Data(),
         ]
         let updated = SecItemUpdate(identity as CFDictionary, values as CFDictionary)
         if updated == errSecSuccess { return true }
@@ -68,6 +101,7 @@ enum WifiCredentialStore {
 
         var item = identity
         item[kSecValueData as String] = Data(password.utf8)
+        item[kSecAttrGeneric as String] = isOpenNetwork ? openNetworkMarker : Data()
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
     }
@@ -254,7 +288,7 @@ enum WifiConfigUI {
             else { return }
             ssidField.stringValue = credential.ssid
             passField.stringValue = credential.password
-            openCheck.state = credential.password.isEmpty ? .on : .off
+            openCheck.state = credential.isOpenNetwork ? .on : .off
         }
 
         func reloadDevice() {
@@ -546,8 +580,14 @@ enum WifiConfigUI {
         case .success(let resolved): port = resolved
         case .failure(let failure): return .failure(failure)
         }
-        let change: ConfigCommands.PasswordChange = credential.password.isEmpty
-            ? .openNetwork : .set(credential.password)
+        guard let password = credential.presetPassword else {
+            return .failure(ConfigFailure(
+                title: "Credential unavailable",
+                message: "Add \"\(ssid)\" again with its password, or save it "
+                    + "explicitly as an open network."))
+        }
+        let change: ConfigCommands.PasswordChange = credential.isOpenNetwork
+            ? .openNetwork : .set(password)
         switch sendCommand(
             ConfigCommands.setWifi(ssid: credential.ssid, password: change), port: port)
         {
@@ -900,7 +940,8 @@ enum WifiConfigUI {
                     ? " The credential is saved in Keychain."
                     : " The display was configured, but Keychain storage failed."
             case .openNetwork:
-                keychainNote = WifiCredentialStore.save(ssid: ssid, password: "")
+                keychainNote = WifiCredentialStore.save(
+                    ssid: ssid, password: "", isOpenNetwork: true)
                     ? " The open network is saved in Keychain."
                     : " The display was configured, but Keychain storage failed."
             case .keepCurrent:
