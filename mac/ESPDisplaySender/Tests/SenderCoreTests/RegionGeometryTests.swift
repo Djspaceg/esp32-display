@@ -13,23 +13,29 @@ final class RegionPresetTests: XCTestCase {
 
     func testPresetsArePanelMultiples() {
         XCTAssertEqual(
-            RegionSpec.panelSize(scale: 1, landscape: false),
+            RegionSpec.panelSize(
+                geometry: .panel172x320, scale: 1, landscape: false),
             CGSize(width: 172, height: 320))
         XCTAssertEqual(
-            RegionSpec.panelSize(scale: 3, landscape: false),
+            RegionSpec.panelSize(
+                geometry: .panel172x320, scale: 3, landscape: false),
             CGSize(width: 516, height: 960))
         XCTAssertEqual(
-            RegionSpec.panelSize(scale: 2, landscape: true),
+            RegionSpec.panelSize(
+                geometry: .panel172x320, scale: 2, landscape: true),
             CGSize(width: 640, height: 344))
     }
 
-    func testGeometryAwarePanelSizeMatchesDefaultFor172x320() {
+    func testCanonicalPanelSizeFor172x320() {
         let geo = PanelGeometry.panel172x320
         for scale in RegionSpec.scalePresets {
             for landscape in [false, true] {
                 XCTAssertEqual(
-                    RegionSpec.panelSize(geometry: geo, scale: scale, landscape: landscape),
-                    RegionSpec.panelSize(scale: scale, landscape: landscape))
+                    RegionSpec.panelSize(
+                        geometry: geo, scale: scale, landscape: landscape),
+                    landscape
+                        ? CGSize(width: Double(320 * scale), height: Double(172 * scale))
+                        : CGSize(width: Double(172 * scale), height: Double(320 * scale)))
             }
         }
     }
@@ -83,7 +89,8 @@ final class RegionPresetTests: XCTestCase {
 
     func testCenteredRegionIsCentered() {
         let region = RegionSpec.centered(
-            on: "S", geometry: nil, scale: 1, landscape: false, in: displaySize)
+            on: "S", geometry: .panel172x320, scale: 1,
+            landscape: false, in: displaySize)
 
         XCTAssertEqual(region.x + region.width / 2, 960, accuracy: 0.001)
         XCTAssertEqual(region.y + region.height / 2, 540, accuracy: 0.001)
@@ -112,27 +119,7 @@ final class RegionPresetTests: XCTestCase {
         XCTAssertEqual(scaled.matchingScale(geometry: square), 2)
         // And the same rectangle is NOT a preset for the default panel, which is
         // what says the geometry is being consulted rather than ignored.
-        XCTAssertNil(scaled.matchingScale(geometry: nil))
-    }
-
-    /// A panel that never said keeps exactly what it had. This is the case that
-    /// covers old firmware, an unstreamable `res`, and `--host` with no discovery,
-    /// so it is asserted rather than assumed to fall out of the optional.
-    func testAPanelThatDidNotSayKeepsTheCompiledInSize() {
-        for scale in RegionSpec.scalePresets {
-            for landscape in [false, true] {
-                XCTAssertEqual(
-                    RegionSpec.panelSize(
-                        geometry: nil, scale: scale, landscape: landscape),
-                    RegionSpec.panelSize(scale: scale, landscape: landscape))
-            }
-        }
-        XCTAssertEqual(
-            RegionSpec.centered(
-                on: "S", geometry: nil, scale: 1, landscape: false, in: displaySize),
-            RegionSpec.centered(
-                on: "S", geometry: .panel172x320, scale: 1, landscape: false,
-                in: displaySize))
+        XCTAssertNil(scaled.matchingScale(geometry: .panel172x320))
     }
 
     /// Presets behave like a zoom, not a jump: whatever was framed stays framed.
@@ -141,7 +128,8 @@ final class RegionPresetTests: XCTestCase {
         let centreX = region.x + region.width / 2
         let centreY = region.y + region.height / 2
 
-        let scaled = region.scaled(to: 2, geometry: nil, in: displaySize)
+        let scaled = region.scaled(
+            to: 2, geometry: .panel172x320, in: displaySize)
 
         XCTAssertEqual(scaled.x + scaled.width / 2, centreX, accuracy: 0.001)
         XCTAssertEqual(scaled.y + scaled.height / 2, centreY, accuracy: 0.001)
@@ -189,9 +177,12 @@ final class RegionPresetTests: XCTestCase {
 
     func testClampingNeverChangesTheAspectRatio() {
         let shapes = [
-            RegionSpec.panelSize(scale: 1, landscape: false),
-            RegionSpec.panelSize(scale: 3, landscape: false),
-            RegionSpec.panelSize(scale: 3, landscape: true),
+            RegionSpec.panelSize(
+                geometry: .panel172x320, scale: 1, landscape: false),
+            RegionSpec.panelSize(
+                geometry: .panel172x320, scale: 3, landscape: false),
+            RegionSpec.panelSize(
+                geometry: .panel172x320, scale: 3, landscape: true),
         ]
 
         for size in shapes {
@@ -213,13 +204,15 @@ final class RegionPresetTests: XCTestCase {
 
     func testMatchingScaleIdentifiesThePreset() {
         let oneX = RegionSpec.centered(
-            on: "S", geometry: nil, scale: 1, landscape: false, in: displaySize)
+            on: "S", geometry: .panel172x320, scale: 1,
+            landscape: false, in: displaySize)
         let threeX = RegionSpec.centered(
-            on: "S", geometry: nil, scale: 3, landscape: false, in: displaySize)
+            on: "S", geometry: .panel172x320, scale: 3,
+            landscape: false, in: displaySize)
         let odd = RegionSpec(display: "S", x: 0, y: 0, width: 200, height: 400)
 
-        XCTAssertEqual(oneX.matchingScale(geometry: nil), 1)
-        XCTAssertEqual(threeX.matchingScale(geometry: nil), 3)
-        XCTAssertNil(odd.matchingScale(geometry: nil))
+        XCTAssertEqual(oneX.matchingScale(geometry: .panel172x320), 1)
+        XCTAssertEqual(threeX.matchingScale(geometry: .panel172x320), 3)
+        XCTAssertNil(odd.matchingScale(geometry: .panel172x320))
     }
 }

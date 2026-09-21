@@ -22,11 +22,13 @@ final class OfflineSourceSelectionTests: XCTestCase {
 
     /// No sessions are registered on this manager, which is exactly the offline
     /// case: a panel remembered from a previous run with nothing on the network.
-    private func offlineManager() -> PanelManager {
-        PanelManager(
-            previewPanels: [
-                PanelSnapshot(serviceName: "teeny", displayName: "teeny"),
-            ],
+    private func offlineManager(
+        geometry: PanelGeometry? = .panel172x320
+    ) -> PanelManager {
+        var panel = PanelSnapshot(serviceName: "teeny", displayName: "teeny")
+        panel.geometry = geometry
+        return PanelManager(
+            previewPanels: [panel],
             savedNetworkNames: [],
             usbSerialPorts: [])
     }
@@ -41,7 +43,7 @@ final class OfflineSourceSelectionTests: XCTestCase {
         try requireScreen()
         let screen = try XCTUnwrap(DisplayCapture.preferredScreen())
         let savedFallback = RegionSpec.centered(
-            on: screen.name, geometry: nil, scale: 1, landscape: false,
+            on: screen.name, geometry: .panel172x320, scale: 1, landscape: false,
             in: screen.size)
         var panel = PanelSnapshot(serviceName: "teeny", displayName: "teeny")
         panel.geometry = PanelGeometry(width: 720, height: 720)
@@ -56,23 +58,14 @@ final class OfflineSourceSelectionTests: XCTestCase {
         XCTAssertEqual(selectorRegion.width, selectorRegion.height, accuracy: 0.001)
     }
 
-    func testNoAdvertisedGeometryKeepsThe172x320Fallback() throws {
+    func testNoAdvertisedGeometryDoesNotOpenASmallRectangle() throws {
         try requireScreen()
-        let screen = try XCTUnwrap(DisplayCapture.preferredScreen())
-        let savedFallback = RegionSpec.centered(
-            on: screen.name, geometry: nil, scale: 1, landscape: false,
-            in: screen.size)
-        var panel = PanelSnapshot(serviceName: "teeny", displayName: "teeny")
-        panel.source = .region(savedFallback)
-        let manager = PanelManager(
-            previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
+        let manager = offlineManager(geometry: nil)
 
         manager.chooseRegion(for: "teeny")
-        defer { manager.finishChoosingRegion() }
 
-        let selectorRegion = try XCTUnwrap(manager.regionSelector.region)
-        XCTAssertEqual(selectorRegion.width, 172, accuracy: 0.001)
-        XCTAssertEqual(selectorRegion.height, 320, accuracy: 0.001)
+        XCTAssertNil(manager.regionSelector.region)
+        XCTAssertNil(manager.panels.first?.source.region)
     }
 
     func testRegionCanBeChosenWhileOffline() throws {
@@ -96,15 +89,11 @@ final class OfflineSourceSelectionTests: XCTestCase {
 
         manager.setRegionScale(3, for: "teeny")
 
-        // Read back against the panel's own geometry, which is what the UI does.
-        // An offline panel has never advertised one, so this is also the assertion
-        // that the nil fallback keeps the presets working for a panel that has
-        // said nothing - the case region mode is most often used in, since framing
-        // works with the panel switched off.
+        // A known geometry can be framed while the panel is offline.
         let panel = manager.panels.first
-        XCTAssertNil(panel?.geometry, "an offline panel has advertised nothing")
+        XCTAssertEqual(panel?.geometry, .panel172x320)
         XCTAssertEqual(
-            panel?.source.region?.matchingScale(geometry: panel?.geometry), 3)
+            panel?.source.region?.matchingScale(geometry: .panel172x320), 3)
     }
 
     func testRotateWorksWhileOffline() throws {
@@ -161,6 +150,7 @@ final class DisplaySelectionTests: XCTestCase {
 
     private func manager(source: PanelSource) -> PanelManager {
         var panel = PanelSnapshot(serviceName: "teeny", displayName: "teeny")
+        panel.geometry = .panel172x320
         panel.source = source
         return PanelManager(
             previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
@@ -227,6 +217,7 @@ final class RegionCancelTests: XCTestCase {
     private func manager(source: PanelSource) -> PanelManager {
         var panel = PanelSnapshot(serviceName: "teeny", displayName: "teeny")
         panel.source = source
+        panel.geometry = .panel172x320
         return PanelManager(
             previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
     }

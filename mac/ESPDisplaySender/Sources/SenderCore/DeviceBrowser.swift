@@ -21,16 +21,12 @@ final class DeviceBrowser {
             self.metadata = metadata
         }
 
-        /// The geometry to stream this panel with.
-        ///
-        /// The single place the fallback is decided, so there is one answer to
-        /// "what happens when a panel does not advertise `res`" rather than one
-        /// per construction site. That matters more than it looks: this value
-        /// drives band arithmetic and frame allocation, so a panel that has
-        /// always streamed at 172x320 has to keep streaming at 172x320 unless it
-        /// said otherwise in a way `ServiceMetadata` believed.
-        var geometry: PanelGeometry {
-            metadata.geometry ?? .panel172x320
+        /// The native geometry from this network advertisement, if it supplied
+        /// a usable `res=WxH` value. Absence is unknown, not 172x320: callers
+        /// must either use identity learned over USB or leave the panel
+        /// unstreamed until its size is known.
+        var geometry: PanelGeometry? {
+            metadata.geometry
         }
     }
 

@@ -51,12 +51,12 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// select embedded firmware. Both are discovery-scoped.
     var profile: String?
     var partition: String?
-    /// What this panel says its screen is, from its `res` TXT record, or nil when
-    /// it did not say or said something `PanelGeometry.isStreamable` refused.
+    /// The panel's native screen size, from its `res` TXT record or from a known
+    /// USB `board` identity. nil means neither source established a usable size.
     ///
-    /// nil is a real answer and the region path treats it as one: it means fall
-    /// back to the compiled-in 172x320 rather than guess. Discovery-scoped and not
-    /// persisted, for the same reason as `chip` - the region rectangle IS
+    /// nil is a real answer and the region path treats it as one: it does not
+    /// guess. Discovery-scoped and not persisted, for the same reason as `chip`
+    /// - the region rectangle IS
     /// persisted, so a geometry remembered from a previous run could reshape a
     /// user's framing before the panel that justified it had said anything.
     var geometry: PanelGeometry?

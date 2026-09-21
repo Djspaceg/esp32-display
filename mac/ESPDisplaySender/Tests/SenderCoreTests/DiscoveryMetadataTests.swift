@@ -23,29 +23,27 @@ final class DiscoveryMetadataTests: XCTestCase {
 
     // MARK: - geometry
 
-    func testAPanelThatAdvertisesNothingKeepsTheOriginalGeometry() {
-        // The path every already-working panel takes, and the one that must not
-        // move: before this feature nothing read TXT at all, so 172x320 was what
-        // every panel streamed with. A panel that says nothing has to keep
-        // getting exactly that.
+    func testAPanelThatAdvertisesNothingHasNoGeometry() {
+        // Absence is not evidence that this panel is the original 172x320
+        // hardware. A concrete geometry drives frame allocation and the capture
+        // aspect ratio, so discovery must leave it unknown until a source names
+        // the panel's actual size.
         let devices = DeviceBrowser.devices(from: [
             DeviceBrowser.Advertisement(endpoint: service("espdisplay-9050"))
         ])
         XCTAssertEqual(devices.count, 1)
         XCTAssertEqual(devices[0].metadata, .empty)
-        XCTAssertEqual(devices[0].geometry, .panel172x320)
-        XCTAssertEqual(devices[0].geometry.width, 172)
-        XCTAssertEqual(devices[0].geometry.height, 320)
+        XCTAssertNil(devices[0].geometry)
 
         // And an empty record set, which is a different thing from no record set
         // and must land in the same place.
         let empty = DeviceBrowser.devices(from: [
             DeviceBrowser.Advertisement(endpoint: service("espdisplay-9050"), txtRecords: [:])
         ])
-        XCTAssertEqual(empty[0].geometry, .panel172x320)
+        XCTAssertNil(empty[0].geometry)
     }
 
-    func testAPanelThatAdvertisesItsResolutionGetsIt() {
+    func testAPanelThatAdvertisesItsResolutionGetsIt() throws {
         let devices = DeviceBrowser.devices(from: [
             DeviceBrowser.Advertisement(
                 endpoint: service("espdisplay-amoled"),
@@ -59,8 +57,9 @@ final class DiscoveryMetadataTests: XCTestCase {
         XCTAssertEqual(devices[0].metadata.firmwareVersion, "1.2.0")
         // The band layout that follows, which is the thing that was wrong before:
         // this panel was being sent 80 bands of 172-pixel rows.
-        XCTAssertEqual(devices[0].geometry.bandCount(landscape: false), 466)
-        XCTAssertEqual(devices[0].geometry.frameBytes, 466 * 466 * 2)
+        let geometry = try XCTUnwrap(devices[0].geometry)
+        XCTAssertEqual(geometry.bandCount(landscape: false), 466)
+        XCTAssertEqual(geometry.frameBytes, 466 * 466 * 2)
     }
 
     func testAdvertisedGeometryRealignsAStoredFallbackRegion() throws {
@@ -92,16 +91,16 @@ final class DiscoveryMetadataTests: XCTestCase {
             accuracy: 0.001)
     }
 
-    func testAnImplausibleResolutionFallsBackToTheDefault() {
-        // Falls back rather than propagating: a geometry drives band arithmetic
-        // and frame allocation, so the failure mode of believing this would be a
-        // vast allocation or datagrams over the agreed packet size.
+    func testAnImplausibleResolutionIsUnknown() {
+        // Do not propagate an invalid geometry: it drives band arithmetic and
+        // frame allocation. Do not replace it with a legacy concrete geometry
+        // either: this panel's size is unknown.
         for value in ["0x0", "60000x60000", "800x480", "junk", ""] {
             let devices = DeviceBrowser.devices(from: [
                 DeviceBrowser.Advertisement(
                     endpoint: service("espdisplay-9050"), txtRecords: ["res": value])
             ])
-            XCTAssertEqual(devices[0].geometry, .panel172x320, "res=\(value)")
+            XCTAssertNil(devices[0].geometry, "res=\(value)")
             XCTAssertNil(devices[0].metadata.geometry, "res=\(value)")
         }
     }
@@ -171,6 +170,42 @@ final class DiscoveryMetadataTests: XCTestCase {
         // it must be nil rather than an empty dictionary so the two stay
         // distinguishable at the boundary.
         XCTAssertNil(DeviceBrowser.txtRecords(from: .none))
+    }
+
+    func testUSBIdentitySuppliesGeometryForAKnownBoard() {
+        let hardwareID = "80456b350450"
+        let port = "/dev/cu.example"
+        var panel = PanelSnapshot(serviceName: "round", displayName: "round")
+        panel.hardwareID = hardwareID
+        let manager = PanelManager(
+            previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [port])
+
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO id=80456b350450 connected=0 ip=0.0.0.0 rot=3 autorot=1 "
+                + "board=co5300 profile=co5300 target=s3 chip=esp32s3 fw=1.5.0")
+        manager.noteUSBIdentity(path: port, identity: identity, generation: 0)
+
+        XCTAssertEqual(
+            manager.panels[0].geometry, PanelGeometry(width: 466, height: 466))
+    }
+
+    func testUSBIdentityDoesNotGuessAnUnrecognizedBoardGeometry() {
+        let hardwareID = "80456b350450"
+        let port = "/dev/cu.example"
+        var panel = PanelSnapshot(serviceName: "future", displayName: "future")
+        panel.hardwareID = hardwareID
+        let manager = PanelManager(
+            previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [port])
+
+        manager.noteUSBIdentity(
+            path: port,
+            name: "future",
+            hardwareID: hardwareID,
+            target: "s3",
+            board: "future-panel",
+            chip: "esp32s3")
+
+        XCTAssertNil(manager.panels[0].geometry)
     }
 
     // MARK: - what the panel list keeps
@@ -335,7 +370,10 @@ final class DiscoveryMetadataTests: XCTestCase {
             DeviceBrowser.Advertisement(
                 endpoint: service("espdisplay-amoled"), txtRecords: ["res": "466x466"])
         ])[0]
-        let sender = FrameSender(endpoint: discovered.endpoint, geometry: discovered.geometry)
+        guard let geometry = discovered.geometry else {
+            return XCTFail("the advertised resolution must be available")
+        }
+        let sender = FrameSender(endpoint: discovered.endpoint, geometry: geometry)
         XCTAssertEqual(sender.geometry, PanelGeometry(width: 466, height: 466))
 
         // Both inits default to the original panel, which is what an explicit
