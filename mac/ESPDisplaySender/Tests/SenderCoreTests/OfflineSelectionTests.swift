@@ -285,3 +285,69 @@ final class RegionCancelTests: XCTestCase {
         XCTAssertEqual(manager.panels.first?.source.region?.y, original.y)
     }
 }
+
+/// The streamed region has to follow a quarter turn, from the user's own
+/// instruction: "rectangular screens only flip 180. if the app chooses a
+/// 90/270 degree orientation, the app changes the region orientation too."
+///
+/// Only square glass can choose a quarter turn at all - the firmware advertises
+/// the capability solely when width equals height (firmware/display_stream/
+/// telemetry.cpp:94) - so this is about a square panel whose region the user has
+/// dragged to a non-square shape, which the marquee allows. Turning the panel
+/// then leaves the captured shape lying across the glass the wrong way until the
+/// region turns with it.
+@MainActor
+final class QuarterTurnRegionTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        _ = NSApplication.shared
+    }
+
+    private func panelWithWideRegion(_ screen: (name: String, size: CGSize))
+        -> PanelSnapshot {
+        var panel = PanelSnapshot(serviceName: "cube", displayName: "cube")
+        panel.geometry = PanelGeometry(width: 240, height: 240)
+        // Deliberately NOT square: a square region rotates to itself, so it
+        // could never show whether the swap happened.
+        panel.source = .region(RegionSpec(
+            display: screen.name, x: 40, y: 60, width: 320, height: 160))
+        return panel
+    }
+
+    func testAQuarterTurnTurnsTheRegionOnItsSide() throws {
+        guard let found = DisplayCapture.preferredScreen() else {
+            throw XCTSkip("no screen available to place a region on")
+        }
+        let screen = (name: found.name, size: found.size)
+        let manager = PanelManager(
+            previewPanels: [panelWithWideRegion(screen)],
+            savedNetworkNames: [], usbSerialPorts: [])
+
+        manager.applyRegionQuarterTurn(from: 0, to: 1, for: "cube")
+
+        let region = try XCTUnwrap(manager.panels.first?.source.region)
+        XCTAssertEqual(region.width, 160, accuracy: 0.001,
+                       "a quarter turn must swap the region's sides")
+        XCTAssertEqual(region.height, 320, accuracy: 0.001,
+                       "a quarter turn must swap the region's sides")
+    }
+
+    func testAHalfTurnLeavesTheRegionAlone() throws {
+        guard let found = DisplayCapture.preferredScreen() else {
+            throw XCTSkip("no screen available to place a region on")
+        }
+        let screen = (name: found.name, size: found.size)
+        let manager = PanelManager(
+            previewPanels: [panelWithWideRegion(screen)],
+            savedNetworkNames: [], usbSerialPorts: [])
+
+        manager.applyRegionQuarterTurn(from: 0, to: 2, for: "cube")
+
+        let region = try XCTUnwrap(manager.panels.first?.source.region)
+        XCTAssertEqual(region.width, 320, accuracy: 0.001,
+                       "180 degrees keeps the same shape on the glass")
+        XCTAssertEqual(region.height, 160, accuracy: 0.001,
+                       "180 degrees keeps the same shape on the glass")
+    }
+}

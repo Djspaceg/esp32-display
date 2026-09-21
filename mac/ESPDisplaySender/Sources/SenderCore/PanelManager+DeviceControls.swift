@@ -125,6 +125,18 @@ extension PanelManager {
         }
     }
 
+    /// Turn the streamed region on its side when a rotation change crosses
+    /// between an even and an odd quarter turn.
+    ///
+    /// Separate from setRotation so it is reachable in tests: setRotation refuses
+    /// to record a rotation it cannot deliver, so it needs a live session or a
+    /// verified USB device, while the decision this makes needs neither.
+    func applyRegionQuarterTurn(from previous: Int, to next: Int,
+                                for serviceName: String) {
+        guard previous % 2 != next % 2 else { return }
+        rotateRegion(for: serviceName)
+    }
+
     func supportsQuarterTurnRotation(_ serviceName: String) -> Bool {
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return false }
@@ -607,9 +619,28 @@ extension PanelManager {
             DeviceProtocol.rotationRange.upperBound)
         guard let path = preferredPath(for: .rotate, serviceName: serviceName)
         else { return }
+        let previous = panels.first { $0.serviceName == serviceName }?.rotation
         updatePanel(serviceName) { panel in
             panel.rotation = clamped
             panel.flipped = clamped == 2
+        }
+        // A quarter turn exchanges the glass's long and short sides, so the
+        // streamed region has to turn with it or the captured shape lies across
+        // the panel the wrong way. Only the ODD/EVEN change matters: 0 to 2 is a
+        // half turn and keeps the same shape, while 0 to 1 or 1 to 2 does not.
+        //
+        // A square region rotates to itself, so this is a no-op in the ordinary
+        // case and only bites when the marquee has been dragged to a non-square
+        // shape - which it allows. Note only square glass can reach here at all:
+        // the firmware advertises the quarter-turn capability solely when width
+        // equals height (firmware/display_stream/telemetry.cpp:94).
+        //
+        // Done beside updatePanel rather than after the transport switch, so it
+        // follows the app's own record of the orientation. That record is already
+        // updated above whether or not the command reaches the panel, and having
+        // the region disagree with it would be the greater surprise.
+        if let previous {
+            applyRegionQuarterTurn(from: previous, to: clamped, for: serviceName)
         }
         switch path {
         case .network:
