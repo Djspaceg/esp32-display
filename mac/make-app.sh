@@ -78,6 +78,27 @@ if [[ -z "${ESPDISP_SKIP_FIRMWARE:-}" ]]; then
   python3 "$HERE/../tools/espdisp.py" release-info "$CATALOG" >/dev/null
 fi
 
+# The build number is derived here, not typed into the project, so it ALWAYS
+# moves when the source moves. It had been pinned at 2 in the project file, which
+# meant every build since reported "1.1 (2)" and no build could be told from any
+# other in Finder or in the app - a rebuilt app looked identical to a two-week-old
+# one, and only the file's timestamp gave it away.
+#
+# The count of commits on HEAD is used because it is strictly numeric, which
+# CFBundleVersion requires, and monotonic, so a higher number is always the newer
+# build. A tree with uncommitted changes gets the same count with a trailing .1,
+# which is still numeric and still sorts above the clean commit it came from.
+#
+# The marketing version (MARKETING_VERSION, 1.1) is deliberately NOT touched: that
+# one is the user's to decide.
+BUILD_NUMBER="$(git -C "$HERE/.." rev-list --count HEAD)"
+SOURCE_COMMIT="$(git -C "$HERE/.." rev-parse --short HEAD)"
+if [[ -n "$(git -C "$HERE/.." status --porcelain --untracked-files=no)" ]]; then
+  BUILD_NUMBER="${BUILD_NUMBER}.1"
+  SOURCE_COMMIT="${SOURCE_COMMIT}-dirty"
+fi
+echo "build number $BUILD_NUMBER from source $SOURCE_COMMIT"
+
 xcodebuild \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
@@ -85,6 +106,7 @@ xcodebuild \
   -destination "platform=macOS" \
   -derivedDataPath "$DERIVED_DATA" \
   -allowProvisioningUpdates \
+  CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
   build
 
 BUILT_APP="$DERIVED_DATA/Build/Products/Release/ESPDisplaySender.app"

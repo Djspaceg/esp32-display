@@ -14,8 +14,13 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.1</string>
+	<!-- Taken from the build setting, which mac/make-app.sh derives from the
+	     commit count so it always moves when the source does. Hardcoding it here
+	     is what pinned every build at 2 and made a fresh app indistinguishable
+	     from a two-week-old one. The marketing version above stays a literal:
+	     that one is the user's to choose. -->
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSAppleScriptEnabled</key>
