@@ -75,35 +75,78 @@ microphone capsule.
 
 Waveshare marks V1 discontinued and V2 as its replacement. Both revisions have
 a speaker and microphone, but they are not software-compatible audio variants.
+The attached BOX is identified as V2, so its descriptor now records V2 rather
+than preserving revision ambiguity.
 
 | Item | V1 | V2 |
 | --- | --- | --- |
-| Output converter | PCM5101APWR, no I2C control | ES8311, I2C `0x18` |
-| Speaker amp | NS8002 | NS4150B |
-| Amp enable | no GPIO enable documented | GPIO15 `PA_CTRL` |
-| Amp rail | schematic net `5V_PCM`; upstream voltage not conclusively named | schematic net `VCC`; upstream voltage not conclusively named |
-| Microphone path | one ICS-43434 digital I2S microphone | two analog capsules into ES7210 |
-| Capture control | no I2C capture device | ES7210 on the existing GPIO11/10 I2C bus |
-| Common output pins | BCLK GPIO48, LRCK GPIO38, ESP data out GPIO47 | same |
-| Capture pins | SCK GPIO15, WS GPIO2, data GPIO39 | shared BCLK GPIO48, LRCK GPIO38, data GPIO39, MCLK GPIO2 |
-| Demonstrated V2 format | not applicable to the V1 sources fetched | 16 kHz in the current Arduino and ESP-IDF examples |
+| Output converter | PCM5101APWR, no I2C control pins | ES8311 at `0x18` |
+| Speaker amp | NS8002 | NS4150B, GPIO15 `PA_CTRL` |
+| Microphone path | one ICS-43434 digital I2S microphone | analog microphones through ES7210 at `0x40` |
+| Control bus | no audio control devices | SDA GPIO11, SCL GPIO10 |
+| Output serial pins | BCLK GPIO48, LRCK GPIO38, data GPIO47 | MCLK GPIO2, BCLK GPIO48, LRCK GPIO38, data GPIO47 |
+| Capture serial pins | SCK GPIO15, WS GPIO2, data GPIO39 | MCLK GPIO2, BCLK GPIO48, LRCK GPIO38, data GPIO39 |
 
-Sources are the two schematics above, the product page's V1/V2 pin table, and
-the current V2 [Arduino output demo](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/Arduino/examples/05_audio_out_tf/05_audio_out_tf.ino)
-and [ESP-IDF board header](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/ESP-IDF/ESP32-S3-Touch-LCD-1.85C-Test/components/auido_borad/boards/include/ESP32_S3_AUDIO_Board.h).
-Waveshare specifies the BOX speaker as 4 ohm, 5 W on the product page.
+The revision parts and GPIO differences come from the
+[product comparison](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.85C),
+[V1 schematic](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.85C/ESP32-S3-Touch-LCD-1.85C-Schematic.pdf),
+and [V2 schematic](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.85C/ESP32-S3-Touch-LCD-1.85C_V2.pdf).
+V1 has no audio I2C control interface: PCM5101A is pin-configured and the
+ICS-43434 exposes only serial audio clocks/data. V2 routes ES8311 and ES7210
+control to the board's shared I2C bus.
 
-Unknown until an attached 1.85C is inspected:
+Every concrete V2 descriptor value has a Waveshare source:
 
-- whether its PCB is V1 or V2;
-- consequently, every audio part and every revision-dependent audio GPIO;
-- V1 sample rate and channel format used by Waveshare's original firmware;
-- exact voltage feeding the `5V_PCM`/`VCC` amplifier rail under USB and battery;
-- V1 shutdown-pin treatment and V2 safe gain;
-- microphone and speaker acoustic performance.
+| Descriptor fields | V2 value | Primary source |
+| --- | --- | --- |
+| `amp`, `codec`, `mic` | NS4150B, ES8311, ES7210 | [V2 schematic](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.85C/ESP32-S3-Touch-LCD-1.85C_V2.pdf); [product comparison](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.85C) |
+| `speaker_bus`, `mic_bus` | I2S, I2S | V2 schematic; [ESP-IDF board header](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/ESP-IDF/ESP32-S3-Touch-LCD-1.85C-Test/components/auido_borad/boards/include/ESP32_S3_AUDIO_Board.h#L34-L111) |
+| playback MCLK/BCLK/LRCK/data | GPIO2/48/38/47 | V2 schematic; [Arduino output demo](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/Arduino/examples/05_audio_out_tf/05_audio_out_tf.ino#L17-L38) |
+| capture MCLK/BCLK/LRCK/data | GPIO2/48/38/39 | V2 schematic; [Arduino capture demo](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/Arduino/examples/08_esp_sr/08_esp_sr.ino#L9-L22) |
+| PDM clock | absent (`-1`) | V2 schematic and board header expose standard I2S, not PDM |
+| amp enable | GPIO15 | V2 schematic `PA_CTRL`; [Arduino output demo](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/Arduino/examples/05_audio_out_tf/05_audio_out_tf.ino#L90-L94) |
+| codec/capture I2C addresses | `0x18` / `0x40` | [ES8311 address definition](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/Arduino/examples/03_audio_out_no_tf/es8311.h#L19-L22); [ES7210 demo](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/Arduino/examples/08_esp_sr/08_esp_sr.ino#L15-L22) |
+| playback/capture rate | 16 kHz / 16 kHz | [ESP-IDF board implementation](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/ESP-IDF/ESP32-S3-Touch-LCD-1.85C-Test/components/auido_borad/boards/ESP32_S3_AUDIO_Board/bsp_board.c#L446-L467) |
+| playback/capture channels | 2 / 2 | [ESP-IDF ADC config](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/ESP-IDF/ESP32-S3-Touch-LCD-1.85C-Test/components/auido_borad/boards/ESP32_S3_AUDIO_Board/bsp_board.c#L78-L113); [shared bus init](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/ESP-IDF/ESP32-S3-Touch-LCD-1.85C-Test/components/auido_borad/boards/ESP32_S3_AUDIO_Board/bsp_board.c#L446-L467) |
 
-The descriptor cannot select V2 merely because V2 is current. It advertises
-physical audio, but every implementation-specific field remains unknown.
+Still unknown are V1's demonstrated sample format, the exact amplifier rail
+under USB and battery, safe gain and click/pop sequencing, and acoustic
+performance. Waveshare specifies the BOX speaker as 4 ohm, 5 W on the product
+page, but that enclosure fact is not a descriptor field.
+
+### 1.85C runtime revision discrimination
+
+An I2C ACK can distinguish the revisions electrically. On V2, both ES8311
+`0x18` and ES7210 `0x40` sit on SDA GPIO11 / SCL GPIO10; on V1 neither
+PCM5101A nor ICS-43434 has an I2C control interface. An ACK at `0x18` is
+therefore the minimal discriminator, with `0x40` available as a second
+confirmation. This remains source-derived until run on attached hardware.
+
+The current S3 detection plan already opens GPIO11/10 at 100 kHz and checks
+`0x15` and `0x20` for the 1.85C touch controller and expander. Adding `0x18`
+or `0x40` to that same `i2c_any_ack` address list would not discriminate:
+both revisions already match through `0x15`/`0x20`. A separate audio-only
+probe can observe the revision, but the current evaluator returns only a board
+variant and aggregate ACK count; it has no revision or runtime capability
+result.
+
+The fixed S3 probe addresses are `0x15`, `0x20`, `0x34`, `0x5A`, `0x6A`, and
+`0x6B`, so `0x18` and `0x40` do not alias an existing fixed discriminator.
+The C6 family scans the full `0x08`-`0x77` range, which includes both numbers,
+but that is a platform-isolated bus and cannot affect S3 exactly-one
+resolution; P4 is likewise a separate always-match plan. Across all eight
+descriptors, an observation-only audio probe changes no candidate result, and
+expanding the existing 1.85C address list changes no selection because both
+revisions already ACK `0x15`/`0x20`. A new V2 candidate alongside the current
+1.85C candidate would make V2 match twice and fail exactly-one selection;
+replacing the current candidate with mutually exclusive revision rules could
+preserve board selection but still would not expose which revision won.
+
+A revision gate is feasible, but not as a data-only address addition. It costs
+one short probe on the already-used bus, generated-model tests, and either a
+revision result or distinct revision variants that can gate audio. The human
+must approve that firmware behavior and any capability-bit consequences before
+implementation. This ADR recommends the gate but does not implement it.
 
 ### Pin collision audit
 
@@ -116,10 +159,13 @@ battery, LED, serial, expander/detection, and reset declarations.
 | 1.85C V1 | 2, 15, 38, 39, 47, 48 | no collision |
 | 1.85C V2 | 2, 15, 38, 39, 47, 48 | no collision |
 
-The codec-control buses intentionally reuse each board's existing touch and
-detection I2C bus. The audio descriptor records only device addresses for that
-reason; duplicating SDA/SCL as audio pins would turn intended bus sharing into
-two sources of truth.
+For V2 specifically, GPIO2 is I2S MCLK. The current descriptor had no GPIO2
+claim in panel, touch, IMU, backlight, battery, LED, serial, expander, or
+detection fields, so the revision-sensitive pin does not collide. GPIO15,
+GPIO38, GPIO39, GPIO47, and GPIO48 are likewise unclaimed in that descriptor.
+The codec-control bus intentionally reuses touch/detection GPIO11/10; audio
+records only device addresses, so this shared bus is not a GPIO collision or a
+second source of pin truth.
 
 ### Descriptor schema
 
@@ -356,17 +402,18 @@ driver.
 ### Phased plan
 
 1. Land descriptor schema, validation, constexpr data, and this ADR only.
-2. On an attached 1.75C, implement backend bring-up and a continuous generated
-   tone/silence test with panel streaming disabled.
+2. On an attached 1.75C and the explicitly confirmed 1.85C V2, implement
+   backend bring-up and a continuous generated tone/silence test with panel
+   streaming disabled.
 3. Add local jitter/resampler tests and soak I2S while the 466 panel paints;
-   reserve internal buffers only after heap/DMA measurements.
-4. Obtain protocol allocation, then add downlink transport and Mac pacing.
-5. Prove zero underruns under video overload; tune video degradation before
+   repeat on the 360 panel and reserve buffers only after heap/DMA measurements.
+4. Before automatic 1.85C audio enablement, obtain approval for and implement
+   the runtime revision gate; keep V1 fail-closed.
+5. Obtain protocol allocation, then add downlink transport and Mac pacing.
+6. Prove zero underruns under video overload; tune video degradation before
    increasing audio complexity.
-6. Add full-duplex microphone uplink and Mac relay integration; repeat the
+7. Add full-duplex microphone uplink and Mac relay integration; repeat the
    overload test on one radio.
-7. Identify attached 1.85C revision, add revision-safe descriptor/detection,
-   and implement the matching backend.
 8. Replace Doom SFX stubs with the eight-channel local mixer. Defer MUS/OPL.
 
 ## Consequences
@@ -382,7 +429,6 @@ dropped merely to preserve it.
 
 ## Cannot be known without an attached board
 
-- the 1.85C BOX PCB revision and therefore its usable audio row;
 - whether either fetched schematic exactly matches the shipped unit;
 - real I2C ACKs for ES8311/ES7210 and safe initialization ordering;
 - I2S clock accuracy, drift sign/rate, and the resampler correction bound;

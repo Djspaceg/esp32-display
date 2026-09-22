@@ -3686,6 +3686,37 @@ def test_board_descriptor_validator():
         lambda: board_descriptor.validate_descriptors(descriptors),
         "repository descriptors pass validation",
     )
+    v2_audio = {
+        "amp": "ns4150b",
+        "codec": "es8311",
+        "mic": "es7210",
+        "speaker_bus": "i2s",
+        "mic_bus": "i2s",
+        "pin_playback_mclk": 2,
+        "pin_playback_bclk": 48,
+        "pin_playback_lrck": 38,
+        "pin_dout": 47,
+        "pin_capture_mclk": 2,
+        "pin_capture_bclk": 48,
+        "pin_capture_lrck": 38,
+        "pin_din": 39,
+        "pin_pdm_clock": -1,
+        "pin_amp_enable": 15,
+        "codec_i2c_address": 0x18,
+        "mic_i2c_address": 0x40,
+        "playback_rate_hz": 16000,
+        "playback_channels": 2,
+        "capture_rate_hz": 16000,
+        "capture_channels": 2,
+    }
+    lcd_185c = next(
+        item for item in descriptors
+        if item["key"] == "s3-touch-lcd-185c")
+    check_equal(
+        lcd_185c["audio"],
+        v2_audio,
+        "the 1.85C descriptor pins the verified V2 audio topology",
+    )
     check(
         espdisp.generate_board_descriptors.write_outputs(
             espdisp.REPO_ROOT, check=True),
@@ -3893,8 +3924,11 @@ def test_board_descriptor_validator():
         "generated constexpr audio data carries verified component enums",
     )
     check(
-        "Variant::LcdSt77916, AudioAmp::Unknown" in generated_audio,
-        "generated 1.85C audio data preserves revision ambiguity",
+        "Variant::LcdSt77916, AudioAmp::Ns4150b, AudioCodec::Es8311, "
+        "AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, "
+        "2, 48, 38, 47, 2, 48, 38, 39, -1, 15, 24, 64, "
+        "16000, 2, 16000, 2" in generated_audio,
+        "generated 1.85C audio data pins the verified V2 topology",
     )
 
     missing = copy.deepcopy(descriptors[0])

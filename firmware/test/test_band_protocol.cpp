@@ -5417,8 +5417,27 @@ int main() {
     const board::AudioConfig *lcd185Audio =
         board::generatedAudioConfig(board::Variant::LcdSt77916);
     CHECK(lcd185Audio != nullptr);
-    CHECK(lcd185Audio->amp == board::AudioAmp::Unknown);
-    CHECK(lcd185Audio->pinPlaybackMclk == board::NO_PIN);
+    CHECK(lcd185Audio->amp == board::AudioAmp::Ns4150b);
+    CHECK(lcd185Audio->codec == board::AudioCodec::Es8311);
+    CHECK(lcd185Audio->mic == board::AudioMic::Es7210);
+    CHECK(lcd185Audio->speakerBus == board::AudioSpeakerBus::I2s);
+    CHECK(lcd185Audio->micBus == board::AudioMicBus::I2s);
+    CHECK(lcd185Audio->pinPlaybackMclk == 2);
+    CHECK(lcd185Audio->pinPlaybackBclk == 48);
+    CHECK(lcd185Audio->pinPlaybackLrck == 38);
+    CHECK(lcd185Audio->pinDout == 47);
+    CHECK(lcd185Audio->pinCaptureMclk == 2);
+    CHECK(lcd185Audio->pinCaptureBclk == 48);
+    CHECK(lcd185Audio->pinCaptureLrck == 38);
+    CHECK(lcd185Audio->pinDin == 39);
+    CHECK(lcd185Audio->pinPdmClock == board::NO_PIN);
+    CHECK(lcd185Audio->pinAmpEnable == 15);
+    CHECK(lcd185Audio->codecI2cAddress == 0x18);
+    CHECK(lcd185Audio->micI2cAddress == 0x40);
+    CHECK(lcd185Audio->playbackRateHz == 16000);
+    CHECK(lcd185Audio->playbackChannels == 2);
+    CHECK(lcd185Audio->captureRateHz == 16000);
+    CHECK(lcd185Audio->captureChannels == 2);
   }
 
   // --- glyph_draw: the on-device text rasterizer (glyph_draw.h)
