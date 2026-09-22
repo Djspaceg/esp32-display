@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "audio_backend.h"
+#include "audio_engine.h"
 
 namespace {
 
@@ -12,7 +13,6 @@ constexpr uint32_t SERVICE_INTERVAL_MS = 10;
 constexpr size_t MAX_SERVICE_FRAMES = 640;
 constexpr uint8_t MAX_CHANNELS = 2;
 
-audio::CodecSerialAudioBackend backend;
 audiobackend::ToneGenerator toneGenerator;
 uint32_t framesRemaining = 0;
 int16_t samples[MAX_SERVICE_FRAMES * MAX_CHANNELS] = {};
@@ -37,9 +37,15 @@ const char *startAudioToneTest(const board::Config &config,
   }
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
+  if (audioengine::streamActive()) {
+    return "network audio is active; stop the sender first";
+  }
+  audioengine::setLocalTestActive(true);
+  audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
   const audiobackend::Format format =
       audiobackend::descriptorFormat(*audioConfig);
   if (!backend.start(config, *audioConfig, format)) {
+    audioengine::setLocalTestActive(false);
     return "codec/I2S initialization failed; amp remains disabled";
   }
   toneGenerator.reset(format.sampleRateHz, format.channels, TONE_FREQUENCY_HZ);
@@ -62,9 +68,11 @@ const char *startAudioToneTest(const board::Config &config,
 
 void stopAudioToneTest(bool report) {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
+  audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
   const bool wasRunning = backend.running();
   framesRemaining = 0;
   backend.stop();
+  audioengine::setLocalTestActive(false);
   if (report && wasRunning) {
     Serial.println("audio: tone stopped; amp disabled, codec muted");
   }
@@ -75,6 +83,7 @@ void stopAudioToneTest(bool report) {
 
 void serviceAudioToneTest() {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
+  audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
   if (!backend.running()) return;
   if (framesRemaining == 0) {
     stopAudioToneTest(false);
@@ -98,7 +107,7 @@ void serviceAudioToneTest() {
 
 bool audioToneTestRunning() {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-  return backend.running();
+  return framesRemaining > 0 && audio::sharedCodecBackend().running();
 #else
   return false;
 #endif

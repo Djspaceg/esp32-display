@@ -8,7 +8,9 @@
 #include <board_config.h>
 
 #include "app_state.h"
+#include "audio_engine.h"
 #include "audio_test.h"
+#include "audio_transport.h"
 #include "display_power.h"
 #include "frame_pipeline.h"
 #include "net_link.h"
@@ -205,6 +207,60 @@ static void processConfigLine(char *line) {
     configSerial().printf(
         "CFGOK audio test started for %lums; send CFGAUDIOTEST stop to abort\n",
         (unsigned long)audioTest.durationMs);
+    return;
+  }
+
+  const serialcfg::ParsedAudioTune audioTune =
+      serialcfg::parseAudioTune(line);
+  if (audioTune.field != serialcfg::AudioTuneField::Unknown) {
+    if (audioTune.field == serialcfg::AudioTuneField::Show) {
+      configSerial().printf(
+          "CFGINFO lowms=%lu targetms=%lu highms=%lu maxppm=%ld "
+          "rcvbufkb=%d queue=%u (not persisted)\n",
+          (unsigned long)audioengine::tuneLowWatermarkMs,
+          (unsigned long)audioengine::tuneTargetWatermarkMs,
+          (unsigned long)audioengine::tuneHighWatermarkMs,
+          (long)audioengine::tuneMaxCorrectionPpm,
+          audiotransport::tuneReceiveBufferBytes / 1024,
+          (unsigned)audiotransport::QUEUE_DEPTH);
+      return;
+    }
+    if (audioTune.field == serialcfg::AudioTuneField::Invalid) {
+      configSerial().println(
+          "CFGERR expected: CFGAUDIO "
+          "<lowms|targetms|highms|maxppm|rcvbufkb> <n>");
+      return;
+    }
+    const serialcfg::AudioTuneConfig current = {
+        audioengine::tuneLowWatermarkMs,
+        audioengine::tuneTargetWatermarkMs,
+        audioengine::tuneHighWatermarkMs,
+        audioengine::tuneMaxCorrectionPpm,
+        audiotransport::tuneReceiveBufferBytes / 1024,
+    };
+    serialcfg::AudioTuneConfig updated = {};
+    if (!serialcfg::applyAudioTune(audioTune, current, updated) ||
+        (audioTune.field == serialcfg::AudioTuneField::ReceiveBufferKb &&
+         !audiotransport::setReceiveBufferBytes(
+             updated.receiveBufferKb * 1024))) {
+      configSerial().println(
+          "CFGERR audio bounds: 20<=low+10<=target, "
+          "target+10<=high<=250, maxppm 50-2000, rcvbufkb 16-256");
+      return;
+    }
+    audioengine::tuneLowWatermarkMs = updated.lowMs;
+    audioengine::tuneTargetWatermarkMs = updated.targetMs;
+    audioengine::tuneHighWatermarkMs = updated.highMs;
+    audioengine::tuneMaxCorrectionPpm = updated.maxPpm;
+    configSerial().printf(
+        "CFGOK lowms=%lu targetms=%lu highms=%lu maxppm=%ld "
+        "rcvbufkb=%d queue=%u (not persisted)\n",
+        (unsigned long)audioengine::tuneLowWatermarkMs,
+        (unsigned long)audioengine::tuneTargetWatermarkMs,
+        (unsigned long)audioengine::tuneHighWatermarkMs,
+        (long)audioengine::tuneMaxCorrectionPpm,
+        audiotransport::tuneReceiveBufferBytes / 1024,
+        (unsigned)audiotransport::QUEUE_DEPTH);
     return;
   }
 

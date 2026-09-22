@@ -47,4 +47,6 @@ class CodecSerialAudioBackend final : public AudioBackend {
   bool running_ = false;
 };
 
+CodecSerialAudioBackend &sharedCodecBackend();
+
 }  // namespace audio

@@ -57,6 +57,11 @@ inline DescriptorStatus classify(const board::AudioConfig &config) {
   return DescriptorStatus::Ready;
 }
 
+inline bool matchesBoard(const board::Config &boardConfig,
+                         const board::AudioConfig &audioConfig) {
+  return boardConfig.variant == audioConfig.variant;
+}
+
 inline Format descriptorFormat(const board::AudioConfig &config) {
   return {config.playbackRateHz, config.playbackChannels, 16};
 }

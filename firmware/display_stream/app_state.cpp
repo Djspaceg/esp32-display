@@ -79,6 +79,7 @@ touchmap::Calibration touchCalibration = touchmap::AXS5106L_ON_C6;
 // Whether a battery telemetry source came up. On S3 this is the AXP2101 PMU;
 // on C6 touch it is the GPIO0 voltage divider, whose charge state is unavailable.
 bool batteryAvailable = false;
+bool audioAvailable = false;
 
 const uint16_t UDP_PORT = 5568;
 

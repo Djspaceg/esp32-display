@@ -7,6 +7,11 @@
 #endif
 
 namespace audio {
+CodecSerialAudioBackend &sharedCodecBackend() {
+  static CodecSerialAudioBackend backend;
+  return backend;
+}
+
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 namespace {
 
@@ -159,7 +164,8 @@ bool CodecSerialAudioBackend::start(
   configured_ = true;
   disableAmp();
 
-  if (audiobackend::classify(config_) !=
+  if (!audiobackend::matchesBoard(boardConfig, config_) ||
+      audiobackend::classify(config_) !=
           audiobackend::DescriptorStatus::Ready ||
       format_.bitsPerSample != 16 ||
       format_.sampleRateHz != config_.playbackRateHz ||

@@ -5,6 +5,8 @@
 #include <Preferences.h>
 
 #include "app_state.h"
+#include "audio_engine.h"
+#include "audio_protocol.h"
 #include "band_protocol.h"
 #include "control_apply.h"
 #include "device_protocol.h"
@@ -36,6 +38,12 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
   hbPort = remotePort;
   lastSenderPacketAt = millis();
 
+  // Audio has its own socket. Refuse even a misrouted or future EAUD kind
+  // before any control or frame parser can interpret its bytes.
+  if (audioproto::hasAudioMagic(data, len)) {
+    statBadLen = statBadLen + 1;
+    return;
+  }
   if (len == 4 && memcmp(data, "EPNG", 4) == 0) {
     return;  // keepalive ping: endpoint refresh only
   }
@@ -80,6 +88,12 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
     portENTER_CRITICAL(&controlMux);
     controls.offer(command);
     portEXIT_CRITICAL(&controlMux);
+    return;
+  }
+  // Audio owns a separate socket and can never arrive here. While its local
+  // fill trend says continuity is at risk, discard video before any frame
+  // parsing or PSRAM copy so the panel's CPU and memory bandwidth go to audio.
+  if (audioengine::shouldSuppressVideo()) {
     return;
   }
   if (len >= 4 && memcmp(data, "ETL1", 4) == 0) {

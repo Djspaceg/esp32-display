@@ -14,6 +14,103 @@ struct ParsedAudioTest {
   uint32_t durationMs;
 };
 
+enum class AudioTuneField : uint8_t {
+  Unknown,
+  Show,
+  LowMs,
+  TargetMs,
+  HighMs,
+  MaxPpm,
+  ReceiveBufferKb,
+  Invalid,
+};
+
+struct ParsedAudioTune {
+  AudioTuneField field;
+  int32_t value;
+};
+
+struct AudioTuneConfig {
+  uint32_t lowMs;
+  uint32_t targetMs;
+  uint32_t highMs;
+  int32_t maxPpm;
+  int32_t receiveBufferKb;
+};
+
+inline ParsedAudioTune parseAudioTune(const char *line) {
+  static const char VERB[] = "CFGAUDIO";
+  static const char PREFIX[] = "CFGAUDIO ";
+  if (line == nullptr) return {AudioTuneField::Unknown, 0};
+  if (strcmp(line, VERB) == 0) return {AudioTuneField::Show, 0};
+  if (strncmp(line, PREFIX, sizeof(PREFIX) - 1) != 0) {
+    return {AudioTuneField::Unknown, 0};
+  }
+  const char *cursor = line + sizeof(PREFIX) - 1;
+  const char *separator = strchr(cursor, ' ');
+  if (separator == nullptr || separator == cursor) {
+    return {AudioTuneField::Invalid, 0};
+  }
+  AudioTuneField field = AudioTuneField::Invalid;
+  const size_t nameLength = (size_t)(separator - cursor);
+  if (nameLength == 5 && memcmp(cursor, "lowms", 5) == 0) {
+    field = AudioTuneField::LowMs;
+  } else if (nameLength == 8 && memcmp(cursor, "targetms", 8) == 0) {
+    field = AudioTuneField::TargetMs;
+  } else if (nameLength == 6 && memcmp(cursor, "highms", 6) == 0) {
+    field = AudioTuneField::HighMs;
+  } else if (nameLength == 6 && memcmp(cursor, "maxppm", 6) == 0) {
+    field = AudioTuneField::MaxPpm;
+  } else if (nameLength == 8 && memcmp(cursor, "rcvbufkb", 8) == 0) {
+    field = AudioTuneField::ReceiveBufferKb;
+  }
+  cursor = separator + 1;
+  if (field == AudioTuneField::Invalid ||
+      *cursor < '0' || *cursor > '9') {
+    return {AudioTuneField::Invalid, 0};
+  }
+  int32_t value = 0;
+  while (*cursor >= '0' && *cursor <= '9') {
+    if (value > 100000) return {AudioTuneField::Invalid, 0};
+    value = value * 10 + (*cursor - '0');
+    cursor++;
+  }
+  if (*cursor != 0) return {AudioTuneField::Invalid, 0};
+  return {field, value};
+}
+
+inline bool applyAudioTune(const ParsedAudioTune &parsed,
+                           const AudioTuneConfig &current,
+                           AudioTuneConfig &updated) {
+  updated = current;
+  switch (parsed.field) {
+    case AudioTuneField::LowMs:
+      updated.lowMs = (uint32_t)parsed.value;
+      break;
+    case AudioTuneField::TargetMs:
+      updated.targetMs = (uint32_t)parsed.value;
+      break;
+    case AudioTuneField::HighMs:
+      updated.highMs = (uint32_t)parsed.value;
+      break;
+    case AudioTuneField::MaxPpm:
+      updated.maxPpm = parsed.value;
+      break;
+    case AudioTuneField::ReceiveBufferKb:
+      updated.receiveBufferKb = parsed.value;
+      break;
+    default:
+      return false;
+  }
+  return updated.lowMs >= 20 &&
+         updated.lowMs + 10 <= updated.targetMs &&
+         updated.targetMs + 10 <= updated.highMs &&
+         updated.highMs <= 250 &&
+         updated.maxPpm >= 50 && updated.maxPpm <= 2000 &&
+         updated.receiveBufferKb >= 16 &&
+         updated.receiveBufferKb <= 256;
+}
+
 inline ParsedAudioTest parseAudioTest(const char *line) {
   static const char VERB[] = "CFGAUDIOTEST";
   static const char PREFIX[] = "CFGAUDIOTEST ";

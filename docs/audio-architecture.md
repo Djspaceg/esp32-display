@@ -1,16 +1,16 @@
 # ADR: Privileged audio streaming
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-22
 
 ## Context
 
-The repository has no audio subsystem today. There is no I2S or PDM setup,
-codec driver, audio descriptor section, audio capability bit, audio datagram,
-or Mac audio sender/receiver. Doom's `i_sound.h` and `i_cdmus.h` interfaces are
-present, but `firmware/doom/src/platform/doom_esp32_stubs.c.inc` implements
-no-op backends. `mac/ESPDisplaySender/Sources/SenderCore/MediaControl.swift`
-sends macOS media keys and carries no audio samples.
+The repository previously had no audio subsystem. The accepted implementation
+adds descriptor-driven 1.75C codec bring-up, the panel transport and engine,
+and the approved wire allocations below. Mac capture/playback remains a later
+implementation stage. Doom's `i_sound.h` and `i_cdmus.h` interfaces are
+present, but `firmware/doom/src/platform/doom_esp32_stubs.c.inc` still
+implements no-op backends.
 
 The first product phase streams Mac audio down to the panel. Microphone audio
 then streams up to the Mac for voice relay. Doom sound effects are a later
@@ -20,8 +20,9 @@ model. The non-negotiable scheduling rule is:
 > Audio is the privileged stream. When radio, CPU, internal RAM, PSRAM, or
 > panel bandwidth is over budget, video loses fidelity or update rate first.
 
-This ADR defines the descriptor data and the future module boundaries. It does
-not implement audio, allocate a wire-protocol bit, or change firmware behavior.
+This ADR records the descriptor data, implemented firmware boundaries, and
+approved wire allocation. It keeps 1.85C audio disabled because no approved
+runtime revision identity exists.
 
 ## Decision
 
@@ -169,8 +170,9 @@ second source of pin truth.
 
 ### Descriptor schema
 
-Every descriptor now has `[audio]`, and `[capabilities].audio` is data only.
-No firmware protocol bit consumes it.
+Every descriptor now has `[audio]`. `[capabilities].audio` is descriptor data;
+firmware translates only the safely identified 1.75C row into the audio
+protocol capability bits.
 
 | Field | Purpose |
 | --- | --- |
@@ -204,7 +206,7 @@ data model. Neither file initializes hardware.
 
 ### Firmware module boundary
 
-The future ownership graph is:
+The ownership graph is:
 
 ```text
 audio_transport  ->  audio_engine  ->  audio_backend
@@ -250,50 +252,64 @@ Current repository facts constrain the design:
 - `panel_transfer.cpp` copies PSRAM pixels into those slots so panel DMA does
   not consume PSRAM bandwidth. `dma_gate` prevents source reuse and is drained
   around panel/flash transitions.
-- `net_link.cpp` runs the S3 receive task at priority 9, default-pinned to core
-  1; `CFGRXCORE` already provides a measured precedent for affinity changes.
+- `net_link.cpp` runs the S3 video receive task at priority 9 on core 1.
 - `docs/tile-stream-plan.md` sections 17.3-17.4 record useful operation around
   296-300 datagrams/s, degradation by 427/s, and collapse around 575/s while
-  the 466 panel paints. The useful payload rate is about 0.44 MB/s.
+  the 466 panel paints. These are measured operating and collapse points, not
+  a budget that can be divided arithmetically.
 - Two 466x466 RGB565 framebuffers occupy 868,624 bytes of PSRAM.
-- Each S3 app slot is 2,031,616 bytes. The supported compile lane reports the
-  post-change sketch at 1,435,082 bytes, leaving 596,534 bytes of app-slot
-  headroom.
 
-The proposed full-duplex audio reserve is about 16 KB of internal RAM:
+The implemented full-duplex path reserves approximately 39 KB of fixed
+internal sample/queue storage:
 
-- 5,760 bytes: maximum 180 ms downlink jitter at 16 kHz, mono PCM16;
-- 5,120 bytes: eight 10 ms stereo-slot I2S DMA buffers;
-- 2,560 bytes: four 20 ms mono capture blocks;
-- about 2,560 bytes: mixer, resampler, crossfade, and framing scratch.
+- about 16 KB: 250 ms maximum downlink jitter at the descriptor's current
+  16 kHz, two-channel PCM16 format;
+- about 17 KB: a depth-12 transport queue whose entries can carry the
+  MTU-bounded 1,400-byte PCM payload;
+- about 6 KB: fixed output, capture, correction, and receive scratch.
 
-No real-time audio sample buffer lives in PSRAM. That costs video 16 KB of
-internal headroom and may require reducing tile decode scratch concurrency,
-socket burst buffering, or draw queue depth after measurement. It does not
-shrink or alias the existing 30,720-byte panel staging pool. PSRAM remains for
-the two framebuffers and non-deadline state.
+The receive and engine tasks additionally request about 14 KB of stack, and
+IDF owns the I2S DMA buffers. Their actual heap cost must be measured with the
+real S3 build and attached-board heap telemetry rather than inferred from
+source declarations.
+
+No real-time audio sample buffer lives in PSRAM. These allocations do not
+shrink or alias the existing panel staging pool. The exact sustainable reserve
+is runtime-tunable and remains an attached-board measurement.
 
 ### Clock domain, jitter, and underrun
 
-The network proposal uses 16 kHz, signed PCM16, mono, in 20 ms packets: 320
-samples and 640 payload bytes, or 50 datagrams/s and 32 KB/s per direction.
-The rate is demonstrated by the target-board vendor examples. The backend
-duplicates mono into the two I2S output slots where hardware expects stereo.
+The wire carries signed little-endian PCM16. Every packet carries its sample
+rate, channel count, frame count, and payload length; the backend format comes
+from the descriptor and the stream must negotiate an exact supported match.
+No transport, jitter, resampler, or backend buffer assumes 16 kHz mono. The
+current 1.75C descriptor uses the vendor-demonstrated 16 kHz, two-slot format.
+Payloads are capped at 1,400 bytes, so packet duration varies with format.
 
-UDP arrives in bursts, but I2S cannot. The panel I2S peripheral is the playout
-clock master. Playout starts only after 120 ms is buffered. The operating range
-is 80-180 ms:
+UDP arrives in bursts, but I2S cannot. The ESP-generated MCLK is the playout
+clock master. Playout starts only after the 120 ms target is buffered. The
+default operating range is 80-180 ms:
 
-- above 120 ms, slightly speed the asynchronous resampler;
-- below 120 ms, slightly slow it;
-- constrain normal correction to a small measured range, initially +/-1000
-  ppm, so clock drift is removed without pitch steps;
-- outside 80-180 ms, make one crossfaded 10 ms hard correction and count it.
+- above target, slightly speed the asynchronous resampler;
+- below target, slightly slow it;
+- bias correction using the local jitter-fill trend, not an underrun report
+  returning from the Mac;
+- constrain normal correction to a runtime-tunable default of +/-400 ppm;
+- above the high watermark, discard at most 10 ms and crossfade the
+  uncorrected and post-discard playout blocks.
+
+The ppm bound follows from the clocks rather than an asserted packet rate.
+Relative drift is bounded by
+`abs(ESP crystal ppm) + abs(Mac clock ppm) + estimator error ppm`.
+Until measured, the planning values are 50 ppm ESP crystal, 100 ppm Mac clock,
+and 50 ppm estimator error: 200 ppm total. The default 400 ppm is a 2x margin,
+and `CFGAUDIO maxppm` permits 50-2,000 ppm for experiments. Attached hardware
+must replace those assumptions with measured fill slope and correction use.
 
 Per-sample drop/insert is rejected as the normal drift policy because periodic
 discontinuities contradict the unbroken-audio bar. A low-cost fractional linear
-resampler at 16 kHz mono is the default; quality can be raised later without
-changing transport or backend ownership.
+resampler is the default; quality can be raised later without changing
+transport or backend ownership.
 
 An underrun cannot honestly be called unbroken sound. The recovery behavior
 minimizes damage but records a failure:
@@ -308,27 +324,53 @@ This avoids a click and avoids an I2S restart gap, but audible silence remains.
 Acceptance therefore requires zero underruns in the target stress run; the
 concealment path is not the success criterion.
 
+The explicit end-to-end latency budgets are:
+
+- downlink target 150 ms, ceiling 220 ms: up to 20 ms Mac capture/packet
+  formation, 10 ms network scheduling, 120 ms panel jitter target, and 10 ms
+  I2S service/output, with the remaining ceiling reserved for burst recovery;
+- uplink target 80 ms, ceiling 120 ms: up to 10 ms ADC service, 10 ms network
+  scheduling, 40 ms Mac receive jitter, and 20 ms CoreAudio conversion/relay.
+
+These are acceptance budgets, not measured results. The human must measure both
+directions on the 1.75C while video is overloaded.
+
 ### Privileged-stream mechanism
 
 Audio wins through mechanisms, not intent:
 
-- I2S service task: core 1, priority 12, above video receive priority 9 and
-  loop/draw priority 1, below WiFi/lwIP system tasks.
-- Audio transport: a separate UDP port and socket/task, so video parsing and
-  video mailbox bursts cannot head-of-line block audio. The human must assign
-  the port before implementation.
+- I2S service/engine task: core 1, priority 12, above video receive priority 9
+  and loop/draw priority 1, below WiFi/lwIP system tasks.
+- Audio ingress: UDP port 5569 has its own socket, a default 96 KiB
+  `SO_RCVBUF`, and a core-1 priority-13 receive task. It drains at most eight
+  datagrams before yielding into a depth-12 fixed queue. This prevents video
+  parsing and mailbox work from head-of-line blocking accepted audio.
+- Ingress limits: a separate port cannot prevent drops in the WiFi driver or
+  lwIP before the audio socket queue. The receive task, socket buffer, queue
+  drops, and minimum fill make that risk observable, but the result is
+  unproven until an attached full-duplex stress test.
 - Sender pacing: audio packets are deadline-scheduled first. Video receives
-  only tokens left after the 50 datagrams/s audio reservation and safety
-  margin.
-- Low watermark: below 80 ms fill, video sends nothing. Between 80 and 120 ms,
-  it sends only already-prepared high-value dirty tiles. Above 120 ms, it may
-  spend the measured residual budget.
+  only tokens left after measured audio demand and a safety margin; there is no
+  hardcoded reservation derived from the approximately 300 datagrams/s
+  operating point.
+- Low watermark: below 80 ms fill, panel video datagrams are rejected before
+  their parser/copy path. Video resumes only when local fill has recovered.
 - Video degradation order: postpone keyframes, lower dirty-tile rate, drop
   least-recent/non-visible bands, then skip whole video frames. Never evict an
   audio packet to preserve a frame.
 - Uplink accounting: microphone packets consume radio airtime even though they
   do not enter the downlink receive queue. Sender pacing subtracts observed
   uplink airtime/loss from the video budget.
+
+`CFGAUDIO lowms`, `targetms`, `highms`, `maxppm`, and `rcvbufkb` tune the
+watermarks, correction bound, and socket reserve without rebuilding. The real
+fill-stability knee is found by sweeping full-duplex packet sizes/rates while
+the panel receives interleaved worst-case video for at least ten minutes per
+point. The knee is the highest video load with non-negative long-run fill
+slope, zero socket/queue drops, zero hard corrections, zero underruns, and both
+latency ceilings met. Repeat around that point after WiFi retries and channel
+conditions change; do not divide the historical collapse number into fixed
+audio and video shares.
 
 Named failure modes are audio socket/mailbox overflow, I2S DMA starvation,
 priority inversion on an I2C or logging lock, sender burst bunching, WiFi
@@ -339,35 +381,42 @@ diagnosis.
 
 ### Microphone uplink
 
-The backend captures at the descriptor's verified format, selects or mixes the
-physical channels to 16 kHz mono PCM16, and hands 20 ms blocks to
-`audio_transport`. Each proposed uplink datagram carries stream version,
-sequence, sample counter, capture timestamp, flags, and 640 bytes of PCM.
+The backend captures at the descriptor's verified format and hands
+MTU-bounded PCM16 blocks to `audio_transport`. Each uplink datagram carries
+stream version, sequence, generation, sample rate, channel count, sample
+counter, capture timestamp, flags, frame count, and payload length. Channel
+selection or mixing is an explicit negotiated conversion, never an implicit
+16 kHz mono rule.
 
 The Mac maintains a short receive jitter queue, converts the stream into its
 CoreAudio processing format, and exposes it to a relay component. The eventual
 relay target (virtual input device, app-specific voice transport, or another
 network endpoint) is a Mac product decision and is not present today.
 
-Downlink and uplink share one ESP32 radio. At the baseline format they total
-100 audio datagrams/s and 64 KB/s of payload before UDP/IP and retry overhead.
-That is below the measured payload ceiling but consumes one third of the
-documented 300-datagram/s operating point before video. Full-duplex stress,
-not separate one-way tests, is the acceptance lane.
+Downlink and uplink share one ESP32 radio. Their packet rate depends on
+negotiated format and packet duration. Full-duplex stress, not separate
+one-way tests or arithmetic against a historical collapse point, is the
+acceptance lane.
 
-### Proposed protocol changes, not approved or implemented
+### Approved protocol allocation
 
-Wire protocol and capability allocation remain reserved for human approval.
-This change proposes names and behavior only:
+The dedicated audio protocol uses these concrete values:
 
-- capabilities `audioDownlink` and `audioUplink`, with bit positions unassigned;
-- versioned datagram kinds `audioPcmDownlinkV1` and `audioPcmUplinkV1`, with
-  numeric values unassigned;
-- a dedicated audio UDP port, numeric value unassigned;
-- sequence, stream generation, sample counter, timestamp, format flags, and
-  payload length in every datagram;
-- an audio status message carrying fill, underruns, late/lost packets, hard
-  corrections, and capture overruns.
+- UDP port: `5569`;
+- audio protocol version: `1`;
+- capability `audioDownlink`: device capability bit `20` (`1 << 20`);
+- capability `audioUplink`: device capability bit `21` (`1 << 21`);
+- datagram kind `audioPcmDownlinkV1`: `1`;
+- datagram kind `audioPcmUplinkV1`: `2`;
+- datagram kind `audioStatusV1`: `3`.
+
+Every datagram starts with `EAUD`, version, and kind. PCM packets carry
+sequence, stream generation, sample rate, channel count, sample counter,
+timestamp, flags, frame count, and payload length. Status carries fill,
+underruns, late/lost data, hard corrections, queue drops, and capture overruns.
+The main mDNS service advertises `audio-port`, `audio-version`, `audio-rate`,
+`audio-play-ch`, and `audio-capture-ch` from the same constants and descriptor.
+The protocol header is `firmware/display_stream/audio_protocol.h`.
 
 Compatibility is fail-closed:
 
@@ -375,9 +424,23 @@ Compatibility is fail-closed:
 - old app + new panel: no audio datagrams arrive, so the panel remains muted;
 - new peers with different audio versions: no audio starts;
 - unknown audio datagrams never enter the existing video parser because the
-  proposed port is separate;
-- descriptor `capabilities.audio` must not be serialized as a protocol bit
-  until the human allocates and approves it.
+  port and parser are separate, and video ingress rejects `EAUD` magic before
+  frame parsing even if a sender misroutes it;
+- only a descriptor classified `Ready` advertises the bits. The ambiguous
+  1.85C family remains fail-closed despite its concrete V2 descriptor row.
+
+After two seconds without an accepted PCM packet, the panel has already faded
+and emitted silence; it then stops the backend, disables the amp, clears the
+stream, and lets video resume. Sender disappearance therefore cannot pin the
+panel permanently in low-watermark suppression.
+
+The ES8311 and ES7210 vendor clock tables cover rates through 96 kHz. The
+current backend supports 16, 24, 44.1, 48, and 64 kHz with the ESP-generated
+256x MCLK available through the Arduino I2S API. Moving the 1.75C operating
+point to 48 kHz requires changing descriptor/negotiation values, measuring the
+threefold radio and internal-buffer demand, retuning packet duration and
+latency, and validating speaker acoustics. Rates requiring another MCLK
+multiple need backend clock configuration work, not transport redesign.
 
 ### Doom phase 2
 
@@ -402,26 +465,25 @@ driver.
 ### Phased plan
 
 1. Land descriptor schema, validation, constexpr data, and this ADR only.
-2. On an attached 1.75C and the explicitly confirmed 1.85C V2, implement
-   backend bring-up and a continuous generated tone/silence test with panel
-   streaming disabled.
-3. Add local jitter/resampler tests and soak I2S while the 466 panel paints;
-   repeat on the 360 panel and reserve buffers only after heap/DMA measurements.
-4. Before automatic 1.85C audio enablement, obtain approval for and implement
-   the runtime revision gate; keep V1 fail-closed.
-5. Obtain protocol allocation, then add downlink transport and Mac pacing.
-6. Prove zero underruns under video overload; tune video degradation before
-   increasing audio complexity.
-7. Add full-duplex microphone uplink and Mac relay integration; repeat the
-   overload test on one radio.
-8. Replace Doom SFX stubs with the eight-channel local mixer. Defer MUS/OPL.
+2. Implement 1.75C-only local backend bring-up and a generated tone with no
+   network dependency; validate it on attached hardware using
+   `docs/audio-bringup-procedure.md`.
+3. Apply the approved allocation and add panel transport, jitter/resampler,
+   underrun concealment, capture uplink, ingress priority, and host tests.
+4. Add Mac capture/playback, audio-first pacing, and persisted input/output
+   device selectors; validate and measure on macOS.
+5. Prove zero underruns and both latency ceilings under full-duplex video
+   overload; tune runtime reserves before increasing audio complexity.
+6. Before automatic 1.85C audio enablement, obtain approval for revision
+   metadata or distinct variants. Keep V1 fail-closed and add no revision
+   probe until then.
+7. Replace Doom SFX stubs with a source joining the same mixer. Defer MUS/OPL.
 
 ## Consequences
 
-The descriptor can now represent absent, fully verified, and honestly unknown
-audio hardware without changing runtime behavior. The hardware facade supports
-direct serial audio and register-controlled codecs without CPU-family
-conditionals.
+The descriptor represents absent, fully verified, and honestly unknown audio
+hardware. Runtime enablement is narrower than descriptor presence: only the
+approved 1.75C identity starts the codec backend and advertises audio.
 
 The design spends internal RAM and video throughput to protect continuous
 audio. A video frame may become stale or incomplete; an audio packet may not be

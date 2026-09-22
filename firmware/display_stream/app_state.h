@@ -52,6 +52,7 @@ bool tileStreamEnabled();
 extern bool touchAvailable;
 extern touchmap::Calibration touchCalibration;
 extern bool batteryAvailable;
+extern bool audioAvailable;
 
 // Shared stats counters (volatile: written from the receive task/callback and
 // read from the loop). The 5-second serial report and EHB1 read them.
