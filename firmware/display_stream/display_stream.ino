@@ -89,6 +89,7 @@ using namespace bandproto;
 // this file keeps only setup() and loop()'s scheduling skeleton. State the
 // skeleton reads lives behind these headers.
 #include "app_state.h"
+#include "audio_test.h"
 #include "control_apply.h"
 #include "display_power.h"
 #include "dma_gate.h"
@@ -552,6 +553,7 @@ void loop() {
 
   handleButton();
   handleSerialConfig();
+  serviceAudioToneTest();
   applyPendingControl();
   updateIdentify();
   serviceTouch();

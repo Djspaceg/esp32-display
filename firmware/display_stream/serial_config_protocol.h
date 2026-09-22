@@ -7,6 +7,36 @@
 
 namespace serialcfg {
 
+enum class AudioTestCommand : uint8_t { Unknown, Start, Stop, Invalid };
+
+struct ParsedAudioTest {
+  AudioTestCommand command;
+  uint32_t durationMs;
+};
+
+inline ParsedAudioTest parseAudioTest(const char *line) {
+  static const char VERB[] = "CFGAUDIOTEST";
+  static const char PREFIX[] = "CFGAUDIOTEST ";
+  if (line == nullptr) return {AudioTestCommand::Unknown, 0};
+  if (strcmp(line, VERB) == 0) return {AudioTestCommand::Start, 1000};
+  if (strncmp(line, PREFIX, sizeof(PREFIX) - 1) != 0) {
+    return {AudioTestCommand::Unknown, 0};
+  }
+  const char *arg = line + sizeof(PREFIX) - 1;
+  if (strcmp(arg, "stop") == 0) return {AudioTestCommand::Stop, 0};
+  if (*arg < '0' || *arg > '9') return {AudioTestCommand::Invalid, 0};
+  uint32_t duration = 0;
+  while (*arg >= '0' && *arg <= '9') {
+    duration = duration * 10U + (uint32_t)(*arg - '0');
+    if (duration > 5000U) return {AudioTestCommand::Invalid, 0};
+    arg++;
+  }
+  if (*arg != 0 || duration < 100U) {
+    return {AudioTestCommand::Invalid, 0};
+  }
+  return {AudioTestCommand::Start, duration};
+}
+
 inline bool hasBrightnessVerb(const char *line) {
   return line != nullptr &&
          (strcmp(line, "CFGBRIGHT") == 0 ||

@@ -8,6 +8,7 @@
 #include <board_config.h>
 
 #include "app_state.h"
+#include "audio_test.h"
 #include "display_power.h"
 #include "frame_pipeline.h"
 #include "net_link.h"
@@ -177,6 +178,34 @@ static void processConfigLine(char *line) {
       case wifipresets::CommandKind::Unknown:
         break;
     }
+  }
+
+  const serialcfg::ParsedAudioTest audioTest =
+      serialcfg::parseAudioTest(line);
+  if (audioTest.command != serialcfg::AudioTestCommand::Unknown) {
+    if (audioTest.command == serialcfg::AudioTestCommand::Invalid) {
+      configSerial().println(
+          "CFGERR expected: CFGAUDIOTEST [100-5000|stop]");
+      return;
+    }
+    if (audioTest.command == serialcfg::AudioTestCommand::Stop) {
+      if (!audioToneTestRunning()) {
+        configSerial().println("CFGINFO audio test is not running");
+        return;
+      }
+      stopAudioToneTest();
+      configSerial().println("CFGOK audio test stopped");
+      return;
+    }
+    const char *error = startAudioToneTest(*bcfg, audioTest.durationMs);
+    if (error != nullptr) {
+      configSerial().printf("CFGERR %s\n", error);
+      return;
+    }
+    configSerial().printf(
+        "CFGOK audio test started for %lums; send CFGAUDIOTEST stop to abort\n",
+        (unsigned long)audioTest.durationMs);
+    return;
   }
 
   if (strncmp(line, "CFGWIFI ", 8) == 0) {

@@ -4,6 +4,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
 OUT="$TMP/test_band_protocol"
+AUDIO_OUT="$TMP/test_audio"
 STAGING_OUT="$TMP/test_panel_transfer_staging"
 STALL_OUT="$TMP/test_panel_transfer_stall_recovery"
 # Address + UB sanitizers, non-recovering: the suite feeds hostile inputs to
@@ -15,6 +16,12 @@ clang++ -std=c++17 -Wall -Wextra -Werror \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
   -o "$OUT" "$HERE/test_band_protocol.cpp"
 "$OUT"
+
+clang++ -std=c++17 -Wall -Wextra -Werror \
+  -fsanitize=address,undefined -fno-sanitize-recover=all \
+  -I"$HERE/../libraries/espdisp_board/src" \
+  -o "$AUDIO_OUT" "$HERE/test_audio.cpp"
+"$AUDIO_OUT"
 
 clang++ -std=c++17 -Wall -Wextra -Werror \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
