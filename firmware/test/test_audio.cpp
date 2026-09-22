@@ -204,15 +204,43 @@ static int testFinding5() {
 static int testFinding6() {
   const board::AudioConfig *mismatched =
       board::generatedAudioConfig(board::Variant::LcdSt77916);
+  const board::AudioConfig *valid =
+      board::generatedAudioConfig(board::Variant::AmoledCo5300);
   CHECK(mismatched != nullptr);
+  CHECK(valid != nullptr);
   audio::CodecSerialAudioBackend backend;
   audiohost::reset();
   CHECK(!backend.start(board::CONFIG_AMOLED_CO5300, *mismatched,
                        audiobackend::descriptorFormat(*mismatched)));
   CHECK(audiohost::hardwareEvents().empty());
+
+  board::AudioConfig malformed = *valid;
+  malformed.codec = board::AudioCodec::Unknown;
+  audiohost::reset();
+  CHECK(!backend.start(board::CONFIG_AMOLED_CO5300, malformed,
+                       audiobackend::descriptorFormat(malformed)));
+  CHECK(audiohost::hardwareEvents().empty());
+
   audiohost::reset();
   backend.stop();
   CHECK(audiohost::hardwareEvents().empty());
+
+  audiohost::reset();
+  CHECK(backend.start(board::CONFIG_AMOLED_CO5300, *valid,
+                      audiobackend::descriptorFormat(*valid)));
+  const auto &events = audiohost::hardwareEvents();
+  CHECK(events.size() > 6);
+  CHECK(events[0].kind == audiohost::HardwareEventKind::PinMode);
+  CHECK(events[0].value == valid->pinAmpEnable);
+  CHECK(events[1].kind == audiohost::HardwareEventKind::DigitalWrite);
+  CHECK(events[1].value == valid->pinAmpEnable * 10 + LOW);
+  CHECK(events[2].kind == audiohost::HardwareEventKind::I2sSetPins);
+  CHECK(events[3].kind == audiohost::HardwareEventKind::I2sBegin);
+  CHECK(events[4].kind == audiohost::HardwareEventKind::I2sWrite);
+  CHECK(events[5].kind == audiohost::HardwareEventKind::WireBegin);
+  CHECK(events.back().kind == audiohost::HardwareEventKind::DigitalWrite);
+  CHECK(events.back().value == valid->pinAmpEnable * 10 + HIGH);
+  backend.stop();
   return 0;
 }
 
@@ -222,6 +250,15 @@ static int testFinding7() {
   CHECK(audiobackend::supportsCodecClock(44100));
   CHECK(audiobackend::supportsCodecClock(48000));
   CHECK(audiobackend::supportsCodecClock(64000));
+  board::AudioConfig at24k = *board::generatedAudioConfig(
+      board::Variant::AmoledCo5300);
+  at24k.playbackRateHz = 24000;
+  at24k.captureRateHz = 24000;
+  audio::CodecSerialAudioBackend backend;
+  audiohost::reset();
+  CHECK(!backend.start(board::CONFIG_AMOLED_CO5300, at24k,
+                       audiobackend::descriptorFormat(at24k)));
+  CHECK(audiohost::hardwareEvents().empty());
   return 0;
 }
 
