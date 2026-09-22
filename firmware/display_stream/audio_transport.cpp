@@ -18,7 +18,10 @@ namespace {
 
 constexpr UBaseType_t RECEIVE_TASK_PRIORITY = 13;
 constexpr uint32_t RECEIVE_TASK_STACK = 5120;
-constexpr int DRAIN_BEFORE_YIELD = 8;
+constexpr int DRAIN_BEFORE_DELAY = 8;
+constexpr size_t RECEIVE_BUFFER_BYTES = 2048;
+static_assert(RECEIVE_BUFFER_BYTES > audioproto::MAX_DATAGRAM_BYTES,
+              "receive buffer must expose oversized datagrams");
 
 int audioSocket = -1;
 QueueHandle_t packetQueue = nullptr;
@@ -53,6 +56,12 @@ bool sendDatagram(const uint8_t *data, size_t length) {
 
 void acceptDatagram(const uint8_t *data, size_t length,
                     const struct sockaddr_in &from) {
+  if (length > audioproto::MAX_DATAGRAM_BYTES) {
+    transportStats.badDatagrams++;
+    transportStats.oversizedDatagrams++;
+    transportStats.ingressDrops++;
+    return;
+  }
   audioproto::PcmDatagram parsed = {};
   const audioproto::ParseResult result =
       audioproto::parsePcmDownlink(data, length, parsed);
@@ -62,6 +71,7 @@ void acceptDatagram(const uint8_t *data, size_t length,
     } else {
       transportStats.badDatagrams++;
     }
+    transportStats.ingressDrops++;
     return;
   }
   Packet packet = {};
@@ -72,34 +82,39 @@ void acceptDatagram(const uint8_t *data, size_t length,
   peerPort = ntohs(from.sin_port);
   if (xQueueSend(packetQueue, &packet, 0) != pdTRUE) {
     transportStats.queueDrops++;
+    transportStats.ingressDrops++;
   }
 }
 
-void receiveTask(void *) {
-  static uint8_t receiveBuffer[audioproto::MAX_DATAGRAM_BYTES];
-  while (true) {
-    struct sockaddr_in from = {};
-    socklen_t fromLength = sizeof(from);
-    int received = lwip_recvfrom(
-        audioSocket, receiveBuffer, sizeof(receiveBuffer), 0,
-        reinterpret_cast<struct sockaddr *>(&from), &fromLength);
-    if (received <= 0) {
-      vTaskDelay(1);
-      continue;
-    }
-    acceptDatagram(receiveBuffer, (size_t)received, from);
-    for (int drained = 0; drained < DRAIN_BEFORE_YIELD; ++drained) {
-      fromLength = sizeof(from);
-      received = lwip_recvfrom(
-          audioSocket, receiveBuffer, sizeof(receiveBuffer), MSG_DONTWAIT,
-          reinterpret_cast<struct sockaddr *>(&from), &fromLength);
-      if (received <= 0) break;
-      acceptDatagram(receiveBuffer, (size_t)received, from);
-    }
-    // The receive task outranks the engine so it can empty lwIP promptly, but
-    // it yields after a bounded burst so the depth-12 handoff queue drains.
-    taskYIELD();
+void receiveBurst() {
+  static uint8_t receiveBuffer[RECEIVE_BUFFER_BYTES];
+  struct sockaddr_in from = {};
+  socklen_t fromLength = sizeof(from);
+  int received = lwip_recvfrom(
+      audioSocket, receiveBuffer, sizeof(receiveBuffer), 0,
+      reinterpret_cast<struct sockaddr *>(&from), &fromLength);
+  if (received <= 0) {
+    vTaskDelay(1);
+    return;
   }
+  acceptDatagram(receiveBuffer, (size_t)received, from);
+  for (int drained = 0; drained < DRAIN_BEFORE_DELAY; ++drained) {
+    fromLength = sizeof(from);
+    received = lwip_recvfrom(
+        audioSocket, receiveBuffer, sizeof(receiveBuffer), MSG_DONTWAIT,
+        reinterpret_cast<struct sockaddr *>(&from), &fromLength);
+    if (received <= 0) return;
+    acceptDatagram(receiveBuffer, (size_t)received, from);
+  }
+  // A yield only offers the CPU to another priority-13 task. If every bounded
+  // drain read found data, delay one tick before the outer blocking receive
+  // can return immediately again. This guarantees time for the priority-12
+  // engine and lower-priority video/draw work under a continuous flood.
+  vTaskDelay(1);
+}
+
+void receiveTask(void *) {
+  while (true) receiveBurst();
 }
 
 }  // namespace
@@ -210,6 +225,19 @@ bool setReceiveBufferBytes(int bytes) {
 }
 
 const Stats &stats() { return transportStats; }
+
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+void hostReceiveBurst() { receiveBurst(); }
+
+void hostResetStats() {
+  transportStats.badDatagrams = 0;
+  transportStats.versionMismatches = 0;
+  transportStats.oversizedDatagrams = 0;
+  transportStats.queueDrops = 0;
+  transportStats.ingressDrops = 0;
+  transportStats.uplinkErrors = 0;
+}
+#endif
 
 #else
 

@@ -35,11 +35,17 @@ before muting the codec and stopping I2S.
 
    ```text
    board: ESP32-S3-Touch-AMOLED-1.75C
+   audio: UDP 5569 ready
+   UDP listening on 5568
    ```
 
    If another profile is reported, stop. `CFGAUDIOTEST` is allowed only for
    the uniquely identified 1.75C profile. The 1.85C profile remains disabled
-   because firmware cannot distinguish incompatible V1 from V2 hardware.
+   because firmware cannot distinguish incompatible V1 from V2 hardware. Do
+   not send the command until `UDP listening on 5568` appears: setup continues
+   servicing serial during its bounded WiFi wait, but tone samples are emitted
+   only after setup reaches `loop()`. The UDP line is the readiness marker even
+   when WiFi timed out and local tone testing is the only goal.
 
 3. Keep the speaker clear of your ear and send:
 
@@ -83,10 +89,10 @@ before muting the codec and stopping I2S.
    failed. The code cannot distinguish those without hardware traces.
 4. `audio: ERROR tone write failed; amp disabled` means initialization
    completed but the I2S write path stopped accepting complete frame blocks.
-5. Correct serial output with no tone points to the analog path: amplifier
-   polarity, speaker connection, codec analog routing, gain, or a board
-   revision mismatch. Do not increase gain until the GPIO and codec clocks
-   have been measured.
-6. A click/pop without the tone means the amp switched but valid serial audio
-   did not reach the ES8311. Capture MCLK, BCLK, LRCK, and DOUT before changing
-   the power sequence.
+5. Correct serial output with no tone does not isolate a failing component.
+   First confirm the command was sent after the readiness marker, then capture
+   MCLK, BCLK, LRCK, DOUT, GPIO46 polarity, and the speaker output before
+   changing gain or the power sequence.
+6. A click/pop without the tone is likewise insufficient to distinguish an
+   I2S, codec-routing, amplifier, speaker, or revision problem. Preserve the
+   serial log and clock/GPIO captures for diagnosis.

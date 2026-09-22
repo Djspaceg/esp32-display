@@ -12,7 +12,7 @@ static const uint8_t FLAG_PCM16_LE = 1u << 0;
 static const size_t HEADER_BYTES = 28;
 static const size_t MAX_PAYLOAD_BYTES = 1400;
 static const size_t MAX_DATAGRAM_BYTES = HEADER_BYTES + MAX_PAYLOAD_BYTES;
-static const size_t STATUS_PAYLOAD_BYTES = 32;
+static const size_t STATUS_PAYLOAD_BYTES = 48;
 
 enum class DatagramKind : uint8_t {
   PcmDownlink = 1,
@@ -51,11 +51,15 @@ struct PcmDatagram {
 struct Status {
   uint32_t fillFrames;
   uint32_t targetFrames;
+  uint32_t minimumFillFrames;
   uint32_t underruns;
+  uint32_t underrunDurationMs;
   uint32_t latePackets;
   uint32_t lostFrames;
   uint32_t hardCorrections;
+  uint32_t ingressDrops;
   uint32_t queueDrops;
+  uint32_t engineDrops;
   uint32_t captureOverruns;
 };
 
@@ -184,9 +188,18 @@ inline size_t writeStatus(uint8_t *output, size_t capacity,
   writeU16LE(output + 24, 0);
   writeU16LE(output + 26, STATUS_PAYLOAD_BYTES);
   const uint32_t fields[] = {
-      status.fillFrames, status.targetFrames, status.underruns,
-      status.latePackets, status.lostFrames, status.hardCorrections,
-      status.queueDrops, status.captureOverruns,
+      status.fillFrames,
+      status.targetFrames,
+      status.minimumFillFrames,
+      status.underruns,
+      status.underrunDurationMs,
+      status.latePackets,
+      status.lostFrames,
+      status.hardCorrections,
+      status.ingressDrops,
+      status.queueDrops,
+      status.engineDrops,
+      status.captureOverruns,
   };
   for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
     writeU32LE(output + HEADER_BYTES + i * sizeof(uint32_t), fields[i]);

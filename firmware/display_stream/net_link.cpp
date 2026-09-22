@@ -31,19 +31,19 @@ AsyncUDP udp;
 // sockaddr s_addr share it on this little-endian core).
 static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
                           uint16_t remotePort) {
+  // Audio has its own socket. Refuse even a misrouted or future EAUD kind
+  // before it can refresh video liveness or redirect the reply endpoint.
+  if (audioproto::hasAudioMagic(data, len)) {
+    statBadLen = statBadLen + 1;
+    return;
+  }
+
   // Any packet from the sender refreshes the heartbeat reply endpoint and
   // proves the sender is alive - keepalives arrive even when the screen is
   // perfectly static, which is why liveness keys off this and not frames.
   hbIp = remoteIp;
   hbPort = remotePort;
   lastSenderPacketAt = millis();
-
-  // Audio has its own socket. Refuse even a misrouted or future EAUD kind
-  // before any control or frame parser can interpret its bytes.
-  if (audioproto::hasAudioMagic(data, len)) {
-    statBadLen = statBadLen + 1;
-    return;
-  }
   if (len == 4 && memcmp(data, "EPNG", 4) == 0) {
     return;  // keepalive ping: endpoint refresh only
   }
@@ -338,3 +338,10 @@ void sendToSender(const uint8_t *data, size_t len) {
     sendAsyncToSender(data, len);
   }
 }
+
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+void hostHandleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
+                       uint16_t remotePort) {
+  handleInbound(data, len, remoteIp, remotePort);
+}
+#endif

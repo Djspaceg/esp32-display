@@ -1,13 +1,28 @@
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
 
+#include "../display_stream/audio_backend.h"
 #include "../display_stream/audio_backend_model.h"
+#include "../display_stream/audio_engine.h"
 #include "../display_stream/audio_engine_model.h"
 #include "../display_stream/audio_protocol.h"
+#include "../display_stream/audio_test.h"
+#include "../display_stream/audio_transport.h"
+#include "../display_stream/app_state.h"
 #include "../display_stream/device_protocol.h"
+#include "../display_stream/display_power.h"
+#include "../display_stream/mdns_announce.h"
+#include "../display_stream/net_link.h"
 #include "../display_stream/serial_config_protocol.h"
+#include "../display_stream/telemetry.h"
 #include "../libraries/espdisp_board/src/board_config.h"
+#include "fakes/audio/audio_host_fakes.h"
 
 static int checks = 0;
 #define CHECK(cond)                                                        \
@@ -19,7 +34,246 @@ static int checks = 0;
     }                                                                      \
   } while (0)
 
+static void putU16(std::vector<uint8_t> &bytes, size_t offset,
+                   uint16_t value) {
+  bytes[offset] = (uint8_t)value;
+  bytes[offset + 1] = (uint8_t)(value >> 8);
+}
+
+static void putU32(std::vector<uint8_t> &bytes, size_t offset,
+                   uint32_t value) {
+  bytes[offset] = (uint8_t)value;
+  bytes[offset + 1] = (uint8_t)(value >> 8);
+  bytes[offset + 2] = (uint8_t)(value >> 16);
+  bytes[offset + 3] = (uint8_t)(value >> 24);
+}
+
+static std::vector<uint8_t> documentedPcm(uint16_t sequence,
+                                          uint32_t sampleCounter,
+                                          uint16_t frameCount,
+                                          uint8_t channels = 2) {
+  const size_t payloadBytes =
+      (size_t)frameCount * channels * sizeof(int16_t);
+  std::vector<uint8_t> bytes(audioproto::HEADER_BYTES + payloadBytes, 0);
+  bytes[0] = 'E';
+  bytes[1] = 'A';
+  bytes[2] = 'U';
+  bytes[3] = 'D';
+  bytes[4] = 1;
+  bytes[5] = 1;
+  bytes[6] = 1;
+  bytes[7] = channels;
+  putU16(bytes, 8, sequence);
+  putU16(bytes, 10, 9);
+  putU32(bytes, 12, 16000);
+  putU32(bytes, 16, sampleCounter);
+  putU32(bytes, 20, 123456);
+  putU16(bytes, 24, frameCount);
+  putU16(bytes, 26, (uint16_t)payloadBytes);
+  for (size_t i = 0; i < payloadBytes; ++i) {
+    bytes[audioproto::HEADER_BYTES + i] = (uint8_t)i;
+  }
+  return bytes;
+}
+
+static audiotransport::Packet enginePacket(uint16_t sequence,
+                                           uint32_t sampleCounter,
+                                           uint16_t frameCount) {
+  audiotransport::Packet packet = {};
+  packet.header = {
+      audioproto::DatagramKind::PcmDownlink,
+      sequence,
+      9,
+      16000,
+      sampleCounter,
+      0,
+      frameCount,
+      2,
+  };
+  packet.payloadBytes = frameCount * 2 * sizeof(int16_t);
+  for (size_t i = 0; i < frameCount * 2; ++i) {
+    packet.samples[i] = (int16_t)(i + 1);
+  }
+  return packet;
+}
+
+static int testFinding1() {
+  audiohost::reset();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_AMOLED_CO5300));
+  for (uint16_t sequence = 0; sequence < 10; ++sequence) {
+    audiohost::enqueueUdp(documentedPcm(sequence, sequence, 1),
+                          0x01020304, 6000);
+  }
+  audiotransport::hostReceiveBurst();
+  CHECK(audiohost::delayCalls() == 1);
+  CHECK(audiohost::yieldCalls() == 0);
+  CHECK(audiohost::pendingUdp() == 1);
+  audiotransport::stop();
+  return 0;
+}
+
+static int testFinding2() {
+  audiohost::reset();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_AMOLED_CO5300));
+  std::vector<uint8_t> overlong = documentedPcm(1, 0, 350);
+  CHECK(overlong.size() == audioproto::MAX_DATAGRAM_BYTES);
+  overlong.push_back(0xA5);
+  audiohost::enqueueUdp(overlong, 0x01020304, 6000);
+  audiotransport::hostReceiveBurst();
+  CHECK(audiotransport::stats().badDatagrams == 1);
+  CHECK(audiotransport::stats().oversizedDatagrams == 1);
+  audiotransport::Packet packet = {};
+  CHECK(!audiotransport::receive(packet, 0));
+  audiotransport::stop();
+  return 0;
+}
+
+static int testFinding3() {
+  audiohost::reset();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_AMOLED_CO5300));
+  for (uint16_t sequence = 0; sequence < 13; ++sequence) {
+    audiohost::enqueueUdp(documentedPcm(sequence, sequence, 1),
+                          0x01020304, 6000);
+  }
+  audiotransport::hostReceiveBurst();
+  audiotransport::hostReceiveBurst();
+  CHECK(audiotransport::stats().queueDrops == 1);
+  CHECK(audiotransport::stats().ingressDrops == 1);
+  audiotransport::stop();
+
+  audioengine::host::resetAdmission(4);
+  CHECK(audioengine::host::admitPacket(enginePacket(1, 0, 3), 100));
+  CHECK(!audioengine::host::admitPacket(enginePacket(2, 3, 2), 200));
+  auto snapshot = audioengine::host::admissionSnapshot();
+  CHECK(snapshot.fillFrames == 3);
+  CHECK(snapshot.lastPacketAt == 100);
+  CHECK(snapshot.engineDrops == 1);
+  CHECK(audioengine::host::discardFrames(3));
+  CHECK(audioengine::host::admitPacket(enginePacket(2, 3, 2), 300));
+  CHECK(audioproto::STATUS_PAYLOAD_BYTES == 48);
+
+  audioengine::PlaybackMetrics metrics;
+  metrics.start(100, 1000);
+  metrics.observe(50, audioengine::UnderrunState::FadingOut, 1010);
+  metrics.observe(0, audioengine::UnderrunState::SilentRefill, 1030);
+  CHECK(metrics.minimumFillFrames() == 0);
+  CHECK(metrics.underrunDurationMs(1040) == 30);
+  metrics.observe(100, audioengine::UnderrunState::Playing, 1050);
+  CHECK(metrics.underrunDurationMs(2000) == 40);
+  return 0;
+}
+
+static int testFinding4() {
+  const int16_t input[8] = {
+      100, 100, 100, 100, 100, 100, 100, 100,
+  };
+  const int16_t lastOutput[2] = {800, 0};
+  int16_t output[8] = {};
+  CHECK(!audioengine::host::renderFadingOut(
+      input, 8, 1, 8, lastOutput, output));
+  CHECK(output[0] == 800);
+  CHECK(output[1] > output[2]);
+  CHECK(output[2] > output[3]);
+  CHECK(output[3] == 0);
+  CHECK(output[4] == 0);
+  return 0;
+}
+
+static int testFinding5() {
+  audiohost::reset();
+  hbIp = 0x11111111;
+  hbPort = 1111;
+  lastSenderPacketAt = 123;
+  statBadLen = 0;
+  audiohost::setMillis(999);
+  const uint8_t audioMagic[] = {'E', 'A', 'U', 'D', 1};
+  hostHandleInbound(audioMagic, sizeof(audioMagic), 0x22222222, 2222);
+  CHECK(hbIp == 0x11111111);
+  CHECK(hbPort == 1111);
+  CHECK(lastSenderPacketAt == 123);
+  CHECK(statBadLen == 1);
+  return 0;
+}
+
+static int testFinding6() {
+  const board::AudioConfig *mismatched =
+      board::generatedAudioConfig(board::Variant::LcdSt77916);
+  CHECK(mismatched != nullptr);
+  audio::CodecSerialAudioBackend backend;
+  audiohost::reset();
+  CHECK(!backend.start(board::CONFIG_AMOLED_CO5300, *mismatched,
+                       audiobackend::descriptorFormat(*mismatched)));
+  CHECK(audiohost::hardwareEvents().empty());
+  audiohost::reset();
+  backend.stop();
+  CHECK(audiohost::hardwareEvents().empty());
+  return 0;
+}
+
+static int testFinding7() {
+  CHECK(!audiobackend::supportsCodecClock(24000));
+  CHECK(audiobackend::supportsCodecClock(16000));
+  CHECK(audiobackend::supportsCodecClock(44100));
+  CHECK(audiobackend::supportsCodecClock(48000));
+  CHECK(audiobackend::supportsCodecClock(64000));
+  return 0;
+}
+
+static int testFinding9() {
+  const std::filesystem::path procedure =
+      std::filesystem::path(__FILE__).parent_path().parent_path()
+          .parent_path() /
+      "docs/audio-bringup-procedure.md";
+  std::ifstream input(procedure);
+  CHECK(input.good());
+  const std::string text((std::istreambuf_iterator<char>(input)),
+                         std::istreambuf_iterator<char>());
+  CHECK(text.find("UDP listening on 5568") != std::string::npos);
+  CHECK(text.find("Correct serial output with no tone points to the analog "
+                  "path") == std::string::npos);
+  return 0;
+}
+
 int main() {
+  const char *filter = std::getenv("AUDIO_TEST_FILTER");
+  const struct {
+    const char *name;
+    int (*test)();
+  } findingTests[] = {
+      {"1", testFinding1},
+      {"2", testFinding2},
+      {"3", testFinding3},
+      {"4", testFinding4},
+      {"5", testFinding5},
+      {"6", testFinding6},
+      {"7", testFinding7},
+      {"9", testFinding9},
+  };
+  for (const auto &finding : findingTests) {
+    if (filter == nullptr || std::strcmp(filter, finding.name) == 0) {
+      if (finding.test() != 0) return 1;
+      if (filter != nullptr) {
+        std::printf("audio finding %s: %d checks passed\n",
+                    finding.name, checks);
+        return 0;
+      }
+    }
+  }
+
+  const char *noAudioError =
+      startAudioToneTest(board::CONFIG_TOUCH_JD9853, 1000);
+  CHECK(noAudioError != nullptr);
+  CHECK(std::strcmp(noAudioError, "board descriptor has no audio") == 0);
+  CHECK((deviceCapabilities() & deviceproto::CAP_AUDIO_DOWNLINK) != 0);
+  CHECK((deviceCapabilities() & deviceproto::CAP_AUDIO_UPLINK) != 0);
+  addMdnsService();
+
   using namespace audiobackend;
 
   const board::AudioConfig *audio =
@@ -164,11 +418,24 @@ int main() {
   const size_t packetBytes = audioproto::writePcm(
       packet, sizeof(packet), outbound, pcm, sizeof(pcm));
   CHECK(packetBytes == audioproto::HEADER_BYTES + sizeof(pcm));
-  CHECK(audioproto::hasAudioMagic(packet, packetBytes));
-  CHECK(!audioproto::hasAudioMagic(packet, 3));
-  CHECK(!audioproto::hasAudioMagic(nullptr, packetBytes));
+  const uint8_t expectedPacket[] = {
+      'E', 'A', 'U', 'D', 1, 1, 1, 2,
+      7, 0, 3, 0,
+      0x80, 0x3E, 0, 0,
+      0x40, 0x01, 0, 0,
+      0x40, 0xE2, 0x01, 0,
+      4, 0, 16, 0,
+      0, 1, 2, 3, 4, 5, 6, 7,
+      8, 9, 10, 11, 12, 13, 14, 15,
+  };
+  CHECK(sizeof(expectedPacket) == packetBytes);
+  CHECK(std::memcmp(packet, expectedPacket, packetBytes) == 0);
+  CHECK(audioproto::hasAudioMagic(expectedPacket, sizeof(expectedPacket)));
+  CHECK(!audioproto::hasAudioMagic(expectedPacket, 3));
+  CHECK(!audioproto::hasAudioMagic(nullptr, sizeof(expectedPacket)));
   audioproto::PcmDatagram parsed = {};
-  CHECK(audioproto::parsePcmDownlink(packet, packetBytes, parsed) ==
+  CHECK(audioproto::parsePcmDownlink(
+            expectedPacket, sizeof(expectedPacket), parsed) ==
         audioproto::ParseResult::Ok);
   CHECK(parsed.header.sequence == 7);
   CHECK(parsed.header.streamGeneration == 3);
@@ -212,21 +479,32 @@ int main() {
         audioproto::ParseResult::BadLength);
 
   const audioproto::Status status = {
-      100, 120, 2, 3, 4, 5, 6, 7,
+      100, 120, 80, 2, 250, 3, 4, 5, 6, 7, 8, 9,
   };
   const size_t statusBytes = audioproto::writeStatus(
       packet, sizeof(packet), 8, 9, 48000, 10, status);
   CHECK(statusBytes ==
         audioproto::HEADER_BYTES + audioproto::STATUS_PAYLOAD_BYTES);
-  CHECK(std::memcmp(packet, "EAUD", 4) == 0);
-  CHECK(packet[4] == audioproto::VERSION);
-  CHECK(packet[5] == (uint8_t)audioproto::DatagramKind::Status);
-  CHECK(audioproto::readU16LE(packet + 8) == 8);
-  CHECK(audioproto::readU16LE(packet + 10) == 9);
-  CHECK(audioproto::readU32LE(packet + 12) == 48000);
-  CHECK(audioproto::readU32LE(packet + audioproto::HEADER_BYTES) == 100);
-  CHECK(audioproto::readU32LE(
-            packet + audioproto::HEADER_BYTES + 7 * sizeof(uint32_t)) == 7);
+  std::vector<uint8_t> expectedStatus(statusBytes, 0);
+  expectedStatus[0] = 'E';
+  expectedStatus[1] = 'A';
+  expectedStatus[2] = 'U';
+  expectedStatus[3] = 'D';
+  expectedStatus[4] = 1;
+  expectedStatus[5] = 3;
+  putU16(expectedStatus, 8, 8);
+  putU16(expectedStatus, 10, 9);
+  putU32(expectedStatus, 12, 48000);
+  putU32(expectedStatus, 20, 10);
+  putU16(expectedStatus, 26, 48);
+  const uint32_t expectedStatusFields[] = {
+      100, 120, 80, 2, 250, 3, 4, 5, 6, 7, 8, 9,
+  };
+  for (size_t i = 0; i < 12; ++i) {
+    putU32(expectedStatus, audioproto::HEADER_BYTES + i * 4,
+           expectedStatusFields[i]);
+  }
+  CHECK(std::memcmp(packet, expectedStatus.data(), statusBytes) == 0);
 
   // --- Jitter storage and sequence/version gates -------------------------
   int16_t jitterStorage[32] = {};
@@ -302,6 +580,10 @@ int main() {
   CHECK(audioengine::crossfadeBlocks(uncorrected, corrected, 4, 2));
   CHECK(corrected[0] == 0);
   CHECK(corrected[1] == 0);
+  CHECK(corrected[2] == 66);
+  CHECK(corrected[3] == -66);
+  CHECK(corrected[4] == 200);
+  CHECK(corrected[5] == -200);
   CHECK(corrected[6] == 400);
   CHECK(corrected[7] == -400);
   CHECK(!audioengine::crossfadeBlocks(nullptr, corrected, 4, 2));

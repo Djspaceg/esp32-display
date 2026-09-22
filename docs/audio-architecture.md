@@ -343,12 +343,19 @@ Audio wins through mechanisms, not intent:
   and loop/draw priority 1, below WiFi/lwIP system tasks.
 - Audio ingress: UDP port 5569 has its own socket, a default 96 KiB
   `SO_RCVBUF`, and a core-1 priority-13 receive task. It drains at most eight
-  datagrams before yielding into a depth-12 fixed queue. This prevents video
-  parsing and mailbox work from head-of-line blocking accepted audio.
+  queued datagrams after the initial receive, then delays one tick before the
+  next blocking receive so the priority-12 engine and lower-priority video
+  work must get CPU time. Accepted packets enter a depth-12 fixed queue.
 - Ingress limits: a separate port cannot prevent drops in the WiFi driver or
-  lwIP before the audio socket queue. The receive task, socket buffer, queue
-  drops, and minimum fill make that risk observable, but the result is
-  unproven until an attached full-duplex stress test.
+  lwIP before the socket API. `SO_RCVBUF` raises the queued-byte accounting
+  limit, but it does not enlarge this build's fixed six-slot
+  `CONFIG_LWIP_UDP_RECVMBOX_SIZE`; that mailbox is the real pre-socket burst
+  limit and exposes no direct drop counter. A stress run must therefore
+  reconcile sender sequence/sample counters with panel `lostFrames`, continue
+  sending long enough to expose a trailing gap, and require zero ingress,
+  handoff-queue, and engine discards. Current fill, stream-lifetime minimum
+  fill, and cumulative underrun duration prevent a 250 ms status sample from
+  hiding a transient empty buffer.
 - Sender pacing: audio packets are deadline-scheduled first. Video receives
   only tokens left after measured audio demand and a safety margin; there is no
   hardcoded reservation derived from the approximately 300 datagrams/s
@@ -367,10 +374,11 @@ watermarks, correction bound, and socket reserve without rebuilding. The real
 fill-stability knee is found by sweeping full-duplex packet sizes/rates while
 the panel receives interleaved worst-case video for at least ten minutes per
 point. The knee is the highest video load with non-negative long-run fill
-slope, zero socket/queue drops, zero hard corrections, zero underruns, and both
-latency ceilings met. Repeat around that point after WiFi retries and channel
-conditions change; do not divide the historical collapse number into fixed
-audio and video shares.
+slope, sender/panel sequence reconciliation showing zero missing frames, zero
+reported ingress/queue/engine discards, zero hard corrections, zero underruns,
+a minimum fill above zero, and both latency ceilings met. Repeat around that
+point after WiFi retries and channel conditions change; do not divide the
+historical collapse number into fixed audio and video shares.
 
 Named failure modes are audio socket/mailbox overflow, I2S DMA starvation,
 priority inversion on an I2C or logging lock, sender burst bunching, WiFi
@@ -413,7 +421,33 @@ The dedicated audio protocol uses these concrete values:
 Every datagram starts with `EAUD`, version, and kind. PCM packets carry
 sequence, stream generation, sample rate, channel count, sample counter,
 timestamp, flags, frame count, and payload length. Status carries fill,
-underruns, late/lost data, hard corrections, queue drops, and capture overruns.
+target fill, stream-lifetime minimum fill, underrun count and duration,
+late/lost data, hard corrections, ingress/queue/engine discards, and capture
+overruns.
+
+The version-1 byte layout is fixed:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 4 | ASCII `EAUD` |
+| 4 | 1 | protocol version |
+| 5 | 1 | datagram kind |
+| 6 | 1 | PCM flags, zero for status |
+| 7 | 1 | PCM channels, zero for status |
+| 8 | 2 | sequence, little-endian |
+| 10 | 2 | stream generation, little-endian |
+| 12 | 4 | sample rate, little-endian |
+| 16 | 4 | sample counter, zero for status |
+| 20 | 4 | timestamp microseconds, little-endian |
+| 24 | 2 | PCM frame count, zero for status |
+| 26 | 2 | payload bytes, little-endian |
+| 28 | variable | PCM16-LE samples or status fields |
+
+The 48-byte status payload is twelve little-endian `u32` values in this order:
+current fill, target fill, minimum fill, underrun count, underrun duration
+milliseconds, late packets, lost frames, hard corrections, ingress drops,
+queue drops, engine drops, and capture overruns.
+
 The main mDNS service advertises `audio-port`, `audio-version`, `audio-rate`,
 `audio-play-ch`, and `audio-capture-ch` from the same constants and descriptor.
 The protocol header is `firmware/display_stream/audio_protocol.h`.
@@ -434,13 +468,13 @@ and emitted silence; it then stops the backend, disables the amp, clears the
 stream, and lets video resume. Sender disappearance therefore cannot pin the
 panel permanently in low-watermark suppression.
 
-The ES8311 and ES7210 vendor clock tables cover rates through 96 kHz. The
-current backend supports 16, 24, 44.1, 48, and 64 kHz with the ESP-generated
-256x MCLK available through the Arduino I2S API. Moving the 1.75C operating
-point to 48 kHz requires changing descriptor/negotiation values, measuring the
-threefold radio and internal-buffer demand, retuning packet duration and
-latency, and validating speaker acoustics. Rates requiring another MCLK
-multiple need backend clock configuration work, not transport redesign.
+The current backend has matching ES8311/ES7210 tuples for 16, 44.1, 48, and
+64 kHz with the ESP-generated 256x MCLK available through the Arduino I2S API.
+Moving the 1.75C operating point to 48 kHz requires changing
+descriptor/negotiation values, measuring the threefold radio and
+internal-buffer demand, retuning packet duration and latency, and validating
+speaker acoustics. Rates such as 24 kHz that lack a matching 256-Fs ES7210
+coefficient are rejected until backend clock configuration is added.
 
 ### Doom phase 2
 

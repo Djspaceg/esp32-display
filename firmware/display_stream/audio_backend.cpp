@@ -158,23 +158,23 @@ bool CodecSerialAudioBackend::initializeEs7210() {
 bool CodecSerialAudioBackend::start(
     const board::Config &boardConfig, const board::AudioConfig &audioConfig,
     const audiobackend::Format &format) {
+  if (!audiobackend::matchesBoard(boardConfig, audioConfig) ||
+      audiobackend::classify(audioConfig) !=
+          audiobackend::DescriptorStatus::Ready ||
+      format.bitsPerSample != 16 ||
+      format.sampleRateHz != audioConfig.playbackRateHz ||
+      format.channels != audioConfig.playbackChannels ||
+      !audiobackend::supportsCodecClock(format.sampleRateHz) ||
+      boardConfig.pinTouchSda == board::NO_PIN ||
+      boardConfig.pinTouchScl == board::NO_PIN) {
+    return false;
+  }
+
   stop();
   config_ = audioConfig;
   format_ = format;
   configured_ = true;
   disableAmp();
-
-  if (!audiobackend::matchesBoard(boardConfig, config_) ||
-      audiobackend::classify(config_) !=
-          audiobackend::DescriptorStatus::Ready ||
-      format_.bitsPerSample != 16 ||
-      format_.sampleRateHz != config_.playbackRateHz ||
-      format_.channels != config_.playbackChannels ||
-      !audiobackend::supportsCodecClock(format_.sampleRateHz) ||
-      boardConfig.pinTouchSda == board::NO_PIN ||
-      boardConfig.pinTouchScl == board::NO_PIN) {
-    return false;
-  }
 
   audioI2s.setPins(config_.pinPlaybackBclk, config_.pinPlaybackLrck,
                    config_.pinDout, config_.pinDin,
@@ -237,6 +237,7 @@ bool CodecSerialAudioBackend::setGain(uint8_t percent) {
 }
 
 void CodecSerialAudioBackend::stop() {
+  if (!configured_ && !running_) return;
   disableAmp();
   if (config_.codecI2cAddress != 0) {
     setCodecMuted(true);
@@ -252,6 +253,9 @@ void CodecSerialAudioBackend::stop() {
     writeRegister(config_.micI2cAddress, ES7210_POWER_DOWN, 0x07);
   }
   audioI2s.end();
+  config_ = {};
+  format_ = {};
+  configured_ = false;
   running_ = false;
 }
 

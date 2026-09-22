@@ -77,6 +77,125 @@ bool render(JitterBuffer &jitter, ResampleCursor &cursor,
   return consumed <= jitter.fillFrames() && jitter.discard(consumed);
 }
 
+bool acceptPacket(const audiotransport::Packet &packet,
+                  uint32_t sampleRateHz, JitterBuffer &jitter,
+                  StreamTracker &tracker, ResampleCursor &cursor,
+                  UnderrunController &underrun, uint8_t &inputChannels,
+                  uint16_t &streamGeneration, volatile bool &seen,
+                  volatile bool &videoSuppressed, uint32_t &lastPacketAt,
+                  uint32_t &latePackets, uint32_t &lostFrames,
+                  uint32_t &engineDrops, uint32_t nowMs) {
+  if (packet.header.sampleRateHz != sampleRateHz ||
+      packet.header.channels == 0 ||
+      packet.header.channels > MAX_CHANNELS) {
+    engineDrops++;
+    return false;
+  }
+  StreamTracker candidateTracker = tracker;
+  const StreamResult sequence = candidateTracker.accept(
+      audioproto::VERSION, packet.header.streamGeneration,
+      packet.header.sequence, packet.header.sampleCounter,
+      packet.header.frameCount);
+  if (sequence.decision == StreamDecision::VersionMismatch ||
+      sequence.decision == StreamDecision::Discontinuity) {
+    engineDrops++;
+    return false;
+  }
+  if (sequence.decision == StreamDecision::Late) {
+    latePackets++;
+    engineDrops++;
+    return false;
+  }
+  if (sequence.decision == StreamDecision::Start) {
+    JitterBuffer candidateJitter;
+    if (!candidateJitter.reset(
+            jitterStorage, jitterCapacityFrames, packet.header.channels) ||
+        !candidateJitter.push(packet.samples, packet.header.frameCount)) {
+      engineDrops++;
+      return false;
+    }
+    jitter = candidateJitter;
+    tracker = candidateTracker;
+    inputChannels = packet.header.channels;
+    streamGeneration = packet.header.streamGeneration;
+    cursor.reset();
+    underrun.reset();
+    seen = true;
+    videoSuppressed = true;
+  } else if (packet.header.channels != inputChannels) {
+    engineDrops++;
+    return false;
+  } else {
+    const size_t requiredFrames =
+        (size_t)sequence.gapFrames + packet.header.frameCount;
+    if (requiredFrames > jitter.freeFrames()) {
+      engineDrops++;
+      return false;
+    }
+    JitterBuffer candidateJitter = jitter;
+    if ((sequence.gapFrames > 0 &&
+         !candidateJitter.pushSilence(sequence.gapFrames)) ||
+        !candidateJitter.push(packet.samples, packet.header.frameCount)) {
+      engineDrops++;
+      return false;
+    }
+    jitter = candidateJitter;
+    tracker = candidateTracker;
+    lostFrames += sequence.gapFrames;
+  }
+  lastPacketAt = nowMs;
+  return true;
+}
+
+void fadeFromLastOutput(int16_t *output, size_t serviceFrames,
+                        uint8_t outputChannels, size_t fadeFrames,
+                        const int16_t *lastOutput) {
+  memset(output, 0,
+         serviceFrames * outputChannels * sizeof(int16_t));
+  if (fadeFrames > serviceFrames) fadeFrames = serviceFrames;
+  if (fadeFrames == 0) return;
+  const int32_t denominator =
+      fadeFrames > 1 ? (int32_t)(fadeFrames - 1) : 1;
+  for (size_t frame = 0; frame < fadeFrames; ++frame) {
+    const int32_t gain = (int32_t)(fadeFrames - frame - 1);
+    for (uint8_t channel = 0; channel < outputChannels; ++channel) {
+      output[frame * outputChannels + channel] =
+          (int16_t)(((int32_t)lastOutput[channel] * gain) / denominator);
+    }
+  }
+}
+
+bool prepareOutputBlock(JitterBuffer &jitter, ResampleCursor &cursor,
+                        int16_t *output, size_t serviceFrames,
+                        uint8_t outputChannels, UnderrunState state,
+                        bool correctionApplied,
+                        const int16_t *correctionSource,
+                        const int16_t *lastOutput, uint32_t fadeFrames) {
+  const bool shouldRender =
+      state == UnderrunState::Playing ||
+      state == UnderrunState::FadingOut ||
+      state == UnderrunState::FadingIn;
+  bool rendered = false;
+  if (shouldRender) {
+    rendered = render(jitter, cursor, output, serviceFrames,
+                      outputChannels);
+  }
+  if (!rendered) {
+    fadeFromLastOutput(output, serviceFrames, outputChannels,
+                       fadeFrames, lastOutput);
+  } else if (correctionApplied) {
+    crossfadeBlocks(correctionSource, output, serviceFrames,
+                    outputChannels);
+  } else if (state == UnderrunState::FadingOut) {
+    applyEdgeFade(output, serviceFrames, outputChannels,
+                  fadeFrames, false);
+  } else if (state == UnderrunState::FadingIn) {
+    applyEdgeFade(output, serviceFrames, outputChannels,
+                  fadeFrames, true);
+  }
+  return rendered;
+}
+
 void engineTask(void *) {
   const uint32_t sampleRateHz = activeAudio->playbackRateHz;
   const uint8_t outputChannels = activeAudio->playbackChannels;
@@ -95,6 +214,7 @@ void engineTask(void *) {
   StreamTracker tracker(framesForMs(sampleRateHz, 100));
   ResampleCursor cursor;
   UnderrunController underrun;
+  PlaybackMetrics playbackMetrics;
   FillTrendController fillController({
       framesForMs(sampleRateHz, tuneTargetWatermarkMs),
       framesForMs(sampleRateHz, tuneLowWatermarkMs),
@@ -109,15 +229,20 @@ void engineTask(void *) {
   uint32_t lostFrames = 0;
   uint32_t hardCorrections = 0;
   uint32_t captureOverruns = 0;
+  uint32_t engineDrops = 0;
   uint32_t lastStatusAt = 0;
   uint32_t lastPacketAt = 0;
+  int16_t lastOutput[MAX_CHANNELS] = {};
 
   while (true) {
     if (localTestActive) {
       audiotransport::Packet discarded = {};
-      while (audiotransport::receive(discarded, 0)) {}
+      while (audiotransport::receive(discarded, 0)) {
+        engineDrops++;
+      }
       tracker.reset();
       jitter.clear();
+      playbackMetrics.reset();
       streamSeen = false;
       suppressVideo = false;
       vTaskDelay(1);
@@ -126,51 +251,20 @@ void engineTask(void *) {
     audiotransport::Packet packet = {};
     bool received = audiotransport::receive(
         packet, backend.running() ? 0 : pdMS_TO_TICKS(2));
-    do {
-      if (!received) break;
-      if (packet.header.sampleRateHz != sampleRateHz ||
-          packet.header.channels == 0 ||
-          packet.header.channels > MAX_CHANNELS) {
-        continue;
-      }
-      const StreamResult sequence = tracker.accept(
-          audioproto::VERSION, packet.header.streamGeneration,
-          packet.header.sequence, packet.header.sampleCounter,
-          packet.header.frameCount);
-      if (sequence.decision == StreamDecision::VersionMismatch ||
-          sequence.decision == StreamDecision::Discontinuity) {
-        continue;
-      }
-      if (sequence.decision == StreamDecision::Late) {
-        latePackets++;
-        continue;
-      }
-      if (sequence.decision == StreamDecision::Start) {
-        inputChannels = packet.header.channels;
-        streamGeneration = packet.header.streamGeneration;
-        jitter.reset(jitterStorage, jitterCapacityFrames, inputChannels);
-        cursor.reset();
-        underrun.reset();
-        streamSeen = true;
-        suppressVideo = true;
-      } else if (packet.header.channels != inputChannels) {
-        continue;
-      }
-      lastPacketAt = millis();
-      if (sequence.gapFrames > 0) {
-        if (!jitter.pushSilence(sequence.gapFrames)) {
-          jitter.clear();
-          underrun.reset();
-          suppressVideo = true;
-          continue;
-        }
-        lostFrames += sequence.gapFrames;
-      }
-      if (!jitter.push(packet.samples, packet.header.frameCount)) {
-        continue;
+    while (received) {
+      const bool startsStream =
+          !streamSeen ||
+          packet.header.streamGeneration != streamGeneration;
+      const uint32_t receivedAt = millis();
+      if (acceptPacket(packet, sampleRateHz, jitter, tracker, cursor,
+                       underrun, inputChannels, streamGeneration,
+                       streamSeen, suppressVideo, lastPacketAt, latePackets,
+                       lostFrames, engineDrops, receivedAt) &&
+          startsStream && backend.running()) {
+        playbackMetrics.start((uint32_t)jitter.fillFrames(), receivedAt);
       }
       received = audiotransport::receive(packet, 0);
-    } while (received);
+    }
 
     if (streamSeen &&
         streamIdleExpired(millis(), lastPacketAt,
@@ -183,6 +277,7 @@ void engineTask(void *) {
       jitter.clear();
       cursor.reset();
       underrun.reset();
+      playbackMetrics.reset();
       streamSeen = false;
       suppressVideo = false;
       continue;
@@ -204,6 +299,10 @@ void engineTask(void *) {
           suppressVideo = false;
           tracker.reset();
           jitter.clear();
+          playbackMetrics.reset();
+        } else {
+          playbackMetrics.start(
+              (uint32_t)jitter.fillFrames(), millis());
         }
       }
       vTaskDelay(1);
@@ -238,35 +337,25 @@ void engineTask(void *) {
     const UnderrunState state = underrun.update(
         (uint32_t)jitter.fillFrames(), drift.trendFrames, lowFrames,
         targetFrames, (uint32_t)serviceFrames);
-    const bool shouldRender =
-        state == UnderrunState::Playing ||
-        state == UnderrunState::FadingOut ||
-        state == UnderrunState::FadingIn;
-    bool rendered = false;
-    if (shouldRender) {
-      rendered = render(jitter, cursor, output, serviceFrames,
-                        outputChannels);
-    }
-    if (!rendered) {
-      memset(output, 0,
-             serviceFrames * outputChannels * sizeof(int16_t));
-    } else if (correctionApplied) {
-      crossfadeBlocks(correctionSource, output, serviceFrames,
-                      outputChannels);
-    } else if (state == UnderrunState::FadingOut) {
-      applyEdgeFade(output, serviceFrames, outputChannels,
-                    framesForMs(sampleRateHz, FADE_MS), false);
-    } else if (state == UnderrunState::FadingIn) {
-      applyEdgeFade(output, serviceFrames, outputChannels,
-                    framesForMs(sampleRateHz, FADE_MS), true);
-    }
+    prepareOutputBlock(
+        jitter, cursor, output, serviceFrames, outputChannels, state,
+        correctionApplied, correctionSource, lastOutput,
+        framesForMs(sampleRateHz, FADE_MS));
     suppressVideo = state != UnderrunState::Playing ||
                     jitter.fillFrames() < lowFrames;
-    if (backend.writeFrames(output, serviceFrames) != serviceFrames) {
-      memset(output, 0,
-             serviceFrames * outputChannels * sizeof(int16_t));
-      backend.writeFrames(output, serviceFrames);
+    size_t written = backend.writeFrames(output, serviceFrames);
+    if (written != serviceFrames) {
+      fadeFromLastOutput(
+          output, serviceFrames, outputChannels,
+          framesForMs(sampleRateHz, FADE_MS), lastOutput);
+      written = backend.writeFrames(output, serviceFrames);
       suppressVideo = true;
+    }
+    if (written == serviceFrames) {
+      for (uint8_t channel = 0; channel < outputChannels; ++channel) {
+        lastOutput[channel] =
+            output[(serviceFrames - 1) * outputChannels + channel];
+      }
     }
 
     const size_t captured = backend.readFrames(capture, serviceFrames);
@@ -280,6 +369,8 @@ void engineTask(void *) {
     }
 
     const uint32_t now = millis();
+    playbackMetrics.observe(
+        (uint32_t)jitter.fillFrames(), state, now);
     if (now - lastStatusAt >= STATUS_INTERVAL_MS) {
       lastStatusAt = now;
       const audiotransport::Stats &transportStats =
@@ -289,11 +380,15 @@ void engineTask(void *) {
           {
               (uint32_t)jitter.fillFrames(),
               targetFrames,
+              playbackMetrics.minimumFillFrames(),
               underrun.underruns(),
+              playbackMetrics.underrunDurationMs(now),
               latePackets,
               lostFrames,
               hardCorrections,
+              transportStats.ingressDrops,
               transportStats.queueDrops,
+              engineDrops,
               captureOverruns,
           });
     }
@@ -301,6 +396,96 @@ void engineTask(void *) {
 }
 
 }  // namespace
+
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+namespace host {
+namespace {
+
+int16_t admissionStorage[64] = {};
+JitterBuffer admissionJitter;
+StreamTracker admissionTracker(128);
+ResampleCursor admissionCursor;
+UnderrunController admissionUnderrun;
+uint8_t admissionChannels = 0;
+uint16_t admissionGeneration = 0;
+bool admissionSeen = false;
+volatile bool admissionSuppressed = false;
+uint32_t admissionLastPacketAt = 0;
+uint32_t admissionLatePackets = 0;
+uint32_t admissionLostFrames = 0;
+uint32_t admissionEngineDrops = 0;
+
+}  // namespace
+
+void resetAdmission(size_t capacityFrames) {
+  if (capacityFrames > 32) capacityFrames = 32;
+  jitterStorage = admissionStorage;
+  jitterCapacityFrames = capacityFrames;
+  admissionJitter = JitterBuffer();
+  admissionTracker = StreamTracker(128);
+  admissionCursor = ResampleCursor();
+  admissionUnderrun = UnderrunController();
+  admissionChannels = 0;
+  admissionGeneration = 0;
+  admissionSeen = false;
+  admissionSuppressed = false;
+  admissionLastPacketAt = 0;
+  admissionLatePackets = 0;
+  admissionLostFrames = 0;
+  admissionEngineDrops = 0;
+}
+
+bool admitPacket(const audiotransport::Packet &packet, uint32_t nowMs) {
+  return acceptPacket(
+      packet, 16000, admissionJitter, admissionTracker, admissionCursor,
+      admissionUnderrun, admissionChannels, admissionGeneration,
+      admissionSeen, admissionSuppressed, admissionLastPacketAt,
+      admissionLatePackets, admissionLostFrames, admissionEngineDrops,
+      nowMs);
+}
+
+bool discardFrames(size_t frames) {
+  return admissionJitter.discard(frames);
+}
+
+AdmissionSnapshot admissionSnapshot() {
+  return {
+      (uint32_t)admissionJitter.fillFrames(),
+      admissionLastPacketAt,
+      admissionLatePackets,
+      admissionLostFrames,
+      admissionEngineDrops,
+      admissionSeen,
+  };
+}
+
+bool renderFadingOut(const int16_t *input, size_t inputFrames,
+                     uint8_t channels, size_t outputFrames,
+                     const int16_t *lastOutput, int16_t *output) {
+  int16_t storage[64] = {};
+  if (input == nullptr || lastOutput == nullptr || output == nullptr ||
+      inputFrames * channels > 64 || outputFrames == 0 ||
+      outputFrames * channels > 64) {
+    return false;
+  }
+  JitterBuffer jitter;
+  if (!jitter.reset(storage, inputFrames, channels) ||
+      !jitter.push(input, inputFrames)) {
+    return false;
+  }
+  ResampleCursor cursor;
+  int16_t mutableLastOutput[2] = {
+      lastOutput[0],
+      (int16_t)(channels > 1 ? lastOutput[1] : 0),
+  };
+  return prepareOutputBlock(
+      jitter, cursor, output, outputFrames, channels,
+      UnderrunState::FadingOut, false, nullptr, mutableLastOutput,
+      outputFrames / 2);
+}
+
+}  // namespace host
+#endif
 
 bool start(const board::Config &config) {
   activeAudio = board::generatedAudioConfig(config.variant);

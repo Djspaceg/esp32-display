@@ -21,7 +21,9 @@ struct Packet {
 struct Stats {
   volatile uint32_t badDatagrams = 0;
   volatile uint32_t versionMismatches = 0;
+  volatile uint32_t oversizedDatagrams = 0;
   volatile uint32_t queueDrops = 0;
+  volatile uint32_t ingressDrops = 0;
   volatile uint32_t uplinkErrors = 0;
 };
 
@@ -39,5 +41,10 @@ const Stats &stats();
 
 extern int tuneReceiveBufferBytes;
 extern TaskHandle_t receiveTaskHandle;
+
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+void hostReceiveBurst();
+void hostResetStats();
+#endif
 
 }  // namespace audiotransport

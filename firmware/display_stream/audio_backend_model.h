@@ -74,16 +74,11 @@ struct Es7210Clock {
 };
 
 inline bool es7210Clock(uint32_t sampleRateHz, Es7210Clock &out) {
-  // Values are the vendor driver's coefficients for an ESP-generated
-  // 256*sample-rate MCLK. Keeping the rate as a lookup parameter means a
-  // descriptor change to one of these demonstrated rates needs no driver
-  // rewrite.
+  // Values are vendor-driver coefficients that match the Arduino I2S layer's
+  // 256*sample-rate MCLK. Rates without a matching 256-Fs tuple are rejected.
   switch (sampleRateHz) {
     case 16000:
       out = {0xC1, 0x20, 0x01, 0x00};
-      return true;
-    case 24000:
-      out = {0x81, 0x20, 0x02, 0x00};
       return true;
     case 44100:
     case 48000:

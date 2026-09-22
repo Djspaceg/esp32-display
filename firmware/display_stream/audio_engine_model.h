@@ -327,4 +327,55 @@ class UnderrunController {
   uint32_t underruns_ = 0;
 };
 
+class PlaybackMetrics {
+ public:
+  void reset() {
+    tracking_ = false;
+    minimumFillFrames_ = 0;
+    underrunActive_ = false;
+    underrunStartedAt_ = 0;
+    underrunDurationMs_ = 0;
+  }
+
+  void start(uint32_t fillFrames, uint32_t nowMs) {
+    tracking_ = true;
+    minimumFillFrames_ = fillFrames;
+    underrunActive_ = false;
+    underrunStartedAt_ = nowMs;
+    underrunDurationMs_ = 0;
+  }
+
+  void observe(uint32_t fillFrames, UnderrunState state, uint32_t nowMs) {
+    if (!tracking_) return;
+    if (fillFrames < minimumFillFrames_) minimumFillFrames_ = fillFrames;
+    const bool underrunning =
+        state == UnderrunState::FadingOut ||
+        state == UnderrunState::SilentRefill ||
+        state == UnderrunState::FadingIn;
+    if (underrunning && !underrunActive_) {
+      underrunActive_ = true;
+      underrunStartedAt_ = nowMs;
+    } else if (!underrunning && underrunActive_) {
+      underrunDurationMs_ += nowMs - underrunStartedAt_;
+      underrunActive_ = false;
+    }
+  }
+
+  uint32_t minimumFillFrames() const {
+    return tracking_ ? minimumFillFrames_ : 0;
+  }
+
+  uint32_t underrunDurationMs(uint32_t nowMs) const {
+    return underrunDurationMs_ +
+           (underrunActive_ ? nowMs - underrunStartedAt_ : 0);
+  }
+
+ private:
+  bool tracking_ = false;
+  uint32_t minimumFillFrames_ = 0;
+  bool underrunActive_ = false;
+  uint32_t underrunStartedAt_ = 0;
+  uint32_t underrunDurationMs_ = 0;
+};
+
 }  // namespace audioengine
