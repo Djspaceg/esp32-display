@@ -57,6 +57,36 @@ MOTION_ENUMS = {
     "none": "MotionController::None",
     "qmi8658": "MotionController::Qmi8658",
 }
+AUDIO_AMP_ENUMS = {
+    "none": "AudioAmp::None",
+    "unknown": "AudioAmp::Unknown",
+    "ns4150b": "AudioAmp::Ns4150b",
+    "ns8002": "AudioAmp::Ns8002",
+}
+AUDIO_CODEC_ENUMS = {
+    "none": "AudioCodec::None",
+    "unknown": "AudioCodec::Unknown",
+    "es8311": "AudioCodec::Es8311",
+    "pcm5101a": "AudioCodec::Pcm5101a",
+}
+AUDIO_MIC_ENUMS = {
+    "none": "AudioMic::None",
+    "unknown": "AudioMic::Unknown",
+    "es7210": "AudioMic::Es7210",
+    "ics43434": "AudioMic::Ics43434",
+    "pdm": "AudioMic::Pdm",
+}
+AUDIO_SPEAKER_BUS_ENUMS = {
+    "none": "AudioSpeakerBus::None",
+    "unknown": "AudioSpeakerBus::Unknown",
+    "i2s": "AudioSpeakerBus::I2s",
+}
+AUDIO_MIC_BUS_ENUMS = {
+    "none": "AudioMicBus::None",
+    "unknown": "AudioMicBus::Unknown",
+    "i2s": "AudioMicBus::I2s",
+    "pdm": "AudioMicBus::Pdm",
+}
 MATCH_ENUMS = {
     "always": "CandidateMatch::Always",
     "flash_range": "CandidateMatch::FlashRange",
@@ -147,6 +177,13 @@ def render_variants(descriptors: Sequence[Dict[str, Any]]) -> str:
     lines.append("constexpr bool supportsDoom(Variant variant) {\n")
     lines.append("  return %s;\n" % (" || ".join(doom) if doom else "false"))
     lines.append("}\n")
+    audio = [
+        "variant == Variant::%s" % item["identity"]["variant"]
+        for item in ordered if item["capabilities"]["audio"]
+    ]
+    lines.append("\nconstexpr bool supportsAudio(Variant variant) {\n")
+    lines.append("  return %s;\n" % (" || ".join(audio) if audio else "false"))
+    lines.append("}\n")
     return "".join(lines)
 
 
@@ -184,6 +221,58 @@ def render_identity(descriptors: Sequence[Dict[str, Any]]) -> str:
         "inline const GeneratedBoardIdentity *generatedIdentity(Variant variant) {\n",
         "  for (const auto &identity : GENERATED_BOARD_IDENTITIES) {\n",
         "    if (identity.variant == variant) return &identity;\n",
+        "  }\n",
+        "  return nullptr;\n",
+        "}\n",
+    ])
+    return "".join(lines)
+
+
+def render_audio(descriptors: Sequence[Dict[str, Any]]) -> str:
+    ordered = sorted(
+        descriptors, key=lambda item: item["identity"]["variant_value"])
+    lines = [
+        HEADER,
+        "#pragma once\n\n",
+        "static constexpr AudioConfig GENERATED_BOARD_AUDIO[] = {\n",
+    ]
+    for descriptor in ordered:
+        identity = descriptor["identity"]
+        audio = descriptor["audio"]
+        lines.append(
+            "    {Variant::%s, %s, %s, %s, %s, %s, "
+            "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, "
+            "%d, %d, %d, %d, %d, %d},\n"
+            % (
+                identity["variant"],
+                AUDIO_AMP_ENUMS[audio["amp"]],
+                AUDIO_CODEC_ENUMS[audio["codec"]],
+                AUDIO_MIC_ENUMS[audio["mic"]],
+                AUDIO_SPEAKER_BUS_ENUMS[audio["speaker_bus"]],
+                AUDIO_MIC_BUS_ENUMS[audio["mic_bus"]],
+                audio["pin_playback_mclk"],
+                audio["pin_playback_bclk"],
+                audio["pin_playback_lrck"],
+                audio["pin_dout"],
+                audio["pin_capture_mclk"],
+                audio["pin_capture_bclk"],
+                audio["pin_capture_lrck"],
+                audio["pin_din"],
+                audio["pin_pdm_clock"],
+                audio["pin_amp_enable"],
+                audio["codec_i2c_address"],
+                audio["mic_i2c_address"],
+                audio["playback_rate_hz"],
+                audio["playback_channels"],
+                audio["capture_rate_hz"],
+                audio["capture_channels"],
+            )
+        )
+    lines.extend([
+        "};\n\n",
+        "inline const AudioConfig *generatedAudioConfig(Variant variant) {\n",
+        "  for (const auto &audio : GENERATED_BOARD_AUDIO) {\n",
+        "    if (audio.variant == variant) return &audio;\n",
         "  }\n",
         "  return nullptr;\n",
         "}\n",
@@ -591,6 +680,8 @@ def expected_outputs(repo_root: str) -> Dict[str, str]:
             render_variants(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_identity.h":
             render_identity(descriptors),
+        "firmware/libraries/espdisp_board/src/generated_board_audio.h":
+            render_audio(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_configs.h":
             render_configs(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_config_lookup.h":

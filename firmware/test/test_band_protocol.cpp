@@ -5395,6 +5395,30 @@ int main() {
     CHECK(board::supportsDoom(board::Variant::LcdGc9107));
     CHECK(board::supportsDoom(board::Variant::LcdSt7789_130));
     CHECK(!board::supportsDoom(board::Variant::TouchJd9853));
+    CHECK(board::supportsAudio(board::Variant::AmoledCo5300));
+    CHECK(board::supportsAudio(board::Variant::LcdSt77916));
+    CHECK(!board::supportsAudio(board::Variant::TouchJd9853));
+    CHECK(!board::supportsAudio(board::Variant::P4_4B));
+    const board::AudioConfig *amoledAudio =
+        board::generatedAudioConfig(board::Variant::AmoledCo5300);
+    CHECK(amoledAudio != nullptr);
+    CHECK(amoledAudio->amp == board::AudioAmp::Ns4150b);
+    CHECK(amoledAudio->codec == board::AudioCodec::Es8311);
+    CHECK(amoledAudio->mic == board::AudioMic::Es7210);
+    CHECK(amoledAudio->pinPlaybackMclk == 16);
+    CHECK(amoledAudio->pinPlaybackBclk == 9);
+    CHECK(amoledAudio->pinPlaybackLrck == 45);
+    CHECK(amoledAudio->pinDout == 8);
+    CHECK(amoledAudio->pinCaptureMclk == 16);
+    CHECK(amoledAudio->pinCaptureBclk == 9);
+    CHECK(amoledAudio->pinCaptureLrck == 45);
+    CHECK(amoledAudio->pinDin == 10);
+    CHECK(amoledAudio->pinAmpEnable == 46);
+    const board::AudioConfig *lcd185Audio =
+        board::generatedAudioConfig(board::Variant::LcdSt77916);
+    CHECK(lcd185Audio != nullptr);
+    CHECK(lcd185Audio->amp == board::AudioAmp::Unknown);
+    CHECK(lcd185Audio->pinPlaybackMclk == board::NO_PIN);
   }
 
   // --- glyph_draw: the on-device text rasterizer (glyph_draw.h)

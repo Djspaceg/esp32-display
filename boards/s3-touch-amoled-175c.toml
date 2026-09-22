@@ -148,8 +148,32 @@ bridge = "none"
 rx = -1
 tx = -1
 
+[audio]
+amp = "ns4150b"
+codec = "es8311"
+mic = "es7210"
+speaker_bus = "i2s"
+mic_bus = "i2s"
+pin_playback_mclk = 16
+pin_playback_bclk = 9
+pin_playback_lrck = 45
+pin_dout = 8
+pin_capture_mclk = 16
+pin_capture_bclk = 9
+pin_capture_lrck = 45
+pin_din = 10
+pin_pdm_clock = -1
+pin_amp_enable = 46
+codec_i2c_address = 24
+mic_i2c_address = 64
+playback_rate_hz = 16000
+playback_channels = 2
+capture_rate_hz = 16000
+capture_channels = 2
+
 [capabilities]
 doom = true
+audio = true
 
 [compile]
 selector = ""

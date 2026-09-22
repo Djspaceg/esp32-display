@@ -26,6 +26,7 @@
     "backlight",
     "power",
     "serial",
+    "audio",
     "capabilities",
     "compile",
     "detection"
@@ -433,12 +434,87 @@
         "tx": {"$ref": "#/$defs/pin"}
       }
     },
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "amp",
+        "codec",
+        "mic",
+        "speaker_bus",
+        "mic_bus",
+        "pin_playback_mclk",
+        "pin_playback_bclk",
+        "pin_playback_lrck",
+        "pin_dout",
+        "pin_capture_mclk",
+        "pin_capture_bclk",
+        "pin_capture_lrck",
+        "pin_din",
+        "pin_pdm_clock",
+        "pin_amp_enable",
+        "codec_i2c_address",
+        "mic_i2c_address",
+        "playback_rate_hz",
+        "playback_channels",
+        "capture_rate_hz",
+        "capture_channels"
+      ],
+      "properties": {
+        "amp": {"enum": ["none", "unknown", "ns4150b", "ns8002"]},
+        "codec": {"enum": ["none", "unknown", "es8311", "pcm5101a"]},
+        "mic": {"enum": ["none", "unknown", "es7210", "ics43434", "pdm"]},
+        "speaker_bus": {"enum": ["none", "unknown", "i2s"]},
+        "mic_bus": {"enum": ["none", "unknown", "i2s", "pdm"]},
+        "pin_playback_mclk": {"$ref": "#/$defs/audioPin"},
+        "pin_playback_bclk": {"$ref": "#/$defs/audioPin"},
+        "pin_playback_lrck": {"$ref": "#/$defs/audioPin"},
+        "pin_dout": {"$ref": "#/$defs/audioPin"},
+        "pin_capture_mclk": {"$ref": "#/$defs/audioPin"},
+        "pin_capture_bclk": {"$ref": "#/$defs/audioPin"},
+        "pin_capture_lrck": {"$ref": "#/$defs/audioPin"},
+        "pin_din": {"$ref": "#/$defs/audioPin"},
+        "pin_pdm_clock": {"$ref": "#/$defs/audioPin"},
+        "pin_amp_enable": {"$ref": "#/$defs/audioPin"},
+        "codec_i2c_address": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        },
+        "mic_i2c_address": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        },
+        "playback_rate_hz": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 96000
+        },
+        "playback_channels": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "capture_rate_hz": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 96000
+        },
+        "capture_channels": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        }
+      }
+    },
     "capabilities": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["doom"],
+      "required": ["doom", "audio"],
       "properties": {
-        "doom": {"type": "boolean"}
+        "doom": {"type": "boolean"},
+        "audio": {"type": "boolean"}
       }
     },
     "compile": {
@@ -514,6 +590,7 @@
   },
   "$defs": {
     "pin": {"type": "integer", "minimum": -1, "maximum": 127},
+    "audioPin": {"type": "integer", "minimum": -1, "maximum": 54},
     "stringArray": {
       "type": "array",
       "items": {"type": "string"}

@@ -3668,7 +3668,7 @@ def test_board_descriptor_validator():
             "migration", "identity", "family", "platform", "capacity",
             "panel", "carrier", "touch", "led", "gesture",
             "orientation", "motion", "reset", "backlight", "power",
-            "serial", "capabilities", "compile", "detection",
+            "serial", "audio", "capabilities", "compile", "detection",
         },
         "schema requires every descriptor section",
     )
@@ -3690,6 +3690,211 @@ def test_board_descriptor_validator():
         espdisp.generate_board_descriptors.write_outputs(
             espdisp.REPO_ROOT, check=True),
         "committed generated board files are current",
+    )
+
+    audio_none = {
+        "amp": "none",
+        "codec": "none",
+        "mic": "none",
+        "speaker_bus": "none",
+        "mic_bus": "none",
+        "pin_playback_mclk": -1,
+        "pin_playback_bclk": -1,
+        "pin_playback_lrck": -1,
+        "pin_dout": -1,
+        "pin_capture_mclk": -1,
+        "pin_capture_bclk": -1,
+        "pin_capture_lrck": -1,
+        "pin_din": -1,
+        "pin_pdm_clock": -1,
+        "pin_amp_enable": -1,
+        "codec_i2c_address": 0,
+        "mic_i2c_address": 0,
+        "playback_rate_hz": 0,
+        "playback_channels": 0,
+        "capture_rate_hz": 0,
+        "capture_channels": 0,
+    }
+    audio_verified = {
+        "amp": "ns4150b",
+        "codec": "es8311",
+        "mic": "es7210",
+        "speaker_bus": "i2s",
+        "mic_bus": "i2s",
+        "pin_playback_mclk": 16,
+        "pin_playback_bclk": 9,
+        "pin_playback_lrck": 45,
+        "pin_dout": 8,
+        "pin_capture_mclk": 16,
+        "pin_capture_bclk": 9,
+        "pin_capture_lrck": 45,
+        "pin_din": 10,
+        "pin_pdm_clock": -1,
+        "pin_amp_enable": 46,
+        "codec_i2c_address": 0x18,
+        "mic_i2c_address": 0x40,
+        "playback_rate_hz": 16000,
+        "playback_channels": 2,
+        "capture_rate_hz": 16000,
+        "capture_channels": 2,
+    }
+
+    absent_audio = copy.deepcopy(descriptors[0])
+    absent_audio["audio"] = copy.deepcopy(audio_none)
+    absent_audio["capabilities"]["audio"] = False
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors([absent_audio]),
+        "an absent audio row passes validation",
+    )
+
+    verified_audio = copy.deepcopy(next(
+        item for item in descriptors
+        if item["identity"]["profile"] == "co5300"))
+    verified_audio["audio"] = copy.deepcopy(audio_verified)
+    verified_audio["capabilities"]["audio"] = True
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors([verified_audio]),
+        "a complete verified audio row passes validation",
+    )
+
+    malformed_audio_enum = copy.deepcopy(verified_audio)
+    malformed_audio_enum["audio"]["amp"] = "plausible-amp"
+    check_descriptor_fails(
+        [malformed_audio_enum],
+        "audio.amp must be one of",
+        "unknown audio amp enums are refused",
+    )
+
+    malformed_audio_pin = copy.deepcopy(verified_audio)
+    malformed_audio_pin["audio"]["pin_playback_mclk"] = -5
+    check_descriptor_fails(
+        [malformed_audio_pin],
+        "audio.pin_playback_mclk must be -1 or GPIO 0..48",
+        "audio pins reject negative values other than the sentinel",
+    )
+
+    out_of_range_audio_pin = copy.deepcopy(verified_audio)
+    out_of_range_audio_pin["audio"]["pin_playback_mclk"] = 49
+    check_descriptor_fails(
+        [out_of_range_audio_pin],
+        "audio.pin_playback_mclk must be -1 or GPIO 0..48",
+        "audio pins use the target GPIO ceiling",
+    )
+
+    colliding_audio_pin = copy.deepcopy(verified_audio)
+    colliding_audio_pin["audio"]["pin_playback_mclk"] = \
+        colliding_audio_pin["carrier"]["pin_sclk"]
+    check_descriptor_fails(
+        [colliding_audio_pin],
+        "audio.pin_playback_mclk GPIO38 collides with carrier.pin_sclk",
+        "audio pins cannot collide with existing board wiring",
+    )
+
+    absent_with_pin = copy.deepcopy(absent_audio)
+    absent_with_pin["audio"]["pin_dout"] = 1
+    check_descriptor_fails(
+        [absent_with_pin],
+        "audio capability is false but audio.pin_dout is declared",
+        "audio-absent rows cannot carry implementation pins",
+    )
+
+    unknown_with_detail = copy.deepcopy(verified_audio)
+    unknown_with_detail["audio"]["amp"] = "unknown"
+    check_descriptor_fails(
+        [unknown_with_detail],
+        "unverified audio rows must leave pins, addresses, rates, and channels unknown",
+        "unknown hardware revisions cannot mix guesses with concrete facts",
+    )
+
+    missing_playback_pin = copy.deepcopy(verified_audio)
+    missing_playback_pin["audio"]["pin_dout"] = -1
+    check_descriptor_fails(
+        [missing_playback_pin],
+        "I2S playback requires audio.pin_playback_bclk, pin_playback_lrck, and pin_dout",
+        "verified I2S playback requires its data pin",
+    )
+
+    malformed_audio_rate = copy.deepcopy(verified_audio)
+    malformed_audio_rate["audio"]["capture_rate_hz"] = 7999
+    check_descriptor_fails(
+        [malformed_audio_rate],
+        "audio.capture_rate_hz must be 8000..96000",
+        "audio sample rates are bounded",
+    )
+
+    malformed_audio_channels = copy.deepcopy(verified_audio)
+    malformed_audio_channels["audio"]["capture_channels"] = 9
+    check_descriptor_fails(
+        [malformed_audio_channels],
+        "audio.capture_channels must be 1..8",
+        "audio channel counts are bounded",
+    )
+
+    missing_codec_address = copy.deepcopy(verified_audio)
+    missing_codec_address["audio"]["codec_i2c_address"] = 0
+    check_descriptor_fails(
+        [missing_codec_address],
+        "ES8311 requires audio.codec_i2c_address",
+        "I2C codecs require a usable address",
+    )
+
+    separate_capture_clocks = copy.deepcopy(verified_audio)
+    separate_capture_clocks["audio"]["pin_capture_mclk"] = 17
+    separate_capture_clocks["audio"]["pin_capture_bclk"] = 18
+    separate_capture_clocks["audio"]["pin_capture_lrck"] = 19
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors(
+            [separate_capture_clocks]),
+        "playback and capture may use independent I2S clocks",
+    )
+
+    pdm_capture = copy.deepcopy(verified_audio)
+    pdm_capture["audio"]["mic"] = "pdm"
+    pdm_capture["audio"]["mic_bus"] = "pdm"
+    pdm_capture["audio"]["pin_capture_mclk"] = -1
+    pdm_capture["audio"]["pin_capture_bclk"] = -1
+    pdm_capture["audio"]["pin_capture_lrck"] = -1
+    pdm_capture["audio"]["pin_pdm_clock"] = 17
+    pdm_capture["audio"]["mic_i2c_address"] = 0
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors([pdm_capture]),
+        "a direct PDM mic may coexist with I2S playback",
+    )
+
+    pdm_with_i2s_clocks = copy.deepcopy(pdm_capture)
+    pdm_with_i2s_clocks["audio"]["pin_capture_bclk"] = 18
+    check_descriptor_fails(
+        [pdm_with_i2s_clocks],
+        "PDM capture must not declare capture I2S clocks",
+        "PDM and capture-I2S clocks cannot be mixed",
+    )
+
+    es7210_on_pdm = copy.deepcopy(pdm_capture)
+    es7210_on_pdm["audio"]["mic"] = "es7210"
+    es7210_on_pdm["audio"]["mic_i2c_address"] = 0x40
+    check_descriptor_fails(
+        [es7210_on_pdm],
+        "ES7210 requires audio.mic_bus i2s",
+        "I2S capture devices cannot be declared as PDM",
+    )
+
+    generated_audio_path = os.path.join(
+        espdisp.REPO_ROOT, "firmware", "libraries", "espdisp_board", "src",
+        "generated_board_audio.h")
+    if os.path.exists(generated_audio_path):
+        with open(generated_audio_path, encoding="utf-8") as source:
+            generated_audio = source.read()
+    else:
+        generated_audio = ""
+    check(
+        "AudioAmp::Ns4150b" in generated_audio and
+        "AudioCodec::Es8311" in generated_audio and
+        "AudioMic::Es7210" in generated_audio,
+        "generated constexpr audio data carries verified component enums",
+    )
+    check(
+        "Variant::LcdSt77916, AudioAmp::Unknown" in generated_audio,
+        "generated 1.85C audio data preserves revision ambiguity",
     )
 
     missing = copy.deepcopy(descriptors[0])

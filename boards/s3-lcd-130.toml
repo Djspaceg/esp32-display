@@ -148,8 +148,32 @@ bridge = "ch343"
 rx = 44
 tx = 43
 
+[audio]
+amp = "none"
+codec = "none"
+mic = "none"
+speaker_bus = "none"
+mic_bus = "none"
+pin_playback_mclk = -1
+pin_playback_bclk = -1
+pin_playback_lrck = -1
+pin_dout = -1
+pin_capture_mclk = -1
+pin_capture_bclk = -1
+pin_capture_lrck = -1
+pin_din = -1
+pin_pdm_clock = -1
+pin_amp_enable = -1
+codec_i2c_address = 0
+mic_i2c_address = 0
+playback_rate_hz = 0
+playback_channels = 0
+capture_rate_hz = 0
+capture_channels = 0
+
 [capabilities]
 doom = true
+audio = false
 
 [compile]
 selector = ""
