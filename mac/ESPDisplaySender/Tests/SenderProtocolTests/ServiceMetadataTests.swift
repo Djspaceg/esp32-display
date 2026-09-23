@@ -110,6 +110,30 @@ final class ServiceMetadataTests: XCTestCase {
         XCTAssertNil(ServiceMetadata(txtRecords: noUplink).audioDescriptor)
     }
 
+    func testAudioAdvertisementSeparatesLateTXTFromExplicitAbsence() {
+        XCTAssertEqual(ServiceMetadata.empty.audioAdvertisement, .unknown)
+        XCTAssertEqual(
+            ServiceMetadata(txtRecords: ["caps": "00000000"]).audioAdvertisement,
+            .unavailable)
+
+        let descriptor = AudioStreamDescriptor(
+            port: 5_569,
+            version: 1,
+            sampleRateHz: 48_000,
+            playbackChannels: 2,
+            captureChannels: 1)
+        XCTAssertEqual(
+            ServiceMetadata(txtRecords: [
+                "caps": "00300000",
+                "audio-port": "5569",
+                "audio-version": "1",
+                "audio-rate": "48000",
+                "audio-play-ch": "2",
+                "audio-capture-ch": "1",
+            ]).audioAdvertisement,
+            .available(descriptor))
+    }
+
     func testAPanelThatSaysNothingYieldsNothing() {
         // Not an error and not a partial answer: a panel running firmware older
         // than any of these records must behave exactly as it did before they

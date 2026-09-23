@@ -19,6 +19,11 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "SenderAudioRT",
+            path: "Sources/SenderAudioRT",
+            publicHeadersPath: "include"
+        ),
+        .target(
             name: "SenderProtocol",
             path: "Sources/SenderProtocol"
         ),
@@ -27,7 +32,7 @@ let package = Package(
         // import it - executable targets cannot be imported.
         .target(
             name: "SenderCore",
-            dependencies: ["SenderProtocol"],
+            dependencies: ["SenderAudioRT", "SenderProtocol"],
             path: "Sources/SenderCore"
         ),
         .executableTarget(

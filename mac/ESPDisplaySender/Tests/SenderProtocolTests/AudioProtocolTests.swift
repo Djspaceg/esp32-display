@@ -158,4 +158,149 @@ final class AudioProtocolTests: XCTestCase {
         XCTAssertTrue(tracker.accept(sequence: 2, streamGeneration: 2))
         XCTAssertEqual(tracker.lostPackets, 1, "new generation is a restart, not loss")
     }
+
+    func testDriftControllerFiltersAndBoundsFillSlope() {
+        let tuning = AudioRuntimeTuning()
+        var controller = AudioDriftController()
+
+        XCTAssertEqual(
+            controller.observe(
+                timestampMicros: 10,
+                fillFrames: 1_000,
+                sampleRateHz: 48_000,
+                tuning: tuning),
+            0)
+        let correction = controller.observe(
+            timestampMicros: 1_000_010,
+            fillFrames: 1_048,
+            sampleRateHz: 48_000,
+            tuning: tuning)
+        XCTAssertGreaterThan(correction, 0)
+        XCTAssertLessThanOrEqual(correction, tuning.maximumCorrectionPPM)
+        XCTAssertEqual(
+            controller.rateMultiplier,
+            1 + correction / 1_000_000,
+            accuracy: 0.000_000_1)
+    }
+
+    func testVariableRatioResamplerChangesDurationAtThePPMBound() {
+        XCTAssertEqual(
+            AudioLinearResampler.outputFrameCount(
+                inputFrames: 48_000, rateMultiplier: 1.0004),
+            47_981)
+        let input = (0..<16).map(Float.init)
+        let output = AudioLinearResampler.resample(
+            interleavedSamples: input,
+            channels: 1,
+            rateMultiplier: 2)
+        XCTAssertEqual(output.count, 8)
+        XCTAssertEqual(output.first, 0)
+        XCTAssertEqual(output.last, 15)
+    }
+
+    func testLatencyTargetContributesToDriftCorrection() {
+        var controller = AudioDriftController()
+        let tuning = AudioRuntimeTuning(driftFilterWeight: 1)
+        _ = controller.observe(
+            timestampMicros: 0,
+            fillFrames: 4_000,
+            sampleRateHz: 48_000,
+            tuning: tuning,
+            targetFillFrames: 3_840)
+        let correction = controller.observe(
+            timestampMicros: 1_000_000,
+            fillFrames: 4_000,
+            sampleRateHz: 48_000,
+            tuning: tuning,
+            targetFillFrames: 3_840)
+        XCTAssertGreaterThan(
+            correction, 0,
+            "a queue above the configured latency target must be consumed faster")
+    }
+
+    func testJitterBufferReordersBeforePlayout() {
+        func packet(_ sequence: UInt16, counter: UInt32) -> AudioProtocol.PCM {
+            AudioProtocol.PCM(
+                kind: .pcmUplink,
+                sequence: sequence,
+                streamGeneration: 5,
+                sampleRateHz: 16_000,
+                sampleCounter: counter,
+                timestampMicros: counter * 62,
+                frameCount: 2,
+                channels: 1,
+                samples: Data(repeating: UInt8(sequence), count: 4))
+        }
+        var jitter = AudioJitterBuffer(
+            targetFrames: 4,
+            ceilingFrames: 12,
+            reorderWindowPackets: 2,
+            reorderTimeoutNanos: 20_000_000)
+
+        XCTAssertEqual(jitter.insert(packet(10, counter: 100), nowNanos: 0), [])
+        XCTAssertEqual(
+            jitter.insert(packet(12, counter: 104), nowNanos: 1_000_000),
+            [.pcm(packet(10, counter: 100))])
+        XCTAssertEqual(
+            jitter.insert(packet(11, counter: 102), nowNanos: 2_000_000),
+            [.pcm(packet(11, counter: 102)), .pcm(packet(12, counter: 104))])
+        XCTAssertEqual(jitter.reorderedPackets, 1)
+        XCTAssertEqual(jitter.lostFrames, 0)
+    }
+
+    func testJitterBufferPreservesExpiredGapAsSilence() {
+        func packet(_ sequence: UInt16, counter: UInt32) -> AudioProtocol.PCM {
+            AudioProtocol.PCM(
+                kind: .pcmUplink,
+                sequence: sequence,
+                streamGeneration: 9,
+                sampleRateHz: 16_000,
+                sampleCounter: counter,
+                timestampMicros: counter * 62,
+                frameCount: 2,
+                channels: 1,
+                samples: Data(repeating: UInt8(sequence), count: 4))
+        }
+        var jitter = AudioJitterBuffer(
+            targetFrames: 2,
+            ceilingFrames: 8,
+            reorderWindowPackets: 2,
+            reorderTimeoutNanos: 20_000_000)
+
+        XCTAssertEqual(
+            jitter.insert(packet(20, counter: 0), nowNanos: 0),
+            [.pcm(packet(20, counter: 0))])
+        XCTAssertEqual(
+            jitter.insert(packet(22, counter: 4), nowNanos: 1_000_000),
+            [])
+        XCTAssertEqual(
+            jitter.poll(nowNanos: 21_000_001),
+            [.silence(frames: 2), .pcm(packet(22, counter: 4))])
+        XCTAssertEqual(jitter.lostFrames, 2)
+    }
+
+    func testAudioDemandReducesOnlyTheVideoShare() {
+        var budget = AudioFirstRadioBudget(tuning: AudioRuntimeTuning())
+        XCTAssertEqual(
+            budget.videoSpacingNanos(
+                baseSpacingMicros: 200,
+                packetBytes: 1_472,
+                nowNanos: 1_000_000_000),
+            200_000)
+
+        budget.recordAudioDatagram(bytes: 700, nowNanos: 1_000_000_000)
+        XCTAssertGreaterThan(
+            budget.videoSpacingNanos(
+                baseSpacingMicros: 200,
+                packetBytes: 1_472,
+                nowNanos: 1_000_000_000),
+            200_000)
+        XCTAssertEqual(
+            budget.videoSpacingNanos(
+                baseSpacingMicros: 200,
+                packetBytes: 1_472,
+                nowNanos: 3_000_000_000),
+            200_000,
+            "expired audio demand does not reserve a permanent fixed share")
+    }
 }

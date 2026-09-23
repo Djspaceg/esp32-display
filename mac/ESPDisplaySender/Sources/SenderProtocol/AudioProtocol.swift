@@ -330,6 +330,18 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
     public var macClockPPM: Double
     public var estimatorErrorPPM: Double
     public var correctionMargin: Double
+    public var driftFilterWeight: Double
+    public var driftRecoveryMilliseconds: Double
+    public var uplinkReorderPackets: Int
+    public var uplinkReorderMilliseconds: Double
+    public var responseTimeoutMilliseconds: Double
+    public var radioWindowMilliseconds: Double
+    public var radioSafetyMargin: Double
+    public var radioPacketOverheadBytes: Int
+    public var maximumVideoDelayMilliseconds: Double
+    public var captureRingSlots: Int
+    public var captureRingSlotMilliseconds: Double
+    public var captureWorkerMilliseconds: Double
 
     public init(
         packetMilliseconds: Double = 20,
@@ -341,7 +353,19 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
         panelClockPPM: Double = 50,
         macClockPPM: Double = 100,
         estimatorErrorPPM: Double = 50,
-        correctionMargin: Double = 2
+        correctionMargin: Double = 2,
+        driftFilterWeight: Double = 0.125,
+        driftRecoveryMilliseconds: Double = 2_000,
+        uplinkReorderPackets: Int = 4,
+        uplinkReorderMilliseconds: Double = 40,
+        responseTimeoutMilliseconds: Double = 1_500,
+        radioWindowMilliseconds: Double = 1_000,
+        radioSafetyMargin: Double = 0.15,
+        radioPacketOverheadBytes: Int = 64,
+        maximumVideoDelayMilliseconds: Double = 50,
+        captureRingSlots: Int = 8,
+        captureRingSlotMilliseconds: Double = 100,
+        captureWorkerMilliseconds: Double = 5
     ) {
         self.packetMilliseconds = packetMilliseconds
         self.downlinkTargetMilliseconds = downlinkTargetMilliseconds
@@ -353,6 +377,18 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
         self.macClockPPM = macClockPPM
         self.estimatorErrorPPM = estimatorErrorPPM
         self.correctionMargin = correctionMargin
+        self.driftFilterWeight = driftFilterWeight
+        self.driftRecoveryMilliseconds = driftRecoveryMilliseconds
+        self.uplinkReorderPackets = uplinkReorderPackets
+        self.uplinkReorderMilliseconds = uplinkReorderMilliseconds
+        self.responseTimeoutMilliseconds = responseTimeoutMilliseconds
+        self.radioWindowMilliseconds = radioWindowMilliseconds
+        self.radioSafetyMargin = radioSafetyMargin
+        self.radioPacketOverheadBytes = radioPacketOverheadBytes
+        self.maximumVideoDelayMilliseconds = maximumVideoDelayMilliseconds
+        self.captureRingSlots = captureRingSlots
+        self.captureRingSlotMilliseconds = captureRingSlotMilliseconds
+        self.captureWorkerMilliseconds = captureWorkerMilliseconds
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -366,6 +402,18 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
         case macClockPPM
         case estimatorErrorPPM
         case correctionMargin
+        case driftFilterWeight
+        case driftRecoveryMilliseconds
+        case uplinkReorderPackets
+        case uplinkReorderMilliseconds
+        case responseTimeoutMilliseconds
+        case radioWindowMilliseconds
+        case radioSafetyMargin
+        case radioPacketOverheadBytes
+        case maximumVideoDelayMilliseconds
+        case captureRingSlots
+        case captureRingSlotMilliseconds
+        case captureWorkerMilliseconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -401,6 +449,45 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
         correctionMargin =
             (try? container.decode(Double.self, forKey: .correctionMargin))
             ?? defaults.correctionMargin
+        driftFilterWeight =
+            (try? container.decode(Double.self, forKey: .driftFilterWeight))
+            ?? defaults.driftFilterWeight
+        driftRecoveryMilliseconds =
+            (try? container.decode(Double.self, forKey: .driftRecoveryMilliseconds))
+            ?? defaults.driftRecoveryMilliseconds
+        uplinkReorderPackets =
+            (try? container.decode(Int.self, forKey: .uplinkReorderPackets))
+            ?? defaults.uplinkReorderPackets
+        uplinkReorderMilliseconds =
+            (try? container.decode(Double.self, forKey: .uplinkReorderMilliseconds))
+            ?? defaults.uplinkReorderMilliseconds
+        responseTimeoutMilliseconds =
+            (try? container.decode(Double.self, forKey: .responseTimeoutMilliseconds))
+            ?? defaults.responseTimeoutMilliseconds
+        radioWindowMilliseconds =
+            (try? container.decode(Double.self, forKey: .radioWindowMilliseconds))
+            ?? defaults.radioWindowMilliseconds
+        radioSafetyMargin =
+            (try? container.decode(Double.self, forKey: .radioSafetyMargin))
+            ?? defaults.radioSafetyMargin
+        radioPacketOverheadBytes =
+            (try? container.decode(Int.self, forKey: .radioPacketOverheadBytes))
+            ?? defaults.radioPacketOverheadBytes
+        maximumVideoDelayMilliseconds =
+            (try? container.decode(
+                Double.self, forKey: .maximumVideoDelayMilliseconds))
+            ?? defaults.maximumVideoDelayMilliseconds
+        captureRingSlots =
+            (try? container.decode(Int.self, forKey: .captureRingSlots))
+            ?? defaults.captureRingSlots
+        captureRingSlotMilliseconds =
+            (try? container.decode(
+                Double.self, forKey: .captureRingSlotMilliseconds))
+            ?? defaults.captureRingSlotMilliseconds
+        captureWorkerMilliseconds =
+            (try? container.decode(
+                Double.self, forKey: .captureWorkerMilliseconds))
+            ?? defaults.captureWorkerMilliseconds
     }
 
     /// abs(panel) + abs(Mac) + abs(estimator), as required by the ADR.
@@ -439,7 +526,29 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
             estimatorErrorPPM: Self.clamp(
                 abs(estimatorErrorPPM), lower: 1, upper: 2_000),
             correctionMargin: Self.clamp(
-                correctionMargin, lower: 1, upper: 10))
+                correctionMargin, lower: 1, upper: 10),
+            driftFilterWeight: Self.clamp(
+                driftFilterWeight, lower: 0.01, upper: 1),
+            driftRecoveryMilliseconds: Self.clamp(
+                driftRecoveryMilliseconds, lower: 250, upper: 30_000),
+            uplinkReorderPackets: min(max(uplinkReorderPackets, 1), 64),
+            uplinkReorderMilliseconds: Self.clamp(
+                uplinkReorderMilliseconds, lower: 1, upper: 500),
+            responseTimeoutMilliseconds: Self.clamp(
+                responseTimeoutMilliseconds, lower: 250, upper: 30_000),
+            radioWindowMilliseconds: Self.clamp(
+                radioWindowMilliseconds, lower: 100, upper: 10_000),
+            radioSafetyMargin: Self.clamp(
+                radioSafetyMargin, lower: 0, upper: 0.75),
+            radioPacketOverheadBytes: min(
+                max(radioPacketOverheadBytes, 0), 1_024),
+            maximumVideoDelayMilliseconds: Self.clamp(
+                maximumVideoDelayMilliseconds, lower: 1, upper: 500),
+            captureRingSlots: min(max(captureRingSlots, 2), 64),
+            captureRingSlotMilliseconds: Self.clamp(
+                captureRingSlotMilliseconds, lower: 10, upper: 500),
+            captureWorkerMilliseconds: Self.clamp(
+                captureWorkerMilliseconds, lower: 1, upper: 50))
     }
 
     private static func clamp(
@@ -478,6 +587,313 @@ public enum AudioTiming {
         let observed = Double(fillDeltaFrames) / Double(elapsedFrames) * 1_000_000
         let bound = tuning.validated.maximumCorrectionPPM
         return min(max(observed, -bound), bound)
+    }
+}
+
+/// Bounded fill-slope estimator. A positive correction means the queue is
+/// growing, so the caller must consume faster or produce fewer frames.
+public struct AudioDriftController: Equatable, Sendable {
+    private var lastTimestampMicros: UInt32?
+    private var lastFillFrames: Int?
+    public private(set) var correctionPPM: Double = 0
+
+    public init() {}
+
+    public var rateMultiplier: Double {
+        1 + correctionPPM / 1_000_000
+    }
+
+    public mutating func observe(
+        timestampMicros: UInt32,
+        fillFrames: Int,
+        sampleRateHz: UInt32,
+        tuning: AudioRuntimeTuning,
+        targetFillFrames: Int? = nil
+    ) -> Double {
+        defer {
+            lastTimestampMicros = timestampMicros
+            lastFillFrames = fillFrames
+        }
+        guard let previousTimestamp = lastTimestampMicros,
+              let previousFill = lastFillFrames
+        else {
+            correctionPPM = 0
+            return correctionPPM
+        }
+        let elapsedMicros = timestampMicros &- previousTimestamp
+        guard elapsedMicros > 0 else { return correctionPPM }
+        let elapsedFrames = max(
+            1,
+            Int(
+                Double(elapsedMicros)
+                    * Double(sampleRateHz)
+                    / 1_000_000))
+        let slope = AudioTiming.correctionPPM(
+            fillDeltaFrames: fillFrames - previousFill,
+            elapsedFrames: elapsedFrames,
+            tuning: tuning)
+        let validated = tuning.validated
+        let recoveryFrames =
+            Double(sampleRateHz)
+                * validated.driftRecoveryMilliseconds
+                / 1_000
+        let targetCorrection = targetFillFrames.map {
+            Double(fillFrames - $0) / max(1, recoveryFrames) * 1_000_000
+        } ?? 0
+        let bound = validated.maximumCorrectionPPM
+        let observed = min(max(slope + targetCorrection, -bound), bound)
+        let weight = validated.driftFilterWeight
+        let filtered = correctionPPM * (1 - weight) + observed * weight
+        correctionPPM = min(
+            max(filtered, -validated.maximumCorrectionPPM),
+            validated.maximumCorrectionPPM)
+        return correctionPPM
+    }
+
+    public mutating func reset() {
+        lastTimestampMicros = nil
+        lastFillFrames = nil
+        correctionPPM = 0
+    }
+}
+
+/// Small continuously variable resampler used off the CoreAudio render thread.
+public enum AudioLinearResampler {
+    public static func outputFrameCount(
+        inputFrames: Int, rateMultiplier: Double
+    ) -> Int {
+        guard inputFrames > 0, rateMultiplier.isFinite else { return 0 }
+        let ratio = min(max(rateMultiplier, 0.5), 2)
+        return max(1, Int((Double(inputFrames) / ratio).rounded()))
+    }
+
+    public static func resample(
+        interleavedSamples: [Float],
+        channels: Int,
+        rateMultiplier: Double
+    ) -> [Float] {
+        guard channels > 0,
+              interleavedSamples.count >= channels
+        else { return [] }
+        let inputFrames = interleavedSamples.count / channels
+        let outputFrames = outputFrameCount(
+            inputFrames: inputFrames, rateMultiplier: rateMultiplier)
+        guard inputFrames > 1, outputFrames > 1 else {
+            return Array(interleavedSamples.prefix(channels))
+        }
+        let scale = Double(inputFrames - 1) / Double(outputFrames - 1)
+        var output = [Float]()
+        output.reserveCapacity(outputFrames * channels)
+        for outputFrame in 0..<outputFrames {
+            let position = Double(outputFrame) * scale
+            let lower = min(Int(position), inputFrames - 1)
+            let upper = min(lower + 1, inputFrames - 1)
+            let fraction = Float(position - Double(lower))
+            for channel in 0..<channels {
+                let low = interleavedSamples[lower * channels + channel]
+                let high = interleavedSamples[upper * channels + channel]
+                output.append(low + (high - low) * fraction)
+            }
+        }
+        return output
+    }
+}
+
+public enum AudioPlayoutChunk: Equatable, Sendable {
+    case pcm(AudioProtocol.PCM)
+    case silence(frames: Int)
+}
+
+/// Sequence/sample-counter jitter queue with a bounded reorder deadline.
+public struct AudioJitterBuffer: Equatable, Sendable {
+    private struct Pending: Equatable, Sendable {
+        let pcm: AudioProtocol.PCM
+    }
+
+    public let targetFrames: Int
+    public let ceilingFrames: Int
+    public let reorderWindowPackets: Int
+    public let reorderTimeoutNanos: UInt64
+
+    private var generation: UInt16?
+    private var expectedSequence: UInt16?
+    private var expectedSampleCounter: UInt32?
+    private var pending: [UInt16: Pending] = [:]
+    private var gapDeadlineNanos: UInt64?
+    private var started = false
+
+    public private(set) var lostFrames: UInt64 = 0
+    public private(set) var latePackets: UInt64 = 0
+    public private(set) var duplicatePackets: UInt64 = 0
+    public private(set) var reorderedPackets: UInt64 = 0
+    public private(set) var generationChanges: UInt64 = 0
+
+    public init(
+        targetFrames: Int,
+        ceilingFrames: Int,
+        reorderWindowPackets: Int,
+        reorderTimeoutNanos: UInt64
+    ) {
+        self.targetFrames = max(1, targetFrames)
+        self.ceilingFrames = max(targetFrames, ceilingFrames)
+        self.reorderWindowPackets = min(max(reorderWindowPackets, 1), 64)
+        self.reorderTimeoutNanos = max(1, reorderTimeoutNanos)
+    }
+
+    public var bufferedFrames: Int {
+        pending.values.reduce(0) { $0 + Int($1.pcm.frameCount) }
+    }
+
+    public mutating func insert(
+        _ pcm: AudioProtocol.PCM, nowNanos: UInt64
+    ) -> [AudioPlayoutChunk] {
+        if generation != pcm.streamGeneration {
+            if generation != nil { generationChanges &+= 1 }
+            generation = pcm.streamGeneration
+            expectedSequence = pcm.sequence
+            expectedSampleCounter = pcm.sampleCounter
+            pending.removeAll(keepingCapacity: true)
+            gapDeadlineNanos = nil
+            started = false
+        }
+        guard let expectedSequence else { return [] }
+        let distance = Int(pcm.sequence &- expectedSequence)
+        if distance >= 0x8000 {
+            latePackets &+= 1
+            return []
+        }
+        if pending[pcm.sequence] != nil {
+            duplicatePackets &+= 1
+            return []
+        }
+        if distance > 0 { reorderedPackets &+= 1 }
+        pending[pcm.sequence] = Pending(pcm: pcm)
+        if !started, bufferedFrames >= targetFrames {
+            started = true
+        }
+        guard started else { return [] }
+        return drain(nowNanos: nowNanos)
+    }
+
+    public mutating func poll(nowNanos: UInt64) -> [AudioPlayoutChunk] {
+        guard started else { return [] }
+        return drain(nowNanos: nowNanos)
+    }
+
+    public mutating func reset() {
+        generation = nil
+        expectedSequence = nil
+        expectedSampleCounter = nil
+        pending.removeAll(keepingCapacity: true)
+        gapDeadlineNanos = nil
+        started = false
+    }
+
+    private mutating func drain(nowNanos: UInt64) -> [AudioPlayoutChunk] {
+        var output = [AudioPlayoutChunk]()
+        while !pending.isEmpty {
+            guard let expectedSequence,
+                  let expectedSampleCounter
+            else { break }
+            guard let item = pending.removeValue(forKey: expectedSequence) else {
+                let future = pending.keys.map {
+                    (distance: Int($0 &- expectedSequence), sequence: $0)
+                }.filter { $0.distance < 0x8000 }
+                guard let nearest = future.min(by: {
+                    $0.distance < $1.distance
+                }) else { break }
+                let farthest = future.map(\.distance).max() ?? 0
+                if gapDeadlineNanos == nil {
+                    gapDeadlineNanos = nowNanos &+ reorderTimeoutNanos
+                }
+                let expired = nowNanos >= (gapDeadlineNanos ?? UInt64.max)
+                    || farthest > reorderWindowPackets
+                    || bufferedFrames >= ceilingFrames
+                guard expired else { break }
+                self.expectedSequence = nearest.sequence
+                gapDeadlineNanos = nil
+                continue
+            }
+
+            let sampleDistance = item.pcm.sampleCounter &- expectedSampleCounter
+            if sampleDistance > 0, sampleDistance < 0x80000000 {
+                output.append(.silence(
+                    frames: min(Int(sampleDistance), ceilingFrames)))
+                lostFrames &+= UInt64(sampleDistance)
+            } else if sampleDistance >= 0x80000000 {
+                latePackets &+= 1
+                self.expectedSequence = expectedSequence &+ 1
+                continue
+            }
+            output.append(.pcm(item.pcm))
+            self.expectedSampleCounter =
+                item.pcm.sampleCounter &+ UInt32(item.pcm.frameCount)
+            self.expectedSequence = expectedSequence &+ 1
+            gapDeadlineNanos = nil
+        }
+        return output
+    }
+}
+
+/// Rolling measured audio demand used to leave only the remaining radio
+/// capacity to video. With no audio observations, video pacing is unchanged.
+public struct AudioFirstRadioBudget: Equatable, Sendable {
+    private struct Sample: Equatable, Sendable {
+        let timestampNanos: UInt64
+        let wireBytes: Int
+    }
+
+    private var tuning: AudioRuntimeTuning
+    private var samples = [Sample]()
+
+    public init(tuning: AudioRuntimeTuning) {
+        self.tuning = tuning.validated
+    }
+
+    public mutating func update(tuning: AudioRuntimeTuning) {
+        self.tuning = tuning.validated
+    }
+
+    public mutating func recordAudioDatagram(bytes: Int, nowNanos: UInt64) {
+        guard bytes > 0 else { return }
+        prune(nowNanos: nowNanos)
+        samples.append(Sample(
+            timestampNanos: nowNanos,
+            wireBytes: bytes + tuning.radioPacketOverheadBytes))
+    }
+
+    public mutating func videoSpacingNanos(
+        baseSpacingMicros: UInt32,
+        packetBytes: Int,
+        nowNanos: UInt64
+    ) -> UInt64 {
+        let base = UInt64(max(1, baseSpacingMicros)) * 1_000
+        prune(nowNanos: nowNanos)
+        guard !samples.isEmpty, packetBytes > 0 else { return base }
+
+        let fullVideoBytes = Double(
+            TileGeometry.maxPacketBytes + tuning.radioPacketOverheadBytes)
+        let baseBytesPerSecond =
+            fullVideoBytes * 1_000_000 / Double(max(1, baseSpacingMicros))
+        let windowSeconds = tuning.radioWindowMilliseconds / 1_000
+        let audioBytesPerSecond =
+            Double(samples.reduce(0) { $0 + $1.wireBytes }) / windowSeconds
+        let available = baseBytesPerSecond * (1 - tuning.radioSafetyMargin)
+            - audioBytesPerSecond
+        let maximum = UInt64(
+            tuning.maximumVideoDelayMilliseconds * 1_000_000)
+        guard available > 0 else { return max(base, maximum) }
+        let packetWireBytes =
+            Double(packetBytes + tuning.radioPacketOverheadBytes)
+        let required = UInt64(
+            (packetWireBytes / available * 1_000_000_000).rounded(.up))
+        return min(max(base, required), maximum)
+    }
+
+    private mutating func prune(nowNanos: UInt64) {
+        let window = UInt64(tuning.radioWindowMilliseconds * 1_000_000)
+        let cutoff = nowNanos > window ? nowNanos - window : 0
+        samples.removeAll { $0.timestampNanos < cutoff }
     }
 }
 

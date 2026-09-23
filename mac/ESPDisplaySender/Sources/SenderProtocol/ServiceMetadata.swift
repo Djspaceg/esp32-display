@@ -1,5 +1,14 @@
 import Foundation
 
+public enum AudioAdvertisement: Hashable, Sendable {
+    /// No readable TXT record was present, so existing live audio state must
+    /// not be erased while Network.framework is still fetching metadata.
+    case unknown
+    /// TXT was present but did not contain one complete supported descriptor.
+    case unavailable
+    case available(AudioStreamDescriptor)
+}
+
 /// What a panel says about itself in its mDNS TXT records, parsed.
 ///
 /// The firmware has advertised these all along (display_stream.ino,
@@ -64,6 +73,9 @@ public struct ServiceMetadata: Hashable, Sendable {
     public let frameProtocolVersion: Int?
     /// Complete audio descriptor, admitted only with both audio capabilities.
     public let audioDescriptor: AudioStreamDescriptor?
+    /// Whether this browse result is silent about audio, explicitly lacks it,
+    /// or carries a complete descriptor.
+    public let audioAdvertisement: AudioAdvertisement
 
     public init(
         name: String? = nil,
@@ -87,6 +99,8 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.capabilities = capabilities
         self.frameProtocolVersion = frameProtocolVersion
         self.audioDescriptor = audioDescriptor
+        self.audioAdvertisement = audioDescriptor.map(AudioAdvertisement.available)
+            ?? .unknown
     }
 
     /// A panel that told us nothing: no TXT records at all, or none we could
@@ -123,8 +137,16 @@ public struct ServiceMetadata: Hashable, Sendable {
         let capabilities = Self.parseCapabilities(records["caps"])
         self.capabilities = capabilities
         self.frameProtocolVersion = Self.parseUnsignedDecimal(records["proto"])
-        self.audioDescriptor = Self.parseAudioDescriptor(
+        let audioDescriptor = Self.parseAudioDescriptor(
             records, capabilities: capabilities)
+        self.audioDescriptor = audioDescriptor
+        if records.isEmpty || records.values.allSatisfy({ $0.isEmpty }) {
+            self.audioAdvertisement = .unknown
+        } else if let audioDescriptor {
+            self.audioAdvertisement = .available(audioDescriptor)
+        } else {
+            self.audioAdvertisement = .unavailable
+        }
     }
 
     // MARK: - field parsing
