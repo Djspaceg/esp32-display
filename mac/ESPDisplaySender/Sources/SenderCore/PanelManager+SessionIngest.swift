@@ -15,9 +15,20 @@ extension PanelManager {
         sessionID: UUID? = nil
     ) {
         if let sessionID, sessions[serviceName]?.id != sessionID { return }
-        guard !supersededServiceNames.contains(serviceName) else { return }
+        guard !supersededServiceNames.contains(serviceName),
+              panels.contains(where: { $0.serviceName == serviceName })
+        else { return }
         updatePanel(serviceName) { panel in
             panel.audioStatus = status
+        }
+    }
+
+    func clearAudio(for serviceName: String) {
+        guard !supersededServiceNames.contains(serviceName),
+              panels.contains(where: { $0.serviceName == serviceName })
+        else { return }
+        updatePanel(serviceName) { panel in
+            panel.audioStatus = nil
         }
     }
 

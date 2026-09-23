@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Network
+import SenderAudioRT
 import SenderProtocol
 
 enum PanelAudioState: Equatable, Sendable {
@@ -30,12 +31,15 @@ struct PanelAudioSnapshot: Equatable, Sendable {
     let tuning: AudioRuntimeTuning
     let panelStatus: AudioProtocol.Status?
     let downlinkQueueDrops: UInt64
-    let uplinkLostPackets: UInt64
+    let captureCallbackDrops: UInt64
+    let uplinkLostFrames: UInt64
     let uplinkLatePackets: UInt64
     let playbackQueueDrops: UInt64
+    let downlinkCorrectionPPM: Double
+    let uplinkCorrectionPPM: Double
 }
 
-/// Accumulates arbitrary capture callback sizes into MTU-safe EAUD payloads.
+/// Accumulates arbitrary converted sizes into MTU-safe EAUD payloads.
 struct AudioPCMChunker: Equatable, Sendable {
     let packetFrames: Int
     let channels: Int
@@ -59,11 +63,12 @@ struct AudioPCMChunker: Equatable, Sendable {
     }
 }
 
-/// Thin macOS adapter around the pure descriptor, wire, timing, and selection
-/// types. One instance belongs to one DeviceSession.
-final class PanelAudioSession {
+/// One queue owns every mutable adapter field. The only cross-queue operation
+/// is the input tap's bounded write into SenderAudioRT's preallocated SPSC ring.
+final class PanelAudioSession: @unchecked Sendable {
     private let descriptor: AudioStreamDescriptor
-    private let addressProvider: @Sendable () -> String?
+    private let peerAddress: PanelPeerAddress
+    private let radioBudget: PanelRadioBudget
     private let onUpdate: @Sendable (PanelAudioSnapshot) -> Void
     private let queue = DispatchQueue(label: "espdisp.audio")
 
@@ -76,36 +81,52 @@ final class PanelAudioSession {
     private var restartPending = false
 
     private var connection: NWConnection?
+    private var connectedPeer: PanelPeerAddressSnapshot?
+    private var connectionReadyNanos: UInt64?
+    private var lastValidInboundNanos: UInt64?
+    private var livenessTimer: DispatchSourceTimer?
+
     private var captureEngine: AVAudioEngine?
     private var playbackEngine: AVAudioEngine?
     private var captureInput: AVAudioInputNode?
     private var captureConverter: AVAudioConverter?
-    private var captureFormat: AVAudioFormat?
+    private var captureReadBuffer: AVAudioPCMBuffer?
+    private var captureConvertedBuffer: AVAudioPCMBuffer?
+    private var captureRing: OpaquePointer?
+    private var captureWorkerTimer: DispatchSourceTimer?
+    private var captureTapInstalled = false
+    private var lastRingDropped: UInt64 = 0
+
     private var player: AVAudioPlayerNode?
     private var playbackFormat: AVAudioFormat?
+    private var playbackFramesEnqueued: UInt64 = 0
+    private var playbackScheduledFrames = 0
     private var engineObservers = [NSObjectProtocol]()
-    private var captureTapInstalled = false
 
     private var chunker: AudioPCMChunker
     private var sequence = UInt16.random(in: 1...UInt16.max)
     private var streamGeneration = UInt16.random(in: 1...UInt16.max)
     private var sampleCounter: UInt32 = 0
     private var streamStartedNanos = DispatchTime.now().uptimeNanoseconds
+    private var packetPacer = AudioPacketPacer()
+    private var capturePending = [Data]()
+    private var captureSendScheduled = false
+
+    private var jitter: AudioJitterBuffer
+    private var downlinkDrift = AudioDriftController()
+    private var uplinkDrift = AudioDriftController()
+    private var downlinkResampler = AudioVariableRateResampler()
+    private var uplinkResampler = AudioVariableRateResampler()
 
     private var inputName = AudioDeviceResolver.systemDefaultName
     private var outputName = AudioDeviceResolver.systemDefaultName
     private var message = "Waiting for the panel audio socket."
     private var state = PanelAudioState.waiting
     private var panelStatus: AudioProtocol.Status?
-    private var sequenceTracker = AudioSequenceTracker()
-    private var packetPacer = AudioPacketPacer()
-    private var capturePending = [Data]()
-    private var captureSendScheduled = false
     private var downlinkQueueDrops: UInt64 = 0
-    private var playbackPending = [AudioProtocol.PCM]()
-    private var playbackPendingFrames = 0
-    private var playbackScheduledFrames = 0
-    private var playbackStarted = false
+    private var captureCallbackDrops: UInt64 = 0
+    private var uplinkLostFrames: UInt64 = 0
+    private var uplinkLatePackets: UInt64 = 0
     private var playbackQueueDrops: UInt64 = 0
     private var lastStatusPublishNanos: UInt64 = 0
 
@@ -113,18 +134,22 @@ final class PanelAudioSession {
         descriptor: AudioStreamDescriptor,
         preferences: AudioDevicePreferences = AudioDevicePreferences(),
         tuning: AudioRuntimeTuning = AudioRuntimeTuning(),
-        addressProvider: @escaping @Sendable () -> String?,
+        peerAddress: PanelPeerAddress,
+        radioBudget: PanelRadioBudget,
         onUpdate: @escaping @Sendable (PanelAudioSnapshot) -> Void
     ) {
+        let validated = tuning.validated
         self.descriptor = descriptor
         self.preferences = preferences
-        self.tuning = tuning.validated
-        self.addressProvider = addressProvider
+        self.tuning = validated
+        self.peerAddress = peerAddress
+        self.radioBudget = radioBudget
         self.onUpdate = onUpdate
-        self.chunker = AudioPCMChunker(
-            packetFrames: AudioTiming.packetFrames(
-                descriptor: descriptor, tuning: tuning),
-            channels: Int(descriptor.playbackChannels))
+        self.chunker = Self.makeChunker(
+            descriptor: descriptor, tuning: validated)
+        self.jitter = Self.makeJitter(
+            descriptor: descriptor, tuning: validated)
+        radioBudget.update(tuning: validated)
     }
 
     func start() {
@@ -170,10 +195,11 @@ final class PanelAudioSession {
             }
             self.preferences = preferences
             self.tuning = validated
-            self.chunker = AudioPCMChunker(
-                packetFrames: AudioTiming.packetFrames(
-                    descriptor: self.descriptor, tuning: validated),
-                channels: Int(self.descriptor.playbackChannels))
+            self.radioBudget.update(tuning: validated)
+            self.chunker = Self.makeChunker(
+                descriptor: self.descriptor, tuning: validated)
+            self.jitter = Self.makeJitter(
+                descriptor: self.descriptor, tuning: validated)
             self.restart(reason: "Audio settings changed.")
         }
     }
@@ -181,8 +207,35 @@ final class PanelAudioSession {
     func devicesChanged() {
         queue.async { [weak self] in
             guard let self, !self.stopped else { return }
-            self.restart(reason: "The available CoreAudio devices changed.")
+            self.restart(reason: "The CoreAudio route changed.")
         }
+    }
+
+    private static func makeChunker(
+        descriptor: AudioStreamDescriptor,
+        tuning: AudioRuntimeTuning
+    ) -> AudioPCMChunker {
+        AudioPCMChunker(
+            packetFrames: AudioTiming.packetFrames(
+                descriptor: descriptor, tuning: tuning),
+            channels: Int(descriptor.playbackChannels))
+    }
+
+    private static func makeJitter(
+        descriptor: AudioStreamDescriptor,
+        tuning: AudioRuntimeTuning
+    ) -> AudioJitterBuffer {
+        let validated = tuning.validated
+        return AudioJitterBuffer(
+            targetFrames: AudioTiming.frames(
+                milliseconds: validated.uplinkJitterMilliseconds,
+                sampleRateHz: descriptor.sampleRateHz),
+            ceilingFrames: AudioTiming.frames(
+                milliseconds: validated.uplinkJitterCeilingMilliseconds,
+                sampleRateHz: descriptor.sampleRateHz),
+            reorderWindowPackets: validated.uplinkReorderPackets,
+            reorderTimeoutNanos: UInt64(
+                validated.uplinkReorderMilliseconds * 1_000_000))
     }
 
     private func beginIfNeeded() {
@@ -195,9 +248,12 @@ final class PanelAudioSession {
         case .notDetermined:
             permissionRequestInFlight = true
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] allowed in
-                self?.queue.async {
-                    guard let self else { return }
+                guard let self else { return }
+                self.queue.async {
                     self.permissionRequestInFlight = false
+                    guard !self.stopped, self.requested, self.enabled else {
+                        return
+                    }
                     if allowed {
                         self.beginIfNeeded()
                     } else {
@@ -215,7 +271,8 @@ final class PanelAudioSession {
     }
 
     private func connect() {
-        guard let address = addressProvider(), !address.isEmpty else {
+        let peer = peerAddress.snapshot
+        guard let address = peer.address, !address.isEmpty else {
             state = .waiting
             message = "Waiting for the panel network address."
             publish()
@@ -230,10 +287,11 @@ final class PanelAudioSession {
         }
 
         let parameters = NWParameters.udp
-        parameters.serviceClass = .voice
+        parameters.serviceClass = .interactiveVoice
         let connection = NWConnection(
             host: NWEndpoint.Host(address), port: port, using: parameters)
         self.connection = connection
+        connectedPeer = peer
         state = .waiting
         message = "Connecting panel audio."
         publish()
@@ -243,13 +301,21 @@ final class PanelAudioSession {
                 guard self.connection === connection else { return }
                 switch newState {
                 case .ready:
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    self.connectionReadyNanos = now
+                    self.lastValidInboundNanos = nil
                     self.receive(on: connection)
                     self.startEngine()
+                    if self.connection === connection {
+                        self.startLivenessTimer()
+                    }
                 case .failed(let error):
-                    self.restart(reason: "Audio network failed: \(error.localizedDescription)")
+                    self.restart(
+                        reason: "Audio network failed: \(error.localizedDescription)")
                 case .waiting(let error):
                     self.state = .recovering
-                    self.message = "Audio network is waiting: \(error.localizedDescription)"
+                    self.message =
+                        "Audio network is waiting: \(error.localizedDescription)"
                     self.publish()
                 default:
                     break
@@ -268,8 +334,8 @@ final class PanelAudioSession {
                     self.handleInbound(data)
                 }
                 if let error {
-                    self.restart(reason:
-                        "Audio receive failed: \(error.localizedDescription)")
+                    self.restart(
+                        reason: "Audio receive failed: \(error.localizedDescription)")
                 } else {
                     self.receive(on: connection)
                 }
@@ -299,6 +365,7 @@ final class PanelAudioSession {
         self.playbackEngine = playbackEngine
         self.captureInput = captureInput
         self.player = player
+
         do {
             try CoreAudioDeviceCatalog.setDevice(
                 CoreAudioDeviceCatalog.deviceID(
@@ -308,6 +375,7 @@ final class PanelAudioSession {
                 CoreAudioDeviceCatalog.deviceID(
                     for: outputResolution.uid, direction: .output, in: devices),
                 on: playbackEngine.outputNode)
+
             guard let captureFormat = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32,
                 sampleRate: Double(descriptor.sampleRateHz),
@@ -319,56 +387,108 @@ final class PanelAudioSession {
                     channels: AVAudioChannelCount(descriptor.captureChannels),
                     interleaved: false)
             else {
-                throw NSError(
-                    domain: "ESPDisplaySender.Audio",
+                throw audioError(
                     code: 1,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "The panel audio descriptor could not form an AVAudioFormat."
-                    ])
+                    message:
+                        "The panel audio descriptor could not form an AVAudioFormat.")
             }
-            let inputFormat = captureInput.outputFormat(forBus: 0)
-            guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,
-                  let converter = AVAudioConverter(
-                      from: inputFormat, to: captureFormat)
-            else {
-                throw NSError(
-                    domain: "ESPDisplaySender.Audio",
-                    code: 2,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "The selected microphone has no usable capture format."
-                    ])
-            }
-            self.captureConverter = converter
-            self.captureFormat = captureFormat
-            self.playbackFormat = playbackFormat
 
-            playbackEngine.attach(player)
-            playbackEngine.connect(
-                player, to: playbackEngine.mainMixerNode, format: playbackFormat)
-            let inputFrames = max(
+            let inputFormat = captureInput.outputFormat(forBus: 0)
+            guard inputFormat.sampleRate > 0,
+                  inputFormat.channelCount > 0,
+                  inputFormat.channelCount <= 2,
+                  inputFormat.commonFormat == .pcmFormatFloat32,
+                  !inputFormat.isInterleaved,
+                  let converter = AVAudioConverter(
+                    from: inputFormat, to: captureFormat)
+            else {
+                throw audioError(
+                    code: 2,
+                    message:
+                        "The selected microphone has no non-interleaved Float32 format.")
+            }
+
+            let requestedInputFrames = max(
                 1,
                 Int(ceil(
                     Double(chunker.packetFrames)
                         * inputFormat.sampleRate
                         / Double(descriptor.sampleRateHz))))
+            let slotFrames = max(
+                requestedInputFrames,
+                Int(ceil(
+                    inputFormat.sampleRate
+                        * tuning.captureRingSlotMilliseconds
+                        / 1_000)))
+            guard let ring = ESPAudioCaptureRingCreate(
+                UInt32(tuning.captureRingSlots),
+                UInt32(slotFrames),
+                UInt32(inputFormat.channelCount)),
+                let readBuffer = AVAudioPCMBuffer(
+                    pcmFormat: inputFormat,
+                    frameCapacity: AVAudioFrameCount(slotFrames))
+            else {
+                throw audioError(
+                    code: 3,
+                    message: "The microphone capture ring could not be allocated.")
+            }
+            let convertedCapacity = max(
+                1,
+                Int(ceil(
+                    Double(slotFrames)
+                        * captureFormat.sampleRate
+                        / inputFormat.sampleRate)) + 8)
+            guard let convertedBuffer = AVAudioPCMBuffer(
+                pcmFormat: captureFormat,
+                frameCapacity: AVAudioFrameCount(convertedCapacity))
+            else {
+                ESPAudioCaptureRingDestroy(ring)
+                throw audioError(
+                    code: 4,
+                    message: "The microphone conversion buffer could not be allocated.")
+            }
+
+            self.captureConverter = converter
+            self.captureReadBuffer = readBuffer
+            self.captureConvertedBuffer = convertedBuffer
+            self.captureRing = ring
+            self.playbackFormat = playbackFormat
+
+            playbackEngine.attach(player)
+            playbackEngine.connect(
+                player, to: playbackEngine.mainMixerNode, format: playbackFormat)
+
+            let inputChannels = Int(inputFormat.channelCount)
             captureInput.installTap(
                 onBus: 0,
-                bufferSize: AVAudioFrameCount(inputFrames),
+                bufferSize: AVAudioFrameCount(requestedInputFrames),
                 format: inputFormat
-            ) { [weak self] buffer, _ in
-                self?.capture(buffer)
+            ) { buffer, _ in
+                guard buffer.frameLength > 0,
+                      let channels = buffer.floatChannelData
+                else { return }
+                let channelZero = UnsafePointer(channels[0])
+                let channelOne: UnsafePointer<Float>? = inputChannels > 1
+                    ? UnsafePointer(channels[1])
+                    : nil
+                _ = ESPAudioCaptureRingWrite(
+                    ring,
+                    channelZero,
+                    channelOne,
+                    UInt32(buffer.frameLength))
             }
             captureTapInstalled = true
 
+            resetStreamState()
             playbackEngine.prepare()
             captureEngine.prepare()
+            ESPAudioCaptureRingSetAccepting(ring, true)
             try playbackEngine.start()
             try captureEngine.start()
             observeEngine(captureEngine)
             observeEngine(playbackEngine)
-            resetStreamState()
+            startCaptureWorker()
+
             state = .streaming
             let fallbacks = [
                 inputResolution.usedFallback ? "input" : nil,
@@ -385,6 +505,13 @@ final class PanelAudioSession {
         }
     }
 
+    private func audioError(code: Int, message: String) -> NSError {
+        NSError(
+            domain: "ESPDisplaySender.Audio",
+            code: code,
+            userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
     private func observeEngine(_ engine: AVAudioEngine) {
         let observer = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
@@ -396,63 +523,105 @@ final class PanelAudioSession {
                 guard self.captureEngine === engine
                     || self.playbackEngine === engine
                 else { return }
-                self.restart(reason: "The selected audio device configuration changed.")
+                self.restart(
+                    reason: "The selected audio device configuration changed.")
             }
         }
         engineObservers.append(observer)
     }
 
-    private func capture(_ buffer: AVAudioPCMBuffer) {
+    private func startCaptureWorker() {
+        captureWorkerTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(
+            deadline: .now(),
+            repeating: .milliseconds(
+                max(1, Int(tuning.captureWorkerMilliseconds.rounded()))))
+        timer.setEventHandler { [weak self] in
+            self?.drainCaptureRing()
+        }
+        timer.resume()
+        captureWorkerTimer = timer
+    }
+
+    private func drainCaptureRing() {
+        guard let ring = captureRing,
+              let readBuffer = captureReadBuffer,
+              let channels = readBuffer.floatChannelData
+        else { return }
+
+        let channelOne = readBuffer.format.channelCount > 1 ? channels[1] : nil
+        var frameCount: UInt32 = 0
+        while ESPAudioCaptureRingRead(
+            ring,
+            channels[0],
+            channelOne,
+            UInt32(readBuffer.frameCapacity),
+            &frameCount)
+        {
+            readBuffer.frameLength = AVAudioFrameCount(frameCount)
+            convertCaptured(readBuffer)
+        }
+        let dropped = ESPAudioCaptureRingDropped(ring)
+        if dropped > lastRingDropped {
+            captureCallbackDrops &+= dropped - lastRingDropped
+            lastRingDropped = dropped
+        }
+    }
+
+    private func convertCaptured(_ input: AVAudioPCMBuffer) {
         guard let converter = captureConverter,
-              let captureFormat,
-              buffer.frameLength > 0
+              let converted = captureConvertedBuffer
         else { return }
-        let scale = captureFormat.sampleRate / buffer.format.sampleRate
-        let capacity = max(
-            1,
-            Int(ceil(Double(buffer.frameLength) * scale)) + 1)
-        guard let converted = AVAudioPCMBuffer(
-            pcmFormat: captureFormat,
-            frameCapacity: AVAudioFrameCount(capacity))
-        else { return }
+
+        converted.frameLength = 0
         var providedInput = false
         var conversionError: NSError?
-        let conversionStatus = converter.convert(
+        let status = converter.convert(
             to: converted,
-            error: &conversionError
-        ) { _, inputStatus in
-            guard !providedInput else {
-                inputStatus.pointee = .noDataNow
-                return nil
-            }
-            providedInput = true
-            inputStatus.pointee = .haveData
-            return buffer
-        }
-        if conversionStatus == .error {
-            let detail = conversionError?.localizedDescription
-                ?? "CoreAudio returned a conversion error."
-            queue.async { [weak self] in
-                self?.restart(reason: "Microphone conversion failed: \(detail)")
-            }
+            error: &conversionError,
+            withInputFrom: { _, inputStatus in
+                guard !providedInput else {
+                    inputStatus.pointee = .noDataNow
+                    return nil
+                }
+                providedInput = true
+                inputStatus.pointee = .haveData
+                return input
+            })
+        if status == .error {
+            restart(
+                reason: "Microphone conversion failed: "
+                    + (conversionError?.localizedDescription
+                        ?? "CoreAudio returned a conversion error."))
             return
         }
-        guard let channelData = converted.floatChannelData else { return }
-        let frameCount = Int(converted.frameLength)
-        let channelCount = Int(converted.format.channelCount)
-        var samples = Data(capacity: frameCount * channelCount * 2)
-        for frame in 0..<frameCount {
-            for channel in 0..<channelCount {
-                let value = min(max(channelData[channel][frame], -1), 1)
-                let signed = Int16(clamping: Int((value * 32_767).rounded()))
-                let bits = UInt16(bitPattern: signed)
-                samples.append(UInt8(bits & 0xFF))
-                samples.append(UInt8(bits >> 8))
+        guard converted.frameLength > 0,
+              let channelData = converted.floatChannelData
+        else { return }
+
+        let frames = Int(converted.frameLength)
+        let channels = Int(converted.format.channelCount)
+        var interleaved = [Float]()
+        interleaved.reserveCapacity(frames * channels)
+        for frame in 0..<frames {
+            for channel in 0..<channels {
+                interleaved.append(channelData[channel][frame])
             }
         }
-        queue.async { [weak self] in
-            self?.sendCaptured(samples)
+        let corrected = downlinkResampler.resample(
+            interleavedSamples: interleaved,
+            channels: channels,
+            rateMultiplier: downlinkDrift.rateMultiplier)
+        var samples = Data(capacity: corrected.count * 2)
+        for value in corrected {
+            let clamped = min(max(value, -1), 1)
+            let signed = Int16(clamping: Int((clamped * 32_767).rounded()))
+            let bits = UInt16(bitPattern: signed)
+            samples.append(UInt8(bits & 0xFF))
+            samples.append(UInt8(bits >> 8))
         }
+        sendCaptured(samples)
     }
 
     private func sendCaptured(_ samples: Data) {
@@ -509,13 +678,17 @@ final class PanelAudioSession {
         if let packet = try? AudioProtocol.encode(pcm) {
             sequence &+= 1
             sampleCounter &+= UInt32(frameCount)
+            radioBudget.recordAudioDatagram(bytes: packet.count, nowNanos: now)
             connection.send(
                 content: packet,
-                completion: .contentProcessed { [weak self] error in
-                    guard let error else { return }
-                    self?.queue.async {
-                        self?.restart(reason:
-                            "Audio send failed: \(error.localizedDescription)")
+                completion: .contentProcessed {
+                    [weak self, weak connection] error in
+                    guard let self, let connection, let error else { return }
+                    self.queue.async {
+                        guard self.connection === connection else { return }
+                        self.restart(
+                            reason: "Audio send failed: "
+                                + error.localizedDescription)
                     }
                 })
         }
@@ -524,11 +697,23 @@ final class PanelAudioSession {
 
     private func handleInbound(_ data: Data) {
         guard let datagram = try? AudioProtocol.decode(data) else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
         switch datagram {
         case .status(let status):
             guard status.sampleRateHz == descriptor.sampleRateHz else { return }
+            noteValidInbound(bytes: data.count, nowNanos: now)
             panelStatus = status.status
-            let now = DispatchTime.now().uptimeNanoseconds
+            let advertisedTarget = Int(status.status.targetFrames)
+            _ = downlinkDrift.observe(
+                timestampMicros: status.timestampMicros,
+                fillFrames: Int(status.status.fillFrames),
+                sampleRateHz: descriptor.sampleRateHz,
+                tuning: tuning,
+                targetFillFrames: advertisedTarget > 0
+                    ? advertisedTarget
+                    : AudioTiming.frames(
+                        milliseconds: tuning.downlinkPanelTargetMilliseconds,
+                        sampleRateHz: descriptor.sampleRateHz))
             let interval = UInt64(tuning.statusPublishMilliseconds * 1_000_000)
             if now - lastStatusPublishNanos >= interval {
                 lastStatusPublishNanos = now
@@ -537,81 +722,186 @@ final class PanelAudioSession {
         case .pcm(let pcm):
             guard pcm.kind == .pcmUplink,
                   pcm.sampleRateHz == descriptor.sampleRateHz,
-                  pcm.channels == descriptor.captureChannels,
-                  sequenceTracker.accept(
-                    sequence: pcm.sequence,
-                    streamGeneration: pcm.streamGeneration)
+                  pcm.channels == descriptor.captureChannels
             else { return }
-            enqueuePlayback(pcm)
+            noteValidInbound(bytes: data.count, nowNanos: now)
+            let lostBefore = jitter.lostFrames
+            let lateBefore = jitter.latePackets
+            let chunks = jitter.insert(pcm, nowNanos: now)
+            accountJitterChanges(
+                lostBefore: lostBefore,
+                lateBefore: lateBefore,
+                nowNanos: now)
+            schedulePlayout(chunks)
+            updateUplinkDrift(nowNanos: now)
         }
     }
 
-    private func enqueuePlayback(_ pcm: AudioProtocol.PCM) {
-        guard player != nil, playbackFormat != nil else { return }
-        let target = AudioTiming.frames(
-            milliseconds: tuning.uplinkTargetMilliseconds,
-            sampleRateHz: descriptor.sampleRateHz)
-        let ceiling = AudioTiming.frames(
-            milliseconds: tuning.uplinkCeilingMilliseconds,
-            sampleRateHz: descriptor.sampleRateHz)
+    private func noteValidInbound(bytes: Int, nowNanos: UInt64) {
+        lastValidInboundNanos = nowNanos
+        radioBudget.recordAudioDatagram(bytes: bytes, nowNanos: nowNanos)
+    }
 
-        if playbackStarted {
-            guard playbackScheduledFrames + Int(pcm.frameCount) <= ceiling else {
-                playbackQueueDrops &+= 1
-                publish()
-                return
+    private func accountInferredUplinkLoss(
+        frames: UInt64, nowNanos: UInt64
+    ) {
+        guard frames > 0 else { return }
+        let payload = frames * UInt64(descriptor.captureChannels) * 2
+        let bounded = min(payload, UInt64(Int.max - AudioProtocol.headerBytes))
+        radioBudget.recordAudioDatagram(
+            bytes: Int(bounded) + AudioProtocol.headerBytes,
+            nowNanos: nowNanos)
+    }
+
+    private func accountJitterChanges(
+        lostBefore: UInt64,
+        lateBefore: UInt64,
+        nowNanos: UInt64
+    ) {
+        let newlyLost = jitter.lostFrames &- lostBefore
+        uplinkLostFrames &+= newlyLost
+        uplinkLatePackets &+= jitter.latePackets &- lateBefore
+        accountInferredUplinkLoss(frames: newlyLost, nowNanos: nowNanos)
+    }
+
+    private func updateUplinkDrift(nowNanos: UInt64) {
+        refreshPlaybackScheduledFrames()
+        _ = uplinkDrift.observe(
+            timestampMicros: UInt32(truncatingIfNeeded: nowNanos / 1_000),
+            fillFrames: jitter.bufferedFrames + playbackScheduledFrames,
+            sampleRateHz: descriptor.sampleRateHz,
+            tuning: tuning,
+            targetFillFrames: AudioTiming.frames(
+                milliseconds: tuning.uplinkJitterMilliseconds,
+                sampleRateHz: descriptor.sampleRateHz))
+    }
+
+    private func schedulePlayout(_ chunks: [AudioPlayoutChunk]) {
+        guard !chunks.isEmpty else { return }
+        for chunk in chunks {
+            switch chunk {
+            case .pcm(let pcm):
+                schedulePlayback(samples: floatSamples(pcm), frames: Int(pcm.frameCount))
+            case .silence(let frames):
+                schedulePlayback(
+                    samples: [Float](
+                        repeating: 0,
+                        count: frames * Int(descriptor.captureChannels)),
+                    frames: frames)
             }
-            schedulePlayback(pcm)
+        }
+    }
+
+    private func floatSamples(_ pcm: AudioProtocol.PCM) -> [Float] {
+        let bytes = [UInt8](pcm.samples)
+        var samples = [Float]()
+        samples.reserveCapacity(Int(pcm.frameCount) * Int(pcm.channels))
+        for offset in stride(from: 0, to: bytes.count, by: 2) {
+            let raw = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+            samples.append(Float(Int16(bitPattern: raw)) / 32_768)
+        }
+        return samples
+    }
+
+    private func schedulePlayback(samples: [Float], frames: Int) {
+        guard frames > 0,
+              let player,
+              let format = playbackFormat
+        else { return }
+        let channels = Int(format.channelCount)
+        let corrected = uplinkResampler.resample(
+            interleavedSamples: samples,
+            channels: channels,
+            rateMultiplier: uplinkDrift.rateMultiplier)
+        let outputFrames = corrected.count / channels
+        guard outputFrames > 0 else { return }
+
+        refreshPlaybackScheduledFrames()
+        let ceiling = AudioTiming.frames(
+            milliseconds: tuning.uplinkJitterCeilingMilliseconds,
+            sampleRateHz: descriptor.sampleRateHz)
+        guard playbackScheduledFrames + outputFrames <= ceiling else {
+            playbackQueueDrops &+= 1
+            publish()
+            return
+        }
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(outputFrames)),
+            let output = buffer.floatChannelData
+        else {
+            playbackQueueDrops &+= 1
+            return
+        }
+        buffer.frameLength = AVAudioFrameCount(outputFrames)
+        for frame in 0..<outputFrames {
+            for channel in 0..<channels {
+                output[channel][frame] = corrected[frame * channels + channel]
+            }
+        }
+        player.scheduleBuffer(buffer, completionHandler: nil)
+        playbackFramesEnqueued &+= UInt64(outputFrames)
+        playbackScheduledFrames += outputFrames
+        if !player.isPlaying {
+            player.play()
+        }
+    }
+
+    private func refreshPlaybackScheduledFrames() {
+        guard let player,
+              let renderTime = player.lastRenderTime,
+              let playerTime = player.playerTime(forNodeTime: renderTime),
+              playerTime.sampleTime >= 0
+        else { return }
+        let rendered = UInt64(playerTime.sampleTime)
+        playbackScheduledFrames = rendered >= playbackFramesEnqueued
+            ? 0
+            : Int(playbackFramesEnqueued - rendered)
+    }
+
+    private func startLivenessTimer() {
+        livenessTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        let interval = max(
+            10,
+            min(250, Int(tuning.responseTimeoutMilliseconds / 4)))
+        timer.schedule(deadline: .now() + .milliseconds(interval),
+                       repeating: .milliseconds(interval))
+        timer.setEventHandler { [weak self] in
+            self?.checkLiveness()
+        }
+        timer.resume()
+        livenessTimer = timer
+    }
+
+    private func checkLiveness() {
+        guard connection != nil else { return }
+        let peer = peerAddress.snapshot
+        if let connectedPeer,
+            peer.generation != connectedPeer.generation
+                || peer.address != connectedPeer.address
+        {
+            restart(reason: "The panel video path resolved a new address.")
             return
         }
 
-        playbackPending.append(pcm)
-        playbackPendingFrames += Int(pcm.frameCount)
-        while playbackPendingFrames > ceiling, !playbackPending.isEmpty {
-            let dropped = playbackPending.removeFirst()
-            playbackPendingFrames -= Int(dropped.frameCount)
-            playbackQueueDrops &+= 1
+        let now = DispatchTime.now().uptimeNanoseconds
+        let responseBase = lastValidInboundNanos ?? connectionReadyNanos
+        let timeout = UInt64(tuning.responseTimeoutMilliseconds * 1_000_000)
+        if let responseBase, now - responseBase > timeout {
+            restart(reason: "The panel audio socket stopped responding.")
+            return
         }
-        guard playbackPendingFrames >= target else { return }
-        let ready = playbackPending
-        playbackPending.removeAll(keepingCapacity: true)
-        playbackPendingFrames = 0
-        playbackStarted = true
-        for packet in ready {
-            schedulePlayback(packet)
-        }
-        player?.play()
-    }
 
-    private func schedulePlayback(_ pcm: AudioProtocol.PCM) {
-        guard let player, let format = playbackFormat,
-              let buffer = AVAudioPCMBuffer(
-                pcmFormat: format,
-                frameCapacity: AVAudioFrameCount(pcm.frameCount)),
-              let channels = buffer.floatChannelData
-        else { return }
-        buffer.frameLength = AVAudioFrameCount(pcm.frameCount)
-        let bytes = [UInt8](pcm.samples)
-        for frame in 0..<Int(pcm.frameCount) {
-            for channel in 0..<Int(pcm.channels) {
-                let offset = (frame * Int(pcm.channels) + channel) * 2
-                let raw = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
-                channels[channel][frame] =
-                    Float(Int16(bitPattern: raw)) / 32_768
-            }
-        }
-        let frames = Int(pcm.frameCount)
-        playbackScheduledFrames += frames
-        player.scheduleBuffer(buffer) { [weak self] in
-            self?.queue.async {
-                guard let self else { return }
-                self.playbackScheduledFrames = max(
-                    0, self.playbackScheduledFrames - frames)
-                if self.playbackScheduledFrames == 0 {
-                    self.playbackStarted = false
-                }
-            }
-        }
+        let lostBefore = jitter.lostFrames
+        let lateBefore = jitter.latePackets
+        let chunks = jitter.poll(nowNanos: now)
+        accountJitterChanges(
+            lostBefore: lostBefore,
+            lateBefore: lateBefore,
+            nowNanos: now)
+        schedulePlayout(chunks)
+        updateUplinkDrift(nowNanos: now)
     }
 
     private func resetStreamState() {
@@ -619,18 +909,18 @@ final class PanelAudioSession {
         streamGeneration &+= 1
         sampleCounter = 0
         streamStartedNanos = DispatchTime.now().uptimeNanoseconds
-        chunker = AudioPCMChunker(
-            packetFrames: AudioTiming.packetFrames(
-                descriptor: descriptor, tuning: tuning),
-            channels: Int(descriptor.playbackChannels))
+        chunker = Self.makeChunker(descriptor: descriptor, tuning: tuning)
         packetPacer.reset()
         capturePending.removeAll(keepingCapacity: true)
         captureSendScheduled = false
-        sequenceTracker = AudioSequenceTracker()
-        playbackPending.removeAll(keepingCapacity: true)
-        playbackPendingFrames = 0
+        jitter = Self.makeJitter(descriptor: descriptor, tuning: tuning)
+        downlinkDrift.reset()
+        uplinkDrift.reset()
+        downlinkResampler.reset()
+        uplinkResampler.reset()
+        playbackFramesEnqueued = 0
         playbackScheduledFrames = 0
-        playbackStarted = false
+        panelStatus = nil
         lastStatusPublishNanos = 0
     }
 
@@ -654,30 +944,53 @@ final class PanelAudioSession {
     }
 
     private func stopPipeline() {
+        livenessTimer?.cancel()
+        livenessTimer = nil
         connection?.cancel()
         connection = nil
+        connectedPeer = nil
+        connectionReadyNanos = nil
+        lastValidInboundNanos = nil
         stopEngine()
     }
 
     private func stopEngine() {
+        captureWorkerTimer?.cancel()
+        captureWorkerTimer = nil
         for observer in engineObservers {
             NotificationCenter.default.removeObserver(observer)
         }
         engineObservers.removeAll(keepingCapacity: true)
+
+        if let ring = captureRing {
+            ESPAudioCaptureRingSetAccepting(ring, false)
+        }
         if captureTapInstalled {
             captureInput?.removeTap(onBus: 0)
             captureTapInstalled = false
         }
-        player?.stop()
         captureEngine?.stop()
         playbackEngine?.stop()
+        player?.stop()
+        if let ring = captureRing {
+            ESPAudioCaptureRingQuiesce(ring)
+            let dropped = ESPAudioCaptureRingDropped(ring)
+            if dropped > lastRingDropped {
+                captureCallbackDrops &+= dropped - lastRingDropped
+            }
+            ESPAudioCaptureRingDestroy(ring)
+        }
+
         captureEngine = nil
         playbackEngine = nil
         captureInput = nil
         captureConverter = nil
-        captureFormat = nil
+        captureReadBuffer = nil
+        captureConvertedBuffer = nil
+        captureRing = nil
         player = nil
         playbackFormat = nil
+        lastRingDropped = 0
         resetStreamState()
     }
 
@@ -691,8 +1004,11 @@ final class PanelAudioSession {
             tuning: tuning,
             panelStatus: panelStatus,
             downlinkQueueDrops: downlinkQueueDrops,
-            uplinkLostPackets: sequenceTracker.lostPackets,
-            uplinkLatePackets: sequenceTracker.latePackets,
-            playbackQueueDrops: playbackQueueDrops))
+            captureCallbackDrops: captureCallbackDrops,
+            uplinkLostFrames: uplinkLostFrames,
+            uplinkLatePackets: uplinkLatePackets,
+            playbackQueueDrops: playbackQueueDrops,
+            downlinkCorrectionPPM: downlinkDrift.correctionPPM,
+            uplinkCorrectionPPM: uplinkDrift.correctionPPM))
     }
 }

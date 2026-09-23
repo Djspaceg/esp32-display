@@ -922,12 +922,19 @@ private struct PanelDetailView: View {
                         + "\(audio.descriptor.captureChannels) up channels")
                 LabeledContent(
                     "Mac downlink loss",
-                    value: "\(audio.downlinkQueueDrops) queue drops")
+                    value: "\(audio.downlinkQueueDrops) queue drops, "
+                        + "\(audio.captureCallbackDrops) callback drops")
                 LabeledContent(
                     "Mac uplink loss",
-                    value: "\(audio.uplinkLostPackets) lost, "
+                    value: "\(audio.uplinkLostFrames) lost frames, "
                         + "\(audio.uplinkLatePackets) late, "
                         + "\(audio.playbackQueueDrops) queue drops")
+                LabeledContent(
+                    "Active drift correction",
+                    value: String(
+                        format: "%.1f ppm down / %.1f ppm up",
+                        audio.downlinkCorrectionPPM,
+                        audio.uplinkCorrectionPPM))
 
                 if let status = audio.panelStatus {
                     LabeledContent(

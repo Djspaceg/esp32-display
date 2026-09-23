@@ -64,4 +64,20 @@ final class AudioDeviceResolverTests: XCTestCase {
         XCTAssertTrue(resolution.usedFallback)
         XCTAssertNil(resolution.uid)
     }
+
+    func testRouteSnapshotChangesWhenOnlyTheSystemDefaultChanges() {
+        let before = CoreAudioRouteSnapshot(
+            options: [microphone, headset, speakers],
+            defaultInputUID: microphone.uid,
+            defaultOutputUID: speakers.uid)
+        let after = CoreAudioRouteSnapshot(
+            options: [microphone, headset, speakers],
+            defaultInputUID: headset.uid,
+            defaultOutputUID: headset.uid)
+
+        XCTAssertNotEqual(
+            before,
+            after,
+            "a default switch must restart an unpinned System Default route")
+    }
 }

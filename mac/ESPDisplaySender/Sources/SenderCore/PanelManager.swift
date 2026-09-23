@@ -13,6 +13,7 @@ final class PanelManager: ObservableObject {
     @Published internal(set) var savedNetworkNames: [String] = []
     @Published internal(set) var usbDevices: [WifiConfigUI.USBDeviceOption] = []
     @Published internal(set) var audioDevices: [AudioDeviceOption] = []
+    var audioRouteSnapshot = CoreAudioRouteSnapshot.empty
     /// Current transport paths. Kept as a projection for flashing/configuration
     /// code that needs a path rather than a display label.
     var usbSerialPorts: [String] { usbDevices.map(\.path) }

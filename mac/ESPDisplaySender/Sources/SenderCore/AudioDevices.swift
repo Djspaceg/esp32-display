@@ -8,6 +8,17 @@ struct CoreAudioDevice {
     let option: AudioDeviceOption
 }
 
+struct CoreAudioRouteSnapshot: Equatable {
+    let options: [AudioDeviceOption]
+    let defaultInputUID: String?
+    let defaultOutputUID: String?
+
+    static let empty = CoreAudioRouteSnapshot(
+        options: [],
+        defaultInputUID: nil,
+        defaultOutputUID: nil)
+}
+
 enum CoreAudioDeviceCatalog {
     static func options() -> [AudioDeviceOption] {
         devices().map(\.option)
@@ -62,17 +73,25 @@ enum CoreAudioDeviceCatalog {
         }
     }
 
+    static func routeSnapshot() -> CoreAudioRouteSnapshot {
+        let devices = devices()
+        return CoreAudioRouteSnapshot(
+            options: devices.map(\.option),
+            defaultInputUID: defaultDeviceUID(
+                for: .input, in: devices),
+            defaultOutputUID: defaultDeviceUID(
+                for: .output, in: devices))
+    }
+
     static func deviceID(
         for uid: String?,
         direction: AudioDeviceDirection,
         in devices: [CoreAudioDevice]
     ) -> AudioDeviceID? {
-        if let uid {
-            return devices.first {
-                $0.option.uid == uid && $0.option.supports(direction)
-            }?.id
-        }
-        return defaultDeviceID(for: direction)
+        guard let uid else { return nil }
+        return devices.first {
+            $0.option.uid == uid && $0.option.supports(direction)
+        }?.id
     }
 
     static func setDevice(
@@ -89,13 +108,15 @@ enum CoreAudioDeviceCatalog {
                         "CoreAudio did not expose an audio unit for device selection."
                 ])
         }
-        let status = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size))
+        let status = withUnsafePointer(to: &deviceID) { pointer in
+            AudioUnitSetProperty(
+                audioUnit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                pointer,
+                UInt32(MemoryLayout<AudioDeviceID>.size))
+        }
         guard status == noErr else {
             throw NSError(
                 domain: NSOSStatusErrorDomain,
@@ -105,6 +126,14 @@ enum CoreAudioDeviceCatalog {
                         "CoreAudio could not select device \(deviceID)."
                 ])
         }
+    }
+
+    private static func defaultDeviceUID(
+        for direction: AudioDeviceDirection,
+        in devices: [CoreAudioDevice]
+    ) -> String? {
+        guard let id = defaultDeviceID(for: direction) else { return nil }
+        return devices.first(where: { $0.id == id })?.option.uid
     }
 
     private static func defaultDeviceID(
@@ -156,21 +185,25 @@ enum CoreAudioDeviceCatalog {
             mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
-        var value: CFString?
-        var size = UInt32(MemoryLayout<CFString?>.size)
-        guard AudioObjectGetPropertyData(
-            id, &address, 0, nil, &size, &value) == noErr,
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            AudioObjectGetPropertyData(
+                id, &address, 0, nil, &size, pointer)
+        }
+        guard status == noErr,
             let value
         else { return nil }
-        return value as String
+        return value.takeUnretainedValue() as String
     }
 }
 
 extension PanelManager {
     func refreshAudioDevices() {
-        let refreshed = CoreAudioDeviceCatalog.options()
-        guard refreshed != audioDevices else { return }
-        audioDevices = refreshed
+        let refreshed = CoreAudioDeviceCatalog.routeSnapshot()
+        guard refreshed != audioRouteSnapshot else { return }
+        audioRouteSnapshot = refreshed
+        audioDevices = refreshed.options
         for session in sessions.values {
             session.audioDevicesChanged()
         }
