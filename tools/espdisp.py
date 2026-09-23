@@ -22,7 +22,7 @@ import tempfile
 import termios
 import time
 import wave
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import generated_board_catalog
 
@@ -3483,6 +3483,20 @@ def audio_packet_frames(descriptor: AudioDescriptor, packet_ms: float) -> int:
     return frames
 
 
+def audio_frame_limit(seconds: float, sample_rate: int) -> int:
+    """Validate a requested run and convert it to at least one frame."""
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise Fail("--seconds must be greater than zero")
+    if not _valid_audio_rate(sample_rate):
+        raise Fail("audio sample rate must be between 8000 and 96000 Hz")
+    return max(1, int(round(seconds * sample_rate)))
+
+
+def validate_audio_drain_seconds(seconds: float) -> None:
+    if not math.isfinite(seconds) or seconds < 0:
+        raise Fail("--drain-seconds must be zero or greater")
+
+
 def validate_audio_wav(wav: wave.Wave_read, descriptor: AudioDescriptor) -> None:
     """Require exact descriptor format; this reference tool does no resampling."""
     if wav.getcomptype() != "NONE":
@@ -3648,6 +3662,16 @@ def _normalized_dns_name(value: str) -> str:
     return value.strip().rstrip(".").lower()
 
 
+def audio_endpoint_host(target: str, addresses: Iterable[str]) -> str:
+    """Prefer a discovered IPv4 address over a second `.local` lookup.
+
+    A link-local IPv6 address needs an interface scope that DNS-SD's AAAA
+    bytes do not carry, so those continue through the service target.
+    """
+    ipv4 = sorted(address for address in addresses if ":" not in address)
+    return ipv4[0] if ipv4 else target
+
+
 def discover_audio(host: str, timeout: float) -> DiscoveredAudio:
     """Browse _espdisp._udp and return the exact panel's audio descriptor."""
     if not math.isfinite(timeout) or timeout <= 0:
@@ -3717,7 +3741,10 @@ def discover_audio(host: str, timeout: float) -> DiscoveredAudio:
                     descriptor = audio_descriptor_from_txt(txt)
                 except Fail as exc:
                     raise Fail("%s: %s" % (host, exc)) from exc
-                matches.append(DiscoveredAudio(target, instance_label, descriptor))
+                matches.append(DiscoveredAudio(
+                    audio_endpoint_host(target, addresses),
+                    instance_label,
+                    descriptor))
             if len(matches) == 1:
                 return matches[0]
             if len(matches) > 1:
@@ -3775,10 +3802,10 @@ def cmd_audio(args: argparse.Namespace) -> int:
     discovery = discover_audio(args.host, args.discovery_timeout)
     descriptor = discovery.descriptor
     packet_frames = audio_packet_frames(descriptor, args.packet_ms)
-    if not math.isfinite(args.seconds) or args.seconds <= 0:
-        raise Fail("--seconds must be greater than zero")
+    frame_limit = audio_frame_limit(args.seconds, descriptor.sample_rate)
     if not math.isfinite(args.status_interval) or args.status_interval < 0:
         raise Fail("--status-interval must be zero or greater")
+    validate_audio_drain_seconds(args.drain_seconds)
 
     source_wav = None
     capture_wav = None
@@ -3826,13 +3853,13 @@ def cmd_audio(args: argparse.Namespace) -> int:
 
         sequence = 0
         generation = (time.time_ns() & 0xFFFF) or 1
-        sample_counter = 0
-        frame_limit = int(round(args.seconds * descriptor.sample_rate))
+        wire_sample_counter = 0
+        sent_frames = 0
         started = time.monotonic()
         deadline = started
         status_state = [float("-inf")]
-        while sample_counter < frame_limit:
-            frames = min(packet_frames, frame_limit - sample_counter)
+        while sent_frames < frame_limit:
+            frames = min(packet_frames, frame_limit - sent_frames)
             if source_wav is not None:
                 pcm = source_wav.readframes(frames)
                 frames = len(pcm) // (descriptor.playback_channels * 2)
@@ -3842,7 +3869,7 @@ def cmd_audio(args: argparse.Namespace) -> int:
                 pcm = audio_tone_pcm(
                     descriptor.sample_rate,
                     descriptor.playback_channels,
-                    sample_counter,
+                    sent_frames,
                     frames,
                     args.tone,
                     args.amplitude,
@@ -3853,13 +3880,14 @@ def cmd_audio(args: argparse.Namespace) -> int:
                 sequence,
                 generation,
                 descriptor.sample_rate,
-                sample_counter,
+                wire_sample_counter,
                 timestamp_micros,
                 descriptor.playback_channels,
                 pcm,
             ))
             sequence = (sequence + 1) & 0xFFFF
-            sample_counter = (sample_counter + frames) & 0xFFFFFFFF
+            wire_sample_counter = (wire_sample_counter + frames) & 0xFFFFFFFF
+            sent_frames += frames
             deadline += frames / descriptor.sample_rate
             while True:
                 remaining = deadline - time.monotonic()
@@ -3881,7 +3909,7 @@ def cmd_audio(args: argparse.Namespace) -> int:
             _receive_audio(
                 sock, descriptor, capture_wav, status_state,
                 args.status_interval)
-        print("audio: sent %d frames" % sample_counter, flush=True)
+        print("audio: sent %d frames" % sent_frames, flush=True)
         return 0
     except OSError as exc:
         raise Fail("audio stream failed: %s" % exc) from exc

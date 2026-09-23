@@ -76,12 +76,14 @@ final class PanelAudioSession {
     private var restartPending = false
 
     private var connection: NWConnection?
-    private var engine: AVAudioEngine?
-    private var captureMixer: AVAudioMixerNode?
-    private var captureMonitorMuteMixer: AVAudioMixerNode?
+    private var captureEngine: AVAudioEngine?
+    private var playbackEngine: AVAudioEngine?
+    private var captureInput: AVAudioInputNode?
+    private var captureConverter: AVAudioConverter?
+    private var captureFormat: AVAudioFormat?
     private var player: AVAudioPlayerNode?
     private var playbackFormat: AVAudioFormat?
-    private var engineObserver: NSObjectProtocol?
+    private var engineObservers = [NSObjectProtocol]()
     private var captureTapInstalled = false
 
     private var chunker: AudioPCMChunker
@@ -134,8 +136,7 @@ final class PanelAudioSession {
     }
 
     func stop() {
-        queue.async { [weak self] in
-            guard let self else { return }
+        queue.async {
             self.stopped = true
             self.requested = false
             self.stopPipeline()
@@ -290,19 +291,23 @@ final class PanelAudioSession {
         inputName = inputResolution.name
         outputName = outputResolution.name
 
-        let engine = AVAudioEngine()
-        let captureMixer = AVAudioMixerNode()
-        let captureMonitorMuteMixer = AVAudioMixerNode()
+        let captureEngine = AVAudioEngine()
+        let playbackEngine = AVAudioEngine()
+        let captureInput = captureEngine.inputNode
         let player = AVAudioPlayerNode()
+        self.captureEngine = captureEngine
+        self.playbackEngine = playbackEngine
+        self.captureInput = captureInput
+        self.player = player
         do {
             try CoreAudioDeviceCatalog.setDevice(
                 CoreAudioDeviceCatalog.deviceID(
                     for: inputResolution.uid, direction: .input, in: devices),
-                on: engine.inputNode)
+                on: captureInput)
             try CoreAudioDeviceCatalog.setDevice(
                 CoreAudioDeviceCatalog.deviceID(
                     for: outputResolution.uid, direction: .output, in: devices),
-                on: engine.outputNode)
+                on: playbackEngine.outputNode)
             guard let captureFormat = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32,
                 sampleRate: Double(descriptor.sampleRateHz),
@@ -322,46 +327,48 @@ final class PanelAudioSession {
                             "The panel audio descriptor could not form an AVAudioFormat."
                     ])
             }
+            let inputFormat = captureInput.outputFormat(forBus: 0)
+            guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,
+                  let converter = AVAudioConverter(
+                      from: inputFormat, to: captureFormat)
+            else {
+                throw NSError(
+                    domain: "ESPDisplaySender.Audio",
+                    code: 2,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "The selected microphone has no usable capture format."
+                    ])
+            }
+            self.captureConverter = converter
+            self.captureFormat = captureFormat
+            self.playbackFormat = playbackFormat
 
-            engine.attach(captureMixer)
-            engine.attach(captureMonitorMuteMixer)
-            engine.attach(player)
-            engine.connect(engine.inputNode, to: captureMixer, format: nil)
-            engine.connect(
-                captureMixer, to: captureMonitorMuteMixer, format: captureFormat)
-            engine.connect(
-                captureMonitorMuteMixer,
-                to: engine.mainMixerNode,
-                format: captureFormat)
-            captureMonitorMuteMixer.outputVolume = 0
-            engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
-            captureMixer.installTap(
+            playbackEngine.attach(player)
+            playbackEngine.connect(
+                player, to: playbackEngine.mainMixerNode, format: playbackFormat)
+            let inputFrames = max(
+                1,
+                Int(ceil(
+                    Double(chunker.packetFrames)
+                        * inputFormat.sampleRate
+                        / Double(descriptor.sampleRateHz))))
+            captureInput.installTap(
                 onBus: 0,
-                bufferSize: AVAudioFrameCount(chunker.packetFrames),
-                format: captureFormat
+                bufferSize: AVAudioFrameCount(inputFrames),
+                format: inputFormat
             ) { [weak self] buffer, _ in
                 self?.capture(buffer)
             }
-            self.captureMixer = captureMixer
-            self.captureMonitorMuteMixer = captureMonitorMuteMixer
             captureTapInstalled = true
-            engine.prepare()
-            try engine.start()
-            self.engine = engine
-            self.player = player
-            self.playbackFormat = playbackFormat
+
+            playbackEngine.prepare()
+            captureEngine.prepare()
+            try playbackEngine.start()
+            try captureEngine.start()
+            observeEngine(captureEngine)
+            observeEngine(playbackEngine)
             resetStreamState()
-            engineObserver = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange,
-                object: engine,
-                queue: nil
-            ) { [weak self, weak engine] _ in
-                guard let self, let engine else { return }
-                self.queue.async {
-                    guard self.engine === engine else { return }
-                    self.restart(reason: "The selected audio device configuration changed.")
-                }
-            }
             state = .streaming
             let fallbacks = [
                 inputResolution.usedFallback ? "input" : nil,
@@ -373,19 +380,66 @@ final class PanelAudioSession {
                     + "using System Default."
             publish()
         } catch {
-            self.engine = engine
-            self.captureMixer = captureMixer
-            self.captureMonitorMuteMixer = captureMonitorMuteMixer
-            self.player = player
             stopEngine()
             restart(reason: "Audio engine failed: \(error.localizedDescription)")
         }
     }
 
+    private func observeEngine(_ engine: AVAudioEngine) {
+        let observer = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self, weak engine] _ in
+            guard let self, let engine else { return }
+            self.queue.async {
+                guard self.captureEngine === engine
+                    || self.playbackEngine === engine
+                else { return }
+                self.restart(reason: "The selected audio device configuration changed.")
+            }
+        }
+        engineObservers.append(observer)
+    }
+
     private func capture(_ buffer: AVAudioPCMBuffer) {
-        guard let channelData = buffer.floatChannelData else { return }
-        let frameCount = Int(buffer.frameLength)
-        let channelCount = Int(buffer.format.channelCount)
+        guard let converter = captureConverter,
+              let captureFormat,
+              buffer.frameLength > 0
+        else { return }
+        let scale = captureFormat.sampleRate / buffer.format.sampleRate
+        let capacity = max(
+            1,
+            Int(ceil(Double(buffer.frameLength) * scale)) + 1)
+        guard let converted = AVAudioPCMBuffer(
+            pcmFormat: captureFormat,
+            frameCapacity: AVAudioFrameCount(capacity))
+        else { return }
+        var providedInput = false
+        var conversionError: NSError?
+        let conversionStatus = converter.convert(
+            to: converted,
+            error: &conversionError
+        ) { _, inputStatus in
+            guard !providedInput else {
+                inputStatus.pointee = .noDataNow
+                return nil
+            }
+            providedInput = true
+            inputStatus.pointee = .haveData
+            return buffer
+        }
+        if conversionStatus == .error {
+            let detail = conversionError?.localizedDescription
+                ?? "CoreAudio returned a conversion error."
+            queue.async { [weak self] in
+                self?.restart(reason: "Microphone conversion failed: \(detail)")
+            }
+            return
+        }
+        guard let channelData = converted.floatChannelData else { return }
+        let frameCount = Int(converted.frameLength)
+        let channelCount = Int(converted.format.channelCount)
         var samples = Data(capacity: frameCount * channelCount * 2)
         for frame in 0..<frameCount {
             for channel in 0..<channelCount {
@@ -606,21 +660,24 @@ final class PanelAudioSession {
     }
 
     private func stopEngine() {
-        if let observer = engineObserver {
+        for observer in engineObservers {
             NotificationCenter.default.removeObserver(observer)
-            engineObserver = nil
         }
+        engineObservers.removeAll(keepingCapacity: true)
         if captureTapInstalled {
-            captureMixer?.removeTap(onBus: 0)
+            captureInput?.removeTap(onBus: 0)
             captureTapInstalled = false
         }
         player?.stop()
-        engine?.stop()
-        captureMixer = nil
-        captureMonitorMuteMixer = nil
+        captureEngine?.stop()
+        playbackEngine?.stop()
+        captureEngine = nil
+        playbackEngine = nil
+        captureInput = nil
+        captureConverter = nil
+        captureFormat = nil
         player = nil
         playbackFormat = nil
-        engine = nil
         resetStreamState()
     }
 

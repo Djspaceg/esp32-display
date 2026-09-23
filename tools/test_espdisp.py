@@ -3168,6 +3168,17 @@ def test_audio_wire_and_descriptor():
         },
         "DNS TXT parser preserves the firmware's audio keys",
     )
+    check_equal(
+        espdisp.audio_endpoint_host(
+            "panel.local", {"fe80::1234", "192.168.1.42"}),
+        "192.168.1.42",
+        "audio discovery uses the parsed IPv4 address without a second DNS lookup",
+    )
+    check_equal(
+        espdisp.audio_endpoint_host("panel.local", {"fe80::1234"}),
+        "panel.local",
+        "scope-less link-local IPv6 falls back to the resolvable service target",
+    )
 
     with tempfile.TemporaryDirectory() as directory:
         good_path = os.path.join(directory, "good.wav")
@@ -3207,6 +3218,23 @@ def test_audio_wire_and_descriptor():
     check_equal(args.command, "audio", "audio command is wired into CLI")
     check_equal(args.packet_ms, 20.0, "audio packet duration has a tunable default")
     check_equal(args.status_interval, 1.0, "status print interval has a tunable default")
+    check_equal(
+        espdisp.audio_frame_limit(0.000001, 16000),
+        1,
+        "a positive sub-frame run still sends one descriptor-rate frame",
+    )
+    for seconds in (0.0, float("nan"), float("inf")):
+        check_fails(
+            lambda seconds=seconds: espdisp.audio_frame_limit(seconds, 16000),
+            "seconds",
+            "audio run duration %r is refused" % seconds,
+        )
+    for drain in (-0.1, float("nan"), float("inf")):
+        check_fails(
+            lambda drain=drain: espdisp.validate_audio_drain_seconds(drain),
+            "drain",
+            "audio drain duration %r is refused" % drain,
+        )
 
 
 def test_describe_bundle():
