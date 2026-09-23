@@ -457,11 +457,12 @@ final class PanelAudioSession: @unchecked Sendable {
                 player, to: playbackEngine.mainMixerNode, format: playbackFormat)
 
             let inputChannels = Int(inputFormat.channelCount)
+            let callbackLease = ringLifetime.makeCallbackLease()
             captureInput.installTap(
                 onBus: 0,
                 bufferSize: AVAudioFrameCount(requestedInputFrames),
                 format: inputFormat
-            ) { [ringLifetime] buffer, _ in
+            ) { [callbackLease] buffer, _ in
                 guard buffer.frameLength > 0,
                       let channels = buffer.floatChannelData
                 else { return }
@@ -469,7 +470,7 @@ final class PanelAudioSession: @unchecked Sendable {
                 let channelOne: UnsafePointer<Float>? = inputChannels > 1
                     ? UnsafePointer(channels[1])
                     : nil
-                _ = ringLifetime.write(
+                _ = callbackLease.write(
                     channelZero: channelZero,
                     channelOne: channelOne,
                     frameCount: UInt32(buffer.frameLength))

@@ -15,6 +15,8 @@ void ESPAudioCaptureRingDestroy(ESPAudioCaptureRing *ring);
 void ESPAudioCaptureRingSetAccepting(
     ESPAudioCaptureRing *ring,
     bool accepting);
+void ESPAudioCaptureRingRetainCallback(ESPAudioCaptureRing *ring);
+void ESPAudioCaptureRingReleaseCallback(ESPAudioCaptureRing *ring);
 void ESPAudioCaptureRingQuiesce(ESPAudioCaptureRing *ring);
 
 bool ESPAudioCaptureRingWrite(

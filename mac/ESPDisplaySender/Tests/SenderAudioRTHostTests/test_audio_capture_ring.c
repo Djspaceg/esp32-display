@@ -268,11 +268,55 @@ static void test_quiesce_stops_acceptance(void) {
   ESPAudioCaptureRingDestroy(ring);
 }
 
+struct callback_lease_context {
+  ESPAudioCaptureRing *ring;
+  atomic_bool started;
+  atomic_bool quiesced;
+};
+
+static void *callback_lease_quiesce(void *opaque) {
+  struct callback_lease_context *context = opaque;
+  atomic_store_explicit(&context->started, true, memory_order_release);
+  ESPAudioCaptureRingQuiesce(context->ring);
+  atomic_store_explicit(&context->quiesced, true, memory_order_release);
+  return NULL;
+}
+
+static void test_callback_lease_blocks_destruction_barrier(void) {
+  ESPAudioCaptureRing *ring = ESPAudioCaptureRingCreate(2, 4, 1);
+  assert(ring != NULL);
+  ESPAudioCaptureRingSetAccepting(ring, true);
+  ESPAudioCaptureRingRetainCallback(ring);
+  struct callback_lease_context context = {
+      .ring = ring,
+      .started = ATOMIC_VAR_INIT(false),
+      .quiesced = ATOMIC_VAR_INIT(false),
+  };
+  pthread_t quiescer;
+  assert(pthread_create(
+      &quiescer, NULL, callback_lease_quiesce, &context) == 0);
+  while (!atomic_load_explicit(&context.started, memory_order_acquire)) {
+    sched_yield();
+  }
+
+  float input[] = {1, 2, 3, 4};
+  while (ESPAudioCaptureRingWrite(ring, input, NULL, 4)) {
+    sched_yield();
+  }
+  assert(!atomic_load_explicit(&context.quiesced, memory_order_acquire));
+
+  ESPAudioCaptureRingReleaseCallback(ring);
+  assert(pthread_join(quiescer, NULL) == 0);
+  assert(atomic_load_explicit(&context.quiesced, memory_order_acquire));
+  ESPAudioCaptureRingDestroy(ring);
+}
+
 int main(void) {
   test_create_and_disabled_boundaries();
   test_wrap_full_empty_and_variable_frames();
   test_concurrent_spsc_publication();
   test_quiesce_stops_acceptance();
+  test_callback_lease_blocks_destruction_barrier();
   puts("AudioCaptureRing host tests: PASS");
   return 0;
 }

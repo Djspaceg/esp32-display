@@ -30,13 +30,8 @@ final class AudioCaptureRingLifetime: @unchecked Sendable {
         ESPAudioCaptureRingSetAccepting(ring, accepting)
     }
 
-    func write(
-        channelZero: UnsafePointer<Float>,
-        channelOne: UnsafePointer<Float>?,
-        frameCount: UInt32
-    ) -> Bool {
-        ESPAudioCaptureRingWrite(
-            ring, channelZero, channelOne, frameCount)
+    func makeCallbackLease() -> AudioCaptureRingCallbackLease {
+        AudioCaptureRingCallbackLease(ring: ring)
     }
 
     func read(
@@ -55,5 +50,30 @@ final class AudioCaptureRingLifetime: @unchecked Sendable {
 
     var dropped: UInt64 {
         ESPAudioCaptureRingDropped(ring)
+    }
+}
+
+/// The tap closure owns this lease from installation until every dispatched
+/// invocation has returned. Releasing it is an atomic operation; destruction
+/// stays on the session queue in AudioCaptureRingLifetime.deinit.
+final class AudioCaptureRingCallbackLease: @unchecked Sendable {
+    private let ring: OpaquePointer
+
+    fileprivate init(ring: OpaquePointer) {
+        self.ring = ring
+        ESPAudioCaptureRingRetainCallback(ring)
+    }
+
+    deinit {
+        ESPAudioCaptureRingReleaseCallback(ring)
+    }
+
+    func write(
+        channelZero: UnsafePointer<Float>,
+        channelOne: UnsafePointer<Float>?,
+        frameCount: UInt32
+    ) -> Bool {
+        ESPAudioCaptureRingWrite(
+            ring, channelZero, channelOne, frameCount)
     }
 }

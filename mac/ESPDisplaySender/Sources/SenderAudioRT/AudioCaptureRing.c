@@ -13,6 +13,7 @@ struct ESPAudioCaptureRing {
   _Atomic uint32_t read_index;
   _Atomic bool accepting;
   _Atomic uint32_t active_writers;
+  _Atomic uint32_t callback_leases;
   _Atomic uint64_t dropped;
   uint32_t *frame_counts;
   float *samples;
@@ -45,6 +46,7 @@ ESPAudioCaptureRing *ESPAudioCaptureRingCreate(
   atomic_init(&ring->read_index, 0);
   atomic_init(&ring->accepting, false);
   atomic_init(&ring->active_writers, 0);
+  atomic_init(&ring->callback_leases, 0);
   atomic_init(&ring->dropped, 0);
   return ring;
 }
@@ -66,13 +68,30 @@ void ESPAudioCaptureRingSetAccepting(
   }
 }
 
+void ESPAudioCaptureRingRetainCallback(ESPAudioCaptureRing *ring) {
+  if (ring != NULL) {
+    atomic_fetch_add_explicit(
+        &ring->callback_leases, 1, memory_order_relaxed);
+  }
+}
+
+void ESPAudioCaptureRingReleaseCallback(ESPAudioCaptureRing *ring) {
+  if (ring != NULL) {
+    atomic_fetch_sub_explicit(
+        &ring->callback_leases, 1, memory_order_release);
+  }
+}
+
 void ESPAudioCaptureRingQuiesce(ESPAudioCaptureRing *ring) {
   if (ring == NULL) {
     return;
   }
   atomic_store_explicit(&ring->accepting, false, memory_order_release);
-  while (atomic_load_explicit(
-      &ring->active_writers, memory_order_acquire) != 0) {
+  while (
+      atomic_load_explicit(
+          &ring->active_writers, memory_order_acquire) != 0 ||
+      atomic_load_explicit(
+          &ring->callback_leases, memory_order_acquire) != 0) {
     sched_yield();
   }
 }
