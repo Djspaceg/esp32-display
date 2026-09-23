@@ -29,6 +29,7 @@ import sys
 import tempfile
 import tomllib
 import unittest.mock
+import wave
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import board_descriptor  # noqa: E402
@@ -3006,6 +3007,206 @@ def test_tile_stream_wire():
         check_equal(at, len(p), "half-res records tile the packet exactly")
     check_equal(sorted(hcovered), sorted(covered),
                 "half-res covers exactly the tiles full-res does")
+
+
+def test_audio_wire_and_descriptor():
+    """Pin the host reference to firmware/test/test_audio.cpp's exact bytes."""
+    pcm_fixture = bytes.fromhex(
+        "45 41 55 44 01 01 01 02 07 00 03 00 80 3e 00 00 "
+        "40 01 00 00 40 e2 01 00 04 00 10 00 "
+        "00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f")
+    status_fixture = bytes.fromhex(
+        "45 41 55 44 01 03 00 00 08 00 09 00 80 bb 00 00 "
+        "00 00 00 00 0a 00 00 00 00 00 30 00 "
+        "64 00 00 00 78 00 00 00 50 00 00 00 02 00 00 00 "
+        "fa 00 00 00 03 00 00 00 04 00 00 00 05 00 00 00 "
+        "06 00 00 00 07 00 00 00 08 00 00 00 09 00 00 00")
+
+    check_equal(
+        espdisp.audio_pcm_datagram(
+            kind=espdisp.AUDIO_KIND_DOWNLINK,
+            sequence=7,
+            stream_generation=3,
+            sample_rate=16000,
+            sample_counter=320,
+            timestamp_micros=123456,
+            channels=2,
+            pcm=bytes(range(16))),
+        pcm_fixture,
+        "audio encoder reproduces firmware PCM vector byte for byte",
+    )
+    pcm = espdisp.parse_audio_datagram(pcm_fixture)
+    check_equal(pcm.kind, espdisp.AUDIO_KIND_DOWNLINK, "PCM fixture kind")
+    check_equal(pcm.sequence, 7, "PCM fixture sequence")
+    check_equal(pcm.stream_generation, 3, "PCM fixture stream generation")
+    check_equal(pcm.sample_rate, 16000, "PCM fixture sample rate")
+    check_equal(pcm.sample_counter, 320, "PCM fixture sample counter")
+    check_equal(pcm.timestamp_micros, 123456, "PCM fixture timestamp")
+    check_equal(pcm.frame_count, 4, "PCM fixture frame count")
+    check_equal(pcm.channels, 2, "PCM fixture channels")
+    check_equal(pcm.payload, bytes(range(16)), "PCM fixture payload")
+
+    status = espdisp.parse_audio_datagram(status_fixture)
+    check_equal(status.kind, espdisp.AUDIO_KIND_STATUS, "status fixture kind")
+    check_equal(status.sequence, 8, "status fixture sequence")
+    check_equal(status.stream_generation, 9, "status stream generation")
+    check_equal(status.sample_rate, 48000, "status fixture sample rate")
+    check_equal(status.timestamp_micros, 10, "status fixture timestamp")
+    check_equal(
+        status.status,
+        espdisp.AudioStatus(
+            fill_frames=100,
+            target_frames=120,
+            minimum_fill_frames=80,
+            underruns=2,
+            underrun_duration_ms=250,
+            late_packets=3,
+            lost_frames=4,
+            hard_corrections=5,
+            ingress_drops=6,
+            queue_drops=7,
+            engine_drops=8,
+            capture_overruns=9,
+        ),
+        "status fixture exposes all twelve firmware fields",
+    )
+    check_equal(
+        espdisp.format_audio_status(status.status),
+        "fill=100 target=120 minimum=80 underruns=2 underrun_ms=250 "
+        "late=3 lost_frames=4 corrections=5 ingress_drops=6 queue_drops=7 "
+        "engine_drops=8 capture_overruns=9",
+        "status output names every bring-up counter",
+    )
+
+    for mutation, needle in [
+        (b"XAUD" + pcm_fixture[4:], "magic"),
+        (pcm_fixture[:4] + b"\x02" + pcm_fixture[5:], "version"),
+        (pcm_fixture[:5] + b"\x63" + pcm_fixture[6:], "kind"),
+        (pcm_fixture[:6] + b"\x00" + pcm_fixture[7:], "flags"),
+        (pcm_fixture[:-1], "length"),
+    ]:
+        check_fails(
+            lambda mutation=mutation: espdisp.parse_audio_datagram(mutation),
+            needle,
+            "audio parser refuses malformed %s fixture" % needle,
+        )
+
+    descriptor = espdisp.audio_descriptor_from_txt({
+        "caps": "00300000",
+        "audio-port": "5569",
+        "audio-version": "1",
+        "audio-rate": "16000",
+        "audio-play-ch": "2",
+        "audio-capture-ch": "2",
+    })
+    check_equal(
+        descriptor,
+        espdisp.AudioDescriptor(
+            port=5569, version=1, sample_rate=16000,
+            playback_channels=2, capture_channels=2),
+        "audio TXT descriptor carries rate and both channel counts",
+    )
+    check_equal(
+        espdisp.audio_packet_frames(descriptor, 20.0),
+        320,
+        "packet duration is converted through advertised rate",
+    )
+    check_fails(
+        lambda: espdisp.audio_packet_frames(descriptor, 50.0),
+        "1400",
+        "packet sizing refuses payloads above firmware MTU",
+    )
+    for records, needle in [
+        ({
+            "caps": "00100000", "audio-port": "5569", "audio-version": "1",
+            "audio-rate": "16000", "audio-play-ch": "2",
+            "audio-capture-ch": "2",
+        }, "uplink"),
+        ({
+            "caps": "00300000", "audio-port": "5569", "audio-version": "2",
+            "audio-rate": "16000", "audio-play-ch": "2",
+            "audio-capture-ch": "2",
+        }, "version"),
+        ({
+            "caps": "00300000", "audio-port": "5569", "audio-version": "1",
+            "audio-rate": "0", "audio-play-ch": "2", "audio-capture-ch": "2",
+        }, "rate"),
+        ({
+            "caps": "00300000", "audio-port": "5569", "audio-version": "1",
+            "audio-rate": "16000", "audio-play-ch": "1",
+        }, "audio-capture-ch"),
+    ]:
+        check_fails(
+            lambda records=records: espdisp.audio_descriptor_from_txt(records),
+            needle,
+            "audio TXT descriptor refuses %s mismatch" % needle,
+        )
+
+    query = espdisp.mdns_query("_espdisp._udp.local", espdisp.DNS_TYPE_PTR)
+    check_equal(query[:2], b"\x00\x00", "mDNS query uses transaction id zero")
+    check_equal(
+        query[-4:],
+        struct.pack("!HH", espdisp.DNS_TYPE_PTR, 0x8001),
+        "mDNS query requests an RFC 6762 unicast response",
+    )
+    txt_rdata = (
+        b"\x0dcaps=00300000"
+        b"\x0faudio-port=5569"
+        b"\x0faudio-version=1"
+        b"\x10audio-rate=16000"
+        b"\x0faudio-play-ch=2"
+        b"\x12audio-capture-ch=2")
+    check_equal(
+        espdisp.parse_dns_txt(txt_rdata),
+        {
+            "caps": "00300000",
+            "audio-port": "5569",
+            "audio-version": "1",
+            "audio-rate": "16000",
+            "audio-play-ch": "2",
+            "audio-capture-ch": "2",
+        },
+        "DNS TXT parser preserves the firmware's audio keys",
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        good_path = os.path.join(directory, "good.wav")
+        bad_path = os.path.join(directory, "bad.wav")
+        with wave.open(good_path, "wb") as wav:
+            wav.setnchannels(2)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b"\x00" * 64)
+        with wave.open(bad_path, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b"\x00" * 32)
+        with wave.open(good_path, "rb") as wav:
+            check_accepts(
+                lambda: espdisp.validate_audio_wav(wav, descriptor),
+                "WAV matching advertised playback format is accepted",
+            )
+        with wave.open(bad_path, "rb") as wav:
+            check_fails(
+                lambda: espdisp.validate_audio_wav(wav, descriptor),
+                "channels",
+                "WAV channel mismatch is refused instead of remixed",
+            )
+
+    tone = espdisp.audio_tone_pcm(
+        sample_rate=48000, channels=2, start_frame=0, frame_count=8,
+        frequency=1000.0, amplitude=0.25)
+    samples = struct.unpack("<16h", tone)
+    check(
+        all(samples[index] == samples[index + 1] for index in range(0, 16, 2)),
+        "generated tone duplicates each frame across advertised channels",
+    )
+
+    args = espdisp.build_parser().parse_args(["audio", "panel.local", "--tone", "440"])
+    check_equal(args.command, "audio", "audio command is wired into CLI")
+    check_equal(args.packet_ms, 20.0, "audio packet duration has a tunable default")
+    check_equal(args.status_interval, 1.0, "status print interval has a tunable default")
 
 
 def test_describe_bundle():
@@ -6955,6 +7156,7 @@ def main():
     test_git_firmware_build()
     test_utc_timestamp()
     test_tile_stream_wire()
+    test_audio_wire_and_descriptor()
     test_describe_bundle()
 
     if failures:
