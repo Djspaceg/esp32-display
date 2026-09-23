@@ -385,6 +385,11 @@ final class AudioProtocolTests: XCTestCase {
                 .pcm(productionUplinkPacket(13, counter: 480)),
             ])
         XCTAssertEqual(playableFrames(startup), productionUplinkTargetFrames)
+        XCTAssertEqual(
+            AudioPlayoutCeiling.scheduledFrames(
+                for: startup,
+                ceilingFrames: productionUplinkTargetFrames * 2),
+            productionUplinkTargetFrames)
         XCTAssertEqual(jitter.reorderedPackets, 1)
         XCTAssertEqual(jitter.lostFrames, 0)
     }
@@ -420,6 +425,11 @@ final class AudioProtocolTests: XCTestCase {
                 .silence(frames: 160),
             ])
         XCTAssertEqual(playableFrames(startup), productionUplinkTargetFrames)
+        XCTAssertEqual(
+            AudioPlayoutCeiling.scheduledFrames(
+                for: startup,
+                ceilingFrames: productionUplinkTargetFrames * 2),
+            productionUplinkTargetFrames)
         XCTAssertEqual(jitter.lostFrames, 160)
         XCTAssertEqual(
             AudioTiming.jitterPollMilliseconds(tuning: AudioRuntimeTuning()),
@@ -443,6 +453,11 @@ final class AudioProtocolTests: XCTestCase {
             nowNanos: 1_000_000)
 
         XCTAssertEqual(playableFrames(startup), productionUplinkTargetFrames)
+        XCTAssertEqual(
+            AudioPlayoutCeiling.scheduledFrames(
+                for: startup,
+                ceilingFrames: productionUplinkTargetFrames * 2),
+            productionUplinkTargetFrames)
         XCTAssertEqual(startup.last, .silence(frames: 160))
         XCTAssertEqual(jitter.lostFrames, 160)
     }
@@ -473,9 +488,125 @@ final class AudioProtocolTests: XCTestCase {
             productionUplinkPacket(54, counter: 640, generation: 9),
             nowNanos: 3_000_000)
 
-        XCTAssertGreaterThanOrEqual(
+        XCTAssertEqual(
             playableFrames(startup),
             productionUplinkTargetFrames)
+        XCTAssertEqual(
+            AudioPlayoutCeiling.scheduledFrames(
+                for: startup,
+                ceilingFrames: productionUplinkTargetFrames),
+            productionUplinkTargetFrames)
+        XCTAssertEqual(jitter.lostFrames, 160)
+    }
+
+    func testJitterStartupCapsOversizedGapForAtomicPlaybackCeiling() {
+        let ceilingFrames = productionUplinkTargetFrames * 2
+        let first = productionUplinkPacket(
+            60, counter: 0, generation: 10)
+        let future = productionUplinkPacket(
+            69, counter: 1_440, generation: 10)
+        var jitter = AudioJitterBuffer(
+            targetFrames: productionUplinkTargetFrames,
+            ceilingFrames: ceilingFrames,
+            reorderWindowPackets: 8,
+            reorderTimeoutNanos: 40_000_000)
+
+        XCTAssertEqual(jitter.insert(first, nowNanos: 0), [])
+        let startup = jitter.insert(future, nowNanos: 1_000_000)
+
+        XCTAssertEqual(
+            startup,
+            [
+                .pcm(first),
+                .silence(frames: 320),
+                .pcm(future),
+            ])
+        XCTAssertEqual(playableFrames(startup), productionUplinkTargetFrames)
+        XCTAssertEqual(
+            AudioPlayoutCeiling.scheduledFrames(
+                for: startup,
+                ceilingFrames: ceilingFrames),
+            productionUplinkTargetFrames)
+        XCTAssertEqual(jitter.lostFrames, 1_280)
+    }
+
+    func testJitterStartupBatchSurvivesAtomicPlaybackCeiling() {
+        let ceilingFrames = productionUplinkTargetFrames * 2
+        let first = productionUplinkPacket(
+            70, counter: 0, generation: 11)
+        let future = productionUplinkPacket(
+            79, counter: 1_440, generation: 11)
+        let previouslyReturned = [
+            AudioPlayoutChunk.pcm(first),
+            .silence(frames: ceilingFrames),
+            .pcm(future),
+        ]
+        XCTAssertEqual(
+            AudioPlayoutCeiling.scheduledFrames(
+                for: previouslyReturned,
+                ceilingFrames: ceilingFrames),
+            320,
+            "the consumer model must reproduce the reviewed failure")
+
+        var jitter = AudioJitterBuffer(
+            targetFrames: productionUplinkTargetFrames,
+            ceilingFrames: ceilingFrames,
+            reorderWindowPackets: 8,
+            reorderTimeoutNanos: 40_000_000)
+        XCTAssertEqual(jitter.insert(first, nowNanos: 0), [])
+        let startup = jitter.insert(future, nowNanos: 1_000_000)
+
+        XCTAssertEqual(
+            AudioPlayoutCeiling.scheduledFrames(
+                for: startup,
+                ceilingFrames: ceilingFrames),
+            productionUplinkTargetFrames)
+        XCTAssertLessThanOrEqual(playableFrames(startup), ceilingFrames)
+    }
+
+    func testJitterDrainCeilingResolvesGapAfterStartup() {
+        let ceilingFrames = productionUplinkTargetFrames * 2
+        var jitter = AudioJitterBuffer(
+            targetFrames: productionUplinkTargetFrames,
+            ceilingFrames: ceilingFrames,
+            reorderWindowPackets: 64,
+            reorderTimeoutNanos: 1_000_000_000)
+
+        for sequence in 80...82 {
+            XCTAssertEqual(
+                jitter.insert(
+                    productionUplinkPacket(
+                        UInt16(sequence),
+                        counter: UInt32(sequence - 80) * 160,
+                        generation: 12),
+                    nowNanos: UInt64(sequence - 80) * 1_000_000),
+                [])
+        }
+        XCTAssertEqual(
+            playableFrames(jitter.insert(
+                productionUplinkPacket(
+                    83, counter: 480, generation: 12),
+                nowNanos: 3_000_000)),
+            productionUplinkTargetFrames)
+
+        for sequence in 85...91 {
+            XCTAssertEqual(
+                jitter.insert(
+                    productionUplinkPacket(
+                        UInt16(sequence),
+                        counter: UInt32(sequence - 80) * 160,
+                        generation: 12),
+                    nowNanos: UInt64(sequence - 80) * 1_000_000),
+                [])
+        }
+        let resolved = jitter.insert(
+            productionUplinkPacket(
+                92, counter: 1_920, generation: 12),
+            nowNanos: 12_000_000)
+
+        XCTAssertEqual(resolved.first, .silence(frames: 160))
+        XCTAssertEqual(resolved.count, 9)
+        XCTAssertEqual(playableFrames(resolved), 1_440)
         XCTAssertEqual(jitter.lostFrames, 160)
     }
 

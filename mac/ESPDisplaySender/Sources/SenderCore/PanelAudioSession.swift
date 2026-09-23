@@ -818,7 +818,11 @@ final class PanelAudioSession: @unchecked Sendable {
         let ceiling = AudioTiming.frames(
             milliseconds: tuning.uplinkJitterCeilingMilliseconds,
             sampleRateHz: descriptor.sampleRateHz)
-        guard playbackScheduledFrames + outputFrames <= ceiling else {
+        guard AudioPlayoutCeiling.accepts(
+            scheduledFrames: playbackScheduledFrames,
+            incomingFrames: outputFrames,
+            ceilingFrames: ceiling)
+        else {
             playbackQueueDrops &+= 1
             publish()
             return

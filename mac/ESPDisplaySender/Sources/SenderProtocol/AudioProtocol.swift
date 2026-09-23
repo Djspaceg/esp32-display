@@ -802,6 +802,97 @@ public enum AudioPlayoutChunk: Equatable, Sendable {
     case silence(frames: Int)
 }
 
+/// Atomic admission policy shared by jitter startup and the playback queue.
+public enum AudioPlayoutCeiling {
+    public static func frameCount(_ chunk: AudioPlayoutChunk) -> Int {
+        switch chunk {
+        case .pcm(let pcm):
+            return Int(pcm.frameCount)
+        case .silence(let frames):
+            return max(0, frames)
+        }
+    }
+
+    public static func accepts(
+        scheduledFrames: Int,
+        incomingFrames: Int,
+        ceilingFrames: Int
+    ) -> Bool {
+        guard scheduledFrames >= 0,
+              incomingFrames > 0,
+              ceilingFrames > 0,
+              scheduledFrames <= ceilingFrames
+        else { return false }
+        return incomingFrames <= ceilingFrames - scheduledFrames
+    }
+
+    public static func scheduledFrames(
+        for chunks: [AudioPlayoutChunk],
+        initiallyScheduledFrames: Int = 0,
+        ceilingFrames: Int
+    ) -> Int {
+        var scheduledFrames = max(0, initiallyScheduledFrames)
+        for chunk in chunks {
+            let incomingFrames = frameCount(chunk)
+            if accepts(
+                scheduledFrames: scheduledFrames,
+                incomingFrames: incomingFrames,
+                ceilingFrames: ceilingFrames)
+            {
+                scheduledFrames += incomingFrames
+            }
+        }
+        return scheduledFrames
+    }
+
+    public static func startupBatch(
+        from chunks: [AudioPlayoutChunk],
+        targetFrames: Int,
+        ceilingFrames: Int
+    ) -> [AudioPlayoutChunk] {
+        let target = max(1, targetFrames)
+        let ceiling = max(target, ceilingFrames)
+        var retainedPCM = [Bool](repeating: false, count: chunks.count)
+        var retainedPCMFrames = 0
+
+        for (index, chunk) in chunks.enumerated() {
+            guard case .pcm = chunk else { continue }
+            let frames = frameCount(chunk)
+            guard accepts(
+                scheduledFrames: retainedPCMFrames,
+                incomingFrames: frames,
+                ceilingFrames: ceiling)
+            else { continue }
+            retainedPCM[index] = true
+            retainedPCMFrames += frames
+        }
+
+        var silenceFramesRemaining =
+            max(target, retainedPCMFrames) - retainedPCMFrames
+        var output = [AudioPlayoutChunk]()
+        output.reserveCapacity(chunks.count + 1)
+        for (index, chunk) in chunks.enumerated() {
+            switch chunk {
+            case .pcm:
+                if retainedPCM[index] {
+                    output.append(chunk)
+                }
+            case .silence(let frames):
+                let retainedFrames = min(
+                    max(0, frames), silenceFramesRemaining)
+                if retainedFrames > 0 {
+                    output.append(.silence(frames: retainedFrames))
+                    silenceFramesRemaining -= retainedFrames
+                }
+            }
+        }
+        if silenceFramesRemaining > 0 {
+            output.append(.silence(frames: silenceFramesRemaining))
+        }
+        return output
+    }
+}
+
 /// Sequence/sample-counter jitter queue with a bounded reorder deadline.
 public struct AudioJitterBuffer: Equatable, Sendable {
     private struct Pending: Equatable, Sendable {
@@ -953,20 +1044,12 @@ public struct AudioJitterBuffer: Equatable, Sendable {
         guard let forceGapResolution = startupReady(
             nowNanos: nowNanos)
         else { return nil }
-        var output = drain(
-            nowNanos: nowNanos,
-            forceGapResolution: forceGapResolution)
-        let playableFrames = output.reduce(0) { frames, chunk in
-            switch chunk {
-            case .pcm(let pcm):
-                return frames + Int(pcm.frameCount)
-            case .silence(let count):
-                return frames + count
-            }
-        }
-        if playableFrames < targetFrames {
-            output.append(.silence(frames: targetFrames - playableFrames))
-        }
+        let output = AudioPlayoutCeiling.startupBatch(
+            from: drain(
+                nowNanos: nowNanos,
+                forceGapResolution: forceGapResolution),
+            targetFrames: targetFrames,
+            ceilingFrames: ceilingFrames)
         started = true
         startupGapDeadlineNanos = nil
         return output
