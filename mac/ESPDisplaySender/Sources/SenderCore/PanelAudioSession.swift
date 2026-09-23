@@ -1,7 +1,6 @@
 import AVFoundation
 import Foundation
 import Network
-import SenderAudioRT
 import SenderProtocol
 
 enum PanelAudioState: Equatable, Sendable {
@@ -92,7 +91,7 @@ final class PanelAudioSession: @unchecked Sendable {
     private var captureConverter: AVAudioConverter?
     private var captureReadBuffer: AVAudioPCMBuffer?
     private var captureConvertedBuffer: AVAudioPCMBuffer?
-    private var captureRing: OpaquePointer?
+    private var captureRingLifetime: AudioCaptureRingLifetime?
     private var captureWorkerTimer: DispatchSourceTimer?
     private var captureTapInstalled = false
     private var lastRingDropped: UInt64 = 0
@@ -420,10 +419,10 @@ final class PanelAudioSession: @unchecked Sendable {
                     inputFormat.sampleRate
                         * tuning.captureRingSlotMilliseconds
                         / 1_000)))
-            guard let ring = ESPAudioCaptureRingCreate(
-                UInt32(tuning.captureRingSlots),
-                UInt32(slotFrames),
-                UInt32(inputFormat.channelCount)),
+            guard let ringLifetime = AudioCaptureRingLifetime(
+                slotCount: UInt32(tuning.captureRingSlots),
+                maximumFrames: UInt32(slotFrames),
+                channels: UInt32(inputFormat.channelCount)),
                 let readBuffer = AVAudioPCMBuffer(
                     pcmFormat: inputFormat,
                     frameCapacity: AVAudioFrameCount(slotFrames))
@@ -442,7 +441,6 @@ final class PanelAudioSession: @unchecked Sendable {
                 pcmFormat: captureFormat,
                 frameCapacity: AVAudioFrameCount(convertedCapacity))
             else {
-                ESPAudioCaptureRingDestroy(ring)
                 throw audioError(
                     code: 4,
                     message: "The microphone conversion buffer could not be allocated.")
@@ -451,7 +449,7 @@ final class PanelAudioSession: @unchecked Sendable {
             self.captureConverter = converter
             self.captureReadBuffer = readBuffer
             self.captureConvertedBuffer = convertedBuffer
-            self.captureRing = ring
+            self.captureRingLifetime = ringLifetime
             self.playbackFormat = playbackFormat
 
             playbackEngine.attach(player)
@@ -463,7 +461,7 @@ final class PanelAudioSession: @unchecked Sendable {
                 onBus: 0,
                 bufferSize: AVAudioFrameCount(requestedInputFrames),
                 format: inputFormat
-            ) { buffer, _ in
+            ) { [ringLifetime] buffer, _ in
                 guard buffer.frameLength > 0,
                       let channels = buffer.floatChannelData
                 else { return }
@@ -471,18 +469,17 @@ final class PanelAudioSession: @unchecked Sendable {
                 let channelOne: UnsafePointer<Float>? = inputChannels > 1
                     ? UnsafePointer(channels[1])
                     : nil
-                _ = ESPAudioCaptureRingWrite(
-                    ring,
-                    channelZero,
-                    channelOne,
-                    UInt32(buffer.frameLength))
+                _ = ringLifetime.write(
+                    channelZero: channelZero,
+                    channelOne: channelOne,
+                    frameCount: UInt32(buffer.frameLength))
             }
             captureTapInstalled = true
 
             resetStreamState()
             playbackEngine.prepare()
             captureEngine.prepare()
-            ESPAudioCaptureRingSetAccepting(ring, true)
+            ringLifetime.setAccepting(true)
             try playbackEngine.start()
             try captureEngine.start()
             observeEngine(captureEngine)
@@ -545,24 +542,23 @@ final class PanelAudioSession: @unchecked Sendable {
     }
 
     private func drainCaptureRing() {
-        guard let ring = captureRing,
+        guard let ringLifetime = captureRingLifetime,
               let readBuffer = captureReadBuffer,
               let channels = readBuffer.floatChannelData
         else { return }
 
         let channelOne = readBuffer.format.channelCount > 1 ? channels[1] : nil
         var frameCount: UInt32 = 0
-        while ESPAudioCaptureRingRead(
-            ring,
-            channels[0],
-            channelOne,
-            UInt32(readBuffer.frameCapacity),
-            &frameCount)
+        while ringLifetime.read(
+            channelZero: channels[0],
+            channelOne: channelOne,
+            frameCapacity: UInt32(readBuffer.frameCapacity),
+            frameCount: &frameCount)
         {
             readBuffer.frameLength = AVAudioFrameCount(frameCount)
             convertCaptured(readBuffer)
         }
-        let dropped = ESPAudioCaptureRingDropped(ring)
+        let dropped = ringLifetime.dropped
         if dropped > lastRingDropped {
             captureCallbackDrops &+= dropped - lastRingDropped
             lastRingDropped = dropped
@@ -643,7 +639,8 @@ final class PanelAudioSession: @unchecked Sendable {
         let deadline = packetPacer.deadlineNanos(
             nowNanos: now,
             frameCount: chunker.packetFrames,
-            sampleRateHz: descriptor.sampleRateHz)
+            sampleRateHz: descriptor.sampleRateHz,
+            rateMultiplier: downlinkDrift.rateMultiplier)
         guard deadline > now else {
             sendNextCapturedChunk(on: connection)
             return
@@ -862,9 +859,7 @@ final class PanelAudioSession: @unchecked Sendable {
     private func startLivenessTimer() {
         livenessTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        let interval = max(
-            10,
-            min(250, Int(tuning.responseTimeoutMilliseconds / 4)))
+        let interval = AudioTiming.jitterPollMilliseconds(tuning: tuning)
         timer.schedule(deadline: .now() + .milliseconds(interval),
                        repeating: .milliseconds(interval))
         timer.setEventHandler { [weak self] in
@@ -962,8 +957,8 @@ final class PanelAudioSession: @unchecked Sendable {
         }
         engineObservers.removeAll(keepingCapacity: true)
 
-        if let ring = captureRing {
-            ESPAudioCaptureRingSetAccepting(ring, false)
+        if let ringLifetime = captureRingLifetime {
+            ringLifetime.setAccepting(false)
         }
         if captureTapInstalled {
             captureInput?.removeTap(onBus: 0)
@@ -972,13 +967,11 @@ final class PanelAudioSession: @unchecked Sendable {
         captureEngine?.stop()
         playbackEngine?.stop()
         player?.stop()
-        if let ring = captureRing {
-            ESPAudioCaptureRingQuiesce(ring)
-            let dropped = ESPAudioCaptureRingDropped(ring)
+        if let ringLifetime = captureRingLifetime {
+            let dropped = ringLifetime.dropped
             if dropped > lastRingDropped {
                 captureCallbackDrops &+= dropped - lastRingDropped
             }
-            ESPAudioCaptureRingDestroy(ring)
         }
 
         captureEngine = nil
@@ -987,7 +980,7 @@ final class PanelAudioSession: @unchecked Sendable {
         captureConverter = nil
         captureReadBuffer = nil
         captureConvertedBuffer = nil
-        captureRing = nil
+        captureRingLifetime = nil
         player = nil
         playbackFormat = nil
         lastRingDropped = 0
