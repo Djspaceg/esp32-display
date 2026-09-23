@@ -3236,6 +3236,106 @@ def test_audio_wire_and_descriptor():
             "audio drain duration %r is refused" % drain,
         )
 
+    check_fails(
+        lambda: espdisp.require_audio_response(0, send_only=False),
+        "no valid audio response",
+        "a silent panel cannot be reported as a successful audio stream",
+    )
+    check_accepts(
+        lambda: espdisp.require_audio_response(1, send_only=False),
+        "one valid status or uplink packet proves panel admission",
+    )
+    check_accepts(
+        lambda: espdisp.require_audio_response(0, send_only=True),
+        "the explicit send-only override permits an unacknowledged endpoint",
+    )
+
+    def uplink(sequence, generation, counter, values):
+        payload = struct.pack("<%dh" % len(values), *values)
+        return espdisp.parse_audio_datagram(espdisp.audio_pcm_datagram(
+            kind=espdisp.AUDIO_KIND_UPLINK,
+            sequence=sequence,
+            stream_generation=generation,
+            sample_rate=16000,
+            sample_counter=counter,
+            timestamp_micros=counter * 62,
+            channels=1,
+            pcm=payload,
+        ))
+
+    reorder = espdisp.AudioUplinkReorderBuffer(channels=1, window_packets=2)
+    check_equal(
+        reorder.push(uplink(10, 7, 100, [10, 11])),
+        struct.pack("<2h", 10, 11),
+        "the first uplink packet starts the captured timeline",
+    )
+    check_equal(
+        reorder.push(uplink(12, 7, 104, [30, 31])),
+        b"",
+        "a future uplink packet is held inside the reorder window",
+    )
+    check_equal(
+        reorder.push(uplink(11, 7, 102, [20, 21])),
+        struct.pack("<4h", 20, 21, 30, 31),
+        "reordered uplink packets are emitted in sample-counter order",
+    )
+    check_equal(reorder.reordered_packets, 1, "uplink reordering is reported")
+    check_equal(
+        reorder.push(uplink(11, 7, 102, [20, 21])),
+        b"",
+        "duplicate uplink packets are not appended twice",
+    )
+    check_equal(reorder.duplicate_packets, 1, "uplink duplicates are reported")
+
+    gap = espdisp.AudioUplinkReorderBuffer(channels=1, window_packets=1)
+    check_equal(
+        gap.push(uplink(20, 3, 0, [1, 2])),
+        struct.pack("<2h", 1, 2),
+        "gap fixture starts with its first packet",
+    )
+    check_equal(
+        gap.push(uplink(22, 3, 4, [5, 6])),
+        b"",
+        "one missing packet is held until the bounded window expires",
+    )
+    check_equal(
+        gap.push(uplink(23, 3, 6, [7, 8])),
+        b"\x00" * 4 + struct.pack("<4h", 5, 6, 7, 8),
+        "expired uplink gaps become exact-duration PCM silence",
+    )
+    check_equal(gap.lost_frames, 2, "uplink lost frames are reported")
+    check_equal(
+        gap.push(uplink(1, 4, 0, [9, 10])),
+        struct.pack("<2h", 9, 10),
+        "a new stream generation resets sequence and sample-counter state",
+    )
+    check_equal(gap.generation_changes, 1, "uplink generation changes are reported")
+
+    check(espdisp.mdns_query_due(None, 1.0, 0.5),
+          "an unsent mDNS question is due immediately")
+    check(not espdisp.mdns_query_due(1.0, 1.49, 0.5),
+          "mDNS follow-up waits for its retry cadence")
+    check(espdisp.mdns_query_due(1.0, 1.5, 0.5),
+          "an unanswered mDNS follow-up is retransmitted")
+
+    invalid_args = espdisp.build_parser().parse_args(
+        ["audio", "panel.local", "--tone", "440", "--seconds", "0"])
+    check_fails(
+        lambda: espdisp.validate_audio_local_args(invalid_args),
+        "--seconds",
+        "panel-independent duration validation precedes discovery",
+    )
+    check_equal(
+        args.send_only,
+        False,
+        "panel acknowledgement is required unless --send-only is explicit",
+    )
+    check_equal(
+        args.uplink_reorder_packets,
+        4,
+        "uplink reorder depth has a runtime default",
+    )
+
 
 def test_describe_bundle():
     """bundle-info's output is the whole point of the manifest, so it is checked.
