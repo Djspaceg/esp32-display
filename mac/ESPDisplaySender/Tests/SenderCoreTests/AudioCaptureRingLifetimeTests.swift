@@ -74,12 +74,15 @@ final class AudioCaptureRingLifetimeTests: XCTestCase {
         lifetime = nil
         wait(for: [ownerReleaseStarted], timeout: 1)
         XCTAssertEqual(
-            destroyed.wait(timeout: .now() + .milliseconds(50)),
+            destroyed.wait(
+                timeout: DispatchTime.now() + .milliseconds(50)),
             .timedOut,
             "the ring must remain alive while the callback lease can reach C")
         release.signal()
         wait(for: [exited], timeout: 1)
-        XCTAssertEqual(destroyed.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(
+            destroyed.wait(timeout: DispatchTime.now() + .seconds(1)),
+            .success)
         XCTAssertNil(weakLifetime.value)
     }
 }

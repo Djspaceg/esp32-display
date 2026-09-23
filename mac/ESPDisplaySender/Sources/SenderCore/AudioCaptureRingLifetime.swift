@@ -1,7 +1,7 @@
 import SenderAudioRT
 
-/// Owns the C ring for as long as either the session or an installed tap
-/// closure can reach it. A callback captures this object, never the raw pointer.
+/// Owns the C ring. Tap closures capture a separate lease, so deinit can wait
+/// until no dispatched callback or entered writer can still reach the pointer.
 final class AudioCaptureRingLifetime: @unchecked Sendable {
     private let ring: OpaquePointer
     private let onDestroy: (() -> Void)?
@@ -55,7 +55,7 @@ final class AudioCaptureRingLifetime: @unchecked Sendable {
 
 /// The tap closure owns this lease from installation until every dispatched
 /// invocation has returned. Releasing it is an atomic operation; destruction
-/// stays on the session queue in AudioCaptureRingLifetime.deinit.
+/// remains the owner's responsibility after the quiesce barrier.
 final class AudioCaptureRingCallbackLease: @unchecked Sendable {
     private let ring: OpaquePointer
 
