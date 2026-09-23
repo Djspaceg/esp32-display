@@ -433,6 +433,33 @@ public enum AudioTiming {
     }
 }
 
+/// Monotonic deadline scheduler for descriptor-sized PCM packets.
+///
+/// CoreAudio normally calls the tap at the requested cadence, but it may
+/// deliver a larger buffer after a scheduling stall. Advancing one packet
+/// deadline at a time prevents those chunks from becoming a UDP burst.
+public struct AudioPacketPacer: Equatable, Sendable {
+    private var nextDeadlineNanos: UInt64?
+
+    public init() {}
+
+    public mutating func deadlineNanos(
+        nowNanos: UInt64,
+        frameCount: Int,
+        sampleRateHz: UInt32
+    ) -> UInt64 {
+        let deadline = max(nextDeadlineNanos ?? nowNanos, nowNanos)
+        let duration = UInt64(max(1, frameCount)) * 1_000_000_000
+            / UInt64(max(1, sampleRateHz))
+        nextDeadlineNanos = deadline &+ max(1, duration)
+        return deadline
+    }
+
+    public mutating func reset() {
+        nextDeadlineNanos = nil
+    }
+}
+
 /// Sequence accounting for the Mac's uplink jitter queue.
 public struct AudioSequenceTracker: Equatable, Sendable {
     private var generation: UInt16?

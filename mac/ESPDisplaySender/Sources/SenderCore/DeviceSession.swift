@@ -74,6 +74,7 @@ final class DeviceSession {
     /// mDNS lookup done again at push time could resolve to something else.
     var resolvedAddress: String? { sender.resolvedAddress }
     private let sender: FrameSender
+    private let audioSession: PanelAudioSession?
     private let source: Source
     private let picker: PickerSource?
     private let onStatus: ((Status) -> Void)?
@@ -136,13 +137,16 @@ final class DeviceSession {
     private var lastCount: UInt64 = 0
 
     init(
-        id: UUID = UUID(),
-        name: String, sender: FrameSender, source: Source, picker: PickerSource?, fps: Int,
-         onStatus: ((Status) -> Void)? = nil,
-         onPreview: ((CGImage, Bool) -> Void)? = nil) {
+        id: UUID = UUID(), name: String, sender: FrameSender,
+        audioSession: PanelAudioSession? = nil,
+        source: Source, picker: PickerSource?, fps: Int,
+        onStatus: ((Status) -> Void)? = nil,
+        onPreview: ((CGImage, Bool) -> Void)? = nil
+    ) {
         self.id = id
         self.name = name
         self.sender = sender
+        self.audioSession = audioSession
         self.source = source
         self.picker = picker
         self._fps = fps
@@ -165,6 +169,7 @@ final class DeviceSession {
             return activeCapture
         }
         sender.stop()
+        audioSession?.stop()
         if let capture {
             Task { await capture.stop() }
         }
@@ -246,7 +251,16 @@ final class DeviceSession {
     func sendDisplaySleep() { sender.sendDisplaySleep() }
     func sendDisplayWake() { sender.sendDisplayWake() }
     func forceKeyframe() { sender.forceKeyframe() }
-    func setPaused(_ paused: Bool) { sender.setPaused(paused) }
+    func setPaused(_ paused: Bool) {
+        sender.setPaused(paused)
+        audioSession?.setEnabled(!paused && !sender.parked)
+    }
+    func applyAudio(
+        preferences: AudioDevicePreferences,
+        tuning: AudioRuntimeTuning
+    ) {
+        audioSession?.update(preferences: preferences, tuning: tuning)
+    }
     func setBrightness(high: Bool) { sender.setBrightness(high: high) }
     func setBrightnessLevel(_ level: Int) { sender.setBrightnessLevel(level) }
     func setFlip(_ flipped: Bool) {
@@ -462,6 +476,7 @@ final class DeviceSession {
         }
 
         guard !isStopped else { return true }
+        audioSession?.start()
 
         let uuidCachePath = "/tmp/espdisplaysender-uuid-\(name)"
         var knownUUID = try? String(
@@ -869,6 +884,7 @@ final class DeviceSession {
     private func waitForDeviceToReturn() async {
         let repliesBeforeParking = sender.deviceRepliesReceived
         sender.setParked(true)
+        audioSession?.setEnabled(false)
         print("[\(name)] no reply for \(Int(Self.parkAfterSilence))s - capture stopped, "
             + "waiting for the display to come back")
         reportProgress(force: true)
@@ -890,6 +906,7 @@ final class DeviceSession {
         }
 
         sender.setParked(false)
+        audioSession?.setEnabled(!sender.paused)
         guard !isStopped else { return }
         setCaptureStatus(.waiting("The panel answered again. Restarting mirroring…"))
         print("[\(name)] display answered again - resuming capture")

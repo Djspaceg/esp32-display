@@ -391,6 +391,12 @@ private struct PanelDetailView: View {
             sourceSection
             displaySection
             connectionSection
+            if panel.audioStatus != nil
+                || panel.capabilities.contains(.audioDownlink)
+                || panel.capabilities.contains(.audioUplink)
+            {
+                audioSection
+            }
             // Gated on the panel actually having a touch screen, so a panel that
             // cannot produce a gesture does not offer to bind one.
             if panel.capabilities.contains(.touch) {
@@ -898,6 +904,74 @@ private struct PanelDetailView: View {
                 + "whenever it is connected by USB, in alphabetical order. "
                 + "Only the first 10 access points are selectable from the "
                 + "device.")
+        }
+    }
+
+    @ViewBuilder
+    private var audioSection: some View {
+        Section {
+            if let audio = panel.audioStatus {
+                LabeledContent("State", value: audio.state.label)
+                LabeledContent("Detail", value: audio.message)
+                LabeledContent("Mac microphone", value: audio.inputName)
+                LabeledContent("Mac speakers", value: audio.outputName)
+                LabeledContent(
+                    "Panel format",
+                    value: "\(audio.descriptor.sampleRateHz) Hz, "
+                        + "\(audio.descriptor.playbackChannels) down / "
+                        + "\(audio.descriptor.captureChannels) up channels")
+                LabeledContent(
+                    "Mac downlink loss",
+                    value: "\(audio.downlinkQueueDrops) queue drops")
+                LabeledContent(
+                    "Mac uplink loss",
+                    value: "\(audio.uplinkLostPackets) lost, "
+                        + "\(audio.uplinkLatePackets) late, "
+                        + "\(audio.playbackQueueDrops) queue drops")
+
+                if let status = audio.panelStatus {
+                    LabeledContent(
+                        "Panel buffer",
+                        value: "\(status.fillFrames) / \(status.targetFrames) frames")
+                    LabeledContent(
+                        "Minimum fill",
+                        value: "\(status.minimumFillFrames) frames")
+                    LabeledContent("Underruns", value: "\(status.underruns)")
+                    LabeledContent(
+                        "Underrun duration",
+                        value: "\(status.underrunDurationMilliseconds) ms")
+                    LabeledContent("Late packets", value: "\(status.latePackets)")
+                    LabeledContent("Lost frames", value: "\(status.lostFrames)")
+                    LabeledContent(
+                        "Clock corrections", value: "\(status.hardCorrections)")
+                    LabeledContent(
+                        "Ingress drops", value: "\(status.ingressDrops)")
+                    LabeledContent("Queue drops", value: "\(status.queueDrops)")
+                    LabeledContent("Engine drops", value: "\(status.engineDrops)")
+                    LabeledContent(
+                        "Capture overruns", value: "\(status.captureOverruns)")
+                } else {
+                    LabeledContent("Panel diagnostics", value: "Waiting for status")
+                }
+            } else {
+                LabeledContent("State", value: "Waiting for audio descriptor")
+            }
+        } header: {
+            Text("Audio")
+        } footer: {
+            if let audio = panel.audioStatus {
+                Text(
+                    "Latency target / ceiling: "
+                        + "\(audio.tuning.downlinkTargetMilliseconds) / "
+                        + "\(audio.tuning.downlinkCeilingMilliseconds) ms downlink, "
+                        + "\(audio.tuning.uplinkTargetMilliseconds) / "
+                        + "\(audio.tuning.uplinkCeilingMilliseconds) ms uplink. "
+                        + "Derived clock bound \(audio.tuning.derivedDriftBoundPPM) ppm; "
+                        + "correction limit \(audio.tuning.maximumCorrectionPPM) ppm.")
+            } else {
+                Text("Audio starts only after the panel advertises a complete "
+                    + "EAUD descriptor and its audio capability bits.")
+            }
         }
     }
 

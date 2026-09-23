@@ -28,6 +28,8 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>ESPDisplaySender discovers and streams to display panels on your local network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ESPDisplaySender sends audio from your selected microphone to the display panel.</string>
 	<!-- Background by default; the manager opts into Dock/menu presence only while visible. -->
 	<key>LSUIElement</key>
 	<true/>

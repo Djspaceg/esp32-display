@@ -453,12 +453,27 @@ public enum ESPDisplaySenderApp {
                 id: UUID = UUID(),
                 name: String,
                 sender: FrameSender,
+                audioDescriptor: AudioStreamDescriptor? = nil,
                 allowUnowned: Bool = false,
                 provisional: Bool = false
             ) {
+                let audioSession = audioDescriptor.map { descriptor in
+                    PanelAudioSession(
+                        descriptor: descriptor,
+                        addressProvider: { [weak sender] in
+                            sender?.resolvedAddress
+                        },
+                        onUpdate: { status in
+                            Task { @MainActor in
+                                panelManager.updateAudio(
+                                    status, for: name, sessionID: id)
+                            }
+                        })
+                }
                 let session = DeviceSession(
                     id: id,
-                    name: name, sender: sender, source: sourceFor(name),
+                    name: name, sender: sender, audioSession: audioSession,
+                    source: sourceFor(name),
                     picker: picker, fps: streaming.fps,
                     onStatus: { status in
                         Task { @MainActor in
@@ -544,6 +559,7 @@ public enum ESPDisplaySenderApp {
                                                 sessionID: sessionID)
                                         }
                                     }),
+                                audioDescriptor: device.metadata.audioDescriptor,
                                 provisional: true)
                         }
                     }

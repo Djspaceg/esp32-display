@@ -124,6 +124,29 @@ final class AudioProtocolTests: XCTestCase {
             "observations are clamped to the derived operating margin")
     }
 
+    func testPacketPacerSpacesBurstCallbacksAtTheDescriptorRate() {
+        var pacer = AudioPacketPacer()
+
+        XCTAssertEqual(
+            pacer.deadlineNanos(
+                nowNanos: 1_000_000_000,
+                frameCount: 320,
+                sampleRateHz: 16_000),
+            1_000_000_000)
+        XCTAssertEqual(
+            pacer.deadlineNanos(
+                nowNanos: 1_000_000_000,
+                frameCount: 320,
+                sampleRateHz: 16_000),
+            1_020_000_000)
+        XCTAssertEqual(
+            pacer.deadlineNanos(
+                nowNanos: 1_100_000_000,
+                frameCount: 320,
+                sampleRateHz: 16_000),
+            1_100_000_000)
+    }
+
     func testSequenceTrackerCountsGapsAndRejectsLatePackets() {
         var tracker = AudioSequenceTracker()
         XCTAssertTrue(tracker.accept(sequence: 7, streamGeneration: 1))
