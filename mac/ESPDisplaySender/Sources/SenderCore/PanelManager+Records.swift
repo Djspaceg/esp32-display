@@ -115,6 +115,9 @@ extension PanelManager {
         session.applyPacing(
             spacingMicros: settings.spacingMicros, adaptive: settings.adaptivePacing)
         session.applyTileQuality(settings.tileQuality)
+        session.applyAudio(
+            preferences: settings.audioDevices,
+            tuning: settings.audioTuning)
         // No frames leave until EINF proves this service is the owned hardware.
         session.setPaused(true)
         if session.name == previewFocus {
@@ -135,6 +138,7 @@ extension PanelManager {
             panel.displayFPS = 0
             panel.captureStatus = .failed(
                 "No session is running for this display, so nothing is being sent.")
+            panel.audioStatus = nil
             panel.lastError = "Gave up trying to reach this display. It is retried "
                 + "automatically once it reappears on the network."
         }

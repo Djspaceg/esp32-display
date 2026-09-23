@@ -261,6 +261,9 @@ final class DeviceSession {
     ) {
         audioSession?.update(preferences: preferences, tuning: tuning)
     }
+    func audioDevicesChanged() {
+        audioSession?.devicesChanged()
+    }
     func setBrightness(high: Bool) { sender.setBrightness(high: high) }
     func setBrightnessLevel(_ level: Int) { sender.setBrightnessLevel(level) }
     func setFlip(_ flipped: Bool) {

@@ -460,6 +460,8 @@ public enum ESPDisplaySenderApp {
                 let audioSession = audioDescriptor.map { descriptor in
                     PanelAudioSession(
                         descriptor: descriptor,
+                        preferences: streaming.audioDevices,
+                        tuning: streaming.audioTuning,
                         addressProvider: { [weak sender] in
                             sender?.resolvedAddress
                         },

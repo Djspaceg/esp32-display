@@ -355,6 +355,54 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
         self.correctionMargin = correctionMargin
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case packetMilliseconds
+        case downlinkTargetMilliseconds
+        case downlinkCeilingMilliseconds
+        case uplinkTargetMilliseconds
+        case uplinkCeilingMilliseconds
+        case statusPublishMilliseconds
+        case panelClockPPM
+        case macClockPPM
+        case estimatorErrorPPM
+        case correctionMargin
+    }
+
+    public init(from decoder: Decoder) throws {
+        let defaults = Self()
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        packetMilliseconds =
+            (try? container.decode(Double.self, forKey: .packetMilliseconds))
+            ?? defaults.packetMilliseconds
+        downlinkTargetMilliseconds =
+            (try? container.decode(Double.self, forKey: .downlinkTargetMilliseconds))
+            ?? defaults.downlinkTargetMilliseconds
+        downlinkCeilingMilliseconds =
+            (try? container.decode(Double.self, forKey: .downlinkCeilingMilliseconds))
+            ?? defaults.downlinkCeilingMilliseconds
+        uplinkTargetMilliseconds =
+            (try? container.decode(Double.self, forKey: .uplinkTargetMilliseconds))
+            ?? defaults.uplinkTargetMilliseconds
+        uplinkCeilingMilliseconds =
+            (try? container.decode(Double.self, forKey: .uplinkCeilingMilliseconds))
+            ?? defaults.uplinkCeilingMilliseconds
+        statusPublishMilliseconds =
+            (try? container.decode(Double.self, forKey: .statusPublishMilliseconds))
+            ?? defaults.statusPublishMilliseconds
+        panelClockPPM =
+            (try? container.decode(Double.self, forKey: .panelClockPPM))
+            ?? defaults.panelClockPPM
+        macClockPPM =
+            (try? container.decode(Double.self, forKey: .macClockPPM))
+            ?? defaults.macClockPPM
+        estimatorErrorPPM =
+            (try? container.decode(Double.self, forKey: .estimatorErrorPPM))
+            ?? defaults.estimatorErrorPPM
+        correctionMargin =
+            (try? container.decode(Double.self, forKey: .correctionMargin))
+            ?? defaults.correctionMargin
+    }
+
     /// abs(panel) + abs(Mac) + abs(estimator), as required by the ADR.
     public var derivedDriftBoundPPM: Double {
         abs(panelClockPPM) + abs(macClockPPM) + abs(estimatorErrorPPM)

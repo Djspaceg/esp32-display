@@ -42,6 +42,46 @@ struct SettingsSheet: View {
             }
 
             Section {
+                Picker("Microphone", selection: $draft.audioDevices.inputUID) {
+                    Text(AudioDeviceResolver.systemDefaultName)
+                        .tag(Optional<String>.none)
+                    if let saved = draft.audioDevices.inputUID,
+                       !manager.audioDevices.contains(where: {
+                           $0.uid == saved && $0.supportsInput
+                       })
+                    {
+                        Text("Missing saved microphone (using System Default)")
+                            .tag(Optional<String>.some(saved))
+                    }
+                    ForEach(manager.audioDevices.filter { $0.supportsInput }) { device in
+                        Text(device.name).tag(Optional<String>.some(device.uid))
+                    }
+                }
+                Picker("Speakers", selection: $draft.audioDevices.outputUID) {
+                    Text(AudioDeviceResolver.systemDefaultName)
+                        .tag(Optional<String>.none)
+                    if let saved = draft.audioDevices.outputUID,
+                       !manager.audioDevices.contains(where: {
+                           $0.uid == saved && $0.supportsOutput
+                       })
+                    {
+                        Text("Missing saved speakers (using System Default)")
+                            .tag(Optional<String>.some(saved))
+                    }
+                    ForEach(manager.audioDevices.filter { $0.supportsOutput }) { device in
+                        Text(device.name).tag(Optional<String>.some(device.uid))
+                    }
+                }
+            } header: {
+                Text("Panel Audio")
+            } footer: {
+                Text("The microphone streams to the panel speaker. Panel microphone "
+                    + "audio plays through the selected speakers. If a saved device "
+                    + "is unplugged, streaming restarts on System Default and returns "
+                    + "to the saved device when macOS reports it again.")
+            }
+
+            Section {
                 Toggle("Tune automatically", isOn: $draft.adaptivePacing)
                 LabeledContent("Packet pacing") {
                     HStack(spacing: 10) {
@@ -119,7 +159,7 @@ struct SettingsSheet: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 14)
         }
-        .frame(width: 560, height: 520)
+        .frame(width: 560, height: 620)
         .onAppear { draft = manager.settings }
     }
 }

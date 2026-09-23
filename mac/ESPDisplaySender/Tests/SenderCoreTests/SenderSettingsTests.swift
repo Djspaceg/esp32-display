@@ -28,6 +28,8 @@ final class SenderSettingsTests: XCTestCase {
         XCTAssertEqual(settings.identifySeconds, 8)
         XCTAssertEqual(settings.tileQuality, .auto)
         XCTAssertEqual(settings.deviceListSortOrder, .alphabetical)
+        XCTAssertEqual(settings.audioDevices, AudioDevicePreferences())
+        XCTAssertEqual(settings.audioTuning, AudioRuntimeTuning())
         XCTAssertEqual(settings, settings.validated, "defaults must be in range")
     }
 
@@ -44,6 +46,8 @@ final class SenderSettingsTests: XCTestCase {
         XCTAssertEqual(decoded.identifySeconds, 12)
         XCTAssertEqual(decoded.tileQuality, .auto)
         XCTAssertEqual(decoded.deviceListSortOrder, .alphabetical)
+        XCTAssertEqual(decoded.audioDevices, AudioDevicePreferences())
+        XCTAssertEqual(decoded.audioTuning, AudioRuntimeTuning())
         // An unrecognized quality string (a future build's value) falls back
         // rather than failing the whole file.
         let future = Data(#"{"fps": 25, "tileQuality": "halfRes"}"#.utf8)
@@ -66,6 +70,42 @@ final class SenderSettingsTests: XCTestCase {
         let decoded = try JSONDecoder().decode(SenderSettings.self, from: data)
         XCTAssertEqual(decoded.tileQuality, .losslessOnly)
         XCTAssertEqual(decoded, settings)
+    }
+
+    func testAudioDevicesAndTuningRoundTrip() throws {
+        var settings = SenderSettings()
+        settings.audioDevices = AudioDevicePreferences(
+            inputUID: "microphone-uid",
+            outputUID: "speaker-uid")
+        settings.audioTuning = AudioRuntimeTuning(
+            packetMilliseconds: 10,
+            downlinkTargetMilliseconds: 140,
+            downlinkCeilingMilliseconds: 210,
+            uplinkTargetMilliseconds: 60,
+            uplinkCeilingMilliseconds: 100,
+            statusPublishMilliseconds: 500,
+            panelClockPPM: 40,
+            macClockPPM: 80,
+            estimatorErrorPPM: 30,
+            correctionMargin: 2.5)
+
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(SenderSettings.self, from: data)
+
+        XCTAssertEqual(decoded, settings)
+        XCTAssertEqual(decoded.audioTuning.derivedDriftBoundPPM, 150)
+        XCTAssertEqual(decoded.audioTuning.maximumCorrectionPPM, 375)
+    }
+
+    func testPartialAudioTuningUsesDefaultsPerField() throws {
+        let data = Data(
+            #"{"audioTuning":{"uplinkTargetMilliseconds":55}}"#.utf8)
+        let decoded = try JSONDecoder().decode(SenderSettings.self, from: data)
+
+        XCTAssertEqual(decoded.audioTuning.uplinkTargetMilliseconds, 55)
+        XCTAssertEqual(decoded.audioTuning.uplinkCeilingMilliseconds, 120)
+        XCTAssertEqual(decoded.audioTuning.downlinkTargetMilliseconds, 150)
+        XCTAssertEqual(decoded.audioTuning.derivedDriftBoundPPM, 200)
     }
 
     /// The pacing bounds come from the sender itself, so the UI cannot offer a
@@ -143,6 +183,19 @@ final class SettingsStoreTests: XCTestCase {
         let loaded = SettingsStore.load(from: storeURL)
         XCTAssertNil(loaded.failure)
         XCTAssertEqual(loaded.settings, settings)
+    }
+
+    func testAudioDeviceUIDsPersistEvenWhileDevicesAreMissing() throws {
+        var settings = SenderSettings()
+        settings.audioDevices = AudioDevicePreferences(
+            inputUID: "unplugged-input",
+            outputUID: "unplugged-output")
+        try SettingsStore.save(settings, to: storeURL)
+
+        let loaded = SettingsStore.load(from: storeURL)
+
+        XCTAssertNil(loaded.failure)
+        XCTAssertEqual(loaded.settings.audioDevices, settings.audioDevices)
     }
 
     /// First run has no file, which is not a problem.

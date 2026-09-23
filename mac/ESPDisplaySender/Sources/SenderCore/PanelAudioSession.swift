@@ -177,6 +177,13 @@ final class PanelAudioSession {
         }
     }
 
+    func devicesChanged() {
+        queue.async { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.restart(reason: "The available CoreAudio devices changed.")
+        }
+    }
+
     private func beginIfNeeded() {
         guard requested, enabled, !stopped, connection == nil,
               !permissionRequestInFlight
