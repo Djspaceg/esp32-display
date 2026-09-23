@@ -103,8 +103,11 @@ final class AudioProtocolTests: XCTestCase {
         let tuning = AudioRuntimeTuning()
         XCTAssertEqual(tuning.downlinkTargetMilliseconds, 150)
         XCTAssertEqual(tuning.downlinkCeilingMilliseconds, 220)
+        XCTAssertEqual(tuning.downlinkPanelTargetMilliseconds, 120)
         XCTAssertEqual(tuning.uplinkTargetMilliseconds, 80)
         XCTAssertEqual(tuning.uplinkCeilingMilliseconds, 120)
+        XCTAssertEqual(tuning.uplinkJitterMilliseconds, 40)
+        XCTAssertEqual(tuning.uplinkJitterCeilingMilliseconds, 80)
         XCTAssertEqual(tuning.derivedDriftBoundPPM, 200)
         XCTAssertEqual(tuning.maximumCorrectionPPM, 400)
         XCTAssertEqual(
@@ -196,6 +199,35 @@ final class AudioProtocolTests: XCTestCase {
         XCTAssertEqual(output.count, 8)
         XCTAssertEqual(output.first, 0)
         XCTAssertEqual(output.last, 15)
+
+        var streaming = AudioVariableRateResampler()
+        var totalFrames = 0
+        let callback = [Float](repeating: 0, count: 320)
+        for _ in 0..<100 {
+            totalFrames += streaming.resample(
+                interleavedSamples: callback,
+                channels: 1,
+                rateMultiplier: 1.0004).count
+        }
+        XCTAssertEqual(
+            totalFrames,
+            Int((32_000.0 / 1.0004).rounded(.down)),
+            "fractional ppm corrections must survive callback-sized rounding")
+
+        var sparse = AudioVariableRateResampler()
+        XCTAssertEqual(
+            sparse.resample(
+                interleavedSamples: [1],
+                channels: 1,
+                rateMultiplier: 2),
+            [])
+        XCTAssertEqual(
+            sparse.resample(
+                interleavedSamples: [1],
+                channels: 1,
+                rateMultiplier: 2),
+            [1],
+            "sub-frame output is carried rather than forced negative")
     }
 
     func testLatencyTargetContributesToDriftCorrection() {
@@ -302,5 +334,17 @@ final class AudioProtocolTests: XCTestCase {
                 nowNanos: 3_000_000_000),
             200_000,
             "expired audio demand does not reserve a permanent fixed share")
+    }
+
+    func testAudioBudgetNeverSpeedsUpAnAlreadySlowerVideoSetting() {
+        var budget = AudioFirstRadioBudget(tuning: AudioRuntimeTuning(
+            maximumVideoDelayMilliseconds: 1))
+        budget.recordAudioDatagram(bytes: 64, nowNanos: 1_000_000_000)
+        XCTAssertEqual(
+            budget.videoSpacingNanos(
+                baseSpacingMicros: 5_000,
+                packetBytes: 64,
+                nowNanos: 1_000_000_000),
+            5_000_000)
     }
 }

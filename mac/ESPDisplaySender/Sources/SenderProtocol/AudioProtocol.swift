@@ -323,8 +323,11 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
     public var packetMilliseconds: Double
     public var downlinkTargetMilliseconds: Double
     public var downlinkCeilingMilliseconds: Double
+    public var downlinkPanelTargetMilliseconds: Double
     public var uplinkTargetMilliseconds: Double
     public var uplinkCeilingMilliseconds: Double
+    public var uplinkJitterMilliseconds: Double
+    public var uplinkJitterCeilingMilliseconds: Double
     public var statusPublishMilliseconds: Double
     public var panelClockPPM: Double
     public var macClockPPM: Double
@@ -347,8 +350,11 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
         packetMilliseconds: Double = 20,
         downlinkTargetMilliseconds: Double = 150,
         downlinkCeilingMilliseconds: Double = 220,
+        downlinkPanelTargetMilliseconds: Double = 120,
         uplinkTargetMilliseconds: Double = 80,
         uplinkCeilingMilliseconds: Double = 120,
+        uplinkJitterMilliseconds: Double = 40,
+        uplinkJitterCeilingMilliseconds: Double = 80,
         statusPublishMilliseconds: Double = 250,
         panelClockPPM: Double = 50,
         macClockPPM: Double = 100,
@@ -370,8 +376,11 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
         self.packetMilliseconds = packetMilliseconds
         self.downlinkTargetMilliseconds = downlinkTargetMilliseconds
         self.downlinkCeilingMilliseconds = downlinkCeilingMilliseconds
+        self.downlinkPanelTargetMilliseconds = downlinkPanelTargetMilliseconds
         self.uplinkTargetMilliseconds = uplinkTargetMilliseconds
         self.uplinkCeilingMilliseconds = uplinkCeilingMilliseconds
+        self.uplinkJitterMilliseconds = uplinkJitterMilliseconds
+        self.uplinkJitterCeilingMilliseconds = uplinkJitterCeilingMilliseconds
         self.statusPublishMilliseconds = statusPublishMilliseconds
         self.panelClockPPM = panelClockPPM
         self.macClockPPM = macClockPPM
@@ -395,8 +404,11 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
         case packetMilliseconds
         case downlinkTargetMilliseconds
         case downlinkCeilingMilliseconds
+        case downlinkPanelTargetMilliseconds
         case uplinkTargetMilliseconds
         case uplinkCeilingMilliseconds
+        case uplinkJitterMilliseconds
+        case uplinkJitterCeilingMilliseconds
         case statusPublishMilliseconds
         case panelClockPPM
         case macClockPPM
@@ -428,12 +440,23 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
         downlinkCeilingMilliseconds =
             (try? container.decode(Double.self, forKey: .downlinkCeilingMilliseconds))
             ?? defaults.downlinkCeilingMilliseconds
+        downlinkPanelTargetMilliseconds =
+            (try? container.decode(
+                Double.self, forKey: .downlinkPanelTargetMilliseconds))
+            ?? defaults.downlinkPanelTargetMilliseconds
         uplinkTargetMilliseconds =
             (try? container.decode(Double.self, forKey: .uplinkTargetMilliseconds))
             ?? defaults.uplinkTargetMilliseconds
         uplinkCeilingMilliseconds =
             (try? container.decode(Double.self, forKey: .uplinkCeilingMilliseconds))
             ?? defaults.uplinkCeilingMilliseconds
+        uplinkJitterMilliseconds =
+            (try? container.decode(Double.self, forKey: .uplinkJitterMilliseconds))
+            ?? defaults.uplinkJitterMilliseconds
+        uplinkJitterCeilingMilliseconds =
+            (try? container.decode(
+                Double.self, forKey: .uplinkJitterCeilingMilliseconds))
+            ?? defaults.uplinkJitterCeilingMilliseconds
         statusPublishMilliseconds =
             (try? container.decode(Double.self, forKey: .statusPublishMilliseconds))
             ?? defaults.statusPublishMilliseconds
@@ -504,6 +527,12 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
             downlinkTargetMilliseconds, lower: 1, upper: 1_000)
         let uplinkTarget = Self.clamp(
             uplinkTargetMilliseconds, lower: 1, upper: 1_000)
+        let uplinkCeiling = Self.clamp(
+            uplinkCeilingMilliseconds,
+            lower: uplinkTarget,
+            upper: 2_000)
+        let uplinkJitter = Self.clamp(
+            uplinkJitterMilliseconds, lower: 1, upper: uplinkTarget)
         return AudioRuntimeTuning(
             packetMilliseconds: Self.clamp(
                 packetMilliseconds, lower: 1, upper: 100),
@@ -512,11 +541,17 @@ public struct AudioRuntimeTuning: Codable, Equatable, Sendable {
                 downlinkCeilingMilliseconds,
                 lower: downlinkTarget,
                 upper: 2_000),
+            downlinkPanelTargetMilliseconds: Self.clamp(
+                downlinkPanelTargetMilliseconds,
+                lower: 1,
+                upper: downlinkTarget),
             uplinkTargetMilliseconds: uplinkTarget,
-            uplinkCeilingMilliseconds: Self.clamp(
-                uplinkCeilingMilliseconds,
-                lower: uplinkTarget,
-                upper: 2_000),
+            uplinkCeilingMilliseconds: uplinkCeiling,
+            uplinkJitterMilliseconds: uplinkJitter,
+            uplinkJitterCeilingMilliseconds: Self.clamp(
+                uplinkJitterCeilingMilliseconds,
+                lower: uplinkJitter,
+                upper: uplinkCeiling),
             statusPublishMilliseconds: Self.clamp(
                 statusPublishMilliseconds, lower: 50, upper: 5_000),
             panelClockPPM: Self.clamp(
@@ -678,7 +713,60 @@ public enum AudioLinearResampler {
         let inputFrames = interleavedSamples.count / channels
         let outputFrames = outputFrameCount(
             inputFrames: inputFrames, rateMultiplier: rateMultiplier)
-        guard inputFrames > 1, outputFrames > 1 else {
+        return resample(
+            interleavedSamples: interleavedSamples,
+            channels: channels,
+            outputFrames: outputFrames)
+    }
+}
+
+/// Carries fractional output frames across buffers so sub-frame ppm
+/// corrections remain effective at normal 10-20 ms callback sizes.
+public struct AudioVariableRateResampler: Equatable, Sendable {
+    private var fractionalFrames: Double = 0
+
+    public init() {}
+
+    public mutating func resample(
+        interleavedSamples: [Float],
+        channels: Int,
+        rateMultiplier: Double
+    ) -> [Float] {
+        guard channels > 0,
+              interleavedSamples.count >= channels,
+              rateMultiplier.isFinite
+        else { return [] }
+        let inputFrames = interleavedSamples.count / channels
+        let ratio = min(max(rateMultiplier, 0.5), 2)
+        let exactFrames = Double(inputFrames) / ratio + fractionalFrames
+        let outputFrames = max(0, Int(exactFrames.rounded(.down)))
+        fractionalFrames = exactFrames - Double(outputFrames)
+        return AudioLinearResampler.resample(
+            interleavedSamples: interleavedSamples,
+            channels: channels,
+            outputFrames: outputFrames)
+    }
+
+    public mutating func reset() {
+        fractionalFrames = 0
+    }
+}
+
+private extension AudioLinearResampler {
+    static func resample(
+        interleavedSamples: [Float],
+        channels: Int,
+        outputFrames: Int
+    ) -> [Float] {
+        let inputFrames = interleavedSamples.count / channels
+        guard inputFrames > 0, outputFrames > 0 else { return [] }
+        if inputFrames == 1 {
+            return Array(
+                repeating: Array(interleavedSamples.prefix(channels)),
+                count: outputFrames
+            ).flatMap { $0 }
+        }
+        guard outputFrames > 1 else {
             return Array(interleavedSamples.prefix(channels))
         }
         let scale = Double(inputFrames - 1) / Double(outputFrames - 1)
@@ -734,8 +822,9 @@ public struct AudioJitterBuffer: Equatable, Sendable {
         reorderWindowPackets: Int,
         reorderTimeoutNanos: UInt64
     ) {
-        self.targetFrames = max(1, targetFrames)
-        self.ceilingFrames = max(targetFrames, ceilingFrames)
+        let target = max(1, targetFrames)
+        self.targetFrames = target
+        self.ceilingFrames = max(target, ceilingFrames)
         self.reorderWindowPackets = min(max(reorderWindowPackets, 1), 64)
         self.reorderTimeoutNanos = max(1, reorderTimeoutNanos)
     }
@@ -857,9 +946,13 @@ public struct AudioFirstRadioBudget: Equatable, Sendable {
     public mutating func recordAudioDatagram(bytes: Int, nowNanos: UInt64) {
         guard bytes > 0 else { return }
         prune(nowNanos: nowNanos)
+        let overhead = tuning.radioPacketOverheadBytes
+        let wireBytes = bytes > Int.max - overhead
+            ? Int.max
+            : bytes + overhead
         samples.append(Sample(
             timestampNanos: nowNanos,
-            wireBytes: bytes + tuning.radioPacketOverheadBytes))
+            wireBytes: wireBytes))
     }
 
     public mutating func videoSpacingNanos(
@@ -876,12 +969,25 @@ public struct AudioFirstRadioBudget: Equatable, Sendable {
         let baseBytesPerSecond =
             fullVideoBytes * 1_000_000 / Double(max(1, baseSpacingMicros))
         let windowSeconds = tuning.radioWindowMilliseconds / 1_000
+        let packetSeconds = tuning.packetMilliseconds / 1_000
+        let measuredSeconds: Double
+        if let first = samples.first, let last = samples.last {
+            let span = Double(last.timestampNanos &- first.timestampNanos)
+                / 1_000_000_000
+            measuredSeconds = min(
+                windowSeconds,
+                max(packetSeconds, span + packetSeconds))
+        } else {
+            measuredSeconds = packetSeconds
+        }
         let audioBytesPerSecond =
-            Double(samples.reduce(0) { $0 + $1.wireBytes }) / windowSeconds
+            Double(samples.reduce(0) { $0 + $1.wireBytes })
+                / measuredSeconds
         let available = baseBytesPerSecond * (1 - tuning.radioSafetyMargin)
             - audioBytesPerSecond
-        let maximum = UInt64(
-            tuning.maximumVideoDelayMilliseconds * 1_000_000)
+        let maximum = max(
+            base,
+            UInt64(tuning.maximumVideoDelayMilliseconds * 1_000_000))
         guard available > 0 else { return max(base, maximum) }
         let packetWireBytes =
             Double(packetBytes + tuning.radioPacketOverheadBytes)

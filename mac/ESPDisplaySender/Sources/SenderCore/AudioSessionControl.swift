@@ -23,6 +23,12 @@ enum AudioSessionReconciler {
     }
 }
 
+enum AudioSessionActivationPolicy {
+    static func isEnabled(paused: Bool, parked: Bool) -> Bool {
+        !paused && !parked
+    }
+}
+
 struct PanelPeerAddressSnapshot: Equatable, Sendable {
     let address: String?
     let generation: UInt64

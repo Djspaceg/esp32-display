@@ -35,6 +35,15 @@ final class AudioSessionControlTests: XCTestCase {
             .remove)
     }
 
+    func testLateAdapterInheritsProvisionalPauseBeforeRunStarts() {
+        XCTAssertFalse(AudioSessionActivationPolicy.isEnabled(
+            paused: true, parked: false))
+        XCTAssertFalse(AudioSessionActivationPolicy.isEnabled(
+            paused: false, parked: true))
+        XCTAssertTrue(AudioSessionActivationPolicy.isEnabled(
+            paused: false, parked: false))
+    }
+
     func testAddressGenerationChangesOnEveryVideoResolution() {
         let address = PanelPeerAddress()
         XCTAssertEqual(
