@@ -77,9 +77,9 @@ void acceptDatagram(const uint8_t *data, size_t length,
   Packet packet = {};
   packet.header = parsed.header;
   packet.payloadBytes = (uint16_t)parsed.payloadBytes;
+  packet.remoteIp = from.sin_addr.s_addr;
+  packet.remotePort = ntohs(from.sin_port);
   memcpy(packet.samples, parsed.payload, parsed.payloadBytes);
-  peerIp = from.sin_addr.s_addr;
-  peerPort = ntohs(from.sin_port);
   if (xQueueSend(packetQueue, &packet, 0) != pdTRUE) {
     transportStats.queueDrops++;
     transportStats.ingressDrops++;
@@ -177,6 +177,12 @@ bool receive(Packet &packet, TickType_t waitTicks) {
          xQueueReceive(packetQueue, &packet, waitTicks) == pdTRUE;
 }
 
+void claimPeer(const Packet &packet) {
+  if (packet.remoteIp == 0 || packet.remotePort == 0) return;
+  peerIp = packet.remoteIp;
+  peerPort = packet.remotePort;
+}
+
 bool sendCapture(const int16_t *samples, uint16_t frameCount,
                  uint8_t channels, uint32_t sampleRateHz,
                  uint16_t streamGeneration, uint32_t sampleCounter) {
@@ -245,6 +251,7 @@ bool start(const board::Config &) { return false; }
 void stop() {}
 bool available() { return false; }
 bool receive(Packet &, TickType_t) { return false; }
+void claimPeer(const Packet &) {}
 bool sendCapture(const int16_t *, uint16_t, uint8_t, uint32_t, uint16_t,
                  uint32_t) {
   return false;

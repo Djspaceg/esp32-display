@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -51,7 +52,8 @@ static void putU32(std::vector<uint8_t> &bytes, size_t offset,
 static std::vector<uint8_t> documentedPcm(uint16_t sequence,
                                           uint32_t sampleCounter,
                                           uint16_t frameCount,
-                                          uint8_t channels = 2) {
+                                          uint8_t channels = 2,
+                                          uint32_t sampleRateHz = 16000) {
   const size_t payloadBytes =
       (size_t)frameCount * channels * sizeof(int16_t);
   std::vector<uint8_t> bytes(audioproto::HEADER_BYTES + payloadBytes, 0);
@@ -65,7 +67,7 @@ static std::vector<uint8_t> documentedPcm(uint16_t sequence,
   bytes[7] = channels;
   putU16(bytes, 8, sequence);
   putU16(bytes, 10, 9);
-  putU32(bytes, 12, 16000);
+  putU32(bytes, 12, sampleRateHz);
   putU32(bytes, 16, sampleCounter);
   putU32(bytes, 20, 123456);
   putU16(bytes, 24, frameCount);
@@ -277,6 +279,167 @@ static int testFinding9() {
   return 0;
 }
 
+static int testRound3RejectedPeerOwnership() {
+  constexpr uint32_t acceptedIp = 0x01020304;
+  constexpr uint16_t acceptedPort = 6000;
+  constexpr uint32_t rejectedIp = 0x05060708;
+  constexpr uint16_t rejectedPort = 7000;
+
+  audiohost::reset();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_AMOLED_CO5300));
+  CHECK(audioengine::start(board::CONFIG_AMOLED_CO5300));
+
+  audiohost::enqueueUdp(documentedPcm(0, 0, 1),
+                        acceptedIp, acceptedPort);
+  audiotransport::hostReceiveBurst();
+  CHECK(audioengine::host::runEngineTaskIterations(1));
+  auto snapshot = audioengine::host::engineLoopSnapshot();
+  CHECK(snapshot.packetsVisited == 1);
+  CHECK(snapshot.packetsAccepted == 1);
+  CHECK(audiotransport::sendStatus(9, 16000, {}));
+  CHECK(audiohost::sentDatagrams().back().remoteIp == acceptedIp);
+  CHECK(audiohost::sentDatagrams().back().remotePort == acceptedPort);
+
+  audiohost::enqueueUdp(
+      documentedPcm(1, 1, 1, 2, 48000), rejectedIp, rejectedPort);
+  audiotransport::hostReceiveBurst();
+  CHECK(audioengine::host::runEngineTaskIterations(1));
+  snapshot = audioengine::host::engineLoopSnapshot();
+  CHECK(snapshot.packetsVisited == 1);
+  CHECK(snapshot.packetsAccepted == 0);
+  CHECK(snapshot.engineDrops == 1);
+  CHECK(audiotransport::sendStatus(9, 16000, {}));
+  CHECK(audiohost::sentDatagrams().back().remoteIp == acceptedIp);
+  CHECK(audiohost::sentDatagrams().back().remotePort == acceptedPort);
+
+  audioengine::stop();
+  audiotransport::stop();
+  return 0;
+}
+
+static int testRound3QueueFullPeerOwnership() {
+  constexpr uint32_t acceptedIp = 0x01020304;
+  constexpr uint16_t acceptedPort = 6000;
+  constexpr uint32_t rejectedIp = 0x05060708;
+  constexpr uint16_t rejectedPort = 7000;
+
+  audiohost::reset();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_AMOLED_CO5300));
+  CHECK(audioengine::start(board::CONFIG_AMOLED_CO5300));
+
+  audiohost::enqueueUdp(documentedPcm(0, 0, 1),
+                        acceptedIp, acceptedPort);
+  audiotransport::hostReceiveBurst();
+  CHECK(audioengine::host::runEngineTaskIterations(1));
+  const auto snapshot = audioengine::host::engineLoopSnapshot();
+  CHECK(snapshot.packetsAccepted == 1);
+  CHECK(audiotransport::sendStatus(9, 16000, {}));
+  CHECK(audiohost::sentDatagrams().back().remoteIp == acceptedIp);
+  CHECK(audiohost::sentDatagrams().back().remotePort == acceptedPort);
+
+  for (uint16_t sequence = 0; sequence < audiotransport::QUEUE_DEPTH;
+       ++sequence) {
+    audiohost::enqueueUdp(documentedPcm(sequence, sequence, 1),
+                          acceptedIp, acceptedPort);
+  }
+  audiohost::enqueueUdp(
+      documentedPcm(12, 12, 1), rejectedIp, rejectedPort);
+  audiotransport::hostReceiveBurst();
+  audiotransport::hostReceiveBurst();
+  CHECK(audiotransport::stats().queueDrops == 1);
+  CHECK(audiotransport::sendStatus(9, 16000, {}));
+  CHECK(audiohost::sentDatagrams().back().remoteIp == acceptedIp);
+  CHECK(audiohost::sentDatagrams().back().remotePort == acceptedPort);
+
+  audioengine::stop();
+  audiotransport::stop();
+  return 0;
+}
+
+static int testRound3EngineLoopSkipsRejectedPacket() {
+  constexpr uint32_t acceptedIp = 0x01020304;
+  constexpr uint16_t acceptedPort = 6000;
+
+  audiohost::reset();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_AMOLED_CO5300));
+  CHECK(audioengine::start(board::CONFIG_AMOLED_CO5300));
+
+  audiohost::enqueueUdp(
+      documentedPcm(0, 0, 1, 2, 48000), 0x05060708, 7000);
+  audiohost::enqueueUdp(
+      documentedPcm(0, 0, 1), acceptedIp, acceptedPort);
+  audiotransport::hostReceiveBurst();
+  CHECK(audioengine::host::runEngineTaskIterations(1));
+  const auto snapshot = audioengine::host::engineLoopSnapshot();
+  CHECK(snapshot.packetsVisited == 2);
+  CHECK(snapshot.packetsAccepted == 1);
+  CHECK(snapshot.engineDrops == 1);
+  audiotransport::Packet remaining = {};
+  CHECK(!audiotransport::receive(remaining, 0));
+  CHECK(audiotransport::sendStatus(9, 16000, {}));
+  CHECK(audiohost::sentDatagrams().back().remoteIp == acceptedIp);
+  CHECK(audiohost::sentDatagrams().back().remotePort == acceptedPort);
+
+  audioengine::stop();
+  audiotransport::stop();
+  return 0;
+}
+
+static int testRound3EngineLoopObservesPlaybackMetrics() {
+  constexpr uint32_t acceptedIp = 0x01020304;
+  constexpr uint16_t acceptedPort = 6000;
+  constexpr uint16_t framesPerPacket = 320;
+
+  audiohost::reset();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_AMOLED_CO5300));
+  CHECK(audioengine::start(board::CONFIG_AMOLED_CO5300));
+  for (uint16_t sequence = 0; sequence < 6; ++sequence) {
+    audiohost::enqueueUdp(
+        documentedPcm(sequence, sequence * framesPerPacket,
+                      framesPerPacket),
+        acceptedIp, acceptedPort);
+  }
+  audiotransport::hostReceiveBurst();
+  audiohost::setMillis(250);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  const auto snapshot = audioengine::host::engineLoopSnapshot();
+  CHECK(snapshot.packetsVisited == 6);
+  CHECK(snapshot.packetsAccepted == 6);
+  CHECK(snapshot.metricsObserveCalls == 1);
+  CHECK(snapshot.minimumFillFrames == 1760);
+
+  const auto &sent = audiohost::sentDatagrams();
+  const auto status = std::find_if(
+      sent.begin(), sent.end(), [](const audiohost::SentDatagram &datagram) {
+        return datagram.data.size() >= audioproto::HEADER_BYTES &&
+               datagram.data[5] ==
+                   (uint8_t)audioproto::DatagramKind::Status;
+      });
+  CHECK(status != sent.end());
+  CHECK(status->remoteIp == acceptedIp);
+  CHECK(status->remotePort == acceptedPort);
+  CHECK(audioproto::readU32LE(
+            status->data.data() + audioproto::HEADER_BYTES) == 1760);
+  CHECK(audioproto::readU32LE(
+            status->data.data() + audioproto::HEADER_BYTES + 8) == 1760);
+
+  audioengine::stop();
+  audiotransport::stop();
+  return 0;
+}
+
 int main() {
   const char *filter = std::getenv("AUDIO_TEST_FILTER");
   const struct {
@@ -291,6 +454,11 @@ int main() {
       {"6", testFinding6},
       {"7", testFinding7},
       {"9", testFinding9},
+      {"round3-peer-rejected", testRound3RejectedPeerOwnership},
+      {"round3-peer-queue", testRound3QueueFullPeerOwnership},
+      {"round3-engine-loop", testRound3EngineLoopSkipsRejectedPacket},
+      {"round3-engine-metrics",
+       testRound3EngineLoopObservesPlaybackMetrics},
   };
   for (const auto &finding : findingTests) {
     if (filter == nullptr || std::strcmp(filter, finding.name) == 0) {

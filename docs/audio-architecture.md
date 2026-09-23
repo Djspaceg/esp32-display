@@ -425,6 +425,11 @@ target fill, stream-lifetime minimum fill, underrun count and duration,
 late/lost data, hard corrections, ingress/queue/engine discards, and capture
 overruns.
 
+The receive task carries a datagram's source through the handoff queue but
+does not make it the uplink peer. The engine claims that endpoint only after
+the packet passes format, sequence, and jitter admission, so rejected or
+queue-dropped traffic cannot redirect capture or status.
+
 The version-1 byte layout is fixed:
 
 | Offset | Size | Field |

@@ -15,6 +15,8 @@ static const size_t QUEUE_DEPTH = 12;
 struct Packet {
   audioproto::PcmHeader header;
   uint16_t payloadBytes;
+  uint32_t remoteIp;
+  uint16_t remotePort;
   int16_t samples[audioproto::MAX_PAYLOAD_BYTES / sizeof(int16_t)];
 };
 
@@ -31,6 +33,7 @@ bool start(const board::Config &config);
 void stop();
 bool available();
 bool receive(Packet &packet, TickType_t waitTicks);
+void claimPeer(const Packet &packet);
 bool sendCapture(const int16_t *samples, uint16_t frameCount,
                  uint8_t channels, uint32_t sampleRateHz,
                  uint16_t streamGeneration, uint32_t sampleCounter);

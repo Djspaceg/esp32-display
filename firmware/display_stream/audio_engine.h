@@ -34,10 +34,21 @@ struct AdmissionSnapshot {
   bool streamSeen;
 };
 
+struct EngineLoopSnapshot {
+  uint32_t packetsVisited;
+  uint32_t packetsAccepted;
+  uint32_t engineDrops;
+  uint32_t metricsObserveCalls;
+  uint32_t minimumFillFrames;
+  uint32_t underrunDurationMs;
+};
+
 void resetAdmission(size_t capacityFrames);
 bool admitPacket(const audiotransport::Packet &packet, uint32_t nowMs);
 bool discardFrames(size_t frames);
 AdmissionSnapshot admissionSnapshot();
+bool runEngineTaskIterations(uint32_t iterations);
+EngineLoopSnapshot engineLoopSnapshot();
 bool renderFadingOut(const int16_t *input, size_t inputFrames,
                      uint8_t channels, size_t outputFrames,
                      const int16_t *lastOutput, int16_t *output);

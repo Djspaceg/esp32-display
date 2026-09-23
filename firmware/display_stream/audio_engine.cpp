@@ -33,10 +33,21 @@ const board::Config *activeBoard = nullptr;
 const board::AudioConfig *activeAudio = nullptr;
 int16_t *jitterStorage = nullptr;
 size_t jitterCapacityFrames = 0;
+bool ownsJitterStorage = false;
 volatile bool engineAvailable = false;
 volatile bool suppressVideo = false;
 volatile bool streamSeen = false;
 volatile bool localTestActive = false;
+
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+uint32_t hostIterationsRemaining = 0;
+uint32_t hostPacketsVisited = 0;
+uint32_t hostPacketsAccepted = 0;
+uint32_t hostEngineDrops = 0;
+uint32_t hostMetricsObserveCalls = 0;
+uint32_t hostMinimumFillFrames = 0;
+uint32_t hostUnderrunDurationMs = 0;
+#endif
 
 uint32_t framesForMs(uint32_t sampleRateHz, uint32_t milliseconds) {
   return (uint32_t)(((uint64_t)sampleRateHz * milliseconds) / 1000U);
@@ -235,6 +246,10 @@ void engineTask(void *) {
   int16_t lastOutput[MAX_CHANNELS] = {};
 
   while (true) {
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+    if (hostIterationsRemaining == 0) return;
+    hostIterationsRemaining--;
+#endif
     if (localTestActive) {
       audiotransport::Packet discarded = {};
       while (audiotransport::receive(discarded, 0)) {
@@ -249,21 +264,31 @@ void engineTask(void *) {
       continue;
     }
     audiotransport::Packet packet = {};
-    bool received = audiotransport::receive(
-        packet, backend.running() ? 0 : pdMS_TO_TICKS(2));
-    while (received) {
+    for (bool received = audiotransport::receive(
+             packet, backend.running() ? 0 : pdMS_TO_TICKS(2));
+         received; received = audiotransport::receive(packet, 0)) {
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+      hostPacketsVisited++;
+#endif
       const bool startsStream =
           !streamSeen ||
           packet.header.streamGeneration != streamGeneration;
       const uint32_t receivedAt = millis();
-      if (acceptPacket(packet, sampleRateHz, jitter, tracker, cursor,
-                       underrun, inputChannels, streamGeneration,
-                       streamSeen, suppressVideo, lastPacketAt, latePackets,
-                       lostFrames, engineDrops, receivedAt) &&
-          startsStream && backend.running()) {
+      const bool accepted = acceptPacket(
+          packet, sampleRateHz, jitter, tracker, cursor, underrun,
+          inputChannels, streamGeneration, streamSeen, suppressVideo,
+          lastPacketAt, latePackets, lostFrames, engineDrops, receivedAt);
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+      hostEngineDrops = engineDrops;
+#endif
+      if (!accepted) continue;
+      audiotransport::claimPeer(packet);
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+      hostPacketsAccepted++;
+#endif
+      if (startsStream && backend.running()) {
         playbackMetrics.start((uint32_t)jitter.fillFrames(), receivedAt);
       }
-      received = audiotransport::receive(packet, 0);
     }
 
     if (streamSeen &&
@@ -371,6 +396,11 @@ void engineTask(void *) {
     const uint32_t now = millis();
     playbackMetrics.observe(
         (uint32_t)jitter.fillFrames(), state, now);
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+    hostMetricsObserveCalls++;
+    hostMinimumFillFrames = playbackMetrics.minimumFillFrames();
+    hostUnderrunDurationMs = playbackMetrics.underrunDurationMs(now);
+#endif
     if (now - lastStatusAt >= STATUS_INTERVAL_MS) {
       lastStatusAt = now;
       const audiotransport::Stats &transportStats =
@@ -421,6 +451,7 @@ void resetAdmission(size_t capacityFrames) {
   if (capacityFrames > 32) capacityFrames = 32;
   jitterStorage = admissionStorage;
   jitterCapacityFrames = capacityFrames;
+  ownsJitterStorage = false;
   admissionJitter = JitterBuffer();
   admissionTracker = StreamTracker(128);
   admissionCursor = ResampleCursor();
@@ -456,6 +487,33 @@ AdmissionSnapshot admissionSnapshot() {
       admissionLostFrames,
       admissionEngineDrops,
       admissionSeen,
+  };
+}
+
+bool runEngineTaskIterations(uint32_t iterations) {
+  if (iterations == 0 || activeAudio == nullptr || activeBoard == nullptr ||
+      jitterStorage == nullptr || jitterCapacityFrames == 0) {
+    return false;
+  }
+  hostIterationsRemaining = iterations;
+  hostPacketsVisited = 0;
+  hostPacketsAccepted = 0;
+  hostEngineDrops = 0;
+  hostMetricsObserveCalls = 0;
+  hostMinimumFillFrames = 0;
+  hostUnderrunDurationMs = 0;
+  engineTask(nullptr);
+  return hostIterationsRemaining == 0;
+}
+
+EngineLoopSnapshot engineLoopSnapshot() {
+  return {
+      hostPacketsVisited,
+      hostPacketsAccepted,
+      hostEngineDrops,
+      hostMetricsObserveCalls,
+      hostMinimumFillFrames,
+      hostUnderrunDurationMs,
   };
 }
 
@@ -500,6 +558,7 @@ bool start(const board::Config &config) {
   jitterStorage = static_cast<int16_t *>(heap_caps_malloc(
       samples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   if (jitterStorage == nullptr) return false;
+  ownsJitterStorage = true;
   jitterCapacityFrames = capacityFrames;
   activeBoard = &config;
   if (xTaskCreatePinnedToCore(
@@ -507,6 +566,7 @@ bool start(const board::Config &config) {
           ENGINE_TASK_PRIORITY, &engineTaskHandle, 1) != pdPASS) {
     heap_caps_free(jitterStorage);
     jitterStorage = nullptr;
+    ownsJitterStorage = false;
     return false;
   }
   engineAvailable = true;
@@ -523,10 +583,11 @@ void stop() {
     engineTaskHandle = nullptr;
   }
   audio::sharedCodecBackend().stop();
-  if (jitterStorage != nullptr) {
+  if (jitterStorage != nullptr && ownsJitterStorage) {
     heap_caps_free(jitterStorage);
-    jitterStorage = nullptr;
   }
+  jitterStorage = nullptr;
+  ownsJitterStorage = false;
   jitterCapacityFrames = 0;
   activeAudio = nullptr;
   activeBoard = nullptr;

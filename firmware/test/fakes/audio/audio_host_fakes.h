@@ -23,6 +23,12 @@ struct HardwareEvent {
   int value;
 };
 
+struct SentDatagram {
+  std::vector<uint8_t> data;
+  uint32_t remoteIp;
+  uint16_t remotePort;
+};
+
 void reset();
 void setMillis(uint32_t value);
 void enqueueUdp(const std::vector<uint8_t> &data, uint32_t remoteIp,
@@ -31,5 +37,6 @@ size_t pendingUdp();
 unsigned delayCalls();
 unsigned yieldCalls();
 const std::vector<HardwareEvent> &hardwareEvents();
+const std::vector<SentDatagram> &sentDatagrams();
 
 }  // namespace audiohost

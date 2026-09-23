@@ -38,6 +38,7 @@ unsigned taskDelayCalls = 0;
 unsigned taskYieldCalls = 0;
 std::deque<UdpDatagram> udpDatagrams;
 std::vector<audiohost::HardwareEvent> events;
+std::vector<audiohost::SentDatagram> sentUdpDatagrams;
 uint8_t activeWireAddress = 0;
 
 }  // namespace
@@ -102,8 +103,20 @@ int lwip_close(int) { return 0; }
 int lwip_bind(int, const struct sockaddr *, socklen_t) { return 0; }
 int lwip_setsockopt(int, int, int, const void *, socklen_t) { return 0; }
 
-ssize_t lwip_sendto(int, const void *, size_t length, int,
-                    const struct sockaddr *, socklen_t) {
+ssize_t lwip_sendto(int, const void *data, size_t length, int,
+                    const struct sockaddr *target, socklen_t targetLength) {
+  if (data == nullptr || target == nullptr ||
+      targetLength < sizeof(sockaddr_in)) {
+    return -1;
+  }
+  const auto *destination =
+      reinterpret_cast<const sockaddr_in *>(target);
+  const auto *bytes = static_cast<const uint8_t *>(data);
+  sentUdpDatagrams.push_back({
+      std::vector<uint8_t>(bytes, bytes + length),
+      destination->sin_addr.s_addr,
+      ntohs(destination->sin_port),
+  });
   return static_cast<ssize_t>(length);
 }
 
@@ -176,6 +189,7 @@ void reset() {
   taskYieldCalls = 0;
   udpDatagrams.clear();
   events.clear();
+  sentUdpDatagrams.clear();
   activeWireAddress = 0;
 }
 
@@ -190,6 +204,9 @@ size_t pendingUdp() { return udpDatagrams.size(); }
 unsigned delayCalls() { return taskDelayCalls; }
 unsigned yieldCalls() { return taskYieldCalls; }
 const std::vector<HardwareEvent> &hardwareEvents() { return events; }
+const std::vector<SentDatagram> &sentDatagrams() {
+  return sentUdpDatagrams;
+}
 
 }  // namespace audiohost
 
