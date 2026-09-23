@@ -3,6 +3,9 @@ import XCTest
 @testable import SenderProtocol
 
 final class AudioProtocolTests: XCTestCase {
+    private let productionUplinkPacketFrames: UInt16 = 160
+    private let productionUplinkTargetFrames = 640
+
     private func fixture(_ name: String) throws -> Data {
         let url = try XCTUnwrap(Bundle.module.url(
             forResource: name, withExtension: "hex", subdirectory: "Fixtures"))
@@ -11,6 +14,37 @@ final class AudioProtocolTests: XCTestCase {
             try XCTUnwrap(UInt8(String($0), radix: 16))
         }
         return Data(bytes)
+    }
+
+    private func productionUplinkPacket(
+        _ sequence: UInt16,
+        counter: UInt32,
+        generation: UInt16 = 5
+    ) -> AudioProtocol.PCM {
+        AudioProtocol.PCM(
+            kind: .pcmUplink,
+            sequence: sequence,
+            streamGeneration: generation,
+            sampleRateHz: 16_000,
+            sampleCounter: counter,
+            timestampMicros: UInt32(
+                UInt64(counter) * 1_000_000 / 16_000),
+            frameCount: productionUplinkPacketFrames,
+            channels: 1,
+            samples: Data(
+                repeating: UInt8(truncatingIfNeeded: sequence),
+                count: Int(productionUplinkPacketFrames) * 2))
+    }
+
+    private func playableFrames(_ chunks: [AudioPlayoutChunk]) -> Int {
+        chunks.reduce(0) { frames, chunk in
+            switch chunk {
+            case .pcm(let pcm):
+                return frames + Int(pcm.frameCount)
+            case .silence(let count):
+                return frames + count
+            }
+        }
     }
 
     func testPCMEncoderAndDecoderMatchFirmwareVector() throws {
@@ -313,87 +347,136 @@ final class AudioProtocolTests: XCTestCase {
     }
 
     func testJitterBufferReordersBeforePlayout() {
-        func packet(_ sequence: UInt16, counter: UInt32) -> AudioProtocol.PCM {
-            AudioProtocol.PCM(
-                kind: .pcmUplink,
-                sequence: sequence,
-                streamGeneration: 5,
-                sampleRateHz: 16_000,
-                sampleCounter: counter,
-                timestampMicros: counter * 62,
-                frameCount: 2,
-                channels: 1,
-                samples: Data(repeating: UInt8(sequence), count: 4))
-        }
         var jitter = AudioJitterBuffer(
-            targetFrames: 4,
-            ceilingFrames: 12,
-            reorderWindowPackets: 2,
-            reorderTimeoutNanos: 20_000_000)
+            targetFrames: productionUplinkTargetFrames,
+            ceilingFrames: productionUplinkTargetFrames * 2,
+            reorderWindowPackets: 4,
+            reorderTimeoutNanos: 40_000_000)
 
-        XCTAssertEqual(jitter.insert(packet(10, counter: 100), nowNanos: 0), [])
         XCTAssertEqual(
-            jitter.insert(packet(12, counter: 104), nowNanos: 1_000_000),
+            jitter.insert(
+                productionUplinkPacket(10, counter: 0),
+                nowNanos: 0),
+            [])
+        XCTAssertEqual(
+            jitter.insert(
+                productionUplinkPacket(12, counter: 320),
+                nowNanos: 1_000_000),
             [],
             "future audio must not count toward contiguous startup")
-        XCTAssertEqual(jitter.contiguousBufferedFrames, 2)
         XCTAssertEqual(
-            jitter.insert(packet(11, counter: 102), nowNanos: 2_000_000),
+            jitter.contiguousBufferedFrames,
+            Int(productionUplinkPacketFrames))
+        XCTAssertEqual(
+            jitter.insert(
+                productionUplinkPacket(11, counter: 160),
+                nowNanos: 2_000_000),
+            [],
+            "three 10 ms packets are still below the 40 ms startup target")
+        let startup = jitter.insert(
+            productionUplinkPacket(13, counter: 480),
+            nowNanos: 3_000_000)
+        XCTAssertEqual(
+            startup,
             [
-                .pcm(packet(10, counter: 100)),
-                .pcm(packet(11, counter: 102)),
-                .pcm(packet(12, counter: 104)),
+                .pcm(productionUplinkPacket(10, counter: 0)),
+                .pcm(productionUplinkPacket(11, counter: 160)),
+                .pcm(productionUplinkPacket(12, counter: 320)),
+                .pcm(productionUplinkPacket(13, counter: 480)),
             ])
+        XCTAssertEqual(playableFrames(startup), productionUplinkTargetFrames)
         XCTAssertEqual(jitter.reorderedPackets, 1)
         XCTAssertEqual(jitter.lostFrames, 0)
     }
 
-    func testJitterStartupResolvesEarlyLossBeforeReleasingAudio() {
-        func packet(_ sequence: UInt16, counter: UInt32) -> AudioProtocol.PCM {
-            AudioProtocol.PCM(
-                kind: .pcmUplink,
-                sequence: sequence,
-                streamGeneration: 7,
-                sampleRateHz: 16_000,
-                sampleCounter: counter,
-                timestampMicros: counter * 62,
-                frameCount: 2,
-                channels: 1,
-                samples: Data(repeating: UInt8(sequence), count: 4))
-        }
+    func testJitterStartupTimeoutPadsToProductionTarget() {
         var jitter = AudioJitterBuffer(
-            targetFrames: 4,
-            ceilingFrames: 12,
-            reorderWindowPackets: 2,
-            reorderTimeoutNanos: 20_000_000)
+            targetFrames: productionUplinkTargetFrames,
+            ceilingFrames: productionUplinkTargetFrames * 2,
+            reorderWindowPackets: 4,
+            reorderTimeoutNanos: 40_000_000)
 
-        XCTAssertEqual(jitter.insert(packet(30, counter: 200), nowNanos: 0), [])
         XCTAssertEqual(
-            jitter.insert(packet(32, counter: 204), nowNanos: 1_000_000),
+            jitter.insert(
+                productionUplinkPacket(30, counter: 0, generation: 7),
+                nowNanos: 0),
             [])
-        XCTAssertEqual(jitter.poll(nowNanos: 20_999_999), [])
+        XCTAssertEqual(
+            jitter.insert(
+                productionUplinkPacket(32, counter: 320, generation: 7),
+                nowNanos: 1_000_000),
+            [])
+        XCTAssertEqual(jitter.poll(nowNanos: 40_999_999), [])
 
-        let startup = jitter.poll(nowNanos: 21_000_000)
+        let startup = jitter.poll(nowNanos: 41_000_000)
         XCTAssertEqual(
             startup,
             [
-                .pcm(packet(30, counter: 200)),
-                .silence(frames: 2),
-                .pcm(packet(32, counter: 204)),
+                .pcm(productionUplinkPacket(
+                    30, counter: 0, generation: 7)),
+                .silence(frames: 160),
+                .pcm(productionUplinkPacket(
+                    32, counter: 320, generation: 7)),
+                .silence(frames: 160),
             ])
-        XCTAssertGreaterThanOrEqual(
-            startup.reduce(0) { frames, chunk in
-                switch chunk {
-                case .pcm(let pcm): return frames + Int(pcm.frameCount)
-                case .silence(let count): return frames + count
-                }
-            },
-            jitter.targetFrames,
-            "startup must schedule the target duration without a gap")
-        XCTAssertEqual(jitter.lostFrames, 2)
+        XCTAssertEqual(playableFrames(startup), productionUplinkTargetFrames)
+        XCTAssertEqual(jitter.lostFrames, 160)
         XCTAssertEqual(
             AudioTiming.jitterPollMilliseconds(tuning: AudioRuntimeTuning()),
             20)
+    }
+
+    func testJitterStartupReorderWindowPadsToProductionTarget() {
+        var jitter = AudioJitterBuffer(
+            targetFrames: productionUplinkTargetFrames,
+            ceilingFrames: productionUplinkTargetFrames * 2,
+            reorderWindowPackets: 1,
+            reorderTimeoutNanos: 40_000_000)
+
+        XCTAssertEqual(
+            jitter.insert(
+                productionUplinkPacket(40, counter: 0, generation: 8),
+                nowNanos: 0),
+            [])
+        let startup = jitter.insert(
+            productionUplinkPacket(42, counter: 320, generation: 8),
+            nowNanos: 1_000_000)
+
+        XCTAssertEqual(playableFrames(startup), productionUplinkTargetFrames)
+        XCTAssertEqual(startup.last, .silence(frames: 160))
+        XCTAssertEqual(jitter.lostFrames, 160)
+    }
+
+    func testJitterStartupCeilingProvidesProductionTarget() {
+        var jitter = AudioJitterBuffer(
+            targetFrames: productionUplinkTargetFrames,
+            ceilingFrames: productionUplinkTargetFrames,
+            reorderWindowPackets: 8,
+            reorderTimeoutNanos: 40_000_000)
+
+        XCTAssertEqual(
+            jitter.insert(
+                productionUplinkPacket(50, counter: 0, generation: 9),
+                nowNanos: 0),
+            [])
+        XCTAssertEqual(
+            jitter.insert(
+                productionUplinkPacket(52, counter: 320, generation: 9),
+                nowNanos: 1_000_000),
+            [])
+        XCTAssertEqual(
+            jitter.insert(
+                productionUplinkPacket(53, counter: 480, generation: 9),
+                nowNanos: 2_000_000),
+            [])
+        let startup = jitter.insert(
+            productionUplinkPacket(54, counter: 640, generation: 9),
+            nowNanos: 3_000_000)
+
+        XCTAssertGreaterThanOrEqual(
+            playableFrames(startup),
+            productionUplinkTargetFrames)
+        XCTAssertEqual(jitter.lostFrames, 160)
     }
 
     func testJitterBufferPreservesExpiredGapAsSilence() {

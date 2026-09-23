@@ -886,28 +886,14 @@ public struct AudioJitterBuffer: Equatable, Sendable {
         }
         pending[pcm.sequence] = Pending(pcm: pcm)
         if !started {
-            guard let forceGapResolution = startupReady(
-                nowNanos: nowNanos)
-            else { return [] }
-            started = true
-            startupGapDeadlineNanos = nil
-            return drain(
-                nowNanos: nowNanos,
-                forceGapResolution: forceGapResolution)
+            return startIfReady(nowNanos: nowNanos) ?? []
         }
         return drain(nowNanos: nowNanos)
     }
 
     public mutating func poll(nowNanos: UInt64) -> [AudioPlayoutChunk] {
         if !started {
-            guard let forceGapResolution = startupReady(
-                nowNanos: nowNanos)
-            else { return [] }
-            started = true
-            startupGapDeadlineNanos = nil
-            return drain(
-                nowNanos: nowNanos,
-                forceGapResolution: forceGapResolution)
+            return startIfReady(nowNanos: nowNanos) ?? []
         }
         return drain(nowNanos: nowNanos)
     }
@@ -959,6 +945,31 @@ public struct AudioJitterBuffer: Equatable, Sendable {
             || farthest > reorderWindowPackets
             || bufferedFrames >= ceilingFrames
         return expired ? true : nil
+    }
+
+    private mutating func startIfReady(
+        nowNanos: UInt64
+    ) -> [AudioPlayoutChunk]? {
+        guard let forceGapResolution = startupReady(
+            nowNanos: nowNanos)
+        else { return nil }
+        var output = drain(
+            nowNanos: nowNanos,
+            forceGapResolution: forceGapResolution)
+        let playableFrames = output.reduce(0) { frames, chunk in
+            switch chunk {
+            case .pcm(let pcm):
+                return frames + Int(pcm.frameCount)
+            case .silence(let count):
+                return frames + count
+            }
+        }
+        if playableFrames < targetFrames {
+            output.append(.silence(frames: targetFrames - playableFrames))
+        }
+        started = true
+        startupGapDeadlineNanos = nil
+        return output
     }
 
     private mutating func drain(
