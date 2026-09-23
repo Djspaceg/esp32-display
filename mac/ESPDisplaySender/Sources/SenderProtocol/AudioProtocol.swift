@@ -623,6 +623,16 @@ public enum AudioTiming {
         let bound = tuning.validated.maximumCorrectionPPM
         return min(max(observed, -bound), bound)
     }
+
+    public static func jitterPollMilliseconds(
+        tuning: AudioRuntimeTuning
+    ) -> Int {
+        let validated = tuning.validated
+        let interval = min(
+            validated.uplinkReorderMilliseconds / 2,
+            validated.responseTimeoutMilliseconds / 4)
+        return max(1, Int(interval.rounded(.down)))
+    }
 }
 
 /// Bounded fill-slope estimator. A positive correction means the queue is
@@ -808,6 +818,7 @@ public struct AudioJitterBuffer: Equatable, Sendable {
     private var expectedSampleCounter: UInt32?
     private var pending: [UInt16: Pending] = [:]
     private var gapDeadlineNanos: UInt64?
+    private var startupGapDeadlineNanos: UInt64?
     private var started = false
 
     public private(set) var lostFrames: UInt64 = 0
@@ -833,6 +844,17 @@ public struct AudioJitterBuffer: Equatable, Sendable {
         pending.values.reduce(0) { $0 + Int($1.pcm.frameCount) }
     }
 
+    public var contiguousBufferedFrames: Int {
+        guard var sequence = expectedSequence else { return 0 }
+        var frames = 0
+        for _ in 0..<pending.count {
+            guard let item = pending[sequence] else { break }
+            frames += Int(item.pcm.frameCount)
+            sequence &+= 1
+        }
+        return frames
+    }
+
     public mutating func insert(
         _ pcm: AudioProtocol.PCM, nowNanos: UInt64
     ) -> [AudioPlayoutChunk] {
@@ -843,6 +865,7 @@ public struct AudioJitterBuffer: Equatable, Sendable {
             expectedSampleCounter = pcm.sampleCounter
             pending.removeAll(keepingCapacity: true)
             gapDeadlineNanos = nil
+            startupGapDeadlineNanos = nil
             started = false
         }
         guard let expectedSequence else { return [] }
@@ -855,17 +878,37 @@ public struct AudioJitterBuffer: Equatable, Sendable {
             duplicatePackets &+= 1
             return []
         }
-        if distance > 0 { reorderedPackets &+= 1 }
-        pending[pcm.sequence] = Pending(pcm: pcm)
-        if !started, bufferedFrames >= targetFrames {
-            started = true
+        if let firstMissingSequence {
+            let reorderDistance = Int(pcm.sequence &- firstMissingSequence)
+            if reorderDistance > 0, reorderDistance < 0x8000 {
+                reorderedPackets &+= 1
+            }
         }
-        guard started else { return [] }
+        pending[pcm.sequence] = Pending(pcm: pcm)
+        if !started {
+            guard let forceGapResolution = startupReady(
+                nowNanos: nowNanos)
+            else { return [] }
+            started = true
+            startupGapDeadlineNanos = nil
+            return drain(
+                nowNanos: nowNanos,
+                forceGapResolution: forceGapResolution)
+        }
         return drain(nowNanos: nowNanos)
     }
 
     public mutating func poll(nowNanos: UInt64) -> [AudioPlayoutChunk] {
-        guard started else { return [] }
+        if !started {
+            guard let forceGapResolution = startupReady(
+                nowNanos: nowNanos)
+            else { return [] }
+            started = true
+            startupGapDeadlineNanos = nil
+            return drain(
+                nowNanos: nowNanos,
+                forceGapResolution: forceGapResolution)
+        }
         return drain(nowNanos: nowNanos)
     }
 
@@ -875,10 +918,53 @@ public struct AudioJitterBuffer: Equatable, Sendable {
         expectedSampleCounter = nil
         pending.removeAll(keepingCapacity: true)
         gapDeadlineNanos = nil
+        startupGapDeadlineNanos = nil
         started = false
     }
 
-    private mutating func drain(nowNanos: UInt64) -> [AudioPlayoutChunk] {
+    private var firstMissingSequence: UInt16? {
+        guard var sequence = expectedSequence else { return nil }
+        for _ in 0..<pending.count {
+            guard pending[sequence] != nil else { break }
+            sequence &+= 1
+        }
+        return sequence
+    }
+
+    /// Returns whether startup must resolve the observed gap before releasing
+    /// audio. Nil means the target is not yet continuously playable.
+    private mutating func startupReady(
+        nowNanos: UInt64
+    ) -> Bool? {
+        let contiguousFrames = contiguousBufferedFrames
+        if contiguousFrames >= targetFrames {
+            startupGapDeadlineNanos = nil
+            return false
+        }
+        guard bufferedFrames > contiguousFrames else {
+            startupGapDeadlineNanos = nil
+            return nil
+        }
+        if startupGapDeadlineNanos == nil {
+            startupGapDeadlineNanos = nowNanos &+ reorderTimeoutNanos
+        }
+        guard let expectedSequence else { return nil }
+        let farthest = pending.keys.map {
+            Int($0 &- expectedSequence)
+        }.filter {
+            $0 < 0x8000
+        }.max() ?? 0
+        let expired =
+            nowNanos >= (startupGapDeadlineNanos ?? UInt64.max)
+            || farthest > reorderWindowPackets
+            || bufferedFrames >= ceilingFrames
+        return expired ? true : nil
+    }
+
+    private mutating func drain(
+        nowNanos: UInt64,
+        forceGapResolution: Bool = false
+    ) -> [AudioPlayoutChunk] {
         var output = [AudioPlayoutChunk]()
         while !pending.isEmpty {
             guard let expectedSequence,
@@ -895,7 +981,8 @@ public struct AudioJitterBuffer: Equatable, Sendable {
                 if gapDeadlineNanos == nil {
                     gapDeadlineNanos = nowNanos &+ reorderTimeoutNanos
                 }
-                let expired = nowNanos >= (gapDeadlineNanos ?? UInt64.max)
+                let expired = forceGapResolution
+                    || nowNanos >= (gapDeadlineNanos ?? UInt64.max)
                     || farthest > reorderWindowPackets
                     || bufferedFrames >= ceilingFrames
                 guard expired else { break }
@@ -1003,30 +1090,43 @@ public struct AudioFirstRadioBudget: Equatable, Sendable {
     }
 }
 
-/// Monotonic deadline scheduler for descriptor-sized PCM packets.
+/// Monotonic deadline scheduler for descriptor-sized PCM packets. The same
+/// drift multiplier used by the resampler scales wall-clock packet duration.
 ///
 /// CoreAudio normally calls the tap at the requested cadence, but it may
 /// deliver a larger buffer after a scheduling stall. Advancing one packet
 /// deadline at a time prevents those chunks from becoming a UDP burst.
 public struct AudioPacketPacer: Equatable, Sendable {
     private var nextDeadlineNanos: UInt64?
+    private var fractionalDurationNanos: Double = 0
 
     public init() {}
 
     public mutating func deadlineNanos(
         nowNanos: UInt64,
         frameCount: Int,
-        sampleRateHz: UInt32
+        sampleRateHz: UInt32,
+        rateMultiplier: Double = 1
     ) -> UInt64 {
         let deadline = max(nextDeadlineNanos ?? nowNanos, nowNanos)
-        let duration = UInt64(max(1, frameCount)) * 1_000_000_000
-            / UInt64(max(1, sampleRateHz))
+        let multiplier = rateMultiplier.isFinite
+            ? min(max(rateMultiplier, 0.5), 2)
+            : 1
+        let exactDuration =
+            Double(max(1, frameCount))
+                * 1_000_000_000
+                / Double(max(1, sampleRateHz))
+                * multiplier
+                + fractionalDurationNanos
+        let duration = max(1, UInt64(exactDuration.rounded(.down)))
+        fractionalDurationNanos = exactDuration - Double(duration)
         nextDeadlineNanos = deadline &+ max(1, duration)
         return deadline
     }
 
     public mutating func reset() {
         nextDeadlineNanos = nil
+        fractionalDurationNanos = 0
     }
 }
 

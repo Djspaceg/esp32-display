@@ -230,6 +230,68 @@ final class AudioProtocolTests: XCTestCase {
             "sub-frame output is carried rather than forced negative")
     }
 
+    func testComposedDownlinkCorrectionChangesDeliveredWireRateForBothSigns() {
+        func deliveredFramesPerSecond(fillOffset: Int) -> Double {
+            let sampleRate: UInt32 = 16_000
+            let packetFrames = 320
+            let targetFrames = 1_920
+            let tuning = AudioRuntimeTuning(
+                driftFilterWeight: 1,
+                driftRecoveryMilliseconds: 250)
+            var controller = AudioDriftController()
+            _ = controller.observe(
+                timestampMicros: 0,
+                fillFrames: targetFrames + fillOffset,
+                sampleRateHz: sampleRate,
+                tuning: tuning,
+                targetFillFrames: targetFrames)
+            _ = controller.observe(
+                timestampMicros: 1_000_000,
+                fillFrames: targetFrames + fillOffset,
+                sampleRateHz: sampleRate,
+                tuning: tuning,
+                targetFillFrames: targetFrames)
+
+            let multiplier = controller.rateMultiplier
+            var resampler = AudioVariableRateResampler()
+            let captureCallback = [Float](repeating: 0, count: packetFrames)
+            var correctedFrames = 0
+            for _ in 0..<5_000 {
+                correctedFrames += resampler.resample(
+                    interleavedSamples: captureCallback,
+                    channels: 1,
+                    rateMultiplier: multiplier).count
+            }
+
+            let fullPackets = correctedFrames / packetFrames
+            var pacer = AudioPacketPacer()
+            for _ in 0..<fullPackets {
+                _ = pacer.deadlineNanos(
+                    nowNanos: 0,
+                    frameCount: packetFrames,
+                    sampleRateHz: sampleRate,
+                    rateMultiplier: multiplier)
+            }
+            let endNanos = pacer.deadlineNanos(
+                nowNanos: 0,
+                frameCount: packetFrames,
+                sampleRateHz: sampleRate,
+                rateMultiplier: multiplier)
+            return Double(fullPackets * packetFrames)
+                * 1_000_000_000
+                / Double(endNanos)
+        }
+
+        XCTAssertGreaterThan(
+            deliveredFramesPerSecond(fillOffset: -100),
+            16_000,
+            "below-target fill must deliver more than the nominal wire rate")
+        XCTAssertLessThan(
+            deliveredFramesPerSecond(fillOffset: 100),
+            16_000,
+            "above-target fill must deliver less than the nominal wire rate")
+    }
+
     func testLatencyTargetContributesToDriftCorrection() {
         var controller = AudioDriftController()
         let tuning = AudioRuntimeTuning(driftFilterWeight: 1)
@@ -272,12 +334,66 @@ final class AudioProtocolTests: XCTestCase {
         XCTAssertEqual(jitter.insert(packet(10, counter: 100), nowNanos: 0), [])
         XCTAssertEqual(
             jitter.insert(packet(12, counter: 104), nowNanos: 1_000_000),
-            [.pcm(packet(10, counter: 100))])
+            [],
+            "future audio must not count toward contiguous startup")
+        XCTAssertEqual(jitter.contiguousBufferedFrames, 2)
         XCTAssertEqual(
             jitter.insert(packet(11, counter: 102), nowNanos: 2_000_000),
-            [.pcm(packet(11, counter: 102)), .pcm(packet(12, counter: 104))])
+            [
+                .pcm(packet(10, counter: 100)),
+                .pcm(packet(11, counter: 102)),
+                .pcm(packet(12, counter: 104)),
+            ])
         XCTAssertEqual(jitter.reorderedPackets, 1)
         XCTAssertEqual(jitter.lostFrames, 0)
+    }
+
+    func testJitterStartupResolvesEarlyLossBeforeReleasingAudio() {
+        func packet(_ sequence: UInt16, counter: UInt32) -> AudioProtocol.PCM {
+            AudioProtocol.PCM(
+                kind: .pcmUplink,
+                sequence: sequence,
+                streamGeneration: 7,
+                sampleRateHz: 16_000,
+                sampleCounter: counter,
+                timestampMicros: counter * 62,
+                frameCount: 2,
+                channels: 1,
+                samples: Data(repeating: UInt8(sequence), count: 4))
+        }
+        var jitter = AudioJitterBuffer(
+            targetFrames: 4,
+            ceilingFrames: 12,
+            reorderWindowPackets: 2,
+            reorderTimeoutNanos: 20_000_000)
+
+        XCTAssertEqual(jitter.insert(packet(30, counter: 200), nowNanos: 0), [])
+        XCTAssertEqual(
+            jitter.insert(packet(32, counter: 204), nowNanos: 1_000_000),
+            [])
+        XCTAssertEqual(jitter.poll(nowNanos: 20_999_999), [])
+
+        let startup = jitter.poll(nowNanos: 21_000_000)
+        XCTAssertEqual(
+            startup,
+            [
+                .pcm(packet(30, counter: 200)),
+                .silence(frames: 2),
+                .pcm(packet(32, counter: 204)),
+            ])
+        XCTAssertGreaterThanOrEqual(
+            startup.reduce(0) { frames, chunk in
+                switch chunk {
+                case .pcm(let pcm): return frames + Int(pcm.frameCount)
+                case .silence(let count): return frames + count
+                }
+            },
+            jitter.targetFrames,
+            "startup must schedule the target duration without a gap")
+        XCTAssertEqual(jitter.lostFrames, 2)
+        XCTAssertEqual(
+            AudioTiming.jitterPollMilliseconds(tuning: AudioRuntimeTuning()),
+            20)
     }
 
     func testJitterBufferPreservesExpiredGapAsSilence() {
