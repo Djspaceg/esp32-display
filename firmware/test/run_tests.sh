@@ -61,3 +61,5 @@ clang++ "${CXXFLAGS[@]}" \
   "$HERE/../display_stream/dma_gate.cpp" \
   "$HERE/../display_stream/panel_transfer.cpp"
 "$STALL_OUT"
+
+bash "$HERE/../../mac/ESPDisplaySender/Tests/SenderAudioRTHostTests/run_tests.sh"
