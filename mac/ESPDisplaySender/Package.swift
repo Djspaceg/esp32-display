@@ -51,5 +51,6 @@ let package = Package(
             dependencies: ["SenderCore"],
             path: "Tests/SenderCoreTests"
         ),
-    ]
+    ],
+    cLanguageStandard: .c11
 )
