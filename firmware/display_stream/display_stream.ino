@@ -89,6 +89,9 @@ using namespace bandproto;
 // this file keeps only setup() and loop()'s scheduling skeleton. State the
 // skeleton reads lives behind these headers.
 #include "app_state.h"
+#include "audio_engine.h"
+#include "audio_test.h"
+#include "audio_transport.h"
 #include "control_apply.h"
 #include "display_power.h"
 #include "dma_gate.h"
@@ -481,6 +484,27 @@ void setup() {
                   WiFi.localIP().toString().c_str(), WiFi.getHostname());
   }
 
+  const bool audioTransportReady = audiotransport::start(*bcfg);
+  const bool audioEngineReady =
+      audioTransportReady && audioengine::start(*bcfg);
+  if (audioTransportReady && audioEngineReady) {
+    audioAvailable = true;
+    Serial.printf(
+        "audio: UDP %u ready (version=%u rcvbuf=%d queue=%u "
+        "watermarks=%lu/%lu/%lums maxppm=%ld)\n",
+        (unsigned)audioproto::UDP_PORT, (unsigned)audioproto::VERSION,
+        audiotransport::tuneReceiveBufferBytes,
+        (unsigned)audiotransport::QUEUE_DEPTH,
+        (unsigned long)audioengine::tuneLowWatermarkMs,
+        (unsigned long)audioengine::tuneTargetWatermarkMs,
+        (unsigned long)audioengine::tuneHighWatermarkMs,
+        (long)audioengine::tuneMaxCorrectionPpm);
+  } else {
+    audioengine::stop();
+    audiotransport::stop();
+    Serial.println("audio: disabled for this runtime profile");
+  }
+
   // OTA before the announce, not after, even though ArduinoOTA is the later
   // arrival here: addMdnsService() bakes deviceCapabilities() into the caps TXT
   // record and registers _arduino._tcp, so both would be wrong if OTA came up
@@ -553,6 +577,7 @@ void loop() {
 
   handleButton();
   handleSerialConfig();
+  serviceAudioToneTest();
   applyPendingControl();
   updateIdentify();
   serviceTouch();

@@ -125,6 +125,8 @@ struct PanelSnapshot: Identifiable, Equatable {
     var captureStatus: CaptureStatus = .waiting("Starting up…")
     /// When a frame was last captured and sent for this panel.
     var lastFrameAt: Date?
+    /// Live audio state and diagnostics. Discovery-only and never persisted.
+    var audioStatus: PanelAudioSnapshot?
 
     var capabilities: DeviceProtocol.Capabilities {
         DeviceProtocol.Capabilities(rawValue: capabilitiesRaw)

@@ -57,6 +57,7 @@ The following files are generated and committed:
 - `firmware/libraries/espdisp_board/src/generated_platform_config.h`
 - `firmware/libraries/espdisp_board/src/generated_board_variants.h`
 - `firmware/libraries/espdisp_board/src/generated_board_identity.h`
+- `firmware/libraries/espdisp_board/src/generated_board_audio.h`
 - `firmware/libraries/espdisp_board/src/generated_board_configs.h`
 - `firmware/libraries/espdisp_board/src/generated_board_config_lookup.h`
 - `firmware/libraries/espdisp_board/src/generated_board_detection.h`

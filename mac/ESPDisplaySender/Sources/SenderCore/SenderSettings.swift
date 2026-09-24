@@ -45,6 +45,10 @@ struct SenderSettings: Codable, Equatable {
     var tileQuality: TileLossyPolicy = .auto
     /// How the display sidebar is ordered.
     var deviceListSortOrder: DeviceListSortOrder = .alphabetical
+    /// Stable CoreAudio UIDs. nil follows the current system default.
+    var audioDevices = AudioDevicePreferences()
+    /// Persisted so latency and drift experiments do not require a rebuild.
+    var audioTuning = AudioRuntimeTuning()
 
     /// Default capture rate; see `fps` for why this is a named constant
     /// rather than three repeated literals.
@@ -53,13 +57,17 @@ struct SenderSettings: Codable, Equatable {
     init(fps: Int = defaultFps, spacingMicros: UInt32 = 200,
          adaptivePacing: Bool = true,
          identifySeconds: Int = 8, tileQuality: TileLossyPolicy = .auto,
-         deviceListSortOrder: DeviceListSortOrder = .alphabetical) {
+         deviceListSortOrder: DeviceListSortOrder = .alphabetical,
+         audioDevices: AudioDevicePreferences = AudioDevicePreferences(),
+         audioTuning: AudioRuntimeTuning = AudioRuntimeTuning()) {
         self.fps = fps
         self.spacingMicros = spacingMicros
         self.adaptivePacing = adaptivePacing
         self.identifySeconds = identifySeconds
         self.tileQuality = tileQuality
         self.deviceListSortOrder = deviceListSortOrder
+        self.audioDevices = audioDevices
+        self.audioTuning = audioTuning.validated
     }
 
     /// Every field decodes independently with its default as the fallback,
@@ -78,6 +86,12 @@ struct SenderSettings: Codable, Equatable {
         let sortOrder = try? c.decodeIfPresent(
             DeviceListSortOrder.self, forKey: .deviceListSortOrder)
         deviceListSortOrder = sortOrder.flatMap { $0 } ?? .alphabetical
+        let devices = try? c.decodeIfPresent(
+            AudioDevicePreferences.self, forKey: .audioDevices)
+        audioDevices = devices.flatMap { $0 } ?? AudioDevicePreferences()
+        let tuning = try? c.decodeIfPresent(
+            AudioRuntimeTuning.self, forKey: .audioTuning)
+        audioTuning = tuning.flatMap { $0 }?.validated ?? AudioRuntimeTuning()
     }
 
     static let fpsRange = 5...60
@@ -98,7 +112,9 @@ struct SenderSettings: Codable, Equatable {
                 max(identifySeconds, Self.identifyRange.lowerBound),
                 Self.identifyRange.upperBound),
             tileQuality: tileQuality,
-            deviceListSortOrder: deviceListSortOrder)
+            deviceListSortOrder: deviceListSortOrder,
+            audioDevices: audioDevices,
+            audioTuning: audioTuning.validated)
     }
 }
 

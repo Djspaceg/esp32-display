@@ -29,6 +29,7 @@ import sys
 import tempfile
 import tomllib
 import unittest.mock
+import wave
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import board_descriptor  # noqa: E402
@@ -3008,6 +3009,362 @@ def test_tile_stream_wire():
                 "half-res covers exactly the tiles full-res does")
 
 
+def test_audio_wire_and_descriptor():
+    """Pin the host reference to firmware/test/test_audio.cpp's exact bytes."""
+    pcm_fixture = bytes.fromhex(
+        "45 41 55 44 01 01 01 02 07 00 03 00 80 3e 00 00 "
+        "40 01 00 00 40 e2 01 00 04 00 10 00 "
+        "00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f")
+    status_fixture = bytes.fromhex(
+        "45 41 55 44 01 03 00 00 08 00 09 00 80 bb 00 00 "
+        "00 00 00 00 0a 00 00 00 00 00 30 00 "
+        "64 00 00 00 78 00 00 00 50 00 00 00 02 00 00 00 "
+        "fa 00 00 00 03 00 00 00 04 00 00 00 05 00 00 00 "
+        "06 00 00 00 07 00 00 00 08 00 00 00 09 00 00 00")
+
+    check_equal(
+        espdisp.audio_pcm_datagram(
+            kind=espdisp.AUDIO_KIND_DOWNLINK,
+            sequence=7,
+            stream_generation=3,
+            sample_rate=16000,
+            sample_counter=320,
+            timestamp_micros=123456,
+            channels=2,
+            pcm=bytes(range(16))),
+        pcm_fixture,
+        "audio encoder reproduces firmware PCM vector byte for byte",
+    )
+    pcm = espdisp.parse_audio_datagram(pcm_fixture)
+    check_equal(pcm.kind, espdisp.AUDIO_KIND_DOWNLINK, "PCM fixture kind")
+    check_equal(pcm.sequence, 7, "PCM fixture sequence")
+    check_equal(pcm.stream_generation, 3, "PCM fixture stream generation")
+    check_equal(pcm.sample_rate, 16000, "PCM fixture sample rate")
+    check_equal(pcm.sample_counter, 320, "PCM fixture sample counter")
+    check_equal(pcm.timestamp_micros, 123456, "PCM fixture timestamp")
+    check_equal(pcm.frame_count, 4, "PCM fixture frame count")
+    check_equal(pcm.channels, 2, "PCM fixture channels")
+    check_equal(pcm.payload, bytes(range(16)), "PCM fixture payload")
+
+    status = espdisp.parse_audio_datagram(status_fixture)
+    check_equal(status.kind, espdisp.AUDIO_KIND_STATUS, "status fixture kind")
+    check_equal(status.sequence, 8, "status fixture sequence")
+    check_equal(status.stream_generation, 9, "status stream generation")
+    check_equal(status.sample_rate, 48000, "status fixture sample rate")
+    check_equal(status.timestamp_micros, 10, "status fixture timestamp")
+    check_equal(
+        status.status,
+        espdisp.AudioStatus(
+            fill_frames=100,
+            target_frames=120,
+            minimum_fill_frames=80,
+            underruns=2,
+            underrun_duration_ms=250,
+            late_packets=3,
+            lost_frames=4,
+            hard_corrections=5,
+            ingress_drops=6,
+            queue_drops=7,
+            engine_drops=8,
+            capture_overruns=9,
+        ),
+        "status fixture exposes all twelve firmware fields",
+    )
+    check_equal(
+        espdisp.format_audio_status(status.status),
+        "fill=100 target=120 minimum=80 underruns=2 underrun_ms=250 "
+        "late=3 lost_frames=4 corrections=5 ingress_drops=6 queue_drops=7 "
+        "engine_drops=8 capture_overruns=9",
+        "status output names every bring-up counter",
+    )
+
+    for mutation, needle in [
+        (b"XAUD" + pcm_fixture[4:], "magic"),
+        (pcm_fixture[:4] + b"\x02" + pcm_fixture[5:], "version"),
+        (pcm_fixture[:5] + b"\x63" + pcm_fixture[6:], "kind"),
+        (pcm_fixture[:6] + b"\x00" + pcm_fixture[7:], "flags"),
+        (pcm_fixture[:-1], "length"),
+    ]:
+        check_fails(
+            lambda mutation=mutation: espdisp.parse_audio_datagram(mutation),
+            needle,
+            "audio parser refuses malformed %s fixture" % needle,
+        )
+
+    descriptor = espdisp.audio_descriptor_from_txt({
+        "caps": "00300000",
+        "audio-port": "5569",
+        "audio-version": "1",
+        "audio-rate": "16000",
+        "audio-play-ch": "2",
+        "audio-capture-ch": "2",
+    })
+    check_equal(
+        descriptor,
+        espdisp.AudioDescriptor(
+            port=5569, version=1, sample_rate=16000,
+            playback_channels=2, capture_channels=2),
+        "audio TXT descriptor carries rate and both channel counts",
+    )
+    check_equal(
+        espdisp.audio_packet_frames(descriptor, 20.0),
+        320,
+        "packet duration is converted through advertised rate",
+    )
+    check_fails(
+        lambda: espdisp.audio_packet_frames(descriptor, 50.0),
+        "1400",
+        "packet sizing refuses payloads above firmware MTU",
+    )
+    for records, needle in [
+        ({
+            "caps": "00100000", "audio-port": "5569", "audio-version": "1",
+            "audio-rate": "16000", "audio-play-ch": "2",
+            "audio-capture-ch": "2",
+        }, "uplink"),
+        ({
+            "caps": "00300000", "audio-port": "5569", "audio-version": "2",
+            "audio-rate": "16000", "audio-play-ch": "2",
+            "audio-capture-ch": "2",
+        }, "version"),
+        ({
+            "caps": "00300000", "audio-port": "5569", "audio-version": "1",
+            "audio-rate": "0", "audio-play-ch": "2", "audio-capture-ch": "2",
+        }, "rate"),
+        ({
+            "caps": "00300000", "audio-port": "5569", "audio-version": "1",
+            "audio-rate": "16000", "audio-play-ch": "1",
+        }, "audio-capture-ch"),
+    ]:
+        check_fails(
+            lambda records=records: espdisp.audio_descriptor_from_txt(records),
+            needle,
+            "audio TXT descriptor refuses %s mismatch" % needle,
+        )
+
+    query = espdisp.mdns_query("_espdisp._udp.local", espdisp.DNS_TYPE_PTR)
+    check_equal(query[:2], b"\x00\x00", "mDNS query uses transaction id zero")
+    check_equal(
+        query[-4:],
+        struct.pack("!HH", espdisp.DNS_TYPE_PTR, 0x8001),
+        "mDNS query requests an RFC 6762 unicast response",
+    )
+    txt_rdata = (
+        b"\x0dcaps=00300000"
+        b"\x0faudio-port=5569"
+        b"\x0faudio-version=1"
+        b"\x10audio-rate=16000"
+        b"\x0faudio-play-ch=2"
+        b"\x12audio-capture-ch=2")
+    check_equal(
+        espdisp.parse_dns_txt(txt_rdata),
+        {
+            "caps": "00300000",
+            "audio-port": "5569",
+            "audio-version": "1",
+            "audio-rate": "16000",
+            "audio-play-ch": "2",
+            "audio-capture-ch": "2",
+        },
+        "DNS TXT parser preserves the firmware's audio keys",
+    )
+    check_equal(
+        espdisp.audio_endpoint_host(
+            "panel.local", {"fe80::1234", "192.168.1.42"}),
+        "192.168.1.42",
+        "audio discovery uses the parsed IPv4 address without a second DNS lookup",
+    )
+    check_equal(
+        espdisp.audio_endpoint_host("panel.local", {"fe80::1234"}),
+        "panel.local",
+        "scope-less link-local IPv6 falls back to the resolvable service target",
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        good_path = os.path.join(directory, "good.wav")
+        bad_path = os.path.join(directory, "bad.wav")
+        with wave.open(good_path, "wb") as wav:
+            wav.setnchannels(2)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b"\x00" * 64)
+        with wave.open(bad_path, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b"\x00" * 32)
+        with wave.open(good_path, "rb") as wav:
+            check_accepts(
+                lambda: espdisp.validate_audio_wav(wav, descriptor),
+                "WAV matching advertised playback format is accepted",
+            )
+        with wave.open(bad_path, "rb") as wav:
+            check_fails(
+                lambda: espdisp.validate_audio_wav(wav, descriptor),
+                "channels",
+                "WAV channel mismatch is refused instead of remixed",
+            )
+
+    tone = espdisp.audio_tone_pcm(
+        sample_rate=48000, channels=2, start_frame=0, frame_count=8,
+        frequency=1000.0, amplitude=0.25)
+    samples = struct.unpack("<16h", tone)
+    check(
+        all(samples[index] == samples[index + 1] for index in range(0, 16, 2)),
+        "generated tone duplicates each frame across advertised channels",
+    )
+
+    args = espdisp.build_parser().parse_args(["audio", "panel.local", "--tone", "440"])
+    check_equal(args.command, "audio", "audio command is wired into CLI")
+    check_equal(args.packet_ms, 20.0, "audio packet duration has a tunable default")
+    check_equal(args.status_interval, 1.0, "status print interval has a tunable default")
+    check_equal(
+        espdisp.audio_frame_limit(0.000001, 16000),
+        1,
+        "a positive sub-frame run still sends one descriptor-rate frame",
+    )
+    for seconds in (0.0, float("nan"), float("inf")):
+        check_fails(
+            lambda seconds=seconds: espdisp.audio_frame_limit(seconds, 16000),
+            "seconds",
+            "audio run duration %r is refused" % seconds,
+        )
+    for drain in (-0.1, float("nan"), float("inf")):
+        check_fails(
+            lambda drain=drain: espdisp.validate_audio_drain_seconds(drain),
+            "drain",
+            "audio drain duration %r is refused" % drain,
+        )
+
+    check_fails(
+        lambda: espdisp.require_audio_response(0, send_only=False),
+        "no valid audio response",
+        "a silent panel cannot be reported as a successful audio stream",
+    )
+    check_accepts(
+        lambda: espdisp.require_audio_response(1, send_only=False),
+        "one valid status or uplink packet proves panel admission",
+    )
+    check_accepts(
+        lambda: espdisp.require_audio_response(0, send_only=True),
+        "the explicit send-only override permits an unacknowledged endpoint",
+    )
+
+    def uplink(sequence, generation, counter, values):
+        payload = struct.pack("<%dh" % len(values), *values)
+        return espdisp.parse_audio_datagram(espdisp.audio_pcm_datagram(
+            kind=espdisp.AUDIO_KIND_UPLINK,
+            sequence=sequence,
+            stream_generation=generation,
+            sample_rate=16000,
+            sample_counter=counter,
+            timestamp_micros=counter * 62,
+            channels=1,
+            pcm=payload,
+        ))
+
+    reorder = espdisp.AudioUplinkReorderBuffer(channels=1, window_packets=2)
+    check_equal(
+        reorder.push(uplink(10, 7, 100, [10, 11])),
+        struct.pack("<2h", 10, 11),
+        "the first uplink packet starts the captured timeline",
+    )
+    check_equal(
+        reorder.push(uplink(12, 7, 104, [30, 31])),
+        b"",
+        "a future uplink packet is held inside the reorder window",
+    )
+    check_equal(
+        reorder.push(uplink(11, 7, 102, [20, 21])),
+        struct.pack("<4h", 20, 21, 30, 31),
+        "reordered uplink packets are emitted in sample-counter order",
+    )
+    check_equal(reorder.reordered_packets, 1, "uplink reordering is reported")
+    check_equal(
+        reorder.push(uplink(11, 7, 102, [20, 21])),
+        b"",
+        "duplicate uplink packets are not appended twice",
+    )
+    check_equal(reorder.duplicate_packets, 1, "uplink duplicates are reported")
+
+    gap = espdisp.AudioUplinkReorderBuffer(channels=1, window_packets=1)
+    check_equal(
+        gap.push(uplink(20, 3, 0, [1, 2])),
+        struct.pack("<2h", 1, 2),
+        "gap fixture starts with its first packet",
+    )
+    check_equal(
+        gap.push(uplink(22, 3, 4, [5, 6])),
+        b"",
+        "one missing packet is held until the bounded window expires",
+    )
+    check_equal(
+        gap.push(uplink(23, 3, 6, [7, 8])),
+        b"\x00" * 4 + struct.pack("<4h", 5, 6, 7, 8),
+        "expired uplink gaps become exact-duration PCM silence",
+    )
+    check_equal(gap.lost_frames, 2, "uplink lost frames are reported")
+    bounded_gap = espdisp.AudioUplinkReorderBuffer(
+        channels=1, window_packets=1)
+    check_equal(
+        bounded_gap.maximum_gap_frames,
+        espdisp.AUDIO_MAX_PAYLOAD_BYTES,
+        "uplink silence bound follows reorder depth and packet payload limit",
+    )
+    check_equal(
+        bounded_gap.push(uplink(30, 5, 0, [1, 2])),
+        struct.pack("<2h", 1, 2),
+        "bounded-gap fixture starts with its first packet",
+    )
+    check_equal(
+        bounded_gap.push(uplink(
+            31, 5, bounded_gap.maximum_gap_frames + 3, [3, 4])),
+        struct.pack("<2h", 3, 4),
+        "an implausibly large forward gap resets without allocating silence",
+    )
+    check_equal(
+        bounded_gap.lost_frames,
+        0,
+        "a rejected forward gap is not reported as synthesized loss",
+    )
+    check_equal(
+        bounded_gap.discontinuities,
+        1,
+        "a rejected forward gap is reported as one discontinuity",
+    )
+    check_equal(
+        gap.push(uplink(1, 4, 0, [9, 10])),
+        struct.pack("<2h", 9, 10),
+        "a new stream generation resets sequence and sample-counter state",
+    )
+    check_equal(gap.generation_changes, 1, "uplink generation changes are reported")
+
+    check(espdisp.mdns_query_due(None, 1.0, 0.5),
+          "an unsent mDNS question is due immediately")
+    check(not espdisp.mdns_query_due(1.0, 1.49, 0.5),
+          "mDNS follow-up waits for its retry cadence")
+    check(espdisp.mdns_query_due(1.0, 1.5, 0.5),
+          "an unanswered mDNS follow-up is retransmitted")
+
+    invalid_args = espdisp.build_parser().parse_args(
+        ["audio", "panel.local", "--tone", "440", "--seconds", "0"])
+    check_fails(
+        lambda: espdisp.validate_audio_local_args(invalid_args),
+        "--seconds",
+        "panel-independent duration validation precedes discovery",
+    )
+    check_equal(
+        args.send_only,
+        False,
+        "panel acknowledgement is required unless --send-only is explicit",
+    )
+    check_equal(
+        args.uplink_reorder_packets,
+        4,
+        "uplink reorder depth has a runtime default",
+    )
+
+
 def test_describe_bundle():
     """bundle-info's output is the whole point of the manifest, so it is checked.
 
@@ -3668,7 +4025,7 @@ def test_board_descriptor_validator():
             "migration", "identity", "family", "platform", "capacity",
             "panel", "carrier", "touch", "led", "gesture",
             "orientation", "motion", "reset", "backlight", "power",
-            "serial", "capabilities", "compile", "detection",
+            "serial", "audio", "capabilities", "compile", "detection",
         },
         "schema requires every descriptor section",
     )
@@ -3686,10 +4043,249 @@ def test_board_descriptor_validator():
         lambda: board_descriptor.validate_descriptors(descriptors),
         "repository descriptors pass validation",
     )
+    v2_audio = {
+        "amp": "ns4150b",
+        "codec": "es8311",
+        "mic": "es7210",
+        "speaker_bus": "i2s",
+        "mic_bus": "i2s",
+        "pin_playback_mclk": 2,
+        "pin_playback_bclk": 48,
+        "pin_playback_lrck": 38,
+        "pin_dout": 47,
+        "pin_capture_mclk": 2,
+        "pin_capture_bclk": 48,
+        "pin_capture_lrck": 38,
+        "pin_din": 39,
+        "pin_pdm_clock": -1,
+        "pin_amp_enable": 15,
+        "codec_i2c_address": 0x18,
+        "mic_i2c_address": 0x40,
+        "playback_rate_hz": 16000,
+        "playback_channels": 2,
+        "capture_rate_hz": 16000,
+        "capture_channels": 2,
+    }
+    lcd_185c = next(
+        item for item in descriptors
+        if item["key"] == "s3-touch-lcd-185c")
+    check_equal(
+        lcd_185c["audio"],
+        v2_audio,
+        "the 1.85C descriptor pins the verified V2 audio topology",
+    )
     check(
         espdisp.generate_board_descriptors.write_outputs(
             espdisp.REPO_ROOT, check=True),
         "committed generated board files are current",
+    )
+
+    audio_none = {
+        "amp": "none",
+        "codec": "none",
+        "mic": "none",
+        "speaker_bus": "none",
+        "mic_bus": "none",
+        "pin_playback_mclk": -1,
+        "pin_playback_bclk": -1,
+        "pin_playback_lrck": -1,
+        "pin_dout": -1,
+        "pin_capture_mclk": -1,
+        "pin_capture_bclk": -1,
+        "pin_capture_lrck": -1,
+        "pin_din": -1,
+        "pin_pdm_clock": -1,
+        "pin_amp_enable": -1,
+        "codec_i2c_address": 0,
+        "mic_i2c_address": 0,
+        "playback_rate_hz": 0,
+        "playback_channels": 0,
+        "capture_rate_hz": 0,
+        "capture_channels": 0,
+    }
+    audio_verified = {
+        "amp": "ns4150b",
+        "codec": "es8311",
+        "mic": "es7210",
+        "speaker_bus": "i2s",
+        "mic_bus": "i2s",
+        "pin_playback_mclk": 16,
+        "pin_playback_bclk": 9,
+        "pin_playback_lrck": 45,
+        "pin_dout": 8,
+        "pin_capture_mclk": 16,
+        "pin_capture_bclk": 9,
+        "pin_capture_lrck": 45,
+        "pin_din": 10,
+        "pin_pdm_clock": -1,
+        "pin_amp_enable": 46,
+        "codec_i2c_address": 0x18,
+        "mic_i2c_address": 0x40,
+        "playback_rate_hz": 16000,
+        "playback_channels": 2,
+        "capture_rate_hz": 16000,
+        "capture_channels": 2,
+    }
+
+    absent_audio = copy.deepcopy(descriptors[0])
+    absent_audio["audio"] = copy.deepcopy(audio_none)
+    absent_audio["capabilities"]["audio"] = False
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors([absent_audio]),
+        "an absent audio row passes validation",
+    )
+
+    verified_audio = copy.deepcopy(next(
+        item for item in descriptors
+        if item["identity"]["profile"] == "co5300"))
+    verified_audio["audio"] = copy.deepcopy(audio_verified)
+    verified_audio["capabilities"]["audio"] = True
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors([verified_audio]),
+        "a complete verified audio row passes validation",
+    )
+
+    malformed_audio_enum = copy.deepcopy(verified_audio)
+    malformed_audio_enum["audio"]["amp"] = "plausible-amp"
+    check_descriptor_fails(
+        [malformed_audio_enum],
+        "audio.amp must be one of",
+        "unknown audio amp enums are refused",
+    )
+
+    malformed_audio_pin = copy.deepcopy(verified_audio)
+    malformed_audio_pin["audio"]["pin_playback_mclk"] = -5
+    check_descriptor_fails(
+        [malformed_audio_pin],
+        "audio.pin_playback_mclk must be -1 or GPIO 0..48",
+        "audio pins reject negative values other than the sentinel",
+    )
+
+    out_of_range_audio_pin = copy.deepcopy(verified_audio)
+    out_of_range_audio_pin["audio"]["pin_playback_mclk"] = 49
+    check_descriptor_fails(
+        [out_of_range_audio_pin],
+        "audio.pin_playback_mclk must be -1 or GPIO 0..48",
+        "audio pins use the target GPIO ceiling",
+    )
+
+    colliding_audio_pin = copy.deepcopy(verified_audio)
+    colliding_audio_pin["audio"]["pin_playback_mclk"] = \
+        colliding_audio_pin["carrier"]["pin_sclk"]
+    check_descriptor_fails(
+        [colliding_audio_pin],
+        "audio.pin_playback_mclk GPIO38 collides with carrier.pin_sclk",
+        "audio pins cannot collide with existing board wiring",
+    )
+
+    absent_with_pin = copy.deepcopy(absent_audio)
+    absent_with_pin["audio"]["pin_dout"] = 1
+    check_descriptor_fails(
+        [absent_with_pin],
+        "audio capability is false but audio.pin_dout is declared",
+        "audio-absent rows cannot carry implementation pins",
+    )
+
+    unknown_with_detail = copy.deepcopy(verified_audio)
+    unknown_with_detail["audio"]["amp"] = "unknown"
+    check_descriptor_fails(
+        [unknown_with_detail],
+        "unverified audio rows must leave pins, addresses, rates, and channels unknown",
+        "unknown hardware revisions cannot mix guesses with concrete facts",
+    )
+
+    missing_playback_pin = copy.deepcopy(verified_audio)
+    missing_playback_pin["audio"]["pin_dout"] = -1
+    check_descriptor_fails(
+        [missing_playback_pin],
+        "I2S playback requires audio.pin_playback_bclk, pin_playback_lrck, and pin_dout",
+        "verified I2S playback requires its data pin",
+    )
+
+    malformed_audio_rate = copy.deepcopy(verified_audio)
+    malformed_audio_rate["audio"]["capture_rate_hz"] = 7999
+    check_descriptor_fails(
+        [malformed_audio_rate],
+        "audio.capture_rate_hz must be 8000..96000",
+        "audio sample rates are bounded",
+    )
+
+    malformed_audio_channels = copy.deepcopy(verified_audio)
+    malformed_audio_channels["audio"]["capture_channels"] = 9
+    check_descriptor_fails(
+        [malformed_audio_channels],
+        "audio.capture_channels must be 1..8",
+        "audio channel counts are bounded",
+    )
+
+    missing_codec_address = copy.deepcopy(verified_audio)
+    missing_codec_address["audio"]["codec_i2c_address"] = 0
+    check_descriptor_fails(
+        [missing_codec_address],
+        "ES8311 requires audio.codec_i2c_address",
+        "I2C codecs require a usable address",
+    )
+
+    separate_capture_clocks = copy.deepcopy(verified_audio)
+    separate_capture_clocks["audio"]["pin_capture_mclk"] = 17
+    separate_capture_clocks["audio"]["pin_capture_bclk"] = 18
+    separate_capture_clocks["audio"]["pin_capture_lrck"] = 19
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors(
+            [separate_capture_clocks]),
+        "playback and capture may use independent I2S clocks",
+    )
+
+    pdm_capture = copy.deepcopy(verified_audio)
+    pdm_capture["audio"]["mic"] = "pdm"
+    pdm_capture["audio"]["mic_bus"] = "pdm"
+    pdm_capture["audio"]["pin_capture_mclk"] = -1
+    pdm_capture["audio"]["pin_capture_bclk"] = -1
+    pdm_capture["audio"]["pin_capture_lrck"] = -1
+    pdm_capture["audio"]["pin_pdm_clock"] = 17
+    pdm_capture["audio"]["mic_i2c_address"] = 0
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors([pdm_capture]),
+        "a direct PDM mic may coexist with I2S playback",
+    )
+
+    pdm_with_i2s_clocks = copy.deepcopy(pdm_capture)
+    pdm_with_i2s_clocks["audio"]["pin_capture_bclk"] = 18
+    check_descriptor_fails(
+        [pdm_with_i2s_clocks],
+        "PDM capture must not declare capture I2S clocks",
+        "PDM and capture-I2S clocks cannot be mixed",
+    )
+
+    es7210_on_pdm = copy.deepcopy(pdm_capture)
+    es7210_on_pdm["audio"]["mic"] = "es7210"
+    es7210_on_pdm["audio"]["mic_i2c_address"] = 0x40
+    check_descriptor_fails(
+        [es7210_on_pdm],
+        "ES7210 requires audio.mic_bus i2s",
+        "I2S capture devices cannot be declared as PDM",
+    )
+
+    generated_audio_path = os.path.join(
+        espdisp.REPO_ROOT, "firmware", "libraries", "espdisp_board", "src",
+        "generated_board_audio.h")
+    if os.path.exists(generated_audio_path):
+        with open(generated_audio_path, encoding="utf-8") as source:
+            generated_audio = source.read()
+    else:
+        generated_audio = ""
+    check(
+        "AudioAmp::Ns4150b" in generated_audio and
+        "AudioCodec::Es8311" in generated_audio and
+        "AudioMic::Es7210" in generated_audio,
+        "generated constexpr audio data carries verified component enums",
+    )
+    check(
+        "Variant::LcdSt77916, AudioAmp::Ns4150b, AudioCodec::Es8311, "
+        "AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, "
+        "2, 48, 38, 47, 2, 48, 38, 39, -1, 15, 24, 64, "
+        "16000, 2, 16000, 2" in generated_audio,
+        "generated 1.85C audio data pins the verified V2 topology",
     )
 
     missing = copy.deepcopy(descriptors[0])
@@ -6716,6 +7312,7 @@ def main():
     test_git_firmware_build()
     test_utc_timestamp()
     test_tile_stream_wire()
+    test_audio_wire_and_descriptor()
     test_describe_bundle()
 
     if failures:

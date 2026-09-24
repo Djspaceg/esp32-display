@@ -133,7 +133,29 @@ REQUIRED_FIELDS = (
     "serial.bridge",
     "serial.rx",
     "serial.tx",
+    "audio.amp",
+    "audio.codec",
+    "audio.mic",
+    "audio.speaker_bus",
+    "audio.mic_bus",
+    "audio.pin_playback_mclk",
+    "audio.pin_playback_bclk",
+    "audio.pin_playback_lrck",
+    "audio.pin_dout",
+    "audio.pin_capture_mclk",
+    "audio.pin_capture_bclk",
+    "audio.pin_capture_lrck",
+    "audio.pin_din",
+    "audio.pin_pdm_clock",
+    "audio.pin_amp_enable",
+    "audio.codec_i2c_address",
+    "audio.mic_i2c_address",
+    "audio.playback_rate_hz",
+    "audio.playback_channels",
+    "audio.capture_rate_hz",
+    "audio.capture_channels",
     "capabilities.doom",
+    "capabilities.audio",
     "compile.selector",
     "compile.macros",
     "detection.order",
@@ -173,6 +195,12 @@ PANEL_BUSES = {"spi", "qspi", "mipi_dsi"}
 TOUCH_CONTROLLERS = {"none", "axs5106l", "cst9217", "cst816", "gt911"}
 POWER_CONTROLLERS = {"none", "axp2101", "battery_adc"}
 MOTION_CONTROLLERS = {"none", "qmi8658"}
+AUDIO_AMPS = {"none", "unknown", "ns4150b", "ns8002"}
+AUDIO_CODECS = {"none", "unknown", "es8311", "pcm5101a"}
+AUDIO_MICS = {"none", "unknown", "es7210", "ics43434", "pdm"}
+AUDIO_SPEAKER_BUSES = {"none", "unknown", "i2s"}
+AUDIO_MIC_BUSES = {"none", "unknown", "i2s", "pdm"}
+GPIO_MAX_BY_TARGET = {"c6": 30, "s3": 48, "p4": 54}
 WIFI_TOPOLOGIES = {"native", "hosted_coprocessor"}
 IDENTITY_SOURCES = {"wifi_station_mac", "efuse_base_mac"}
 SERIAL_TRANSPORTS = {"native_usb_cdc", "uart_bridge"}
@@ -333,6 +361,238 @@ def _validate_detection(descriptor: Dict[str, Any]) -> None:
     elif detection["sda"] != -1 or detection["scl"] != -1:
         raise DescriptorError(
             "%s: non-I2C detection must not declare I2C pins" % source)
+
+
+AUDIO_PIN_FIELDS = (
+    "pin_playback_mclk",
+    "pin_playback_bclk",
+    "pin_playback_lrck",
+    "pin_dout",
+    "pin_capture_mclk",
+    "pin_capture_bclk",
+    "pin_capture_lrck",
+    "pin_din",
+    "pin_pdm_clock",
+    "pin_amp_enable",
+)
+AUDIO_DETAIL_FIELDS = AUDIO_PIN_FIELDS + (
+    "codec_i2c_address",
+    "mic_i2c_address",
+    "playback_rate_hz",
+    "playback_channels",
+    "capture_rate_hz",
+    "capture_channels",
+)
+EXISTING_PIN_PATHS = (
+    "carrier.pin_sclk",
+    "carrier.pin_mosi",
+    "carrier.pin_data1",
+    "carrier.pin_data2",
+    "carrier.pin_data3",
+    "carrier.pin_cs",
+    "carrier.pin_dc",
+    "carrier.pin_rst",
+    "carrier.pin_bl",
+    "carrier.pin_boot",
+    "carrier.pin_rgb_led",
+    "touch.sda",
+    "touch.scl",
+    "touch.reset",
+    "touch.interrupt",
+    "backlight.enable_pin",
+    "power.battery_adc",
+    "power.battery_enable",
+    "power.charge_status",
+    "serial.rx",
+    "serial.tx",
+    "detection.sda",
+    "detection.scl",
+    "detection.reset_pin",
+)
+
+
+def _validate_audio_pin(
+    descriptor: Dict[str, Any], field: str, maximum: int,
+) -> int:
+    path = "audio." + field
+    value = _expect_type(descriptor, path, int)
+    if value != -1 and not 0 <= value <= maximum:
+        raise DescriptorError(
+            "%s: %s must be -1 or GPIO 0..%d"
+            % (_source_name(descriptor), path, maximum)
+        )
+    return value
+
+
+def _validate_audio(descriptor: Dict[str, Any]) -> None:
+    source = _source_name(descriptor)
+    audio = descriptor["audio"]
+    amp = _expect_choice(descriptor, "audio.amp", AUDIO_AMPS)
+    codec = _expect_choice(descriptor, "audio.codec", AUDIO_CODECS)
+    mic = _expect_choice(descriptor, "audio.mic", AUDIO_MICS)
+    speaker_bus = _expect_choice(
+        descriptor, "audio.speaker_bus", AUDIO_SPEAKER_BUSES)
+    mic_bus = _expect_choice(
+        descriptor, "audio.mic_bus", AUDIO_MIC_BUSES)
+    capability = _expect_type(descriptor, "capabilities.audio", bool)
+    maximum = GPIO_MAX_BY_TARGET[descriptor["identity"]["target"]]
+    pins = {
+        field: _validate_audio_pin(descriptor, field, maximum)
+        for field in AUDIO_PIN_FIELDS
+    }
+    details = {
+        field: _expect_type(descriptor, "audio." + field, int)
+        for field in AUDIO_DETAIL_FIELDS if field not in AUDIO_PIN_FIELDS
+    }
+    for field in ("codec_i2c_address", "mic_i2c_address"):
+        if not 0 <= details[field] <= 127:
+            raise DescriptorError(
+                "%s: audio.%s must be 0..127" % (source, field))
+
+    if not capability:
+        for field, value in pins.items():
+            if value != -1:
+                raise DescriptorError(
+                    "%s: audio capability is false but audio.%s is declared"
+                    % (source, field)
+                )
+        if any(details.values()) or any(
+                value != "none"
+                for value in (amp, codec, mic, speaker_bus, mic_bus)):
+            raise DescriptorError(
+                "%s: audio capability is false but audio hardware is declared"
+                % source
+            )
+        return
+
+    enum_values = (amp, codec, mic, speaker_bus, mic_bus)
+    if "unknown" in enum_values:
+        if any(value != "unknown" for value in enum_values) or \
+                any(value != -1 for value in pins.values()) or \
+                any(details.values()):
+            raise DescriptorError(
+                "%s: unverified audio rows must leave pins, addresses, rates, "
+                "and channels unknown" % source
+            )
+        return
+
+    if speaker_bus == "none" and mic_bus == "none":
+        raise DescriptorError(
+            "%s: audio capability requires playback or capture" % source)
+    if speaker_bus == "none":
+        if amp != "none" or codec != "none":
+            raise DescriptorError(
+                "%s: audio without playback must not declare amp or codec"
+                % source
+            )
+        if details["playback_rate_hz"] != 0 or \
+                details["playback_channels"] != 0:
+            raise DescriptorError(
+                "%s: audio without playback must use zero playback bounds"
+                % source
+            )
+    else:
+        if amp == "none":
+            raise DescriptorError(
+                "%s: I2S speaker output requires audio.amp" % source)
+        for field in ("pin_playback_bclk", "pin_playback_lrck", "pin_dout"):
+            if pins[field] == -1:
+                raise DescriptorError(
+                    "%s: I2S playback requires audio.pin_playback_bclk, "
+                    "pin_playback_lrck, and pin_dout" % source
+                )
+        _expect_int_range(
+            descriptor, "audio.playback_rate_hz", 8000, 96000)
+        _expect_int_range(
+            descriptor, "audio.playback_channels", 1, 8)
+
+    if mic_bus == "none":
+        if mic != "none":
+            raise DescriptorError(
+                "%s: audio without capture must not declare a mic" % source)
+        if details["capture_rate_hz"] != 0 or \
+                details["capture_channels"] != 0:
+            raise DescriptorError(
+                "%s: audio without capture must use zero capture bounds"
+                % source
+            )
+    else:
+        if mic == "none":
+            raise DescriptorError(
+                "%s: audio capture requires audio.mic" % source)
+        if pins["pin_din"] == -1:
+            raise DescriptorError(
+                "%s: audio capture requires audio.pin_din" % source)
+        if mic_bus == "i2s" and (
+                pins["pin_capture_bclk"] == -1 or
+                pins["pin_capture_lrck"] == -1):
+            raise DescriptorError(
+                "%s: I2S capture requires audio.pin_capture_bclk and "
+                "pin_capture_lrck" % source
+            )
+        if mic_bus == "pdm" and pins["pin_pdm_clock"] == -1:
+            raise DescriptorError(
+                "%s: PDM capture requires audio.pin_pdm_clock" % source)
+        if mic_bus == "pdm" and any(
+                pins[field] != -1 for field in (
+                    "pin_capture_mclk",
+                    "pin_capture_bclk",
+                    "pin_capture_lrck",
+                )):
+            raise DescriptorError(
+                "%s: PDM capture must not declare capture I2S clocks" % source)
+        _expect_int_range(
+            descriptor, "audio.capture_rate_hz", 8000, 96000)
+        _expect_int_range(
+            descriptor, "audio.capture_channels", 1, 8)
+
+    if mic_bus != "pdm" and pins["pin_pdm_clock"] != -1:
+        raise DescriptorError(
+            "%s: audio.pin_pdm_clock is only valid for PDM capture" % source)
+    if codec == "es8311":
+        if not 0x08 <= details["codec_i2c_address"] <= 0x77:
+            raise DescriptorError(
+                "%s: ES8311 requires audio.codec_i2c_address" % source)
+        if pins["pin_playback_mclk"] == -1:
+            raise DescriptorError(
+                "%s: ES8311 requires audio.pin_playback_mclk" % source)
+    elif details["codec_i2c_address"] != 0:
+        raise DescriptorError(
+            "%s: non-I2C audio codec must use address 0" % source)
+    if mic == "es7210":
+        if mic_bus != "i2s":
+            raise DescriptorError(
+                "%s: ES7210 requires audio.mic_bus i2s" % source)
+        if not 0x08 <= details["mic_i2c_address"] <= 0x77:
+            raise DescriptorError(
+                "%s: ES7210 requires audio.mic_i2c_address" % source)
+        if pins["pin_capture_mclk"] == -1:
+            raise DescriptorError(
+                "%s: ES7210 requires audio.pin_capture_mclk" % source)
+    elif details["mic_i2c_address"] != 0:
+        raise DescriptorError(
+            "%s: non-I2C audio mic must use address 0" % source)
+    if mic == "ics43434" and mic_bus != "i2s":
+        raise DescriptorError(
+            "%s: ICS-43434 requires audio.mic_bus i2s" % source)
+    if mic == "pdm" and mic_bus != "pdm":
+        raise DescriptorError(
+            "%s: PDM mic requires audio.mic_bus pdm" % source)
+    if amp == "ns4150b" and pins["pin_amp_enable"] == -1:
+        raise DescriptorError(
+            "%s: NS4150B requires audio.pin_amp_enable" % source)
+
+    existing_pins: Dict[int, str] = {}
+    for path in EXISTING_PIN_PATHS:
+        value = _field(descriptor, path)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            existing_pins.setdefault(value, path)
+    for field, value in pins.items():
+        if value in existing_pins:
+            raise DescriptorError(
+                "%s: audio.%s GPIO%d collides with %s"
+                % (source, field, value, existing_pins[value])
+            )
 
 
 def load_repository_descriptors(repo_root: str) -> List[Dict[str, Any]]:
@@ -589,6 +849,7 @@ def validate_descriptors(
             descriptor, "power.controller", POWER_CONTROLLERS)
         _expect_choice(
             descriptor, "motion.controller", MOTION_CONTROLLERS)
+        _validate_audio(descriptor)
 
         flash_bytes = _expect_type(descriptor, "family.flash_bytes", list)
         if not flash_bytes:

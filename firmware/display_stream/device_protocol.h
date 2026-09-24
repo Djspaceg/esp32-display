@@ -135,6 +135,12 @@ enum Capability : uint32_t {
   // separate, unambiguous format for large panels whose grid cannot fit tile
   // v1's 10-bit index. P4-4B advertises this instead of packed bands/tile v1.
   CAP_LARGE_TILE_STREAM = 1u << 19,
+  // Accepts version-1 PCM audio on audioproto::UDP_PORT. This is separate
+  // from descriptor capability: it is advertised only after the dedicated
+  // audio transport and engine have started for an approved runtime variant.
+  CAP_AUDIO_DOWNLINK = 1u << 20,
+  // Emits version-1 captured PCM on the same dedicated audio socket.
+  CAP_AUDIO_UPLINK = 1u << 21,
 };
 
 enum class ControlOpcode : uint8_t {

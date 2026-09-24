@@ -112,6 +112,11 @@ public enum DeviceProtocol {
         /// Accepts ETL1, the magic-prefixed large-tile format with 16-bit tile
         /// indices used by panels whose grid exceeds tile v1's 10-bit field.
         public static let largeTileStream = Capabilities(rawValue: 1 << 19)
+        /// Accepts EAUD v1 PCM16-LE playback on the separately advertised
+        /// audio port. Firmware exposes this only after its audio engine starts.
+        public static let audioDownlink = Capabilities(rawValue: 1 << 20)
+        /// Emits EAUD v1 microphone PCM and status to the accepted downlink peer.
+        public static let audioUplink = Capabilities(rawValue: 1 << 21)
     }
 
     public struct DeviceInfo: Equatable, Sendable {

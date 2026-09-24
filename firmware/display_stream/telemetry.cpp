@@ -56,6 +56,10 @@ uint32_t deviceCapabilities() {
                               | deviceproto::CAP_TOUCH_LONGPRESS)
                            : 0u)
          | (batteryAvailable ? deviceproto::CAP_BATTERY : 0u)
+         | (audioAvailable
+                ? (deviceproto::CAP_AUDIO_DOWNLINK |
+                   deviceproto::CAP_AUDIO_UPLINK)
+                : 0u)
          // Exactly ONE bit-15 frame protocol per board, never both: a tile
          // packet and a packed band packet are byte-ambiguous past the
          // shared flag bit, so a board that accepted both could misparse

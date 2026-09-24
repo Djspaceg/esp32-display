@@ -391,6 +391,12 @@ private struct PanelDetailView: View {
             sourceSection
             displaySection
             connectionSection
+            if panel.audioStatus != nil
+                || panel.capabilities.contains(.audioDownlink)
+                || panel.capabilities.contains(.audioUplink)
+            {
+                audioSection
+            }
             // Gated on the panel actually having a touch screen, so a panel that
             // cannot produce a gesture does not offer to bind one.
             if panel.capabilities.contains(.touch) {
@@ -899,6 +905,85 @@ private struct PanelDetailView: View {
                 + "Only the first 10 access points are selectable from the "
                 + "device.")
         }
+    }
+
+    @ViewBuilder
+    private var audioSection: some View {
+        Section {
+            if let audio = panel.audioStatus {
+                LabeledContent("State", value: audio.state.label)
+                LabeledContent("Detail", value: audio.message)
+                LabeledContent("Mac microphone", value: audio.inputName)
+                LabeledContent("Mac speakers", value: audio.outputName)
+                LabeledContent(
+                    "Panel format",
+                    value: "\(audio.descriptor.sampleRateHz) Hz, "
+                        + "\(audio.descriptor.playbackChannels) down / "
+                        + "\(audio.descriptor.captureChannels) up channels")
+                LabeledContent(
+                    "Mac downlink loss",
+                    value: "\(audio.downlinkQueueDrops) queue drops, "
+                        + "\(audio.captureCallbackDrops) callback drops")
+                LabeledContent(
+                    "Mac uplink loss",
+                    value: "\(audio.uplinkLostFrames) lost frames, "
+                        + "\(audio.uplinkLatePackets) late, "
+                        + "\(audio.playbackQueueDrops) queue drops")
+                LabeledContent(
+                    "Active drift correction",
+                    value: String(
+                        format: "%.1f ppm down / %.1f ppm up",
+                        audio.downlinkCorrectionPPM,
+                        audio.uplinkCorrectionPPM))
+
+                if let status = audio.panelStatus {
+                    LabeledContent(
+                        "Panel buffer",
+                        value: "\(status.fillFrames) / \(status.targetFrames) frames")
+                    LabeledContent(
+                        "Minimum fill",
+                        value: "\(status.minimumFillFrames) frames")
+                    LabeledContent("Underruns", value: "\(status.underruns)")
+                    LabeledContent(
+                        "Underrun duration",
+                        value: "\(status.underrunDurationMilliseconds) ms")
+                    LabeledContent("Late packets", value: "\(status.latePackets)")
+                    LabeledContent("Lost frames", value: "\(status.lostFrames)")
+                    LabeledContent(
+                        "Clock corrections", value: "\(status.hardCorrections)")
+                    LabeledContent(
+                        "Ingress drops", value: "\(status.ingressDrops)")
+                    LabeledContent("Queue drops", value: "\(status.queueDrops)")
+                    LabeledContent("Engine drops", value: "\(status.engineDrops)")
+                    LabeledContent(
+                        "Capture overruns", value: "\(status.captureOverruns)")
+                } else {
+                    LabeledContent("Panel diagnostics", value: "Waiting for status")
+                }
+            } else {
+                LabeledContent("State", value: "Waiting for audio descriptor")
+            }
+        } header: {
+            Text("Audio")
+        } footer: {
+            if let audio = panel.audioStatus {
+                Text(audioFooterText(audio.tuning))
+            } else {
+                Text("Audio starts only after the panel advertises a complete "
+                    + "EAUD descriptor and its audio capability bits.")
+            }
+        }
+    }
+
+    private func audioFooterText(_ tuning: AudioRuntimeTuning) -> String {
+        var summary = "Latency target / ceiling: "
+        summary += "\(tuning.downlinkTargetMilliseconds) / "
+        summary += "\(tuning.downlinkCeilingMilliseconds) ms downlink, "
+        summary += "\(tuning.uplinkTargetMilliseconds) / "
+        summary += "\(tuning.uplinkCeilingMilliseconds) ms uplink. "
+        summary += "Derived clock bound \(tuning.derivedDriftBoundPPM) ppm; "
+        summary += "correction limit \(tuning.maximumCorrectionPPM) ppm."
+        return summary
     }
 
     /// The gesture preset and, below it, what each gesture will actually do.

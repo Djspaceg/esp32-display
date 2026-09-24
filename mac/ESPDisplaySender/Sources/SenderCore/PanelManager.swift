@@ -12,6 +12,8 @@ final class PanelManager: ObservableObject {
     @Published internal(set) var panels: [PanelSnapshot] = []
     @Published internal(set) var savedNetworkNames: [String] = []
     @Published internal(set) var usbDevices: [WifiConfigUI.USBDeviceOption] = []
+    @Published internal(set) var audioDevices: [AudioDeviceOption] = []
+    var audioRouteSnapshot = CoreAudioRouteSnapshot.empty
     /// Current transport paths. Kept as a projection for flashing/configuration
     /// code that needs a path rather than a display label.
     var usbSerialPorts: [String] { usbDevices.map(\.path) }
@@ -161,6 +163,7 @@ final class PanelManager: ObservableObject {
         usbDevices = WifiConfigUI.candidatePorts().map {
             WifiConfigUI.USBDeviceOption(path: $0)
         }
+        refreshAudioDevices()
         if let failure = loaded.failure {
             report(.persistence, detail: "Saved display settings could not be read "
                 + "from \(url?.path ?? "disk"): \(failure)")
@@ -173,6 +176,7 @@ final class PanelManager: ObservableObject {
             [weak self] _ in
             Task { @MainActor in
                 self?.refreshUSBPorts()
+                self?.refreshAudioDevices()
                 self?.sortPanels()
                 self?.objectWillChange.send()
             }
@@ -297,6 +301,9 @@ final class PanelManager: ObservableObject {
                 spacingMicros: validated.spacingMicros,
                 adaptive: validated.adaptivePacing)
             session.applyTileQuality(validated.tileQuality)
+            session.applyAudio(
+                preferences: validated.audioDevices,
+                tuning: validated.audioTuning)
         }
         saveSettings()
     }

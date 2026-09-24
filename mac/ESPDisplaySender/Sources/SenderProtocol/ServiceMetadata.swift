@@ -1,5 +1,14 @@
 import Foundation
 
+public enum AudioAdvertisement: Hashable, Sendable {
+    /// No readable TXT record was present, so existing live audio state must
+    /// not be erased while Network.framework is still fetching metadata.
+    case unknown
+    /// TXT was present but did not contain one complete supported descriptor.
+    case unavailable
+    case available(AudioStreamDescriptor)
+}
+
 /// What a panel says about itself in its mDNS TXT records, parsed.
 ///
 /// The firmware has advertised these all along (display_stream.ino,
@@ -19,6 +28,11 @@ import Foundation
 /// | `target` | release family token | `c6`, `s3`, or `p4` |
 /// | `profile` | runtime hardware token | selected carrier/panel profile |
 /// | `partition` | compatibility token | installed flash layout |
+/// | `audio-port` | `%u` | dedicated EAUD UDP port |
+/// | `audio-version` | `%u` | EAUD protocol generation |
+/// | `audio-rate` | `%lu` | descriptor sample rate |
+/// | `audio-play-ch` | `%u` | descriptor playback channels |
+/// | `audio-capture-ch` | `%u` | descriptor capture channels |
 ///
 /// TOLERANT BY CONSTRUCTION. Nothing here throws and nothing here is required:
 /// a record that is missing, empty, misspelled, out of range, or written by a
@@ -57,6 +71,11 @@ public struct ServiceMetadata: Hashable, Sendable {
     public let capabilities: DeviceProtocol.Capabilities?
     /// `proto`. Which frame-protocol generation this panel speaks.
     public let frameProtocolVersion: Int?
+    /// Complete audio descriptor, admitted only with both audio capabilities.
+    public let audioDescriptor: AudioStreamDescriptor?
+    /// Whether this browse result is silent about audio, explicitly lacks it,
+    /// or carries a complete descriptor.
+    public let audioAdvertisement: AudioAdvertisement
 
     public init(
         name: String? = nil,
@@ -67,7 +86,8 @@ public struct ServiceMetadata: Hashable, Sendable {
         profile: String? = nil,
         partition: String? = nil,
         capabilities: DeviceProtocol.Capabilities? = nil,
-        frameProtocolVersion: Int? = nil
+        frameProtocolVersion: Int? = nil,
+        audioDescriptor: AudioStreamDescriptor? = nil
     ) {
         self.name = name
         self.geometry = geometry
@@ -78,6 +98,9 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.partition = partition
         self.capabilities = capabilities
         self.frameProtocolVersion = frameProtocolVersion
+        self.audioDescriptor = audioDescriptor
+        self.audioAdvertisement = audioDescriptor.map(AudioAdvertisement.available)
+            ?? .unknown
     }
 
     /// A panel that told us nothing: no TXT records at all, or none we could
@@ -111,8 +134,19 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.profile = Self.nonEmpty(records["profile"])
         self.partition = Self.nonEmpty(records["partition"])
         self.geometry = Self.parseResolution(records["res"])
-        self.capabilities = Self.parseCapabilities(records["caps"])
+        let capabilities = Self.parseCapabilities(records["caps"])
+        self.capabilities = capabilities
         self.frameProtocolVersion = Self.parseUnsignedDecimal(records["proto"])
+        let audioDescriptor = Self.parseAudioDescriptor(
+            records, capabilities: capabilities)
+        self.audioDescriptor = audioDescriptor
+        if records.isEmpty || records.values.allSatisfy({ $0.isEmpty }) {
+            self.audioAdvertisement = .unknown
+        } else if let audioDescriptor {
+            self.audioAdvertisement = .available(audioDescriptor)
+        } else {
+            self.audioAdvertisement = .unavailable
+        }
     }
 
     // MARK: - field parsing
@@ -192,5 +226,32 @@ public struct ServiceMetadata: Hashable, Sendable {
               let parsed = Int(value)
         else { return nil }
         return parsed
+    }
+
+    static func parseAudioDescriptor(
+        _ records: [String: String],
+        capabilities: DeviceProtocol.Capabilities?
+    ) -> AudioStreamDescriptor? {
+        guard let capabilities,
+              capabilities.contains(.audioDownlink),
+              capabilities.contains(.audioUplink),
+              let port = parseUnsignedDecimal(records["audio-port"]),
+              let version = parseUnsignedDecimal(records["audio-version"]),
+              let sampleRate = parseUnsignedDecimal(records["audio-rate"]),
+              let playbackChannels = parseUnsignedDecimal(records["audio-play-ch"]),
+              let captureChannels = parseUnsignedDecimal(records["audio-capture-ch"]),
+              let portValue = UInt16(exactly: port),
+              let versionValue = UInt8(exactly: version),
+              let sampleRateValue = UInt32(exactly: sampleRate),
+              let playbackValue = UInt8(exactly: playbackChannels),
+              let captureValue = UInt8(exactly: captureChannels)
+        else { return nil }
+        let descriptor = AudioStreamDescriptor(
+            port: portValue,
+            version: versionValue,
+            sampleRateHz: sampleRateValue,
+            playbackChannels: playbackValue,
+            captureChannels: captureValue)
+        return descriptor.isSupported ? descriptor : nil
     }
 }

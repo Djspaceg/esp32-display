@@ -459,12 +459,32 @@ public enum ESPDisplaySenderApp {
                 name: String,
                 sender: FrameSender,
                 source: DeviceSession.Source? = nil,
+                audioDescriptor: AudioStreamDescriptor? = nil,
                 allowUnowned: Bool = false,
                 provisional: Bool = false
             ) {
+                let makeAudioSession: (AudioStreamDescriptor) -> PanelAudioSession = {
+                    descriptor in
+                    PanelAudioSession(
+                        descriptor: descriptor,
+                        preferences: streaming.audioDevices,
+                        tuning: streaming.audioTuning,
+                        peerAddress: sender.peerAddressState,
+                        radioBudget: sender.radioBudget,
+                        onUpdate: { status in
+                            Task { @MainActor in
+                                panelManager.updateAudio(
+                                    status, for: name, sessionID: id)
+                            }
+                        })
+                }
+                let audioSession = audioDescriptor.map(makeAudioSession)
                 let session = DeviceSession(
                     id: id,
-                    name: name, sender: sender, source: source ?? sourceFor(name),
+                    name: name, sender: sender, audioSession: audioSession,
+                    audioDescriptor: audioDescriptor,
+                    audioSessionFactory: makeAudioSession,
+                    source: source ?? sourceFor(name),
                     picker: picker, fps: streaming.fps,
                     onStatus: { status in
                         Task { @MainActor in
@@ -478,6 +498,9 @@ public enum ESPDisplaySenderApp {
                                 sessionID: id)
                         }
                     })
+                session.applyAudio(
+                    preferences: streaming.audioDevices,
+                    tuning: streaming.audioTuning)
                 // A provisional discovery must be unable to send even if its
                 // run task wins the scheduler race against manager registration.
                 if provisional { session.setPaused(true) }
@@ -530,6 +553,15 @@ public enum ESPDisplaySenderApp {
                     Task { @MainActor in
                         panelManager.noteDiscovery(devices)
                         let currentSources = panelManager.persistedSources()
+                        for device in devices {
+                            registry.reconcileAudio(
+                                device.name,
+                                advertisement:
+                                    device.metadata.audioAdvertisement)
+                            if device.metadata.audioAdvertisement == .unavailable {
+                                panelManager.clearAudio(for: device.name)
+                            }
+                        }
                         for device in devices
                             where panelManager.shouldLaunchDiscoveredService(device.name)
                                 && !registry.shouldSkip(device.name)
@@ -560,6 +592,7 @@ public enum ESPDisplaySenderApp {
                                     }),
                                 source: currentSources[device.name]?
                                     .sessionSource(defaultDisplay: opts.displayName),
+                                audioDescriptor: device.metadata.audioDescriptor,
                                 provisional: true)
                         }
                     }

@@ -253,6 +253,8 @@ final class FrameSender {
     private var _deviceInfo: DeviceProtocol.DeviceInfo?
     private var _lastControlAck: DeviceProtocol.ControlAck?
     private var _resolvedAddress: String?
+    let peerAddressState = PanelPeerAddress()
+    let radioBudget = PanelRadioBudget()
     private var _paused = false
     private var _parked = false
     /// Genuine replies from the device: heartbeats, info, and control
@@ -811,6 +813,7 @@ final class FrameSender {
                 lock.lock()
                 _resolvedAddress = address
                 lock.unlock()
+                peerAddressState.publish(address)
                 try? address.write(
                     toFile: Self.ipCachePath, atomically: true, encoding: .utf8)
             }
@@ -1540,11 +1543,16 @@ final class FrameSender {
         _ packets: [Data], spacing: UInt32, on conn: NWConnection
     ) -> UInt64 {
         guard !packets.isEmpty else { return 0 }
-        let spacingNs = UInt64(spacing) * 1_000
         let start = DispatchTime.now().uptimeNanoseconds
         if pacingDeadline < start { pacingDeadline = start }
         var slept: UInt64 = 0
         for (index, packet) in packets.enumerated() {
+            let nowBeforeSend = DispatchTime.now().uptimeNanoseconds
+            let spacingNs = radioBudget.videoSpacingNanos(
+                baseSpacingMicros: spacing,
+                packetBytes: packet.count,
+                nowNanos: nowBeforeSend)
+            let audioHasPriority = spacingNs > UInt64(spacing) * 1_000
             conn.send(
                 content: packet,
                 completion: .contentProcessed { [weak self] error in
@@ -1557,7 +1565,9 @@ final class FrameSender {
             // Pause on burst boundaries only. The tail of a frame does not
             // sleep: its debt rides on `pacingDeadline` into the next call,
             // which is what keeps the rate honest without idling here.
-            guard (index + 1) % Self.pacingBurstPackets == 0 else { continue }
+            guard audioHasPriority
+                || (index + 1) % Self.pacingBurstPackets == 0
+            else { continue }
             let now = DispatchTime.now().uptimeNanoseconds
             guard pacingDeadline > now else { continue }
             let micros = UInt32(

@@ -9,6 +9,7 @@ import glob
 import hashlib
 import importlib
 import json
+import math
 import os
 import re
 import select
@@ -20,7 +21,8 @@ import sys
 import tempfile
 import termios
 import time
-from typing import Dict, List, NamedTuple, Optional, Tuple
+import wave
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import generated_board_catalog
 
@@ -3229,6 +3231,931 @@ def espota_command(
 
 
 # --------------------------------------------------------------------------
+# EAUD audio reference sender/receiver
+
+AUDIO_PORT = 5569
+AUDIO_VERSION = 1
+AUDIO_FLAG_PCM16_LE = 1
+AUDIO_KIND_DOWNLINK = 1
+AUDIO_KIND_UPLINK = 2
+AUDIO_KIND_STATUS = 3
+AUDIO_HEADER_BYTES = 28
+AUDIO_MAX_PAYLOAD_BYTES = 1400
+AUDIO_STATUS_PAYLOAD_BYTES = 48
+AUDIO_CAP_DOWNLINK = 1 << 20
+AUDIO_CAP_UPLINK = 1 << 21
+
+DNS_TYPE_A = 1
+DNS_TYPE_PTR = 12
+DNS_TYPE_TXT = 16
+DNS_TYPE_AAAA = 28
+DNS_TYPE_SRV = 33
+MDNS_GROUP = ("224.0.0.251", 5353)
+MDNS_SERVICE = "_espdisp._udp.local"
+
+
+class AudioDescriptor(NamedTuple):
+    port: int
+    version: int
+    sample_rate: int
+    playback_channels: int
+    capture_channels: int
+
+
+class AudioStatus(NamedTuple):
+    fill_frames: int
+    target_frames: int
+    minimum_fill_frames: int
+    underruns: int
+    underrun_duration_ms: int
+    late_packets: int
+    lost_frames: int
+    hard_corrections: int
+    ingress_drops: int
+    queue_drops: int
+    engine_drops: int
+    capture_overruns: int
+
+
+class AudioDatagram(NamedTuple):
+    kind: int
+    sequence: int
+    stream_generation: int
+    sample_rate: int
+    sample_counter: int
+    timestamp_micros: int
+    frame_count: int
+    channels: int
+    payload: bytes
+    status: Optional[AudioStatus]
+
+
+class DNSRecord(NamedTuple):
+    name: str
+    rrtype: int
+    value: object
+
+
+class DiscoveredAudio(NamedTuple):
+    host: str
+    service_name: str
+    descriptor: AudioDescriptor
+
+
+class AudioUplinkReorderBuffer:
+    """Bounded uplink reorder queue that preserves the panel sample timeline."""
+
+    def __init__(self, channels: int, window_packets: int):
+        if channels not in (1, 2):
+            raise Fail("uplink reorder channels must be 1 or 2")
+        if not 1 <= window_packets <= 64:
+            raise Fail("uplink reorder window must be between 1 and 64 packets")
+        self.channels = channels
+        self.window_packets = window_packets
+        # A missing sequence is released only after the reorder window has
+        # expired. Each possible missing packet can carry at most one MTU-sized
+        # payload, so never synthesize more silence than that bounded gap.
+        self.maximum_gap_frames = (
+            (window_packets + 1)
+            * (AUDIO_MAX_PAYLOAD_BYTES // (channels * 2)))
+        self.generation = None
+        self.expected_sequence = None
+        self.expected_sample_counter = None
+        self.pending: Dict[int, AudioDatagram] = {}
+        self.received_packets = 0
+        self.reordered_packets = 0
+        self.duplicate_packets = 0
+        self.lost_frames = 0
+        self.discontinuities = 0
+        self.generation_changes = 0
+
+    @staticmethod
+    def _sequence_distance(sequence: int, expected: int) -> int:
+        return (sequence - expected) & 0xFFFF
+
+    @staticmethod
+    def _sample_distance(counter: int, expected: int) -> int:
+        return (counter - expected) & 0xFFFFFFFF
+
+    def _begin_generation(self, datagram: AudioDatagram) -> None:
+        if self.generation is not None:
+            self.generation_changes += 1
+        self.pending.clear()
+        self.generation = datagram.stream_generation
+        self.expected_sequence = datagram.sequence
+        self.expected_sample_counter = datagram.sample_counter
+
+    def push(self, datagram: AudioDatagram) -> bytes:
+        if datagram.kind != AUDIO_KIND_UPLINK:
+            raise Fail("uplink reorder buffer received a non-uplink datagram")
+        if datagram.channels != self.channels:
+            raise Fail("uplink reorder buffer channel count changed")
+        if self.generation != datagram.stream_generation:
+            self._begin_generation(datagram)
+        assert self.expected_sequence is not None
+        distance = self._sequence_distance(
+            datagram.sequence, self.expected_sequence)
+        if distance >= 0x8000 or datagram.sequence in self.pending:
+            self.duplicate_packets += 1
+            return b""
+        if distance > 0:
+            self.reordered_packets += 1
+        self.pending[datagram.sequence] = datagram
+        self.received_packets += 1
+        return self._drain(force=False)
+
+    def finish(self) -> bytes:
+        return self._drain(force=True)
+
+    def _drain(self, force: bool) -> bytes:
+        output = bytearray()
+        while self.pending:
+            assert self.expected_sequence is not None
+            datagram = self.pending.pop(self.expected_sequence, None)
+            if datagram is None:
+                distances = [
+                    (self._sequence_distance(sequence, self.expected_sequence),
+                     sequence)
+                    for sequence in self.pending
+                ]
+                distance, sequence = min(distances)
+                farthest = max(item[0] for item in distances)
+                if not force and farthest <= self.window_packets:
+                    break
+                self.expected_sequence = sequence
+                continue
+
+            assert self.expected_sample_counter is not None
+            sample_distance = self._sample_distance(
+                datagram.sample_counter, self.expected_sample_counter)
+            if 0 < sample_distance < 0x80000000:
+                if sample_distance > self.maximum_gap_frames:
+                    # Network input must never turn a fabricated sample counter
+                    # into an unbounded allocation. Treat an implausible jump as
+                    # a fresh timeline, retain this packet, and synthesize none.
+                    self.discontinuities += 1
+                else:
+                    output.extend(
+                        b"\x00" * (sample_distance * self.channels * 2))
+                    self.lost_frames += sample_distance
+            elif sample_distance >= 0x80000000:
+                overlap = self._sample_distance(
+                    self.expected_sample_counter, datagram.sample_counter)
+                if overlap >= datagram.frame_count:
+                    self.duplicate_packets += 1
+                    self.expected_sequence = (
+                        self.expected_sequence + 1) & 0xFFFF
+                    continue
+                byte_offset = overlap * self.channels * 2
+                output.extend(datagram.payload[byte_offset:])
+                self.expected_sample_counter = (
+                    datagram.sample_counter + datagram.frame_count) & 0xFFFFFFFF
+                self.expected_sequence = (
+                    self.expected_sequence + 1) & 0xFFFF
+                continue
+
+            output.extend(datagram.payload)
+            self.expected_sample_counter = (
+                datagram.sample_counter + datagram.frame_count) & 0xFFFFFFFF
+            self.expected_sequence = (self.expected_sequence + 1) & 0xFFFF
+        return bytes(output)
+
+
+def _valid_audio_rate(sample_rate: int) -> bool:
+    return 8000 <= sample_rate <= 96000
+
+
+def audio_pcm_datagram(
+    kind: int,
+    sequence: int,
+    stream_generation: int,
+    sample_rate: int,
+    sample_counter: int,
+    timestamp_micros: int,
+    channels: int,
+    pcm: bytes,
+) -> bytes:
+    """Encode one firmware-compatible EAUD v1 PCM16-LE datagram."""
+    if kind not in (AUDIO_KIND_DOWNLINK, AUDIO_KIND_UPLINK):
+        raise Fail("audio PCM kind must be downlink or uplink")
+    if not _valid_audio_rate(sample_rate):
+        raise Fail("audio sample rate must be between 8000 and 96000 Hz")
+    if channels not in (1, 2):
+        raise Fail("audio channel count must be 1 or 2")
+    bytes_per_frame = channels * 2
+    if not pcm or len(pcm) % bytes_per_frame:
+        raise Fail("audio PCM payload is not a whole non-empty frame")
+    if len(pcm) > AUDIO_MAX_PAYLOAD_BYTES:
+        raise Fail(
+            "audio PCM payload is %d bytes; firmware limit is %d"
+            % (len(pcm), AUDIO_MAX_PAYLOAD_BYTES))
+    frame_count = len(pcm) // bytes_per_frame
+    header = struct.pack(
+        "<4sBBBBHHIIIHH",
+        b"EAUD",
+        AUDIO_VERSION,
+        kind,
+        AUDIO_FLAG_PCM16_LE,
+        channels,
+        sequence & 0xFFFF,
+        stream_generation & 0xFFFF,
+        sample_rate,
+        sample_counter & 0xFFFFFFFF,
+        timestamp_micros & 0xFFFFFFFF,
+        frame_count,
+        len(pcm),
+    )
+    return header + pcm
+
+
+def parse_audio_datagram(data: bytes) -> AudioDatagram:
+    """Decode one strict EAUD v1 PCM or status datagram."""
+    if len(data) < AUDIO_HEADER_BYTES:
+        raise Fail("audio datagram is truncated before the 28-byte header")
+    (
+        magic,
+        version,
+        kind,
+        flags,
+        channels,
+        sequence,
+        stream_generation,
+        sample_rate,
+        sample_counter,
+        timestamp_micros,
+        frame_count,
+        payload_bytes,
+    ) = struct.unpack("<4sBBBBHHIIIHH", data[:AUDIO_HEADER_BYTES])
+    if magic != b"EAUD":
+        raise Fail("audio datagram has bad magic")
+    if version != AUDIO_VERSION:
+        raise Fail(
+            "audio datagram version is %d; this tool supports %d"
+            % (version, AUDIO_VERSION))
+    if kind not in (AUDIO_KIND_DOWNLINK, AUDIO_KIND_UPLINK, AUDIO_KIND_STATUS):
+        raise Fail("audio datagram has unknown kind %d" % kind)
+    if not _valid_audio_rate(sample_rate):
+        raise Fail("audio datagram sample rate is outside 8000..96000 Hz")
+    if len(data) != AUDIO_HEADER_BYTES + payload_bytes:
+        raise Fail(
+            "audio datagram length is %d; header declares %d"
+            % (len(data), AUDIO_HEADER_BYTES + payload_bytes))
+    payload = data[AUDIO_HEADER_BYTES:]
+    status = None
+    if kind == AUDIO_KIND_STATUS:
+        if flags != 0 or channels != 0 or sample_counter != 0 or frame_count != 0:
+            raise Fail("audio status header contains PCM fields")
+        if payload_bytes != AUDIO_STATUS_PAYLOAD_BYTES:
+            raise Fail("audio status payload length must be 48 bytes")
+        status = AudioStatus(*struct.unpack("<12I", payload))
+    else:
+        if flags != AUDIO_FLAG_PCM16_LE:
+            raise Fail("audio PCM flags do not select PCM16-LE")
+        if channels not in (1, 2) or frame_count == 0:
+            raise Fail("audio PCM format has an invalid channel or frame count")
+        expected = frame_count * channels * 2
+        if payload_bytes > AUDIO_MAX_PAYLOAD_BYTES or payload_bytes != expected:
+            raise Fail(
+                "audio PCM payload length is %d; format requires %d"
+                % (payload_bytes, expected))
+    return AudioDatagram(
+        kind,
+        sequence,
+        stream_generation,
+        sample_rate,
+        sample_counter,
+        timestamp_micros,
+        frame_count,
+        channels,
+        payload,
+        status,
+    )
+
+
+def format_audio_status(status: AudioStatus) -> str:
+    """One stable, grep-friendly line naming every firmware status field."""
+    return (
+        "fill=%d target=%d minimum=%d underruns=%d underrun_ms=%d "
+        "late=%d lost_frames=%d corrections=%d ingress_drops=%d "
+        "queue_drops=%d engine_drops=%d capture_overruns=%d"
+        % status)
+
+
+def _strict_decimal(records: Dict[str, str], key: str) -> int:
+    value = records.get(key)
+    if value is None:
+        raise Fail("panel audio TXT record is missing %s" % key)
+    if not value or not value.isascii() or not value.isdigit():
+        raise Fail("panel audio TXT %s=%r is not unsigned decimal" % (key, value))
+    return int(value)
+
+
+def audio_descriptor_from_txt(txt_records: Dict[str, str]) -> AudioDescriptor:
+    """Validate the complete mDNS contract required for full-duplex audio."""
+    records = {key.lower(): value for key, value in txt_records.items()}
+    caps_text = records.get("caps", "")
+    if (not caps_text or len(caps_text) > 8
+            or re.fullmatch(r"[0-9A-Fa-f]+", caps_text) is None):
+        raise Fail("panel audio TXT caps is missing or malformed")
+    capabilities = int(caps_text, 16)
+    if not capabilities & AUDIO_CAP_DOWNLINK:
+        raise Fail("panel does not advertise audio downlink capability")
+    if not capabilities & AUDIO_CAP_UPLINK:
+        raise Fail("panel does not advertise audio uplink capability")
+    port = _strict_decimal(records, "audio-port")
+    version = _strict_decimal(records, "audio-version")
+    sample_rate = _strict_decimal(records, "audio-rate")
+    playback_channels = _strict_decimal(records, "audio-play-ch")
+    capture_channels = _strict_decimal(records, "audio-capture-ch")
+    if not 1 <= port <= 65535:
+        raise Fail("panel audio port is outside 1..65535")
+    if version != AUDIO_VERSION:
+        raise Fail(
+            "panel audio version is %d; this tool supports %d"
+            % (version, AUDIO_VERSION))
+    if not _valid_audio_rate(sample_rate):
+        raise Fail("panel audio rate is outside 8000..96000 Hz")
+    if playback_channels not in (1, 2):
+        raise Fail("panel audio-play-ch must be 1 or 2")
+    if capture_channels not in (1, 2):
+        raise Fail("panel audio-capture-ch must be 1 or 2")
+    return AudioDescriptor(
+        port, version, sample_rate, playback_channels, capture_channels)
+
+
+def audio_packet_frames(descriptor: AudioDescriptor, packet_ms: float) -> int:
+    """Convert a runtime packet duration to frames through the descriptor."""
+    if not math.isfinite(packet_ms) or packet_ms <= 0:
+        raise Fail("audio packet duration must be greater than zero")
+    frames = max(1, int(round(descriptor.sample_rate * packet_ms / 1000.0)))
+    payload_bytes = frames * descriptor.playback_channels * 2
+    if payload_bytes > AUDIO_MAX_PAYLOAD_BYTES:
+        maximum = (
+            AUDIO_MAX_PAYLOAD_BYTES * 1000.0
+            / descriptor.sample_rate
+            / descriptor.playback_channels
+            / 2)
+        raise Fail(
+            "audio packet is %d bytes; firmware limit is %d. "
+            "Use --packet-ms %.3f or less"
+            % (payload_bytes, AUDIO_MAX_PAYLOAD_BYTES, maximum))
+    return frames
+
+
+def audio_frame_limit(seconds: float, sample_rate: int) -> int:
+    """Validate a requested run and convert it to at least one frame."""
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise Fail("--seconds must be greater than zero")
+    if not _valid_audio_rate(sample_rate):
+        raise Fail("audio sample rate must be between 8000 and 96000 Hz")
+    return max(1, int(round(seconds * sample_rate)))
+
+
+def validate_audio_drain_seconds(seconds: float) -> None:
+    if not math.isfinite(seconds) or seconds < 0:
+        raise Fail("--drain-seconds must be zero or greater")
+
+
+def validate_audio_wav_container(wav: wave.Wave_read) -> None:
+    """Validate every WAV property that does not depend on panel discovery."""
+    if wav.getcomptype() != "NONE":
+        raise Fail("audio WAV must contain uncompressed PCM")
+    if wav.getsampwidth() != 2:
+        raise Fail("audio WAV sample width must be 16-bit PCM")
+    if not _valid_audio_rate(wav.getframerate()):
+        raise Fail("audio WAV rate must be between 8000 and 96000 Hz")
+    if wav.getnchannels() not in (1, 2):
+        raise Fail("audio WAV channel count must be 1 or 2")
+
+
+def validate_audio_wav(wav: wave.Wave_read, descriptor: AudioDescriptor) -> None:
+    """Require exact descriptor format; this reference tool does no resampling."""
+    validate_audio_wav_container(wav)
+    if wav.getframerate() != descriptor.sample_rate:
+        raise Fail(
+            "audio WAV rate is %d Hz; panel advertises %d Hz"
+            % (wav.getframerate(), descriptor.sample_rate))
+    if wav.getnchannels() != descriptor.playback_channels:
+        raise Fail(
+            "audio WAV has %d channels; panel playback advertises %d"
+            % (wav.getnchannels(), descriptor.playback_channels))
+
+
+def audio_tone_pcm(
+    sample_rate: int,
+    channels: int,
+    start_frame: int,
+    frame_count: int,
+    frequency: float,
+    amplitude: float,
+) -> bytes:
+    """Generate interleaved PCM16-LE using the requested descriptor format."""
+    if not _valid_audio_rate(sample_rate):
+        raise Fail("tone sample rate is outside 8000..96000 Hz")
+    if channels not in (1, 2):
+        raise Fail("tone channel count must be 1 or 2")
+    if not math.isfinite(frequency) or not 1 <= frequency < sample_rate / 2:
+        raise Fail("tone frequency must be between 1 Hz and Nyquist")
+    if not math.isfinite(amplitude) or not 0 < amplitude <= 1:
+        raise Fail("tone amplitude must be greater than 0 and at most 1")
+    samples = []
+    scale = int(round(32767 * amplitude))
+    for frame in range(start_frame, start_frame + frame_count):
+        sample = int(round(scale * math.sin(2 * math.pi * frequency * frame / sample_rate)))
+        samples.extend([sample] * channels)
+    return struct.pack("<%dh" % len(samples), *samples)
+
+
+def _dns_name(name: str) -> bytes:
+    labels = name.rstrip(".").split(".")
+    encoded = bytearray()
+    for label in labels:
+        raw = label.encode("utf-8")
+        if not raw or len(raw) > 63:
+            raise Fail("invalid DNS label in %r" % name)
+        encoded.append(len(raw))
+        encoded.extend(raw)
+    encoded.append(0)
+    return bytes(encoded)
+
+
+def mdns_query(name: str, rrtype: int) -> bytes:
+    """Build one RFC 6762 query requesting the reply on our source port."""
+    return struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0) + _dns_name(name) + struct.pack(
+        "!HH", rrtype, 0x8001)
+
+
+def _decode_dns_name(data: bytes, offset: int) -> Tuple[str, int]:
+    labels = []
+    cursor = offset
+    resume = None
+    seen = set()
+    while True:
+        if cursor >= len(data):
+            raise Fail("mDNS packet has a truncated name")
+        length = data[cursor]
+        if length & 0xC0 == 0xC0:
+            if cursor + 1 >= len(data):
+                raise Fail("mDNS packet has a truncated name pointer")
+            pointer = ((length & 0x3F) << 8) | data[cursor + 1]
+            if pointer in seen or pointer >= len(data):
+                raise Fail("mDNS packet has an invalid name pointer")
+            seen.add(pointer)
+            if resume is None:
+                resume = cursor + 2
+            cursor = pointer
+            continue
+        if length & 0xC0:
+            raise Fail("mDNS packet uses an unsupported name label")
+        cursor += 1
+        if length == 0:
+            return ".".join(labels).lower(), resume if resume is not None else cursor
+        if cursor + length > len(data):
+            raise Fail("mDNS packet has a truncated name label")
+        try:
+            labels.append(data[cursor:cursor + length].decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise Fail("mDNS packet has a non-UTF-8 service name") from exc
+        cursor += length
+
+
+def parse_dns_txt(data: bytes) -> Dict[str, str]:
+    """Decode DNS-SD length-prefixed key=value strings."""
+    records = {}
+    offset = 0
+    while offset < len(data):
+        length = data[offset]
+        offset += 1
+        if offset + length > len(data):
+            raise Fail("mDNS TXT record is truncated")
+        try:
+            entry = data[offset:offset + length].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise Fail("mDNS TXT record is not UTF-8") from exc
+        offset += length
+        if "=" not in entry:
+            continue
+        key, value = entry.split("=", 1)
+        lower = key.lower()
+        if lower in records:
+            raise Fail("mDNS TXT record repeats key %s" % lower)
+        records[lower] = value
+    return records
+
+
+def parse_mdns_packet(data: bytes) -> List[DNSRecord]:
+    """Read the PTR/TXT/SRV/address records needed for audio discovery."""
+    if len(data) < 12:
+        raise Fail("mDNS packet is shorter than its header")
+    _, _, questions, answers, authorities, additionals = struct.unpack(
+        "!HHHHHH", data[:12])
+    offset = 12
+    for _ in range(questions):
+        _, offset = _decode_dns_name(data, offset)
+        if offset + 4 > len(data):
+            raise Fail("mDNS packet has a truncated question")
+        offset += 4
+    records = []
+    for _ in range(answers + authorities + additionals):
+        name, offset = _decode_dns_name(data, offset)
+        if offset + 10 > len(data):
+            raise Fail("mDNS packet has a truncated record header")
+        rrtype, _, _, length = struct.unpack("!HHIH", data[offset:offset + 10])
+        offset += 10
+        end = offset + length
+        if end > len(data):
+            raise Fail("mDNS packet has truncated record data")
+        value = None
+        if rrtype == DNS_TYPE_PTR:
+            value, _ = _decode_dns_name(data, offset)
+        elif rrtype == DNS_TYPE_TXT:
+            value = parse_dns_txt(data[offset:end])
+        elif rrtype == DNS_TYPE_SRV:
+            if length < 6:
+                raise Fail("mDNS SRV record is truncated")
+            _, _, port = struct.unpack("!HHH", data[offset:offset + 6])
+            target, _ = _decode_dns_name(data, offset + 6)
+            value = (target, port)
+        elif rrtype == DNS_TYPE_A and length == 4:
+            value = socket.inet_ntop(socket.AF_INET, data[offset:end])
+        elif rrtype == DNS_TYPE_AAAA and length == 16:
+            value = socket.inet_ntop(socket.AF_INET6, data[offset:end])
+        if value is not None:
+            records.append(DNSRecord(name, rrtype, value))
+        offset = end
+    return records
+
+
+def _normalized_dns_name(value: str) -> str:
+    return value.strip().rstrip(".").lower()
+
+
+def audio_endpoint_host(target: str, addresses: Iterable[str]) -> str:
+    """Prefer a discovered IPv4 address over a second `.local` lookup.
+
+    A link-local IPv6 address needs an interface scope that DNS-SD's AAAA
+    bytes do not carry, so those continue through the service target.
+    """
+    ipv4 = sorted(address for address in addresses if ":" not in address)
+    return ipv4[0] if ipv4 else target
+
+
+def mdns_query_due(
+    last_sent: Optional[float], now: float, retry_interval: float
+) -> bool:
+    return last_sent is None or now - last_sent >= retry_interval
+
+
+def discover_audio(
+    host: str, timeout: float, retry_interval: float = 0.5
+) -> DiscoveredAudio:
+    """Browse _espdisp._udp and return the exact panel's audio descriptor."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise Fail("audio discovery timeout must be greater than zero")
+    if not math.isfinite(retry_interval) or retry_interval <= 0:
+        raise Fail("audio discovery retry interval must be greater than zero")
+    wanted = _normalized_dns_name(host)
+    if not wanted:
+        raise Fail("audio host must not be empty")
+
+    txt_by_instance = {}
+    target_by_instance = {}
+    addresses_by_target = {}
+    instances = set()
+    query_times: Dict[Tuple[str, int], float] = {}
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(min(0.25, timeout))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            root_key = (MDNS_SERVICE, DNS_TYPE_PTR)
+            if mdns_query_due(
+                    query_times.get(root_key), now, retry_interval):
+                sock.sendto(
+                    mdns_query(MDNS_SERVICE, DNS_TYPE_PTR), MDNS_GROUP)
+                query_times[root_key] = now
+            try:
+                packet, _ = sock.recvfrom(9000)
+            except socket.timeout:
+                packet = None
+            if packet is not None:
+                try:
+                    records = parse_mdns_packet(packet)
+                except Fail:
+                    records = []
+                for record in records:
+                    if record.rrtype == DNS_TYPE_PTR and record.name == MDNS_SERVICE:
+                        instances.add(record.value)
+                    elif record.rrtype == DNS_TYPE_TXT:
+                        txt_by_instance[record.name] = record.value
+                        instances.add(record.name)
+                    elif record.rrtype == DNS_TYPE_SRV:
+                        target_by_instance[record.name] = record.value[0]
+                        instances.add(record.name)
+                    elif record.rrtype in (DNS_TYPE_A, DNS_TYPE_AAAA):
+                        addresses_by_target.setdefault(record.name, set()).add(record.value)
+
+            for instance in sorted(instances):
+                for rrtype in (DNS_TYPE_TXT, DNS_TYPE_SRV):
+                    key = (instance, rrtype)
+                    now = time.monotonic()
+                    if mdns_query_due(
+                            query_times.get(key), now, retry_interval):
+                        sock.sendto(mdns_query(instance, rrtype), MDNS_GROUP)
+                        query_times[key] = now
+            for target in sorted(target_by_instance.values()):
+                for rrtype in (DNS_TYPE_A, DNS_TYPE_AAAA):
+                    key = (target, rrtype)
+                    now = time.monotonic()
+                    if mdns_query_due(
+                            query_times.get(key), now, retry_interval):
+                        sock.sendto(mdns_query(target, rrtype), MDNS_GROUP)
+                        query_times[key] = now
+
+            matches = []
+            for instance, txt in txt_by_instance.items():
+                target = target_by_instance.get(instance)
+                if target is None:
+                    continue
+                instance_label = instance.split(".", 1)[0]
+                target_label = target.split(".", 1)[0]
+                addresses = addresses_by_target.get(target, set())
+                if wanted not in {
+                    instance, instance_label, target, target_label, *addresses
+                }:
+                    continue
+                try:
+                    descriptor = audio_descriptor_from_txt(txt)
+                except Fail as exc:
+                    raise Fail("%s: %s" % (host, exc)) from exc
+                matches.append(DiscoveredAudio(
+                    audio_endpoint_host(target, addresses),
+                    instance_label,
+                    descriptor))
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise Fail("%s matched more than one mDNS audio service" % host)
+        raise Fail(
+            "%s did not advertise a complete _espdisp._udp audio descriptor "
+            "within %.1fs" % (host, timeout))
+    except OSError as exc:
+        raise Fail("audio mDNS discovery failed: %s" % exc) from exc
+    finally:
+        sock.close()
+
+
+def _receive_audio(
+    sock: socket.socket,
+    descriptor: AudioDescriptor,
+    capture_wav: Optional[wave.Wave_write],
+    uplink: AudioUplinkReorderBuffer,
+    status_state: List[float],
+    status_interval: float,
+) -> bool:
+    try:
+        data = sock.recv(AUDIO_HEADER_BYTES + AUDIO_MAX_PAYLOAD_BYTES)
+    except BlockingIOError:
+        return False
+    try:
+        datagram = parse_audio_datagram(data)
+    except Fail as exc:
+        print("audio: ignored datagram: %s" % exc, file=sys.stderr)
+        return False
+    if datagram.kind == AUDIO_KIND_UPLINK:
+        if (datagram.sample_rate != descriptor.sample_rate
+                or datagram.channels != descriptor.capture_channels):
+            print(
+                "audio: ignored uplink format %d Hz/%d ch; expected %d Hz/%d ch"
+                % (
+                    datagram.sample_rate,
+                    datagram.channels,
+                    descriptor.sample_rate,
+                    descriptor.capture_channels,
+                ),
+                file=sys.stderr,
+            )
+            return False
+        rendered = uplink.push(datagram)
+        if capture_wav is not None and rendered:
+            capture_wav.writeframesraw(rendered)
+        return True
+    elif datagram.kind == AUDIO_KIND_STATUS and datagram.status is not None:
+        if datagram.sample_rate != descriptor.sample_rate:
+            print(
+                "audio: ignored status rate %d Hz; expected %d Hz"
+                % (datagram.sample_rate, descriptor.sample_rate),
+                file=sys.stderr,
+            )
+            return False
+        now = time.monotonic()
+        if status_interval == 0 or now - status_state[0] >= status_interval:
+            print("audio status: " + format_audio_status(datagram.status), flush=True)
+            status_state[0] = now
+        return True
+    return False
+
+
+def validate_audio_local_args(args: argparse.Namespace) -> None:
+    """Reject panel-independent mistakes before waiting for mDNS."""
+    if not math.isfinite(args.seconds) or args.seconds <= 0:
+        raise Fail("--seconds must be greater than zero")
+    if not math.isfinite(args.packet_ms) or args.packet_ms <= 0:
+        raise Fail("--packet-ms must be greater than zero")
+    if not math.isfinite(args.status_interval) or args.status_interval < 0:
+        raise Fail("--status-interval must be zero or greater")
+    validate_audio_drain_seconds(args.drain_seconds)
+    if not math.isfinite(args.response_timeout) or args.response_timeout < 0:
+        raise Fail("--response-timeout must be zero or greater")
+    if (not math.isfinite(args.discovery_timeout)
+            or args.discovery_timeout <= 0):
+        raise Fail("--discovery-timeout must be greater than zero")
+    if (not math.isfinite(args.discovery_retry_interval)
+            or args.discovery_retry_interval <= 0):
+        raise Fail("--discovery-retry-interval must be greater than zero")
+    if not 1 <= args.uplink_reorder_packets <= 64:
+        raise Fail("--uplink-reorder-packets must be between 1 and 64")
+    if args.tone is not None:
+        if not math.isfinite(args.tone) or args.tone < 1:
+            raise Fail("--tone must be at least 1 Hz")
+        if not math.isfinite(args.amplitude) or not 0 < args.amplitude <= 1:
+            raise Fail("--amplitude must be greater than 0 and at most 1")
+
+
+def require_audio_response(response_count: int, send_only: bool) -> None:
+    if response_count == 0 and not send_only:
+        raise Fail(
+            "panel sent no valid audio response; the stream was not proven "
+            "admitted. Use --send-only only when an unacknowledged send is intentional")
+
+
+def cmd_audio(args: argparse.Namespace) -> int:
+    """Stream exact-format PCM to a panel and receive its microphone/status."""
+    source_wav = None
+    capture_wav = None
+    sock = None
+    try:
+        validate_audio_local_args(args)
+        if args.wav:
+            try:
+                source_wav = wave.open(args.wav, "rb")
+            except (OSError, wave.Error) as exc:
+                raise Fail("cannot read audio WAV %s: %s" % (args.wav, exc)) from exc
+            validate_audio_wav_container(source_wav)
+
+        discovery = discover_audio(
+            args.host,
+            args.discovery_timeout,
+            retry_interval=args.discovery_retry_interval,
+        )
+        descriptor = discovery.descriptor
+        packet_frames = audio_packet_frames(descriptor, args.packet_ms)
+        frame_limit = audio_frame_limit(args.seconds, descriptor.sample_rate)
+        if args.tone is not None and args.tone >= descriptor.sample_rate / 2:
+            raise Fail("--tone must be below the panel descriptor's Nyquist rate")
+        if source_wav is not None:
+            validate_audio_wav(source_wav, descriptor)
+        if args.receive_wav:
+            try:
+                capture_wav = wave.open(args.receive_wav, "wb")
+            except (OSError, wave.Error) as exc:
+                raise Fail(
+                    "cannot create uplink WAV %s: %s" % (args.receive_wav, exc)) from exc
+            capture_wav.setnchannels(descriptor.capture_channels)
+            capture_wav.setsampwidth(2)
+            capture_wav.setframerate(descriptor.sample_rate)
+
+        addresses = socket.getaddrinfo(
+            discovery.host,
+            descriptor.port,
+            type=socket.SOCK_DGRAM,
+        )
+        if not addresses:
+            raise Fail("cannot resolve audio host %s" % discovery.host)
+        family, socktype, protocol, _, address = addresses[0]
+        sock = socket.socket(family, socktype, protocol)
+        sock.connect(address)
+        sock.setblocking(False)
+        print(
+            "audio: %s at %s:%d, %d Hz, playback %d ch, capture %d ch"
+            % (
+                discovery.service_name,
+                discovery.host,
+                descriptor.port,
+                descriptor.sample_rate,
+                descriptor.playback_channels,
+                descriptor.capture_channels,
+            ),
+            flush=True,
+        )
+
+        sequence = 0
+        generation = (time.time_ns() & 0xFFFF) or 1
+        wire_sample_counter = 0
+        sent_frames = 0
+        started = time.monotonic()
+        deadline = started
+        status_state = [float("-inf")]
+        response_count = 0
+        uplink = AudioUplinkReorderBuffer(
+            descriptor.capture_channels, args.uplink_reorder_packets)
+        while sent_frames < frame_limit:
+            frames = min(packet_frames, frame_limit - sent_frames)
+            if source_wav is not None:
+                pcm = source_wav.readframes(frames)
+                frames = len(pcm) // (descriptor.playback_channels * 2)
+                if frames == 0:
+                    break
+            else:
+                pcm = audio_tone_pcm(
+                    descriptor.sample_rate,
+                    descriptor.playback_channels,
+                    sent_frames,
+                    frames,
+                    args.tone,
+                    args.amplitude,
+                )
+            timestamp_micros = int((time.monotonic() - started) * 1_000_000)
+            sock.send(audio_pcm_datagram(
+                AUDIO_KIND_DOWNLINK,
+                sequence,
+                generation,
+                descriptor.sample_rate,
+                wire_sample_counter,
+                timestamp_micros,
+                descriptor.playback_channels,
+                pcm,
+            ))
+            sequence = (sequence + 1) & 0xFFFF
+            wire_sample_counter = (wire_sample_counter + frames) & 0xFFFFFFFF
+            sent_frames += frames
+            deadline += frames / descriptor.sample_rate
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                readable, _, _ = select.select([sock], [], [], remaining)
+                if not readable:
+                    break
+                response_count += int(_receive_audio(
+                    sock, descriptor, capture_wav, uplink, status_state,
+                    args.status_interval))
+
+        drain_deadline = time.monotonic() + args.drain_seconds
+        while time.monotonic() < drain_deadline:
+            readable, _, _ = select.select(
+                [sock], [], [], drain_deadline - time.monotonic())
+            if not readable:
+                break
+            response_count += int(_receive_audio(
+                sock, descriptor, capture_wav, uplink, status_state,
+                args.status_interval))
+        if response_count == 0 and not args.send_only:
+            response_deadline = time.monotonic() + args.response_timeout
+            while time.monotonic() < response_deadline:
+                readable, _, _ = select.select(
+                    [sock], [], [], response_deadline - time.monotonic())
+                if not readable:
+                    break
+                response_count += int(_receive_audio(
+                    sock, descriptor, capture_wav, uplink, status_state,
+                    args.status_interval))
+                if response_count > 0:
+                    break
+
+        trailing = uplink.finish()
+        if capture_wav is not None and trailing:
+            capture_wav.writeframesraw(trailing)
+        if uplink.received_packets:
+            print(
+                "audio uplink: packets=%d reordered=%d duplicates=%d "
+                "lost_frames=%d discontinuities=%d generation_changes=%d"
+                % (
+                    uplink.received_packets,
+                    uplink.reordered_packets,
+                    uplink.duplicate_packets,
+                    uplink.lost_frames,
+                    uplink.discontinuities,
+                    uplink.generation_changes,
+                ),
+                flush=True,
+            )
+        require_audio_response(response_count, args.send_only)
+        print("audio: sent %d frames" % sent_frames, flush=True)
+        return 0
+    except OSError as exc:
+        raise Fail("audio stream failed: %s" % exc) from exc
+    finally:
+        if sock is not None:
+            sock.close()
+        if source_wav is not None:
+            source_wav.close()
+        if capture_wav is not None:
+            capture_wav.close()
+
+
+# --------------------------------------------------------------------------
 # Tile-stream smoke test (CAP_TILE_STREAM firmware, phase 3 of
 # docs/tile-stream-plan.md). Hand-built packets exercising every codec and
 # the reassembler before the Mac app's encoder exists. The wire vectors are
@@ -4799,6 +5726,53 @@ def build_parser() -> argparse.ArgumentParser:
     p_pw.add_argument("--port", help="serial device (default: autodetected)")
     p_pw.add_argument("--timeout", type=float, default=6.0, help="reply timeout (s)")
     p_pw.set_defaults(func=cmd_set_password)
+
+    p_audio = subs.add_parser(
+        "audio",
+        help="stream a WAV or tone to a panel and capture microphone/status",
+        description="Discover the panel's EAUD descriptor over mDNS, then send "
+        "exact-format PCM16-LE on its advertised audio port. The same socket "
+        "receives microphone PCM and decoded status. No sample rate or channel "
+        "count is assumed; a WAV must exactly match the advertised playback format.",
+    )
+    p_audio.add_argument("host", help="panel IP, hostname, or service instance")
+    source = p_audio.add_mutually_exclusive_group(required=True)
+    source.add_argument("--wav", help="PCM16 WAV matching the panel descriptor")
+    source.add_argument("--tone", type=float, metavar="HZ", help="generated sine tone")
+    p_audio.add_argument(
+        "--seconds", type=float, default=10.0,
+        help="maximum stream duration (default 10)")
+    p_audio.add_argument(
+        "--packet-ms", type=float, default=20.0,
+        help="PCM duration per datagram (default 20; must fit the 1400-byte payload)")
+    p_audio.add_argument(
+        "--amplitude", type=float, default=0.2,
+        help="tone amplitude from 0 to 1 (default 0.2)")
+    p_audio.add_argument(
+        "--receive-wav",
+        help="write panel microphone uplink to this PCM16 WAV")
+    p_audio.add_argument(
+        "--status-interval", type=float, default=1.0,
+        help="minimum seconds between status lines; 0 prints every packet (default 1)")
+    p_audio.add_argument(
+        "--drain-seconds", type=float, default=0.25,
+        help="receive after the final downlink packet (default 0.25)")
+    p_audio.add_argument(
+        "--response-timeout", type=float, default=1.0,
+        help="extra wait for the first panel response (default 1)")
+    p_audio.add_argument(
+        "--send-only", action="store_true",
+        help="allow success without any status or microphone response")
+    p_audio.add_argument(
+        "--uplink-reorder-packets", type=int, default=4,
+        help="microphone reorder window in packets (default 4)")
+    p_audio.add_argument(
+        "--discovery-timeout", type=float, default=5.0,
+        help="seconds to wait for the complete mDNS audio descriptor (default 5)")
+    p_audio.add_argument(
+        "--discovery-retry-interval", type=float, default=0.5,
+        help="seconds between unanswered mDNS queries (default 0.5)")
+    p_audio.set_defaults(func=cmd_audio)
 
     p_tile = subs.add_parser(
         "tile-test",

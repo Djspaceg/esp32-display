@@ -74,6 +74,13 @@ final class DeviceSession {
     /// mDNS lookup done again at push time could resolve to something else.
     var resolvedAddress: String? { sender.resolvedAddress }
     private let sender: FrameSender
+    private var audioSession: PanelAudioSession?
+    private var audioDescriptor: AudioStreamDescriptor?
+    private let audioSessionFactory: ((AudioStreamDescriptor) -> PanelAudioSession)?
+    private var audioPreferences = AudioDevicePreferences()
+    private var audioTuning = AudioRuntimeTuning()
+    private var audioRunStarted = false
+    private var audioEnabled = true
     private let source: Source
     private let picker: PickerSource?
     private let onStatus: ((Status) -> Void)?
@@ -136,13 +143,20 @@ final class DeviceSession {
     private var lastCount: UInt64 = 0
 
     init(
-        id: UUID = UUID(),
-        name: String, sender: FrameSender, source: Source, picker: PickerSource?, fps: Int,
-         onStatus: ((Status) -> Void)? = nil,
-         onPreview: ((CGImage, Bool) -> Void)? = nil) {
+        id: UUID = UUID(), name: String, sender: FrameSender,
+        audioSession: PanelAudioSession? = nil,
+        audioDescriptor: AudioStreamDescriptor? = nil,
+        audioSessionFactory: ((AudioStreamDescriptor) -> PanelAudioSession)? = nil,
+        source: Source, picker: PickerSource?, fps: Int,
+        onStatus: ((Status) -> Void)? = nil,
+        onPreview: ((CGImage, Bool) -> Void)? = nil
+    ) {
         self.id = id
         self.name = name
         self.sender = sender
+        self.audioSession = audioSession
+        self.audioDescriptor = audioDescriptor
+        self.audioSessionFactory = audioSessionFactory
         self.source = source
         self.picker = picker
         self._fps = fps
@@ -165,6 +179,7 @@ final class DeviceSession {
             return activeCapture
         }
         sender.stop()
+        currentAudioSession?.stop()
         if let capture {
             Task { await capture.stop() }
         }
@@ -246,7 +261,84 @@ final class DeviceSession {
     func sendDisplaySleep() { sender.sendDisplaySleep() }
     func sendDisplayWake() { sender.sendDisplayWake() }
     func forceKeyframe() { sender.forceKeyframe() }
-    func setPaused(_ paused: Bool) { sender.setPaused(paused) }
+    func setPaused(_ paused: Bool) {
+        sender.setPaused(paused)
+        setAudioEnabled(AudioSessionActivationPolicy.isEnabled(
+            paused: paused, parked: sender.parked))
+    }
+    func applyAudio(
+        preferences: AudioDevicePreferences,
+        tuning: AudioRuntimeTuning
+    ) {
+        let session = stateLock.withLock {
+            audioPreferences = preferences
+            audioTuning = tuning.validated
+            return audioSession
+        }
+        sender.radioBudget.update(tuning: tuning)
+        session?.update(preferences: preferences, tuning: tuning)
+    }
+    func audioDevicesChanged() {
+        currentAudioSession?.devicesChanged()
+    }
+
+    private var currentAudioSession: PanelAudioSession? {
+        stateLock.withLock { audioSession }
+    }
+
+    private func setAudioEnabled(_ enabled: Bool) {
+        let session = stateLock.withLock {
+            audioEnabled = enabled
+            return audioSession
+        }
+        session?.setEnabled(enabled)
+    }
+
+    /// Apply a later browse result without rebuilding video. `.unknown` means
+    /// TXT is still absent and must leave an existing adapter untouched.
+    func reconcileAudio(_ advertisement: AudioAdvertisement) {
+        var oldSession: PanelAudioSession?
+        var newSession: PanelAudioSession?
+        var shouldStart = false
+        var shouldEnable = false
+        var preferences = AudioDevicePreferences()
+        var tuning = AudioRuntimeTuning()
+
+        stateLock.lock()
+        guard !_stopped else {
+            stateLock.unlock()
+            return
+        }
+        switch AudioSessionReconciler.decide(
+            current: audioDescriptor,
+            advertisement: advertisement)
+        {
+        case .keep:
+            stateLock.unlock()
+            return
+        case .remove:
+            oldSession = audioSession
+            audioSession = nil
+            audioDescriptor = nil
+        case .install(let descriptor):
+            oldSession = audioSession
+            newSession = audioSessionFactory?(descriptor)
+            audioSession = newSession
+            audioDescriptor = descriptor
+            shouldStart = audioRunStarted
+            shouldEnable = audioEnabled
+            preferences = audioPreferences
+            tuning = audioTuning
+        }
+        stateLock.unlock()
+
+        oldSession?.stop()
+        newSession?.update(preferences: preferences, tuning: tuning)
+        newSession?.setEnabled(shouldEnable)
+        if shouldStart {
+            newSession?.start()
+        }
+    }
     func setBrightness(high: Bool) { sender.setBrightness(high: high) }
     func setBrightnessLevel(_ level: Int) { sender.setBrightnessLevel(level) }
     func setFlip(_ flipped: Bool) {
@@ -462,6 +554,11 @@ final class DeviceSession {
         }
 
         guard !isStopped else { return true }
+        let audio = stateLock.withLock {
+            audioRunStarted = true
+            return audioSession
+        }
+        audio?.start()
 
         let uuidCachePath = "/tmp/espdisplaysender-uuid-\(name)"
         var knownUUID = try? String(
@@ -869,6 +966,7 @@ final class DeviceSession {
     private func waitForDeviceToReturn() async {
         let repliesBeforeParking = sender.deviceRepliesReceived
         sender.setParked(true)
+        setAudioEnabled(false)
         print("[\(name)] no reply for \(Int(Self.parkAfterSilence))s - capture stopped, "
             + "waiting for the display to come back")
         reportProgress(force: true)
@@ -890,6 +988,8 @@ final class DeviceSession {
         }
 
         sender.setParked(false)
+        setAudioEnabled(AudioSessionActivationPolicy.isEnabled(
+            paused: sender.paused, parked: false))
         guard !isStopped else { return }
         setCaptureStatus(.waiting("The panel answered again. Restarting mirroring…"))
         print("[\(name)] display answered again - resuming capture")
@@ -1049,6 +1149,14 @@ final class SessionRegistry: @unchecked Sendable {
         sessions[name] = nil
         retiredAt[name] = Date()
         lock.unlock()
+    }
+
+    func reconcileAudio(
+        _ name: String,
+        advertisement: AudioAdvertisement
+    ) {
+        let session = lock.withLock { sessions[name] }
+        session?.reconcileAudio(advertisement)
     }
 
     var all: [DeviceSession] {

@@ -67,6 +67,73 @@ final class ServiceMetadataTests: XCTestCase {
         XCTAssertEqual(metadata.capabilities?.contains(.battery), true)
     }
 
+    func testReadsCompleteAudioDescriptorFromFirmwareTXT() {
+        let metadata = ServiceMetadata(txtRecords: [
+            "caps": "00300000",
+            "audio-port": "5569",
+            "audio-version": "1",
+            "audio-rate": "16000",
+            "audio-play-ch": "2",
+            "audio-capture-ch": "2",
+        ])
+        XCTAssertEqual(metadata.audioDescriptor, AudioStreamDescriptor(
+            port: 5_569,
+            version: 1,
+            sampleRateHz: 16_000,
+            playbackChannels: 2,
+            captureChannels: 2))
+        XCTAssertEqual(metadata.capabilities?.contains(.audioDownlink), true)
+        XCTAssertEqual(metadata.capabilities?.contains(.audioUplink), true)
+    }
+
+    func testAudioDescriptorFailsClosed() {
+        let complete = [
+            "caps": "00300000",
+            "audio-port": "5569",
+            "audio-version": "1",
+            "audio-rate": "16000",
+            "audio-play-ch": "2",
+            "audio-capture-ch": "2",
+        ]
+        for key in complete.keys {
+            var records = complete
+            records[key] = nil
+            XCTAssertNil(
+                ServiceMetadata(txtRecords: records).audioDescriptor,
+                "missing \(key) must disable audio")
+        }
+        var oldVersion = complete
+        oldVersion["audio-version"] = "2"
+        XCTAssertNil(ServiceMetadata(txtRecords: oldVersion).audioDescriptor)
+        var noUplink = complete
+        noUplink["caps"] = "00100000"
+        XCTAssertNil(ServiceMetadata(txtRecords: noUplink).audioDescriptor)
+    }
+
+    func testAudioAdvertisementSeparatesLateTXTFromExplicitAbsence() {
+        XCTAssertEqual(ServiceMetadata.empty.audioAdvertisement, .unknown)
+        XCTAssertEqual(
+            ServiceMetadata(txtRecords: ["caps": "00000000"]).audioAdvertisement,
+            .unavailable)
+
+        let descriptor = AudioStreamDescriptor(
+            port: 5_569,
+            version: 1,
+            sampleRateHz: 48_000,
+            playbackChannels: 2,
+            captureChannels: 1)
+        XCTAssertEqual(
+            ServiceMetadata(txtRecords: [
+                "caps": "00300000",
+                "audio-port": "5569",
+                "audio-version": "1",
+                "audio-rate": "48000",
+                "audio-play-ch": "2",
+                "audio-capture-ch": "1",
+            ]).audioAdvertisement,
+            .available(descriptor))
+    }
+
     func testAPanelThatSaysNothingYieldsNothing() {
         // Not an error and not a partial answer: a panel running firmware older
         // than any of these records must behave exactly as it did before they
@@ -80,6 +147,7 @@ final class ServiceMetadataTests: XCTestCase {
         XCTAssertNil(metadata.target)
         XCTAssertNil(metadata.capabilities)
         XCTAssertNil(metadata.frameProtocolVersion)
+        XCTAssertNil(metadata.audioDescriptor)
         XCTAssertFalse(metadata.namesAChip)
     }
 

@@ -19,3 +19,8 @@ void sendToSender(const uint8_t *data, size_t len);
 // PlatformConfig uses the raw lwIP receive task.
 extern int tuneRxDrainYieldEvery;
 extern TaskHandle_t rxTaskHandle;
+
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+void hostHandleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
+                       uint16_t remotePort);
+#endif

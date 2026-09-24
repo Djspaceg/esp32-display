@@ -5414,6 +5414,49 @@ int main() {
     CHECK(board::supportsDoom(board::Variant::LcdGc9107));
     CHECK(board::supportsDoom(board::Variant::LcdSt7789_130));
     CHECK(!board::supportsDoom(board::Variant::TouchJd9853));
+    CHECK(board::supportsAudio(board::Variant::AmoledCo5300));
+    CHECK(board::supportsAudio(board::Variant::LcdSt77916));
+    CHECK(!board::supportsAudio(board::Variant::TouchJd9853));
+    CHECK(!board::supportsAudio(board::Variant::P4_4B));
+    const board::AudioConfig *amoledAudio =
+        board::generatedAudioConfig(board::Variant::AmoledCo5300);
+    CHECK(amoledAudio != nullptr);
+    CHECK(amoledAudio->amp == board::AudioAmp::Ns4150b);
+    CHECK(amoledAudio->codec == board::AudioCodec::Es8311);
+    CHECK(amoledAudio->mic == board::AudioMic::Es7210);
+    CHECK(amoledAudio->pinPlaybackMclk == 16);
+    CHECK(amoledAudio->pinPlaybackBclk == 9);
+    CHECK(amoledAudio->pinPlaybackLrck == 45);
+    CHECK(amoledAudio->pinDout == 8);
+    CHECK(amoledAudio->pinCaptureMclk == 16);
+    CHECK(amoledAudio->pinCaptureBclk == 9);
+    CHECK(amoledAudio->pinCaptureLrck == 45);
+    CHECK(amoledAudio->pinDin == 10);
+    CHECK(amoledAudio->pinAmpEnable == 46);
+    const board::AudioConfig *lcd185Audio =
+        board::generatedAudioConfig(board::Variant::LcdSt77916);
+    CHECK(lcd185Audio != nullptr);
+    CHECK(lcd185Audio->amp == board::AudioAmp::Ns4150b);
+    CHECK(lcd185Audio->codec == board::AudioCodec::Es8311);
+    CHECK(lcd185Audio->mic == board::AudioMic::Es7210);
+    CHECK(lcd185Audio->speakerBus == board::AudioSpeakerBus::I2s);
+    CHECK(lcd185Audio->micBus == board::AudioMicBus::I2s);
+    CHECK(lcd185Audio->pinPlaybackMclk == 2);
+    CHECK(lcd185Audio->pinPlaybackBclk == 48);
+    CHECK(lcd185Audio->pinPlaybackLrck == 38);
+    CHECK(lcd185Audio->pinDout == 47);
+    CHECK(lcd185Audio->pinCaptureMclk == 2);
+    CHECK(lcd185Audio->pinCaptureBclk == 48);
+    CHECK(lcd185Audio->pinCaptureLrck == 38);
+    CHECK(lcd185Audio->pinDin == 39);
+    CHECK(lcd185Audio->pinPdmClock == board::NO_PIN);
+    CHECK(lcd185Audio->pinAmpEnable == 15);
+    CHECK(lcd185Audio->codecI2cAddress == 0x18);
+    CHECK(lcd185Audio->micI2cAddress == 0x40);
+    CHECK(lcd185Audio->playbackRateHz == 16000);
+    CHECK(lcd185Audio->playbackChannels == 2);
+    CHECK(lcd185Audio->captureRateHz == 16000);
+    CHECK(lcd185Audio->captureChannels == 2);
   }
 
   // --- glyph_draw: the on-device text rasterizer (glyph_draw.h)

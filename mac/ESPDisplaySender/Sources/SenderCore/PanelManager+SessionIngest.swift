@@ -9,6 +9,29 @@ import SenderProtocol
 /// superseded-name checks, and are copied into the published
 /// snapshots.
 extension PanelManager {
+    func updateAudio(
+        _ status: PanelAudioSnapshot,
+        for serviceName: String,
+        sessionID: UUID? = nil
+    ) {
+        if let sessionID, sessions[serviceName]?.id != sessionID { return }
+        guard !supersededServiceNames.contains(serviceName),
+              panels.contains(where: { $0.serviceName == serviceName })
+        else { return }
+        updatePanel(serviceName) { panel in
+            panel.audioStatus = status
+        }
+    }
+
+    func clearAudio(for serviceName: String) {
+        guard !supersededServiceNames.contains(serviceName),
+              panels.contains(where: { $0.serviceName == serviceName })
+        else { return }
+        updatePanel(serviceName) { panel in
+            panel.audioStatus = nil
+        }
+    }
+
     func update(_ status: DeviceSession.Status, sessionID: UUID? = nil) {
         if let sessionID, sessions[status.serviceName]?.id != sessionID { return }
         guard !supersededServiceNames.contains(status.serviceName) else { return }
