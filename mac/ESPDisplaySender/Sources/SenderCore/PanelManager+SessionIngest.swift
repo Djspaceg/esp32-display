@@ -46,9 +46,6 @@ extension PanelManager {
             else { return }
             reconciledIdentity = false
         }
-        let previousRotation = panels.first {
-            $0.serviceName == status.serviceName
-        }?.rotation
         updatePanel(status.serviceName) { panel in
             panel.lastSeen = status.updatedAt
             panel.lastHeartbeatAt = status.heartbeatAge.map {
@@ -74,11 +71,14 @@ extension PanelManager {
                     + "automatically as soon as the panel answers again."
                 : nil
             if let address = status.resolvedAddress { panel.address = address }
+            // The session's last EINF, replayed every status tick. Its
+            // orientation can predate a rotation this app or USB has set
+            // since, and every fresh EINF already arrives as `.info`, so the
+            // replay leaves orientation alone.
             if let info = status.info {
-                Self.apply(info, to: &panel)
+                Self.apply(info, to: &panel, includeOrientation: false)
             }
         }
-        followReportedRotation(from: previousRotation, for: status.serviceName)
         persistIfNeeded(force: reconciledIdentity)
     }
 
@@ -173,7 +173,7 @@ extension PanelManager {
 
     static func apply(
         _ info: DeviceProtocol.DeviceInfo, to panel: inout PanelSnapshot,
-        keepBrightness: Bool = false
+        keepBrightness: Bool = false, includeOrientation: Bool = true
     ) {
         panel.displayName = info.name
         panel.hardwareID = info.deviceID
@@ -190,8 +190,10 @@ extension PanelManager {
             panel.brightness = Int(info.brightness)
         }
         panel.brightnessHigh = info.brightnessHigh
-        panel.flipped = info.flipped
-        panel.rotation = info.rotation
+        if includeOrientation {
+            panel.flipped = info.flipped
+            panel.rotation = info.rotation
+        }
         panel.sleeping = info.sleeping
         panel.idle = info.idle
         panel.manuallyOff = info.manuallyOff

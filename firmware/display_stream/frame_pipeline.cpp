@@ -750,15 +750,18 @@ void fillPanel(uint16_t rgb565) {
 #endif
 }
 
-bool adoptLocalFrameShape() {
+bool adoptLocalFrameShape(bool reshape) {
   if (!panelIsRectangular()) return false;
   // Only a change of mount re-shapes. A flip, a mirror or an automatic
   // correction also dirties MADCTL, and must leave a card that a landscape
-  // stream left at rotation 0 in the shape it is.
+  // stream left at rotation 0 in the shape it is. Recorded on every call,
+  // including mid-stream ones that do not re-shape, so a mount change the
+  // stream already covered is not replayed later by a flip.
   static int8_t adopted = -1;
   const bool landscape = localFrameLandscape();
   if (adopted == (int8_t)landscape) return false;
   adopted = (int8_t)landscape;
+  if (!reshape) return false;
   if (bufLandscape == landscape && pendingLandscape == landscape) return false;
   portENTER_CRITICAL(&drawMux);
   memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
@@ -803,10 +806,8 @@ void serviceRotationRepaint() {
     // stream in progress keeps the shape its frames carry. The receive task
     // can still be writing bands here (survey keeps receiving); the worst a
     // collision leaves is a torn frame the next keyframe replaces.
-    if (wifiSelectorActive || surveyActive || idleActive ||
-        statFramesShown == 0) {
-      adoptLocalFrameShape();
-    }
+    adoptLocalFrameShape(wifiSelectorActive || surveyActive || idleActive ||
+                         statFramesShown == 0);
     bool orientationSettled = (bufLandscape == pendingLandscape);
     applyPanelConfig(bufLandscape);
     const char *repainted;

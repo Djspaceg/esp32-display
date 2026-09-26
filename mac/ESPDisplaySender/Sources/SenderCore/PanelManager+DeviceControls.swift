@@ -624,10 +624,17 @@ extension PanelManager {
     func setFlip(_ flipped: Bool, for serviceName: String) {
         guard let path = preferredPath(for: .flip, serviceName: serviceName)
         else { return }
+        let previous = panels.first { $0.serviceName == serviceName }?.rotation
         commandedRotationAt[serviceName] = Date()
         updatePanel(serviceName) { panel in
             panel.flipped = flipped
             panel.rotation = flipped ? 2 : 0
+        }
+        // Only reachable from an odd rotation that something else set; the
+        // flip then means upright or upside-down, so the region stands up.
+        if let previous {
+            applyRegionQuarterTurn(
+                from: previous, to: flipped ? 2 : 0, for: serviceName)
         }
         switch path {
         case .network:

@@ -1,53 +1,46 @@
 # Outcome
 
-Adds the ELECROW CrowPanel 1.28" ESP32-S3 rotary knob as S3 runtime profile
-`gc9a01-knob-128`. The user confirmed it online and working on glass. Knob
-turn and press are wired but still need their own mapping.
+The ESP32-S3-LCD-1.9 and both C6 1.47-inch panels now accept 90 and 270 degrees through the existing `rot=`, CFGROT, Rotate and CAP_ROTATE. Picking either in the app turns the capture region on its side (320x170 on the 1.9). No wire-protocol or CFG command changed. Not yet checked on the glass.
 
 # Decisions to evaluate
 
-D1 The knob push switch (GPIO41) is the board's BOOT button, and GPIO0 is left unassigned. Why: the firmware has exactly one button input. If overruled: set `pin_boot = 0` and the knob press does nothing.
-D2 An encoder detent steps the existing button controls: it moves the WiFi selector, and otherwise picks the high or low backlight preset. Why: the brief forbids new wire or CFG commands. If overruled: the follow-up knob-mapping task replaces `applyEncoderTurn`.
-D3 The encoder is decoded one step per A edge, direction from B, per the EC3501-C15H30 datasheet (30 detents per 15 pulses); clockwise follows ELECROW's decoder. Supersedes: a full-cycle-per-detent decoder, because the datasheet says half-cycle. If overruled: restore the full-cycle model in `rotary_encoder_model.h`.
-D4 GPIO1, which switches the LCD rail, becomes the new optional `carrier.pin_panel_power`. The encoder lines become `pin_encoder_a` and `pin_encoder_b`. All three default to -1. Why: other descriptors, including the parallel Waveshare board, stay valid unchanged. If overruled: make them required and add them to every descriptor.
-D5 The S3 knob probe power-cycles GPIO1 as its reset line, and runs only when no earlier probe answered. Why: the CST816D is unpowered otherwise, and other S3 boards keep their GPIO1 undriven. If overruled: reorder the probes.
-D6 Address-list probes ignore a bus that acknowledges reserved 0x7F. Why: on this board the unpowered GC9A01 clamps GPIO11 low, which false-matched the 1.85C and halted boot. If overruled: detection returns to the 1.85C false match.
-D7 The panel reuses the C3 board's `PANEL_GC9107_240X240` at 40 MHz; the vendor runs 80 MHz. Why: one shared panel profile. If overruled: fork the panel profile at 80 MHz.
-D8 Variant 11, catalog and detection order 70. Why: this leaves 10 and 60 for the Waveshare worker. If overruled: renumber.
-D9 The bootstrap tool now refuses to drive GPIO41, 42 and 45 while the knob is a possible S3 candidate. This blocks the 1.3" and 1.54" templates. Why: those pins are switch contacts to ground. If overruled: drop them from `_forbidden_drive_pins`.
+D1 On rectangular glass the frame's shape decides the MADCTL axis swap, and only rotation's half turn reaches the quadrant (`panelorient::addressedRotation`). Why: this never draws a frame of the wrong shape, and 0/180 stay byte-identical. If overruled: firmware would need a new frame format to turn portrait frames.
+D2 Rotation 1 with landscape frames is q=1, and 3 is q=3, the same as square glass. The 1.9's 35-column gap moves to the row axis. Why: it matches the square and old landscape conventions. If overruled: swap them in `addressedRotation`.
+D3 A frame of the wrong shape for the rotation (old app, CLI CFGROT mid-stream) draws in its own shape and lies sideways. Why: the sender owns the frame shape. If overruled: the firmware letterboxes or refuses it.
+D4 A parity change on rectangular glass sets the region's shape (landscape at 90/270, portrait at 0/180) instead of toggling it. Why: a region already dragged landscape at 0 stays landscape at 90. If overruled: toggle, as on square glass.
+D5 Automatic correction stays a 180 flip. In a landscape mount it reads the flip across the other axis (`motionorient::forMounting`) and resets on a parity change. Why: sideways gravity would otherwise never correct. If overruled: flip-only reads the portrait axis in every mount.
+D6 With no stream, the on-device screens (boot fills, idle, survey, WiFi selector) go landscape at 90/270, and a mount change clears bufA to the new shape. Why: they already lay out for either shape. If overruled: they stay portrait.
+D7 Doom is unchanged: it forces rotation 0 and draws portrait, letterboxed. Why: its controls are laid out for that orientation. If overruled: a separate landscape Doom task.
+D8 Picking 90/270 turns only a region source. Display and window sources keep their own shape. Why: they have no region to turn. If overruled: letterbox them into the rotation's shape.
+D9 A rotation set outside the app (serial, another Mac) also re-shapes the region, except within 3 s of the app's own command. The status tick no longer replays a stale EINF rotation. Why: stale reports would turn the region back. If overruled: only the app's picker turns it.
 
 # Open questions
 
-- Knob and click usefulness: the default is D2 until the separate mapping task.
-- Encoder clicks per step and direction are unmeasured; the default is D3.
-- Touch corner mapping is unmeasured; the default is raw axes, as ELECROW ships them.
-- The 5-LED ring (GPIO48) and power LED (GPIO40) are left undriven; the default is off.
+- Which physical way round 90 is: the default is D2, and the user confirms on the glass.
+- The landscape-mount flip direction on the 1.9 and C6 Touch IMUs: the default is D5's derivation, which is unmeasured.
 
 # Gate facts
 
-Publish settings: local branch only, no push, PR, CR or merge. The user merges.
+Publish settings: local branch `rect-panel-landscape`. No push, PR, CR or AutoSDE, because this is a personal GitHub repo and the brief says no push. The user merges.
 Call sites, packages/*: none touched.
-Adversarial-review rounds: 1 independent round, which changed D3, D5 and D9.
-Every lane below passed on the final HEAD:
-- descriptor check: `gate-descriptor-check.log`
-- firmware host tests: `gate-firmware-tests.log`
-- `test_espdisp.py`: `gate-test-espdisp.log`
-- S3 compile: `gate-compile-s3.log`
-- `swift test`: `gate-swift-test.log`
-- macOS app build: `app-build.log`
+Adversarial-review rounds: 2 (code-review.md). They changed D6 and D9 and added the validator rule.
+Final-HEAD lanes, all passing:
+- `gate-firmware-tests.log`
+- `gate-test-espdisp.log`
+- `gate-compile-s3.log`
+- `gate-compile-c6.log`
+- `gate-swift-test.log`
+- `gate-descriptor-check.log`
+- `release-shipping.log` (bundles)
+- `app-build.log`
 
 # Evidence
 
-- `device-flash.log`: canonical S3 bundle regions written to 68:EE:8F:5D:AC:8C, verified, no erase.
-- `device-boot.log`: the false 1.85C match that D6 fixes.
-- `device-flash-dev-canary.log`: dev app with the fix, app region only.
-- `device-boot-dev-canary.log`: the knob detected, panel and touch up.
-- `device-identity-dev-canary.log`: the CFGSHOW reply.
-- `code-review.md`: the review and what became of each finding.
+- `code-review.md`: the findings and what became of each.
+- The `gate-*.log`, `release-shipping.log` and `app-build.log` files: the lanes above.
 
 # Residuals
 
-- The final bundle commit was not re-flashed, per instruction; the board runs the equivalent dev build of `0803984`.
-- No knob turn or press events were captured.
-- EINF is UDP only and the board has no WiFi.
-- Merging with the Waveshare branch will conflict in the S3 probe table, the descriptor count and the bundles. Re-run the generator and the release after merging.
+- No hardware check yet; it waits on the user's serial window.
+- The C6 boards are not attached.
+- There are no host tests for the adopt/parity firmware state or for Choose Region.

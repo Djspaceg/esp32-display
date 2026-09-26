@@ -63,9 +63,10 @@ void fillPanel(uint16_t rgb565);
 // On rectangular glass, give bufA the frame shape the mounting rotation calls
 // for (localFrameLandscape) when no sender frame is deciding it, clearing what
 // it held. Acts only when that shape changed since the last call, i.e. on a
-// change of mount. Returns whether bufA was re-shaped; always false on square
-// glass.
-bool adoptLocalFrameShape();
+// change of mount, and only when `reshape` says no stream owns bufA; the new
+// shape is recorded either way. Returns whether bufA was re-shaped; always
+// false on square glass.
+bool adoptLocalFrameShape(bool reshape = true);
 
 // loop()'s two draw-side service calls: reapply a pending rotation and
 // repaint from cache, then run the streaming draw pass (which also owns the
