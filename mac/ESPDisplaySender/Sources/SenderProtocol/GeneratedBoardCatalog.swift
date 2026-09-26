@@ -10,7 +10,7 @@ public enum GeneratedBoardCatalog {
         public let bootloaderAddress: Int
     }
 
-    public static let sourceSHA256 = "242e76cf680937fb5c400864faa3455a8bbb5569c173d11a2e1f54d6fa842f1b"
+    public static let sourceSHA256 = "af816ad3a7c47b3d4a340414fc3693463cadace797aa639a917e657086b82039"
     public static let requiredFamilies: Set<String> = ["c3", "c6", "s3", "p4"]
     public static let expected: [String: Expected] = [
         "c3": Expected(chip: "esp32c3", profiles: ["gc9a01a-240"], flashBytes: [4194304], partition: "c3-4m-ota", bootloaderAddress: 0),
@@ -52,5 +52,5 @@ public enum GeneratedBoardCatalog {
         "p4": Set(["p4", "p4-4b"]),
     ]
 
-    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7703-4b", "gc9107", "st7789-130", "st7789-154", "co5300", "st77916", "gc9a01-knob-128"])
+    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7789", "jd9853", "st7703-4b", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"])
 }

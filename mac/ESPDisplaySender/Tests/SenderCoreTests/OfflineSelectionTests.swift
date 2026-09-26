@@ -281,12 +281,12 @@ final class RegionCancelTests: XCTestCase {
 /// instruction: "rectangular screens only flip 180. if the app chooses a
 /// 90/270 degree orientation, the app changes the region orientation too."
 ///
-/// Only square glass can choose a quarter turn at all - the firmware advertises
-/// the capability solely when width equals height (firmware/display_stream/
-/// telemetry.cpp:94) - so this is about a square panel whose region the user has
-/// dragged to a non-square shape, which the marquee allows. Turning the panel
-/// then leaves the captured shape lying across the glass the wrong way until the
-/// region turns with it.
+/// On square glass this is about a region the user has dragged to a non-square
+/// shape, which the marquee allows: turning the panel leaves the captured shape
+/// lying across the glass the wrong way until the region turns with it. On
+/// rectangular glass it is what makes 90 and 270 landscape at all: the panel
+/// draws whatever shape the frames arrive in, so the region has to lie on its
+/// side for an odd rotation and stand upright for an even one.
 @MainActor
 final class QuarterTurnRegionTests: XCTestCase {
 
@@ -340,5 +340,79 @@ final class QuarterTurnRegionTests: XCTestCase {
                        "180 degrees keeps the same shape on the glass")
         XCTAssertEqual(region.height, 160, accuracy: 0.001,
                        "180 degrees keeps the same shape on the glass")
+    }
+
+    // MARK: rectangular glass (the 1.9-inch S3, 170x320)
+
+    private func stick(_ screen: (name: String, size: CGSize),
+                       width: Double, height: Double) -> PanelSnapshot {
+        var panel = PanelSnapshot(serviceName: "stick", displayName: "stick")
+        panel.geometry = PanelGeometry(width: 170, height: 320)
+        panel.source = .region(RegionSpec(
+            display: screen.name, x: 40, y: 60, width: width, height: height))
+        return panel
+    }
+
+    private func region(
+        after previous: Int, _ next: Int, from panel: PanelSnapshot
+    ) throws -> RegionSpec {
+        let manager = PanelManager(
+            previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
+        manager.applyRegionQuarterTurn(from: previous, to: next, for: "stick")
+        return try XCTUnwrap(manager.panels.first?.source.region)
+    }
+
+    func testRectangularNinetyAndTwoSeventyCaptureALandscapeRegion() throws {
+        guard let found = DisplayCapture.preferredScreen() else {
+            throw XCTSkip("no screen available to place a region on")
+        }
+        let screen = (name: found.name, size: found.size)
+        for next in [1, 3] {
+            let turned = try region(
+                after: 0, next, from: stick(screen, width: 170, height: 320))
+            XCTAssertEqual(turned.width, 320, accuracy: 0.001,
+                           "\(next * 90) degrees must capture 320 wide")
+            XCTAssertEqual(turned.height, 170, accuracy: 0.001,
+                           "\(next * 90) degrees must capture 170 tall")
+        }
+    }
+
+    func testRectangularBackToUprightCapturesAPortraitRegion() throws {
+        guard let found = DisplayCapture.preferredScreen() else {
+            throw XCTSkip("no screen available to place a region on")
+        }
+        let screen = (name: found.name, size: found.size)
+        for next in [0, 2] {
+            let turned = try region(
+                after: 1, next, from: stick(screen, width: 320, height: 170))
+            XCTAssertEqual(turned.width, 170, accuracy: 0.001)
+            XCTAssertEqual(turned.height, 320, accuracy: 0.001)
+        }
+    }
+
+    /// A region already dragged landscape at 0 degrees is already what 90
+    /// needs; toggling it would stand it upright and lose landscape.
+    func testRectangularLandscapeRegionStaysLandscapeAtNinety() throws {
+        guard let found = DisplayCapture.preferredScreen() else {
+            throw XCTSkip("no screen available to place a region on")
+        }
+        let screen = (name: found.name, size: found.size)
+        let kept = try region(
+            after: 0, 1, from: stick(screen, width: 320, height: 170))
+        XCTAssertEqual(kept.width, 320, accuracy: 0.001)
+        XCTAssertEqual(kept.height, 170, accuracy: 0.001)
+    }
+
+    func testRectangularHalfTurnKeepsTheRegionShape() throws {
+        guard let found = DisplayCapture.preferredScreen() else {
+            throw XCTSkip("no screen available to place a region on")
+        }
+        let screen = (name: found.name, size: found.size)
+        let landscape = try region(
+            after: 1, 3, from: stick(screen, width: 320, height: 170))
+        XCTAssertEqual(landscape.width, 320, accuracy: 0.001)
+        let portrait = try region(
+            after: 0, 2, from: stick(screen, width: 170, height: 320))
+        XCTAssertEqual(portrait.width, 170, accuracy: 0.001)
     }
 }

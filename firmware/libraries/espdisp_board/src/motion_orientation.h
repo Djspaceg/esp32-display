@@ -79,6 +79,23 @@ inline uint8_t classify(const int16_t raw[3], const Calibration &calibration,
   return cardinal;
 }
 
+// The calibration the classifier should read gravity through for this
+// mounting. Flip-only glass mounted at an odd rotation stands on its side, so
+// upright and upside-down lie along the panel's X axis and the even cardinals
+// FlipOnly accepts never occur. Turning the panel axes one quarter back (new Y
+// is -X, new X is +Y) makes that mount's upright read as cardinal 0 and its
+// upside-down as 2, so the correction stays a pure 180 on top of the manual
+// rotation: gravity -X, which square glass corrects with rotation 1, gives
+// automatic 0 under manual 1, and gravity +X gives automatic 2, i.e. 3.
+inline Calibration forMounting(const Calibration &calibration,
+                               uint8_t manualRotation, AutomaticMode mode) {
+  if (mode != AutomaticMode::FlipOnly || (manualRotation & 1) == 0) {
+    return calibration;
+  }
+  return {calibration.panelYAxis, calibration.panelYSign,
+          calibration.panelXAxis, (int8_t)-calibration.panelXSign};
+}
+
 inline uint8_t compose(uint8_t manualRotation, uint8_t automaticRotation) {
   return (uint8_t)((manualRotation + automaticRotation) & 3);
 }

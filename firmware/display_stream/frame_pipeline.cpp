@@ -737,11 +737,32 @@ void fillPanel(uint16_t rgb565) {
     bufB[i] = hi;
     bufB[i + 1] = lo;
   }
-  if (queuePanelBitmap(panel, *bcfg, 0, 0, PANEL_W, PANEL_H, bufB) != ESP_OK) {
+  // In the shape MADCTL currently addresses: after a landscape frame, or on
+  // rectangular glass mounted at rotation 1/3, the window is the panel's
+  // height wide. Same byte count either way.
+  if (queuePanelBitmap(panel, *bcfg, 0, 0,
+                       PANEL_GEOMETRY.frameWidth(panelLandscape),
+                       PANEL_GEOMETRY.frameHeight(panelLandscape),
+                       bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
   }
   waitForDmaIdle(500);
 #endif
+}
+
+bool adoptLocalFrameShape() {
+  if (!panelIsRectangular()) return false;
+  const bool landscape = localFrameLandscape();
+  if (bufLandscape == landscape && pendingLandscape == landscape) return false;
+  portENTER_CRITICAL(&drawMux);
+  memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
+  pendingLandscape = landscape;
+  portEXIT_CRITICAL(&drawMux);
+  // bufA's old content is laid out in the other shape, so it is no background
+  // for a card any more; a sender that resumes keyframes it in its own shape.
+  if (bufA != nullptr) memset(bufA, 0, frameSourceBytes());
+  bufLandscape = landscape;
+  return true;
 }
 // Reapply a pending user/motion rotation and repaint the whole screen from
 // what is already cached. Body and reasoning moved verbatim from loop().
@@ -758,10 +779,11 @@ void serviceRotationRepaint() {
   // refresh.
   //
   // This is fixable locally because a user rotation leaves bufA valid: a 180
-  // changes only the scan direction, and a quarter turn is only reachable on
-  // square glass, where the band geometry is orientation-symmetric - either
-  // way the bands in bufA still tile the frame and the new MADCTL re-addresses
-  // them. A landscape change is not, so one still mid-flight here
+  // changes only the scan direction, a quarter turn on square glass keeps the
+  // orientation-symmetric band geometry, and on rectangular glass a quarter
+  // turn never changes the addressed shape (panelorient::addressedRotation) -
+  // either way the bands in bufA still tile the frame and the new MADCTL
+  // re-addresses them. A landscape change is not, so one still mid-flight here
   // (bufLandscape not yet agreeing with the completed frame) only reapplies
   // the config and leaves the repaint to the keyframe the sender guarantees.
   //
@@ -769,6 +791,14 @@ void serviceRotationRepaint() {
   // DeviceSession.setFlip/setRotation force a keyframe. A BOOT-button turn is
   // invisible to the sender, so nothing asked for one.
   if (madctlDirty && dmaInFlight == 0) {
+    // The firmware's own screens take their shape from bufA. While one is up,
+    // or nothing has been streamed yet, a rotation into or out of landscape
+    // on rectangular glass re-shapes bufA so they turn with the glass; a
+    // stream in progress keeps the shape its frames carry.
+    if (wifiSelectorActive || surveyActive || idleActive ||
+        statFramesShown == 0) {
+      adoptLocalFrameShape();
+    }
     bool orientationSettled = (bufLandscape == pendingLandscape);
     applyPanelConfig(bufLandscape);
     const char *repainted;

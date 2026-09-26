@@ -88,8 +88,13 @@ extension PanelManager {
         let reusable = existing.flatMap { region -> RegionSpec? in
             return region.matchesAspect(of: geometry) ? region : nil
         }
+        // Landscape from the start on rectangular glass mounted at 90 or 270,
+        // where the region's shape is what makes the panel landscape.
+        let startLandscape = geometry.width != geometry.height
+            && (panel?.rotation ?? 0) % 2 != 0
         guard let region = reusable
-            ?? Self.startingRegion(geometry: geometry) else {
+            ?? Self.startingRegion(
+                geometry: geometry, landscape: startLandscape) else {
             operationOutcome = .failure(
                 "No display available",
                 "macOS reported no screen to draw a region on.")
@@ -202,11 +207,13 @@ extension PanelManager {
 
     /// A sensible first rectangle: 2x the panel, centred on the focused screen.
     /// 2x rather than 1x so it is big enough to see and grab.
-    private static func startingRegion(geometry: PanelGeometry) -> RegionSpec? {
+    private static func startingRegion(
+        geometry: PanelGeometry, landscape: Bool
+    ) -> RegionSpec? {
         guard let screen = DisplayCapture.preferredScreen() else { return nil }
         return RegionSpec.centered(
-            on: screen.name, geometry: geometry, scale: 2, landscape: false,
-            in: screen.size)
+            on: screen.name, geometry: geometry, scale: 2,
+            landscape: landscape, in: screen.size)
     }
 
     // MARK: live preview

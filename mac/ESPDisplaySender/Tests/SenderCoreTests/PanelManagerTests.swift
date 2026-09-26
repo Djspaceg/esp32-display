@@ -339,15 +339,54 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertFalse(manager.canControl(panel.serviceName, capability: .rotate))
     }
 
-    func testRectangularPanelStaysFlipOnlyEvenIfRotateCapabilityIsSet() {
+    func testRectangularNetworkPanelWithRotateCapabilityOffersQuarterTurns() {
         var panel = controllablePanel(capabilities: .flip.union(.rotate))
         panel.geometry = PanelGeometry(width: 172, height: 320)
+        let manager = makeManager([panel])
+        manager.register(makeSession(name: panel.serviceName))
+
+        XCTAssertTrue(manager.supportsQuarterTurnRotation(panel.serviceName))
+        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .rotate))
+        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .flip))
+    }
+
+    /// Firmware from before rectangular landscape withholds `.rotate` on
+    /// rectangular glass, so it keeps the 180 toggle it always had.
+    func testRectangularPanelWithoutRotateCapabilityStaysFlipOnly() {
+        var panel = controllablePanel(capabilities: .flip)
+        panel.geometry = PanelGeometry(width: 170, height: 320)
         let manager = makeManager([panel])
         manager.register(makeSession(name: panel.serviceName))
 
         XCTAssertFalse(manager.supportsQuarterTurnRotation(panel.serviceName))
         XCTAssertFalse(manager.canControl(panel.serviceName, capability: .rotate))
         XCTAssertTrue(manager.canControl(panel.serviceName, capability: .flip))
+    }
+
+    func testS3LCD190WithReportedRotateCapabilityOffersQuarterTurnsOverVerifiedUSB() {
+        let path = "/dev/cu.usbmodem-190"
+        var panel = controllablePanel(
+            capabilities: .power.union(.flip),
+            heartbeatAt: Date(timeIntervalSinceNow: -60))
+        panel.usbPort = path
+        panel.usbHardwareID = panel.hardwareID
+        let manager = PanelManager(
+            previewPanels: [panel],
+            savedNetworkNames: [],
+            usbSerialPorts: [path])
+        let identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO ssid64= name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
+                + "connected=0 rot=1 pwr=on board=st7789-190 "
+                + "profile=st7789-190 target=s3 chip=esp32s3 "
+                + "partition=universal-8m-doom-ota ota=off ssid= "
+                + "caps=00002000 bllevel=128 fw=1.5.0")
+        manager.noteUSBIdentity(
+            path: path,
+            identity: identity,
+            generation: manager.usbPathGeneration(path))
+
+        XCTAssertTrue(manager.supportsQuarterTurnRotation(panel.serviceName))
+        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .rotate))
     }
 
     func testUnknownGeometryStaysFlipOnlyEvenIfRotateCapabilityIsSet() {

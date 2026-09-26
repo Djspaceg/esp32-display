@@ -428,9 +428,11 @@ void setup() {
     Serial.println("FATAL: display init failed");
     while (true) delay(1000);
   }
-  // Apply the saved flip up front so even the boot status fills land the
-  // right way up, not just streamed frames.
-  applyPanelConfig(false);
+  // Apply the saved rotation up front so even the boot status fills land the
+  // right way up, not just streamed frames - landscape-shaped on rectangular
+  // glass mounted at rotation 1 or 3.
+  adoptLocalFrameShape();
+  applyPanelConfig(bufLandscape);
   // Panel-command brightness (the AMOLED) needs the panel up before it can
   // apply; its init table ends at full brightness, so this restores the
   // user's saved level. A harmless repeat on PWM boards.

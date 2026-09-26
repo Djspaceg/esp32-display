@@ -1948,6 +1948,48 @@ int main() {
     CHECK_EQ(centeredWindow[3].x, 0);
     CHECK_EQ(centeredWindow[3].y, 34);
 
+    // Rectangular landscape (rotation 1/3). The frame's shape decides the axis
+    // swap there, so only rotation's half turn reaches the quadrant: every
+    // rotation keeps the quadrant's parity equal to the frame's shape, 0 and 2
+    // stay exactly the historical table, and rotation 1 with the landscape
+    // frames the sender streams for it is the very state square glass uses at
+    // rotation 1.
+    {
+      using panelorient::addressedRotation;
+      for (uint8_t rotation = 0; rotation < 4; rotation++) {
+        CHECK(addressedRotation(rotation, false) == rotation);
+        CHECK(addressedRotation(rotation, true) == (rotation & 2));
+        for (int shape = 0; shape < 2; shape++) {
+          const bool landscape = shape != 0;
+          const uint8_t q =
+              quadrant(addressedRotation(rotation, true), landscape);
+          CHECK(swapXY(q) == landscape);
+          if ((rotation & 1) == 0) {
+            CHECK(q == quadrant(rotation, landscape));
+          }
+        }
+      }
+      CHECK(quadrant(addressedRotation(1, true), true) == quadrant(1, false));
+      CHECK(quadrant(addressedRotation(3, true), true) == quadrant(3, false));
+      // Unmasked input stays in range.
+      CHECK(addressedRotation(7, true) == 2);
+      CHECK(addressedRotation(7, false) == 3);
+
+      // The 1.9-inch S3's 35-column offset moves to the row axis at 90 and
+      // 270, as its descriptor's per-rotation offsets say, and back at 0/180.
+      const uint8_t turns[4] = {0, 1, 2, 3};
+      const uint16_t wantX[4] = {35, 0, 35, 0};
+      const uint16_t wantY[4] = {0, 35, 0, 35};
+      for (int i = 0; i < 4; i++) {
+        const bool landscape = (turns[i] & 1) != 0;
+        const panelorient::WindowGap gap = panelorient::windowGap(
+            170, 320, 240, 320, 35, 0,
+            quadrant(addressedRotation(turns[i], true), landscape));
+        CHECK_EQ(gap.x, wantX[i]);
+        CHECK_EQ(gap.y, wantY[i]);
+      }
+    }
+
     const panelorient::WindowGap unverifiedWindow =
         panelorient::windowGap(128, 128, 0, 0, 2, 1, 2);
     CHECK_EQ(unverifiedWindow.x, 2);
@@ -3214,7 +3256,50 @@ int main() {
     CHECK(motionorient::compose(1, 0) == 1);
     CHECK(motionorient::compose(1, 2) == 3);
 
+    // Rectangular glass mounted in landscape (manual 1 or 3) stands on its
+    // side, so its flip is read across the other axis and still never yields
+    // a quarter turn: gravity -X (square glass's rotation 1) is automatic 0,
+    // +X is automatic 2, and upright/upside-down gravity is now the side.
+    for (uint8_t manual = 1; manual < 4; manual += 2) {
+      const Calibration mounted = motionorient::forMounting(
+          identity, manual, AutomaticMode::FlipOnly);
+      CHECK(motionorient::classify(
+                left, mounted, 0, AutomaticMode::FlipOnly) == 0);
+      CHECK(motionorient::classify(
+                right, mounted, 0, AutomaticMode::FlipOnly) == 2);
+      CHECK(motionorient::classify(
+                upright, mounted, 0, AutomaticMode::FlipOnly) ==
+            motionorient::INVALID_ROTATION);
+      CHECK(motionorient::classify(
+                upsideDown, mounted, 2, AutomaticMode::FlipOnly) ==
+            motionorient::INVALID_ROTATION);
+    }
+    CHECK(motionorient::compose(
+              1, motionorient::classify(
+                     left,
+                     motionorient::forMounting(
+                         identity, 1, AutomaticMode::FlipOnly),
+                     0, AutomaticMode::FlipOnly)) ==
+          motionorient::cardinalFor(-8192, 0));
+    // Even mounts and square glass read gravity exactly as before.
     const Calibration swapped = {1, -1, 0, 1};
+    for (uint8_t manual = 0; manual < 4; manual++) {
+      const Calibration fourWay = motionorient::forMounting(
+          swapped, manual, AutomaticMode::FourWay);
+      CHECK(fourWay.panelXAxis == swapped.panelXAxis &&
+            fourWay.panelXSign == swapped.panelXSign &&
+            fourWay.panelYAxis == swapped.panelYAxis &&
+            fourWay.panelYSign == swapped.panelYSign);
+      if ((manual & 1) == 0) {
+        const Calibration even = motionorient::forMounting(
+            swapped, manual, AutomaticMode::FlipOnly);
+        CHECK(even.panelXAxis == swapped.panelXAxis &&
+              even.panelXSign == swapped.panelXSign &&
+              even.panelYAxis == swapped.panelYAxis &&
+              even.panelYSign == swapped.panelYSign);
+      }
+    }
+
     CHECK(motionorient::classify(
               right, swapped, 2, AutomaticMode::FourWay) == 0);
 
@@ -3393,7 +3478,7 @@ int main() {
 
     // Whether the frame is landscape-shaped follows the total quadrant, and
     // collapses to the landscape flag whenever the rotation is 0 or 2 - which
-    // is every rectangular panel, quarter turns being square-only.
+    // is every rotation a rectangular panel addresses (see below).
     for (uint8_t rotation = 0; rotation < 4; rotation++) {
       CHECK(touchmap::swapsAxes(false, rotation) == ((rotation & 1) != 0));
       // Landscape adds one quarter turn, so it toggles the parity.
@@ -3407,6 +3492,24 @@ int main() {
     CHECK(touchmap::swapsAxes(false, 3) == true);
     CHECK(touchmap::swapsAxes(true, 1) == false);
     CHECK(touchmap::swapsAxes(true, 3) == false);
+
+    // Rectangular glass at 90/270: the sketch passes the addressed rotation
+    // (panelorient::addressedRotation), so a finger on a landscape frame maps
+    // through the same quadrant the pixels were drawn through - square glass's
+    // rotation 1 or 3 - and the frame shape never disagrees with the flag.
+    for (uint8_t rotation = 1; rotation < 4; rotation += 2) {
+      const uint8_t addressed = panelorient::addressedRotation(rotation, true);
+      CHECK(touchmap::swapsAxes(true, addressed));
+      CHECK(!touchmap::swapsAxes(false, addressed));
+      for (int16_t ry = 0; ry < LONG; ry += 29) {
+        for (int16_t rx = 0; rx < SHORT; rx += 13) {
+          const Point viaFrame = touchmap::map(rx, ry, true, addressed);
+          const Point viaSquare = touchmap::map(rx, ry, false, rotation);
+          CHECK(viaFrame.x == viaSquare.x);
+          CHECK(viaFrame.y == viaSquare.y);
+        }
+      }
+    }
 
     // Structural properties that must hold in every orientation, checked over
     // the whole coordinate space rather than at hand-picked points, and now

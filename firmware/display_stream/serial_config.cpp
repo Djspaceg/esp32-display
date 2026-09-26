@@ -363,18 +363,17 @@ static void processConfigLine(char *line) {
                   want != 0, panelRotation);
   } else if (strncmp(line, "CFGROT ", 7) == 0) {
     // Set the mounting rotation in clockwise quarter turns: CFGROT 0|1|2|3.
-    // Quarter turns (1 and 3) require a square panel whose backend has passed
-    // physical transform validation. Rectangular panels use sender landscape;
-    // a backend without validated quarter turns fails closed through its
-    // PanelConfig.
+    // Quarter turns (1 and 3) require a backend that has passed physical
+    // transform validation; one without fails closed through its PanelConfig.
+    // On rectangular glass 1 and 3 are landscape: the firmware's own screens
+    // turn at once, and streamed frames follow the sender's landscape region
+    // (see panelorient::addressedRotation).
     int want = atoi(line + 7);
     if (want < 0 || want > 3) {
       configSerial().println("CFGERR expected: CFGROT 0|1|2|3");
       return;
     }
-    if ((want & 1) != 0 &&
-        (bcfg->panel->width != bcfg->panel->height ||
-         !bcfg->panel->supportsCommandRotation)) {
+    if ((want & 1) != 0 && !bcfg->panel->supportsCommandRotation) {
       configSerial().printf("CFGERR rotation %d unsupported by %s (%ux%u); "
                     "only 0 and 2 apply here\n",
                     want, bcfg->name, bcfg->panel->width,

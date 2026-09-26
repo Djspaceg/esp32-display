@@ -786,11 +786,11 @@ private struct PanelDetailView: View {
                 }
             }
             if manager.supportsQuarterTurnRotation(panel.serviceName) {
-                // Square panels advertise quarter-turn rotation, so the
-                // orientation control becomes a four-way choice. Rectangular
-                // panels keep the 180 toggle below: their 90-degree case is
-                // the sender-side landscape mechanism, and their firmware
-                // never advertises `.rotate`.
+                // Panels whose firmware advertises quarter-turn rotation get
+                // a four-way choice. On rectangular glass 90 and 270 are
+                // landscape, and choosing one turns the capture region on
+                // its side. Firmware without `.rotate` keeps the 180 toggle
+                // below.
                 LabeledContent("Orientation") {
                     Picker("Orientation", selection: Binding(
                         get: { panel.rotation },

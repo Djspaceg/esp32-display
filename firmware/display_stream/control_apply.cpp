@@ -79,8 +79,7 @@ void applyPendingControl() {
         break;
       case deviceproto::ControlOpcode::Rotate:
         if ((command.value & 1) != 0 &&
-            (bcfg->panel->width != bcfg->panel->height ||
-             !bcfg->panel->supportsCommandRotation)) {
+            !bcfg->panel->supportsCommandRotation) {
           // Defense in depth behind the capability gate: a panel without
           // validated quarter turns never advertises CAP_ROTATE, so a
           // well-behaved sender never sends 1 or 3 here.

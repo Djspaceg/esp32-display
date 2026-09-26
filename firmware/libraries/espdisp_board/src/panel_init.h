@@ -316,17 +316,21 @@ inline bool setPanelBrightness(esp_lcd_panel_handle_t panel,
 ///   portrait   MADCTL 0       flipped  MX|MY
 ///   landscape  MV|MX          flipped  MV|MY
 ///
-/// which the host suite asserts, so shipped panels are unaffected. Rotations
-/// 1 and 3 only make sense on square glass (the sketch gates them there); on
-/// rectangular panels a quarter turn is what the sender-driven landscape
-/// mechanism already expresses.
+/// which the host suite asserts, so shipped panels are unaffected. On
+/// rectangular glass rotations 1 and 3 reach the quadrant through the
+/// landscape frames the sender streams for them, not directly - see
+/// panelorient::addressedRotation - so the axis swap always follows the frame
+/// actually being drawn, and the col/row gap moves to the other axis with it.
 ///
 inline void applyOrientation(esp_lcd_panel_handle_t panel,
                              const board::Config &cfg, bool landscape,
                              uint8_t rotation,
                              bool installationMirrorX = false) {
   const uint8_t q = panelorient::quadrant(
-      (uint8_t)(rotation + cfg.panel->orientationOffset), landscape);
+      panelorient::addressedRotation(
+          (uint8_t)(rotation + cfg.panel->orientationOffset),
+          cfg.panel->width != cfg.panel->height),
+      landscape);
   const bool swap = panelorient::swapXY(q);
   esp_lcd_panel_swap_xy(panel, swap);
   esp_lcd_panel_mirror(panel,

@@ -162,10 +162,11 @@ inline Point rawToGlass(int16_t rawX, int16_t rawY,
 }
 
 /// Whether this orientation's framebuffer has swapped axes (landscape-shaped),
-/// i.e. the quadrant is odd. With rotation limited to {0, 2} - every
-/// rectangular panel, since only square glass accepts quarter turns - this is
-/// exactly the landscape flag, which is why callers that key buffer shape on
-/// `landscape` alone stay correct. Dimension-free, so it takes no Calibration.
+/// i.e. the quadrant is odd. On a rectangular panel the caller passes the
+/// addressed rotation (panelorient::addressedRotation, always 0 or 2 there), so
+/// this is exactly the landscape flag, which is why callers that key buffer
+/// shape on `landscape` alone stay correct. Dimension-free, so it takes no
+/// Calibration.
 inline bool swapsAxes(bool landscape, uint8_t rotation) {
   return panelorient::swapXY(panelorient::quadrant(rotation, landscape));
 }
@@ -239,9 +240,9 @@ inline Point mirrorFrameX(Point p, bool axesSwapped,
 /// Raw controller coordinates straight to a clamped framebuffer point.
 ///
 /// The clamp is bounded by the quadrant's frame shape, not the landscape flag
-/// alone: an odd total quadrant (only reachable with rotation 1/3, i.e. on
-/// square glass where the two shapes coincide anyway) swaps which axis is
-/// long. On every rectangular panel the two agree - see swapsAxes.
+/// alone: an odd total quadrant from rotation 1/3 swaps which axis is long. On
+/// square glass the two shapes coincide anyway, and on rectangular glass the
+/// caller passes the addressed rotation, so the two agree - see swapsAxes.
 inline Point map(int16_t rawX, int16_t rawY, bool landscape, uint8_t rotation,
                  Calibration cal = AXS5106L_ON_C6) {
   return clampToFrame(

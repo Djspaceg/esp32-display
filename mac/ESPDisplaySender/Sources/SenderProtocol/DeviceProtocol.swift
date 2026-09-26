@@ -60,10 +60,11 @@ public enum DeviceProtocol {
         /// and not a protocol version bump.
         public static let compressedBands = Capabilities(rawValue: 1 << 12)
         /// Accepts `rotate`, i.e. any quarter turn rather than only the 180
-        /// flip. Only square panels advertise it: on rectangular glass a
-        /// physical 90-degree turn is what the sender-driven landscape
-        /// mechanism already expresses, and a MADCTL quarter turn would fight
-        /// it. A new opcode plus this bit rather than widened `flip` values,
+        /// flip. Square glass turns the image in place; on rectangular glass
+        /// rotation 1 or 3 is landscape, and the sender turns its capture
+        /// region on its side so the landscape frames it streams carry the
+        /// quarter turn. Firmware before that withheld the bit on rectangular
+        /// glass, so those panels keep only the flip. A new opcode plus this bit rather than widened `flip` values,
         /// because old firmware rejects a flip value above 1 SILENTLY — no
         /// acknowledgement at all — and this sender could not tell that from
         /// packet loss. The UI keeps the flip toggle for panels without the

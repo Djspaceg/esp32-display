@@ -90,13 +90,12 @@ uint32_t deviceCapabilities() {
          // has no other way to know the panel's shape, and the firmware
          // itself does nothing with it (see the CAP_ROUND_DISPLAY comment).
          | (bcfg->panel->roundDisplay ? deviceproto::CAP_ROUND_DISPLAY : 0u)
-         // Quarter turns only where the glass is square. On a rectangular
-         // panel a 90-degree mounting turn is what the sender-driven
-         // landscape mechanism already expresses, and honouring rotation 1/3
-         // there would fight it - so the capability is withheld and the
-         // Rotate handler NACKs those values as defense in depth behind it.
-         | (bcfg->panel->width == bcfg->panel->height &&
-                    bcfg->panel->supportsCommandRotation
+         // Quarter turns wherever the backend has validated them. On
+         // rectangular glass rotation 1/3 is landscape and composes with the
+         // sender's landscape frames instead of fighting them (see
+         // panelorient::addressedRotation); the Rotate handler NACKs 1/3 on a
+         // backend without validation as defense in depth behind this bit.
+         | (bcfg->panel->supportsCommandRotation
                 ? deviceproto::CAP_ROTATE : 0u)
          // Only when OTA actually came up, not merely because this build
          // contains the code and not merely because a password is stored: a

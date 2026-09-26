@@ -59,10 +59,11 @@ enum Capability : uint32_t {
   // byte-identical on the wire.
   CAP_COMPRESSED_BANDS = 1u << 12,
   // Accepts Rotate, i.e. any quarter turn rather than only the 180 Flip.
-  // Advertised only by panels whose glass is square (panelW == panelH): on a
-  // rectangular panel a 90-degree mounting turn is what the sender-driven
-  // landscape mechanism already expresses, and accepting rotation 1/3 there
-  // would fight it. A NEW opcode plus this bit rather than widened Flip
+  // Advertised by every panel backend with validated quarter turns. Square
+  // glass turns the image in place; on rectangular glass rotation 1/3 is
+  // landscape, carried by the landscape frames the sender streams for it
+  // (the old firmware withheld this bit there, so a sender still offers
+  // only the 180 Flip to it). A NEW opcode plus this bit rather than widened Flip
   // values, because old firmware's validControlValue rejects Flip > 1
   // SILENTLY - parseControl returns false, no ack is sent, and a sender
   // could not tell rejection from packet loss. An unknown opcode is refused
@@ -151,9 +152,9 @@ enum class ControlOpcode : uint8_t {
   BrightnessLevel = 5,
   // Value 0-3: clockwise quarter turns. Supersedes Flip internally (Rotate 2
   // == Flip 1); Flip stays valid in both directions so old senders keep
-  // working. Whether values 1 and 3 are honoured is a panel-shape fact the
-  // sketch owns (square glass only, NACKed there with a nonzero ack status);
-  // this file only knows the representable range.
+  // working. Whether values 1 and 3 are honoured is a panel-backend fact the
+  // sketch owns (NACKed with a nonzero ack status where unvalidated); this
+  // file only knows the representable range.
   Rotate = 6,
   // Value 0 or 1: whether the display should be on. A standing instruction,
   // persisted, and independent of ESLP/EWAK and the idle timer - see the
@@ -211,9 +212,9 @@ inline bool validControlValue(ControlOpcode opcode, int32_t value) {
     case ControlOpcode::BrightnessLevel:
       return value >= BRIGHTNESS_LEVEL_MIN && value <= BRIGHTNESS_LEVEL_MAX;
     case ControlOpcode::Rotate:
-      // The full quarter-turn range. The panel-shape restriction (1 and 3
-      // only on square glass) deliberately does NOT live here: this header
-      // is board-blind, and the sketch is what knows the panel's shape. It
+      // The full quarter-turn range. The panel-backend restriction (1 and 3
+      // only where validated) deliberately does NOT live here: this header
+      // is board-blind, and the sketch is what knows the panel. It
       // NACKs rather than drops, so a sender can tell "refused" from "lost".
       return value >= 0 && value <= 3;
     case ControlOpcode::Power:

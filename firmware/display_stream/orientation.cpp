@@ -6,6 +6,7 @@
 #include <board_touch.h>
 #include <motion_orientation.h>
 #include <display_backend.h>
+#include <panel_orientation.h>
 
 #include "app_state.h"
 
@@ -13,8 +14,9 @@
 // QMI8658 state. Automatic correction is intentionally transient: the user's
 // mounting rotation remains the only value persisted or reported to the Mac.
 // Square panels accept all four gravity cardinals. Rectangular panels accept
-// only upright/upside-down, holding the last stable flip while gravity points
-// at either side.
+// only upright/upside-down of their mount, holding the last stable flip while
+// gravity points at either side; mounted in landscape that flip is read across
+// the panel's other axis (motionorient::forMounting).
 bool motionAvailable = false;
 static motionorient::Tracker motionTracker;
 static boardmotion::Sample lastMotionSample = {0, 0, 0};
@@ -40,6 +42,19 @@ uint8_t appliedPanelRotation = 0;
 
 uint8_t desiredPanelRotation() {
   return motionorient::compose(panelRotation, automaticRotation);
+}
+
+bool panelIsRectangular() {
+  return bcfg->panel->width != bcfg->panel->height;
+}
+
+uint8_t addressedPanelRotation() {
+  return panelorient::addressedRotation(appliedPanelRotation,
+                                        panelIsRectangular());
+}
+
+bool localFrameLandscape() {
+  return panelIsRectangular() && (panelRotation & 1) != 0;
 }
 
 void setAutomaticRotationEnabled(bool enabled) {
@@ -71,18 +86,34 @@ void serviceAutoRotation() {
   if ((uint32_t)(now - lastMotionPollAt) < 100) return;
   lastMotionPollAt = now;
 
+  const motionorient::AutomaticMode mode =
+      motionorient::automaticModeForPanel(bcfg->panel->width,
+                                          bcfg->panel->height);
+  // A flip learned in one mounting parity means nothing in the other: the
+  // classifier's axes turn with the mount (motionorient::forMounting), so
+  // start that half over from upright rather than carry a stale 180.
+  static int8_t trackedParity = -1;
+  const int8_t parity = (int8_t)(panelRotation & 1);
+  if (mode == motionorient::AutomaticMode::FlipOnly &&
+      parity != trackedParity) {
+    trackedParity = parity;
+    motionTracker.reset(now);
+    if (automaticRotation != 0) {
+      automaticRotation = 0;
+      madctlDirty = true;
+    }
+  }
+
   boardmotion::Sample sample;
   if (!boardmotion::read(sample)) return;
   lastMotionSample = sample;
   motionSampleValid = true;
 
   const int16_t raw[3] = {sample.x, sample.y, sample.z};
-  const motionorient::Calibration calibration = {
-      bcfg->motionXAxis, bcfg->motionXSign,
-      bcfg->motionYAxis, bcfg->motionYSign};
-  const motionorient::AutomaticMode mode =
-      motionorient::automaticModeForPanel(bcfg->panel->width,
-                                          bcfg->panel->height);
+  const motionorient::Calibration calibration = motionorient::forMounting(
+      {bcfg->motionXAxis, bcfg->motionXSign,
+       bcfg->motionYAxis, bcfg->motionYSign},
+      panelRotation, mode);
   if (!motionTracker.update(raw, calibration, mode, now,
                             !boardtouch::isPressed())) {
     return;

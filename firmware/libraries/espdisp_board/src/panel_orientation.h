@@ -32,6 +32,23 @@ inline uint8_t quadrant(uint8_t rotation, bool landscape) {
   return (uint8_t)((rotation + (landscape ? 1u : 0u)) & 3u);
 }
 
+/// The part of the mounting rotation that reaches the quadrant directly.
+///
+/// On square glass every quarter turn does, since the frame is the same shape
+/// either way. On rectangular glass the frame's shape IS the axis swap: a
+/// landscape frame is the panel's height wide and can only be addressed through
+/// an odd quadrant, and a portrait frame only through an even one. So there the
+/// quarter turn of rotation 1/3 is carried by the landscape frames the sender
+/// streams for it (the app turns its capture region on its side), and only the
+/// half-turn part reaches the quadrant. Rotation 1 with landscape frames is then
+/// q=1, the same MADCTL state as square glass at rotation 1; rotation 0 and 2
+/// are unchanged from the historical table; and a frame of the "wrong" shape for
+/// the rotation is still addressed in its own shape instead of overflowing the
+/// window.
+inline uint8_t addressedRotation(uint8_t rotation, bool rectangular) {
+  return (uint8_t)(rotation & (rectangular ? 2u : 3u));
+}
+
 /// MADCTL MV: odd quadrants exchange the axes.
 inline bool swapXY(uint8_t q) { return (q & 1) != 0; }
 

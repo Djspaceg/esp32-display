@@ -128,21 +128,34 @@ extension PanelManager {
     /// Turn the streamed region on its side when a rotation change crosses
     /// between an even and an odd quarter turn.
     ///
+    /// On rectangular glass the region's shape is what makes 90 and 270
+    /// landscape: the firmware addresses whatever shape the frames arrive in,
+    /// and only the half turn of the rotation reaches the panel directly. So
+    /// there the crossing sets the shape outright - landscape for an odd
+    /// rotation, portrait for an even one - rather than toggling it, which
+    /// keeps a region the user already dragged landscape at 0 degrees
+    /// landscape when they pick 90. On square glass (or before the geometry is
+    /// known) any shape turns with the glass, so it toggles.
+    ///
     /// Separate from setRotation so it is reachable in tests: setRotation refuses
     /// to record a rotation it cannot deliver, so it needs a live session or a
     /// verified USB device, while the decision this makes needs neither.
     func applyRegionQuarterTurn(from previous: Int, to next: Int,
                                 for serviceName: String) {
         guard previous % 2 != next % 2 else { return }
+        if let geometry = geometry(of: serviceName),
+           geometry.width != geometry.height {
+            guard let region = panels.first(
+                where: { $0.serviceName == serviceName })?.source.region,
+                region.isLandscape != (next % 2 != 0)
+            else { return }
+        }
         rotateRegion(for: serviceName)
     }
 
     func supportsQuarterTurnRotation(_ serviceName: String) -> Bool {
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return false }
-        if let geometry = panel.geometry, geometry.width != geometry.height {
-            return false
-        }
         if panel.capabilities.contains(.rotate), panel.geometry != nil { return true }
         guard let device = verifiedUSBDevice(for: serviceName) else { return false }
         return usbDevice(device, reports: .quarterTurn)
@@ -205,11 +218,9 @@ extension PanelManager {
     ) -> [OperationPath] {
         switch requirement {
         case .networkControl(let capability):
-            if capability == .rotate {
-                guard let geometry = panel.geometry,
-                      geometry.width == geometry.height
-                else { return [] }
-            }
+            // A quarter turn needs the panel's shape, to know whether the
+            // region has to turn with it.
+            if capability == .rotate, panel.geometry == nil { return [] }
             guard networkControlReady(serviceName, panel: panel),
                   panel.capabilities.contains(capability)
             else { return [] }
@@ -610,9 +621,9 @@ extension PanelManager {
 
     /// Set the mounting rotation in clockwise quarter turns, on a panel whose
     /// firmware accepts one. Gated on `.rotate`: older firmware refuses the
-    /// opcode silently, and rectangular panels never advertise it (their
-    /// 90-degree case is the landscape mechanism, not MADCTL). `setFlip`
-    /// stays alongside for those panels.
+    /// opcode silently, and firmware before rectangular landscape never
+    /// advertised it on rectangular glass. `setFlip` stays alongside for
+    /// those panels.
     func setRotation(_ rotation: Int, for serviceName: String) {
         let clamped = min(
             max(rotation, DeviceProtocol.rotationRange.lowerBound),
@@ -629,11 +640,12 @@ extension PanelManager {
         // the panel the wrong way. Only the ODD/EVEN change matters: 0 to 2 is a
         // half turn and keeps the same shape, while 0 to 1 or 1 to 2 does not.
         //
-        // A square region rotates to itself, so this is a no-op in the ordinary
-        // case and only bites when the marquee has been dragged to a non-square
-        // shape - which it allows. Note only square glass can reach here at all:
-        // the firmware advertises the quarter-turn capability solely when width
-        // equals height (firmware/display_stream/telemetry.cpp:94).
+        // On square glass a square region rotates to itself, so this only
+        // bites when the marquee has been dragged to a non-square shape. On
+        // rectangular glass it is the whole of landscape: 90 and 270 capture a
+        // region lying on its side (320x170 on the 1.9-inch), and the panel
+        // draws the landscape frames that produces - automatic correction on
+        // the panel stays a 180 flip on top.
         //
         // Done beside updatePanel rather than after the transport switch, so it
         // follows the app's own record of the orientation. That record is already

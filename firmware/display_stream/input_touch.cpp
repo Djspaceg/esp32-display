@@ -119,10 +119,10 @@ void serviceTouch() {
   // rather than taking the AXS5106L default implicitly.
   touchmap::Point p = touchmap::map(
       (int16_t)sample.rawX, (int16_t)sample.rawY, panelLandscape,
-      appliedPanelRotation, touchCalibration);
+      addressedPanelRotation(), touchCalibration);
   if (panelMirrorX) {
     p = touchmap::mirrorFrameX(
-        p, touchmap::swapsAxes(panelLandscape, appliedPanelRotation),
+        p, touchmap::swapsAxes(panelLandscape, addressedPanelRotation()),
         touchCalibration);
   }
   touchgesture::Event event =

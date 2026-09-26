@@ -60,6 +60,11 @@ void reportTileDrawStats();
 // Fill the whole panel with one RGB565 color (boot status feedback).
 void fillPanel(uint16_t rgb565);
 
+// On rectangular glass, give bufA the frame shape the mounting rotation calls
+// for (localFrameLandscape) when no sender frame is deciding it, clearing what
+// it held. Returns whether the shape changed; always false on square glass.
+bool adoptLocalFrameShape();
+
 // loop()'s two draw-side service calls: reapply a pending rotation and
 // repaint from cache, then run the streaming draw pass (which also owns the
 // delay(1) idle pacing).

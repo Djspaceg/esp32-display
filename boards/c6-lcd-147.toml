@@ -113,7 +113,7 @@ press_max_ms = 10000
 [orientation]
 offsets = [[34, 0], [0, 34], [34, 0], [0, 34]]
 mirror_x_supported = true
-quarter_turns = [0, 2]
+quarter_turns = [0, 1, 2, 3]
 
 [motion]
 controller = "none"
