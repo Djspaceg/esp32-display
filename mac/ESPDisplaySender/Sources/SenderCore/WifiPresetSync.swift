@@ -209,12 +209,14 @@ extension WifiConfigUI {
         case .success(let reply): rosterReply = reply
         case .failure(let reason):
             return .failure(ConfigFailure(
-                title: "Could not read WiFi presets", message: reason))
+                title: "Could not read WiFi presets",
+                message: "\(ConfigCommands.showWifiPresets) on \(port): \(reason)"))
         }
         guard let roster = ConfigCommands.wifiPresetRoster(from: rosterReply) else {
             return .failure(ConfigFailure(
                 title: "Could not read WiFi presets",
-                message: "The display returned an invalid preset roster. "
+                message: "\(ConfigCommands.showWifiPresets) on \(port) replied "
+                    + "\"\(excerpt(rosterReply))\", which is not a preset roster. "
                     + "Flash current firmware and try again."))
         }
 
@@ -228,7 +230,8 @@ extension WifiConfigUI {
             case .success(let value): reply = value
             case .failure(let reason):
                 return .failure(ConfigFailure(
-                    title: "Could not read WiFi preset \(slot)", message: reason))
+                    title: "Could not read WiFi preset \(slot)",
+                    message: "\(command) on \(port): \(reason)"))
             }
             guard let parsed = ConfigCommands.wifiPresetSlot(from: reply),
                   parsed.slot == slot,
@@ -236,7 +239,8 @@ extension WifiConfigUI {
             else {
                 return .failure(ConfigFailure(
                     title: "Could not read WiFi preset \(slot)",
-                    message: "The display returned inconsistent slot data."))
+                    message: "\(command) replied \"\(excerpt(reply))\", which does "
+                        + "not match slot \(slot) of the roster."))
             }
             slots[slot] = parsed
         }
@@ -362,7 +366,8 @@ extension WifiConfigUI {
             if case .failure(let reason) = send(command, port, 6) {
                 return .failure(ConfigFailure(
                     title: "WiFi preset sync stopped",
-                    message: "Command \(index + 1) of \(commands.count) failed: \(reason). "
+                    message: "Command \(index + 1) of \(commands.count) "
+                        + "(\(presetCommandSummary(command))) failed: \(reason). "
                         + "The display may contain part of the requested collection; "
                         + "reload it before retrying."))
             }
@@ -375,9 +380,12 @@ extension WifiConfigUI {
         }
         for slot in ConfigCommands.wifiPresetSlotRange {
             guard after.slots[slot]?.ssid == desired[slot - 1] else {
+                let held = after.slots[slot].map { "\"\($0.ssid)\"" } ?? "nothing"
+                let wanted = desired[slot - 1].map { "\"\($0)\"" } ?? "nothing"
                 return .failure(ConfigFailure(
                     title: "WiFi preset verification failed",
-                    message: "Slot \(slot) did not match after synchronization."))
+                    message: "Slot \(slot) holds \(held) instead of \(wanted) "
+                        + "(read back with CFGWIFISHOW \(slot))."))
             }
         }
 
@@ -395,6 +403,20 @@ extension WifiConfigUI {
                     + "display is still joined to the network you expect."))
         }
         return .success((after, commands.count))
+    }
+
+    /// A preset command as it may appear in a message: the verb and slot,
+    /// never the SSID or password fields.
+    static func presetCommandSummary(_ command: String) -> String {
+        let words = command.split(separator: " ")
+        guard let verb = words.first else { return command }
+        guard words.count > 1, let slot = Int(words[1]) else { return String(verb) }
+        return "\(verb) slot \(slot)"
+    }
+
+    /// A reply cut to a length that fits a banner.
+    private static func excerpt(_ reply: String) -> String {
+        reply.count > 120 ? String(reply.prefix(120)) + "…" : reply
     }
 
     private static func configFailure(

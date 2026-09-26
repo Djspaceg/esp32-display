@@ -17,18 +17,9 @@ import SenderProtocol
 /// tested is every computation this drives; what is not is a write to hardware.
 enum UsbOnboarder {
 
-    /// Where onboarding has got to. Coarse, because the expensive step reports its
-    /// own progress from esptool's output.
-    enum Progress: Equatable, Sendable {
-        /// Asking the board what chip it is.
-        case readingChip
-        /// esptool is writing. `percent` is nil when its output carried none.
-        case writing(percent: Int?, status: String)
-        /// The board is restarting and the serial device is coming back.
-        case waitingForBoard
-        /// A configuration line is going down the cable.
-        case configuring(String)
-    }
+    /// Where a run has got to, and every line worth keeping for its transcript.
+    /// The phases and their wording live in `UsbFlashPhase`.
+    typealias Progress = UsbFlashEvent
 
     /// What a completed onboarding did, for the outcome alert.
     struct Completion: Equatable, Sendable {
@@ -53,7 +44,8 @@ enum UsbOnboarder {
     /// which is measured output from the attached board, and is why the MAC is
     /// what gets shown as the board's identity.
     static func detectChip(
-        port: String, tool: EsptoolCommand.Tool
+        port: String, tool: EsptoolCommand.Tool,
+        onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async -> UsbOnboarding.ChipDetection {
         let command: EsptoolCommand
         do {
@@ -62,7 +54,9 @@ enum UsbOnboarder {
             return .failed(reason: error.localizedDescription)
         }
         do {
-            let outcome = try await EsptoolRunner.run(command)
+            let outcome = try await EsptoolRunner.run(command) { line in
+                onProgress?(.log(.esptool, line))
+            }
             guard let chip = EsptoolOutput.chipToken(in: outcome.output) else {
                 let reason = EsptoolOutput.failureSummary(in: outcome.output)
                     ?? "it printed nothing at all."
@@ -83,14 +77,44 @@ enum UsbOnboarder {
     /// `WifiConfigUI.probePort` applies. Blocking serial I/O, so this is called
     /// from a background task.
     static func probeExistingFirmware(port: String) -> UsbOnboarding.ExistingFirmware {
-        switch WifiConfigUI.probePort(port, timeout: 3) {
-        case .identified(let identity):
-            return .answered(
-                name: identity.name,
-                hardwareID: identity.hardwareID)
-        case .unavailable:
-            return .silent
+        probe(port: port).existing
+    }
+
+    /// What one CFGSHOW on a port found: the answer, the firmware version it
+    /// reported, and the last line the port produced when it did not answer.
+    struct PortAnswer: Equatable, Sendable {
+        var existing: UsbOnboarding.ExistingFirmware
+        var firmwareVersion: String?
+        var lastLine: String?
+    }
+
+    static func probe(
+        port: String, log: WifiConfigUI.SerialLog? = nil
+    ) -> PortAnswer {
+        let lastLine = LastLine()
+        let tee: WifiConfigUI.SerialLog = { source, text in
+            if source == .received { lastLine.set(text) }
+            log?(source, text)
         }
+        switch WifiConfigUI.probePort(port, timeout: 3, log: tee) {
+        case .identified(let identity):
+            return PortAnswer(
+                existing: .answered(name: identity.name, hardwareID: identity.hardwareID),
+                firmwareVersion: identity.status?.firmwareVersion)
+        case .unavailable(let reason):
+            return PortAnswer(existing: .silent, lastLine: lastLine.value ?? reason)
+        }
+    }
+
+    private final class LastLine: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: String?
+        func set(_ line: String) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            lock.withLock { stored = trimmed }
+        }
+        var value: String? { lock.withLock { stored } }
     }
 
     // MARK: - writing the board
@@ -132,9 +156,14 @@ enum UsbOnboarder {
 
         let command = try EsptoolCommand.writeFlash(
             tool: tool, chip: chip, port: port, writes: staged, eraseAll: eraseAll)
-        onProgress(.writing(percent: nil, status: "Starting esptool…"))
+        onProgress(.phase(.enteringDownloadMode))
+        let tracker = TrackerBox(EsptoolFlashTracker(parts: writes.map {
+            EsptoolFlashTracker.Part(
+                role: $0.role, address: $0.address, size: $0.payload.count)
+        }))
         let outcome = try await EsptoolRunner.run(command) { line in
-            onProgress(.writing(percent: EsptoolOutput.percentage(in: line), status: line))
+            onProgress(.log(.esptool, line))
+            if let phase = tracker.consume(line) { onProgress(.phase(phase)) }
         }
         guard outcome.succeeded else {
             throw WifiConfigUI.ConfigFailure(
@@ -156,32 +185,50 @@ enum UsbOnboarder {
     /// CFG* handler in the firmware restarts as well. So this is the same wait
     /// three times over, and it is one function so the waiting rule cannot differ
     /// between them.
+    ///
+    /// A LINE THAT GOT NO REPLY IS SENT ONCE MORE. Every step here is idempotent
+    /// (the same name, the same network), and a reply lost to a board that was
+    /// still coming up is otherwise a failed onboarding of a board that is fine.
+    /// A CFGERR is a refusal and is never retried.
     static func sendConfiguration(
         steps: [UsbOnboarding.ConfigStep],
         flashedPort: String,
         expectedHardwareID: String? = nil,
+        io: SettleIO = .live,
         onProgress: @escaping @Sendable (Progress) -> Void
     ) async -> Result<String, WifiConfigUI.ConfigFailure> {
         var port = flashedPort
         for step in steps {
-            onProgress(.waitingForBoard)
-            switch await settle(
-                flashedPort: port, expectedHardwareID: expectedHardwareID)
-            {
-            case .success(let resolved):
-                port = resolved
-            case .failure(let failure):
-                return .failure(failure)
-            }
-            onProgress(.configuring(step.label))
-            switch WifiConfigUI.sendCommand(step.command, port: port) {
-            case .success:
-                continue
-            case .failure(let reason):
-                return .failure(WifiConfigUI.ConfigFailure(
-                    title: "Could not finish setting up the board",
-                    message: "The firmware is on it, and \(step.label.lowercased()) "
-                        + "did not go through: \(reason)"))
+            var tries = 0
+            while true {
+                tries += 1
+                switch await settle(
+                    flashedPort: port, expectedHardwareID: expectedHardwareID,
+                    io: io, onProgress: onProgress)
+                {
+                case .success(let board):
+                    port = board.port
+                case .failure(let failure):
+                    return .failure(failure)
+                }
+                onProgress(.phase(.configuring(step.label)))
+                let result = io.send(step.command, port) { source, text in
+                    onProgress(.log(source, text))
+                }
+                switch result {
+                case .success:
+                    break
+                case .failure(let reason) where !reason.hasPrefix("CFGERR") && tries < 2:
+                    onProgress(.log(.app, "No reply to \(step.label.lowercased()) "
+                        + "(\(reason)); waiting for the board and sending it again."))
+                    continue
+                case .failure(let reason):
+                    return .failure(WifiConfigUI.ConfigFailure(
+                        title: "Could not finish setting up the board",
+                        message: "The firmware is on it, and \(step.label.lowercased()) "
+                            + "did not go through: \(reason)"))
+                }
+                break
             }
         }
         return .success(port)
@@ -200,43 +247,137 @@ enum UsbOnboarder {
         return ConfigCommands.canonicalHardwareID(reported) == expected
     }
 
+    /// The board, found again after a restart.
+    struct SettledBoard: Equatable, Sendable {
+        var port: String
+        var firmwareVersion: String?
+    }
+
+    /// Everything `settle` touches outside itself, so a test can drive it with a
+    /// virtual clock and fake ports.
+    struct SettleIO: Sendable {
+        var ports: @Sendable () -> [String]
+        var probe: @Sendable (String, WifiConfigUI.SerialLog?) -> PortAnswer
+        var send: @Sendable (String, String, WifiConfigUI.SerialLog?) -> WifiConfigUI.CommandResult
+        var sleep: @Sendable (Double) async -> Void
+        var now: @Sendable () -> Double
+        var isCancelled: @Sendable () -> Bool
+
+        static let live = SettleIO(
+            ports: { WifiConfigUI.candidatePorts() },
+            probe: { port, log in UsbOnboarder.probe(port: port, log: log) },
+            send: { command, port, log in
+                WifiConfigUI.sendCommand(command, port: port, log: log, acceptInfo: false)
+            },
+            sleep: { seconds in
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            },
+            now: { ProcessInfo.processInfo.systemUptime },
+            isCancelled: { Task.isCancelled })
+    }
+
     /// Find the board again and prove it is listening.
     ///
     /// A DEVICE NODE IS NOT AN ANSWER. `SerialSettlePolicy` decides which node to
-    /// try and when to give up; what makes an attempt successful is CFGSHOW
-    /// replying, because the node reappears seconds before the firmware is reading
-    /// lines.
+    /// try; what makes an attempt successful is CFGSHOW replying with the expected
+    /// hardware ID, because the node reappears seconds before the firmware is
+    /// reading lines. It recovers on its own from the two things measured to
+    /// happen - the node being renamed, and a slow first answer - and stops at
+    /// `SerialSettlePolicy.budgetSeconds` of real time, reporting each look as it
+    /// goes so the sheet can say what it is waiting for.
     static func settle(
         flashedPort: String,
-        expectedHardwareID: String? = nil
-    ) async -> Result<String, WifiConfigUI.ConfigFailure> {
+        expectedHardwareID: String? = nil,
+        io: SettleIO = .live,
+        onProgress: @escaping @Sendable (Progress) -> Void = { _ in }
+    ) async -> Result<SettledBoard, WifiConfigUI.ConfigFailure> {
         let expectedHardwareID = ConfigCommands.canonicalHardwareID(expectedHardwareID)
+        let budget = SerialSettlePolicy.budgetSeconds
+        let started = io.now()
+        var lastSeen: String?
+        var announcedMove = false
+        /// Nodes that answered as some other board: not asked again.
+        var otherBoards: Set<String> = []
+        let log: WifiConfigUI.SerialLog = { source, text in onProgress(.log(source, text)) }
+
+        func report(_ target: SettleWait.Target, attempt: Int) {
+            onProgress(.phase(.waitingForBoard(SettleWait(
+                target: target, attempt: attempt, elapsed: io.now() - started,
+                budget: budget, lastSeen: lastSeen))))
+        }
+
+        /// Ask one port; the board if it answers as the expected one.
+        func ask(_ port: String) -> SettledBoard? {
+            let answer = io.probe(port, log)
+            if matchesExpectedHardwareID(answer.existing, expectedHardwareID: expectedHardwareID) {
+                return SettledBoard(port: port, firmwareVersion: answer.firmwareVersion)
+            }
+            if case .answered(_, let reported) = answer.existing {
+                otherBoards.insert(port)
+                lastSeen = "a different board (ID \(reported ?? "unknown")) answered on \(port)"
+            } else {
+                lastSeen = answer.lastLine.map { "\(port): \($0)" }
+                    ?? "no answer from \(port) within 3 s"
+            }
+            return nil
+        }
+
         for attempt in 0...SerialSettlePolicy.attempts {
-            let ports = WifiConfigUI.candidatePorts()
+            if io.isCancelled() { break }
+            if io.now() - started >= budget { break }
+            let ports = io.ports()
             let step = SerialSettlePolicy.step(
-                attempt: attempt, flashedPort: flashedPort, ports: ports)
+                attempt: attempt, flashedPort: flashedPort, ports: ports,
+                canIdentify: expectedHardwareID != nil)
             switch step {
             case .waitAndRetry(let seconds):
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                report(.reappear(flashedPort: flashedPort), attempt: attempt + 1)
+                await io.sleep(seconds)
             case .use(let port):
-                let existing = probeExistingFirmware(port: port)
-                if matchesExpectedHardwareID(
-                    existing, expectedHardwareID: expectedHardwareID) {
-                    return .success(port)
+                report(.answer(port: port), attempt: attempt + 1)
+                if port != flashedPort, !announcedMove {
+                    announcedMove = true
+                    onProgress(.log(.app, "The board moved from \(flashedPort) to \(port)."))
                 }
-                try? await Task.sleep(
-                    nanoseconds: UInt64(SerialSettlePolicy.retryWait * 1_000_000_000))
+                if let board = ask(port) { return .success(board) }
+                await io.sleep(SerialSettlePolicy.retryWait)
+            case .identify(let candidates):
+                report(.identify(ports: candidates), attempt: attempt + 1)
+                // Each silent node costs three seconds, so the budget and Stop
+                // are checked per node, not per look.
+                for port in candidates where !otherBoards.contains(port) {
+                    if io.isCancelled() || io.now() - started >= budget { break }
+                    if let board = ask(port) {
+                        onProgress(.log(.app, "\(port) reported this board's ID."))
+                        return .success(board)
+                    }
+                }
+                await io.sleep(SerialSettlePolicy.retryWait)
             case .ambiguous, .giveUp:
                 return .failure(WifiConfigUI.ConfigFailure(
                     title: "The board did not come back",
                     message: SerialSettlePolicy.explain(step, flashedPort: flashedPort)
                         ?? "The board did not answer after restarting."))
             }
-            if Task.isCancelled { break }
+        }
+        if io.isCancelled() {
+            return .failure(WifiConfigUI.ConfigFailure(
+                title: "Stopped", message: "Waiting for the board was stopped."))
         }
         return .failure(WifiConfigUI.ConfigFailure(
             title: "The board did not come back",
-            message: SerialSettlePolicy.explain(.giveUp, flashedPort: flashedPort)
-                ?? "The board did not answer after restarting."))
+            message: (SerialSettlePolicy.explain(.giveUp, flashedPort: flashedPort)
+                ?? "The board did not answer after restarting.")
+                + (lastSeen.map { " Last seen: \($0)." } ?? "")))
+    }
+}
+
+/// The tracker, shared with esptool's line callback, which runs on another queue.
+private final class TrackerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tracker: EsptoolFlashTracker
+    init(_ tracker: EsptoolFlashTracker) { self.tracker = tracker }
+    func consume(_ line: String) -> UsbFlashPhase? {
+        lock.withLock { tracker.consume(line) }
     }
 }

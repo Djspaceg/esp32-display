@@ -844,6 +844,25 @@ final class DeviceSourceConfigTests: XCTestCase {
 }
 
 final class ConfigCommandsTests: XCTestCase {
+    // Measured: a backlog that overflowed mid-line has the reply appended to it.
+    func testReplyIsFoundAfterATruncatedLogLine() {
+        XCTAssertEqual(
+            ConfigCommands.reply(in: "frames=1001 dropped=212 heap=12151CFGINFO id=1cdbd47b5b94 fw=1.5.0\r"),
+            .accepted("CFGINFO id=1cdbd47b5b94 fw=1.5.0"))
+        XCTAssertEqual(
+            ConfigCommands.reply(in: "tiledraw: 1 passCFGERR unknown command"),
+            .refused("CFGERR unknown command"))
+        XCTAssertEqual(ConfigCommands.reply(in: "CFGOK name saved"), .accepted("CFGOK name saved"))
+        XCTAssertNil(ConfigCommands.reply(in: "motion: raw=8285,355,-1113 mode=flip-only"))
+    }
+
+    // The earliest marker decides: an SSID inside an accepted reply is not a refusal.
+    func testEarliestReplyMarkerWins() {
+        XCTAssertEqual(
+            ConfigCommands.reply(in: "CFGINFO ssid=CFGERR-net fw=1.5.0"),
+            .accepted("CFGINFO ssid=CFGERR-net fw=1.5.0"))
+    }
+
     // A blank password field must NOT wipe the device's saved password: the
     // command omits the argument entirely, which the firmware reads as
     // "keep what's in use".

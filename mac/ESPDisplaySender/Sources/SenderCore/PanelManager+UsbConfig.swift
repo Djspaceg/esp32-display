@@ -284,6 +284,9 @@ extension PanelManager {
                     + "the USB devices and select it again before continuing.")
             return false
         }
+        beginUSBFlash(hardwareID: stableID)
+        var wroteFlash = false
+        defer { finishUSBFlash(hardwareID: stableID, wroteFlash: wroteFlash) }
         if let existing = panelAssociated(withHardwareID: stableID) {
             selectedServiceName = existing.serviceName
             operationOutcome = .failure(
@@ -321,6 +324,7 @@ extension PanelManager {
         // Re-read identity at the last safe point before a write. CFGSHOW is
         // enough on current firmware; blank/legacy boards are verified through
         // esptool's chip and MAC read, which is non-destructive.
+        progress(.phase(.findingBoard))
         var cfgIdentityMatched = false
         var cfgTarget: String?
         if case .identified(let identity) = await probeUSBDevice(request.port, timeout: 3),
@@ -352,7 +356,8 @@ extension PanelManager {
                     "esptool is required to re-read the chip and MAC before writing.")
                 return false
             }
-            let detection = await UsbOnboarder.detectChip(port: request.port, tool: tool)
+            let detection = await UsbOnboarder.detectChip(
+                port: request.port, tool: tool, onProgress: progress)
             guard case .detected(let chip, let mac) = detection,
                   ConfigCommands.canonicalHardwareID(mac) == stableID,
                   request.chip == nil || request.chip == chip
@@ -397,6 +402,7 @@ extension PanelManager {
                         + "and mutually compatible, so nothing was sent.")
                 return false
             }
+            wroteFlash = true
             do {
                 try await UsbOnboarder.flash(
                     writes: writes, chip: chip, port: request.port, tool: tool,

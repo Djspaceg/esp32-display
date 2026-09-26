@@ -19,12 +19,14 @@ import Foundation
 /// node the instant it appears has nothing listening for it. So the caller's loop
 /// is: wait, choose a node, ask CFGSHOW, and only treat an answer as proof.
 ///
-/// UNVERIFIED: no board has been flashed from this app, so the timings below are
-/// chosen from the sequence rather than measured against it. What IS measured is
-/// that the node name changed across a reset, which is the property the policy is
-/// shaped around. The budget is generous for that reason - being slow costs a few
-/// seconds on a path a user runs once per board, and being early costs a board
-/// that came up with the wrong credentials and no obvious way to tell.
+/// THE BUDGET IS WALL-CLOCK. Each look that finds a node spends up to three
+/// seconds on CFGSHOW, so a budget counted in attempts said "about twenty
+/// seconds" and could wait ninety. The caller stops at `budgetSeconds` of real
+/// time whatever the attempt count, and `attempts` is only a backstop. What is
+/// measured is that the node name changed across a reset, and that a board which
+/// booted with nobody reading answers its first CFGSHOW behind a truncated log
+/// backlog (see `ConfigCommands.reply(in:)`). The budget covers the firmware's
+/// own bounded 30-second WiFi wait in `setup()` plus boot.
 public enum SerialSettlePolicy {
 
     /// What to do on this attempt.
@@ -37,6 +39,9 @@ public enum SerialSettlePolicy {
         /// written. Refuses rather than picking, for the same reason esptool is
         /// never run without `--port`.
         case ambiguous(ports: [String])
+        /// Several candidates, and the board's hardware ID is known: ask each
+        /// one and take the one that reports it. CFGSHOW only reads.
+        case identify(ports: [String])
         /// The budget is spent.
         case giveUp
     }
@@ -51,23 +56,22 @@ public enum SerialSettlePolicy {
     /// Between attempts after that.
     public static let retryWait = 0.75
 
-    /// Attempts, including the initial wait. 24 attempts at 0.75s after a 2s wait
-    /// is about twenty seconds, which covers a board that boots, initialises a
-    /// panel and starts servicing serial.
-    public static let attempts = 24
+    /// A backstop on looks at the device list; `budgetSeconds` is what ends a
+    /// wait in practice.
+    public static let attempts = 80
 
-    /// The whole budget, for a message that says how long it waited.
-    public static var budgetSeconds: Double {
-        initialWait + Double(attempts - 1) * retryWait
-    }
+    /// The whole wait, in seconds of real time from the restart.
+    public static let budgetSeconds = 45.0
 
     /// Decide.
     ///
     /// `attempt` counts from 0. `flashedPort` is the node the board was on before
     /// the reset, which is a hint and never an assumption; `ports` is a fresh
     /// enumeration.
+    /// `canIdentify` says the caller knows the board's hardware ID, which is what
+    /// makes asking several candidates safe instead of a guess.
     public static func step(
-        attempt: Int, flashedPort: String, ports: [String]
+        attempt: Int, flashedPort: String, ports: [String], canIdentify: Bool = false
     ) -> Step {
         guard attempt >= 0 else { return .waitAndRetry(seconds: initialWait) }
         guard attempt < attempts else { return .giveUp }
@@ -79,7 +83,7 @@ public enum SerialSettlePolicy {
         // board.
         if ports.count == 1 { return .use(port: ports[0]) }
         if ports.isEmpty { return .waitAndRetry(seconds: retryWait) }
-        return .ambiguous(ports: ports)
+        return canIdentify ? .identify(ports: ports) : .ambiguous(ports: ports)
     }
 
     /// What to tell the user when the budget runs out, or when the answer is
@@ -87,7 +91,7 @@ public enum SerialSettlePolicy {
     /// thing.
     public static func explain(_ step: Step, flashedPort: String) -> String? {
         switch step {
-        case .use, .waitAndRetry:
+        case .use, .waitAndRetry, .identify:
             return nil
         case .ambiguous(let ports):
             return "After the restart, \(ports.count) USB serial devices were "

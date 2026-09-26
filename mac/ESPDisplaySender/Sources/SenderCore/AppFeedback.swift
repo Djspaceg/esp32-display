@@ -12,6 +12,9 @@ struct OperationOutcome: Equatable, Sendable {
     var kind: Kind
     var title: String
     var message: String
+    /// What to do about a failure, when the step that failed does not already
+    /// say it. USB runs fill this from the phase that was running.
+    var nextAction: String? = nil
 
     static func failure(_ failure: WifiConfigUI.ConfigFailure) -> OperationOutcome {
         OperationOutcome(kind: .failure, title: failure.title, message: failure.message)

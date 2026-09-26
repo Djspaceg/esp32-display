@@ -340,6 +340,9 @@ extension PanelManager {
                 "This display's hardware ID is not a six-byte MAC address, so the "
                     + "app cannot prove which connected board is safe to write.")
         }
+        beginUSBFlash(hardwareID: expectedID)
+        var wroteFlash = false
+        defer { finishUSBFlash(hardwareID: expectedID, wroteFlash: wroteFlash) }
         guard usbPathGeneration(path) == expectedGeneration,
               let current = usbDevices.first(where: {
                   $0.path == path && $0.isConnected
@@ -360,7 +363,7 @@ extension PanelManager {
                     + "nothing was written.")
         }
 
-        progress(.readingChip)
+        progress(.phase(.findingBoard))
         var cfgTarget: String?
         var cfgBoard: String?
         var cfgChip: String?
@@ -451,7 +454,8 @@ extension PanelManager {
                     + "core. It was not found under \(searched.joined(separator: " or ")).")
         }
 
-        let detection = await UsbOnboarder.detectChip(port: path, tool: tool)
+        let detection = await UsbOnboarder.detectChip(
+            port: path, tool: tool, onProgress: progress)
         let detectedChip: String
         let detectedMAC: String?
         switch detection {
@@ -546,6 +550,7 @@ extension PanelManager {
                     + "current format-3 bundle.")
         }
 
+        wroteFlash = true
         do {
             try await UsbOnboarder.flash(
                 writes: writes, chip: detectedChip, port: path, tool: tool,
@@ -556,6 +561,37 @@ extension PanelManager {
             return .failure("Flashing failed", error.localizedDescription)
         }
         refreshUSBPorts()
+        // Written is not the same as running. The board is waited for exactly as
+        // onboarding waits for it, and the version it then reports is the proof
+        // that the new image is the one that booted.
+        let answered: UsbOnboarder.SettledBoard
+        switch await UsbOnboarder.settle(
+            flashedPort: path, expectedHardwareID: expectedID, onProgress: progress)
+        {
+        case .success(let board):
+            answered = board
+        case .failure(let failure) where failure.title == "Stopped":
+            return .failure(failure)
+        case .failure:
+            return .failure(
+                "Written, but the board did not answer",
+                "\(bundle.firmwareVersion) was written to \(target.displayName), "
+                    + "but the board did not answer CFGSHOW with its hardware ID "
+                    + "within \(Int(SerialSettlePolicy.budgetSeconds)) seconds of "
+                    + "restarting.")
+        }
+        refreshUSBPorts()
+        if let running = answered.firmwareVersion,
+           FirmwareVersion.compare(running, to: bundle.firmwareVersion) != .same {
+            var outcome = OperationOutcome.failure(
+                "The board restarted into the old firmware",
+                "\(bundle.firmwareVersion) was written, but after restarting the board "
+                    + "reports \(running) on \(answered.port).")
+            outcome.nextAction = "Run the USB update again. If it comes back on "
+                + "\(running) a second time, copy the transcript from Details and "
+                + "report it."
+            return outcome
+        }
         if case .fullFlashMigration(let oldLayout, let newLayout) =
             partitionCompatibility {
             return .success(
@@ -563,13 +599,15 @@ extension PanelManager {
                 "\(bundle.firmwareVersion) was written to \(target.displayName). "
                     + "The board had the old \(oldLayout) layout, which needed a "
                     + "full USB write; this installed \(newLayout) and its new "
-                    + "partition table without erasing saved settings.")
+                    + "partition table without erasing saved settings. It answered "
+                    + "on \(answered.port) after restarting.")
         }
         return .success(
             "Firmware written over USB",
             "\(bundle.firmwareVersion) was written to \(target.displayName) "
-                + "without erasing the chip, and the display is restarting. Its "
-                + "saved WiFi, name, display settings and OTA password remain.")
+                + "without erasing the chip, and the board answered on "
+                + "\(answered.port) after restarting. Its saved WiFi, name, display "
+                + "settings and OTA password remain.")
     }
 
 }

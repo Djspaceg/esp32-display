@@ -785,6 +785,56 @@ def test_cfgotapw_line():
         "a password containing the token is still just a payload")
 
 
+def test_serial_reply_after_truncated_backlog():
+    # Measured on an ESP32-S3-LCD-1.9: a backlog that overflowed mid-line has the
+    # reply appended to it. A prefix match drops it; every board that booted with
+    # nobody reading answers this way first.
+    check_equal(
+        espdisp.find_reply(
+            "frames=1001 dropped=212 heap=12151CFGINFO id=1cdbd47b5b94 fw=1.5.0\r",
+            espdisp.CFG_PREFIXES),
+        "CFGINFO id=1cdbd47b5b94 fw=1.5.0",
+        "a CFGINFO glued to a truncated log line is found")
+    check_equal(
+        espdisp.find_reply("tiledraw: 1 passCFGERR nope", espdisp.CFG_PREFIXES),
+        "CFGERR nope", "a glued refusal is a refusal")
+    check_equal(
+        espdisp.find_reply("CFGINFO ssid=CFGERR-net", espdisp.CFG_PREFIXES),
+        "CFGINFO ssid=CFGERR-net", "the earliest marker wins")
+    check_equal(
+        espdisp.find_reply("motion: raw=1,2,3", espdisp.CFG_PREFIXES),
+        None, "a log line is not a reply")
+
+    # End to end through send_config_line, against a pseudo-terminal that
+    # answers the way the board did.
+    import threading
+
+    primary, secondary = os.openpty()
+    path = os.ttyname(secondary)
+    backlog = (b"motion: raw=8273,376,-1138 candidate=-1 mode=flip-only\n"
+               b"frames=1001 dropped=212 partial=0 heap=12151")
+
+    def board():
+        got = b""
+        while b"\n" not in got:
+            got += os.read(primary, 64)
+        os.write(primary, backlog + b"CFGINFO id=1cdbd47b5b94 fw=1.5.0\n")
+
+    worker = threading.Thread(target=board, daemon=True)
+    worker.start()
+    try:
+        check_equal(
+            espdisp.send_config_line(path, "CFGSHOW", 3.0),
+            "CFGINFO id=1cdbd47b5b94 fw=1.5.0",
+            "send_config_line returns the reply behind a truncated backlog")
+    except espdisp.Fail as exc:
+        check(False, "send_config_line timed out behind a backlog: %s" % exc)
+    finally:
+        worker.join(1.0)
+        os.close(secondary)
+        os.close(primary)
+
+
 def test_espota_command():
     cmd = espdisp.espota_command(
         "/core/tools/espota.py", "panel.local", 3232, "hunter2hunter2",
@@ -7562,6 +7612,7 @@ def main():
     test_discovery_command()
     test_password_policy()
     test_cfgotapw_line()
+    test_serial_reply_after_truncated_backlog()
     test_espota_command()
     test_app_image_picks_the_app_not_the_flash_image()
     test_fw_version_from_sketch()

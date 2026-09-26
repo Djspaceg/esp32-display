@@ -208,6 +208,34 @@ public enum ConfigCommands {
     /// `CFGOTAPW clear`: forget the stored password, which turns OTA back off.
     public static let clearOTAPassword = "CFGOTAPW clear"
 
+    /// A reply the firmware sent, found in one received line.
+    public enum Reply: Equatable, Sendable {
+        /// `CFGOK ...` or `CFGINFO ...`: the command was taken.
+        case accepted(String)
+        /// `CFGERR ...`: the command was refused.
+        case refused(String)
+    }
+
+    /// The reply in a line read from the serial port, or nil if it carries none.
+    ///
+    /// SEARCHED FOR, NOT MATCHED AT THE START. A board that printed while nobody
+    /// had its port open flushes that backlog when the port opens, and the backlog
+    /// ends wherever its transmit buffer overflowed - mid-line. The reply is then
+    /// appended to the partial line. Measured on an ESP32-S3-LCD-1.9 after a minute
+    /// unread: `...drawerr=0 heap=12151CFGINFO ssid64=...`. A prefix test drops
+    /// that reply, and after a flash - when the board has booted with nobody
+    /// reading - it drops every one. The earliest marker wins, so an SSID inside a
+    /// CFGINFO reply that happens to contain "CFGERR" is still an acceptance.
+    public static func reply(in line: String) -> Reply? {
+        let markers = ["CFGOK", "CFGINFO", "CFGERR"]
+        let found = markers.compactMap { marker -> (String, String.Index)? in
+            line.range(of: marker).map { (marker, $0.lowerBound) }
+        }.min { $0.1 < $1.1 }
+        guard let (marker, start) = found else { return nil }
+        let text = String(line[start...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return marker == "CFGERR" ? .refused(text) : .accepted(text)
+    }
+
     /// Read one space-delimited `key=value` field from a CFGINFO reply.
     public static func field(_ key: String, from line: String) -> String? {
         for token in line.split(separator: " ", omittingEmptySubsequences: true) {

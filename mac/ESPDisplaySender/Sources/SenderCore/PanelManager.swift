@@ -149,6 +149,17 @@ final class PanelManager: ObservableObject {
     /// The last completed sync per board, so the UI can say what did not fit
     /// without re-reading the display.
     var wifiPresetSyncReports: [String: WifiPresetSyncReport] = [:]
+    /// Boards (by hardware ID) a USB flash or onboarding run currently owns.
+    /// Between esptool's reset and the run's last line the board answers
+    /// CFGSHOW before it is safe to hand preset commands, so the automatic
+    /// sync waits for the run to finish.
+    /// A count, not a set: a second run on the same board (the update sheet can
+    /// be closed while its wait runs, and reopened) must not have its hold
+    /// released by the first one finishing.
+    var usbFlashesInFlight: [String: Int] = [:]
+    /// Bumped each time a run starts on a board. A sync that started before a
+    /// run and finishes after it has seen a board that was reset under it.
+    var usbFlashEpochs: [String: Int] = [:]
 
     init(
         settings: SenderSettings? = nil,

@@ -542,7 +542,209 @@ final class WifiPresetSyncTests: XCTestCase {
         XCTAssertNotNil(manager.wifiPresetSyncReport(for: "studio-display"))
     }
 
+    /// What the banner under "WiFi presets could not be copied" says: which
+    /// board, which command and slot, and what the board replied.
+    func testAFailedSyncSaysWhichCommandSlotAndReply() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        device.sabotage = .refuseSets
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+
+        let issue = try XCTUnwrap(manager.issues.first)
+        XCTAssertEqual(issue.title, "WiFi presets could not be copied")
+        XCTAssertTrue(issue.detail.hasPrefix("studio-display: WiFi preset sync stopped."),
+                      issue.detail)
+        XCTAssertTrue(issue.detail.contains("(CFGWIFISET slot 1) failed: device refused the write"),
+                      issue.detail)
+        XCTAssertFalse(issue.detail.contains(Data("pw-alpha".utf8).base64EncodedString()))
+    }
+
+    func testATimedOutReadSaysWhichCommandTimedOut() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let manager = manager(path: path, saved: ["alpha"], device: FakePresetDevice(slots: [:]))
+        manager.usbControlSender = { _, _, _ in
+            .failure("no response from the device (is display_stream flashed?)")
+        }
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+
+        let detail = try XCTUnwrap(manager.issues.first?.detail)
+        XCTAssertEqual(
+            detail,
+            "studio-display: Could not read WiFi presets. CFGWIFISHOW on \(path): "
+                + "no response from the device (is display_stream flashed?)")
+    }
+
+    /// The rescue image answers CFGSHOW with an identity and nothing else. It is
+    /// waited out - no command, no banner - and the stream firmware's first
+    /// CFGSHOW brings the sync.
+    func testTheRescueImageIsWaitedForNotReported() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+
+        manager.noteUSBIdentity(
+            path: path, identity: Self.rescueIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+        XCTAssertTrue(device.commands.isEmpty, device.commands.description)
+        XCTAssertTrue(manager.issues.isEmpty, manager.issues.description)
+
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(device.mutations.count, 1)
+        XCTAssertNotNil(manager.wifiPresetSyncReport(for: "studio-display"))
+    }
+
+    /// While a USB flash owns the board, a CFGSHOW answer does not start a
+    /// sync; the run's end re-probes, and the fresh answer does.
+    func testAFlashInFlightHoldsTheSyncUntilItEnds() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+        answerReprobes(manager, with: Self.verifiedIdentity)
+
+        manager.beginUSBFlash(hardwareID: "02:00:00:12:34:56")
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+        XCTAssertTrue(device.commands.isEmpty, device.commands.description)
+
+        manager.finishUSBFlash(hardwareID: "020000123456", wroteFlash: true)
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(device.mutations.count, 1)
+        XCTAssertTrue(manager.issues.isEmpty, manager.issues.description)
+    }
+
+    /// The run's own settle never updates the device list, so what it said
+    /// before the flash is not trusted after it: a board that does not answer
+    /// the re-probe gets no sync and no banner.
+    func testTheRunsEndDoesNotSyncOnPreFlashVerification() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+        let before = device.commands.count
+
+        manager.beginUSBFlash(hardwareID: "020000123456")
+        manager.finishUSBFlash(hardwareID: "020000123456", wroteFlash: true)
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(device.commands.count, before, device.commands.description)
+        XCTAssertTrue(manager.issues.isEmpty, manager.issues.description)
+        XCTAssertNil(manager.verifiedUSBDevice(for: "studio-display"))
+    }
+
+    /// A sync already running when a run starts fails against a board being
+    /// reset. It is not reported, and when the run is over before it is, the
+    /// sync is tried again rather than lost.
+    func testASyncOverlappingAWholeRunIsDiscardedAndRetried() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+        answerReprobes(manager, with: Self.verifiedIdentity)
+        let gate = DispatchSemaphore(value: 0)
+        let first = LockedFlag()
+        manager.usbControlSender = { command, _, _ in
+            if first.takeFirst() {
+                gate.wait()
+                return .failure("no response from the device (is display_stream flashed?)")
+            }
+            return device.send(command)
+        }
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        XCTAssertFalse(manager.wifiPresetSyncTasks.isEmpty)
+
+        manager.beginUSBFlash(hardwareID: "020000123456")
+        manager.finishUSBFlash(hardwareID: "020000123456", wroteFlash: true)
+        // Let the re-probe land while the stale sync is still registered.
+        try await Task.sleep(nanoseconds: 30_000_000)
+        gate.signal()
+        try await waitForSyncToSettle(manager)
+        try await waitForSyncToSettle(manager)
+
+        XCTAssertTrue(manager.issues.isEmpty, manager.issues.description)
+        XCTAssertEqual(device.mutations.count, 1)
+        XCTAssertNotNil(manager.wifiPresetSyncReport(for: "studio-display"))
+    }
+
+    /// Two runs on one board: the first one ending does not release the second.
+    func testASecondRunKeepsItsHoldWhenTheFirstEnds() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+        answerReprobes(manager, with: Self.verifiedIdentity)
+
+        manager.beginUSBFlash(hardwareID: "020000123456")
+        manager.beginUSBFlash(hardwareID: "020000123456")
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        manager.finishUSBFlash(hardwareID: "020000123456", wroteFlash: true)
+        try await waitForSyncToSettle(manager)
+        XCTAssertTrue(device.commands.isEmpty, device.commands.description)
+
+        manager.finishUSBFlash(hardwareID: "020000123456", wroteFlash: true)
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(device.mutations.count, 1)
+    }
+
+    /// A run that stopped at a check wrote nothing; the collection is not
+    /// rewritten for it. One that wrote flash gets it again.
+    func testOnlyARunThatWroteFlashRewritesTheCollection() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+        answerReprobes(manager, with: Self.verifiedIdentity)
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(device.mutations.count, 1)
+
+        manager.beginUSBFlash(hardwareID: "020000123456")
+        manager.finishUSBFlash(hardwareID: "020000123456", wroteFlash: false)
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(device.mutations.count, 1)
+
+        manager.beginUSBFlash(hardwareID: "020000123456")
+        manager.finishUSBFlash(hardwareID: "020000123456", wroteFlash: true)
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(device.mutations.count, 2)
+    }
+
+    /// A 1.5.0 build from before the serial fix can lose `fw=` - its last token -
+    /// to a 256-byte cut. `ssid64=` is its first and still marks the stream
+    /// firmware; the rescue image sends neither.
+    func testStreamFirmwareIsRecognisedWithoutItsTruncatedVersion() {
+        let truncated = WifiConfigUI.usbIdentity(from:
+            "CFGINFO ssid64= name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 connected=0")
+        XCTAssertTrue(PanelManager.runsStreamFirmware(truncated.status))
+        XCTAssertTrue(PanelManager.runsStreamFirmware(Self.verifiedIdentity.status))
+        XCTAssertFalse(PanelManager.runsStreamFirmware(Self.rescueIdentity.status))
+        XCTAssertFalse(PanelManager.runsStreamFirmware(nil))
+    }
+
     // MARK: helpers
+
+    /// Verbatim shape of firmware/rescue/rescue.ino's reportIdentity().
+    private static let rescueIdentity = WifiConfigUI.usbIdentity(from:
+        "CFGINFO id=020000123456 board=st77916 profile=st77916 target=s3-185 "
+            + "chip=esp32s3 partition=8MB")
 
     private static let verifiedIdentity = WifiConfigUI.usbIdentity(from:
         "CFGINFO name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
@@ -573,12 +775,31 @@ final class WifiPresetSyncTests: XCTestCase {
         return manager
     }
 
+    /// What the run's-end re-probe hears: a fresh CFGSHOW from this identity.
     @MainActor
-    private func waitForSyncToSettle(_ manager: PanelManager) async throws {
-        for _ in 0..<200 {
-            if manager.wifiPresetSyncTasks.isEmpty { break }
+    private func answerReprobes(
+        _ manager: PanelManager, with identity: WifiConfigUI.USBIdentity
+    ) {
+        manager.usbControlReprobe = { [weak manager] path, _ in
+            guard let manager else { return }
+            manager.noteUSBIdentity(
+                path: path, identity: identity,
+                generation: manager.usbPathGeneration(path))
+        }
+    }
+
+    @MainActor
+    private func waitForSyncToSettle(
+        _ manager: PanelManager, file: StaticString = #filePath, line: UInt = #line
+    ) async throws {
+        // A hop first, so a re-probe Task scheduled just before has run.
+        try await Task.sleep(nanoseconds: 10_000_000)
+        var settled = false
+        for _ in 0..<400 {
+            if manager.wifiPresetSyncTasks.isEmpty { settled = true; break }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
+        XCTAssertTrue(settled, "a preset sync never finished", file: file, line: line)
         // One more hop so the completion handler's main-actor work is applied.
         try await Task.sleep(nanoseconds: 20_000_000)
     }
@@ -719,5 +940,17 @@ private final class FakePresetDevice: @unchecked Sendable {
             return .success("CFGOK wifi slot=\(slot) cleared")
         }
         return .failure("unexpected command")
+    }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+    /// True exactly once.
+    func takeFirst() -> Bool {
+        lock.withLock {
+            defer { taken = true }
+            return !taken
+        }
     }
 }

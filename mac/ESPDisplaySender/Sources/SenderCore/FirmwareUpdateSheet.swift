@@ -330,7 +330,7 @@ struct FirmwareUpdateSheet: View {
     @State private var passwordProblem: String?
     @State private var confirmPush = false
     @State private var otaProgress: FirmwarePusher.Progress?
-    @State private var usbProgress: UsbOnboarder.Progress?
+    @StateObject private var usbFlash = UsbFlashMonitor(flow: .update)
     /// A sheet-owned failure appears immediately above the action bar. Routing
     /// this through the manager window's alert defers it behind this sheet.
     @State private var updateFailure: OperationOutcome?
@@ -389,7 +389,7 @@ struct FirmwareUpdateSheet: View {
             updateFailure = nil
             passwordProblem = nil
             otaProgress = nil
-            usbProgress = nil
+            usbFlash.reset()
             reloadAutomaticFirmwareForSelectedTransport()
         }
         // A firmware write is at least as consequential as a restart, so the
@@ -681,7 +681,13 @@ struct FirmwareUpdateSheet: View {
         }
     }
 
+    @ViewBuilder
     private func failureSection(_ failure: OperationOutcome) -> some View {
+        if selectedTransport == .usb, usbFlash.session.failure != nil {
+            Section("Update failed") {
+                UsbFlashStatusView(session: usbFlash.session)
+            }
+        } else {
         Section("Update failed") {
             VStack(alignment: .leading, spacing: 6) {
                 Text(failure.title)
@@ -694,10 +700,14 @@ struct FirmwareUpdateSheet: View {
                     .textSelection(.enabled)
             }
         }
+        }
     }
 
     private var progressSection: some View {
         Section("Progress") {
+            if selectedTransport == .usb {
+                UsbFlashStatusView(session: usbFlash.session)
+            } else {
             VStack(alignment: .leading, spacing: 8) {
                 if let fraction = progressFraction {
                     ProgressView(value: fraction)
@@ -717,6 +727,7 @@ struct FirmwareUpdateSheet: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
             }
         }
     }
@@ -809,6 +820,11 @@ struct FirmwareUpdateSheet: View {
     /// interrupt, which is what makes leaving safe.
     private var isWaitingForResult: Bool {
         if case .finishing = otaProgress { return true }
+        // After a USB write the board is only being waited for; closing leaves
+        // the wait running and its outcome still arrives in the manager window.
+        if selectedTransport == .usb, case .waitingForBoard = usbFlash.session.phase {
+            return true
+        }
         return false
     }
 
@@ -883,24 +899,10 @@ struct FirmwareUpdateSheet: View {
         if case .sending(let sent, let total) = otaProgress, total > 0 {
             return Double(sent) / Double(total)
         }
-        if case .writing(let percent?, _) = usbProgress {
-            return Double(percent) / 100
-        }
         return nil
     }
 
     private var progressDescription: String {
-        if selectedTransport == .usb {
-            switch usbProgress {
-            case .none: return "Starting…"
-            case .readingChip: return "Re-verifying the board's chip and MAC…"
-            case .writing(let percent, let status):
-                guard let percent else { return status }
-                return "\(percent)% · \(status)"
-            case .waitingForBoard: return "Waiting for the board to restart…"
-            case .configuring(let label): return label
-            }
-        }
         switch otaProgress {
         case .none:
             return "Starting…"
@@ -1143,7 +1145,7 @@ struct FirmwareUpdateSheet: View {
         isPushing = true
         updateFailure = nil
         otaProgress = nil
-        usbProgress = nil
+        usbFlash.reset()
 
         switch selectedTransport {
         case .wifi:
@@ -1173,12 +1175,15 @@ struct FirmwareUpdateSheet: View {
                 finish(outcome)
             }
         case .usb:
+            let monitor = usbFlash
+            monitor.record(.phase(.findingBoard))
             Task {
                 let outcome = await manager.flashFirmwareOverUSB(
                     bundle: bundle, to: target
                 ) { update in
-                    Task { @MainActor in usbProgress = update }
+                    monitor.record(update)
                 }
+                if outcome.kind == .failure { monitor.fail(outcome) }
                 finish(outcome)
             }
         }

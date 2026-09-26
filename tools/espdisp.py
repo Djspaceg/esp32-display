@@ -962,6 +962,22 @@ def write_serial(fd, payload: bytes, timeout: float = 5.0) -> None:
             time.sleep(0.01)
 
 
+def find_reply(text: str, markers) -> "str | None":
+    """The reply in one received line, from its earliest marker, or None.
+
+    Searched for rather than matched at the start. A board that printed while
+    nobody had its port open flushes that backlog when the port opens, and the
+    backlog ends wherever its transmit buffer overflowed - mid-line - with the
+    reply appended to the partial line. Measured on an ESP32-S3-LCD-1.9 after a
+    minute unread: "...drawerr=0 heap=12151CFGINFO ssid64=...". The app's
+    ConfigCommands.reply(in:) applies the same rule.
+    """
+    found = [(text.find(m), m) for m in markers if m in text]
+    if not found:
+        return None
+    return text[min(found)[0]:].strip()
+
+
 def send_config_line(address: str, line: str, timeout: float) -> str:
     """Write one config line and return the first CFG* reply, or raise on timeout."""
     fd = open_serial(address)
@@ -982,9 +998,9 @@ def send_config_line(address: str, line: str, timeout: float) -> str:
             buf += chunk
             while b"\n" in buf:
                 raw, buf = buf.split(b"\n", 1)
-                text = raw.strip().decode(errors="replace")
-                if text.startswith(CFG_PREFIXES):
-                    return text
+                reply = find_reply(raw.decode(errors="replace"), CFG_PREFIXES)
+                if reply is not None:
+                    return reply
         raise Fail("no CFG reply from %s within %.1fs" % (address, timeout))
     finally:
         os.close(fd)
@@ -1021,8 +1037,9 @@ class SerialBootstrapTransport:
             self.buffer += chunk
             while b"\n" in self.buffer:
                 raw, self.buffer = self.buffer.split(b"\n", 1)
-                line = raw.strip().decode("utf-8", errors="replace")
-                if line.startswith(("BOOTOK ", "BOOTERR ")):
+                line = find_reply(
+                    raw.decode("utf-8", errors="replace"), ("BOOTOK ", "BOOTERR "))
+                if line is not None:
                     return line
         raise TimeoutError(
             "no bootstrap reply from %s within %.1fs" % (self.address, timeout)

@@ -47,7 +47,7 @@ struct AddDeviceSheet: View {
     @State private var eraseAll = false
 
     @State private var running = false
-    @State private var progress: UsbOnboarder.Progress?
+    @StateObject private var flash = UsbFlashMonitor(flow: .onboarding)
     @State private var confirming = false
     @State private var work: Task<Void, Never>?
 
@@ -59,7 +59,7 @@ struct AddDeviceSheet: View {
             }
             networkSection
             verdictSection
-            if running {
+            if running || flash.session.failure != nil {
                 progressSection
             }
         }
@@ -299,19 +299,8 @@ struct AddDeviceSheet: View {
     }
 
     private var progressSection: some View {
-        Section("Progress") {
-            VStack(alignment: .leading, spacing: 8) {
-                if let percent = writingPercent {
-                    ProgressView(value: Double(percent), total: 100)
-                } else {
-                    ProgressView().progressViewStyle(.linear)
-                }
-                Text(progressDescription)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        Section(flash.session.failure == nil ? "Progress" : "What went wrong") {
+            UsbFlashStatusView(session: flash.session)
         }
     }
 
@@ -521,29 +510,13 @@ struct AddDeviceSheet: View {
         }
     }
 
+    /// From the start of a run that writes flash until the board restarts:
+    /// Stop is withheld for that window (see the action bar).
     private var isWritingFlash: Bool {
-        if case .writing = progress { return true }
-        return false
-    }
-
-    private var writingPercent: Int? {
-        if case .writing(let percent, _) = progress { return percent }
-        return nil
-    }
-
-    private var progressDescription: String {
-        switch progress {
-        case .none:
-            return "Starting…"
-        case .readingChip:
-            return "Reading the board…"
-        case .writing(let percent, let status):
-            guard let percent else { return status }
-            return "\(percent)% · \(status)"
-        case .waitingForBoard:
-            return "Waiting for the board to restart…"
-        case .configuring(let label):
-            return label
+        guard effectiveMode == .flashAndConfigure else { return false }
+        switch flash.session.phase {
+        case .waitingForBoard, .configuring: return false
+        default: return true
         }
     }
 
@@ -733,9 +706,8 @@ struct AddDeviceSheet: View {
               let change = credential.passwordChange
         else { return }
         running = true
-        progress = effectiveMode == .flashAndConfigure
-            ? .writing(percent: nil, status: "Starting…")
-            : .waitingForBoard
+        flash.reset(flow: effectiveMode == .flashAndConfigure ? .onboarding : .configureOnly)
+        flash.record(.phase(.findingBoard))
         let job = PanelManager.USBOnboardRequest(
             port: port,
             mode: effectiveMode,
@@ -763,11 +735,17 @@ struct AddDeviceSheet: View {
         // redrawing, and cancellation is wired to the Stop button rather than to the
         // view's lifetime.
         work = Task {
+            let monitor = flash
             let succeeded = await manager.onboardUSBDevice(job) { update in
-                Task { @MainActor in progress = update }
+                monitor.record(update)
             }
             running = false
-            progress = nil
+            if !succeeded, let outcome = manager.operationOutcome,
+               outcome.kind == .failure {
+                // Kept on screen with the step, what was last seen and the
+                // transcript; the alert says the same thing once.
+                flash.fail(outcome)
+            }
             if succeeded {
                 dismiss()
             } else {

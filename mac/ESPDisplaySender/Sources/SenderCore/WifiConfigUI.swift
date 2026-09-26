@@ -344,10 +344,20 @@ enum WifiConfigUI {
         return fd
     }
 
+    /// Where `sendCommand` reports what crossed the port, for a transcript.
+    typealias SerialLog = @Sendable (UsbFlashTranscript.Source, String) -> Void
+
+    /// Write one line and wait for the firmware's reply to it.
+    ///
+    /// `acceptInfo: false` is for setting commands, whose reply is always a CFGOK
+    /// or CFGERR: a CFGINFO left unread by an earlier CFGSHOW (a background
+    /// identity probe racing this one) is then not mistaken for the answer.
     static func sendCommand(
-        _ command: String, port: String, timeout: TimeInterval = 6
+        _ command: String, port: String, timeout: TimeInterval = 6,
+        log: SerialLog? = nil, acceptInfo: Bool = true
     ) -> CommandResult {
         guard let fd = openSerial(port) else {
+            log?(.app, "could not open \(port)")
             return .failure("could not open \(port)")
         }
         defer { close(fd) }
@@ -357,27 +367,55 @@ enum WifiConfigUI {
 
         let line = command + "\n"
         let wrote = line.withCString { write(fd, $0, strlen($0)) }
-        guard wrote > 0 else { return .failure("write to \(port) failed") }
+        guard wrote > 0 else {
+            log?(.app, "write to \(port) failed")
+            return .failure("write to \(port) failed")
+        }
+        log?(.sent, "\(port): " + ConfigCommands.redactedForLog(command))
 
-        var buffer = ""
+        func decide(_ line: String) -> CommandResult? {
+            switch ConfigCommands.reply(in: line) {
+            case .accepted(let reply) where acceptInfo || !reply.hasPrefix("CFGINFO"):
+                return .success(reply)
+            case .refused(let reply):
+                return .failure(reply)
+            default:
+                return nil
+            }
+        }
+
+        // Split on scalars (`EsptoolOutput.splitLines`), so "\r\n" - what older
+        // firmware's println ends a reply with - is a line break and not one
+        // Character equal to neither terminator.
+        var pending = ""
+        var lastByte = Date()
         let deadline = Date(timeIntervalSinceNow: timeout)
         while Date() < deadline {
             let n = read(fd, &scratch, scratch.count)
             if n > 0 {
-                buffer += String(decoding: scratch[0..<n], as: UTF8.self)
-                for response in buffer.split(separator: "\n", omittingEmptySubsequences: true) {
-                    let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmed.hasPrefix("CFGOK") || trimmed.hasPrefix("CFGINFO") {
-                        return .success(trimmed)
-                    }
-                    if trimmed.hasPrefix("CFGERR") {
-                        return .failure(trimmed)
-                    }
+                pending += String(decoding: scratch[0..<n], as: UTF8.self)
+                lastByte = Date()
+                let split = EsptoolOutput.splitLines(pending)
+                pending = split.remainder
+                for response in split.lines where !response.isEmpty {
+                    log?(.received, response)
+                    if let result = decide(response) { return result }
                 }
             } else {
+                // A reply whose newline never comes: older firmware cut a long
+                // CFGSHOW reply at 256 bytes and the newline went with the tail.
+                // Once the port has been quiet a moment, what is there is all
+                // there will be until the next log line.
+                if !pending.isEmpty, Date().timeIntervalSince(lastByte) > 0.2,
+                   let result = decide(pending) {
+                    log?(.received, pending)
+                    return result
+                }
                 usleep(50_000)
             }
         }
+        if !pending.isEmpty { log?(.received, pending) }
+        log?(.app, "no reply from \(port) within \(Int(timeout.rounded())) s")
         return .failure("no response from the device (is display_stream flashed?)")
     }
 
@@ -835,7 +873,13 @@ enum WifiConfigUI {
     /// Ask a port to identify itself. CFGSHOW answering at all is what proves
     /// the path speaks our configuration protocol.
     static func probePort(_ port: String, timeout: TimeInterval) -> PortProbe {
-        switch sendCommand("CFGSHOW", port: port, timeout: timeout) {
+        probePort(port, timeout: timeout, log: nil)
+    }
+
+    static func probePort(
+        _ port: String, timeout: TimeInterval, log: SerialLog?
+    ) -> PortProbe {
+        switch sendCommand("CFGSHOW", port: port, timeout: timeout, log: log) {
         case .success(let info):
             return .identified(usbIdentity(from: info))
         case .failure(let reason):
