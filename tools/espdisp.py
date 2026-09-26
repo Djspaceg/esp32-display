@@ -2,6 +2,7 @@
 """Build, flash, update, and configure the esp32-display firmware without hand-typing FQBNs."""
 import argparse
 import base64
+import errno
 import fnmatch
 import functools
 import getpass
@@ -11,9 +12,11 @@ import importlib
 import json
 import math
 import os
+import pty
 import re
 import select
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -314,6 +317,7 @@ def run_retune_session(**kwargs):
 # catalog, a packed bundle, or a serial port and stays runnable on 3.9.
 DESCRIPTOR_DERIVED_COMMANDS = frozenset({
     "compile",
+    "rescue-build",
     "flash",
     "ota",
     "bundle",
@@ -1592,8 +1596,9 @@ def git_provenance(repo_root: str = REPO_ROOT) -> Tuple[Optional[str], bool]:
     a non-zero result, so a missing git needs no special case here.
 
     `git status --porcelain` counts untracked source files as dirty. Task reports
-    under `.agents/` and generated firmware output under `firmware-releases/`
-    or `firmware-dev/` are excluded because neither can affect compilation;
+    under `.agents/` and generated firmware output under `firmware-releases/`,
+    `firmware-dev/` or `firmware-rescue/` are excluded because none of them can
+    affect compilation;
     every other untracked file still makes provenance dirty.
     """
     head = run_capture(["git", "-C", repo_root, "rev-parse", "HEAD"], timeout=15.0)
@@ -1618,7 +1623,7 @@ def git_provenance(repo_root: str = REPO_ROOT) -> Tuple[Optional[str], bool]:
             continue
         if any(
             path == root or path.startswith(root + "/")
-            for root in ("firmware-releases", "firmware-dev")
+            for root in ("firmware-releases", "firmware-dev", "firmware-rescue")
         ):
             continue
         relevant.append(line)
@@ -4706,10 +4711,15 @@ def canonical_family_value(values: dict, family: Family):
 
 
 def esptool_invocation(
-    family: Family, port_address: str, subcommand: str
+    family: Family, port_address: str, subcommand: str,
+    connect: Tuple[str, ...] = (), tool: Optional[str] = None,
 ) -> List[str]:
-    """One esptool command line for this family and port, chip pinned."""
-    tool = esptool_path()
+    """One esptool command line for this family and port, chip pinned.
+
+    `connect` carries global options such as --before/--after; `tool` skips
+    the arduino-cli lookup when the caller already located esptool.
+    """
+    tool = tool or esptool_path()
     if not tool:
         raise Fail("esptool not found (install the esp32 Arduino core)")
     command = [tool]
@@ -4719,8 +4729,9 @@ def esptool_invocation(
         "--chip", family.chip,
         "--port", port_address,
         "--baud", family.upload_speed,
-        subcommand,
     ])
+    command.extend(connect)
+    command.append(subcommand)
     return command
 
 
@@ -5017,6 +5028,671 @@ def cmd_flash(args) -> int:
     print(
         "\nFlashed canonical %s release %s from %s"
         % (family.key, version, artifact))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# rescue: reflash a board whose firmware kills its own USB right after boot
+#
+# Such a board is on USB for well under a second to a few seconds per plug-in,
+# and esptool spends about four seconds starting up. So esptool is started
+# BEFORE the plug-in, with open_port_attempts = 0: it then retries opening and
+# connecting to its port every 0.1 s, forever and silently. Its port is a
+# symlink that does not exist until a new USB port appears; the link is then
+# pointed at that port, esptool resets the chip into ROM download mode, whose
+# USB stays up, and writes the rescue image. When the board drops off first,
+# the link is removed and the same esptool keeps waiting for the replug.
+
+RESCUE_SKETCH_DIR = os.path.join(REPO_ROOT, "firmware", "rescue")
+RESCUE_ROOT = os.path.join(REPO_ROOT, "firmware-rescue")
+RESCUE_INDEX_NAME = "rescue.json"
+RESCUE_INDEX_FORMAT = 1
+RESCUE_APP_ROLE = "app"
+RESCUE_ROLES = REQUIRED_FLASH_ROLES + (RESCUE_APP_ROLE,)
+RESCUE_POLL_SECONDS = 0.01
+# esptool reports nothing while it retries, so a linked port that has not
+# connected by then is given up on: wrong family, not an Espressif chip, or a
+# board that never enters download mode.
+RESCUE_CONNECT_TIMEOUT = 10.0
+# Four connect attempts per pass: on a USB-UART bridge esptool cycles through
+# four reset sequences, and every pass starts that cycle over.
+RESCUE_ESPTOOL_CFG = "[esptool]\nopen_port_attempts = 0\nconnect_attempts = 4\n"
+RESCUE_READY_MARKER = "Retrying failed connection"
+RESCUE_CONNECTED_MARKER = "Connected to"
+RESCUE_MISSED = "Missed it. Unplug the board, then plug it in again."
+
+
+def rescue_compile_flags(family: Family) -> Tuple[str, ...]:
+    """The family's compile selectors, without the Doom runtime it does not use."""
+    return tuple(
+        flag for flag in family.extra_flags if flag != "-DESPDISP_DOOM_RUNTIME")
+
+
+def compile_rescue(family: Family, output_dir: str) -> List[str]:
+    """Build the rescue sketch for one family into output_dir.
+
+    Built with the family's own board options and partition table, so the
+    rescue image leaves NVS, the other OTA slot and the Doom WAD where the
+    real firmware expects them.
+    """
+    if not os.path.isdir(RESCUE_SKETCH_DIR):
+        raise Fail("rescue sketch not found: %s" % RESCUE_SKETCH_DIR)
+    staged_root = tempfile.mkdtemp(prefix="espdisp-rescue-%s-" % family.key)
+    sketch_dir = os.path.join(staged_root, "rescue")
+    shutil.copytree(RESCUE_SKETCH_DIR, sketch_dir,
+                    ignore=shutil.ignore_patterns("build"))
+    if family.partition_csv:
+        source = os.path.join(REPO_ROOT, "firmware", family.partition_csv)
+        if not os.path.isfile(source):
+            raise Fail("partition table not found: %s" % source)
+        shutil.copy2(source, os.path.join(sketch_dir, "partitions.csv"))
+    cmd = [arduino_cli(), "compile", "-b", family.fqbn,
+           "--libraries", LIBRARIES_DIR]
+    flags = rescue_compile_flags(family)
+    if flags:
+        joined = " ".join(flags)
+        cmd += [
+            "--build-property", "compiler.c.extra_flags=%s" % joined,
+            "--build-property", "compiler.cpp.extra_flags=%s" % joined,
+        ]
+    cmd += [
+        "--build-path", os.path.join(output_dir, "build"),
+        "--output-dir", output_dir,
+    ]
+    try:
+        return run_streaming(cmd + ["."], cwd=sketch_dir)
+    finally:
+        shutil.rmtree(staged_root, ignore_errors=True)
+
+
+def rescue_family_dir(family: Family, root: str = RESCUE_ROOT) -> str:
+    return os.path.join(root, family.key)
+
+
+def write_rescue_images(
+    family: Family, output_dir: str, root: str = RESCUE_ROOT
+) -> str:
+    """Copy one compiled rescue build into root/<family>/ with its index."""
+    entries, payloads = collect_flash_parts(family, output_dir)
+    app = read_binary(app_image(output_dir))
+    regions = []
+    blobs = {}
+    for entry in entries:
+        regions.append((entry["address"], entry["role"]))
+        blobs[entry["role"]] = payloads[entry["role"]]
+    regions.append((APP_FLASH_ADDRESS, RESCUE_APP_ROLE))
+    blobs[RESCUE_APP_ROLE] = app
+    commit, dirty = git_provenance()
+    index = {
+        "format": RESCUE_INDEX_FORMAT,
+        "family": family.key,
+        "chip": family.chip,
+        "built_at": utc_timestamp(),
+        "source_commit": commit,
+        "source_dirty": dirty,
+        "regions": [
+            {
+                "role": role,
+                "address": address,
+                "file": "%s.bin" % role,
+                "bytes": len(blobs[role]),
+                "sha256": sha256_hex(blobs[role]),
+            }
+            for address, role in sorted(regions)
+        ],
+    }
+    directory = rescue_family_dir(family, root)
+    os.makedirs(directory, exist_ok=True)
+    for region in index["regions"]:
+        write_file_atomically(
+            os.path.join(directory, region["file"]), blobs[region["role"]])
+    write_file_atomically(
+        os.path.join(directory, RESCUE_INDEX_NAME),
+        (json.dumps(index, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    return directory
+
+
+def load_rescue_images(
+    family: Family, root: str = RESCUE_ROOT
+) -> List[Tuple[int, str, str]]:
+    """Verified (address, role, path) writes for one family's rescue image.
+
+    Refuses anything that is not exactly the four bundle-style regions, for
+    this family's chip, byte-identical to what the index recorded.
+    """
+    directory = rescue_family_dir(family, root)
+    index_path = os.path.join(directory, RESCUE_INDEX_NAME)
+    try:
+        with open(index_path, "rb") as fh:
+            index = json.loads(fh.read().decode("utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Fail("no usable rescue image for %s at %s (%s); build one with "
+                   "`rescue-build --family %s`"
+                   % (family.key, index_path, exc, family.key))
+    if not isinstance(index, dict) or index.get("format") != RESCUE_INDEX_FORMAT:
+        raise Fail("%s: unsupported rescue index format" % index_path)
+    if index.get("family") != family.key or index.get("chip") != family.chip:
+        raise Fail("%s describes %s/%s, not %s/%s" % (
+            index_path, index.get("family"), index.get("chip"),
+            family.key, family.chip))
+    regions = index.get("regions")
+    if not isinstance(regions, list):
+        raise Fail("%s: regions must be a list" % index_path)
+    roles = [region.get("role") for region in regions
+             if isinstance(region, dict)]
+    if len(roles) != len(regions) or sorted(roles) != sorted(RESCUE_ROLES):
+        raise Fail("%s must list exactly %s" % (
+            index_path, ", ".join(RESCUE_ROLES)))
+    writes = []
+    for region in regions:
+        address = region.get("address")
+        name = region.get("file")
+        if not is_whole_number(address) or address < 0:
+            raise Fail("%s: %s has no valid address" % (index_path, region["role"]))
+        if not isinstance(name, str) or os.path.basename(name) != name:
+            raise Fail("%s: %s has no valid file name" % (index_path, region["role"]))
+        path = os.path.join(directory, name)
+        blob = read_binary(path)
+        if len(blob) != region.get("bytes") or sha256_hex(blob) != region.get("sha256"):
+            raise Fail("%s does not match %s" % (path, index_path))
+        writes.append((address, region["role"], path))
+    if dict((role, address) for address, role, _ in writes).get(
+            RESCUE_APP_ROLE) != APP_FLASH_ADDRESS:
+        raise Fail("%s: the app must be written at 0x%x"
+                   % (index_path, APP_FLASH_ADDRESS))
+    clash = conflicting_flash_address([(a, role) for a, role, _ in writes])
+    if clash:
+        raise Fail("%s writes both %s and %s to 0x%x"
+                   % (index_path, clash[1], clash[2], clash[0]))
+    return sorted(writes)
+
+
+def cmd_rescue_build(args) -> int:
+    family = FAMILIES[args.family]
+    output_dir = tempfile.mkdtemp(prefix="espdisp-rescue-build-%s-" % family.key)
+    try:
+        report_sizes(compile_rescue(family, output_dir))
+        directory = write_rescue_images(
+            family, output_dir, args.output_root or RESCUE_ROOT)
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+    load_rescue_images(family, args.output_root or RESCUE_ROOT)
+    print("Rescue image for %s written to %s" % (family.key, directory))
+    return 0
+
+
+def serial_port_names(listdir=os.listdir) -> List[str]:
+    """The /dev serial nodes this tool treats as boards, found without opening any."""
+    try:
+        names = listdir("/dev")
+    except OSError:
+        return []
+    ports = []
+    for name in names:
+        path = "/dev/" + name
+        if any(fnmatch.fnmatch(path, pattern) for pattern in PORT_GLOBS):
+            ports.append(path)
+    return sorted(ports)
+
+
+def new_rescue_ports(baseline: Iterable[str], present: Iterable[str]) -> List[str]:
+    """Ports present now that were not attached before the plug-in."""
+    known = set(baseline)
+    return sorted(port for port in set(present) if port not in known)
+
+
+def rescue_link_path(directory: str, index: int) -> str:
+    """The --port one spawned esptool is given, spelled under /dev/.
+
+    esptool picks its USB Serial/JTAG reset only after matching the port to a
+    USB device. esptool 5.3 resolves a symlinked port anywhere, but 5.1 only
+    under /dev/, so the link, which lives in a private directory, is named
+    through /dev/.. to keep the right reset on both. Every spawn gets its own
+    index, so no esptool, however it outlived its kill, can follow the link
+    meant for the next one.
+    """
+    return "/dev/.." + os.path.join(
+        os.path.realpath(directory), "port-%d" % index)
+
+
+def parse_usb_devices(text: str) -> List[Tuple[int, str]]:
+    """(locationID, serial) for each device in `ioreg -r -c IOUSBHostDevice -d 1 -l`."""
+    devices: List[Tuple[int, str]] = []
+    location: Optional[int] = None
+    serial = ""
+    for line in text.splitlines():
+        if "+-o " in line:
+            if location is not None:
+                devices.append((location, serial))
+            location, serial = None, ""
+            continue
+        found = re.search(r'"locationID" = (\d+)', line)
+        if found:
+            location = int(found.group(1))
+        found = re.search(r'"USB Serial Number" = "([^"]*)"', line)
+        if found:
+            serial = found.group(1)
+    if location is not None:
+        devices.append((location, serial))
+    return devices
+
+
+def usb_devices() -> List[Tuple[int, str]]:
+    """The attached USB devices, read from the IORegistry without opening any port.
+
+    Depth 1 keeps this at about 20 ms, which matters: it runs between a new
+    port appearing and esptool being pointed at it.
+    """
+    proc = run_capture(
+        ["ioreg", "-r", "-c", "IOUSBHostDevice", "-d", "1", "-l", "-w0"],
+        timeout=5.0)
+    return parse_usb_devices(proc.stdout) if proc.returncode == 0 else []
+
+
+def usb_identity_for_port(
+    port: str, devices: List[Tuple[int, str]]
+) -> Optional[Tuple[int, str]]:
+    """The USB device behind a /dev/cu.* name, or None when it cannot be told.
+
+    macOS names a CDC port usbmodem<location in hex><interface> and many
+    bridge ports usbserial-<serial>, so the name leads to the device.
+    """
+    name = os.path.basename(port)
+    best = None
+    if name.startswith("cu.usbmodem"):
+        suffix = name[len("cu.usbmodem"):].lower()
+        for location, serial in devices:
+            token = "%x" % location
+            if location and suffix.startswith(token) and (
+                    best is None or len(token) > len("%x" % best[0])):
+                best = (location, serial)
+    elif name.startswith("cu.usbserial-"):
+        suffix = name[len("cu.usbserial-"):]
+        for location, serial in devices:
+            if serial and serial == suffix:
+                best = (location, serial)
+    return best
+
+
+def identity_is_known(
+    identity: Optional[Tuple[int, str]], known: Iterable[Tuple[int, str]]
+) -> bool:
+    """Whether a port's device was attached before rescue started.
+
+    The same serial is the same board, wherever it is plugged; the same
+    location is the same socket. A port whose device cannot be found is left
+    to the name check.
+    """
+    if identity is None:
+        return False
+    location, serial = identity
+    return any((serial and serial == other_serial) or location == other_location
+               for other_location, other_serial in known)
+
+
+class RescueWorker:
+    """The one esptool, started ahead of the plug-in and waiting on a link.
+
+    esptool runs on a pseudo-terminal, not a pipe. Python line-buffers a tty,
+    and "Connected to" is printed without a flush, so a pipe could sit on it
+    past the connect timeout. It also runs in its own session: the bundled
+    esptool is a PyInstaller bootloader whose child is the real esptool, and
+    only a signal to the whole process group reaches that child.
+    """
+
+    def __init__(self, command: List[str], link: str, cwd: str, env: dict,
+                 popen=subprocess.Popen):
+        self.link = link
+        self.port: Optional[str] = None
+        self.ready = False
+        self.connected = False
+        self.tail = ""
+        self._since_link = ""
+        self._echo: List[str] = []
+        master, slave = pty.openpty()
+        try:
+            self.proc = popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                              stdout=slave, stderr=slave, start_new_session=True)
+        except BaseException:
+            os.close(master)
+            raise
+        finally:
+            os.close(slave)
+        self._fd: Optional[int] = master
+        os.set_blocking(master, False)
+
+    def _read(self) -> None:
+        while self._fd is not None:
+            try:
+                chunk = os.read(self._fd, 4096)
+            except BlockingIOError:
+                return
+            except OSError as exc:
+                if exc.errno == errno.EIO:  # the terminal's other side closed
+                    return
+                raise
+            if not chunk:
+                return
+            text = chunk.decode("utf-8", errors="replace")
+            self.tail = (self.tail + text)[-4096:]
+            if not self.ready:
+                self.ready = RESCUE_READY_MARKER in self.tail
+            elif self.port is not None:
+                self._since_link = (self._since_link + text)[-4096:]
+                self.connected = (self.connected or
+                                  RESCUE_CONNECTED_MARKER in self._since_link)
+                self._echo.append(text)
+
+    def poll(self) -> Optional[int]:
+        self._read()
+        code = self.proc.poll()
+        if code is not None:
+            self._read()
+        return code
+
+    def take_output(self) -> str:
+        text = "".join(self._echo)
+        self._echo = []
+        return text
+
+    def _link_file(self) -> str:
+        return os.path.normpath(self.link)
+
+    def link_to(self, port: str) -> None:
+        self.unlink()
+        os.symlink(port, self._link_file())
+        self.port = port
+        self._since_link = ""
+
+    def unlink(self) -> None:
+        try:
+            os.unlink(self._link_file())
+        except FileNotFoundError:
+            pass
+        self.port = None
+
+    def last_error(self) -> str:
+        """The last line that names an error, else the last line at all.
+
+        esptool follows a serial exception with a generic note about drivers,
+        which would otherwise hide the actual error.
+        """
+        lines = [line.strip() for line in re.split(r"[\r\n]+", self.tail)]
+        lines = [line for line in lines if line and line.strip(".")]
+        errors = [line for line in lines
+                  if re.search(r"error occurred|errno|could not|failed", line, re.I)
+                  and not line.startswith(("Note:", "For troubleshooting"))]
+        return (errors or lines or [""])[-1]
+
+    def _group_alive(self) -> bool:
+        try:
+            os.killpg(self.proc.pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def kill(self) -> None:
+        """Stop the whole esptool process tree, then drop its link.
+
+        SIGTERM first, which the PyInstaller bootloader forwards and which lets
+        it remove its extraction directory; SIGKILL to the group only if
+        anything is still alive after a grace period.
+        """
+        self.unlink()
+        if self._fd is None:
+            return
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(self.proc.pid, sig)
+            except ProcessLookupError:
+                break
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                self.proc.poll()
+                if not self._group_alive():
+                    break
+                time.sleep(0.05)
+            if not self._group_alive():
+                break
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        os.close(self._fd)
+        self._fd = None
+
+
+def rescue_spawner(
+    family: Family, writes: List[Tuple[int, str, str]], work: str, tool: str,
+    environ: dict, worker=RescueWorker,
+):
+    """A function starting one waiting esptool per call, each on its own link."""
+    config = os.path.join(work, "esptool.cfg")
+    with open(config, "w", encoding="utf-8") as out:
+        out.write(RESCUE_ESPTOOL_CFG)
+    # The environment spelling of open_port_attempts outranks the file, so it
+    # is pinned too; ESPTOOL_CFGFILE keeps a user's own config out of it.
+    env = dict(environ, ESPTOOL_CFGFILE=config, ESPTOOL_OPEN_PORT_ATTEMPTS="0")
+    count = [0]
+
+    def spawn():
+        link = rescue_link_path(work, count[0])
+        count[0] += 1
+        command = esptool_invocation(
+            family, link, "write_flash",
+            connect=("--before", "default-reset", "--after", "hard-reset"),
+            tool=tool)
+        for address, _, path in writes:
+            command.extend(["0x%X" % address, path])
+        return worker(command, link, work, env)
+
+    return spawn
+
+
+def run_rescue(
+    list_ports, spawn, family_key: str, clock=time.monotonic,
+    sleep=time.sleep, say=print, echo=None, identify=None,
+) -> str:
+    """Wait for one new USB port and let the waiting esptool rescue it.
+
+    Returns the port once esptool has written the image. A port attached
+    before "plug the board in now" is never touched, even when it drops off
+    and comes back, and neither is a new port whose USB device (`identify`,
+    by location or serial) was attached then. Runs until then, or Ctrl-C.
+    """
+    echo = echo or (lambda text: (sys.stdout.write(text), sys.stdout.flush()))
+    identify = identify or (lambda: [])
+    baseline = set(list_ports())
+    known_devices = set(identify())
+    say("Starting esptool; this takes a few seconds. If the board to rescue "
+        "is plugged in, unplug it now.")
+    worker = spawn()
+    try:
+        started = False    # "plug in now" has been said once
+        announced = False  # ...and holds for the current esptool
+        linked: Optional[Tuple[str, float]] = None  # (port, since)
+        refused = set()
+        gone = set()
+        told_ignored = set()
+        told_crowd = False
+        told_wait = None
+        while True:
+            now = clock()
+            present = set(list_ports())
+            if not started:
+                if not present <= baseline:
+                    known_devices |= set(identify())
+                baseline |= present
+            code = worker.poll()
+            if linked is not None:
+                text = worker.take_output()
+                if text:
+                    echo(text)
+            if code is not None:
+                if linked is None:
+                    raise Fail("esptool stopped while waiting for the board: %s"
+                               % (worker.last_error() or code))
+                port = linked[0]
+                linked = None
+                if code == 0:
+                    return port
+                reason = worker.last_error()
+                if reason:
+                    say("esptool: %s" % reason)
+                if port in present:
+                    say("esptool could not finish on %s; trying again." % port)
+                else:
+                    say(RESCUE_MISSED)
+                worker.kill()
+                worker = spawn()
+                announced = False
+                continue
+            if worker.ready and not announced:
+                say("Plug the board in now. (Ctrl-C to stop.)" if not started
+                    else "esptool is waiting again.")
+                started = announced = True
+            if linked is not None:
+                port, since = linked
+                if port not in present and not worker.connected:
+                    worker.unlink()
+                    linked = None
+                    say(RESCUE_MISSED)
+                elif (port in present and not worker.connected
+                      and now - since > RESCUE_CONNECT_TIMEOUT):
+                    # Killed, not just unlinked: an esptool part-way through a
+                    # connect pass still holds the port open and could go on
+                    # to write a board it was just told to give up.
+                    worker.kill()
+                    worker = spawn()
+                    announced = False
+                    linked = None
+                    refused.add(port)
+                    say("esptool could not connect to %s in %d s; is it an %s "
+                        "board? Unplug it." % (
+                            port, RESCUE_CONNECT_TIMEOUT, family_key.upper()))
+            elif started:
+                refused &= present
+                for port in sorted(baseline):
+                    if port not in present:
+                        gone.add(port)
+                    elif port in gone and port not in told_ignored:
+                        told_ignored.add(port)
+                        say("Ignoring %s: it was attached before rescue started. "
+                            "If that is the board to rescue, press Ctrl-C, "
+                            "unplug it, and start again." % port)
+                fresh = [port for port in new_rescue_ports(baseline, present)
+                         if port not in refused]
+                if len(fresh) == 1 and identity_is_known(
+                        usb_identity_for_port(fresh[0], identify()),
+                        known_devices):
+                    port = fresh[0]
+                    baseline.add(port)
+                    say("Ignoring %s: it is the same USB device as one attached "
+                        "before rescue started." % port)
+                    fresh = []
+                if len(fresh) > 1:
+                    if not told_crowd:
+                        say("%d new ports appeared (%s); touching none of them. "
+                            "Leave only the board to rescue plugged in."
+                            % (len(fresh), ", ".join(fresh)))
+                        told_crowd = True
+                elif len(fresh) == 1:
+                    told_crowd = False
+                    port = fresh[0]
+                    if not worker.ready:
+                        if told_wait != port:
+                            say("Board seen on %s, but esptool is still starting; "
+                                "keep it plugged in." % port)
+                            told_wait = port
+                    else:
+                        worker.link_to(port)
+                        linked = (port, now)
+                        told_wait = None
+                        say("Board seen on %s; resetting it into download mode."
+                            % port)
+                else:
+                    told_crowd = False
+                    told_wait = None
+            sleep(RESCUE_POLL_SECONDS)
+    finally:
+        worker.kill()
+
+
+def rescue_override_warning(reply: str, port: str) -> Optional[str]:
+    """What to tell the user when the rescue image reports a stored CFGBOARD."""
+    forced = None
+    for token in reply.split():
+        if token.startswith("cfgboard="):
+            forced = token[len("cfgboard="):]
+    if not forced or forced == "auto":
+        return None
+    return ("WARNING: this board has a stored CFGBOARD override (%s). The real "
+            "firmware will force that profile again at boot. Clear it before "
+            "flashing: %s config --port %s CFGBOARD auto"
+            % (forced, os.path.basename(sys.argv[0]), port))
+
+
+def report_rescue_override(
+    port: str, send=None, sleep=time.sleep, say=print, exists=os.path.exists,
+    attempts: int = 8,
+) -> None:
+    """Ask the freshly rescued board for its identity and warn about an override.
+
+    Only the port that rescue itself just flashed is opened. The rescue image
+    reboots after the write and its USB port comes back within a second or
+    two, so a missing reply is retried a few times.
+    """
+    send = send or send_config_line
+    for _ in range(attempts):
+        if exists(port):
+            try:
+                reply = send(port, "CFGSHOW", 2.0)
+            except Fail:
+                reply = None
+            if reply and reply.startswith("CFGINFO"):
+                warning = rescue_override_warning(reply, port)
+                if warning:
+                    say(warning)
+                return
+        sleep(1.0)
+    say("Could not read the rescue image's identity; check it with: "
+        "%s config --port %s CFGSHOW (a cfgboard= other than auto must be "
+        "cleared with CFGBOARD auto before flashing)"
+        % (os.path.basename(sys.argv[0]), port))
+
+
+def cmd_rescue(args) -> int:
+    family = FAMILIES[args.family]
+    writes = load_rescue_images(family)
+    tool = esptool_path()
+    if not tool:
+        raise Fail("esptool not found (install the esp32 Arduino core)")
+    work = tempfile.mkdtemp(prefix="espdisp-rescue-%s-" % family.key)
+    print("Rescue image: %s (%s)" % (rescue_family_dir(family), ", ".join(
+        "%s@0x%x" % (role, address) for address, role, _ in writes)), flush=True)
+    spawn = rescue_spawner(family, writes, work, tool, dict(os.environ))
+
+    def say(text: str) -> None:
+        print(">>> " + text, flush=True)
+
+    def terminate(signum, frame):
+        raise KeyboardInterrupt()
+
+    # A plain kill must still stop the waiting esptool, which would otherwise
+    # keep retrying forever.
+    previous = signal.signal(signal.SIGTERM, terminate)
+    try:
+        port = run_rescue(serial_port_names, spawn, family.key, say=say,
+                          identify=usb_devices)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        shutil.rmtree(work, ignore_errors=True)
+    say("Done. The board is running the rescue image on %s." % port)
+    report_rescue_override(port, say=say)
+    say("Flash the real firmware now: %s flash --family %s --port %s"
+        % (os.path.basename(sys.argv[0]), family.key, port))
     return 0
 
 
@@ -5678,6 +6354,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --build, write every part without asking the device what it "
              "holds; use when the device's contents may not be what they claim")
     p_flash.set_defaults(func=cmd_flash)
+
+    p_rescue = subs.add_parser(
+        "rescue",
+        help="reflash a board whose firmware kills its USB right after boot",
+        description="Start esptool first, then plug the board in: the first USB "
+        "port that appears after the start is reset into download mode and "
+        "given the family's rescue image (bootloader, partition table, boot "
+        "selector and app; no chip erase, no eFuse writes). Ports attached "
+        "before the start are never touched. Retries until it succeeds or "
+        "Ctrl-C. Afterwards flash the real firmware with `flash`.",
+    )
+    p_rescue.add_argument("--family", required=True, choices=family_choices())
+    p_rescue.set_defaults(func=cmd_rescue)
+
+    p_rescue_build = subs.add_parser(
+        "rescue-build",
+        help="compile the rescue image for one family into firmware-rescue/",
+    )
+    p_rescue_build.add_argument(
+        "--family", required=True, choices=family_choices())
+    p_rescue_build.add_argument(
+        "--output-root", help="write here instead of firmware-rescue/")
+    p_rescue_build.set_defaults(func=cmd_rescue_build)
 
     p_ota = subs.add_parser(
         "ota",

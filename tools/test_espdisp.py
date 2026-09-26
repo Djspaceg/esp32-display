@@ -23,10 +23,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest.mock
 import wave
@@ -7583,6 +7585,739 @@ int main() {
                 "esptool confirmation happens before the serial transport opens")
 
 
+# --- rescue ----------------------------------------------------------------
+
+
+class RescueStop(Exception):
+    """Ends a rescue loop test that is not meant to succeed."""
+
+
+class RescueWorld:
+    """A fake clock, /dev listing and esptool for run_rescue.
+
+    The fake esptool behaves like esptool 5.3.1 with open_port_attempts = 0:
+    it never exits while it cannot open or connect. It opens a linked port
+    0.1 s after the link and holds it for one connect pass (2.4 s) before
+    closing and reopening through the link: removing the link does not revoke
+    an open port, exactly as with a real file descriptor. It connects to a
+    port of the right family connect_after seconds after the link, writes it,
+    and exits exit_after seconds later: 0 if the port is still there, 1 if
+    not. Only kill() stops it.
+    """
+
+    def __init__(self, baseline, windows, limit=60.0, ready_after=4.0,
+                 open_after=0.3, exit_after=1.0, early_exit=False,
+                 fail_first=False, foreign=(), connect_after=None,
+                 identities=None):
+        self.t = 0.0
+        self.baseline = baseline
+        self.windows = windows  # (port, start, end)
+        self.limit = limit
+        self.ready_after = ready_after
+        self.open_after = open_after
+        self.exit_after = exit_after
+        self.early_exit = early_exit
+        self.fail_first = fail_first
+        self.foreign = set(foreign)
+        self.connect_after = connect_after or {}  # port -> seconds after link
+        self.identities = identities or {}  # port -> (location, serial)
+        self.workers = []
+        self.messages = []
+        self.echoed = []
+        self.written = []
+
+    def identify(self):
+        present = set(self.ports())
+        return [identity for port, identity in sorted(self.identities.items())
+                if port in present]
+
+    def ports(self):
+        present = set()
+        for port, start, end in list(self.baseline) + list(self.windows):
+            if start <= self.t < end:
+                present.add(port)
+        return sorted(present)
+
+    def clock(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.t = round(self.t + seconds, 6)
+        if self.t > self.limit:
+            raise RescueStop()
+
+    def spawn(self):
+        worker = RescueFakeWorker(self)
+        self.workers.append(worker)
+        return worker
+
+    def say(self, text):
+        self.messages.append(text)
+
+    def said(self, needle):
+        return any(needle in message for message in self.messages)
+
+    def links(self):
+        return [port for worker in self.workers for port in worker.links]
+
+
+class RescueFakeWorker:
+    def __init__(self, world):
+        self.world = world
+        self.born = world.t
+        self.port = None
+        self.ready = False
+        self.connected = False
+        self.code = None
+        self.links = []
+        self.killed = False
+        self.linked_at = None
+        self.connected_at = None
+        self.held = None  # the port esptool has open, link or no link
+        self.held_since = None
+
+    def poll(self):
+        world, now = self.world, self.world.t
+        if self.code is not None or self.killed:
+            return self.code
+        if world.early_exit:
+            self.code = 2
+            return self.code
+        if not self.ready and now - self.born >= world.ready_after:
+            self.ready = True
+        if (self.held and not self.connected
+                and now - self.held_since >= 2.4):
+            self.held = None  # the connect pass failed; esptool closes the port
+        if (self.port and self.held is None and self.port in world.ports()
+                and now - self.linked_at >= 0.1):
+            self.held, self.held_since = self.port, now
+        if (self.held and not self.connected and self.held in world.ports()
+                and self.held not in world.foreign
+                and now - self.linked_at >= world.connect_after.get(
+                    self.held, world.open_after)):
+            self.connected, self.connected_at = True, now
+        if self.connected and now - self.connected_at >= world.exit_after:
+            self.code = 0 if self.held in world.ports() else 1
+            if world.fail_first:
+                world.fail_first = False
+                self.code = 1
+            if self.code == 0:
+                world.written.append(self.held)
+        return self.code
+
+    def take_output(self):
+        return "Writing..." if self.connected else ""
+
+    def link_to(self, port):
+        self.port, self.linked_at = port, self.world.t
+        self.links.append(port)
+
+    def unlink(self):
+        self.port = None
+        if self.held is not None and self.held not in self.world.ports():
+            self.held = None  # the device is gone, so its descriptor is dead
+
+    def last_error(self):
+        return "could not open port"
+
+    def kill(self):
+        self.killed = True
+
+
+def run_rescue_world(world, **options):
+    """The rescued port, or "STOPPED" when the loop was still running at the limit."""
+    try:
+        return espdisp.run_rescue(
+            world.ports, world.spawn, "s3", clock=world.clock, sleep=world.sleep,
+            say=world.say, echo=world.echoed.append, **options)
+    except RescueStop:
+        return "STOPPED"
+
+
+def run_rescue_until_stopped(world):
+    return run_rescue_world(world) == "STOPPED"
+
+
+def test_rescue_port_selection():
+    listing = ["cu.usbmodem1312201", "tty.usbmodem1312201", "cu.usbserial-10",
+               "cu.Bluetooth-Incoming-Port", "null"]
+    check_equal(espdisp.serial_port_names(lambda _: listing),
+                ["/dev/cu.usbmodem1312201", "/dev/cu.usbserial-10"],
+                "rescue lists only board-like call-up ports")
+
+    def unreadable(_):
+        raise OSError("no /dev")
+    check_equal(espdisp.serial_port_names(unreadable), [],
+                "an unreadable /dev lists nothing")
+    check_equal(espdisp.new_rescue_ports(
+        ["/dev/cu.usbmodemA"], ["/dev/cu.usbmodemA", "/dev/cu.usbmodemB"]),
+        ["/dev/cu.usbmodemB"], "only a port absent at the start is new")
+    check_equal(espdisp.new_rescue_ports(["/dev/cu.usbmodemA"], []), [],
+                "a vanished port is not new")
+
+    directory = tempfile.mkdtemp(prefix="espdisp-test-rescue-")
+    try:
+        link = espdisp.rescue_link_path(directory, 3)
+        check(link.startswith("/dev/../"), "the rescue port path is spelled under /dev/")
+        check(link != espdisp.rescue_link_path(directory, 4),
+              "each spawn index has its own link")
+        target = os.path.join(directory, "device")
+        open(target, "w").close()
+        os.symlink(target, os.path.normpath(link))
+        check(os.path.islink(link), "esptool sees the /dev/ spelling as a symlink")
+        check_equal(os.path.realpath(link), os.path.realpath(target),
+                    "esptool resolves the link to the real port")
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+    command = espdisp.esptool_invocation(
+        espdisp.FAMILIES["s3"], "/dev/x", "write_flash",
+        connect=("--before", "default-reset"), tool="/opt/esptool")
+    check_equal(command, ["/opt/esptool", "--chip", "esp32s3", "--port", "/dev/x",
+                          "--baud", "921600", "--before", "default-reset",
+                          "write_flash"],
+                "connect options go before the subcommand")
+
+
+def test_rescue_retry_loop():
+    other = ("/dev/cu.usbmodemOTHER", 0.0, 1e9)
+    flicker = [("/dev/cu.usbmodemFLICK", 0.0, 5.0),
+               ("/dev/cu.usbmodemFLICK", 5.5, 1e9)]
+    board = "/dev/cu.usbmodemB"
+
+    # Too short a window, then a long one: the same esptool waits throughout.
+    world = RescueWorld([other] + flicker, [(board, 6.0, 6.2), (board, 9.0, 1e9)])
+    check_equal(run_rescue_world(world), board, "rescue succeeds on the board")
+    check_equal(sorted(set(world.links())), [board], "only the new port is ever linked")
+    check(world.said("Plug the board in now"), "rescue asks for the plug-in")
+    check(world.said(espdisp.RESCUE_MISSED), "a short window is reported as missed")
+    check(world.said("Ignoring /dev/cu.usbmodemFLICK"),
+          "a port attached at the start that comes back is ignored aloud")
+    check_equal(len(world.workers), 1, "a miss before connecting costs no relaunch")
+    check(world.workers[0].killed, "esptool is stopped at the end")
+    check(world.echoed, "the flashing esptool's output is shown")
+
+    # esptool connects, the board drops off mid-write, esptool fails: relaunch.
+    world = RescueWorld([other], [(board, 6.0, 7.0), (board, 14.0, 1e9)])
+    check_equal(run_rescue_world(world), board, "rescue succeeds after a failure")
+    check_equal(len(world.workers), 2, "a failed esptool is relaunched")
+    check(world.workers[0].killed, "the failed esptool is reaped")
+    check(world.said(espdisp.RESCUE_MISSED), "the failure asks for a replug")
+    check(world.said("esptool: could not open port"), "the esptool error is shown")
+    check(world.said("esptool is waiting again"), "the relaunch is announced")
+
+    # esptool fails with the board still attached: retry without a replug,
+    # once the relaunched esptool is ready.
+    world = RescueWorld([other], [(board, 6.0, 1e9)], fail_first=True)
+    check_equal(run_rescue_world(world), board, "rescue retries a failed write")
+    check(world.said("could not finish on %s; trying again" % board),
+          "a failure with the board attached is retried")
+    check(world.said("esptool is still starting"), "the wait is explained")
+    check(not world.said(espdisp.RESCUE_MISSED), "no replug is asked for")
+
+    # Two new ports at once: touch neither.
+    world = RescueWorld([other], [(board, 6.0, 1e9), ("/dev/cu.usbmodemC", 6.0, 1e9)],
+                        limit=12.0)
+    check(run_rescue_until_stopped(world), "two new ports never end in a flash")
+    check(not world.links(), "no esptool is pointed at either of two new ports")
+    check(world.said("2 new ports appeared"), "two new ports are reported")
+    check(world.workers[0].killed, "esptool is stopped when the loop is interrupted")
+
+    # A port that appears before "plug the board in now" counts as attached
+    # at the start, and is never touched.
+    world = RescueWorld([other], [(board, 1.5, 1e9)], limit=15.0)
+    check(run_rescue_until_stopped(world), "a port attached at start-up is not flashed")
+    check(not world.links(), "a port attached during start-up is left alone")
+
+    # A board esptool cannot connect to is given up on, not retried silently,
+    # and the right board plugged in next is still found.
+    foreign = "/dev/cu.usbserial-FOREIGN"
+    world = RescueWorld([other], [(foreign, 6.0, 1e9), (board, 20.0, 1e9)],
+                        foreign=[foreign])
+    check_equal(run_rescue_world(world), board,
+                "the right board is flashed after a foreign one")
+    check(world.said("could not connect to %s" % foreign), "the foreign port is named")
+    check_equal(world.links(), [foreign, board],
+                "a refused port is not relinked while it stays attached")
+    check(world.workers[0].killed and world.workers[0].code is None,
+          "the esptool that gave up is killed, not left connecting")
+    check_equal(world.workers[0].links, [foreign], "the killed esptool saw only the foreign port")
+    check_equal(world.workers[1].links if len(world.workers) > 1 else None, [board],
+                "a fresh esptool flashes the board")
+
+    # An esptool that stops while waiting is a setup error, not a retry loop.
+    world = RescueWorld([other], [], early_exit=True)
+    check_fails(lambda: run_rescue_world(world), "stopped while waiting",
+                "an esptool that cannot wait is reported, not relaunched forever")
+
+
+def test_rescue_worker_output():
+    directory = tempfile.mkdtemp(prefix="espdisp-test-worker-")
+    # A real process in its own session stands in for esptool's process group,
+    # so kill() has a group to signal; the test writes esptool's output itself.
+    sleeper = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    terminal = {}
+
+    class FakeProcess:
+        pid = sleeper.pid
+
+        def __init__(self):
+            self.code = None
+
+        def poll(self):
+            return self.code if sleeper.poll() is None else (self.code or -15)
+
+        def wait(self, timeout=None):
+            sleeper.wait(timeout)
+            return self.poll()
+
+    process = FakeProcess()
+
+    def popen(command, **kwargs):
+        check(kwargs.get("start_new_session") is True,
+              "esptool runs in its own session")
+        terminal["write"] = os.dup(kwargs["stdout"])
+        check(os.isatty(terminal["write"]), "esptool writes to a terminal, not a pipe")
+        return process
+
+    write_fd = None
+    try:
+        worker = espdisp.RescueWorker(
+            ["esptool"], espdisp.rescue_link_path(directory, 0), directory, {},
+            popen=popen)
+        write_fd = terminal["write"]
+
+        def feed(text):
+            os.write(write_fd, text.encode())
+            time.sleep(0.02)
+            return worker.poll()
+
+        check_equal(worker.poll(), None, "an idle pipe reads as nothing yet")
+        feed("Serial port /dev/../x:\n[Errno 2] could not open port\n")
+        check(not worker.ready, "esptool is not waiting until it says so")
+        feed("Retrying failed connection")
+        check(worker.ready, "the retry banner means esptool is waiting")
+        feed("..........")
+        check_equal(worker.take_output(), "", "nothing is echoed before a link")
+        worker.link_to("/dev/cu.usbmodemB")
+        check_equal(os.readlink(os.path.normpath(worker.link)), "/dev/cu.usbmodemB",
+                    "linking points the waiting path at the new port")
+        feed("\nConnecting...")
+        check(not worker.connected, "connecting is not yet connected")
+        feed("\nConnected to ESP32-S3 on /dev/../x:\n")
+        check(worker.connected, "esptool reports it connected")
+        check("Connected to" in worker.take_output(), "output after the link is echoed")
+        feed("\nA fatal error occurred: port vanished\n")
+        check_equal(worker.last_error(), "A fatal error occurred: port vanished",
+                    "the last error line is kept for the user")
+        feed("\nA serial exception error occurred: device disconnected\n"
+             "Note: This error originates from pySerial. It is likely not a "
+             "problem with esptool, but with the hardware connection or drivers.\n"
+             "For troubleshooting steps visit: https://example.invalid\n")
+        check_equal(worker.last_error(),
+                    "A serial exception error occurred: device disconnected",
+                    "esptool's driver note does not hide the actual error")
+        process.code = 2
+        check_equal(worker.poll(), 2, "the exit code is reported")
+        worker.kill()
+        check(not os.path.lexists(os.path.normpath(worker.link)),
+              "killing a worker removes its link")
+        check(sleeper.poll() is not None, "killing a worker signals its process group")
+    finally:
+        if write_fd is not None:
+            os.close(write_fd)
+        if sleeper.poll() is None:
+            sleeper.kill()
+        sleeper.wait()
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def rescue_env_without_unbuffered():
+    return {key: value for key, value in os.environ.items()
+            if key != "PYTHONUNBUFFERED"}
+
+
+def wait_for(predicate, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_rescue_worker_process_tree():
+    """esptool is a PyInstaller bootloader with the real esptool as its child.
+
+    Killing only the bootloader leaves the child running, still holding the
+    port. This fake has the same shape: a parent that starts a child and waits.
+    """
+    directory = tempfile.mkdtemp(prefix="espdisp-test-tree-")
+    child_pid = None
+    try:
+        script = os.path.join(directory, "bootloader.py")
+        with open(script, "w") as out:
+            out.write(
+                "import subprocess, sys\n"
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "\"import os, time\\nprint('child', os.getpid(), flush=True)\\n"
+                "print('Retrying failed connection', flush=True)\\n"
+                "while True: time.sleep(0.05)\"])\n"
+                "child.wait()\n")
+        worker = espdisp.RescueWorker(
+            [sys.executable, script], espdisp.rescue_link_path(directory, 0),
+            directory, rescue_env_without_unbuffered())
+
+        def child_seen():
+            nonlocal child_pid
+            worker.poll()
+            found = re.search(r"child (\d+)", worker.tail)
+            if found:
+                child_pid = int(found.group(1))
+            return child_pid is not None and worker.ready
+        check(wait_for(child_seen, 10.0), "the fake esptool tree started")
+        worker.kill()
+        check(wait_for(lambda: child_pid is not None and not pid_alive(child_pid), 5.0),
+              "killing a worker stops the whole esptool process tree")
+    finally:
+        if child_pid is not None and pid_alive(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_rescue_worker_sees_unflushed_connect():
+    """esptool prints "Connected to" without flushing; a pipe would sit on it."""
+    directory = tempfile.mkdtemp(prefix="espdisp-test-flush-")
+    worker = None
+    try:
+        script = os.path.join(directory, "esptool.py")
+        with open(script, "w") as out:
+            out.write(
+                "import sys, time\n"
+                "print('Retrying failed connection', flush=True)\n"
+                "time.sleep(0.5)\n"
+                "print('Connected to ESP32-S3 on /dev/x:')\n"
+                "time.sleep(10)\n")
+        link = espdisp.rescue_link_path(directory, 0)
+        worker = espdisp.RescueWorker([sys.executable, script], link, directory,
+                                      rescue_env_without_unbuffered())
+        check(wait_for(lambda: worker.poll() is None and worker.ready, 10.0),
+              "the fake esptool is waiting")
+        worker.link_to(os.path.join(directory, "device"))
+        check(wait_for(lambda: worker.poll() is None and worker.connected, 3.0),
+              "an unflushed \"Connected to\" is seen while esptool still runs")
+    finally:
+        if worker is not None:
+            worker.kill()
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_rescue_spawner():
+    family = espdisp.FAMILIES["s3"]
+    writes = [(0, "bootloader", "/r/bootloader.bin"), (0x8000, "partitions", "/r/p.bin"),
+              (0xE000, "boot_app0", "/r/o.bin"), (0x10000, "app", "/r/app.bin")]
+    directory = tempfile.mkdtemp(prefix="espdisp-test-spawner-")
+    try:
+        made = []
+
+        class Capture:
+            def __init__(self, command, link, cwd, env):
+                self.command, self.link, self.cwd, self.env = command, link, cwd, env
+                made.append(self)
+
+        try:
+            spawn = espdisp.rescue_spawner(family, writes, directory, "/opt/esptool",
+                                           {"PATH": "/bin"}, worker=Capture)
+            spawn()
+            spawn()
+        except (AttributeError, TypeError) as exc:
+            check(False, "rescue has a spawner giving each esptool its own link (%s)" % exc)
+            return
+        check_equal(len(made), 2, "each spawn makes one esptool")
+        check(made[0].link != made[1].link,
+              "a relaunched esptool never shares a link with the one before it")
+        for worker in made:
+            command = worker.command
+            check(command[command.index("--port") + 1] == worker.link,
+                  "esptool is pointed at its own link")
+            check(command[:1] == ["/opt/esptool"], "the located esptool is used")
+            before = command.index("--before")
+            check_equal(command[before:before + 5],
+                        ["--before", "default-reset", "--after", "hard-reset",
+                         "write_flash"],
+                        "esptool resets into download mode, then back")
+            check_equal(command[before + 5:],
+                        ["0x0", "/r/bootloader.bin", "0x8000", "/r/p.bin",
+                         "0xE000", "/r/o.bin", "0x10000", "/r/app.bin"],
+                        "exactly the four rescue regions are written")
+            check("--erase-all" not in command and "-e" not in command,
+                  "rescue never erases the chip")
+            check_equal(worker.env.get("ESPTOOL_OPEN_PORT_ATTEMPTS"), "0",
+                        "the environment override of open_port_attempts is pinned")
+            with open(worker.env["ESPTOOL_CFGFILE"]) as fh:
+                config = fh.read()
+            check("open_port_attempts = 0" in config and "connect_attempts = 4" in config,
+                  "esptool.cfg waits forever and tries every bridge reset")
+            check_equal(worker.env.get("PATH"), "/bin", "the caller's environment is kept")
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_rescue_late_connection_and_identity():
+    other = ("/dev/cu.usbmodemOTHER", 0.0, 1e9)
+    board = "/dev/cu.usbmodemB"
+    slow = "/dev/cu.usbmodemSLOW"
+
+    # A board whose connect lands just after the timeout must not be written.
+    world = RescueWorld([other], [(slow, 6.0, 1e9), (board, 22.0, 1e9)],
+                        connect_after={slow: 10.4})
+    try:
+        result = run_rescue_world(world)
+    except espdisp.Fail as exc:
+        result = "Fail: %s" % exc
+    check(slow not in world.written,
+          "a board refused at the timeout is never written afterwards")
+    check_equal(result, board, "the next board is rescued, not misreported")
+    check(world.said("could not connect to %s" % slow), "the refused port is named")
+
+    # An attached board that re-enumerates under a new name is not new: here it
+    # comes back on another socket, with the same USB serial.
+    attached = "/dev/cu.usbmodem1312201"
+    renamed = "/dev/cu.usbmodem2000001"
+    board = "/dev/cu.usbmodem1400001"
+    identities = {attached: (0x131220, "AA:BB"), renamed: (0x200000, "AA:BB"),
+                  board: (0x140000, "CC:DD")}
+    world = RescueWorld(
+        [(attached, 0.0, 6.0)], [(renamed, 6.5, 1e9), (board, 12.0, 1e9)],
+        identities=identities)
+    try:
+        result = run_rescue_world(world, identify=world.identify)
+    except TypeError as exc:
+        check(False, "rescue checks USB identity, not just port names (%s)" % exc)
+        return
+    check(renamed not in world.links(),
+          "a renamed port of an attached board is never linked")
+    check(world.said("same USB device"), "the renamed port is reported")
+    check_equal(result, board, "a truly new board is still rescued")
+
+
+IOREG_SAMPLE = """+-o USB2.1 Hub@00131200  <class IOUSBHostDevice, id 0x100000f7e>
+  | {
+  |   "locationID" = 1249792
+  | }
+  |
++-o USB JTAG/serial debug unit@00131220  <class IOUSBHostDevice, id 0x1000087ef>
+  | {
+  |   "kUSBSerialNumberString" = "1C:DB:D4:7B:5B:94"
+  |   "locationID" = 1249824
+  |   "USB Serial Number" = "1C:DB:D4:7B:5B:94"
+  | }
+  |
++-o USB Single Serial@00140000  <class IOUSBHostDevice, id 0x100009999>
+    {
+      "locationID" = 1310720
+      "USB Serial Number" = "5A67017634"
+    }
+"""
+
+
+def test_rescue_usb_identity():
+    try:
+        devices = espdisp.parse_usb_devices(IOREG_SAMPLE)
+    except AttributeError as exc:
+        check(False, "rescue can read USB identities (%s)" % exc)
+        return
+    check_equal(devices, [(0x131200, ""), (0x131220, "1C:DB:D4:7B:5B:94"),
+                          (0x140000, "5A67017634")],
+                "ioreg devices are read as (location, serial)")
+    check_equal(espdisp.usb_identity_for_port("/dev/cu.usbmodem1312201", devices),
+                (0x131220, "1C:DB:D4:7B:5B:94"),
+                "a usbmodem port maps to the device at its location")
+    check_equal(espdisp.usb_identity_for_port("/dev/cu.usbserial-5A67017634", devices),
+                (0x140000, "5A67017634"),
+                "a usbserial port maps to the device with its serial")
+    check_equal(espdisp.usb_identity_for_port("/dev/cu.usbmodem9999", devices), None,
+                "an unknown port maps to nothing")
+    check(espdisp.identity_is_known((0x131220, "1C:DB:D4:7B:5B:94"),
+                                    [(0x200000, "1C:DB:D4:7B:5B:94")]),
+          "the same serial on another socket is the same board")
+    check(espdisp.identity_is_known((0x131220, ""), [(0x131220, "")]),
+          "the same location is the same socket")
+    check(not espdisp.identity_is_known((0x131220, ""), [(0x140000, "")]),
+          "a different socket without serials is a different board")
+    check(not espdisp.identity_is_known(None, [(0x131220, "")]),
+          "an unresolved port is judged by its name alone")
+
+
+def test_rescue_override_warning():
+    try:
+        warning = espdisp.rescue_override_warning(
+            "CFGINFO id=1cdbd47b5b94 board=st7789-190 profile=st7789-190 "
+            "target=s3 chip=esp32s3 partition=universal-8m-doom-ota "
+            "cfgboard=st7789-130", "/dev/cu.usbmodemB")
+    except AttributeError as exc:
+        check(False, "rescue reports a stored CFGBOARD override (%s)" % exc)
+        return
+    check(warning is not None and "st7789-130" in warning, "the override is named")
+    check(warning is not None and "config --port /dev/cu.usbmodemB CFGBOARD auto" in warning,
+          "the warning says exactly how to clear it")
+    check_equal(espdisp.rescue_override_warning(
+        "CFGINFO id=1 board=st7789-190 cfgboard=auto", "/dev/x"), None,
+        "no override, no warning")
+    check_equal(espdisp.rescue_override_warning("CFGINFO id=1 board=x", "/dev/x"), None,
+                "an image without the field is not guessed at")
+
+    replies = [espdisp.Fail("no CFG reply"), "CFGINFO id=1 cfgboard=gc9107"]
+    said = []
+
+    def send(port, line, timeout):
+        check_equal(line, "CFGSHOW", "rescue asks the rescue image for its identity")
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+    espdisp.report_rescue_override("/dev/x", send=send, sleep=lambda s: None,
+                                   say=said.append, exists=lambda p: True)
+    check(any("gc9107" in line for line in said),
+          "a stored override is reported after a retry")
+    said = []
+    espdisp.report_rescue_override("/dev/x", send=lambda *a: (_ for _ in ()).throw(
+        espdisp.Fail("no reply")), sleep=lambda s: None, say=said.append,
+        exists=lambda p: True)
+    check(any("config --port /dev/x CFGSHOW" in line for line in said),
+          "an unreadable identity says how to check by hand")
+
+
+def write_fake_rescue(root, family, regions):
+    directory = os.path.join(root, family.key)
+    os.makedirs(directory, exist_ok=True)
+    entries = []
+    for role, address, blob in regions:
+        with open(os.path.join(directory, role + ".bin"), "wb") as out:
+            out.write(blob)
+        entries.append({"role": role, "address": address, "file": role + ".bin",
+                        "bytes": len(blob), "sha256": espdisp.sha256_hex(blob)})
+    index = {"format": 1, "family": family.key, "chip": family.chip,
+             "regions": entries}
+    with open(os.path.join(directory, espdisp.RESCUE_INDEX_NAME), "w") as out:
+        json.dump(index, out)
+    return index
+
+
+def test_rescue_images():
+    family = espdisp.FAMILIES["c6"]
+    good = [("bootloader", 0, b"b"), ("partitions", 0x8000, b"p"),
+            ("boot_app0", 0xE000, b"o"), ("app", 0x10000, b"a")]
+    root = tempfile.mkdtemp(prefix="espdisp-test-rescue-images-")
+    try:
+        write_fake_rescue(root, family, good)
+        writes = espdisp.load_rescue_images(family, root)
+        check_equal([(address, role) for address, role, _ in writes],
+                    [(0, "bootloader"), (0x8000, "partitions"),
+                     (0xE000, "boot_app0"), (0x10000, "app")],
+                    "a rescue image is four regions in address order")
+        check_fails(lambda: espdisp.load_rescue_images(espdisp.FAMILIES["s3"], root),
+                    "no usable rescue image", "a family without an image is refused")
+
+        with open(os.path.join(root, "c6", "app.bin"), "wb") as out:
+            out.write(b"tampered")
+        check_fails(lambda: espdisp.load_rescue_images(family, root),
+                    "does not match", "a changed region is refused")
+
+        write_fake_rescue(root, family, good[:3])
+        check_fails(lambda: espdisp.load_rescue_images(family, root),
+                    "must list exactly", "a missing region is refused")
+
+        write_fake_rescue(root, family, good[:3] + [("app", 0x20000, b"a")])
+        check_fails(lambda: espdisp.load_rescue_images(family, root),
+                    "the app must be written", "an app elsewhere is refused")
+
+        write_fake_rescue(root, family, [("bootloader", 0x8000, b"b")] + good[1:])
+        check_fails(lambda: espdisp.load_rescue_images(family, root),
+                    "writes both", "two regions at one address are refused")
+
+        index = write_fake_rescue(root, family, good)
+        index["chip"] = "esp32s3"
+        with open(os.path.join(root, "c6", espdisp.RESCUE_INDEX_NAME), "w") as out:
+            json.dump(index, out)
+        check_fails(lambda: espdisp.load_rescue_images(family, root),
+                    "describes", "another chip's image is refused")
+
+        index["chip"] = family.chip
+        index["regions"][3]["file"] = "../app.bin"
+        with open(os.path.join(root, "c6", espdisp.RESCUE_INDEX_NAME), "w") as out:
+            json.dump(index, out)
+        check_fails(lambda: espdisp.load_rescue_images(family, root),
+                    "valid file name", "a region outside the folder is refused")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    check_equal(espdisp.rescue_compile_flags(espdisp.FAMILIES["p4"]),
+                ("-DESPDISP_BOARD_P4_4B",),
+                "the rescue build keeps the carrier selector and drops Doom")
+    check_equal(espdisp.rescue_compile_flags(espdisp.FAMILIES["s3"]), (),
+                "the S3 rescue build needs no selector")
+
+    # The committed images: every family, verified, and laid out exactly like
+    # its canonical release so NVS and the other slots are left alone.
+    catalog = espdisp.load_release_catalog(
+        os.path.join(espdisp.RELEASE_ROOT, espdisp.RELEASE_CATALOG_NAME))
+    for key, family in sorted(espdisp.FAMILIES.items()):
+        writes = espdisp.load_rescue_images(family)
+        entry = catalog["families"][key]
+        with open(os.path.join(espdisp.RELEASE_ROOT, entry["artifact"]), "rb") as fh:
+            manifest, _, flash_payloads = espdisp.unpack_bundle(fh.read())
+        parts = {part["role"]: part["address"]
+                 for part in manifest["images"][0]["flash_parts"]}
+        for address, role, path in writes:
+            if role == espdisp.RESCUE_APP_ROLE:
+                check_equal(address, manifest["images"][0]["app_address"],
+                            "%s rescue app lands in the release app slot" % key)
+                continue
+            check_equal(address, parts[role], "%s rescue %s address" % (key, role))
+            with open(path, "rb") as fh:
+                check(fh.read() == flash_payloads[key][role],
+                      "%s rescue %s matches the release" % (key, role))
+        app = [path for _, role, path in writes if role == espdisp.RESCUE_APP_ROLE][0]
+        with open(app, "rb") as fh:
+            blob = fh.read()
+        check(b"espdisp rescue image" in blob, "%s rescue app is the rescue sketch" % key)
+        check(len(blob) < 1024 * 1024, "%s rescue app stays small" % key)
+
+        # Stale images are the failure this guards: a detection or panel change
+        # that never reaches the rescue image, so it misreads a new board.
+        with open(os.path.join(espdisp.rescue_family_dir(family),
+                               espdisp.RESCUE_INDEX_NAME)) as fh:
+            index = json.load(fh)
+        check(index["source_dirty"] is False, "%s rescue image built from a clean tree" % key)
+        inputs = ["firmware/rescue", "firmware/libraries"]
+        if family.partition_csv:
+            inputs.append(os.path.join("firmware", family.partition_csv))
+        if os.path.isdir(os.path.join(espdisp.REPO_ROOT, ".git")) or os.path.isfile(
+                os.path.join(espdisp.REPO_ROOT, ".git")):
+            diff = subprocess.run(
+                ["git", "-C", espdisp.REPO_ROOT, "diff", "--quiet",
+                 str(index["source_commit"]), "--"] + inputs,
+                capture_output=True, text=True)
+            if diff.returncode != 0:
+                print("  %s rescue image is stale or its commit is unknown: run "
+                      "`tools/espdisp.py rescue-build --family %s` and commit it"
+                      % (key, key))
+            check(diff.returncode == 0,
+                  "%s rescue image matches its sources since %s"
+                  % (key, str(index["source_commit"])[:7]))
+
+
 def main():
     test_bootstrap_solvers_and_derivations()
     test_bootstrap_knob_press_pin_blocks_template_drive()
@@ -7641,6 +8376,16 @@ def main():
     test_tile_stream_wire()
     test_audio_wire_and_descriptor()
     test_describe_bundle()
+    test_rescue_port_selection()
+    test_rescue_retry_loop()
+    test_rescue_worker_output()
+    test_rescue_images()
+    test_rescue_worker_process_tree()
+    test_rescue_worker_sees_unflushed_connect()
+    test_rescue_spawner()
+    test_rescue_late_connection_and_identity()
+    test_rescue_usb_identity()
+    test_rescue_override_warning()
 
     if failures:
         print("FAILED: %d of %d checks" % (failures, checks))

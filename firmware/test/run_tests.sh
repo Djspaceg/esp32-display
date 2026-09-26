@@ -7,6 +7,7 @@ OUT="$TMP/test_band_protocol"
 AUDIO_OUT="$TMP/test_audio"
 STAGING_OUT="$TMP/test_panel_transfer_staging"
 STALL_OUT="$TMP/test_panel_transfer_stall_recovery"
+RESCUE_OUT="$TMP/test_rescue_model"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -61,5 +62,11 @@ clang++ "${CXXFLAGS[@]}" \
   "$HERE/../display_stream/dma_gate.cpp" \
   "$HERE/../display_stream/panel_transfer.cpp"
 "$STALL_OUT"
+
+# The rescue image's USB-pin guard and screen layout, for every board profile.
+clang++ "${CXXFLAGS[@]}" \
+  -I"$HERE/../libraries/espdisp_board/src" \
+  -o "$RESCUE_OUT" "$HERE/test_rescue_model.cpp"
+"$RESCUE_OUT"
 
 bash "$HERE/../../mac/ESPDisplaySender/Tests/SenderAudioRTHostTests/run_tests.sh"

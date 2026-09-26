@@ -217,6 +217,33 @@ The normal flash path writes only the bootloader, partition table, OTA
 initializer, and application segments. It does not issue a whole-chip erase,
 change fuses/security settings, or rewrite calibration data.
 
+### Rescue a board that drops off USB
+
+If firmware drives a board's own USB pins, the board shows up on USB for a
+moment after each plug-in and then disappears, too briefly for `flash`. Unplug
+it and run:
+
+```sh
+python3 tools/espdisp.py rescue --family s3
+```
+
+Wait for "Plug the board in now", then plug it in; replug whenever it says
+"Missed it". Only a port that appears after the command starts is touched. The
+board then runs the rescue image from `firmware-rescue/<family>/`: it keeps USB
+alive, never drives the USB pins, and shows RESCUE with the detected board name
+on the panel. The ESP32-S3-LCD-1.3's backlight is on a USB pin, so its panel
+stays dark. Follow up with `flash`. Rescue writes the bootloader, the release
+partition table, the OTA selector and its own app, and nothing else, so NVS
+settings and the Doom WAD survive. Rebuild a family's rescue image with
+`rescue-build --family <family>` after changing the rescue sketch, board
+detection or a panel profile.
+
+A profile forced earlier with `CFGBOARD` is stored in NVS and would be forced
+again by the real firmware. The rescue screen then shows it in red, and
+`rescue` warns about it. Clear it before `flash` with
+`python3 tools/espdisp.py config --port <port> CFGBOARD auto`, which the rescue
+image answers by removing only that setting.
+
 ## Serial configuration
 
 Send one `CFG*` command with the stdlib-only CLI:
@@ -335,6 +362,7 @@ in odd orientations remain unverified.
 | `tools/test_espdisp.py` | Python source/parser/writer/catalog tests |
 | `firmware-dev/` | Ignored build-numbered artifacts and local catalog |
 | `firmware-releases/` | Canonical committed family artifacts and catalog |
+| `firmware-rescue/` | Prebuilt rescue images, one per family (`firmware/rescue/`) |
 | `mac/ESPDisplaySender/` | Native app, protocol readers, and Swift tests |
 | `docs/firmware-target-architecture.md` | Family selection and extension rules |
 | `docs/code-structure.md` | Module ownership |

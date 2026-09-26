@@ -1,46 +1,43 @@
 # Outcome
 
-The ESP32-S3-LCD-1.9 and both C6 1.47-inch panels now accept 90 and 270 degrees through the existing `rot=`, CFGROT, Rotate and CAP_ROTATE. Picking either in the app turns the capture region on its side (320x170 on the 1.9). No wire-protocol or CFG command changed. Not yet checked on the glass.
+Adds `espdisp.py rescue --family <c3|c6|s3|p4>` and per-family images in `firmware-rescue/`. On the 1.9 it caught the first plug-in, detected st7789-190, and the user saw RESCUE on the glass; 1.5.0 was restored with NVS intact.
 
 # Decisions to evaluate
 
-D1 On rectangular glass the frame's shape decides the MADCTL axis swap, and only rotation's half turn reaches the quadrant (`panelorient::addressedRotation`). Why: this never draws a frame of the wrong shape, and 0/180 stay byte-identical. If overruled: firmware would need a new frame format to turn portrait frames.
-D2 Rotation 1 with landscape frames is q=1, and 3 is q=3, the same as square glass. The 1.9's 35-column gap moves to the row axis. Why: it matches the square and old landscape conventions. If overruled: swap them in `addressedRotation`.
-D3 A frame of the wrong shape for the rotation (old app, CLI CFGROT mid-stream) draws in its own shape and lies sideways. Why: the sender owns the frame shape. If overruled: the firmware letterboxes or refuses it.
-D4 A parity change on rectangular glass sets the region's shape (landscape at 90/270, portrait at 0/180) instead of toggling it. Why: a region already dragged landscape at 0 stays landscape at 90. If overruled: toggle, as on square glass.
-D5 Automatic correction stays a 180 flip. In a landscape mount it reads the flip across the other axis (`motionorient::forMounting`) and resets on a parity change. Why: sideways gravity would otherwise never correct. If overruled: flip-only reads the portrait axis in every mount.
-D6 With no stream, the on-device screens (boot fills, idle, survey, WiFi selector) go landscape at 90/270, and a mount change clears bufA to the new shape. Why: they already lay out for either shape. If overruled: they stay portrait.
-D7 Doom is unchanged: it forces rotation 0 and draws portrait, letterboxed. Why: its controls are laid out for that orientation. If overruled: a separate landscape Doom task.
-D8 Picking 90/270 turns only a region source. Display and window sources keep their own shape. Why: they have no region to turn. If overruled: letterbox them into the rotation's shape.
-D9 A rotation set outside the app (serial, another Mac) also re-shapes the region, except within 3 s of the app's own command. A change reported before the geometry is known waits for it. The status tick no longer replays a stale EINF rotation. Why: stale reports would turn the region back. If overruled: only the app's picker turns it.
+D1 Built on main with be0cca5 merged in, so the S3 rescue image detects the 1.9 as st7789-190. Why: the user answered "Build on main - everything should be on main, so i can use it". If overruled: n/a. Supersedes: pre-merge images that saw a 1.9 as a 1.3.
+D2 The rescue firmware never drives the chip's USB Serial/JTAG pads, so a real 1.3 shows a drawn but unlit panel. Why: it cannot tell a correct detection from a misdetection. If overruled: allow GPIO19/20 on UART-bridge carriers.
+D3 One esptool waits on a symlink `/dev/../<tmp>/port`, pointed at the only port new since start-up. Supersedes: a pool of four, because esptool 5.3 retries every 0.1 s. If overruled: n/a.
+D4 A linked port not connected within 10 s is refused while attached; esptool's whole process group is killed (SIGTERM, then SIGKILL) and a new one gets a new link. Why: esptool retries silently forever, and its PyInstaller child outlives a plain kill. If overruled: change `RESCUE_CONNECT_TIMEOUT`.
+D5 A port seen before "Plug the board in now", or a new port whose USB device (serial or location, from ioreg) was attached then, is never touched. Why: never touch another board. If overruled: a board plugged in too early must be replugged after Ctrl-C.
+D6 Rescue images are raw region files plus `rescue.json`, not `.espdispfw` bundles; partition table, bootloader and boot_app0 match the release byte for byte (tested). Why: never look like a release; NVS survives. If overruled: bundles.
+D7 CFGSHOW gets a CFGINFO reply with id, board, profile, target, chip, partition and a new cfgboard= field, and no fw=. Why: parsers look fields up by name; a rescue image must not claim a release. If overruled: add fw=.
+D8 An unidentified S3 also answers on UART0 (GPIO43/44), like the stream firmware. Why: the 1.3's bridge and the ROM console. If overruled: USB CDC only.
+D9 A host test fails when `firmware/rescue`, `firmware/libraries` or a partition CSV changed since a family's `rescue.json` commit. Why: stale images misread new boards. If overruled: a printed warning.
+D10 The rescue image reads the stored CFGBOARD key, shows a forced profile in red and in cfgboard=, and `CFGBOARD auto` removes only that key; `rescue` warns with the exact command. Why: the real firmware would force it again and re-brick USB. If overruled: have `flash` clear it.
 
 # Open questions
 
-- Which physical way round 90 is: the default is D2, and the user confirms on the glass.
-- The landscape-mount flip direction on the 1.9 and C6 Touch IMUs: the default is D5's derivation, which is unmeasured.
+- None. D1 was answered by the user (build on main).
 
 # Gate facts
 
-Publish settings: local branch `rect-panel-landscape`. No push, PR, CR or AutoSDE, because this is a personal GitHub repo and the brief says no push. The user merges.
-Call sites, packages/*: none touched.
-Adversarial-review rounds: 2 (code-review.md). They changed D6 and D9 and added the validator rule.
-Lanes, all passing, ran on `68175cb` (the commits after it touch docs only):
-- `gate-firmware-tests.log`
-- `gate-test-espdisp.log`
-- `gate-compile-s3.log`
-- `gate-compile-c6.log`
-- `gate-swift-test.log`
-- `gate-descriptor-check.log`
-- `release-shipping.log`: bundles from clean `aa00127`, with no FW_VERSION bump
-- `app-build.log`: Release build into `esp32-display-rect-landscape-appbuild`, not installed or launched
+Publish: local branch `add-rescue-firmware` only; no push/PR/CR/merge, no AutoSDE or cr (GitHub remote).
+Call sites, packages/*: none touched. Shared tool functions changed:
+- `esptool_invocation` gains optional `connect`/`tool`; callers `part_matches_device`, `write_bundle_over_usb` (unchanged), `rescue_spawner`.
+- `git_provenance` ignores `firmware-rescue/`; callers: bundle/release manifests and `write_rescue_images`.
+
+Lanes, all green: `run_tests.sh` (firmware-tests.log), `test_espdisp.py` (py-tests.log), `compile --family` x4 (compile-<family>.log), `rescue-build` x4 (rescue-build-<family>.log).
+Swift unchanged. Adversarial-review rounds: 3. Round 1 changed D3 and D4; round 2 added D9; round 3 changed D4, D5 and D7 and added D10.
 
 # Evidence
 
-- `code-review.md`: the findings and what became of each.
-- `rect-landscape-gate.log`: all the lanes combined. The full logs are in `/Users/stepblk/Source/esp32-display-rect-landscape-logs/`. The capture tool only reads the main checkout, so, as the user decided, it was copied there for the capture and deleted straight after.
+- code-review.md: all three review rounds and each finding's fate.
+- device-rescue-{flash,boot}-1_9.log: rescue on the 1.9 (1c:db:d4:7b:5b:94), boot as st7789-190.
+- device-restore-{flash,boot}-1_9.log: 1.5.0 restored, board=st7789-190 fw=1.5.0.
+- rescue-red-green.log: new tests red on ef5ca1d and 5c9d998, green after the fix.
+- rescue-pty-dryrun.log: real esptool on a pty; timeout kills the tree, nothing left.
 
 # Residuals
 
-- No hardware check yet; it waits on the user's serial window.
-- The C6 boards are not attached.
-- There are no host tests for the adopt/parity firmware state or for Choose Region.
+- Detection can be wrong (C3/P4 always match; an 8 MB S3 is a GC9107); only the USB-pin guard is absolute.
+- Images rebuilt from another checkout path differ byte-wise (absolute `__FILE__` paths).

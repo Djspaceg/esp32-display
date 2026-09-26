@@ -1,0 +1,38 @@
+{
+  "built_at": "2026-09-26T01:22:29Z",
+  "chip": "esp32c3",
+  "family": "c3",
+  "format": 1,
+  "regions": [
+    {
+      "address": 0,
+      "bytes": 19536,
+      "file": "bootloader.bin",
+      "role": "bootloader",
+      "sha256": "d4a87d86e17457c5d9e6d9b6c83f1af5ab0122a58545aaab392af1135a01f00a"
+    },
+    {
+      "address": 32768,
+      "bytes": 3072,
+      "file": "partitions.bin",
+      "role": "partitions",
+      "sha256": "915675fe9f18fce5ac6291ffc8dcf18e099b1ff4c7748aa9bf1ee41b49284295"
+    },
+    {
+      "address": 57344,
+      "bytes": 8192,
+      "file": "boot_app0.bin",
+      "role": "boot_app0",
+      "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+    },
+    {
+      "address": 65536,
+      "bytes": 377552,
+      "file": "app.bin",
+      "role": "app",
+      "sha256": "d3d62f78260b82831c1fb6ded83759350e6a56aaed31668c90733887f050664c"
+    }
+  ],
+  "source_commit": "2513690909e07815b689ed98edcbb521c07bad78",
+  "source_dirty": false
+}
