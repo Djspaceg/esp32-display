@@ -2307,6 +2307,27 @@ int main() {
     CHECK(s3Plan.probes[4].resetLowMs == 20);
     CHECK(s3Plan.probes[4].resetReleaseWaitMs == 300);
     {
+      // A bus that acknowledges the reserved canary address is held low (the
+      // knob's unpowered GC9A01 clamps GPIO11, which is the 1.85C's SDA), so
+      // its acknowledgements are not evidence for the 1.85C.
+      CHECK(boarddetectmodel::CANARY_ADDRESS == 0x7F);
+      const ProbeEvidence clamped =
+          boarddetectmodel::addressProbeEvidence(true, 2, true);
+      CHECK(clamped.status == ProbeStatus::Started && clamped.ackCount == 0);
+      const ProbeEvidence clean =
+          boarddetectmodel::addressProbeEvidence(true, 2, false);
+      CHECK(clean.status == ProbeStatus::Started && clean.ackCount == 2);
+      CHECK(boarddetectmodel::addressProbeEvidence(false, 0, false).status ==
+            ProbeStatus::StartFailed);
+      ProbeEvidence knobBoard[5] = {};
+      knobBoard[1] = clamped;
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 4, knobBoard));
+      knobBoard[4] = {ProbeStatus::Started, 1};
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      16u * 1024u * 1024u, knobBoard, 5)
+                .variant == Variant::ElecrowKnob128);
+    }
+    {
       // The rail-pulsing knob probe runs only while nothing has answered, so
       // the other S3 boards never have their GPIO1 driven by it.
       ProbeEvidence seen[5] = {};

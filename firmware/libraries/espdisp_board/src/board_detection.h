@@ -80,6 +80,21 @@ constexpr bool flashMatches(uint32_t flashBytes, uint32_t minExclusive,
   return flashBytes != 0 || (minExclusive == 0 && maxInclusive == 0);
 }
 
+/// A reserved 7-bit address no device may hold. An address-list probe also
+/// addresses it: if it "answers", SDA is being held low - a stuck bus, or an
+/// unpowered chip clamping the line, as the CrowPanel knob's GC9A01 does to
+/// GPIO11 while its supply rail is off - and every acknowledgement on that bus
+/// is meaningless.
+static const uint8_t CANARY_ADDRESS = 0x7F;
+
+/// Evidence from one address-list probe, discarding acknowledgements from a
+/// bus that also acknowledged CANARY_ADDRESS.
+inline ProbeEvidence addressProbeEvidence(bool busStarted, uint8_t ackCount,
+                                          bool canaryAcked) {
+  if (!busStarted) return {ProbeStatus::StartFailed, 0};
+  return {ProbeStatus::Started, canaryAcked ? (uint8_t)0 : ackCount};
+}
+
 /// Whether probe `index` should run given the evidence gathered so far. A probe
 /// with a reset line drives that GPIO push-pull (on the CrowPanel knob it is the
 /// panel supply rail), which is only justified while no earlier probe has

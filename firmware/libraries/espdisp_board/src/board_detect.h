@@ -47,13 +47,22 @@ inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
 
   const bool busOk = Wire.begin(plan.sda, plan.scl, plan.frequencyHz);
   uint8_t found = 0;
+  bool canaryAcked = false;
   if (!busOk) {
     if (verbose) {
       Serial.printf("board: WARN %s %s probe bus would not start\n",
                     target, profile);
     }
   } else if (plan.addressCount > 0) {
-    for (uint8_t i = 0; i < plan.addressCount; ++i) {
+    Wire.beginTransmission(boarddetectmodel::CANARY_ADDRESS);
+    canaryAcked = Wire.endTransmission() == 0;
+    if (canaryAcked && verbose) {
+      Serial.printf("board: WARN %s %s bus SDA=%d SCL=%d acknowledged reserved "
+                    "0x%02X; ignoring it as stuck or back-powered\n",
+                    target, profile, plan.sda, plan.scl,
+                    boarddetectmodel::CANARY_ADDRESS);
+    }
+    for (uint8_t i = 0; i < plan.addressCount && !canaryAcked; ++i) {
       const uint8_t address = plan.addresses[i];
       Wire.beginTransmission(address);
       if (Wire.endTransmission() != 0) continue;
@@ -85,6 +94,9 @@ inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
     pinMode(plan.sda, INPUT);
     pinMode(plan.scl, INPUT);
     if (plan.resetPin != board::NO_PIN) pinMode(plan.resetPin, INPUT);
+  }
+  if (plan.addressCount > 0) {
+    return boarddetectmodel::addressProbeEvidence(busOk, found, canaryAcked);
   }
   return {
       busOk ? ProbeStatus::Started : ProbeStatus::StartFailed,
