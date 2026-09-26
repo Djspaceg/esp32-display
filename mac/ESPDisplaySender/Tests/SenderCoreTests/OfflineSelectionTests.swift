@@ -436,6 +436,33 @@ final class QuarterTurnRegionTests: XCTestCase {
         XCTAssertEqual(kept.width, 320, accuracy: 0.001)
     }
 
+    /// A panel can report its rotation before it has said how big it is; the
+    /// change is held and followed once the geometry arrives.
+    func testReportedRotationBeforeGeometryIsFollowedWhenItArrives() throws {
+        guard let found = DisplayCapture.preferredScreen() else {
+            throw XCTSkip("no screen available to place a region on")
+        }
+        let screen = (name: found.name, size: found.size)
+        var panel = stick(screen, width: 170, height: 320)
+        panel.geometry = nil
+        panel.rotation = 1
+        let manager = PanelManager(
+            previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
+        manager.followReportedRotation(from: 0, for: "stick")
+        let waiting = try XCTUnwrap(manager.panels.first?.source.region)
+        XCTAssertEqual(waiting.width, 170, accuracy: 0.001)
+        XCTAssertEqual(manager.rotationAwaitingGeometry["stick"], 0)
+
+        manager.updatePanel("stick") {
+            $0.geometry = PanelGeometry(width: 170, height: 320)
+        }
+        manager.followRotationAwaitingGeometry(for: "stick")
+        let turned = try XCTUnwrap(manager.panels.first?.source.region)
+        XCTAssertEqual(turned.width, 320, accuracy: 0.001)
+        XCTAssertEqual(turned.height, 170, accuracy: 0.001)
+        XCTAssertNil(manager.rotationAwaitingGeometry["stick"])
+    }
+
     func testSquareReportedRotationLeavesTheRegionAlone() throws {
         guard let found = DisplayCapture.preferredScreen() else {
             throw XCTSkip("no screen available to place a region on")

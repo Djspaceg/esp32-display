@@ -427,6 +427,7 @@ extension PanelManager {
         if let rotationBefore {
             followReportedRotation(
                 from: rotationBefore.rotation, for: rotationBefore.serviceName)
+            followRotationAwaitingGeometry(for: rotationBefore.serviceName)
         }
         sortPanels()
         if associationChanged { persistIfNeeded(force: true) }

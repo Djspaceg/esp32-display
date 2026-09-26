@@ -82,6 +82,7 @@ extension PanelManager {
                 sessions[device.name]?.useRegion(aligned)
                 correctedRegion = true
             }
+            followRotationAwaitingGeometry(for: device.name)
         }
         if correctedRegion {
             refreshPreviewDriver()

@@ -21,7 +21,10 @@ It found no blocking defects.
 It found no blocking defects. Round-1 items 1, 4, 5, 6 and 7 were confirmed resolved.
 
 1. should-fix: the session status tick replays the last cached EINF every few seconds. With report following, a stale `rotation` could turn the region back, or ping-pong against USB reprobes. **Fixed**: the tick no longer writes orientation (`includeOrientation: false`), because every fresh EINF already arrives as the `.info` event. This also removes a UI glitch that predates the change, where the picker briefly showed the old rotation after a command.
-2. nit: following is change-triggered, so a report that lands before the geometry is known is not retried. Also, `setFlip` from an odd rotation did not stand the region up. **Partly fixed**: `setFlip` now calls `applyRegionQuarterTurn`. The launch-order edge was **deferred**, because reconciling on every mismatch would override a landscape region the user deliberately dragged at 0/180.
+2. nit: following is change-triggered, so a report that lands before the geometry is known is not retried. Also, `setFlip` from an odd rotation did not stand the region up. **Fixed**:
+   - `setFlip` now calls `applyRegionQuarterTurn`.
+   - A parity change reported before the geometry is known is held in `rotationAwaitingGeometry` and followed when the mDNS or USB geometry arrives. A test covers this.
+   - Reconciling on every mismatch was rejected, because it would override a landscape region the user deliberately dragged at 0/180.
 3. nit: the `adopted` static in `adoptLocalFrameShape` went stale across a mount change made while streaming. **Fixed**: the shape is recorded on every MADCTL service and re-shapes bufA only when no stream owns it.
 4. nit: pressing Escape after Choose Region at 90/270 restores the earlier portrait source. **No change needed**: Escape restores the previous source by design.
 

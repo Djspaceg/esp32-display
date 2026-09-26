@@ -160,19 +160,39 @@ extension PanelManager {
     /// inside `rotationEchoGrace` of this app's own command are skipped: the
     /// panel's periodic info can still carry the old value, and following it
     /// would turn the region back and forth. Square glass is left alone.
+    ///
+    /// A change reported before the panel's geometry is known is held in
+    /// `rotationAwaitingGeometry` and followed when the geometry arrives, so a
+    /// panel that answers before it advertises its size is not left streaming
+    /// the wrong shape.
     func followReportedRotation(from previous: Int?, for serviceName: String) {
         guard let previous,
               let next = panels.first(
                   where: { $0.serviceName == serviceName })?.rotation,
-              previous % 2 != next % 2,
-              let geometry = geometry(of: serviceName),
-              geometry.width != geometry.height
+              previous % 2 != next % 2
         else { return }
+        guard let geometry = geometry(of: serviceName) else {
+            if rotationAwaitingGeometry[serviceName] == nil {
+                rotationAwaitingGeometry[serviceName] = previous
+            }
+            return
+        }
+        guard geometry.width != geometry.height else { return }
         if let commanded = commandedRotationAt[serviceName],
            Date().timeIntervalSince(commanded) < Self.rotationEchoGrace {
             return
         }
         applyRegionQuarterTurn(from: previous, to: next, for: serviceName)
+    }
+
+    /// Follow a rotation change held back for want of geometry; call once the
+    /// geometry is set.
+    func followRotationAwaitingGeometry(for serviceName: String) {
+        guard geometry(of: serviceName) != nil,
+              let previous = rotationAwaitingGeometry.removeValue(
+                  forKey: serviceName)
+        else { return }
+        followReportedRotation(from: previous, for: serviceName)
     }
 
     func supportsQuarterTurnRotation(_ serviceName: String) -> Bool {

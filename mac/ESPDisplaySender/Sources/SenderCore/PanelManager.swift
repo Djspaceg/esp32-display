@@ -98,6 +98,10 @@ final class PanelManager: ObservableObject {
     /// `rotationEchoGrace` of it may still carry the old value, so it does not
     /// turn the region back; see `followReportedRotation`.
     var commandedRotationAt: [String: Date] = [:]
+    /// The rotation a panel was at before a reported change that arrived while
+    /// its geometry was still unknown, so the change can still be followed
+    /// once the geometry says whether the glass is rectangular.
+    var rotationAwaitingGeometry: [String: Int] = [:]
 
     /// Last gesture sequence number seen from each panel, so a redelivered UDP
     /// datagram is not acted on twice. Compared for inequality rather than
