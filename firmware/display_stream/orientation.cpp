@@ -40,12 +40,23 @@ bool automaticRotationEnabled = true;
 uint8_t automaticRotation = 0;
 uint8_t appliedPanelRotation = 0;
 
-uint8_t desiredPanelRotation() {
-  return motionorient::compose(panelRotation, automaticRotation);
-}
-
 bool panelIsRectangular() {
   return bcfg->panel->width != bcfg->panel->height;
+}
+
+// The mounting parity the flip-only tracker last started in; -1 before it has
+// run. See serviceAutoRotation.
+static int8_t autoTrackedParity = -1;
+
+uint8_t desiredPanelRotation() {
+  // A flip learned in the other mounting parity is void from the moment the
+  // mount changes, not only once the tracker next polls, or the first repaint
+  // after a 0 -> 1 change would flash 180 degrees wrong.
+  if (panelIsRectangular() &&
+      autoTrackedParity != (int8_t)(panelRotation & 1)) {
+    return (uint8_t)(panelRotation & 3);
+  }
+  return motionorient::compose(panelRotation, automaticRotation);
 }
 
 uint8_t addressedPanelRotation() {
@@ -83,26 +94,25 @@ void applyPanelConfig(bool landscape) {
 void serviceAutoRotation() {
   if (!motionAvailable || !automaticRotationEnabled) return;
   const uint32_t now = millis();
-  if ((uint32_t)(now - lastMotionPollAt) < 100) return;
-  lastMotionPollAt = now;
 
   const motionorient::AutomaticMode mode =
       motionorient::automaticModeForPanel(bcfg->panel->width,
                                           bcfg->panel->height);
   // A flip learned in one mounting parity means nothing in the other: the
   // classifier's axes turn with the mount (motionorient::forMounting), so
-  // start that half over from upright rather than carry a stale 180.
-  static int8_t trackedParity = -1;
+  // start that half over from upright rather than carry a stale 180. Ahead
+  // of the poll rate limit so the reset is never late.
   const int8_t parity = (int8_t)(panelRotation & 1);
   if (mode == motionorient::AutomaticMode::FlipOnly &&
-      parity != trackedParity) {
-    trackedParity = parity;
+      parity != autoTrackedParity) {
+    autoTrackedParity = parity;
     motionTracker.reset(now);
-    if (automaticRotation != 0) {
-      automaticRotation = 0;
-      madctlDirty = true;
-    }
+    // No MADCTL change: desiredPanelRotation already ignored the old flip.
+    automaticRotation = 0;
   }
+
+  if ((uint32_t)(now - lastMotionPollAt) < 100) return;
+  lastMotionPollAt = now;
 
   boardmotion::Sample sample;
   if (!boardmotion::read(sample)) return;

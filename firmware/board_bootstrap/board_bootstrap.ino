@@ -804,8 +804,13 @@ static void handlePanelEdges(char **tokens, int count) {
     error("PANEL_EDGES arguments are invalid");
     return;
   }
+  // Program the quadrant the orientation names. Rectangular glass addresses
+  // only rotation's half turn directly (panelorient::addressedRotation), so
+  // its odd orientations are reached through the landscape flag instead.
+  const bool rectangular = candidatePanel.width != candidatePanel.height;
   boarddisplay::applyOrientation(
-      panel, candidateConfig, false, (uint8_t)args.orientation);
+      panel, candidateConfig, rectangular && (args.orientation & 1) != 0,
+      (uint8_t)(rectangular ? (args.orientation & 2) : args.orientation));
   fillFrame(0x0000);
   rectangle(0, 0, candidatePanel.width, 3, 0xFFFF);
   rectangle(0, candidatePanel.height - 3, candidatePanel.width, 3, 0xFFFF);

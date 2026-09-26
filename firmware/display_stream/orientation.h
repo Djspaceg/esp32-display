@@ -1,7 +1,8 @@
 // Panel orientation: the sender-driven landscape flag, the user's persisted
 // mounting rotation, the gravity-derived automatic correction, and the MADCTL
-// application that composes them. Touch mapping reads appliedPanelRotation so
-// a finger is never transformed ahead of a pending orientation change.
+// application that composes them. Touch mapping reads addressedPanelRotation
+// (derived from appliedPanelRotation) so a finger is never transformed ahead
+// of a pending orientation change.
 #pragma once
 
 #include <stdint.h>

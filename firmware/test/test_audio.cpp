@@ -477,6 +477,21 @@ int main() {
   CHECK(std::strcmp(noAudioError, "board descriptor has no audio") == 0);
   CHECK((deviceCapabilities() & deviceproto::CAP_AUDIO_DOWNLINK) != 0);
   CHECK((deviceCapabilities() & deviceproto::CAP_AUDIO_UPLINK) != 0);
+  // Quarter turns are advertised wherever the backend validated them, square
+  // or not: on rectangular glass 90/270 is landscape.
+  CHECK((deviceCapabilities() & deviceproto::CAP_ROTATE) != 0);
+  {
+    const board::Config *saved = bcfg;
+    const board::Config *rectangular[] = {&board::CONFIG_LCD_ST7789_190,
+                                          &board::CONFIG_LCD_ST7789,
+                                          &board::CONFIG_TOUCH_JD9853};
+    for (const board::Config *config : rectangular) {
+      bcfg = config;
+      CHECK(bcfg->panel->width != bcfg->panel->height);
+      CHECK((deviceCapabilities() & deviceproto::CAP_ROTATE) != 0);
+    }
+    bcfg = saved;
+  }
   addMdnsService();
 
   using namespace audiobackend;

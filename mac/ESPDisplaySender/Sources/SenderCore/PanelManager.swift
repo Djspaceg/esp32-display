@@ -94,6 +94,10 @@ final class PanelManager: ObservableObject {
     /// the device's own reports while a drag is in flight; see
     /// `ignoreReportedBrightness`.
     var commandedBrightness: [String: (level: Int, at: Date)] = [:]
+    /// When this app last asked each panel for a rotation. A report inside
+    /// `rotationEchoGrace` of it may still carry the old value, so it does not
+    /// turn the region back; see `followReportedRotation`.
+    var commandedRotationAt: [String: Date] = [:]
 
     /// Last gesture sequence number seen from each panel, so a redelivered UDP
     /// datagram is not acted on twice. Compared for inequality rather than
@@ -108,6 +112,9 @@ final class PanelManager: ObservableObject {
     /// reports. Long enough to cover a coalesced drag plus a round trip, short
     /// enough that a lost command self-corrects while the user is still there.
     static let brightnessEchoGrace: TimeInterval = 1.5
+    /// Longer than the panel's 2 s EINF period, so the last report sent before
+    /// a rotation command landed has been superseded.
+    static let rotationEchoGrace: TimeInterval = 3
     /// Debounced USB brightness writes. A slider drag may produce dozens of
     /// values; only the latest one should open a serial transaction.
     var usbBrightnessTasks: [String: Task<Void, Never>] = [:]

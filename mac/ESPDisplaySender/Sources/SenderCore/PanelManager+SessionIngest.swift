@@ -46,6 +46,9 @@ extension PanelManager {
             else { return }
             reconciledIdentity = false
         }
+        let previousRotation = panels.first {
+            $0.serviceName == status.serviceName
+        }?.rotation
         updatePanel(status.serviceName) { panel in
             panel.lastSeen = status.updatedAt
             panel.lastHeartbeatAt = status.heartbeatAge.map {
@@ -75,6 +78,7 @@ extension PanelManager {
                 Self.apply(info, to: &panel)
             }
         }
+        followReportedRotation(from: previousRotation, for: status.serviceName)
         persistIfNeeded(force: reconciledIdentity)
     }
 
@@ -107,12 +111,16 @@ extension PanelManager {
             reconciledIdentity = reconciled
             let keepBrightness = ignoreReportedBrightness(
                 Int(info.brightness), for: serviceName)
+            let previousRotation = panels.first {
+                $0.serviceName == serviceName
+            }?.rotation
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
                 panel.lastHeartbeatAt = now
                 panel.lastError = nil
                 Self.apply(info, to: &panel, keepBrightness: keepBrightness)
             }
+            followReportedRotation(from: previousRotation, for: serviceName)
             // EINF means the device just connected or rebooted, so anything it
             // was told before is gone. This is the only moment the sender knows
             // to push it again.

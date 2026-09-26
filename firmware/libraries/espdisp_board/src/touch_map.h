@@ -1,8 +1,8 @@
 // Mapping raw AXS5106L touch coordinates into framebuffer coordinates.
 //
 // The panel's orientation follows macOS at runtime and the user can rotate it
-// in quarter turns for its mounting (180 on rectangular panels, any quarter on
-// square ones), so a touch point only means something once it has been through
+// in quarter turns for its mounting (on rectangular panels 90/270 arrive as
+// landscape frames; see panelorient::addressedRotation), so a touch point only means something once it has been through
 // the same transform the pixels went through. This file is that
 // transform, and it lives beside panel_init.h deliberately: if touch and pixels
 // disagree about which way is up, taps land in the wrong place, and the only way

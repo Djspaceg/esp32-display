@@ -4153,6 +4153,22 @@ def test_board_descriptor_validator():
         "a complete verified audio row passes validation",
     )
 
+    # Rectangular glass keeps an even orientation offset: the firmware applies
+    # only rotation's half turn there, so an odd offset would be dropped.
+    lcd_190 = next(
+        item for item in descriptors if item["key"] == "s3-lcd-190")
+    check_equal(
+        lcd_190["orientation"]["quarter_turns"], [0, 1, 2, 3],
+        "the 1.9-inch rectangular panel offers all four quarter turns",
+    )
+    odd_rect_offset = copy.deepcopy(lcd_190)
+    odd_rect_offset["panel"]["orientation_offset"] = 1
+    check_descriptor_fails(
+        [odd_rect_offset],
+        "panel.orientation_offset must be 0 or 2 on rectangular glass",
+        "an odd orientation offset on rectangular glass is refused",
+    )
+
     malformed_audio_enum = copy.deepcopy(verified_audio)
     malformed_audio_enum["audio"]["amp"] = "plausible-amp"
     check_descriptor_fails(

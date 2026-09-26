@@ -373,6 +373,7 @@ extension PanelManager {
                 }
             }
         }
+        var rotationBefore: (serviceName: String, rotation: Int)?
         if let status = serialStatus,
            let panelIndex = panels.firstIndex(where: {
                stableHardwareID(of: $0) == canonicalID
@@ -383,6 +384,8 @@ extension PanelManager {
             panels[panelIndex].currentSSID =
                 status.currentSSID?.isEmpty == false ? status.currentSSID : nil
             if let rssi = status.rssi { panels[panelIndex].rssi = rssi }
+            rotationBefore = (
+                panels[panelIndex].serviceName, panels[panelIndex].rotation)
             if let rotation = status.rotation {
                 panels[panelIndex].rotation = rotation
                 panels[panelIndex].flipped = rotation == 2
@@ -419,6 +422,11 @@ extension PanelManager {
                 refreshPreviewDriver()
                 persistIfNeeded(force: true)
             }
+        }
+        // After the geometry above, which is what says the glass is rectangular.
+        if let rotationBefore {
+            followReportedRotation(
+                from: rotationBefore.rotation, for: rotationBefore.serviceName)
         }
         sortPanels()
         if associationChanged { persistIfNeeded(force: true) }

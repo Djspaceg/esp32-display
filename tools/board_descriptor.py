@@ -954,8 +954,17 @@ def validate_descriptors(
             descriptor, "panel.col_offset", 0, 255)
         row_offset = _expect_int_range(
             descriptor, "panel.row_offset", 0, 255)
-        _expect_int_range(
+        orientation_offset = _expect_int_range(
             descriptor, "panel.orientation_offset", 0, 3)
+        # Rectangular glass takes its axis swap from the frame's shape, so the
+        # firmware applies only the half turn of rotation plus this offset
+        # (panelorient::addressedRotation) and an odd offset would be dropped.
+        if (panel_width != panel_height and
+                orientation_offset % 2 != 0):
+            raise DescriptorError(
+                "%s: panel.orientation_offset must be 0 or 2 on rectangular "
+                "glass" % source
+            )
         if (memory_width == 0) != (memory_height == 0):
             raise DescriptorError(
                 "%s: panel memory extents must both be known or both be 0"

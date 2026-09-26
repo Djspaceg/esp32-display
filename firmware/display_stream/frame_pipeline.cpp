@@ -752,7 +752,13 @@ void fillPanel(uint16_t rgb565) {
 
 bool adoptLocalFrameShape() {
   if (!panelIsRectangular()) return false;
+  // Only a change of mount re-shapes. A flip, a mirror or an automatic
+  // correction also dirties MADCTL, and must leave a card that a landscape
+  // stream left at rotation 0 in the shape it is.
+  static int8_t adopted = -1;
   const bool landscape = localFrameLandscape();
+  if (adopted == (int8_t)landscape) return false;
+  adopted = (int8_t)landscape;
   if (bufLandscape == landscape && pendingLandscape == landscape) return false;
   portENTER_CRITICAL(&drawMux);
   memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
@@ -794,7 +800,9 @@ void serviceRotationRepaint() {
     // The firmware's own screens take their shape from bufA. While one is up,
     // or nothing has been streamed yet, a rotation into or out of landscape
     // on rectangular glass re-shapes bufA so they turn with the glass; a
-    // stream in progress keeps the shape its frames carry.
+    // stream in progress keeps the shape its frames carry. The receive task
+    // can still be writing bands here (survey keeps receiving); the worst a
+    // collision leaves is a torn frame the next keyframe replaces.
     if (wifiSelectorActive || surveyActive || idleActive ||
         statFramesShown == 0) {
       adoptLocalFrameShape();

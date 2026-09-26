@@ -84,14 +84,19 @@ extension PanelManager {
         // Remembered whole, not just the rectangle: Escape has to be able to put
         // back a source that was not a region at all.
         sourceBeforeRegion = panel?.source
-        let existing = panel?.source.region
-        let reusable = existing.flatMap { region -> RegionSpec? in
-            return region.matchesAspect(of: geometry) ? region : nil
-        }
-        // Landscape from the start on rectangular glass mounted at 90 or 270,
-        // where the region's shape is what makes the panel landscape.
+        // Landscape on rectangular glass mounted at 90 or 270, where the
+        // region's shape is what makes the panel landscape. At 0 and 180 a
+        // region the user dragged landscape stays as it is.
         let startLandscape = geometry.width != geometry.height
             && (panel?.rotation ?? 0) % 2 != 0
+        let existing = panel?.source.region
+        let reusable = existing.flatMap { region -> RegionSpec? in
+            guard region.matchesAspect(of: geometry) else { return nil }
+            guard startLandscape, !region.isLandscape,
+                  let screen = DisplayCapture.screen(named: region.display)
+            else { return region }
+            return region.rotated(in: screen.frame.size)
+        }
         guard let region = reusable
             ?? Self.startingRegion(
                 geometry: geometry, landscape: startLandscape) else {

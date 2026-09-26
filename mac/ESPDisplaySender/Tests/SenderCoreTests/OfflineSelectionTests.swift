@@ -403,6 +403,53 @@ final class QuarterTurnRegionTests: XCTestCase {
         XCTAssertEqual(kept.height, 170, accuracy: 0.001)
     }
 
+    /// A rotation set outside this app (serial CFGROT, another Mac) reaches it
+    /// only as a report, and still has to lay the region on its side.
+    func testRectangularReportedQuarterTurnTurnsTheRegion() throws {
+        guard let found = DisplayCapture.preferredScreen() else {
+            throw XCTSkip("no screen available to place a region on")
+        }
+        let screen = (name: found.name, size: found.size)
+        var panel = stick(screen, width: 170, height: 320)
+        panel.rotation = 1
+        let manager = PanelManager(
+            previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
+        manager.followReportedRotation(from: 0, for: "stick")
+        let turned = try XCTUnwrap(manager.panels.first?.source.region)
+        XCTAssertEqual(turned.width, 320, accuracy: 0.001)
+        XCTAssertEqual(turned.height, 170, accuracy: 0.001)
+    }
+
+    /// Just after this app commanded a rotation, a report can still carry the
+    /// old value; following it would turn the region back.
+    func testReportedRotationInsideTheEchoGraceIsIgnored() throws {
+        guard let found = DisplayCapture.preferredScreen() else {
+            throw XCTSkip("no screen available to place a region on")
+        }
+        let screen = (name: found.name, size: found.size)
+        let manager = PanelManager(
+            previewPanels: [stick(screen, width: 320, height: 170)],
+            savedNetworkNames: [], usbSerialPorts: [])
+        manager.commandedRotationAt["stick"] = Date()
+        manager.followReportedRotation(from: 1, for: "stick")
+        let kept = try XCTUnwrap(manager.panels.first?.source.region)
+        XCTAssertEqual(kept.width, 320, accuracy: 0.001)
+    }
+
+    func testSquareReportedRotationLeavesTheRegionAlone() throws {
+        guard let found = DisplayCapture.preferredScreen() else {
+            throw XCTSkip("no screen available to place a region on")
+        }
+        let screen = (name: found.name, size: found.size)
+        var panel = panelWithWideRegion(screen)
+        panel.rotation = 1
+        let manager = PanelManager(
+            previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
+        manager.followReportedRotation(from: 0, for: "cube")
+        let kept = try XCTUnwrap(manager.panels.first?.source.region)
+        XCTAssertEqual(kept.width, 320, accuracy: 0.001)
+    }
+
     func testRectangularHalfTurnKeepsTheRegionShape() throws {
         guard let found = DisplayCapture.preferredScreen() else {
             throw XCTSkip("no screen available to place a region on")

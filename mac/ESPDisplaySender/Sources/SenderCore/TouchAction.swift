@@ -123,10 +123,11 @@ enum TouchAction: Equatable, Sendable {
     /// user's finger moved across whatever image they were looking at — the
     /// directions simply rotate with the panel. And the long/short axis split
     /// this function makes is only a real distinction on rectangular panels,
-    /// which never rotate by a quarter (rotation 1/3 is gated to square glass,
-    /// where both axes are the same length and the split is nominal but
-    /// consistent on both ends). So no rotation parameter is needed, and
-    /// adding one would imply a dependency that does not exist.
+    /// whose 90 and 270 arrive as landscape frames, so the `landscape` flag
+    /// the panel reports already names the frame's shape (on square glass the
+    /// split is nominal but consistent on both ends). So no rotation parameter
+    /// is needed, and adding one would imply a dependency that does not
+    /// exist.
     static func vector(
         of gesture: DeviceProtocol.TouchGesture, landscape: Bool
     ) -> SwipeVector? {

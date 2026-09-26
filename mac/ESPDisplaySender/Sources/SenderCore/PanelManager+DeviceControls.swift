@@ -153,6 +153,28 @@ extension PanelManager {
         rotateRegion(for: serviceName)
     }
 
+    /// Follow a rotation the panel reports that this app did not just ask for:
+    /// one set over serial or from another Mac. On rectangular glass the
+    /// region's shape is what makes 90 and 270 landscape, so a reported change
+    /// of parity sets it exactly as picking the rotation here would. Reports
+    /// inside `rotationEchoGrace` of this app's own command are skipped: the
+    /// panel's periodic info can still carry the old value, and following it
+    /// would turn the region back and forth. Square glass is left alone.
+    func followReportedRotation(from previous: Int?, for serviceName: String) {
+        guard let previous,
+              let next = panels.first(
+                  where: { $0.serviceName == serviceName })?.rotation,
+              previous % 2 != next % 2,
+              let geometry = geometry(of: serviceName),
+              geometry.width != geometry.height
+        else { return }
+        if let commanded = commandedRotationAt[serviceName],
+           Date().timeIntervalSince(commanded) < Self.rotationEchoGrace {
+            return
+        }
+        applyRegionQuarterTurn(from: previous, to: next, for: serviceName)
+    }
+
     func supportsQuarterTurnRotation(_ serviceName: String) -> Bool {
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return false }
@@ -602,6 +624,7 @@ extension PanelManager {
     func setFlip(_ flipped: Bool, for serviceName: String) {
         guard let path = preferredPath(for: .flip, serviceName: serviceName)
         else { return }
+        commandedRotationAt[serviceName] = Date()
         updatePanel(serviceName) { panel in
             panel.flipped = flipped
             panel.rotation = flipped ? 2 : 0
@@ -631,6 +654,7 @@ extension PanelManager {
         guard let path = preferredPath(for: .rotate, serviceName: serviceName)
         else { return }
         let previous = panels.first { $0.serviceName == serviceName }?.rotation
+        commandedRotationAt[serviceName] = Date()
         updatePanel(serviceName) { panel in
             panel.rotation = clamped
             panel.flipped = clamped == 2
