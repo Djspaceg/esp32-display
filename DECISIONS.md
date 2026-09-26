@@ -18,12 +18,13 @@ Streamed C3 frames remain unverified because the board has no Wi-Fi credentials;
 Publish settings: local branch only; no CR or PR, publish, merge, or push. Packages call sites: none touched. Adversarial-review rounds: 3 inherited C3 passes; final independent review pending.
 
 - `reconciled-source-gate.log`: descriptor check, firmware tests, Python tool tests, C3 compile, C6 compile, S3 compile, P4 compile, and Swift tests all passed; Swift executed 603 tests.
-- `reconciled-release.log`: shipping C3, C6, S3, and P4 bundles plus manifest regenerated successfully.
-- `reconciled-app-install.log`: `mac/make-app.sh` passed and installed app build 315.1 without launching it.
+- `add-board-c3-2424s012-release-rebuild.log.md`: clean shipping C3 (1236488), C6 (1260726), S3 (5706934), and P4 (5679733) bundles plus manifest regenerated successfully.
+- `mac/make-app.sh`: passed and installed app build 316.1 without launching it.
+- Firmware version and release notes: unchanged from main; shipping remains 1.5.0 and the existing release-notes prose was retained.
 
 # Evidence
 
-`code-review.md`: preserved C3 and main-audio review records plus reconciliation handoff. `reconciled-source-gate.log`: full source gate. `reconciled-release.log`: shipping release. `reconciled-app-install.log`: installation output.
+`code-review.md`: preserved C3 and main-audio review records plus reconciliation handoff. `add-board-c3-2424s012-source-gate.log.md`: source gate. `add-board-c3-2424s012-release-rebuild.log.md`: shipping release.
 
 # Residuals
 

@@ -93,7 +93,9 @@ carry the resulting source digest.
 
 `reconciled-source-gate.log` records passing descriptor, firmware, Python,
 C3/C6/S3/P4 compile, and Swift lanes. Swift executed 603 tests, retaining the
-audio-suite baseline from main. `reconciled-release.log` records successful
-shipping 1.5.0 C3/C6/S3/P4 bundle and manifest regeneration. The C3 bundle
-changed but was not flashed; no Wi-Fi credentials were written, so streamed
-frames remain unverified.
+audio-suite baseline from main. The clean shipping 1.5.0 rebuild produced C3
+1236488 bytes, C6 1260726 bytes, S3 5706934 bytes, and P4 5679733 bytes; the
+installed app build 316.1 embeds those four artifacts. The C3 bundle changed
+but was not flashed; no Wi-Fi credentials were written, so streamed frames
+remain unverified. The firmware version and release-notes prose are unchanged
+from main.
