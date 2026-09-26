@@ -197,7 +197,9 @@ def bundle_family_keys(requested: Optional[List[str]]) -> List[str]:
     """One current bundle carries exactly one firmware family."""
     selected = requested or []
     if len(selected) != 1 or selected[0] not in FAMILIES:
-        raise Fail("bundle requires exactly one --family: c6, s3, or p4")
+        raise Fail(
+            "bundle requires exactly one --family: %s"
+            % ", ".join(sorted(FAMILIES)))
     return selected
 
 
@@ -549,7 +551,7 @@ class NetworkPort(NamedTuple):
     address: str
     hostname: str
     board: str  # chip-level Arduino board token
-    target: str  # firmware family: c6, s3, or p4
+    target: str  # firmware family: c3, c6, s3, or p4
     profile: str  # runtime physical profile token
     partition: str  # release partition compatibility token
 
@@ -935,11 +937,36 @@ def open_serial(address: str):
     return fd
 
 
+def write_serial(fd, payload: bytes, timeout: float = 5.0) -> None:
+    """Write all of payload to a nonblocking serial descriptor.
+
+    Native USB CDC targets can accept a host write before their receive task has
+    drained the previous USB packet.  Keep each transfer below a full packet
+    and give that task a short chance to run between chunks.
+    """
+    sent = 0
+    deadline = time.monotonic() + timeout
+    while sent < len(payload):
+        try:
+            count = os.write(fd, payload[sent:sent + 16])
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Fail("serial write timed out")
+            select.select([], [fd], [], min(0.2, remaining))
+            continue
+        if count <= 0:
+            raise Fail("serial write made no progress")
+        sent += count
+        if sent < len(payload):
+            time.sleep(0.01)
+
+
 def send_config_line(address: str, line: str, timeout: float) -> str:
     """Write one config line and return the first CFG* reply, or raise on timeout."""
     fd = open_serial(address)
     try:
-        os.write(fd, (line + "\n").encode())
+        write_serial(fd, (line + "\n").encode())
         deadline = time.monotonic() + timeout
         buf = b""
         while time.monotonic() < deadline:
@@ -979,7 +1006,7 @@ class SerialBootstrapTransport:
     def request(self, command: str, timeout: float = 5.0):
         if self.fd is None:
             raise OSError("bootstrap transport is closed")
-        os.write(self.fd, (command + "\n").encode("ascii"))
+        write_serial(self.fd, (command + "\n").encode("ascii"), timeout)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             ready, _, _ = select.select([self.fd], [], [], 0.2)
@@ -2556,7 +2583,7 @@ def validate_release_catalog(
         )
     families = catalog["families"]
     if not isinstance(families, dict) or set(families) != set(FAMILIES):
-        raise Fail("release catalog must list exactly c6, s3, and p4")
+        raise Fail("release catalog must list exactly c3, c6, s3, and p4")
     root = os.path.realpath(output_root)
     required_entry = {
         "latest_version", "artifact", "sha256", "bytes", "chip",
@@ -5051,9 +5078,25 @@ def _verify_partition_payload(family: Family, blob: bytes) -> None:
             "app1": (0x00, 0x11, 0x200000, 0x1F0000),
             "doom_wad": (0x42, 0x06, 0x3FF000, 0x401000),
         }
-    elif family.key == "c6":
+    elif family.key in ("c3", "c6"):
         if any(entry[0] == "doom_wad" for entry in entries):
-            raise Fail("c6 partition table contains an incompatible payload")
+            raise Fail("%s partition table contains an incompatible payload" %
+                       family.key)
+        if family.key == "c3":
+            expected = {
+                "nvs": (0x01, 0x02, 0x009000, 0x005000),
+                "otadata": (0x01, 0x00, 0x00E000, 0x002000),
+                "app0": (0x00, 0x10, 0x010000, 0x1F0000),
+                "app1": (0x00, 0x11, 0x200000, 0x1F0000),
+            }
+            if set(by_label) != set(expected):
+                raise Fail("%s partition labels are %s, expected %s" %
+                           (family.key, ", ".join(sorted(by_label)),
+                            ", ".join(sorted(expected))))
+            for label, want in expected.items():
+                if by_label[label] != want:
+                    raise Fail("%s partition %s is %r, expected %r" %
+                               (family.key, label, by_label[label], want))
         return
     else:
         raise Fail("unrecognised firmware family %s" % family.key)
@@ -5676,7 +5719,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bundle.set_defaults(func=cmd_bundle)
 
     p_release = subs.add_parser(
-        "release", help="build c6, s3, and p4 artifacts with a catalog")
+        "release", help="build c3, c6, s3, and p4 artifacts with a catalog")
     p_release.add_argument(
         "--output-root",
         help="artifact directory (default firmware-dev for build-numbered firmware)")

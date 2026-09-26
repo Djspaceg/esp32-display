@@ -72,6 +72,9 @@ static int infoBarGlyphScale(const char *text, int frameWidth) {
 // Compose the idle card over the (pristine) last frame in bufA and push it.
 // Text position moves on every draw to avoid burn-in.
 void drawIdleScreen() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  return;
+#endif
   int w = bufLandscape ? PANEL_H : PANEL_W;
   int hgt = bufLandscape ? PANEL_W : PANEL_H;
 
@@ -273,6 +276,9 @@ static void drawWifiControl(int width, int height,
 }
 
 void drawWifiSelectorScreen() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  return;
+#endif
   if (!wifiSelectorActive || bufB == nullptr || panel == nullptr) return;
   if (!waitForDmaIdle(200)) return;
 
@@ -377,6 +383,10 @@ void drawWifiSelectorScreen() {
 }
 
 void openWifiSelector() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  Serial.println("wifi selector unavailable on compact C3 framebuffer");
+  return;
+#endif
   wifiSelectorCount = 0;
   const uint16_t mask = validWifiPresetMask();
   const size_t orderedCount = wifipresets::orderedSlots(
@@ -504,6 +514,9 @@ bool handleSurveyTap(int16_t x, int16_t y) {
 // at full brightness, so the panel itself is the meter while it is carried
 // around the room. Redrawn every 500 ms by loop() while surveyActive.
 void drawSurveyScreen() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  return;
+#endif
   if (wifiSelectorActive) return;
   // Entry is user-driven and should be visible immediately. Once surveyActive
   // is set no new stream DMA is queued, so waiting drains only the pass that
@@ -601,6 +614,10 @@ const char *defaultInfoBarText() {
 // else uninterrupted, which is the entire point of this being a bar and not
 // a card.
 void showInfoBar(const char *text) {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  (void)text;
+  return;
+#endif
   if (bufB == nullptr || panel == nullptr) return;
 
   const int w = bufLandscape ? PANEL_H : PANEL_W;
@@ -638,6 +655,10 @@ void showInfoBar(const char *text) {
 // - which is exactly what makes "just redraw bufA's rows" a correct revert
 // rather than a stale snapshot.
 void clearInfoBarIfExpired() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  infoBarUntil = 0;
+  return;
+#endif
   if (infoBarUntil == 0 || infoBarActive()) return;
   infoBarUntil = 0;
   if (bufB == nullptr || panel == nullptr) return;
@@ -667,6 +688,9 @@ void clearInfoBarIfExpired() {
 // its declaration comment), so this is a correct base regardless of which
 // run triggered the call.
 void redrawInfoBarOverRun() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  return;
+#endif
   if (bufB == nullptr || panel == nullptr) return;
   const int w = bufLandscape ? PANEL_H : PANEL_W;
   const int hgt = bufLandscape ? PANEL_W : PANEL_H;
@@ -693,6 +717,11 @@ void redrawInfoBarOverRun() {
 // frame and belongs to the network path, which keeps writing into it throughout.
 // percent < 0 draws no bar, for the states where there is no meaningful figure.
 void drawOtaScreen(const char *headline, int percent) {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  (void)headline;
+  (void)percent;
+  return;
+#endif
   if (bufB == nullptr || panel == nullptr) {
     return;
   }

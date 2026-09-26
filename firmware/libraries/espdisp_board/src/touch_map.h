@@ -97,6 +97,14 @@ static const Calibration CST816_ON_ST7789_240 = {
     /* rawXMirrored */ false, /* rawYMirrored */ false,
     /* rotateClockwise */ true};
 
+/// Starting calibration for the ESP32-2424S012C-Y(B)'s CST816 touch panel.
+/// Corner observations on the physical round glass determine whether either
+/// raw axis needs mirroring.
+static const Calibration CST816_ON_C3_2424S012 = {
+    /* panelShort */ 240, /* panelLong */ 240,
+    /* rawXMirrored */ false, /* rawYMirrored */ false,
+    /* rotateClockwise */ true};
+
 /// Starting calibration for the 720x720 GT911 on the Waveshare 4B. The
 /// supported vendor path uses raw rotation-0 coordinates without swapping or
 /// mirroring; physical corner validation may refine the carrier profile.

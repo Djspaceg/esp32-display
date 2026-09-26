@@ -450,7 +450,9 @@ static bool selectPanelTypes(const PanelValues &values) {
     candidatePanel.profile = board::PanelProfile::St77916_360x360;
   } else if (strcmp(values.driver, "gc9107") == 0) {
     candidatePanel.driver = board::PanelDriver::Gc9107;
-    candidatePanel.profile = board::PanelProfile::Gc9107_128x128;
+    candidatePanel.profile = values.width == 128
+        ? board::PanelProfile::Gc9107_128x128
+        : board::PanelProfile::Gc9107_240x240;
   } else if (strcmp(values.driver, "st7703") == 0) {
     candidatePanel.driver = board::PanelDriver::St7703;
     candidatePanel.profile = board::PanelProfile::St7703_720x720;
@@ -465,6 +467,8 @@ static bool selectPanelTypes(const PanelValues &values) {
          candidatePanel.driver == board::PanelDriver::Co5300 ||
          candidatePanel.driver == board::PanelDriver::St77916 ||
          candidatePanel.driver == board::PanelDriver::Gc9107;
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+  return candidatePanel.driver == board::PanelDriver::Gc9107;
 #else
   return candidatePanel.driver == board::PanelDriver::St7789 ||
          candidatePanel.driver == board::PanelDriver::Jd9853;
@@ -550,6 +554,8 @@ static const board::PlatformConfig *currentPlatform() {
   return &board::PLATFORM_ESP32_P4;
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
   return &board::PLATFORM_ESP32_S3;
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+  return &board::PLATFORM_ESP32_C3;
 #else
   return &board::PLATFORM_ESP32_C6;
 #endif

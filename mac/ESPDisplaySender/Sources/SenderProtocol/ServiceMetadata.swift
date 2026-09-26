@@ -25,7 +25,7 @@ public enum AudioAdvertisement: Hashable, Sendable {
 /// | `proto` | `%u` | `deviceproto::FRAME_PROTOCOL_VERSION` |
 /// | `caps` | `%08lx` | capability bits, lowercase hex |
 /// | `chip` | `CONFIG_IDF_TARGET` | MCU family: `esp32c6`, `esp32s3`, or `unknown` |
-/// | `target` | release family token | `c6`, `s3`, or `p4` |
+/// | `target` | release family token | `c3`, `c6`, `s3`, or `p4` |
 /// | `profile` | runtime hardware token | selected carrier/panel profile |
 /// | `partition` | compatibility token | installed flash layout |
 /// | `audio-port` | `%u` | dedicated EAUD UDP port |
@@ -61,7 +61,7 @@ public struct ServiceMetadata: Hashable, Sendable {
     public let firmwareVersion: String?
     /// `chip`. The IDF chip token, such as `esp32c6` or `esp32s3`.
     public let chip: String?
-    /// `target`. The firmware release family (`c6`, `s3`, or `p4`).
+    /// `target`. The firmware release family (`c3`, `c6`, `s3`, or `p4`).
     public let target: String?
     /// `profile`. Runtime physical panel/controller profile.
     public let profile: String?

@@ -13,9 +13,13 @@
 
 #include "band_protocol.h"
 
-// Where the frame buffers live is a per-chip fact (PSRAM on the S3, internal
-// DMA-capable SRAM on the C6); setup() allocates them with these caps.
+// bufB reaches the panel and therefore needs the draw capability; bufA only
+// receives packets and is copied into bufB. C3 uses its non-DMA-capable SRAM
+// for bufA so both 240x240 frames fit without PSRAM.
 extern const uint32_t FRAME_BUF_CAPS;
+extern const uint32_t FRAME_SOURCE_BUF_CAPS;
+size_t frameSourceBytes();
+size_t frameDrawBytes();
 extern uint8_t *bufA;
 extern uint8_t *bufB;
 extern bool bufLandscape;  // orientation of bufA's content

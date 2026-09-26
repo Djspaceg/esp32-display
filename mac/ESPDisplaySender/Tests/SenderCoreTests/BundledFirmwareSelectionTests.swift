@@ -104,6 +104,11 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                         family: family, chip: entry.chip,
                         profile: nil, partition: nil)
                     usb = complete
+                case "c3":
+                    live = .init(
+                        family: family, chip: entry.chip,
+                        profile: nil, partition: nil)
+                    usb = complete
                 case "p4":
                     live = .init(
                         family: nil, chip: nil, profile: nil, partition: nil)

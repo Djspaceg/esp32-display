@@ -195,10 +195,14 @@ void serviceTouch() {
     return;
   }
   if (event.gesture == touchgesture::Gesture::Tap && idleActive) {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+    Serial.println("touch: signal survey unavailable on compact C3 framebuffer");
+#else
     surveyActive = true;
     Serial.println("touch: signal survey on");
     drawSurveyScreen();
     return;
+#endif
   }
   if (event.gesture == touchgesture::Gesture::Tap) {
     showInfoBar(defaultInfoBarText());

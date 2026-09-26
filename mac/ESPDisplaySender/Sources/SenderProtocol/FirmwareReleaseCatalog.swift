@@ -512,7 +512,7 @@ public enum FirmwareReleaseCatalogError: Error, LocalizedError, Equatable {
         case .unsupportedSchema(let schema): return "Unsupported release catalog schema \(schema)."
         case .invalidKeys(let owner): return "Release catalog has invalid keys at \(owner)."
         case .invalidField(let field): return "Release catalog has an invalid \(field) field."
-        case .incompleteFamilies: return "Release catalog must contain exactly c6, s3, and p4."
+        case .incompleteFamilies: return "Release catalog must contain exactly c3, c6, s3, and p4."
         case .invalidEntry(let family): return "Release catalog entry \(family) is not an object."
         case .invalidVersion(let family, let value): return "\(family) has invalid version \(value)."
         case .invalidArtifact(let family): return "\(family) has a non-canonical artifact path."

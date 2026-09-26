@@ -11,6 +11,7 @@ enum class Variant : uint8_t {
   TouchSt7789 = 6,
   P4_4B = 7,
   LcdSt7789_130 = 8,
+  C3_2424S012 = 9,
 };
 
 constexpr bool supportsDoom(Variant variant) {

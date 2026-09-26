@@ -191,8 +191,13 @@ def preprocess_board_config(*selectors, target="CONFIG_IDF_TARGET_ESP32P4"):
 def _historical_exact_target_board_table():
     check_equal(
         sorted(espdisp.BOARDS),
-        ["c6", "p4-4b", "s3-085", "s3-154", "s3-175", "s3-185"],
+        ["c3", "c6", "p4-4b", "s3-085", "s3-154", "s3-175", "s3-185"],
         "only canonical exact targets are board-table keys")
+    check_equal(
+        espdisp.BOARDS["c3"].fqbn,
+        "esp32:esp32:esp32c3:CDCOnBoot=cdc,FlashSize=4M,PartitionScheme=custom",
+        "C3 FQBN",
+    )
     check_equal(
         espdisp.BOARDS["c6"].fqbn,
         "esp32:esp32:esp32c6:CDCOnBoot=cdc,FlashSize=8M",
@@ -301,7 +306,10 @@ def _historical_exact_target_board_table():
     check_equal(
         espdisp.board_key_for_fqbn("esp32:esp32:esp32s3:PSRAM=opi"), None,
         "an S3 FQBN cannot identify the attached display")
-    check_equal(espdisp.board_key_for_fqbn("esp32:esp32:esp32c3"), None, "unknown chip")
+    check_equal(
+        espdisp.board_key_for_fqbn("esp32:esp32:esp32c3"), "c3",
+        "C3 FQBN is a supported exact target",
+    )
     check_equal(espdisp.board_key_for_fqbn("nonsense"), None, "malformed FQBN")
     check_equal(espdisp.board_key_for_chip("esp32c6"), "c6", "unique chip -> target")
     check_equal(
@@ -320,7 +328,7 @@ def _historical_exact_target_argparse():
     parser = espdisp.build_parser()
     check_equal(
         espdisp.board_choices(),
-        ["c6", "p4-4b", "s3", "s3-085", "s3-154", "s3-175", "s3-185"],
+        ["c3", "c6", "p4-4b", "s3", "s3-085", "s3-154", "s3-175", "s3-185"],
         "argparse accepts canonical targets plus the compatibility alias")
     for command in ("compile", "flash"):
         args = parser.parse_args([command, "--board", "s3"])
@@ -339,7 +347,7 @@ def _historical_exact_target_argparse():
     check_equal(default_bundle.board, None, "bundle selection remains optional")
     check_equal(
         espdisp.bundle_board_keys(default_bundle.board),
-        ["c6", "p4-4b", "s3-085", "s3-154", "s3-175", "s3-185"],
+        ["c3", "c6", "p4-4b", "s3-085", "s3-154", "s3-175", "s3-185"],
         "default bundle builds every canonical target exactly once")
     info = parser.parse_args([
         "bundle-info", "--require-all-targets", "/tmp/firmware.espdispfw",
@@ -4029,14 +4037,14 @@ def test_board_descriptor_validator():
         },
         "schema requires every descriptor section",
     )
-    check_equal(len(descriptors), 8, "all current boards have descriptors")
+    check_equal(len(descriptors), 9, "all current boards have descriptors")
     check_equal(
         sorted(
             descriptor["identity"]["profile"]
             for descriptor in descriptors
             if descriptor["migration"]["firmware_config"] == "generated"
         ),
-        ["co5300", "jd9853", "st7703-4b"],
+        ["co5300", "gc9a01a-240", "jd9853", "st7703-4b"],
         "one board per family uses generated firmware config",
     )
     check_accepts(
@@ -4336,7 +4344,8 @@ def test_board_descriptor_validator():
     )
 
     capacity_conflict = copy.deepcopy(descriptors[0])
-    capacity_conflict["capacity"]["minimum_flash_bytes"] = 4 * 1024 * 1024
+    capacity_conflict["capacity"]["minimum_flash_bytes"] = (
+        capacity_conflict["family"]["common_layout_bytes"] - 1)
     check_descriptor_fails(
         [capacity_conflict],
         "capacity conflict",
@@ -4357,10 +4366,12 @@ def test_board_descriptor_validator():
 
 
 def test_universal_family_catalog_and_cli():
-    check_equal(sorted(espdisp.FAMILIES), ["c6", "p4", "s3"],
-                "release catalog exposes exactly three families")
-    check_equal(espdisp.family_choices(), ["c6", "p4", "s3"],
+    check_equal(sorted(espdisp.FAMILIES), ["c3", "c6", "p4", "s3"],
+                "release catalog exposes exactly four families")
+    check_equal(espdisp.family_choices(), ["c3", "c6", "p4", "s3"],
                 "CLI family choices contain no profile artifact names")
+    check_equal(espdisp.FAMILIES["c3"].profiles, ("gc9a01a-240",),
+                "C3 maps its round-panel profile")
     check_equal(espdisp.FAMILIES["c6"].profiles, ("st7789", "jd9853"),
                 "C6 maps both runtime profiles")
     check_equal(
@@ -4369,6 +4380,8 @@ def test_universal_family_catalog_and_cli():
         "S3 maps all runtime profiles into one family")
     check_equal(espdisp.FAMILIES["p4"].profiles, ("st7703-4b",),
                 "P4 advertises its exact physical profile")
+    check(not espdisp.FAMILIES["c3"].requires_doom_wad,
+          "C3 explicitly prohibits the Doom WAD payload")
     check(not espdisp.FAMILIES["c6"].requires_doom_wad,
           "C6 explicitly prohibits the Doom WAD payload")
     check(espdisp.FAMILIES["s3"].requires_doom_wad,
@@ -4396,6 +4409,10 @@ def test_universal_family_catalog_and_cli():
           "chip platforms contain no carrier selector or partition source")
     check_equal(espdisp.FAMILIES["s3"].partition_csv, "partitions_s3.csv",
                 "S3 uses the 8 MiB dual-OTA Doom partition layout")
+    check_equal(espdisp.FAMILIES["c3"].partition_csv, "partitions_c3.csv",
+                "C3 uses its 4 MiB dual-OTA partition layout")
+    check_equal(espdisp.FAMILIES["c3"].extra_flags, (),
+                "C3 has no Doom runtime compile flag")
     check_equal(espdisp.FAMILIES["s3"].extra_flags, ("-DESPDISP_DOOM_RUNTIME",),
                 "canonical S3 links the runtime-gated Doom easter egg")
     check_equal(espdisp.FAMILIES["s3"].extra_library_dirs, ("firmware",),
@@ -4405,6 +4422,7 @@ def test_universal_family_catalog_and_cli():
                 "P4 retains its carrier selector and links the Doom runtime")
     check_equal(espdisp.FAMILIES["p4"].extra_library_dirs, ("firmware",),
                 "canonical P4 includes the Doom library path")
+    check_equal(espdisp.board_key_for_chip("esp32c3"), "c3", "C3 chip to family")
     check_equal(espdisp.board_key_for_chip("esp32c6"), "c6", "C6 chip to family")
     check_equal(espdisp.board_key_for_chip("esp32s3"), "s3", "S3 chip to family")
     check_equal(espdisp.board_key_for_chip("esp32p4"), "p4", "P4 chip to family")
@@ -5017,7 +5035,7 @@ def test_release_catalog_contract():
     bad = json.loads(json.dumps(catalog))
     del bad["families"]["p4"]
     check_fails(lambda: espdisp.validate_release_catalog(bad, "/tmp/releases", False),
-                "exactly c6, s3, and p4", "missing family")
+                "exactly c3, c6, s3, and p4", "missing family")
     bad = json.loads(json.dumps(catalog))
     bad["families"]["s3"]["artifact"] = "../escape.espdispfw"
     check_fails(lambda: espdisp.validate_release_catalog(bad, "/tmp/releases", False),
@@ -5171,7 +5189,8 @@ def test_release_writes_only_bare_shipping_bundles():
 
         check_equal(
             [os.path.basename(call.output) for call in bundle_calls],
-            ["espdisp-c6-1.5.0.espdispfw",
+            ["espdisp-c3-1.5.0.espdispfw",
+             "espdisp-c6-1.5.0.espdispfw",
              "espdisp-s3-1.5.0.espdispfw",
              "espdisp-p4-1.5.0.espdispfw"],
             "release builds only bare-version artifact names")
@@ -5230,7 +5249,8 @@ def test_release_defaults_to_build_numbered_dev_bundles():
             "default release resolves through the development output root")
         check_equal(
             [os.path.basename(call.output) for call in bundle_calls],
-            ["espdisp-c6-1.5.0+999.gabcdef0.espdispfw",
+            ["espdisp-c3-1.5.0+999.gabcdef0.espdispfw",
+             "espdisp-c6-1.5.0+999.gabcdef0.espdispfw",
              "espdisp-s3-1.5.0+999.gabcdef0.espdispfw",
              "espdisp-p4-1.5.0+999.gabcdef0.espdispfw"],
             "default release keeps build identity in development filenames")
@@ -5369,7 +5389,8 @@ def test_release_regenerates_only_with_exact_version_confirmation():
 
         check_equal(
             [os.path.basename(call.output) for call in bundle_calls],
-            ["espdisp-c6-1.5.0.espdispfw",
+            ["espdisp-c3-1.5.0.espdispfw",
+             "espdisp-c6-1.5.0.espdispfw",
              "espdisp-s3-1.5.0.espdispfw",
              "espdisp-p4-1.5.0.espdispfw"],
             "same-version regeneration keeps bare shipping names")
@@ -6448,6 +6469,22 @@ def bootstrap_success_answers():
 
 
 def test_bootstrap_solvers_and_derivations():
+    chunks = []
+    write_sizes = iter([3, 2, 4])
+
+    def partial_write(_fd, data):
+        size = next(write_sizes)
+        chunks.append(bytes(data[:size]))
+        return size
+
+    with unittest.mock.patch.object(
+            espdisp.os, "write", side_effect=partial_write):
+        espdisp.write_serial(123, b"abcdefghi")
+    check_equal(
+        b"".join(chunks), b"abcdefghi",
+        "serial writer completes partial native-USB writes",
+    )
+
     for key in ("s3-touch-lcd-154", "s3-touch-amoled-175c"):
         descriptor = committed_descriptor(key)
         solved = espdisp.solve_imu_mapping(

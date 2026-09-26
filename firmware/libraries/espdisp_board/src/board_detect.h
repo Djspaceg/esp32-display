@@ -109,6 +109,20 @@ inline board::Variant probeC6(bool verbose = true,
   return result.variant;
 }
 
+inline board::Variant probeC3(bool verbose = true,
+                              int *outFoundCount = nullptr) {
+  const board::DetectionResult result = board::detectFromEvidence(
+      board::Platform::Esp32C3, ESP.getFlashChipSize(), nullptr, 0);
+  if (outFoundCount != nullptr) {
+    *outFoundCount = result.matchedCandidates;
+  }
+  if (verbose) {
+    Serial.printf("board: C3 detection -> %s\n",
+                  board::configFor(result.variant).name);
+  }
+  return result.variant;
+}
+
 inline board::Variant probeS3(bool verbose = true,
                               int *outCandidateCount = nullptr) {
   const uint32_t flashBytes = ESP.getFlashChipSize();
@@ -155,6 +169,8 @@ inline board::Variant probe(bool verbose = true,
   return result.variant;
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
   return probeS3(verbose, outFoundCount);
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+  return probeC3(verbose, outFoundCount);
 #else
   return probeC6(verbose, outFoundCount);
 #endif

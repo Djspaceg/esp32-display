@@ -36,8 +36,69 @@ const uint32_t FRAME_BUF_CAPS =
     board::COMPILED_PLATFORM.usePsramFrameBuffers
         ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
         : MALLOC_CAP_DMA;
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+const uint32_t FRAME_SOURCE_BUF_CAPS = MALLOC_CAP_8BIT;
+#else
+const uint32_t FRAME_SOURCE_BUF_CAPS = FRAME_BUF_CAPS;
+#endif
 uint8_t *bufA = nullptr;
 uint8_t *bufB = nullptr;
+
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+static uint16_t c3RowStart[240];
+static uint16_t c3RowPixels[240];
+static size_t c3RowOffset[241];
+static size_t c3FrameBytes = 0;
+
+static void configureC3CircleStorage() {
+  size_t offset = 0;
+  for (int y = 0; y < 240; ++y) {
+    int first = 0;
+    int last = 239;
+    while ((2 * first - 239) * (2 * first - 239) +
+               (2 * y - 239) * (2 * y - 239) >
+           240 * 240) {
+      ++first;
+    }
+    while ((2 * last - 239) * (2 * last - 239) +
+               (2 * y - 239) * (2 * y - 239) >
+           240 * 240) {
+      --last;
+    }
+    c3RowStart[y] = (uint16_t)first;
+    c3RowPixels[y] = (uint16_t)(last - first + 1);
+    c3RowOffset[y] = offset;
+    offset += (size_t)c3RowPixels[y] * 2;
+  }
+  c3RowOffset[240] = offset;
+  c3FrameBytes = offset;
+}
+
+static void storeC3Band(const uint8_t *square, int y0, int rows) {
+  for (int row = 0; row < rows; ++row) {
+    const int y = y0 + row;
+    const size_t bytes = (size_t)c3RowPixels[y] * 2;
+    memcpy(bufA + c3RowOffset[y],
+           square + ((size_t)row * 240 + c3RowStart[y]) * 2, bytes);
+  }
+}
+#endif
+
+size_t frameSourceBytes() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  return c3FrameBytes;
+#else
+  return FRAME_BYTES;
+#endif
+}
+
+size_t frameDrawBytes() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  return 240 * 2;
+#else
+  return FRAME_BYTES;
+#endif
+}
 
 // Runtime profile resolution assigns protocol geometry before networking starts.
 static Reassembler *reassembler = nullptr;  // tested logic: band_protocol.h
@@ -125,6 +186,9 @@ static uint32_t tdGateBlocked = 0;  // passes refused because DMA was busy
 #endif
 
 bool initializeFramePipeline() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  configureC3CircleStorage();
+#endif
   if (reassembler != nullptr) return false;
   const largetileproto::Geometry largeGeometry = {
       PANEL_GEOMETRY.width, PANEL_GEOMETRY.height};
@@ -202,6 +266,19 @@ bool applyBandPayload(const bandproto::Header &h, bool compressed,
     bufLandscape = h.landscape;
   }
 
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  uint8_t square[bandproto::MAX_PACKET_BYTES - bandproto::HEADER_BYTES];
+  if (compressed) {
+    if (!rle565::decode(payload, payloadLen, square, rawLen)) {
+      statBadLen = statBadLen + 1;
+      return false;
+    }
+  } else {
+    memcpy(square, payload, rawLen);
+  }
+  storeC3Band(square, h.bandIndex * PANEL_GEOMETRY.rowsPerBand(h.landscape),
+              (int)(rawLen / PANEL_GEOMETRY.rowBytes(h.landscape)));
+#else
   uint8_t *dst = bufA + PANEL_GEOMETRY.bandOffset(h.bandIndex, h.landscape);
   if (compressed) {
     if (!rle565::decode(payload, payloadLen, dst, rawLen)) {
@@ -211,6 +288,7 @@ bool applyBandPayload(const bandproto::Header &h, bool compressed,
   } else {
     memcpy(dst, payload, rawLen);
   }
+#endif
   portENTER_CRITICAL(&drawMux);
   pendingDrawBitmap[h.bandIndex >> 3] |= 1 << (h.bandIndex & 7);
   portEXIT_CRITICAL(&drawMux);
@@ -635,6 +713,25 @@ static void serviceLargeTileDraw() {
 // Fill the whole panel with one RGB565 color (used for status feedback).
 // Draws from staging (bufB) - bufA belongs to the network path.
 void fillPanel(uint16_t rgb565) {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  const uint8_t hi = rgb565 >> 8, lo = rgb565 & 0xFF;
+  for (int y = 0; y < PANEL_H; ++y) {
+    const int x0 = c3RowStart[y];
+    const int x1 = x0 + c3RowPixels[y];
+    const size_t bytes = (size_t)c3RowPixels[y] * 2;
+    for (size_t i = 0; i < bytes; i += 2) {
+      bufB[i] = hi;
+      bufB[i + 1] = lo;
+    }
+    if (queuePanelBitmap(panel, *bcfg, x0, y, x1, y + 1, bufB) != ESP_OK) {
+      statDrawErrors++;
+    }
+    if (!waitForDmaIdle(500)) {
+      statDrawErrors++;
+      break;
+    }
+  }
+#else
   uint8_t hi = rgb565 >> 8, lo = rgb565 & 0xFF;
   for (size_t i = 0; i < FRAME_BYTES; i += 2) {
     bufB[i] = hi;
@@ -644,6 +741,7 @@ void fillPanel(uint16_t rgb565) {
     statDrawErrors = statDrawErrors + 1;
   }
   waitForDmaIdle(500);
+#endif
 }
 // Reapply a pending user/motion rotation and repaint the whole screen from
 // what is already cached. Body and reasoning moved verbatim from loop().
@@ -811,6 +909,34 @@ void serviceStreamDraw() {
     // the end marker would overshoot the frame), so a run that reaches the
     // end sizes itself against the frame instead.
     bool drewAny = false;
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+    bool c3DmaTimedOut = false;
+    for (uint16_t band = 0; band < totalBands; ++band) {
+      if ((bands[band >> 3] & (1 << (band & 7))) == 0) continue;
+      const int y0 = band * bandRows;
+      const int y1 = min(frameRows, y0 + bandRows);
+      for (int y = y0; y < y1; ++y) {
+        const int x0 = c3RowStart[y];
+        const int x1 = x0 + c3RowPixels[y];
+        const size_t bytes = (size_t)c3RowPixels[y] * 2;
+        portENTER_CRITICAL(&drawMux);
+        memcpy(bufB, bufA + c3RowOffset[y], bytes);
+        portEXIT_CRITICAL(&drawMux);
+        if (queuePanelBitmap(panel, *bcfg, x0, y, x1, y + 1, bufB) != ESP_OK) {
+          statDrawErrors++;
+        } else if (waitForDmaIdle(500)) {
+          drewAny = true;
+        } else {
+          portENTER_CRITICAL(&drawMux);
+          pendingDrawBitmap[band >> 3] |= 1 << (band & 7);
+          portEXIT_CRITICAL(&drawMux);
+          c3DmaTimedOut = true;
+          break;
+        }
+      }
+      if (c3DmaTimedOut) break;
+    }
+#else
     forEachRun(bands, totalBands, [&](int runStart, int runEnd) {
       size_t off = PANEL_GEOMETRY.bandOffset((uint16_t)runStart, landscape);
       size_t bytes =
@@ -840,6 +966,7 @@ void serviceStreamDraw() {
         }
       }
     });
+#endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
     // Tile runs (CAP_TILE_STREAM): merged horizontal rects, each one strided

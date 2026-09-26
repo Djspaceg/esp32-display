@@ -17,7 +17,7 @@ build, USB onboarding, OTA updates, and canonical precompiled releases.
 
 ## Firmware families
 
-Release families are exactly `c6`, `s3`, and `p4`. Every family is universal
+Release families are exactly `c3`, `c6`, `s3`, and `p4`. Every family is universal
 within its currently supported chip-family profiles. Product names, panel names,
 and internal build-target keys are not release names.
 
@@ -112,8 +112,8 @@ recovery override. `CFGBOARD auto` clears the override.
 Current firmware reports independent identity evidence:
 
 ```text
-target=c6|s3|p4
-chip=esp32c6|esp32s3|esp32p4
+target=c3|c6|s3|p4
+chip=esp32c3|esp32c6|esp32s3|esp32p4
 profile=<runtime profile>
 partition=<compatibility token>
 ```
@@ -265,7 +265,7 @@ mac/make-app.sh
 ```
 
 The Xcode build phase validates `firmware-releases/manifest.json` and copies
-exactly its latest c6/s3/p4 artifacts directly into the app before signing. No
+exactly its latest c3/c6/s3/p4 artifacts directly into the app before signing. No
 second repository copy exists under `mac/`.
 
 A development fallback can build without firmware resources:

@@ -367,13 +367,20 @@ void setup() {
     Serial.println("FATAL: could not initialize runtime frame geometry");
     while (true) delay(1000);
   }
-  bufA = (uint8_t *)heap_caps_malloc(FRAME_BYTES, FRAME_BUF_CAPS);
-  bufB = (uint8_t *)heap_caps_malloc(FRAME_BYTES, FRAME_BUF_CAPS);
+  bufB = (uint8_t *)heap_caps_malloc(frameDrawBytes(), FRAME_BUF_CAPS);
+  bufA = (uint8_t *)heap_caps_malloc(frameSourceBytes(), FRAME_SOURCE_BUF_CAPS);
   if (!bufA || !bufB) {
-    Serial.println("FATAL: frame buffer alloc failed");
+    Serial.printf(
+        "FATAL: frame buffer alloc failed frame=%u source_caps=0x%lx "
+        "draw_caps=0x%lx free=%u largest_source=%u largest_draw=%u\n",
+        (unsigned)frameSourceBytes(), (unsigned long)FRAME_SOURCE_BUF_CAPS,
+        (unsigned long)FRAME_BUF_CAPS,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_largest_free_block(FRAME_SOURCE_BUF_CAPS),
+        (unsigned)heap_caps_get_largest_free_block(FRAME_BUF_CAPS));
     while (true) delay(1000);
   }
-  memset(bufA, 0, FRAME_BYTES);
+  memset(bufA, 0, frameSourceBytes());
   Serial.printf("buffers ok, free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
   Serial.printf("board: %s (family=%s profile=%s)\n", bcfg->name,
                 board::targetToken(boardVariant),
@@ -436,6 +443,8 @@ void setup() {
       ? touchmap::CST9217_ON_CO5300
       : bcfg->variant == board::Variant::LcdSt77916
           ? touchmap::CST816_ON_ST77916
+          : bcfg->variant == board::Variant::C3_2424S012
+              ? touchmap::CST816_ON_C3_2424S012
           : bcfg->variant == board::Variant::TouchSt7789
               ? touchmap::CST816_ON_ST7789_240
               : touchmap::AXS5106L_ON_C6;

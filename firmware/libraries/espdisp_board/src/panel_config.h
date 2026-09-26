@@ -23,6 +23,7 @@ enum class PanelProfile : uint8_t {
   Co5300_466x466,
   St77916_360x360,
   Gc9107_128x128,
+  Gc9107_240x240,
   St7789_240x240,
   St7703_720x720,
   St7789V2_240x240,

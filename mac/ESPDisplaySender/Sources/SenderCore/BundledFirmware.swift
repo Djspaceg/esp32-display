@@ -1,7 +1,7 @@
 import Foundation
 import SenderProtocol
 
-/// The canonical c6, s3, and p4 firmware resources shipped inside the app.
+/// The canonical c3, c6, s3, and p4 firmware resources shipped inside the app.
 enum BundledFirmware {
     static let catalogResourceName = "manifest"
 
@@ -63,7 +63,7 @@ enum BundledFirmware {
             }
         }
 
-        /// The canonical family target (`c6`/`s3`/`p4`) the resolver settled on.
+        /// The canonical family target (`c3`/`c6`/`s3`/`p4`) the resolver settled on.
         /// Because every bundled artifact serves exactly its own family, this is
         /// also the exact target for image, payload, and flash-plan lookups.
         var canonicalTarget: String { selection.catalogEntry.family }

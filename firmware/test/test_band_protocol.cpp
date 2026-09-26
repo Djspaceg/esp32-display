@@ -2072,6 +2072,15 @@ int main() {
     CHECK(c6Plan.probes[0].resetReleaseWaitMs == 100);
     CHECK(c6Plan.probes[0].release == ProbeRelease::OnSuccessNoAck);
 
+    const auto &c3Plan =
+        board::detectionPlanForPlatform(board::Platform::Esp32C3);
+    CHECK(c3Plan.resolution == ResolutionPolicy::ExactlyOne);
+    CHECK(c3Plan.probeCount == 0);
+    const auto c3Detected = board::detectFromEvidence(
+        board::Platform::Esp32C3, 4u * 1024u * 1024u, nullptr, 0);
+    CHECK(c3Detected.variant == Variant::C3_2424S012);
+    CHECK(c3Detected.matchedCandidates == 1);
+
     ProbeEvidence c6Evidence[] = {{ProbeStatus::Started, 1}};
     auto detected = board::detectFromEvidence(
         board::Platform::Esp32C6, 8u * 1024u * 1024u, c6Evidence, 1);
@@ -4179,7 +4188,8 @@ int main() {
   // offered for a panel.
   //
   // Every literal below is written out by hand from tools/espdisp.py BOARDS
-  // (chip="esp32c6", chip="esp32s3") rather than taken from the header, for the
+  // (chip="esp32c3", chip="esp32c6", chip="esp32s3") rather than taken from
+  // the header, for the
   // same reason firmware/test and Tests/SenderProtocolTests assert the same band
   // bytes independently: the CLI and the Swift app cannot be recompiled from
   // here, so a token that drifts has to fail a test rather than silently agree
@@ -4204,6 +4214,7 @@ int main() {
     // of here. If a stray sdkconfig.h ever landed on the host include path these
     // fail first, which is a much clearer report than the token assertion above.
     CHECK(chipidentity::buildIdfTarget() == nullptr);
+    CHECK(!chipidentity::buildTargetsEsp32C3());
     CHECK(!chipidentity::buildTargetsEsp32C6());
     CHECK(!chipidentity::buildTargetsEsp32S3());
 
@@ -4211,6 +4222,8 @@ int main() {
     // disk for core 3.3.11: CONFIG_IDF_TARGET is "esp32c6" at
     // esp32c6-libs/3.3.11/qio_qspi/include/sdkconfig.h:429 and "esp32s3" at
     // esp32s3-libs/3.3.11/*/include/sdkconfig.h:394.
+    CHECK(strcmp(chipidentity::selectToken("esp32c3", false, false),
+                 "esp32c3") == 0);
     CHECK(strcmp(chipidentity::selectToken("esp32c6", false, false),
                  "esp32c6") == 0);
     CHECK(strcmp(chipidentity::selectToken("esp32s3", false, false),
@@ -4225,6 +4238,8 @@ int main() {
     // per-chip flag is not. Asserted in both directions: a C6 build must not
     // answer with the S3 token, which is the mistake that would put an S3 image
     // on a C6 panel.
+    CHECK(strcmp(chipidentity::selectToken(nullptr, false, false, false, true),
+                 "esp32c3") == 0);
     CHECK(strcmp(chipidentity::selectToken(nullptr, true, false), "esp32c6") ==
           0);
     CHECK(strcmp(chipidentity::selectToken(nullptr, true, false), "esp32s3") !=
@@ -4272,6 +4287,7 @@ int main() {
     // manifest. This is the assertion that fails if someone renames a token to
     // something tidier - "c6", say - which would compile, advertise, and match
     // nothing.
+    CHECK(strcmp(chipidentity::TOKEN_ESP32C3, "esp32c3") == 0);
     CHECK(strcmp(chipidentity::TOKEN_ESP32C6, "esp32c6") == 0);
     CHECK(strcmp(chipidentity::TOKEN_ESP32S3, "esp32s3") == 0);
     CHECK(strcmp(chipidentity::TOKEN_UNKNOWN, "unknown") == 0);
@@ -4292,6 +4308,10 @@ int main() {
     static_assert(chipidentity::sameToken("esp32c6",
                                           chipidentity::TOKEN_ESP32C6),
                   "sameToken must be usable in a constant expression");
+    static_assert(chipidentity::sameToken(
+                      chipidentity::selectToken(nullptr, false, false, false, true),
+                      "esp32c3"),
+                  "C3 fallback token must be usable in a constant expression");
     static_assert(chipidentity::sameToken(
                       chipidentity::selectToken(nullptr, false, true),
                       "esp32s3"),
@@ -5384,6 +5404,24 @@ int main() {
 
   // --- platform/panel/carrier composition for P4 -------------------------
   {
+    const board::Config &c3 = board::configFor(board::Variant::C3_2424S012);
+    CHECK(c3.platform == &board::PLATFORM_ESP32_C3);
+    CHECK(c3.panel == &board::PANEL_GC9107_240X240);
+    CHECK(c3.platform->wifi == board::WifiTopology::Native);
+    CHECK(c3.platform->identity == board::IdentitySource::WifiStationMac);
+    CHECK(!c3.platform->usePsramFrameBuffers);
+    CHECK(!c3.platform->useRawLwipReceiveTask);
+    CHECK(c3.panel->roundDisplay && c3.panel->width == 240 &&
+          c3.panel->height == 240);
+    CHECK(c3.pinSclk == 6 && c3.pinMosi == 7 && c3.pinCs == 10 &&
+          c3.pinDc == 2 && c3.pinBl == 3);
+    CHECK(c3.pinBootButton == board::NO_PIN);
+    CHECK(c3.hasTouch() && c3.touch == board::TouchController::Cst816 &&
+          c3.pinTouchSda == 4 && c3.pinTouchScl == 5 &&
+          c3.pinTouchRst == 1 && c3.pinTouchInt == 0);
+    CHECK(strcmp(board::variantToken(c3.variant), "gc9a01a-240") == 0);
+    CHECK(strcmp(board::targetToken(c3.variant), "c3") == 0);
+
     const board::Config &p4 = board::configFor(board::Variant::P4_4B);
     CHECK(p4.platform == &board::PLATFORM_ESP32_P4);
     CHECK(p4.panel == &board::PANEL_ST7703_720X720);
@@ -5404,8 +5442,8 @@ int main() {
     CHECK(strcmp(board::targetToken(p4.variant), "p4") == 0);
     CHECK(strcmp(board::PLATFORM_ESP32_P4.chipToken,
                  p4.platform->chipToken) == 0);
-    // Doom ships on every board that can run it, so the only boards without it
-    // are the C6 pair, which cannot. Any S3 or P4 variant asserting false here
+    // Doom ships on every board that can run it. The single-core C3 and the
+    // C6 pair deliberately omit it; any S3 or P4 variant asserting false here
     // means a descriptor lost its capability flag.
     CHECK(board::supportsDoom(board::Variant::P4_4B));
     CHECK(board::supportsDoom(board::Variant::AmoledCo5300));
@@ -5413,6 +5451,7 @@ int main() {
     CHECK(board::supportsDoom(board::Variant::LcdSt77916));
     CHECK(board::supportsDoom(board::Variant::LcdGc9107));
     CHECK(board::supportsDoom(board::Variant::LcdSt7789_130));
+    CHECK(!board::supportsDoom(board::Variant::C3_2424S012));
     CHECK(!board::supportsDoom(board::Variant::TouchJd9853));
     CHECK(board::supportsAudio(board::Variant::AmoledCo5300));
     CHECK(board::supportsAudio(board::Variant::LcdSt77916));

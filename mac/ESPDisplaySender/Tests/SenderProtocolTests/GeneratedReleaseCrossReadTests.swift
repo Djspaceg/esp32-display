@@ -12,7 +12,7 @@ final class GeneratedReleaseCrossReadTests: XCTestCase {
             .deletingLastPathComponent()
         let catalogURL = root.appendingPathComponent("firmware-releases/manifest.json")
         let catalog = try FirmwareReleaseCatalog.read(contentsOf: catalogURL)
-        for family in ["c6", "s3", "p4"] {
+        for family in ["c3", "c6", "s3", "p4"] {
             let entry = try XCTUnwrap(catalog.families[family])
             XCTAssertFalse(entry.revisions.isEmpty)
             XCTAssertNil(entry.latestBuild)
@@ -27,7 +27,7 @@ final class GeneratedReleaseCrossReadTests: XCTestCase {
                 XCTAssertEqual(bundle.releaseNotes?.count, 10)
                 let verified = try catalog.bundle(
                     for: revision, in: entry, data: data)
-                if family == "c6" {
+                if family == "c3" || family == "c6" {
                     XCTAssertNil(
                         try XCTUnwrap(verified.images.first)
                             .flashPart(role: "doom_wad"))

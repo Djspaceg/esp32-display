@@ -374,6 +374,8 @@ void setup() {
       ? touchmap::CST9217_ON_CO5300
       : variant == board::Variant::LcdSt77916
           ? touchmap::CST816_ON_ST77916
+          : variant == board::Variant::C3_2424S012
+              ? touchmap::CST816_ON_C3_2424S012
           : variant == board::Variant::TouchSt7789
               ? touchmap::CST816_ON_ST7789_240
               : touchmap::AXS5106L_ON_C6;

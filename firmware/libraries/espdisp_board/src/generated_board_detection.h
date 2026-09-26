@@ -3,6 +3,13 @@
 
 using namespace boarddetectmodel;
 
+static constexpr CandidateRule GENERATED_C3_CANDIDATES[] = {
+    {9, CandidateMatch::Always, 255, 0, 0},
+};
+static constexpr FamilyDetectionPlan GENERATED_C3_DETECTION = {
+    nullptr, 0, GENERATED_C3_CANDIDATES,
+    sizeof(GENERATED_C3_CANDIDATES) / sizeof(GENERATED_C3_CANDIDATES[0]), ResolutionPolicy::ExactlyOne};
+
 static constexpr I2cProbePlan GENERATED_C6_PROBES[] = {
     {0, 0, 18, 19, 100000, 8, 119, {0x00, 0x00, 0x00, 0x00}, 0, 20, 20, 100, ProbeRelease::OnSuccessNoAck},
 };
@@ -43,8 +50,9 @@ static constexpr uint8_t GENERATED_MAX_PROBE_COUNT = 4;
 inline const FamilyDetectionPlan &detectionPlanForPlatform(
     Platform platform) {
   switch (platform) {
+    case Platform::Esp32C3: return GENERATED_C3_DETECTION;
+    case Platform::Esp32C6: return GENERATED_C6_DETECTION;
     case Platform::Esp32S3: return GENERATED_S3_DETECTION;
-    case Platform::Esp32P4: return GENERATED_P4_DETECTION;
-    default: return GENERATED_C6_DETECTION;
+    default: return GENERATED_P4_DETECTION;
   }
 }

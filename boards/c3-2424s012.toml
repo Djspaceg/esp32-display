@@ -1,0 +1,198 @@
+schema = 1
+key = "c3-2424s012"
+catalog_order = 10
+name = "ESP32-2424S012C-Y(B) (GC9A01A)"
+hardware = ["ESP32-2424S012C-Y(B)", "ESP32-2424S012C"]
+
+[migration]
+firmware_config = "generated"
+config_symbol = "CONFIG_C3_2424S012"
+
+[identity]
+target = "c3"
+chip = "esp32c3"
+profile = "gc9a01a-240"
+partition = "c3-4m-ota"
+variant = "C3_2424S012"
+variant_value = 9
+legacy_targets = []
+
+[family]
+platform_key = "c3"
+build_target = "c3"
+fqbn = "esp32:esp32:esp32c3:CDCOnBoot=cdc,FlashSize=4M,PartitionScheme=custom"
+partition_csv = "partitions_c3.csv"
+extra_flags = []
+extra_library_dirs = []
+fqbn_options = []
+flash_bytes = [4194304]
+common_layout_bytes = 4194304
+requires_doom_wad = false
+bootloader_address = 0
+partitions_address = 32768
+boot_app0_address = 57344
+app_address = 65536
+blurb = "ESP32-C3 240x240 round display firmware"
+
+[platform]
+use_psram_frame_buffers = false
+use_raw_lwip_receive_task = false
+wifi = "native"
+identity_source = "wifi_station_mac"
+serial = "native_usb_cdc"
+
+[capacity]
+minimum_flash_bytes = 4194304
+
+[panel]
+symbol = "PANEL_GC9107_240X240"
+profile = "Gc9107_240x240"
+driver = "Gc9107"
+bus = "spi"
+width = 240
+height = 240
+memory_width = 240
+memory_height = 240
+pixel_clock_hz = 40000000
+spi_mode = 0
+col_offset = 0
+row_offset = 0
+orientation_offset = 0
+invert_color = true
+round_display = true
+supports_command_rotation = true
+color_order = "bgr"
+data_endian = "big"
+pixel_depth = 16
+dsi_data_lanes = 0
+dsi_lane_mbps = 0
+hsync_back_porch = 0
+hsync_pulse_width = 0
+hsync_front_porch = 0
+vsync_back_porch = 0
+vsync_pulse_width = 0
+vsync_front_porch = 0
+
+[carrier]
+pin_sclk = 6
+pin_mosi = 7
+pin_data1 = -1
+pin_data2 = -1
+pin_data3 = -1
+pin_cs = 10
+pin_dc = 2
+pin_rst = -1
+pin_bl = 3
+pin_boot = -1
+pin_rgb_led = -1
+
+[touch]
+controller = "cst816"
+sda = 4
+scl = 5
+reset = 1
+interrupt = 0
+addresses = [21]
+panel_short = 240
+panel_long = 240
+raw_x_mirrored = false
+raw_y_mirrored = false
+rotate_clockwise = true
+
+[led]
+channel_order = "rgb"
+pixel_count = 0
+
+[gesture]
+swipe_min_px = 24
+tap_max_move_px = 12
+tap_max_ms = 400
+long_press_ms = 600
+press_max_ms = 10000
+
+[orientation]
+offsets = [[0, 0], [0, 0], [0, 0], [0, 0]]
+mirror_x_supported = true
+quarter_turns = [0, 1, 2, 3]
+
+[motion]
+controller = "none"
+address = 0
+x_axis = 0
+x_sign = 1
+y_axis = 1
+y_sign = 1
+
+[reset]
+expander = "none"
+expander_address = 0
+panel_output = 0
+touch_output = 0
+
+[backlight]
+kind = "pwm"
+enable_pin = -1
+inverted = false
+
+[power]
+controller = "none"
+battery_adc = -1
+battery_adc_scale = 0
+battery_enable = -1
+charge_status = -1
+axp_address = 0
+
+[serial]
+transport = "native_usb_cdc"
+bridge = "none"
+rx = -1
+tx = -1
+
+[audio]
+amp = "none"
+codec = "none"
+mic = "none"
+speaker_bus = "none"
+mic_bus = "none"
+pin_playback_mclk = -1
+pin_playback_bclk = -1
+pin_playback_lrck = -1
+pin_dout = -1
+pin_capture_mclk = -1
+pin_capture_bclk = -1
+pin_capture_lrck = -1
+pin_din = -1
+pin_pdm_clock = -1
+pin_amp_enable = -1
+codec_i2c_address = 0
+mic_i2c_address = 0
+playback_rate_hz = 0
+playback_channels = 0
+capture_rate_hz = 0
+capture_channels = 0
+
+[capabilities]
+doom = false
+audio = false
+
+[compile]
+selector = ""
+macros = []
+
+[detection]
+order = 10
+resolution = "exactly_one"
+no_match = "unknown"
+kind = "always"
+flash_min_exclusive = 0
+flash_max_inclusive = 0
+sda = -1
+scl = -1
+frequency_hz = 0
+scan_first = 0
+scan_last = 0
+addresses = []
+reset_pin = -1
+reset_low_ms = 0
+reset_release_wait_ms = 0
+release = "never"

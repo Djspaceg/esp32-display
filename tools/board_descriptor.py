@@ -177,6 +177,7 @@ REQUIRED_FIELDS = (
 )
 
 PLATFORM_ENUM = {
+    "c3": "Esp32C3",
     "c6": "Esp32C6",
     "s3": "Esp32S3",
     "p4": "Esp32P4",
@@ -200,7 +201,7 @@ AUDIO_CODECS = {"none", "unknown", "es8311", "pcm5101a"}
 AUDIO_MICS = {"none", "unknown", "es7210", "ics43434", "pdm"}
 AUDIO_SPEAKER_BUSES = {"none", "unknown", "i2s"}
 AUDIO_MIC_BUSES = {"none", "unknown", "i2s", "pdm"}
-GPIO_MAX_BY_TARGET = {"c6": 30, "s3": 48, "p4": 54}
+GPIO_MAX_BY_TARGET = {"c3": 21, "c6": 30, "s3": 48, "p4": 54}
 WIFI_TOPOLOGIES = {"native", "hosted_coprocessor"}
 IDENTITY_SOURCES = {"wifi_station_mac", "efuse_base_mac"}
 SERIAL_TRANSPORTS = {"native_usb_cdc", "uart_bridge"}

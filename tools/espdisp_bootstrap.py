@@ -25,6 +25,7 @@ class BootstrapDeviceRefusal(BootstrapFailure):
 
 
 CHIP_FAMILIES = {
+    "esp32c3": "c3",
     "esp32c6": "c6",
     "esp32s3": "s3",
     "esp32p4": "p4",

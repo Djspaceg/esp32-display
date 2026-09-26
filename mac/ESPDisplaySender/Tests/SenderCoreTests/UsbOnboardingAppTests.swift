@@ -510,7 +510,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             .appendingPathComponent(FirmwareReleaseCatalog.fileName)
         let catalog = try FirmwareReleaseCatalog.read(contentsOf: catalogURL)
         var selections = [String: BundledFirmware.Selection]()
-        for family in ["c6", "s3", "p4"] {
+        for family in ["c3", "c6", "s3", "p4"] {
             let entry = try XCTUnwrap(catalog.families[family])
             let url = root
                 .appendingPathComponent("firmware-releases", isDirectory: true)

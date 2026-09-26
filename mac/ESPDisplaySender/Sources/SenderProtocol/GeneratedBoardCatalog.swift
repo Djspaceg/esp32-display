@@ -10,15 +10,17 @@ public enum GeneratedBoardCatalog {
         public let bootloaderAddress: Int
     }
 
-    public static let sourceSHA256 = "aaad5fe26d0a962c5df65b0bc7cb1eb45e1eac3d0a18431781e9d1f27ea8ed65"
-    public static let requiredFamilies: Set<String> = ["c6", "s3", "p4"]
+    public static let sourceSHA256 = "1a212074dc94636af60ce253f63da6b85d034d3ff3a707161db7bc56837a8dcd"
+    public static let requiredFamilies: Set<String> = ["c3", "c6", "s3", "p4"]
     public static let expected: [String: Expected] = [
+        "c3": Expected(chip: "esp32c3", profiles: ["gc9a01a-240"], flashBytes: [4194304], partition: "c3-4m-ota", bootloaderAddress: 0),
         "c6": Expected(chip: "esp32c6", profiles: ["st7789", "jd9853"], flashBytes: [8388608], partition: "default-8m", bootloaderAddress: 0),
         "s3": Expected(chip: "esp32s3", profiles: ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-ota", bootloaderAddress: 0),
         "p4": Expected(chip: "esp32p4", profiles: ["st7703-4b"], flashBytes: [33554432], partition: "p4-32m-ota", bootloaderAddress: 8192),
     ]
 
     public static let profilesByTarget: [String: Set<String>] = [
+        "c3": Set(["gc9a01a-240"]),
         "c6": Set(["st7789", "jd9853"]),
         "s3": Set(["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"]),
         "p4": Set(["st7703-4b"]),
@@ -30,6 +32,7 @@ public enum GeneratedBoardCatalog {
     ]
 
     public static let geometryByProfile: [String: PanelGeometry] = [
+        "gc9a01a-240": PanelGeometry(width: 240, height: 240),
         "st7789": PanelGeometry(width: 172, height: 320),
         "jd9853": PanelGeometry(width: 172, height: 320),
         "gc9107": PanelGeometry(width: 128, height: 128),
@@ -41,10 +44,11 @@ public enum GeneratedBoardCatalog {
     ]
 
     public static let universalFamilyAliases: [String: Set<String>] = [
+        "c3": Set(["c3"]),
         "c6": Set(["c6"]),
         "s3": Set(["s3", "s3-085", "s3-154", "s3-175", "s3-185"]),
         "p4": Set(["p4", "p4-4b"]),
     ]
 
-    public static let quarterTurnProfiles: Set<String> = Set(["st7703-4b", "gc9107", "st7789-130", "st7789-154", "co5300", "st77916"])
+    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7703-4b", "gc9107", "st7789-130", "st7789-154", "co5300", "st77916"])
 }

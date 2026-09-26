@@ -44,7 +44,7 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// remembered from a previous run would risk pushing an image chosen from
     /// stale information. A panel has to be discovered to be pushed to anyway.
     var chip: String?
-    /// Firmware release family from mDNS (`c6`, `s3`, or `p4`).
+    /// Firmware release family from mDNS (`c3`, `c6`, `s3`, or `p4`).
     /// Discovery-scoped and deliberately excluded from `PersistedPanel`.
     var target: String?
     /// Runtime physical profile and partition evidence used with family/chip to

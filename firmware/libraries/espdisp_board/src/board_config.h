@@ -1,7 +1,7 @@
 // Which supported board this binary is running on, and every board fact that
 // follows from that.
 //
-// Eight board profiles are supported across the c6, s3, and p4 release
+// Nine board profiles are supported across the c3, c6, s3, and p4 release
 // families. Each family has one artifact; runtime profile selection keeps the
 // physical panel/controller token independent from that family identity:
 //
@@ -100,6 +100,14 @@ enum class MotionController : uint8_t { None, Qmi8658 };
 #error "ESP32-S3 family builds must not use profile-specific compile selectors"
 #endif
 #define ESPDISP_PANEL_S3_RUNTIME 1
+static const Variant COMPILED_VARIANT = Variant::Unknown;
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+#if defined(ESPDISP_BOARD_P4_4B) || defined(ESPDISP_BOARD_S3_085) || \
+    defined(ESPDISP_BOARD_S3_154) || defined(ESPDISP_DOOM_S3_175) || \
+    defined(ESPDISP_BOARD_S3_185) || defined(ESPDISP_DOOM_RUNTIME)
+#error "ESP32-C3 family builds must not use selectors from another family"
+#endif
+#define ESPDISP_PANEL_C3_RUNTIME 1
 static const Variant COMPILED_VARIANT = Variant::Unknown;
 #else
 #if defined(ESPDISP_BOARD_P4_4B) || defined(ESPDISP_BOARD_S3_085) || \

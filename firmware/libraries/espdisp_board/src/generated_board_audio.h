@@ -10,6 +10,7 @@ static constexpr AudioConfig GENERATED_BOARD_AUDIO[] = {
     {Variant::TouchSt7789, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
     {Variant::P4_4B, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
     {Variant::LcdSt7789_130, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
+    {Variant::C3_2424S012, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
 };
 
 inline const AudioConfig *generatedAudioConfig(Variant variant) {

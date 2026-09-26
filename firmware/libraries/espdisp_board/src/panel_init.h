@@ -25,11 +25,13 @@
 
 #include <board_config.h>
 #include <board_io.h>
-#if defined(ESPDISP_PANEL_S3_RUNTIME)
+#if defined(ESPDISP_PANEL_S3_RUNTIME) || defined(ESPDISP_PANEL_C3_RUNTIME)
 #include <esp_lcd_gc9107.h>
+#if defined(ESPDISP_PANEL_S3_RUNTIME)
 #include <esp_lcd_panel_st7789.h>
 #include <esp_lcd_st77916.h>
 #include <esp_lcd_co5300.h>
+#endif
 #elif defined(ESPDISP_PANEL_GC9107_128X128)
 #include <esp_lcd_gc9107.h>
 #elif defined(ESPDISP_PANEL_ST7789_240X240)
@@ -52,7 +54,7 @@
 namespace boardpanel {
 
 #if defined(ESPDISP_PANEL_GC9107_128X128) || \
-    defined(ESPDISP_PANEL_S3_RUNTIME)
+    defined(ESPDISP_PANEL_S3_RUNTIME) || defined(ESPDISP_PANEL_C3_RUNTIME)
 // Waveshare's controller-specific Arduino GC9107 sequence. It deliberately
 // includes COLMOD=0x05, INVON, SLPOUT with 120ms delay, and DISPON with 20ms
 // delay; the generic Espressif defaults are not this panel's sequence.
@@ -149,7 +151,8 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
     buscfg.quadwp_io_num = -1;
     buscfg.quadhd_io_num = -1;
   }
-  if (spi_bus_initialize(host, &buscfg, SPI_DMA_CH_AUTO) != ESP_OK) {
+  const esp_err_t busResult = spi_bus_initialize(host, &buscfg, SPI_DMA_CH_AUTO);
+  if (busResult != ESP_OK) {
     return false;
   }
 
@@ -174,8 +177,9 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
   }
 
   esp_lcd_panel_io_handle_t io = nullptr;
-  if (esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)host, &io_config, &io) !=
-      ESP_OK) {
+  const esp_err_t ioResult =
+      esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)host, &io_config, &io);
+  if (ioResult != ESP_OK) {
     return false;
   }
 
@@ -198,7 +202,7 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
   esp_err_t err = ESP_ERR_NOT_SUPPORTED;
   switch (cfg.panel->driver) {
 #if defined(ESPDISP_PANEL_GC9107_128X128) || \
-    defined(ESPDISP_PANEL_S3_RUNTIME)
+    defined(ESPDISP_PANEL_S3_RUNTIME) || defined(ESPDISP_PANEL_C3_RUNTIME)
     case board::PanelDriver::Gc9107: {
       gc9107_vendor_config_t vendor = {
           .init_cmds = GC9107_WAVESHARE_INIT,

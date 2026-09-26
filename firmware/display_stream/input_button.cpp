@@ -113,6 +113,11 @@ void initializeButtonInput() {
 }
 
 static void setSignalSurvey(bool active) {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  (void)active;
+  Serial.println("button: signal survey unavailable on compact C3 framebuffer");
+  return;
+#endif
   surveyActive = active;
   Serial.printf("button: double press -> signal survey %s\n",
                 surveyActive ? "on" : "off");

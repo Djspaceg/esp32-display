@@ -43,7 +43,7 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
             JSONSerialization.data(withJSONObject: object))) {
             XCTAssertEqual(
                 $0 as? FirmwareReleaseCatalogError,
-                .invalidRevisions("c6"))
+                .invalidRevisions("c3"))
         }
 
         object = try XCTUnwrap(
@@ -100,9 +100,14 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
         }
     }
 
-    func testReadsExactlyThreeFamiliesAndSelectsWithIndependentEvidence() throws {
+    func testReadsExactlyFourFamiliesAndSelectsWithIndependentEvidence() throws {
         let catalog = try FirmwareReleaseCatalog.read(Self.catalogData())
-        XCTAssertEqual(Set(catalog.families.keys), ["c6", "s3", "p4"])
+        XCTAssertEqual(Set(catalog.families.keys), ["c3", "c6", "s3", "p4"])
+        let c3 = try catalog.entry(for: .init(
+            family: "c3", chip: "esp32c3", profile: "gc9a01a-240",
+            partition: "c3-4m-ota"))
+        XCTAssertEqual(c3.family, "c3")
+        XCTAssertEqual(c3.profiles, ["gc9a01a-240"])
         let s3 = try catalog.entry(for: .init(
             family: "s3", chip: "esp32s3", profile: "co5300",
             partition: "universal-8m-doom-ota"))
@@ -162,21 +167,27 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
         revisionVersions: [String]? = nil
     ) throws -> Data {
         let profiles: [String: [String]] = [
+            "c3": ["gc9a01a-240"],
             "c6": ["st7789", "jd9853"],
             "s3": ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"],
             "p4": ["st7703-4b"],
         ]
-        let chips = ["c6": "esp32c6", "s3": "esp32s3", "p4": "esp32p4"]
+        let chips = [
+            "c3": "esp32c3", "c6": "esp32c6",
+            "s3": "esp32s3", "p4": "esp32p4",
+        ]
         let partitions = [
-            "c6": "default-8m", "s3": "universal-8m-doom-ota", "p4": "p4-32m-ota",
+            "c3": "c3-4m-ota", "c6": "default-8m",
+            "s3": "universal-8m-doom-ota", "p4": "p4-32m-ota",
         ]
         let flashes: [String: [Int]] = [
+            "c3": [4 * 1024 * 1024],
             "c6": [8 * 1024 * 1024],
             "s3": [8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024],
             "p4": [32 * 1024 * 1024],
         ]
         var families = [String: Any]()
-        for family in ["c6", "s3", "p4"] {
+        for family in ["c3", "c6", "s3", "p4"] {
             let profileList = profiles[family]!
             var hardware = [String: [String]]()
             for profile in profileList { hardware[profile] = ["Fixture \(profile)"] }
