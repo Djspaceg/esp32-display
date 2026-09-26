@@ -181,6 +181,52 @@ int main() {
     CHECK(!rescuemodel::planPins(bridge).uartBridge);
   }
 
+  // --- Low power: a dim backlight and no coprocessor ------------------------
+  {
+    // Readable, but a fraction of the stream firmware's full-brightness draw.
+    CHECK(rescuemodel::BACKLIGHT_LEVEL > 0);
+    CHECK(rescuemodel::BACKLIGHT_LEVEL <= 255 / 4);
+    CHECK(rescuemodel::backlightDuty(rescuemodel::BACKLIGHT_LEVEL, false) ==
+          rescuemodel::BACKLIGHT_LEVEL);
+    CHECK(rescuemodel::backlightDuty(rescuemodel::BACKLIGHT_LEVEL, true) ==
+          255 - rescuemodel::BACKLIGHT_LEVEL);
+    // Every lit path uses the constant, and nothing drives a backlight full on.
+    const std::string sketch = sourceText("../rescue/rescue.ino");
+    CHECK(sketch.find("setBrightness(panel, *cfg, rescuemodel::BACKLIGHT_LEVEL)") !=
+          std::string::npos);
+    CHECK(sketch.find("rescuemodel::backlightDuty(") != std::string::npos);
+    CHECK(sketch.find("digitalWrite(cfg->pinBl") == std::string::npos);
+    CHECK(sketch.find("setBrightness(panel, *cfg, 2") == std::string::npos);
+    CHECK(sketch.find("WiFi.") == std::string::npos);
+    // A command-dimmed panel (CO5300) comes out of init at full: it is dimmed
+    // before the first draw, not after.
+    const size_t dim = sketch.find(
+        "if (commandBrightness) {\n    boarddisplay::setBrightness(panel, *cfg, "
+        "rescuemodel::BACKLIGHT_LEVEL);");
+    CHECK(dim != std::string::npos);
+    CHECK(dim < sketch.find("if (!drawScreen(panel))"));
+    CHECK(sketch.find("setBrightness(panel, *cfg, 0)") != std::string::npos);
+
+    // Held off only where the WiFi is a hosted coprocessor, never on a USB pin.
+    using board::WifiTopology;
+    CHECK(rescuemodel::coprocessorHoldPin(WifiTopology::HostedCoprocessor,
+                                          Platform::Esp32P4, 54) == 54);
+    CHECK(rescuemodel::coprocessorHoldPin(WifiTopology::Native,
+                                          Platform::Esp32S3, 54) == board::NO_PIN);
+    CHECK(rescuemodel::coprocessorHoldPin(WifiTopology::HostedCoprocessor,
+                                          Platform::Esp32P4, 24) == board::NO_PIN);
+    CHECK(rescuemodel::coprocessorHoldPin(WifiTopology::HostedCoprocessor,
+                                          Platform::Esp32P4, board::NO_PIN) ==
+          board::NO_PIN);
+    // Every platform the generated catalog marks hosted is a P4.
+    for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+      const board::Config &cfg = board::configFor(identity.variant);
+      if (cfg.platform->wifi == WifiTopology::HostedCoprocessor) {
+        CHECK(cfg.platform->platform == Platform::Esp32P4);
+      }
+    }
+  }
+
   // --- The guard covers every pin bring-up drives ---------------------------
   {
     // What the shared bring-up and the rescue sketch actually read, straight

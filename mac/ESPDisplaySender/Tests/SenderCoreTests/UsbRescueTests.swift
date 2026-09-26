@@ -1,0 +1,749 @@
+import XCTest
+@testable import SenderCore
+@testable import SenderProtocol
+
+/// Repair: catching a board that drops off USB, on a virtual clock with fake
+/// ports and fake esptools, plus the real process-group kill on a harmless
+/// shell tree. No test here opens a USB port.
+final class UsbRescueTests: XCTestCase {
+
+    // MARK: - the fake bench
+
+    /// A fake clock, /dev listing and esptool, the same bench as
+    /// tools/test_espdisp.py `RescueWorld`.
+    ///
+    /// The fake esptool behaves like esptool 5.3.1 with open_port_attempts = 0:
+    /// it never exits while it cannot open or connect. It opens a linked port
+    /// 0.1 s after the link and holds it for one connect pass (2.4 s) before
+    /// closing and reopening through the link. It connects to a port of the
+    /// right family `connectAfter` seconds after the link, writes it, and exits
+    /// `exitAfter` seconds later: 0 if the port is still there, 1 if not.
+    final class World {
+        typealias Window = (port: String, start: Double, end: Double)
+        var t = 0.0
+        let baseline: [Window]
+        let windows: [Window]
+        var limit = 60.0
+        var readyAfter = 4.0
+        var openAfter = 0.3
+        var exitAfter = 1.0
+        var earlyExit = false
+        var failFirst = false
+        var foreign: Set<String> = []
+        var connectAfter: [String: Double] = [:]
+        var identities: [String: UsbRescue.USBIdentity] = [:]
+        var workers: [FakeWorker] = []
+        var events: [UsbFlashEvent] = []
+        var written: [String] = []
+
+        init(baseline: [Window], windows: [Window]) {
+            self.baseline = baseline
+            self.windows = windows
+        }
+
+        func ports() -> [String] {
+            Set((baseline + windows).filter { $0.start <= t && t < $0.end }.map(\.port)).sorted()
+        }
+
+        func identify() -> [UsbRescue.USBIdentity] {
+            let present = Set(ports())
+            return identities.filter { present.contains($0.key) }.sorted { $0.key < $1.key }
+                .map(\.value)
+        }
+
+        var io: UsbRescuer.IO {
+            UsbRescuer.IO(
+                ports: { self.ports() },
+                identify: { self.identify() },
+                spawn: {
+                    let worker = FakeWorker(world: self)
+                    self.workers.append(worker)
+                    return worker
+                },
+                now: { self.t },
+                sleep: { seconds in self.t = ((self.t + seconds) * 1e6).rounded() / 1e6 },
+                isCancelled: { self.t > self.limit })
+        }
+
+        var messages: [String] {
+            events.compactMap {
+                if case .log(.app, let text) = $0 { return text }
+                return nil
+            }
+        }
+
+        func said(_ needle: String) -> Bool { messages.contains { $0.contains(needle) } }
+
+        var steps: [UsbRescueStep] {
+            events.compactMap {
+                if case .phase(.rescue(let step)) = $0 { return step }
+                return nil
+            }
+        }
+
+        var links: [String] { workers.flatMap(\.links) }
+
+        /// The rescued port, "STOPPED" when the loop was still running at the
+        /// limit, or "FAIL: <title>".
+        func run(identify: Bool = true) async -> String {
+            var io = self.io
+            if !identify { io.identify = { [] } }
+            do {
+                return try await UsbRescuer.run(
+                    family: .named("s3")!, regions: UsbRescueTests.regions, io: io
+                ) { self.events.append($0) }
+            } catch let failure as WifiConfigUI.ConfigFailure {
+                return failure.title == "Stopped" ? "STOPPED" : "FAIL: \(failure.title)"
+            } catch {
+                return "FAIL: \(error)"
+            }
+        }
+    }
+
+    final class FakeWorker: RescueWorker {
+        let world: World
+        let born: Double
+        var port: String?
+        var isReady = false
+        var isConnected = false
+        var code: Int32?
+        var links: [String] = []
+        var killed = false
+        var linkedAt = 0.0
+        var connectedAt = 0.0
+        var held: String?
+        var heldSince = 0.0
+        var echoed = false
+
+        init(world: World) {
+            self.world = world
+            born = world.t
+        }
+
+        func poll() -> Int32? {
+            let now = world.t
+            if code != nil || killed { return code }
+            if world.earlyExit {
+                code = 2
+                return code
+            }
+            if !isReady, now - born >= world.readyAfter { isReady = true }
+            if held != nil, !isConnected, now - heldSince >= 2.4 { held = nil }
+            if let port, held == nil, world.ports().contains(port), now - linkedAt >= 0.1 {
+                held = port
+                heldSince = now
+            }
+            if let held, !isConnected, world.ports().contains(held), !world.foreign.contains(held),
+               now - linkedAt >= world.connectAfter[held, default: world.openAfter] {
+                isConnected = true
+                connectedAt = now
+            }
+            if isConnected, now - connectedAt >= world.exitAfter {
+                code = world.ports().contains(held ?? "") ? 0 : 1
+                if world.failFirst {
+                    world.failFirst = false
+                    code = 1
+                }
+                if code == 0, let held { world.written.append(held) }
+            }
+            return code
+        }
+
+        func takeOutput() -> String {
+            guard isConnected, !echoed else { return "" }
+            echoed = true
+            return "Connecting...\nConnected to ESP32-S3 on \(port ?? "?"):\n"
+                + "Writing at 0x00010000 [=====>   ] 50.0% 1000/2000 bytes...\n"
+        }
+
+        func link(to port: String) throws {
+            self.port = port
+            linkedAt = world.t
+            links.append(port)
+        }
+
+        func unlink() {
+            port = nil
+            if let held, !world.ports().contains(held) { self.held = nil }
+        }
+
+        func lastError() -> String { "could not open port" }
+
+        func kill() { killed = true }
+    }
+
+    static let regions = [
+        UsbRescue.Region(address: 0, role: "bootloader", path: "/r/bootloader.bin", bytes: 20_000),
+        UsbRescue.Region(address: 0x8000, role: "partitions", path: "/r/partitions.bin", bytes: 3072),
+        UsbRescue.Region(address: 0xE000, role: "boot_app0", path: "/r/boot_app0.bin", bytes: 8192),
+        UsbRescue.Region(address: 0x10000, role: "app", path: "/r/app.bin", bytes: 400_000),
+    ]
+
+    private let other: World.Window = ("/dev/cu.usbmodemOTHER", 0, 1e9)
+    private let board = "/dev/cu.usbmodemB"
+
+    // MARK: - new-port selection
+
+    func testOnlyAPortAbsentAtTheStartIsNew() {
+        XCTAssertEqual(
+            UsbRescue.newPorts(baseline: ["/dev/cu.usbmodemA"],
+                               present: ["/dev/cu.usbmodemA", "/dev/cu.usbmodemB"]),
+            ["/dev/cu.usbmodemB"])
+        XCTAssertEqual(UsbRescue.newPorts(baseline: ["/dev/cu.usbmodemA"], present: []), [])
+    }
+
+    func testPortsMapToTheirUSBDevice() {
+        let devices = [
+            UsbRescue.USBIdentity(location: 0x131200, serial: ""),
+            UsbRescue.USBIdentity(location: 0x131220, serial: "1C:DB:D4:7B:5B:94"),
+            UsbRescue.USBIdentity(location: 0x140000, serial: "5A67017634"),
+        ]
+        XCTAssertEqual(UsbRescue.identity(forPort: "/dev/cu.usbmodem1312201", devices: devices),
+                       devices[1], "the longest matching location wins")
+        XCTAssertEqual(UsbRescue.identity(forPort: "/dev/cu.usbserial-5A67017634", devices: devices),
+                       devices[2])
+        XCTAssertNil(UsbRescue.identity(forPort: "/dev/cu.usbmodem9999", devices: devices))
+        XCTAssertTrue(UsbRescue.isKnown(
+            devices[1], in: [.init(location: 0x200000, serial: "1C:DB:D4:7B:5B:94")]),
+            "the same serial on another socket is the same board")
+        XCTAssertTrue(UsbRescue.isKnown(
+            .init(location: 0x131220, serial: ""), in: [.init(location: 0x131220, serial: "")]))
+        XCTAssertFalse(UsbRescue.isKnown(
+            .init(location: 0x131220, serial: ""), in: [.init(location: 0x140000, serial: "")]))
+        XCTAssertFalse(UsbRescue.isKnown(nil, in: devices))
+    }
+
+    func testLinkIsSpelledUnderDevAndResolvesToThePort() throws {
+        let directory = try temporaryDirectory()
+        let link = UsbRescue.linkPath(directory: directory.path, index: 3)
+        XCTAssertTrue(link.hasPrefix("/dev/../"))
+        XCTAssertNotEqual(link, UsbRescue.linkPath(directory: directory.path, index: 4))
+        let target = directory.appendingPathComponent("device")
+        FileManager.default.createFile(atPath: target.path, contents: nil)
+        try FileManager.default.createSymbolicLink(
+            atPath: UsbRescue.linkFile(for: link), withDestinationPath: target.path)
+        XCTAssertEqual(
+            URL(fileURLWithPath: link).resolvingSymlinksInPath().path,
+            target.resolvingSymlinksInPath().path)
+    }
+
+    // MARK: - the relaunch loop
+
+    func testAShortWindowIsAMissAndTheSameEsptoolKeepsWaiting() async {
+        let world = World(
+            baseline: [other, ("/dev/cu.usbmodemFLICK", 0, 5), ("/dev/cu.usbmodemFLICK", 5.5, 1e9)],
+            windows: [(board, 6.0, 6.2), (board, 9.0, 1e9)])
+        let result = await world.run()
+        XCTAssertEqual(result, board)
+        XCTAssertEqual(Set(world.links), [board], "only the new port is ever linked")
+        XCTAssertTrue(world.said("Plug the board in now"))
+        XCTAssertTrue(world.said("Missed it"))
+        XCTAssertTrue(world.said("Ignoring /dev/cu.usbmodemFLICK"))
+        XCTAssertEqual(world.workers.count, 1, "a miss before connecting costs no relaunch")
+        XCTAssertTrue(world.workers[0].killed, "esptool is stopped at the end")
+        XCTAssertTrue(world.events.contains(.log(.esptool, "Connected to ESP32-S3 on \(board):")))
+    }
+
+    func testAFailedWriteAfterTheBoardDropsOffRelaunchesEsptool() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 7.0), (board, 14.0, 1e9)])
+        let result = await world.run()
+        XCTAssertEqual(result, board)
+        XCTAssertEqual(world.workers.count, 2, "a failed esptool is relaunched")
+        XCTAssertTrue(world.workers[0].killed, "the failed esptool is reaped")
+        XCTAssertTrue(world.said("Missed it"))
+        XCTAssertTrue(world.said("esptool: could not open port"))
+        XCTAssertTrue(world.said("esptool is waiting again"))
+    }
+
+    func testAFailedWriteWithTheBoardStillAttachedRetriesWithoutAReplug() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 1e9)])
+        world.failFirst = true
+        let result = await world.run()
+        XCTAssertEqual(result, board)
+        XCTAssertTrue(world.said("could not finish on \(board); trying again"))
+        XCTAssertTrue(world.said("esptool is still starting"))
+        XCTAssertFalse(world.said("Missed it"))
+        XCTAssertTrue(world.steps.contains(.seenWhileStarting(port: board)))
+    }
+
+    func testTwoNewPortsAreNeverTouched() async {
+        let world = World(
+            baseline: [other], windows: [(board, 6.0, 1e9), ("/dev/cu.usbmodemC", 6.0, 1e9)])
+        world.limit = 12
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertTrue(world.links.isEmpty)
+        XCTAssertTrue(world.said("2 new ports appeared"))
+        XCTAssertTrue(world.workers[0].killed, "esptool is stopped when the run is stopped")
+        XCTAssertEqual(world.steps.last, .tooManyPorts([board, "/dev/cu.usbmodemC"]))
+    }
+
+    func testAPortThatAppearsWhileEsptoolStartsCountsAsAttached() async {
+        let world = World(baseline: [other], windows: [(board, 1.5, 1e9)])
+        world.limit = 15
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertTrue(world.links.isEmpty)
+    }
+
+    func testABoardEsptoolCannotReachIsGivenUpAndTheNextOneIsRescued() async {
+        let foreign = "/dev/cu.usbserial-FOREIGN"
+        let world = World(baseline: [other], windows: [(foreign, 6.0, 1e9), (board, 20.0, 1e9)])
+        world.foreign = [foreign]
+        let result = await world.run()
+        XCTAssertEqual(result, board)
+        XCTAssertTrue(world.said("could not connect to \(foreign)"))
+        XCTAssertEqual(world.links, [foreign, board], "a refused port is not relinked")
+        XCTAssertTrue(world.workers[0].killed && world.workers[0].code == nil,
+                      "the esptool that gave up is killed, not left connecting")
+        XCTAssertEqual(world.workers[0].links, [foreign])
+        XCTAssertEqual(world.workers.dropFirst().first?.links, [board])
+        XCTAssertTrue(world.steps.contains(.couldNotConnect(port: foreign, family: "s3")))
+    }
+
+    func testAnEsptoolThatStopsWhileWaitingIsAFailureNotALoop() async {
+        let world = World(baseline: [other], windows: [])
+        world.earlyExit = true
+        let result = await world.run()
+        XCTAssertEqual(result, "FAIL: esptool stopped while waiting for the board")
+        XCTAssertEqual(world.workers.count, 1)
+        XCTAssertTrue(world.workers[0].killed)
+    }
+
+    func testAConnectJustAfterTheTimeoutIsNeverWritten() async {
+        let slow = "/dev/cu.usbmodemSLOW"
+        let world = World(baseline: [other], windows: [(slow, 6.0, 1e9), (board, 22.0, 1e9)])
+        world.connectAfter = [slow: 10.4]
+        let result = await world.run()
+        XCTAssertFalse(world.written.contains(slow))
+        XCTAssertEqual(result, board)
+        XCTAssertTrue(world.said("could not connect to \(slow)"))
+    }
+
+    func testARenamedPortOfAnAttachedBoardIsNotNew() async {
+        let attached = "/dev/cu.usbmodem1312201"
+        let renamed = "/dev/cu.usbmodem2000001"
+        let fresh = "/dev/cu.usbmodem1400001"
+        let world = World(
+            baseline: [(attached, 0, 6)], windows: [(renamed, 6.5, 1e9), (fresh, 12.0, 1e9)])
+        world.identities = [
+            attached: .init(location: 0x131220, serial: "AA:BB"),
+            renamed: .init(location: 0x200000, serial: "AA:BB"),
+            fresh: .init(location: 0x140000, serial: "CC:DD"),
+        ]
+        let result = await world.run()
+        XCTAssertFalse(world.links.contains(renamed))
+        XCTAssertTrue(world.said("same USB device"))
+        XCTAssertEqual(result, fresh)
+    }
+
+    // MARK: - phase reporting
+
+    func testARunReportsEachInstructionInOrder() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 6.2), (board, 9.0, 1e9)])
+        _ = await world.run()
+        XCTAssertEqual(world.steps, [
+            .startingEsptool, .plugIn, .caught(port: board),
+            .missed(esptoolReady: true), .caught(port: board), .rescued(port: board),
+        ])
+        let flashPhases = world.events.compactMap { event -> UsbFlashPhase? in
+            if case .phase(let phase) = event, case .rescue = phase { return nil }
+            if case .phase(let phase) = event { return phase }
+            return nil
+        }
+        XCTAssertEqual(flashPhases.first, .enteringDownloadMode,
+                       "esptool's own output drives the flash phases once linked")
+        XCTAssertTrue(flashPhases.contains {
+            if case .writing(let part) = $0 { return part.role == "app" && part.index == 4 }
+            return false
+        })
+    }
+
+    func testAMissAfterConnectingSaysSoWhileEsptoolRestarts() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 7.0), (board, 14.0, 1e9)])
+        _ = await world.run()
+        let missed = world.steps.filter { if case .missed = $0 { return true }; return false }
+        XCTAssertEqual(missed, [.missed(esptoolReady: false), .missed(esptoolReady: true)])
+    }
+
+    func testRescueStepsReadAsPlainInstructions() {
+        XCTAssertEqual(UsbFlashPhase.rescue(.plugIn).title, "Plug the board in now")
+        XCTAssertEqual(UsbFlashPhase.rescue(.missed(esptoolReady: true)).title,
+                       "Missed it - unplug and plug in again")
+        XCTAssertEqual(UsbFlashPhase.rescue(.missed(esptoolReady: false)).detail,
+                       "esptool is starting again; plug the board in when this says so.")
+        XCTAssertEqual(
+            UsbRepairModel.headline(for: .installing(Self.rescuedBoard()), phase: .writing(
+                FlashPartProgress(index: 1, count: 4, role: "bootloader", address: 0,
+                                  percent: 5, bytesBefore: 0, bytes: 1, totalBytes: 4))),
+            "Rescue firmware is on - installing the real firmware")
+        XCTAssertEqual(UsbRepairModel.headline(for: .catching, phase: .rescue(.plugIn)),
+                       "Plug the board in now")
+        XCTAssertEqual(UsbRepairModel.headline(for: .catching, phase: .enteringDownloadMode),
+                       "Got it - keep the board plugged in")
+    }
+
+    func testARepairFailureNamesTheStepAndWhatToDo() {
+        var session = UsbFlashSession(flow: .repair)
+        session.apply(.phase(.rescue(.startingEsptool)), at: 0)
+        session.apply(.phase(.rescue(.plugIn)), at: 4)
+        XCTAssertEqual(session.phase?.title, "Plug the board in now")
+        XCTAssertTrue(session.transcript.text.contains("Plug the board in now - esptool is waiting"))
+        session.apply(.log(.esptool, "A fatal error occurred: could not open port"), at: 5)
+        session.fail(title: "esptool stopped while waiting for the board",
+                     message: "could not open port", at: 5)
+        XCTAssertEqual(session.failure?.step, "Waiting for the board to be plugged in")
+        XCTAssertEqual(session.failure?.lastSeen, ["A fatal error occurred: could not open port"])
+        XCTAssertTrue(session.failure?.nextAction.contains("start the repair again") == true)
+
+        var installing = UsbFlashSession(flow: .repair)
+        installing.apply(.phase(.waitingForBoard(SettleWait(
+            target: .reappear(flashedPort: board), attempt: 1, elapsed: 1, budget: 60))), at: 0)
+        installing.fail(title: "The board did not come back", message: "", at: 1)
+        XCTAssertTrue(installing.failure?.nextAction.hasPrefix("The firmware is written") == true)
+    }
+
+    // MARK: - the process-tree kill
+
+    /// A fake process group that ignores SIGTERM until `termWorks`.
+    final class FakeGroup: @unchecked Sendable {
+        var signals: [Int32] = []
+        var alive = true
+        var termWorks = false
+        var clock = 0.0
+
+        var seam: EsptoolRunner.Signals {
+            EsptoolRunner.Signals(
+                signalGroup: { _, signal in
+                    // Every attempt is recorded, dead group or not, so a test
+                    // can see a kill that should not have signalled at all.
+                    self.signals.append(signal)
+                    guard self.alive else { return false }
+                    if signal == SIGKILL || (signal == SIGTERM && self.termWorks) {
+                        self.alive = false
+                    }
+                    return true
+                },
+                groupAlive: { _ in self.alive },
+                reap: { _ in self.alive ? nil : -self.signals.last! },
+                sleep: { self.clock += $0 },
+                now: { self.clock })
+        }
+    }
+
+    func testKillSendsSIGTERMToTheGroupAndStopsThereWhenItWorks() {
+        let group = FakeGroup()
+        group.termWorks = true
+        let process = EsptoolRunner.WaitingProcess(pid: 4242, fd: nil, signals: group.seam)
+        process.kill(grace: 1)
+        XCTAssertEqual(group.signals, [SIGTERM])
+        XCTAssertEqual(process.exitCode, -SIGTERM)
+    }
+
+    func testKillEscalatesToSIGKILLAfterTheGrace() {
+        let group = FakeGroup()
+        let process = EsptoolRunner.WaitingProcess(pid: 4242, fd: nil, signals: group.seam)
+        process.kill(grace: 1)
+        XCTAssertEqual(group.signals, [SIGTERM, SIGKILL])
+        XCTAssertGreaterThanOrEqual(group.clock, 1, "SIGKILL only after the grace period")
+        process.kill(grace: 1)
+        XCTAssertEqual(group.signals, [SIGTERM, SIGKILL], "a second kill signals nothing")
+    }
+
+    /// The bundled esptool is a PyInstaller bootloader with the real esptool as
+    /// its child; killing only the parent would leave the child holding the
+    /// port. This shell has the same shape, and both ignore SIGTERM, so only a
+    /// SIGKILL to the whole group ends it.
+    func testKillStopsTheWholeProcessTree() throws {
+        let directory = try temporaryDirectory()
+        let process = try EsptoolRunner.WaitingProcess(
+            EsptoolCommand(executable: "/bin/sh", arguments: ["-c",
+                "trap '' TERM; sleep 60 & echo child $!; "
+                    + "[ -t 1 ] && echo on-a-terminal; echo Retrying failed connection; wait"]),
+            environment: ["PATH": "/usr/bin:/bin"], directory: directory.path)
+        var output = ""
+        XCTAssertTrue(waitFor(5) {
+            output += process.read()
+            return output.contains("Retrying failed connection")
+        })
+        XCTAssertTrue(output.contains("on-a-terminal"), "esptool writes to a terminal, not a pipe")
+        // A terminal ends lines with \r\n, one Character in Swift, so split on
+        // the scalar set rather than on "\n".
+        let child = try XCTUnwrap(output.components(separatedBy: .newlines)
+            .first { $0.hasPrefix("child ") }
+            .flatMap { Int32($0.dropFirst(6).trimmingCharacters(in: .whitespacesAndNewlines)) })
+        XCTAssertTrue(isAlive(child))
+        process.kill(grace: 0.5)
+        XCTAssertNotNil(process.exitCode, "the leader is reaped, not left a zombie")
+        XCTAssertTrue(waitFor(5) { !self.isAlive(child) }, "the child is stopped with its parent")
+    }
+
+    /// The app quitting or crashing never runs kill(): its end closes its
+    /// descriptors, and that alone must stop an esptool that retries forever.
+    func testTheAppGoingAwayStopsTheWholeTree() throws {
+        let directory = try temporaryDirectory()
+        let process = try EsptoolRunner.WaitingProcess(
+            EsptoolCommand(executable: "/bin/sh", arguments: ["-c",
+                "sleep 60 & echo child $!; echo Retrying failed connection; wait"]),
+            environment: ["PATH": "/usr/bin:/bin"], directory: directory.path)
+        var output = ""
+        XCTAssertTrue(waitFor(5) {
+            output += process.read()
+            return output.contains("Retrying failed connection")
+        })
+        let child = try XCTUnwrap(output.components(separatedBy: .newlines)
+            .first { $0.hasPrefix("child ") }
+            .flatMap { Int32($0.dropFirst(6).trimmingCharacters(in: .whitespacesAndNewlines)) })
+        XCTAssertTrue(isAlive(child))
+        usleep(300_000)
+        XCTAssertNil(process.poll(), "the watchdog waits while the app is there")
+        process.abandon()
+        XCTAssertTrue(waitFor(5) { process.poll() != nil }, "the leader is hung up")
+        XCTAssertTrue(waitFor(5) { !self.isAlive(child) }, "and so is its child")
+    }
+
+    func testTheWatchdogPassesEsptoolsExitStatusThrough() throws {
+        let directory = try temporaryDirectory()
+        let process = try EsptoolRunner.WaitingProcess(
+            EsptoolCommand(executable: "/bin/sh", arguments: ["-c", "exit 3"]),
+            environment: ["PATH": "/usr/bin:/bin"], directory: directory.path)
+        XCTAssertTrue(waitFor(5) { process.poll() != nil })
+        XCTAssertEqual(process.exitCode, 3)
+    }
+
+    func testTheWorkerSeesReadinessAndAnUnflushedConnect() throws {
+        let directory = try temporaryDirectory()
+        let link = UsbRescue.linkPath(directory: directory.path, index: 0)
+        let process = try EsptoolRunner.WaitingProcess(
+            EsptoolCommand(executable: "/bin/sh", arguments: ["-c",
+                "echo Retrying failed connection; sleep 1; "
+                    + "printf 'Connected to ESP32-S3 on /dev/x:'; sleep 30"]),
+            environment: ["PATH": "/usr/bin:/bin"], directory: directory.path)
+        let worker = UsbRescuer.EsptoolWorker(process: process, link: link)
+        defer { worker.kill() }
+        XCTAssertTrue(waitFor(5) { worker.poll() == nil && worker.isReady })
+        try worker.link(to: "/dev/cu.usbmodemB")
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: UsbRescue.linkFile(for: link)),
+            "/dev/cu.usbmodemB", "linking points the waiting path at the new port")
+        XCTAssertTrue(waitFor(5) { worker.poll() == nil && worker.isConnected })
+        XCTAssertTrue(worker.takeOutput().contains("Connected to"))
+        worker.kill()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: UsbRescue.linkFile(for: link)),
+                       "killing a worker removes its link")
+        XCTAssertNotNil(worker.poll())
+    }
+
+    // MARK: - the esptool invocation
+
+    func testEachSpawnGetsItsOwnLinkAndTheCLIsArguments() throws {
+        let work = try temporaryDirectory()
+        var made: [(EsptoolCommand, [String: String], String)] = []
+        let spawn = try UsbRescuer.spawner(
+            family: .named("s3")!, regions: Self.regions, work: work,
+            tool: EsptoolCommand.Tool(path: "/opt/esptool"),
+            environment: ["PATH": "/bin"]
+        ) { command, environment, link in
+            made.append((command, environment, link))
+            return FakeWorker(world: World(baseline: [], windows: []))
+        }
+        _ = try spawn()
+        _ = try spawn()
+        XCTAssertEqual(made.count, 2)
+        XCTAssertNotEqual(made[0].2, made[1].2, "a relaunched esptool never shares a link")
+        for (command, environment, link) in made {
+            XCTAssertEqual(command.executable, "/opt/esptool")
+            XCTAssertEqual(command.arguments, [
+                "--chip", "esp32s3", "--port", link, "--baud", "921600",
+                "--before", "default-reset", "--after", "hard-reset", "write-flash",
+                "0x0", "/r/bootloader.bin", "0x8000", "/r/partitions.bin",
+                "0xe000", "/r/boot_app0.bin", "0x10000", "/r/app.bin",
+            ])
+            XCTAssertEqual(environment["ESPTOOL_OPEN_PORT_ATTEMPTS"], "0")
+            XCTAssertEqual(environment["PATH"], "/bin")
+            let config = try String(contentsOfFile: try XCTUnwrap(environment["ESPTOOL_CFGFILE"]),
+                                    encoding: .utf8)
+            XCTAssertTrue(config.contains("open_port_attempts = 0"))
+            XCTAssertTrue(config.contains("connect_attempts = 4"))
+        }
+    }
+
+    func testTheRescueWriteNeverErasesAndStillRefusesAnEmptyPort() throws {
+        let tool = EsptoolCommand.Tool(path: "/opt/esptool")
+        let writes = [EsptoolCommand.StagedWrite(role: "app", address: 0x10000, path: "/r/app.bin")]
+        let command = try EsptoolCommand.rescueWriteFlash(
+            tool: tool, chip: "esp32p4", port: "/dev/../x/port-0", baud: 460_800, writes: writes)
+        XCTAssertFalse(command.arguments.contains("-e"))
+        XCTAssertEqual(command.arguments[5], "460800")
+        XCTAssertThrowsError(try EsptoolCommand.rescueWriteFlash(
+            tool: tool, chip: "esp32p4", port: " ", baud: 460_800, writes: writes)) {
+            XCTAssertEqual($0 as? EsptoolCommandError, .noPort)
+        }
+        XCTAssertEqual(UsbRescue.Family.named("p4")?.baud, 460_800)
+        XCTAssertEqual(UsbRescue.Family.all.map(\.chip), ["esp32c3", "esp32c6", "esp32s3", "esp32p4"])
+    }
+
+    // MARK: - the images the app carries
+
+    func testEveryCommittedRescueImageLoadsAndVerifies() throws {
+        for family in UsbRescue.Family.all {
+            let regions = try UsbRescue.loadImage(
+                family: family, directory: Self.repoRoot.appendingPathComponent(
+                    "firmware-rescue/\(family.key)"))
+            XCTAssertEqual(regions.map(\.role).sorted(), UsbRescue.roles.sorted(), family.key)
+            XCTAssertEqual(regions.first { $0.role == "app" }?.address, 0x10000)
+        }
+    }
+
+    func testATamperedOrMisfiledRescueImageIsRefused() throws {
+        let copy = try temporaryDirectory().appendingPathComponent("s3")
+        try FileManager.default.copyItem(
+            at: Self.repoRoot.appendingPathComponent("firmware-rescue/s3"), to: copy)
+        XCTAssertThrowsError(try UsbRescue.loadImage(family: .named("c6")!, directory: copy)) {
+            guard case .malformed = $0 as? UsbRescue.ImageError else {
+                return XCTFail("\($0)")
+            }
+        }
+        let indexURL = copy.appendingPathComponent(UsbRescue.indexName)
+        let original = try Data(contentsOf: indexURL)
+        var index = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        var regions = try XCTUnwrap(index["regions"] as? [[String: Any]])
+        regions.append(["address": 0x300000, "file": "app.bin", "bytes": 1, "sha256": "x"])
+        index["regions"] = regions
+        try JSONSerialization.data(withJSONObject: index).write(to: indexURL)
+        XCTAssertThrowsError(try UsbRescue.loadImage(family: .named("s3")!, directory: copy),
+                             "a region without a role is refused, as the CLI refuses it")
+        try original.write(to: indexURL)
+        let handle = try FileHandle(forWritingTo: copy.appendingPathComponent("app.bin"))
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data([0]))
+        try handle.close()
+        XCTAssertThrowsError(try UsbRescue.loadImage(family: .named("s3")!, directory: copy)) {
+            XCTAssertEqual($0 as? UsbRescue.ImageError, .mismatch(file: "app.bin"))
+        }
+    }
+
+    // MARK: - after the write
+
+    func testTheRescuedBoardIsReadWithItsStoredOverride() async {
+        let tries = Counter()
+        let events = EventLog()
+        let rescued = await UsbRescuer.readRescuedBoard(
+            port: board, family: .named("s3")!, exists: { _ in true },
+            send: { command, _, _ in
+                XCTAssertEqual(command, "CFGSHOW")
+                tries.count += 1
+                return tries.count < 3 ? .failure("no response")
+                    : .success("CFGINFO id=aabbccddeeff board=st7789-190 profile=st7789-190 "
+                        + "target=s3 chip=esp32s3 partition=universal-8m-doom-ota "
+                        + "cfgboard=st7789-190")
+            },
+            sleep: { _ in }, onProgress: { events.append($0) })
+        XCTAssertEqual(tries.count, 3, "a rescue image still restarting is asked again")
+        XCTAssertEqual(rescued?.storedOverride, "st7789-190")
+        XCTAssertEqual(rescued?.identity.hardwareID, "aabbccddeeff")
+        XCTAssertEqual(rescued?.identity.target, "s3")
+        XCTAssertEqual(events.events.first, .phase(.rescue(.readingBoard(port: self.board))))
+        XCTAssertNil(UsbRescue.storedOverride(inReply: "CFGINFO id=aabbccddeeff cfgboard=auto"))
+    }
+
+    func testTheInstallTakesTheRescuedBoardsFamilyImage() throws {
+        let releases = try Self.releaseSet()
+        let s3 = try PanelManager.repairInstallSelection(
+            for: Self.rescuedBoard(), releases: releases)
+        XCTAssertEqual(s3.canonicalTarget, "s3")
+        XCTAssertNotNil(s3.selection.bundle.flashPlan(forTarget: "s3"))
+        var unknown = Self.rescuedBoard()
+        unknown.identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO id=aabbccddeeff board=unknown profile=unknown target=unknown "
+                + "chip=esp32s3 partition=universal-8m-doom-ota cfgboard=auto")
+        XCTAssertEqual(
+            try PanelManager.repairInstallSelection(for: unknown, releases: releases)
+                .canonicalTarget, "s3",
+            "an undetected profile falls back to the family that was chosen")
+    }
+
+    @MainActor
+    func testRepairHoldsBackgroundProbesOfNewPorts() {
+        let manager = PanelManager(previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+        let ports = ["/dev/cu.usbmodem-not-a-device"]
+        XCTAssertEqual(manager.portsToIdentify(ports), ports)
+        manager.holdUSBProbes()
+        manager.holdUSBProbes()
+        XCTAssertEqual(manager.portsToIdentify(ports), [], "no CFGSHOW while a repair holds probes")
+        manager.usbProbeHolds -= 1
+        XCTAssertEqual(manager.portsToIdentify(ports), [], "one owner's release keeps another's hold")
+    }
+
+    func testEsptoolOutputHelpers() {
+        XCTAssertEqual(UsbRescue.lastError(in:
+            "Connecting....\nA serial exception error occurred: device disconnected\n"
+                + "Note: This error originates from pySerial.\nFor troubleshooting steps visit: x\n"),
+            "A serial exception error occurred: device disconnected")
+        XCTAssertEqual(UsbRescue.strippingTerminalCodes("\u{1B}[33mWarning\u{1B}[0m\u{1B}[2K"),
+                       "Warning")
+    }
+
+    // MARK: - helpers
+
+    static func rescuedBoard() -> UsbRescuer.RescuedBoard {
+        UsbRescuer.RescuedBoard(
+            port: "/dev/cu.usbmodemB", family: .named("s3")!,
+            identity: WifiConfigUI.usbIdentity(from:
+                "CFGINFO id=aabbccddeeff board=st7789-190 profile=st7789-190 target=s3 "
+                    + "chip=esp32s3 partition=universal-8m-doom-ota cfgboard=auto"),
+            storedOverride: nil)
+    }
+
+    static let repoRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+
+    static func releaseSet() throws -> BundledFirmware.ReleaseSet {
+        let releaseRoot = repoRoot.appendingPathComponent("firmware-releases")
+        let catalog = try FirmwareReleaseCatalog.read(
+            contentsOf: releaseRoot.appendingPathComponent(FirmwareReleaseCatalog.fileName))
+        var options = [String: [BundledFirmware.RevisionOption]]()
+        for entry in catalog.families.values {
+            options[entry.family] = try entry.revisions.map { revision in
+                let url = releaseRoot.appendingPathComponent(revision.artifact)
+                let bundle = try FirmwareBundle.read(Data(contentsOf: url))
+                return BundledFirmware.RevisionOption(
+                    revision: revision,
+                    selection: .init(catalogEntry: entry, revision: revision, bundle: bundle, url: url),
+                    unavailableReason: nil)
+            }
+        }
+        return .init(catalog: catalog, revisionOptions: options)
+    }
+
+    private func temporaryDirectory() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("espdisp-rescue-test-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    private func waitFor(_ seconds: Double, _ predicate: () -> Bool) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: seconds)
+        while Date() < deadline {
+            if predicate() { return true }
+            usleep(20_000)
+        }
+        return predicate()
+    }
+
+    private func isAlive(_ pid: Int32) -> Bool {
+        Darwin.kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    final class Counter: @unchecked Sendable { var count = 0 }
+
+    final class EventLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [UsbFlashEvent] = []
+        func append(_ event: UsbFlashEvent) { lock.withLock { stored.append(event) } }
+        var events: [UsbFlashEvent] { lock.withLock { stored } }
+    }
+}

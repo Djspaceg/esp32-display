@@ -336,6 +336,10 @@ struct FirmwareUpdateSheet: View {
     @State private var updateFailure: OperationOutcome?
     @State private var isPushing = false
     @State private var sheetIsVisible = false
+    /// Showing the repair flow in place of the form, for this display's board
+    /// when it drops off USB right after it starts.
+    @State private var repairing = false
+    @State private var prepared = false
 
     init(
         manager: PanelManager,
@@ -350,6 +354,23 @@ struct FirmwareUpdateSheet: View {
     }
 
     var body: some View {
+        if repairing {
+            UsbRepairView(
+                manager: manager,
+                family: UsbRescue.Family.named(effectiveTarget)
+                    ?? UsbRescue.Family.forChip(effectiveChip),
+                closeTitle: "Back"
+            ) { _ in
+                repairing = false
+                refreshUSBDevice()
+            }
+            .frame(width: 560, height: 620)
+        } else {
+            updateForm
+        }
+    }
+
+    private var updateForm: some View {
         Form {
             panelSection
             transportSection
@@ -378,6 +399,10 @@ struct FirmwareUpdateSheet: View {
         .frame(width: 560, height: 620)
         .onAppear {
             sheetIsVisible = true
+            // Once per sheet: coming back from the repair flow must not reset
+            // a password or a firmware file already chosen.
+            guard !prepared else { return }
+            prepared = true
             prefillPassword()
             loadBundledFirmwareIfAvailable()
         }
@@ -434,6 +459,15 @@ struct FirmwareUpdateSheet: View {
                     .accessibilityLabel("Refresh USB device")
                     .disabled(isPushing || isRefreshingUSBDevices)
                     .help("Refresh connected USB serial ports")
+                    if path == nil {
+                        Button("Repair…") {
+                            usbRefreshTask?.cancel()
+                            repairing = true
+                        }
+                        .disabled(isPushing)
+                        .help("For a board that appears for a moment after it is "
+                            + "plugged in, then disappears")
+                    }
                 }
             }
         }

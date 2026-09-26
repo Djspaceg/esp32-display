@@ -50,8 +50,23 @@ struct AddDeviceSheet: View {
     @StateObject private var flash = UsbFlashMonitor(flow: .onboarding)
     @State private var confirming = false
     @State private var work: Task<Void, Never>?
+    /// Showing the repair flow in place of the form, for a board that drops
+    /// off USB before it can be chosen here.
+    @State private var repairing = false
+    @State private var prepared = false
 
     var body: some View {
+        if repairing {
+            UsbRepairView(manager: manager, family: nil, closeTitle: "Back") { repairedPort in
+                finishRepair(port: repairedPort)
+            }
+            .frame(width: 560, height: 620)
+        } else {
+            addForm
+        }
+    }
+
+    private var addForm: some View {
         Form {
             deviceSection
             if mode == .flashAndConfigure {
@@ -69,7 +84,13 @@ struct AddDeviceSheet: View {
             actionBar
         }
         .frame(width: 560, height: 620)
-        .onAppear(perform: prepare)
+        // Once per sheet: coming back from the repair flow must not reset the
+        // network and firmware already chosen.
+        .onAppear {
+            guard !prepared else { return }
+            prepared = true
+            prepare()
+        }
         .onDisappear {
             // The sheet going away must not leave esptool running against a board
             // with nobody watching. Unlike the OTA push - where the transfer is
@@ -170,6 +191,12 @@ struct AddDeviceSheet: View {
                 .labelsHidden()
                 .fixedSize()
                 .disabled(running)
+            }
+            LabeledContent("Not listed?") {
+                Button("Repair a Board…") { startRepair() }
+                    .disabled(running)
+                    .help("For a board that appears for a moment after it is plugged "
+                        + "in, then disappears")
             }
         } header: {
             Text("Device")
@@ -658,6 +685,25 @@ struct AddDeviceSheet: View {
                     hardwareID: ConfigCommands.canonicalHardwareID(mac))
             }
             preselectExactTarget()
+        }
+    }
+
+    private func startRepair() {
+        work?.cancel()
+        inspecting = false
+        repairing = true
+    }
+
+    /// Back from the repair flow, on the board it repaired when it got that far,
+    /// so what that board still needs - usually its WiFi - is the next step here.
+    private func finishRepair(port repairedPort: String?) {
+        repairing = false
+        manager.refreshUSBDevices()
+        guard let repairedPort, manager.usbSerialPorts.contains(repairedPort) else { return }
+        if port == repairedPort {
+            inspect()
+        } else {
+            port = repairedPort
         }
     }
 

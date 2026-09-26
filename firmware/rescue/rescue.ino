@@ -2,10 +2,11 @@
 // onto a board whose firmware kills its own USB right after boot.
 //
 // It does as little as possible: detect the board with the shared detector,
-// bring up only that board's panel, draw RESCUE with the board's name, and
-// keep USB serial alive so a real flash can follow. It never drives the chip's
-// USB Serial/JTAG pads (rescue_model.h), reads and writes no NVS, and starts no
-// radio. It reads one NVS key, the stored CFGBOARD override, because the real
+// bring up only that board's panel, draw RESCUE with the board's name at a low
+// backlight, and keep USB serial alive so a real flash can follow. It never
+// drives the chip's USB Serial/JTAG pads (rescue_model.h), reads and writes no
+// NVS, starts no radio, and holds a hosted WiFi coprocessor in reset, so it
+// draws far less than the stream firmware. It reads one NVS key, the stored CFGBOARD override, because the real
 // firmware flashed next would force that profile again; it shows it on the
 // glass and in CFGINFO, and `CFGBOARD auto` removes only that key. Over serial
 // it answers CFGSHOW with the identity fields of the stream firmware's
@@ -115,17 +116,26 @@ static void bringUpPanel() {
     return;
   }
   boarddisplay::applyOrientation(panel, *cfg, false, 0);
+  // A panel dimmed by command (the CO5300 AMOLED) leaves its init sequence at
+  // full brightness, so it is dimmed before the draw, and darkened if the
+  // draw fails. A pin backlight and a DSI one are still off at this point.
+  const bool commandBrightness = !cfg->isDsi() && !cfg->hasBacklightPin();
+  if (commandBrightness) {
+    boarddisplay::setBrightness(panel, *cfg, rescuemodel::BACKLIGHT_LEVEL);
+  }
   if (!drawScreen(panel)) {
+    if (commandBrightness) boarddisplay::setBrightness(panel, *cfg, 0);
     say("rescue: panel draw failed; serial only");
     return;
   }
   panelHandle = panel;
   panelUp = true;
   if (cfg->isDsi() || !cfg->hasBacklightPin()) {
-    boarddisplay::setBrightness(panel, *cfg, 200);
+    boarddisplay::setBrightness(panel, *cfg, rescuemodel::BACKLIGHT_LEVEL);
   } else if (pins.backlight) {
-    pinMode(cfg->pinBl, OUTPUT);
-    digitalWrite(cfg->pinBl, cfg->backlightInverted ? LOW : HIGH);
+    analogWrite(cfg->pinBl, rescuemodel::backlightDuty(
+                                rescuemodel::BACKLIGHT_LEVEL,
+                                cfg->backlightInverted));
   } else {
     say("rescue: panel %ux%u drawn, but backlight GPIO%d is a USB pin; left "
         "off, so the glass stays dark", cfg->panel->width, cfg->panel->height,
@@ -184,7 +194,25 @@ static void reportStatus() {
       forced != nullptr ? forced : "auto");
 }
 
+// Before anything else: a coprocessor left to boot on its own draws current
+// the whole time the rescue image runs.
+static int8_t holdCoprocessor() {
+#if defined(BOARD_HAS_SDIO_ESP_HOSTED)
+  const int8_t pin = rescuemodel::coprocessorHoldPin(
+      board::COMPILED_PLATFORM.wifi, board::COMPILED_PLATFORM.platform,
+      BOARD_SDIO_ESP_HOSTED_RESET);
+  if (pin != board::NO_PIN) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+  }
+  return pin;
+#else
+  return board::NO_PIN;
+#endif
+}
+
 void setup() {
+  const int8_t coprocessorPin = holdCoprocessor();
   Serial.setTxBufferSize(1024);
   Serial.begin(115200);
 #if !defined(CONFIG_IDF_TARGET_ESP32P4)
@@ -203,6 +231,9 @@ void setup() {
   say("=== espdisp rescue image (%s) ===", board::COMPILED_PLATFORM.chipToken);
   say("rescue: chip=%s rev=%d flash=%uMB", ESP.getChipModel(),
       ESP.getChipRevision(), (unsigned)(ESP.getFlashChipSize() >> 20));
+  if (coprocessorPin != board::NO_PIN) {
+    say("rescue: WiFi coprocessor held in reset (GPIO%d low)", coprocessorPin);
+  }
   {
     Preferences prefs;
     if (prefs.begin("espdisp", true)) {

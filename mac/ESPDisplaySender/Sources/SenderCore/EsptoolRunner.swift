@@ -167,3 +167,240 @@ enum EsptoolRunner {
             output: transcript.withValue { $0 })
     }
 }
+
+extension EsptoolRunner {
+
+    /// Process-group signalling and reaping, as seams so the kill escalation
+    /// can be driven by a test without a process to kill.
+    struct Signals: Sendable {
+        /// Send a signal to a whole process group; false when there is none.
+        var signalGroup: @Sendable (pid_t, Int32) -> Bool
+        /// Whether anything in the group is still alive.
+        var groupAlive: @Sendable (pid_t) -> Bool
+        /// Reap the leader if it has exited, without blocking: its exit code,
+        /// negative for a signal, or nil while it runs.
+        var reap: @Sendable (pid_t) -> Int32?
+        var sleep: @Sendable (Double) -> Void
+        var now: @Sendable () -> Double
+
+        static let live = Signals(
+            signalGroup: { pid, signal in Darwin.killpg(pid, signal) == 0 || errno != ESRCH },
+            groupAlive: { pid in Darwin.killpg(pid, 0) == 0 || errno == EPERM },
+            reap: { pid in
+                var status: Int32 = 0
+                guard waitpid(pid, &status, WNOHANG) == pid else { return nil }
+                return EsptoolRunner.exitCode(fromWaitStatus: status)
+            },
+            sleep: { seconds in usleep(useconds_t(seconds * 1_000_000)) },
+            now: { ProcessInfo.processInfo.systemUptime })
+    }
+
+    /// `waitpid`'s status as a code: the exit status, or minus the signal.
+    static func exitCode(fromWaitStatus status: Int32) -> Int32 {
+        let signal = status & 0x7f
+        return signal == 0 ? (status >> 8) & 0xff : -signal
+    }
+
+    /// One esptool left running for as long as it takes, for `UsbRescuer`.
+    ///
+    /// NOT `run` above, for two reasons measured with the CLI rescue first.
+    /// esptool runs on a PSEUDO-TERMINAL, not a pipe: it is Python, Python
+    /// line-buffers only a tty, and "Connected to" is printed without a flush,
+    /// so through a pipe it could sit unread past the connect timeout. And it
+    /// runs in ITS OWN SESSION: the bundled esptool is a PyInstaller bootloader
+    /// whose child is the real esptool, and only a signal to the whole process
+    /// group reaches that child. `Process` offers neither, so this is
+    /// posix_spawn. Nothing else about spawning differs: no stdin, one output
+    /// stream, and only the descriptors named here are inherited.
+    final class WaitingProcess: @unchecked Sendable {
+        let pid: pid_t
+        private var fd: Int32?
+        private let signals: Signals
+        /// The write end of the watchdog pipe; closing it stops the group.
+        private var watchdogFD: Int32?
+        private(set) var exitCode: Int32?
+        /// kill() has run to the end: nothing is signalled again, because the
+        /// pid of a reaped leader may by now belong to someone else.
+        private var finished = false
+
+        enum Failure: Error, LocalizedError {
+            case couldNotStart(String)
+            var errorDescription: String? {
+                if case .couldNotStart(let reason) = self { return "Could not start esptool: \(reason)" }
+                return nil
+            }
+        }
+
+        /// Test seam: a process some other code started, or none at all.
+        init(pid: pid_t, fd: Int32?, signals: Signals) {
+            self.pid = pid
+            self.fd = fd
+            self.signals = signals
+        }
+
+        convenience init(
+            _ command: EsptoolCommand, environment: [String: String],
+            directory: String, signals: Signals = .live
+        ) throws {
+            guard FileManager.default.isExecutableFile(atPath: command.executable) else {
+                throw Failure.couldNotStart("\(command.executable) is not an executable file")
+            }
+            var master: Int32 = -1
+            var slave: Int32 = -1
+            guard openpty(&master, &slave, nil, nil, nil) == 0 else {
+                throw Failure.couldNotStart("no pseudo-terminal: \(String(cString: strerror(errno)))")
+            }
+            defer { close(slave) }
+            var watchdog: [Int32] = [-1, -1]
+            guard pipe(&watchdog) == 0 else {
+                close(master)
+                throw Failure.couldNotStart("no watchdog pipe: \(String(cString: strerror(errno)))")
+            }
+            defer { close(watchdog[0]) }
+            // Only this object holds the write end: a child the app spawns
+            // later must not keep it open, or the app exiting would not show.
+            _ = fcntl(watchdog[1], F_SETFD, FD_CLOEXEC)
+
+            var actions: posix_spawn_file_actions_t?
+            posix_spawn_file_actions_init(&actions)
+            defer { posix_spawn_file_actions_destroy(&actions) }
+            posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+            posix_spawn_file_actions_adddup2(&actions, slave, 1)
+            posix_spawn_file_actions_adddup2(&actions, slave, 2)
+            posix_spawn_file_actions_adddup2(&actions, watchdog[0], 3)
+            posix_spawn_file_actions_addchdir(&actions, directory)
+
+            var attributes: posix_spawnattr_t?
+            posix_spawnattr_init(&attributes)
+            defer { posix_spawnattr_destroy(&attributes) }
+            // SETSID: its own session and process group, led by the child.
+            // CLOEXEC_DEFAULT: none of the app's sockets or open serial ports
+            // leak into esptool. The signal mask and dispositions are reset
+            // so an ignored SIGTERM in the app is not inherited.
+            posix_spawnattr_setflags(&attributes, Int16(
+                POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT
+                    | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF))
+            var noSignals = sigset_t()
+            sigemptyset(&noSignals)
+            posix_spawnattr_setsigmask(&attributes, &noSignals)
+            var everySignal = sigset_t()
+            sigfillset(&everySignal)
+            posix_spawnattr_setsigdefault(&attributes, &everySignal)
+
+            let argv = (["/bin/sh", "-c", Self.watchdogScript, "esptool-watchdog",
+                         command.executable] + command.arguments).map { strdup($0) }
+            let envp = environment.map { strdup("\($0.key)=\($0.value)") }
+            defer {
+                argv.forEach { free($0) }
+                envp.forEach { free($0) }
+            }
+            var pid: pid_t = 0
+            let result = (argv + [nil]).withUnsafeBufferPointer { argvPointer in
+                (envp + [nil]).withUnsafeBufferPointer { envpPointer in
+                    posix_spawn(&pid, "/bin/sh", &actions, &attributes,
+                                argvPointer.baseAddress, envpPointer.baseAddress)
+                }
+            }
+            guard result == 0 else {
+                close(master)
+                close(watchdog[1])
+                throw Failure.couldNotStart(String(cString: strerror(result)))
+            }
+            _ = fcntl(master, F_SETFL, fcntl(master, F_GETFL) | O_NONBLOCK)
+            _ = fcntl(master, F_SETFD, FD_CLOEXEC)
+            self.init(pid: pid, fd: master, signals: signals)
+            watchdogFD = watchdog[1]
+        }
+
+        /// The wrapper esptool runs under, as the leader of its process group.
+        ///
+        /// kill() is not enough on its own: an app that quits or crashes never
+        /// calls it, and a pty that is not a controlling terminal (posix_spawn
+        /// cannot make it one) hangs nobody up when it closes. So a watcher in
+        /// the group reads a pipe only this app holds open. When the app goes,
+        /// however it goes, the read ends and the watcher hangs up the whole
+        /// group - otherwise an esptool that retries forever would keep
+        /// opening its link's port, and write whatever board turned up there.
+        /// The watcher's input is fd 3 explicitly: an asynchronous list in a
+        /// non-interactive shell otherwise reads /dev/null and would fire at
+        /// once. esptool's own exit status is passed through.
+        static let watchdogScript = """
+            "$@" </dev/null 3<&- &
+            tool=$!
+            (read -r _ <&3; kill -HUP 0) &
+            watch=$!
+            exec 3<&-
+            wait "$tool"
+            code=$?
+            kill "$watch" 2>/dev/null
+            exit "$code"
+            """
+
+        /// Everything written since the last call, without blocking.
+        func read() -> String {
+            guard let fd else { return "" }
+            var text = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let count = Darwin.read(fd, &buffer, buffer.count)
+                // EAGAIN: nothing more for now. EIO: the other side closed.
+                guard count > 0 else { break }
+                text.append(buffer, count: count)
+            }
+            return String(decoding: text, as: UTF8.self)
+        }
+
+        /// The exit code once esptool has exited, else nil.
+        func poll() -> Int32? {
+            if exitCode == nil, pid > 0 { exitCode = signals.reap(pid) }
+            return exitCode
+        }
+
+        /// Stop the whole esptool process tree and wait for it to go.
+        ///
+        /// SIGTERM first, which the PyInstaller bootloader forwards and which
+        /// lets it remove its extraction directory; SIGKILL to the group only
+        /// if anything is still alive after `grace`. Safe to call twice.
+        func kill(grace: Double = 5) {
+            guard !finished else { return }
+            finished = true
+            if pid > 0 {
+                for signal in [SIGTERM, SIGKILL] {
+                    guard signals.signalGroup(pid, signal) else { break }
+                    let deadline = signals.now() + grace
+                    while signals.now() < deadline {
+                        _ = poll()
+                        if !signals.groupAlive(pid) { break }
+                        signals.sleep(0.05)
+                    }
+                    if !signals.groupAlive(pid) { break }
+                }
+                // Reaped, not left a zombie: bounded, like the CLI's wait(5).
+                let deadline = signals.now() + grace
+                while poll() == nil, signals.now() < deadline { signals.sleep(0.05) }
+            }
+            closeDescriptors()
+        }
+
+        private func closeDescriptors() {
+            if let fd {
+                close(fd)
+                self.fd = nil
+            }
+            if let watchdogFD {
+                close(watchdogFD)
+                self.watchdogFD = nil
+            }
+        }
+
+        /// Close every descriptor without signalling anything, which is what
+        /// the app exiting does. Only the tests call this.
+        func abandon() {
+            closeDescriptors()
+        }
+
+        deinit {
+            kill(grace: 1)
+        }
+    }
+}

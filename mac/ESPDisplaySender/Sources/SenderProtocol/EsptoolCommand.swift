@@ -234,6 +234,39 @@ public struct EsptoolCommand: Equatable, Sendable {
         return EsptoolCommand(executable: tool.executable, arguments: arguments)
     }
 
+    /// The write that puts a rescue image on a board caught during its brief
+    /// USB window (`UsbRescue`), argv for argv what `tools/espdisp.py
+    /// rescue_spawner` runs.
+    ///
+    /// `port` is the waiting link, not a device, so the `noPort` refusal still
+    /// applies to it. None of the `-z --flash-mode keep` options of the normal
+    /// write: the CLI that was proven on hardware passes none, and they are
+    /// esptool's defaults anyway. Never an erase: the rescue image leaves NVS,
+    /// the other OTA slot and the Doom WAD where they are.
+    public static func rescueWriteFlash(
+        tool: Tool,
+        chip: String,
+        port: String,
+        baud: Int,
+        writes: [StagedWrite]
+    ) throws -> EsptoolCommand {
+        let normal = try writeFlash(
+            tool: tool, chip: chip, port: port, baud: baud, writes: writes)
+        var arguments = tool.leadingArguments
+        arguments += [
+            "--chip", chip.trimmingCharacters(in: .whitespacesAndNewlines),
+            "--port", port.trimmingCharacters(in: .whitespacesAndNewlines),
+            "--baud", String(baud),
+            "--before", beforeReset,
+            "--after", afterReset,
+            tool.writeFlashSubcommand,
+        ]
+        for write in writes {
+            arguments += [hexAddress(write.address), write.path]
+        }
+        return EsptoolCommand(executable: normal.executable, arguments: arguments)
+    }
+
     /// The read-only probe that asks a board what it is.
     ///
     /// Same `--port` rule, and for the same reason: without it esptool picks a

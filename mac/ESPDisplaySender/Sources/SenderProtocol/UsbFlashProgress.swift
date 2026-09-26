@@ -22,6 +22,9 @@ public enum UsbFlashPhase: Equatable, Sendable {
     case waitingForBoard(SettleWait)
     /// A configuration line is going down the cable; the label says which.
     case configuring(String)
+    /// Repair: catching a board that drops off USB and giving it the rescue
+    /// image. The step says what the person holding the board should do.
+    case rescue(UsbRescueStep)
 
     public var title: String {
         switch self {
@@ -41,6 +44,8 @@ public enum UsbFlashPhase: Equatable, Sendable {
             return "Waiting for the board to answer"
         case .configuring(let label):
             return label
+        case .rescue(let step):
+            return step.title
         }
     }
 
@@ -51,6 +56,8 @@ public enum UsbFlashPhase: Equatable, Sendable {
             return part.percent.map { "\($0)% of \(part.partName)" }
         case .waitingForBoard(let wait):
             return wait.summary
+        case .rescue(let step):
+            return step.detail
         default:
             return nil
         }
@@ -326,6 +333,9 @@ public struct UsbFlashSession: Equatable, Sendable {
         case configureOnly
         /// Firmware Update over USB: flash, then wait for the board to answer.
         case update
+        /// Repair: catch a board that drops off USB, write the rescue image,
+        /// then install the real firmware and wait for it to answer.
+        case repair
     }
 
     public let flow: Flow
@@ -368,6 +378,7 @@ public struct UsbFlashSession: Equatable, Sendable {
         let step: String
         switch phase {
         case .findingBoard, nil: step = "Checking the board before writing"
+        case .rescue(let rescue)?: step = rescue.activity
         case let phase?: step = phase.title
         }
         failure = UsbFlashFailure(
@@ -387,7 +398,7 @@ public struct UsbFlashSession: Equatable, Sendable {
             return wait.lastSeen.map { [$0] } ?? []
         case .configuring:
             return transcript.last(2, from: [.sent, .received])
-        case .findingBoard, nil:
+        case .findingBoard, .rescue, nil:
             return transcript.last(3, from: [.esptool, .received])
         }
     }
@@ -412,10 +423,18 @@ public struct UsbFlashSession: Equatable, Sendable {
             case .configureOnly:
                 return "Unplug the board, plug it back in, and run Set Up WiFi "
                     + "only again."
-            case .update:
+            case .update, .repair:
                 return "The firmware is written. Unplug the board and plug it back "
                     + "in; it should answer within a minute."
             }
+        case .rescue(.rescued), .rescue(.readingBoard):
+            return "The rescue firmware is on the board and keeps its USB up. "
+                + "Unplug it, press Start Over, and plug it in when asked; it is "
+                + "caught at once."
+        case .rescue:
+            return "Check the chip family, use a data cable on a USB port directly "
+                + "on the Mac, and start the repair again. Anything already "
+                + "written is the rescue image, which is safe to write again."
         case .configuring:
             return "Unplug the board, plug it back in, then run this again with "
                 + "Set Up WiFi only to resend the settings."

@@ -545,8 +545,14 @@ extension PanelManager {
         }
     }
 
+    /// The ports a background identity probe may ask CFGSHOW: none while a
+    /// repair holds probes.
+    func portsToIdentify(_ ports: [String]) -> [String] {
+        usbProbeHolds == 0 ? ports : []
+    }
+
     func identifyUSBPorts(_ ports: [String]) {
-        for path in ports {
+        for path in portsToIdentify(ports) {
             Task { @MainActor [weak self] in
                 _ = await self?.probeUSBDevice(path)
             }

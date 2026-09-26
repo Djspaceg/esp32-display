@@ -90,6 +90,34 @@ static const char *const PANEL_PIN_FIELDS[] = {
 static const char *const BACKLIGHT_PIN_FIELDS[] = {"pinBl"};
 static const char *const BRIDGE_PIN_FIELDS[] = {"pinSerialRx", "pinSerialTx"};
 
+// ---- Power ----------------------------------------------------------------
+
+/// The level, 0-255 on the stream firmware's scale, the rescue image lights
+/// its panel at: enough to read RESCUE, about an eighth of full. A board that
+/// browns out under the stream firmware's draw (a P4 restarting on POWERON
+/// every few seconds) must not hit the same limit on the image meant to save
+/// it, so the rescue image never drives its backlight any brighter.
+static const uint8_t BACKLIGHT_LEVEL = 32;
+
+/// The PWM duty for a level; an active-low backlight (a P-FET gate) takes the
+/// complement, as display_stream's driveBrightness() does.
+constexpr uint8_t backlightDuty(uint8_t level, bool inverted) {
+  return inverted ? (uint8_t)(255 - level) : level;
+}
+
+/// The line to hold low so a hosted WiFi coprocessor (the P4 carrier's C6)
+/// stays powered down, or NO_PIN. `resetPin` is the core's ESP-Hosted reset,
+/// its CHIP_PU, which the stream firmware drives on the same boards. The
+/// rescue image starts no radio, so the coprocessor has nothing to do but draw
+/// current. Never a USB pin.
+constexpr int8_t coprocessorHoldPin(board::WifiTopology wifi,
+                                    board::Platform platform, int8_t resetPin) {
+  return wifi == board::WifiTopology::HostedCoprocessor &&
+                 resetPin != board::NO_PIN && !isUsbPin(platform, resetPin)
+             ? resetPin
+             : board::NO_PIN;
+}
+
 // ---- Stored CFGBOARD override -------------------------------------------
 
 /// The profile a stored CFGBOARD value (NVS "espdisp"/"board") would force on

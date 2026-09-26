@@ -71,6 +71,10 @@ final class PanelManager: ObservableObject {
         String: (generation: Int, task: Task<WifiConfigUI.PortProbe, Never>)
     ] = [:]
     var usbPathGenerations: [String: Int] = [:]
+    /// While above zero, newly attached ports are not asked CFGSHOW in the
+    /// background. A repair holds this: the board it is catching must be
+    /// opened by esptool alone, in the moment it is on USB.
+    var usbProbeHolds = 0
     /// A path-only USB choice made during this app run. Legacy firmware cannot
     /// report CFGSHOW id=, so this is the narrow bridge that lets the user choose
     /// among several name-only devices. It is never persisted and expires when
