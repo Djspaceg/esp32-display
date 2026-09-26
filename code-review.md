@@ -7,13 +7,19 @@ need for an independent review of the final branch tip.
 
 ## Verdict
 
-One Medium severity descriptor defect is open. I found no serious defect in the
+No open findings. (One Medium descriptor finding was withdrawn; see below.) I found no serious defect in the
 C3 compact-framebuffer mapping after auditing its allocation, all direct buffer
 accesses, boundary rows, packet ordering, and compile-time isolation.
 
 ## Findings
 
 ### Medium: the descriptor disables the physical BOOT button
+
+**WITHDRAWN.** The board owner confirmed that this board has no physical buttons, so
+`pin_boot = -1` is correct. The pin map this finding relied on describes the board
+family, not this board. A fix that set GPIO9 (ad7729f, 5e1935f) was reverted before
+it reached any board or main. Declaring a button pin on a board with no button makes
+the firmware watch an unconnected strapping pin, which can read phantom presses.
 
 **Location:** `boards/c3-2424s012.toml:86`
 

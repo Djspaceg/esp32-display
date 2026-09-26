@@ -5415,10 +5415,7 @@ int main() {
           c3.panel->height == 240);
     CHECK(c3.pinSclk == 6 && c3.pinMosi == 7 && c3.pinCs == 10 &&
           c3.pinDc == 2 && c3.pinBl == 3);
-    // BOOT is GPIO9, the C3's boot-mode strapping pin. Without it the
-    // post-boot brightness, rotate and display-off presses do nothing.
-    CHECK_EQ(c3.pinBootButton, 9);
-    CHECK(c3.hasBootButton());
+    CHECK(c3.pinBootButton == board::NO_PIN);
     CHECK(c3.hasTouch() && c3.touch == board::TouchController::Cst816 &&
           c3.pinTouchSda == 4 && c3.pinTouchScl == 5 &&
           c3.pinTouchRst == 1 && c3.pinTouchInt == 0);
