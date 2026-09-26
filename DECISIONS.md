@@ -12,7 +12,7 @@ D5 Automatic correction stays a 180 flip. In a landscape mount it reads the flip
 D6 With no stream, the on-device screens (boot fills, idle, survey, WiFi selector) go landscape at 90/270, and a mount change clears bufA to the new shape. Why: they already lay out for either shape. If overruled: they stay portrait.
 D7 Doom is unchanged: it forces rotation 0 and draws portrait, letterboxed. Why: its controls are laid out for that orientation. If overruled: a separate landscape Doom task.
 D8 Picking 90/270 turns only a region source. Display and window sources keep their own shape. Why: they have no region to turn. If overruled: letterbox them into the rotation's shape.
-D9 A rotation set outside the app (serial, another Mac) also re-shapes the region, except within 3 s of the app's own command. The status tick no longer replays a stale EINF rotation. Why: stale reports would turn the region back. If overruled: only the app's picker turns it.
+D9 A rotation set outside the app (serial, another Mac) also re-shapes the region, except within 3 s of the app's own command. A change reported before the geometry is known waits for it. The status tick no longer replays a stale EINF rotation. Why: stale reports would turn the region back. If overruled: only the app's picker turns it.
 
 # Open questions
 
@@ -24,15 +24,15 @@ D9 A rotation set outside the app (serial, another Mac) also re-shapes the regio
 Publish settings: local branch `rect-panel-landscape`. No push, PR, CR or AutoSDE, because this is a personal GitHub repo and the brief says no push. The user merges.
 Call sites, packages/*: none touched.
 Adversarial-review rounds: 2 (code-review.md). They changed D6 and D9 and added the validator rule.
-Final-HEAD lanes, all passing:
+Lanes, all passing, ran on `68175cb` (the commits after it touch docs only):
 - `gate-firmware-tests.log`
 - `gate-test-espdisp.log`
 - `gate-compile-s3.log`
 - `gate-compile-c6.log`
 - `gate-swift-test.log`
 - `gate-descriptor-check.log`
-- `release-shipping.log` (bundles)
-- `app-build.log`
+- `release-shipping.log`: bundles from clean `aa00127`, with no FW_VERSION bump
+- `app-build.log`: Release build into `esp32-display-rect-landscape-appbuild`, not installed or launched
 
 # Evidence
 
