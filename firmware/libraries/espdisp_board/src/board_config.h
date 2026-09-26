@@ -25,7 +25,9 @@
 //                              touch on I2C GPIO6/7, rotary encoder on
 //                              GPIO45/42 and knob press on GPIO41
 //
-// The C6 and S3 families choose a profile before any panel GPIO is driven.
+// The C6 and S3 families choose a profile before any panel GPIO is driven,
+// except that the CrowPanel knob probe pulses that board's panel supply rail
+// (GPIO1), and only when no earlier S3 probe has answered.
 // C6 distinguishes its two profiles on one shared I2C bus. S3 first uses the
 // 8 MiB flash identity for GC9107, then probes profile-specific I2C buses on
 // larger-flash hardware and accepts a result only when exactly one profile
@@ -251,9 +253,10 @@ struct Config {
   int8_t pinSerialRx = NO_PIN;
   int8_t pinSerialTx = NO_PIN;
 
-  /// Optional GPIO that switches the panel's own supply rail, driven high
-  /// before the panel bus starts and never lowered afterwards. On the
-  /// CrowPanel knob it also feeds the backlight anode and the touch pull-ups.
+  /// Optional GPIO that switches the panel's own supply rail. Panel bring-up
+  /// drives it high before the bus starts and holds it there (boot detection
+  /// may pulse it earlier). On the CrowPanel knob it also feeds the backlight
+  /// anode and the touch pull-ups.
   int8_t pinPanelPower = NO_PIN;
 
   /// Optional quadrature rotary encoder, both lines idle-high. Its push switch,

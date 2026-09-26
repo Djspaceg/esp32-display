@@ -4213,6 +4213,29 @@ def test_board_descriptor_validator():
         "carrier.pin_encoder_a GPIO41 collides with carrier.pin_boot",
         "encoder lines cannot collide with existing carrier wiring",
     )
+    encoder_on_touch = copy.deepcopy(knob)
+    encoder_on_touch["carrier"]["pin_encoder_a"] = 5
+    check_descriptor_fails(
+        [encoder_on_touch],
+        "carrier.pin_encoder_a GPIO5 collides with touch.interrupt",
+        "encoder lines cannot collide with touch wiring",
+    )
+    rail_on_touch_reset = copy.deepcopy(knob)
+    rail_on_touch_reset["carrier"]["pin_panel_power"] = 13
+    check_descriptor_fails(
+        [rail_on_touch_reset],
+        "carrier.pin_panel_power GPIO13 collides with touch.reset",
+        "the panel rail cannot collide with touch wiring",
+    )
+    audio_on_encoder = copy.deepcopy(verified_audio)
+    audio_on_encoder["carrier"]["pin_encoder_a"] = 3
+    audio_on_encoder["carrier"]["pin_encoder_b"] = 13
+    audio_on_encoder["audio"]["pin_playback_mclk"] = 3
+    check_descriptor_fails(
+        [audio_on_encoder],
+        "audio.pin_playback_mclk GPIO3 collides with carrier.pin_encoder_a",
+        "audio pins cannot collide with optional carrier lines",
+    )
     out_of_range_power = copy.deepcopy(knob)
     out_of_range_power["carrier"]["pin_panel_power"] = 49
     check_descriptor_fails(
@@ -6665,6 +6688,30 @@ def test_bootstrap_knob_press_pin_blocks_template_drive():
             )
 
 
+def test_bootstrap_knob_encoder_pins_block_template_drive():
+    # Encoder contacts close to ground at every other detent, so the 1.54-inch
+    # template's D/C on GPIO45 (knob encoder A) must not be driven either.
+    with tempfile.TemporaryDirectory() as tmp:
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            check_fails(
+                lambda: espdisp.run_bootstrap_session(
+                    transport=BootstrapS3Transport(),
+                    prompter=BootstrapFakePrompter(
+                        bootstrap_success_answers()),
+                    stream=BootstrapFakeStream(tty=True),
+                    repo_root=espdisp.REPO_ROOT,
+                    name="synthetic-s3",
+                    candidate_key="s3-touch-lcd-154",
+                    confirmed_chip="esp32s3",
+                    output_path=os.path.join(tmp, "synthetic-s3.toml"),
+                ),
+                "refusing to drive GPIO45 for panel calibration; candidate "
+                "descriptor set marks it as "
+                "s3-elecrow-knob-128.carrier.pin_encoder_a",
+                "a possible knob carrier keeps its encoder lines undriven",
+            )
+
+
 def test_bootstrap_full_synthetic_session():
     with tempfile.TemporaryDirectory() as tmp:
         # This session templates from the 1.3-inch board, whose MOSI is the
@@ -7390,6 +7437,7 @@ int main() {
 def main():
     test_bootstrap_solvers_and_derivations()
     test_bootstrap_knob_press_pin_blocks_template_drive()
+    test_bootstrap_knob_encoder_pins_block_template_drive()
     test_bootstrap_full_synthetic_session()
     test_bootstrap_retune_is_section_scoped()
     test_bootstrap_refusals_and_color_controls()

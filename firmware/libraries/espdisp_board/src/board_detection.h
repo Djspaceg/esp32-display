@@ -80,6 +80,24 @@ constexpr bool flashMatches(uint32_t flashBytes, uint32_t minExclusive,
   return flashBytes != 0 || (minExclusive == 0 && maxInclusive == 0);
 }
 
+/// Whether probe `index` should run given the evidence gathered so far. A probe
+/// with a reset line drives that GPIO push-pull (on the CrowPanel knob it is the
+/// panel supply rail), which is only justified while no earlier probe has
+/// identified its board: once one has, this probe could only add a second
+/// candidate, and on that board the line is some other net.
+inline bool shouldRunProbe(const FamilyDetectionPlan &plan, uint8_t index,
+                           const ProbeEvidence *evidence) {
+  if (index >= plan.probeCount) return false;
+  if (plan.probes[index].resetPin < 0) return true;
+  for (uint8_t i = 0; i < index; ++i) {
+    if (evidence[i].status == ProbeStatus::Started &&
+        evidence[i].ackCount > 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 inline bool candidateMatches(const CandidateRule &candidate,
                              uint32_t flashBytes,
                              const ProbeEvidence *evidence,

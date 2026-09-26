@@ -133,7 +133,8 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
                  esp_lcd_panel_handle_t *outPanel) {
   if (cfg.pinPanelPower != board::NO_PIN) {
     // A carrier-switched panel rail must be up and settled before the
-    // controller sees reset or its first command. It is never lowered again.
+    // controller sees reset or its first command. Boot detection may have
+    // pulsed and released it; from here on it is held high.
     pinMode(cfg.pinPanelPower, OUTPUT);
     digitalWrite(cfg.pinPanelPower, HIGH);
     delay(20);

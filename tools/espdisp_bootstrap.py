@@ -670,6 +670,11 @@ def _forbidden_drive_pins(
             ("power.charge_status", candidate["power"]["charge_status"]),
             ("power.battery_enable", candidate["power"]["battery_enable"]),
             ("serial.rx", candidate["serial"]["rx"]),
+            # Switch contacts to ground, like pin_boot.
+            ("carrier.pin_encoder_a", board_descriptor.optional_pin(
+                candidate, "carrier.pin_encoder_a")),
+            ("carrier.pin_encoder_b", board_descriptor.optional_pin(
+                candidate, "carrier.pin_encoder_b")),
         )
         for field, pin in fields:
             if pin >= 0:

@@ -137,6 +137,13 @@ inline board::Variant probeS3(bool verbose = true,
             probe.flashMaxInclusive)) {
       continue;
     }
+    if (!boarddetectmodel::shouldRunProbe(plan, i, evidence)) {
+      if (verbose) {
+        Serial.printf("board: S3 %s probe skipped; an earlier bus answered\n",
+                      probeProfile(plan, i));
+      }
+      continue;
+    }
     evidence[i] = collectI2cEvidence(
         probe, "S3", probeProfile(plan, i), verbose);
   }

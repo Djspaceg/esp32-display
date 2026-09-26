@@ -700,36 +700,34 @@ int main() {
       for (size_t i = 0; i < count; ++i) total += decoder.update(states[i]);
       return total;
     };
-    CHECK(pinState(true, true) == REST_STATE);
+    CHECK(pinState(true, true) == 3);
     CHECK(pinState(true, false) == 2 && pinState(false, true) == 1);
-    CHECK(quarterStep(3, 3) == 0);
-    CHECK(quarterStep(3, 0) == 0);  // both lines at once: direction unknown
-    CHECK(quarterStep(3, 2) == -quarterStep(2, 3));
 
-    // One full quadrature cycle per detent, each direction.
-    const uint8_t forward[] = {2, 0, 1, 3};
-    const uint8_t backward[] = {1, 0, 2, 3};
+    // ELECROW's clockwise cycle 3-1-0-2-3 is two detents (one per A edge).
     Decoder decoder;
-    CHECK(quarterStep(3, 2) == 1);
-    CHECK(feed(decoder, forward, 4) == 1);
-    CHECK(feed(decoder, forward, 4) == 1);
-    CHECK(feed(decoder, backward, 4) == -1);
-    CHECK(decoder.state == REST_STATE && decoder.accumulated == 0);
+    const uint8_t clockwise[] = {1, 0, 2, 3};
+    CHECK(feed(decoder, clockwise, 4) == 2);
+    CHECK(decoder.update(1) == 1);   // A falls while B is high: one click
+    CHECK(decoder.update(0) == 0);   // B alone is never a detent
+    CHECK(decoder.update(2) == 1);   // A rises while B is low: one click
+    CHECK(decoder.update(3) == 0);
+    const uint8_t counterClockwise[] = {2, 0, 1, 3};
+    CHECK(feed(decoder, counterClockwise, 4) == -2);
+    CHECK(decoder.state == 3);
 
-    // Contact bounce around rest cancels instead of clicking.
-    const uint8_t bounce[] = {2, 3, 2, 3, 1, 3};
-    CHECK(feed(decoder, bounce, 6) == 0);
-    // A detent that bounces on its way out still counts once.
-    const uint8_t noisyForward[] = {2, 3, 2, 0, 2, 0, 1, 3};
-    CHECK(feed(decoder, noisyForward, 8) == 1);
-    // Turning half-way and back is not a detent.
-    const uint8_t halfAndBack[] = {2, 0, 2, 3};
-    CHECK(feed(decoder, halfAndBack, 4) == 0);
-    // A lost edge mid-cycle (invalid jump) still resolves the direction.
-    const uint8_t skipped[] = {2, 0, 3};
-    CHECK(feed(decoder, skipped, 3) == 1);
+    // B chattering on its edge at a detent never clicks.
+    const uint8_t bChatter[] = {2, 3, 2, 3, 2, 3};
+    CHECK(feed(decoder, bChatter, 6) == 0);
+    // A bouncing across its edge settles to exactly one click.
+    const uint8_t aBounce[] = {1, 3, 1, 3, 1};
+    CHECK(feed(decoder, aBounce, 5) == 1);
+    // Turning onto the next detent and straight back nets zero.
+    const uint8_t overAndBack[] = {3, 1};
+    CHECK(feed(decoder, overAndBack, 2) == 0);
+    // Both lines changing between samples carries no direction.
+    CHECK(decoder.update(2) == 0);
     // Samples outside two bits are masked rather than trusted.
-    CHECK(decoder.update(0xFF) == 0 && decoder.state == REST_STATE);
+    CHECK(decoder.update(0xFE) == 0 && decoder.state == 2);
   }
 
   // --- BOOT short/double-press effects -----------------------------------
@@ -2308,6 +2306,28 @@ int main() {
     CHECK(s3Plan.probes[4].resetPin == 1);
     CHECK(s3Plan.probes[4].resetLowMs == 20);
     CHECK(s3Plan.probes[4].resetReleaseWaitMs == 300);
+    {
+      // The rail-pulsing knob probe runs only while nothing has answered, so
+      // the other S3 boards never have their GPIO1 driven by it.
+      ProbeEvidence seen[5] = {};
+      for (uint8_t i = 0; i < 4; ++i) {
+        CHECK(boarddetectmodel::shouldRunProbe(s3Plan, i, seen));
+      }
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 4, seen));
+      seen[1] = {ProbeStatus::Started, 0};
+      seen[3] = {ProbeStatus::StartFailed, 0};
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 4, seen));
+      seen[2] = {ProbeStatus::Started, 1};
+      CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 4, seen));
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 3, seen));
+      CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 5, seen));
+      // Skipped evidence stays NotRun, so the knob candidate cannot match and
+      // the board that answered still resolves on its own.
+      seen[4] = {};
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      16u * 1024u * 1024u, seen, 5)
+                .variant == Variant::TouchSt7789);
+    }
     for (uint8_t i = 0; i < s3Plan.probeCount; ++i) {
       CHECK(s3Plan.probes[i].frequencyHz == 100000);
       CHECK(s3Plan.probes[i].release == ProbeRelease::Always);

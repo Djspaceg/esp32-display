@@ -256,10 +256,12 @@ def _validate_optional_pins(descriptor: Dict[str, Any]) -> None:
         raise DescriptorError(
             "%s: carrier.pin_encoder_a and pin_encoder_b must both be "
             "declared or both be -1" % source)
+    # Detection lines are excluded: a probe may deliberately drive a carrier
+    # line, as the knob's probe pulses its panel supply rail.
     existing = {}
     for path in EXISTING_PIN_PATHS:
         value = _field(descriptor, path)
-        if (path.startswith("carrier.") and isinstance(value, int) and
+        if (not path.startswith("detection.") and isinstance(value, int) and
                 not isinstance(value, bool) and value >= 0):
             existing.setdefault(value, path)
     for path, value in values.items():
@@ -632,6 +634,10 @@ def _validate_audio(descriptor: Dict[str, Any]) -> None:
     existing_pins: Dict[int, str] = {}
     for path in EXISTING_PIN_PATHS:
         value = _field(descriptor, path)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            existing_pins.setdefault(value, path)
+    for path in OPTIONAL_PIN_DEFAULTS:
+        value = optional_pin(descriptor, path)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             existing_pins.setdefault(value, path)
     for field, value in pins.items():

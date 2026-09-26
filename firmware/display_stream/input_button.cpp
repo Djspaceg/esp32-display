@@ -105,8 +105,10 @@ static bool takeBootButtonEdge(BootButtonEdge &edge) {
 // has: it moves the WiFi selector highlight like a short press does there, and
 // otherwise picks the high or low backlight preset the short press toggles
 // between. The knob's push switch is the carrier's BOOT button, so every press
-// tier above applies to it unchanged. Steps are decoded in the ISR (a detent's
-// four edges can come and go inside one render pass) and applied from loop().
+// tier above applies to it unchanged - except that a press during which the
+// knob turned performs no press action, because press-and-turn is one gesture.
+// Steps are decoded in the ISR (a fast turn can cross several detents inside
+// one render pass) and their net is applied from loop().
 static gpio_num_t encoderPinA = GPIO_NUM_NC;
 static gpio_num_t encoderPinB = GPIO_NUM_NC;
 static rotaryencoder::Decoder encoderDecoder;
@@ -244,10 +246,18 @@ static void handleShortRelease(uint32_t releasedAt) {
       shortPressTracker.record(releasedAt, DOUBLE_PRESS_MS, previewEnabled));
 }
 
-static void applyEncoderStep(int8_t direction) {
-  Serial.printf("knob: turn %+d\n", (int)direction);
+// A turn this large between two loop passes is a stall, not intent; the
+// selector still moves at most this many rows for it.
+static const int16_t MAX_SELECTOR_STEPS_PER_PASS = 4;
+
+static void applyEncoderTurn(int16_t steps) {
+  Serial.printf("knob: turn %+d\n", (int)steps);
+  const int8_t direction = steps > 0 ? 1 : -1;
   if (wifiSelectorActive) {
-    moveWifiSelector(direction);
+    const int16_t count = steps > 0 ? steps : (int16_t)-steps;
+    for (int16_t i = 0; i < count && i < MAX_SELECTOR_STEPS_PER_PASS; ++i) {
+      moveWifiSelector(direction);
+    }
     return;
   }
   if (surveyActive) {
@@ -271,17 +281,16 @@ static void applyEncoderStep(int8_t direction) {
                 blIsHigh() ? "high" : "low");
 }
 
-static void handleEncoder() {
-  if (bcfg == nullptr || !bcfg->hasEncoder()) return;
+// Applies any detents since the last pass; returns whether there were any.
+static bool handleEncoder() {
+  if (bcfg == nullptr || !bcfg->hasEncoder()) return false;
   portENTER_CRITICAL(&encoderMux);
-  int16_t steps = encoderPendingSteps;
+  const int16_t steps = encoderPendingSteps;
   encoderPendingSteps = 0;
   portEXIT_CRITICAL(&encoderMux);
-  while (steps != 0) {
-    const int8_t direction = steps > 0 ? 1 : -1;
-    steps = (int16_t)(steps - direction);
-    applyEncoderStep(direction);
-  }
+  if (steps == 0) return false;
+  applyEncoderTurn(steps);
+  return true;
 }
 
 // Process queued BOOT edges: short press toggles backlight, a completed long
@@ -293,13 +302,14 @@ static void handleEncoder() {
 // keep their immediate behavior because they are a separate mode and never
 // fall through to the power action.
 void handleButton() {
-  handleEncoder();
+  const bool knobTurned = handleEncoder();
   if (bcfg == nullptr || !bcfg->hasBootButton()) return;
 
   static bool wasDown = false;
   static bool longFired = false;
   static bool extraLongFired = false;
   static bool selectorEntryHold = false;
+  static bool turnedWhileDown = false;
   static uint32_t downAt = 0;
 
   auto fireLongPress = [&]() {
@@ -334,11 +344,22 @@ void handleButton() {
         wasDown = true;
         longFired = false;
         extraLongFired = false;
+        turnedWhileDown = false;
         downAt = edge.atMs;
       }
       continue;
     }
     if (!wasDown) continue;
+    if (knobTurned) turnedWhileDown = true;
+    if (turnedWhileDown) {
+      Serial.println("knob: press released after a turn; no press action");
+      wasDown = false;
+      longFired = false;
+      extraLongFired = false;
+      selectorEntryHold = false;
+      turnedWhileDown = false;
+      continue;
+    }
 
     const uint32_t heldMs = edge.atMs - downAt;
     if (selectorEntryHold) {
@@ -378,7 +399,8 @@ void handleButton() {
     wasDown = false;
   }
 
-  if (wasDown) {
+  if (wasDown && knobTurned) turnedWhileDown = true;
+  if (wasDown && !turnedWhileDown) {
     const uint32_t heldMs = buttonClockMs() - downAt;
     if (!selectorEntryHold) {
       if (wifiSelectorActive) {
