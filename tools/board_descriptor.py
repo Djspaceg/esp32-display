@@ -206,6 +206,15 @@ WIFI_TOPOLOGIES = {"native", "hosted_coprocessor"}
 IDENTITY_SOURCES = {"wifi_station_mac", "efuse_base_mac"}
 SERIAL_TRANSPORTS = {"native_usb_cdc", "uart_bridge"}
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Optional fields and the value an absent field means. The detection sense is
+# an input-only analog guard for carriers whose I2C buses answer identically:
+# millivolts on sense_pin with the internal pull-down enabled must fall within
+# [sense_min_mv, sense_max_mv]; a sense_max_mv of 0 is unbounded.
+OPTIONAL_FIELDS = {
+    "detection.sense_pin": -1,
+    "detection.sense_min_mv": 0,
+    "detection.sense_max_mv": 0,
+}
 # Carrier wiring only some boards have. Absent means -1 (no such line), so a
 # descriptor written before a field existed stays valid without restating it.
 OPTIONAL_PIN_DEFAULTS = {
@@ -215,10 +224,21 @@ OPTIONAL_PIN_DEFAULTS = {
 }
 ALLOWED_TOP_LEVEL = {path.split(".", 1)[0] for path in REQUIRED_FIELDS}
 ALLOWED_SECTION_FIELDS: Dict[str, set[str]] = {}
-for required_path in REQUIRED_FIELDS + tuple(OPTIONAL_PIN_DEFAULTS):
+for required_path in (tuple(REQUIRED_FIELDS) + tuple(OPTIONAL_FIELDS)
+                      + tuple(OPTIONAL_PIN_DEFAULTS)):
     section, separator, field = required_path.partition(".")
     if separator:
         ALLOWED_SECTION_FIELDS.setdefault(section, set()).add(field)
+
+
+def detection_sense(descriptor: Dict[str, Any]) -> Tuple[int, int, int]:
+    """The (pin, minimum mV, maximum mV) sense guard; pin -1 when absent."""
+    detection = descriptor["detection"]
+    return (
+        detection.get("sense_pin", OPTIONAL_FIELDS["detection.sense_pin"]),
+        detection.get("sense_min_mv", OPTIONAL_FIELDS["detection.sense_min_mv"]),
+        detection.get("sense_max_mv", OPTIONAL_FIELDS["detection.sense_max_mv"]),
+    )
 
 
 def _field(descriptor: Dict[str, Any], path: str) -> Any:
@@ -410,6 +430,53 @@ def _validate_detection(descriptor: Dict[str, Any]) -> None:
     elif detection["sda"] != -1 or detection["scl"] != -1:
         raise DescriptorError(
             "%s: non-I2C detection must not declare I2C pins" % source)
+
+    sense_pin, sense_min, sense_max = detection_sense(descriptor)
+    for path, value in (
+        ("detection.sense_pin", sense_pin),
+        ("detection.sense_min_mv", sense_min),
+        ("detection.sense_max_mv", sense_max),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise DescriptorError("%s: %s must be int" % (source, path))
+    if sense_pin == -1:
+        if sense_min or sense_max:
+            raise DescriptorError(
+                "%s: detection sense window requires detection.sense_pin"
+                % source)
+    else:
+        # Only the S3 detector collects senses, and only ADC1 (GPIO1..10) is
+        # guaranteed free of the WiFi driver; a pin the ADC cannot read would
+        # never produce evidence.
+        if descriptor["identity"]["target"] != "s3":
+            raise DescriptorError(
+                "%s: detection sense guards are only supported on s3" % source)
+        if not 1 <= sense_pin <= 10:
+            raise DescriptorError(
+                "%s: detection.sense_pin must be an S3 ADC1 pin (1..10)"
+                % source)
+        if not 0 <= sense_min <= 3300 or not 0 <= sense_max <= 3300:
+            raise DescriptorError(
+                "%s: detection sense window must be 0..3300 mV" % source)
+        if sense_max and sense_min > sense_max:
+            raise DescriptorError(
+                "%s: detection sense window is empty" % source)
+        if not sense_min and not sense_max:
+            raise DescriptorError(
+                "%s: detection sense window must bound at least one side"
+                % source)
+
+
+def _sense_windows_disjoint(
+    first: Tuple[int, int, int], second: Tuple[int, int, int],
+) -> bool:
+    pin_a, min_a, max_a = first
+    pin_b, min_b, max_b = second
+    if pin_a < 0 or pin_a != pin_b:
+        return False
+    high_a = max_a or 3300
+    high_b = max_b or 3300
+    return high_a < min_b or high_b < min_a
 
 
 AUDIO_PIN_FIELDS = (
@@ -732,7 +799,8 @@ def validate_descriptors(
     identities: Dict[Tuple[str, str, str, str], str] = {}
     variants: Dict[str, str] = {}
     variant_values: Dict[int, str] = {}
-    detection_signatures: Dict[Tuple[Any, ...], str] = {}
+    detection_signatures: Dict[
+        Tuple[Any, ...], List[Tuple[str, Tuple[int, int, int]]]] = {}
     family_contracts: Dict[str, Tuple[Any, ...]] = {}
     generated_by_family: Dict[str, List[str]] = {}
     detection_orders: Dict[Tuple[str, int], str] = {}
@@ -824,13 +892,20 @@ def validate_descriptors(
             )
         detection_orders[order_key] = source
 
+        # Two candidates may share one probe signature only when both carry a
+        # sense guard on the same pin with disjoint windows, so the analog
+        # reading can never select both.
         signature = _detection_signature(descriptor)
-        if signature in detection_signatures:
-            raise DescriptorError(
-                "%s: duplicate probe signature already claimed by %s"
-                % (source, detection_signatures[signature])
-            )
-        detection_signatures[signature] = source
+        sense = detection_sense(descriptor)
+        for other_source, other_sense in detection_signatures.get(
+                signature, []):
+            if not _sense_windows_disjoint(sense, other_sense):
+                raise DescriptorError(
+                    "%s: duplicate probe signature already claimed by %s"
+                    % (source, other_source)
+                )
+        detection_signatures.setdefault(signature, []).append(
+            (source, sense))
 
         capacity = descriptor["capacity"]["minimum_flash_bytes"]
         layout = descriptor["family"]["common_layout_bytes"]
@@ -979,6 +1054,10 @@ def validate_descriptors(
         if descriptor["panel"]["pixel_depth"] not in (16,):
             raise DescriptorError(
                 "%s: panel.pixel_depth must currently be 16" % source
+            )
+        if descriptor["led"]["channel_order"] not in ("rgb", "grb"):
+            raise DescriptorError(
+                "%s: led.channel_order must be rgb or grb" % source
             )
         if descriptor["panel"]["color_order"] not in ("rgb", "bgr"):
             raise DescriptorError(

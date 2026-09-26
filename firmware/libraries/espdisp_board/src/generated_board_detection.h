@@ -28,17 +28,20 @@ static constexpr I2cProbePlan GENERATED_S3_PROBES[] = {
     {8388608, 0, 47, 48, 100000, 0, 0, {0x6B, 0x00, 0x00, 0x00}, 1, -1, 0, 0, ProbeRelease::Always},
     {8388608, 0, 6, 7, 100000, 0, 0, {0x15, 0x00, 0x00, 0x00}, 1, 1, 20, 300, ProbeRelease::Always},
 };
+static constexpr int8_t GENERATED_S3_SENSE_PINS[] = {4};
 static constexpr CandidateRule GENERATED_S3_CANDIDATES[] = {
     {5, CandidateMatch::FlashRange, 255, 0, 8388608},
     {3, CandidateMatch::I2cAnyAck, 0, 8388608, 0},
     {4, CandidateMatch::I2cAnyAck, 1, 8388608, 0},
     {6, CandidateMatch::I2cAnyAck, 2, 8388608, 0},
-    {8, CandidateMatch::I2cAnyAck, 3, 8388608, 0},
+    {8, CandidateMatch::I2cAnyAck, 3, 8388608, 0, 0, 0, 150},
+    {10, CandidateMatch::I2cAnyAck, 3, 8388608, 0, 0, 250, 0},
     {11, CandidateMatch::I2cAnyAck, 4, 8388608, 0},
 };
 static constexpr FamilyDetectionPlan GENERATED_S3_DETECTION = {
     GENERATED_S3_PROBES, 5, GENERATED_S3_CANDIDATES,
-    sizeof(GENERATED_S3_CANDIDATES) / sizeof(GENERATED_S3_CANDIDATES[0]), ResolutionPolicy::ExactlyOne};
+    sizeof(GENERATED_S3_CANDIDATES) / sizeof(GENERATED_S3_CANDIDATES[0]), ResolutionPolicy::ExactlyOne,
+    GENERATED_S3_SENSE_PINS, 1};
 
 static constexpr CandidateRule GENERATED_P4_CANDIDATES[] = {
     {7, CandidateMatch::Always, 255, 0, 0},
@@ -48,6 +51,7 @@ static constexpr FamilyDetectionPlan GENERATED_P4_DETECTION = {
     sizeof(GENERATED_P4_CANDIDATES) / sizeof(GENERATED_P4_CANDIDATES[0]), ResolutionPolicy::FirstMatch};
 
 static constexpr uint8_t GENERATED_MAX_PROBE_COUNT = 5;
+static constexpr uint8_t GENERATED_MAX_SENSE_COUNT = 1;
 
 inline const FamilyDetectionPlan &detectionPlanForPlatform(
     Platform platform) {

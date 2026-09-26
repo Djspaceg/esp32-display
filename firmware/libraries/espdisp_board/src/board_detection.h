@@ -1,4 +1,10 @@
 // Hardware-free declarative board detection evaluator.
+//
+// A candidate may also carry an analog sense guard: the millivolts read on one
+// GPIO, with the internal pull-down enabled, must fall inside the candidate's
+// window. It separates carriers whose I2C buses answer identically (the S3
+// 1.3-inch and 1.9-inch carriers both expose only a QMI8658 at 0x6B on
+// GPIO47/48). A guarded candidate never matches without a reading.
 #pragma once
 
 #include <stddef.h>
@@ -52,12 +58,26 @@ struct I2cProbePlan {
   ProbeRelease release;
 };
 
+/// No analog sense guard on this candidate.
+static constexpr uint8_t NO_SENSE = 255;
+
 struct CandidateRule {
   uint8_t variantValue;
   CandidateMatch match;
   uint8_t probeIndex;
   uint32_t flashMinExclusive;
   uint32_t flashMaxInclusive;
+  /// Index into FamilyDetectionPlan::sensePins, or NO_SENSE.
+  uint8_t senseIndex = NO_SENSE;
+  /// Inclusive millivolt window; 0 for max means unbounded.
+  uint16_t senseMinMv = 0;
+  uint16_t senseMaxMv = 0;
+};
+
+/// One analog sense reading, indexed like FamilyDetectionPlan::sensePins.
+struct SenseEvidence {
+  bool read = false;
+  uint16_t millivolts = 0;
 };
 
 struct FamilyDetectionPlan {
@@ -66,7 +86,59 @@ struct FamilyDetectionPlan {
   const CandidateRule *candidates;
   uint8_t candidateCount;
   ResolutionPolicy resolution;
+  const int8_t *sensePins = nullptr;
+  uint8_t senseCount = 0;
 };
+
+/// Nominal millivolts for a raw 12-bit sample at 12 dB attenuation (about
+/// 0-3100 mV full scale). Used only when the chip carries no ADC calibration
+/// eFuses; the uncalibrated error of roughly 10 percent sits well inside the
+/// sense windows, so such a chip still detects instead of falling to CFGBOARD.
+constexpr int nominalSenseMillivolts(int raw) {
+  return raw <= 0 ? 0 : (raw >= 4095 ? 3100 : (raw * 3100) / 4095);
+}
+
+/// Turn one sense pin's ADC samples into evidence: the median millivolts of
+/// `count` samples. `calibratedMillivolts` holds the calibration scheme's
+/// conversion of each raw sample, or is nullptr when the chip has no ADC
+/// calibration, in which case the nominal raw-count scale is used. Any negative
+/// sample means a failed read, and no samples means no evidence; both leave the
+/// evidence unread.
+inline SenseEvidence senseEvidenceFromSamples(const int *raw,
+                                              const int *calibratedMillivolts,
+                                              size_t count) {
+  SenseEvidence evidence;
+  if (raw == nullptr || count == 0 || count > 16) return evidence;
+  uint16_t millivolts[16] = {};
+  for (size_t i = 0; i < count; ++i) {
+    if (raw[i] < 0) return evidence;
+    const int value = calibratedMillivolts != nullptr
+                          ? calibratedMillivolts[i]
+                          : nominalSenseMillivolts(raw[i]);
+    if (value < 0) return evidence;
+    millivolts[i] = (uint16_t)(value > 0xFFFF ? 0xFFFF : value);
+  }
+  for (size_t i = 1; i < count; ++i) {
+    for (size_t j = i; j > 0 && millivolts[j - 1] > millivolts[j]; --j) {
+      const uint16_t swap = millivolts[j];
+      millivolts[j] = millivolts[j - 1];
+      millivolts[j - 1] = swap;
+    }
+  }
+  evidence.read = true;
+  evidence.millivolts = millivolts[count / 2];
+  return evidence;
+}
+
+inline bool senseMatches(const CandidateRule &candidate,
+                         const SenseEvidence *senses, size_t senseCount) {
+  if (candidate.senseIndex == NO_SENSE) return true;
+  if (senses == nullptr || candidate.senseIndex >= senseCount) return false;
+  const SenseEvidence &sense = senses[candidate.senseIndex];
+  if (!sense.read) return false;
+  if (sense.millivolts < candidate.senseMinMv) return false;
+  return candidate.senseMaxMv == 0 || sense.millivolts <= candidate.senseMaxMv;
+}
 
 struct Evaluation {
   uint8_t variantValue;
@@ -145,12 +217,15 @@ inline bool candidateMatches(const CandidateRule &candidate,
 inline Evaluation evaluate(const FamilyDetectionPlan &plan,
                            uint32_t flashBytes,
                            const ProbeEvidence *evidence,
-                           size_t evidenceCount) {
+                           size_t evidenceCount,
+                           const SenseEvidence *senses = nullptr,
+                           size_t senseCount = 0) {
   uint8_t selected = 0;
   uint8_t matches = 0;
   for (uint8_t i = 0; i < plan.candidateCount; ++i) {
     const CandidateRule &candidate = plan.candidates[i];
-    if (!candidateMatches(candidate, flashBytes, evidence, evidenceCount)) {
+    if (!candidateMatches(candidate, flashBytes, evidence, evidenceCount) ||
+        !senseMatches(candidate, senses, senseCount)) {
       continue;
     }
     if (matches == 0) selected = candidate.variantValue;

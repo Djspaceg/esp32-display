@@ -1,7 +1,7 @@
 // Which supported board this binary is running on, and every board fact that
 // follows from that.
 //
-// Ten board profiles are supported across the c3, c6, s3, and p4 release
+// Eleven board profiles are supported across the c3, c6, s3, and p4 release
 // families. Each family has one artifact; runtime profile selection keeps the
 // physical panel/controller token independent from that family identity:
 //
@@ -17,6 +17,9 @@
 //                              battery ADC and eight addressable RGB LEDs
 //   ESP32-S3-LCD-1.3           ST7789V2 240x240 over SPI, QMI8658A IMU on
 //                              I2C GPIO47/48, battery ADC and one RGB LED
+//   ESP32-S3-LCD-1.9           ST7789V2 170x320 over SPI, QMI8658 IMU on
+//                              I2C GPIO47/48, two GRB LEDs, active-low
+//                              backlight
 //   ESP32-S3-Touch-LCD-1.54    ST7789 240x240 over SPI, CST816 touch and
 //                              QMI8658 IMU on I2C GPIO42/41, battery ADC
 //   ESP32-S3-Touch-LCD-1.85C   ST77916 360x360 LCD over QSPI, CST816 touch
@@ -263,6 +266,10 @@ struct Config {
   /// when it has one, is the carrier's pinBootButton.
   int8_t pinEncoderA = NO_PIN;
   int8_t pinEncoderB = NO_PIN;
+
+  /// Addressable LED byte order: GRB for WS2812B parts driven that way by the
+  /// vendor, otherwise the RGB order measured on the C6.
+  bool rgbLedGrb = false;
 
   SerialTransport serialTransport() const {
     return pinSerialRx != NO_PIN && pinSerialTx != NO_PIN
@@ -526,6 +533,60 @@ static const Config CONFIG_LCD_ST7789_130 = {
     /* serialTx */ 43,
 };
 
+/// Waveshare ESP32-S3-LCD-1.9: 170x320 ST7789V2 over 4-wire SPI (column
+/// offset 35 in a 240x320 controller), QMI8658 on I2C GPIO47/48, BOOT on
+/// GPIO0, two WS2812B on GPIO15, native USB-Serial-JTAG on GPIO19/20. The
+/// backlight is an AO3401 P-FET, so GPIO14 is active low. GPIO4 senses the
+/// system rail through a 200k/100k divider: it reads VSYS/3 on USB and on
+/// battery alike, which makes it the detection guard that keeps this carrier
+/// apart from the 1.3-inch one, and not a battery gauge. Pins and init facts
+/// are from Waveshare's schematic and ESP-IDF factory demo.
+static const Config CONFIG_LCD_ST7789_190 = {
+    Variant::LcdSt7789_190,
+    "ESP32-S3-LCD-1.9 (ST7789V2)",
+    &PLATFORM_ESP32_S3,
+    &PANEL_ST7789V2_170X320,
+    /* sclk  */ 10,
+    /* mosi  */ 13,
+    /* data1 */ NO_PIN,
+    /* data2 */ NO_PIN,
+    /* data3 */ NO_PIN,
+    /* cs    */ 12,
+    /* dc    */ 11,
+    /* rst   */ 9,
+    /* bl    */ 14,
+    /* boot  */ 0,
+    /* led   */ 15,
+    TouchController::None,
+    /* touchSda */ 47,  // shared QMI8658 bus; the non-touch SKU has no touch
+    /* touchScl */ 48,
+    /* touchRst */ NO_PIN,
+    /* touchInt */ NO_PIN,
+    // No battery telemetry: the GPIO4 divider sits on the system rail, which
+    // is VBUS through a diode on USB, so it would report a full cell whenever
+    // the board is plugged in, battery or not.
+    PowerController::None,
+    /* batteryAdc */ NO_PIN,
+    /* adcScale */ 0,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
+    MotionController::Qmi8658,
+    // Waveshare's QMI8658 example consumes the sensor axes without remapping.
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
+    /* pinBlEnable */ NO_PIN,
+    /* backlightInverted */ true,
+    /* serialRx */ NO_PIN,
+    /* serialTx */ NO_PIN,
+    /* panelPower */ NO_PIN,
+    /* encoderA */ NO_PIN,
+    /* encoderB */ NO_PIN,
+    // Waveshare's ESP-IDF and Arduino WS2812 demos both drive these as GRB.
+    /* rgbLedGrb */ true,
+};
+
 /// ELECROW CrowPanel 1.28" rotary display: GC9A01 240x240 round IPS over
 /// 4-wire SPI, CST816D touch on GPIO6/7, and a detented EC3501 encoder whose
 /// push switch (GPIO41, active low) takes the BOOT-button actions. GPIO1 powers
@@ -591,32 +652,42 @@ struct DetectionResult {
 
 inline DetectionResult detectFromEvidence(
     Platform platform, uint32_t flashBytes,
-    const boarddetectmodel::ProbeEvidence *evidence, size_t evidenceCount) {
+    const boarddetectmodel::ProbeEvidence *evidence, size_t evidenceCount,
+    const boarddetectmodel::SenseEvidence *senses = nullptr,
+    size_t senseCount = 0) {
   const boarddetectmodel::Evaluation result = boarddetectmodel::evaluate(
-      detectionPlanForPlatform(platform), flashBytes, evidence, evidenceCount);
+      detectionPlanForPlatform(platform), flashBytes, evidence, evidenceCount,
+      senses, senseCount);
   return {(Variant)result.variantValue, result.matchedCandidates};
 }
 
 /// Resolve the S3 detector's independent profile signals. The 8 MiB carrier is
 /// identified by flash capacity; each larger-flash profile has a distinct I2C
-/// bus. Exactly one candidate is required. No match and conflicting matches
-/// both remain Unknown so setup can stay serial-only until CFGBOARD supplies an
-/// explicit recovery override.
+/// bus, except that the 1.3-inch and 1.9-inch carriers share GPIO47/48 and are
+/// separated by the GPIO4 sense: the 1.9's system-rail divider versus the
+/// 1.3's bare header pin. A negative gpio4Millivolts means no reading. Exactly
+/// one candidate is required. No match and conflicting matches both remain
+/// Unknown so setup can stay serial-only until CFGBOARD supplies an explicit
+/// recovery override.
 inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
                                   bool st77916Bus, bool st7789Bus,
-                                  bool st7789_130Bus,
-                                  bool knob128Bus = false) {
+                                  bool qmi8658Bus47_48,
+                                  bool knob128Bus = false,
+                                  int gpio4Millivolts = -1) {
   const boarddetectmodel::ProbeEvidence evidence[] = {
       {boarddetectmodel::ProbeStatus::Started, (uint8_t)(co5300Bus ? 1 : 0)},
       {boarddetectmodel::ProbeStatus::Started, (uint8_t)(st77916Bus ? 1 : 0)},
       {boarddetectmodel::ProbeStatus::Started, (uint8_t)(st7789Bus ? 1 : 0)},
       {boarddetectmodel::ProbeStatus::Started,
-       (uint8_t)(st7789_130Bus ? 1 : 0)},
+       (uint8_t)(qmi8658Bus47_48 ? 1 : 0)},
       {boarddetectmodel::ProbeStatus::Started, (uint8_t)(knob128Bus ? 1 : 0)},
   };
+  const boarddetectmodel::SenseEvidence sense = {
+      gpio4Millivolts >= 0,
+      (uint16_t)(gpio4Millivolts < 0 ? 0 : gpio4Millivolts)};
   return detectFromEvidence(
              Platform::Esp32S3, flashBytes, evidence,
-             sizeof(evidence) / sizeof(evidence[0]))
+             sizeof(evidence) / sizeof(evidence[0]), &sense, 1)
       .variant;
 }
 

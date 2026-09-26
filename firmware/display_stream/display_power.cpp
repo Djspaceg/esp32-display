@@ -106,7 +106,8 @@ void driveBrightness(uint8_t level) {
   if (bcfg->isDsi() && panel != nullptr) {
     boarddisplay::setBrightness(panel, *bcfg, level);
   } else if (bcfg->hasBacklightPin()) {
-    analogWrite(bcfg->pinBl, level);
+    // An active-low backlight (a P-FET gate) takes the complementary duty.
+    analogWrite(bcfg->pinBl, bcfg->backlightInverted ? 255 - level : level);
   } else if (panel != nullptr) {
     boarddisplay::setBrightness(panel, *bcfg, level);
   }

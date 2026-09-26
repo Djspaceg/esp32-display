@@ -406,8 +406,10 @@ void setup() {
     // NEO_RGB, not the usual NEO_GRB. This was measured with CFGLED on the C6;
     // the 0.85-inch S3 follows Waveshare's explicit Arduino RGB declaration and
     // still requires physical red/green/blue validation.
-    rgbLed = new Adafruit_NeoPixel(RGB_COUNT, bcfg->pinRgbLed,
-                                   NEO_RGB + NEO_KHZ800);
+    // The 1.9-inch S3 opts into GRB, matching Waveshare's WS2812 demos.
+    rgbLed = new Adafruit_NeoPixel(
+        RGB_COUNT, bcfg->pinRgbLed,
+        (bcfg->rgbLedGrb ? NEO_GRB : NEO_RGB) + NEO_KHZ800);
     rgbLed->begin();
     rgbLed->setBrightness(RGB_LED_BRIGHTNESS);
     updateSignalLed();  // red until WiFi is up

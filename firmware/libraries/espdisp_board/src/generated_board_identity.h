@@ -20,6 +20,7 @@ static constexpr GeneratedBoardIdentity GENERATED_BOARD_IDENTITIES[] = {
     {Variant::P4_4B, Platform::Esp32P4, "p4", "esp32p4", "st7703-4b", "p4-32m-ota"},
     {Variant::LcdSt7789_130, Platform::Esp32S3, "s3", "esp32s3", "st7789-130", "universal-8m-doom-ota"},
     {Variant::C3_2424S012, Platform::Esp32C3, "c3", "esp32c3", "gc9a01a-240", "c3-4m-ota"},
+    {Variant::LcdSt7789_190, Platform::Esp32S3, "s3", "esp32s3", "st7789-190", "universal-8m-doom-ota"},
     {Variant::ElecrowKnob128, Platform::Esp32S3, "s3", "esp32s3", "gc9a01-knob-128", "universal-8m-doom-ota"},
 };
 

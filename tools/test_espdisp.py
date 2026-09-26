@@ -4037,7 +4037,7 @@ def test_board_descriptor_validator():
         },
         "schema requires every descriptor section",
     )
-    check_equal(len(descriptors), 10, "all current boards have descriptors")
+    check_equal(len(descriptors), 11, "all current boards have descriptors")
     check_equal(
         sorted(
             descriptor["identity"]["profile"]
@@ -4414,6 +4414,89 @@ def test_board_descriptor_validator():
         "two boards cannot claim the same detection evidence",
     )
 
+    # A shared probe signature is legal only behind disjoint sense windows on
+    # one pin, which is what separates the 1.3-inch and 1.9-inch S3 carriers.
+    s3_base = next(
+        item for item in descriptors if item["key"] == "s3-touch-lcd-154")
+    sensed_low = copy.deepcopy(s3_base)
+    sensed_low["detection"].update(sense_pin=4, sense_max_mv=150)
+    sensed_high = copy.deepcopy(s3_base)
+    sensed_high.update(key="sensed-high", name="Sensed high fixture",
+                       catalog_order=250)
+    sensed_high["identity"].update(
+        profile="sensed-high", variant="SensedHigh", variant_value=250,
+        legacy_targets=[])
+    sensed_high["migration"]["config_symbol"] = "CONFIG_SENSED_HIGH"
+    sensed_high["detection"].update(order=250, sense_pin=4, sense_min_mv=250)
+    c3_sensed = copy.deepcopy(descriptors[0])
+    c3_sensed["detection"].update(sense_pin=4, sense_min_mv=250)
+    check_descriptor_fails(
+        [c3_sensed],
+        "only supported on s3",
+        "sense guards are refused where no detector collects them",
+    )
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors(
+            [sensed_low, sensed_high]),
+        "disjoint sense windows may share one probe signature",
+    )
+    overlapping = copy.deepcopy(sensed_high)
+    overlapping["detection"]["sense_min_mv"] = 100
+    check_descriptor_fails(
+        [sensed_low, overlapping],
+        "duplicate probe signature",
+        "overlapping sense windows cannot share a probe signature",
+    )
+    other_pin = copy.deepcopy(sensed_high)
+    other_pin["detection"]["sense_pin"] = 5
+    check_descriptor_fails(
+        [sensed_low, other_pin],
+        "duplicate probe signature",
+        "sense guards on different pins cannot separate one probe",
+    )
+    touching = copy.deepcopy(sensed_high)
+    touching["detection"]["sense_min_mv"] = 150
+    check_descriptor_fails(
+        [sensed_low, touching],
+        "duplicate probe signature",
+        "inclusive sense windows that share an edge are not disjoint",
+    )
+    non_adc = copy.deepcopy(sensed_high)
+    non_adc["detection"]["sense_pin"] = 19
+    check_descriptor_fails(
+        [non_adc],
+        "S3 ADC1 pin",
+        "a sense pin outside ADC1 is refused",
+    )
+    one_sided = copy.deepcopy(sensed_high)
+    del one_sided["detection"]["sense_pin"]
+    check_descriptor_fails(
+        [sensed_low, one_sided],
+        "detection sense window requires detection.sense_pin",
+        "a sense window without a pin is refused",
+    )
+    unbounded = copy.deepcopy(sensed_high)
+    unbounded["detection"]["sense_min_mv"] = 0
+    check_descriptor_fails(
+        [unbounded],
+        "must bound at least one side",
+        "a sense guard that accepts every reading is refused",
+    )
+    by_key = {item["key"]: item for item in descriptors}
+    check_equal(
+        board_descriptor.detection_sense(by_key["s3-lcd-130"]), (4, 0, 150),
+        "the 1.3-inch carrier requires its bare GPIO4 header pin to read low",
+    )
+    check_equal(
+        board_descriptor.detection_sense(by_key["s3-lcd-190"]), (4, 250, 0),
+        "the 1.9-inch carrier requires its GPIO4 VSYS divider to read high",
+    )
+    check_equal(
+        board_descriptor.detection_sense(by_key["s3-touch-lcd-154"]),
+        (-1, 0, 0),
+        "an unguarded descriptor reports no sense pin",
+    )
+
     capacity_conflict = copy.deepcopy(descriptors[0])
     capacity_conflict["capacity"]["minimum_flash_bytes"] = (
         capacity_conflict["family"]["common_layout_bytes"] - 1)
@@ -4447,8 +4530,8 @@ def test_universal_family_catalog_and_cli():
                 "C6 maps both runtime profiles")
     check_equal(
         espdisp.FAMILIES["s3"].profiles,
-        ("gc9107", "st7789-130", "st7789-154", "co5300", "st77916",
-         "gc9a01-knob-128"),
+        ("gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300",
+         "st77916", "gc9a01-knob-128"),
         "S3 maps all runtime profiles into one family")
     check_equal(espdisp.FAMILIES["p4"].profiles, ("st7703-4b",),
                 "P4 advertises its exact physical profile")
@@ -7192,7 +7275,7 @@ def test_bootstrap_refusals_and_color_controls():
     check_equal(
         {item["key"] for item in safe},
         {
-            "s3-lcd-130", "s3-touch-lcd-154",
+            "s3-lcd-130", "s3-touch-lcd-154", "s3-lcd-190",
             "s3-touch-amoled-175c", "s3-touch-lcd-185c",
             "s3-elecrow-knob-128",
         },

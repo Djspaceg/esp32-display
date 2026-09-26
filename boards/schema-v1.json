@@ -587,7 +587,10 @@
         "reset_pin": {"$ref": "#/$defs/pin"},
         "reset_low_ms": {"type": "integer", "minimum": 0},
         "reset_release_wait_ms": {"type": "integer", "minimum": 0},
-        "release": {"enum": ["never", "always", "on_success_no_ack"]}
+        "release": {"enum": ["never", "always", "on_success_no_ack"]},
+        "sense_pin": {"$ref": "#/$defs/pin"},
+        "sense_min_mv": {"type": "integer", "minimum": 0, "maximum": 3300},
+        "sense_max_mv": {"type": "integer", "minimum": 0, "maximum": 3300}
       }
     }
   },

@@ -33,14 +33,17 @@ Its platform contains no ST7703 timing, GT911 behavior, or carrier GPIOs.
 | Family | Chip | Runtime profiles | Partition compatibility |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-ota` |
+| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-ota` |
 | `p4` | `esp32p4` | `st7703-4b` | `p4-32m-ota` |
 
 C6 probes its shared I2C bus before panel GPIO initialization. S3 uses 8 MiB
 flash identity for the GC9107 carrier and distinct I2C buses on larger-flash
 carriers. The `st7789-130` carrier is identified by its QMI8658A at `0x6B` on
 GPIO47/48 and overrides the S3 platform's native-CDC default with its CH343
-UART bridge on GPIO44/43. S3 accepts automatic detection only when exactly one
+UART bridge on GPIO44/43. The `st7789-190` carrier answers identically on
+GPIO47/48; a GPIO4 read with the pull-down enabled separates them (its VSYS/3
+divider at least 250 mV, the 1.3's bare header pin at most 150 mV). S3 accepts
+automatic detection only when exactly one
 compatible profile is found. Zero or multiple candidates leave display and
 networking disabled while serial `CFGBOARD` remains available as a recovery
 override.

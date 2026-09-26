@@ -24,7 +24,7 @@ and internal build-target keys are not release names.
 | Family | Chip | Runtime profiles | Canonical partition |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-ota` |
+| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-ota` |
 | `p4` | `esp32p4` | `st7703-4b` | `p4-32m-ota` |
 
 The S3 image uses an 8 MiB common-denominator dual-OTA layout and contains all
@@ -57,6 +57,7 @@ orientations or only a 180-degree flip.
 | `gc9107` | [ESP32-S3-LCD-0.85](https://www.waveshare.com/esp32-s3-lcd-0.85.htm) | `esp32s3` | GC9107 | 128x128 | 0.85" | Yes | No | None | 0/90/180/270 |
 | `st7789-130` | [ESP32-S3-LCD-1.3](https://www.waveshare.com/esp32-s3-lcd-1.3.htm) | `esp32s3` | ST7789V2 | 240x240 | 1.3" | Yes | Yes | Four-way | 0/90/180/270 |
 | `st7789-154` | [ESP32-S3-LCD-1.54](https://www.waveshare.com/esp32-s3-lcd-1.54.htm) | `esp32s3` | ST7789 | 240x240 | 1.54" | Yes | Yes | Four-way | 0/90/180/270 |
+| `st7789-190` | [ESP32-S3-LCD-1.9](https://docs.waveshare.com/ESP32-S3-LCD-1.9) | `esp32s3` | ST7789V2 | 170x320 | 1.9" | No | Yes | Flip only (0/180) | 0/180 |
 | `co5300` | [ESP32-S3-Touch-AMOLED-1.75C](https://www.waveshare.com/esp32-s3-touch-amoled-1.75c.htm) | `esp32s3` | CO5300 (AMOLED) | 466x466 | 1.75" | Yes | Yes | Four-way | 0/90/180/270 |
 | `st77916` | [ESP32-S3-Touch-LCD-1.85C](https://www.waveshare.com/esp32-s3-touch-lcd-1.85c.htm) | `esp32s3` | ST77916 (round) | 360x360 | 1.85" | Yes | No | None | 0/90/180/270 |
 | `gc9a01-knob-128` | [ELECROW CrowPanel 1.28" Rotary Display](https://github.com/Elecrow-RD/CrowPanel-1.28inch-HMI-ESP32-Rotary-Display-240-240-IPS-Round-Touch-Knob-Screen) | `esp32s3` | GC9A01 (round) | 240x240 | 1.28" | Yes | No | None | 0/90/180/270 |
@@ -80,7 +81,7 @@ Orientation rules behind the last three columns:
 Axis calibration is not uniform. Two profiles are field-verified, each checked in
 all four cable positions on real hardware: `co5300` (panel X = raw Y, panel Y =
 raw X, neither negated) and `st7789-154` (the vendor's identity axes, confirmed
-correct as shipped rather than assumed). `st7789-130` and `jd9853` still use the
+correct as shipped rather than assumed). `st7789-130`, `st7789-190` and `jd9853` still use the
 vendor example's identity axes with no calibration run behind them, so their
 automatic orientation may be correctly shaped but wrongly signed until one is
 done. Two positions is not a calibration: a single inverted sign leaves one
@@ -101,7 +102,10 @@ Profile selection occurs before panel GPIO initialization.
 - S3 identifies the 8 MiB GC9107 carrier by flash capacity, then probes distinct
   I2C buses on larger-flash carriers. The `st7789-130` profile uses the
   QMI8658A at `0x6B` on GPIO47/48 and routes CFG commands through its CH343
-  UART bridge; existing S3 profiles retain native USB CDC. The
+  UART bridge; existing S3 profiles retain native USB CDC. The `st7789-190`
+  carrier answers identically on GPIO47/48, so both profiles also read GPIO4
+  with the pull-down enabled: the 1.9's system-rail divider reads at least
+  250 mV and the 1.3's bare header pin at most 150 mV. The
   `gc9a01-knob-128` profile powers its GPIO1-switched panel rail for the probe
   and looks for its CST816D at `0x15` on GPIO6/7. Exactly one compatible
   candidate is required.

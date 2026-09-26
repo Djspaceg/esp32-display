@@ -2279,6 +2279,36 @@ int main() {
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, true,
                                     false, false, true) == Variant::Unknown);
 
+    // The 1.3-inch and 1.9-inch carriers answer identically on GPIO47/48, so
+    // the GPIO4 sense separates them: the 1.3's bare header pin reads near
+    // zero under the pull-down, the 1.9's VSYS/3 divider reads several hundred
+    // millivolts. No reading, or one in the dead band, stays Unknown rather
+    // than guessing a pin map that would drive the other board's USB pins.
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, true, /*knob*/ false, 12) == Variant::LcdSt7789_130);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, true, /*knob*/ false, 150) == Variant::LcdSt7789_130);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, true, /*knob*/ false, 560) == Variant::LcdSt7789_190);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, true, /*knob*/ false, 250) == Variant::LcdSt7789_190);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, true, /*knob*/ false, 1700) == Variant::LcdSt7789_190);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, true, /*knob*/ false, 200) == Variant::Unknown);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, true, /*knob*/ false, 151) == Variant::Unknown);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, true, /*knob*/ false, 249) == Variant::Unknown);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, true) == Variant::Unknown);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, false, /*knob*/ false, 560) == Variant::Unknown);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    true, false, /*knob*/ false, 560) == Variant::TouchSt7789);
+    CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
+                                    false, true, /*knob*/ false, 560) == Variant::LcdGc9107);
+
     const auto &s3Plan =
         board::detectionPlanForPlatform(board::Platform::Esp32S3);
     CHECK(s3Plan.resolution == ResolutionPolicy::ExactlyOne);
@@ -2352,6 +2382,107 @@ int main() {
     for (uint8_t i = 0; i < s3Plan.probeCount; ++i) {
       CHECK(s3Plan.probes[i].frequencyHz == 100000);
       CHECK(s3Plan.probes[i].release == ProbeRelease::Always);
+    }
+    CHECK(s3Plan.senseCount == 1);
+    CHECK(board::GENERATED_MAX_SENSE_COUNT >= s3Plan.senseCount);
+    CHECK(s3Plan.sensePins != nullptr && s3Plan.sensePins[0] == 4);
+    CHECK(board::detectionPlanForPlatform(board::Platform::Esp32C6)
+              .senseCount == 0);
+    {
+      // A guarded candidate never matches without a reading, and the
+      // evaluator never reads past the sense array it was given.
+      const board::SenseEvidence unread[1] = {};
+      ProbeEvidence shared[4] = {};
+      shared[3] = {ProbeStatus::Started, 1};
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      16u * 1024u * 1024u, shared, 4,
+                                      unread, 1)
+                .matchedCandidates == 0);
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      16u * 1024u * 1024u, shared, 4)
+                .matchedCandidates == 0);
+      // A sense index beyond the supplied array is refused, not read.
+      const board::SenseEvidence noSenses[1] = {{true, 600}};
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      16u * 1024u * 1024u, shared, 4,
+                                      noSenses, 0)
+                .matchedCandidates == 0);
+      const board::SenseEvidence railSense[1] = {{true, 600}};
+      const board::DetectionResult rail = board::detectFromEvidence(
+          board::Platform::Esp32S3, 16u * 1024u * 1024u, shared, 4,
+          railSense, 1);
+      CHECK(rail.variant == Variant::LcdSt7789_190);
+      CHECK(rail.matchedCandidates == 1);
+    }
+    {
+      // A chip without ADC calibration eFuses still yields a sense reading
+      // from raw counts, so the 1.3 keeps auto-detecting on such silicon and
+      // the 1.9 still separates from it. Nominal 12 dB scale: about 0.757 mV
+      // per count, so 20 counts is ~15 mV and 700 counts ~530 mV.
+      ProbeEvidence shared[4] = {};
+      shared[3] = {ProbeStatus::Started, 1};
+      const int bareHeader[5] = {18, 20, 22, 19, 21};
+      const board::SenseEvidence low =
+          board::senseEvidenceFromSamples(bareHeader, nullptr, 5);
+      CHECK(low.read);
+      CHECK(low.millivolts <= 150);
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      16u * 1024u * 1024u, shared, 4, &low, 1)
+                .variant == Variant::LcdSt7789_130);
+      const int railDivider[5] = {690, 705, 700, 698, 702};
+      const board::SenseEvidence high =
+          board::senseEvidenceFromSamples(railDivider, nullptr, 5);
+      CHECK(high.read);
+      CHECK(high.millivolts >= 250 && high.millivolts <= 700);
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      16u * 1024u * 1024u, shared, 4, &high, 1)
+                .variant == Variant::LcdSt7789_190);
+      // Calibrated conversions win when present; a failed raw read or no
+      // samples still leaves the evidence unread.
+      const int calibrated[5] = {540, 520, 530, 525, 535};
+      const board::SenseEvidence cal =
+          board::senseEvidenceFromSamples(railDivider, calibrated, 5);
+      CHECK(cal.read && cal.millivolts == 530);
+      const int failed[5] = {20, -1, 20, 20, 20};
+      CHECK(!board::senseEvidenceFromSamples(failed, nullptr, 5).read);
+      CHECK(!board::senseEvidenceFromSamples(bareHeader, nullptr, 0).read);
+    }
+    {
+      // ESP32-S3-LCD-1.9: Waveshare schematic and ESP-IDF factory demo.
+      const board::Config &lcd = board::configFor(Variant::LcdSt7789_190);
+      CHECK(lcd.variant == Variant::LcdSt7789_190);
+      CHECK(strcmp(board::variantToken(lcd.variant), "st7789-190") == 0);
+      CHECK(strcmp(board::targetToken(lcd.variant), "s3") == 0);
+      CHECK(board::variantFromName("st7789-190") == Variant::LcdSt7789_190);
+      CHECK(board::variantMatchesPlatform(lcd.variant,
+                                          board::Platform::Esp32S3));
+      CHECK(lcd.panel->driver == board::PanelDriver::St7789);
+      CHECK(lcd.panel->bus == board::PanelBus::Spi);
+      CHECK(lcd.panel->width == 170 && lcd.panel->height == 320);
+      CHECK(lcd.panel->memoryWidth == 240 && lcd.panel->memoryHeight == 320);
+      CHECK(lcd.panel->colOffset == 35 && lcd.panel->rowOffset == 0);
+      CHECK(lcd.panel->spiMode == 0);
+      CHECK(lcd.panel->invertColor && !lcd.panel->roundDisplay);
+      CHECK(lcd.pinSclk == 10 && lcd.pinMosi == 13 && lcd.pinCs == 12 &&
+            lcd.pinDc == 11 && lcd.pinRst == 9);
+      CHECK(lcd.pinData1 == board::NO_PIN && !lcd.isQspi());
+      CHECK(lcd.pinBl == 14 && lcd.hasBacklightPin());
+      CHECK(lcd.backlightInverted);  // AO3401 P-FET gate: active low
+      CHECK(lcd.pinBootButton == 0 && lcd.pinRgbLed == 15);
+      CHECK(!lcd.hasTouch());
+      CHECK(lcd.hasMotion() && lcd.pinTouchSda == 47 && lcd.pinTouchScl == 48);
+      // GPIO4 measures the system rail, not the cell: no battery claim.
+      CHECK(lcd.power == board::PowerController::None && !lcd.hasBattery());
+      CHECK(lcd.rgbLedGrb);
+      CHECK(!board::configFor(Variant::LcdSt7789_130).rgbLedGrb);
+      CHECK(lcd.serialTransport() == board::SerialTransport::NativeUsbCdc);
+      // GPIO19/20 are this carrier's USB D-/D+; nothing may claim them.
+      const int8_t used[] = {lcd.pinSclk, lcd.pinMosi, lcd.pinCs, lcd.pinDc,
+                             lcd.pinRst, lcd.pinBl, lcd.pinBootButton,
+                             lcd.pinRgbLed, lcd.pinTouchSda, lcd.pinTouchScl};
+      for (int8_t pin : used) CHECK(pin != 19 && pin != 20);
+      const Geometry geometry = {lcd.panel->width, lcd.panel->height};
+      CHECK(geometry.valid());
     }
 
     ProbeEvidence s3Evidence[5] = {};
@@ -5586,6 +5717,7 @@ int main() {
     CHECK(board::supportsDoom(board::Variant::LcdSt77916));
     CHECK(board::supportsDoom(board::Variant::LcdGc9107));
     CHECK(board::supportsDoom(board::Variant::LcdSt7789_130));
+    CHECK(board::supportsDoom(board::Variant::LcdSt7789_190));
     CHECK(board::supportsDoom(board::Variant::ElecrowKnob128));
     CHECK(!board::supportsAudio(board::Variant::ElecrowKnob128));
     CHECK(!board::supportsDoom(board::Variant::C3_2424S012));
