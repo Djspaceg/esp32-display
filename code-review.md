@@ -70,3 +70,30 @@ discontinuity accounting.
 No unresolved review findings. `git diff --check` passed. The final source gate
 passes for firmware tests, Python tests, C6/S3/P4 compiles, and Swift tests.
 C3 is not a family in this branch and its requested compile command exits 2.
+
+## Reconciliation handoff
+
+This record is not an author self-review. A separate agent must independently
+review the final branch after handoff.
+
+### Conflict resolution
+
+1. `tools/generated_board_catalog.py` was deleted at conflict resolution and
+   regenerated from the reconciled board descriptors.
+2. `GeneratedBoardCatalog.swift` was deleted at conflict resolution and
+   regenerated from the reconciled board descriptors.
+3. This file preserves both parent review records as separate sections.
+
+Regeneration also exposed the required audio schema on the older C3 descriptor.
+The C3 now explicitly declares no audio hardware and the shared descriptor
+validator recognizes the C3 GPIO 0 through 21 range. The regenerated catalogs
+carry the resulting source digest.
+
+### Author verification record
+
+`reconciled-source-gate.log` records passing descriptor, firmware, Python,
+C3/C6/S3/P4 compile, and Swift lanes. Swift executed 603 tests, retaining the
+audio-suite baseline from main. `reconciled-release.log` records successful
+shipping 1.5.0 C3/C6/S3/P4 bundle and manifest regeneration. The C3 bundle
+changed but was not flashed; no Wi-Fi credentials were written, so streamed
+frames remain unverified.
