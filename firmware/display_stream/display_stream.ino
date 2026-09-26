@@ -413,7 +413,7 @@ void setup() {
     updateSignalLed();  // red until WiFi is up
   }
 
-  if (bcfg->hasBootButton()) {
+  if (bcfg->hasBootButton() || bcfg->hasEncoder()) {
     initializeButtonInput();
   }
   if (bcfg->hasBacklightPin() && !bcfg->isDsi()) {
@@ -445,6 +445,8 @@ void setup() {
           ? touchmap::CST816_ON_ST77916
           : bcfg->variant == board::Variant::C3_2424S012
               ? touchmap::CST816_ON_C3_2424S012
+          : bcfg->variant == board::Variant::ElecrowKnob128
+              ? touchmap::CST816_ON_ELECROW_KNOB_128
           : bcfg->variant == board::Variant::TouchSt7789
               ? touchmap::CST816_ON_ST7789_240
               : touchmap::AXS5106L_ON_C6;

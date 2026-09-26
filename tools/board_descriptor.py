@@ -206,9 +206,16 @@ WIFI_TOPOLOGIES = {"native", "hosted_coprocessor"}
 IDENTITY_SOURCES = {"wifi_station_mac", "efuse_base_mac"}
 SERIAL_TRANSPORTS = {"native_usb_cdc", "uart_bridge"}
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Carrier wiring only some boards have. Absent means -1 (no such line), so a
+# descriptor written before a field existed stays valid without restating it.
+OPTIONAL_PIN_DEFAULTS = {
+    "carrier.pin_panel_power": -1,
+    "carrier.pin_encoder_a": -1,
+    "carrier.pin_encoder_b": -1,
+}
 ALLOWED_TOP_LEVEL = {path.split(".", 1)[0] for path in REQUIRED_FIELDS}
 ALLOWED_SECTION_FIELDS: Dict[str, set[str]] = {}
-for required_path in REQUIRED_FIELDS:
+for required_path in REQUIRED_FIELDS + tuple(OPTIONAL_PIN_DEFAULTS):
     section, separator, field = required_path.partition(".")
     if separator:
         ALLOWED_SECTION_FIELDS.setdefault(section, set()).add(field)
@@ -224,6 +231,45 @@ def _field(descriptor: Dict[str, Any], path: str) -> Any:
             )
         value = value[component]
     return value
+
+
+def optional_pin(descriptor: Dict[str, Any], path: str) -> int:
+    """An OPTIONAL_PIN_DEFAULTS field, or its default when the board omits it."""
+    section, _, field = path.partition(".")
+    return descriptor.get(section, {}).get(field, OPTIONAL_PIN_DEFAULTS[path])
+
+
+def _validate_optional_pins(descriptor: Dict[str, Any]) -> None:
+    source = _source_name(descriptor)
+    maximum = GPIO_MAX_BY_TARGET.get(descriptor["identity"]["target"], 0)
+    values = {}
+    for path in OPTIONAL_PIN_DEFAULTS:
+        value = optional_pin(descriptor, path)
+        if (not isinstance(value, int) or isinstance(value, bool) or
+                (value != -1 and not 0 <= value <= maximum)):
+            raise DescriptorError(
+                "%s: %s must be -1 or GPIO 0..%d" % (source, path, maximum))
+        values[path] = value
+    encoder_a = values["carrier.pin_encoder_a"]
+    encoder_b = values["carrier.pin_encoder_b"]
+    if (encoder_a == -1) != (encoder_b == -1):
+        raise DescriptorError(
+            "%s: carrier.pin_encoder_a and pin_encoder_b must both be "
+            "declared or both be -1" % source)
+    existing = {}
+    for path in EXISTING_PIN_PATHS:
+        value = _field(descriptor, path)
+        if (path.startswith("carrier.") and isinstance(value, int) and
+                not isinstance(value, bool) and value >= 0):
+            existing.setdefault(value, path)
+    for path, value in values.items():
+        if value < 0:
+            continue
+        if value in existing:
+            raise DescriptorError(
+                "%s: %s GPIO%d collides with %s"
+                % (source, path, value, existing[value]))
+        existing[value] = path
 
 
 def _source_name(descriptor: Dict[str, Any]) -> str:
@@ -687,6 +733,7 @@ def validate_descriptors(
     config_symbols: Dict[str, str] = {}
     resolutions: Dict[str, str] = {}
     catalog_orders: Dict[Tuple[str, int], str] = {}
+    panels: Dict[str, Tuple[Dict[str, Any], str]] = {}
 
     for descriptor in descriptors:
         _validate_shape(descriptor)
@@ -851,6 +898,16 @@ def validate_descriptors(
         _expect_choice(
             descriptor, "motion.controller", MOTION_CONTROLLERS)
         _validate_audio(descriptor)
+        _validate_optional_pins(descriptor)
+        panel_symbol = descriptor["panel"]["symbol"]
+        if panel_symbol in panels:
+            shared, owner = panels[panel_symbol]
+            if shared != descriptor["panel"]:
+                raise DescriptorError(
+                    "%s: panel %s differs from the same panel in %s"
+                    % (source, panel_symbol, owner))
+        else:
+            panels[panel_symbol] = (descriptor["panel"], source)
 
         flash_bytes = _expect_type(descriptor, "family.flash_bytes", list)
         if not flash_bytes:

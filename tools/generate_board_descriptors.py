@@ -341,6 +341,8 @@ def _config_initializer(descriptor: Dict[str, Any]) -> str:
         _bool(backlight["inverted"]),
         str(serial["rx"]),
         str(serial["tx"]),
+        *(str(board_descriptor.optional_pin(descriptor, "carrier." + key))
+          for key in ("pin_panel_power", "pin_encoder_a", "pin_encoder_b")),
     ]
     rendered = []
     for index in range(0, len(values), 6):
@@ -356,7 +358,14 @@ def render_configs(descriptors: Sequence[Dict[str, Any]]) -> str:
         if descriptor["migration"]["firmware_config"] == "generated"
     ]
     lines = [HEADER, "#pragma once\n\n"]
+    emitted_panels = set()
     for descriptor in descriptors:
+        # Carriers may share one panel profile; the validator has already
+        # required every sharer to state identical panel facts.
+        symbol = descriptor["panel"]["symbol"]
+        if symbol in emitted_panels:
+            continue
+        emitted_panels.add(symbol)
         lines.append(_panel_initializer(descriptor))
     lines.append("\n")
     for descriptor in generated:

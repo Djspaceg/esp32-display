@@ -71,7 +71,8 @@ static constexpr Config CONFIG_C3_2424S012 = {
     3, -1, -1, TouchController::Cst816, 4, 5,
     1, 0, PowerController::None, -1, 0, -1,
     -1, MotionController::None, 0, 1, 1, 1,
-    0, 0, -1, false, -1, -1
+    0, 0, -1, false, -1, -1,
+    -1, -1, -1
 };
 static constexpr Config CONFIG_TOUCH_JD9853 = {
     Variant::TouchJd9853, "ESP32-C6-Touch-LCD-1.47 (JD9853)", &PLATFORM_ESP32_C6, &PANEL_JD9853_172X320, 1, 2,
@@ -79,7 +80,8 @@ static constexpr Config CONFIG_TOUCH_JD9853 = {
     23, 9, -1, TouchController::Axs5106l, 18, 19,
     20, 21, PowerController::BatteryAdc, 0, 3, -1,
     -1, MotionController::Qmi8658, 0, 1, 1, 1,
-    0, 0, -1, false, -1, -1
+    0, 0, -1, false, -1, -1,
+    -1, -1, -1
 };
 static constexpr Config CONFIG_P4_4B = {
     Variant::P4_4B, "ESP32-P4-WIFI6-Touch-LCD-4B (ST7703)", &PLATFORM_ESP32_P4, &PANEL_ST7703_720X720, -1, -1,
@@ -87,7 +89,8 @@ static constexpr Config CONFIG_P4_4B = {
     26, 35, -1, TouchController::Gt911, 7, 8,
     -1, -1, PowerController::None, -1, 0, -1,
     -1, MotionController::None, 0, 1, 1, 1,
-    0, 0, 33, true, -1, -1
+    0, 0, 33, true, -1, -1,
+    -1, -1, -1
 };
 static constexpr Config CONFIG_AMOLED_CO5300 = {
     Variant::AmoledCo5300, "ESP32-S3-Touch-AMOLED-1.75C (CO5300)", &PLATFORM_ESP32_S3, &PANEL_CO5300_466X466, 38, 4,
@@ -95,5 +98,6 @@ static constexpr Config CONFIG_AMOLED_CO5300 = {
     -1, 0, -1, TouchController::Cst9217, 15, 14,
     2, 11, PowerController::Axp2101, -1, 0, -1,
     -1, MotionController::Qmi8658, 1, 1, 0, 1,
-    0, 0, -1, false, -1, -1
+    0, 0, -1, false, -1, -1,
+    -1, -1, -1
 };

@@ -10,19 +10,19 @@ public enum GeneratedBoardCatalog {
         public let bootloaderAddress: Int
     }
 
-    public static let sourceSHA256 = "1a212074dc94636af60ce253f63da6b85d034d3ff3a707161db7bc56837a8dcd"
+    public static let sourceSHA256 = "21bee8b5d3b57b5476d97dd72f13e4df9d3e3a62ad674af38a06a51f120dd1b4"
     public static let requiredFamilies: Set<String> = ["c3", "c6", "s3", "p4"]
     public static let expected: [String: Expected] = [
         "c3": Expected(chip: "esp32c3", profiles: ["gc9a01a-240"], flashBytes: [4194304], partition: "c3-4m-ota", bootloaderAddress: 0),
         "c6": Expected(chip: "esp32c6", profiles: ["st7789", "jd9853"], flashBytes: [8388608], partition: "default-8m", bootloaderAddress: 0),
-        "s3": Expected(chip: "esp32s3", profiles: ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-ota", bootloaderAddress: 0),
+        "s3": Expected(chip: "esp32s3", profiles: ["gc9107", "st7789-130", "st7789-154", "co5300", "st77916", "gc9a01-knob-128"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-ota", bootloaderAddress: 0),
         "p4": Expected(chip: "esp32p4", profiles: ["st7703-4b"], flashBytes: [33554432], partition: "p4-32m-ota", bootloaderAddress: 8192),
     ]
 
     public static let profilesByTarget: [String: Set<String>] = [
         "c3": Set(["gc9a01a-240"]),
         "c6": Set(["st7789", "jd9853"]),
-        "s3": Set(["gc9107", "st7789-130", "st7789-154", "co5300", "st77916"]),
+        "s3": Set(["gc9107", "st7789-130", "st7789-154", "co5300", "st77916", "gc9a01-knob-128"]),
         "p4": Set(["st7703-4b"]),
         "p4-4b": Set(["st7703-4b"]),
         "s3-085": Set(["gc9107"]),
@@ -40,6 +40,7 @@ public enum GeneratedBoardCatalog {
         "st7789-154": PanelGeometry(width: 240, height: 240),
         "co5300": PanelGeometry(width: 466, height: 466),
         "st77916": PanelGeometry(width: 360, height: 360),
+        "gc9a01-knob-128": PanelGeometry(width: 240, height: 240),
         "st7703-4b": PanelGeometry(width: 720, height: 720),
     ]
 
@@ -50,5 +51,5 @@ public enum GeneratedBoardCatalog {
         "p4": Set(["p4", "p4-4b"]),
     ]
 
-    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7703-4b", "gc9107", "st7789-130", "st7789-154", "co5300", "st77916"])
+    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7703-4b", "gc9107", "st7789-130", "st7789-154", "co5300", "st77916", "gc9a01-knob-128"])
 }

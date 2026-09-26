@@ -4037,7 +4037,7 @@ def test_board_descriptor_validator():
         },
         "schema requires every descriptor section",
     )
-    check_equal(len(descriptors), 9, "all current boards have descriptors")
+    check_equal(len(descriptors), 10, "all current boards have descriptors")
     check_equal(
         sorted(
             descriptor["identity"]["profile"]
@@ -4184,6 +4184,54 @@ def test_board_descriptor_validator():
         [colliding_audio_pin],
         "audio.pin_playback_mclk GPIO38 collides with carrier.pin_sclk",
         "audio pins cannot collide with existing board wiring",
+    )
+
+    knob = next(
+        item for item in descriptors if item["key"] == "s3-elecrow-knob-128")
+    check_equal(
+        [board_descriptor.optional_pin(knob, "carrier." + field)
+         for field in ("pin_panel_power", "pin_encoder_a", "pin_encoder_b")],
+        [1, 45, 42],
+        "the knob carrier declares its panel rail and encoder lines",
+    )
+    check_equal(
+        board_descriptor.optional_pin(verified_audio, "carrier.pin_encoder_a"),
+        -1,
+        "carriers that omit an optional line read it as absent",
+    )
+    half_encoder = copy.deepcopy(knob)
+    half_encoder["carrier"]["pin_encoder_b"] = -1
+    check_descriptor_fails(
+        [half_encoder],
+        "pin_encoder_a and pin_encoder_b must both be declared",
+        "an encoder needs both quadrature lines",
+    )
+    colliding_encoder = copy.deepcopy(knob)
+    colliding_encoder["carrier"]["pin_encoder_a"] = 41
+    check_descriptor_fails(
+        [colliding_encoder],
+        "carrier.pin_encoder_a GPIO41 collides with carrier.pin_boot",
+        "encoder lines cannot collide with existing carrier wiring",
+    )
+    out_of_range_power = copy.deepcopy(knob)
+    out_of_range_power["carrier"]["pin_panel_power"] = 49
+    check_descriptor_fails(
+        [out_of_range_power],
+        "carrier.pin_panel_power must be -1 or GPIO 0..48",
+        "the panel rail pin uses the target GPIO ceiling",
+    )
+    divergent_panel = copy.deepcopy(knob)
+    divergent_panel["panel"]["pixel_clock_hz"] = 80000000
+    c3_round = next(
+        item for item in descriptors if item["key"] == "c3-2424s012")
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors([c3_round, knob]),
+        "two carriers may share one identical panel profile",
+    )
+    check_descriptor_fails(
+        [c3_round, divergent_panel],
+        "panel PANEL_GC9107_240X240 differs from the same panel",
+        "carriers sharing a panel symbol must agree on every panel fact",
     )
 
     absent_with_pin = copy.deepcopy(absent_audio)
@@ -4376,7 +4424,8 @@ def test_universal_family_catalog_and_cli():
                 "C6 maps both runtime profiles")
     check_equal(
         espdisp.FAMILIES["s3"].profiles,
-        ("gc9107", "st7789-130", "st7789-154", "co5300", "st77916"),
+        ("gc9107", "st7789-130", "st7789-154", "co5300", "st77916",
+         "gc9a01-knob-128"),
         "S3 maps all runtime profiles into one family")
     check_equal(espdisp.FAMILIES["p4"].profiles, ("st7703-4b",),
                 "P4 advertises its exact physical profile")
@@ -6579,8 +6628,48 @@ def test_bootstrap_solvers_and_derivations():
     )
 
 
+def repo_root_without_boards(tmp, *keys):
+    """A repository root whose boards/ omits the named descriptors."""
+    root = os.path.join(tmp, "repo-without-" + "-".join(keys))
+    shutil.copytree(
+        os.path.join(espdisp.REPO_ROOT, "boards"),
+        os.path.join(root, "boards"),
+        ignore=lambda _dir, names: [
+            name for name in names if name[:-len(".toml")] in keys],
+    )
+    return root
+
+
+def test_bootstrap_knob_press_pin_blocks_template_drive():
+    # The CrowPanel knob's push switch shorts GPIO41 to ground, and its I2C bus
+    # (GPIO6/7) cannot be scanned to rule it out because GPIO7 is the 1.3-inch
+    # board's battery sense. While the knob stays a possible candidate, driving
+    # GPIO41 as the 1.3-inch template's MOSI must be refused.
+    with tempfile.TemporaryDirectory() as tmp:
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            check_fails(
+                lambda: espdisp.run_bootstrap_session(
+                    transport=BootstrapS3Transport(),
+                    prompter=BootstrapFakePrompter(
+                        bootstrap_success_answers()),
+                    stream=BootstrapFakeStream(tty=True),
+                    repo_root=espdisp.REPO_ROOT,
+                    name="synthetic-s3",
+                    candidate_key="s3-lcd-130",
+                    confirmed_chip="esp32s3",
+                    output_path=os.path.join(tmp, "synthetic-s3.toml"),
+                ),
+                "refusing to drive GPIO41 for panel calibration; candidate "
+                "descriptor set marks it as s3-elecrow-knob-128.carrier.pin_boot",
+                "a possible knob carrier keeps its press switch undriven",
+            )
+
+
 def test_bootstrap_full_synthetic_session():
     with tempfile.TemporaryDirectory() as tmp:
+        # This session templates from the 1.3-inch board, whose MOSI is the
+        # knob carrier's press switch; see the test above for that refusal.
+        repo_root = repo_root_without_boards(tmp, "s3-elecrow-knob-128")
         output = os.path.join(tmp, "synthetic-s3.toml")
         stream = BootstrapFakeStream(tty=True)
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
@@ -6588,7 +6677,7 @@ def test_bootstrap_full_synthetic_session():
                 transport=BootstrapS3Transport(),
                 prompter=BootstrapFakePrompter(bootstrap_success_answers()),
                 stream=stream,
-                repo_root=espdisp.REPO_ROOT,
+                repo_root=repo_root,
                 name="synthetic-s3",
                 candidate_key="s3-lcd-130",
                 confirmed_chip="esp32s3",
@@ -6599,7 +6688,7 @@ def test_bootstrap_full_synthetic_session():
         with open(output, "rb") as source:
             draft = tomllib.load(source)
         descriptors = board_descriptor.load_repository_descriptors(
-            espdisp.REPO_ROOT)
+            repo_root)
         draft["_source"] = output
         check_accepts(
             lambda: board_descriptor.validate_descriptors(descriptors + [draft]),
@@ -6643,7 +6732,7 @@ def test_bootstrap_full_synthetic_session():
                 transport=BootstrapS3Transport(),
                 prompter=BootstrapFakePrompter(bootstrap_success_answers()),
                 stream=no_color_stream,
-                repo_root=espdisp.REPO_ROOT,
+                repo_root=repo_root,
                 name="synthetic-s3-no-color",
                 candidate_key="s3-lcd-130",
                 confirmed_chip="esp32s3",
@@ -6938,12 +7027,13 @@ def test_bootstrap_refusals_and_color_controls():
             output.write("original\n")
         answers = bootstrap_success_answers()
         answers["overwrite"] = "no"
+        repo_root = repo_root_without_boards(tmp, "s3-elecrow-knob-128")
         check_fails(
             lambda: espdisp.run_bootstrap_session(
                 transport=BootstrapS3Transport(),
                 prompter=BootstrapFakePrompter(answers),
                 stream=BootstrapFakeStream(),
-                repo_root=espdisp.REPO_ROOT,
+                repo_root=repo_root,
                 name="existing",
                 candidate_key="s3-lcd-130",
                 confirmed_chip="esp32s3",
@@ -7057,6 +7147,7 @@ def test_bootstrap_refusals_and_color_controls():
         {
             "s3-lcd-130", "s3-touch-lcd-154",
             "s3-touch-amoled-175c", "s3-touch-lcd-185c",
+            "s3-elecrow-knob-128",
         },
         "a requested candidate retains every still-plausible S3 descriptor",
     )
@@ -7298,6 +7389,7 @@ int main() {
 
 def main():
     test_bootstrap_solvers_and_derivations()
+    test_bootstrap_knob_press_pin_blocks_template_drive()
     test_bootstrap_full_synthetic_session()
     test_bootstrap_retune_is_section_scoped()
     test_bootstrap_refusals_and_color_controls()

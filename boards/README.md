@@ -21,3 +21,7 @@ The `migration.firmware_config` field records the staged firmware migration.
 Exactly one board in each CPU family is currently `generated`; other boards
 remain on their existing handwritten `Config` rows while their identity,
 detection, build-tool, and Mac catalog data already come from these descriptors.
+
+`carrier.pin_panel_power`, `carrier.pin_encoder_a`, and `carrier.pin_encoder_b`
+are optional and default to `-1`. Declare them only on a carrier that switches
+its panel supply from a GPIO or has a rotary encoder.

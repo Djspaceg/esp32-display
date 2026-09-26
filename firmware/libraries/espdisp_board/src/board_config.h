@@ -1,7 +1,7 @@
 // Which supported board this binary is running on, and every board fact that
 // follows from that.
 //
-// Nine board profiles are supported across the c3, c6, s3, and p4 release
+// Ten board profiles are supported across the c3, c6, s3, and p4 release
 // families. Each family has one artifact; runtime profile selection keeps the
 // physical panel/controller token independent from that family identity:
 //
@@ -21,6 +21,9 @@
 //                              QMI8658 IMU on I2C GPIO42/41, battery ADC
 //   ESP32-S3-Touch-LCD-1.85C   ST77916 360x360 LCD over QSPI, CST816 touch
 //                              on I2C GPIO11/10, reset through TCA9554
+//   CrowPanel 1.28 Rotary Knob GC9A01 240x240 round LCD over SPI, CST816D
+//                              touch on I2C GPIO6/7, rotary encoder on
+//                              GPIO45/42 and knob press on GPIO41
 //
 // The C6 and S3 families choose a profile before any panel GPIO is driven.
 // C6 distinguishes its two profiles on one shared I2C bus. S3 first uses the
@@ -248,6 +251,16 @@ struct Config {
   int8_t pinSerialRx = NO_PIN;
   int8_t pinSerialTx = NO_PIN;
 
+  /// Optional GPIO that switches the panel's own supply rail, driven high
+  /// before the panel bus starts and never lowered afterwards. On the
+  /// CrowPanel knob it also feeds the backlight anode and the touch pull-ups.
+  int8_t pinPanelPower = NO_PIN;
+
+  /// Optional quadrature rotary encoder, both lines idle-high. Its push switch,
+  /// when it has one, is the carrier's pinBootButton.
+  int8_t pinEncoderA = NO_PIN;
+  int8_t pinEncoderB = NO_PIN;
+
   SerialTransport serialTransport() const {
     return pinSerialRx != NO_PIN && pinSerialTx != NO_PIN
                ? SerialTransport::UartBridge
@@ -256,6 +269,9 @@ struct Config {
 
   bool hasRgbLed() const { return pinRgbLed != NO_PIN; }
   bool hasBootButton() const { return pinBootButton != NO_PIN; }
+  bool hasEncoder() const {
+    return pinEncoderA != NO_PIN && pinEncoderB != NO_PIN;
+  }
   bool hasTouch() const {
     if (touch == TouchController::None || pinTouchSda == NO_PIN ||
         pinTouchScl == NO_PIN) {
@@ -507,6 +523,54 @@ static const Config CONFIG_LCD_ST7789_130 = {
     /* serialTx */ 43,
 };
 
+/// ELECROW CrowPanel 1.28" rotary display: GC9A01 240x240 round IPS over
+/// 4-wire SPI, CST816D touch on GPIO6/7, and a detented EC3501 encoder whose
+/// push switch (GPIO41, active low) takes the BOOT-button actions. GPIO1 powers
+/// the LCD-3.3 rail - panel, backlight anode and touch pull-ups - so nothing on
+/// the glass works until it is high. Nets are from ELECROW's schematic; the
+/// vendor factory sketch confirms the same pins and SPI mode 0 with inversion.
+/// The five-LED WS2812 ring (GPIO48) and green power LED (GPIO40) are left
+/// undriven.
+static const Config CONFIG_ELECROW_KNOB_128 = {
+    Variant::ElecrowKnob128,
+    "CrowPanel 1.28 Rotary Knob (GC9A01)",
+    &PLATFORM_ESP32_S3,
+    &PANEL_GC9107_240X240,
+    /* sclk  */ 10,
+    /* mosi  */ 11,
+    /* data1 */ NO_PIN,
+    /* data2 */ NO_PIN,
+    /* data3 */ NO_PIN,
+    /* cs    */ 9,
+    /* dc    */ 3,
+    /* rst   */ 14,
+    /* bl    */ 46,
+    /* boot  */ 41,  // knob push switch; the chip BOOT key GPIO0 is unused
+    /* led   */ NO_PIN,
+    TouchController::Cst816,
+    /* touchSda */ 6,
+    /* touchScl */ 7,
+    /* touchRst */ 13,
+    /* touchInt */ 5,
+    PowerController::None,
+    /* batteryAdc */ NO_PIN,
+    /* adcScale */ 0,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
+    MotionController::None,
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
+    /* pinBlEnable */ NO_PIN,
+    /* backlightInverted */ false,
+    /* serialRx */ NO_PIN,
+    /* serialTx */ NO_PIN,
+    /* panelPower */ 1,
+    /* encoderA */ 45,
+    /* encoderB */ 42,
+};
+
 #include "generated_board_config_lookup.h"
 
 /// Whether a physical profile belongs to a platform family. This is used both
@@ -537,13 +601,15 @@ inline DetectionResult detectFromEvidence(
 /// explicit recovery override.
 inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
                                   bool st77916Bus, bool st7789Bus,
-                                  bool st7789_130Bus) {
+                                  bool st7789_130Bus,
+                                  bool knob128Bus = false) {
   const boarddetectmodel::ProbeEvidence evidence[] = {
       {boarddetectmodel::ProbeStatus::Started, (uint8_t)(co5300Bus ? 1 : 0)},
       {boarddetectmodel::ProbeStatus::Started, (uint8_t)(st77916Bus ? 1 : 0)},
       {boarddetectmodel::ProbeStatus::Started, (uint8_t)(st7789Bus ? 1 : 0)},
       {boarddetectmodel::ProbeStatus::Started,
        (uint8_t)(st7789_130Bus ? 1 : 0)},
+      {boarddetectmodel::ProbeStatus::Started, (uint8_t)(knob128Bus ? 1 : 0)},
   };
   return detectFromEvidence(
              Platform::Esp32S3, flashBytes, evidence,

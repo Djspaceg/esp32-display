@@ -33,7 +33,7 @@ Its platform contains no ST7703 timing, GT911 behavior, or carrier GPIOs.
 | Family | Chip | Runtime profiles | Partition compatibility |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `co5300`, `st77916` | `universal-8m-doom-ota` |
+| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-ota` |
 | `p4` | `esp32p4` | `st7703-4b` | `p4-32m-ota` |
 
 C6 probes its shared I2C bus before panel GPIO initialization. S3 uses 8 MiB
@@ -140,6 +140,7 @@ under motion, and odd-orientation touch corners remain unverified.
 | `st7789-130` | Attached carrier chip/flash probe, unique QMI8658A detection on GPIO47/48, production `CFGSHOW` over CH343, motion initialization, and WiFi association | Visual RGB/offset/backlight/rotation, battery with an attached cell, and sustained streaming checks pending |
 | `st7789-154` | Family compile and host profile tests | No attached carrier for current runtime testing |
 | `st77916` | Family compile and host profile tests | No attached carrier for current runtime testing |
+| `gc9a01-knob-128` | Family compile, host profile and encoder decoder tests | On-glass colour, orientation, touch corners and encoder direction unverified |
 
 ## Extension rules
 

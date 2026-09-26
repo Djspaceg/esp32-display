@@ -248,7 +248,10 @@
         "pin_rst": {"$ref": "#/$defs/pin"},
         "pin_bl": {"$ref": "#/$defs/pin"},
         "pin_boot": {"$ref": "#/$defs/pin"},
-        "pin_rgb_led": {"$ref": "#/$defs/pin"}
+        "pin_rgb_led": {"$ref": "#/$defs/pin"},
+        "pin_panel_power": {"$ref": "#/$defs/pin"},
+        "pin_encoder_a": {"$ref": "#/$defs/pin"},
+        "pin_encoder_b": {"$ref": "#/$defs/pin"}
       }
     },
     "touch": {

@@ -105,6 +105,14 @@ static const Calibration CST816_ON_C3_2424S012 = {
     /* rawXMirrored */ false, /* rawYMirrored */ false,
     /* rotateClockwise */ true};
 
+/// Starting calibration for the CrowPanel 1.28 rotary knob's CST816D. ELECROW's
+/// driver and ESPHome example both consume raw coordinates with no swap or
+/// mirror; corner observations on the glass decide whether either bit flips.
+static const Calibration CST816_ON_ELECROW_KNOB_128 = {
+    /* panelShort */ 240, /* panelLong */ 240,
+    /* rawXMirrored */ false, /* rawYMirrored */ false,
+    /* rotateClockwise */ true};
+
 /// Starting calibration for the 720x720 GT911 on the Waveshare 4B. The
 /// supported vendor path uses raw rotation-0 coordinates without swapping or
 /// mirroring; physical corner validation may refine the carrier profile.

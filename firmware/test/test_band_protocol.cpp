@@ -17,6 +17,7 @@
 #include "../display_stream/button_press_model.h"
 #include "../display_stream/chip_identity.h"
 #include "../display_stream/control_queue.h"
+#include "../display_stream/rotary_encoder_model.h"
 #include "../display_stream/device_protocol.h"
 #include "../display_stream/glyph_draw.h"
 #include "../display_stream/large_tile_protocol.h"
@@ -689,6 +690,46 @@ int main() {
     CHECK(displaySsid(credentials, clipped, sizeof(clipped)) == 6);
     CHECK(strcmp(clipped, "Lab...") == 0);
     CHECK(displaySsid(credentials, nullptr, 0) == 0);
+  }
+
+  // --- rotary encoder detents ----------------------------------------------
+  {
+    using namespace rotaryencoder;
+    auto feed = [](Decoder &decoder, const uint8_t *states, size_t count) {
+      int total = 0;
+      for (size_t i = 0; i < count; ++i) total += decoder.update(states[i]);
+      return total;
+    };
+    CHECK(pinState(true, true) == REST_STATE);
+    CHECK(pinState(true, false) == 2 && pinState(false, true) == 1);
+    CHECK(quarterStep(3, 3) == 0);
+    CHECK(quarterStep(3, 0) == 0);  // both lines at once: direction unknown
+    CHECK(quarterStep(3, 2) == -quarterStep(2, 3));
+
+    // One full quadrature cycle per detent, each direction.
+    const uint8_t forward[] = {2, 0, 1, 3};
+    const uint8_t backward[] = {1, 0, 2, 3};
+    Decoder decoder;
+    CHECK(quarterStep(3, 2) == 1);
+    CHECK(feed(decoder, forward, 4) == 1);
+    CHECK(feed(decoder, forward, 4) == 1);
+    CHECK(feed(decoder, backward, 4) == -1);
+    CHECK(decoder.state == REST_STATE && decoder.accumulated == 0);
+
+    // Contact bounce around rest cancels instead of clicking.
+    const uint8_t bounce[] = {2, 3, 2, 3, 1, 3};
+    CHECK(feed(decoder, bounce, 6) == 0);
+    // A detent that bounces on its way out still counts once.
+    const uint8_t noisyForward[] = {2, 3, 2, 0, 2, 0, 1, 3};
+    CHECK(feed(decoder, noisyForward, 8) == 1);
+    // Turning half-way and back is not a detent.
+    const uint8_t halfAndBack[] = {2, 0, 2, 3};
+    CHECK(feed(decoder, halfAndBack, 4) == 0);
+    // A lost edge mid-cycle (invalid jump) still resolves the direction.
+    const uint8_t skipped[] = {2, 0, 3};
+    CHECK(feed(decoder, skipped, 3) == 1);
+    // Samples outside two bits are masked rather than trusted.
+    CHECK(decoder.update(0xFF) == 0 && decoder.state == REST_STATE);
   }
 
   // --- BOOT short/double-press effects -----------------------------------
@@ -2230,12 +2271,21 @@ int main() {
                                     false, false) == Variant::Unknown);
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, true, true,
                                     false, false) == Variant::Unknown);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, false, true) ==
+          Variant::ElecrowKnob128);
+    // An 8 MiB part is the GC9107 carrier by flash alone; a knob bus answering
+    // there does not make a second candidate out of it.
+    CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
+                                    false, false, true) == Variant::LcdGc9107);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, true,
+                                    false, false, true) == Variant::Unknown);
 
     const auto &s3Plan =
         board::detectionPlanForPlatform(board::Platform::Esp32S3);
     CHECK(s3Plan.resolution == ResolutionPolicy::ExactlyOne);
     CHECK(board::GENERATED_MAX_PROBE_COUNT >= s3Plan.probeCount);
-    CHECK(s3Plan.probeCount == 4);
+    CHECK(s3Plan.probeCount == 5);
     CHECK(s3Plan.probes[0].sda == 15 && s3Plan.probes[0].scl == 14);
     CHECK(s3Plan.probes[0].addresses[0] == 0x5A);
     CHECK(s3Plan.probes[0].addresses[1] == 0x34);
@@ -2250,27 +2300,35 @@ int main() {
     CHECK(s3Plan.probes[2].addresses[2] == 0x6B);
     CHECK(s3Plan.probes[3].sda == 47 && s3Plan.probes[3].scl == 48);
     CHECK(s3Plan.probes[3].addresses[0] == 0x6B);
+    // The knob's CST816D sits on the GPIO1-switched rail, so its probe "reset"
+    // is a power cycle of that rail before addressing 0x15.
+    CHECK(s3Plan.probes[4].sda == 6 && s3Plan.probes[4].scl == 7);
+    CHECK(s3Plan.probes[4].addressCount == 1);
+    CHECK(s3Plan.probes[4].addresses[0] == 0x15);
+    CHECK(s3Plan.probes[4].resetPin == 1);
+    CHECK(s3Plan.probes[4].resetLowMs == 20);
+    CHECK(s3Plan.probes[4].resetReleaseWaitMs == 300);
     for (uint8_t i = 0; i < s3Plan.probeCount; ++i) {
       CHECK(s3Plan.probes[i].frequencyHz == 100000);
       CHECK(s3Plan.probes[i].release == ProbeRelease::Always);
     }
 
-    ProbeEvidence s3Evidence[4] = {};
+    ProbeEvidence s3Evidence[5] = {};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 4);
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 5);
     CHECK(detected.variant == Variant::LcdGc9107);
     CHECK(detected.matchedCandidates == 1);
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 4);
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 5);
     CHECK(detected.variant == Variant::Unknown);
     CHECK(detected.matchedCandidates == 0);
     s3Evidence[0] = {ProbeStatus::Started, 1};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 4);
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 5);
     CHECK(detected.variant == Variant::AmoledCo5300);
     s3Evidence[1] = {ProbeStatus::Started, 1};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 4);
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 5);
     CHECK(detected.variant == Variant::Unknown);
     CHECK(detected.matchedCandidates == 2);
 
@@ -5422,6 +5480,42 @@ int main() {
     CHECK(strcmp(board::variantToken(c3.variant), "gc9a01a-240") == 0);
     CHECK(strcmp(board::targetToken(c3.variant), "c3") == 0);
 
+    const board::Config &knob = board::configFor(board::Variant::ElecrowKnob128);
+    CHECK(knob.variant == board::Variant::ElecrowKnob128);
+    CHECK(knob.platform == &board::PLATFORM_ESP32_S3);
+    CHECK(knob.panel == &board::PANEL_GC9107_240X240);
+    CHECK(knob.panel->bus == board::PanelBus::Spi && !knob.isQspi());
+    CHECK(knob.panel->roundDisplay && knob.panel->invertColor);
+    CHECK(knob.pinSclk == 10 && knob.pinMosi == 11 && knob.pinCs == 9 &&
+          knob.pinDc == 3 && knob.pinRst == 14 && knob.pinBl == 46);
+    CHECK(knob.pinData1 == board::NO_PIN && knob.pinData2 == board::NO_PIN &&
+          knob.pinData3 == board::NO_PIN);
+    CHECK(knob.pinPanelPower == 1);
+    CHECK(knob.hasBootButton() && knob.pinBootButton == 41);
+    CHECK(knob.hasEncoder() && knob.pinEncoderA == 45 &&
+          knob.pinEncoderB == 42);
+    CHECK(!knob.hasRgbLed() && !knob.hasBattery() && !knob.hasMotion());
+    CHECK(knob.hasTouch() && knob.touch == board::TouchController::Cst816 &&
+          knob.pinTouchSda == 6 && knob.pinTouchScl == 7 &&
+          knob.pinTouchRst == 13 && knob.pinTouchInt == 5);
+    CHECK(knob.serialTransport() == board::SerialTransport::NativeUsbCdc);
+    CHECK(strcmp(board::variantToken(knob.variant), "gc9a01-knob-128") == 0);
+    CHECK(strcmp(board::targetToken(knob.variant), "s3") == 0);
+    CHECK(board::variantFromName("gc9a01-knob-128") ==
+          board::Variant::ElecrowKnob128);
+    CHECK(board::variantMatchesPlatform(board::Variant::ElecrowKnob128,
+                                        board::Platform::Esp32S3));
+    CHECK(!board::variantMatchesPlatform(board::Variant::ElecrowKnob128,
+                                         board::Platform::Esp32C3));
+    // Every other carrier leaves the new optional lines absent.
+    for (const board::Config *other :
+         {&c3, &board::configFor(board::Variant::LcdSt77916),
+          &board::configFor(board::Variant::AmoledCo5300),
+          &board::configFor(board::Variant::LcdSt7789_130)}) {
+      CHECK(other->pinPanelPower == board::NO_PIN);
+      CHECK(!other->hasEncoder());
+    }
+
     const board::Config &p4 = board::configFor(board::Variant::P4_4B);
     CHECK(p4.platform == &board::PLATFORM_ESP32_P4);
     CHECK(p4.panel == &board::PANEL_ST7703_720X720);
@@ -5451,6 +5545,8 @@ int main() {
     CHECK(board::supportsDoom(board::Variant::LcdSt77916));
     CHECK(board::supportsDoom(board::Variant::LcdGc9107));
     CHECK(board::supportsDoom(board::Variant::LcdSt7789_130));
+    CHECK(board::supportsDoom(board::Variant::ElecrowKnob128));
+    CHECK(!board::supportsAudio(board::Variant::ElecrowKnob128));
     CHECK(!board::supportsDoom(board::Variant::C3_2424S012));
     CHECK(!board::supportsDoom(board::Variant::TouchJd9853));
     CHECK(board::supportsAudio(board::Variant::AmoledCo5300));

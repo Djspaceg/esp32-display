@@ -11,6 +11,7 @@
 #include "display_power.h"
 #include "orientation.h"
 #include "prefs_store.h"
+#include "rotary_encoder_model.h"
 #include "ui_screens.h"
 
 #if defined(ESPDISP_DOOM_RUNTIME)
@@ -99,7 +100,53 @@ static bool takeBootButtonEdge(BootButtonEdge &edge) {
   return true;
 }
 
+// ---- Rotary encoder (knob carriers) ------------------------------------
+// Each completed detent is one step of the controls the BOOT button already
+// has: it moves the WiFi selector highlight like a short press does there, and
+// otherwise picks the high or low backlight preset the short press toggles
+// between. The knob's push switch is the carrier's BOOT button, so every press
+// tier above applies to it unchanged. Steps are decoded in the ISR (a detent's
+// four edges can come and go inside one render pass) and applied from loop().
+static gpio_num_t encoderPinA = GPIO_NUM_NC;
+static gpio_num_t encoderPinB = GPIO_NUM_NC;
+static rotaryencoder::Decoder encoderDecoder;
+static volatile int16_t encoderPendingSteps = 0;
+static portMUX_TYPE encoderMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void IRAM_ATTR onEncoderEdge() {
+  const uint8_t state = rotaryencoder::pinState(
+      gpio_get_level(encoderPinA) != 0, gpio_get_level(encoderPinB) != 0);
+  portENTER_CRITICAL_ISR(&encoderMux);
+  const int8_t step = encoderDecoder.update(state);
+  if (step != 0 && encoderPendingSteps > -1000 && encoderPendingSteps < 1000) {
+    encoderPendingSteps = (int16_t)(encoderPendingSteps + step);
+  }
+  portEXIT_CRITICAL_ISR(&encoderMux);
+}
+
+static void initializeEncoderInput() {
+  if (bcfg == nullptr || !bcfg->hasEncoder()) return;
+  encoderPinA = (gpio_num_t)bcfg->pinEncoderA;
+  encoderPinB = (gpio_num_t)bcfg->pinEncoderB;
+  pinMode(bcfg->pinEncoderA, INPUT_PULLUP);
+  pinMode(bcfg->pinEncoderB, INPUT_PULLUP);
+  portENTER_CRITICAL(&encoderMux);
+  encoderDecoder = rotaryencoder::Decoder();
+  encoderDecoder.state = rotaryencoder::pinState(
+      digitalRead(bcfg->pinEncoderA) != LOW,
+      digitalRead(bcfg->pinEncoderB) != LOW);
+  encoderPendingSteps = 0;
+  portEXIT_CRITICAL(&encoderMux);
+  attachInterrupt(digitalPinToInterrupt(bcfg->pinEncoderA), onEncoderEdge,
+                  CHANGE);
+  attachInterrupt(digitalPinToInterrupt(bcfg->pinEncoderB), onEncoderEdge,
+                  CHANGE);
+  Serial.printf("knob: encoder on GPIO%d/GPIO%d\n", bcfg->pinEncoderA,
+                bcfg->pinEncoderB);
+}
+
 void initializeButtonInput() {
+  initializeEncoderInput();
   if (bcfg == nullptr || !bcfg->hasBootButton()) return;
   bootButtonPin = (gpio_num_t)bcfg->pinBootButton;
   pinMode(bcfg->pinBootButton, INPUT_PULLUP);
@@ -197,6 +244,46 @@ static void handleShortRelease(uint32_t releasedAt) {
       shortPressTracker.record(releasedAt, DOUBLE_PRESS_MS, previewEnabled));
 }
 
+static void applyEncoderStep(int8_t direction) {
+  Serial.printf("knob: turn %+d\n", (int)direction);
+  if (wifiSelectorActive) {
+    moveWifiSelector(direction);
+    return;
+  }
+  if (surveyActive) {
+    Serial.println("knob: turn ignored during signal survey");
+    return;
+  }
+  if (fixedBlLevel != 0) {
+    Serial.printf("knob: turn ignored (backlight fixed at %u)\n",
+                  fixedBlLevel);
+    return;
+  }
+  // A short press still waiting out its double-press window commits first,
+  // so the knob never lands on a level the pending decision then overrides.
+  applyShortPressDecision(shortPressTracker.flush());
+  const uint8_t want = direction > 0 ? BL_HIGH : BL_LOW;
+  if (userBlLevel == want) return;
+  userBlLevel = want;
+  applyBacklight();
+  saveDisplayPrefs();
+  Serial.printf("knob: turn -> backlight %s (saved)\n",
+                blIsHigh() ? "high" : "low");
+}
+
+static void handleEncoder() {
+  if (bcfg == nullptr || !bcfg->hasEncoder()) return;
+  portENTER_CRITICAL(&encoderMux);
+  int16_t steps = encoderPendingSteps;
+  encoderPendingSteps = 0;
+  portEXIT_CRITICAL(&encoderMux);
+  while (steps != 0) {
+    const int8_t direction = steps > 0 ? 1 : -1;
+    steps = (int16_t)(steps - direction);
+    applyEncoderStep(direction);
+  }
+}
+
 // Process queued BOOT edges: short press toggles backlight, a completed long
 // press flips the display 180 degrees, and an extra-long press toggles manual
 // display off/on. Capturing the edges outside the render loop is load-bearing:
@@ -206,6 +293,7 @@ static void handleShortRelease(uint32_t releasedAt) {
 // keep their immediate behavior because they are a separate mode and never
 // fall through to the power action.
 void handleButton() {
+  handleEncoder();
   if (bcfg == nullptr || !bcfg->hasBootButton()) return;
 
   static bool wasDown = false;

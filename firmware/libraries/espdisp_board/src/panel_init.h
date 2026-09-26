@@ -131,6 +131,13 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
                  esp_lcd_panel_io_color_trans_done_cb_t doneCb, void *userCtx,
                  esp_lcd_panel_io_handle_t *outIo,
                  esp_lcd_panel_handle_t *outPanel) {
+  if (cfg.pinPanelPower != board::NO_PIN) {
+    // A carrier-switched panel rail must be up and settled before the
+    // controller sees reset or its first command. It is never lowered again.
+    pinMode(cfg.pinPanelPower, OUTPUT);
+    digitalWrite(cfg.pinPanelPower, HIGH);
+    delay(20);
+  }
   if (!boardio::begin(cfg) || !boardio::pulseReset(cfg.panelResetExio)) {
     return false;
   }
