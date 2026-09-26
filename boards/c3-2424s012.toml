@@ -83,7 +83,7 @@ pin_cs = 10
 pin_dc = 2
 pin_rst = -1
 pin_bl = 3
-pin_boot = -1
+pin_boot = 9
 pin_rgb_led = -1
 
 [touch]

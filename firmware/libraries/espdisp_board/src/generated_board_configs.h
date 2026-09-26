@@ -68,7 +68,7 @@ static constexpr PanelConfig PANEL_ST77916_360X360 = {
 static constexpr Config CONFIG_C3_2424S012 = {
     Variant::C3_2424S012, "ESP32-2424S012C-Y(B) (GC9A01A)", &PLATFORM_ESP32_C3, &PANEL_GC9107_240X240, 6, 7,
     -1, -1, -1, 10, 2, -1,
-    3, -1, -1, TouchController::Cst816, 4, 5,
+    3, 9, -1, TouchController::Cst816, 4, 5,
     1, 0, PowerController::None, -1, 0, -1,
     -1, MotionController::None, 0, 1, 1, 1,
     0, 0, -1, false, -1, -1
