@@ -37,7 +37,7 @@ Lanes, all passing, ran on `68175cb` (the commits after it touch docs only):
 # Evidence
 
 - `code-review.md`: the findings and what became of each.
-- The `gate-*.log`, `release-shipping.log` and `app-build.log` files: the lanes above.
+- The `gate-*.log`, `release-shipping.log` and `app-build.log` files are in `/Users/stepblk/Source/esp32-display-rect-landscape-logs/`. They are not captured, because the evidence tool resolves file captures against the main checkout rather than this worktree.
 
 # Residuals
 
