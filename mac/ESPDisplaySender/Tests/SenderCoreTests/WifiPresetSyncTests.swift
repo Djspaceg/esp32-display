@@ -694,6 +694,35 @@ final class WifiPresetSyncTests: XCTestCase {
         XCTAssertTrue(manager.wifiPresetSyncRechecks.isEmpty)
     }
 
+    /// Deleting every saved network while a copy is still running leaves the
+    /// board with nothing it should hold, so that copy failing afterwards is
+    /// no failure to report; nothing would ever clear the banner otherwise.
+    func testACopyFailingAfterEveryNetworkIsDeletedIsNotReported() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        device.sabotage = .refuseSets
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+        let writing = LockedCounter(0)
+        manager.usbControlSender = { command, _, _ in
+            if command.hasPrefix("CFGWIFISET ") {
+                writing.count()
+                Thread.sleep(forTimeInterval: 0.2)
+            }
+            return device.send(command)
+        }
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitUntil { writing.total == 1 }
+
+        manager.savedNetworkNames = []
+        manager.syncWifiPresetsToAttachedDevices()
+        try await waitForSyncToSettle(manager)
+
+        XCTAssertEqual(device.mutations.count, 1, device.mutations.description)
+        XCTAssertTrue(manager.issues.isEmpty, manager.issues.description)
+    }
+
     /// A board still attached after its silence was reported is tried again
     /// later, and the banner clears once it answers - no replug needed.
     func testABoardThatComesGoodAfterTheReportClearsItsBanner() async throws {

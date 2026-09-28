@@ -215,6 +215,9 @@ extension PanelManager {
                 // Cleared so the next probe retries. A half-written collection
                 // must not look synchronized.
                 self.syncedWifiPresetSignatures[hardwareID] = nil
+                // Every saved network was deleted while this ran, and that
+                // resolved the banner: the board is short of nothing now.
+                guard !self.savedNetworkNames.isEmpty else { return }
                 let delays = self.wifiPresetSyncRetryDelays
                 let wentSilent = silence.wentSilent
                 if wentSilent, attempt < delays.count {

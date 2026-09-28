@@ -2,6 +2,16 @@
 
 Each finished branch keeps its own review record below, whole.
 
+## Integration review of app-error-banner-auto-clear (on integrate-main-0928)
+
+Independent read of `git diff main...app-error-banner-auto-clear` (main = e95e38e) by the integrator, who did not write it. Checked: every sync, retry, recheck and resolve key is the canonical hardware ID (`usbDevices[].hardwareID` is set canonical; `stableHardwareID` canonicalizes); `forget` cancels the sync and recheck before resolving, and the new `!Task.isCancelled` guard stops a cancelled run from clearing a newer registration; a retry or recheck that finds the board held off waits again; the untagged `report(_:detail:)` callers (`.screenRecording`, `.deviceConfig`) still clear through `resolve(_:)`.
+
+| # | Severity | Finding | Disposition |
+|---|----------|---------|-------------|
+| I1 | Low | Deleting every saved network while a copy was still running (its last retry, or a write the board refused) let that copy report afterwards. The banner then named a collection that no longer exists, and nothing cleared it: rechecks stop at the empty collection, and only Dismiss removed it. | Fixed in its own commit on integrate-main-0928: a failed copy that finds the collection empty reports nothing. `testACopyFailingAfterEveryNetworkIsDeletedIsNotReported`, red before the fix and green after. |
+
+Not changed: after a reported silence, a board that is unplugged keeps its banner until it is replugged and copies, or is dismissed. This is the branch's stated design.
+
 ## Code review: issue banners clear on recovery; slow boards are waited out
 
 Branch `app-error-banner-auto-clear`, `git diff main...HEAD` (main = e95e38e). One adversarial round by a read-only reviewer agent (file reads and `swift test --filter` only; no ports, no app launch). It found no blocking issues. It checked that report and resolve use the same canonical hardware ID, that no second sync can start alongside a retry wait, how flashes interleave with retries, the `!Task.isCancelled` guard, that CFGWIFIUSE is never sent, and all six persistence call sites.
