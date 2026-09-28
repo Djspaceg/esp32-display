@@ -30,6 +30,18 @@ final class PanelManager: ObservableObject {
     @Published internal(set) var operationOutcome: OperationOutcome?
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []
+    /// What each source currently reports under an issue kind, in report order.
+    /// `issues` is derived from this.
+    private var issueSources: [AppIssue: [(source: String, detail: String)]] = [:]
+    /// The two files behind `.persistence`. Each one's save withdraws only its
+    /// own failure: saving the app settings says nothing about the display
+    /// records, and the reverse.
+    static let panelRecordsIssueSource = "display records"
+    static let settingsIssueSource = "app settings"
+    /// A file that could not be read at launch. Saving over it later does not
+    /// bring back what it held, so only Dismiss clears these.
+    static let panelRecordsReadIssueSource = "display records (read)"
+    static let settingsReadIssueSource = "app settings (read)"
     /// Persisted app settings, including streaming policy and sidebar ordering.
     @Published private(set) var settings = SenderSettings()
     /// Live image of what the selected panel is being sent. Its own observable
@@ -153,6 +165,19 @@ final class PanelManager: ObservableObject {
     /// The last completed sync per board, so the UI can say what did not fit
     /// without re-reading the display.
     var wifiPresetSyncReports: [String: WifiPresetSyncReport] = [:]
+    /// How long to wait before each retry of an automatic preset sync the
+    /// board went silent on. A board can answer CFGSHOW and then go quiet for
+    /// several seconds - still booting after the port opened, or restarted once
+    /// early on - so silence is only reported once every retry is silent too:
+    /// 45 s of waiting, about a minute with each attempt's 3 s timeout.
+    var wifiPresetSyncRetryDelays: [TimeInterval] = [3, 6, 12, 24]
+    /// How often a board whose silence was reported is tried again while it
+    /// stays attached, so the banner clears when it comes good.
+    var wifiPresetSyncRecheckInterval: TimeInterval = 60
+    var wifiPresetSyncRechecks: [String: Task<Void, Never>] = [:]
+    /// Boards (by hardware ID) the preset sheet is reading or writing. The
+    /// automatic sync would otherwise talk over it on the same port.
+    var wifiPresetSheetOperations: [String: Int] = [:]
     /// Boards (by hardware ID) a USB flash or onboarding run currently owns.
     /// Between esptool's reset and the run's last line the board answers
     /// CFGSHOW before it is safe to hand preset commands, so the automatic
@@ -191,11 +216,13 @@ final class PanelManager: ObservableObject {
         }
         refreshAudioDevices()
         if let failure = loaded.failure {
-            report(.persistence, detail: "Saved display settings could not be read "
+            report(.persistence, source: Self.panelRecordsReadIssueSource,
+                   detail: "Saved display settings could not be read "
                 + "from \(url?.path ?? "disk"): \(failure)")
         }
         if let failure = loadedSettings.failure {
-            report(.persistence, detail: "App settings could not be read, so "
+            report(.persistence, source: Self.settingsReadIssueSource,
+                   detail: "App settings could not be read, so "
                 + "the defaults are in use: \(failure)")
         }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) {
@@ -347,9 +374,10 @@ final class PanelManager: ObservableObject {
         guard let settingsURL else { return }
         do {
             try SettingsStore.save(settings, to: settingsURL)
-            resolve(.persistence)
+            resolve(.persistence, source: Self.settingsIssueSource)
         } catch {
-            report(.persistence, detail: "App settings could not be saved to "
+            report(.persistence, source: Self.settingsIssueSource,
+                   detail: "App settings could not be saved to "
                 + "\(settingsURL.path): \(error.localizedDescription)")
         }
     }
@@ -360,18 +388,52 @@ final class PanelManager: ObservableObject {
     /// Record a standing problem, replacing any earlier report of the same kind
     /// so a repeating failure does not stack up.
     func report(_ issue: AppIssue, detail: String) {
-        let reported = ReportedIssue(issue: issue, detail: detail)
+        report(issue, source: "", detail: detail)
+    }
+
+    /// Record a problem that one of several independent sources has - one
+    /// board, one file - so that source recovering withdraws only its own part.
+    /// The banner stays up, showing every remaining source, until the last one
+    /// recovers.
+    func report(_ issue: AppIssue, source: String, detail: String) {
+        var sources = issueSources[issue, default: []]
+        if let index = sources.firstIndex(where: { $0.source == source }) {
+            sources[index].detail = detail
+        } else {
+            sources.append((source, detail))
+        }
+        issueSources[issue] = sources
+        publishIssue(issue)
+    }
+
+    /// Withdraw a problem because it no longer applies, whatever reported it.
+    func resolve(_ issue: AppIssue) {
+        issueSources[issue] = nil
+        publishIssue(issue)
+    }
+
+    /// Withdraw one source's part of a problem because that source is fine now.
+    func resolve(_ issue: AppIssue, source: String) {
+        guard var sources = issueSources[issue] else { return }
+        sources.removeAll { $0.source == source }
+        issueSources[issue] = sources.isEmpty ? nil : sources
+        publishIssue(issue)
+    }
+
+    private func publishIssue(_ issue: AppIssue) {
+        guard let sources = issueSources[issue], !sources.isEmpty else {
+            issues.removeAll { $0.issue == issue }
+            return
+        }
+        let reported = ReportedIssue(
+            issue: issue,
+            detail: sources.map(\.detail).joined(separator: "\n"))
         if let index = issues.firstIndex(where: { $0.issue == issue }) {
             guard issues[index] != reported else { return }
             issues[index] = reported
         } else {
             issues.append(reported)
         }
-    }
-
-    /// Withdraw a problem because it no longer applies.
-    func resolve(_ issue: AppIssue) {
-        issues.removeAll { $0.issue == issue }
     }
 
     /// Dismiss a problem the user has read. Identical to `resolve`, but named
@@ -485,9 +547,10 @@ final class PanelManager: ObservableObject {
         lastPersistedAt = now
         do {
             try PanelStore.save(panels.map(PersistedPanel.init(snapshot:)), to: url)
-            resolve(.persistence)
+            resolve(.persistence, source: Self.panelRecordsIssueSource)
         } catch {
-            report(.persistence, detail: "Display names and USB assignments could not "
+            report(.persistence, source: Self.panelRecordsIssueSource,
+                   detail: "Display names and USB assignments could not "
                 + "be written to \(url.path): \(error.localizedDescription)")
         }
     }

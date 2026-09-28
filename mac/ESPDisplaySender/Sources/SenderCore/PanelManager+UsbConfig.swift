@@ -153,6 +153,8 @@ extension PanelManager {
         let currentName = panel.displayName
         let preferredPort = panel.usbPort
         let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
+        let held = beginWifiPresetSheetOperation(for: panel)
+        defer { endWifiPresetSheetOperation(held) }
         return await Task.detached(priority: .userInitiated) {
             WifiConfigUI.wifiPresets(
                 currentName: currentName,
@@ -180,6 +182,8 @@ extension PanelManager {
         let currentName = panel.displayName
         let preferredPort = panel.usbPort
         let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
+        let held = beginWifiPresetSheetOperation(for: panel)
+        defer { endWifiPresetSheetOperation(held) }
         let result = await Task.detached(priority: .userInitiated) {
             WifiConfigUI.syncWifiPresets(
                 desired,
@@ -195,6 +199,21 @@ extension PanelManager {
             forgetWifiPresetSync(hardwareID: hardwareID)
         }
         return result
+    }
+
+    /// Hold the automatic preset sync off this board while the sheet talks to
+    /// it. A sync already running is not stopped; one waiting to retry waits
+    /// on until the sheet is done.
+    private func beginWifiPresetSheetOperation(for panel: PanelSnapshot) -> String? {
+        guard let hardwareID = stableHardwareID(of: panel) else { return nil }
+        wifiPresetSheetOperations[hardwareID, default: 0] += 1
+        return hardwareID
+    }
+
+    private func endWifiPresetSheetOperation(_ hardwareID: String?) {
+        guard let hardwareID, let count = wifiPresetSheetOperations[hardwareID]
+        else { return }
+        wifiPresetSheetOperations[hardwareID] = count > 1 ? count - 1 : nil
     }
 
     func configureUSB(preferredSSID: String? = nil) {

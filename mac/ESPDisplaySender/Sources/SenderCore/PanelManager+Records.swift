@@ -180,6 +180,10 @@ extension PanelManager {
         }
         if let hardwareID = stableHardwareID(of: panel) {
             _ = setRememberedOTAPassword(nil, for: hardwareID)
+            // Nothing is expected of a board without a record, so neither is a
+            // copy of the presets.
+            forgetWifiPresetSync(hardwareID: hardwareID)
+            resolve(.wifiPresetSync, source: hardwareID)
         }
         panels.remove(at: index)
         if selectedServiceName == serviceName {

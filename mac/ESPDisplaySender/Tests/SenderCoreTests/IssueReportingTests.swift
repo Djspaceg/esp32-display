@@ -218,6 +218,44 @@ final class IssueReportingTests: XCTestCase {
         XCTAssertTrue(manager.issues.isEmpty)
     }
 
+    /// One board's recovery withdraws only that board's part of the banner;
+    /// the last one recovering clears it.
+    func testASourceRecoveringWithdrawsOnlyItsOwnPart() {
+        let manager = makeManager()
+        manager.report(.wifiPresetSync, source: "board-a", detail: "a failed")
+        manager.report(.wifiPresetSync, source: "board-b", detail: "b failed")
+        XCTAssertEqual(manager.issues.map(\.detail), ["a failed\nb failed"])
+
+        manager.resolve(.wifiPresetSync, source: "board-a")
+        XCTAssertEqual(manager.issues.map(\.detail), ["b failed"])
+
+        manager.resolve(.wifiPresetSync, source: "board-b")
+        XCTAssertTrue(manager.issues.isEmpty, manager.issues.description)
+    }
+
+    /// Saving the app settings says nothing about the display records file.
+    func testSavingOneFileDoesNotClearTheOthersFailure() {
+        let manager = makeManager()
+        manager.report(.persistence, source: PanelManager.panelRecordsIssueSource,
+                       detail: "records could not be written")
+
+        manager.resolve(.persistence, source: PanelManager.settingsIssueSource)
+
+        XCTAssertEqual(manager.issues.map(\.detail), ["records could not be written"])
+    }
+
+    /// A dismissed banner is not brought back by another source recovering.
+    func testDismissingForgetsEverySource() {
+        let manager = makeManager()
+        manager.report(.wifiPresetSync, source: "board-a", detail: "a failed")
+        manager.report(.wifiPresetSync, source: "board-b", detail: "b failed")
+
+        manager.dismissIssue(.wifiPresetSync)
+        manager.resolve(.wifiPresetSync, source: "board-a")
+
+        XCTAssertTrue(manager.issues.isEmpty, manager.issues.description)
+    }
+
     /// Every kind needs a title, since the banner shows it as the headline.
     func testEveryIssueKindHasATitle() {
         for issue in AppIssue.allCases {

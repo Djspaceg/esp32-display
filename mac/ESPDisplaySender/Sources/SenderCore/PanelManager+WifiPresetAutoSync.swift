@@ -38,7 +38,8 @@ extension PanelManager {
     /// again.
     ///
     /// Nor while a USB flash or onboarding run owns the board; the run's end
-    /// re-probes it (`finishUSBFlash`).
+    /// re-probes it (`finishUSBFlash`). Nor while the preset sheet or a repair
+    /// has the port (`wifiPresetSyncHeldOff`).
     func wifiPresetSyncDevice(
         for serviceName: String
     ) -> WifiConfigUI.USBDeviceOption? {
@@ -48,7 +49,8 @@ extension PanelManager {
               device.hardwareID?.isEmpty == false,
               Self.runsStreamFirmware(device.serialStatus),
               let hardwareID = ConfigCommands.canonicalHardwareID(device.hardwareID),
-              usbFlashesInFlight[hardwareID] == nil
+              usbFlashesInFlight[hardwareID] == nil,
+              !wifiPresetSyncHeldOff(hardwareID: hardwareID)
         else { return nil }
         return device
     }
@@ -118,6 +120,8 @@ extension PanelManager {
     /// Push the saved collection to every board that is attached and verified.
     /// Called when the app's own list of saved networks changes.
     func syncWifiPresetsToAttachedDevices() {
+        // Nothing saved is nothing to copy, so no board is short of anything.
+        if savedNetworkNames.isEmpty { resolve(.wifiPresetSync) }
         for serviceName in panels.map(\.serviceName) {
             syncWifiPresetsIfNeeded(for: serviceName)
         }
@@ -125,7 +129,21 @@ extension PanelManager {
 
     /// Push the saved collection to one board if it is attached, verified, and
     /// does not already hold exactly this collection.
-    func syncWifiPresetsIfNeeded(for serviceName: String) {
+    ///
+    /// A failure where the board went silent - no reply at all to a command - is
+    /// retried after each of `wifiPresetSyncRetryDelays` and reported only when
+    /// the last retry is silent too: a board that answers CFGSHOW can still be
+    /// booting, and its silence in those seconds is not a verdict. After that
+    /// the board is checked again every `wifiPresetSyncRecheckInterval` while
+    /// it stays verified, so a board that comes good later clears its banner.
+    /// A failure the board answered - a refused write, a readback that does not
+    /// match - is its verdict, and is reported at once.
+    ///
+    /// Each retry re-enters here, so it re-checks that the board is still
+    /// attached and verified and copies whatever the collection is by then. A
+    /// board that is no longer verified when its retry comes is left to its next
+    /// CFGSHOW answer, unreported. `attempt` counts the retries already made.
+    func syncWifiPresetsIfNeeded(for serviceName: String, attempt: Int = 0) {
         guard let device = wifiPresetSyncDevice(for: serviceName),
               let hardwareID = device.hardwareID
         else { return }
@@ -143,6 +161,7 @@ extension PanelManager {
         let sender = usbControlSender
         let displayName = panels.first { $0.serviceName == serviceName }?
             .displayName ?? serviceName
+        let silence = WifiPresetSilence()
 
         let epoch = usbFlashEpochs[hardwareID, default: 0]
         let work = Task { @MainActor [weak self] in
@@ -158,11 +177,15 @@ extension PanelManager {
                     credentials: credentials,
                     port: path,
                     send: { command, port, timeout in
-                        sender(command, port, timeout)
+                        let result = sender(command, port, timeout)
+                        silence.note(result)
+                        return result
                     })
             }.value
 
-            guard let self else { return }
+            // Cancelled by `forgetWifiPresetSync`, which also dropped this
+            // task's registration; a newer sync may hold it by now.
+            guard let self, !Task.isCancelled else { return }
             self.wifiPresetSyncTasks[hardwareID] = nil
             // A run that started while this was running reset the board under
             // it; whatever this saw is not a verdict on the board. If that run
@@ -185,17 +208,91 @@ extension PanelManager {
             case .success(let report):
                 self.syncedWifiPresetSignatures[hardwareID] = signature
                 self.wifiPresetSyncReports[hardwareID] = report
+                self.wifiPresetSyncRechecks.removeValue(forKey: hardwareID)?.cancel()
+                self.resolve(.wifiPresetSync, source: hardwareID)
                 self.objectWillChange.send()
             case .failure(let failure):
                 // Cleared so the next probe retries. A half-written collection
                 // must not look synchronized.
                 self.syncedWifiPresetSignatures[hardwareID] = nil
+                let delays = self.wifiPresetSyncRetryDelays
+                let wentSilent = silence.wentSilent
+                if wentSilent, attempt < delays.count {
+                    self.retryWifiPresetSync(
+                        hardwareID: hardwareID, serviceName: serviceName,
+                        attempt: attempt + 1, after: delays[attempt])
+                    return
+                }
                 self.report(
-                    .wifiPresetSync,
+                    .wifiPresetSync, source: hardwareID,
                     detail: "\(displayName): \(failure.title). \(failure.message)")
+                if wentSilent {
+                    self.recheckWifiPresetSync(
+                        hardwareID: hardwareID, serviceName: serviceName)
+                }
             }
         }
         wifiPresetSyncTasks[hardwareID] = work
+    }
+
+    /// Whether something else has the board's serial port for now: the preset
+    /// sheet reading or writing it, or a repair holding every probe off.
+    func wifiPresetSyncHeldOff(hardwareID: String) -> Bool {
+        usbProbeHolds > 0 || wifiPresetSheetOperations[hardwareID] != nil
+    }
+
+    /// The record's service name now, which a rename during a wait may have
+    /// changed.
+    private func currentServiceName(
+        forHardwareID hardwareID: String, fallback: String
+    ) -> String {
+        panelAssociated(withHardwareID: hardwareID)?.serviceName ?? fallback
+    }
+
+    /// Wait, then try the board again. The wait is registered as the board's
+    /// sync task, so a CFGSHOW answer in the meantime does not start a second
+    /// sync beside it and `forgetWifiPresetSync` can cancel it. While the port
+    /// is held off, the same wait starts over rather than using up a retry.
+    private func retryWifiPresetSync(
+        hardwareID: String, serviceName: String,
+        attempt: Int, after delay: TimeInterval
+    ) {
+        wifiPresetSyncTasks[hardwareID] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.wifiPresetSyncTasks[hardwareID] = nil
+            let name = self.currentServiceName(
+                forHardwareID: hardwareID, fallback: serviceName)
+            guard !self.wifiPresetSyncHeldOff(hardwareID: hardwareID) else {
+                self.retryWifiPresetSync(
+                    hardwareID: hardwareID, serviceName: name,
+                    attempt: attempt, after: delay)
+                return
+            }
+            self.syncWifiPresetsIfNeeded(for: name, attempt: attempt)
+        }
+    }
+
+    /// After a reported silent failure, try the board again now and then while
+    /// it stays verified, so a board that comes good clears its banner without
+    /// being replugged. Not registered as the sync task: a CFGSHOW answer in
+    /// the meantime may start a sync of its own.
+    private func recheckWifiPresetSync(hardwareID: String, serviceName: String) {
+        let interval = wifiPresetSyncRecheckInterval
+        wifiPresetSyncRechecks[hardwareID]?.cancel()
+        wifiPresetSyncRechecks[hardwareID] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, interval) * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.wifiPresetSyncRechecks[hardwareID] = nil
+            let name = self.currentServiceName(
+                forHardwareID: hardwareID, fallback: serviceName)
+            guard !self.wifiPresetSyncHeldOff(hardwareID: hardwareID) else {
+                self.recheckWifiPresetSync(hardwareID: hardwareID, serviceName: name)
+                return
+            }
+            self.syncWifiPresetsIfNeeded(
+                for: name, attempt: self.wifiPresetSyncRetryDelays.count)
+        }
     }
 
     /// The last sync's report for the board behind a record, if there is one.
@@ -213,5 +310,24 @@ extension PanelManager {
         else { return }
         syncedWifiPresetSignatures[canonical] = nil
         wifiPresetSyncTasks.removeValue(forKey: canonical)?.cancel()
+        wifiPresetSyncRechecks.removeValue(forKey: canonical)?.cancel()
     }
+}
+
+/// Whether any command in one sync attempt went unanswered. A reply carrying
+/// CFGERR is the board answering; anything else a failed send returns - no
+/// reply before the timeout, a port that would not open or take the write -
+/// is the board not answering.
+private final class WifiPresetSilence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var silent = false
+
+    func note(_ result: WifiConfigUI.CommandResult) {
+        guard case .failure(let reason) = result,
+              ConfigCommands.reply(in: reason) == nil
+        else { return }
+        lock.withLock { silent = true }
+    }
+
+    var wentSilent: Bool { lock.withLock { silent } }
 }
