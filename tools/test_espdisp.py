@@ -8091,12 +8091,14 @@ def test_rescue_late_connection_and_identity():
     check(world.said("could not connect to %s" % slow), "the refused port is named")
 
     # An attached board that re-enumerates under a new name is not new: here it
-    # comes back on another socket, with the same USB serial.
+    # comes back on a socket on the Mac itself, with the same USB serial, under
+    # the names macOS really gives those locations.
     attached = "/dev/cu.usbmodem1312201"
-    renamed = "/dev/cu.usbmodem2000001"
-    board = "/dev/cu.usbmodem1400001"
-    identities = {attached: (0x131220, "AA:BB"), renamed: (0x200000, "AA:BB"),
-                  board: (0x140000, "CC:DD")}
+    renamed = "/dev/cu.usbmodem14101"
+    board = "/dev/cu.usbmodem101"
+    identities = {attached: (0x131220, "1C:DB:D4:7B:5B:94"),
+                  renamed: (0x14100000, "1C:DB:D4:7B:5B:94"),
+                  board: (0x00100000, "68:EE:8F:5D:AC:8C")}
     world = RescueWorld(
         [(attached, 0.0, 6.0)], [(renamed, 6.5, 1e9), (board, 12.0, 1e9)],
         identities=identities)
@@ -8157,6 +8159,33 @@ def test_rescue_usb_identity():
           "a different socket without serials is a different board")
     check(not espdisp.identity_is_known(None, [(0x131220, "")]),
           "an unresolved port is judged by its name alone")
+
+
+def test_rescue_usb_identity_real_names():
+    """The names macOS really gives CDC ports.
+
+    A device with a usable serial is named after it (the P4 here: serial
+    5B90170069, port usbmodem5B901700691); otherwise after its locationID with
+    the trailing zero nibbles dropped, plus the interface (0x00100000 is
+    usbmodem101, 0x01100000 usbmodem1101, 0x14100000 usbmodem14101).
+    """
+    p4 = (0x131220, "5B90170069")
+    root = (0x00100000, "1C:DB:D4:7B:5B:94")
+    hub = (0x01100000, "68:EE:8F:5D:AC:8C")
+    deep = (0x14100000, "")
+    devices = [p4, root, hub, deep]
+    check_equal(espdisp.usb_identity_for_port("/dev/cu.usbmodem5B901700691", devices),
+                p4, "a serial-named port maps to the device with that serial")
+    check_equal(espdisp.usb_identity_for_port("/dev/cu.usbmodem101", devices), root,
+                "a port on the Mac itself maps to its location")
+    check_equal(espdisp.usb_identity_for_port("/dev/cu.usbmodem1101", devices), hub,
+                "a port on a first-level hub maps to its location")
+    check_equal(espdisp.usb_identity_for_port("/dev/cu.usbmodem14101", devices), deep,
+                "trailing zero nibbles are dropped from the location")
+    check_equal(espdisp.usb_identity_for_port("/dev/cu.usbmodem14103", devices), deep,
+                "a second interface is the same device")
+    check_equal(espdisp.usb_identity_for_port("/dev/cu.usbmodem1312201", [root]), None,
+                "location 0x00100000 does not claim a port under 0x131220")
 
 
 def test_rescue_override_warning():
@@ -8385,6 +8414,7 @@ def main():
     test_rescue_spawner()
     test_rescue_late_connection_and_identity()
     test_rescue_usb_identity()
+    test_rescue_usb_identity_real_names()
     test_rescue_override_warning()
 
     if failures:

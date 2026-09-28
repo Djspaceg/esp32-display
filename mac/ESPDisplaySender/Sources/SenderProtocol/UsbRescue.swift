@@ -26,6 +26,13 @@ public enum UsbRescue {
     /// connected by then is given up on: wrong family, not an Espressif chip,
     /// or a board that never enters download mode.
     public static let connectTimeout = 10.0
+    /// Failed writes in a row on one port before it is left alone, as a port
+    /// that never connects is: a board of another family fails at once, every
+    /// time, and relaunching resets it every few seconds for nothing.
+    public static let failuresBeforeRefusal = 3
+    /// How long esptool may take once it has said "Connected to". The rescue
+    /// image is under half a megabyte, written in seconds even at 460800 baud.
+    public static let writeTimeout = 120.0
     /// Four connect attempts per pass: on a USB-UART bridge esptool cycles
     /// through four reset sequences, and every pass starts that cycle over.
     public static let esptoolConfig = "[esptool]\nopen_port_attempts = 0\nconnect_attempts = 4\n"
@@ -187,19 +194,37 @@ public enum UsbRescue {
     }
 
     /// The device behind a /dev/cu.* name, or nil when it cannot be told.
+    /// Only the fallback: `UsbRescuer.usbDevice(forPort:)` asks the IORegistry
+    /// which device publishes the port, and that answer is used when it has one.
     ///
-    /// macOS names a CDC port usbmodem<location in hex><interface> and many
-    /// bridge ports usbserial-<serial>, so the name leads to the device.
+    /// macOS names a CDC port usbmodem<serial><interface> when the device has
+    /// a usable serial number (5B90170069 is usbmodem5B901700691), otherwise
+    /// usbmodem<location in hex, trailing zero nibbles dropped><interface>
+    /// (0x14100000 is usbmodem14101, 0x00100000 usbmodem101). Many bridge ports
+    /// are usbserial-<serial>. The interface is one or two digits, which is what
+    /// keeps location 0x00100000 ("1") from claiming usbmodem1312201.
     public static func identity(forPort port: String, devices: [USBIdentity]) -> USBIdentity? {
+        func isInterface<S: StringProtocol>(_ rest: S) -> Bool {
+            (1...2).contains(rest.count) && rest.allSatisfy(\.isNumber)
+        }
         let name = (port as NSString).lastPathComponent
         var best: USBIdentity?
         if name.hasPrefix("cu.usbmodem") {
             let suffix = name.dropFirst("cu.usbmodem".count).lowercased()
+            for device in devices where !device.serial.isEmpty {
+                let token = device.serial.lowercased()
+                if suffix.hasPrefix(token), isInterface(suffix.dropFirst(token.count)) {
+                    return device
+                }
+            }
+            var bestToken = ""
             for device in devices where device.location != 0 {
-                let token = String(device.location, radix: 16)
-                if suffix.hasPrefix(token),
-                   best.map({ token.count > String($0.location, radix: 16).count }) ?? true {
+                var token = String(device.location, radix: 16)
+                while token.hasSuffix("0") { token.removeLast() }
+                if suffix.hasPrefix(token), isInterface(suffix.dropFirst(token.count)),
+                   token.count > bestToken.count {
                     best = device
+                    bestToken = token
                 }
             }
         } else if name.hasPrefix("cu.usbserial-") {
@@ -274,6 +299,13 @@ public enum UsbRescue {
 
     public static let clearOverrideCommand = "CFGBOARD auto"
 
+    /// Whether esptool gave up because the chip is not the one it was told
+    /// ("This chip is ESP32-C6, not ESP32-S3. Wrong --chip argument?").
+    public static func isWrongChip(_ error: String) -> Bool {
+        error.contains("Wrong --chip")
+            || error.range(of: "This chip is .+, not ", options: .regularExpression) != nil
+    }
+
     /// esptool's output with terminal control sequences removed. On a pty it
     /// may colour its warnings and redraw its progress bar with escapes.
     public static func strippingTerminalCodes(_ text: String) -> String {
@@ -308,7 +340,7 @@ public enum UsbRescueStep: Equatable, Sendable {
     public var title: String {
         switch self {
         case .startingEsptool:
-            return "Unplug the board and wait"
+            return "Keep the board unplugged"
         case .plugIn:
             return "Plug the board in now"
         case .missed:
@@ -341,7 +373,8 @@ public enum UsbRescueStep: Equatable, Sendable {
     public var detail: String? {
         switch self {
         case .startingEsptool:
-            return "Starting esptool; this takes a few seconds."
+            return "Starting esptool; this takes a few seconds. A board plugged in "
+                + "now is left alone for this repair."
         case .plugIn:
             return "esptool is waiting and will catch the board as soon as it appears."
         case .missed(let ready):
@@ -353,8 +386,9 @@ public enum UsbRescueStep: Equatable, Sendable {
         case .caught(let port):
             return "Board seen on \(port); resetting it into download mode."
         case .couldNotConnect(let port, let family):
-            return "esptool could not connect to \(port) in "
-                + "\(Int(UsbRescue.connectTimeout)) s. Is it an ESP32-\(family.uppercased()) board?"
+            return "esptool gave up on \(port): it did not connect within "
+                + "\(Int(UsbRescue.connectTimeout)) s, or its writes kept failing. Is it "
+                + "an ESP32-\(family.uppercased()) board?"
         case .tooManyPorts(let ports):
             return "\(ports.count) new USB serial devices appeared "
                 + "(\(ports.joined(separator: ", "))); none of them is touched."

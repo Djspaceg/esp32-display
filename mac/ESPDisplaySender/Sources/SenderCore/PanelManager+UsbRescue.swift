@@ -69,6 +69,7 @@ extension PanelManager {
                 let io = UsbRescuer.IO(
                     ports: { WifiConfigUI.candidatePorts() },
                     identify: { UsbRescuer.usbDevices() },
+                    identifyPort: { UsbRescuer.usbDevice(forPort: $0) },
                     spawn: spawn,
                     now: { ProcessInfo.processInfo.systemUptime },
                     sleep: { try? await Task.sleep(for: .seconds($0)) },
@@ -142,25 +143,48 @@ extension PanelManager {
         }
     }
 
+    /// Why a rescued board gets no install offer.
+    enum RepairInstallError: Error, LocalizedError, Equatable {
+        case boardNotIdentified(family: String, profile: String?, target: String?)
+
+        var errorDescription: String? {
+            switch self {
+            case .boardNotIdentified(let family, let profile, let target):
+                return "The rescue image could not identify this board (it reported "
+                    + "profile \(profile ?? "none") and target \(target ?? "none")), so "
+                    + "no firmware is installed. \(family) was chosen, but the chip "
+                    + "family alone does not say which display this is."
+            }
+        }
+    }
+
     /// Which bundled image a rescued board takes, from what the rescue image
     /// reported: the same resolver a USB update uses, so a board whose family,
     /// chip and profile are all known gets exactly its family's image.
     ///
-    /// A token the rescue image could not work out reads "unknown", which is
-    /// no evidence either way, so it is left out; the family then comes from
-    /// the image that was just written, which the user chose.
+    /// A board the rescue image's detector did not identify reports
+    /// `profile=auto target=unknown` (variantToken and targetToken of an
+    /// unknown variant). That is refused rather than guessed from the family
+    /// the user chose: nothing then says which display the board drives, and
+    /// the real firmware's own detection is what failed on it before.
     nonisolated static func repairInstallSelection(
         for board: UsbRescuer.RescuedBoard, releases: BundledFirmware.ReleaseSet
     ) throws -> BundledFirmware.UpdateResolution {
         func known(_ value: String?) -> String? {
-            value == ServiceMetadata.unknownChip ? nil : value
+            guard let value, !value.isEmpty, value != ServiceMetadata.unknownChip,
+                  value != "auto"
+            else { return nil }
+            return value
         }
         let identity = board.identity
+        guard let profile = known(identity.board), let target = known(identity.target) else {
+            throw RepairInstallError.boardNotIdentified(
+                family: board.family.displayName, profile: identity.board,
+                target: identity.target)
+        }
         return try releases.resolveUpdate(
-            family: known(identity.target) ?? board.family.key,
-            chip: known(identity.chip) ?? board.family.chip,
-            profile: known(identity.board), partition: known(identity.partition),
-            transport: .usb)
+            family: target, chip: known(identity.chip) ?? board.family.chip,
+            profile: profile, partition: known(identity.partition), transport: .usb)
     }
 
     /// Install the real firmware on a board the rescue image is running on,

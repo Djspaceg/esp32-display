@@ -5294,18 +5294,31 @@ def usb_identity_for_port(
 ) -> Optional[Tuple[int, str]]:
     """The USB device behind a /dev/cu.* name, or None when it cannot be told.
 
-    macOS names a CDC port usbmodem<location in hex><interface> and many
-    bridge ports usbserial-<serial>, so the name leads to the device.
+    macOS names a CDC port usbmodem<serial><interface> when the device has a
+    usable serial number (5B90170069 -> usbmodem5B901700691), otherwise
+    usbmodem<location in hex, trailing zero nibbles dropped><interface>
+    (0x14100000 -> usbmodem14101, 0x00100000 -> usbmodem101). Many bridge
+    ports are usbserial-<serial>. The interface is one or two digits, which is
+    what keeps location 0x00100000 ("1") from claiming usbmodem1312201.
     """
+    def interface(rest: str) -> bool:
+        return 1 <= len(rest) <= 2 and rest.isdigit()
+
     name = os.path.basename(port)
     best = None
     if name.startswith("cu.usbmodem"):
         suffix = name[len("cu.usbmodem"):].lower()
         for location, serial in devices:
-            token = "%x" % location
-            if location and suffix.startswith(token) and (
-                    best is None or len(token) > len("%x" % best[0])):
-                best = (location, serial)
+            token = serial.lower()
+            if token and suffix.startswith(token) and interface(suffix[len(token):]):
+                return (location, serial)
+        best_token = ""
+        for location, serial in devices:
+            token = ("%x" % location).rstrip("0")
+            if (location and suffix.startswith(token)
+                    and interface(suffix[len(token):])
+                    and len(token) > len(best_token)):
+                best, best_token = (location, serial), token
     elif name.startswith("cu.usbserial-"):
         suffix = name[len("cu.usbserial-"):]
         for location, serial in devices:

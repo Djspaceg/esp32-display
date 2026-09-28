@@ -35,6 +35,9 @@ enum UsbRescuer {
     struct IO {
         var ports: () -> [String]
         var identify: () -> [UsbRescue.USBIdentity]
+        /// The device that publishes a port, from the IORegistry; nil when it
+        /// cannot be found there, and the name is parsed instead.
+        var identifyPort: (String) -> UsbRescue.USBIdentity? = { _ in nil }
         var spawn: () throws -> RescueWorker
         var now: () -> Double
         var sleep: (Double) async -> Void
@@ -67,16 +70,27 @@ enum UsbRescuer {
         var baseline = Set(io.ports())
         var knownDevices = Set(io.identify())
         report(.startingEsptool)
-        say("Starting esptool; this takes a few seconds. If the board to repair "
-            + "is plugged in, unplug it now.")
+        // Everything attached now is left alone for the whole run, however it
+        // is replugged: the same socket gives the same name, and another
+        // socket the same USB device. So the board must be unplugged BEFORE
+        // Start, and the words say so rather than "unplug it now".
+        say("Starting esptool; this takes a few seconds. Keep the board to repair "
+            + "unplugged until this says \"Plug the board in now\".")
+        if !baseline.isEmpty {
+            say("Attached now, so left alone for this whole repair: "
+                + baseline.sorted().joined(separator: ", ") + ". If one of them is "
+                + "the board to repair, stop, unplug it, and start again.")
+        }
         var worker = try io.spawn()
         defer { worker.kill() }
 
         var started = false      // "plug in now" has been said once
         var announced = false    // ...and holds for the current esptool
         var missed = false       // the last attempt ended in a miss
-        var linked: (port: String, since: Double)?
+        var linked: (port: String, since: Double, connectedAt: Double?)?
         var refused = Set<String>()
+        /// Failed writes in a row per port, while it stays attached.
+        var failures: [String: Int] = [:]
         var gone = Set<String>()
         var toldIgnored = Set<String>()
         var toldCrowd = false
@@ -97,7 +111,14 @@ enum UsbRescuer {
             let now = io.now()
             let present = Set(io.ports())
             if !started {
-                if !present.isSubset(of: baseline) { knownDevices.formUnion(io.identify()) }
+                let early = present.subtracting(baseline)
+                if !early.isEmpty {
+                    knownDevices.formUnion(io.identify())
+                    say("Ignoring " + early.sorted().joined(separator: ", ")
+                        + ": it appeared before esptool was ready, so it is left alone "
+                        + "for this repair. If that is the board, stop, unplug it, "
+                        + "and start again.")
+                }
                 baseline.formUnion(present)
             }
             let code = worker.poll()
@@ -120,7 +141,20 @@ enum UsbRescuer {
                 let reason = worker.lastError()
                 if !reason.isEmpty { say("esptool: \(reason)") }
                 if present.contains(port) {
-                    say("esptool could not finish on \(port); trying again.")
+                    // A board of another family fails at once and every time;
+                    // relaunching would reset it every few seconds for good.
+                    failures[port, default: 0] += 1
+                    let wrongChip = UsbRescue.isWrongChip(reason)
+                    if wrongChip || failures[port, default: 0] >= UsbRescue.failuresBeforeRefusal {
+                        refused.insert(port)
+                        say("esptool could not write \(port) ("
+                            + (wrongChip ? "it is another chip"
+                                : "\(failures[port, default: 0]) failed attempts")
+                            + "); is it an \(family.displayName) board? Unplug it.")
+                        report(.couldNotConnect(port: port, family: family.key))
+                    } else {
+                        say("esptool could not finish on \(port); trying again.")
+                    }
                 } else {
                     say("Missed it. Unplug the board, then plug it in again.")
                     missed = true
@@ -137,8 +171,28 @@ enum UsbRescuer {
                     report(missed ? .missed(esptoolReady: true) : .plugIn)
                 }
             }
+            if linked != nil, worker.isConnected, linked?.connectedAt == nil {
+                linked?.connectedAt = now
+            }
             if let current = linked {
-                if !present.contains(current.port), !worker.isConnected {
+                if let connectedAt = current.connectedAt,
+                   now - connectedAt > UsbRescue.writeTimeout {
+                    // Connected but never finished: killed, and counted like a
+                    // failed write, so a board that always hangs is let go.
+                    try relaunch()
+                    linked = nil
+                    echo.finish(onProgress)
+                    failures[current.port, default: 0] += 1
+                    if failures[current.port, default: 0] >= UsbRescue.failuresBeforeRefusal {
+                        refused.insert(current.port)
+                        say("esptool stopped writing to \(current.port) \(failures[current.port, default: 0]) "
+                            + "times; is it an \(family.displayName) board? Unplug it.")
+                        report(.couldNotConnect(port: current.port, family: family.key))
+                    } else {
+                        say("esptool stopped writing to \(current.port) for "
+                            + "\(Int(UsbRescue.writeTimeout)) s; trying again.")
+                    }
+                } else if !present.contains(current.port), !worker.isConnected {
                     worker.unlink()
                     linked = nil
                     missed = true
@@ -160,6 +214,7 @@ enum UsbRescuer {
             } else if started {
                 let hadRefused = !refused.isEmpty
                 refused.formIntersection(present)
+                failures = failures.filter { present.contains($0.key) }
                 if hadRefused, refused.isEmpty, worker.isReady {
                     report(missed ? .missed(esptoolReady: true) : .plugIn)
                 }
@@ -177,7 +232,8 @@ enum UsbRescuer {
                     .filter { !refused.contains($0) }
                 if fresh.count == 1,
                    UsbRescue.isKnown(
-                       UsbRescue.identity(forPort: fresh[0], devices: io.identify()),
+                       io.identifyPort(fresh[0])
+                           ?? UsbRescue.identity(forPort: fresh[0], devices: io.identify()),
                        in: knownDevices) {
                     baseline.insert(fresh[0])
                     say("Ignoring \(fresh[0]): it is the same USB device as one "
@@ -203,7 +259,7 @@ enum UsbRescuer {
                         }
                     } else {
                         try worker.link(to: port)
-                        linked = (port, now)
+                        linked = (port, now, nil)
                         toldWait = nil
                         missed = false
                         echo = Echo(regions: regions)
@@ -354,6 +410,44 @@ enum UsbRescuer {
                 tool: tool, chip: family.chip, port: link, baud: family.baud, writes: writes)
             return try launch(command, environment, link)
         }
+    }
+
+    /// The USB device that publishes a serial port, found by walking up the
+    /// IORegistry from the port's IOSerialBSDClient: no name parsing and no
+    /// port opened. nil when the port is not (or no longer) registered.
+    static func usbDevice(forPort port: String) -> UsbRescue.USBIdentity? {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(
+            kIOMainPortDefault, IOServiceMatching("IOSerialBSDClient"), &iterator)
+            == KERN_SUCCESS
+        else { return nil }
+        defer { IOObjectRelease(iterator) }
+        func property(_ entry: io_registry_entry_t, _ key: String) -> Any? {
+            IORegistryEntryCreateCFProperty(
+                entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+        }
+        while case let service = IOIteratorNext(iterator), service != 0 {
+            defer { IOObjectRelease(service) }
+            guard property(service, "IOCalloutDevice") as? String == port else { continue }
+            var entry = service
+            IOObjectRetain(entry)
+            while true {
+                if IOObjectConformsTo(entry, "IOUSBHostDevice") != 0 {
+                    defer { IOObjectRelease(entry) }
+                    guard let location = (property(entry, "locationID") as? NSNumber)?.intValue
+                    else { return nil }
+                    return UsbRescue.USBIdentity(
+                        location: location,
+                        serial: property(entry, "USB Serial Number") as? String ?? "")
+                }
+                var parent: io_registry_entry_t = 0
+                let result = IORegistryEntryGetParentEntry(entry, "IOService", &parent)
+                IOObjectRelease(entry)
+                guard result == KERN_SUCCESS else { return nil }
+                entry = parent
+            }
+        }
+        return nil
     }
 
     /// The attached USB devices, read from the IORegistry without opening any.

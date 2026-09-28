@@ -31,7 +31,16 @@ final class UsbRescueTests: XCTestCase {
         var failFirst = false
         var foreign: Set<String> = []
         var connectAfter: [String: Double] = [:]
+        /// Ports of a board of another family: esptool syncs, sees the wrong
+        /// chip, and exits 2 at once, as esptool 5 does ("Wrong --chip argument?").
+        var wrongChip: Set<String> = []
+        /// Ports where the write fails every time, with the port still there.
+        var alwaysFails: Set<String> = []
+        /// Ports where esptool connects and then never finishes the write.
+        var hangsAfterConnect: Set<String> = []
         var identities: [String: UsbRescue.USBIdentity] = [:]
+        /// What the IORegistry says publishes a port, whatever its name.
+        var registry: [String: UsbRescue.USBIdentity] = [:]
         var workers: [FakeWorker] = []
         var events: [UsbFlashEvent] = []
         var written: [String] = []
@@ -55,6 +64,7 @@ final class UsbRescueTests: XCTestCase {
             UsbRescuer.IO(
                 ports: { self.ports() },
                 identify: { self.identify() },
+                identifyPort: { self.registry[$0] },
                 spawn: {
                     let worker = FakeWorker(world: self)
                     self.workers.append(worker)
@@ -133,10 +143,24 @@ final class UsbRescueTests: XCTestCase {
                 held = port
                 heldSince = now
             }
+            if let held, !isConnected, world.wrongChip.contains(held), world.ports().contains(held),
+               now - linkedAt >= world.openAfter {
+                error = "A fatal error occurred: This chip is ESP32-C6, not ESP32-S3. "
+                    + "Wrong --chip argument?"
+                code = 2
+                return code
+            }
             if let held, !isConnected, world.ports().contains(held), !world.foreign.contains(held),
                now - linkedAt >= world.connectAfter[held, default: world.openAfter] {
                 isConnected = true
                 connectedAt = now
+            }
+            if isConnected, let held, world.hangsAfterConnect.contains(held) { return nil }
+            if isConnected, let held, world.alwaysFails.contains(held),
+               now - connectedAt >= world.exitAfter {
+                error = "A fatal error occurred: Packet content transfer stopped"
+                code = 2
+                return code
             }
             if isConnected, now - connectedAt >= world.exitAfter {
                 code = world.ports().contains(held ?? "") ? 0 : 1
@@ -167,7 +191,8 @@ final class UsbRescueTests: XCTestCase {
             if let held, !world.ports().contains(held) { self.held = nil }
         }
 
-        func lastError() -> String { "could not open port" }
+        var error = "could not open port"
+        func lastError() -> String { error }
 
         func kill() { killed = true }
     }
@@ -190,6 +215,27 @@ final class UsbRescueTests: XCTestCase {
                                present: ["/dev/cu.usbmodemA", "/dev/cu.usbmodemB"]),
             ["/dev/cu.usbmodemB"])
         XCTAssertEqual(UsbRescue.newPorts(baseline: ["/dev/cu.usbmodemA"], present: []), [])
+    }
+
+    /// Real macOS spellings: a CDC port is named after the device's serial
+    /// number when it has a usable one (the P4 on this Mac: serial 5B90170069,
+    /// port usbmodem5B901700691), otherwise after its locationID with the
+    /// trailing zero nibbles dropped, plus the interface (0x00100000 is
+    /// usbmodem101, 0x01100000 usbmodem1101, 0x14100000 usbmodem14101).
+    func testRealMacOSPortNamesMapToTheirDevice() {
+        let p4 = UsbRescue.USBIdentity(location: 0x131220, serial: "5B90170069")
+        let root = UsbRescue.USBIdentity(location: 0x0010_0000, serial: "1C:DB:D4:7B:5B:94")
+        let hub = UsbRescue.USBIdentity(location: 0x0110_0000, serial: "68:EE:8F:5D:AC:8C")
+        let deep = UsbRescue.USBIdentity(location: 0x1410_0000, serial: "")
+        let devices = [p4, root, hub, deep]
+        XCTAssertEqual(UsbRescue.identity(forPort: "/dev/cu.usbmodem5B901700691", devices: devices), p4)
+        XCTAssertEqual(UsbRescue.identity(forPort: "/dev/cu.usbmodem101", devices: devices), root)
+        XCTAssertEqual(UsbRescue.identity(forPort: "/dev/cu.usbmodem1101", devices: devices), hub)
+        XCTAssertEqual(UsbRescue.identity(forPort: "/dev/cu.usbmodem14101", devices: devices), deep)
+        XCTAssertEqual(UsbRescue.identity(forPort: "/dev/cu.usbmodem14103", devices: devices), deep,
+                       "a second interface is the same device")
+        XCTAssertNil(UsbRescue.identity(forPort: "/dev/cu.usbmodem1312201", devices: [root]),
+                     "location 0x00100000 does not claim a port under 0x131220")
     }
 
     func testPortsMapToTheirUSBDevice() {
@@ -320,21 +366,85 @@ final class UsbRescueTests: XCTestCase {
         XCTAssertTrue(world.said("could not connect to \(slow)"))
     }
 
+    /// A board attached before the run, moved to a socket on the Mac itself
+    /// after "Plug the board in now", under the names macOS really gives it.
     func testARenamedPortOfAnAttachedBoardIsNotNew() async {
         let attached = "/dev/cu.usbmodem1312201"
-        let renamed = "/dev/cu.usbmodem2000001"
-        let fresh = "/dev/cu.usbmodem1400001"
+        let renamed = "/dev/cu.usbmodem14101"
+        let fresh = "/dev/cu.usbmodem101"
         let world = World(
             baseline: [(attached, 0, 6)], windows: [(renamed, 6.5, 1e9), (fresh, 12.0, 1e9)])
         world.identities = [
-            attached: .init(location: 0x131220, serial: "AA:BB"),
-            renamed: .init(location: 0x200000, serial: "AA:BB"),
-            fresh: .init(location: 0x140000, serial: "CC:DD"),
+            attached: .init(location: 0x131220, serial: "1C:DB:D4:7B:5B:94"),
+            renamed: .init(location: 0x1410_0000, serial: "1C:DB:D4:7B:5B:94"),
+            fresh: .init(location: 0x0010_0000, serial: "68:EE:8F:5D:AC:8C"),
         ]
         let result = await world.run()
         XCTAssertFalse(world.links.contains(renamed))
         XCTAssertTrue(world.said("same USB device"))
         XCTAssertEqual(result, fresh)
+    }
+
+    /// The registry's answer wins over the name: a pre-attached board under a
+    /// name no rule parses is still recognised.
+    func testTheRegistrysDeviceForAPortIsUsedBeforeItsName() async {
+        let attached = "/dev/cu.usbmodem5B901700691"
+        let moved = "/dev/cu.usbserial-0001"
+        let device = UsbRescue.USBIdentity(location: 0x131220, serial: "5B90170069")
+        let world = World(baseline: [(attached, 0, 6)], windows: [(moved, 6.5, 1e9)])
+        world.identities = [attached: device]
+        world.registry = [moved: UsbRescue.USBIdentity(location: 0x1410_0000, serial: "5B90170069")]
+        world.limit = 20
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertTrue(world.links.isEmpty)
+        XCTAssertTrue(world.said("same USB device"))
+        XCTAssertNil(UsbRescuer.usbDevice(forPort: "/dev/cu.not-a-registered-port"),
+                     "a port nothing publishes has no device (registry read only)")
+    }
+
+    func testAWrongChipFamilyIsGivenUpInsteadOfResetForever() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 1e9)])
+        world.wrongChip = [board]
+        world.limit = 60
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertEqual(world.links, [board], "the board is reset once, not every few seconds")
+        XCTAssertTrue(world.said("is it an ESP32-S3 board?"))
+        XCTAssertTrue(world.steps.contains(.couldNotConnect(port: board, family: "s3")))
+    }
+
+    func testRepeatedWriteFailuresOnOnePortAreGivenUp() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 1e9)])
+        world.alwaysFails = [board]
+        world.limit = 120
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertEqual(world.links.count, UsbRescue.failuresBeforeRefusal,
+                       "after that many failed writes the port is left alone")
+        XCTAssertTrue(world.said("is it an ESP32-S3 board?"))
+    }
+
+    func testAHungWriteIsGivenUpAfterTheWriteLimit() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 1e9)])
+        world.hangsAfterConnect = [board]
+        world.limit = UsbRescue.writeTimeout + 30
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertTrue(world.workers[0].killed, "the hung esptool is killed at the limit")
+        XCTAssertGreaterThan(world.workers.count, 1)
+        XCTAssertTrue(world.said("stopped writing to \(board)"))
+    }
+
+    func testTheStartMessageSaysBoardsAttachedNowAreLeftAlone() async {
+        let world = World(baseline: [other], windows: [])
+        world.limit = 5
+        _ = await world.run()
+        let first = world.messages.first ?? ""
+        XCTAssertFalse(first.contains("unplug it now"),
+                       "a board unplugged after Start comes back under the same name and is ignored")
+        XCTAssertTrue(world.said("left alone"))
+        XCTAssertTrue(world.said("/dev/cu.usbmodemOTHER"))
     }
 
     // MARK: - phase reporting
@@ -653,14 +763,23 @@ final class UsbRescueTests: XCTestCase {
             for: Self.rescuedBoard(), releases: releases)
         XCTAssertEqual(s3.canonicalTarget, "s3")
         XCTAssertNotNil(s3.selection.bundle.flashPlan(forTarget: "s3"))
-        var unknown = Self.rescuedBoard()
-        unknown.identity = WifiConfigUI.usbIdentity(from:
-            "CFGINFO id=aabbccddeeff board=unknown profile=unknown target=unknown "
+    }
+
+    /// What the S3 rescue image really says when its detector finds no board:
+    /// variantToken(Unknown) is "auto" and targetToken(Unknown) "unknown".
+    func testAnUnidentifiedBoardIsRefusedAndSaysSo() throws {
+        let releases = try Self.releaseSet()
+        var unidentified = Self.rescuedBoard()
+        unidentified.identity = WifiConfigUI.usbIdentity(from:
+            "CFGINFO id=aabbccddeeff board=auto profile=auto target=unknown "
                 + "chip=esp32s3 partition=universal-8m-doom-ota cfgboard=auto")
-        XCTAssertEqual(
-            try PanelManager.repairInstallSelection(for: unknown, releases: releases)
-                .canonicalTarget, "s3",
-            "an undetected profile falls back to the family that was chosen")
+        XCTAssertThrowsError(
+            try PanelManager.repairInstallSelection(for: unidentified, releases: releases)
+        ) { error in
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("could not identify"), message)
+            XCTAssertTrue(message.contains("ESP32-S3"), message)
+        }
     }
 
     @MainActor
