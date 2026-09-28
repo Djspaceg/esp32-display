@@ -564,7 +564,9 @@
             "flash_range",
             "i2c_any_ack",
             "i2c_no_ack",
-            "i2c_any_ack_or_start_failure"
+            "i2c_any_ack_or_start_failure",
+            "dsi_panel_id",
+            "dsi_panel_id_other"
           ]
         },
         "flash_min_exclusive": {"type": "integer", "minimum": 0},
@@ -590,7 +592,14 @@
         "release": {"enum": ["never", "always", "on_success_no_ack"]},
         "sense_pin": {"$ref": "#/$defs/pin"},
         "sense_min_mv": {"type": "integer", "minimum": 0, "maximum": 3300},
-        "sense_max_mv": {"type": "integer", "minimum": 0, "maximum": 3300}
+        "sense_max_mv": {"type": "integer", "minimum": 0, "maximum": 3300},
+        "panel_id": {
+          "description": "Controller ID bytes a dsi_panel_id candidate requires from a DCS 0x04 read of its MIPI-DSI panel.",
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"type": "integer", "minimum": 0, "maximum": 255}
+        }
       }
     }
   },

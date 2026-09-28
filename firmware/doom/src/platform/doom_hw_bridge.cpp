@@ -208,6 +208,8 @@ extern "C" void doom_touch_init(void) {
     }
     s_touch_calibration = bcfg->variant == board::Variant::P4_4B
         ? touchmap::GT911_ON_ST7703_4B
+        : bcfg->variant == board::Variant::P4_4C
+        ? touchmap::GT911_ON_JD9365_4C
         : touchmap::CST9217_ON_CO5300;
     bool available = boardtouch::init(*bcfg);
     if (!available) {

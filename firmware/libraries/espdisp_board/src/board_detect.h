@@ -4,7 +4,8 @@
 // the GC9107 carrier and profile-specific I2C buses on larger-flash hardware,
 // plus input-only analog sense pins where two carriers share one I2C bus.
 // S3 accepts exactly one candidate; zero or multiple candidates remain Unknown
-// so the firmware can stay serial-only until an operator uses CFGBOARD.
+// so the firmware can stay serial-only until an operator uses CFGBOARD. P4
+// reads its MIPI-DSI panel's controller ID and resolves the same way.
 #pragma once
 
 #include <Arduino.h>
@@ -18,6 +19,9 @@
 #endif
 
 #include <board_config.h>
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+#include <panel_init_dsi.h>
+#endif
 
 namespace boarddetect {
 
@@ -192,6 +196,21 @@ inline boarddetectmodel::SenseEvidence collectSense(int8_t pin,
                   (unsigned)evidence.millivolts,
                   calibrated ? "calibrated" : "nominal, no ADC calibration");
   }
+#elif defined(CONFIG_IDF_TARGET_ESP32P4)
+  // P4 senses are digital: the level with the internal pull-down enabled,
+  // reported as 0 or 3300 mV. A pin with an external pull-up reads high; a
+  // floating one reads low. The pin is handed back as a plain input.
+  if (pin < 0) return evidence;
+  pinMode(pin, INPUT_PULLDOWN);
+  delay(2);
+  const int level = digitalRead(pin);
+  pinMode(pin, INPUT);
+  evidence.read = true;
+  evidence.millivolts = level == HIGH ? 3300 : 0;
+  if (verbose) {
+    Serial.printf("board: sense GPIO%d = %s (pull-down)\n", pin,
+                  level == HIGH ? "high" : "low");
+  }
 #else
   (void)pin;
   (void)verbose;
@@ -298,15 +317,57 @@ inline board::Variant probeS3(bool verbose = true,
   return result.variant;
 }
 
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+inline board::Variant probeP4(bool verbose = true,
+                              int *outCandidateCount = nullptr) {
+  const auto &plan =
+      board::detectionPlanForPlatform(board::Platform::Esp32P4);
+  // Input-only senses first, then the panel read that drives the reset line.
+  boarddetectmodel::SenseEvidence
+      senses[board::GENERATED_MAX_SENSE_COUNT > 0
+                 ? board::GENERATED_MAX_SENSE_COUNT
+                 : 1] = {};
+  for (uint8_t i = 0; i < plan.senseCount; ++i) {
+    senses[i] = collectSense(plan.sensePins[i], verbose);
+  }
+  boarddetectmodel::PanelIdEvidence panelId;
+  if (plan.dsiIdProbe != nullptr) {
+    uint8_t id[3] = {0, 0, 0};
+    const bool ok = boardpaneldsi::readPanelId(*plan.dsiIdProbe, id);
+    panelId = boarddetectmodel::panelIdEvidenceFromRead(ok, id);
+    if (verbose) {
+      if (ok) {
+        Serial.printf("board: P4 panel ID %02X %02X %02X\n", id[0], id[1],
+                      id[2]);
+      } else {
+        Serial.println("board: P4 panel ID read failed or timed out");
+      }
+    }
+  }
+  const board::DetectionResult result = board::detectFromEvidence(
+      board::Platform::Esp32P4, ESP.getFlashChipSize(), nullptr, 0, senses,
+      plan.senseCount, &panelId);
+  if (outCandidateCount != nullptr) {
+    *outCandidateCount = result.matchedCandidates;
+  }
+  if (verbose) {
+    if (result.variant == board::Variant::Unknown) {
+      Serial.printf("board: P4 detection found %d compatible profiles; "
+                    "serial-only until CFGBOARD resolves one\n",
+                    result.matchedCandidates);
+    } else {
+      Serial.printf("board: P4 detection -> %s\n",
+                    board::configFor(result.variant).name);
+    }
+  }
+  return result.variant;
+}
+#endif
+
 inline board::Variant probe(bool verbose = true,
                             int *outFoundCount = nullptr) {
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
-  const board::DetectionResult result = board::detectFromEvidence(
-      board::Platform::Esp32P4, ESP.getFlashChipSize(), nullptr, 0);
-  if (outFoundCount != nullptr) {
-    *outFoundCount = result.matchedCandidates;
-  }
-  return result.variant;
+  return probeP4(verbose, outFoundCount);
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
   return probeS3(verbose, outFoundCount);
 #elif defined(CONFIG_IDF_TARGET_ESP32C3)

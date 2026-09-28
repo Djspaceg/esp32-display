@@ -442,6 +442,10 @@ def _candidate_evidence_state(
     kind = detection["kind"]
     if kind in ("always", "flash_range"):
         return "match"
+    # The panel-ID read needs the DSI bus, which bootstrap never drives, so
+    # it can neither confirm nor rule out such a candidate.
+    if kind in ("dsi_panel_id", "dsi_panel_id_other"):
+        return "unknown"
     pair = (detection["sda"], detection["scl"])
     if pair in scan_failures:
         return (

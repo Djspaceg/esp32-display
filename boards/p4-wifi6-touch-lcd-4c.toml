@@ -1,0 +1,204 @@
+schema = 1
+key = "p4-wifi6-touch-lcd-4c"
+catalog_order = 11
+name = "ESP32-P4-WIFI6-Touch-LCD-4C (JD9365)"
+hardware = ["ESP32-P4-WIFI6-Touch-LCD-4C"]
+
+[migration]
+firmware_config = "legacy"
+config_symbol = "CONFIG_P4_4C"
+
+[identity]
+target = "p4"
+chip = "esp32p4"
+profile = "jd9365-4c"
+partition = "p4-32m-ota"
+variant = "P4_4C"
+variant_value = 12
+legacy_targets = []
+
+[family]
+platform_key = "p4"
+build_target = "p4-4b"
+fqbn = "esp32:esp32:esp32p4:USBMode=default,CDCOnBoot=default,UploadMode=default,FlashSize=32M,PartitionScheme=custom,PSRAM=enabled,ChipVariant=prev3"
+partition_csv = "partitions_p4_4b.csv"
+extra_flags = ["-DESPDISP_BOARD_P4_4B", "-DESPDISP_DOOM_RUNTIME"]
+extra_library_dirs = ["firmware"]
+fqbn_options = ["UploadSpeed=460800"]
+flash_bytes = [33554432]
+common_layout_bytes = 33554432
+requires_doom_wad = true
+bootloader_address = 8192
+partitions_address = 32768
+boot_app0_address = 57344
+app_address = 65536
+blurb = "Universal ESP32-P4 display firmware"
+
+[platform]
+use_psram_frame_buffers = true
+use_raw_lwip_receive_task = true
+wifi = "hosted_coprocessor"
+identity_source = "efuse_base_mac"
+serial = "uart_bridge"
+
+[capacity]
+minimum_flash_bytes = 33554432
+
+[panel]
+symbol = "PANEL_JD9365_720X720"
+profile = "Jd9365_720x720"
+driver = "Jd9365"
+bus = "mipi_dsi"
+width = 720
+height = 720
+memory_width = 0
+memory_height = 0
+pixel_clock_hz = 80000000
+spi_mode = 0
+col_offset = 0
+row_offset = 0
+orientation_offset = 0
+invert_color = false
+round_display = true
+supports_command_rotation = true
+color_order = "rgb"
+data_endian = "big"
+pixel_depth = 16
+dsi_data_lanes = 2
+dsi_lane_mbps = 1500
+hsync_back_porch = 20
+hsync_pulse_width = 20
+hsync_front_porch = 40
+vsync_back_porch = 12
+vsync_pulse_width = 4
+vsync_front_porch = 24
+
+[carrier]
+pin_sclk = -1
+pin_mosi = -1
+pin_data1 = -1
+pin_data2 = -1
+pin_data3 = -1
+pin_cs = -1
+pin_dc = -1
+pin_rst = 27
+pin_bl = 26
+pin_boot = 35
+pin_rgb_led = -1
+
+[touch]
+controller = "gt911"
+sda = 7
+scl = 8
+reset = -1
+interrupt = -1
+addresses = [93, 20]
+panel_short = 720
+panel_long = 720
+raw_x_mirrored = false
+raw_y_mirrored = false
+rotate_clockwise = true
+
+[led]
+channel_order = "rgb"
+pixel_count = 0
+
+[gesture]
+swipe_min_px = 24
+tap_max_move_px = 12
+tap_max_ms = 400
+long_press_ms = 600
+press_max_ms = 10000
+
+[orientation]
+offsets = [[0, 0], [0, 0], [0, 0], [0, 0]]
+mirror_x_supported = false
+quarter_turns = [0, 1, 2, 3]
+
+[motion]
+controller = "none"
+address = 0
+x_axis = 0
+x_sign = 1
+y_axis = 1
+y_sign = 1
+
+[reset]
+expander = "none"
+expander_address = 0
+panel_output = 0
+touch_output = 0
+
+[backlight]
+kind = "dsi_pwm"
+enable_pin = 33
+inverted = true
+
+[power]
+controller = "none"
+battery_adc = -1
+battery_adc_scale = 0
+battery_enable = -1
+charge_status = -1
+axp_address = 0
+
+[serial]
+transport = "uart_bridge"
+bridge = "ch343"
+rx = -1
+tx = -1
+
+[audio]
+amp = "none"
+codec = "none"
+mic = "none"
+speaker_bus = "none"
+mic_bus = "none"
+pin_playback_mclk = -1
+pin_playback_bclk = -1
+pin_playback_lrck = -1
+pin_dout = -1
+pin_capture_mclk = -1
+pin_capture_bclk = -1
+pin_capture_lrck = -1
+pin_din = -1
+pin_pdm_clock = -1
+pin_amp_enable = -1
+codec_i2c_address = 0
+mic_i2c_address = 0
+playback_rate_hz = 0
+playback_channels = 0
+capture_rate_hz = 0
+capture_channels = 0
+
+[capabilities]
+doom = true
+audio = false
+
+[compile]
+selector = ""
+macros = []
+
+[detection]
+order = 11
+resolution = "exactly_one"
+no_match = "unknown"
+kind = "dsi_panel_id"
+flash_min_exclusive = 0
+flash_max_inclusive = 0
+sda = -1
+scl = -1
+frequency_hz = 0
+scan_first = 0
+scan_last = 0
+addresses = []
+reset_pin = 27
+reset_low_ms = 10
+reset_release_wait_ms = 120
+release = "never"
+# GPIO52 is a floating 40-pin header pin here and reads low with the internal
+# pull-down; the 4B's PHY pull-up would read high. Input only.
+sense_pin = 52
+sense_max_mv = 1650
+# The JD9365 answers DCS 0x04 with 93 65 04, measured on the attached 4C.
+panel_id = [0x93, 0x65, 0x04]

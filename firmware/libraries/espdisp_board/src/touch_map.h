@@ -121,6 +121,14 @@ static const Calibration GT911_ON_ST7703_4B = {
     /* rawXMirrored */ false, /* rawYMirrored */ false,
     /* rotateClockwise */ true};
 
+/// Starting calibration for the 720x720 GT911-family controller on the
+/// Waveshare 4C. Waveshare's XC BSP polls it with swap and both mirrors off,
+/// the same raw rotation-0 convention as the 4B; glass validation may refine it.
+static const Calibration GT911_ON_JD9365_4C = {
+    /* panelShort */ 720, /* panelLong */ 720,
+    /* rawXMirrored */ false, /* rawYMirrored */ false,
+    /* rotateClockwise */ true};
+
 inline int16_t frameWidth(bool landscape, Calibration cal = AXS5106L_ON_C6) {
   return landscape ? cal.panelLong : cal.panelShort;
 }

@@ -493,9 +493,10 @@ static void processConfigLine(char *line) {
     applyBacklight();
     configSerial().printf("CFGOK bllevel=%u (saved)\n", (unsigned)userBlLevel);
   } else if (strncmp(line, "CFGBOARD ", 9) == 0) {
-    // Override C6/S3 board auto-detection. Compile-fixed P4 parses every
-    // profile token for telemetry round-trips but rejects overrides below.
-    // The escape hatch for a board whose I2C peripherals do not answer, and the
+    // Override board auto-detection within this artifact's family. A
+    // compile-fixed family would parse every profile token for telemetry
+    // round-trips but reject overrides below; none is compile-fixed now.
+    // The escape hatch for a board whose probes do not answer, and the
     // way to undo a wrong forcing ("auto"). Reboots, because the pin map and
     // panel driver are chosen during setup and cannot be swapped underneath a
     // running panel.

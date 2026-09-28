@@ -5,6 +5,14 @@
 // window. It separates carriers whose I2C buses answer identically (the S3
 // 1.3-inch and 1.9-inch carriers both expose only a QMI8658 at 0x6B on
 // GPIO47/48). A guarded candidate never matches without a reading.
+//
+// A MIPI-DSI family may also identify its carrier by the panel controller
+// itself: the ID bytes the panel returns to a DCS read. The P4 4B and 4C
+// carriers wire identical I2C buses, so the controller ID separates them,
+// together with a sense guard that reads each carrier's own wiring. A
+// candidate either names the exact ID it requires, or accepts any completed
+// read that no other candidate in the family claims; the validator requires
+// the second kind to carry a sense guard.
 #pragma once
 
 #include <stddef.h>
@@ -30,6 +38,8 @@ enum class CandidateMatch : uint8_t {
   I2cAnyAck,
   I2cNoAck,
   I2cAnyAckOrStartFailure,
+  DsiPanelId,
+  DsiPanelIdOther,
 };
 
 enum class ResolutionPolicy : uint8_t {
@@ -72,6 +82,8 @@ struct CandidateRule {
   /// Inclusive millivolt window; 0 for max means unbounded.
   uint16_t senseMinMv = 0;
   uint16_t senseMaxMv = 0;
+  /// The controller ID a DsiPanelId candidate requires.
+  uint8_t panelId[3] = {0, 0, 0};
 };
 
 /// One analog sense reading, indexed like FamilyDetectionPlan::sensePins.
@@ -79,6 +91,36 @@ struct SenseEvidence {
   bool read = false;
   uint16_t millivolts = 0;
 };
+
+/// DCS "read display ID": three bytes on both MIPI-DSI controllers in use.
+static const uint8_t DSI_PANEL_ID_COMMAND = 0x04;
+
+/// How to reach a MIPI-DSI panel for its ID read. Every DSI candidate in a
+/// family shares these facts, so the read runs before the carrier is known.
+struct DsiIdProbePlan {
+  uint8_t dataLanes;
+  uint16_t laneMbps;
+  int8_t resetPin;
+  uint16_t resetLowMs;
+  uint16_t resetReleaseWaitMs;
+};
+
+/// The ID bytes one DCS read returned. Unread when the read failed or timed
+/// out. A completed read of all 0x00 or all 0xFF is still evidence: it can
+/// never equal a declared ID (the validator refuses those), so it only reaches
+/// a DsiPanelIdOther candidate, whose sense guard must also agree.
+struct PanelIdEvidence {
+  bool read = false;
+  uint8_t id[3] = {0, 0, 0};
+};
+
+inline PanelIdEvidence panelIdEvidenceFromRead(bool ok, const uint8_t *id) {
+  PanelIdEvidence evidence;
+  if (!ok || id == nullptr) return evidence;
+  evidence.read = true;
+  for (int i = 0; i < 3; ++i) evidence.id[i] = id[i];
+  return evidence;
+}
 
 struct FamilyDetectionPlan {
   const I2cProbePlan *probes;
@@ -88,6 +130,7 @@ struct FamilyDetectionPlan {
   ResolutionPolicy resolution;
   const int8_t *sensePins = nullptr;
   uint8_t senseCount = 0;
+  const DsiIdProbePlan *dsiIdProbe = nullptr;
 };
 
 /// Nominal millivolts for a raw 12-bit sample at 12 dB attenuation (about
@@ -138,6 +181,37 @@ inline bool senseMatches(const CandidateRule &candidate,
   if (!sense.read) return false;
   if (sense.millivolts < candidate.senseMinMv) return false;
   return candidate.senseMaxMv == 0 || sense.millivolts <= candidate.senseMaxMv;
+}
+
+inline bool panelIdEquals(const CandidateRule &candidate,
+                          const PanelIdEvidence &evidence) {
+  return evidence.read && evidence.id[0] == candidate.panelId[0] &&
+         evidence.id[1] == candidate.panelId[1] &&
+         evidence.id[2] == candidate.panelId[2];
+}
+
+/// The panel-ID half of a candidate. Other kinds pass. DsiPanelIdOther accepts
+/// an answered ID only when no DsiPanelId candidate of the same plan claims it,
+/// so the two kinds can never both match one reading.
+inline bool panelIdMatches(const FamilyDetectionPlan &plan,
+                           const CandidateRule &candidate,
+                           const PanelIdEvidence *panelId) {
+  if (candidate.match != CandidateMatch::DsiPanelId &&
+      candidate.match != CandidateMatch::DsiPanelIdOther) {
+    return true;
+  }
+  if (panelId == nullptr || !panelId->read) return false;
+  if (candidate.match == CandidateMatch::DsiPanelId) {
+    return panelIdEquals(candidate, *panelId);
+  }
+  for (uint8_t i = 0; i < plan.candidateCount; ++i) {
+    const CandidateRule &other = plan.candidates[i];
+    if (other.match == CandidateMatch::DsiPanelId &&
+        panelIdEquals(other, *panelId)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 struct Evaluation {
@@ -195,6 +269,11 @@ inline bool candidateMatches(const CandidateRule &candidate,
   }
   if (candidate.match == CandidateMatch::Always) return true;
   if (candidate.match == CandidateMatch::FlashRange) return true;
+  // Decided by panelIdMatches, which needs the whole plan.
+  if (candidate.match == CandidateMatch::DsiPanelId ||
+      candidate.match == CandidateMatch::DsiPanelIdOther) {
+    return true;
+  }
   if (candidate.probeIndex >= evidenceCount || evidence == nullptr) {
     return false;
   }
@@ -209,6 +288,8 @@ inline bool candidateMatches(const CandidateRule &candidate,
              (probe.status == ProbeStatus::Started && probe.ackCount > 0);
     case CandidateMatch::Always:
     case CandidateMatch::FlashRange:
+    case CandidateMatch::DsiPanelId:
+    case CandidateMatch::DsiPanelIdOther:
       return true;
   }
   return false;
@@ -219,13 +300,15 @@ inline Evaluation evaluate(const FamilyDetectionPlan &plan,
                            const ProbeEvidence *evidence,
                            size_t evidenceCount,
                            const SenseEvidence *senses = nullptr,
-                           size_t senseCount = 0) {
+                           size_t senseCount = 0,
+                           const PanelIdEvidence *panelId = nullptr) {
   uint8_t selected = 0;
   uint8_t matches = 0;
   for (uint8_t i = 0; i < plan.candidateCount; ++i) {
     const CandidateRule &candidate = plan.candidates[i];
     if (!candidateMatches(candidate, flashBytes, evidence, evidenceCount) ||
-        !senseMatches(candidate, senses, senseCount)) {
+        !senseMatches(candidate, senses, senseCount) ||
+        !panelIdMatches(plan, candidate, panelId)) {
       continue;
     }
     if (matches == 0) selected = candidate.variantValue;

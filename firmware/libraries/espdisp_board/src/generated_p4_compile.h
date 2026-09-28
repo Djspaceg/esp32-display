@@ -2,7 +2,7 @@
 #pragma once
 
 #if defined(ESPDISP_BOARD_P4_4B)
-#define ESPDISP_PANEL_ST7703_720X720 1
+#define ESPDISP_PANEL_P4_RUNTIME 1
 #define ESPDISP_LARGE_TILE_STREAM 1
-static const Variant COMPILED_VARIANT = Variant::P4_4B;
+static const Variant COMPILED_VARIANT = Variant::Unknown;
 #endif

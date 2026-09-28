@@ -1,4 +1,4 @@
-// ESP32-P4 MIPI-DSI backend for reusable ST7703 panel profiles.
+// ESP32-P4 MIPI-DSI backend for the ST7703 and JD9365 panel profiles.
 #pragma once
 
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
@@ -7,14 +7,21 @@
 #include <driver/ledc.h>
 #include <esp_heap_caps.h>
 #include <esp_lcd_mipi_dsi.h>
+#include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_ldo_regulator.h>
+#include <freertos/semphr.h>
+#include <esp_lcd_jd9365.h>
 #include <esp_lcd_st7703.h>
 
 #include "board_config.h"
 #include "panel_orientation.h"
 
 namespace boardpaneldsi {
+
+// Both Waveshare P4 carriers power the DSI PHY from the chip's LDO_VO3.
+static const int PHY_LDO_CHANNEL = 3;
+static const int PHY_LDO_MILLIVOLTS = 2500;
 
 inline esp_lcd_dsi_bus_handle_t dsiBus = nullptr;
 inline esp_lcd_panel_io_handle_t dbiIo = nullptr;
@@ -51,7 +58,8 @@ inline bool init(const board::Config &cfg, size_t maxTransfer,
                  esp_lcd_panel_io_handle_t *outIo,
                  esp_lcd_panel_handle_t *outPanel) {
   if (!cfg.isDsi() || cfg.panel == nullptr ||
-      cfg.panel->driver != board::PanelDriver::St7703) {
+      (cfg.panel->driver != board::PanelDriver::St7703 &&
+       cfg.panel->driver != board::PanelDriver::Jd9365)) {
     return false;
   }
   completion = doneCb;
@@ -83,8 +91,8 @@ inline bool init(const board::Config &cfg, size_t maxTransfer,
   if (ledc_channel_config(&channel) != ESP_OK) return false;
 
   esp_ldo_channel_config_t ldo = {};
-  ldo.chan_id = 3;
-  ldo.voltage_mv = 2500;
+  ldo.chan_id = PHY_LDO_CHANNEL;
+  ldo.voltage_mv = PHY_LDO_MILLIVOLTS;
   if (esp_ldo_acquire_channel(&ldo, &phyPower) != ESP_OK) return false;
 
   esp_lcd_dsi_bus_config_t bus = {};
@@ -116,14 +124,20 @@ inline bool init(const board::Config &cfg, size_t maxTransfer,
   dpi.video_timing.vsync_front_porch = cfg.panel->vsyncFrontPorch;
   dpi.flags.use_dma2d = 1;
 
-  st7703_vendor_config_t vendor = {dsiBus, &dpi};
   esp_lcd_panel_dev_config_t dev = {};
   dev.reset_gpio_num = cfg.pinRst;
   dev.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
   dev.bits_per_pixel = 16;
-  dev.vendor_config = &vendor;
   esp_lcd_panel_handle_t panel = nullptr;
-  if (esp_lcd_new_panel_st7703(dbiIo, &dev, &panel) != ESP_OK) return false;
+  if (cfg.panel->driver == board::PanelDriver::Jd9365) {
+    jd9365_vendor_config_t vendor = {dsiBus, &dpi};
+    dev.vendor_config = &vendor;
+    if (esp_lcd_new_panel_jd9365(dbiIo, &dev, &panel) != ESP_OK) return false;
+  } else {
+    st7703_vendor_config_t vendor = {dsiBus, &dpi};
+    dev.vendor_config = &vendor;
+    if (esp_lcd_new_panel_st7703(dbiIo, &dev, &panel) != ESP_OK) return false;
+  }
 
   esp_lcd_dpi_panel_event_callbacks_t callbacks = {};
   callbacks.on_color_trans_done = onColorDone;
@@ -147,6 +161,99 @@ inline bool init(const board::Config &cfg, size_t maxTransfer,
   if (outIo) *outIo = dbiIo;
   *outPanel = panel;
   return true;
+}
+
+/// Read the panel controller's DCS ID before any carrier is chosen: power the
+/// PHY, bring up a command-mode DSI bus, pulse the panel reset line and read
+/// three bytes. Everything is released again, so init() starts from scratch;
+/// the reset line is left driven high, out of reset. Only the DSI pads, the
+/// PHY LDO and the panel reset GPIO are touched, and every P4 carrier shares
+/// them. Returns whether the read itself succeeded. Unbounded: the SDK waits
+/// for a reply that an absent panel never sends, so call readPanelId().
+inline bool readPanelIdBlocking(const boarddetectmodel::DsiIdProbePlan &plan,
+                                uint8_t id[3]) {
+  esp_ldo_channel_handle_t ldo = nullptr;
+  esp_lcd_dsi_bus_handle_t bus = nullptr;
+  esp_lcd_panel_io_handle_t io = nullptr;
+  bool ok = false;
+  esp_ldo_channel_config_t ldoConfig = {};
+  ldoConfig.chan_id = PHY_LDO_CHANNEL;
+  ldoConfig.voltage_mv = PHY_LDO_MILLIVOLTS;
+  esp_lcd_dsi_bus_config_t busConfig = {};
+  busConfig.bus_id = 0;
+  busConfig.num_data_lanes = plan.dataLanes;
+  busConfig.phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT;
+  busConfig.lane_bit_rate_mbps = plan.laneMbps;
+  esp_lcd_dbi_io_config_t dbi = {};
+  dbi.virtual_channel = 0;
+  dbi.lcd_cmd_bits = 8;
+  dbi.lcd_param_bits = 8;
+  if (esp_ldo_acquire_channel(&ldoConfig, &ldo) == ESP_OK &&
+      esp_lcd_new_dsi_bus(&busConfig, &bus) == ESP_OK &&
+      esp_lcd_new_panel_io_dbi(bus, &dbi, &io) == ESP_OK) {
+    if (plan.resetPin != board::NO_PIN) {
+      pinMode(plan.resetPin, OUTPUT);
+      digitalWrite(plan.resetPin, HIGH);
+      delay(5);
+      digitalWrite(plan.resetPin, LOW);
+      delay(plan.resetLowMs);
+      digitalWrite(plan.resetPin, HIGH);
+      delay(plan.resetReleaseWaitMs);
+    }
+    ok = esp_lcd_panel_io_rx_param(
+             io, boarddetectmodel::DSI_PANEL_ID_COMMAND, id, 3) == ESP_OK;
+  }
+  if (io != nullptr) esp_lcd_panel_io_del(io);
+  if (bus != nullptr) esp_lcd_del_dsi_bus(bus);
+  if (ldo != nullptr) esp_ldo_release_channel(ldo);
+  return ok;
+}
+
+/// Static so a read abandoned on timeout never writes into a dead frame.
+struct PanelIdRead {
+  boarddetectmodel::DsiIdProbePlan plan;
+  uint8_t id[3];
+  bool ok;
+  SemaphoreHandle_t done;
+};
+inline PanelIdRead panelIdRead = {};
+
+inline void panelIdTask(void *) {
+  panelIdRead.ok = readPanelIdBlocking(panelIdRead.plan, panelIdRead.id);
+  xSemaphoreGive(panelIdRead.done);
+  // The caller deletes this task either way, so it never deletes itself and
+  // the handle stays valid until then.
+  vTaskSuspend(nullptr);
+}
+
+/// readPanelIdBlocking() with a deadline. The read runs in its own task; if
+/// it has not finished in timeoutMs (the reset pulse takes about 135 ms of
+/// that) the task is deleted where it waits and the read counts as failed,
+/// so boot reaches serial-only CFGBOARD recovery instead of hanging. The
+/// abandoned PHY LDO and DSI bus stay claimed, which is harmless there: that
+/// path initializes no panel.
+inline bool readPanelId(const boarddetectmodel::DsiIdProbePlan &plan,
+                        uint8_t id[3], uint32_t timeoutMs = 1000) {
+  if (panelIdRead.done == nullptr) {
+    panelIdRead.done = xSemaphoreCreateBinary();
+    if (panelIdRead.done == nullptr) return false;
+  }
+  // A read that finished just after an earlier deadline left the semaphore
+  // given; clear it so this call waits for its own read.
+  xSemaphoreTake(panelIdRead.done, 0);
+  panelIdRead.plan = plan;
+  panelIdRead.ok = false;
+  TaskHandle_t task = nullptr;
+  if (xTaskCreate(panelIdTask, "panelid", 4096, nullptr,
+                  uxTaskPriorityGet(nullptr), &task) != pdPASS) {
+    return false;
+  }
+  const bool finished =
+      xSemaphoreTake(panelIdRead.done, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+  vTaskDelete(task);
+  if (!finished) return false;
+  for (int i = 0; i < 3; ++i) id[i] = panelIdRead.id[i];
+  return panelIdRead.ok;
 }
 
 inline esp_err_t drawBitmap(esp_lcd_panel_handle_t panel, int x0, int y0,

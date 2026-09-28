@@ -31,9 +31,9 @@ String defaultDeviceName() {
 }
 
 // ---- Board identity and display geometry ------------------------------
-// C6 and S3 resolve a physical profile before any panel GPIO is driven. P4 is
-// currently fixed to its internal 4B carrier. The user-facing target remains
-// the chip family in every case.
+// Every family resolves a physical profile before any panel GPIO is driven;
+// P4 does so by reading its DSI panel's controller ID. The user-facing target
+// remains the chip family in every case.
 board::Variant boardVariant = board::COMPILED_VARIANT;
 const board::Config *bcfg = nullptr;
 bandproto::Geometry PANEL_GEOMETRY = {0, 0};
@@ -60,7 +60,8 @@ bool tileStreamEnabled() {
 }
 
 bool largeTileStreamEnabled() {
-  return bcfg->variant == board::Variant::P4_4B;
+  return bcfg->variant == board::Variant::P4_4B ||
+         bcfg->variant == board::Variant::P4_4C;
 }
 
 // Whether the touch controller came up. Not simply "is this the Touch board":

@@ -29,6 +29,13 @@ static constexpr PanelConfig PANEL_ST7703_720X720 = {
     false, false, true,
     2, 480, 50, 20, 50,
     20, 4, 20};
+static constexpr PanelConfig PANEL_JD9365_720X720 = {
+    PanelProfile::Jd9365_720x720, PanelDriver::Jd9365, PanelBus::MipiDsi,
+    720, 720, 0, 0,
+    80000000, 0, 0, 0, 0,
+    false, true, true,
+    2, 1500, 20, 20, 40,
+    12, 4, 24};
 static constexpr PanelConfig PANEL_GC9107_128X128 = {
     PanelProfile::Gc9107_128x128, PanelDriver::Gc9107, PanelBus::Spi,
     128, 128, 0, 0,

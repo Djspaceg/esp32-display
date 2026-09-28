@@ -177,13 +177,16 @@ audio = false
 
 [compile]
 selector = "ESPDISP_BOARD_P4_4B"
-macros = ["ESPDISP_PANEL_ST7703_720X720", "ESPDISP_LARGE_TILE_STREAM"]
+macros = ["ESPDISP_PANEL_P4_RUNTIME", "ESPDISP_LARGE_TILE_STREAM"]
 
 [detection]
 order = 10
-resolution = "first_match"
+resolution = "exactly_one"
 no_match = "unknown"
-kind = "always"
+# Any completed DCS 0x04 ID read that no other P4 board claims, on a carrier
+# whose GPIO52 sense reads high. The ST7703's own ID bytes are unpublished and
+# unmeasured here, so the sense guard, not the ID, identifies the 4B.
+kind = "dsi_panel_id_other"
 flash_min_exclusive = 0
 flash_max_inclusive = 0
 sda = -1
@@ -192,7 +195,12 @@ frequency_hz = 0
 scan_first = 0
 scan_last = 0
 addresses = []
-reset_pin = -1
-reset_low_ms = 0
-reset_release_wait_ms = 0
+reset_pin = 27
+reset_low_ms = 10
+reset_release_wait_ms = 120
 release = "never"
+# GPIO52 is the IP101 PHY's MDIO line, pulled up by 1.5K (R88) to the
+# always-on PHY rail, so it reads high against the internal pull-down; on the
+# 4C it is a floating header pin. Input only.
+sense_pin = 52
+sense_min_mv = 1650

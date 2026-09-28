@@ -189,7 +189,10 @@ DETECTION_KINDS = {
     "i2c_any_ack",
     "i2c_no_ack",
     "i2c_any_ack_or_start_failure",
+    "dsi_panel_id",
+    "dsi_panel_id_other",
 }
+DSI_DETECTION_KINDS = {"dsi_panel_id", "dsi_panel_id_other"}
 DETECTION_RESOLUTIONS = {"first_match", "exactly_one"}
 PROBE_RELEASES = {"never", "always", "on_success_no_ack"}
 PANEL_BUSES = {"spi", "qspi", "mipi_dsi"}
@@ -209,11 +212,14 @@ IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Optional fields and the value an absent field means. The detection sense is
 # an input-only analog guard for carriers whose I2C buses answer identically:
 # millivolts on sense_pin with the internal pull-down enabled must fall within
-# [sense_min_mv, sense_max_mv]; a sense_max_mv of 0 is unbounded.
+# [sense_min_mv, sense_max_mv]; a sense_max_mv of 0 is unbounded. panel_id is
+# the three controller ID bytes a dsi_panel_id candidate requires from a DCS
+# read of its MIPI-DSI panel.
 OPTIONAL_FIELDS = {
     "detection.sense_pin": -1,
     "detection.sense_min_mv": 0,
     "detection.sense_max_mv": 0,
+    "detection.panel_id": [],
 }
 # Carrier wiring only some boards have. Absent means -1 (no such line), so a
 # descriptor written before a field existed stays valid without restating it.
@@ -239,6 +245,13 @@ def detection_sense(descriptor: Dict[str, Any]) -> Tuple[int, int, int]:
         detection.get("sense_min_mv", OPTIONAL_FIELDS["detection.sense_min_mv"]),
         detection.get("sense_max_mv", OPTIONAL_FIELDS["detection.sense_max_mv"]),
     )
+
+
+def detection_panel_id(descriptor: Dict[str, Any]) -> Tuple[int, ...]:
+    """The controller ID a dsi_panel_id candidate requires; () when absent."""
+    value = descriptor["detection"].get(
+        "panel_id", OPTIONAL_FIELDS["detection.panel_id"])
+    return tuple(value) if isinstance(value, list) else value
 
 
 def _field(descriptor: Dict[str, Any], path: str) -> Any:
@@ -410,6 +423,7 @@ def _validate_detection(descriptor: Dict[str, Any]) -> None:
         raise DescriptorError(
             "%s: detection.addresses contains a duplicate" % source)
 
+    _validate_dsi_detection(descriptor, kind)
     is_i2c = kind.startswith("i2c_")
     if is_i2c:
         _expect_int_range(descriptor, "detection.sda", 0, 127)
@@ -445,16 +459,26 @@ def _validate_detection(descriptor: Dict[str, Any]) -> None:
                 "%s: detection sense window requires detection.sense_pin"
                 % source)
     else:
-        # Only the S3 detector collects senses, and only ADC1 (GPIO1..10) is
+        # The S3 detector reads its senses through ADC1 (GPIO1..10), the unit
         # guaranteed free of the WiFi driver; a pin the ADC cannot read would
-        # never produce evidence.
-        if descriptor["identity"]["target"] != "s3":
+        # never produce evidence. The P4 detector reads a sense as a digital
+        # level with the pull-down enabled, reported as 0 or 3300 mV, on any
+        # GPIO except its USB Serial/JTAG pads.
+        target = descriptor["identity"]["target"]
+        if target not in ("s3", "p4"):
             raise DescriptorError(
-                "%s: detection sense guards are only supported on s3" % source)
-        if not 1 <= sense_pin <= 10:
+                "%s: detection sense guards are only supported on s3 and p4"
+                % source)
+        if target == "s3" and not 1 <= sense_pin <= 10:
             raise DescriptorError(
                 "%s: detection.sense_pin must be an S3 ADC1 pin (1..10)"
                 % source)
+        if target == "p4" and (
+                not 0 <= sense_pin <= GPIO_MAX_BY_TARGET["p4"] or
+                sense_pin in (24, 25)):
+            raise DescriptorError(
+                "%s: detection.sense_pin must be a P4 GPIO other than the "
+                "USB Serial/JTAG pads 24/25" % source)
         if not 0 <= sense_min <= 3300 or not 0 <= sense_max <= 3300:
             raise DescriptorError(
                 "%s: detection sense window must be 0..3300 mV" % source)
@@ -465,6 +489,75 @@ def _validate_detection(descriptor: Dict[str, Any]) -> None:
             raise DescriptorError(
                 "%s: detection sense window must bound at least one side"
                 % source)
+
+
+def _validate_dsi_detection(descriptor: Dict[str, Any], kind: str) -> None:
+    """A panel-ID candidate reads its own MIPI-DSI panel, and nothing else."""
+    source = _source_name(descriptor)
+    detection = descriptor["detection"]
+    panel_id = detection_panel_id(descriptor)
+    if not isinstance(panel_id, tuple):
+        raise DescriptorError(
+            "%s: detection.panel_id must be a list of bytes" % source)
+    if kind not in DSI_DETECTION_KINDS:
+        if panel_id:
+            raise DescriptorError(
+                "%s: detection.panel_id requires kind dsi_panel_id" % source)
+        return
+    if descriptor["identity"]["target"] != "p4" or \
+            descriptor["panel"]["bus"] != "mipi_dsi":
+        raise DescriptorError(
+            "%s: panel-ID detection requires a p4 MIPI-DSI panel" % source)
+    for path in ("flash_min_exclusive", "flash_max_inclusive", "frequency_hz",
+                 "scan_first", "scan_last"):
+        if detection[path] != 0:
+            raise DescriptorError(
+                "%s: panel-ID detection must leave detection.%s at 0"
+                % (source, path))
+    if detection["addresses"] or detection["release"] != "never":
+        raise DescriptorError(
+            "%s: panel-ID detection must not declare I2C addresses or a bus "
+            "release" % source)
+    reset_pin = detection["reset_pin"]
+    if reset_pin < 0 or reset_pin != descriptor["carrier"]["pin_rst"]:
+        raise DescriptorError(
+            "%s: panel-ID detection.reset_pin must be the panel reset "
+            "carrier.pin_rst" % source)
+    if detection["reset_low_ms"] <= 0 or \
+            detection["reset_release_wait_ms"] <= 0:
+        raise DescriptorError(
+            "%s: panel-ID detection needs positive reset timings" % source)
+    if kind == "dsi_panel_id_other":
+        if panel_id:
+            raise DescriptorError(
+                "%s: dsi_panel_id_other must not declare detection.panel_id"
+                % source)
+        # Any completed read matches this kind, so the carrier itself must be
+        # identified by an independent sense guard.
+        if detection_sense(descriptor)[0] < 0:
+            raise DescriptorError(
+                "%s: dsi_panel_id_other requires a detection.sense_pin guard"
+                % source)
+        return
+    if len(panel_id) != 3 or any(
+            not isinstance(value, int) or isinstance(value, bool) or
+            not 0 <= value <= 255 for value in panel_id):
+        raise DescriptorError(
+            "%s: detection.panel_id must be exactly three bytes" % source)
+    if panel_id in ((0, 0, 0), (255, 255, 255)):
+        raise DescriptorError(
+            "%s: detection.panel_id must not be all 0x00 or all 0xFF, which "
+            "an absent panel reads" % source)
+
+
+def _dsi_probe_facts(descriptor: Dict[str, Any]) -> Tuple[int, ...]:
+    detection = descriptor["detection"]
+    return (
+        descriptor["panel"]["dsi_data_lanes"],
+        detection["reset_pin"],
+        detection["reset_low_ms"],
+        detection["reset_release_wait_ms"],
+    )
 
 
 def _sense_windows_disjoint(
@@ -756,6 +849,7 @@ def _detection_signature(descriptor: Dict[str, Any]) -> Tuple[Any, ...]:
         detection["scan_first"],
         detection["scan_last"],
         tuple(detection["addresses"]),
+        detection_panel_id(descriptor),
     )
 
 
@@ -808,6 +902,9 @@ def validate_descriptors(
     resolutions: Dict[str, str] = {}
     catalog_orders: Dict[Tuple[str, int], str] = {}
     panels: Dict[str, Tuple[Dict[str, Any], str]] = {}
+    dsi_probe_facts: Dict[str, Tuple[Tuple[int, ...], str]] = {}
+    dsi_other: Dict[str, str] = {}
+    dsi_family: Dict[str, bool] = {}
 
     for descriptor in descriptors:
         _validate_shape(descriptor)
@@ -891,6 +988,33 @@ def validate_descriptors(
                 % (source, order_key[1], order_key[0])
             )
         detection_orders[order_key] = source
+
+        # One DSI ID read serves the whole family, so every panel-ID candidate
+        # must be reachable the same way, and no family may mix it with probes
+        # that could match the same board independently.
+        kind = descriptor["detection"]["kind"]
+        target_key = identity["target"]
+        is_dsi = kind in DSI_DETECTION_KINDS
+        if dsi_family.setdefault(target_key, is_dsi) != is_dsi:
+            raise DescriptorError(
+                "%s: family %s mixes panel-ID detection with other kinds"
+                % (source, target_key))
+        if is_dsi:
+            facts = _dsi_probe_facts(descriptor)
+            if target_key in dsi_probe_facts and \
+                    dsi_probe_facts[target_key][0] != facts:
+                raise DescriptorError(
+                    "%s: panel-ID detection lanes, reset pin or timings "
+                    "differ from %s"
+                    % (source, dsi_probe_facts[target_key][1]))
+            dsi_probe_facts.setdefault(target_key, (facts, source))
+            if kind == "dsi_panel_id_other":
+                if target_key in dsi_other:
+                    raise DescriptorError(
+                        "%s: family %s already has a dsi_panel_id_other "
+                        "candidate in %s"
+                        % (source, target_key, dsi_other[target_key]))
+                dsi_other[target_key] = source
 
         # Two candidates may share one probe signature only when both carry a
         # sense guard on the same pin with disjoint windows, so the analog

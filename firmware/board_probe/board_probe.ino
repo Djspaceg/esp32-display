@@ -1,5 +1,6 @@
-// Read-only carrier diagnostic. It never initializes a display bus and writes
-// no flash; fixed targets scan only their configured I2C bus.
+// Read-only carrier diagnostic. It writes no flash and draws nothing. On P4
+// it briefly brings up the DSI command bus to read the panel controller's ID,
+// which is how that family tells its carriers apart.
 #include <Arduino.h>
 #include <Wire.h>
 #include <esp_mac.h>
@@ -32,13 +33,12 @@ void setup() {
       identity[2], identity[3], identity[4], identity[5]);
 
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
-  const board::Config &cfg = board::configFor(board::COMPILED_VARIANT);
-  Serial.printf("platform=%s target=%s board=%s\n", cfg.platform->chipToken,
-                board::targetToken(cfg.variant), board::variantToken(cfg.variant));
-  Serial.printf("I2C scan only: SDA=%d SCL=%d\n", cfg.pinTouchSda,
-                cfg.pinTouchScl);
+  // Both P4 carriers share this bus; only the DSI panel ID tells them apart.
+  const int8_t sda = board::CONFIG_P4_4B.pinTouchSda;
+  const int8_t scl = board::CONFIG_P4_4B.pinTouchScl;
+  Serial.printf("I2C scan only: SDA=%d SCL=%d\n", sda, scl);
   int found = 0;
-  if (Wire.begin(cfg.pinTouchSda, cfg.pinTouchScl, 100000)) {
+  if (Wire.begin(sda, scl, 100000)) {
     for (uint8_t address = 1; address < 0x7F; ++address) {
       Wire.beginTransmission(address);
       if (Wire.endTransmission() == 0) {
@@ -46,9 +46,15 @@ void setup() {
         ++found;
       }
     }
+    Wire.end();
   }
   Serial.printf("scan complete: %d devices; expected GT911 at 0x5D or 0x14\n",
                 found);
+  int candidates = 0;
+  const board::Variant variant = boarddetect::probe(true, &candidates);
+  Serial.printf("VERDICT: target=%s board=%s candidates=%d\n",
+                board::targetToken(variant), board::variantToken(variant),
+                candidates);
 #else
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   Serial.println("Scanning S3 profile discriminator buses");

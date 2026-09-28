@@ -362,14 +362,16 @@ void setup() {
                 ESP.getChipRevision(), ESP.getFlashChipSize() / (1024 * 1024),
                 (unsigned long)ESP.getFreeHeap());
 
-  // Fixed targets select a profile before any GPIO is driven. The C6 artifact
-  // alone uses the I2C detector.
+  // Fixed targets select a profile before any GPIO is driven; the family
+  // artifacts run their detector.
   variant = board::COMPILED_VARIANT != board::Variant::Unknown
       ? board::COMPILED_VARIANT
       : boarddetect::probe();
   cfg = &board::configFor(variant);
   touchCalibration = variant == board::Variant::P4_4B
       ? touchmap::GT911_ON_ST7703_4B
+      : variant == board::Variant::P4_4C
+      ? touchmap::GT911_ON_JD9365_4C
       : variant == board::Variant::AmoledCo5300
       ? touchmap::CST9217_ON_CO5300
       : variant == board::Variant::LcdSt77916
@@ -391,6 +393,7 @@ void setup() {
                 : cfg->panel->driver == board::PanelDriver::Co5300 ? "CO5300"
                 : cfg->panel->driver == board::PanelDriver::St77916 ? "ST77916"
                 : cfg->panel->driver == board::PanelDriver::St7703 ? "ST7703"
+                : cfg->panel->driver == board::PanelDriver::Jd9365 ? "JD9365"
                 : cfg->panel->driver == board::PanelDriver::Jd9853 ? "JD9853" : "ST7789",
                 cfg->pinSclk, cfg->pinMosi, cfg->pinCs, cfg->pinDc, cfg->pinRst,
                 cfg->pinBl);

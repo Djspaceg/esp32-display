@@ -170,7 +170,7 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
             "c3": ["gc9a01a-240"],
             "c6": ["st7789", "jd9853"],
             "s3": ["gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"],
-            "p4": ["st7703-4b"],
+            "p4": ["st7703-4b", "jd9365-4c"],
         ]
         let chips = [
             "c3": "esp32c3", "c6": "esp32c6",

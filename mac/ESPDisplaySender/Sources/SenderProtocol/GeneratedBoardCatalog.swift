@@ -10,20 +10,20 @@ public enum GeneratedBoardCatalog {
         public let bootloaderAddress: Int
     }
 
-    public static let sourceSHA256 = "af816ad3a7c47b3d4a340414fc3693463cadace797aa639a917e657086b82039"
+    public static let sourceSHA256 = "6281b9ef451e0671d03f3ccd36435b3bf000e03ae4038301f46ed117ef3e48f9"
     public static let requiredFamilies: Set<String> = ["c3", "c6", "s3", "p4"]
     public static let expected: [String: Expected] = [
         "c3": Expected(chip: "esp32c3", profiles: ["gc9a01a-240"], flashBytes: [4194304], partition: "c3-4m-ota", bootloaderAddress: 0),
         "c6": Expected(chip: "esp32c6", profiles: ["st7789", "jd9853"], flashBytes: [8388608], partition: "default-8m", bootloaderAddress: 0),
         "s3": Expected(chip: "esp32s3", profiles: ["gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-ota", bootloaderAddress: 0),
-        "p4": Expected(chip: "esp32p4", profiles: ["st7703-4b"], flashBytes: [33554432], partition: "p4-32m-ota", bootloaderAddress: 8192),
+        "p4": Expected(chip: "esp32p4", profiles: ["st7703-4b", "jd9365-4c"], flashBytes: [33554432], partition: "p4-32m-ota", bootloaderAddress: 8192),
     ]
 
     public static let profilesByTarget: [String: Set<String>] = [
         "c3": Set(["gc9a01a-240"]),
         "c6": Set(["st7789", "jd9853"]),
         "s3": Set(["gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"]),
-        "p4": Set(["st7703-4b"]),
+        "p4": Set(["st7703-4b", "jd9365-4c"]),
         "p4-4b": Set(["st7703-4b"]),
         "s3-085": Set(["gc9107"]),
         "s3-154": Set(["st7789-154"]),
@@ -43,6 +43,7 @@ public enum GeneratedBoardCatalog {
         "st77916": PanelGeometry(width: 360, height: 360),
         "gc9a01-knob-128": PanelGeometry(width: 240, height: 240),
         "st7703-4b": PanelGeometry(width: 720, height: 720),
+        "jd9365-4c": PanelGeometry(width: 720, height: 720),
     ]
 
     public static let universalFamilyAliases: [String: Set<String>] = [
@@ -52,5 +53,5 @@ public enum GeneratedBoardCatalog {
         "p4": Set(["p4", "p4-4b"]),
     ]
 
-    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7789", "jd9853", "st7703-4b", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"])
+    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7789", "jd9853", "st7703-4b", "jd9365-4c", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"])
 }

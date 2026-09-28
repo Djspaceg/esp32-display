@@ -14,6 +14,7 @@ enum class PanelDriver : uint8_t {
   St77916,
   Gc9107,
   St7703,
+  Jd9365,
 };
 
 enum class PanelBus : uint8_t { Spi, Qspi, MipiDsi };
@@ -28,6 +29,7 @@ enum class PanelProfile : uint8_t {
   St7703_720x720,
   St7789V2_240x240,
   St7789V2_170x320,
+  Jd9365_720x720,
 };
 
 struct PanelConfig {

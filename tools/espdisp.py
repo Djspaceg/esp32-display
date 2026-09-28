@@ -125,7 +125,7 @@ class BuildTarget(NamedTuple):
     partition_csv: Optional[str] = None
     extra_flags: Tuple[str, ...] = ()
     extra_library_dirs: Tuple[str, ...] = ()
-    required_profile: Optional[str] = None
+    required_profiles: Optional[Tuple[str, ...]] = None
     fqbn_options: Tuple[str, ...] = ()
 
 
@@ -863,12 +863,17 @@ def probe_chip(address: str) -> Optional[str]:
 
 
 def _validate_flash_profile(family: Family, profile: Optional[str]) -> None:
-    """Require carrier evidence for compile-fixed artifacts before USB writes."""
-    required = family.build_config.required_profile
-    if required is not None and profile != required:
+    """Require carrier evidence before USB writes where the target demands it.
+
+    The P4 image detects its carrier at boot, but it still drives the DSI PHY
+    and panel reset of whatever P4 it lands on, so the operator must name one
+    of the family's carriers.
+    """
+    required = family.build_config.required_profiles
+    if required is not None and profile not in required:
         raise Fail(
-            "%s uses exact build target %s; re-run with --profile %s"
-            % (family.key, family.build_config.key, required))
+            "%s uses build target %s; re-run with --profile %s"
+            % (family.key, family.build_config.key, "|".join(required)))
     if profile is not None and profile not in family.profiles:
         raise Fail("profile %s is not supported by family %s" % (profile, family.key))
 
@@ -5704,8 +5709,10 @@ def cmd_rescue(args) -> int:
         shutil.rmtree(work, ignore_errors=True)
     say("Done. The board is running the rescue image on %s." % port)
     report_rescue_override(port, say=say)
-    say("Flash the real firmware now: %s flash --family %s --port %s"
-        % (os.path.basename(sys.argv[0]), family.key, port))
+    required = family.build_config.required_profiles
+    profile = (" --profile %s" % "|".join(required)) if required else ""
+    say("Flash the real firmware now: %s flash --family %s%s --port %s"
+        % (os.path.basename(sys.argv[0]), family.key, profile, port))
     return 0
 
 
@@ -6350,7 +6357,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_flash.add_argument(
         "--profile", choices=sorted({profile for family in FAMILIES.values()
                                       for profile in family.profiles}),
-        help="physical-profile cross-check; required for p4 recovery workflows")
+        help="physical-profile evidence; required for p4 (either carrier)")
     p_flash.add_argument(
         "--port", help="serial device (default: the one matching %s)" %
         ", ".join(PORT_GLOBS))

@@ -43,7 +43,7 @@
 #elif defined(ESPDISP_PANEL_C6_RUNTIME)
 #include <esp_lcd_panel_st7789.h>
 #include <esp_lcd_jd9853.h>
-#elif defined(ESPDISP_PANEL_ST7703_720X720)
+#elif defined(ESPDISP_PANEL_P4_RUNTIME)
 // MIPI-DSI targets are constructed by panel_init_dsi.h.
 #else
 #error "No panel implementation selected for this firmware family"

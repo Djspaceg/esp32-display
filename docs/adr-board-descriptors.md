@@ -121,33 +121,45 @@ One artifact per CPU family remains absolute. A descriptor whose
 runs. The refusal includes the board source, its minimum capacity, the family,
 and the common layout size.
 
-### P4 compile-fixed exception
+### P4 runtime detection
 
-P4 remains compile-fixed. `board_config.h` keeps the existing selector count,
-compatible-selector, Doom selector, and family cross-selector `#error` guards.
-Inside the accepted P4 4B branch, the generated header emits exactly:
+Amended 2026-09-26 when the 4C joined the 4B. P4 is no longer compile-fixed.
+`board_config.h` keeps the existing selector count, compatible-selector, Doom
+selector, and family cross-selector `#error` guards, and the historical
+`ESPDISP_BOARD_P4_4B` selector now names the whole P4 family. The generated
+header emits exactly:
 
-- `ESPDISP_PANEL_ST7703_720X720`
+- `ESPDISP_PANEL_P4_RUNTIME`
 - `ESPDISP_LARGE_TILE_STREAM`
-- `COMPILED_VARIANT = Variant::P4_4B`
+- `COMPILED_VARIANT = Variant::Unknown`
 
-Runtime P4 composition is not part of this decision.
+The two carriers' I2C buses answer identically, so detection gains two
+descriptor kinds that read the MIPI-DSI panel's DCS `0x04` controller ID:
+`dsi_panel_id` requires the exact three bytes in `detection.panel_id`, and
+`dsi_panel_id_other` accepts any answered ID that no `dsi_panel_id` candidate
+of the family claims. The validator restricts both to P4 MIPI-DSI panels,
+requires `detection.reset_pin` to be the panel reset, requires every such
+candidate of a family to share lanes, reset pin and timings, allows one
+`dsi_panel_id_other` per family, requires that one to carry a sense guard, and
+forbids mixing them with other kinds. P4 sense guards are digital: the level
+with the pull-down enabled, reported as 0 or 3300 mV. The 4B guards on GPIO52
+reading high (its PHY's MDIO pull-up), the 4C on it reading low. A failed or
+timed-out read is no evidence.
 
 ### Persisted override precedence
 
 Descriptors provide hardware and behavior defaults. Persisted user settings
 remain a later layer:
 
-1. The compiled CPU family is the outer constraint. P4 also has a fixed
-   compiled carrier.
+1. The compiled CPU family is the outer constraint.
 2. NVS is read before detection and before profile-dependent GPIO setup.
-3. On C6/S3, a nonzero `CFGBOARD` value that belongs to the compiled family
-   wins over probing.
+3. A nonzero `CFGBOARD` value that belongs to the compiled family wins over
+   probing.
 4. A cross-family stored value is ignored and probing proceeds.
 5. `CFGBOARD auto` stores zero and restores automatic detection.
-6. Compile-fixed P4 rejects `CFGBOARD`.
-7. An unresolved S3 profile initializes no panel, network, or peripheral GPIO
-   and accepts only `CFGBOARD` in serial recovery.
+6. A compile-fixed family would reject `CFGBOARD`; none is compile-fixed now.
+7. An unresolved S3 or P4 profile initializes no panel, network, or peripheral
+   GPIO and accepts only `CFGBOARD` in serial recovery.
 8. After profile resolution, `CFGROT` overrides the descriptor orientation
    default; legacy `CFGFLIP` is read only when `rot` is absent.
 9. `CFGMIRRORX` remains persisted and DSI continues rejecting it.

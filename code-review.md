@@ -1,8 +1,12 @@
-# Code review: in-app USB Repair flow and low-power rescue image
+# Code review records (integrated on main)
+
+Each finished branch keeps its own review record below, whole.
+
+## Code review: in-app USB Repair flow and low-power rescue image
 
 Branch `usb-repair-flow`, `git diff main...HEAD` (main = e229bff). Two adversarial rounds by read-only reviewer agents (git and file reads only; no builds, no ports), then one independent review of the squash on main.
 
-## Round 1 (whole diff)
+### Round 1 (whole diff)
 
 | # | Severity | Finding | Disposition |
 |---|----------|---------|-------------|
@@ -17,7 +21,7 @@ Branch `usb-repair-flow`, `git diff main...HEAD` (main = e229bff). Two adversari
 
 Round 1 found the port-selection loop matches `run_rescue` step for step, and the argv, environment, spawn flags, threading, install checks and embed script sound.
 
-## Round 2 (a116dcf, f533b55, 0407b20)
+### Round 2 (a116dcf, f533b55, 0407b20)
 
 | # | Severity | Finding | Disposition |
 |---|----------|---------|-------------|
@@ -28,7 +32,7 @@ Round 1 found the port-selection loop matches `run_rescue` step for step, and th
 
 Round 2 checked the watchdog script in full, the fd lifecycle, hold balance, the safety of GPIO54 on the only P4 profile (pins 27/26/35/7/8/33), `analogWrite` behind the USB-pin guard, and image provenance (source_commit clean, hashes match).
 
-## Independent review of e95e38e (independent-review.md)
+### Independent review of e95e38e (independent-review.md)
 
 | # | Severity | Finding | Disposition |
 |---|----------|---------|-------------|
@@ -43,7 +47,7 @@ Round 2 checked the watchdog script in full, the fd lifecycle, hold balance, the
 
 Not changed and reported: tools/espdisp.py `rescue` still has findings 2 and 6 (only the app was asked for).
 
-## Call sites of the shared enums changed (SenderProtocol)
+### Call sites of the shared enums changed (SenderProtocol)
 
 `UsbFlashPhase` (+ `.rescue`), `UsbFlashSession.Flow` (+ `.repair`):
 - `UsbFlashPhase.title`, `.detail`, `.fraction` (UsbFlashProgress.swift)
@@ -54,6 +58,57 @@ Not changed and reported: tools/espdisp.py `rescue` still has findings 2 and 6 (
 - `UsbRepairModel.canStop`, `UsbRepairModel.headline`
 - `EsptoolCommand.rescueWriteFlash` is new; `writeFlash` is unchanged and still validates it.
 
-## Process note
+### Process note
 
 An early UX capture rendered `AddDeviceSheet`, whose `onAppear` refreshes USB. It auto-selected the attached P4 port and began its CFGSHOW inspection. That capture was removed; the capture test now renders only `UsbRepairView`, which does no USB I/O.
+
+## Code review: ESP32-P4-WIFI6-Touch-LCD-4C board support
+
+Scope: `git diff main...board-p4-lcd-4c`. Two independent adversarial rounds,
+each run by a separate reviewer that read the diff against Waveshare's XC BSP
+3.0.1, Espressif's JD9365 component 2.0.2, both board schematics, the
+disassembled ESP-IDF 3.3.11 DSI read path, and the 4C boot logs. Neither
+reviewer modified the worktree, opened a port or flashed anything.
+
+### Round 1 (reviewed e5c96f1)
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| C1 | Critical | `firmware-releases/manifest.json`, the bundles and the rescue images were stale, so the catalog listed P4 with one profile and every flash and the Mac catalog failed. | Fixed. Rescue images and 1.5.0 bundles regenerated from committed HEAD (a9afe57, 2d6422d); Python and Swift suites green. |
+| H1 | High | The SDK's DCS read has no timeout, so an absent panel hangs boot before serial recovery. | Fixed (5702333). The read runs in a helper task with a 1 s deadline; timeout counts as a failed read and boot reaches CFGBOARD recovery. |
+| H2 | High | The 4B path rests on the ST7703's unmeasured ID; a blank reply would make every 4B Unknown. | Mitigated (5702333). The 4B is identified by its GPIO52 MDIO pull-up, and any completed read is accepted. Still unmeasured on a real 4B: raised to the human. |
+| H3 | High | Any ID other than 93 65 04 became a 4B (catch-all), including a corrupted 4C read. | Fixed (5702333). Each carrier needs two agreeing signals: 4C = 93 65 04 + GPIO52 low; 4B = GPIO52 high + any other completed read. Everything else is Unknown. |
+| H4 | High | P4 USB writes no longer required carrier evidence. | Fixed (5702333). `--profile st7703-4b|jd9365-4c` is required again. |
+| M1 | Medium | A 3.4C (same PCB and JD9365) would be taken for a 4C. | Deferred: unsupported board; residual in DECISIONS.md. |
+| M2 | Medium | Bootstrap now asks for the P4 carrier but its firmware accepts only st7703. | Deferred: bootstrap protocol change out of scope; residual. |
+| M3 | Medium | No 4C log came from the committed build, and the board was power-cycling. | Resolved. Power loss isolated (backlight 217 + WiFi radio exceed the port); brightness lowered per the human's decision; final image logs captured. |
+| L1 | Low | An unresolved P4 leaves the backlight lit by its hardware pull-up. | Deferred: existing unresolved-S3 behavior; residual. |
+| L2 | Low | CFGBOARD error hint omits the P4 profiles. | Deferred: CFG strings are out of scope. |
+| L3 | Low | board_probe banner says "no display writes". | No change: the probe still writes nothing to the panel; its header comment now says it reads the ID over DSI. |
+| L4 | Low | Panel-ID kinds ignored leftover I2C and flash fields. | Fixed (5702333) with validator tests. |
+
+Checked and not defects: the JD9365 table matches the BSP's 4-inch branch byte
+for byte (197 entries); controller preamble and reset timing match Espressif's
+driver; timing, pins and backlight polarity match the BSP and schematic; the
+ID read releases what it acquired; probing at 480 Mbps returns the same ID the
+factory image read at 1500 Mbps; the two detection kinds cannot both match.
+
+### Round 2 (reviewed 5702333)
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| N1 | Medium | The timeout path has never run on hardware. | Deferred: needs the 4C booted with its panel ribbon unplugged; residual. |
+| N2 | High | A 4B updated over the air goes serial-only if GPIO52 does not read high on it. | Raised to the human (no 4B attached). |
+| N3 | Medium | The Mac app (already on main) picks the P4 image from chip identity alone; `rescue` writes the P4 rescue image without `--profile`. | Deferred: pre-existing on main; residual. |
+| N4 | Low | The rescue closing hint omitted `--profile`. | Fixed (b28f2b9). |
+| N5 | Low | A 4C header HAT pulling GPIO52 high turns it Unknown. | Documented (b28f2b9): README tells the owner to send `CFGBOARD jd9365-4c`. |
+| N6 | Nit | `panelIdTask` was `static` in a header used by `inline` code. | Fixed (b28f2b9). |
+| - | Latent | A read finishing just after its deadline leaves the semaphore given. | Fixed (b28f2b9): cleared before each read. |
+
+Checked and not defects: deleting the read task mid-spin is safe (no locks,
+critical sections or disabled interrupts in the SDK path); worst core-0 stall
+about 0.87 s, under the 5 s watchdog; the GPIO52 read is input-only with the
+pull-down and nothing else uses GPIO52 on either board; misidentification now
+needs two independent faults.
+
+No AutoSDE or CRUX: the remote is GitHub, and nothing was pushed.

@@ -163,7 +163,7 @@ int main() {
       }
       ++profiles;
     }
-    CHECK(profiles == 11);
+    CHECK(profiles == 12);
 
     board::Config onUsb = board::CONFIG_TOUCH_ST7789;
     onUsb.pinSclk = 19;
@@ -307,6 +307,12 @@ int main() {
     CHECK(strcmp(rescuemodel::effectiveOverride((uint8_t)Variant::LcdSt7789,
                                                 Platform::Esp32C6, none),
                  "st7789") == 0);
+    // P4 is a detected family now, so its stored key is reported like S3's.
+    CHECK(strcmp(rescuemodel::effectiveOverride((uint8_t)Variant::P4_4C,
+                                                Platform::Esp32P4, none),
+                 "jd9365-4c") == 0);
+    CHECK(rescuemodel::effectiveOverride((uint8_t)Variant::P4_4C,
+                                         Platform::Esp32S3, none) == nullptr);
   }
 
   // --- Word wrap ------------------------------------------------------------

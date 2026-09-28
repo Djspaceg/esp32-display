@@ -14,6 +14,7 @@ inline const Config *generatedConfigFor(Variant variant) {
     case Variant::C3_2424S012: return &CONFIG_C3_2424S012;
     case Variant::LcdSt7789_190: return &CONFIG_LCD_ST7789_190;
     case Variant::ElecrowKnob128: return &CONFIG_ELECROW_KNOB_128;
+    case Variant::P4_4C: return &CONFIG_P4_4C;
     default: return nullptr;
   }
 }

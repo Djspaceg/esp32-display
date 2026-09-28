@@ -43,12 +43,16 @@ static constexpr FamilyDetectionPlan GENERATED_S3_DETECTION = {
     sizeof(GENERATED_S3_CANDIDATES) / sizeof(GENERATED_S3_CANDIDATES[0]), ResolutionPolicy::ExactlyOne,
     GENERATED_S3_SENSE_PINS, 1};
 
+static constexpr DsiIdProbePlan GENERATED_P4_DSI_ID_PROBE = {2, 480, 27, 10, 120};
+static constexpr int8_t GENERATED_P4_SENSE_PINS[] = {52};
 static constexpr CandidateRule GENERATED_P4_CANDIDATES[] = {
-    {7, CandidateMatch::Always, 255, 0, 0},
+    {7, CandidateMatch::DsiPanelIdOther, 255, 0, 0, 0, 1650, 0},
+    {12, CandidateMatch::DsiPanelId, 255, 0, 0, 0, 0, 1650, {0x93, 0x65, 0x04}},
 };
 static constexpr FamilyDetectionPlan GENERATED_P4_DETECTION = {
     nullptr, 0, GENERATED_P4_CANDIDATES,
-    sizeof(GENERATED_P4_CANDIDATES) / sizeof(GENERATED_P4_CANDIDATES[0]), ResolutionPolicy::FirstMatch};
+    sizeof(GENERATED_P4_CANDIDATES) / sizeof(GENERATED_P4_CANDIDATES[0]), ResolutionPolicy::ExactlyOne,
+    GENERATED_P4_SENSE_PINS, 1, &GENERATED_P4_DSI_ID_PROBE};
 
 static constexpr uint8_t GENERATED_MAX_PROBE_COUNT = 5;
 static constexpr uint8_t GENERATED_MAX_SENSE_COUNT = 1;

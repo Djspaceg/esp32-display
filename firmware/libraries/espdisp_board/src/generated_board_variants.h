@@ -14,10 +14,11 @@ enum class Variant : uint8_t {
   C3_2424S012 = 9,
   LcdSt7789_190 = 10,
   ElecrowKnob128 = 11,
+  P4_4C = 12,
 };
 
 constexpr bool supportsDoom(Variant variant) {
-  return variant == Variant::AmoledCo5300 || variant == Variant::LcdSt77916 || variant == Variant::LcdGc9107 || variant == Variant::TouchSt7789 || variant == Variant::P4_4B || variant == Variant::LcdSt7789_130 || variant == Variant::LcdSt7789_190 || variant == Variant::ElecrowKnob128;
+  return variant == Variant::AmoledCo5300 || variant == Variant::LcdSt77916 || variant == Variant::LcdGc9107 || variant == Variant::TouchSt7789 || variant == Variant::P4_4B || variant == Variant::LcdSt7789_130 || variant == Variant::LcdSt7789_190 || variant == Variant::ElecrowKnob128 || variant == Variant::P4_4C;
 }
 
 constexpr bool supportsAudio(Variant variant) {

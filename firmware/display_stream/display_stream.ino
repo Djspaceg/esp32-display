@@ -387,6 +387,7 @@ void setup() {
                 board::variantToken(boardVariant));
   Serial.printf("  driver=%s bus=%s %ux%u pclk=%luMHz\n",
                 bcfg->panel->driver == board::PanelDriver::St7703    ? "ST7703"
+                : bcfg->panel->driver == board::PanelDriver::Jd9365 ? "JD9365"
                 : bcfg->panel->driver == board::PanelDriver::Co5300 ? "CO5300"
                 : bcfg->panel->driver == board::PanelDriver::St77916 ? "ST77916"
                 : bcfg->panel->driver == board::PanelDriver::Gc9107  ? "GC9107"
@@ -443,6 +444,8 @@ void setup() {
   // the controller answered, so this has to be settled before we announce.
   touchCalibration = bcfg->variant == board::Variant::P4_4B
       ? touchmap::GT911_ON_ST7703_4B
+      : bcfg->variant == board::Variant::P4_4C
+      ? touchmap::GT911_ON_JD9365_4C
       : bcfg->variant == board::Variant::AmoledCo5300
       ? touchmap::CST9217_ON_CO5300
       : bcfg->variant == board::Variant::LcdSt77916
