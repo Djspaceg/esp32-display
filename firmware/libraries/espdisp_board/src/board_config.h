@@ -1,7 +1,7 @@
 // Which supported board this binary is running on, and every board fact that
 // follows from that.
 //
-// Twelve board profiles are supported across the c3, c6, s3, and p4 release
+// Thirteen board profiles are supported across the c3, c6, s3, and p4 release
 // families. Each family has one artifact; runtime profile selection keeps the
 // physical panel/controller token independent from that family identity:
 //
@@ -31,6 +31,7 @@
 //                              I2C GPIO7/8
 //   ESP32-P4-WIFI6-Touch-LCD-4C  JD9365 720x720 round LCD over MIPI-DSI, GT911
 //                              touch on I2C GPIO7/8
+//   ESP32-P4-WIFI6-Touch-LCD-3.4C  JD9365 800x800 round LCD, otherwise the 4C
 //
 // The C6 and S3 families choose a profile before any panel GPIO is driven,
 // except that the CrowPanel knob probe pulses that board's panel supply rail
@@ -685,7 +686,111 @@ static const Config CONFIG_P4_4C = {
     /* backlightInverted */ true,
 };
 
+/// Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C: the 4C's XC carrier with 3.4-inch
+/// 800x800 round JD9365 glass. Same pins, backlight, touch bus and audio parts
+/// as the 4C; Waveshare's BSP 3.0.1 selects it with
+/// CONFIG_BSP_LCD_TYPE_800_800_3_4_INCH at the same lane rate, pixel clock
+/// and porches. Detection tells it from the 4C only by the GT9271's stored
+/// config resolution (800x800). Not yet run on 3.4C hardware.
+static const Config CONFIG_P4_34C = {
+    Variant::P4_34C,
+    "ESP32-P4-WIFI6-Touch-LCD-3.4C (JD9365)",
+    &PLATFORM_ESP32_P4,
+    &PANEL_JD9365_800X800,
+    /* sclk  */ NO_PIN,
+    /* mosi  */ NO_PIN,
+    /* data1 */ NO_PIN,
+    /* data2 */ NO_PIN,
+    /* data3 */ NO_PIN,
+    /* cs    */ NO_PIN,
+    /* dc    */ NO_PIN,
+    /* rst   */ 27,
+    /* bl    */ 26,
+    /* boot  */ 35,
+    /* led   */ NO_PIN,
+    TouchController::Gt911,
+    /* touchSda */ 7,
+    /* touchScl */ 8,
+    /* touchRst */ NO_PIN,
+    /* touchInt */ NO_PIN,
+    PowerController::None,
+    /* batteryAdc */ NO_PIN,
+    /* adcScale */ 0,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
+    MotionController::None,
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
+    /* pinBlEnable */ 33,
+    /* backlightInverted */ true,
+};
+
 #include "generated_board_config_lookup.h"
+
+/// The backlight wiring every carrier of one family shares, so it can be
+/// driven off before the carrier is known. `valid` is false when the family
+/// has no carrier, or when any two of its carriers wire the backlight
+/// differently: then nothing may be driven.
+struct UnresolvedBacklight {
+  bool valid;
+  int8_t pinBl;
+  int8_t pinBlEnable;
+  bool inverted;
+};
+
+inline UnresolvedBacklight unresolvedBacklight(Platform platform) {
+  UnresolvedBacklight result = {false, NO_PIN, NO_PIN, false};
+  bool first = true;
+  for (const auto &identity : GENERATED_BOARD_IDENTITIES) {
+    if (identity.platform != platform) continue;
+    const Config *config = generatedConfigFor(identity.variant);
+    if (config == nullptr || config->pinBl == NO_PIN) {
+      return {false, NO_PIN, NO_PIN, false};
+    }
+    if (first) {
+      result = {true, config->pinBl, config->pinBlEnable,
+                config->backlightInverted};
+      first = false;
+    } else if (config->pinBl != result.pinBl ||
+               config->pinBlEnable != result.pinBlEnable ||
+               config->backlightInverted != result.inverted) {
+      return {false, NO_PIN, NO_PIN, false};
+    }
+  }
+  return result;
+}
+
+/// "profile|profile|...|auto" for one family, in catalog order, for the
+/// CFGBOARD error hint. False (and an empty string) when it does not fit.
+inline bool formatProfileHint(Platform platform, char *out, size_t capacity) {
+  if (out == nullptr || capacity == 0) return false;
+  out[0] = 0;
+  size_t used = 0;
+  auto append = [&](const char *text) {
+    const size_t length = strlen(text);
+    const size_t separator = used != 0 ? 1 : 0;
+    if (used + separator + length + 1 > capacity) return false;
+    if (separator) out[used++] = '|';
+    memcpy(out + used, text, length);
+    used += length;
+    out[used] = 0;
+    return true;
+  };
+  for (const auto &identity : GENERATED_BOARD_IDENTITIES_BY_CATALOG) {
+    if (identity.platform != platform) continue;
+    if (!append(identity.profile)) {
+      out[0] = 0;
+      return false;
+    }
+  }
+  if (!append("auto")) {
+    out[0] = 0;
+    return false;
+  }
+  return true;
+}
 
 /// Whether a physical profile belongs to a platform family. This is used both
 /// for CFGBOARD recovery overrides and for detection results, so neither path
@@ -705,10 +810,11 @@ inline DetectionResult detectFromEvidence(
     const boarddetectmodel::ProbeEvidence *evidence, size_t evidenceCount,
     const boarddetectmodel::SenseEvidence *senses = nullptr,
     size_t senseCount = 0,
-    const boarddetectmodel::PanelIdEvidence *panelId = nullptr) {
+    const boarddetectmodel::PanelIdEvidence *panelId = nullptr,
+    const boarddetectmodel::TouchConfigEvidence *touchConfig = nullptr) {
   const boarddetectmodel::Evaluation result = boarddetectmodel::evaluate(
       detectionPlanForPlatform(platform), flashBytes, evidence, evidenceCount,
-      senses, senseCount, panelId);
+      senses, senseCount, panelId, touchConfig);
   return {(Variant)result.variantValue, result.matchedCandidates};
 }
 
@@ -742,21 +848,29 @@ inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
       .variant;
 }
 
-/// Resolve the P4 carrier from the ID its MIPI-DSI panel returned to a DCS
-/// read (`idRead` false when the read failed or timed out) and from GPIO52
-/// read against the internal pull-down (`gpio52Level` -1 when unread). The
-/// 4C needs its JD9365's 93 65 04 and a low GPIO52 (a floating header pin);
-/// the 4B needs a high GPIO52 (its PHY's 1.5K MDIO pull-up) and any other
-/// completed read. Every other combination stays Unknown, so neither carrier
-/// is taken for the other on one signal alone.
-inline Variant variantFromP4PanelId(bool idRead, const uint8_t *id,
-                                    int gpio52Level = -1) {
+/// Resolve the P4 carrier from its three passive signals: the ID its MIPI-DSI
+/// panel returned to a DCS 0x04 read (`idRead` false when the read failed or
+/// timed out), GPIO52 read against the internal pull-down (`gpio52Level` -1
+/// when unread), and the resolution stored in the GT touch controller's
+/// config (`touchRead` false when no controller answered). The 4B needs its
+/// ST7703's 38 21 1F and a high GPIO52 (its PHY's 1.5K MDIO pull-up). The XC
+/// carrier needs its JD9365's 93 65 04 and a low GPIO52 (a floating header
+/// pin), and then the touch config tells its glass apart: 720x720 is the 4C,
+/// 800x800 the 3.4C. Every other combination stays Unknown.
+inline Variant variantFromP4Evidence(bool idRead, const uint8_t *id,
+                                     int gpio52Level, bool touchRead,
+                                     uint16_t touchWidth,
+                                     uint16_t touchHeight) {
   const boarddetectmodel::PanelIdEvidence evidence =
       boarddetectmodel::panelIdEvidenceFromRead(idRead, id);
   const boarddetectmodel::SenseEvidence sense = {
       gpio52Level >= 0, (uint16_t)(gpio52Level > 0 ? 3300 : 0)};
+  boarddetectmodel::TouchConfigEvidence touch;
+  touch.read = touchRead;
+  touch.width = touchWidth;
+  touch.height = touchHeight;
   return detectFromEvidence(Platform::Esp32P4, 32u * 1024u * 1024u, nullptr,
-                            0, &sense, 1, &evidence)
+                            0, &sense, 1, &evidence, &touch)
       .variant;
 }
 

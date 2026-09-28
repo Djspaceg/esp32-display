@@ -17,7 +17,41 @@ final class UsbRepairModel: ObservableObject {
         case failed(UsbRescuer.RescuedBoard?)
     }
 
-    @Published var family: UsbRescue.Family?
+    @Published var family: UsbRescue.Family? {
+        didSet { if family != oldValue { carrier = nil } }
+    }
+    /// The board the user names, for a family whose image drives carrier pins
+    /// (P4). Nothing is written until it is one of that family's boards.
+    @Published var carrier: String?
+
+    struct CarrierChoice: Identifiable, Equatable {
+        let profile: String
+        let name: String
+        var id: String { profile }
+    }
+
+    var needsCarrier: Bool {
+        guard let family else { return false }
+        return GeneratedBoardCatalog.carrierEvidenceFamilies.contains(family.key)
+    }
+
+    /// The chosen family's boards, in catalog order, named as printed on them.
+    var carrierChoices: [CarrierChoice] {
+        guard let family, needsCarrier,
+              let profiles = GeneratedBoardCatalog.expected[family.key]?.profiles
+        else { return [] }
+        return profiles.map {
+            CarrierChoice(
+                profile: $0,
+                name: GeneratedBoardCatalog.hardwareByProfile[$0]?.first ?? $0)
+        }
+    }
+
+    var canStart: Bool {
+        guard family != nil, !isRunning else { return false }
+        guard needsCarrier else { return true }
+        return carrierChoices.contains { $0.profile == carrier }
+    }
     /// Set by the run itself; internal only so a capture can show a stage.
     @Published internal(set) var stage: Stage = .choosing
     /// What Install would write, or why nothing can be.
@@ -71,7 +105,8 @@ final class UsbRepairModel: ObservableObject {
     }
 
     func start(manager: PanelManager) {
-        guard let family, !isRunning else { return }
+        guard let family, canStart else { return }
+        let carrier = needsCarrier ? self.carrier : nil
         hold(manager)
         monitor.reset(flow: .repair)
         installOffer = nil
@@ -79,7 +114,8 @@ final class UsbRepairModel: ObservableObject {
         stage = .catching
         let monitor = monitor
         work = Task {
-            let result = await manager.rescueUSBBoard(family: family) { monitor.record($0) }
+            let result = await manager.rescueUSBBoard(
+                family: family, carrier: carrier) { monitor.record($0) }
             switch result {
             case .success(let board): rescued(board)
             case .failure(let failure):
@@ -258,6 +294,15 @@ struct UsbRepairView: View {
                 }
             }
             .disabled(model.stage != .choosing)
+            if model.needsCarrier {
+                Picker("Board", selection: $model.carrier) {
+                    Text("Choose…").tag(String?.none)
+                    ForEach(model.carrierChoices) { choice in
+                        Text(choice.name).tag(Optional(choice.profile))
+                    }
+                }
+                .disabled(model.stage != .choosing)
+            }
         } header: {
             Text("Repair a board that drops off USB")
         } footer: {
@@ -330,7 +375,7 @@ struct UsbRepairView: View {
         switch model.stage {
         case .choosing:
             Button("Start") { model.start(manager: manager) }
-                .disabled(model.family == nil)
+                .disabled(!model.canStart)
         case .catching, .clearing, .installing:
             Button("Install Real Firmware") {}
                 .disabled(true)

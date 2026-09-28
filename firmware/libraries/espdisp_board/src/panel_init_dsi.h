@@ -130,7 +130,10 @@ inline bool init(const board::Config &cfg, size_t maxTransfer,
   dev.bits_per_pixel = 16;
   esp_lcd_panel_handle_t panel = nullptr;
   if (cfg.panel->driver == board::PanelDriver::Jd9365) {
-    jd9365_vendor_config_t vendor = {dsiBus, &dpi};
+    const jd9365_glass_t glass =
+        cfg.panel->profile == board::PanelProfile::Jd9365_800x800
+            ? JD9365_GLASS_34C_800 : JD9365_GLASS_4C_720;
+    jd9365_vendor_config_t vendor = {dsiBus, &dpi, glass};
     dev.vendor_config = &vendor;
     if (esp_lcd_new_panel_jd9365(dbiIo, &dev, &panel) != ESP_OK) return false;
   } else {

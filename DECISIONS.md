@@ -97,6 +97,10 @@ D4 P4 USB writes still require `--profile`, now either carrier. Why: the image d
 D5 JD9365 is a vendored adapter (`esp_lcd_jd9365`) with the BSP's 4-inch table, like `esp_lcd_st7703`. Why: no new dependencies. If overruled: pull the Espressif component.
 D6 Vendor timing kept: 1500 Mbps, 80 MHz pclk, porches 20/20/40 and 12/4/24. Audio stays off, as on the 4B (ES8311, ES7210, NS4150B present). If overruled: lower pclk; enable P4 audio.
 D7 The board's brightness was set to 128 over serial (`CFGBRIGHT`) after flashing. Why: the human chose this port plus lower brightness; at 217 it dies before WiFi. The app has since set 96. If overruled: reset in the app.
+D8 The 3.4C is its own profile, `jd9365-34c`, told from the 4C only by the GT9271's stored config resolution (register 0x8048, read-only): 720x720 measured on the 4C, 800x800 inferred for the 3.4C. The JD9365 table differs in one byte (page 1 reg 0x40). Why: same PCB, same panel ID, no strap. If overruled: drop the profile and pin 3.4Cs with CFGBOARD.
+D9 The 4B requires its measured ID 38 21 1F plus GPIO52 high. Supersedes: D2's any-other-read rule for the 4B, because the human asked for the measured ID. If overruled: restore dsi_panel_id_other.
+D10 An unresolved P4 drives BL_EN GPIO33 low and PWM GPIO26 high, only because every P4 carrier wires them alike. If overruled: leave the pins alone.
+D11 The Mac chip-only fallback, the Repair flow and `espdisp.py rescue` all require a named P4 carrier; Repair refuses to install when the rescue image reports a different one. If overruled: family alone.
 
 ### Open questions
 
@@ -129,9 +133,7 @@ Adversarial-review rounds: 2. Round 1 changed D2 and D4 and added D3.
 
 ### Residuals
 
-- The 3.4C (same PCB and JD9365) would detect as a 4C.
-- Bootstrap cannot bring up a 4C.
-- An unresolved P4 leaves the backlight lit.
-- The Mac app picks the P4 image from chip alone (already on main).
-- The timeout path is untested on hardware.
-- The loopTask watchdog on a stuck hosted RPC is tracked on its own row.
+Closed on branch p4-4c-gaps (aab2d3a): the 3.4C profile (D8), bootstrap accepts jd9365, backlight off when unresolved (D10), carrier guards (D11), the timeout path (proven on the 4C: read failed after 0.93 s, CFGBOARD recovery), the exact 4B ID (D9), and the CFGBOARD hint (now `st7703-4b|jd9365-4c|jd9365-34c|auto` on P4). Remaining:
+- EINF over UDP is still not witnessed. The firmware now logs `net: EINF <n> bytes to <ip>:<port>` when its sender changes, but the running app sent the 4C nothing during the tests.
+- The 3.4C profile has not run on 3.4C hardware; the 4B has not run the touch-config read.
+- The loopTask watchdog on a stuck hosted RPC and P4 audio are tracked on their own rows.

@@ -456,11 +456,17 @@ static bool selectPanelTypes(const PanelValues &values) {
   } else if (strcmp(values.driver, "st7703") == 0) {
     candidatePanel.driver = board::PanelDriver::St7703;
     candidatePanel.profile = board::PanelProfile::St7703_720x720;
+  } else if (strcmp(values.driver, "jd9365") == 0) {
+    // The width picks the XC glass table: 800 for the 3.4C, else the 4C.
+    candidatePanel.driver = board::PanelDriver::Jd9365;
+    candidatePanel.profile = values.width == 800
+        ? board::PanelProfile::Jd9365_800x800
+        : board::PanelProfile::Jd9365_720x720;
   } else {
     return false;
   }
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
-  return candidatePanel.driver == board::PanelDriver::St7703 &&
+  return bootstrapproto::dsiPanelDriverSupported(values.driver) &&
          candidatePanel.bus == board::PanelBus::MipiDsi;
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
   return candidatePanel.driver == board::PanelDriver::St7789 ||

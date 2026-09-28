@@ -504,8 +504,15 @@ static void processConfigLine(char *line) {
     board::Variant want = board::variantFromName(token);
     bool isAuto = strcmp(token, "auto") == 0;
     if (want == board::Variant::Unknown && !isAuto) {
-      configSerial().println(
-          "CFGERR expected: CFGBOARD st7789|jd9853|gc9107|st7789-130|st7789-154|co5300|st77916|auto");
+      // The hint names this artifact's own profiles, from the descriptors,
+      // so it cannot fall behind a newly added board again.
+      char profiles[160];
+      if (board::formatProfileHint(board::COMPILED_PLATFORM.platform,
+                                   profiles, sizeof(profiles))) {
+        configSerial().printf("CFGERR expected: CFGBOARD %s\n", profiles);
+      } else {
+        configSerial().println("CFGERR expected: CFGBOARD <profile>|auto");
+      }
       return;
     }
     if (board::COMPILED_VARIANT != board::Variant::Unknown) {

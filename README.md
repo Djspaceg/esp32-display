@@ -25,7 +25,7 @@ and internal build-target keys are not release names.
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
 | `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-ota` |
-| `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c` | `p4-32m-ota` |
+| `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c`, `jd9365-34c` | `p4-32m-ota` |
 
 The S3 image uses an 8 MiB common-denominator dual-OTA layout and contains all
 supported S3 panel, touch, power, and peripheral paths, including the
@@ -64,6 +64,7 @@ orientations or only a 180-degree flip.
 | `gc9a01-knob-128` | [ELECROW CrowPanel 1.28" Rotary Display](https://github.com/Elecrow-RD/CrowPanel-1.28inch-HMI-ESP32-Rotary-Display-240-240-IPS-Round-Touch-Knob-Screen) | `esp32s3` | GC9A01 (round) | 240x240 | 1.28" | Yes | No | None | 0/90/180/270 |
 | `st7703-4b` | [ESP32-P4-WIFI6-Touch-LCD-4B](https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-4b.htm) | `esp32p4` | ST7703 (MIPI-DSI) | 720x720 | 4" | Yes | No | None | 0/90/180/270 |
 | `jd9365-4c` | [ESP32-P4-WIFI6-Touch-LCD-4C](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-4C) | `esp32p4` | JD9365 (MIPI-DSI, round) | 720x720 | 4" | Yes | No | None | 0/90/180/270 |
+| `jd9365-34c` | [ESP32-P4-WIFI6-Touch-LCD-3.4C](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-3.4C) | `esp32p4` | JD9365 (MIPI-DSI, round) | 800x800 | 3.4" | Yes | No | None | 0/90/180/270 |
 
 Orientation rules behind the last three columns:
 
@@ -111,15 +112,19 @@ Profile selection occurs before panel GPIO initialization.
   `gc9a01-knob-128` profile powers its GPIO1-switched panel rail for the probe
   and looks for its CST816D at `0x15` on GPIO6/7. Exactly one compatible
   candidate is required.
-- P4's two carriers wire identical I2C buses, so P4 needs two independent
-  signals before choosing. It reads GPIO52 with the pull-down enabled (the
-  4B's Ethernet PHY pulls that MDIO line up with 1.5K; on the 4C it is a
-  floating header pin) and its MIPI-DSI panel's controller ID (DCS `0x04`,
-  with a one-second deadline). The 4C needs its JD9365's `93 65 04` and a low
-  GPIO52; the 4B needs a high GPIO52 and any other completed read. Any
-  disagreement, or a failed read, resolves neither, like an unresolved S3.
-  A 4C with something on its header that pulls GPIO52 high is therefore
-  Unknown; send `CFGBOARD jd9365-4c` over serial to pin it.
+- P4's carriers wire identical I2C buses, so P4 needs signals that agree
+  before choosing. It reads GPIO52 with the pull-down enabled (the 4B's
+  Ethernet PHY pulls that MDIO line up with 1.5K; on the XC carrier of the 4C
+  and 3.4C it is a floating header pin), the resolution stored in the GT9271
+  touch controller's config (register `0x8048`, read-only), and its MIPI-DSI
+  panel's controller ID (DCS `0x04`, with a one-second deadline). The 4B needs
+  its ST7703's `38 21 1F` and a high GPIO52. The 4C needs its JD9365's
+  `93 65 04`, a low GPIO52 and a 720x720 touch config; the 3.4C the same with
+  an 800x800 one. Any disagreement, or a failed read, resolves neither, like
+  an unresolved S3, and the backlight is switched off. An XC board with
+  something on its header that pulls GPIO52 high is therefore Unknown; send
+  `CFGBOARD jd9365-4c` (or `jd9365-34c`) over serial to pin it. The 3.4C
+  profile comes from Waveshare's BSP and has not been run on 3.4C hardware.
   The internal family selector remains a build implementation detail and the
   artifact is `p4`.
 
@@ -236,7 +241,12 @@ it and run:
 
 ```sh
 python3 tools/espdisp.py rescue --family s3
+python3 tools/espdisp.py rescue --family p4 --profile jd9365-4c
 ```
+
+As with `flash`, P4 needs `--profile` naming the carrier (`st7703-4b`,
+`jd9365-4c` or `jd9365-34c`), because its image drives the display pins of any
+P4 it lands on. The app's Repair flow asks for the board for the same reason.
 
 Wait for "Plug the board in now", then plug it in; replug whenever it says
 "Missed it". Only a port that appears after the command starts is touched. The

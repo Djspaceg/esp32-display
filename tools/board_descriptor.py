@@ -220,6 +220,7 @@ OPTIONAL_FIELDS = {
     "detection.sense_min_mv": 0,
     "detection.sense_max_mv": 0,
     "detection.panel_id": [],
+    "detection.touch_resolution": [],
 }
 # Carrier wiring only some boards have. Absent means -1 (no such line), so a
 # descriptor written before a field existed stays valid without restating it.
@@ -251,6 +252,13 @@ def detection_panel_id(descriptor: Dict[str, Any]) -> Tuple[int, ...]:
     """The controller ID a dsi_panel_id candidate requires; () when absent."""
     value = descriptor["detection"].get(
         "panel_id", OPTIONAL_FIELDS["detection.panel_id"])
+    return tuple(value) if isinstance(value, list) else value
+
+
+def detection_touch_resolution(descriptor: Dict[str, Any]) -> Tuple[int, ...]:
+    """The GT9xx config resolution a candidate requires; () when absent."""
+    value = descriptor["detection"].get(
+        "touch_resolution", OPTIONAL_FIELDS["detection.touch_resolution"])
     return tuple(value) if isinstance(value, list) else value
 
 
@@ -424,6 +432,7 @@ def _validate_detection(descriptor: Dict[str, Any]) -> None:
             "%s: detection.addresses contains a duplicate" % source)
 
     _validate_dsi_detection(descriptor, kind)
+    _validate_touch_resolution(descriptor)
     is_i2c = kind.startswith("i2c_")
     if is_i2c:
         _expect_int_range(descriptor, "detection.sda", 0, 127)
@@ -548,6 +557,44 @@ def _validate_dsi_detection(descriptor: Dict[str, Any], kind: str) -> None:
         raise DescriptorError(
             "%s: detection.panel_id must not be all 0x00 or all 0xFF, which "
             "an absent panel reads" % source)
+
+
+def _validate_touch_resolution(descriptor: Dict[str, Any]) -> None:
+    """A touch-config guard reads a GT9xx the board itself declares."""
+    source = _source_name(descriptor)
+    resolution = detection_touch_resolution(descriptor)
+    if not isinstance(resolution, tuple):
+        raise DescriptorError(
+            "%s: detection.touch_resolution must be a list" % source)
+    if not resolution:
+        return
+    if len(resolution) != 2 or any(
+            not isinstance(value, int) or isinstance(value, bool) or
+            not 1 <= value <= 65535 for value in resolution):
+        raise DescriptorError(
+            "%s: detection.touch_resolution must be [width, height]" % source)
+    if descriptor["identity"]["target"] != "p4":
+        raise DescriptorError(
+            "%s: touch-config detection is only supported on p4" % source)
+    touch = descriptor["touch"]
+    if touch["controller"] != "gt911" or touch["sda"] < 0 or \
+            touch["scl"] < 0 or not touch["addresses"]:
+        raise DescriptorError(
+            "%s: detection.touch_resolution requires a gt911 touch "
+            "controller with its bus and addresses" % source)
+    if len(touch["addresses"]) > 2:
+        raise DescriptorError(
+            "%s: touch-config detection probes at most two addresses" % source)
+    panel = descriptor["panel"]
+    if tuple(resolution) != (panel["width"], panel["height"]):
+        raise DescriptorError(
+            "%s: detection.touch_resolution must equal the panel's "
+            "width x height" % source)
+
+
+def _touch_probe_facts(descriptor: Dict[str, Any]) -> Tuple[Any, ...]:
+    touch = descriptor["touch"]
+    return (touch["sda"], touch["scl"], tuple(touch["addresses"]))
 
 
 def _dsi_probe_facts(descriptor: Dict[str, Any]) -> Tuple[int, ...]:
@@ -850,6 +897,7 @@ def _detection_signature(descriptor: Dict[str, Any]) -> Tuple[Any, ...]:
         detection["scan_last"],
         tuple(detection["addresses"]),
         detection_panel_id(descriptor),
+        detection_touch_resolution(descriptor),
     )
 
 
@@ -905,6 +953,8 @@ def validate_descriptors(
     dsi_probe_facts: Dict[str, Tuple[Tuple[int, ...], str]] = {}
     dsi_other: Dict[str, str] = {}
     dsi_family: Dict[str, bool] = {}
+    touch_probe_facts: Dict[str, Tuple[Tuple[Any, ...], str]] = {}
+    panel_id_owners: Dict[Tuple[str, Tuple[int, ...]], List[Dict[str, Any]]] = {}
 
     for descriptor in descriptors:
         _validate_shape(descriptor)
@@ -1008,6 +1058,14 @@ def validate_descriptors(
                     "differ from %s"
                     % (source, dsi_probe_facts[target_key][1]))
             dsi_probe_facts.setdefault(target_key, (facts, source))
+            if detection_touch_resolution(descriptor):
+                touch_facts = _touch_probe_facts(descriptor)
+                if target_key in touch_probe_facts and \
+                        touch_probe_facts[target_key][0] != touch_facts:
+                    raise DescriptorError(
+                        "%s: touch-config detection bus or addresses differ "
+                        "from %s" % (source, touch_probe_facts[target_key][1]))
+                touch_probe_facts.setdefault(target_key, (touch_facts, source))
             if kind == "dsi_panel_id_other":
                 if target_key in dsi_other:
                     raise DescriptorError(
@@ -1212,6 +1270,25 @@ def validate_descriptors(
                 "%s: capacity.minimum_flash_bytes must be one of the family "
                 "flash_bytes values" % source
             )
+
+    # Candidates that share an exact panel ID can only be told apart by their
+    # touch resolution, so each of them must name one; a candidate without it
+    # would match every such board alongside its sibling.
+    for descriptor in descriptors:
+        panel_id = detection_panel_id(descriptor)
+        if panel_id:
+            panel_id_owners.setdefault(
+                (descriptor["identity"]["target"], panel_id), []).append(descriptor)
+    for (target, panel_id), owners in sorted(panel_id_owners.items()):
+        if len(owners) < 2:
+            continue
+        for owner in owners:
+            if not detection_touch_resolution(owner):
+                raise DescriptorError(
+                    "%s: boards that share panel ID %s must each declare "
+                    "detection.touch_resolution"
+                    % (_source_name(owner),
+                       " ".join("%02X" % value for value in panel_id)))
 
     if len(descriptors) >= 3:
         for target in sorted(family_contracts):

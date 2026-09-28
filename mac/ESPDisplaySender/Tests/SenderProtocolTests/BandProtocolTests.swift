@@ -320,12 +320,13 @@ final class PanelGeometryTests: XCTestCase {
     }
 
     func testIsStreamableBoundsTheFrameAllocation() {
-        // Band bounds cap legacy geometries, while the one admitted ETL1
-        // target is the known 720x720 profile. Search the combined admission
-        // edge so a future broadening is deliberate.
+        // Band bounds cap legacy geometries, while the admitted ETL1 targets
+        // are the catalog's large panels: 720x720 (4B, 4C) and 800x800 (3.4C).
+        // Search the combined admission edge so a future broadening is
+        // deliberate.
         var largest = (bytes: 0, width: 0, height: 0)
-        for width in 1...800 {
-            for height in 1...800 {
+        for width in 1...1024 {
+            for height in 1...1024 {
                 let geometry = PanelGeometry(width: width, height: height)
                 guard geometry.isStreamable, geometry.frameBytes > largest.bytes else {
                     continue
@@ -333,10 +334,10 @@ final class PanelGeometryTests: XCTestCase {
                 largest = (geometry.frameBytes, width, height)
             }
         }
-        XCTAssertEqual(largest.bytes, 720 * 720 * 2,
+        XCTAssertEqual(largest.bytes, 800 * 800 * 2,
                        "the biggest streamable frame")
-        XCTAssertEqual([largest.width, largest.height], [720, 720])
-        XCTAssertLessThan(largest.bytes, 1_048_576, "still under a megabyte")
+        XCTAssertEqual([largest.width, largest.height], [800, 800])
+        XCTAssertLessThan(largest.bytes, 1_310_720, "still under 1.25 MiB")
     }
 }
 

@@ -61,7 +61,8 @@ bool tileStreamEnabled() {
 
 bool largeTileStreamEnabled() {
   return bcfg->variant == board::Variant::P4_4B ||
-         bcfg->variant == board::Variant::P4_4C;
+         bcfg->variant == board::Variant::P4_4C ||
+         bcfg->variant == board::Variant::P4_34C;
 }
 
 // Whether the touch controller came up. Not simply "is this the Touch board":

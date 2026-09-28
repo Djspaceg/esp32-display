@@ -372,6 +372,8 @@ void setup() {
       ? touchmap::GT911_ON_ST7703_4B
       : variant == board::Variant::P4_4C
       ? touchmap::GT911_ON_JD9365_4C
+      : variant == board::Variant::P4_34C
+      ? touchmap::GT911_ON_JD9365_34C
       : variant == board::Variant::AmoledCo5300
       ? touchmap::CST9217_ON_CO5300
       : variant == board::Variant::LcdSt77916

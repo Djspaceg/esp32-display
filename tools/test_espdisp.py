@@ -4089,7 +4089,7 @@ def test_board_descriptor_validator():
         },
         "schema requires every descriptor section",
     )
-    check_equal(len(descriptors), 12, "all current boards have descriptors")
+    check_equal(len(descriptors), 13, "all current boards have descriptors")
     check_equal(
         sorted(
             descriptor["identity"]["profile"]
@@ -4550,16 +4550,29 @@ def test_board_descriptor_validator():
         "must bound at least one side",
         "a sense guard that accepts every reading is refused",
     )
-    # P4 panel-ID detection: the 4C names its JD9365's exact ID, the 4B takes
-    # any other answering panel, and the rules keep that pair unambiguous.
+    # P4 panel-ID detection: every carrier names its controller's exact ID
+    # (the 4B's ST7703 38 21 1F and the XC carrier's JD9365 93 65 04, both
+    # measured), and the 4C and 3.4C, which share that JD9365, add the GT9271
+    # config resolution. dsi_panel_id_other stays available as a kind and is
+    # exercised below through a fixture.
     p4_4b = next(
         item for item in descriptors if item["key"] == "p4-wifi6-touch-lcd-4b")
     p4_4c = next(
         item for item in descriptors if item["key"] == "p4-wifi6-touch-lcd-4c")
     check_equal(board_descriptor.detection_panel_id(p4_4c), (0x93, 0x65, 0x04),
                 "the 4C requires the JD9365 ID measured on the attached board")
-    check_equal(board_descriptor.detection_panel_id(p4_4b), (),
-                "the 4B names no ID; it takes any other answering panel")
+    check_equal(board_descriptor.detection_panel_id(p4_4b), (0x38, 0x21, 0x1F),
+                "the 4B requires the ST7703 ID measured on a real 4B")
+    p4_34c = next(
+        item for item in descriptors if item["key"] == "p4-wifi6-touch-lcd-34c")
+    check_equal(board_descriptor.detection_panel_id(p4_34c), (0x93, 0x65, 0x04),
+                "the 3.4C shares the 4C's JD9365 ID")
+    check_equal(board_descriptor.detection_touch_resolution(p4_4c), (720, 720),
+                "the 4C requires its GT9271's 720x720 config (measured)")
+    check_equal(board_descriptor.detection_touch_resolution(p4_34c), (800, 800),
+                "the 3.4C requires an 800x800 touch config")
+    check_equal(board_descriptor.detection_touch_resolution(p4_4b), (),
+                "the 4B does not consult its touch controller")
     check_equal(p4_4c["detection"]["resolution"], "exactly_one",
                 "P4 panel-ID detection requires exactly one candidate")
 
@@ -4576,15 +4589,18 @@ def test_board_descriptor_validator():
         fixture["detection"]["order"] = order
         return fixture
 
+    catch_all = copy.deepcopy(p4_4b)
+    catch_all["detection"]["kind"] = "dsi_panel_id_other"
+    catch_all["detection"].pop("panel_id")
     same_id = p4_fixture(p4_4c, "same-id", 250, 250)
     check_descriptor_fails(
         [p4_4b, p4_4c, same_id],
         "duplicate probe signature",
         "two P4 boards cannot claim one panel ID",
     )
-    second_other = p4_fixture(p4_4b, "second-other", 250, 250)
+    second_other = p4_fixture(catch_all, "second-other", 250, 250)
     check_descriptor_fails(
-        [p4_4b, p4_4c, second_other],
+        [catch_all, p4_4c, second_other],
         "already has a dsi_panel_id_other",
         "a family allows one catch-all panel-ID candidate",
     )
@@ -4597,7 +4613,7 @@ def test_board_descriptor_validator():
     check_descriptor_fails(
         [blank_id], "all 0x00 or all 0xFF",
         "an absent panel's read cannot be a board's ID")
-    unguarded = copy.deepcopy(p4_4b)
+    unguarded = copy.deepcopy(catch_all)
     for field in ("sense_pin", "sense_min_mv", "sense_max_mv"):
         unguarded["detection"].pop(field, None)
     check_descriptor_fails(
@@ -4617,7 +4633,7 @@ def test_board_descriptor_validator():
                 "the 4B requires its GPIO52 MDIO pull-up to read high")
     check_equal(board_descriptor.detection_sense(p4_4c), (52, 0, 1650),
                 "the 4C requires its floating GPIO52 to read low")
-    other_with_id = copy.deepcopy(p4_4b)
+    other_with_id = copy.deepcopy(catch_all)
     other_with_id["detection"]["panel_id"] = [0x38, 0x21, 0x1F]
     check_descriptor_fails(
         [other_with_id], "must not declare detection.panel_id",
@@ -4658,6 +4674,7 @@ def test_board_descriptor_validator():
         "one DSI ID read must serve every P4 candidate",
     )
     mixed = p4_fixture(p4_4b, "mixed-always", 250, 250)
+    mixed["detection"].pop("panel_id")
     mixed["detection"].update(kind="always", reset_pin=-1, reset_low_ms=0,
                               reset_release_wait_ms=0)
     check_descriptor_fails(
@@ -4665,6 +4682,67 @@ def test_board_descriptor_validator():
         "mixes panel-ID detection",
         "an always-match P4 board would tie with every panel-ID board",
     )
+    # The touch-config guard: equal to the glass, on the board's own GT9xx,
+    # at most two addresses, one shared touch bus per family, P4 only.
+    wrong_glass = copy.deepcopy(p4_4c)
+    wrong_glass["detection"]["touch_resolution"] = [800, 800]
+    check_descriptor_fails(
+        [wrong_glass], "must equal the panel's width x height",
+        "a touch-config guard must name the board's own glass")
+    malformed = copy.deepcopy(p4_4c)
+    malformed["detection"]["touch_resolution"] = [720]
+    check_descriptor_fails(
+        [malformed], "must be [width, height]",
+        "a touch-config guard is a width and a height")
+    no_gt = copy.deepcopy(p4_4c)
+    no_gt["touch"]["controller"] = "cst816"
+    check_descriptor_fails(
+        [no_gt], "requires a gt911 touch controller",
+        "only a GT9xx stores a config resolution")
+    three_addresses = copy.deepcopy(p4_4c)
+    three_addresses["touch"]["addresses"] = [0x5D, 0x14, 0x28]
+    check_descriptor_fails(
+        [three_addresses], "at most two addresses",
+        "the touch-config read tries at most two addresses")
+    other_bus = p4_fixture(p4_4c, "other-bus", 250, 250)
+    other_bus["detection"]["panel_id"] = [0x11, 0x22, 0x33]
+    other_bus["touch"]["sda"] = 9
+    check_descriptor_fails(
+        [p4_4b, p4_4c, other_bus],
+        "touch-config detection bus or addresses differ",
+        "one touch-config read must serve every P4 candidate")
+    s3_touch = copy.deepcopy(s3_base)
+    s3_touch["detection"]["touch_resolution"] = [240, 240]
+    check_descriptor_fails(
+        [s3_touch], "only supported on p4",
+        "touch-config detection is P4 only")
+    check_accepts(
+        lambda: board_descriptor.validate_descriptors([p4_4b, p4_4c, p4_34c]),
+        "the 4C and 3.4C share a panel ID but not a touch resolution",
+    )
+    unguarded_xc = copy.deepcopy(p4_4c)
+    unguarded_xc["detection"].pop("touch_resolution")
+    check_descriptor_fails(
+        [p4_4b, unguarded_xc, p4_34c],
+        "share panel ID",
+        "boards sharing a panel ID must each name a touch resolution")
+    frame_pipeline = open(os.path.join(
+        espdisp.REPO_ROOT, "firmware", "display_stream", "frame_pipeline.cpp"),
+        encoding="utf-8").read()
+    match = re.search(r"LARGE_MAX_WIDTH = (\d+);", frame_pipeline)
+    check(match is not None, "frame_pipeline declares LARGE_MAX_WIDTH")
+    if match:
+        check(int(match.group(1)) >= max(
+            item["panel"]["width"] for item in descriptors
+            if item["identity"]["target"] == "p4"),
+            "the large-tile scratch rows fit the widest P4 panel")
+    same_glass = p4_fixture(p4_34c, "same-glass", 250, 250)
+    same_glass["detection"]["touch_resolution"] = [720, 720]
+    same_glass["panel"] = copy.deepcopy(p4_4c["panel"])
+    check_descriptor_fails(
+        [p4_4b, p4_4c, same_glass],
+        "duplicate probe signature",
+        "two XC boards cannot claim the same touch resolution")
 
     by_key = {item["key"]: item for item in descriptors}
     check_equal(
@@ -4717,8 +4795,9 @@ def test_universal_family_catalog_and_cli():
         ("gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300",
          "st77916", "gc9a01-knob-128"),
         "S3 maps all runtime profiles into one family")
-    check_equal(espdisp.FAMILIES["p4"].profiles, ("st7703-4b", "jd9365-4c"),
-                "P4 maps both runtime-detected carriers into one family")
+    check_equal(espdisp.FAMILIES["p4"].profiles,
+                ("st7703-4b", "jd9365-4c", "jd9365-34c"),
+                "P4 maps its three runtime-detected carriers into one family")
     check(not espdisp.FAMILIES["c3"].requires_doom_wad,
           "C3 explicitly prohibits the Doom WAD payload")
     check(not espdisp.FAMILIES["c6"].requires_doom_wad,
@@ -4732,7 +4811,7 @@ def test_universal_family_catalog_and_cli():
     check_equal(espdisp.BUILD_TARGETS["p4-4b"].platform, "p4",
                 "the P4 build target references the reusable P4 platform")
     check_equal(espdisp.BUILD_TARGETS["p4-4b"].required_profiles,
-                ("st7703-4b", "jd9365-4c"),
+                ("st7703-4b", "jd9365-4c", "jd9365-34c"),
                 "P4 USB writes still require naming one of its carriers")
     check_equal(espdisp.BUILD_TARGETS["p4-4b"].fqbn_options,
                 ("UploadSpeed=460800",),
@@ -5208,20 +5287,20 @@ def test_family_resolution_and_discovery():
     # The image detects its carrier, but it still drives the DSI PHY and
     # panel reset of any P4 it lands on, so the operator names a carrier.
     check_fails(lambda: espdisp.resolve_family("p4", blank),
-                "--profile st7703-4b|jd9365-4c",
+                "--profile st7703-4b|jd9365-4c|jd9365-34c",
                 "explicit P4 family still requires carrier evidence")
     check_fails(lambda: espdisp.resolve_family(None, known_p4),
-                "--profile st7703-4b|jd9365-4c",
+                "--profile st7703-4b|jd9365-4c|jd9365-34c",
                 "enumerated P4 chip does not select a carrier by itself")
     check_fails(lambda: espdisp.resolve_family("p4", blank, "co5300"),
-                "--profile st7703-4b|jd9365-4c",
+                "--profile st7703-4b|jd9365-4c|jd9365-34c",
                 "a profile from another family is refused for P4")
     check_fails(lambda: espdisp.resolve_family("c6", known), "contradicts",
                 "explicit family contradiction")
     with unittest.mock.patch.object(espdisp, "probe_chip", return_value="esp32p4"), \
          unittest.mock.patch("sys.stdout", io.StringIO()):
         check_fails(lambda: espdisp.resolve_family(None, blank),
-                    "--profile st7703-4b|jd9365-4c",
+                    "--profile st7703-4b|jd9365-4c|jd9365-34c",
                     "P4 chip identity alone cannot select the P4 image")
         check_equal(
             espdisp.resolve_family(None, blank, "st7703-4b").key, "p4",
@@ -7440,8 +7519,9 @@ def test_bootstrap_refusals_and_color_controls():
     check_equal(selected["key"], "p4-wifi6-touch-lcd-4c",
                 "an operator names the P4 carrier bootstrap cannot detect")
     check_equal(sorted(item["key"] for item in safe),
-                ["p4-wifi6-touch-lcd-4b", "p4-wifi6-touch-lcd-4c"],
-                "both P4 carriers stay in the drive safety set")
+                ["p4-wifi6-touch-lcd-34c", "p4-wifi6-touch-lcd-4b",
+                 "p4-wifi6-touch-lcd-4c"],
+                "every P4 carrier stays in the drive safety set")
 
     c6 = [
         item for item in candidates
@@ -7672,6 +7752,11 @@ int main() {
   const char *badEdges[] = {"x=2147483647", "y=10"};
   PanelEdgesArgs edges = {};
   if (parsePanelEdgesArgs(badEdges, 2, 172, 320, edges)) return 13;
+  // The P4 bootstrap drives both of its MIPI-DSI panel controllers.
+  if (!dsiPanelDriverSupported("st7703")) return 14;
+  if (!dsiPanelDriverSupported("jd9365")) return 15;
+  if (dsiPanelDriverSupported("st7789")) return 16;
+  if (dsiPanelDriverSupported(nullptr)) return 17;
   return 0;
 }
 ''')
@@ -8326,6 +8411,33 @@ def test_rescue_usb_identity_real_names():
                 "location 0x00100000 does not claim a port under 0x131220")
 
 
+def test_rescue_carrier_guard():
+    # rescue takes flash's carrier guard: a P4 image drives the DSI PHY and
+    # panel reset of whatever P4 it lands on, so nothing is loaded or spawned
+    # until one of the family's carriers is named.
+    parser = espdisp.build_parser()
+    args = parser.parse_args(["rescue", "--family", "p4", "--profile", "jd9365-4c"])
+    check_equal(args.profile, "jd9365-4c", "rescue accepts a carrier profile")
+    touched = []
+    with unittest.mock.patch.object(
+            espdisp, "load_rescue_images",
+            side_effect=lambda family: touched.append(family.key) or []):
+        check_fails(
+            lambda: espdisp.cmd_rescue(parser.parse_args(["rescue", "--family", "p4"])),
+            "--profile st7703-4b|jd9365-4c|jd9365-34c",
+            "P4 rescue refuses to start without a named carrier")
+        check_fails(
+            lambda: espdisp.cmd_rescue(parser.parse_args(
+                ["rescue", "--family", "p4", "--profile", "co5300"])),
+            "--profile st7703-4b|jd9365-4c|jd9365-34c",
+            "P4 rescue refuses another family's profile")
+    check_equal(touched, [], "a refused rescue loads no image")
+    check("st7703-4b" in espdisp.rescue_flash_hint(espdisp.FAMILIES["p4"], "/dev/x"),
+          "the closing hint names the P4 carriers")
+    check("--profile" not in espdisp.rescue_flash_hint(espdisp.FAMILIES["s3"], "/dev/x"),
+          "families without a carrier guard get no --profile in the hint")
+
+
 def test_rescue_override_warning():
     try:
         warning = espdisp.rescue_override_warning(
@@ -8553,6 +8665,7 @@ def main():
     test_rescue_late_connection_and_identity()
     test_rescue_usb_identity()
     test_rescue_usb_identity_real_names()
+    test_rescue_carrier_guard()
     test_rescue_override_warning()
 
     if failures:

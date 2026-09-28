@@ -95,10 +95,11 @@ public struct PanelGeometry: Hashable, Sendable {
 
     /// ETL1 can carry up to a 4096-tile grid with 16-bit tile indices.
     public var isLargeTileStreamable: Bool {
-        // ETL1 is capability-gated, but mDNS metadata arrives before EINF. Keep
-        // the admission edge exact until another large panel target is added,
-        // so a hostile arbitrary resolution cannot expand frame allocation.
-        width == 720 && height == 720
+        // ETL1 is capability-gated, but mDNS metadata arrives before EINF. The
+        // admission edge stays exact - only the large panels the board
+        // descriptors declare (720x720 and 800x800 today) - so a hostile
+        // arbitrary resolution cannot expand frame allocation.
+        GeneratedBoardCatalog.largeTileGeometries.contains(self)
     }
 
     /// Whether at least one negotiated frame transport can carry this panel.

@@ -163,7 +163,7 @@ int main() {
       }
       ++profiles;
     }
-    CHECK(profiles == 12);
+    CHECK(profiles == 13);
 
     board::Config onUsb = board::CONFIG_TOUCH_ST7789;
     onUsb.pinSclk = 19;
@@ -285,6 +285,20 @@ int main() {
       }
       CHECK(!rescuemodel::planPins(cfg).uartBridge);
     }
+  }
+
+  // --- An unresolved board's backlight-off never touches a USB pad ---------
+  {
+    for (const Platform platform :
+         {Platform::Esp32C3, Platform::Esp32C6, Platform::Esp32S3,
+          Platform::Esp32P4}) {
+      const board::UnresolvedBacklight backlight =
+          board::unresolvedBacklight(platform);
+      if (!backlight.valid) continue;
+      CHECK(!rescuemodel::isUsbPin(platform, backlight.pinBl));
+      CHECK(!rescuemodel::isUsbPin(platform, backlight.pinBlEnable));
+    }
+    CHECK(board::unresolvedBacklight(Platform::Esp32P4).valid);
   }
 
   // --- A stored CFGBOARD override is reported the way the stream applies it -

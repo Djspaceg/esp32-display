@@ -482,6 +482,9 @@ enum UsbRescuer {
         var identity: WifiConfigUI.USBIdentity
         /// The profile a stored CFGBOARD override forces, if any.
         var storedOverride: String?
+        /// The carrier the user named before the rescue image was written, for
+        /// a family that needs one (P4); nil otherwise.
+        var carrier: String? = nil
     }
 
     /// Ask the freshly rescued board, on that port only, what it is.

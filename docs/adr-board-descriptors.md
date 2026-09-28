@@ -146,6 +146,14 @@ with the pull-down enabled, reported as 0 or 3300 mV. The 4B guards on GPIO52
 reading high (its PHY's MDIO pull-up), the 4C on it reading low. A failed or
 timed-out read is no evidence.
 
+Amended again when the 3.4C joined. It shares the 4C's PCB and JD9365, so a
+candidate may also declare `detection.touch_resolution = [width, height]`: the
+resolution its GT9xx stores in config register `0x8048`, read passively over
+the touch bus before the panel is touched. The validator requires it to equal
+the panel's width and height, a gt911 touch controller with its bus and at most
+two addresses, and one shared touch bus per family. Every P4 candidate now uses
+`dsi_panel_id` with an exact ID: the 4B `38 21 1F`, measured on a real 4B.
+
 ### Persisted override precedence
 
 Descriptors provide hardware and behavior defaults. Persisted user settings

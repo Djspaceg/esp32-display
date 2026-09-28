@@ -23,6 +23,23 @@ static constexpr GeneratedBoardIdentity GENERATED_BOARD_IDENTITIES[] = {
     {Variant::LcdSt7789_190, Platform::Esp32S3, "s3", "esp32s3", "st7789-190", "universal-8m-doom-ota"},
     {Variant::ElecrowKnob128, Platform::Esp32S3, "s3", "esp32s3", "gc9a01-knob-128", "universal-8m-doom-ota"},
     {Variant::P4_4C, Platform::Esp32P4, "p4", "esp32p4", "jd9365-4c", "p4-32m-ota"},
+    {Variant::P4_34C, Platform::Esp32P4, "p4", "esp32p4", "jd9365-34c", "p4-32m-ota"},
+};
+
+static constexpr GeneratedBoardIdentity GENERATED_BOARD_IDENTITIES_BY_CATALOG[] = {
+    {Variant::C3_2424S012, Platform::Esp32C3, "c3", "esp32c3", "gc9a01a-240", "c3-4m-ota"},
+    {Variant::LcdSt7789, Platform::Esp32C6, "c6", "esp32c6", "st7789", "default-8m"},
+    {Variant::TouchJd9853, Platform::Esp32C6, "c6", "esp32c6", "jd9853", "default-8m"},
+    {Variant::P4_4B, Platform::Esp32P4, "p4", "esp32p4", "st7703-4b", "p4-32m-ota"},
+    {Variant::P4_4C, Platform::Esp32P4, "p4", "esp32p4", "jd9365-4c", "p4-32m-ota"},
+    {Variant::P4_34C, Platform::Esp32P4, "p4", "esp32p4", "jd9365-34c", "p4-32m-ota"},
+    {Variant::LcdGc9107, Platform::Esp32S3, "s3", "esp32s3", "gc9107", "universal-8m-doom-ota"},
+    {Variant::LcdSt7789_130, Platform::Esp32S3, "s3", "esp32s3", "st7789-130", "universal-8m-doom-ota"},
+    {Variant::TouchSt7789, Platform::Esp32S3, "s3", "esp32s3", "st7789-154", "universal-8m-doom-ota"},
+    {Variant::LcdSt7789_190, Platform::Esp32S3, "s3", "esp32s3", "st7789-190", "universal-8m-doom-ota"},
+    {Variant::AmoledCo5300, Platform::Esp32S3, "s3", "esp32s3", "co5300", "universal-8m-doom-ota"},
+    {Variant::LcdSt77916, Platform::Esp32S3, "s3", "esp32s3", "st77916", "universal-8m-doom-ota"},
+    {Variant::ElecrowKnob128, Platform::Esp32S3, "s3", "esp32s3", "gc9a01-knob-128", "universal-8m-doom-ota"},
 };
 
 inline const GeneratedBoardIdentity *generatedIdentity(Variant variant) {

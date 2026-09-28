@@ -2546,12 +2546,13 @@ int main() {
     CHECK(detected.variant == Variant::Unknown);
     CHECK(detected.matchedCandidates == 2);
 
-    // P4: no I2C probes. Each carrier needs two independent signals: the ID
-    // its MIPI-DSI panel returns to DCS 0x04, and GPIO52 read against the
+    // P4: no I2C scan. Each carrier needs independent signals that agree: the
+    // ID its MIPI-DSI panel returns to DCS 0x04, GPIO52 read against the
     // internal pull-down (the 4B's PHY pulls its MDIO line up with 1.5K; on
-    // the 4C it is a floating header pin). The 4C's JD9365 answers 93 65 04
-    // (measured). Any disagreement between the two, or a failed read, is
-    // Unknown.
+    // the XC carrier it is a floating header pin), and on the XC carrier the
+    // resolution stored in the GT touch controller's config, which is the
+    // only thing that separates the 4C (720, measured) from the 3.4C (800).
+    // Measured: 4C JD9365 93 65 04 + GT 720x720; 4B ST7703 38 21 1F.
     const auto &p4Plan =
         board::detectionPlanForPlatform(board::Platform::Esp32P4);
     CHECK(p4Plan.probeCount == 0);
@@ -2559,15 +2560,24 @@ int main() {
     CHECK(p4Plan.senseCount == 1 && p4Plan.sensePins[0] == 52);
     CHECK(p4Plan.dsiIdProbe != nullptr);
     CHECK(p4Plan.dsiIdProbe->dataLanes == 2);
-    CHECK(p4Plan.dsiIdProbe->laneMbps == 480);  // the slower panel's rate
+    CHECK(p4Plan.dsiIdProbe->laneMbps == 480);  // the slowest panel's rate
     CHECK(p4Plan.dsiIdProbe->resetPin == 27);
     CHECK(p4Plan.dsiIdProbe->resetPin == board::CONFIG_P4_4B.pinRst &&
-          p4Plan.dsiIdProbe->resetPin == board::CONFIG_P4_4C.pinRst);
+          p4Plan.dsiIdProbe->resetPin == board::CONFIG_P4_4C.pinRst &&
+          p4Plan.dsiIdProbe->resetPin == board::CONFIG_P4_34C.pinRst);
     CHECK(p4Plan.dsiIdProbe->resetLowMs == 10 &&
           p4Plan.dsiIdProbe->resetReleaseWaitMs == 120);
     CHECK(boarddetectmodel::DSI_PANEL_ID_COMMAND == 0x04);
+    CHECK(p4Plan.touchConfigProbe != nullptr);
+    CHECK(p4Plan.touchConfigProbe->sda == 7 && p4Plan.touchConfigProbe->scl == 8);
+    CHECK(p4Plan.touchConfigProbe->addressCount == 2 &&
+          p4Plan.touchConfigProbe->addresses[0] == 0x5D &&
+          p4Plan.touchConfigProbe->addresses[1] == 0x14);
+    CHECK(boarddetectmodel::GT_CONFIG_RESOLUTION_REGISTER == 0x8048);
     CHECK(board::detectionPlanForPlatform(board::Platform::Esp32S3)
               .dsiIdProbe == nullptr);
+    CHECK(board::detectionPlanForPlatform(board::Platform::Esp32S3)
+              .touchConfigProbe == nullptr);
     CHECK(board::detectionPlanForPlatform(board::Platform::Esp32C6)
               .dsiIdProbe == nullptr);
     detected = board::detectFromEvidence(
@@ -2576,62 +2586,98 @@ int main() {
     CHECK(detected.matchedCandidates == 0);
     {
       const uint8_t jd9365[3] = {0x93, 0x65, 0x04};
-      const uint8_t st7703Like[3] = {0x38, 0x21, 0x1F};
+      const uint8_t st7703[3] = {0x38, 0x21, 0x1F};
       const uint8_t nearMiss[3] = {0x93, 0x65, 0x05};
+      const uint8_t st7703Miss[3] = {0x38, 0x21, 0x1E};
       const uint8_t zeros[3] = {0x00, 0x00, 0x00};
       const uint8_t ones[3] = {0xFF, 0xFF, 0xFF};
       const int low = 0, high = 1, unread = -1;
-      // Both signals agree.
-      CHECK(board::variantFromP4PanelId(true, jd9365, low) == Variant::P4_4C);
-      CHECK(board::variantFromP4PanelId(true, st7703Like, high) ==
+      using board::variantFromP4Evidence;
+      // All signals agree.
+      CHECK(variantFromP4Evidence(true, jd9365, low, true, 720, 720) ==
+            Variant::P4_4C);
+      CHECK(variantFromP4Evidence(true, jd9365, low, true, 800, 800) ==
+            Variant::P4_34C);
+      CHECK(variantFromP4Evidence(true, st7703, high, false, 0, 0) ==
             Variant::P4_4B);
-      // The ST7703's own ID is unmeasured, so a 4B whose panel answers
-      // blank or near-miss bytes is still the 4B on its GPIO52 pull-up.
-      CHECK(board::variantFromP4PanelId(true, zeros, high) == Variant::P4_4B);
-      CHECK(board::variantFromP4PanelId(true, ones, high) == Variant::P4_4B);
-      CHECK(board::variantFromP4PanelId(true, nearMiss, high) ==
+      // The 4B does not consult the touch controller.
+      CHECK(variantFromP4Evidence(true, st7703, high, true, 720, 720) ==
             Variant::P4_4B);
-      // Neither carrier is ever taken for the other on one signal: a 4C with
-      // a corrupted or new-revision ID, a 4B-looking ID on a floating GPIO52,
-      // and a JD9365 behind a pulled-up GPIO52 all stay Unknown.
-      CHECK(board::variantFromP4PanelId(true, nearMiss, low) ==
+      // The 4B now needs its measured ID: blank and near-miss reads are no
+      // longer the 4B on the GPIO52 pull-up alone.
+      CHECK(variantFromP4Evidence(true, zeros, high, false, 0, 0) ==
             Variant::Unknown);
-      CHECK(board::variantFromP4PanelId(true, st7703Like, low) ==
+      CHECK(variantFromP4Evidence(true, ones, high, false, 0, 0) ==
             Variant::Unknown);
-      CHECK(board::variantFromP4PanelId(true, zeros, low) == Variant::Unknown);
-      CHECK(board::variantFromP4PanelId(true, jd9365, high) ==
+      CHECK(variantFromP4Evidence(true, st7703Miss, high, false, 0, 0) ==
+            Variant::Unknown);
+      CHECK(variantFromP4Evidence(true, nearMiss, high, false, 0, 0) ==
+            Variant::Unknown);
+      // The XC carrier without a readable or known touch resolution is
+      // neither the 4C nor the 3.4C.
+      CHECK(variantFromP4Evidence(true, jd9365, low, false, 0, 0) ==
+            Variant::Unknown);
+      CHECK(variantFromP4Evidence(true, jd9365, low, true, 1024, 600) ==
+            Variant::Unknown);
+      CHECK(variantFromP4Evidence(true, jd9365, low, true, 720, 800) ==
+            Variant::Unknown);
+      // No carrier is ever taken for another on one signal.
+      CHECK(variantFromP4Evidence(true, nearMiss, low, true, 720, 720) ==
+            Variant::Unknown);
+      CHECK(variantFromP4Evidence(true, st7703, low, true, 720, 720) ==
+            Variant::Unknown);
+      CHECK(variantFromP4Evidence(true, jd9365, high, true, 720, 720) ==
+            Variant::Unknown);
+      CHECK(variantFromP4Evidence(true, jd9365, high, true, 800, 800) ==
             Variant::Unknown);
       // A failed or timed-out read, or an unread sense, is no evidence.
-      CHECK(board::variantFromP4PanelId(false, jd9365, low) ==
+      CHECK(variantFromP4Evidence(false, jd9365, low, true, 720, 720) ==
             Variant::Unknown);
-      CHECK(board::variantFromP4PanelId(false, st7703Like, high) ==
+      CHECK(variantFromP4Evidence(false, st7703, high, false, 0, 0) ==
             Variant::Unknown);
-      CHECK(board::variantFromP4PanelId(true, nullptr, high) ==
+      CHECK(variantFromP4Evidence(true, nullptr, high, false, 0, 0) ==
             Variant::Unknown);
-      CHECK(board::variantFromP4PanelId(true, jd9365, unread) ==
+      CHECK(variantFromP4Evidence(true, jd9365, unread, true, 720, 720) ==
             Variant::Unknown);
-      CHECK(board::variantFromP4PanelId(true, st7703Like, unread) ==
+      CHECK(variantFromP4Evidence(true, st7703, unread, false, 0, 0) ==
             Variant::Unknown);
-      // Exactly one candidate matches any agreeing evidence, so ExactlyOne
-      // never sees a tie between the two carriers.
+      // Exactly one candidate matches any agreeing evidence.
       const boarddetectmodel::PanelIdEvidence id4c =
           boarddetectmodel::panelIdEvidenceFromRead(true, jd9365);
       const boarddetectmodel::PanelIdEvidence id4b =
-          boarddetectmodel::panelIdEvidenceFromRead(true, st7703Like);
+          boarddetectmodel::panelIdEvidenceFromRead(true, st7703);
       const boarddetectmodel::SenseEvidence senseLow = {true, 0};
       const boarddetectmodel::SenseEvidence senseHigh = {true, 3300};
+      const boarddetectmodel::TouchConfigEvidence touch720 = {true, 720, 720};
+      const boarddetectmodel::TouchConfigEvidence touch800 = {true, 800, 800};
       CHECK(board::detectFromEvidence(board::Platform::Esp32P4,
                                       32u * 1024u * 1024u, nullptr, 0,
-                                      &senseLow, 1, &id4c)
+                                      &senseLow, 1, &id4c, &touch720)
                 .matchedCandidates == 1);
       CHECK(board::detectFromEvidence(board::Platform::Esp32P4,
                                       32u * 1024u * 1024u, nullptr, 0,
-                                      &senseHigh, 1, &id4b)
+                                      &senseLow, 1, &id4c, &touch800)
                 .matchedCandidates == 1);
       CHECK(board::detectFromEvidence(board::Platform::Esp32P4,
                                       32u * 1024u * 1024u, nullptr, 0,
-                                      &senseHigh, 1, &id4c)
+                                      &senseHigh, 1, &id4b, &touch720)
+                .matchedCandidates == 1);
+      CHECK(board::detectFromEvidence(board::Platform::Esp32P4,
+                                      32u * 1024u * 1024u, nullptr, 0,
+                                      &senseHigh, 1, &id4c, &touch720)
                 .matchedCandidates == 0);
+      // Touch-config evidence never selects a board by itself.
+      CHECK(board::detectFromEvidence(board::Platform::Esp32P4,
+                                      32u * 1024u * 1024u, nullptr, 0,
+                                      nullptr, 0, nullptr, &touch720)
+                .variant == Variant::Unknown);
+      // GT config bytes are little-endian X max then Y max.
+      const uint8_t gtConfig[4] = {0xD0, 0x02, 0xD0, 0x02};  // measured 4C
+      const boarddetectmodel::TouchConfigEvidence parsed =
+          boarddetectmodel::touchConfigEvidenceFromRead(true, gtConfig);
+      CHECK(parsed.read && parsed.width == 720 && parsed.height == 720);
+      CHECK(!boarddetectmodel::touchConfigEvidenceFromRead(false, gtConfig).read);
+      CHECK(!boarddetectmodel::touchConfigEvidenceFromRead(true, nullptr).read);
       // Panel-ID evidence never selects a board in a family without DSI
       // candidates.
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
@@ -5937,6 +5983,64 @@ int main() {
                                          board::Platform::Esp32S3));
     CHECK(board::supportsDoom(board::Variant::P4_4C));
     CHECK(!board::supportsAudio(board::Variant::P4_4C));
+
+    // The 3.4C: the 4C's XC carrier with 800x800 JD9365 glass. Vendor BSP
+    // 3.0.1 (CONFIG_BSP_LCD_TYPE_800_800_3_4_INCH) gives the same lanes,
+    // lane rate, pixel clock and porches as the 4C.
+    const board::Config &p34c = board::configFor(board::Variant::P4_34C);
+    CHECK(p34c.variant == board::Variant::P4_34C);
+    CHECK(p34c.platform == &board::PLATFORM_ESP32_P4);
+    CHECK(p34c.panel == &board::PANEL_JD9365_800X800);
+    CHECK(p34c.panel->driver == board::PanelDriver::Jd9365);
+    CHECK(p34c.panel->profile == board::PanelProfile::Jd9365_800x800);
+    CHECK(p34c.isDsi() && p34c.panel->roundDisplay);
+    CHECK(p34c.panel->width == 800 && p34c.panel->height == 800);
+    CHECK(p34c.panel->pixelClockHz == p4c.panel->pixelClockHz);
+    CHECK(p34c.panel->dsiDataLanes == 2 && p34c.panel->dsiLaneMbps == 1500);
+    CHECK(p34c.panel->hsyncPulseWidth == 20 && p34c.panel->hsyncBackPorch == 20 &&
+          p34c.panel->hsyncFrontPorch == 40);
+    CHECK(p34c.panel->vsyncPulseWidth == 4 && p34c.panel->vsyncBackPorch == 12 &&
+          p34c.panel->vsyncFrontPorch == 24);
+    for (const auto field : {&board::Config::pinRst, &board::Config::pinBl,
+                             &board::Config::pinBootButton,
+                             &board::Config::pinTouchSda,
+                             &board::Config::pinTouchScl,
+                             &board::Config::pinBlEnable}) {
+      CHECK(p34c.*field == p4c.*field);
+    }
+    CHECK(p34c.backlightInverted && p34c.touch == board::TouchController::Gt911);
+    CHECK(strcmp(board::variantToken(p34c.variant), "jd9365-34c") == 0);
+    CHECK(strcmp(board::targetToken(p34c.variant), "p4") == 0);
+    CHECK(board::variantFromName("jd9365-34c") == board::Variant::P4_34C);
+    CHECK(board::supportsDoom(board::Variant::P4_34C));
+    CHECK(!board::supportsAudio(board::Variant::P4_34C));
+
+    // Unresolved P4: every P4 carrier shares the backlight wiring, so the
+    // backlight can be driven off before the carrier is known. S3 carriers
+    // disagree, so nothing is driven there.
+    const board::UnresolvedBacklight p4Dark =
+        board::unresolvedBacklight(board::Platform::Esp32P4);
+    CHECK(p4Dark.valid);
+    CHECK(p4Dark.pinBl == 26 && p4Dark.pinBlEnable == 33 && p4Dark.inverted);
+    CHECK(!board::unresolvedBacklight(board::Platform::Esp32S3).valid);
+    CHECK(!board::unresolvedBacklight(board::Platform::Esp32C6).valid);
+
+    // The CFGBOARD hint lists this family's profiles, then auto.
+    char hint[160];
+    CHECK(board::formatProfileHint(board::Platform::Esp32P4, hint,
+                                   sizeof(hint)));
+    CHECK(strcmp(hint, "st7703-4b|jd9365-4c|jd9365-34c|auto") == 0);
+    CHECK(board::formatProfileHint(board::Platform::Esp32S3, hint,
+                                   sizeof(hint)));
+    CHECK(strcmp(hint,
+                 "gc9107|st7789-130|st7789-154|st7789-190|co5300|st77916|"
+                 "gc9a01-knob-128|auto") == 0);
+    CHECK(board::formatProfileHint(board::Platform::Esp32C6, hint,
+                                   sizeof(hint)));
+    CHECK(strcmp(hint, "st7789|jd9853|auto") == 0);
+    char tiny[8];
+    CHECK(!board::formatProfileHint(board::Platform::Esp32P4, tiny,
+                                    sizeof(tiny)));
     // Doom ships on every board that can run it. The single-core C3 and the
     // C6 pair deliberately omit it; any S3 or P4 variant asserting false here
     // means a descriptor lost its capability flag.

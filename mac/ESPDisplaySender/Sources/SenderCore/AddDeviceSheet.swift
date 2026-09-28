@@ -203,10 +203,10 @@ struct AddDeviceSheet: View {
         } footer: {
             Text("The chip is read from the board. The C6 and S3 families each "
                 + "ship one universal image that serves every display in the "
-                + "family, so the chip picks it on its own. A P4 board shows its "
-                + "bundled image too, but its exact display target must be "
-                + "confirmed - from what the board reports or by choosing it - "
-                + "before anything is written.")
+                + "family, so the chip picks it on its own. A P4 image drives the "
+                + "display pins of whatever P4 it lands on, so its board must be "
+                + "known - from what the board reports or by choosing it - "
+                + "before its image is offered.")
         }
     }
 

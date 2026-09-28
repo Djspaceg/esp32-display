@@ -318,6 +318,41 @@ inline board::Variant probeS3(bool verbose = true,
 }
 
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
+/// Read the GT9xx's stored config resolution (register 0x8048: X max, Y max,
+/// u16 little-endian) at whichever planned address answers. Read-only; the
+/// bus is ended and its pins handed back as plain inputs.
+inline boarddetectmodel::TouchConfigEvidence collectTouchConfig(
+    const boarddetectmodel::TouchConfigProbePlan &plan, bool verbose) {
+  boarddetectmodel::TouchConfigEvidence evidence;
+  if (!Wire.begin(plan.sda, plan.scl, 100000)) {
+    if (verbose) Serial.println("board: P4 touch config bus would not start");
+    return evidence;
+  }
+  const uint16_t reg = boarddetectmodel::GT_CONFIG_RESOLUTION_REGISTER;
+  for (uint8_t i = 0; i < plan.addressCount && !evidence.read; ++i) {
+    const uint8_t address = plan.addresses[i];
+    Wire.beginTransmission(address);
+    Wire.write((uint8_t)(reg >> 8));
+    Wire.write((uint8_t)reg);
+    if (Wire.endTransmission(false) != 0) continue;
+    uint8_t bytes[4] = {0, 0, 0, 0};
+    if (Wire.requestFrom(address, (size_t)4) != 4) continue;
+    for (uint8_t b = 0; b < 4; ++b) bytes[b] = (uint8_t)Wire.read();
+    evidence = boarddetectmodel::touchConfigEvidenceFromRead(true, bytes);
+    if (verbose) {
+      Serial.printf("board: P4 touch config at 0x%02X: %ux%u\n", address,
+                    (unsigned)evidence.width, (unsigned)evidence.height);
+    }
+  }
+  Wire.end();
+  pinMode(plan.sda, INPUT);
+  pinMode(plan.scl, INPUT);
+  if (!evidence.read && verbose) {
+    Serial.println("board: P4 touch config unread (no GT9xx answered)");
+  }
+  return evidence;
+}
+
 inline board::Variant probeP4(bool verbose = true,
                               int *outCandidateCount = nullptr) {
   const auto &plan =
@@ -329,6 +364,10 @@ inline board::Variant probeP4(bool verbose = true,
                  : 1] = {};
   for (uint8_t i = 0; i < plan.senseCount; ++i) {
     senses[i] = collectSense(plan.sensePins[i], verbose);
+  }
+  boarddetectmodel::TouchConfigEvidence touchConfig;
+  if (plan.touchConfigProbe != nullptr) {
+    touchConfig = collectTouchConfig(*plan.touchConfigProbe, verbose);
   }
   boarddetectmodel::PanelIdEvidence panelId;
   if (plan.dsiIdProbe != nullptr) {
@@ -346,7 +385,7 @@ inline board::Variant probeP4(bool verbose = true,
   }
   const board::DetectionResult result = board::detectFromEvidence(
       board::Platform::Esp32P4, ESP.getFlashChipSize(), nullptr, 0, senses,
-      plan.senseCount, &panelId);
+      plan.senseCount, &panelId, &touchConfig);
   if (outCandidateCount != nullptr) {
     *outCandidateCount = result.matchedCandidates;
   }
@@ -363,6 +402,29 @@ inline board::Variant probeP4(bool verbose = true,
   return result.variant;
 }
 #endif
+
+/// When detection resolved no carrier, turn the backlight off if every
+/// carrier of this family wires it the same way (P4: BL_EN GPIO33 low and
+/// the inverted PWM line GPIO26 high). Otherwise nothing is driven, because
+/// a pin that is a backlight on one carrier may be something else on another.
+inline bool darkenUnresolvedBacklight(board::Platform platform,
+                                      bool verbose = true) {
+  const board::UnresolvedBacklight backlight =
+      board::unresolvedBacklight(platform);
+  if (!backlight.valid) return false;
+  if (backlight.pinBlEnable != board::NO_PIN) {
+    pinMode(backlight.pinBlEnable, OUTPUT);
+    digitalWrite(backlight.pinBlEnable, LOW);
+  }
+  pinMode(backlight.pinBl, OUTPUT);
+  digitalWrite(backlight.pinBl, backlight.inverted ? HIGH : LOW);
+  if (verbose) {
+    Serial.printf("board: backlight off (enable GPIO%d low, PWM GPIO%d %s)\n",
+                  backlight.pinBlEnable, backlight.pinBl,
+                  backlight.inverted ? "high" : "low");
+  }
+  return true;
+}
 
 inline board::Variant probe(bool verbose = true,
                             int *outFoundCount = nullptr) {

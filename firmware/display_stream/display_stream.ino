@@ -313,6 +313,7 @@ void setup() {
     }
   }
   if (boardVariant == board::Variant::Unknown) {
+    boarddetect::darkenUnresolvedBacklight(board::COMPILED_PLATFORM.platform);
     beginSerialRecovery();
     Serial.println("board: FATAL no unique compatible profile; display, network, "
                    "and streaming remain disabled");
@@ -446,6 +447,8 @@ void setup() {
       ? touchmap::GT911_ON_ST7703_4B
       : bcfg->variant == board::Variant::P4_4C
       ? touchmap::GT911_ON_JD9365_4C
+      : bcfg->variant == board::Variant::P4_34C
+      ? touchmap::GT911_ON_JD9365_34C
       : bcfg->variant == board::Variant::AmoledCo5300
       ? touchmap::CST9217_ON_CO5300
       : bcfg->variant == board::Variant::LcdSt77916

@@ -5681,8 +5681,19 @@ def report_rescue_override(
         % (os.path.basename(sys.argv[0]), port))
 
 
+def rescue_flash_hint(family: Family, port: str) -> str:
+    """The command that installs the real firmware after a rescue."""
+    required = family.build_config.required_profiles
+    profile = (" --profile %s" % "|".join(required)) if required else ""
+    return "%s flash --family %s%s --port %s" % (
+        os.path.basename(sys.argv[0]), family.key, profile, port)
+
+
 def cmd_rescue(args) -> int:
     family = FAMILIES[args.family]
+    # flash's carrier guard: a family whose image drives carrier pins (P4)
+    # gets nothing written until the operator names one of its carriers.
+    _validate_flash_profile(family, getattr(args, "profile", None))
     writes = load_rescue_images(family)
     tool = esptool_path()
     if not tool:
@@ -5709,10 +5720,7 @@ def cmd_rescue(args) -> int:
         shutil.rmtree(work, ignore_errors=True)
     say("Done. The board is running the rescue image on %s." % port)
     report_rescue_override(port, say=say)
-    required = family.build_config.required_profiles
-    profile = (" --profile %s" % "|".join(required)) if required else ""
-    say("Flash the real firmware now: %s flash --family %s%s --port %s"
-        % (os.path.basename(sys.argv[0]), family.key, profile, port))
+    say("Flash the real firmware now: %s" % rescue_flash_hint(family, port))
     return 0
 
 
@@ -6386,6 +6394,10 @@ def build_parser() -> argparse.ArgumentParser:
         "Ctrl-C. Afterwards flash the real firmware with `flash`.",
     )
     p_rescue.add_argument("--family", required=True, choices=family_choices())
+    p_rescue.add_argument(
+        "--profile", choices=sorted({profile for family in FAMILIES.values()
+                                      for profile in family.profiles}),
+        help="physical-profile evidence; required for p4 (any of its carriers)")
     p_rescue.set_defaults(func=cmd_rescue)
 
     p_rescue_build = subs.add_parser(

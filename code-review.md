@@ -172,3 +172,20 @@ pull-down and nothing else uses GPIO52 on either board; misidentification now
 needs two independent faults.
 
 No AutoSDE or CRUX: the remote is GitHub, and nothing was pushed.
+
+## Code review: P4 and 4C gap fixes (p4-4c-gaps)
+
+Scope: `git diff main...p4-4c-gaps`, one independent adversarial round on 5d97e2d. The reviewer built P4 firmware and rescue, and ran the host, Python and Swift suites, in its own scratch tree.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| F1 | High | The Mac app admitted only 720x720 for ETL1, so a 3.4C's `res=800x800` was never streamable. | Fixed (5e7c5b3): admits exactly the catalog's large-tile panels, generated from the P4 descriptors; tests for 800x800 and refused sizes. |
+| F2 | Medium | `testUpdatePreselectionFallsBackFromAChipOnlyP4USBProbe` still expected a chip-only P4 fallback. | Fixed: inverted, and it now covers a named carrier. |
+| F3 | Low-Med | `resolveFamilyForUpdate` had no carrier guard; the Add Display footer promised a chip-only P4 image. | Fixed: same guard; footer reworded. |
+| F4 | Low | The validator accepted two boards sharing a panel ID with only one naming a touch resolution. | Fixed: all boards sharing an ID must declare one; test added. |
+| F5 | Low | The exact 4B ID and the touch-config read rest on one 4B unit and no 4B run of the new read. | Accepted; residual in DECISIONS.md. |
+| F6 | Low | 3.4C = 800x800 is an inference from the vendor driver. | Accepted; a mismatch leaves the board Unknown (safe); residual. |
+| F7 | Low | No test tied LARGE_MAX_WIDTH to the catalog. | Fixed: Python test. |
+| Info | - | Rescue hint lists all carriers; bootstrap picks glass by width; EINF log may once pair a stale IP and port; backlight helper also reaches C3. | Left as is: harmless. |
+
+Checked and not defects: the touch-config I2C read (repeated start, address order, bus handed back); JD9365 page tracking (only page-1 0x40 overridden); large-tile buffer sizes and init order; the backlight helper never touches a USB pad; `formatProfileHint` bounds under ASan; the Repair and rescue CLI guards; generator, validator and schema consistency.

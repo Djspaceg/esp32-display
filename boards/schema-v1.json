@@ -599,6 +599,13 @@
           "minItems": 3,
           "maxItems": 3,
           "items": {"type": "integer", "minimum": 0, "maximum": 255}
+        },
+        "touch_resolution": {
+          "description": "GT9xx config resolution [width, height] a p4 candidate requires, read passively from register 0x8048; must equal the panel's width and height.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "integer", "minimum": 1, "maximum": 65535}
         }
       }
     }

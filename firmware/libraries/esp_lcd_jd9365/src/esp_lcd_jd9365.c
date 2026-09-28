@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // JD9365 MIPI-DSI initialization adapted from Espressif's esp_lcd_jd9365
-// component 2.0.2, with the 720x720 panel table from Waveshare's
-// esp32_p4_wifi6_touch_lcd_xc BSP 3.0.1 (the CONFIG_BSP_LCD_TYPE_720_720_4_INCH
-// branch, which is the ESP32-P4-WIFI6-Touch-LCD-4C's glass).
+// component 2.0.2, with the panel table from Waveshare's
+// esp32_p4_wifi6_touch_lcd_xc BSP 3.0.1. The table below is the
+// CONFIG_BSP_LCD_TYPE_720_720_4_INCH branch (the 4C's glass); the
+// CONFIG_BSP_LCD_TYPE_800_800_3_4_INCH branch (the 3.4C's) is identical except
+// for page 1 register 0x40, which PAGE1_REG40 below supplies per glass.
 #include "esp_lcd_jd9365.h"
 
 #include <stdlib.h>
@@ -255,6 +257,10 @@ static const uint8_t DSI_LANE_CONFIG = 0x80;
 static const uint8_t DSI_TWO_LANES = 0x01;
 static const uint8_t COLMOD_RGB565 = 0x55;
 
+// Page 1 register 0x40: 0x04 on the 4C's glass, 0x00 on the 3.4C's.
+static const uint8_t PAGE1_REG40_4C = 0x04;
+static const uint8_t PAGE1_REG40_34C = 0x00;
+
 esp_err_t esp_lcd_new_panel_jd9365(
     esp_lcd_panel_io_handle_t io,
     const esp_lcd_panel_dev_config_t *panel_config,
@@ -266,6 +272,12 @@ esp_err_t esp_lcd_new_panel_jd9365(
       (const jd9365_vendor_config_t *)panel_config->vendor_config;
   if (!vendor->dsi_bus || !vendor->dpi_config) return ESP_ERR_INVALID_ARG;
   if (panel_config->bits_per_pixel != 16) return ESP_ERR_NOT_SUPPORTED;
+  if (vendor->glass != JD9365_GLASS_4C_720 &&
+      vendor->glass != JD9365_GLASS_34C_800) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  const uint8_t page1Reg40 = vendor->glass == JD9365_GLASS_34C_800
+                                 ? PAGE1_REG40_34C : PAGE1_REG40_4C;
 
   if (panel_config->reset_gpio_num >= 0) {
     gpio_config_t gpio = {
@@ -296,9 +308,15 @@ esp_err_t esp_lcd_new_panel_jd9365(
     err = esp_lcd_panel_io_tx_param(io, DSI_LANE_CONFIG, &DSI_TWO_LANES, 1);
   }
   if (err != ESP_OK) return err;
+  uint8_t page = PAGE_USER;
   for (size_t i = 0; i < sizeof(INIT) / sizeof(INIT[0]); ++i) {
-    err = esp_lcd_panel_io_tx_param(
-        io, INIT[i].cmd, INIT[i].data, INIT[i].length);
+    const uint8_t *data = INIT[i].data;
+    if (INIT[i].cmd == PAGE_SELECT && INIT[i].length == 1) {
+      page = INIT[i].data[0];
+    } else if (page == 0x01 && INIT[i].cmd == 0x40 && INIT[i].length == 1) {
+      data = &page1Reg40;
+    }
+    err = esp_lcd_panel_io_tx_param(io, INIT[i].cmd, data, INIT[i].length);
     if (err != ESP_OK) return err;
     if (INIT[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(INIT[i].delay_ms));
   }

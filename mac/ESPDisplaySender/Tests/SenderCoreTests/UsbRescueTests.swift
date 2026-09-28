@@ -765,6 +765,58 @@ final class UsbRescueTests: XCTestCase {
         XCTAssertNotNil(s3.selection.bundle.flashPlan(forTarget: "s3"))
     }
 
+    static func rescuedP4(carrier: String?, reported: String) -> UsbRescuer.RescuedBoard {
+        UsbRescuer.RescuedBoard(
+            port: "/dev/cu.usbmodemB", family: .named("p4")!,
+            identity: WifiConfigUI.usbIdentity(from:
+                "CFGINFO id=e8f60ae0a0e4 board=\(reported) profile=\(reported) target=p4 "
+                    + "chip=esp32p4 partition=p4-32m-ota cfgboard=auto"),
+            storedOverride: nil, carrier: carrier)
+    }
+
+    /// P4 takes the CLI's carrier guard: the user names the carrier before the
+    /// rescue image is written, and the install goes ahead only when the
+    /// rescue image's own detection agrees with that choice.
+    func testAP4InstallNeedsTheNamedCarrierToMatchTheRescuedBoard() throws {
+        let releases = try Self.releaseSet()
+        let p4 = try PanelManager.repairInstallSelection(
+            for: Self.rescuedP4(carrier: "jd9365-4c", reported: "jd9365-4c"),
+            releases: releases)
+        XCTAssertEqual(p4.canonicalTarget, "p4")
+        XCTAssertThrowsError(try PanelManager.repairInstallSelection(
+            for: Self.rescuedP4(carrier: "st7703-4b", reported: "jd9365-4c"),
+            releases: releases)
+        ) { error in
+            XCTAssertEqual(error as? PanelManager.RepairInstallError,
+                           .carrierMismatch(chosen: "st7703-4b", reported: "jd9365-4c"))
+            XCTAssertTrue(error.localizedDescription.contains("st7703-4b"))
+        }
+        XCTAssertThrowsError(try PanelManager.repairInstallSelection(
+            for: Self.rescuedP4(carrier: nil, reported: "jd9365-4c"),
+            releases: releases)
+        ) { error in
+            XCTAssertEqual(error as? PanelManager.RepairInstallError,
+                           .carrierMismatch(chosen: nil, reported: "jd9365-4c"))
+        }
+    }
+
+    @MainActor
+    func testTheP4RepairWaitsForACarrierBeforeStarting() {
+        let model = UsbRepairModel(family: .named("p4"))
+        XCTAssertTrue(model.needsCarrier)
+        XCTAssertFalse(model.canStart)
+        XCTAssertEqual(model.carrierChoices.map(\.profile),
+                       ["st7703-4b", "jd9365-4c", "jd9365-34c"])
+        model.carrier = "jd9365-4c"
+        XCTAssertTrue(model.canStart)
+        model.carrier = "co5300"
+        XCTAssertFalse(model.canStart, "a profile from another family is no choice")
+        let s3 = UsbRepairModel(family: .named("s3"))
+        XCTAssertFalse(s3.needsCarrier)
+        XCTAssertTrue(s3.canStart)
+        XCTAssertFalse(UsbRepairModel(family: nil).canStart)
+    }
+
     /// What the S3 rescue image really says when its detector finds no board:
     /// variantToken(Unknown) is "auto" and targetToken(Unknown) "unknown".
     func testAnUnidentifiedBoardIsRefusedAndSaysSo() throws {

@@ -186,6 +186,11 @@ enum BundledFirmware {
                    !accepted.contains(family) {
                     throw strictError
                 }
+                // The same carrier guard as resolveUpdate.
+                if GeneratedBoardCatalog.carrierEvidenceFamilies.contains(entry.family),
+                   Self.usable(mergedIdentity.profile) == nil {
+                    throw strictError
+                }
                 if let profile = Self.usable(mergedIdentity.profile),
                    !entry.profiles.contains(profile) {
                     throw strictError
@@ -303,7 +308,11 @@ enum BundledFirmware {
         /// strict error rather than papering over it with a fallback. USB is the
         /// sole exception for complete matching identity whose partition token
         /// differs, because that path writes the replacement table and app
-        /// together; OTA keeps the strict partition error.
+        /// together; OTA keeps the strict partition error. A family in
+        /// `GeneratedBoardCatalog.carrierEvidenceFamilies` (P4) never falls
+        /// back on its chip alone: its image drives the DSI PHY and panel
+        /// reset of whatever board it lands on, so, as `espdisp.py flash`
+        /// requires `--profile`, one of its carriers must be named or reported.
         func resolveUpdate(
             family: String?, chip: String?, profile: String?, partition: String?,
             transport: UpdateTransport
@@ -320,6 +329,10 @@ enum BundledFirmware {
                 else { throw strictError }
                 let entry = selection.catalogEntry
                 if let family = Self.usable(family), !accepted.contains(family) {
+                    throw strictError
+                }
+                if GeneratedBoardCatalog.carrierEvidenceFamilies.contains(entry.family),
+                   Self.usable(profile) == nil {
                     throw strictError
                 }
                 if let profile = Self.usable(profile),

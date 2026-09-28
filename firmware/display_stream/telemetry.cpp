@@ -122,6 +122,21 @@ void sendDeviceInfo() {
       currentBrightness(), deviceId, cfgName.c_str(), FW_VERSION);
   if (len > 0) {
     sendToSender(packet, len);
+    // One serial line whenever EINF starts going to a different sender, so
+    // a USB log can show which host the panel is answering without printing
+    // every two-second heartbeat. hbIp holds the first octet in its low byte.
+    static uint32_t loggedIp = 0;
+    static uint16_t loggedPort = 0;
+    const uint32_t ip = hbIp;
+    const uint16_t port = hbPort;
+    if (ip != loggedIp || port != loggedPort) {
+      loggedIp = ip;
+      loggedPort = port;
+      Serial.printf("net: EINF %u bytes to %u.%u.%u.%u:%u\n", (unsigned)len,
+                    (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
+                    (unsigned)((ip >> 16) & 0xFF), (unsigned)(ip >> 24),
+                    (unsigned)port);
+    }
   }
 }
 

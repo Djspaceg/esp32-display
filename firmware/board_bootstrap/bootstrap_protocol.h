@@ -24,6 +24,14 @@ inline bool parseBoundedLong(const char *text, long minimum, long maximum,
   return true;
 }
 
+/// The PANEL_CONFIG driver= values the P4 bootstrap can bring up over
+/// MIPI-DSI: the 4B's ST7703 and the XC carrier's JD9365.
+inline bool dsiPanelDriverSupported(const char *driver) {
+  if (driver == nullptr) return false;
+  return std::strcmp(driver, "st7703") == 0 ||
+         std::strcmp(driver, "jd9365") == 0;
+}
+
 inline bool commandRequiresConfirm(const char *command) {
   if (command == nullptr) return false;
   const char *commands[] = {

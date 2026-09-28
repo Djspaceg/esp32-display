@@ -129,6 +129,13 @@ static const Calibration GT911_ON_JD9365_4C = {
     /* rawXMirrored */ false, /* rawYMirrored */ false,
     /* rotateClockwise */ true};
 
+/// The same GT9271 convention on the 3.4C's 800x800 glass (vendor BSP: swap
+/// and both mirrors off). Not yet validated on 3.4C glass.
+static const Calibration GT911_ON_JD9365_34C = {
+    /* panelShort */ 800, /* panelLong */ 800,
+    /* rawXMirrored */ false, /* rawYMirrored */ false,
+    /* rotateClockwise */ true};
+
 inline int16_t frameWidth(bool landscape, Calibration cal = AXS5106L_ON_C6) {
   return landscape ? cal.panelLong : cal.panelShort;
 }

@@ -257,6 +257,7 @@ void setup() {
                   board::CONFIG_LCD_ST7789_130.pinSerialTx);
     bridge = true;
 #endif
+    boarddetect::darkenUnresolvedBacklight(board::COMPILED_PLATFORM.platform);
     say("rescue: board not identified; no panel, serial only");
     reportOverride();
     reportIdentity();

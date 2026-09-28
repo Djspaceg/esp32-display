@@ -44,15 +44,17 @@ static constexpr FamilyDetectionPlan GENERATED_S3_DETECTION = {
     GENERATED_S3_SENSE_PINS, 1};
 
 static constexpr DsiIdProbePlan GENERATED_P4_DSI_ID_PROBE = {2, 480, 27, 10, 120};
+static constexpr TouchConfigProbePlan GENERATED_P4_TOUCH_CONFIG_PROBE = {7, 8, {0x5D, 0x14}, 2};
 static constexpr int8_t GENERATED_P4_SENSE_PINS[] = {52};
 static constexpr CandidateRule GENERATED_P4_CANDIDATES[] = {
-    {7, CandidateMatch::DsiPanelIdOther, 255, 0, 0, 0, 1650, 0},
-    {12, CandidateMatch::DsiPanelId, 255, 0, 0, 0, 0, 1650, {0x93, 0x65, 0x04}},
+    {7, CandidateMatch::DsiPanelId, 255, 0, 0, 0, 1650, 0, {0x38, 0x21, 0x1F}},
+    {12, CandidateMatch::DsiPanelId, 255, 0, 0, 0, 0, 1650, {0x93, 0x65, 0x04}, 720, 720},
+    {13, CandidateMatch::DsiPanelId, 255, 0, 0, 0, 0, 1650, {0x93, 0x65, 0x04}, 800, 800},
 };
 static constexpr FamilyDetectionPlan GENERATED_P4_DETECTION = {
     nullptr, 0, GENERATED_P4_CANDIDATES,
     sizeof(GENERATED_P4_CANDIDATES) / sizeof(GENERATED_P4_CANDIDATES[0]), ResolutionPolicy::ExactlyOne,
-    GENERATED_P4_SENSE_PINS, 1, &GENERATED_P4_DSI_ID_PROBE};
+    GENERATED_P4_SENSE_PINS, 1, &GENERATED_P4_DSI_ID_PROBE, &GENERATED_P4_TOUCH_CONFIG_PROBE};
 
 static constexpr uint8_t GENERATED_MAX_PROBE_COUNT = 5;
 static constexpr uint8_t GENERATED_MAX_SENSE_COUNT = 1;

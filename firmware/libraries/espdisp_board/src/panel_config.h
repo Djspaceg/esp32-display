@@ -30,6 +30,7 @@ enum class PanelProfile : uint8_t {
   St7789V2_240x240,
   St7789V2_170x320,
   Jd9365_720x720,
+  Jd9365_800x800,
 };
 
 struct PanelConfig {

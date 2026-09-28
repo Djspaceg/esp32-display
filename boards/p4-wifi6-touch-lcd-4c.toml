@@ -202,3 +202,6 @@ sense_pin = 52
 sense_max_mv = 1650
 # The JD9365 answers DCS 0x04 with 93 65 04, measured on the attached 4C.
 panel_id = [0x93, 0x65, 0x04]
+# The 3.4C shares this PCB and panel controller; only the GT9271's stored
+# config resolution tells the glass apart (720x720, measured on this 4C).
+touch_resolution = [720, 720]

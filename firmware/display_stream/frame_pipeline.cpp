@@ -185,6 +185,15 @@ static uint32_t tdPassUs = 0;       // whole pass, wall clock
 static uint32_t tdGateBlocked = 0;  // passes refused because DMA was busy
 #endif
 
+#if defined(ESPDISP_LARGE_TILE_STREAM)
+// The widest large-tile panel this build carries (the 3.4C's 800 px); the
+// scratch rows are sized for it and the geometry itself comes from the
+// resolved profile in initializeFramePipeline().
+static const uint16_t LARGE_MAX_WIDTH = 800;
+static largetileproto::Geometry LARGE_GEOMETRY = {0, 0};
+static largetileproto::Reassembler *largeReassembler = nullptr;
+#endif
+
 bool initializeFramePipeline() {
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   configureC3CircleStorage();
@@ -198,6 +207,16 @@ bool initializeFramePipeline() {
   }
   reassembler = new Reassembler(PANEL_GEOMETRY);
   if (reassembler == nullptr) return false;
+#if defined(ESPDISP_LARGE_TILE_STREAM)
+  if (largeTileStreamEnabled()) {
+    if (!largeGeometry.valid() || largeGeometry.width > LARGE_MAX_WIDTH) {
+      return false;
+    }
+    LARGE_GEOMETRY = largeGeometry;
+    largeReassembler = new largetileproto::Reassembler(LARGE_GEOMETRY);
+    if (largeReassembler == nullptr) return false;
+  }
+#endif
   memset(pendingDrawBitmap, 0, sizeof(pendingDrawBitmap));
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   TILE_GEOMETRY = {PANEL_GEOMETRY.width, PANEL_GEOMETRY.height};
@@ -493,13 +512,14 @@ void handleTilePacket(const uint8_t *data, size_t len) {
 
 #if defined(ESPDISP_LARGE_TILE_STREAM)
 // ---- Large tile stream (ETL1) -------------------------------------------
-static const largetileproto::Geometry LARGE_GEOMETRY = {720, 720};
-static largetileproto::Reassembler largeReassembler(LARGE_GEOMETRY);
+// LARGE_MAX_WIDTH, LARGE_GEOMETRY and largeReassembler are declared above
+// initializeFramePipeline(), which sets them.
 static uint8_t largePending[largetileproto::BITMAP_BYTES];
-static uint8_t largeScratch[720 * largetileproto::TILE_DIM * 2]
+static uint8_t largeScratch[LARGE_MAX_WIDTH * largetileproto::TILE_DIM * 2]
     __attribute__((aligned(4)));
-static uint8_t largeHalfScratch[360 * 8 * 2] __attribute__((aligned(4)));
-static uint8_t largeDrawStage[720 * largetileproto::TILE_DIM * 2]
+static uint8_t largeHalfScratch[(LARGE_MAX_WIDTH / 2) * 8 * 2]
+    __attribute__((aligned(4)));
+static uint8_t largeDrawStage[LARGE_MAX_WIDTH * largetileproto::TILE_DIM * 2]
     __attribute__((aligned(4)));
 static volatile uint32_t largeFramesCompleted = 0;
 static volatile bool largePendingLandscape = false;
@@ -518,7 +538,7 @@ static bool applyLargeRecord(const largetileproto::Header &header,
 
   tileproto::VisibleSpanPlan span = {0, 0};
   bool dropped = false;
-  const largetileproto::Action action = largeReassembler.onRecordIfValid(
+  const largetileproto::Action action = largeReassembler->onRecordIfValid(
       header, record.startTile, record.runLength, [&]() {
         const uint8_t *encoded = record.payload;
         size_t encodedLength = record.payloadLength;
@@ -619,6 +639,10 @@ static bool applyLargeRecord(const largetileproto::Header &header,
 }
 
 void handleLargeTilePacket(const uint8_t *data, size_t len) {
+  if (largeReassembler == nullptr) {
+    statBadLen++;
+    return;
+  }
   largetileproto::Header header;
   if (!largetileproto::parseHeader(data, len, header) ||
       header.dirtyTileCount == 0 ||

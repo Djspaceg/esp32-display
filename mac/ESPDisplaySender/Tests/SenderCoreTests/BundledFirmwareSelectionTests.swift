@@ -373,30 +373,28 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 partition: nil))
     }
 
-    func testUpdatePreselectionFallsBackFromAChipOnlyP4USBProbe() throws {
+    /// P4 takes the CLI's carrier guard: its image drives the DSI PHY and
+    /// panel reset of any P4 it lands on, so a chip-only probe selects nothing,
+    /// in the update selection and in the family resolution alike.
+    func testUpdatePreselectionRefusesAChipOnlyP4USBProbe() throws {
         let releases = try Self.releaseSet()
+        let live = FirmwareReleaseCatalog.Identity(
+            family: nil, chip: nil, profile: nil, partition: nil)
+        let usb = FirmwareReleaseCatalog.Identity(
+            family: nil, chip: "esp32p4", profile: nil, partition: nil)
 
-        let selected = try releases.selectForUpdate(
-            live: .init(
-                family: nil,
-                chip: nil,
-                profile: nil,
-                partition: nil),
-            usb: .init(
-                family: nil,
-                chip: "esp32p4",
-                profile: nil,
-                partition: nil),
-            transport: .usb)
+        XCTAssertThrowsError(try releases.selectForUpdate(
+            live: live, usb: usb, transport: .usb))
+        XCTAssertThrowsError(try releases.resolveFamilyForUpdate(
+            live: live, usb: usb, transport: .usb))
 
-        XCTAssertEqual(selected.selection.catalogEntry.family, "p4")
-        XCTAssertEqual(
-            selected.identity,
-            .init(
-                family: "p4",
-                chip: "esp32p4",
-                profile: nil,
-                partition: nil))
+        let named = FirmwareReleaseCatalog.Identity(
+            family: nil, chip: "esp32p4", profile: "jd9365-4c", partition: nil)
+        XCTAssertEqual(try releases.selectForUpdate(
+            live: live, usb: named, transport: .usb)
+            .selection.catalogEntry.family, "p4")
+        XCTAssertEqual(try releases.resolveFamilyForUpdate(
+            live: live, usb: named, transport: .usb).canonicalTarget, "p4")
     }
 
     func testUpdatePreselectionCanonicalizesLegacyS3FamilyAliases() throws {

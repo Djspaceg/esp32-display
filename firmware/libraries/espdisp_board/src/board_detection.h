@@ -13,6 +13,11 @@
 // candidate either names the exact ID it requires, or accepts any completed
 // read that no other candidate in the family claims; the validator requires
 // the second kind to carry a sense guard.
+//
+// A candidate may also require the resolution stored in its GT9xx touch
+// controller's config. It is the only runtime difference between two
+// carriers that share a PCB and a panel controller but not the glass (the
+// 3.4C and 4C). The register is read passively over I2C; nothing is written.
 #pragma once
 
 #include <stddef.h>
@@ -84,6 +89,9 @@ struct CandidateRule {
   uint16_t senseMaxMv = 0;
   /// The controller ID a DsiPanelId candidate requires.
   uint8_t panelId[3] = {0, 0, 0};
+  /// The GT9xx config resolution this candidate requires; 0x0 = not checked.
+  uint16_t touchWidth = 0;
+  uint16_t touchHeight = 0;
 };
 
 /// One analog sense reading, indexed like FamilyDetectionPlan::sensePins.
@@ -122,6 +130,37 @@ inline PanelIdEvidence panelIdEvidenceFromRead(bool ok, const uint8_t *id) {
   return evidence;
 }
 
+/// GT9xx config register holding X output max then Y output max, each u16
+/// little-endian, as the touch controller stores them for its glass.
+static const uint16_t GT_CONFIG_RESOLUTION_REGISTER = 0x8048;
+
+/// Where to read the touch controller's config resolution: its I2C bus and
+/// the addresses it may answer on (GT9xx picks one at reset).
+struct TouchConfigProbePlan {
+  int8_t sda;
+  int8_t scl;
+  uint8_t addresses[2];
+  uint8_t addressCount;
+};
+
+/// The config resolution a touch controller returned. Unread when no
+/// address answered or the read failed.
+struct TouchConfigEvidence {
+  bool read = false;
+  uint16_t width = 0;
+  uint16_t height = 0;
+};
+
+inline TouchConfigEvidence touchConfigEvidenceFromRead(bool ok,
+                                                       const uint8_t *bytes) {
+  TouchConfigEvidence evidence;
+  if (!ok || bytes == nullptr) return evidence;
+  evidence.read = true;
+  evidence.width = (uint16_t)(bytes[0] | (bytes[1] << 8));
+  evidence.height = (uint16_t)(bytes[2] | (bytes[3] << 8));
+  return evidence;
+}
+
 struct FamilyDetectionPlan {
   const I2cProbePlan *probes;
   uint8_t probeCount;
@@ -131,6 +170,7 @@ struct FamilyDetectionPlan {
   const int8_t *sensePins = nullptr;
   uint8_t senseCount = 0;
   const DsiIdProbePlan *dsiIdProbe = nullptr;
+  const TouchConfigProbePlan *touchConfigProbe = nullptr;
 };
 
 /// Nominal millivolts for a raw 12-bit sample at 12 dB attenuation (about
@@ -212,6 +252,16 @@ inline bool panelIdMatches(const FamilyDetectionPlan &plan,
     }
   }
   return true;
+}
+
+/// The touch-config half of a candidate: a candidate that names a resolution
+/// matches only a read that returned exactly it.
+inline bool touchConfigMatches(const CandidateRule &candidate,
+                               const TouchConfigEvidence *touch) {
+  if (candidate.touchWidth == 0 && candidate.touchHeight == 0) return true;
+  return touch != nullptr && touch->read &&
+         touch->width == candidate.touchWidth &&
+         touch->height == candidate.touchHeight;
 }
 
 struct Evaluation {
@@ -301,14 +351,16 @@ inline Evaluation evaluate(const FamilyDetectionPlan &plan,
                            size_t evidenceCount,
                            const SenseEvidence *senses = nullptr,
                            size_t senseCount = 0,
-                           const PanelIdEvidence *panelId = nullptr) {
+                           const PanelIdEvidence *panelId = nullptr,
+                           const TouchConfigEvidence *touchConfig = nullptr) {
   uint8_t selected = 0;
   uint8_t matches = 0;
   for (uint8_t i = 0; i < plan.candidateCount; ++i) {
     const CandidateRule &candidate = plan.candidates[i];
     if (!candidateMatches(candidate, flashBytes, evidence, evidenceCount) ||
         !senseMatches(candidate, senses, senseCount) ||
-        !panelIdMatches(plan, candidate, panelId)) {
+        !panelIdMatches(plan, candidate, panelId) ||
+        !touchConfigMatches(candidate, touchConfig)) {
       continue;
     }
     if (matches == 0) selected = candidate.variantValue;

@@ -12,6 +12,28 @@ final class LargeTileProtocolTests: XCTestCase {
         XCTAssertFalse(PanelGeometry(width: 720, height: 720).isBandStreamable)
     }
 
+    /// The 3.4C's 800x800 glass is too wide for a band row, so it streams only
+    /// over ETL1. The admission edge is still exact: only the catalog's own
+    /// large panels, never an arbitrary advertised size.
+    func testGeometryAdmitsExactlyTheCatalogsLargePanels() {
+        XCTAssertTrue(PanelGeometry(width: 800, height: 800).isLargeTileStreamable)
+        XCTAssertTrue(PanelGeometry(width: 800, height: 800).isStreamable)
+        XCTAssertFalse(PanelGeometry(width: 800, height: 800).isBandStreamable)
+        XCTAssertTrue(PanelGeometry(width: 720, height: 720).isLargeTileStreamable)
+        for size in [(800, 720), (720, 800), (1024, 1024), (640, 640), (799, 800)] {
+            XCTAssertFalse(
+                PanelGeometry(width: size.0, height: size.1).isLargeTileStreamable,
+                "\(size.0)x\(size.1) is not a large panel in the catalog")
+        }
+        XCTAssertEqual(ServiceMetadata.parseResolution("800x800"),
+                       PanelGeometry(width: 800, height: 800))
+        XCTAssertNil(ServiceMetadata.parseResolution("1024x1024"))
+        for geometry in GeneratedBoardCatalog.largeTileGeometries {
+            XCTAssertTrue(LargeTileGeometry(
+                width: geometry.width, height: geometry.height).isStreamable)
+        }
+    }
+
     func testHandAuthoredETL1Bytes() {
         var packet = LargeTileProtocol.header(
             frameId: 0x1234, dirtyCount: 3, landscape: true)

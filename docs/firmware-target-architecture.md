@@ -34,7 +34,7 @@ ST7703 or JD9365 timing, GT911 behavior, or carrier GPIOs.
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
 | `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-ota` |
-| `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c` | `p4-32m-ota` |
+| `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c`, `jd9365-34c` | `p4-32m-ota` |
 
 C6 probes its shared I2C bus before panel GPIO initialization. S3 uses 8 MiB
 flash identity for the GC9107 carrier and distinct I2C buses on larger-flash
@@ -48,16 +48,20 @@ compatible profile is found. Zero or multiple candidates leave display and
 networking disabled while serial `CFGBOARD` remains available as a recovery
 override.
 
-P4's 4B and 4C carriers wire identical I2C buses (GT911-family touch, ES8311,
-ES7210 on GPIO7/8), so P4 combines two other signals. First it reads GPIO52
+P4's 4B, 4C and 3.4C carriers wire identical I2C buses (GT911-family touch,
+ES8311, ES7210 on GPIO7/8), so P4 combines other signals. First it reads GPIO52
 with the pull-down enabled, input only: the 4B's IP101 PHY pulls that MDIO
-line up with 1.5K, while on the 4C it is a floating header pin. Then it powers
-the DSI PHY, brings up a command-mode DSI bus, pulses the shared panel reset
-GPIO27 and reads DCS `0x04` in a task with a one-second deadline (the SDK read
-itself never times out). The 4C needs `93 65 04` and a low GPIO52; the 4B needs
-a high GPIO52 and any other completed read, because its ST7703's ID is not yet
-measured. Any disagreement or failed read matches neither, and P4 then stays
-serial-only with `CFGBOARD` recovery exactly as an unresolved S3 does.
+line up with 1.5K, while on the XC carrier (4C and 3.4C) it is a floating
+header pin. It reads the GT9271's stored config resolution at register
+`0x8048`, read-only: the 4C and 3.4C share a PCB and a JD9365, and only that
+resolution (720x720 or 800x800) tells their glass apart. Then it powers the
+DSI PHY, brings up a command-mode DSI bus, pulses the shared panel reset GPIO27
+and reads DCS `0x04` in a task with a one-second deadline (the SDK read itself
+never times out). The 4B needs `38 21 1F` and a high GPIO52; the 4C needs
+`93 65 04`, a low GPIO52 and 720x720; the 3.4C the same with 800x800. Any
+disagreement or failed read matches neither, and P4 then switches the shared
+backlight off and stays serial-only with `CFGBOARD` recovery exactly as an
+unresolved S3 does.
 
 The S3 artifact uses the 8 MiB common-denominator dual-OTA layout and links the
 Doom easter egg, runtime-gated to the `co5300` profile. Its canonical bundle

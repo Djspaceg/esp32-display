@@ -183,10 +183,9 @@ macros = ["ESPDISP_PANEL_P4_RUNTIME", "ESPDISP_LARGE_TILE_STREAM"]
 order = 10
 resolution = "exactly_one"
 no_match = "unknown"
-# Any completed DCS 0x04 ID read that no other P4 board claims, on a carrier
-# whose GPIO52 sense reads high. The ST7703's own ID bytes are unpublished and
-# unmeasured here, so the sense guard, not the ID, identifies the 4B.
-kind = "dsi_panel_id_other"
+# The ST7703 answers DCS 0x04 with 38 21 1F, measured on a real 4B
+# (e8:f6:0a:e0:b5:5a), on a carrier whose GPIO52 sense reads high.
+kind = "dsi_panel_id"
 flash_min_exclusive = 0
 flash_max_inclusive = 0
 sda = -1
@@ -204,3 +203,4 @@ release = "never"
 # 4C it is a floating header pin. Input only.
 sense_pin = 52
 sense_min_mv = 1650
+panel_id = [0x38, 0x21, 0x1F]

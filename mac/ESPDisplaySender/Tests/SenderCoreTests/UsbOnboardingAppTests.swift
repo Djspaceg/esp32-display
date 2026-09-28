@@ -458,15 +458,31 @@ final class UsbOnboardingAppTests: XCTestCase {
             }
     }
 
-    func testAUniqueP4ChipResolvesTheBundledFamilyWithoutFullIdentity() throws {
+    /// The P4 image drives the DSI PHY and panel reset of whatever P4 it
+    /// lands on, so, like `espdisp.py flash`, a chip alone never selects it:
+    /// the carrier has to be named or reported.
+    func testAP4ChipAloneDoesNotSelectTheBundledFamily() throws {
+        let releases = try Self.bundledReleaseSet()
+
+        XCTAssertThrowsError(try releases.resolveUpdate(
+            family: nil, chip: "esp32p4", profile: nil, partition: nil,
+            transport: .usb))
+        XCTAssertThrowsError(try releases.resolveUpdate(
+            family: "p4", chip: "esp32p4", profile: nil, partition: nil,
+            transport: .usb))
+        XCTAssertTrue(GeneratedBoardCatalog.carrierEvidenceFamilies.contains("p4"))
+        XCTAssertFalse(GeneratedBoardCatalog.carrierEvidenceFamilies.contains("s3"))
+    }
+
+    func testAP4ChipWithANamedCarrierResolvesTheBundledFamily() throws {
         let releases = try Self.bundledReleaseSet()
 
         let resolution = try releases.resolveUpdate(
-            family: nil, chip: "esp32p4", profile: nil, partition: nil,
+            family: nil, chip: "esp32p4", profile: "jd9365-4c", partition: nil,
             transport: .usb)
 
         guard case .familyFallback(let selection) = resolution else {
-            return XCTFail("a P4 chip-only match should use the family fallback")
+            return XCTFail("a P4 chip with a named carrier should use the family fallback")
         }
         XCTAssertEqual(selection.catalogEntry.family, "p4")
         XCTAssertEqual(resolution.canonicalTarget, "p4")

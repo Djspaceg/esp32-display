@@ -31,8 +31,20 @@ extension PanelManager {
     /// waiting esptool opens the board.
     func rescueUSBBoard(
         family: UsbRescue.Family,
+        carrier: String? = nil,
         progress: @escaping @Sendable (UsbFlashEvent) -> Void
     ) async -> Result<UsbRescuer.RescuedBoard, WifiConfigUI.ConfigFailure> {
+        // The CLI's carrier guard: a family whose image drives carrier pins
+        // (P4) gets nothing written until one of its carriers is named.
+        if GeneratedBoardCatalog.carrierEvidenceFamilies.contains(family.key),
+           !(GeneratedBoardCatalog.expected[family.key]?.profiles ?? [])
+               .contains(carrier ?? "") {
+            return .failure(WifiConfigUI.ConfigFailure(
+                title: "Choose the board first",
+                message: "\(family.displayName) images drive the display pins of "
+                    + "whatever board they land on, so name which board this is "
+                    + "before anything is written."))
+        }
         let regions: [UsbRescue.Region]
         do {
             guard let directory = Self.rescueImageDirectory(for: family) else {
@@ -77,7 +89,7 @@ extension PanelManager {
                 let port = try await UsbRescuer.run(
                     family: family, regions: regions, io: io, onProgress: progress)
                 progress(.log(.app, "Done. The board is running the rescue image on \(port)."))
-                guard let board = await UsbRescuer.readRescuedBoard(
+                guard var board = await UsbRescuer.readRescuedBoard(
                     port: port, family: family, onProgress: progress)
                 else {
                     return .failure(WifiConfigUI.ConfigFailure(
@@ -85,6 +97,7 @@ extension PanelManager {
                         message: "The rescue firmware was written to the board on \(port), "
                             + "but it did not say which board it is on."))
                 }
+                board.carrier = carrier
                 progress(.phase(.rescue(.rescued(port: board.port))))
                 return .success(board)
             } catch let failure as WifiConfigUI.ConfigFailure {
@@ -126,13 +139,14 @@ extension PanelManager {
                     message: "The stored board override was cleared; the board was "
                         + "not read again."))
             }
-            guard let reread = await UsbRescuer.readRescuedBoard(
+            guard var reread = await UsbRescuer.readRescuedBoard(
                 port: port, family: board.family, onProgress: progress)
             else {
                 return .failure(WifiConfigUI.ConfigFailure(
                     title: "The rescue image did not answer",
                     message: "The override was cleared, but the board did not answer again."))
             }
+            reread.carrier = board.carrier
             progress(.phase(.rescue(.rescued(port: reread.port))))
             return .success(reread)
         }
@@ -146,6 +160,7 @@ extension PanelManager {
     /// Why a rescued board gets no install offer.
     enum RepairInstallError: Error, LocalizedError, Equatable {
         case boardNotIdentified(family: String, profile: String?, target: String?)
+        case carrierMismatch(chosen: String?, reported: String)
 
         var errorDescription: String? {
             switch self {
@@ -154,6 +169,14 @@ extension PanelManager {
                     + "profile \(profile ?? "none") and target \(target ?? "none")), so "
                     + "no firmware is installed. \(family) was chosen, but the chip "
                     + "family alone does not say which display this is."
+            case .carrierMismatch(let chosen, let reported):
+                guard let chosen else {
+                    return "No board was named for this chip family, so no firmware is "
+                        + "installed. The rescue image reports \(reported)."
+                }
+                return "You named \(chosen), but the rescue image reports \(reported), "
+                    + "so no firmware is installed. Check which board this is, then "
+                    + "repair it again naming that board."
             }
         }
     }
@@ -181,6 +204,14 @@ extension PanelManager {
             throw RepairInstallError.boardNotIdentified(
                 family: board.family.displayName, profile: identity.board,
                 target: identity.target)
+        }
+        // The CLI's carrier guard: a family whose image drives carrier pins
+        // installs only onto the carrier the user named, and only when the
+        // rescue image's own detection agrees.
+        if GeneratedBoardCatalog.carrierEvidenceFamilies.contains(board.family.key),
+           board.carrier != profile {
+            throw RepairInstallError.carrierMismatch(
+                chosen: board.carrier, reported: profile)
         }
         return try releases.resolveUpdate(
             family: target, chip: known(identity.chip) ?? board.family.chip,
