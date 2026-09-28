@@ -257,6 +257,10 @@ final class FrameSender {
     let radioBudget = PanelRadioBudget()
     private var _paused = false
     private var _parked = false
+    /// Between ESLP and EWAK: the Mac's displays are asleep. The periodic
+    /// repaint is skipped meanwhile, because the firmware reads any drawn
+    /// frame as the Mac being awake and relights the panel on it.
+    private var _displaysAsleep = false
     /// Genuine replies from the device: heartbeats, info, and control
     /// acknowledgements. Unlike `heartbeatAge` this is never advanced by the
     /// reconnect grace period, so it is the only sound evidence that the panel
@@ -1046,6 +1050,7 @@ final class FrameSender {
     /// backlight instead of glowing on stale pixels all night. Sent a few
     /// times because it's UDP.
     func sendDisplaySleep() {
+        lock.withLock { _displaysAsleep = true }
         sendLegacyControl("ESLP")
     }
 
@@ -1053,7 +1058,16 @@ final class FrameSender {
     /// in which case there is no frame to send and the panel would stay
     /// dark waiting for one.
     func sendDisplayWake() {
+        lock.withLock { _displaysAsleep = false }
         sendLegacyControl("EWAK")
+    }
+
+    /// Whether the periodic full repaint may run. Not while parked (nobody is
+    /// listening), paused (the user asked for no frames), or while the Mac's
+    /// displays sleep: the repaint would relight a panel that ESLP had just
+    /// darkened and hold the pre-sleep picture on it until the Mac woke.
+    var refreshAllowed: Bool {
+        lock.withLock { !_parked && !_paused && !_displaysAsleep }
     }
 
     func setBrightness(high: Bool) {
@@ -1626,7 +1640,7 @@ final class FrameSender {
         timer.schedule(deadline: .now() + refreshInterval, repeating: refreshInterval)
         timer.setEventHandler { [weak self] in
             guard let self, let frame = self.lastSentFrame else { return }
-            guard !self.parked else { return }
+            guard self.refreshAllowed else { return }
             guard Date().timeIntervalSince(self.lastSendAt) >= self.refreshInterval else {
                 return  // real frames are flowing; nothing to do
             }

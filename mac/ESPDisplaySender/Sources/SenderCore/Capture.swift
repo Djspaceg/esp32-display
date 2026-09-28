@@ -1,6 +1,7 @@
 import AppKit
 import CoreMedia
 import Foundation
+import os
 import ScreenCaptureKit
 import SenderProtocol
 
@@ -34,6 +35,12 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var _stopReason: String?
     private var _lastSampleAt = Date()
     private var _lastFrameAt: Date?
+    /// Status of the last sample, for the log line when a stall is detected.
+    private var _lastSampleStatus: SCFrameStatus?
+    /// The stream whose samples are accepted. Cleared before stopping and when
+    /// a start times out, so a stream that starts late or will not stop cannot
+    /// keep feeding frames into a session that has moved on.
+    private var _acceptedStream: ObjectIdentifier?
     private var _previewEnabled = false
     private var _configuredFPS = 30
     /// The sub-rectangle being captured, or nil for the whole source.
@@ -70,9 +77,9 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// Last time ANY sample arrived (including idle/incomplete status
-    /// frames). A healthy SCStream emits these periodically even for a
-    /// static screen, so a long silence means the stream is dead - some
-    /// deaths (sleep/wake) never fire the delegate error.
+    /// frames). Not a liveness signal: status-only samples keep it fresh on a
+    /// stream delivering no pixels, and a static screen may send nothing at
+    /// all. The stall log reports it to tell those two apart.
     var lastSampleAt: Date {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -87,6 +94,22 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _lastFrameAt
+    }
+
+    /// The last sample's frame status, e.g. "idle" or "blank", or "none".
+    var lastSampleStatusDescription: String {
+        stateLock.withLock {
+            guard let status = _lastSampleStatus else { return "none" }
+            switch status {
+            case .complete: return "complete"
+            case .idle: return "idle"
+            case .blank: return "blank"
+            case .suspended: return "suspended"
+            case .started: return "started"
+            case .stopped: return "stopped"
+            @unknown default: return "status \(status.rawValue)"
+            }
+        }
     }
 
     var landscape: Bool {
@@ -150,11 +173,90 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         return nil
     }
 
+    /// How long a ScreenCaptureKit call may take before the supervisor gives up
+    /// on it. Each normally completes in well under a second.
+    static let callDeadline: TimeInterval = 10
+
+    /// The shareable content, or an error if ScreenCaptureKit does not answer
+    /// within `callDeadline`. Every lookup goes through here: the supervisor
+    /// makes one of these every watchdog tick, and a single fetch that never
+    /// returned used to stop the watchdog for good.
+    static func shareableContent(
+        excludingDesktopWindows: Bool, onScreenWindowsOnly: Bool
+    ) async throws -> SCShareableContent {
+        // Circuit breaker: an expired call leaves its task parked inside
+        // ScreenCaptureKit, so while it stays wedged ask at most every
+        // `unresponsiveRetry` instead of leaking a task on every lookup.
+        if let expiredAt = lastExpiry.withLock({ $0 }),
+            ProcessInfo.processInfo.systemUptime - expiredAt < unresponsiveRetry
+        {
+            throw CaptureDeadlineExpired(operation: "Listing shareable content")
+        }
+        do {
+            let content = try await withCaptureDeadline(
+                callDeadline, "Listing shareable content"
+            ) {
+                try await SCShareableContent.excludingDesktopWindows(
+                    excludingDesktopWindows, onScreenWindowsOnly: onScreenWindowsOnly)
+            }
+            responsiveness.withLock { $0 = false }
+            lastExpiry.withLock { $0 = nil }
+            return content
+        } catch let error as CaptureDeadlineExpired {
+            responsiveness.withLock { $0 = true }
+            lastExpiry.withLock { $0 = ProcessInfo.processInfo.systemUptime }
+            throw error
+        }
+    }
+
+    /// How long lookups fail fast after one timed out.
+    static let unresponsiveRetry: TimeInterval = 30
+    private static let lastExpiry = OSAllocatedUnfairLock<TimeInterval?>(initialState: nil)
+
+    /// True while the last shareable-content fetch timed out. The lookups
+    /// built on it answer nil either way, and without this a wedged
+    /// ScreenCaptureKit read as "the display is not there": a calm Waiting
+    /// status, and a picker selection thrown away as gone.
+    static var isUnresponsive: Bool { responsiveness.withLock { $0 } }
+    private static let responsiveness = OSAllocatedUnfairLock(initialState: false)
+
+    /// Processes owning a normal on-screen window, or nil if ScreenCaptureKit
+    /// could not be asked. For application-only filters, which deliver nothing
+    /// while every window of the application is minimised or hidden.
+    static func onScreenWindowOwnerPIDs() async -> [pid_t]? {
+        guard let content = try? await shareableContent(
+            excludingDesktopWindows: true, onScreenWindowsOnly: true)
+        else { return nil }
+        return content.windows
+            .filter { $0.windowLayer == 0 && $0.isOnScreen }
+            .compactMap { $0.owningApplication?.processID }
+    }
+
+    /// Whether this login session is off the console or its screen is locked.
+    /// Either way capture legitimately delivers nothing, so the stall monitor
+    /// holds rather than reporting a failure.
+    static func sessionIsInactive() -> Bool {
+        guard let info = CGSessionCopyCurrentDictionary() as? [String: Any] else {
+            return false
+        }
+        let onConsole = info[kCGSessionOnConsoleKey as String] as? Bool ?? true
+        let locked = info["CGSSessionScreenIsLocked"] as? Bool ?? false
+        return !onConsole || locked
+    }
+
+    /// Whether a display is asleep. A slept display legitimately delivers no
+    /// frames, so the stall monitor holds rather than restarting into it. Nil
+    /// means the source is not one display (a window, a picker selection), and
+    /// the main display stands in for it.
+    static func isAsleep(_ displayID: CGDirectDisplayID?) -> Bool {
+        CGDisplayIsAsleep(displayID ?? CGMainDisplayID()) != 0
+    }
+
     /// Displays ScreenCaptureKit can capture, with names and pixel sizes
     /// (what --list-displays prints).
     static func listDisplays() async throws -> [(id: CGDirectDisplayID, name: String, width: Int, height: Int)] {
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            false, onScreenWindowsOnly: false)
+        let content = try await shareableContent(
+            excludingDesktopWindows: false, onScreenWindowsOnly: false)
         return content.displays.map { d in
             (id: d.displayID, name: name(for: d.displayID) ?? "(unnamed)",
              width: d.width, height: d.height)
@@ -170,8 +272,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// user input, not to a display reconfiguration, so NSScreen is already
     /// current and re-entering the run loop would only risk reentrancy.
     static func capturableDisplays() async -> [(display: SCDisplay, name: String)] {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(
-            false, onScreenWindowsOnly: false)
+        guard let content = try? await shareableContent(
+            excludingDesktopWindows: false, onScreenWindowsOnly: false)
         else { return [] }
         return content.displays.map {
             (display: $0, name: currentName(for: $0.displayID) ?? "(unnamed)")
@@ -206,8 +308,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Normal application windows large enough to be worth capturing
     /// (what --list-windows prints).
     static func listWindows() async throws -> [(id: UInt32, app: String, title: String, width: Int, height: Int)] {
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            true, onScreenWindowsOnly: false)
+        let content = try await shareableContent(
+            excludingDesktopWindows: true, onScreenWindowsOnly: false)
         return content.windows
             .filter { $0.windowLayer == 0 && $0.frame.width >= 100 && $0.frame.height >= 100 }
             .map {
@@ -229,8 +331,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// and revisit windows. Sorting by an identity that does not move keeps one
     /// swipe equal to one step, and keeps an app's windows adjacent.
     static func cyclableWindows() async -> [(window: SCWindow, label: String)] {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(
-            true, onScreenWindowsOnly: true)
+        guard let content = try? await shareableContent(
+            excludingDesktopWindows: true, onScreenWindowsOnly: true)
         else { return [] }
         return content.windows
             .filter {
@@ -256,8 +358,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `matching` (case-insensitive). Largest match wins, preferring
     /// on-screen windows.
     static func findWindow(matching: String) async -> SCWindow? {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(
-            true, onScreenWindowsOnly: false)
+        guard let content = try? await shareableContent(
+            excludingDesktopWindows: true, onScreenWindowsOnly: false)
         else { return nil }
         let candidates = content.windows.filter { w in
             guard w.windowLayer == 0, w.frame.width >= 100, w.frame.height >= 100
@@ -287,8 +389,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// system and NSScreen is the authority on that.
     @MainActor
     static func findDisplay(named name: String) async -> (display: SCDisplay, points: CGSize)? {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(
-            false, onScreenWindowsOnly: false)
+        guard let content = try? await shareableContent(
+            excludingDesktopWindows: false, onScreenWindowsOnly: false)
         else { return nil }
         for display in content.displays {
             guard let screenName = currentName(for: display.displayID),
@@ -338,8 +440,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// resizing one window of an app that has several could hand the session
     /// to a sibling window and restart capture on the wrong content.
     static func findWindow(id windowID: CGWindowID) async -> SCWindow? {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(
-            true, onScreenWindowsOnly: false)
+        guard let content = try? await shareableContent(
+            excludingDesktopWindows: true, onScreenWindowsOnly: false)
         else { return nil }
         return content.windows.first { $0.windowID == windowID }
     }
@@ -410,8 +512,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
         case .display:
             guard let stale = filter.includedDisplays.first else { return .notResolvable }
-            guard let content = try? await SCShareableContent.excludingDesktopWindows(
-                    false, onScreenWindowsOnly: false),
+            guard let content = try? await shareableContent(
+                    excludingDesktopWindows: false, onScreenWindowsOnly: false),
                 let fresh = content.displays.first(where: {
                     $0.displayID == stale.displayID
                 })
@@ -438,8 +540,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     ///      SOURCE, which shows the identical pixels
     ///   4. The panel's distinctive 172:320 aspect ratio, either orientation
     static func resolve(named nameSubstring: String, knownUUID: String?) async -> Resolved? {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(
-            false, onScreenWindowsOnly: false)
+        guard let content = try? await shareableContent(
+            excludingDesktopWindows: false, onScreenWindowsOnly: false)
         else { return nil }
         let displays = content.displays
 
@@ -560,7 +662,21 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 width: width, height: height, fps: fps, sourceRect: sourceRect),
             delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
-        try await stream.startCapture()
+        let identity = ObjectIdentifier(stream)
+        stateLock.withLock { _acceptedStream = identity }
+        do {
+            try await withCaptureDeadline(
+                Self.callDeadline, "Starting capture",
+                onLateSuccess: { _ in Task { try? await stream.stopCapture() } }
+            ) {
+                try await stream.startCapture()
+            }
+        } catch {
+            stateLock.withLock {
+                if _acceptedStream == identity { _acceptedStream = nil }
+            }
+            throw error
+        }
         self.stream = stream
     }
 
@@ -603,12 +719,15 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let width = geometry.frameWidth(landscape: landscape)
         let height = geometry.frameHeight(landscape: landscape)
         do {
-            try await stream.updateConfiguration(
-                Self.configuration(
-                    width: width, height: height, fps: current.fps, sourceRect: rect))
+            try await withCaptureDeadline(Self.callDeadline, "Moving the region") {
+                try await stream.updateConfiguration(
+                    Self.configuration(
+                        width: width, height: height, fps: current.fps, sourceRect: rect))
+            }
         } catch {
             FileHandle.standardError.write(
                 Data("capture region update failed: \(error.localizedDescription)\n".utf8))
+            markWedgedIfExpired(error)
             return false
         }
         stateLock.withLock {
@@ -642,11 +761,14 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let width = geometry.frameWidth(landscape: wanted)
         let height = geometry.frameHeight(landscape: wanted)
         do {
-            try await stream.updateConfiguration(
-                Self.configuration(width: width, height: height, fps: current.fps))
+            try await withCaptureDeadline(Self.callDeadline, "Re-orienting capture") {
+                try await stream.updateConfiguration(
+                    Self.configuration(width: width, height: height, fps: current.fps))
+            }
         } catch {
             FileHandle.standardError.write(
                 Data("capture reorient failed: \(error.localizedDescription)\n".utf8))
+            markWedgedIfExpired(error)
             return false
         }
         stateLock.withLock {
@@ -667,18 +789,42 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func retarget(to filter: SCContentFilter) async -> Bool {
         guard let stream else { return false }
         do {
-            try await stream.updateContentFilter(filter)
+            try await withCaptureDeadline(Self.callDeadline, "Retargeting capture") {
+                try await stream.updateContentFilter(filter)
+            }
         } catch {
             FileHandle.standardError.write(
                 Data("capture retarget failed: \(error.localizedDescription)\n".utf8))
+            markWedgedIfExpired(error)
             return false
         }
         return true
     }
 
+    /// A reconfigure that timed out may still apply later, leaving the stream
+    /// at a size this capture no longer expects. Mark it stopped so the
+    /// watchdog rebuilds it on its next tick instead of waiting out a stall.
+    private func markWedgedIfExpired(_ error: Error) {
+        guard let expired = error as? CaptureDeadlineExpired else { return }
+        stateLock.withLock {
+            _stopped = true
+            _stopReason = expired.localizedDescription
+        }
+    }
+
     /// Stop the capture stream, ignoring shutdown errors.
+    ///
+    /// Bounded like every other ScreenCaptureKit call: the supervisor awaits
+    /// this before every restart, so a stop that never returned would wedge it.
+    /// Samples are refused first, so a stream that will not stop cannot feed
+    /// the session after it has moved on.
     func stop() async {
-        try? await stream?.stopCapture()
+        stateLock.withLock { _acceptedStream = nil }
+        if let stream {
+            _ = try? await withCaptureDeadline(Self.callDeadline, "Stopping capture") {
+                try await stream.stopCapture()
+            }
+        }
         stream = nil
     }
 
@@ -692,6 +838,10 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     ) {
         guard type == .screen else { return }
         stateLock.lock()
+        guard _acceptedStream == ObjectIdentifier(stream) else {
+            stateLock.unlock()
+            return
+        }
         _lastSampleAt = Date()
         let width = _outW
         let height = _outH
@@ -699,20 +849,23 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let wantsPreview = _previewEnabled
         stateLock.unlock()
 
-        guard sampleBuffer.isValid,
-            let pixelBuffer = sampleBuffer.imageBuffer
-        else { return }
+        guard sampleBuffer.isValid else { return }
 
         // SCK delivers "idle" buffers without status attachments sometimes;
-        // only forward complete frames.
+        // only forward new frames. `.started` is one: the first frame of a
+        // stream, which is what shows a restarted stream is alive on a screen
+        // that is not changing. Read before the pixel check so status-only
+        // samples still leave their status for the stall log.
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(
             sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
             let statusRaw = attachments.first?[.status] as? Int,
-            let status = SCFrameStatus(rawValue: statusRaw),
-            status != .complete
+            let status = SCFrameStatus(rawValue: statusRaw)
         {
-            return
+            stateLock.withLock { _lastSampleStatus = status }
+            guard Self.carriesNewFrame(status) else { return }
         }
+
+        guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
 
         if PixelConvert.bgraToRGB565BE(pixelBuffer, width: width, height: height, into: &rgbBuffer) {
             stateLock.lock()
@@ -723,6 +876,13 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             emitPreviewIfDue(width: width, height: height, landscape: isLandscape,
                              enabled: wantsPreview)
         }
+    }
+
+    /// Whether a sample with this status is a new picture to send. `.started`
+    /// counts: it is the first frame of a stream, and on a static screen the
+    /// only one, so it is what shows a probe-restarted stream is alive.
+    static func carriesNewFrame(_ status: SCFrameStatus) -> Bool {
+        status == .complete || status == .started
     }
 
     /// Hand the UI an image of the frame just sent, no more often than
@@ -746,6 +906,12 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         FileHandle.standardError.write(Data("capture stopped: \(error)\n".utf8))
         stateLock.lock()
+        // A stream this capture has already let go of (stopped, or abandoned
+        // when its start timed out) says nothing about the one running now.
+        guard _acceptedStream == ObjectIdentifier(stream) else {
+            stateLock.unlock()
+            return
+        }
         _stopped = true
         _stopReason = error.localizedDescription
         stateLock.unlock()

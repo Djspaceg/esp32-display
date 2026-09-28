@@ -16,7 +16,8 @@ enum CaptureStatus: Equatable, Sendable {
     case streaming
     /// The stream went away and is being re-established.
     case recovering(String)
-    /// Capture is not running, and will not be until something changes.
+    /// Capture is not delivering, and the user should know: either nothing
+    /// will change until they act, or automatic retries have not fixed it yet.
     case failed(String)
     /// Deliberately not capturing: the user paused it, or the panel is gone.
     case suspended(String)

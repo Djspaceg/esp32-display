@@ -2,6 +2,43 @@
 
 Each finished branch keeps its own record below.
 
+## Capture stall restart (capture-stall-restart)
+
+### Outcome
+
+A capture stream that stops delivering frames on a live panel is now restarted within about a minute, shows a failure in the window if restarts do not bring it back, and clears when frames return. The periodic repaint no longer relights a panel on a stale picture while the Mac's displays sleep. Cause of the Sep 25-28 stall: not proven; see Open questions.
+
+### Decisions to evaluate
+
+D1 Liveness is judged by real frames, not samples; 60 s without one probes with a restart, backed off to 300 s while probes keep proving the screen static. Why: idle/blank status samples kept the old 120 s any-sample check happy on a dead stream. If overruled: change CaptureStallMonitor.stallAfter / maxStallAfter.
+D2 A failure is shown only after a restarted stream gives no frame in 10 s (retries back off to 120 s). Why: every routine restart flagged would train the user to ignore it. If overruled: change firstFrameGrace, or show on the first probe.
+D3 Every ScreenCaptureKit call is bounded at 10 s, and lookups fail fast for 30 s after a timeout. Why: one call that never returned wedged the watchdog. If overruled: change DisplayCapture.callDeadline / unresponsiveRetry.
+D4 Silence is not judged while paused, the captured display sleeps, the session is locked or off console, a followed window is off screen, or no application of an app-only picker selection has an on-screen window; a failure shown then is cleared and returns after wake if still dead. If overruled: edit DeviceSession.isCaptureLive.
+D5 The refresh repaint is skipped between ESLP and EWAK and while paused; the firmware's wake-on-drawn-frame rule is unchanged. Why: app-only fix, no firmware release. If overruled: also gate it in firmware.
+
+### Open questions
+
+- How the raw test log reaches the evidence (the capture tool reads only the main checkout). Answered by the human: copy it in, attach, delete at once. Done; the main checkout was left clean and nothing was committed there.
+- Which path stalled build 336? Default: two confirmed-in-code candidates, neither observed: status-only samples fooling the any-sample check, or a wedged ScreenCaptureKit await (low confidence either way). The display slept Sep 26 03:17 to Sep 28 09:15 with no system sleep; the repaint explains the stale lit picture during that window (confirmed in code), but frames=5 in 900 s after wake means capture itself had also stopped. The new stall log line (sample age, last status, frame count) names the path next time.
+
+### Gate facts
+
+Publish: local branch capture-stall-restart on main 93684af; GitHub remote, no CR/AutoSDE/PR, nothing pushed or merged.
+Call sites, packages/*: none touched. Changed internal symbols: shareableContent (9 lookups in Capture.swift); noteRegionApplied(_:requested:) (2 region starts in DeviceSession.run); FrameSender.refreshAllowed (refresh timer only).
+Lanes at bd068f8: swift test 705/0 (capture-stall-swift-test.log); Release xcodebuild + codesign (capture-stall-release-build.log); red-first 7eaba9d (capture-stall-red-test.log) and 683e237 (capture-stall-app-filter-red.log); mutations (capture-stall-mutation-red.log).
+Adversarial-review rounds: 1 (separate agent); it added D4 and D5 and changed D1's backoff.
+
+### Evidence
+
+- code-review.md: the round's 13 findings and dispositions.
+- Logs above, in /Users/stepblk/Source/esp32-display-capture-stall-scratch/.
+- No screenshot: the human is at the screen; the visible change is one status line.
+
+### Residuals
+
+- Not run live or on hardware; the live run is the human's own use after the Project Agent installs the merged app.
+- Built app, not installed: /Users/stepblk/Source/esp32-display-capture-stall-scratch/dd/Build/Products/Release/ESPDisplaySender.app
+
 ## USB Repair (usb-repair-flow)
 
 ### Outcome

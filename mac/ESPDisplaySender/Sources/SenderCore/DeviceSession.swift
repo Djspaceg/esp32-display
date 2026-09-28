@@ -60,6 +60,9 @@ final class DeviceSession {
         /// The application that owns it, used to find the replacement when a
         /// resize or full-screen transition destroys and recreates the window.
         var owner: String?
+        /// Whether the window was on screen at the last check. A minimised or
+        /// hidden window legitimately delivers no frames.
+        var onScreen = true
     }
 
     let id: UUID
@@ -142,6 +145,10 @@ final class DeviceSession {
     private var lastReport = Date()
     private var lastCount: UInt64 = 0
 
+    /// Judges whether the running stream is still delivering frames. Touched
+    /// only by the `run()` task, which is sequential, so it takes no lock.
+    private var stallMonitor = CaptureStallMonitor()
+
     init(
         id: UUID = UUID(), name: String, sender: FrameSender,
         audioSession: PanelAudioSession? = nil,
@@ -204,6 +211,73 @@ final class DeviceSession {
         stateLock.unlock()
         guard changed else { return }
         reportProgress(force: true)
+    }
+
+    /// The status for a source that could not be found: a calm Waiting, unless
+    /// the lookup failed because ScreenCaptureKit stopped answering, which is a
+    /// fault the user should see rather than a display that is simply absent.
+    private func sourceMissing(_ waiting: String) -> CaptureStatus {
+        DisplayCapture.isUnresponsive
+            ? .failed(Self.unresponsiveMessage)
+            : .waiting(waiting)
+    }
+
+    private static let unresponsiveMessage =
+        "Screen capture is not responding, so the source cannot be found. "
+        + "Retrying automatically."
+
+    /// A clock for the stall monitor that wall-clock changes cannot move.
+    private static func monotonicNow() -> Date {
+        Date(timeIntervalSinceReferenceDate: ProcessInfo.processInfo.systemUptime)
+    }
+
+    /// Whether silence from capture would mean something. Not while the user
+    /// has paused the panel, the captured display sleeps, the login session is
+    /// locked or off the console, or a followed window (or every window of a
+    /// picked application) is off screen: each of
+    /// those legitimately delivers no frames.
+    static func isCaptureLive(
+        paused: Bool, displayAsleep: Bool, sessionInactive: Bool, windowOnScreen: Bool
+    ) -> Bool {
+        !paused && !displayAsleep && !sessionInactive && windowOnScreen
+    }
+
+    /// Whether an application-only picker selection has anything to show:
+    /// true when one of its applications owns an on-screen window. An empty
+    /// application list means the selection is not an application filter.
+    static func applicationContentVisible(
+        includedApplicationPIDs: [pid_t], onScreenWindowOwnerPIDs: [pid_t]
+    ) -> Bool {
+        guard !includedApplicationPIDs.isEmpty else { return true }
+        let owners = Set(onScreenWindowOwnerPIDs)
+        return includedApplicationPIDs.contains { owners.contains($0) }
+    }
+
+    static let stallFailureMessage =
+        "No new picture from the source. Restarting capture has not brought it "
+        + "back yet; still retrying."
+
+    /// What the watchdog does with a stall verdict: the status to publish, if
+    /// any, and whether to rebuild the stream. A routine probe restart
+    /// publishes nothing, so a static screen never flickers the status.
+    static func stallResponse(
+        to verdict: CaptureStallMonitor.Verdict
+    ) -> (status: CaptureStatus?, restart: Bool) {
+        switch verdict {
+        case .healthy: return (nil, false)
+        case .recovered: return (.streaming, false)
+        case .restart(let failing):
+            return (failing ? .failed(stallFailureMessage) : nil, true)
+        }
+    }
+
+    /// Report the stream as healthy, unless the stall monitor is still waiting
+    /// for a restarted stream to prove itself. Starting a stream is not proof
+    /// it delivers, and clearing a stall failure on start alone would flick it
+    /// off and back on at every retry. The monitor clears it on the first frame.
+    private func markStreaming() {
+        guard !stallMonitor.isFailing else { return }
+        setCaptureStatus(.streaming)
     }
 
     /// Turn the live preview on or off for this session. Off costs nothing:
@@ -517,11 +591,25 @@ final class DeviceSession {
         stateLock.withLock { _region ?? stored }
     }
 
-    private func noteRegionApplied(_ spec: RegionSpec) {
-        stateLock.withLock {
-            _region = spec
+    /// Record the region a stream was just started with.
+    ///
+    /// `requested` is the region the start was computed from. If the user
+    /// dragged the marquee while the stream was starting, `_region` has moved
+    /// on, and overwriting it with the start's value would drop the newest
+    /// rectangle; the drain loop is run to catch up to it instead.
+    private func noteRegionApplied(_ spec: RegionSpec, requested: RegionSpec) {
+        let drain: DisplayCapture? = stateLock.withLock {
             _appliedRegion = spec
+            guard let current = _region, current != requested else {
+                _region = spec
+                return nil
+            }
+            guard !regionUpdateInFlight, let running = activeCapture else { return nil }
+            regionUpdateInFlight = true
+            return running
         }
+        guard let drain else { return }
+        Task { [weak self] in await self?.drainRegionUpdates(drain) }
     }
 
     /// Runs until the session gives up connecting. Returns false if the
@@ -586,6 +674,12 @@ final class DeviceSession {
             let baselineSettingsGeneration = currentSettingsGeneration
             let fps = self.fps
             var displayShape: (CGDirectDisplayID, Int, Int, Bool)?
+            /// The display whose sleep explains silence, when the source is
+            /// one display that is not tracked through `displayShape`.
+            var pickedDisplayID: CGDirectDisplayID?
+            /// The applications an application-only picker selection shows,
+            /// so silence while none of them has a window on screen is held.
+            var pickedApplicationPIDs: [pid_t] = []
             var tracked: TrackedWindow?
 
             // ---- Source selection & capture start
@@ -600,7 +694,7 @@ final class DeviceSession {
             if let drawn = regionSelection {
                 guard let found = await DisplayCapture.findDisplay(named: drawn.display)
                 else {
-                    setCaptureStatus(.waiting(
+                    setCaptureStatus(sourceMissing(
                         "Waiting for the display \"\(drawn.display)\", where this "
                             + "region was drawn."))
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -612,9 +706,9 @@ final class DeviceSession {
                 do {
                     try await capture.start(
                         display: display, sourceRect: region.rect, fps: fps)
-                    noteRegionApplied(region)
+                    noteRegionApplied(region, requested: drawn)
                     announced = false
-                    setCaptureStatus(.streaming)
+                    markStreaming()
                     print("[\(name)] capturing \(region.sizeDescription) at "
                         + "(\(Int(region.x)),\(Int(region.y))) of "
                         + "\"\(drawn.display)\" at \(fps) fps")
@@ -636,6 +730,11 @@ final class DeviceSession {
                 // dead until the menu bar picker handed over a fresh filter.
                 let resolution = await DisplayCapture.resolveTarget(of: selection.filter)
                 var filter = selection.filter
+                pickedDisplayID = selection.filter.includedDisplays.first?.displayID
+                if selection.filter.style == .application {
+                    pickedApplicationPIDs =
+                        selection.filter.includedApplications.map(\.processID)
+                }
                 switch resolution {
                 case .resolved(let target):
                     filter = target.filter
@@ -646,6 +745,12 @@ final class DeviceSession {
                             landscape: target.size.width > target.size.height,
                             owner: target.owner)
                     }
+                case .contentGone where DisplayCapture.isUnresponsive:
+                    // The lookup timed out, which says nothing about the
+                    // selection, so it must not count toward dropping it.
+                    setCaptureStatus(.failed(Self.unresponsiveMessage))
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
                 case .contentGone:
                     // Do not keep restarting against something that is gone.
                     pickerFailures += 1
@@ -666,7 +771,7 @@ final class DeviceSession {
                     try await capture.start(contentFilter: filter, fps: fps)
                     pickerFailures = 0
                     announced = false
-                    setCaptureStatus(.streaming)
+                    markStreaming()
                     print("[\(name)] capturing \(picker!.describe(filter)) "
                         + "from picker selection at \(fps) fps")
                 } catch {
@@ -693,7 +798,7 @@ final class DeviceSession {
                             + "to draw its region on ...")
                         announced = true
                     }
-                    setCaptureStatus(.waiting(
+                    setCaptureStatus(sourceMissing(
                         "Waiting for the display \"\(stored.display)\", where this "
                             + "region was drawn."))
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -702,15 +807,16 @@ final class DeviceSession {
                 // Clamped every time: a region outlives the display geometry it
                 // was drawn against, and ScreenCaptureKit yields nothing useful
                 // for a rectangle that falls outside the display.
-                let region = effectiveRegion(stored).clamped(to: found.points)
+                let requested = effectiveRegion(stored)
+                let region = requested.clamped(to: found.points)
                 let display = found.display
                 displayShape = (display.displayID, display.width, display.height, false)
                 do {
                     try await capture.start(
                         display: display, sourceRect: region.rect, fps: fps)
-                    noteRegionApplied(region)
+                    noteRegionApplied(region, requested: requested)
                     announced = false
-                    setCaptureStatus(.streaming)
+                    markStreaming()
                     print("[\(name)] capturing \(region.sizeDescription) at "
                         + "(\(Int(region.x)),\(Int(region.y))) of \"\(stored.display)\" "
                         + "at \(fps) fps")
@@ -729,7 +835,7 @@ final class DeviceSession {
                         print("[\(name)] waiting for a window matching \"\(winName)\" ...")
                         announced = true
                     }
-                    setCaptureStatus(.waiting(
+                    setCaptureStatus(sourceMissing(
                         "Waiting for a window matching \"\(winName)\"."))
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
@@ -742,7 +848,7 @@ final class DeviceSession {
                 do {
                     try await capture.start(window: window, fps: fps)
                     announced = false
-                    setCaptureStatus(.streaming)
+                    markStreaming()
                     print("[\(name)] capturing window \(app): \"\(window.title ?? "")\" "
                         + "at \(fps) fps")
                 } catch {
@@ -764,7 +870,7 @@ final class DeviceSession {
                             + "(or a picker selection) ...")
                         announced = true
                     }
-                    setCaptureStatus(.waiting(
+                    setCaptureStatus(sourceMissing(
                         displayName.isEmpty
                             ? "No display to mirror yet. Choose a source."
                             : "Waiting for the display \"\(displayName)\"."))
@@ -781,7 +887,7 @@ final class DeviceSession {
                 do {
                     try await capture.start(display: display, fps: fps)
                     announced = false
-                    setCaptureStatus(.streaming)
+                    markStreaming()
                     let dispName = DisplayCapture.name(for: display.displayID) ?? "?"
                     print("[\(name)] capturing \"\(dispName)\" "
                         + "(\(display.width)x\(display.height)) at \(fps) fps"
@@ -797,6 +903,8 @@ final class DeviceSession {
                 }
             }
 
+            stallMonitor.streamStarted(at: Self.monotonicNow())
+
             // Capture has just (re)started, so publish the new source now.
             // reportProgress throttles itself to one report every five seconds,
             // which left the window describing the previous source for seconds
@@ -805,7 +913,7 @@ final class DeviceSession {
 
             // ---- Watchdog: poll for death, reconfiguration, silent stalls,
             // source changes, and a blackholed network path.
-            while !isStopped {
+            watchdog: while !isStopped {
                 await waitForWatchdogTick(baselineSource: baselineSourceGeneration)
                 reportProgress()
 
@@ -830,23 +938,50 @@ final class DeviceSession {
                             ?? "Mirroring stopped. Reconnecting…"))
                     break
                 }
-                // Sleep/wake can kill the stream without firing the
-                // delegate, so silence is our only signal for that. It is a
-                // coarse one: ScreenCaptureKit delivers nothing at all for a
-                // truly static screen (measured - a 30s threshold restarted
-                // capture every 30s on an idle display), so the timeout is
-                // long enough to avoid churning on idle content. A restart
-                // is harmless either way, just noisy.
-                if Date().timeIntervalSince(capture.lastSampleAt) > 120 {
-                    print("[\(name)] no capture samples for 120s - restarting capture")
-                    setCaptureStatus(.recovering(
-                        "No frames from the source for two minutes. Reconnecting…"))
-                    break
+                // A stream can stop delivering without the delegate firing:
+                // sleep/wake, a display that slept, or a stream that keeps
+                // sending idle or blank status samples with no pixels. Only
+                // frames count; see CaptureStallMonitor for why a long silence
+                // is probed with a restart rather than trusted.
+                // Unknown (the lookup failed) counts as visible: a failing
+                // ScreenCaptureKit is a fault to report, not a reason to hold.
+                var applicationVisible = true
+                if !pickedApplicationPIDs.isEmpty,
+                    let owners = await DisplayCapture.onScreenWindowOwnerPIDs()
+                {
+                    applicationVisible = Self.applicationContentVisible(
+                        includedApplicationPIDs: pickedApplicationPIDs,
+                        onScreenWindowOwnerPIDs: owners)
                 }
+                let live = Self.isCaptureLive(
+                    paused: sender.paused,
+                    displayAsleep: DisplayCapture.isAsleep(displayShape?.0 ?? pickedDisplayID),
+                    sessionInactive: DisplayCapture.sessionIsInactive(),
+                    windowOnScreen: (tracked?.onScreen ?? true) && applicationVisible)
+                let verdict = stallMonitor.check(capture, at: Self.monotonicNow(), live: live)
+                let response = Self.stallResponse(to: verdict)
+                if case .restart(let failing) = verdict {
+                    let sampleAge = Int(Date().timeIntervalSince(capture.lastSampleAt))
+                    print("[\(name)] no new frame for "
+                        + (failing ? "a restarted stream" : "\(Int(stallMonitor.currentStallAfter))s")
+                        + " - restarting capture (last sample \(sampleAge)s ago, "
+                        + "status \(capture.lastSampleStatusDescription), "
+                        + "\(capture.framesCaptured) frames from this stream)")
+                } else if verdict == .recovered {
+                    print("[\(name)] capture failure cleared"
+                        + (live ? " - frames are arriving again" : " while not live"))
+                }
+                if let status = response.status { setCaptureStatus(status) }
+                if response.restart { break watchdog }
                 if let shape = displayShape {
                     let current = await DisplayCapture.resolve(
                         named: trackedDisplayName(), knownUUID: knownUUID)
-                    if current == nil
+                    // A timed-out lookup is not a display change; restarting a
+                    // working stream into an unresponsive ScreenCaptureKit
+                    // would only lose it.
+                    if current == nil, DisplayCapture.isUnresponsive {
+                        // Fall through to the remaining checks.
+                    } else if current == nil
                         || (current!.display.displayID, current!.display.width,
                             current!.display.height, current!.viaMirror) != shape
                     {
@@ -915,6 +1050,10 @@ final class DeviceSession {
     ) async -> Bool {
         var window = await DisplayCapture.findWindow(id: tracked.id)
 
+        // A lookup that timed out says nothing about the window; keep the
+        // stream it is already running.
+        if window == nil && DisplayCapture.isUnresponsive { return true }
+
         if window == nil {
             // The ID is gone. Before giving up, look for a replacement from
             // the same application: that is the recreated-window case.
@@ -939,6 +1078,7 @@ final class DeviceSession {
         }
 
         guard let window else { return false }
+        tracked.onScreen = window.isOnScreen
 
         let nowLandscape = window.frame.width > window.frame.height
         if nowLandscape != tracked.landscape {
@@ -954,7 +1094,7 @@ final class DeviceSession {
                 + "\(Int(window.frame.width))x\(Int(window.frame.height)) - "
                 + "re-oriented in place")
         }
-        setCaptureStatus(.streaming)
+        markStreaming()
         return true
     }
 
