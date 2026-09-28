@@ -150,7 +150,7 @@ final class PanelPersistenceTests: XCTestCase {
                     "framesSent", "framesShown", "framesDropped", "sendErrors",
                     "diffPercent", "brightness", "brightnessHigh", "flipped", "sleeping",
                     "idle", "paused", "discovered", "lastHeartbeatAt", "firmwareVersion",
-                    "chip", "target", "currentSSID", "capabilitiesRaw", "frameProtocolVersion",
+                    "chip", "target", "currentSSID", "networkConnected", "networkReportedAt", "announcedSSID", "announcedAt", "lastReplyAt", "capabilitiesRaw", "frameProtocolVersion",
                     "controlProtocolVersion", "sourceDescription", "lastError"] {
             XCTAssertFalse(json.contains("\"\(key)\""), "\(key) reached disk")
         }

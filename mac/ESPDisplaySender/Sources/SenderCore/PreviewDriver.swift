@@ -28,6 +28,10 @@ final class PreviewDriver {
         /// The display an Automatic source tracks. Part of the identity so
         /// changing it re-resolves.
         let defaultDisplay: String
+        /// The frame size and shape streaming would send, so the viewfinder
+        /// matches it.
+        let geometry: PanelGeometry
+        let landscape: Bool
     }
 
     private var capture: DisplayCapture?
@@ -40,10 +44,12 @@ final class PreviewDriver {
 
     /// Preview a panel's source, or carry on if it is already the one running.
     func run(
-        serviceName: String, source: PanelSource, defaultDisplay: String, fps: Int
+        serviceName: String, source: PanelSource, defaultDisplay: String,
+        geometry: PanelGeometry = .panel172x320, landscape: Bool = false, fps: Int
     ) {
         let target = Target(
-            serviceName: serviceName, source: source, defaultDisplay: defaultDisplay)
+            serviceName: serviceName, source: source, defaultDisplay: defaultDisplay,
+            geometry: geometry, landscape: landscape)
         guard target != current else { return }
 
         // A marquee drag produces a new region for every step. Reconfigure the
@@ -52,6 +58,8 @@ final class PreviewDriver {
         if let capture,
             let existing = current,
             existing.serviceName == serviceName,
+            existing.landscape == landscape,
+            existing.geometry == geometry,
             case .region(let new) = source,
             case .region(let old) = existing.source,
             new.display == old.display
@@ -80,6 +88,8 @@ final class PreviewDriver {
     private func start(_ target: Target, fps: Int, token: Int) async {
         let name = target.serviceName
         let capture = DisplayCapture(
+            geometry: target.geometry,
+            landscape: target.landscape,
             onPreview: { [weak self] image, landscape in
                 Task { @MainActor in self?.onPreview?(image, landscape, name) }
             },

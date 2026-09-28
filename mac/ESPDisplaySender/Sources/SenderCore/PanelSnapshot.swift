@@ -60,16 +60,32 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// persisted, so a geometry remembered from a previous run could reshape a
     /// user's framing before the panel that justified it had said anything.
     var geometry: PanelGeometry?
-    /// The network this panel actually reported joining, read over USB with
-    /// CFGSHOW. nil until asked, and never learned any other way: EINF's
-    /// network telemetry carries a `wifiConnected` flag but never the SSID
-    /// string itself (see the comment on `deviceproto` field additions for
-    /// why - a fixed-length parser on the sender side would reject the
-    /// packet outright rather than degrade). Discovery-scoped and not
-    /// persisted, for the same reason as `chip`/`geometry`: it is a fact
-    /// about what the device is doing right now, and remembering a stale
-    /// answer from a previous run would misrepresent it.
+    /// The network this panel reports it is set to join, read over USB with
+    /// CFGSHOW ("" when none is set); nil until asked. The network it has
+    /// joined, announced over WiFi, is `announcedSSID`. EINF carries neither:
+    /// a fixed-length parser on the sender side would reject a longer packet
+    /// outright (see the comment on `deviceproto` field additions).
+    /// Discovery-scoped and not persisted, for the same reason as
+    /// `chip`/`geometry`: it is a fact about what the device is doing right
+    /// now, and remembering a stale answer from a previous run would
+    /// misrepresent it.
     var currentSSID: String?
+    /// CFGSHOW's `connected=` beside it: whether the board has actually joined
+    /// `currentSSID`. nil until asked, discovery-scoped like `currentSSID`.
+    var networkConnected: Bool?
+    /// When that USB report arrived, so a later silence over WiFi can outrank it.
+    var networkReportedAt: Date?
+    /// The network the panel announces it has joined, from its mDNS `ssid`
+    /// record. Kept apart from `currentSSID` (USB) because a cached
+    /// announcement can outlive a change made over USB, and cleared with the
+    /// other discovery records when the service goes away.
+    var announcedSSID: String?
+    /// When `announcedSSID` last changed. Not refreshed by a browse result that
+    /// repeats it, which is how a stale cached record keeps coming back.
+    var announcedAt: Date?
+    /// When the device last really answered over WiFi. Not `lastHeartbeatAt`,
+    /// which every reconnect refreshes whether or not the device replies.
+    var lastReplyAt: Date?
     var frameProtocolVersion: Int?
     var controlProtocolVersion: Int?
     var capabilitiesRaw: UInt32 = 0
@@ -154,6 +170,31 @@ struct PanelSnapshot: Identifiable, Equatable {
 
     var isOnline: Bool {
         isOnline(asOf: Date())
+    }
+
+    /// The "Connected WiFi" row for this panel, from the newest evidence.
+    ///
+    /// A reply over WiFi within the online window is the board on WiFi, named
+    /// by its announcement (the network joined) or else by USB. Replies that
+    /// stopped after the last USB report mean it dropped off. Otherwise the USB
+    /// report stands: it is newer than anything heard over WiFi, and a cached
+    /// announcement from before a change over USB must not outrank it.
+    func boardNetworkDescription(asOf now: Date) -> String {
+        let usbName = currentSSID.flatMap { $0.isEmpty ? nil : $0 }
+        if let lastReplyAt, now.timeIntervalSince(lastReplyAt) < 10 {
+            let usbIsNewer = networkReportedAt.map { reported in
+                announcedAt.map { reported > $0 } ?? true
+            } ?? false
+            if let usbName, usbIsNewer || announcedSSID == nil { return usbName }
+            return announcedSSID ?? "Connected (name not reported)"
+        }
+        if let lastReplyAt, networkReportedAt.map({ lastReplyAt > $0 }) ?? true {
+            if let usbName { return "Not connected (set to \"\(usbName)\")" }
+            if let announcedSSID { return "Not connected (last on \"\(announcedSSID)\")" }
+            return "Not connected"
+        }
+        return PanelManager.boardNetworkDescription(
+            reportedSSID: currentSSID, connected: networkConnected)
     }
 
     func isOnline(asOf now: Date) -> Bool {

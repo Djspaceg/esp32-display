@@ -23,6 +23,8 @@
 #include "../display_stream/serial_config_protocol.h"
 #include "../display_stream/telemetry.h"
 #include "../libraries/espdisp_board/src/board_config.h"
+#include "fakes/audio/ESPmDNS.h"
+#include "fakes/audio/WiFi.h"
 #include "fakes/audio/audio_host_fakes.h"
 
 static int checks = 0;
@@ -492,7 +494,24 @@ int main() {
     }
     bcfg = saved;
   }
+  // The joined network is announced, so a sender that only sees the panel over
+  // WiFi can show which network it is on. Taken from the radio, not from the
+  // saved credentials: it is the network actually joined.
+  WiFi.setSSID("Studio WiFi");
+  MDNS.clearTxt();
   addMdnsService();
+  CHECK(MDNS.hasTxt("ssid"));
+  CHECK(MDNS.txt("ssid") == "Studio WiFi");
+  CHECK(MDNS.txt("name") == cfgName.c_str());
+  CHECK(mdnsSsidIsCurrent());
+  // Announced before WiFi joined (setup's timeout path, or a join between
+  // setup and the first loop): the loop has to notice and re-announce.
+  WiFi.setSSID("");
+  addMdnsService();
+  WiFi.setSSID("Studio WiFi");
+  CHECK(!mdnsSsidIsCurrent());
+  addMdnsService();
+  CHECK(mdnsSsidIsCurrent());
 
   using namespace audiobackend;
 

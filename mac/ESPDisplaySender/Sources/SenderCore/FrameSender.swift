@@ -266,6 +266,8 @@ final class FrameSender {
     /// reconnect grace period, so it is the only sound evidence that the panel
     /// is really answering rather than merely having been reconnected to.
     private var _deviceReplies: UInt64 = 0
+    /// When the last of those replies arrived.
+    private var _lastReplyAt: Date?
     private var nextControlSequence = UInt16.random(in: 1...UInt16.max)
     /// Coalescing state for the brightness slider, guarded by `lock`.
     ///
@@ -453,6 +455,14 @@ final class FrameSender {
         lock.lock()
         defer { lock.unlock() }
         return _currentLandscape
+    }
+
+    /// Seconds since the device last really answered; nil if it never has.
+    /// Unlike `heartbeatAge`, a reconnect does not refresh it.
+    var replyAge: TimeInterval? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _lastReplyAt.map { Date().timeIntervalSince($0) }
     }
 
     /// Seconds since the last device heartbeat; nil if none received yet.
@@ -880,6 +890,7 @@ final class FrameSender {
             }
             _lastHeartbeatAt = Date()
             _deviceReplies &+= 1
+            _lastReplyAt = _lastHeartbeatAt
             let negotiatedTransport = Self.frameTransport(
                 for: geometry, capabilities: info.capabilities)
             let transportChanged = Self.transportChangeRequiresKeyframe(
@@ -893,6 +904,7 @@ final class FrameSender {
             lock.withLock {
                 _lastControlAck = acknowledgement
                 _deviceReplies &+= 1
+                _lastReplyAt = Date()
             }
             if !acknowledgement.succeeded {
                 let message = "control \(acknowledgement.sequence) failed with status "
@@ -907,7 +919,10 @@ final class FrameSender {
             // is proof the link works — but deliberately not as a heartbeat.
             // Heartbeat age drives the reconnect watchdog and the pacing
             // hill-climb, and a finger is not evidence that frames are landing.
-            lock.withLock { _deviceReplies &+= 1 }
+            lock.withLock {
+                _deviceReplies &+= 1
+                _lastReplyAt = Date()
+            }
             onDeviceEvent?(.touch(touch))
             return
         }
@@ -919,7 +934,10 @@ final class FrameSender {
             // whether frames are landing. It arrives on a 10s timer regardless
             // of the stream, so letting it stand in for a heartbeat would keep
             // a panel reading "Online" indefinitely after its stream died.
-            lock.withLock { _deviceReplies &+= 1 }
+            lock.withLock {
+                _deviceReplies &+= 1
+                _lastReplyAt = Date()
+            }
             onDeviceEvent?(.battery(battery))
             return
         }
@@ -928,6 +946,7 @@ final class FrameSender {
         lock.lock()
         _lastHeartbeatAt = Date()
         _deviceReplies &+= 1
+        _lastReplyAt = _lastHeartbeatAt
         let prev = prevStats
         prevStats = stats
         _stats = stats

@@ -1,6 +1,7 @@
 #include "mdns_announce.h"
 
 #include <Arduino.h>
+#include <string.h>
 #include <ESPmDNS.h>
 #include <WiFi.h>
 
@@ -10,6 +11,11 @@
 #include "ota_service.h"
 #include "telemetry.h"
 
+
+// The `ssid` value last announced, so the loop can tell when the radio has
+// since joined a network the announcement does not name. 32 bytes is the
+// 802.11 maximum.
+static char announcedSsid[33] = "";
 
 // Advertise the service and every TXT record. Both the initial announce and
 // the post-heal re-announce call this, and every value is derived from the
@@ -56,6 +62,16 @@ void addMdnsService() {
   const char *target = board::targetToken(boardVariant);
   const char *profile = board::variantToken(boardVariant);
   const char *partition = bcfg->platform->partitionToken;
+  // The network actually joined, from the radio rather than the saved
+  // credentials, so a sender that only sees this panel over WiFi can say which
+  // network it is on. EINF cannot carry it: its fixed layout is parsed by
+  // exact length on the sender side. Empty when announced before WiFi joined
+  // (setup announces even after its WiFi timeout); the loop re-announces once
+  // mdnsSsidIsCurrent() says the radio has joined something else.
+  const String joinedSsid = WiFi.SSID();
+  const char *ssid = joinedSsid.c_str();
+  strncpy(announcedSsid, ssid, sizeof(announcedSsid) - 1);
+  announcedSsid[sizeof(announcedSsid) - 1] = 0;
   MDNS.setInstanceName(cfgName);
   MDNS.addService("espdisp", "udp", UDP_PORT);
   MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
@@ -67,6 +83,7 @@ void addMdnsService() {
   MDNS.addServiceTxt("espdisp", "udp", "target", target);
   MDNS.addServiceTxt("espdisp", "udp", "profile", profile);
   MDNS.addServiceTxt("espdisp", "udp", "partition", partition);
+  MDNS.addServiceTxt("espdisp", "udp", "ssid", ssid);
   if (audioAvailable && audio != nullptr) {
     MDNS.addServiceTxt("espdisp", "udp", "audio-port", audioPort);
     MDNS.addServiceTxt("espdisp", "udp", "audio-version", audioVersion);
@@ -95,6 +112,10 @@ void addMdnsService() {
     MDNS.addServiceTxt("arduino", "tcp", "partition", partition);
   }
 }
+bool mdnsSsidIsCurrent() {
+  return strcmp(WiFi.SSID().c_str(), announcedSsid) == 0;
+}
+
 bool restartMdnsService() {
   MDNS.end();
   if (!MDNS.begin(cfgName.c_str())) {

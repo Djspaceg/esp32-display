@@ -153,6 +153,20 @@ extension PanelManager {
         rotateRegion(for: serviceName)
     }
 
+    /// Turn a region whose shape disagrees with the rotation on rectangular
+    /// glass - one saved before capture took its frame shape from the
+    /// rotation, or one drawn before the geometry was known. The frame is
+    /// landscape exactly at 90 and 270 there, so a region of the other shape
+    /// would be letterboxed. Call once the geometry is set.
+    func alignRegionToRotation(for serviceName: String) {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }),
+              let geometry = panel.geometry, geometry.width != geometry.height,
+              let region = panel.source.region,
+              region.isLandscape != (panel.rotation % 2 != 0)
+        else { return }
+        rotateRegion(for: serviceName)
+    }
+
     /// Follow a rotation the panel reports that this app did not just ask for:
     /// one set over serial or from another Mac. On rectangular glass the
     /// region's shape is what makes 90 and 270 landscape, so a reported change
@@ -656,6 +670,7 @@ extension PanelManager {
             applyRegionQuarterTurn(
                 from: previous, to: flipped ? 2 : 0, for: serviceName)
         }
+        refreshPreviewDriver()
         switch path {
         case .network:
             guard let session = sessions[serviceName] else { return }
@@ -705,6 +720,8 @@ extension PanelManager {
         if let previous {
             applyRegionQuarterTurn(from: previous, to: clamped, for: serviceName)
         }
+        // The offline viewfinder takes its frame shape from the rotation too.
+        refreshPreviewDriver()
         switch path {
         case .network:
             guard let session = sessions[serviceName] else { return }

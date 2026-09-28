@@ -84,15 +84,16 @@ extension PanelManager {
         // Remembered whole, not just the rectangle: Escape has to be able to put
         // back a source that was not a region at all.
         sourceBeforeRegion = panel?.source
-        // Landscape on rectangular glass mounted at 90 or 270, where the
-        // region's shape is what makes the panel landscape. At 0 and 180 a
-        // region the user dragged landscape stays as it is.
-        let startLandscape = geometry.width != geometry.height
-            && (panel?.rotation ?? 0) % 2 != 0
+        // On rectangular glass the rotation decides the shape: landscape at 90
+        // and 270, portrait at 0 and 180, matching the frames capture streams
+        // (`DisplayCapture.streamsLandscape`). A region of the other shape
+        // would only be letterboxed, so it is turned to match.
+        let rectangular = geometry.width != geometry.height
+        let startLandscape = rectangular && (panel?.rotation ?? 0) % 2 != 0
         let existing = panel?.source.region
         let reusable = existing.flatMap { region -> RegionSpec? in
             guard region.matchesAspect(of: geometry) else { return nil }
-            guard startLandscape, !region.isLandscape,
+            guard rectangular, region.isLandscape != startLandscape,
                   let screen = DisplayCapture.screen(named: region.display)
             else { return region }
             return region.rotated(in: screen.frame.size)
@@ -107,6 +108,7 @@ extension PanelManager {
         }
         apply(region, to: serviceName)
         regionSelector.activeScale = region.matchingScale(geometry: geometry)
+        regionSelector.allowsRotate = !rectangular
         regionSelector.show(region)
     }
 
@@ -271,6 +273,8 @@ extension PanelManager {
             serviceName: name,
             source: panel.source,
             defaultDisplay: defaultDisplayName,
+            geometry: Self.previewGeometry(for: panel),
+            landscape: Self.previewLandscape(for: panel),
             fps: min(settings.fps, 15))
 
         // Say what the picture is. Without this the hero shows a live image
@@ -282,6 +286,27 @@ extension PanelManager {
                 "Previewing on this Mac. The display is offline, so nothing "
                     + "is being sent to it yet.")
         }
+    }
+
+    /// The frame shape the offline viewfinder uses for a panel: the one
+    /// streaming would send. Before the panel has reported its size, a region
+    /// already has the shape the rotation gave it (`applyRegionQuarterTurn`
+    /// turns it either way), and any other source takes the preview capture's
+    /// own geometry, which is rectangular until the size is known.
+    nonisolated static func previewLandscape(for panel: PanelSnapshot) -> Bool {
+        if let geometry = panel.geometry {
+            return DisplayCapture.streamsLandscape(
+                geometry: geometry, rotation: panel.rotation)
+        }
+        if let region = panel.source.region { return region.isLandscape }
+        return DisplayCapture.streamsLandscape(
+            geometry: previewGeometry(for: panel), rotation: panel.rotation)
+    }
+
+    /// The frame size the offline viewfinder captures at: the panel's own once
+    /// it is known, so a square panel is not previewed through a 172x320 frame.
+    nonisolated static func previewGeometry(for panel: PanelSnapshot) -> PanelGeometry {
+        panel.geometry ?? .panel172x320
     }
 
     /// Accept a frame from a session. Frames from a panel that is no longer

@@ -381,8 +381,11 @@ extension PanelManager {
             if let version = status.firmwareVersion, !version.isEmpty {
                 panels[panelIndex].firmwareVersion = version
             }
-            panels[panelIndex].currentSSID =
-                status.currentSSID?.isEmpty == false ? status.currentSSID : nil
+            // Kept as reported: "" is the board saying no network is set, which
+            // is an answer, where nil is not having asked.
+            panels[panelIndex].currentSSID = status.currentSSID
+            panels[panelIndex].networkConnected = status.networkConnected
+            panels[panelIndex].networkReportedAt = Date()
             if let rssi = status.rssi { panels[panelIndex].rssi = rssi }
             rotationBefore = (
                 panels[panelIndex].serviceName, panels[panelIndex].rotation)
@@ -393,6 +396,8 @@ extension PanelManager {
                 panels[panelIndex].flipped = flipped
                 panels[panelIndex].rotation = flipped ? 2 : 0
             }
+            sessions[panels[panelIndex].serviceName]?.setPanelRotation(
+                panels[panelIndex].rotation)
             if let level = status.brightnessLevel {
                 panels[panelIndex].brightness = level
             }
@@ -428,6 +433,9 @@ extension PanelManager {
             followReportedRotation(
                 from: rotationBefore.rotation, for: rotationBefore.serviceName)
             followRotationAwaitingGeometry(for: rotationBefore.serviceName)
+            alignRegionToRotation(for: rotationBefore.serviceName)
+            // The offline viewfinder takes its frame shape from the rotation.
+            refreshPreviewDriver()
         }
         sortPanels()
         if associationChanged { persistIfNeeded(force: true) }
@@ -573,8 +581,7 @@ extension PanelManager {
     /// Best-effort and silent: this runs on appearing, not on a button press,
     /// so a board that happens to be unreachable over USB right now (no
     /// cable, wrong port assigned, mid-reboot) should not raise an alert -
-    /// the picker just falls back to its old default, same as before this
-    /// existed. `Task.detached` because `WifiConfigUI.currentSSID` is
+    /// the rows just keep what they already showed. `Task.detached` because `WifiConfigUI.currentNetwork` is
     /// blocking serial I/O with up to a several-second timeout, and this
     /// actor must not stall on it.
     func refreshCurrentSSID(for serviceName: String) {
@@ -584,14 +591,18 @@ extension PanelManager {
         let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
         let preferredPort = panel.usbPort
         Task { @MainActor [weak self] in
-            let ssid = await Task.detached {
-                WifiConfigUI.currentSSID(
+            let network = await Task.detached {
+                WifiConfigUI.currentNetwork(
                     currentName: currentName,
                     expectedHardwareID: expectedHardwareID,
                     preferredPort: preferredPort)
             }.value
-            guard let ssid else { return }
-            self?.updatePanel(serviceName) { $0.currentSSID = ssid }
+            guard let network else { return }
+            self?.updatePanel(serviceName) {
+                $0.currentSSID = network.ssid
+                $0.networkConnected = network.connected
+                $0.networkReportedAt = Date()
+            }
         }
     }
 

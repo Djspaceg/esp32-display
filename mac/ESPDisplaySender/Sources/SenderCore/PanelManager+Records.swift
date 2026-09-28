@@ -26,6 +26,8 @@ extension PanelManager {
                 panels[index].profile = nil
                 panels[index].partition = nil
                 panels[index].geometry = nil
+                panels[index].announcedSSID = nil
+                panels[index].announcedAt = nil
             }
         }
         // Discovery attaches live state to records; it does not create records.
@@ -66,6 +68,16 @@ extension PanelManager {
             else { continue }
             panels[index].partition = device.metadata.partition
         }
+        // The joined network, announced while the panel is on WiFi. Kept like
+        // the records above when a later result omits it, and in its own field
+        // so a cached announcement cannot overwrite a newer USB report.
+        for device in devices where device.metadata.ssid != nil {
+            guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
+            else { continue }
+            guard panels[index].announcedSSID != device.metadata.ssid else { continue }
+            panels[index].announcedSSID = device.metadata.ssid
+            panels[index].announcedAt = Date()
+        }
         // The resolution takes the same treatment and for the same reason: a
         // second browse result without metadata must not erase a `res` that has
         // already arrived. A panel does not stop knowing its own screen size.
@@ -83,6 +95,7 @@ extension PanelManager {
                 correctedRegion = true
             }
             followRotationAwaitingGeometry(for: device.name)
+            alignRegionToRotation(for: device.name)
         }
         if correctedRegion {
             refreshPreviewDriver()
@@ -127,6 +140,9 @@ extension PanelManager {
         }
         sessions[session.name] = session
         session.setFPS(settings.fps)
+        if let rotation = panels.first(where: { $0.serviceName == session.name })?.rotation {
+            session.setPanelRotation(rotation)
+        }
         session.applyPacing(
             spacingMicros: settings.spacingMicros, adaptive: settings.adaptivePacing)
         session.applyTileQuality(settings.tileQuality)

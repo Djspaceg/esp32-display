@@ -259,7 +259,9 @@ final class PanelManager: ObservableObject {
             self.setRegionScale(scale, for: target)
         }
         regionSelector.onRotate = { [weak self] in
-            guard let self, let target = self.regionTarget else { return }
+            guard let self, let target = self.regionTarget,
+                  self.geometry(of: target).map({ $0.width == $0.height }) ?? true
+            else { return }
             self.rotateRegion(for: target)
         }
         previewDriver.onPreview = { [weak self] image, landscape, serviceName in
@@ -456,13 +458,16 @@ final class PanelManager: ObservableObject {
     /// exclude every square Mac display from the list rather than excluding the
     /// panel it was meant to catch. The point is to skip a display that IS a
     /// panel, and the only panels this can see are shaped like the constant.
-    /// Which saved network the "Saved WiFi" picker should default to.
+    /// Which of this Mac's saved networks the picker should preselect.
     ///
     /// `reportedSSID` is what the device actually said over CFGSHOW
     /// (`PanelSnapshot.currentSSID`). `explicitSelection` is only a value the
-    /// user picked; an automatically displayed fallback must remain nil so a
+    /// user picked; an automatically displayed default must remain nil so a
     /// delayed device reply can replace it. An explicit choice wins while it
-    /// remains saved, then the device report, then the first saved credential.
+    /// remains saved, then the device report - and otherwise nothing. Falling
+    /// back to the first saved credential made the row read as the board's
+    /// network when it was only the top of the app's list; the board's own
+    /// report is `boardNetworkDescription`, shown on its own row.
     ///
     /// `nonisolated` because it only examines its arguments.
     nonisolated static func preferredSSID(
@@ -472,7 +477,31 @@ final class PanelManager: ObservableObject {
             return explicitSelection
         }
         if let reportedSSID, savedNames.contains(reportedSSID) { return reportedSSID }
-        return savedNames.first ?? ""
+        return ""
+    }
+
+    /// The network the board itself reports, for the settings window.
+    ///
+    /// The name comes from the panel's own mDNS `ssid` record (the network it
+    /// has joined) or from CFGSHOW's `ssid=` over USB (the network it is set to
+    /// join), whichever arrived last. Firmware from before the record names it
+    /// only over USB, so with neither this says the name is not reported rather
+    /// than offering the app's saved list. An empty `reportedSSID` is the board
+    /// saying over USB that no network is set.
+    nonisolated static func boardNetworkDescription(
+        reportedSSID: String?, connected: Bool?
+    ) -> String {
+        guard let reportedSSID else {
+            return connected == true
+                ? "Connected (name not reported)"
+                : "Unknown (not reported yet)"
+        }
+        guard !reportedSSID.isEmpty else { return "None configured" }
+        switch connected {
+        case true?: return reportedSSID
+        case false?: return "Not connected (set to \"\(reportedSSID)\")"
+        case nil: return "\(reportedSSID) (connection not reported)"
+        }
     }
 
     nonisolated static func isPanelShaped(_ width: Int, _ height: Int) -> Bool {
@@ -497,6 +526,10 @@ final class PanelManager: ObservableObject {
     ) {
         if let index = panels.firstIndex(where: { $0.serviceName == serviceName }) {
             change(&panels[index])
+            // Every orientation write that goes through here - this app's own
+            // rotate and flip, EINF and EACK reports - reaches the capture's
+            // frame shape too. A no-op unless the shape actually changes.
+            sessions[serviceName]?.setPanelRotation(panels[index].rotation)
             sortPanels()
         }
     }

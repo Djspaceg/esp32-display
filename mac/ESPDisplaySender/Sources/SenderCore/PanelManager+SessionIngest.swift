@@ -51,6 +51,9 @@ extension PanelManager {
             panel.lastHeartbeatAt = status.heartbeatAge.map {
                 status.updatedAt.addingTimeInterval(-$0)
             }
+            if let replyAge = status.replyAge {
+                panel.lastReplyAt = status.updatedAt.addingTimeInterval(-replyAge)
+            }
             panel.displayFPS = status.displayFPS
             panel.framesSent = status.framesSent
             panel.sendErrors = status.sendErrors
@@ -99,6 +102,7 @@ extension PanelManager {
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
                 panel.lastHeartbeatAt = now
+                panel.lastReplyAt = now
                 panel.lastError = nil
                 panel.framesShown = stats.shown
                 panel.framesDropped = stats.dropped
@@ -117,6 +121,7 @@ extension PanelManager {
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
                 panel.lastHeartbeatAt = now
+                panel.lastReplyAt = now
                 panel.lastError = nil
                 Self.apply(info, to: &panel, keepBrightness: keepBrightness)
             }
@@ -131,6 +136,7 @@ extension PanelManager {
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
                 panel.lastHeartbeatAt = now
+                panel.lastReplyAt = now
                 if !keepBrightness {
                     panel.brightness = Int(acknowledgement.brightness)
                 }
@@ -151,7 +157,11 @@ extension PanelManager {
             // evidence that frames are arriving, and letting it stand in for a
             // heartbeat would keep a panel reading "Online" after its stream
             // had stopped.
-            updatePanel(serviceName) { $0.lastSeen = now }
+            // It is a reply, though: the panel sent it over WiFi.
+            updatePanel(serviceName) { panel in
+                panel.lastSeen = now
+                panel.lastReplyAt = now
+            }
             handleTouch(touch, for: serviceName)
         case .battery(let battery):
             // Not `lastHeartbeatAt`, for the same reason as touch and one more:
@@ -160,6 +170,7 @@ extension PanelManager {
             // panel reading "Online" forever.
             updatePanel(serviceName) { panel in
                 panel.lastSeen = now
+                panel.lastReplyAt = now
                 panel.battery = battery
                 // Stamped so the row can age it out. The panel stops sending
                 // rather than reporting a failure, so this timestamp is the only

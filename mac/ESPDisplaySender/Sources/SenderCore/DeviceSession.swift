@@ -38,6 +38,8 @@ final class DeviceSession {
         /// on screen".
         let lastFrameAt: Date?
         let updatedAt: Date
+        /// Seconds since the device last really answered (`FrameSender.replyAge`).
+        var replyAge: TimeInterval? = nil
     }
 
     /// What this device should show, from the per-device config file:
@@ -56,7 +58,6 @@ final class DeviceSession {
     /// can be absorbed in place instead of by rebuilding the stream.
     private struct TrackedWindow {
         var id: CGWindowID
-        var landscape: Bool
         /// The application that owns it, used to find the replacement when a
         /// resize or full-screen transition destroys and recreates the window.
         var owner: String?
@@ -108,6 +109,8 @@ final class DeviceSession {
     /// each restart - the opposite of the reassurance this row is for.
     private var _lastFrameAt: Date?
     private var _fps: Int
+    /// The panel's mounting rotation in quarter turns, as the manager records it.
+    private var _panelRotation = 0
     /// Bumped when a setting that capture was started with changes, so the
     /// watchdog restarts the stream rather than leaving the old rate running.
     private var settingsGeneration: UInt64 = 0
@@ -320,6 +323,49 @@ final class DeviceSession {
         _fps = fps
         if changed { settingsGeneration &+= 1 }
         stateLock.unlock()
+    }
+
+    /// Tell capture how the panel is mounted. The frame shape follows it for
+    /// every kind of source (`DisplayCapture.streamsLandscape`). A change that
+    /// alters the shape reshapes the running stream in place; only if that
+    /// fails - no stream yet, or ScreenCaptureKit refusing - does the watchdog
+    /// restart capture, as for a frame-rate change. A 180 flip keeps the shape
+    /// and is left to the panel.
+    func setPanelRotation(_ rotation: Int) {
+        let geometry = sender.geometry
+        let capture: DisplayCapture?? = stateLock.withLock {
+            let before = DisplayCapture.streamsLandscape(
+                geometry: geometry, rotation: _panelRotation)
+            _panelRotation = rotation
+            guard DisplayCapture.streamsLandscape(geometry: geometry, rotation: rotation)
+                != before
+            else { return .none }
+            return .some(activeCapture)
+        }
+        guard case .some(let running) = capture else { return }
+        guard let running else {
+            // Capture may be being built right now with the old shape.
+            stateLock.withLock { settingsGeneration &+= 1 }
+            return
+        }
+        Task { [weak self] in
+            // The wanted shape is read when the reshape runs, so a rotation that
+            // flaps back before then asks for the shape it ended on.
+            guard let self else { return }
+            if await running.reshape(landscape: self.streamsLandscape) { return }
+            self.stateLock.withLock { self.settingsGeneration &+= 1 }
+        }
+    }
+
+    /// How many capture restarts have been requested for a changed setting.
+    var captureSettingsGenerationForTesting: UInt64 { currentSettingsGeneration }
+
+    /// Whether capture streams landscape frames for the panel's rotation.
+    var streamsLandscape: Bool {
+        let geometry = sender.geometry
+        return stateLock.withLock {
+            DisplayCapture.streamsLandscape(geometry: geometry, rotation: _panelRotation)
+        }
     }
 
     private var currentSettingsGeneration: UInt64 {
@@ -658,11 +704,15 @@ final class DeviceSession {
         var parkRequested = false
 
         while !isStopped {
+            // Read before the shape below, so a rotation landing in between
+            // restarts capture on the next tick instead of being missed.
+            let baselineSettingsGeneration = currentSettingsGeneration
             let capture = DisplayCapture(
                 // The sender's geometry, not a constant: the capture has to
                 // produce frames of exactly the size the sender will send, and
                 // the sender's came from the panel's `res` TXT record.
                 geometry: sender.geometry,
+                landscape: streamsLandscape,
                 onPreview: { [weak self] image, landscape in
                     self?.onPreview?(image, landscape)
                 },
@@ -671,7 +721,6 @@ final class DeviceSession {
                 })
             adopt(capture)
             let baselineSourceGeneration = sourceGeneration
-            let baselineSettingsGeneration = currentSettingsGeneration
             let fps = self.fps
             var displayShape: (CGDirectDisplayID, Int, Int, Bool)?
             /// The display whose sleep explains silence, when the source is
@@ -741,9 +790,7 @@ final class DeviceSession {
                     rememberPickerFilter(target.filter)
                     if let windowID = target.windowID {
                         tracked = TrackedWindow(
-                            id: windowID,
-                            landscape: target.size.width > target.size.height,
-                            owner: target.owner)
+                            id: windowID, owner: target.owner)
                     }
                 case .contentGone where DisplayCapture.isUnresponsive:
                     // The lookup timed out, which says nothing about the
@@ -841,10 +888,7 @@ final class DeviceSession {
                     continue
                 }
                 let app = window.owningApplication?.applicationName ?? "?"
-                tracked = TrackedWindow(
-                    id: window.windowID,
-                    landscape: window.frame.width > window.frame.height,
-                    owner: app)
+                tracked = TrackedWindow(id: window.windowID, owner: app)
                 do {
                     try await capture.start(window: window, fps: fps)
                     announced = false
@@ -1040,9 +1084,9 @@ final class DeviceSession {
     ///    full-screen transitions do) counted as "closed", even though its
     ///    replacement was right there.
     ///
-    /// Now the window is re-found by ID, orientation changes are applied to the
-    /// live stream, and a recreated window is retargeted rather than chased
-    /// with a rebuild.
+    /// Now the window is re-found by ID, an aspect flip leaves the frame shape
+    /// alone (it follows the panel's rotation), and a recreated window is
+    /// retargeted rather than chased with a rebuild.
     ///
     /// - Returns: false when the stream genuinely has to be rebuilt.
     private func followWindow(
@@ -1079,21 +1123,9 @@ final class DeviceSession {
 
         guard let window else { return false }
         tracked.onScreen = window.isOnScreen
-
-        let nowLandscape = window.frame.width > window.frame.height
-        if nowLandscape != tracked.landscape {
-            guard await capture.reorient(landscape: nowLandscape) else {
-                print("[\(name)] window aspect flipped - restarting capture")
-                return false
-            }
-            tracked.landscape = nowLandscape
-            // The panel's buffer still holds the previous orientation, and the
-            // band diff would otherwise skip everything that happens to match.
-            sender.forceKeyframe()
-            print("[\(name)] window resized to "
-                + "\(Int(window.frame.width))x\(Int(window.frame.height)) - "
-                + "re-oriented in place")
-        }
+        // A resize that flips the window between portrait and landscape needs
+        // nothing here: the frame shape follows the panel's rotation, not the
+        // window, and the stream fits whatever shape the window has into it.
         markStreaming()
         return true
     }
@@ -1223,7 +1255,8 @@ final class DeviceSession {
             landscape: sender.currentLandscape,
             captureStatus: reported,
             lastFrameAt: frameAt,
-            updatedAt: now))
+            updatedAt: now,
+            replyAge: sender.replyAge))
         // A parked session has nothing to report every five seconds; the park
         // and resume lines say all there is to say.
         guard !parked else {

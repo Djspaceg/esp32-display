@@ -2,6 +2,93 @@
 
 Each finished branch keeps its own review record below, whole.
 
+## Code review: board-reported WiFi and one capture orientation rule
+
+Branch `app-wifi-orientation`, rebased onto main 696d0ae (capture-stall fix). Commits: db67796 fix, b5990f2 round-1 fixes, 697df1b residuals, 0ceed4f network name over WiFi, d85c9ab round-2 fixes, 02e0585 round-3 fixes. There were three adversarial rounds, each by a separate reviewer agent that only read files and ran grep; none opened a port, launched the app or flashed a board. An earlier round-1 run was lost when the app restarted and never reported.
+
+### Causes
+
+**WiFi.**
+- `PanelManager.preferredSSID` fell back to `savedNames.first` (PanelManager.swift, `return savedNames.first ?? ""`).
+- The only row was the saved-networks picker labelled "Saved WiFi", so the app's first Keychain entry read as the board's network.
+- CFGSHOW's `connected=` was parsed but never shown.
+
+**Orientation.**
+- Capture.swift `start(display:)`, `start(window:)` and `start(contentFilter:)` set the landscape bit from the Mac source's own shape (`display.width > display.height`, `window.frame`, `contentRect`).
+- DeviceSession `followWindow` re-oriented the stream on every window aspect flip.
+- Region took the bit from its rectangle, which the app turns with the rotation.
+- The firmware reads the bit as a quarter turn (`panelorient::quadrant`). So a wide Screen, Window or picker share arrived sideways at rotation 0, and so did any wide source on square glass.
+
+### Rebase onto 696d0ae
+
+Capture.swift and DeviceSession.swift conflicted, and so did this file and DECISIONS.md.
+- **Stall monitor kept whole:** `withCaptureDeadline`, `markWedgedIfExpired`, the `_acceptedStream` gating, `markStreaming` and `TrackedWindow.onScreen` are all kept.
+- **The shared reconfigure queue:** region drags and rotation reshapes go through one reconfigure queue. The deadline and the wedge marking now apply to that queue.
+- **Window reorient:** reorienting a window's stream when its aspect flips is still removed, because the frame shape follows the rotation.
+- **These two records:** in this file and DECISIONS.md, this section and the stall worker's were both new entries at the same point. Both are kept, this one first; taking only this one would have deleted the stall worker's record.
+- **Stall tests:** they pass after the rebase.
+
+### Round 1 (whole diff)
+
+| # | Severity | Finding | Disposition |
+|---|----------|---------|-------------|
+| F1 | Near blocking | On rectangular glass at 0 or 180 degrees, a landscape region was letterboxed. The marquee's Rotate made it worse. | Fixed. `alignRegionToRotation` turns such a region upright, and the marquee hides Rotate on rectangular glass. Three tests. |
+| F2 | Non-blocking | "Connected WiFi" kept the `connected=0` read at boot. | Fixed. Replies now decide the row; see R2-1 and R3-1. |
+| F3 | Non-blocking | A rotation that changed the frame shape restarted capture. | Fixed. `DisplayCapture.reshape` reconfigures in place, with a restart only as the fallback. |
+| F4 | Nit | The offline preview kept the old shape after a rotation reported over USB. | Fixed: the preview is refreshed after the USB ingest. |
+| F5 | Nit | An empty `ssid64=` read "Unknown", an old name was never cleared, and three comments were out of date. | Fixed: it now reads "None configured". |
+| F6 | Nit | The per-kind tests only checked one rule. | Fixed. Restart decision, alignment and drain tests were added in rounds 1 to 3. |
+| F7 | Nit | Overlap with the capture-restart, banner and layout workers. | Accepted, because the fix needs it. The stall conflicts were resolved in the rebase above. |
+
+### Residuals closed (697df1b, red first)
+
+- **Unknown-size preview:** an offline panel whose size is not known now previews in the shape it streams. A region keeps the shape its rotation gave it; any other source uses the rectangular default. Once the size is known, the preview captures at the panel's own size.
+- **Silent board:** a board that goes quiet over WiFi now reads "Not connected" (reworked in R2-1).
+
+### Network name over WiFi (0ceed4f, human decision, red first)
+
+- **Firmware:** the mDNS announcement gains an `ssid` entry set from `WiFi.SSID()`. The host fakes now record TXT entries, and `test_audio` checks it.
+- **App:** `ServiceMetadata.ssid` is parsed and shown.
+- **Rows:** the two rows moved into `WifiNetworkRows`, which is rendered offscreen to wifi-rows.png.
+
+### Round 2 (0ceed4f)
+
+| # | Severity | Finding | Disposition |
+|---|----------|---------|-------------|
+| R2-1 | Blocking | A reconnect refreshes `lastHeartbeatAt` without any reply, so a silent board flapped to "connected". | Fixed. `FrameSender.replyAge` counts only genuine replies and reaches `lastReplyAt`. Test: `testAReconnectWithNoReplyIsNotTheBoardBeingConnected`. |
+| R2-2 | Non-blocking | A cached mDNS name overwrote a newer USB report and was never cleared. | Fixed. `announcedSSID` is a separate field, cleared when the service leaves. Two tests. |
+| R2-3 | Non-blocking | A reshape was lost when a reconfigure failed without timing out. | Fixed. On failure the drain rolls back and stops the capture so it is rebuilt. Two tests. |
+| R2-4 | Non-blocking | The first frame at the new size was dropped. | Fixed. The new size is expected before the call. Test: `testTheNewFrameSizeIsExpectedWhileTheReshapeIsApplied`. |
+| R2-5 | Nit | The firmware comment was wrong, and a join after setup's announce left `ssid` empty. | Fixed. `mdnsSsidIsCurrent()` plus a 5-second re-announce check. Tested on the host. |
+| R2-6 | Nit | The render test did not pin the rendering. | Fixed. Changing only the words must change the pixels. |
+| R2-7 | Nit | Wording mixed the two sources. | Fixed: "set to" (USB) versus "last on" (announcement). |
+
+### Round 3 (d85c9ab)
+
+| # | Severity | Finding | Disposition |
+|---|----------|---------|-------------|
+| R3-1 | Medium | Only the 5-second status report recorded replies, so the row said "not connected" while capture waited for its source. | Fixed. Every device event records a reply. Test: `testAHeartbeatEventAloneShowsTheBoardOnWiFi`. |
+| R3-2 | Medium | A reshape queued behind a failing region update was dropped. | Fixed. A pending shape change also stops the capture. Test: `testAReshapeQueuedBehindAFailingRegionUpdateStopsTheCapture`. |
+| R3-3 | Low | A drain that outlived `stop()` reported success. | Fixed. The stream is read on each pass. Test: `testADrainWithNoStreamLeftDoesNotReportSuccess`. |
+| R3-4 | Low | While the board replied, a stale announcement beat a newer USB report. | Fixed. `announcedAt` is stamped only when the value changes. Test: `testAUSBReportNewerThanTheAnnouncementWinsWhileReplying`. |
+
+Every round-3 finding was red before its fix and green after. No fourth round was run on 02e0585.
+
+### Gate at f8e99dd
+
+- **`swift test`:** 742 tests, 0 failures. swift-test.log holds five red runs before the green run: the two bugs, the residuals, the name over WiFi, round 2 and round 3.
+- **Firmware host tests:** pass, with two red runs first.
+- **Firmware compile:** c3, c6, s3 and p4 all exit 0. c6 is at 93% of its app partition.
+- **Tools and bundles:** `tools/test_espdisp.py` passes 1889 checks. The 1.5.0 bundles were regenerated from clean 98e75c7 (firmware.log).
+- **Release app build:** succeeded and embeds the new p4 bundle (release-build.log).
+- **On the 4C under the port lock** (hardware.log):
+  - The board flashed and joined WiFi.
+  - Its mDNS record now carries `ssid`, which it did not before.
+  - The canonical reflash succeeded.
+- **Not confirmed on the app side:** the running app, build 342, had not heard from the board since 14:47.
+- **Logs:** in /Users/stepblk/Source/esp32-display-wifi-orient-logs/.
+- **After hand-off:** an independent agent must still review this.
+
 ## Code review: capture stall detection and restart (capture-stall-restart)
 
 Branch `capture-stall-restart`, `git diff 93684af..HEAD`. One adversarial round by a separate read-only reviewer agent (file reads, `swift build`, `swift test` only; no app launch, no ports) against 9c8d7f2. Every finding was addressed in 5a851cd, and the one gap left in finding 4 in bd068f8. An independent agent must still perform the post-handoff review. This file is the only review artifact: no CRUX, AutoSDE or pull request is used for this repository.

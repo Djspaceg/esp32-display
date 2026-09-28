@@ -2,6 +2,49 @@
 
 Each finished branch keeps its own record below.
 
+## Board WiFi report and capture orientation (app-wifi-orientation)
+
+### Outcome
+
+The settings window shows the network the board reports ("Connected WiFi") apart from the Mac's saved list ("Saved on this Mac"). Boards announce their joined network over WiFi, and the 4C did so on hardware. Every capture source streams upright. Rebased onto 696d0ae with the stall monitor intact; 1.5.0 bundles regenerated. Gates pass.
+
+### Decisions to evaluate
+
+D1 The board names its joined network in an mDNS `ssid` record (WiFi.SSID()), shown without USB; USB still names the network it is set to join. EINF is unchanged. Why: the sender parses EINF by exact length. Supersedes: showing the name over USB only, because the human chose "Add the network name". If overruled: drop the record and the row says "Connected (name not reported)".
+D2 The saved picker preselects nothing unless the board reported a saved network or the user picked one. Supersedes: falling back to the first saved name, because that was the bug. If overruled: restore the fallback.
+D3 One rule for every source: landscape exactly when the glass is rectangular and at 90 or 270. The source is fitted in, so a wide display on a portrait panel at 0 is letterboxed but upright. If overruled: crop to fill.
+D4 On rectangular glass the marquee has no Rotate, and a region of the wrong shape is turned to match. If overruled: change the rotation to match the region instead.
+D5 A shape-changing rotation reshapes the running stream; a failed reshape stops capture for a rebuild. Why: a picker share may not survive a rebuild. If overruled: always restart.
+D6 "Connected" comes from genuine replies within 10 s, else the newest of reply-silence and the USB report. Why: reconnects refresh the heartbeat without a reply. If overruled: use Online status.
+
+### Open questions
+
+- A sideways panel using a landscape region at 0 degrees gets it stood upright on upgrade. Default: stood upright; 90 or 270 restores it.
+- The 4C was running the audio worker's build (audio records, caps 003967ef) before this check; it now runs this branch's canonical p4 bundle, with audio off. Default: left on canonical as instructed; the audio worker reflashes when it needs it.
+- Record conflict: this file and code-review.md keep both this section and the stall worker's. Default: both kept.
+
+### Gate facts
+
+- Publish settings: local commits only; no push, no PR, no review service.
+- Call sites: no packages/* symbol touched.
+- swift test at f8e99dd: 742 tests, 0 failures, five red runs first. Log: swift-test.log.
+- Firmware host tests pass (two red runs first); compile c3, c6, s3, p4 exit 0 (c6 93%); test_espdisp 1889 checks OK; release --shipping --regenerate-existing 1.5.0 from clean 98e75c7, p4 sha256 9f21c9f4. Log: firmware.log.
+- Release app build at f8e99dd succeeded; it embeds the new p4 bundle. Log: release-build.log.
+- 4C under the port lock: flash exit 0 (MAC e8:f6:0a:e0:a0:e4), WiFi up, mDNS `ssid` present (absent before), canonical reflash exit 0. Log: hardware.log.
+- Adversarial review: 3 rounds, 18 findings; 17 fixed, 1 accepted.
+
+### Evidence
+
+- wifi-rows.png: the two rows rendered offscreen in six states.
+- hardware.log: the locked flash, boot log, mDNS records before and after, reflash.
+- swift-test.log, firmware.log, release-build.log: gate runs with red runs.
+- code-review.md: causes, rebase and every finding.
+
+### Residuals
+
+- App side unconfirmed: the running app (build 342, before this change) has not heard from the board since 14:47, and the announced name is not saved to panels.json. Needs a relaunch of this build.
+- CFGSHOW got no reply within 6 s right after the serial capture; the boot log showed WiFi up.
+
 ## Capture stall restart (capture-stall-restart)
 
 ### Outcome

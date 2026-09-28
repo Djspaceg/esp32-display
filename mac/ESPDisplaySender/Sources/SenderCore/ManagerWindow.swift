@@ -464,8 +464,8 @@ private struct PanelDetailView: View {
             editedName = panel.displayName
             editedIdleText = panel.idleText
             // CFGSHOW is asynchronous. `selectedSSID` remains derived from the
-            // optional explicit choice, so this reply can replace the initial
-            // fallback without being mistaken for a user selection.
+            // optional explicit choice, so this reply can fill the empty
+            // default without being mistaken for a user selection.
             manager.refreshCurrentSSID(for: panel.serviceName)
         }
         .onChange(of: panel.idleText) { _, newValue in
@@ -630,8 +630,8 @@ private struct PanelDetailView: View {
                     }
                 }
                 .help("Drag an aspect-locked rectangle over your screen to "
-                    + "choose what this panel shows; its size presets and "
-                    + "rotation are on the rectangle itself")
+                    + "choose what this panel shows; its size presets (and, "
+                    + "on square panels, rotation) are on the rectangle itself")
                 if let region = panel.source.region {
                     Text(region.sizeDescription)
                         .font(.caption)
@@ -858,34 +858,22 @@ private struct PanelDetailView: View {
                 CopyableAddress(address: panel.address)
             }
             LabeledContent("WiFi signal", value: panel.signalDescription)
-            LabeledContent("Saved WiFi") {
-                HStack(spacing: 8) {
-                    Picker("Saved WiFi", selection: wifiSelection) {
-                        Text("Select a network…").tag("")
-                        ForEach(manager.savedNetworkNames, id: \.self) { ssid in
-                            Text(ssid).tag(ssid)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-
-                    Button("Apply") {
-                        manager.applySavedNetwork(selectedSSID, to: panel.serviceName)
-                    }
-                    .disabled(selectedSSID.isEmpty
-                        || !manager.canPerform(.savedWiFi, for: panel.serviceName))
-                    .help(operationHelp(.savedWiFi, "Apply this saved network"))
-
-                    Button(manager.savedNetworkNames.isEmpty ? "Add…" : "Edit…") {
-                        manager.configureUSB(
-                            preferredSSID: selectedSSID.isEmpty ? nil : selectedSSID)
-                    }
-                    .disabled(!manager.canPerform(
-                        .savedWiFi, for: panel.serviceName))
-                    .help(operationHelp(
-                        .savedWiFi, "Add or edit saved WiFi credentials"))
-                }
-            }
+            WifiNetworkRows(
+                connectedDescription: panel.boardNetworkDescription(asOf: Date()),
+                savedNetworkNames: manager.savedNetworkNames,
+                selection: wifiSelection,
+                canApply: manager.canPerform(.savedWiFi, for: panel.serviceName),
+                canEdit: manager.canPerform(.savedWiFi, for: panel.serviceName),
+                applyHelp: operationHelp(.savedWiFi, "Apply this saved network"),
+                editHelp: operationHelp(
+                    .savedWiFi, "Add or edit saved WiFi credentials"),
+                onApply: {
+                    manager.applySavedNetwork(selectedSSID, to: panel.serviceName)
+                },
+                onEdit: {
+                    manager.configureUSB(
+                        preferredSSID: selectedSSID.isEmpty ? nil : selectedSSID)
+                })
             LabeledContent("On-device picker") {
                 Button("Manage Presets...") {
                     showingWifiPresets = true
@@ -898,7 +886,9 @@ private struct PanelDetailView: View {
         } header: {
             Text("Network Connection")
         } footer: {
-            Text("WiFi credentials are stored in your login Keychain and applied "
+            Text("Connected WiFi is the network the display itself reports, "
+                + "over WiFi or USB. "
+                + "WiFi credentials are stored in your login Keychain and applied "
                 + "to this physical display over its current USB connection. "
                 + "Saved networks are copied to the display automatically "
                 + "whenever it is connected by USB, in alphabetical order. "

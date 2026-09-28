@@ -91,6 +91,49 @@ final class DiscoveryMetadataTests: XCTestCase {
             accuracy: 0.001)
     }
 
+    // MARK: - joined network
+
+    func testTheJoinedNetworkIsReadFromItsRecord() {
+        XCTAssertEqual(
+            ServiceMetadata(txtRecords: ["ssid": "Studio WiFi"]).ssid, "Studio WiFi")
+        XCTAssertNil(ServiceMetadata(txtRecords: ["ssid": ""]).ssid)
+        XCTAssertNil(ServiceMetadata(txtRecords: [:]).ssid)
+    }
+
+    /// The name reaches the "Connected WiFi" row with no USB report at all.
+    func testAnAnnouncedNetworkShowsWithoutUSB() {
+        let manager = PanelManager(
+            previewPanels: [PanelSnapshot(serviceName: "white-cube", displayName: "white-cube")],
+            savedNetworkNames: [], usbSerialPorts: [])
+        manager.noteDiscovery([
+            DeviceBrowser.Device(
+                name: "white-cube", endpoint: service("white-cube"),
+                metadata: ServiceMetadata(txtRecords: ["ssid": "Studio WiFi"]))
+        ])
+        manager.updatePanel("white-cube") { $0.lastReplyAt = Date() }
+
+        XCTAssertEqual(manager.panels[0].announcedSSID, "Studio WiFi")
+        XCTAssertEqual(
+            manager.panels[0].boardNetworkDescription(asOf: Date()), "Studio WiFi")
+    }
+
+    /// A second browse result without the record must not erase the name, as
+    /// for every other record here.
+    func testABrowseResultWithoutTheRecordKeepsTheName() {
+        let manager = PanelManager(
+            previewPanels: [PanelSnapshot(serviceName: "white-cube", displayName: "white-cube")],
+            savedNetworkNames: [], usbSerialPorts: [])
+        manager.noteDiscovery([
+            DeviceBrowser.Device(
+                name: "white-cube", endpoint: service("white-cube"),
+                metadata: ServiceMetadata(txtRecords: ["ssid": "Studio WiFi"]))
+        ])
+        manager.noteDiscovery([
+            DeviceBrowser.Device(name: "white-cube", endpoint: service("white-cube"))
+        ])
+        XCTAssertEqual(manager.panels[0].announcedSSID, "Studio WiFi")
+    }
+
     func testAnImplausibleResolutionIsUnknown() {
         // Do not propagate an invalid geometry: it drives band arithmetic and
         // frame allocation. Do not replace it with a legacy concrete geometry

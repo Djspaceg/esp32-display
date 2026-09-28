@@ -36,6 +36,9 @@ final class RegionSelector: NSObject {
     var onScale: ((Int) -> Void)?
     /// The rotate button on the marquee: swap the rectangle's sides.
     var onRotate: (() -> Void)?
+    /// False for rectangular glass, where the panel's rotation decides the
+    /// rectangle's shape and a free rotate would only letterbox the frame.
+    var allowsRotate = true
 
     /// Which preset the current region matches, highlighted on the overlay.
     /// The manager sets it because matching needs the panel's geometry, which
@@ -84,7 +87,7 @@ final class RegionSelector: NSObject {
         view?.sizeLabel = clamped.sizeDescription
         // Rotating a square swaps two equal sides; hide the button rather than
         // offer one that visibly does nothing.
-        view?.includeRotate = abs(clamped.width - clamped.height) > 0.5
+        view?.includeRotate = allowsRotate && abs(clamped.width - clamped.height) > 0.5
         view?.activeScale = activeScale
     }
 

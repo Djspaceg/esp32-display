@@ -67,6 +67,8 @@ public struct ServiceMetadata: Hashable, Sendable {
     public let profile: String?
     /// `partition`. Flash-layout compatibility token.
     public let partition: String?
+    /// `ssid`. The WiFi network the panel has joined.
+    public let ssid: String?
     /// `caps`. The same bits EINF reports, available before a session exists.
     public let capabilities: DeviceProtocol.Capabilities?
     /// `proto`. Which frame-protocol generation this panel speaks.
@@ -85,6 +87,7 @@ public struct ServiceMetadata: Hashable, Sendable {
         target: String? = nil,
         profile: String? = nil,
         partition: String? = nil,
+        ssid: String? = nil,
         capabilities: DeviceProtocol.Capabilities? = nil,
         frameProtocolVersion: Int? = nil,
         audioDescriptor: AudioStreamDescriptor? = nil
@@ -96,6 +99,7 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.target = target
         self.profile = profile
         self.partition = partition
+        self.ssid = ssid
         self.capabilities = capabilities
         self.frameProtocolVersion = frameProtocolVersion
         self.audioDescriptor = audioDescriptor
@@ -133,6 +137,7 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.target = Self.nonEmpty(records["target"])
         self.profile = Self.nonEmpty(records["profile"])
         self.partition = Self.nonEmpty(records["partition"])
+        self.ssid = Self.nonEmpty(records["ssid"])
         self.geometry = Self.parseResolution(records["res"])
         let capabilities = Self.parseCapabilities(records["caps"])
         self.capabilities = capabilities

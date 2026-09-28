@@ -711,6 +711,14 @@ void loop() {
     restartMdnsService();
   }
   wifiWasConnected = wifiConnected;
+  // A join the edge above never saw - between setup's announce and the first
+  // loop - leaves the ssid record empty. Checked every 5s, so a failing mDNS
+  // restart is retried at that pace rather than every loop.
+  static uint32_t lastSsidRecordCheck = 0;
+  if (wifiConnected && millis() - lastSsidRecordCheck >= 5000) {
+    lastSsidRecordCheck = millis();
+    if (!mdnsSsidIsCurrent()) restartMdnsService();
+  }
   if (wifiConnected && wifiLegacyMirrorPending &&
       (lastWifiMirrorAttempt == 0 ||
        millis() - lastWifiMirrorAttempt >= 5000)) {

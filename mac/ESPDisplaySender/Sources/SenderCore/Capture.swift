@@ -24,12 +24,20 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let onPreview: ((CGImage, Bool) -> Void)?
 
     /// Guards every field the capture queue and the supervisor both touch.
-    /// Orientation in particular is now written while frames are in flight,
-    /// because a resize re-configures the stream instead of replacing it.
     private let stateLock = NSLock()
-    private var _landscape = false
+    /// The frame shape. It follows the panel's rotation (`streamsLandscape`),
+    /// never the source, and a rotation that changes it reshapes the running
+    /// stream in place (`reshape`) so a picker share survives it.
+    private var _landscape: Bool
     private var _outW: Int
     private var _outH: Int
+    /// Reconfigurations asked for but not yet handed to the stream. Region
+    /// drags and reshapes share one queue, applied newest-wins by one drain at a
+    /// time, so a slow region update can never land after a reshape and put the
+    /// old frame shape back.
+    private var _pendingRect: CGRect?
+    private var _pendingLandscape: Bool?
+    private var _reconfiguring = false
     private var _framesCaptured: UInt64 = 0
     private var _stopped = false
     private var _stopReason: String?
@@ -131,17 +139,22 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     ///     an image of the frame just sent. Only while preview is enabled.
     ///   - geometry: the panel's native pixel size. Must be the geometry of the
     ///     sender these frames are handed to.
+    ///   - landscape: whether to stream landscape frames, from
+    ///     `streamsLandscape(geometry:rotation:)`. A rotation that changes it
+    ///     later goes through `reshape(landscape:)`.
     ///   - onFrame: called on the capture queue with each converted
     ///     RGB565BE frame and whether it is landscape (the axes swapped).
     init(
         geometry: PanelGeometry = .panel172x320,
+        landscape: Bool = false,
         onPreview: ((CGImage, Bool) -> Void)? = nil,
         onFrame: @escaping ([UInt8], Bool) -> Void
     ) {
         self.geometry = geometry
         self.rgbBuffer = [UInt8](repeating: 0, count: geometry.frameBytes)
-        self._outW = geometry.width
-        self._outH = geometry.height
+        self._landscape = landscape
+        self._outW = geometry.frameWidth(landscape: landscape)
+        self._outH = geometry.frameHeight(landscape: landscape)
         self.onFrame = onFrame
         self.onPreview = onPreview
     }
@@ -602,53 +615,60 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         return nil
     }
 
-    /// Start capturing a display. Orientation follows the aspect ratio:
-    /// wider than tall captures landscape (320x172), else portrait (172x320).
+    /// Whether a capture streams landscape frames (the panel's height wide).
+    ///
+    /// One rule for every kind of source - Screen, Window, Region and a picker
+    /// selection alike - because the firmware reads the landscape bit as a
+    /// quarter turn: rectangular glass addresses a frame through
+    /// `(rotation & 2) + landscape` and square glass through
+    /// `rotation + landscape` (`panelorient::quadrant`). Up on the Mac is up on
+    /// the glass only when landscape means exactly "rectangular glass mounted a
+    /// quarter turn", and never on square glass, which turns for every rotation
+    /// itself. The source's own shape is fitted into that frame
+    /// (`scalesToFit`) and never picks it: taking it from the source is what
+    /// turned a wide Screen or Window a quarter turn at rotation 0 while a
+    /// Region beside it stayed upright.
+    static func streamsLandscape(geometry: PanelGeometry, rotation: Int) -> Bool {
+        geometry.width != geometry.height && rotation % 2 != 0
+    }
+
+    /// Start capturing a display, fitted into this capture's frame shape.
     func start(display: SCDisplay, fps: Int) async throws {
         try await start(
             filter: SCContentFilter(display: display, excludingWindows: []),
-            landscape: display.width > display.height, fps: fps)
+            fps: fps)
     }
 
     /// Start capturing a single window, independent of any display - works
     /// even when the window is occluded or the virtual display is gone.
     func start(window: SCWindow, fps: Int) async throws {
         try await start(
-            filter: SCContentFilter(desktopIndependentWindow: window),
-            landscape: window.frame.width > window.frame.height, fps: fps)
+            filter: SCContentFilter(desktopIndependentWindow: window), fps: fps)
     }
 
     /// Start capturing a rectangle of a display rather than the whole thing.
     ///
     /// `sourceRect` is in points relative to the display's top-left corner,
-    /// which is what ScreenCaptureKit asks for. Orientation follows the
-    /// rectangle, so a portrait marquee streams portrait.
+    /// which is what ScreenCaptureKit asks for. The frame shape still comes
+    /// from the panel's rotation; setting the rotation is what turns the
+    /// rectangle on its side to match (`applyRegionQuarterTurn`).
     func start(display: SCDisplay, sourceRect: CGRect, fps: Int) async throws {
         try await start(
             filter: SCContentFilter(display: display, excludingWindows: []),
-            landscape: sourceRect.width > sourceRect.height,
             fps: fps,
             sourceRect: sourceRect)
     }
 
     /// Start capturing whatever the user chose in macOS's content picker.
-    /// Orientation comes from the filter's content rect, so a picked portrait
-    /// window streams portrait and a landscape display streams landscape.
     func start(contentFilter: SCContentFilter, fps: Int) async throws {
-        let rect = contentFilter.contentRect
-        try await start(
-            filter: contentFilter, landscape: rect.width > rect.height, fps: fps)
+        try await start(filter: contentFilter, fps: fps)
     }
 
     private func start(
-        filter: SCContentFilter, landscape: Bool, fps: Int, sourceRect: CGRect? = nil
+        filter: SCContentFilter, fps: Int, sourceRect: CGRect? = nil
     ) async throws {
-        let width = geometry.frameWidth(landscape: landscape)
-        let height = geometry.frameHeight(landscape: landscape)
+        let (width, height) = stateLock.withLock { (_outW, _outH) }
         stateLock.withLock {
-            _landscape = landscape
-            _outW = width
-            _outH = height
             _configuredFPS = fps
             _sourceRect = sourceRect
             _stopped = false
@@ -702,81 +722,124 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     ///
     /// Reconfigures rather than restarts, because the marquee sends one of these
     /// for every step of a drag and rebuilding the stream that often would make
-    /// the panel flicker and reset its band diff. Orientation is recomputed too,
-    /// so dragging a portrait marquee out into a landscape one is handled in the
-    /// same call.
+    /// the panel flicker and reset its band diff. The frame shape is kept: it
+    /// follows the panel's rotation, not the rectangle.
     ///
-    /// - Returns: true when the stream was reconfigured.
+    /// - Returns: false when the stream could not be reconfigured.
     @discardableResult
     func updateRegion(_ rect: CGRect) async -> Bool {
-        guard let stream else { return false }
-        let current = stateLock.withLock {
-            (rect: _sourceRect, fps: _configuredFPS)
-        }
-        guard current.rect != rect else { return false }
-
-        let landscape = rect.width > rect.height
-        let width = geometry.frameWidth(landscape: landscape)
-        let height = geometry.frameHeight(landscape: landscape)
-        do {
-            try await withCaptureDeadline(Self.callDeadline, "Moving the region") {
-                try await stream.updateConfiguration(
-                    Self.configuration(
-                        width: width, height: height, fps: current.fps, sourceRect: rect))
-            }
-        } catch {
-            FileHandle.standardError.write(
-                Data("capture region update failed: \(error.localizedDescription)\n".utf8))
-            markWedgedIfExpired(error)
-            return false
-        }
-        stateLock.withLock {
-            _landscape = landscape
-            _outW = width
-            _outH = height
-            _sourceRect = rect
-        }
-        return true
+        await reconfigure(rect: rect, landscape: nil)
     }
 
-    /// Re-orient a running stream in place, without replacing it.
+    /// Change the frame shape of a running stream in place, for a rotation that
+    /// crosses between an even and an odd quarter turn.
     ///
-    /// A resize that flips the source between portrait and landscape used to
-    /// require a full restart, because output geometry was fixed when the
-    /// stream was created. Restarting is what actually broke mirroring: a
-    /// stream started from a picker selection cannot reliably be recreated
-    /// from that same filter, so the "fix" for a resize dropped the share
-    /// altogether. Reconfiguring keeps the existing stream, and with it the
-    /// system's sharing session.
+    /// Reconfiguring keeps the existing stream, and with it the system's
+    /// sharing session: a stream started from a picker selection cannot
+    /// reliably be recreated from that same filter, so a restart here could
+    /// drop the share altogether. The source rectangle, if any, is kept.
     ///
-    /// - Returns: true when the stream was reconfigured.
+    /// - Returns: false when the stream could not be reconfigured, and the
+    ///   caller should restart capture instead.
     @discardableResult
-    func reorient(landscape wanted: Bool) async -> Bool {
-        guard let stream else { return false }
-        let current = stateLock.withLock {
-            (landscape: _landscape, fps: _configuredFPS)
-        }
-        guard current.landscape != wanted else { return false }
+    func reshape(landscape: Bool) async -> Bool {
+        await reconfigure(rect: nil, landscape: landscape)
+    }
 
-        let width = geometry.frameWidth(landscape: wanted)
-        let height = geometry.frameHeight(landscape: wanted)
-        do {
-            try await withCaptureDeadline(Self.callDeadline, "Re-orienting capture") {
-                try await stream.updateConfiguration(
-                    Self.configuration(width: width, height: height, fps: current.fps))
+    /// Stands in for ScreenCaptureKit's reconfigure in tests, so the drain can
+    /// run without a stream. Called with the frame size and source rectangle.
+    var configureForTesting: ((Int, Int, CGRect?) async throws -> Void)?
+
+    /// The frame size samples are currently converted at.
+    var frameSizeForTesting: (width: Int, height: Int) {
+        stateLock.withLock { (_outW, _outH) }
+    }
+
+    private func reconfigure(rect: CGRect?, landscape: Bool?) async -> Bool {
+        guard stream != nil || configureForTesting != nil else { return false }
+        let drains = stateLock.withLock { () -> Bool in
+            if let rect { _pendingRect = rect }
+            if let landscape { _pendingLandscape = landscape }
+            guard !_reconfiguring else { return false }
+            _reconfiguring = true
+            return true
+        }
+        // Another call is draining: it picks this value up before it finishes.
+        guard drains else { return true }
+        while true {
+            let next = stateLock.withLock {
+                () -> (rect: CGRect?, landscape: Bool, fps: Int)? in
+                let rect = _pendingRect ?? _sourceRect
+                let landscape = _pendingLandscape ?? _landscape
+                _pendingRect = nil
+                _pendingLandscape = nil
+                guard rect != _sourceRect || landscape != _landscape else {
+                    _reconfiguring = false
+                    return nil
+                }
+                return (rect, landscape, _configuredFPS)
             }
-        } catch {
-            FileHandle.standardError.write(
-                Data("capture reorient failed: \(error.localizedDescription)\n".utf8))
-            markWedgedIfExpired(error)
-            return false
+            guard let next else { return true }
+            // Read each pass: stop() can take the stream away mid-drain, and
+            // then nothing below applies and success must not be reported.
+            let hook = configureForTesting
+            let stream = self.stream
+            guard hook != nil || stream != nil else {
+                stateLock.withLock { _reconfiguring = false }
+                return false
+            }
+            let width = geometry.frameWidth(landscape: next.landscape)
+            let height = geometry.frameHeight(landscape: next.landscape)
+            // Expect the new size before asking for it: ScreenCaptureKit may
+            // deliver the first new-size frame before the call returns, and on
+            // a static screen that is the only one. Frames still in flight at
+            // the old size are dropped by PixelConvert's size check, and
+            // FrameSender keyframes on the landscape change.
+            let before = stateLock.withLock { () -> (landscape: Bool, width: Int, height: Int) in
+                let before = (_landscape, _outW, _outH)
+                _landscape = next.landscape
+                _outW = width
+                _outH = height
+                return before
+            }
+            do {
+                if let hook {
+                    try await hook(width, height, next.rect)
+                } else if let stream {
+                    try await withCaptureDeadline(Self.callDeadline, "Reconfiguring capture") {
+                        try await stream.updateConfiguration(
+                            Self.configuration(
+                                width: width, height: height, fps: next.fps,
+                                sourceRect: next.rect))
+                    }
+                }
+            } catch {
+                FileHandle.standardError.write(
+                    Data("capture reconfigure failed: \(error.localizedDescription)\n".utf8))
+                stateLock.withLock {
+                    _landscape = before.landscape
+                    _outW = before.width
+                    _outH = before.height
+                    _reconfiguring = false
+                    // A shape change that did not apply leaves the stream in the
+                    // old shape under a panel at the new rotation, and nothing
+                    // else would notice: have the watchdog rebuild it, which
+                    // starts in the shape the rotation calls for.
+                    // The same holds for a reshape queued behind this call,
+                    // which the drain stops before reaching.
+                    let queuedShape = _pendingLandscape.map { $0 != before.landscape } ?? false
+                    _pendingRect = nil
+                    _pendingLandscape = nil
+                    if next.landscape != before.landscape || queuedShape {
+                        _stopped = true
+                        _stopReason = "the frame shape could not be changed"
+                    }
+                }
+                markWedgedIfExpired(error)
+                return false
+            }
+            stateLock.withLock { _sourceRect = next.rect }
         }
-        stateLock.withLock {
-            _landscape = wanted
-            _outW = width
-            _outH = height
-        }
-        return true
     }
 
     /// Point a running stream at freshly resolved content, without replacing
