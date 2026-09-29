@@ -59,32 +59,31 @@ inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
 
   const bool busOk = Wire.begin(plan.sda, plan.scl, plan.frequencyHz);
   uint8_t found = 0;
-  bool canaryAcked = false;
+  ProbeEvidence addressEvidence = {};
   if (!busOk) {
     if (verbose) {
       Serial.printf("board: WARN %s %s probe bus would not start\n",
                     target, profile);
     }
   } else if (plan.addressCount > 0) {
-    Wire.beginTransmission(boarddetectmodel::CANARY_ADDRESS);
-    canaryAcked = Wire.endTransmission() == 0;
-    if (canaryAcked && verbose) {
-      Serial.printf("board: WARN %s %s bus SDA=%d SCL=%d acknowledged reserved "
-                    "0x%02X; ignoring it as stuck or back-powered\n",
-                    target, profile, plan.sda, plan.scl,
-                    boarddetectmodel::CANARY_ADDRESS);
-    }
-    for (uint8_t i = 0; i < plan.addressCount && !canaryAcked; ++i) {
-      const uint8_t address = plan.addresses[i];
-      Wire.beginTransmission(address);
-      if (Wire.endTransmission() != 0) continue;
-      ++found;
-      if (verbose) {
-        Serial.printf(
-            "board: %s %s signal at 0x%02X on SDA=%d SCL=%d\n",
-            target, profile, address, plan.sda, plan.scl);
-      }
-    }
+    addressEvidence = boarddetectmodel::addressListEvidence(
+        plan, [&](uint8_t address) {
+          Wire.beginTransmission(address);
+          if (Wire.endTransmission() != 0) return false;
+          if (!verbose) return true;
+          if (address == boarddetectmodel::CANARY_ADDRESS) {
+            Serial.printf(
+                "board: WARN %s %s bus SDA=%d SCL=%d acknowledged reserved "
+                "0x%02X; ignoring it as stuck or back-powered\n",
+                target, profile, plan.sda, plan.scl, address);
+          } else {
+            Serial.printf(
+                "board: %s %s signal at 0x%02X on SDA=%d SCL=%d\n",
+                target, profile, address, plan.sda, plan.scl);
+          }
+          return true;
+        });
+    found = addressEvidence.ackCount;
   } else {
     for (uint8_t address = plan.scanFirst; address <= plan.scanLast;
          ++address) {
@@ -108,7 +107,8 @@ inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
     if (plan.resetPin != board::NO_PIN) pinMode(plan.resetPin, INPUT);
   }
   if (plan.addressCount > 0) {
-    return boarddetectmodel::addressProbeEvidence(busOk, found, canaryAcked);
+    return busOk ? addressEvidence
+                 : boarddetectmodel::addressProbeEvidence(false, 0, false);
   }
   return {
       busOk ? ProbeStatus::Started : ProbeStatus::StartFailed,
@@ -272,23 +272,19 @@ inline board::Variant probeS3(bool verbose = true,
       board::detectionPlanForPlatform(board::Platform::Esp32S3);
   boarddetectmodel::ProbeEvidence
       evidence[board::GENERATED_MAX_PROBE_COUNT] = {};
-  for (uint8_t i = 0; i < plan.probeCount; ++i) {
-    const auto &probe = plan.probes[i];
-    if (!boarddetectmodel::flashMatches(
-            flashBytes, probe.flashMinExclusive,
-            probe.flashMaxInclusive)) {
-      continue;
-    }
-    if (!boarddetectmodel::shouldRunProbe(plan, i, evidence)) {
-      if (verbose) {
-        Serial.printf("board: S3 %s probe skipped; an earlier bus answered\n",
-                      probeProfile(plan, i));
-      }
-      continue;
-    }
-    evidence[i] = collectI2cEvidence(
-        probe, "S3", probeProfile(plan, i), verbose);
-  }
+  boarddetectmodel::runI2cProbes(
+      plan, flashBytes, evidence,
+      [&](uint8_t i) {
+        return collectI2cEvidence(plan.probes[i], "S3", probeProfile(plan, i),
+                                  verbose);
+      },
+      [&](uint8_t i) {
+        if (verbose) {
+          Serial.printf(
+              "board: S3 %s probe skipped; an earlier bus answered\n",
+              probeProfile(plan, i));
+        }
+      });
   boarddetectmodel::SenseEvidence
       senses[board::GENERATED_MAX_SENSE_COUNT > 0
                  ? board::GENERATED_MAX_SENSE_COUNT

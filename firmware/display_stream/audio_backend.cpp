@@ -1,7 +1,7 @@
 #include "audio_backend.h"
 
 #include <Arduino.h>
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_AUDIO_RUNTIME)
 #include <ESP_I2S.h>
 #include <Wire.h>
 #endif
@@ -12,7 +12,58 @@ CodecSerialAudioBackend &sharedCodecBackend() {
   return backend;
 }
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+namespace {
+
+// One probe per boot: capability bits, mDNS records, and every later start
+// agree on the same answer.
+bool statusKnown = false;
+board::Variant statusVariant = {};
+audiobackend::DescriptorStatus cachedStatus =
+    audiobackend::DescriptorStatus::NoAudio;
+
+}  // namespace
+
+audiobackend::DescriptorStatus boardAudioStatus(
+    const board::Config &boardConfig) {
+  if (statusKnown && statusVariant == boardConfig.variant) return cachedStatus;
+  const board::AudioConfig *audioConfig =
+      board::generatedAudioConfig(boardConfig.variant);
+  audiobackend::DescriptorStatus status =
+      audioConfig == nullptr ? audiobackend::DescriptorStatus::NoAudio
+                             : audiobackend::classify(*audioConfig);
+  if (status == audiobackend::DescriptorStatus::Ready) {
+    const audiobackend::CodecProbe probe =
+        probeCodecs(boardConfig, *audioConfig);
+    const bool identified = audiobackend::codecsIdentified(probe);
+    status = audiobackend::runtimeStatus(*audioConfig, identified);
+    Serial.printf(
+        "audio: codec 0x%02x %s id=%02x%02x, adc 0x%02x %s id=%02x%02x: %s\n",
+        (unsigned)audioConfig->codecI2cAddress,
+        probe.codecRead ? "read" : "no-ack", (unsigned)probe.codecId1,
+        (unsigned)probe.codecId2, (unsigned)audioConfig->micI2cAddress,
+        probe.micRead ? "read" : "no-ack", (unsigned)probe.micId1,
+        (unsigned)probe.micId0,
+        identified ? "ES8311+ES7210 identified, amp held off"
+                   : "not identified, audio pins untouched");
+    if (identified) {
+      pinMode(audioConfig->pinAmpEnable, OUTPUT);
+      digitalWrite(audioConfig->pinAmpEnable, LOW);
+    }
+  }
+  statusKnown = true;
+  statusVariant = boardConfig.variant;
+  cachedStatus = status;
+  return status;
+}
+
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+void resetBoardAudioStatusForTest() {
+  statusKnown = false;
+  cachedStatus = audiobackend::DescriptorStatus::NoAudio;
+}
+#endif
+
+#if defined(ESPDISP_AUDIO_RUNTIME)
 namespace {
 
 I2SClass audioI2s;
@@ -75,6 +126,49 @@ bool CodecSerialAudioBackend::writeRegister(uint8_t address, uint8_t reg,
   Wire.write(reg);
   Wire.write(value);
   return Wire.endTransmission() == 0;
+}
+
+namespace {
+
+bool readRegisterOnce(uint8_t address, uint8_t reg, uint8_t &value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  if (Wire.endTransmission() != 0) return false;
+  if (Wire.requestFrom(address, (size_t)1) != 1) return false;
+  value = (uint8_t)Wire.read();
+  return true;
+}
+
+// One retry: Espressif's ES8311 driver repeats a write because the first
+// transaction occasionally fails. A miss here only ever fails closed.
+bool readRegister(uint8_t address, uint8_t reg, uint8_t &value) {
+  return readRegisterOnce(address, reg, value) ||
+         readRegisterOnce(address, reg, value);
+}
+
+}  // namespace
+
+audiobackend::CodecProbe probeCodecs(const board::Config &boardConfig,
+                                     const board::AudioConfig &audioConfig) {
+  audiobackend::CodecProbe probe = {};
+  const audiobackend::ControlBus bus =
+      audiobackend::controlBus(boardConfig, audioConfig);
+  if (audioConfig.codecI2cAddress == 0 || audioConfig.micI2cAddress == 0 ||
+      bus.sda == board::NO_PIN || bus.scl == board::NO_PIN ||
+      !Wire.begin(bus.sda, bus.scl, CONTROL_I2C_HZ)) {
+    return probe;
+  }
+  probe.codecRead =
+      readRegister(audioConfig.codecI2cAddress,
+                   audiobackend::ES8311_CHIP_ID1_REG, probe.codecId1) &&
+      readRegister(audioConfig.codecI2cAddress,
+                   audiobackend::ES8311_CHIP_ID2_REG, probe.codecId2);
+  probe.micRead =
+      readRegister(audioConfig.micI2cAddress,
+                   audiobackend::ES7210_CHIP_ID1_REG, probe.micId1) &&
+      readRegister(audioConfig.micI2cAddress,
+                   audiobackend::ES7210_CHIP_ID0_REG, probe.micId0);
+  return probe;
 }
 
 void CodecSerialAudioBackend::disableAmp() {
@@ -164,9 +258,15 @@ bool CodecSerialAudioBackend::start(
       format.bitsPerSample != 16 ||
       format.sampleRateHz != audioConfig.playbackRateHz ||
       format.channels != audioConfig.playbackChannels ||
-      !audiobackend::supportsCodecClock(format.sampleRateHz) ||
-      boardConfig.pinTouchSda == board::NO_PIN ||
-      boardConfig.pinTouchScl == board::NO_PIN) {
+      !audiobackend::supportsCodecClock(format.sampleRateHz)) {
+    return false;
+  }
+  // Positive identification comes before the first audio GPIO or clock: on
+  // wrong hardware the amplifier-enable net may be something else entirely.
+  // The per-boot verdict is used rather than a fresh probe, because start()
+  // also runs on the engine task and an I2C read there would race the loop
+  // task's touch and IMU reads on the shared, unlocked Wire receive buffer.
+  if (boardAudioStatus(boardConfig) != audiobackend::DescriptorStatus::Ready) {
     return false;
   }
 
@@ -193,9 +293,7 @@ bool CodecSerialAudioBackend::start(
     audioI2s.end();
     return false;
   }
-  if (!Wire.begin(boardConfig.pinTouchSda, boardConfig.pinTouchScl,
-                  CONTROL_I2C_HZ) ||
-      !initializeEs8311() || !initializeEs7210() ||
+  if (!initializeEs8311() || !initializeEs7210() ||
       !setGain(STARTUP_GAIN_PERCENT)) {
     stop();
     return false;
@@ -263,6 +361,11 @@ void CodecSerialAudioBackend::stop() {
 
 bool CodecSerialAudioBackend::writeRegister(uint8_t, uint8_t, uint8_t) {
   return false;
+}
+
+audiobackend::CodecProbe probeCodecs(const board::Config &,
+                                     const board::AudioConfig &) {
+  return {};
 }
 
 void CodecSerialAudioBackend::disableAmp() {}

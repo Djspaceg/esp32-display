@@ -149,6 +149,10 @@ rx = -1
 tx = -1
 
 [audio]
+# No speaker or microphone: no audio part on either schematic, and the vendor
+# repository carries no audio driver.
+# https://files.waveshare.com/wiki/ESP32-S3-LCD-1.9/ESP32-S3-LCD-1.9-Schematic.pdf
+# https://files.waveshare.com/wiki/ESP32-S3-LCD-1.9/ESP32-S3-Touch-LCD-1.9-Schematic.pdf
 amp = "none"
 codec = "none"
 mic = "none"

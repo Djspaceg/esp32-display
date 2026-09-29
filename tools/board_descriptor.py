@@ -228,6 +228,9 @@ OPTIONAL_PIN_DEFAULTS = {
     "carrier.pin_panel_power": -1,
     "carrier.pin_encoder_a": -1,
     "carrier.pin_encoder_b": -1,
+    # The codec control bus, declared only when it is not the touch bus.
+    "audio.pin_control_sda": -1,
+    "audio.pin_control_scl": -1,
 }
 ALLOWED_TOP_LEVEL = {path.split(".", 1)[0] for path in REQUIRED_FIELDS}
 ALLOWED_SECTION_FIELDS: Dict[str, set[str]] = {}
@@ -291,6 +294,12 @@ def _validate_optional_pins(descriptor: Dict[str, Any]) -> None:
             raise DescriptorError(
                 "%s: %s must be -1 or GPIO 0..%d" % (source, path, maximum))
         values[path] = value
+    control_sda = values["audio.pin_control_sda"]
+    control_scl = values["audio.pin_control_scl"]
+    if (control_sda == -1) != (control_scl == -1):
+        raise DescriptorError(
+            "%s: audio.pin_control_sda and pin_control_scl must both be "
+            "declared or both be -1" % source)
     encoder_a = values["carrier.pin_encoder_a"]
     encoder_b = values["carrier.pin_encoder_b"]
     if (encoder_a == -1) != (encoder_b == -1):
@@ -705,8 +714,12 @@ def _validate_audio(descriptor: Dict[str, Any]) -> None:
             raise DescriptorError(
                 "%s: audio.%s must be 0..127" % (source, field))
 
+    control_bus = {
+        field: optional_pin(descriptor, "audio." + field)
+        for field in ("pin_control_sda", "pin_control_scl")
+    }
     if not capability:
-        for field, value in pins.items():
+        for field, value in list(pins.items()) + list(control_bus.items()):
             if value != -1:
                 raise DescriptorError(
                     "%s: audio capability is false but audio.%s is declared"
@@ -725,6 +738,7 @@ def _validate_audio(descriptor: Dict[str, Any]) -> None:
     if "unknown" in enum_values:
         if any(value != "unknown" for value in enum_values) or \
                 any(value != -1 for value in pins.values()) or \
+                any(value != -1 for value in control_bus.values()) or \
                 any(details.values()):
             raise DescriptorError(
                 "%s: unverified audio rows must leave pins, addresses, rates, "
@@ -837,6 +851,19 @@ def _validate_audio(descriptor: Dict[str, Any]) -> None:
     if amp == "ns4150b" and pins["pin_amp_enable"] == -1:
         raise DescriptorError(
             "%s: NS4150B requires audio.pin_amp_enable" % source)
+    if codec == "es8311" or mic == "es7210":
+        touch_bus = (_field(descriptor, "touch.sda"),
+                     _field(descriptor, "touch.scl"))
+        # Firmware has one Wire bus, started first by touch, so a separate
+        # codec bus is only meaningful on a board without touch.
+        if control_bus["pin_control_sda"] != -1 and -1 not in touch_bus:
+            raise DescriptorError(
+                "%s: audio.pin_control_sda/scl are only for boards without a "
+                "touch I2C bus" % source)
+        if control_bus["pin_control_sda"] == -1 and -1 in touch_bus:
+            raise DescriptorError(
+                "%s: ES8311/ES7210 need audio.pin_control_sda/scl or a touch "
+                "I2C bus" % source)
 
     existing_pins: Dict[int, str] = {}
     for path in EXISTING_PIN_PATHS:
@@ -853,6 +880,68 @@ def _validate_audio(descriptor: Dict[str, Any]) -> None:
                 "%s: audio.%s GPIO%d collides with %s"
                 % (source, field, value, existing_pins[value])
             )
+
+
+def family_amp_enable_pins(family: List[Dict[str, Any]]) -> set:
+    """Every audio amplifier-enable GPIO declared by one family's boards."""
+    return {
+        item["audio"]["pin_amp_enable"] for item in family
+        if item["capabilities"]["audio"] and item["audio"]["pin_amp_enable"] >= 0
+    }
+
+
+def _validate_amp_pins_before_identification(
+        descriptors: List[Dict[str, Any]]) -> None:
+    """An audio board's amp enable must not be an earlier detection probe line.
+
+    Detection runs before audio identification, and an address probe enables
+    internal pull-ups on its lines. A probe on another board's amplifier enable
+    is skipped once an earlier probe identifies a board (quietAfterMatch), so
+    the audio board's own probe has to come first.
+    """
+    def lines(item: Dict[str, Any]) -> Tuple[int, int, int]:
+        return (item["detection"]["sda"], item["detection"]["scl"],
+                item["detection"]["reset_pin"])
+
+    def flash_overlaps(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+        def bounds(item: Dict[str, Any]) -> Tuple[int, float]:
+            upper = item["detection"]["flash_max_inclusive"]
+            return (item["detection"]["flash_min_exclusive"],
+                    upper if upper else float("inf"))
+        (a_low, a_high), (b_low, b_high) = bounds(a), bounds(b)
+        return max(a_low, b_low) < min(a_high, b_high)
+
+    by_target: Dict[str, List[Dict[str, Any]]] = {}
+    for item in descriptors:
+        by_target.setdefault(item["identity"]["target"], []).append(item)
+    for family in by_target.values():
+        ordered = sorted(family, key=lambda item: item["detection"]["order"])
+        for position, board in enumerate(ordered):
+            if not board["capabilities"]["audio"]:
+                continue
+            amp = board["audio"]["pin_amp_enable"]
+            if amp < 0:
+                continue
+            if board["detection"]["sda"] < 0:
+                # No probe of its own, so nothing earlier can answer and make
+                # another probe quiet: only a disjoint flash range keeps a
+                # probe on this amp enable from running on this board.
+                for other in ordered:
+                    if (other is not board and other["detection"]["sda"] >= 0
+                            and amp in lines(other)
+                            and flash_overlaps(board, other)):
+                        raise DescriptorError(
+                            "%s: audio.pin_amp_enable GPIO%d is a detection "
+                            "line of %s, whose flash range overlaps this "
+                            "board's" % (_source_name(board), amp,
+                                         _source_name(other)))
+                continue
+            for earlier in ordered[:position]:
+                if amp in lines(earlier):
+                    raise DescriptorError(
+                        "%s: audio.pin_amp_enable GPIO%d is a detection line "
+                        "of earlier-ordered %s; order this board's probe first"
+                        % (_source_name(board), amp, _source_name(earlier)))
 
 
 def load_repository_descriptors(repo_root: str) -> List[Dict[str, Any]]:
@@ -1290,6 +1379,7 @@ def validate_descriptors(
                     % (_source_name(owner),
                        " ".join("%02X" % value for value in panel_id)))
 
+    _validate_amp_pins_before_identification(descriptors)
     if len(descriptors) >= 3:
         for target in sorted(family_contracts):
             generated = generated_by_family.get(target, [])

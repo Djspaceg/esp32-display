@@ -149,6 +149,10 @@ rx = -1
 tx = -1
 
 [audio]
+# No speaker, amplifier, codec, buzzer, or microphone: the V1.0 schematic has
+# only the C3 module, LCD FPC, backlight FET, charger, DC-DC, USB-C, header and
+# buttons (pad S1 on IO8 has no driver or ground return). The C3 has no DAC.
+# https://raw.githubusercontent.com/rzeldent/platformio-espressif32-sunton/0d9a9b1a494bd245744f139d7cc583584fe3bce1/assets/schematics/ESP32-2424S012-V1.0.png
 amp = "none"
 codec = "none"
 mic = "none"

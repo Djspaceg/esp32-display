@@ -647,8 +647,8 @@ static const Config CONFIG_ELECROW_KNOB_128 = {
 /// active low (the BSP inverts LEDC), with BL_EN on GPIO33 pulled up; BOOT
 /// GPIO35. GT911-family touch is polled on I2C GPIO7/8: its reset (GPIO23)
 /// is left alone, as the BSP does, and its interrupt only reaches a test pad.
-/// The ES8311 codec (0x18), ES7210 mic ADC (0x40) and NS4150B amplifier
-/// (GPIO53) share that bus but, as on the 4B, P4 audio is not enabled. No IMU,
+/// The ES8311 codec (0x18) and ES7210 mic ADC (0x40) share that bus; the
+/// NS4150B amplifier enable is GPIO53 (audio comes from the descriptor). No IMU,
 /// PMU, battery gauge or addressable LED. CH343 UART bridge on the USB-C port.
 /// Pins and timing are from Waveshare's XC schematic and BSP 3.0.1.
 static const Config CONFIG_P4_4C = {
@@ -831,20 +831,27 @@ inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
                                   bool qmi8658Bus47_48,
                                   bool knob128Bus = false,
                                   int gpio4Millivolts = -1) {
-  const boarddetectmodel::ProbeEvidence evidence[] = {
-      {boarddetectmodel::ProbeStatus::Started, (uint8_t)(co5300Bus ? 1 : 0)},
-      {boarddetectmodel::ProbeStatus::Started, (uint8_t)(st77916Bus ? 1 : 0)},
-      {boarddetectmodel::ProbeStatus::Started, (uint8_t)(st7789Bus ? 1 : 0)},
-      {boarddetectmodel::ProbeStatus::Started,
-       (uint8_t)(qmi8658Bus47_48 ? 1 : 0)},
-      {boarddetectmodel::ProbeStatus::Started, (uint8_t)(knob128Bus ? 1 : 0)},
-  };
+  // Generated probe order: the 1.85C bus runs before the 1.75C's, because the
+  // 1.75C's SDA is the 1.85C V2's amplifier enable. The answers go through the
+  // same probe loop the device runs, so its skip rules apply here too.
+  const bool answers[] = {st77916Bus, co5300Bus, st7789Bus, qmi8658Bus47_48,
+                          knob128Bus};
+  const auto &plan = detectionPlanForPlatform(Platform::Esp32S3);
+  boarddetectmodel::ProbeEvidence evidence[GENERATED_MAX_PROBE_COUNT] = {};
+  boarddetectmodel::runI2cProbes(
+      plan, flashBytes, evidence,
+      [&](uint8_t i) {
+        return boarddetectmodel::ProbeEvidence{
+            boarddetectmodel::ProbeStatus::Started,
+            (uint8_t)(i < sizeof(answers) && answers[i] ? 1 : 0)};
+      },
+      [](uint8_t) {});
   const boarddetectmodel::SenseEvidence sense = {
       gpio4Millivolts >= 0,
       (uint16_t)(gpio4Millivolts < 0 ? 0 : gpio4Millivolts)};
   return detectFromEvidence(
-             Platform::Esp32S3, flashBytes, evidence,
-             sizeof(evidence) / sizeof(evidence[0]), &sense, 1)
+             Platform::Esp32S3, flashBytes, evidence, plan.probeCount, &sense,
+             1)
       .variant;
 }
 

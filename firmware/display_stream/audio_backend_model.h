@@ -6,6 +6,12 @@
 
 #include <board_config.h>
 
+// The codec backend, engine, transport, and tone test run on the dual-core
+// targets whose boards carry audio. C3 and C6 boards have none.
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32P4)
+#define ESPDISP_AUDIO_RUNTIME 1
+#endif
+
 namespace audiobackend {
 
 struct Format {
@@ -17,7 +23,7 @@ struct Format {
 enum class DescriptorStatus : uint8_t {
   NoAudio,
   UnsupportedTopology,
-  RevisionNotApproved,
+  HardwareNotIdentified,
   Ready,
 };
 
@@ -48,13 +54,64 @@ inline DescriptorStatus classify(const board::AudioConfig &config) {
       config.captureChannels == 0 || config.captureChannels > 2) {
     return DescriptorStatus::UnsupportedTopology;
   }
-  // The 1.85C descriptor records V2 wiring, but runtime detection cannot yet
-  // distinguish V2 from incompatible V1 hardware. Only the uniquely identified
-  // 1.75C may drive audio until revision metadata or variants are approved.
-  if (config.variant != board::Variant::AmoledCo5300) {
-    return DescriptorStatus::RevisionNotApproved;
-  }
   return DescriptorStatus::Ready;
+}
+
+// Chip-ID registers read to identify the parts positively. An ACK alone could
+// come from any device strapped to the same address.
+inline constexpr uint8_t ES8311_CHIP_ID1_REG = 0xFD;
+inline constexpr uint8_t ES8311_CHIP_ID2_REG = 0xFE;
+inline constexpr uint8_t ES8311_CHIP_ID1 = 0x83;
+inline constexpr uint8_t ES8311_CHIP_ID2 = 0x11;
+inline constexpr uint8_t ES7210_CHIP_ID1_REG = 0x3D;
+inline constexpr uint8_t ES7210_CHIP_ID0_REG = 0x3E;
+inline constexpr uint8_t ES7210_CHIP_ID1 = 0x72;
+inline constexpr uint8_t ES7210_CHIP_ID0 = 0x10;
+
+// What a read-only probe of the descriptor's two I2C addresses returned.
+struct CodecProbe {
+  bool codecRead;
+  uint8_t codecId1;
+  uint8_t codecId2;
+  bool micRead;
+  uint8_t micId1;
+  uint8_t micId0;
+};
+
+// Both parts must answer with their own chip IDs. This is what separates the
+// 1.85C V2 (ES8311 + ES7210 on the touch bus) from V1, whose PCM5101A and
+// ICS-43434 have no I2C interface, and it keeps every other codec board from
+// powering audio when the expected parts are not actually there.
+inline bool codecsIdentified(const CodecProbe &probe) {
+  return probe.codecRead && probe.codecId1 == ES8311_CHIP_ID1 &&
+         probe.codecId2 == ES8311_CHIP_ID2 && probe.micRead &&
+         probe.micId1 == ES7210_CHIP_ID1 && probe.micId0 == ES7210_CHIP_ID0;
+}
+
+// A supported descriptor becomes Ready only once the parts it names have been
+// positively identified on this board.
+inline DescriptorStatus runtimeStatus(const board::AudioConfig &config,
+                                      bool hardwareIdentified) {
+  const DescriptorStatus status = classify(config);
+  if (status != DescriptorStatus::Ready) return status;
+  return hardwareIdentified ? DescriptorStatus::Ready
+                            : DescriptorStatus::HardwareNotIdentified;
+}
+
+struct ControlBus {
+  int8_t sda;
+  int8_t scl;
+};
+
+// The codec control bus: the descriptor's own pair when declared (the 0.85
+// has no touch bus), otherwise the board's touch I2C bus the codecs share.
+inline ControlBus controlBus(const board::Config &boardConfig,
+                             const board::AudioConfig &audioConfig) {
+  if (audioConfig.pinControlSda != board::NO_PIN &&
+      audioConfig.pinControlScl != board::NO_PIN) {
+    return {audioConfig.pinControlSda, audioConfig.pinControlScl};
+  }
+  return {boardConfig.pinTouchSda, boardConfig.pinTouchScl};
 }
 
 inline bool matchesBoard(const board::Config &boardConfig,

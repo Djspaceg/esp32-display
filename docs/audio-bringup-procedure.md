@@ -1,11 +1,21 @@
-# 1.75C local speaker bring-up
+# Local speaker bring-up (ES8311 + ES7210 boards)
 
-This procedure exercises only the ESP32-S3-Touch-AMOLED-1.75C speaker path.
-It does not require WiFi or the Mac sender, and it must not be used to infer
-that the microphone or network audio paths work.
+This procedure exercises only a board's speaker path. It applies to every
+board whose descriptor declares ES8311 + ES7210 + NS4150B: the 1.75C, the
+1.85C V2, the S3-LCD-0.85, the S3-Touch-LCD-1.54, and the P4 4B, 4C and
+3.4C. It
+does not require WiFi or the Mac sender, and it must not be used to infer that
+the microphone or network audio paths work.
+
+At boot, before any audio starts, firmware reads both chips' ID registers
+over the codec control bus (read-only; no audio GPIO or clock is touched).
+Only a board where ES8311 reads `83 11` and ES7210 reads `72 10` enables
+audio, and its amplifier-enable is driven low at that moment.
 
 The safe power-up order implemented by `CodecSerialAudioBackend` is:
 
+0. Check the boot-time chip-ID verdict; refuse before any pin write unless
+   both parts were identified.
 1. Drive the descriptor's NS4150B enable pin low.
 2. Start I2S clocks from the descriptor's MCLK, BCLK, LRCK, DOUT, DIN, rate,
    and slot count.
@@ -21,28 +31,26 @@ before muting the codec and stopping I2S.
 
 ## Procedure
 
-1. Build and flash the S3 family sketch from this branch:
+1. Build and flash the board's family from this branch (P4 USB writes need
+   the carrier profile):
 
    ```sh
-   python3 tools/espdisp.py compile --family s3
-   python3 tools/espdisp.py flash --family s3
+   python3 tools/espdisp.py flash --family s3 --build --port <port>
+   python3 tools/espdisp.py flash --family p4 --build --profile jd9365-4c --port <port>
    ```
 
-   Flashing is intentionally a human step; this change was developed without
-   attached hardware.
-
-2. Open the board's configuration serial port at 115200 baud and wait for:
+2. Open the board's configuration serial port at 115200 baud and wait for
+   the identification line, the audio readiness line, and the UDP marker:
 
    ```text
-   board: ESP32-S3-Touch-AMOLED-1.75C
+   audio: codec 0x18 read id=8311, adc 0x40 read id=7210: ES8311+ES7210 identified, amp held off
    audio: UDP 5569 ready
    UDP listening on 5568
    ```
 
-   If another profile is reported, stop. `CFGAUDIOTEST` is allowed only for
-   the uniquely identified 1.75C profile. The 1.85C profile remains disabled
-   because firmware cannot distinguish incompatible V1 from V2 hardware. Do
-   not send the command until `UDP listening on 5568` appears: setup continues
+   If the identification line ends `not identified, audio pins untouched`,
+   stop: audio is off by design on that unit (on the 1.85C, this is the V1
+   revision). Do not send the command until `UDP listening on 5568` appears: setup continues
    servicing serial during its bounded WiFi wait, but tone samples are emitted
    only after setup reaches `loop()`. The UDP line is the readiness marker even
    when WiFi timed out and local tone testing is the only goal.
@@ -59,9 +67,15 @@ before muting the codec and stopping I2S.
    CFGOK audio test started for 1000ms; send CFGAUDIOTEST stop to abort
    ```
 
-   The following diagnostic line must name values from the generated
-   descriptor: rate 16000, channels 2, MCLK 16, BCLK 9, LRCK 45, DOUT 8, and
-   amp 46.
+   The following diagnostic line must name the board's generated descriptor
+   values, all at rate 16000 and channels 2:
+
+   | Board | MCLK | BCLK | LRCK | DOUT | amp |
+   | --- | ---: | ---: | ---: | ---: | ---: |
+   | 1.75C | 16 | 9 | 45 | 8 | 46 |
+   | 1.85C V2 | 2 | 48 | 38 | 47 | 15 |
+   | 0.85, 1.54 | 8 | 9 | 10 | 12 | 7 |
+   | P4 4B, 4C, 3.4C | 13 | 12 | 10 | 9 | 53 |
 
 5. Listen for a steady 440 Hz tone lasting one second. At completion, confirm:
 
@@ -80,13 +94,16 @@ before muting the codec and stopping I2S.
 
 ## Failure meaning
 
-1. `CFGERR board descriptor has no audio` means the detected profile is not
-   the 1.75C audio descriptor.
+1. `CFGERR board descriptor has no audio` means the detected profile's
+   vendor hardware has no speaker or microphone.
 2. `CFGERR audio disabled: board revision is not safely distinguishable`
-   means the profile is 1.85C; do not override this guard.
+   means the ES8311 and ES7210 did not both answer with their chip IDs at
+   boot. On the 1.85C this is the V1 revision; elsewhere it means the parts
+   are absent or the control bus is faulty. Do not override this guard.
 3. `CFGERR codec/I2S initialization failed; amp remains disabled` means I2S
    allocation, the shared I2C bus, ES8311 at `0x18`, or ES7210 at `0x40`
-   failed. The code cannot distinguish those without hardware traces.
+   failed after identification. The code cannot distinguish those without
+   hardware traces.
 4. `audio: ERROR tone write failed; amp disabled` means initialization
    completed but the I2S write path stopped accepting complete frame blocks.
 5. Correct serial output with no tone does not isolate a failing component.

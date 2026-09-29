@@ -149,6 +149,10 @@ rx = 44
 tx = 43
 
 [audio]
+# No speaker or microphone on any of -, -B, -C (one PCB; B and C add a case).
+# Schematic: https://files.waveshare.com/wiki/ESP32-S3-LCD-1.3/ESP32S3_1.3inch.pdf
+# Product page lists Speaker "-" and mic "-" for each variant:
+# https://www.waveshare.com/esp32-s3-lcd-1.3.htm
 amp = "none"
 codec = "none"
 mic = "none"

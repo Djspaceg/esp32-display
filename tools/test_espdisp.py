@@ -4254,6 +4254,102 @@ def test_board_descriptor_validator():
         "audio pins cannot collide with existing board wiring",
     )
 
+    # Audio verdicts from each board's vendor schematic and BSP (sources in
+    # the descriptors). Every board with the ES8311 + ES7210 + NS4150B design
+    # declares it; the rest have no speaker or microphone at all.
+    check_equal(
+        sorted(item["key"] for item in descriptors
+               if item["capabilities"]["audio"]),
+        ["p4-wifi6-touch-lcd-34c", "p4-wifi6-touch-lcd-4b",
+         "p4-wifi6-touch-lcd-4c", "s3-lcd-085",
+         "s3-touch-amoled-175c", "s3-touch-lcd-154", "s3-touch-lcd-185c"],
+        "exactly the boards with vendor-documented audio declare it",
+    )
+    for item in descriptors:
+        if item["capabilities"]["audio"]:
+            check_equal(
+                (item["audio"]["amp"], item["audio"]["codec"],
+                 item["audio"]["mic"]),
+                ("ns4150b", "es8311", "es7210"),
+                "%s declares the one supported codec topology" % item["key"],
+            )
+    lcd_085 = next(item for item in descriptors if item["key"] == "s3-lcd-085")
+    check_equal(
+        [board_descriptor.optional_pin(lcd_085, "audio." + field)
+         for field in ("pin_control_sda", "pin_control_scl")],
+        [42, 41],
+        "the touchless 0.85 declares its codec control bus",
+    )
+    check_equal(
+        board_descriptor.optional_pin(verified_audio, "audio.pin_control_sda"),
+        -1,
+        "codec rows on the touch bus leave the control bus implicit",
+    )
+    busless_codec = copy.deepcopy(lcd_085)
+    del busless_codec["audio"]["pin_control_sda"]
+    del busless_codec["audio"]["pin_control_scl"]
+    check_descriptor_fails(
+        [busless_codec],
+        "ES8311/ES7210 need audio.pin_control_sda/scl or a touch I2C bus",
+        "a codec row with no I2C control bus is refused",
+    )
+    half_control_bus = copy.deepcopy(lcd_085)
+    half_control_bus["audio"]["pin_control_scl"] = -1
+    check_descriptor_fails(
+        [half_control_bus],
+        "audio.pin_control_sda and pin_control_scl must both be declared",
+        "a codec control bus needs both lines",
+    )
+    control_on_carrier = copy.deepcopy(lcd_085)
+    control_on_carrier["audio"]["pin_control_sda"] = \
+        control_on_carrier["carrier"]["pin_sclk"]
+    check_descriptor_fails(
+        [control_on_carrier],
+        "audio.pin_control_sda GPIO38 collides with carrier.pin_sclk",
+        "the codec control bus cannot collide with carrier wiring",
+    )
+    amoled = next(
+        item for item in descriptors if item["key"] == "s3-touch-amoled-175c")
+    check(
+        lcd_185c["detection"]["order"] < amoled["detection"]["order"],
+        "the 1.85C probe runs before the probe on its amp-enable GPIO15",
+    )
+    amp_after_probe = copy.deepcopy(lcd_185c)
+    amp_after_probe["detection"]["order"] = amoled["detection"]["order"] + 1
+    check_descriptor_fails(
+        [amoled, amp_after_probe],
+        "audio.pin_amp_enable GPIO15 is a detection line of earlier-ordered",
+        "an audio board's amp enable cannot be an earlier probe's line",
+    )
+    # An audio board with no probe of its own (the flash-identified 0.85) is
+    # protected only by flash ranges: a probe on its amp enable must not be
+    # able to run on it.
+    knob_on_085 = copy.deepcopy(next(
+        item for item in descriptors if item["key"] == "s3-elecrow-knob-128"))
+    knob_on_085["detection"]["flash_min_exclusive"] = 0
+    check_descriptor_fails(
+        [lcd_085, knob_on_085],
+        "audio.pin_amp_enable GPIO7 is a detection line of",
+        "a probe on a probeless audio board's amp enable cannot share its "
+        "flash range",
+    )
+    control_beside_touch = copy.deepcopy(verified_audio)
+    control_beside_touch["audio"]["pin_control_sda"] = 1
+    control_beside_touch["audio"]["pin_control_scl"] = 3
+    check_descriptor_fails(
+        [control_beside_touch],
+        "audio.pin_control_sda/scl are only for boards without a touch I2C bus",
+        "a board with touch cannot declare a second codec bus",
+    )
+    control_without_audio = copy.deepcopy(absent_audio)
+    control_without_audio["audio"]["pin_control_sda"] = 42
+    control_without_audio["audio"]["pin_control_scl"] = 41
+    check_descriptor_fails(
+        [control_without_audio],
+        "audio capability is false but audio.pin_control_sda is declared",
+        "an audio-absent row declares no control bus",
+    )
+
     knob = next(
         item for item in descriptors if item["key"] == "s3-elecrow-knob-128")
     check_equal(

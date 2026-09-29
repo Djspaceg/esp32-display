@@ -2,9 +2,10 @@
 
 #include <string.h>
 
+#include "audio_backend.h"
 #include "audio_backend_model.h"
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_AUDIO_RUNTIME)
 #include <lwip/sockets.h>
 #endif
 
@@ -13,7 +14,7 @@ namespace audiotransport {
 int tuneReceiveBufferBytes = 96 * 1024;
 TaskHandle_t receiveTaskHandle = nullptr;
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_AUDIO_RUNTIME)
 namespace {
 
 constexpr UBaseType_t RECEIVE_TASK_PRIORITY = 13;
@@ -120,11 +121,8 @@ void receiveTask(void *) {
 }  // namespace
 
 bool start(const board::Config &config) {
-  const board::AudioConfig *audio =
-      board::generatedAudioConfig(config.variant);
-  if (audio == nullptr ||
-      audiobackend::classify(*audio) !=
-          audiobackend::DescriptorStatus::Ready) {
+  if (audio::boardAudioStatus(config) !=
+      audiobackend::DescriptorStatus::Ready) {
     return false;
   }
   packetQueue = xQueueCreate(QUEUE_DEPTH, sizeof(Packet));

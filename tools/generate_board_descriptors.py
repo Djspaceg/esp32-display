@@ -267,7 +267,7 @@ def render_audio(descriptors: Sequence[Dict[str, Any]]) -> str:
         lines.append(
             "    {Variant::%s, %s, %s, %s, %s, %s, "
             "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, "
-            "%d, %d, %d, %d, %d, %d},\n"
+            "%d, %d, %d, %d, %d, %d, %d, %d},\n"
             % (
                 identity["variant"],
                 AUDIO_AMP_ENUMS[audio["amp"]],
@@ -291,6 +291,10 @@ def render_audio(descriptors: Sequence[Dict[str, Any]]) -> str:
                 audio["playback_channels"],
                 audio["capture_rate_hz"],
                 audio["capture_channels"],
+                board_descriptor.optional_pin(
+                    descriptor, "audio.pin_control_sda"),
+                board_descriptor.optional_pin(
+                    descriptor, "audio.pin_control_scl"),
             )
         )
     lines.extend([
@@ -461,6 +465,7 @@ def render_detection(
             if key and key not in probes:
                 probes.append(key)
         max_probe_count = max(max_probe_count, len(probes))
+        amp_pins = board_descriptor.family_amp_enable_pins(family)
         prefix = target.upper()
         if probes:
             lines.append(
@@ -474,15 +479,17 @@ def render_detection(
                     release,
                 ) = probe
                 padded = list(addresses) + [0] * (4 - len(addresses))
+                quiet = bool({sda, scl, reset_pin} & amp_pins)
                 lines.append(
                     "    {%d, %d, %d, %d, %d, %d, %d, "
-                    "{%s}, %d, %d, %d, %d, %s},\n"
+                    "{%s}, %d, %d, %d, %d, %s, %s},\n"
                     % (
                         flash_min, flash_max, sda, scl, frequency,
                         scan_first, scan_last,
                         ", ".join("0x%02X" % value for value in padded),
                         len(addresses), reset_pin, reset_low, reset_wait,
                         RELEASE_ENUMS[release],
+                        "true" if quiet else "false",
                     )
                 )
             lines.append("};\n")

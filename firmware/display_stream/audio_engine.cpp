@@ -6,7 +6,7 @@
 #include "audio_engine_model.h"
 #include "audio_transport.h"
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_AUDIO_RUNTIME)
 #include <esp_heap_caps.h>
 #endif
 
@@ -18,7 +18,7 @@ uint32_t tuneHighWatermarkMs = 180;
 int32_t tuneMaxCorrectionPpm = 400;
 TaskHandle_t engineTaskHandle = nullptr;
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_AUDIO_RUNTIME)
 namespace {
 
 constexpr UBaseType_t ENGINE_TASK_PRIORITY = 12;
@@ -548,7 +548,7 @@ bool renderFadingOut(const int16_t *input, size_t inputFrames,
 bool start(const board::Config &config) {
   activeAudio = board::generatedAudioConfig(config.variant);
   if (activeAudio == nullptr ||
-      audiobackend::classify(*activeAudio) !=
+      audio::boardAudioStatus(config) !=
           audiobackend::DescriptorStatus::Ready) {
     return false;
   }

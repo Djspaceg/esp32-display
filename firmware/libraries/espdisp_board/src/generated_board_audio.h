@@ -2,19 +2,19 @@
 #pragma once
 
 static constexpr AudioConfig GENERATED_BOARD_AUDIO[] = {
-    {Variant::LcdSt7789, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
-    {Variant::TouchJd9853, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
-    {Variant::AmoledCo5300, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 16, 9, 45, 8, 16, 9, 45, 10, -1, 46, 24, 64, 16000, 2, 16000, 2},
-    {Variant::LcdSt77916, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 2, 48, 38, 47, 2, 48, 38, 39, -1, 15, 24, 64, 16000, 2, 16000, 2},
-    {Variant::LcdGc9107, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
-    {Variant::TouchSt7789, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
-    {Variant::P4_4B, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
-    {Variant::LcdSt7789_130, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
-    {Variant::C3_2424S012, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
-    {Variant::LcdSt7789_190, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
-    {Variant::ElecrowKnob128, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
-    {Variant::P4_4C, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
-    {Variant::P4_34C, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0},
+    {Variant::LcdSt7789, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, -1, -1},
+    {Variant::TouchJd9853, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, -1, -1},
+    {Variant::AmoledCo5300, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 16, 9, 45, 8, 16, 9, 45, 10, -1, 46, 24, 64, 16000, 2, 16000, 2, -1, -1},
+    {Variant::LcdSt77916, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 2, 48, 38, 47, 2, 48, 38, 39, -1, 15, 24, 64, 16000, 2, 16000, 2, -1, -1},
+    {Variant::LcdGc9107, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 8, 9, 10, 12, 8, 9, 10, 11, -1, 7, 24, 64, 16000, 2, 16000, 2, 42, 41},
+    {Variant::TouchSt7789, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 8, 9, 10, 12, 8, 9, 10, 11, -1, 7, 24, 64, 16000, 2, 16000, 2, -1, -1},
+    {Variant::P4_4B, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 13, 12, 10, 9, 13, 12, 10, 11, -1, 53, 24, 64, 16000, 2, 16000, 2, -1, -1},
+    {Variant::LcdSt7789_130, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, -1, -1},
+    {Variant::C3_2424S012, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, -1, -1},
+    {Variant::LcdSt7789_190, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, -1, -1},
+    {Variant::ElecrowKnob128, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, -1, -1},
+    {Variant::P4_4C, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 13, 12, 10, 9, 13, 12, 10, 11, -1, 53, 24, 64, 16000, 2, 16000, 2, -1, -1},
+    {Variant::P4_34C, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 13, 12, 10, 9, 13, 12, 10, 11, -1, 53, 24, 64, 16000, 2, 16000, 2, -1, -1},
 };
 
 inline const AudioConfig *generatedAudioConfig(Variant variant) {

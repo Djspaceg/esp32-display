@@ -149,6 +149,9 @@ rx = -1
 tx = -1
 
 [audio]
+# No speaker or microphone: no audio part on the schematic, and the product
+# selection table lists Speaker "-" and mic "-".
+# https://files.waveshare.com/wiki/ESP32-C6-LCD-1.47/ESP32-C6-LCD-1.47_schemetics.pdf
 amp = "none"
 codec = "none"
 mic = "none"

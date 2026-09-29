@@ -2,6 +2,39 @@
 
 Each finished branch keeps its own review record below, whole.
 
+## Code review: audio on every capable board (audio-enable-boards)
+
+Two adversarial rounds, each by a separate read-only agent.
+
+### Round 1 (93684af..3c70de2)
+
+The reviewer ran the host tests, the generator `--check`, `test_espdisp.py`, and the p4 and s3 compiles, and re-fetched every pinned vendor source. It found no fail-open path. The wire protocol and the CFG surface are unchanged.
+
+| ID | Severity | Where | Defect | Fate |
+|---|---|---|---|---|
+| F1 | Medium | `audio_backend.cpp` `start()` on the engine task | The chip-ID re-probe read `Wire` on the engine task, racing loopTask touch/IMU/AXP reads on the unlocked receive buffer. That could cause a phantom tap or rotation, or a stall of up to 1 s. | Fixed in 4edae16: start() uses the cached verdict and does no I2C read. The test failed before the fix. |
+| F2 | Low, pre-existing | S3 detection probe on SDA 15 / SCL 14 | It pulled up GPIO15, the 1.85C V2's amp enable. | Fixed in a3d8873: the 1.85C bus is probed first, and the probe on GPIO15 is quietAfterMatch. The runtime test through the `runI2cProbes` seam failed before the fix. |
+| F3 | Low | `board_descriptor.py` | A codec bus was accepted beside a touch bus. | Fixed in 4edae16, red-first. |
+| F4 | Low | `s3-lcd-085.toml` | The second mic may not be fitted. | Open question: needs a 0.85 on the bench. |
+| F5 | Nit | `audio_test.cpp` | The 1.85C CFGERR text is reused for any failed ID. | Kept: the CFG surface must not change. |
+| F6 | Nit | `audio_config.h` | New fields were 0/0 when zero-initialized. | Fixed in 4edae16: they default to -1. |
+| F7 | Nit | `_validate_audio` | Unverified rows skipped the control-bus pins. | Fixed in 4edae16. |
+
+### Round 2 (a3d8873, the detection reorder)
+
+The reviewer walked every S3 board through the new probe order: every board resolves as before, with no new electrical exposure. It mutation-tested the new tests (all three mutants fail) and reran the identity seam against 93684af (`FAIL ... !started`).
+
+| ID | Severity | Where | Defect | Fate |
+|---|---|---|---|---|
+| R1 | Low-Medium | `board_detection.h` skip rule, `board_detect.h` | A 1.85C-bus ack now skips the 1.75C probe. A 1.75C touch-interrupt pulse on GPIO11 after the canary check could then read as a 1.85C where before it gave Unknown. | Fixed in 03596ad: the sequence moved into the `addressListEvidence` seam and re-checks the canary after its list. Its test failed at runtime before the trailing check. |
+| R2 | Low | `board_descriptor.py` amp-pin rule | Audio boards with no probe (the 0.85) were exempt, so a future 8 MiB probe on GPIO7 would be silent. | Fixed in 03596ad: a probe on such a board's amp enable is refused when its flash range overlaps. The test failed without the rule. |
+| R3 | Low | `variantFromS3Probe` | It ignored the skip rules, so a test pinned a both-ack Unknown that the device never produces. | Fixed in 03596ad: it runs `runI2cProbes`. Expectations were updated red-first, plus a check that two buses which each run their own probe still give Unknown. |
+| R4 | Info, pre-existing | `espdisp_bootstrap.py` `_forbidden_drive_pins` | Operator bootstrap I2C discovery can still pull up amp enables. | Deferred: bootstrap asks the operator's consent first. Forbidding amp pins would also drop the 1.75C's own 15/14 bus from discovery, as touch-interrupt pins already drop 11/10. |
+
+The reviewer also estimated that a released SDA sits near 0.6 V against R42, which is probably below the NS4150B's high threshold (unchecked against its datasheet). The reorder is kept regardless.
+
+Final gate at bfae637 is green; see gate-full.log.
+
 ## Code review: board-reported WiFi and one capture orientation rule
 
 Branch `app-wifi-orientation`, rebased onto main 696d0ae (capture-stall fix). Commits: db67796 fix, b5990f2 round-1 fixes, 697df1b residuals, 0ceed4f network name over WiFi, d85c9ab round-2 fixes, 02e0585 round-3 fixes. There were three adversarial rounds, each by a separate reviewer agent that only read files and ran grep; none opened a port, launched the app or flashed a board. An earlier round-1 run was lost when the app restarted and never reported.

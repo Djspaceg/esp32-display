@@ -197,7 +197,11 @@ selector = ""
 macros = []
 
 [detection]
-order = 30
+# Before the 1.75C's probe (order 20): that probe pulls up SDA GPIO15, which is
+# this board's NS4150B enable. Once this bus answers, that probe is skipped
+# (quietAfterMatch), so GPIO15 stays on its 10K pull-down (V2 schematic R42)
+# until audio identification drives it low.
+order = 15
 resolution = "exactly_one"
 no_match = "unknown"
 kind = "i2c_any_ack"

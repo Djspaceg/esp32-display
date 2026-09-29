@@ -2309,8 +2309,10 @@ int main() {
                                     true, false) == Variant::TouchSt7789);
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
                                     false, false) == Variant::Unknown);
+    // With the 1.85C bus answering, the probe on its amp-enable GPIO15 (the
+    // 1.75C's bus) is skipped, exactly as on the device, so this is the 1.85C.
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, true, true,
-                                    false, false) == Variant::Unknown);
+                                    false, false) == Variant::LcdSt77916);
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
                                     false, false, true) ==
           Variant::ElecrowKnob128);
@@ -2318,8 +2320,12 @@ int main() {
     // there does not make a second candidate out of it.
     CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
                                     false, false, true) == Variant::LcdGc9107);
+    // The knob probe pulses a rail and is skipped once any bus has answered.
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, true,
-                                    false, false, true) == Variant::Unknown);
+                                    false, false, true) == Variant::LcdSt77916);
+    // Buses that each run their own probe still make an ambiguity.
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, true,
+                                    true, false) == Variant::Unknown);
 
     // The 1.3-inch and 1.9-inch carriers answer identically on GPIO47/48, so
     // the GPIO4 sense separates them: the 1.3's bare header pin reads near
@@ -2356,14 +2362,18 @@ int main() {
     CHECK(s3Plan.resolution == ResolutionPolicy::ExactlyOne);
     CHECK(board::GENERATED_MAX_PROBE_COUNT >= s3Plan.probeCount);
     CHECK(s3Plan.probeCount == 5);
-    CHECK(s3Plan.probes[0].sda == 15 && s3Plan.probes[0].scl == 14);
-    CHECK(s3Plan.probes[0].addresses[0] == 0x5A);
-    CHECK(s3Plan.probes[0].addresses[1] == 0x34);
-    CHECK(s3Plan.probes[0].addresses[2] == 0x6A);
-    CHECK(s3Plan.probes[0].addresses[3] == 0x6B);
-    CHECK(s3Plan.probes[1].sda == 11 && s3Plan.probes[1].scl == 10);
-    CHECK(s3Plan.probes[1].addresses[0] == 0x15);
-    CHECK(s3Plan.probes[1].addresses[1] == 0x20);
+    // The 1.85C's bus comes first: the 1.75C's SDA (GPIO15) is the 1.85C V2's
+    // amplifier enable, so that probe is quiet once a board has answered.
+    CHECK(s3Plan.probes[0].sda == 11 && s3Plan.probes[0].scl == 10);
+    CHECK(s3Plan.probes[0].addresses[0] == 0x15);
+    CHECK(s3Plan.probes[0].addresses[1] == 0x20);
+    CHECK(!s3Plan.probes[0].quietAfterMatch);
+    CHECK(s3Plan.probes[1].sda == 15 && s3Plan.probes[1].scl == 14);
+    CHECK(s3Plan.probes[1].addresses[0] == 0x5A);
+    CHECK(s3Plan.probes[1].addresses[1] == 0x34);
+    CHECK(s3Plan.probes[1].addresses[2] == 0x6A);
+    CHECK(s3Plan.probes[1].addresses[3] == 0x6B);
+    CHECK(s3Plan.probes[1].quietAfterMatch);
     CHECK(s3Plan.probes[2].sda == 42 && s3Plan.probes[2].scl == 41);
     CHECK(s3Plan.probes[2].addresses[0] == 0x15);
     CHECK(s3Plan.probes[2].addresses[1] == 0x6A);
@@ -2391,8 +2401,25 @@ int main() {
       CHECK(clean.status == ProbeStatus::Started && clean.ackCount == 2);
       CHECK(boarddetectmodel::addressProbeEvidence(false, 0, false).status ==
             ProbeStatus::StartFailed);
+      // A line pulled low by another driver partway through the list (on a
+      // 1.75C, GPIO11 is the touch interrupt and the 1.85C bus's SDA) acks
+      // every later address. The canary is addressed again after the list,
+      // so that reads as stuck rather than as a 1.85C: the 1.85C probe runs
+      // first and would otherwise skip the 1.75C's own probe.
+      {
+        unsigned transactions = 0;
+        const ProbeEvidence glitched = boarddetectmodel::addressListEvidence(
+            s3Plan.probes[0], [&](uint8_t) { return ++transactions >= 2; });
+        CHECK(glitched.status == ProbeStatus::Started);
+        CHECK(glitched.ackCount == 0);
+        const ProbeEvidence genuine = boarddetectmodel::addressListEvidence(
+            s3Plan.probes[0], [&](uint8_t address) {
+              return address == 0x15 || address == 0x20;
+            });
+        CHECK(genuine.ackCount == 2);
+      }
       ProbeEvidence knobBoard[5] = {};
-      knobBoard[1] = clamped;
+      knobBoard[0] = clamped;
       CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 4, knobBoard));
       knobBoard[4] = {ProbeStatus::Started, 1};
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
@@ -2420,6 +2447,47 @@ int main() {
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
                                       16u * 1024u * 1024u, seen, 5)
                 .variant == Variant::TouchSt7789);
+    }
+    {
+      // Detection runs before audio identification, and an address probe
+      // enables internal pull-ups on its SDA and SCL. On each S3 audio board,
+      // with only that board's own bus answering, the real probe loop must
+      // never touch the board's amplifier-enable pin: on the 1.85C V2 that is
+      // GPIO15, the SDA of the 1.75C's probe, so a pull-up there would turn
+      // the NS4150B on before the codec is initialized.
+      struct SimulatedBoard {
+        Variant variant;
+        int8_t sda;
+        int8_t scl;
+      } boards[] = {
+          {Variant::LcdSt77916, 11, 10},
+          {Variant::AmoledCo5300, 15, 14},
+          {Variant::TouchSt7789, 42, 41},
+      };
+      for (const SimulatedBoard &simulated : boards) {
+        const board::AudioConfig *audio =
+            board::generatedAudioConfig(simulated.variant);
+        CHECK(audio != nullptr && audio->pinAmpEnable != board::NO_PIN);
+        ProbeEvidence evidence[5] = {};
+        bool touchedAmp = false;
+        boarddetectmodel::runI2cProbes(
+            s3Plan, 16u * 1024u * 1024u, evidence,
+            [&](uint8_t i) {
+              const auto &probe = s3Plan.probes[i];
+              touchedAmp = touchedAmp || probe.sda == audio->pinAmpEnable ||
+                           probe.scl == audio->pinAmpEnable ||
+                           probe.resetPin == audio->pinAmpEnable;
+              const bool answers =
+                  probe.sda == simulated.sda && probe.scl == simulated.scl;
+              return ProbeEvidence{ProbeStatus::Started,
+                                   (uint8_t)(answers ? 1 : 0)};
+            },
+            [](uint8_t) {});
+        CHECK(!touchedAmp);
+        CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                        16u * 1024u * 1024u, evidence, 5)
+                  .variant == simulated.variant);
+      }
     }
     for (uint8_t i = 0; i < s3Plan.probeCount; ++i) {
       CHECK(s3Plan.probes[i].frequencyHz == 100000);
@@ -2536,11 +2604,11 @@ int main() {
         board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 5);
     CHECK(detected.variant == Variant::Unknown);
     CHECK(detected.matchedCandidates == 0);
-    s3Evidence[0] = {ProbeStatus::Started, 1};
+    s3Evidence[1] = {ProbeStatus::Started, 1};
     detected = board::detectFromEvidence(
         board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 5);
     CHECK(detected.variant == Variant::AmoledCo5300);
-    s3Evidence[1] = {ProbeStatus::Started, 1};
+    s3Evidence[0] = {ProbeStatus::Started, 1};
     detected = board::detectFromEvidence(
         board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 5);
     CHECK(detected.variant == Variant::Unknown);
@@ -2819,14 +2887,14 @@ int main() {
 
     const auto &generatedS3Plan =
         board::detectionPlanForPlatform(board::Platform::Esp32S3);
-    CHECK(generatedS3Plan.probes[0].addressCount == 4);
-    CHECK(generatedS3Plan.probes[0].addresses[0] == 0x5A);
-    CHECK(generatedS3Plan.probes[0].addresses[1] == 0x34);
-    CHECK(generatedS3Plan.probes[0].addresses[2] == 0x6A);
-    CHECK(generatedS3Plan.probes[0].addresses[3] == 0x6B);
-    CHECK(generatedS3Plan.probes[1].addressCount == 2);
-    CHECK(generatedS3Plan.probes[1].addresses[0] == 0x15);
-    CHECK(generatedS3Plan.probes[1].addresses[1] == 0x20);
+    CHECK(generatedS3Plan.probes[1].addressCount == 4);
+    CHECK(generatedS3Plan.probes[1].addresses[0] == 0x5A);
+    CHECK(generatedS3Plan.probes[1].addresses[1] == 0x34);
+    CHECK(generatedS3Plan.probes[1].addresses[2] == 0x6A);
+    CHECK(generatedS3Plan.probes[1].addresses[3] == 0x6B);
+    CHECK(generatedS3Plan.probes[0].addressCount == 2);
+    CHECK(generatedS3Plan.probes[0].addresses[0] == 0x15);
+    CHECK(generatedS3Plan.probes[0].addresses[1] == 0x20);
     CHECK(generatedS3Plan.probes[2].addressCount == 3);
     CHECK(generatedS3Plan.probes[2].addresses[0] == 0x15);
     CHECK(generatedS3Plan.probes[2].addresses[1] == 0x6A);
@@ -5982,7 +6050,7 @@ int main() {
     CHECK(!board::variantMatchesPlatform(board::Variant::P4_4C,
                                          board::Platform::Esp32S3));
     CHECK(board::supportsDoom(board::Variant::P4_4C));
-    CHECK(!board::supportsAudio(board::Variant::P4_4C));
+    CHECK(board::supportsAudio(board::Variant::P4_4C));
 
     // The 3.4C: the 4C's XC carrier with 800x800 JD9365 glass. Vendor BSP
     // 3.0.1 (CONFIG_BSP_LCD_TYPE_800_800_3_4_INCH) gives the same lanes,
@@ -6013,7 +6081,7 @@ int main() {
     CHECK(strcmp(board::targetToken(p34c.variant), "p4") == 0);
     CHECK(board::variantFromName("jd9365-34c") == board::Variant::P4_34C);
     CHECK(board::supportsDoom(board::Variant::P4_34C));
-    CHECK(!board::supportsAudio(board::Variant::P4_34C));
+    CHECK(board::supportsAudio(board::Variant::P4_34C));
 
     // Unresolved P4: every P4 carrier shares the backlight wiring, so the
     // backlight can be driven off before the carrier is known. S3 carriers
@@ -6058,7 +6126,7 @@ int main() {
     CHECK(board::supportsAudio(board::Variant::AmoledCo5300));
     CHECK(board::supportsAudio(board::Variant::LcdSt77916));
     CHECK(!board::supportsAudio(board::Variant::TouchJd9853));
-    CHECK(!board::supportsAudio(board::Variant::P4_4B));
+    CHECK(board::supportsAudio(board::Variant::P4_4B));
     const board::AudioConfig *amoledAudio =
         board::generatedAudioConfig(board::Variant::AmoledCo5300);
     CHECK(amoledAudio != nullptr);

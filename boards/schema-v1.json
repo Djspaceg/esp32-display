@@ -479,6 +479,8 @@
         "pin_din": {"$ref": "#/$defs/audioPin"},
         "pin_pdm_clock": {"$ref": "#/$defs/audioPin"},
         "pin_amp_enable": {"$ref": "#/$defs/audioPin"},
+        "pin_control_sda": {"$ref": "#/$defs/audioPin"},
+        "pin_control_scl": {"$ref": "#/$defs/audioPin"},
         "codec_i2c_address": {
           "type": "integer",
           "minimum": 0,

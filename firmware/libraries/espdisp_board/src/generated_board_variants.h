@@ -23,5 +23,5 @@ constexpr bool supportsDoom(Variant variant) {
 }
 
 constexpr bool supportsAudio(Variant variant) {
-  return variant == Variant::AmoledCo5300 || variant == Variant::LcdSt77916;
+  return variant == Variant::AmoledCo5300 || variant == Variant::LcdSt77916 || variant == Variant::LcdGc9107 || variant == Variant::TouchSt7789 || variant == Variant::P4_4B || variant == Variant::P4_4C || variant == Variant::P4_34C;
 }

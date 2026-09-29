@@ -230,18 +230,39 @@ static int testFinding6() {
   CHECK(audiohost::hardwareEvents().empty());
 
   audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
   CHECK(backend.start(board::CONFIG_AMOLED_CO5300, *valid,
                       audiobackend::descriptorFormat(*valid)));
   const auto &events = audiohost::hardwareEvents();
-  CHECK(events.size() > 6);
-  CHECK(events[0].kind == audiohost::HardwareEventKind::PinMode);
-  CHECK(events[0].value == valid->pinAmpEnable);
-  CHECK(events[1].kind == audiohost::HardwareEventKind::DigitalWrite);
-  CHECK(events[1].value == valid->pinAmpEnable * 10 + LOW);
-  CHECK(events[2].kind == audiohost::HardwareEventKind::I2sSetPins);
-  CHECK(events[3].kind == audiohost::HardwareEventKind::I2sBegin);
-  CHECK(events[4].kind == audiohost::HardwareEventKind::I2sWrite);
-  CHECK(events[5].kind == audiohost::HardwareEventKind::WireBegin);
+  // The read-only chip-ID probe runs first; only then does any pin move.
+  size_t first = 0;
+  while (first < events.size() &&
+         (events[first].kind == audiohost::HardwareEventKind::WireBegin ||
+          events[first].kind ==
+              audiohost::HardwareEventKind::WireTransmission ||
+          events[first].kind == audiohost::HardwareEventKind::WireRequest)) {
+    ++first;
+  }
+  CHECK(first >= 9);
+  CHECK(events.size() > first + 5);
+  // Identification and start() each drive the amp low before any clock.
+  size_t ampLowPairs = 0;
+  while (first + 1 < events.size() &&
+         events[first].kind == audiohost::HardwareEventKind::PinMode &&
+         events[first].value == valid->pinAmpEnable &&
+         events[first + 1].kind ==
+             audiohost::HardwareEventKind::DigitalWrite &&
+         events[first + 1].value == valid->pinAmpEnable * 10 + LOW) {
+    first += 2;
+    ++ampLowPairs;
+  }
+  CHECK(ampLowPairs >= 1);
+  first -= 2;
+  CHECK(events[first + 2].kind == audiohost::HardwareEventKind::I2sSetPins);
+  CHECK(events[first + 3].kind == audiohost::HardwareEventKind::I2sBegin);
+  CHECK(events[first + 4].kind == audiohost::HardwareEventKind::I2sWrite);
+  CHECK(events[first + 5].kind ==
+        audiohost::HardwareEventKind::WireTransmission);
   CHECK(events.back().kind == audiohost::HardwareEventKind::DigitalWrite);
   CHECK(events.back().value == valid->pinAmpEnable * 10 + HIGH);
   backend.stop();
@@ -442,6 +463,197 @@ static int testRound3EngineLoopObservesPlaybackMetrics() {
   return 0;
 }
 
+
+static bool anyPinOrClockEvent() {
+  for (const auto &event : audiohost::hardwareEvents()) {
+    if (event.kind != audiohost::HardwareEventKind::WireBegin &&
+        event.kind != audiohost::HardwareEventKind::WireTransmission &&
+        event.kind != audiohost::HardwareEventKind::WireRequest) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool ampDrivenHigh(int pin) {
+  for (const auto &event : audiohost::hardwareEvents()) {
+    if (event.kind == audiohost::HardwareEventKind::DigitalWrite &&
+        event.value == pin * 10 + HIGH) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The 1.85C V1 carries PCM5101A + ICS-43434, neither of which has an I2C
+// interface, so nothing answers at 0x18 or 0x40. Audio must stay off with no
+// audio GPIO, clock, or codec register touched.
+static int testIdentity185cV1() {
+  const board::AudioConfig *audio =
+      board::generatedAudioConfig(board::Variant::LcdSt77916);
+  CHECK(audio != nullptr);
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audiohost::setI2cDevice(0x18, false);
+  audiohost::setI2cDevice(0x40, false);
+  CHECK(audio::boardAudioStatus(board::CONFIG_LCD_ST77916) ==
+        audiobackend::DescriptorStatus::HardwareNotIdentified);
+  CHECK(!anyPinOrClockEvent());
+  CHECK(audiohost::wireRegisterWrites() == 0);
+  CHECK(!audiotransport::start(board::CONFIG_LCD_ST77916));
+  CHECK(!audioengine::start(board::CONFIG_LCD_ST77916));
+  const char *error = startAudioToneTest(board::CONFIG_LCD_ST77916, 1000);
+  CHECK(error != nullptr);
+  CHECK(std::strcmp(
+            error,
+            "audio disabled: board revision is not safely distinguishable") ==
+        0);
+  audio::CodecSerialAudioBackend backend;
+  CHECK(!backend.start(board::CONFIG_LCD_ST77916, *audio,
+                       audiobackend::descriptorFormat(*audio)));
+  CHECK(!anyPinOrClockEvent());
+  CHECK(!ampDrivenHigh(audio->pinAmpEnable));
+  CHECK(audiohost::wireRegisterWrites() == 0);
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
+// The 1.85C V2: genuine ES8311 and ES7210 IDs. Audio is enabled, and the
+// amplifier is driven off at identification rather than left floating.
+static int testIdentity185cV2() {
+  const board::AudioConfig *audio =
+      board::generatedAudioConfig(board::Variant::LcdSt77916);
+  CHECK(audio != nullptr);
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  CHECK(audio::boardAudioStatus(board::CONFIG_LCD_ST77916) ==
+        audiobackend::DescriptorStatus::Ready);
+  CHECK(audiohost::wireRegisterWrites() == 0);
+  const auto &events = audiohost::hardwareEvents();
+  CHECK(events.size() >= 2);
+  CHECK(events[events.size() - 2].kind ==
+        audiohost::HardwareEventKind::PinMode);
+  CHECK(events[events.size() - 2].value == audio->pinAmpEnable);
+  CHECK(events.back().value == audio->pinAmpEnable * 10 + LOW);
+  CHECK(!ampDrivenHigh(audio->pinAmpEnable));
+  // The cached answer is reused: a second query does not probe again.
+  const size_t before = events.size();
+  CHECK(audio::boardAudioStatus(board::CONFIG_LCD_ST77916) ==
+        audiobackend::DescriptorStatus::Ready);
+  CHECK(audiohost::hardwareEvents().size() == before);
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
+// An ACK is not identification: some other device strapped to 0x18, or only
+// one of the two parts present, keeps audio off with the pins untouched.
+static int testIdentityRejectsImpostors() {
+  const board::AudioConfig *audio =
+      board::generatedAudioConfig(board::Variant::LcdSt77916);
+  CHECK(audio != nullptr);
+  struct Case {
+    bool codecPresent;
+    uint8_t codecId1;
+    bool micPresent;
+    uint8_t micId1;
+  } cases[] = {
+      {true, 0x33, true, 0x72},   // wrong device at 0x18
+      {true, 0x83, true, 0x00},   // wrong device at 0x40
+      {true, 0x83, false, 0x72},  // codec alone
+      {false, 0x83, true, 0x72},  // ADC alone
+  };
+  for (const Case &item : cases) {
+    audiohost::reset();
+    audio::resetBoardAudioStatusForTest();
+    audiohost::setI2cDevice(0x18, item.codecPresent, 0xFD, item.codecId1,
+                            0xFE, 0x11);
+    audiohost::setI2cDevice(0x40, item.micPresent, 0x3D, item.micId1, 0x3E,
+                            0x10);
+    CHECK(audio::boardAudioStatus(board::CONFIG_LCD_ST77916) ==
+          audiobackend::DescriptorStatus::HardwareNotIdentified);
+    audio::CodecSerialAudioBackend backend;
+    CHECK(!backend.start(board::CONFIG_LCD_ST77916, *audio,
+                         audiobackend::descriptorFormat(*audio)));
+    CHECK(!anyPinOrClockEvent());
+    CHECK(audiohost::wireRegisterWrites() == 0);
+  }
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
+// The 0.85 has no touch controller, so its codec bus comes from the audio
+// descriptor rather than the (absent) touch pins.
+static int testControlBusWithoutTouch() {
+  const board::AudioConfig *audio =
+      board::generatedAudioConfig(board::Variant::LcdGc9107);
+  CHECK(audio != nullptr);
+  CHECK(board::CONFIG_LCD_GC9107.pinTouchSda == board::NO_PIN);
+  const audiobackend::ControlBus bus =
+      audiobackend::controlBus(board::CONFIG_LCD_GC9107, *audio);
+  CHECK(bus.sda == 42 && bus.scl == 41);
+  const board::AudioConfig *touchBus =
+      board::generatedAudioConfig(board::Variant::TouchSt7789);
+  CHECK(touchBus != nullptr);
+  CHECK(touchBus->pinControlSda == board::NO_PIN);
+  const audiobackend::ControlBus shared =
+      audiobackend::controlBus(board::CONFIG_TOUCH_ST7789, *touchBus);
+  CHECK(shared.sda == board::CONFIG_TOUCH_ST7789.pinTouchSda &&
+        shared.scl == board::CONFIG_TOUCH_ST7789.pinTouchScl);
+  return 0;
+}
+
+// Every board whose descriptor names ES8311 + ES7210 + NS4150B is enabled at
+// runtime once identified, including both P4 carriers.
+static int testIdentityEnablesEveryCodecBoard() {
+  const board::Config *boards[] = {&board::CONFIG_AMOLED_CO5300,
+                                   &board::CONFIG_LCD_ST77916,
+                                   &board::CONFIG_LCD_GC9107,
+                                   &board::CONFIG_TOUCH_ST7789,
+                                   &board::CONFIG_P4_4B,
+                                   &board::CONFIG_P4_4C,
+                                   &board::CONFIG_P4_34C};
+  for (const board::Config *config : boards) {
+    const board::AudioConfig *audio =
+        board::generatedAudioConfig(config->variant);
+    CHECK(audio != nullptr);
+    CHECK(board::supportsAudio(config->variant));
+    CHECK(audiobackend::classify(*audio) ==
+          audiobackend::DescriptorStatus::Ready);
+    CHECK(audiobackend::matchesBoard(*config, *audio));
+    audiohost::reset();
+    audio::resetBoardAudioStatusForTest();
+    CHECK(audio::boardAudioStatus(*config) ==
+          audiobackend::DescriptorStatus::Ready);
+    // The probe runs on the codec control bus: the touch bus, or the
+    // descriptor's own pair on a board without touch.
+    const audiobackend::ControlBus bus =
+        audiobackend::controlBus(*config, *audio);
+    CHECK(bus.sda != board::NO_PIN && bus.scl != board::NO_PIN);
+    CHECK(audiohost::hardwareEvents().front().kind ==
+          audiohost::HardwareEventKind::WireBegin);
+    CHECK(audiohost::hardwareEvents().front().value ==
+          bus.sda * 100 + bus.scl);
+    // Once the boot verdict is cached, start() (which also runs on the
+    // engine task) issues no I2C read: a read there would race the loop
+    // task's touch and IMU reads on the unlocked Wire receive buffer.
+    const size_t probeEvents = audiohost::hardwareEvents().size();
+    audio::CodecSerialAudioBackend backend;
+    CHECK(backend.start(*config, *audio,
+                        audiobackend::descriptorFormat(*audio)));
+    for (size_t index = probeEvents;
+         index < audiohost::hardwareEvents().size(); ++index) {
+      CHECK(audiohost::hardwareEvents()[index].kind !=
+            audiohost::HardwareEventKind::WireRequest);
+    }
+    CHECK(ampDrivenHigh(audio->pinAmpEnable));
+    backend.stop();
+    CHECK(audiohost::hardwareEvents().back().kind ==
+          audiohost::HardwareEventKind::I2sEnd);
+  }
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
 int main() {
   const char *filter = std::getenv("AUDIO_TEST_FILTER");
   const struct {
@@ -456,6 +668,11 @@ int main() {
       {"6", testFinding6},
       {"7", testFinding7},
       {"9", testFinding9},
+      {"identity-185c-v1", testIdentity185cV1},
+      {"identity-185c-v2", testIdentity185cV2},
+      {"identity-impostors", testIdentityRejectsImpostors},
+      {"identity-every-codec-board", testIdentityEnablesEveryCodecBoard},
+      {"control-bus-without-touch", testControlBusWithoutTouch},
       {"round3-peer-rejected", testRound3RejectedPeerOwnership},
       {"round3-peer-queue", testRound3QueueFullPeerOwnership},
       {"round3-engine-loop", testRound3EngineLoopSkipsRejectedPacket},
@@ -537,7 +754,9 @@ int main() {
   const board::AudioConfig *v2 =
       board::generatedAudioConfig(board::Variant::LcdSt77916);
   CHECK(v2 != nullptr);
-  CHECK(classify(*v2) == DescriptorStatus::RevisionNotApproved);
+  CHECK(classify(*v2) == DescriptorStatus::Ready);
+  CHECK(runtimeStatus(*v2, false) == DescriptorStatus::HardwareNotIdentified);
+  CHECK(runtimeStatus(*v2, true) == DescriptorStatus::Ready);
   CHECK(!matchesBoard(board::CONFIG_AMOLED_CO5300, *v2));
   const board::AudioConfig *silent =
       board::generatedAudioConfig(board::Variant::TouchJd9853);

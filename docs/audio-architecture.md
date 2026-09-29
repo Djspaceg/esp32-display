@@ -1,12 +1,12 @@
 # ADR: Privileged audio streaming
 
 - Status: Accepted
-- Date: 2026-09-22
+- Date: 2026-09-22; runtime enablement widened 2026-09-28
 
 ## Context
 
 The repository previously had no audio subsystem. The accepted implementation
-adds descriptor-driven 1.75C codec bring-up, the panel transport and engine,
+adds descriptor-driven ES8311/ES7210 codec bring-up, the panel transport and engine,
 and the approved wire allocations below. Mac capture/playback remains a later
 implementation stage. Doom's `i_sound.h` and `i_cdmus.h` interfaces are
 present, but `firmware/doom/src/platform/doom_esp32_stubs.c.inc` still
@@ -21,8 +21,9 @@ model. The non-negotiable scheduling rule is:
 > panel bandwidth is over budget, video loses fidelity or update rate first.
 
 This ADR records the descriptor data, implemented firmware boundaries, and
-approved wire allocation. It keeps 1.85C audio disabled because no approved
-runtime revision identity exists.
+approved wire allocation. Every board whose vendor schematic carries the
+ES8311 + ES7210 + NS4150B design runs audio once firmware has positively
+identified both chips at runtime; see "Runtime hardware identification".
 
 ## Decision
 
@@ -115,7 +116,74 @@ under USB and battery, safe gain and click/pop sequencing, and acoustic
 performance. Waveshare specifies the BOX speaker as 4 ohm, 5 W on the product
 page, but that enclosure fact is not a descriptor field.
 
-### 1.85C runtime revision discrimination
+### Other boards with the same audio design
+
+A schematic and BSP check of every descriptor (sources are pinned in each
+`[audio]` block) found the same ES8311 DAC -> NS4150B speaker path and
+two-microphone ES7210 capture on four more boards. In every case ES8311's own
+ADC inputs are unconnected and ES7210 MIC3 carries the amplifier's echo
+reference.
+
+| Board | MCLK/BCLK/LRCK/DOUT/DIN | Amp enable | Control I2C | Notes |
+| --- | --- | --- | --- | --- |
+| ESP32-S3-LCD-0.85 | 8/9/10/12/11 | GPIO7, active high | SDA 42 / SCL 41, not a touch bus | no touch, so the descriptor declares `pin_control_sda/scl`; the product photo labels one microphone |
+| ESP32-S3-Touch-LCD-1.54 | 8/9/10/12/11 | GPIO7, active high | touch/IMU bus 42/41 | |
+| ESP32-P4-WIFI6-Touch-LCD-4B | 13/12/10/9/11 | GPIO53, 10K pull-down | GT911 bus 7/8 | |
+| ESP32-P4-WIFI6-Touch-LCD-4C | 13/12/10/9/11 | GPIO53, 10K pull-down | GT911 bus 7/8 | shared XC schematic |
+| ESP32-P4-WIFI6-Touch-LCD-3.4C | 13/12/10/9/11 | GPIO53, 10K pull-down | GT911 bus 7/8 | the 4C's XC schematic and BSP; not checked on a 3.4C |
+
+The vendors capture 4-slot TDM so MIC3 can feed echo cancellation. These rows
+use the 1.75C's two-slot standard I2S (MIC1/MIC2), so one backend register
+sequence serves every board. The C3, both C6 boards, the Elecrow knob, the
+S3-LCD-1.3 family and the S3-LCD-1.9 have no speaker or microphone.
+
+### Runtime hardware identification
+
+A descriptor names the parts a board design carries; it cannot prove the
+parts are on the unit that booted. Before anything starts audio, firmware
+reads the chip-ID registers of both parts over the codec control bus:
+ES8311 `0xFD`/`0xFE` must read `0x83`/`0x11` and ES7210 `0x3D`/`0x3E` must
+read `0x72`/`0x10` (Everest datasheets; Linux `es8311.h`). The probe writes no
+codec register and touches no audio GPIO or clock, each read is retried once,
+and the answer is cached for the boot so capability bits, mDNS, and every
+later start agree. A positively identified board has its amplifier-enable
+driven low at identification. Anything else is `HardwareNotIdentified`:
+transport, engine, capability bits, and `CFGAUDIOTEST` all stay off, and the
+backend's own `start()` checks that cached verdict before its first pin write.
+It does not probe again: `start()` also runs on the engine task, and an I2C
+read there would race the loop task's touch and IMU reads, because `Wire`
+leaves its receive buffer unlocked between `requestFrom()` and `read()`.
+
+For the 1.85C this is the revision discriminator. V2 puts ES8311 (`0x18`)
+and ES7210 (`0x40`) on the touch bus; V1's PCM5101A and ICS-43434 have no I2C
+interface, and nothing else on V1's bus (CST816 `0x15`, TCA9554 `0x20`,
+PCF85063 `0x51`) answers either address. The TCA9554 wiring is identical on
+both revisions, so it cannot discriminate. On V1, GPIO15 and GPIO2 are the
+ICS-43434's SCK and WS, and the NS8002's shutdown pin is tied to ground: that
+amplifier is always on and firmware cannot switch it off. V1 therefore stays
+silent because its I2S pins are never driven, not because of an amp line.
+
+Board detection runs before identification, and an address probe enables
+internal pull-ups on its lines. The 1.75C's probe uses SDA GPIO15, which is
+the 1.85C V2's NS4150B enable, so the 1.85C's own bus (SDA 11 / SCL 10) is
+probed first. A probe whose line is any audio board's amplifier enable is
+generated `quietAfterMatch` and runs only while no earlier bus has answered.
+On a 1.85C V2, GPIO15 therefore stays on its 10K pull-down (V2 schematic R42)
+from reset until identification drives it low; firmware cannot drive it
+earlier, because until the chip IDs are read the same pin may be V1's
+ICS-43434 clock. The validator refuses any descriptor order that would put an
+audio board's amplifier enable on an earlier probe's lines, and, for an audio
+board with no probe of its own (the 0.85), any probe on its amplifier enable
+whose flash range overlaps it. Because the 1.85C's answer now skips the
+1.75C's probe instead of making an ambiguity, each address probe addresses
+the reserved canary again after its list: on a 1.75C, GPIO11 (the 1.85C bus's
+SDA) is the touch interrupt, and a pulse partway through the list would
+otherwise read as a 1.85C.
+
+The historical analysis below explains why this is an audio-layer probe and
+not a board-detection change.
+
+### 1.85C runtime revision discrimination (analysis)
 
 An I2C ACK can distinguish the revisions electrically. On V2, both ES8311
 `0x18` and ES7210 `0x40` sit on SDA GPIO11 / SCL GPIO10; on V1 neither
@@ -159,6 +227,9 @@ battery, LED, serial, expander/detection, and reset declarations.
 | 1.75C | 8, 9, 10, 16, 45, 46 | no collision |
 | 1.85C V1 | 2, 15, 38, 39, 47, 48 | no collision |
 | 1.85C V2 | 2, 15, 38, 39, 47, 48 | no collision |
+| 0.85 | 7, 8, 9, 10, 11, 12 (control 41, 42) | no collision |
+| 1.54 | 7, 8, 9, 10, 11, 12 | no collision |
+| P4 4B / 4C / 3.4C | 9, 10, 11, 12, 13, 53 | no collision |
 
 For V2 specifically, GPIO2 is I2S MCLK. The current descriptor had no GPIO2
 claim in panel, touch, IMU, backlight, battery, LED, serial, expander, or
@@ -171,8 +242,8 @@ second source of pin truth.
 ### Descriptor schema
 
 Every descriptor now has `[audio]`. `[capabilities].audio` is descriptor data;
-firmware translates only the safely identified 1.75C row into the audio
-protocol capability bits.
+firmware translates a row into the audio protocol capability bits only after
+runtime hardware identification.
 
 | Field | Purpose |
 | --- | --- |
@@ -186,7 +257,8 @@ protocol capability bits.
 | `pin_dout`, `pin_din` | MCU-perspective playback and capture data. |
 | `pin_pdm_clock` | PDM clock when capture does not use I2S clocks. |
 | `pin_amp_enable` | Explicit shutdown/enable control; never inferred. |
-| `codec_i2c_address`, `mic_i2c_address` | Register-control endpoints on the already-declared board I2C bus. |
+| `codec_i2c_address`, `mic_i2c_address` | Register-control endpoints on the codec control bus. |
+| `pin_control_sda`, `pin_control_scl` | Optional; the codec control bus when it is not the touch bus. Omitted (`-1`) means the touch bus. |
 | rate/channel fields | A verified hardware/demo operating point and buffer-sizing input. Zero means absent or unverified. |
 
 The validator enforces enums, 8-96 kHz rates, 1-8 channels, I2C address
@@ -230,8 +302,9 @@ Backends split by electrical topology, not CPU family:
   microphone. This covers the 1.85C V1 shape and future dumb-I2S/PDM carriers.
 - `CodecSerialAudioBackend`: ES8311-class output plus ES7210-class capture,
   initialized over the board's existing I2C bus. This covers the 1.75C and
-  1.85C V2 shape. A future P4 carrier supplies its resolved descriptor I2C bus
-  to the same backend; the backend does not own board detection.
+  1.85C V2 shape, the 0.85, the 1.54, and both P4 carriers. The backend
+  resolves the control bus from the descriptor; it does not own board
+  detection.
 
 The facade exposes `start`, `writeFrames`, `readFrames`, `setGain`, and
 `stop`; it does not expose ES8311 registers to `audio_engine`. This avoids
@@ -465,8 +538,9 @@ Compatibility is fail-closed:
 - unknown audio datagrams never enter the existing video parser because the
   port and parser are separate, and video ingress rejects `EAUD` magic before
   frame parsing even if a sender misroutes it;
-- only a descriptor classified `Ready` advertises the bits. The ambiguous
-  1.85C family remains fail-closed despite its concrete V2 descriptor row.
+- only a descriptor classified `Ready` and positively identified at runtime
+  advertises the bits, so a 1.85C V1 (or any unit missing the parts) stays
+  fail-closed.
 
 After two seconds without an accepted PCM packet, the panel has already faded
 and emitted silence; it then stops the backend, disables the amp, clears the
@@ -513,16 +587,15 @@ driver.
    device selectors; validate and measure on macOS.
 5. Prove zero underruns and both latency ceilings under full-duplex video
    overload; tune runtime reserves before increasing audio complexity.
-6. Before automatic 1.85C audio enablement, obtain approval for revision
-   metadata or distinct variants. Keep V1 fail-closed and add no revision
-   probe until then.
+6. Done: every ES8311/ES7210 board, 1.85C V2 included, enables audio after
+   runtime chip-ID identification; V1 stays fail-closed.
 7. Replace Doom SFX stubs with a source joining the same mixer. Defer MUS/OPL.
 
 ## Consequences
 
 The descriptor represents absent, fully verified, and honestly unknown audio
 hardware. Runtime enablement is narrower than descriptor presence: only the
-approved 1.75C identity starts the codec backend and advertises audio.
+runtime-identified codec hardware starts the backend and advertises audio.
 
 The design spends internal RAM and video throughput to protect continuous
 audio. A video frame may become stale or incomplete; an audio packet may not be

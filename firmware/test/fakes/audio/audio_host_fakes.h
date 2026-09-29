@@ -16,6 +16,7 @@ enum class HardwareEventKind {
   I2sEnd,
   WireBegin,
   WireTransmission,
+  WireRequest,
 };
 
 struct HardwareEvent {
@@ -38,5 +39,11 @@ unsigned delayCalls();
 unsigned yieldCalls();
 const std::vector<HardwareEvent> &hardwareEvents();
 const std::vector<SentDatagram> &sentDatagrams();
+
+// I2C devices the fake bus answers for. reset() installs a genuine ES8311 at
+// 0x18 and ES7210 at 0x40; tests remove or alter them to model other boards.
+void setI2cDevice(uint8_t address, bool present, uint8_t idRegisterA = 0,
+                  uint8_t idA = 0, uint8_t idRegisterB = 0, uint8_t idB = 0);
+unsigned wireRegisterWrites();
 
 }  // namespace audiohost

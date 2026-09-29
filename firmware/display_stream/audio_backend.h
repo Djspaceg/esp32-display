@@ -49,4 +49,21 @@ class CodecSerialAudioBackend final : public AudioBackend {
 
 CodecSerialAudioBackend &sharedCodecBackend();
 
+// Read-only probe of the descriptor's codec and capture-ADC chip IDs on the
+// board I2C bus. It writes no codec register and touches no audio GPIO, so it
+// is safe on a board revision that does not carry the parts.
+audiobackend::CodecProbe probeCodecs(const board::Config &boardConfig,
+                                     const board::AudioConfig &audioConfig);
+
+// The runtime audio status for this board: the descriptor classification,
+// then, for a supported descriptor, one cached probe. A positively identified
+// board has its amplifier driven off before this returns, and nothing else
+// may start audio until it has.
+audiobackend::DescriptorStatus boardAudioStatus(
+    const board::Config &boardConfig);
+
+#if defined(ESPDISP_HOST_AUDIO_TEST)
+void resetBoardAudioStatusForTest();
+#endif
+
 }  // namespace audio

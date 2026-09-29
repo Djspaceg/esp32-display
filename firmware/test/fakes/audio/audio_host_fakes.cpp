@@ -41,6 +41,29 @@ std::vector<audiohost::HardwareEvent> events;
 std::vector<audiohost::SentDatagram> sentUdpDatagrams;
 uint8_t activeWireAddress = 0;
 
+struct FakeI2cDevice {
+  bool present;
+  uint8_t registers[256];
+};
+FakeI2cDevice i2cDevices[128] = {};
+unsigned activeWireBytes = 0;
+uint8_t activeWireRegister = 0;
+unsigned registerWrites = 0;
+int pendingRead = -1;
+
+void installGenuineCodecs() {
+  for (auto &device : i2cDevices) device = {};
+  i2cDevices[0x18].present = true;
+  i2cDevices[0x18].registers[0xFD] = 0x83;
+  i2cDevices[0x18].registers[0xFE] = 0x11;
+  i2cDevices[0x40].present = true;
+  i2cDevices[0x40].registers[0x3D] = 0x72;
+  i2cDevices[0x40].registers[0x3E] = 0x10;
+}
+
+// Tests that never call reset() still see the genuine parts.
+const bool genuineCodecsInstalled = (installGenuineCodecs(), true);
+
 }  // namespace
 
 FakeSerial Serial;
@@ -164,21 +187,46 @@ void I2SClass::end() {
   events.push_back({audiohost::HardwareEventKind::I2sEnd, 0});
 }
 
-bool TwoWire::begin(int8_t, int8_t, uint32_t) {
-  events.push_back({audiohost::HardwareEventKind::WireBegin, 0});
+bool TwoWire::begin(int8_t sda, int8_t scl, uint32_t) {
+  events.push_back({audiohost::HardwareEventKind::WireBegin, sda * 100 + scl});
   return true;
 }
 
 void TwoWire::beginTransmission(uint8_t address) {
   activeWireAddress = address;
+  activeWireBytes = 0;
 }
 
-size_t TwoWire::write(uint8_t) { return 1; }
+size_t TwoWire::write(uint8_t value) {
+  if (activeWireBytes == 0) activeWireRegister = value;
+  activeWireBytes++;
+  return 1;
+}
 
 uint8_t TwoWire::endTransmission() {
   events.push_back(
       {audiohost::HardwareEventKind::WireTransmission, activeWireAddress});
+  if (activeWireAddress >= 128 || !i2cDevices[activeWireAddress].present) {
+    return 2;
+  }
+  if (activeWireBytes > 1) registerWrites++;
   return 0;
+}
+
+size_t TwoWire::requestFrom(uint8_t address, size_t length) {
+  events.push_back({audiohost::HardwareEventKind::WireRequest, address});
+  pendingRead = -1;
+  if (address >= 128 || !i2cDevices[address].present || length != 1) {
+    return 0;
+  }
+  pendingRead = i2cDevices[address].registers[activeWireRegister];
+  return 1;
+}
+
+int TwoWire::read() {
+  const int value = pendingRead;
+  pendingRead = -1;
+  return value;
 }
 
 namespace audiohost {
@@ -191,7 +239,23 @@ void reset() {
   events.clear();
   sentUdpDatagrams.clear();
   activeWireAddress = 0;
+  activeWireBytes = 0;
+  activeWireRegister = 0;
+  registerWrites = 0;
+  pendingRead = -1;
+  installGenuineCodecs();
 }
+
+void setI2cDevice(uint8_t address, bool present, uint8_t idRegisterA,
+                  uint8_t idA, uint8_t idRegisterB, uint8_t idB) {
+  if (address >= 128) return;
+  i2cDevices[address] = {};
+  i2cDevices[address].present = present;
+  i2cDevices[address].registers[idRegisterA] = idA;
+  i2cDevices[address].registers[idRegisterB] = idB;
+}
+
+unsigned wireRegisterWrites() { return registerWrites; }
 
 void setMillis(uint32_t value) { nowMs = value; }
 

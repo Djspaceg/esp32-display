@@ -51,22 +51,28 @@ Every board this firmware runs on, and what each one supports. "Square" is a
 functional property, not cosmetic: it decides whether the IMU can drive all four
 orientations or only a 180-degree flip.
 
-| Runtime profile | Board | Chip | Panel | Resolution | Diagonal | Square | IMU | Automatic orientation | Orientations in the app |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `st7789` | [ESP32-C6-LCD-1.47](https://www.waveshare.com/esp32-c6-lcd-1.47.htm) | `esp32c6` | ST7789 | 172x320 | 1.47" | No | No | None | 0/180 |
-| `jd9853` | [ESP32-C6-Touch-LCD-1.47](https://www.waveshare.com/esp32-c6-touch-lcd-1.47.htm) | `esp32c6` | JD9853 | 172x320 | 1.47" | No | Yes | Flip only (0/180) | 0/180 |
-| `gc9107` | [ESP32-S3-LCD-0.85](https://www.waveshare.com/esp32-s3-lcd-0.85.htm) | `esp32s3` | GC9107 | 128x128 | 0.85" | Yes | No | None | 0/90/180/270 |
-| `st7789-130` | [ESP32-S3-LCD-1.3](https://www.waveshare.com/esp32-s3-lcd-1.3.htm) | `esp32s3` | ST7789V2 | 240x240 | 1.3" | Yes | Yes | Four-way | 0/90/180/270 |
-| `st7789-154` | [ESP32-S3-LCD-1.54](https://www.waveshare.com/esp32-s3-lcd-1.54.htm) | `esp32s3` | ST7789 | 240x240 | 1.54" | Yes | Yes | Four-way | 0/90/180/270 |
-| `st7789-190` | [ESP32-S3-LCD-1.9](https://docs.waveshare.com/ESP32-S3-LCD-1.9) | `esp32s3` | ST7789V2 | 170x320 | 1.9" | No | Yes | Flip only (0/180) | 0/180 |
-| `co5300` | [ESP32-S3-Touch-AMOLED-1.75C](https://www.waveshare.com/esp32-s3-touch-amoled-1.75c.htm) | `esp32s3` | CO5300 (AMOLED) | 466x466 | 1.75" | Yes | Yes | Four-way | 0/90/180/270 |
-| `st77916` | [ESP32-S3-Touch-LCD-1.85C](https://www.waveshare.com/esp32-s3-touch-lcd-1.85c.htm) | `esp32s3` | ST77916 (round) | 360x360 | 1.85" | Yes | No | None | 0/90/180/270 |
-| `gc9a01-knob-128` | [ELECROW CrowPanel 1.28" Rotary Display](https://github.com/Elecrow-RD/CrowPanel-1.28inch-HMI-ESP32-Rotary-Display-240-240-IPS-Round-Touch-Knob-Screen) | `esp32s3` | GC9A01 (round) | 240x240 | 1.28" | Yes | No | None | 0/90/180/270 |
-| `st7703-4b` | [ESP32-P4-WIFI6-Touch-LCD-4B](https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-4b.htm) | `esp32p4` | ST7703 (MIPI-DSI) | 720x720 | 4" | Yes | No | None | 0/90/180/270 |
-| `jd9365-4c` | [ESP32-P4-WIFI6-Touch-LCD-4C](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-4C) | `esp32p4` | JD9365 (MIPI-DSI, round) | 720x720 | 4" | Yes | No | None | 0/90/180/270 |
-| `jd9365-34c` | [ESP32-P4-WIFI6-Touch-LCD-3.4C](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-3.4C) | `esp32p4` | JD9365 (MIPI-DSI, round) | 800x800 | 3.4" | Yes | No | None | 0/90/180/270 |
+| Runtime profile | Board | Chip | Panel | Resolution | Diagonal | Square | IMU | Automatic orientation | Orientations in the app | Audio |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `st7789` | [ESP32-C6-LCD-1.47](https://www.waveshare.com/esp32-c6-lcd-1.47.htm) | `esp32c6` | ST7789 | 172x320 | 1.47" | No | No | None | 0/180 | None |
+| `jd9853` | [ESP32-C6-Touch-LCD-1.47](https://www.waveshare.com/esp32-c6-touch-lcd-1.47.htm) | `esp32c6` | JD9853 | 172x320 | 1.47" | No | Yes | Flip only (0/180) | 0/180 | None |
+| `gc9107` | [ESP32-S3-LCD-0.85](https://www.waveshare.com/esp32-s3-lcd-0.85.htm) | `esp32s3` | GC9107 | 128x128 | 0.85" | Yes | No | None | 0/90/180/270 | Speaker + mic |
+| `st7789-130` | [ESP32-S3-LCD-1.3](https://www.waveshare.com/esp32-s3-lcd-1.3.htm) | `esp32s3` | ST7789V2 | 240x240 | 1.3" | Yes | Yes | Four-way | 0/90/180/270 | None |
+| `st7789-154` | [ESP32-S3-LCD-1.54](https://www.waveshare.com/esp32-s3-lcd-1.54.htm) | `esp32s3` | ST7789 | 240x240 | 1.54" | Yes | Yes | Four-way | 0/90/180/270 | Speaker + 2 mics |
+| `st7789-190` | [ESP32-S3-LCD-1.9](https://docs.waveshare.com/ESP32-S3-LCD-1.9) | `esp32s3` | ST7789V2 | 170x320 | 1.9" | No | Yes | Flip only (0/180) | 0/180 | None |
+| `co5300` | [ESP32-S3-Touch-AMOLED-1.75C](https://www.waveshare.com/esp32-s3-touch-amoled-1.75c.htm) | `esp32s3` | CO5300 (AMOLED) | 466x466 | 1.75" | Yes | Yes | Four-way | 0/90/180/270 | Speaker + 2 mics |
+| `st77916` | [ESP32-S3-Touch-LCD-1.85C](https://www.waveshare.com/esp32-s3-touch-lcd-1.85c.htm) | `esp32s3` | ST77916 (round) | 360x360 | 1.85" | Yes | No | None | 0/90/180/270 | Speaker + 2 mics (V2; V1 stays off) |
+| `gc9a01-knob-128` | [ELECROW CrowPanel 1.28" Rotary Display](https://github.com/Elecrow-RD/CrowPanel-1.28inch-HMI-ESP32-Rotary-Display-240-240-IPS-Round-Touch-Knob-Screen) | `esp32s3` | GC9A01 (round) | 240x240 | 1.28" | Yes | No | None | 0/90/180/270 | None |
+| `st7703-4b` | [ESP32-P4-WIFI6-Touch-LCD-4B](https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-4b.htm) | `esp32p4` | ST7703 (MIPI-DSI) | 720x720 | 4" | Yes | No | None | 0/90/180/270 | Speaker + 2 mics |
+| `jd9365-4c` | [ESP32-P4-WIFI6-Touch-LCD-4C](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-4C) | `esp32p4` | JD9365 (MIPI-DSI, round) | 720x720 | 4" | Yes | No | None | 0/90/180/270 | Speaker + 2 mics |
+| `jd9365-34c` | [ESP32-P4-WIFI6-Touch-LCD-3.4C](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-3.4C) | `esp32p4` | JD9365 (MIPI-DSI, round) | 800x800 | 3.4" | Yes | No | None | 0/90/180/270 | Speaker + 2 mics |
 
-Orientation rules behind the last three columns:
+The Audio column is the vendor hardware, sourced in each board's descriptor.
+Every audio board uses ES8311 (speaker, via an NS4150B amplifier) and ES7210
+(microphones), and firmware turns audio on only after both chips answer with
+their chip IDs over I2C. On the 1.85C that is what separates V2 from V1, whose
+different audio parts stay off. The C3 board has no audio.
+
+Orientation rules behind the Square, IMU and orientation columns:
 
 - A square panel with an IMU auto-rotates through all four cardinal
   orientations.

@@ -7,7 +7,7 @@
 
 namespace {
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_AUDIO_RUNTIME)
 constexpr uint32_t TONE_FREQUENCY_HZ = 440;
 constexpr uint32_t SERVICE_INTERVAL_MS = 10;
 constexpr size_t MAX_SERVICE_FRAMES = 640;
@@ -25,18 +25,20 @@ const char *startAudioToneTest(const board::Config &config,
   const board::AudioConfig *audioConfig =
       board::generatedAudioConfig(config.variant);
   if (audioConfig == nullptr) return "no generated audio descriptor";
-  switch (audiobackend::classify(*audioConfig)) {
+  switch (audio::boardAudioStatus(config)) {
     case audiobackend::DescriptorStatus::NoAudio:
       return "board descriptor has no audio";
     case audiobackend::DescriptorStatus::UnsupportedTopology:
       return "audio descriptor topology is unsupported";
-    case audiobackend::DescriptorStatus::RevisionNotApproved:
+    case audiobackend::DescriptorStatus::HardwareNotIdentified:
+      // Kept verbatim for CFG clients: the codec and ADC did not both answer
+      // with their chip IDs, which on the 1.85C means the V1 revision.
       return "audio disabled: board revision is not safely distinguishable";
     case audiobackend::DescriptorStatus::Ready:
       break;
   }
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_AUDIO_RUNTIME)
   if (audioengine::streamActive()) {
     return "network audio is active; stop the sender first";
   }
@@ -67,7 +69,7 @@ const char *startAudioToneTest(const board::Config &config,
 }
 
 void stopAudioToneTest(bool report) {
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_AUDIO_RUNTIME)
   audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
   const bool wasRunning = backend.running();
   framesRemaining = 0;
@@ -82,7 +84,7 @@ void stopAudioToneTest(bool report) {
 }
 
 void serviceAudioToneTest() {
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_AUDIO_RUNTIME)
   audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
   if (!backend.running()) return;
   if (framesRemaining == 0) {
@@ -106,7 +108,7 @@ void serviceAudioToneTest() {
 }
 
 bool audioToneTestRunning() {
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if defined(ESPDISP_AUDIO_RUNTIME)
   return framesRemaining > 0 && audio::sharedCodecBackend().running();
 #else
   return false;

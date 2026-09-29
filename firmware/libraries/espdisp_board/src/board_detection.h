@@ -71,6 +71,10 @@ struct I2cProbePlan {
   uint16_t resetLowMs;
   uint16_t resetReleaseWaitMs;
   ProbeRelease release;
+  // A probe line is another board's audio amplifier enable. The probe's
+  // pull-ups could switch that amplifier on, so it runs only while no earlier
+  // probe has identified a board.
+  bool quietAfterMatch = false;
 };
 
 /// No analog sense guard on this candidate.
@@ -291,15 +295,37 @@ inline ProbeEvidence addressProbeEvidence(bool busStarted, uint8_t ackCount,
   return {ProbeStatus::Started, canaryAcked ? (uint8_t)0 : ackCount};
 }
 
+/// One address-list probe on a started bus, with each address transaction
+/// behind `acked(address)`. Acknowledgements are discarded when the bus also
+/// acknowledges CANARY_ADDRESS (stuck or back-powered), checked both before
+/// and after the list: another driver can pull a line low partway through (on
+/// a 1.75C, GPIO11 is the touch interrupt and the 1.85C bus's SDA), which
+/// acknowledges every later address, and the trailing canary sees it too.
+template <typename Acked>
+inline ProbeEvidence addressListEvidence(const I2cProbePlan &plan,
+                                         Acked acked) {
+  if (acked(CANARY_ADDRESS)) return addressProbeEvidence(true, 0, true);
+  uint8_t found = 0;
+  for (uint8_t i = 0; i < plan.addressCount; ++i) {
+    if (acked(plan.addresses[i])) ++found;
+  }
+  const bool trailingCanary = found > 0 && acked(CANARY_ADDRESS);
+  return addressProbeEvidence(true, found, trailingCanary);
+}
+
 /// Whether probe `index` should run given the evidence gathered so far. A probe
 /// with a reset line drives that GPIO push-pull (on the CrowPanel knob it is the
-/// panel supply rail), which is only justified while no earlier probe has
-/// identified its board: once one has, this probe could only add a second
-/// candidate, and on that board the line is some other net.
+/// panel supply rail), and a quietAfterMatch probe pulls up a line that is
+/// another board's amplifier enable (the 1.75C's SDA is the 1.85C V2's
+/// GPIO15). Either is only justified while no earlier probe has identified its
+/// board: once one has, this probe could only add a second candidate, and on
+/// that board the line is some other net.
 inline bool shouldRunProbe(const FamilyDetectionPlan &plan, uint8_t index,
                            const ProbeEvidence *evidence) {
   if (index >= plan.probeCount) return false;
-  if (plan.probes[index].resetPin < 0) return true;
+  if (plan.probes[index].resetPin < 0 && !plan.probes[index].quietAfterMatch) {
+    return true;
+  }
   for (uint8_t i = 0; i < index; ++i) {
     if (evidence[i].status == ProbeStatus::Started &&
         evidence[i].ackCount > 0) {
@@ -307,6 +333,27 @@ inline bool shouldRunProbe(const FamilyDetectionPlan &plan, uint8_t index,
     }
   }
   return true;
+}
+
+/// The I2C probe loop, with the electrical work behind `collect(index)` and the
+/// skip report behind `skipped(index)`. probeS3 runs it against the real bus;
+/// host tests run the same loop and skip rules against a simulated one.
+template <typename Collect, typename Skipped>
+inline void runI2cProbes(const FamilyDetectionPlan &plan, uint32_t flashBytes,
+                         ProbeEvidence *evidence, Collect collect,
+                         Skipped skipped) {
+  for (uint8_t i = 0; i < plan.probeCount; ++i) {
+    const I2cProbePlan &probe = plan.probes[i];
+    if (!flashMatches(flashBytes, probe.flashMinExclusive,
+                      probe.flashMaxInclusive)) {
+      continue;
+    }
+    if (!shouldRunProbe(plan, i, evidence)) {
+      skipped(i);
+      continue;
+    }
+    evidence[i] = collect(i);
+  }
 }
 
 inline bool candidateMatches(const CandidateRule &candidate,

@@ -9,6 +9,8 @@ class TwoWire {
   void beginTransmission(uint8_t address);
   size_t write(uint8_t value);
   uint8_t endTransmission();
+  size_t requestFrom(uint8_t address, size_t length);
+  int read();
 };
 
 extern TwoWire Wire;

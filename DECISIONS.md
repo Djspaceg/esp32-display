@@ -2,6 +2,57 @@
 
 Each finished branch keeps its own record below.
 
+## Audio on every capable board (audio-enable-boards)
+
+### Outcome
+
+Audio runs on the seven boards whose vendor hardware has it: 1.75C, 1.85C V2, S3-LCD-0.85, S3-Touch-LCD-1.54, P4 4B, 4C and 3.4C. The other six have none. Rebased onto main 0140c45. The 4C speaker is verified: the human heard its tone. S3 detection no longer pulls up the 1.85C V2 amp enable before identification.
+
+### Decisions to evaluate
+
+D1 Audio turns on only after ES8311 reads 83 11 and ES7210 reads 72 10 over I2C at boot (read-only, retried once, cached per boot); the amp pin is driven low at that moment. Why: an ACK alone could be another device; this also tells 1.85C V2 from V1. If overruled: trust the descriptor alone.
+D2 A failed ID on any board returns the existing 1.85C CFGERR text. Why: the CFG surface stays unchanged. If overruled: a new string.
+D3 The 0.85's codec bus (SDA 42 / SCL 41) goes in optional `audio.pin_control_sda/scl`, which are refused beside a touch bus. Why: one Wire bus. If overruled: a second Wire port.
+D4 Two-slot 16 kHz I2S capture (MIC1/MIC2) on every board, not the vendors' 4-slot TDM. Why: one backend sequence; no protocol change. If overruled: TDM and echo cancellation.
+D5 start() checks the cached verdict and never re-probes. Supersedes: re-probing in start(), because review found that it races touch/IMU reads on the shared Wire buffer.
+D6 The 1.85C bus is probed before the 1.75C's; a probe on any audio board's amp enable runs only while no earlier bus has answered. Why: the 1.75C's SDA is the 1.85C V2's GPIO15 amp enable. Trade-off: a board answering on both buses now resolves as the 1.85C, not Unknown, so each probe re-checks the canary after its list. If overruled: keep the old order and accept the pull-up.
+D7 The amp is not driven low before identification. Why: until the IDs are read, GPIO15 may be V1's mic clock; the V2's 10K pull-down (R42) holds it low from reset. If overruled: drive GPIO15 low on every S3 boot.
+D8 The 3.4C gets the 4C's audio row without a hardware check. Why: its wiki links the same XC schematic, and the XC BSP's audio pins do not depend on the panel. If overruled: mark its audio unknown until a 3.4C is tested.
+
+### Open questions
+
+- Tone heard? Answered by the human, "yes and yes": 16:23 PDT, clean and steady for about 5 s.
+- How to attach logs? Answered by the human: copy one into main, capture, delete. Done each time; sha256 matched and main stayed clean.
+- Is the 0.85's second mic fitted? Default: 2 channels, as on the schematic.
+
+### Gate facts
+
+Publish: local branch `audio-enable-boards`, rebased onto main 0140c45; the old tip is kept as local branch `audio-enable-boards-pre-rebase`. Intermediate bundle and rescue commits were dropped and rebuilt once. Nothing pushed, no PR, no CR (GitHub remote).
+Call sites, packages/*: none touched. Shared symbols changed:
+- `RevisionNotApproved` was renamed `HardwareNotIdentified`: `audio_test.cpp`, `test_audio.cpp`.
+- `boardAudioStatus()` gates transport, engine, `audio_test.cpp` and backend `start()`.
+- New seams `runI2cProbes` and `addressListEvidence` serve `probeS3`, `collectI2cEvidence` and `variantFromS3Probe`.
+- `I2cProbePlan.quietAfterMatch` is emitted by the generator and read by `shouldRunProbe`.
+
+Lanes at 389b0c6, all green (gate-full.log):
+- `run_tests.sh`: 107006 checks, plus 835 audio, 4 seam and 554 rescue
+- `test_espdisp.py`: 1930 checks
+- compile c6, s3, p4, c3
+- descriptor `--check`
+- `swift test`: 745 tests
+
+Review rounds: 2. Round 1 changed D5; round 2 added D6's canary re-check. The one deferred finding is in code-review.
+
+### Evidence
+
+- gate-full.log: every lane.
+- red-first: the probe loop pulled GPIO15 on a simulated 1.85C; the identity seam against 93684af started I2S for an impostor at 0x18/0x40 (a V1 cannot show this red: the old gate refused all 1.85C); canary, validator and F1/F3 reds.
+- hw-4c-serial: chip-ID boot line, caps 003967ef, tone test.
+
+### Residuals
+
+- Unverified: the 4C mic (app only). Not attached: 4B, 3.4C, 1.75C, 1.85C V1 and V2, 0.85, 1.54. A USB watcher is armed for them.
+
 ## Board WiFi report and capture orientation (app-wifi-orientation)
 
 ### Outcome

@@ -5,6 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
 OUT="$TMP/test_band_protocol"
 AUDIO_OUT="$TMP/test_audio"
+SEAM_OUT="$TMP/test_audio_identity_seam"
 STAGING_OUT="$TMP/test_panel_transfer_staging"
 STALL_OUT="$TMP/test_panel_transfer_stall_recovery"
 RESCUE_OUT="$TMP/test_rescue_model"
@@ -37,6 +38,25 @@ clang++ "${CXXFLAGS[@]}" \
   "$HERE/../display_stream/telemetry.cpp" \
   "$HERE/../display_stream/mdns_announce.cpp"
 "$AUDIO_OUT"
+
+# The start gate at runtime, through the backend API alone: an impostor that
+# acknowledges at the codec addresses gets no clocks and no amplifier.
+clang++ "${CXXFLAGS[@]}" \
+  -DCONFIG_IDF_TARGET_ESP32S3 \
+  -DESPDISP_HOST_AUDIO_TEST \
+  -I"$HERE/fakes/audio" \
+  -I"$HERE/../libraries/espdisp_board/src" \
+  -o "$SEAM_OUT" \
+  "$HERE/test_audio_identity_seam.cpp" \
+  "$HERE/fakes/audio/audio_host_fakes.cpp" \
+  "$HERE/../display_stream/audio_transport.cpp" \
+  "$HERE/../display_stream/audio_engine.cpp" \
+  "$HERE/../display_stream/audio_backend.cpp" \
+  "$HERE/../display_stream/audio_test.cpp" \
+  "$HERE/../display_stream/net_link.cpp" \
+  "$HERE/../display_stream/telemetry.cpp" \
+  "$HERE/../display_stream/mdns_announce.cpp"
+"$SEAM_OUT"
 
 clang++ "${CXXFLAGS[@]}" \
   -DCONFIG_IDF_TARGET_ESP32S3 \

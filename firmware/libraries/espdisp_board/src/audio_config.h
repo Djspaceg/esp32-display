@@ -35,6 +35,10 @@ struct AudioConfig {
   uint8_t playbackChannels;
   uint32_t captureRateHz;
   uint8_t captureChannels;
+  // Codec control bus when it is not the touch bus; NO_PIN means the touch
+  // bus. See audiobackend::controlBus().
+  int8_t pinControlSda = -1;
+  int8_t pinControlScl = -1;
 };
 
 }  // namespace board

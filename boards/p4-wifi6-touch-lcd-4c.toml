@@ -149,31 +149,41 @@ rx = -1
 tx = -1
 
 [audio]
-amp = "none"
-codec = "none"
-mic = "none"
-speaker_bus = "none"
-mic_bus = "none"
-pin_playback_mclk = -1
-pin_playback_bclk = -1
-pin_playback_lrck = -1
-pin_dout = -1
-pin_capture_mclk = -1
-pin_capture_bclk = -1
-pin_capture_lrck = -1
-pin_din = -1
+# Same audio wiring as the 4B (the 4C wiki links the shared XC schematic):
+# ES8311 DAC (0x18) -> NS4150B (GPIO53, 10K pull-down, active high); two
+# analog microphones into ES7210 (0x40). One I2S bus; the codecs share the
+# GT911's I2C bus (SDA GPIO7 / SCL GPIO8). Parts and nets: schematic page 1,
+# https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-XC/ESP32-P4-WIFI6-Touch-LCD-XC-Schematic.pdf
+# Pins and amp polarity: Waveshare BSP,
+# https://github.com/waveshareteam/Waveshare-ESP32-components/blob/30d0ac3b8b6b27ebd402c5852819cbe0dab92749/bsp/esp32_p4_wifi6_touch_lcd_xc/include/bsp/esp32_p4_wifi6_touch_lcd_xc.h#L34-L44
+# https://github.com/waveshareteam/Waveshare-ESP32-components/blob/30d0ac3b8b6b27ebd402c5852819cbe0dab92749/bsp/esp32_p4_wifi6_touch_lcd_xc/esp32_p4_wifi6_touch_lcd_xc.c#L698-L710
+# (The BSP header comment says ES8311 records; its code and the schematic
+# record through ES7210.)
+amp = "ns4150b"
+codec = "es8311"
+mic = "es7210"
+speaker_bus = "i2s"
+mic_bus = "i2s"
+pin_playback_mclk = 13
+pin_playback_bclk = 12
+pin_playback_lrck = 10
+pin_dout = 9
+pin_capture_mclk = 13
+pin_capture_bclk = 12
+pin_capture_lrck = 10
+pin_din = 11
 pin_pdm_clock = -1
-pin_amp_enable = -1
-codec_i2c_address = 0
-mic_i2c_address = 0
-playback_rate_hz = 0
-playback_channels = 0
-capture_rate_hz = 0
-capture_channels = 0
+pin_amp_enable = 53
+codec_i2c_address = 24
+mic_i2c_address = 64
+playback_rate_hz = 16000
+playback_channels = 2
+capture_rate_hz = 16000
+capture_channels = 2
 
 [capabilities]
 doom = true
-audio = false
+audio = true
 
 [compile]
 selector = ""

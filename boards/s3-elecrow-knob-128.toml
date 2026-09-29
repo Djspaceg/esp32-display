@@ -177,6 +177,9 @@ rx = -1
 tx = -1
 
 [audio]
+# No speaker, amplifier, codec, or microphone among the schematic's parts or
+# nets; the transistor stages switch the LCD rail, 5 V header and backlight.
+# https://github.com/Elecrow-RD/CrowPanel-1.28inch-HMI-ESP32-Rotary-Display-240-240-IPS-Round-Touch-Knob-Screen/blob/9eae887eba6ed7605f1ebc80a960635cd4719cdd/Eagle_SCH%26PCB/ESP32%20Display-1.28-V1.0.sch
 amp = "none"
 codec = "none"
 mic = "none"
