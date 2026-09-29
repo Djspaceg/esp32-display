@@ -12,6 +12,10 @@ enum class LinkState : uint8_t {
   Connected,
   NetworkUnavailable,
   RadioUnresponsive,
+  // Associated, but the WiFi co-processor (P4's C6) has stopped answering.
+  // A reconnect cannot revive it, and an accepted one would only restart the
+  // fault clock, so the supervisor issues none and restarts once instead.
+  CoprocessorSilent,
 };
 
 struct Decision {
@@ -37,10 +41,22 @@ class Supervisor {
     retryDelayMs_ = INITIAL_RETRY_MS;
     nextRetryAt_ = 0;
     radioFaultSince_ = 0;
+    coprocessorSilent_ = false;
+    coprocessorSilentSince_ = 0;
   }
 
   Decision update(uint32_t now, LinkState state) {
     Decision decision;
+    if (state == LinkState::CoprocessorSilent) {
+      if (!coprocessorSilent_) {
+        coprocessorSilent_ = true;
+        coprocessorSilentSince_ = now;
+      }
+      decision.restart = now - coprocessorSilentSince_ >= RADIO_FAULT_RESTART_MS &&
+                         requestRadioRestart();
+      return decision;
+    }
+    coprocessorSilent_ = false;
     if (state == LinkState::Connected) {
       disconnected_ = false;
       radioFaultActive_ = false;
@@ -111,6 +127,8 @@ class Supervisor {
   uint32_t retryDelayMs_ = INITIAL_RETRY_MS;
   uint32_t nextRetryAt_ = 0;
   uint32_t radioFaultSince_ = 0;
+  bool coprocessorSilent_ = false;
+  uint32_t coprocessorSilentSince_ = 0;
 };
 
 }  // namespace wifisupervisor

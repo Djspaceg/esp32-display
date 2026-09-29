@@ -8584,6 +8584,22 @@ def test_rescue_carrier_guard():
           "families without a carrier guard get no --profile in the hint")
 
 
+def test_fault_inject_switch_stays_out_of_builds():
+    # A bench checkout keeps the gitignored switch beside the sketch; only an
+    # explicit ESPDISP_FAULT_INJECT=1 may carry it into the staged build.
+    for environ in ({}, {"ESPDISP_FAULT_INJECT": "0"},
+                    {"ESPDISP_FAULT_INJECT": "yes"}):
+        check(espdisp.FAULT_INJECT_SWITCH in
+              espdisp.staged_sketch_ignores(environ),
+              "fault switch left out of the build with %r" % environ)
+    check(espdisp.FAULT_INJECT_SWITCH not in
+          espdisp.staged_sketch_ignores({"ESPDISP_FAULT_INJECT": "1"}),
+          "fault switch staged only on explicit request")
+    for name in ("build", "partitions.csv"):
+        check(name in espdisp.staged_sketch_ignores({}),
+              "%s still left out of the staged sketch" % name)
+
+
 def test_rescue_override_warning():
     try:
         warning = espdisp.rescue_override_warning(
@@ -8814,6 +8830,7 @@ def main():
     test_rescue_usb_identity_real_names()
     test_rescue_carrier_guard()
     test_rescue_override_warning()
+    test_fault_inject_switch_stays_out_of_builds()
 
     if failures:
         print("FAILED: %d of %d checks" % (failures, checks))

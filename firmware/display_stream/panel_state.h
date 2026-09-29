@@ -181,7 +181,9 @@ inline void formatBatteryLine(char *out, size_t outLen, bool externalPower,
 /// same snprintf.
 inline void formatWifiLine(char *out, size_t outLen, bool connected,
                            int rssiDbm) {
-  if (connected) {
+  if (connected && rssiDbm == 0) {
+    snprintf(out, outLen, "wifi --");  // associated, no current reading
+  } else if (connected) {
     snprintf(out, outLen, "wifi %d dBm", rssiDbm);
   } else {
     snprintf(out, outLen, "wifi down");

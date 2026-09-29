@@ -2,6 +2,47 @@
 
 Each finished branch keeps its own record below.
 
+## P4 hosted-WiFi RPC watchdog (p4-hosted-rpc-offloop)
+
+### Outcome
+
+The P4 watchdog reboots are fixed. The 4C reproduced the reboot on demand: a side task kept the C6 busy, loopTask's RSSI read waited, and the watchdog fired. The fixed build survives the same injection. Confidence is HIGH. Code and bundles are at 6298050 on branch p4-hosted-rpc-offloop, not pushed.
+
+### Decisions to evaluate
+
+D1 One worker task (wifi_worker, core 0) owns every WiFi driver call after setup(). loopTask reads a cached RSSI, sampled every 500 ms and reported as unknown after 10 s, and posts reconnects. Why: covers every hosted RPC reachable from loopTask, not only RSSI. If overruled: gate the calls per site instead.
+D2 If the C6 stops answering for 30 s while associated, the supervisor restarts the board once, 60 s later, and sends no reconnects. Why: the old watchdog reboot was what recovered a stuck C6, and an accepted reconnect kept restarting the fault clock. If overruled: change COPROCESSOR_SILENT_MS or RADIO_FAULT_RESTART_MS.
+D3 The falsifier is a blocking C6 scan, not a C6 reset on GPIO54. Why: holding GPIO54 low breaks the SDIO link, and ESP-Hosted then restarts the host at once (SW_CPU_RESET, no watchdog), which never exercises the 5 s RPC wait. If overruled: none; the GPIO54 result is recorded.
+D4 The bench fault hook is committed but off: it needs a gitignored header plus ESPDISP_FAULT_INJECT=1 at build time, and it prints a boot banner when present. Why: repeatable falsifier. If overruled: drop fault_inject.* before merge.
+D5 An unknown RSSI is sent in EINF as -127 and shows as "wifi --" on the panel. Why: a 0 dBm reading looked like perfect signal. If overruled: send 0.
+
+### Open questions
+
+- C6 co-processor firmware: the host library is ESP-Hosted 2.12.11 and expects a C6 on 2.12.11. The C6 never answers the version request (Req_GetCoprocessorFwVersion, ESP_FAIL after 1 s, every boot), so its version reads 0.0.0. The inference is that it predates that request, so it is older than 2.6.0, the oldest version the Arduino core recognises. That is a competing reason for the C6 going quiet. Default: the C6 image is untouched (your call).
+- The soak ran with no stream. The app has not sent to the 4C since 14:47 local (panels.json lastSeen). Default: soak recorded as idle-only; re-soak once the app is streaming.
+- After a scan, the C6 stays silent until a host reboot (the rescue restart). Default: rely on the D2 restart.
+
+### Gate facts
+
+Publish: local branch only, GitHub remote, no CR/AutoSDE, no push.
+Call sites, packages/*: none touched. wifiworker::rssi() callers: telemetry.cpp EINF, display_stream.ino status line / idle reassociate / link heal, ui_screens.cpp status card / survey / info bar, signal_led.cpp, serial_config.cpp CFGSHOW. requestReconnect: supervisor retry. requestReassociate: idle reassociate, link heal.
+Lanes (all at a4d6e55): gate-run_tests.log exit 0; gate-test_espdisp.log 1895 OK; gate-compile-{p4,s3,c6,c3}.log exit 0; release-shipping.log exit 0 (bundles from a4d6e55, hook absent).
+Red first: red-first-hosted-rpc-budget.log (pre-fix code: 4 FAIL over 15 loopTask sites).
+Adversarial review rounds: 1 independent; it changed D2, D4 and D5.
+
+### Evidence
+
+- baseline-scan-falsify.log: current code, task_wdt loopTask at 10.8 s.
+- baseline-falsify.log: GPIO54 hold gives an SDIO restart, not a watchdog.
+- final-scan-falsify.log, final-jam-falsify.log: fixed build, no watchdog; silent-C6 restart at 130 s.
+- soak-15min.log: 889 s, 180 status lines, 0 resets, idle.
+- code-review.md: the review and its dispositions.
+
+### Residuals
+
+- Soak without streaming (above). Only the 4C was run; the 4B shares the code (inferred).
+- A POWERON reset follows the software restart on the 4C (the known power issue, not investigated).
+
 ## Layout cleanup (app-layout-cleanup)
 
 ### Outcome

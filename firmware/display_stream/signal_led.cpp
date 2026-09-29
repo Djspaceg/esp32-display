@@ -3,6 +3,7 @@
 #include <WiFi.h>
 
 #include "app_state.h"
+#include "wifi_worker.h"
 
 
 // ---- Onboard RGB LED(s): WiFi signal quality indicator ------------------
@@ -40,8 +41,10 @@ void updateSignalLed() {
     // Smooth with an EMA: instantaneous RSSI jitters a few dB between
     // reads, which made the color visibly flicker at the band edges.
     static float rssiAvg = 0;
-    int rssi = WiFi.RSSI();
-    rssiAvg = (rssiAvg == 0) ? rssi : rssiAvg * 0.7f + rssi * 0.3f;
+    const int rssi = wifiworker::rssi();  // 0: no current sample, hold color
+    if (rssi != 0) {
+      rssiAvg = (rssiAvg == 0) ? rssi : rssiAvg * 0.7f + rssi * 0.3f;
+    }
     float clamped = rssiAvg;
     if (clamped > -55) clamped = -55;
     if (clamped < -90) clamped = -90;

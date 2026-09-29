@@ -96,3 +96,6 @@ fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
 *.app
+
+# Bench-only switch for firmware/display_stream/fault_inject.cpp
+firmware/display_stream/fault_inject_local.h

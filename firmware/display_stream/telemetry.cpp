@@ -11,6 +11,7 @@
 #include "display_power.h"
 #include "net_link.h"
 #include "orientation.h"
+#include "wifi_worker.h"
 #include "ota_policy.h"
 #include "ota_service.h"
 #include "panel_state.h"
@@ -113,12 +114,20 @@ uint8_t currentDeviceFlags() {
                                  panelManuallyOff);
 }
 
+// EINF's "no reading" is -127, as for a dropped link; wifiworker::rssi()
+// reports 0 for no current sample.
+static int16_t einfRssi() {
+  if (WiFi.status() != WL_CONNECTED) return -127;
+  const int rssi = wifiworker::rssi();
+  return rssi == 0 ? -127 : (int16_t)rssi;
+}
+
 void sendDeviceInfo() {
   if (hbPort == 0) return;
   uint8_t packet[96];
   size_t len = deviceproto::writeInfo(
       packet, sizeof(packet), currentDeviceFlags(), deviceCapabilities(),
-      millis() / 1000, WiFi.status() == WL_CONNECTED ? (int16_t)WiFi.RSSI() : -127,
+      millis() / 1000, einfRssi(),
       currentBrightness(), deviceId, cfgName.c_str(), FW_VERSION);
   if (len > 0) {
     sendToSender(packet, len);

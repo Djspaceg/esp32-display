@@ -95,6 +95,7 @@ using namespace bandproto;
 #include "control_apply.h"
 #include "display_power.h"
 #include "dma_gate.h"
+#include "fault_inject.h"
 #include "frame_pipeline.h"
 #include "input_button.h"
 #include "input_touch.h"
@@ -108,6 +109,7 @@ using namespace bandproto;
 #include "signal_led.h"
 #include "telemetry.h"
 #include "ui_screens.h"
+#include "wifi_worker.h"
 
 namespace {
 
@@ -165,6 +167,7 @@ void setup() {
     delay(50);
   }
   Serial.println("=== display_stream (esp_lcd DMA) ===");
+  faultinject::announce();
   Serial.printf("firmware %s (source %s), frame protocol %u, control protocol %u\n",
                 FW_VERSION, FW_SOURCE, deviceproto::FRAME_PROTOCOL_VERSION,
                 deviceproto::CONTROL_PROTOCOL_VERSION);
@@ -555,6 +558,12 @@ void setup() {
     fillPanel(0x9000);  // dark red: no WiFi - fix with CFGWIFI over USB
   }
 
+  // Before the watchdog below: from here on loop() never waits on the WiFi
+  // driver itself (see wifi_worker.h).
+  if (!wifiworker::start()) {
+    Serial.println("WARN: WiFi worker failed to start; RSSI reads unknown");
+  }
+
   if (startInboundTransport()) {
     Serial.printf("UDP listening on %u\n", UDP_PORT);
   } else {
@@ -713,7 +722,8 @@ void loop() {
   wifiWasConnected = wifiConnected;
   // A join the edge above never saw - between setup's announce and the first
   // loop - leaves the ssid record empty. Checked every 5s, so a failing mDNS
-  // restart is retried at that pace rather than every loop.
+  // restart is retried at that pace rather than every loop. The check reads
+  // the WiFi worker's cached SSID, so it never waits on a hosted RPC.
   static uint32_t lastSsidRecordCheck = 0;
   if (wifiConnected && millis() - lastSsidRecordCheck >= 5000) {
     lastSsidRecordCheck = millis();
@@ -735,8 +745,20 @@ void loop() {
       addMdnsService();  // caps TXT and _arduino._tcp were announced without OTA
     }
   }
+  // Associated but the co-processor has stopped answering (P4): the watchdog
+  // reboot used to recover this by accident; the supervisor now restarts once.
+  const bool coprocessorSilent = wifiConnected && wifiworker::coprocessorSilent();
+  static bool coprocessorSilentReported = false;
+  if (coprocessorSilent != coprocessorSilentReported) {
+    coprocessorSilentReported = coprocessorSilent;
+    Serial.println(coprocessorSilent
+                       ? "WiFi co-processor not answering; treating radio as down"
+                       : "WiFi co-processor answering again");
+  }
   const wifisupervisor::LinkState wifiLinkState =
-      wifiConnected
+      coprocessorSilent
+          ? wifisupervisor::LinkState::CoprocessorSilent
+      : wifiConnected
           ? wifisupervisor::LinkState::Connected
           : wifiStatus == WL_STOPPED || wifiStatus == WL_NO_SHIELD
                 ? wifisupervisor::LinkState::RadioUnresponsive
@@ -746,11 +768,17 @@ void loop() {
   if (wifiDecision.reconnect) {
     Serial.printf("WiFi down; retrying (next in %lus)\n",
                   (unsigned long)(wifiDecision.nextRetryMs / 1000));
-    wifiSupervisor.noteReconnectResult(millis(), WiFi.reconnect());
+    wifiworker::requestReconnect();
+  }
+  bool reconnectAccepted = false;
+  if (wifiworker::takeReconnectResult(reconnectAccepted)) {
+    wifiSupervisor.noteReconnectResult(millis(), reconnectAccepted);
   }
   if (wifiDecision.restart) {
     markWifiRestartAttempted();
-    Serial.println("WiFi radio unavailable >60s; restarting once");
+    Serial.println(coprocessorSilent
+                       ? "WiFi co-processor silent >90s; restarting once"
+                       : "WiFi radio unavailable >60s; restarting once");
     Serial.flush();
     delay(100);
     ESP.restart();
@@ -781,12 +809,12 @@ void loop() {
   } else if (lastPacketSeenAt == 0) {
     lastPacketSeenAt = millis();
   }
-  if (millis() - lastPacketSeenAt > 120000 && WiFi.RSSI() < -85 &&
-      millis() - lastIdleReassoc > 120000) {
+  const int idleRssi = wifiworker::rssi();
+  if (millis() - lastPacketSeenAt > 120000 && idleRssi != 0 &&
+      idleRssi < -85 && millis() - lastIdleReassoc > 120000) {
     lastIdleReassoc = millis();
-    Serial.printf("idle+weak link (rssi=%d), re-associating\n", (int)WiFi.RSSI());
-    WiFi.disconnect();
-    WiFi.reconnect();
+    Serial.printf("idle+weak link (rssi=%d), re-associating\n", idleRssi);
+    wifiworker::requestReassociate();
   }
 
   // Link supervisor: if the sender is actively pushing chunks (packets
@@ -820,9 +848,9 @@ void loop() {
     bool starving = packetsDelta > 2u * PANEL_GEOMETRY.maxBandCount() &&
                     millis() - lastShownChangeAt > 20000;
     if (starving && healStage == 0) {
-      Serial.printf("link heal: reconnecting WiFi (rssi=%d)\n", (int)WiFi.RSSI());
-      WiFi.disconnect();
-      WiFi.reconnect();
+      Serial.printf("link heal: reconnecting WiFi (rssi=%d)\n",
+                    wifiworker::rssi());
+      wifiworker::requestReassociate();
       healStage = 1;
       healStartedAt = millis();
     } else if (starving && healStage == 1 &&
@@ -897,7 +925,7 @@ void loop() {
                   (unsigned long)statFramesShown, (unsigned long)statFramesDropped,
                   (unsigned long)statFramesPartial, (unsigned long)statPackets,
                   (unsigned long)statBadLen, (unsigned long)statDrawErrors,
-                  (unsigned long)ESP.getFreeHeap(), (int)WiFi.RSSI());
+                  (unsigned long)ESP.getFreeHeap(), wifiworker::rssi());
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
     reportTileDrawStats();
 #endif

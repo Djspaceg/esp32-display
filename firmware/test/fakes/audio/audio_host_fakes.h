@@ -39,6 +39,16 @@ unsigned delayCalls();
 unsigned yieldCalls();
 const std::vector<HardwareEvent> &hardwareEvents();
 const std::vector<SentDatagram> &sentDatagrams();
+// Each WiFi.RSSI() advances the fake clock by this much (0 after reset());
+// 5000 models ESP-Hosted's DEFAULT_RPC_RSP_TIMEOUT with a silent C6.
+void setRssiRpcStallMs(uint32_t value);
+unsigned rssiRpcCalls();
+// WiFi.reconnect() and WiFi.disconnect(), stalled the same way.
+unsigned linkRpcCalls();
+// WiFi.SSID(), stalled the same way.
+unsigned ssidRpcCalls();
+// What WiFi.RSSI() returns (-42 after reset()); 0 is a failed RPC.
+void setRssiValue(int value);
 
 // I2C devices the fake bus answers for. reset() installs a genuine ES8311 at
 // 0x18 and ES7210 at 0x40; tests remove or alter them to model other boards.

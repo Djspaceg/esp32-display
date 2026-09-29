@@ -40,6 +40,11 @@ std::deque<UdpDatagram> udpDatagrams;
 std::vector<audiohost::HardwareEvent> events;
 std::vector<audiohost::SentDatagram> sentUdpDatagrams;
 uint8_t activeWireAddress = 0;
+uint32_t rssiStallMs = 0;
+unsigned rssiCalls = 0;
+unsigned linkCalls = 0;
+unsigned ssidCalls = 0;
+int rssiValue = -42;
 
 struct FakeI2cDevice {
   bool present;
@@ -74,6 +79,30 @@ TwoWire Wire;
 uint32_t millis() { return nowMs; }
 uint32_t micros() { return nowMs * 1000U; }
 void delay(uint32_t milliseconds) { nowMs += milliseconds; }
+
+int FakeWiFi::RSSI() const {
+  rssiCalls++;
+  nowMs += rssiStallMs;
+  return rssiValue;
+}
+
+bool FakeWiFi::reconnect() {
+  linkCalls++;
+  nowMs += rssiStallMs;
+  return true;
+}
+
+String FakeWiFi::SSID() const {
+  ssidCalls++;
+  nowMs += rssiStallMs;
+  return String(ssid_.c_str());
+}
+
+bool FakeWiFi::disconnect() {
+  linkCalls++;
+  nowMs += rssiStallMs;
+  return true;
+}
 
 void pinMode(int pin, int) {
   events.push_back({audiohost::HardwareEventKind::PinMode, pin});
@@ -244,6 +273,12 @@ void reset() {
   registerWrites = 0;
   pendingRead = -1;
   installGenuineCodecs();
+  rssiStallMs = 0;
+  rssiCalls = 0;
+  linkCalls = 0;
+  ssidCalls = 0;
+  rssiValue = -42;
+  WiFi.setStatus(WL_CONNECTED);
 }
 
 void setI2cDevice(uint8_t address, bool present, uint8_t idRegisterA,
@@ -271,6 +306,11 @@ const std::vector<HardwareEvent> &hardwareEvents() { return events; }
 const std::vector<SentDatagram> &sentDatagrams() {
   return sentUdpDatagrams;
 }
+void setRssiRpcStallMs(uint32_t value) { rssiStallMs = value; }
+unsigned rssiRpcCalls() { return rssiCalls; }
+unsigned linkRpcCalls() { return linkCalls; }
+unsigned ssidRpcCalls() { return ssidCalls; }
+void setRssiValue(int value) { rssiValue = value; }
 
 }  // namespace audiohost
 

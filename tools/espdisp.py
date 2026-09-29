@@ -2921,6 +2921,23 @@ def validate_family_app_contract(board: Family, app: bytes) -> None:
         )
 
 
+# firmware/display_stream/fault_inject.cpp compiles its bench-only C6 fault
+# commands in only when this gitignored header is in the staged sketch. It is
+# left out of every build unless the environment asks for it, so a checkout
+# that holds it for bench work cannot leak it into a bundle or release.
+FAULT_INJECT_SWITCH = "fault_inject_local.h"
+FAULT_INJECT_ENV = "ESPDISP_FAULT_INJECT"
+
+
+def staged_sketch_ignores(environ=None) -> Tuple[str, ...]:
+    """Names the staged display_stream sketch copy leaves out."""
+    environ = os.environ if environ is None else environ
+    ignores: Tuple[str, ...] = ("build", "partitions.csv")
+    if environ.get(FAULT_INJECT_ENV, "") != "1":
+        ignores += (FAULT_INJECT_SWITCH,)
+    return ignores
+
+
 BUILD_IDENTITY_HEADER = "build_identity.h"
 
 
@@ -2978,10 +2995,15 @@ def compile_board(
     # gitignored local WiFi defaults file in the source tree.
     staged_root = tempfile.mkdtemp(prefix="espdisp-sketch-%s-" % board.key)
     build_sketch_dir = os.path.join(staged_root, "display_stream")
+    ignores = staged_sketch_ignores()
     shutil.copytree(
         SKETCH_DIR, build_sketch_dir,
-        ignore=shutil.ignore_patterns("build", "partitions.csv"),
+        ignore=shutil.ignore_patterns(*ignores),
     )
+    if (FAULT_INJECT_SWITCH not in ignores and
+            os.path.isfile(os.path.join(build_sketch_dir, FAULT_INJECT_SWITCH))):
+        print("WARNING: %s=1: bench-only C6 fault injection is compiled in; "
+              "never ship this image" % FAULT_INJECT_ENV, flush=True)
     if partition_source:
         shutil.copy2(partition_source,
                      os.path.join(build_sketch_dir, "partitions.csv"))

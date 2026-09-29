@@ -25,6 +25,7 @@ static constexpr int HIGH = 1;
 #define pdMS_TO_TICKS(ms) ((TickType_t)(ms))
 
 struct portMUX_TYPE {};
+#define portMUX_INITIALIZER_UNLOCKED {}
 
 #define portENTER_CRITICAL(mux) ((void)(mux))
 #define portEXIT_CRITICAL(mux) ((void)(mux))

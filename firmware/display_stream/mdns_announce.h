@@ -5,6 +5,7 @@
 
 void addMdnsService();
 bool restartMdnsService();
-// Whether the announced `ssid` record still names the network the radio has
-// joined. False when WiFi joined after the last announcement.
+// Whether the announced `ssid` record still names the network the WiFi
+// worker last read. False when WiFi joined after the last announcement; true
+// while the worker has no reading. Never issues a WiFi RPC once the worker runs.
 bool mdnsSsidIsCurrent();

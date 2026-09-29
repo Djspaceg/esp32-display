@@ -21,6 +21,7 @@
 #include "prefs_store.h"
 #include "telemetry.h"
 #include "wifi_selector_model.h"
+#include "wifi_worker.h"
 
 
 // ---- Quick info bar (a lit panel only) ---------------------------------
@@ -90,7 +91,7 @@ void drawIdleScreen() {
   const char *lineName = cfgName.c_str();
   snprintf(lineIp, sizeof(lineIp), "%s", WiFi.localIP().toString().c_str());
   panelstate::formatWifiLine(lineWifi, sizeof(lineWifi),
-                             WiFi.status() == WL_CONNECTED, (int)WiFi.RSSI());
+                             WiFi.status() == WL_CONNECTED, wifiworker::rssi());
   // Only for a board with a battery telemetry source and a reading that has
   // not aged out. A stale reading is worse than none (see
   // panelstate::shouldShowBatteryLine).
@@ -193,6 +194,7 @@ void drawIdleScreen() {
 // WiFi bar - the words answer "will the stream work HERE".
 static const char *surveyQualityWord(bool connected, int rssi) {
   if (!connected) return "no wifi";
+  if (rssi == 0) return "no reading";  // wifiworker: no current sample
   if (rssi >= -60) return "excellent";
   if (rssi >= -70) return "good";
   if (rssi >= -75) return "fair";
@@ -525,10 +527,10 @@ void drawSurveyScreen() {
   const int w = bufLandscape ? PANEL_H : PANEL_W;
   const int hgt = bufLandscape ? PANEL_W : PANEL_H;
   const bool connected = WiFi.status() == WL_CONNECTED;
-  const int rssi = connected ? (int)WiFi.RSSI() : 0;
+  const int rssi = connected ? wifiworker::rssi() : 0;
 
   char lineRssi[16];
-  if (connected) {
+  if (connected && rssi != 0) {
     snprintf(lineRssi, sizeof(lineRssi), "%d", rssi);
   } else {
     snprintf(lineRssi, sizeof(lineRssi), "--");
@@ -596,7 +598,7 @@ const char *defaultInfoBarText() {
                                   lastBattery.percent,
                                   toChargeWord(lastBattery.charge));
   } else if (WiFi.status() == WL_CONNECTED) {
-    panelstate::formatWifiLine(text, sizeof(text), true, (int)WiFi.RSSI());
+    panelstate::formatWifiLine(text, sizeof(text), true, wifiworker::rssi());
   } else {
     panelstate::formatWifiLine(text, sizeof(text), false, 0);
   }

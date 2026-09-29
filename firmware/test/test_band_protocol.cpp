@@ -174,6 +174,31 @@ int main() {
     CHECK(rejectedCommand.update(65000, LinkState::NetworkUnavailable).restart);
   }
 
+  // --- WiFi recovery: a silent co-processor restarts once, no reconnects ---
+  {
+    using namespace wifisupervisor;
+    Supervisor silent;
+    CHECK(!silent.update(1000, LinkState::Connected).reconnect);
+    for (uint32_t now = 2000; now < 62000; now += 1000) {
+      const Decision decision = silent.update(now, LinkState::CoprocessorSilent);
+      CHECK(!decision.reconnect);
+      CHECK(!decision.restart);
+      // A reconnect result still in flight must not restart the clock.
+      silent.noteReconnectResult(now, true);
+    }
+    CHECK(silent.update(62000, LinkState::CoprocessorSilent).restart);
+    CHECK(silent.restartAlreadyAttempted());
+    CHECK(!silent.update(200000, LinkState::CoprocessorSilent).restart);
+
+    Supervisor recovered;
+    CHECK(!recovered.update(0, LinkState::CoprocessorSilent).restart);
+    CHECK(!recovered.update(59000, LinkState::CoprocessorSilent).restart);
+    CHECK(!recovered.update(60000, LinkState::Connected).restart);
+    CHECK(!recovered.update(61000, LinkState::CoprocessorSilent).restart);
+    CHECK(!recovered.update(120999, LinkState::CoprocessorSilent).restart);
+    CHECK(recovered.update(121000, LinkState::CoprocessorSilent).restart);
+  }
+
   // --- board-bootstrap command authorization and strict parsing ----------
   {
     using namespace bootstrapproto;

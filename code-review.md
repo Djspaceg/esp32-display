@@ -2,6 +2,38 @@
 
 Each finished branch keeps its own review record below, whole.
 
+## Integration review of p4-hosted-rpc-offloop (on integrate-main-0928)
+
+The branch was based on 93684af; main had since gained app-wifi-orientation, p4-4c-gaps, audio-enable-boards and app-layout-cleanup. Checked in the code before squashing, the branch's two High review findings:
+
+- Fault-injection hook out of release builds: closed. `fault_inject.cpp` compiles its commands only when the gitignored `fault_inject_local.h` defines `ESPDISP_FAULT_INJECT 1`. `compile_board`, which `compile`, `bundle` and `release` all go through, leaves that header out of the staged sketch unless `ESPDISP_FAULT_INJECT=1` is in the environment, and warns when it is in. The integration worktree has no such header.
+- Silent-C6 recovery not defeated by its own reconnect: closed. `Supervisor::update` returns on `CoprocessorSilent` before any reconnect branch, so no reconnect restarts its clock; the one restart comes `RADIO_FAULT_RESTART_MS` later. The loop maps a silent C6 to that state ahead of Connected and the disconnected states.
+
+| # | Severity | Finding | Disposition |
+|---|----------|---------|-------------|
+| I2 | High | app-wifi-orientation's mDNS `ssid` record calls `WiFi.SSID()` on loopTask: in `addMdnsService` (every announce and re-announce) and in `mdnsSsidIsCurrent`, which the loop runs every 5 s while connected. On P4 that is a hosted RPC that can wait 5 s, so two in one pass reach the 10 s loop watchdog, the reboot this branch fixes. The branch's `test_hosted_rpc_budget` failed on the merged tree (mdns_announce.cpp:71 and :117). | Fixed in the squash. `wifi_worker` reads the SSID once per association and after each reconnect or reassociate it runs, only right after an RSSI answer (a silent C6 is not asked), retrying a failed read after `SSID_POLL_MS`; `wifiworker::ssid()` returns that cache. mDNS reads only the cache, and no reading yet counts as current, so the worker's first reading triggers the existing re-announce. Before the worker starts (setup's first announce), `ssid()` reads WiFi.SSID() on the caller, as the worker's requests already do. The budget test went from red to green, plus `testMdnsReadsTheWorkersSsid` (no SSID RPC or wait on the announce, check or restart path; one read per association; silent C6 not asked; failed read retried on the interval, not every pass). |
+| I3 | Medium | audio-enable-boards' identity seam test links `telemetry.cpp` without `wifi_worker.cpp`; this branch makes telemetry call `wifiworker::rssi()`, so `run_tests.sh` failed to link. | Fixed: the seam test links `wifi_worker.cpp`, as this branch already did for test_audio. |
+
+Not verified on hardware: the integrated image has not run the 4C scan injection. That re-run is owed to the watchdog worker, which has the bench.
+
+## Code review: loopTask off hosted WiFi RPCs (p4-hosted-rpc-offloop)
+
+One adversarial round by an independent read-only reviewer agent. It had no serial port access and did no flashing; it ran only the host tests. It reviewed `git diff main...HEAD` at 9c3182d. Every finding was then addressed in a4d6e55 and re-verified with the host suite, a four-family compile, and the 4C scan and jam injections on the final build.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | High | The bench fault hook was switched on just by the presence of the gitignored `fault_inject_local.h`. `espdisp.py` copies the whole sketch, and its dirty check ignores ignored files, so a release built from a bench checkout would quietly accept DIAGC6HOLD and the other commands. DIAGC6VER also made an RPC on loopTask. | Fixed. `staged_sketch_ignores()` leaves the header out unless `ESPDISP_FAULT_INJECT=1`, and the build warns when it is included (tested in `test_fault_inject_switch_stays_out_of_builds`). The source now checks the macro's value, the image prints a boot banner when the hook is in, and DIAGC6VER's RPC runs on a side task. Checked: the regenerated p4 bundle contains no DIAGC6HOLD string. |
+| 2 | High | Silent-C6 recovery could be defeated. A reconnect the C6 still accepted cleared the radio fault and restarted the 60 s clock, so the board could loop without ever restarting. | Fixed. New supervisor state `CoprocessorSilent`: no reconnects while in it, a restart 60 s in, and in-flight reconnect results are ignored. Host tested in test_band_protocol.cpp (clock not reset by accepted results; one restart only; recovery clears it). On the 4C: silent at 70 s, restart at 130 s, C6 back afterwards. |
+| 3 | Low | The cached RSSI survived a disconnect for up to 10 s, so the idle-reassociate check could act on the old link's reading. | Fixed. The worker drops its sample when not associated (tested). |
+| 4 | Low | An unknown RSSI (0) was shown as a real reading, "0 dBm". | Fixed. EINF sends -127 (tested). The panel shows "wifi --", "--" and "no reading". CFGSHOW still prints rssi=0, which was already its failure value. |
+| 5 | Low | If the worker failed to start, reconnect requests were dropped for the whole boot. | Fixed. Without a running worker, requests run on the caller, as before the change. The queue is deleted if creating the task fails. |
+| 6 | Low | Source-scan gaps: multi-line calls, WiFi.STA and esp_hosted_ spellings, firmware/libraries not scanned, no self-test. | Fixed. The scan is now a regex over comment- and string-blanked text, covers display_stream and libraries, and tests its own matcher against hits and misses. Not done: a per-function allowlist; allowed files are listed with a reason. |
+| 7 | Nit | The "other core" comment is wrong on single-core chips, and the survey meter dropped to 1 Hz. | Fixed. Comment corrected; RSSI is sampled every 500 ms. |
+
+Reviewer's "checked and fine" list, kept here: no other hosted RPC remains on loopTask (WiFi.status and localIP are local; mDNS, ArduinoOTA and the CFG handlers make no esp_wifi calls). Calling STA methods from the worker is safe. Fully silent C6: it restarts once about 90 s in. Native-WiFi boards are unaffected. The hook compiles only on P4.
+
+AutoSDE and CRUX were not used: GitHub remote, no CR (see DECISIONS.md, Gate facts).
+
 ## Code review: display window layout and reported firmware build (app-layout-cleanup)
 
 Two rounds by an independent agent that did not write the change. Full round texts: code-review-round1.md and code-review-round2.md in the task evidence. Both rounds ran `swift test` (704, 0 failures) and `tools/test_espdisp.py` (1899 checks); round 2 formatted the worst-case CFGINFO line from the real format string (547 bytes).

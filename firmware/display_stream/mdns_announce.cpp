@@ -10,6 +10,7 @@
 #include "device_protocol.h"
 #include "ota_service.h"
 #include "telemetry.h"
+#include "wifi_worker.h"
 
 
 // The `ssid` value last announced, so the loop can tell when the radio has
@@ -67,9 +68,12 @@ void addMdnsService() {
   // network it is on. EINF cannot carry it: its fixed layout is parsed by
   // exact length on the sender side. Empty when announced before WiFi joined
   // (setup announces even after its WiFi timeout); the loop re-announces once
-  // mdnsSsidIsCurrent() says the radio has joined something else.
-  const String joinedSsid = WiFi.SSID();
-  const char *ssid = joinedSsid.c_str();
+  // mdnsSsidIsCurrent() says the radio has joined something else. Read from
+  // the WiFi worker's cache: on P4 WiFi.SSID() is a hosted RPC that can hold
+  // loopTask for 5 s, and this also runs on every re-announce.
+  char joinedSsid[sizeof(announcedSsid)];
+  wifiworker::ssid(joinedSsid, sizeof(joinedSsid));
+  const char *ssid = joinedSsid;
   strncpy(announcedSsid, ssid, sizeof(announcedSsid) - 1);
   announcedSsid[sizeof(announcedSsid) - 1] = 0;
   MDNS.setInstanceName(cfgName);
@@ -114,7 +118,11 @@ void addMdnsService() {
   }
 }
 bool mdnsSsidIsCurrent() {
-  return strcmp(WiFi.SSID().c_str(), announcedSsid) == 0;
+  // No reading yet is not a change: the worker's first reading of this
+  // association arrives within a pass, and the next check compares that.
+  char joined[sizeof(announcedSsid)];
+  if (!wifiworker::ssid(joined, sizeof(joined))) return true;
+  return strcmp(joined, announcedSsid) == 0;
 }
 
 bool restartMdnsService() {

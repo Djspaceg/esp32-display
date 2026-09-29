@@ -12,6 +12,7 @@
 #include "audio_test.h"
 #include "audio_transport.h"
 #include "display_power.h"
+#include "fault_inject.h"
 #include "frame_pipeline.h"
 #include "net_link.h"
 #include "orientation.h"
@@ -25,6 +26,7 @@
 #include "tile_bench.h"
 #include "ui_screens.h"
 #include "wifi_presets.h"
+#include "wifi_worker.h"
 
 
 static Stream *selectedConfigPort = &Serial;
@@ -75,6 +77,7 @@ void beginSerialRecovery() {
 //   CFGSHOW\n  -> CFGINFO ssid=... ip=... rssi=...
 // Base64 avoids every quoting hazard SSIDs and passwords can contain.
 static void processConfigLine(char *line) {
+  if (faultinject::handleLine(line, *replyConfigPort)) return;
   if (bcfg == nullptr && strncmp(line, "CFGBOARD ", 9) != 0) {
     configSerial().println(
         "CFGERR profile unresolved; use CFGBOARD <profile> or CFGBOARD auto");
@@ -809,7 +812,7 @@ static void processConfigLine(char *line) {
         deviceId[0], deviceId[1], deviceId[2],
         deviceId[3], deviceId[4], deviceId[5],
         WiFi.status() == WL_CONNECTED,
-        WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(),
+        WiFi.localIP().toString().c_str(), wifiworker::rssi(),
         panelRotation == 2, panelRotation, panelMirrorX,
         automaticRotationEnabled, automaticRotation, appliedPanelRotation,
         motionAvailable, blIsHigh() ? "high" : "low", fixedBlLevel,

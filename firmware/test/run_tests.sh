@@ -36,7 +36,8 @@ clang++ "${CXXFLAGS[@]}" \
   "$HERE/../display_stream/audio_test.cpp" \
   "$HERE/../display_stream/net_link.cpp" \
   "$HERE/../display_stream/telemetry.cpp" \
-  "$HERE/../display_stream/mdns_announce.cpp"
+  "$HERE/../display_stream/mdns_announce.cpp" \
+  "$HERE/../display_stream/wifi_worker.cpp"
 "$AUDIO_OUT"
 
 # The start gate at runtime, through the backend API alone: an impostor that
@@ -55,8 +56,12 @@ clang++ "${CXXFLAGS[@]}" \
   "$HERE/../display_stream/audio_test.cpp" \
   "$HERE/../display_stream/net_link.cpp" \
   "$HERE/../display_stream/telemetry.cpp" \
-  "$HERE/../display_stream/mdns_announce.cpp"
+  "$HERE/../display_stream/mdns_announce.cpp" \
+  "$HERE/../display_stream/wifi_worker.cpp"
 "$SEAM_OUT"
+
+# loopTask never waits on a hosted WiFi RPC (the P4 watchdog reboot).
+zsh "$HERE/test_hosted_rpc_budget.sh"
 
 clang++ "${CXXFLAGS[@]}" \
   -DCONFIG_IDF_TARGET_ESP32S3 \
