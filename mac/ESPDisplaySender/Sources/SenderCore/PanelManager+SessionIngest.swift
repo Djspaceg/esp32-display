@@ -189,6 +189,9 @@ extension PanelManager {
         panel.displayName = info.name
         panel.hardwareID = info.deviceID
         panel.rssi = Int(info.rssi)
+        // The reported build is tied to the version it came with
+        // (`currentFirmwareSource`), so a version change here hides a stale
+        // build without discarding one that already arrived for the new one.
         panel.firmwareVersion = info.firmwareVersion
         panel.frameProtocolVersion = Int(info.frameProtocolVersion)
         panel.controlProtocolVersion = Int(info.controlProtocolVersion)

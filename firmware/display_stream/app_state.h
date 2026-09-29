@@ -23,6 +23,7 @@ extern uint8_t wifiCredentialPresetSlot;
 extern bool wifiLegacyMirrorPending;
 extern String cfgName;
 extern const char *FW_VERSION;
+extern const char *FW_SOURCE;
 extern uint8_t deviceId[6];
 String defaultDeviceName();
 

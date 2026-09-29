@@ -53,6 +53,16 @@ extension PanelManager {
             else { continue }
             panels[index].chip = device.metadata.chip
         }
+        // The build travels with `fw`: a result that carries a version speaks
+        // for the firmware announcing it, so its `src` (or lack of one) replaces
+        // what was there. A result without `fw` says nothing about either.
+        for device in devices {
+            guard let version = device.metadata.firmwareVersion,
+                  let index = panels.firstIndex(where: { $0.serviceName == device.name })
+            else { continue }
+            panels[index].noteFirmwareSource(
+                device.metadata.firmwareSource, reportedWith: version)
+        }
         for device in devices where device.metadata.target != nil {
             guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
             else { continue }

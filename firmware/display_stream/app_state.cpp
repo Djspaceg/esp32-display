@@ -4,6 +4,18 @@
 
 #include "dma_gate.h"
 
+// tools/espdisp.py writes build_identity.h into its private copy of the sketch
+// before compiling, naming the commit the image was built from - the same
+// commit, spelled the same way, as the bundle manifest's source_commit and
+// source_dirty. A compile outside that tool has no such file and reports
+// "unknown", which is an answer rather than a guess.
+#if __has_include("build_identity.h")
+#include "build_identity.h"
+#endif
+#ifndef ESPDISP_SOURCE_ID
+#define ESPDISP_SOURCE_ID "unknown"
+#endif
+
 
 // WiFi credentials live in NVS flash and are reconfigurable over the USB
 // serial port without reflashing (see handleSerialConfig). The compiled-in
@@ -19,6 +31,12 @@ bool wifiLegacyMirrorPending = false;
 // (espdisplay-XXXX from the MAC); changeable via CFGNAME over USB.
 String cfgName;
 const char *FW_VERSION = "1.5.0";
+// Which build of FW_VERSION this is: "<40 hex>" or "<40 hex>-dirty". FW_VERSION
+// only moves at a release, so without this every image built between two
+// releases reports the same thing. Reported as CFGINFO src= and mDNS TXT src,
+// both new optional fields; EINF is length-checked exactly by shipped senders,
+// so it is not extended.
+const char *FW_SOURCE = ESPDISP_SOURCE_ID;
 uint8_t deviceId[6] = {0};
 
 // Reads the MAC straight from eFuse rather than via WiFi.macAddress(),

@@ -3,6 +3,8 @@
 
 # Local WiFi credentials
 firmware/display_stream/wifi_config.h
+# Written by tools/espdisp.py into its private sketch copy only; never source.
+firmware/display_stream/build_identity.h
 
 # arduino-cli build output. Compiling with --output-dir makes arduino-cli use
 # <sketch>/build/<fqbn>/ as its working directory, and `tools/espdisp.py ota`

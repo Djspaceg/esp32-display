@@ -165,8 +165,8 @@ void setup() {
     delay(50);
   }
   Serial.println("=== display_stream (esp_lcd DMA) ===");
-  Serial.printf("firmware %s, frame protocol %u, control protocol %u\n",
-                FW_VERSION, deviceproto::FRAME_PROTOCOL_VERSION,
+  Serial.printf("firmware %s (source %s), frame protocol %u, control protocol %u\n",
+                FW_VERSION, FW_SOURCE, deviceproto::FRAME_PROTOCOL_VERSION,
                 deviceproto::CONTROL_PROTOCOL_VERSION);
   wifiSupervisor.begin(wifiRestartAlreadyAttempted());
   if (!chipidentity::readDeviceId(deviceId)) {

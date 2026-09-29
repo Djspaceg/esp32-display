@@ -138,6 +138,10 @@ struct SettingsSheet: View {
             }
         }
         .formStyle(.grouped)
+        // Every message in here - errors above all - can be selected and
+        // copied. Set once at the root, so a message added later cannot be
+        // the one that forgot.
+        .textSelection(.enabled)
         .labeledContentStyle(.labelColumn)
         // A floating glass action bar rather than a row bolted to the bottom of
         // the form, so the content scrolls under it.

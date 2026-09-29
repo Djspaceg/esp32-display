@@ -140,19 +140,6 @@ struct UsbFlashStatusView: View {
     }
 
     private var transcriptBlock: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ScrollView {
-                Text(session.transcript.text)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(height: 160)
-            Button("Copy Transcript") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(session.transcript.text, forType: .string)
-            }
-            .controlSize(.small)
-        }
+        UsbFlashTranscriptView(session: session)
     }
 }

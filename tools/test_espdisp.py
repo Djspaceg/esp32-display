@@ -5368,6 +5368,56 @@ def test_compile_wifi_config_staging():
             "a build with local WiFi defaults leaves the source tree unchanged")
 
 
+def test_build_identity_header():
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    check(
+        '#define ESPDISP_SOURCE_ID "%s"\n' % commit
+        in espdisp.build_identity_header(commit, False),
+        "a clean commit is reported exactly as the manifest's source_commit")
+    check(
+        '#define ESPDISP_SOURCE_ID "%s-dirty"\n' % commit
+        in espdisp.build_identity_header(commit, True),
+        "a dirty tree appends -dirty, as source_dirty says")
+    for bad in (None, "", "0123abc", commit.upper(), commit + '"; x', "../" + commit):
+        check(
+            '#define ESPDISP_SOURCE_ID "unknown"\n'
+            in espdisp.build_identity_header(bad, False),
+            "anything but a 40-hex commit is reported as unknown: %r" % (bad,))
+
+    family = espdisp.FAMILIES["c6"]
+    observed = {}
+
+    def inspect_compile(command, cwd=None):
+        with open(os.path.join(cwd, espdisp.BUILD_IDENTITY_HEADER),
+                  "r", encoding="utf-8") as source:
+            observed["header"] = source.read()
+        return []
+
+    with tempfile.TemporaryDirectory() as directory:
+        sketch_dir = os.path.join(directory, "display_stream")
+        os.makedirs(sketch_dir)
+        with open(os.path.join(sketch_dir, "display_stream.ino"), "w",
+                  encoding="utf-8") as sketch:
+            sketch.write("void setup() {}\nvoid loop() {}\n")
+        with unittest.mock.patch.object(
+            espdisp, "SKETCH_DIR", sketch_dir
+        ), unittest.mock.patch.object(
+            espdisp, "arduino_cli", return_value="/bin/arduino-cli"
+        ), unittest.mock.patch.object(
+            espdisp, "run_streaming", side_effect=inspect_compile
+        ), unittest.mock.patch.object(
+            espdisp, "git_provenance",
+            side_effect=AssertionError("provenance was passed in")
+        ), unittest.mock.patch("sys.stdout", io.StringIO()):
+            espdisp.compile_board(family, provenance=(commit, True))
+        check_equal(
+            observed.get("header"), espdisp.build_identity_header(commit, True),
+            "the staged sketch carries the provenance the bundle records")
+        check(
+            not os.path.exists(os.path.join(sketch_dir, espdisp.BUILD_IDENTITY_HEADER)),
+            "the identity header is written only into the private copy")
+
+
 def test_family_resolution_and_discovery():
     blank = espdisp.PortInfo("/dev/cu.usbmodem1", [], "unknown")
     known = espdisp.PortInfo("/dev/cu.usbmodem2", ["s3"], "S3")
@@ -8746,6 +8796,7 @@ def main():
     test_unpack_bundle_refusals()
     test_bundle_file_round_trip()
     test_git_provenance()
+    test_build_identity_header()
     test_git_firmware_build()
     test_utc_timestamp()
     test_tile_stream_wire()

@@ -33,9 +33,12 @@ class LineGuard {
 void line(Stream &port, const char *text);
 
 // Formatting buffer size. The CFGINFO identity reply is the longest line this
-// firmware emits, at a few hundred bytes; this leaves room for it to grow
-// without the fields being trimmed to fit a transport limit.
-static const size_t LINE_BYTES = 512;
+// firmware emits: with a 32-byte SSID (twice, once base64), a 32-byte name, the
+// longest profile, target and partition tokens and the src= build identity it
+// reaches about 550 bytes. A trimmed line loses its LAST fields first, and
+// src= is last, so this is sized with headroom rather than to the byte. Both
+// uses are on the loop task's stack, one at a time.
+static const size_t LINE_BYTES = 768;
 
 void printfLine(Stream &port, const char *format, ...)
     __attribute__((format(printf, 2, 3)));

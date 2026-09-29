@@ -116,6 +116,24 @@ public enum EsptoolOutput {
         return Int(value)
     }
 
+    /// The line without esptool 5.x's text progress bar.
+    ///
+    /// `Writing at 0x00010000 [=====>     ] 12.3% 4096/1234567 bytes...` becomes
+    /// `Writing at 0x00010000 12.3% 4096/1234567 bytes...`. The app draws a real
+    /// progress bar from the same percentage, so the ASCII one is noise in the
+    /// "Last seen" lines and the transcript; the address, percentage and byte
+    /// counts are what is worth reading. A line without a bar is returned as is.
+    public static func withoutProgressBar(_ line: String) -> String {
+        // Only a bracket of bar characters directly before a percentage, so
+        // `Chip type: ... [rev v0.2]` and anything else bracketed is left alone.
+        guard line.contains("["),
+              let regex = try? NSRegularExpression(
+                pattern: "[ \\t]*\\[[=>#. \\t-]*\\][ \\t]*(?=\\d{1,3}(?:\\.\\d+)?[ \\t]*%)")
+        else { return line }
+        let range = NSRange(line.startIndex..<line.endIndex, in: line)
+        return regex.stringByReplacingMatches(in: line, range: range, withTemplate: " ")
+    }
+
     /// Whether a line is worth showing as status: esptool prints blank lines and
     /// bare progress redraws, and an empty status area flickering is worse than a
     /// stale one.

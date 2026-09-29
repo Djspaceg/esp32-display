@@ -34,6 +34,30 @@ struct PanelSnapshot: Identifiable, Equatable {
     var freeHeap: UInt32 = 0
     var spacingMicros: UInt32 = 0
     var firmwareVersion: String?
+    /// Which build is running, from mDNS `src` or CFGSHOW `src=`, and the
+    /// version it was reported alongside. Read through `currentFirmwareSource`,
+    /// which only answers while that version is still the one running: the
+    /// build and the version arrive by different routes (mDNS or USB, and
+    /// EINF), in either order, so a build is tied to its version rather than
+    /// cleared by whichever arrives second. Discovery-scoped like `chip`.
+    private(set) var firmwareSource: FirmwareSourceIdentity?
+    private(set) var firmwareSourceVersion: String?
+
+    /// The reported build, when it belongs to the version running now.
+    var currentFirmwareSource: FirmwareSourceIdentity? {
+        guard let firmwareSourceVersion, firmwareSourceVersion == firmwareVersion
+        else { return nil }
+        return firmwareSource
+    }
+
+    /// Record what one report said: `source` nil means that firmware does not
+    /// name its build, which is an answer too.
+    mutating func noteFirmwareSource(
+        _ source: FirmwareSourceIdentity?, reportedWith version: String
+    ) {
+        firmwareSource = source
+        firmwareSourceVersion = version
+    }
     /// Which chip this panel is, from its `chip` mDNS TXT record: `esp32c6`,
     /// `esp32s3`, or `unknown` from a build that could not name its own. nil
     /// means the panel never sent the record, i.e. firmware older than it.

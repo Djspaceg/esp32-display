@@ -2,6 +2,31 @@
 
 Each finished branch keeps its own review record below, whole.
 
+## Code review: display window layout and reported firmware build (app-layout-cleanup)
+
+Two rounds by an independent agent that did not write the change. Full round texts: code-review-round1.md and code-review-round2.md in the task evidence. Both rounds ran `swift test` (704, 0 failures) and `tools/test_espdisp.py` (1899 checks); round 2 formatted the worst-case CFGINFO line from the real format string (547 bytes).
+
+Acceptance checklist, both rounds: all ten items met (hero density, Orientation with Source, uptime in hero, progress at the bottom of the floating footer, flash errors shown as they happen, ASCII bar gone, screen switch in the Brightness row, error text selectable app-wide, running build in Firmware, Update Firmware in Firmware). Standing rules met: every revision stays installable and labelled Upgrade/Reinstall/Downgrade; src= is ignored by old readers; FW_VERSION and release-notes.md unchanged.
+
+| # | Severity | Finding | Disposition |
+|---|----------|---------|-------------|
+| R1-1 | Should-fix | Worst-case CFGINFO (~546 bytes) overran the 512-byte line buffer, trimming src= or reading a dirty build as clean. | Fixed: LINE_BYTES 768 (9db91bf); round 2 confirmed 215 bytes spare. |
+| R1-2 | Should-fix | mDNS src then EINF of the new version cleared the build for good. | Fixed: build tied to the version it came with (`currentFirmwareSource`). |
+| R1-3 | Should-fix | Screen-off footer said "long BOOT hold"; 600 ms rotates, 3 s toggles. | Fixed: wording names three seconds and the shorter hold's effect. |
+| R1-4 | Should-fix | Board answering with a dirty build after a clean write passed. | Fixed; round 2 extended it: silence after writing a self-naming image also fails (5e859a1). |
+| R1-5 | Should-fix | "Legacy firmware" wording lost for old firmware. | Fixed; round 2 found A below in the fix. |
+| R2-A | Should-fix | "Heard from" used lastHeartbeatAt, set before any reply, so Legacy showed on every launch. | Fixed: requires an EINF (5e859a1). |
+| R1-6 | Nit | src= spoofable through the SSID on old firmware. | Fixed: src= read only after the plain ssid=. |
+| R1-8 | Nit | Repair error text could include esptool's ASCII bar. | Fixed in UsbRescue.lastError. |
+| R1-10 | Nit | Add Display dropped a failure if closed mid-run. | Fixed: the manager alert is cleared only while the sheet shows it. |
+| R1-7 | Nit | Bundled-firmware cache also caches a failed load. | Left: resources cannot change while the app runs. |
+| R1-9 | Nit | Repair progress is not in the floating footer. | Left: it is the form's second section, on screen; DECISIONS D3. |
+| R1-11 | Nit | Brightness cannot be changed while the screen is off. | Left on purpose (D2). |
+| R1-12 | Nit | git_provenance reports clean when git status fails. | Left: pre-existing tool behaviour, outside this change. |
+| R2-B | Nit | "Does not report which build" shows in the gap before the build report arrives. | Left: transient, seconds. |
+| R2-C | Nit | A stale mDNS record can overwrite a newer USB answer for the same version. | Left: same version, next CFGSHOW corrects it. |
+| R1/R2 | Unverified | Selectable text vs clicks on disclosure labels. | Labels opt out with `.textSelection(.disabled)`; not checked in a live app (none launched). |
+
 ## Code review: audio on every capable board (audio-enable-boards)
 
 Two adversarial rounds, each by a separate read-only agent.

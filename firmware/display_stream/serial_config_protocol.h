@@ -203,12 +203,16 @@ inline bool parseBrightnessLevels(const char *line, BrightnessLevels &levels) {
   return true;
 }
 
+/// The CFGINFO tail. src= is last and new: every reader of this line takes
+/// fields by key (the app's lastField, espdisp.py's split), so an older reader
+/// ignores it, and fw= keeps exactly the value it always had.
 inline int formatShowExtension(char *output, size_t outputSize,
                                uint32_t capabilities, uint8_t brightnessLevel,
-                               const char *firmwareVersion) {
-  return snprintf(output, outputSize, " caps=%08lx bllevel=%u fw=%s",
+                               const char *firmwareVersion,
+                               const char *sourceId) {
+  return snprintf(output, outputSize, " caps=%08lx bllevel=%u fw=%s src=%s",
                   (unsigned long)capabilities, (unsigned)brightnessLevel,
-                  firmwareVersion);
+                  firmwareVersion, sourceId);
 }
 
 }  // namespace serialcfg

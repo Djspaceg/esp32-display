@@ -86,6 +86,7 @@ enum UsbOnboarder {
         var existing: UsbOnboarding.ExistingFirmware
         var firmwareVersion: String?
         var lastLine: String?
+        var firmwareSource: FirmwareSourceIdentity? = nil
     }
 
     static func probe(
@@ -100,7 +101,8 @@ enum UsbOnboarder {
         case .identified(let identity):
             return PortAnswer(
                 existing: .answered(name: identity.name, hardwareID: identity.hardwareID),
-                firmwareVersion: identity.status?.firmwareVersion)
+                firmwareVersion: identity.status?.firmwareVersion,
+                firmwareSource: identity.status?.firmwareSource)
         case .unavailable(let reason):
             return PortAnswer(existing: .silent, lastLine: lastLine.value ?? reason)
         }
@@ -251,6 +253,8 @@ enum UsbOnboarder {
     struct SettledBoard: Equatable, Sendable {
         var port: String
         var firmwareVersion: String?
+        /// The build it reported, when its firmware names one.
+        var firmwareSource: FirmwareSourceIdentity? = nil
     }
 
     /// Everything `settle` touches outside itself, so a test can drive it with a
@@ -310,7 +314,9 @@ enum UsbOnboarder {
         func ask(_ port: String) -> SettledBoard? {
             let answer = io.probe(port, log)
             if matchesExpectedHardwareID(answer.existing, expectedHardwareID: expectedHardwareID) {
-                return SettledBoard(port: port, firmwareVersion: answer.firmwareVersion)
+                return SettledBoard(
+                    port: port, firmwareVersion: answer.firmwareVersion,
+                    firmwareSource: answer.firmwareSource)
             }
             if case .answered(_, let reported) = answer.existing {
                 otherBoards.insert(port)

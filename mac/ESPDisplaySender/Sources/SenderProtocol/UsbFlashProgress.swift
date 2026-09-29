@@ -269,7 +269,10 @@ public struct UsbFlashTranscript: Equatable, Sendable {
     public init() {}
 
     public mutating func append(_ source: Source, _ text: String, at elapsed: Double) {
-        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // esptool's ASCII bar is dropped here, once, so neither "Last seen" nor
+        // the transcript repeats what the real progress bar already shows.
+        let text = (source == .esptool ? EsptoolOutput.withoutProgressBar(text) : text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         // esptool redraws its progress line hundreds of times; one line per part
         // is what is worth keeping.

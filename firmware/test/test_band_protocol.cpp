@@ -369,6 +369,7 @@ int main() {
               "automaticRotationEnabled, automaticRotation, "
               "appliedPanelRotation") != std::string::npos);
     CHECK(source.find("FW_VERSION") != std::string::npos);
+    CHECK(source.find("FW_VERSION, FW_SOURCE") != std::string::npos);
   }
 
   // Power-off must reach the panel driver, and a three-second power hold must
@@ -434,13 +435,23 @@ int main() {
             levels.idle == 3 && levels.survey == 4);
     }
 
-    char extension[64];
+    char extension[128];
     CHECK(serialcfg::formatShowExtension(
               extension, sizeof(extension), deviceproto::CAP_ROTATE,
-              128, "1.5.0") > 0);
+              128, "1.5.0", "unknown") > 0);
     CHECK(strcmp(
               extension,
-              " caps=00002000 bllevel=128 fw=1.5.0") == 0);
+              " caps=00002000 bllevel=128 fw=1.5.0 src=unknown") == 0);
+    // The longest source a build can report still fits the buffer the sketch
+    // formats into, so src= is never cut off mid-commit.
+    CHECK(serialcfg::formatShowExtension(
+              extension, sizeof(extension), 0xffffffffu, 255,
+              "1.5.0", "0123456789abcdef0123456789abcdef01234567-dirty") <
+          (int)sizeof(extension));
+    CHECK(strcmp(
+              extension,
+              " caps=ffffffff bllevel=255 fw=1.5.0 "
+              "src=0123456789abcdef0123456789abcdef01234567-dirty") == 0);
   }
 
   const Geometry G172 = GEOMETRY_172X320;

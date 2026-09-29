@@ -380,6 +380,11 @@ extension PanelManager {
            }) {
             if let version = status.firmwareVersion, !version.isEmpty {
                 panels[panelIndex].firmwareVersion = version
+                // Written even when nil: this reply came from the stream
+                // firmware that is running now, so a missing src= means this
+                // build does not name itself, not that an older answer stands.
+                panels[panelIndex].noteFirmwareSource(
+                    status.firmwareSource, reportedWith: version)
             }
             // Kept as reported: "" is the board saying no network is set, which
             // is an answer, where nil is not having asked.
@@ -585,7 +590,8 @@ extension PanelManager {
     /// blocking serial I/O with up to a several-second timeout, and this
     /// actor must not stall on it.
     func refreshCurrentSSID(for serviceName: String) {
-        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        guard !serialIODisabled,
+              let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return }
         let currentName = panel.displayName
         let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID

@@ -285,7 +285,7 @@ public enum UsbRescue {
                        options: [.regularExpression, .caseInsensitive]) != nil
                 && !line.hasPrefix("Note:") && !line.hasPrefix("For troubleshooting")
         }
-        return errors.last ?? lines.last ?? ""
+        return EsptoolOutput.withoutProgressBar(errors.last ?? lines.last ?? "")
     }
 
     /// The profile a stored CFGBOARD override forces, from the rescue image's

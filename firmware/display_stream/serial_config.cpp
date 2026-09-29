@@ -781,10 +781,10 @@ static void processConfigLine(char *line) {
     mbedtls_base64_encode(name64, sizeof(name64) - 1, &name64Len,
                           (const unsigned char *)cfgName.c_str(), cfgName.length());
     name64[name64Len] = 0;
-    char extension[64];
+    char extension[128];
     serialcfg::formatShowExtension(
         extension, sizeof(extension), deviceCapabilities(), userBlLevel,
-        FW_VERSION);
+        FW_VERSION, FW_SOURCE);
     // ota= is three-valued on purpose: "off" (no password stored), "pending" (a
     // password is stored but the radio was not ready when setup ran, so nothing
     // is listening yet), "on" (listening). Reporting only on/off would make a
@@ -797,7 +797,7 @@ static void processConfigLine(char *line) {
     configSerial().printf(
         "CFGINFO ssid64=%s name64=%s id=%02x%02x%02x%02x%02x%02x "
         // mirrorx= and blfixed= come from the prism/fixed-backlight work;
-        // caps=, bllevel= and fw= are appended by formatShowExtension above, so they
+        // caps=, bllevel=, fw= and src= are appended by formatShowExtension above, so they
         // are deliberately NOT repeated here - a duplicated key in CFGINFO
         // would make the field ambiguous to every parser reading it.
         "connected=%d ip=%s rssi=%d flip=%d rot=%u mirrorx=%d autorot=%d "

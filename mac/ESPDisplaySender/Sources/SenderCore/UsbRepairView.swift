@@ -280,8 +280,12 @@ struct UsbRepairView: View {
             }
         }
         .formStyle(.grouped)
+        // Every message in here - errors above all - can be selected and
+        // copied. Set once at the root, so a message added later cannot be
+        // the one that forgot.
+        .textSelection(.enabled)
         .labeledContentStyle(.labelColumn)
-        .safeAreaInset(edge: .bottom) { actionBar }
+        .safeAreaInset(edge: .bottom) { actionBar.textSelection(.enabled) }
         .onDisappear { model.close() }
     }
 
@@ -342,6 +346,7 @@ struct UsbRepairView: View {
                 Text(problem)
                     .font(.callout)
                     .foregroundStyle(.orange)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

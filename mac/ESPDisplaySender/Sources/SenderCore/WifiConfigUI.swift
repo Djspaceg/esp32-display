@@ -125,6 +125,9 @@ enum WifiConfigUI {
     /// Live facts returned by one current CFGSHOW probe. None are persisted.
     struct USBStatus: Equatable, Sendable {
         var firmwareVersion: String?
+        /// `src=`: which build of `firmwareVersion` is running. nil from
+        /// firmware predating the field, and from a build reporting `unknown`.
+        var firmwareSource: FirmwareSourceIdentity? = nil
         /// The same capability bitset EINF and mDNS report. nil means firmware
         /// predates USB capability reporting, so optional controls fail closed.
         var capabilities: DeviceProtocol.Capabilities?
@@ -797,6 +800,16 @@ enum WifiConfigUI {
             else { return nil }
             return DeviceProtocol.Capabilities(rawValue: bits)
         }
+        /// A field of the extension formatShowExtension appends after the plain
+        /// `ssid=`, and never one inside it: the SSID is free text, and on
+        /// firmware predating a field an SSID ending " src=<commit>" would
+        /// otherwise be read as that field.
+        func extensionToken(_ key: String) -> String? {
+            guard let ssid = ConfigCommands.decodeField("ssid64=", from: info),
+                  let ssidRange = info.range(of: " ssid=\(ssid)", options: .backwards)
+            else { return nil }
+            return ConfigCommands.lastField(key, from: String(info[ssidRange.upperBound...]))
+        }
         func appendedCapabilities() -> DeviceProtocol.Capabilities? {
             guard let ssid = ConfigCommands.decodeField("ssid64=", from: info),
                   let ssidRange = info.range(of: " ssid=\(ssid)")
@@ -844,6 +857,7 @@ enum WifiConfigUI {
         }
         let status = USBStatus(
             firmwareVersion: appendedToken("fw="),
+            firmwareSource: FirmwareSourceIdentity(reported: extensionToken("src=")),
             capabilities: appendedCapabilities(),
             currentSSID: ConfigCommands.decodeField("ssid64=", from: info),
             networkConnected: boolean("connected="),

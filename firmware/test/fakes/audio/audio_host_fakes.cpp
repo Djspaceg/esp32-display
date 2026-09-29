@@ -280,6 +280,7 @@ uint8_t wifiCredentialPresetSlot = 0;
 bool wifiLegacyMirrorPending = false;
 String cfgName("audio-host");
 const char *FW_VERSION = "host";
+const char *FW_SOURCE = "unknown";
 uint8_t deviceId[6] = {};
 board::Variant boardVariant = board::Variant::AmoledCo5300;
 const board::Config *bcfg = &board::CONFIG_AMOLED_CO5300;

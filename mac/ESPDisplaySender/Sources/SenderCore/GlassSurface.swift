@@ -9,6 +9,7 @@ import SwiftUI
 /// opaque fallback is a real design state rather than a grudging concession.
 struct GlassCard: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.glassRendersOpaque) private var rendersOpaque
 
     let cornerRadius: CGFloat
     let tint: Color?
@@ -16,7 +17,7 @@ struct GlassCard: ViewModifier {
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        if reduceTransparency {
+        if reduceTransparency || rendersOpaque {
             content
                 .background(shape.fill(.background.secondary))
                 .overlay(shape.strokeBorder(.separator, lineWidth: 1))
@@ -26,6 +27,13 @@ struct GlassCard: ViewModifier {
                     .regular.tint(tint).interactive(interactive), in: shape)
         }
     }
+}
+
+extension EnvironmentValues {
+    /// Draw glass as the Reduce Transparency surface. For offscreen captures:
+    /// glass is composited by the window server, so a view rendered into a
+    /// bitmap off screen shows nothing where the glass should be.
+    @Entry var glassRendersOpaque = false
 }
 
 extension View {

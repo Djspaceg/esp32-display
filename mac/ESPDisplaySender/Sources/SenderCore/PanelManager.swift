@@ -28,6 +28,13 @@ final class PanelManager: ObservableObject {
     }
     /// The outcome of the most recent user-initiated action, cleared when read.
     @Published internal(set) var operationOutcome: OperationOutcome?
+    /// The app's bundled firmware once read; see `bundledFirmware`. Not
+    /// published: it is filled in on first use and never changes after.
+    var bundledFirmwareCache: BundledFirmware.Availability?
+    /// Set by offscreen captures, which render the detail pane: its appearance
+    /// asks CFGSHOW for the current SSID, and a capture must never open a real
+    /// serial port another process may be using.
+    var serialIODisabled = false
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []
     /// What each source currently reports under an issue kind, in report order.

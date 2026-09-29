@@ -281,9 +281,11 @@ private struct IssueBanner: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(issue.title)
                     .fontWeight(.medium)
+                    .textSelection(.enabled)
                 Text(issue.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
@@ -336,7 +338,7 @@ private struct PanelRow: View {
 
 // MARK: - Detail
 
-private struct PanelDetailView: View {
+struct PanelDetailView: View {
     let panel: PanelSnapshot
     @ObservedObject var manager: PanelManager
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -362,6 +364,10 @@ private struct PanelDetailView: View {
     /// pushing everything above them off the screen the rest of the time is a
     /// poor trade.
     @State private var showDiagnostics = false
+    /// The four brightness presets and the audio counters: set once, or read
+    /// only when something is wrong, so folded away like Diagnostics.
+    @State private var showBrightnessPresets = false
+    @State private var showAudioDiagnostics = false
     @FocusState private var nameIsFocused: Bool
 
     private var normalizedName: String {
@@ -386,17 +392,16 @@ private struct PanelDetailView: View {
     }
 
     var body: some View {
+        // What gets changed goes first and what is only read goes last: where
+        // the picture comes from and which way up it is, the screen, then the
+        // firmware. Network credentials, touch bindings and the screensaver are
+        // set once and left, and the audio and frame counters are diagnostics.
         Form {
             heroSection
             sourceSection
             displaySection
+            firmwareSection
             connectionSection
-            if panel.audioStatus != nil
-                || panel.capabilities.contains(.audioDownlink)
-                || panel.capabilities.contains(.audioUplink)
-            {
-                audioSection
-            }
             // Gated on the panel actually having a touch screen, so a panel that
             // cannot produce a gesture does not offer to bind one.
             if panel.capabilities.contains(.touch) {
@@ -405,11 +410,20 @@ private struct PanelDetailView: View {
             if panel.capabilities.contains(.idleText) {
                 screensaverSection
             }
-            firmwareSection
+            if panel.audioStatus != nil
+                || panel.capabilities.contains(.audioDownlink)
+                || panel.capabilities.contains(.audioUplink)
+            {
+                audioSection
+            }
             diagnosticsSection
             dangerSection
         }
         .formStyle(.grouped)
+        // Every message in here - errors above all - can be selected and
+        // copied. Set once at the root, so a message added later cannot be
+        // the one that forgot.
+        .textSelection(.enabled)
         // A third for the label, the rest for the value. Grouped rows otherwise
         // push content to the trailing edge, which left the screensaver editor
         // and the label naming it at opposite ends of the window.
@@ -540,10 +554,30 @@ private struct PanelDetailView: View {
     /// glass does not stack.
     private var heroSection: some View {
         Section {
-            MirrorHero(panel: panel, preview: manager.preview)
+            MirrorHero(
+                panel: panel, preview: manager.preview,
+                facts: heroFacts)
                 .listRowBackground(Color.clear)
                 .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
         }
+    }
+
+    /// The facts about the board itself that used to be spread over four
+    /// sections - or, for the model and the USB device, nowhere at all.
+    private var heroFacts: [MirrorHero.Fact] {
+        let usb = manager.usbAttachment(for: panel.serviceName)
+        return [
+            .init(label: "Board", value: panel.boardModelDescription),
+            .init(label: "USB", value: usb.summary, isMuted: usb.port == nil),
+            .init(label: "Network", value: panel.networkSummary,
+                  isMuted: panel.address == nil),
+            .init(label: "Up", value: panel.uptimeSummary,
+                  isMuted: panel.uptimeSeconds == 0),
+        ] + (panel.capabilities.contains(.battery)
+            // Only for a panel that advertises a battery. A C6 has no PMU and
+            // will never report one, so an unconditional row would read as a
+            // flat or missing battery instead of hardware that does not exist.
+            ? [.init(label: "Battery", value: panel.batteryDescription)] : [])
     }
 
     private var sourceSection: some View {
@@ -591,18 +625,15 @@ private struct PanelDetailView: View {
             if panel.source.kind == .region {
                 regionControls
             }
-            LabeledContent("Uptime", value: panel.uptimeDescription)
-            // Only for a panel that advertises a battery. A C6 has no PMU and
-            // will never report one, so an unconditional row would read as a
-            // flat or missing battery instead of hardware that does not exist.
-            if panel.capabilities.contains(.battery) {
-                LabeledContent("Battery", value: panel.batteryDescription)
-            }
+            // With the source because the two are one decision: a quarter turn
+            // turns the capture region on its side too.
+            orientationControls
         } header: {
             Text("Source")
         } footer: {
             Text("A region streams a rectangle of one screen, locked to the panel's "
-                + "\(PixelConvert.width):\(PixelConvert.height) shape — 1× sends one "
+                + (panel.shapeDescription.map { "\($0) shape" } ?? "shape")
+                + " — 1× sends one "
                 + "screen point per panel pixel, higher multiples frame more and "
                 + "scale it down. Choosing a display, window, or application "
                 + "instead uses the macOS picker. Either choice is remembered and "
@@ -668,20 +699,116 @@ private struct PanelDetailView: View {
             set: { manager.selectDisplay($0, for: panel.serviceName) })
     }
 
+    /// Which way up the image is drawn, and the motion-sensor option where the
+    /// panel has one. Shown in the Source section.
+    @ViewBuilder
+    private var orientationControls: some View {
+        if manager.supportsQuarterTurnRotation(panel.serviceName) {
+            // Panels whose firmware advertises quarter-turn rotation get
+            // a four-way choice. On rectangular glass 90 and 270 are
+            // landscape, and choosing one turns the capture region on
+            // its side. Firmware without `.rotate` keeps the 180 toggle
+            // below.
+            LabeledContent("Orientation") {
+                Picker("Orientation", selection: Binding(
+                    get: { panel.rotation },
+                    set: { manager.setRotation($0, for: panel.serviceName) })) {
+                    Text("0°").tag(0)
+                    Text("90°").tag(1)
+                    Text("180°").tag(2)
+                    Text("270°").tag(3)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .disabled(!manager.canControl(panel.serviceName, capability: .rotate))
+                .help(controlHelp(
+                    .rotate,
+                    "Turn the image clockwise to match how the panel is mounted"))
+            }
+        } else {
+            LabeledContent("Orientation") {
+                Toggle("Rotate 180°", isOn: Binding(
+                    get: { panel.flipped },
+                    set: { manager.setFlip($0, for: panel.serviceName) }))
+                    .toggleStyle(.switch)
+                    .fixedSize()
+                    .disabled(!manager.canControl(panel.serviceName, capability: .flip))
+                    .help(controlHelp(.flip, "Rotate the image on the panel"))
+            }
+        }
+        if let status = manager.automaticRotationStatus(panel.serviceName),
+           let enabled = status.automaticRotationEnabled,
+           let effective = status.effectiveRotation {
+            LabeledContent("Automatic orientation") {
+                Toggle("Automatic orientation", isOn: Binding(
+                    get: { enabled },
+                    set: {
+                        manager.setAutomaticRotation(
+                            $0, for: panel.serviceName)
+                    }))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .fixedSize()
+                    .disabled(
+                        !manager.canPerform(
+                            .automaticRotation, for: panel.serviceName))
+                    .help(operationHelp(
+                        .automaticRotation,
+                        "Use the motion sensor to keep the image upright."))
+            }
+            LabeledContent(
+                "Effective rotation",
+                value: "\(effective * 90)°")
+        }
+    }
+
     private var displaySection: some View {
-        Section("Display") {
-            // Unconditional, unlike the rotation controls below: every board
-            // has a backlight or panel-command brightness sink, so `.power`
-            // is advertised everywhere (see `Capabilities.power`).
-            LabeledContent("Power") {
-                // labelsHidden, unlike the Brightness/Orientation switch
-                // fallbacks below: those keep "High"/"Rotate 180°" because the
-                // label names what turning it ON means. "On" adds nothing
-                // "Power" hasn't already said, and an unlabeled switch is the
-                // narrower, more reliably fixed-width control - the same
-                // reasoning that already gives the segmented Orientation
-                // picker labelsHidden.
-                Toggle("On", isOn: Binding(
+        Section {
+            brightnessRow
+            if let levels = manager.brightnessLevels(panel.serviceName) {
+                DisclosureGroup(isExpanded: $showBrightnessPresets) {
+                    brightnessPresetRows(levels)
+                } label: {
+                    disclosureLabel("Brightness presets", isExpanded: $showBrightnessPresets)
+                }
+            }
+            if panel.controlProtocolVersion != Int(DeviceProtocol.controlProtocolVersion),
+               manager.verifiedUSBDevice(for: panel.serviceName) == nil {
+                Text("Flash the current firmware to enable remote controls.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Display")
+        } footer: {
+            Text("Turning the screen off turns its backlight off, and blanks the "
+                + "panel too where the panel supports that, while the board stays "
+                + "on WiFi and keeps receiving. A "
+                + "touch does not wake it. It stays off across restarts until it is "
+                + "turned back on here, or on a board with a button by holding it "
+                + "for three seconds (a shorter hold rotates the picture).")
+        }
+    }
+
+    /// The screen switch and the level it lights at, as one control.
+    ///
+    /// The switch used to be a row of its own labelled "Power", which it is not:
+    /// the firmware's `pwr=` is a standing "screen off" instruction - backlight 0
+    /// and, where the panel accepts it, its own display-off command (the P4 4C's
+    /// JD9365 answers ESP_ERR_NOT_SUPPORTED, so there only the backlight goes
+    /// dark) - with the board still powered,
+    /// on WiFi and receiving (`panelstate::backlightLevel`, `applyBacklight`).
+    /// Off is the bottom of the brightness range in every sense a person cares
+    /// about, so it sits at the slider's leading end, and the slider rests while
+    /// the screen is off rather than pretending to set a level nobody can see.
+    private var brightnessRow: some View {
+        LabeledContent("Brightness") {
+            HStack(spacing: 10) {
+                // Unconditional: every board has a backlight or panel-command
+                // brightness sink, so `.power` is advertised everywhere (see
+                // `Capabilities.power`).
+                Toggle("Screen on", isOn: Binding(
                     get: { !panel.manuallyOff },
                     set: { manager.setPower($0, for: panel.serviceName) }))
                     .toggleStyle(.switch)
@@ -690,34 +817,30 @@ private struct PanelDetailView: View {
                     .disabled(!manager.canControl(panel.serviceName, capability: .power))
                     .help(controlHelp(
                         .power,
-                        "Turn the panel's display off without unplugging it. "
-                            + "Persists across a reboot until turned back on."))
-            }
-            if manager.supportsBrightnessLevel(panel.serviceName) {
-                LabeledContent("Brightness") {
-                    HStack(spacing: 10) {
-                        // No `step:`. The range is 1...255, and a step made
-                        // macOS draw a tick mark per step - 254 of them,
-                        // merging into what looked like a stray rule under the
-                        // slider. The binding already rounds on the way out.
-                        //
-                        // Left to fill the value column rather than capped at a
-                        // width, which made a short slider float in the middle
-                        // of an otherwise empty row.
-                        Slider(value: brightnessLevel, in: brightnessBounds)
-                            .disabled(!manager.canControl(
-                                panel.serviceName, capability: .brightnessLevel))
-                            .help(controlHelp(
-                                .brightnessLevel, "Set the panel backlight"))
-                            .accessibilityLabel("Brightness level")
-                        Text("\(brightnessPercent)%")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .frame(width: 38, alignment: .trailing)
-                    }
-                }
-            } else {
-                LabeledContent("Brightness") {
+                        panel.manuallyOff
+                            ? "Turn the screen back on"
+                            : "Turn the screen off. The board stays on WiFi, "
+                                + "and it stays off until turned back on."))
+                    .accessibilityLabel("Screen on")
+                if manager.supportsBrightnessLevel(panel.serviceName) {
+                    // No `step:`. The range is 1...255, and a step made macOS
+                    // draw a tick mark per step - 254 of them, merging into what
+                    // looked like a stray rule under the slider. The binding
+                    // already rounds on the way out.
+                    Slider(value: brightnessLevel, in: brightnessBounds)
+                        .frame(maxWidth: .infinity)
+                        .labelsHidden()
+                        .layoutPriority(1)
+                        .disabled(panel.manuallyOff || !manager.canControl(
+                            panel.serviceName, capability: .brightnessLevel))
+                        .help(controlHelp(
+                            .brightnessLevel, "Set the panel backlight"))
+                        .accessibilityLabel("Brightness level")
+                    Text(panel.manuallyOff ? "Off" : "\(brightnessPercent)%")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 38, alignment: .trailing)
+                } else {
                     Toggle("High", isOn: Binding(
                         get: { panel.brightnessHigh },
                         set: { manager.setBrightness(high: $0, for: panel.serviceName) }))
@@ -726,130 +849,83 @@ private struct PanelDetailView: View {
                         // switch at the far edge of the row from the words
                         // naming it. fixedSize keeps the pair together.
                         .fixedSize()
-                        .disabled(!manager.canControl(
+                        .disabled(panel.manuallyOff || !manager.canControl(
                             panel.serviceName, capability: .brightness))
                         .help(controlHelp(.brightness, "Set the panel backlight"))
+                    Spacer(minLength: 0)
                 }
-            }
-            if let levels = manager.brightnessLevels(panel.serviceName) {
-                LabeledContent("Low brightness") {
-                    HStack(spacing: 8) {
-                        Text("\(levels.low)")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .frame(width: 28, alignment: .trailing)
-                        Stepper(
-                            "Low brightness",
-                            value: brightnessPreset(\.low),
-                            in: 1...max(1, levels.high - 1))
-                            .labelsHidden()
-                    }
-                }
-                LabeledContent("High brightness") {
-                    HStack(spacing: 8) {
-                        Text("\(levels.high)")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .frame(width: 28, alignment: .trailing)
-                        Stepper(
-                            "High brightness",
-                            value: brightnessPreset(\.high),
-                            in: min(255, levels.low + 1)...255)
-                            .labelsHidden()
-                    }
-                }
-                LabeledContent("Idle brightness") {
-                    HStack(spacing: 8) {
-                        Text("\(levels.idle)")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .frame(width: 28, alignment: .trailing)
-                        Stepper(
-                            "Idle brightness",
-                            value: brightnessPreset(\.idle),
-                            in: DeviceProtocol.brightnessLevelRange)
-                            .labelsHidden()
-                    }
-                }
-                LabeledContent("Survey brightness") {
-                    HStack(spacing: 8) {
-                        Text("\(levels.survey)")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .frame(width: 28, alignment: .trailing)
-                        Stepper(
-                            "Survey brightness",
-                            value: brightnessPreset(\.survey),
-                            in: DeviceProtocol.brightnessLevelRange)
-                            .labelsHidden()
-                    }
-                }
-            }
-            if manager.supportsQuarterTurnRotation(panel.serviceName) {
-                // Panels whose firmware advertises quarter-turn rotation get
-                // a four-way choice. On rectangular glass 90 and 270 are
-                // landscape, and choosing one turns the capture region on
-                // its side. Firmware without `.rotate` keeps the 180 toggle
-                // below.
-                LabeledContent("Orientation") {
-                    Picker("Orientation", selection: Binding(
-                        get: { panel.rotation },
-                        set: { manager.setRotation($0, for: panel.serviceName) })) {
-                        Text("0°").tag(0)
-                        Text("90°").tag(1)
-                        Text("180°").tag(2)
-                        Text("270°").tag(3)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .fixedSize()
-                    .disabled(!manager.canControl(panel.serviceName, capability: .rotate))
-                    .help(controlHelp(
-                        .rotate,
-                        "Turn the image clockwise to match how the panel is mounted"))
-                }
-            } else {
-                LabeledContent("Orientation") {
-                    Toggle("Rotate 180°", isOn: Binding(
-                        get: { panel.flipped },
-                        set: { manager.setFlip($0, for: panel.serviceName) }))
-                        .toggleStyle(.switch)
-                        .fixedSize()
-                        .disabled(!manager.canControl(panel.serviceName, capability: .flip))
-                        .help(controlHelp(.flip, "Rotate the image on the panel"))
-                }
-            }
-            if let status = manager.automaticRotationStatus(panel.serviceName),
-               let enabled = status.automaticRotationEnabled,
-               let effective = status.effectiveRotation {
-                LabeledContent("Automatic orientation") {
-                    Toggle("Automatic orientation", isOn: Binding(
-                        get: { enabled },
-                        set: {
-                            manager.setAutomaticRotation(
-                                $0, for: panel.serviceName)
-                        }))
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                        .fixedSize()
-                        .disabled(
-                            !manager.canPerform(
-                                .automaticRotation, for: panel.serviceName))
-                        .help(operationHelp(
-                            .automaticRotation,
-                            "Use the motion sensor to keep the image upright."))
-                }
-                LabeledContent(
-                    "Effective rotation",
-                    value: "\(effective * 90)°")
-            }
-            if panel.controlProtocolVersion != Int(DeviceProtocol.controlProtocolVersion),
-               manager.verifiedUSBDevice(for: panel.serviceName) == nil {
-                Text("Flash the current firmware to enable remote controls.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
             }
         }
+    }
+
+    @ViewBuilder
+    private func brightnessPresetRows(_ levels: WifiConfigUI.BrightnessLevels) -> some View {
+            LabeledContent("Low brightness") {
+                HStack(spacing: 8) {
+                    Text("\(levels.low)")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 28, alignment: .trailing)
+                    Stepper(
+                        "Low brightness",
+                        value: brightnessPreset(\.low),
+                        in: 1...max(1, levels.high - 1))
+                        .labelsHidden()
+                }
+            }
+            LabeledContent("High brightness") {
+                HStack(spacing: 8) {
+                    Text("\(levels.high)")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 28, alignment: .trailing)
+                    Stepper(
+                        "High brightness",
+                        value: brightnessPreset(\.high),
+                        in: min(255, levels.low + 1)...255)
+                        .labelsHidden()
+                }
+            }
+            LabeledContent("Idle brightness") {
+                HStack(spacing: 8) {
+                    Text("\(levels.idle)")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 28, alignment: .trailing)
+                    Stepper(
+                        "Idle brightness",
+                        value: brightnessPreset(\.idle),
+                        in: DeviceProtocol.brightnessLevelRange)
+                        .labelsHidden()
+                }
+            }
+            LabeledContent("Survey brightness") {
+                HStack(spacing: 8) {
+                    Text("\(levels.survey)")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 28, alignment: .trailing)
+                    Stepper(
+                        "Survey brightness",
+                        value: brightnessPreset(\.survey),
+                        in: DeviceProtocol.brightnessLevelRange)
+                        .labelsHidden()
+                }
+            }
+    }
+
+    /// A disclosure label whose whole row is the hit target; see the note in
+    /// `diagnosticsSection`.
+    private func disclosureLabel(_ title: String, isExpanded: Binding<Bool>) -> some View {
+        Text(title)
+            // A selectable label takes the click as the start of a selection,
+            // and the row would stop opening.
+            .textSelection(.disabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .onTapGesture { isExpanded.wrappedValue.toggle() }
+            .accessibilityAddTraits(.isButton)
     }
 
     private var connectionSection: some View {
@@ -902,53 +978,15 @@ private struct PanelDetailView: View {
         Section {
             if let audio = panel.audioStatus {
                 LabeledContent("State", value: audio.state.label)
-                LabeledContent("Detail", value: audio.message)
+                LabeledContent("Detail") {
+                    Text(audio.message).textSelection(.enabled)
+                }
                 LabeledContent("Mac microphone", value: audio.inputName)
                 LabeledContent("Mac speakers", value: audio.outputName)
-                LabeledContent(
-                    "Panel format",
-                    value: "\(audio.descriptor.sampleRateHz) Hz, "
-                        + "\(audio.descriptor.playbackChannels) down / "
-                        + "\(audio.descriptor.captureChannels) up channels")
-                LabeledContent(
-                    "Mac downlink loss",
-                    value: "\(audio.downlinkQueueDrops) queue drops, "
-                        + "\(audio.captureCallbackDrops) callback drops")
-                LabeledContent(
-                    "Mac uplink loss",
-                    value: "\(audio.uplinkLostFrames) lost frames, "
-                        + "\(audio.uplinkLatePackets) late, "
-                        + "\(audio.playbackQueueDrops) queue drops")
-                LabeledContent(
-                    "Active drift correction",
-                    value: String(
-                        format: "%.1f ppm down / %.1f ppm up",
-                        audio.downlinkCorrectionPPM,
-                        audio.uplinkCorrectionPPM))
-
-                if let status = audio.panelStatus {
-                    LabeledContent(
-                        "Panel buffer",
-                        value: "\(status.fillFrames) / \(status.targetFrames) frames")
-                    LabeledContent(
-                        "Minimum fill",
-                        value: "\(status.minimumFillFrames) frames")
-                    LabeledContent("Underruns", value: "\(status.underruns)")
-                    LabeledContent(
-                        "Underrun duration",
-                        value: "\(status.underrunDurationMilliseconds) ms")
-                    LabeledContent("Late packets", value: "\(status.latePackets)")
-                    LabeledContent("Lost frames", value: "\(status.lostFrames)")
-                    LabeledContent(
-                        "Clock corrections", value: "\(status.hardCorrections)")
-                    LabeledContent(
-                        "Ingress drops", value: "\(status.ingressDrops)")
-                    LabeledContent("Queue drops", value: "\(status.queueDrops)")
-                    LabeledContent("Engine drops", value: "\(status.engineDrops)")
-                    LabeledContent(
-                        "Capture overruns", value: "\(status.captureOverruns)")
-                } else {
-                    LabeledContent("Panel diagnostics", value: "Waiting for status")
+                DisclosureGroup(isExpanded: $showAudioDiagnostics) {
+                    audioDiagnosticRows(audio)
+                } label: {
+                    disclosureLabel("Audio diagnostics", isExpanded: $showAudioDiagnostics)
                 }
             } else {
                 LabeledContent("State", value: "Waiting for audio descriptor")
@@ -962,6 +1000,55 @@ private struct PanelDetailView: View {
                 Text("Audio starts only after the panel advertises a complete "
                     + "EAUD descriptor and its audio capability bits.")
             }
+        }
+    }
+
+    @ViewBuilder
+    private func audioDiagnosticRows(_ audio: PanelAudioSnapshot) -> some View {
+        LabeledContent(
+            "Panel format",
+            value: "\(audio.descriptor.sampleRateHz) Hz, "
+                + "\(audio.descriptor.playbackChannels) down / "
+                + "\(audio.descriptor.captureChannels) up channels")
+        LabeledContent(
+            "Mac downlink loss",
+            value: "\(audio.downlinkQueueDrops) queue drops, "
+                + "\(audio.captureCallbackDrops) callback drops")
+        LabeledContent(
+            "Mac uplink loss",
+            value: "\(audio.uplinkLostFrames) lost frames, "
+                + "\(audio.uplinkLatePackets) late, "
+                + "\(audio.playbackQueueDrops) queue drops")
+        LabeledContent(
+            "Active drift correction",
+            value: String(
+                format: "%.1f ppm down / %.1f ppm up",
+                audio.downlinkCorrectionPPM,
+                audio.uplinkCorrectionPPM))
+
+        if let status = audio.panelStatus {
+            LabeledContent(
+                "Panel buffer",
+                value: "\(status.fillFrames) / \(status.targetFrames) frames")
+            LabeledContent(
+                "Minimum fill",
+                value: "\(status.minimumFillFrames) frames")
+            LabeledContent("Underruns", value: "\(status.underruns)")
+            LabeledContent(
+                "Underrun duration",
+                value: "\(status.underrunDurationMilliseconds) ms")
+            LabeledContent("Late packets", value: "\(status.latePackets)")
+            LabeledContent("Lost frames", value: "\(status.lostFrames)")
+            LabeledContent(
+                "Clock corrections", value: "\(status.hardCorrections)")
+            LabeledContent(
+                "Ingress drops", value: "\(status.ingressDrops)")
+            LabeledContent("Queue drops", value: "\(status.queueDrops)")
+            LabeledContent("Engine drops", value: "\(status.engineDrops)")
+            LabeledContent(
+                "Capture overruns", value: "\(status.captureOverruns)")
+        } else {
+            LabeledContent("Panel diagnostics", value: "Waiting for status")
         }
     }
 
@@ -1036,6 +1123,7 @@ private struct PanelDetailView: View {
                     systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
             if panel.gesturePreset == .multimedia, !MediaControl.isAuthorized {
                 HStack(spacing: 8) {
@@ -1099,6 +1187,7 @@ private struct PanelDetailView: View {
                     systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
                     .foregroundStyle(.orange)
+                    .textSelection(.enabled)
             }
         } header: {
             Text("Screensaver")
@@ -1111,15 +1200,53 @@ private struct PanelDetailView: View {
         }
     }
 
+    /// What is on the board, held against what the app carries, and the one
+    /// action that changes it.
+    ///
+    /// This used to show only `fw=`, which is FW_VERSION and moves only at a
+    /// release, so it read the same across months of rebuilds. The running build
+    /// is now reported by the board itself and matched to a bundled revision;
+    /// see `InstalledFirmware`. The protocol numbers moved to Diagnostics.
     private var firmwareSection: some View {
-        Section("Firmware") {
-            LabeledContent("Version", value: panel.firmwareVersion ?? "Legacy firmware")
-            LabeledContent(
-                "Frame protocol",
-                value: panel.frameProtocolVersion.map(String.init) ?? "2")
-            LabeledContent(
-                "Control protocol",
-                value: panel.controlProtocolVersion.map(String.init) ?? "Not available")
+        let installed = manager.installedFirmware(for: panel.serviceName)
+        let updateUnavailable = manager.firmwareUpdateUnavailableReason(panel.serviceName)
+        return Section("Firmware") {
+            LabeledContent("Running") {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(installed.runningText)
+                        .monospacedDigit()
+                        .textSelection(.enabled)
+                    Text(installed.matchText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            LabeledContent("Update") {
+                VStack(alignment: .leading, spacing: 4) {
+                    // Not marked destructive: it opens a sheet rather than doing
+                    // anything, and the sheet has its own confirmation naming the
+                    // direction - upgrade, reinstall or downgrade.
+                    // Deliberately NOT disabled when an update cannot proceed. A
+                    // greyed button explains nothing, and a tooltip is invisible
+                    // until someone hovers it: the reason is shown as text under
+                    // the button, and pressing it reports the same sentence
+                    // through the outcome alert.
+                    Button("Update Firmware…") {
+                        updateTarget = manager.beginFirmwareUpdate(panel.serviceName)
+                    }
+                    .help(updateUnavailable
+                        ?? "Update this display over WiFi or a matched USB connection")
+                    if let updateUnavailable {
+                        Text(updateUnavailable)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
             LabeledContent("Wireless updates") {
                 Text(manager.canPerform(
                     .wirelessFirmwareUpdate, for: panel.serviceName)
@@ -1181,10 +1308,21 @@ private struct PanelDetailView: View {
                     fromByteCount: Int64(panel.freeHeap), countStyle: .memory))
                 LabeledContent("Packet pacing", value: "\(panel.spacingMicros) µs")
                 if let hardwareID = panel.hardwareID {
-                    LabeledContent("Hardware ID", value: hardwareID)
+                    LabeledContent("Hardware ID") {
+                        Text(PanelManager.formattedHardwareID(hardwareID))
+                            .monospaced()
+                            .textSelection(.enabled)
+                    }
                 }
+                LabeledContent(
+                    "Frame protocol",
+                    value: panel.frameProtocolVersion.map(String.init) ?? "2")
+                LabeledContent(
+                    "Control protocol",
+                    value: panel.controlProtocolVersion.map(String.init) ?? "Not available")
             } label: {
                 Text("Diagnostics")
+                    .textSelection(.disabled)
                     // The whole label is the hit target, not just the arrow -
                     // filled to the row's width, then given a shape to
                     // hit-test against, since text alone is only as wide as
@@ -1208,25 +1346,6 @@ private struct PanelDetailView: View {
 
     private var dangerSection: some View {
         Section {
-            // Not marked destructive: it opens a sheet rather than doing
-            // anything, and the sheet has its own confirmation naming the
-            // direction - update, reinstall or downgrade.
-            // Deliberately NOT disabled when an update cannot proceed. A greyed
-            // button explains nothing, and a tooltip is invisible until someone
-            // hovers it: the reason is shown as text under the button, and
-            // pressing it reports the same sentence through the outcome alert.
-            Button("Update Firmware…") {
-                updateTarget = manager.beginFirmwareUpdate(panel.serviceName)
-            }
-            .help(manager.firmwareUpdateUnavailableReason(panel.serviceName)
-                ?? "Update this display over WiFi or a matched USB connection")
-            if let reason =
-                manager.firmwareUpdateUnavailableReason(panel.serviceName) {
-                Text(reason)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
             Button("Restart Display…", role: .destructive) {
                 confirmRestart = true
             }
@@ -1396,6 +1515,7 @@ private struct PanelDetailView: View {
                 Text(otaPasswordProblem)
                     .font(.caption)
                     .foregroundStyle(.orange)
+                    .textSelection(.enabled)
                     .frame(width: 260, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
@@ -1441,20 +1561,31 @@ private struct PanelDetailView: View {
 
 // MARK: - Hero
 
-/// What one panel is showing, and whether it is still being fed.
+/// What one panel is showing, whether it is still being fed, and what it is.
 ///
-/// Deliberately narrow in scope: the name and connection state now live in the
-/// merged titlebar, so this is only the picture, the capture state, and the two
-/// numbers that qualify it. Repeating the name here as a heading cost a whole
-/// line of window height to say what the titlebar already said.
-private struct MirrorHero: View {
+/// The name and connection state live in the merged titlebar, so the name is
+/// not repeated here. What this adds beside the picture is the handful of facts
+/// that say which physical board this is - its model, the USB device it is on
+/// and what answered there, its address, and how long it has been up - which
+/// used to be spread across four sections or not shown at all.
+struct MirrorHero: View {
+    struct Fact: Equatable, Identifiable {
+        let label: String
+        let value: String
+        /// Greyed: an absence ("Not connected by USB") rather than a value.
+        var isMuted = false
+
+        var id: String { label }
+    }
+
     let panel: PanelSnapshot
     @ObservedObject var preview: FramePreview
+    var facts: [Fact] = []
 
     @Namespace private var glassNamespace
 
     /// Panel geometry, so the placeholder is the same shape as a real frame.
-    private static let thumbnailHeight: CGFloat = 96
+    private static let thumbnailHeight: CGFloat = 108
 
     private var frame: PreviewFrame? {
         // Never show one panel's frame against another's details.
@@ -1464,32 +1595,66 @@ private struct MirrorHero: View {
 
     var body: some View {
         GlassEffectContainer(spacing: 14) {
-            // The same one third / two thirds split the rows below use, so the
-            // picture sits in the label column and its state in the value
-            // column. Centred rather than baseline-aligned: an image's text
-            // baseline is just its bottom edge, which would hang the status
-            // pill off the foot of the thumbnail.
-            LabelColumnLayout(alignment: .center) {
-                thumbnail
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                VStack(alignment: .leading, spacing: 7) {
-                    statusPill
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                    if let lastError = panel.lastError {
-                        Text(lastError)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 10) {
+                // The same one third / two thirds split the rows below use, so
+                // the picture sits in the label column and its state in the
+                // value column. Centred rather than baseline-aligned: an image's
+                // text baseline is just its bottom edge, which would hang the
+                // status pill off the foot of the thumbnail.
+                LabelColumnLayout(alignment: .center) {
+                    thumbnail
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            statusPill
+                            Text(detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                                .lineLimit(1)
+                        }
+                        factGrid
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                if let lastError = panel.lastError {
+                    Label {
+                        Text(lastError)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .padding(12)
             .glassCard(cornerRadius: 16)
         }
+    }
+
+    /// Selectable, because every one of these is something a person copies:
+    /// an address for ssh, a port for esptool, a model to search for.
+    private var factGrid: some View {
+        Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 3) {
+            ForEach(facts) { fact in
+                GridRow(alignment: .firstTextBaseline) {
+                    Text(fact.label)
+                        .foregroundStyle(.secondary)
+                        .gridColumnAlignment(.trailing)
+                    Text(fact.value)
+                        .foregroundStyle(fact.isMuted ? .secondary : .primary)
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .font(.caption)
+        .monospacedDigit()
     }
 
     /// State as its own small glass capsule, so "is this working" reads at a
@@ -1502,6 +1667,7 @@ private struct MirrorHero: View {
             Text(panel.captureStatus.summary)
                 .font(.callout)
                 .fontWeight(.medium)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 10)
@@ -1530,9 +1696,7 @@ private struct MirrorHero: View {
             } else {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(.quaternary.opacity(0.5))
-                    .aspectRatio(
-                        CGFloat(PixelConvert.width) / CGFloat(PixelConvert.height),
-                        contentMode: .fit)
+                    .aspectRatio(placeholderAspect, contentMode: .fit)
                     .frame(height: Self.thumbnailHeight)
                     .overlay(
                         Image(systemName: "display.slash")
@@ -1541,6 +1705,13 @@ private struct MirrorHero: View {
             }
         }
         .accessibilityHidden(true)
+    }
+
+    /// The placeholder takes the panel's own mounted shape; a panel that has
+    /// not said what it is gets a square rather than one board's portrait.
+    private var placeholderAspect: CGFloat {
+        guard let shape = panel.mountedGeometry, shape.height > 0 else { return 1 }
+        return CGFloat(shape.width) / CGFloat(shape.height)
     }
 
     private var symbol: String {

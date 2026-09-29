@@ -77,6 +77,7 @@ void addMdnsService() {
   MDNS.addServiceTxt("espdisp", "udp", "name", cfgName);
   MDNS.addServiceTxt("espdisp", "udp", "res", res);
   MDNS.addServiceTxt("espdisp", "udp", "fw", FW_VERSION);
+  MDNS.addServiceTxt("espdisp", "udp", "src", FW_SOURCE);
   MDNS.addServiceTxt("espdisp", "udp", "proto", proto);
   MDNS.addServiceTxt("espdisp", "udp", "caps", caps);
   MDNS.addServiceTxt("espdisp", "udp", "chip", chip);

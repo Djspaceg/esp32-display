@@ -66,8 +66,10 @@ struct WifiPresetSheet: View {
                     Label(failure.title, systemImage: "exclamationmark.triangle.fill")
                         .fontWeight(.semibold)
                         .foregroundStyle(.red)
+                        .textSelection(.enabled)
                     Text(failure.message)
                         .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
             } else if let confirmation {
                 Section {
@@ -77,6 +79,10 @@ struct WifiPresetSheet: View {
             }
         }
         .formStyle(.grouped)
+        // Every message in here - errors above all - can be selected and
+        // copied. Set once at the root, so a message added later cannot be
+        // the one that forgot.
+        .textSelection(.enabled)
         .labeledContentStyle(.labelColumn)
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 10) {

@@ -54,6 +54,9 @@ struct AddDeviceSheet: View {
     /// off USB before it can be chosen here.
     @State private var repairing = false
     @State private var prepared = false
+    /// Whether the form is on screen, so a failure is only taken off the
+    /// manager window's alert when this sheet is there to show it instead.
+    @State private var formIsShowing = false
 
     var body: some View {
         if repairing {
@@ -74,24 +77,34 @@ struct AddDeviceSheet: View {
             }
             networkSection
             verdictSection
-            if running || flash.session.failure != nil {
-                progressSection
+            // Progress and failure are in the floating footer, always on
+            // screen; the transcript stays here.
+            if !flash.session.transcript.entries.isEmpty {
+                Section("Details") {
+                    UsbFlashTranscriptView(session: flash.session)
+                }
             }
         }
         .formStyle(.grouped)
+        // Every message in here - errors above all - can be selected and
+        // copied. Set once at the root, so a message added later cannot be
+        // the one that forgot.
+        .textSelection(.enabled)
         .labeledContentStyle(.labelColumn)
         .safeAreaInset(edge: .bottom) {
-            actionBar
+            actionBar.textSelection(.enabled)
         }
         .frame(width: 560, height: 620)
         // Once per sheet: coming back from the repair flow must not reset the
         // network and firmware already chosen.
         .onAppear {
+            formIsShowing = true
             guard !prepared else { return }
             prepared = true
             prepare()
         }
         .onDisappear {
+            formIsShowing = false
             // The sheet going away must not leave esptool running against a board
             // with nobody watching. Unlike the OTA push - where the transfer is
             // finished before the sheet can be closed - a flash can be in the
@@ -312,6 +325,7 @@ struct AddDeviceSheet: View {
                         + "table and app are written together.")
                     .font(.callout)
                     .foregroundStyle(.orange)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
             VStack(alignment: .leading, spacing: 6) {
@@ -325,13 +339,23 @@ struct AddDeviceSheet: View {
         }
     }
 
-    private var progressSection: some View {
-        Section(flash.session.failure == nil ? "Progress" : "What went wrong") {
-            UsbFlashStatusView(session: flash.session)
+    private var actionBar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            actionButtons
+            // At the bottom of the floating footer, so it is on screen for the
+            // whole run without scrolling.
+            if running || flash.session.failure != nil {
+                Divider()
+                FlashStatusFooterView(status: .usb(flash.session))
+            }
         }
+        .padding(12)
+        .glassCard(cornerRadius: 16)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 14)
     }
 
-    private var actionBar: some View {
+    private var actionButtons: some View {
         HStack(spacing: 10) {
             Spacer()
             Button(running ? "Stop" : "Cancel", role: .cancel) {
@@ -365,10 +389,6 @@ struct AddDeviceSheet: View {
                 !plan.canStart || running || selectedHardwareID == nil
                     || manager.isUSBDeviceAssociated(port))
         }
-        .padding(12)
-        .glassCard(cornerRadius: 16)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 14)
     }
 
     // MARK: - derived
@@ -788,16 +808,18 @@ struct AddDeviceSheet: View {
             running = false
             if !succeeded, let outcome = manager.operationOutcome,
                outcome.kind == .failure {
-                // Kept on screen with the step, what was last seen and the
-                // transcript; the alert says the same thing once.
+                // Shown here, now, with the step, what was last seen and the
+                // transcript. Taken off the manager window too: its alert sits
+                // behind this sheet and would only appear once the sheet was
+                // closed, repeating an old failure after the fact.
                 flash.fail(outcome)
+                if formIsShowing { manager.clearOperationOutcome() }
             }
             if succeeded {
                 dismiss()
             } else {
                 // Left open with the port, the firmware and the network still filled
-                // in, so a retry is one button. The outcome alert says what
-                // happened.
+                // in, so a retry is one button. The footer says what happened.
                 manager.refreshUSBPorts()
             }
         }

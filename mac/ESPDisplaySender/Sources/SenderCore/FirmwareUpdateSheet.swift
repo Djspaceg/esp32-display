@@ -208,11 +208,22 @@ struct FirmwareUpdatePlan: Equatable {
 /// Pure row text for the bundled revision picker, kept outside the view so the
 /// exact labels can be checked against the committed release catalog headlessly.
 enum FirmwareRevisionPresentation {
+    /// `1.5.0 - Reinstall`, or `1.5.0 - Reinstall - Installed` when the board
+    /// reports exactly this build. The verb is still the version comparison, so
+    /// the installed revision stays selectable and installable like any other.
     static func title(
         revision: FirmwareReleaseCatalog.Revision,
-        plan: FirmwareUpdatePlan
+        plan: FirmwareUpdatePlan,
+        isInstalled: Bool = false
     ) -> String {
-        "\(identity(revision)) - \(plan.verb)"
+        "\(identity(revision)) - \(plan.verb)" + (isInstalled ? " - Installed" : "")
+    }
+
+    /// The Running row: the version, and the build when the board names one.
+    static func running(version: String?, source: FirmwareSourceIdentity?) -> String {
+        guard let version else { return "Not reported over USB" }
+        guard let source else { return version }
+        return "\(version) (build \(source.summary))"
     }
 
     static func unavailableTitle(
@@ -347,10 +358,26 @@ struct FirmwareUpdateSheet: View {
         bundledFirmware: BundledFirmware.Availability? = nil
     ) {
         self.manager = manager
-        self.bundledFirmware = bundledFirmware ?? BundledFirmware.load()
+        self.bundledFirmware = bundledFirmware ?? manager.bundledFirmware
         _target = State(initialValue: target)
         _selectedTransport = State(
             initialValue: target.usbDevice != nil ? .usb : .wifi)
+    }
+
+    /// For offscreen captures only: the sheet part-way through a USB run, or
+    /// after one failed, without running anything.
+    init(
+        manager: PanelManager,
+        target: PanelManager.FirmwareUpdateTarget,
+        bundledFirmware: BundledFirmware.Availability,
+        capturing monitor: UsbFlashMonitor,
+        isPushing: Bool,
+        failure: OperationOutcome? = nil
+    ) {
+        self.init(manager: manager, target: target, bundledFirmware: bundledFirmware)
+        _usbFlash = StateObject(wrappedValue: monitor)
+        _isPushing = State(initialValue: isPushing)
+        _updateFailure = State(initialValue: failure)
     }
 
     var body: some View {
@@ -382,19 +409,25 @@ struct FirmwareUpdateSheet: View {
                     passwordSection
                 }
             }
-            if let updateFailure {
-                failureSection(updateFailure)
-            }
-            if isPushing {
-                progressSection
+            // The run's progress and failure are in the floating footer, which
+            // is always on screen; only the transcript stays in the form.
+            if selectedTransport == .usb,
+               !usbFlash.session.transcript.entries.isEmpty {
+                Section("Details") {
+                    UsbFlashTranscriptView(session: usbFlash.session)
+                }
             }
         }
         .formStyle(.grouped)
+        // Every message in here - errors above all - can be selected and
+        // copied. Set once at the root, so a message added later cannot be
+        // the one that forgot.
+        .textSelection(.enabled)
         .labeledContentStyle(.labelColumn)
         // A floating glass action bar, as in SettingsSheet, so the form scrolls
         // under it rather than being pushed up by a row bolted to the bottom.
         .safeAreaInset(edge: .bottom) {
-            actionBar
+            actionBar.textSelection(.enabled)
         }
         .frame(width: 560, height: 620)
         .onAppear {
@@ -438,9 +471,11 @@ struct FirmwareUpdateSheet: View {
     private var panelSection: some View {
         Section("Panel") {
             LabeledContent("Display", value: target.displayName)
-            LabeledContent(
-                "Running",
-                value: target.firmwareVersion ?? "Not reported over USB")
+            LabeledContent("Running") {
+                Text(FirmwareRevisionPresentation.running(
+                    version: target.firmwareVersion, source: target.firmwareSource))
+                    .textSelection(.enabled)
+            }
             LabeledContent("Chip", value: chipDescription)
             LabeledContent("Target", value: targetDescription)
             LabeledContent("Address", value: target.address ?? "Not available")
@@ -554,7 +589,9 @@ struct FirmwareUpdateSheet: View {
                 LabeledContent("File", value: bundleURL.lastPathComponent)
                 LabeledContent("Version", value: bundle.firmwareVersion)
                 LabeledContent("Built", value: bundle.builtAt)
-                LabeledContent("Source", value: sourceDescription(bundle))
+                LabeledContent("Source") {
+                    Text(sourceDescription(bundle)).textSelection(.enabled)
+                }
             }
             if !revisionOptions.isEmpty {
                 revisionPicker
@@ -573,6 +610,7 @@ struct FirmwareUpdateSheet: View {
                     Text(readFailure)
                         .font(.callout)
                         .foregroundStyle(.orange)
+                        .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 } else if revisionOptions.isEmpty {
                     // Plain prose rather than markdown: these strings are built
@@ -612,6 +650,7 @@ struct FirmwareUpdateSheet: View {
                 Text(option.unavailableReason ?? "Validation failed.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -666,6 +705,7 @@ struct FirmwareUpdateSheet: View {
                 Text(migration.planDetail)
                     .font(.callout)
                     .foregroundStyle(.orange)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
             VStack(alignment: .leading, spacing: 6) {
@@ -680,6 +720,7 @@ struct FirmwareUpdateSheet: View {
                     : plan.detail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if selectedTransport == .usb, !usbBundleCanWrite(bundle) {
@@ -689,6 +730,7 @@ struct FirmwareUpdateSheet: View {
                     systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
                     .foregroundStyle(.orange)
+                    .textSelection(.enabled)
             }
         }
     }
@@ -703,6 +745,7 @@ struct FirmwareUpdateSheet: View {
                 Text(passwordProblem)
                     .font(.callout)
                     .foregroundStyle(.orange)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
         } header: {
@@ -715,58 +758,42 @@ struct FirmwareUpdateSheet: View {
         }
     }
 
-    @ViewBuilder
-    private func failureSection(_ failure: OperationOutcome) -> some View {
-        if selectedTransport == .usb, usbFlash.session.failure != nil {
-            Section("Update failed") {
-                UsbFlashStatusView(session: usbFlash.session)
-            }
-        } else {
-        Section("Update failed") {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(failure.title)
-                    .fontWeight(.medium)
-                    .textSelection(.enabled)
-                Text(failure.message)
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-            }
+    /// What the footer shows under the buttons, or nil when nothing has run.
+    private var footerStatus: FlashFooterStatus? {
+        if selectedTransport == .usb, isPushing || usbFlash.session.failure != nil {
+            return .usb(usbFlash.session)
         }
+        if let updateFailure { return .failure(updateFailure) }
+        guard isPushing else { return nil }
+        var detail: String?
+        if isWaitingForResult {
+            detail = "This can take a while on a large image. You can close this "
+                + "window; if it is closed, the result appears in the manager "
+                + "window. Otherwise it appears here."
         }
+        return .progress(
+            fraction: progressFraction, title: progressDescription, detail: detail)
     }
 
-    private var progressSection: some View {
-        Section("Progress") {
-            if selectedTransport == .usb {
-                UsbFlashStatusView(session: usbFlash.session)
-            } else {
-            VStack(alignment: .leading, spacing: 8) {
-                if let fraction = progressFraction {
-                    ProgressView(value: fraction)
-                } else {
-                    ProgressView()
-                        .progressViewStyle(.linear)
-                }
-                Text(progressDescription)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                if isWaitingForResult {
-                    Text("This can take a while on a large image. You can close "
-                        + "this window; if it is closed, the result appears in "
-                        + "the manager window. Otherwise it appears here.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            }
-        }
-    }
-
+    /// Floats over the form like SettingsSheet's, and carries the run's status
+    /// under its buttons so progress and failure are never below the fold.
     private var actionBar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            actionButtons
+            // At the bottom of the footer, under the buttons: the footer
+            // floats over the form, so this is on screen for the whole run.
+            if let footerStatus {
+                Divider()
+                FlashStatusFooterView(status: footerStatus)
+            }
+        }
+        .padding(12)
+        .glassCard(cornerRadius: 16)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 14)
+    }
+
+    private var actionButtons: some View {
         HStack(spacing: 10) {
             Spacer()
             Button(dismissTitle, role: .cancel) { dismiss() }
@@ -793,10 +820,6 @@ struct FirmwareUpdateSheet: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canBeginPush)
         }
-        .padding(12)
-        .glassCard(cornerRadius: 16)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 14)
     }
 
     // MARK: derived
@@ -987,7 +1010,9 @@ struct FirmwareUpdateSheet: View {
     private func sourceDescription(_ bundle: FirmwareBundle) -> String {
         guard let commit = bundle.sourceCommit else { return "Not a git checkout" }
         let short = String(commit.prefix(12))
-        return bundle.sourceDirty ? "\(short) (uncommitted changes)" : short
+        let built = bundle.sourceDirty ? "\(short) (uncommitted changes)" : short
+        return target.firmwareSource?.isExactly(bundle) == true
+            ? "\(built) - the build this panel is running" : built
     }
 
     private func byteCount(_ bytes: Int) -> String {
@@ -1099,7 +1124,8 @@ struct FirmwareUpdateSheet: View {
         }
         return FirmwareRevisionPresentation.title(
             revision: option.revision,
-            plan: plan(selection.bundle))
+            plan: plan(selection.bundle),
+            isInstalled: target.firmwareSource?.isExactly(selection.bundle) == true)
     }
 
     private func reloadAutomaticFirmwareForSelectedTransport() {

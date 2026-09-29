@@ -2,6 +2,49 @@
 
 Each finished branch keeps its own record below.
 
+## Layout cleanup (app-layout-cleanup)
+
+### Outcome
+
+The display window is reordered (what is changed first, read-only last), the hero carries board model, USB device and identity, network, uptime and battery, and the Firmware section shows the build on the board, matched to the bundled release. The firmware reports that build as a new optional field, verified on the 4C. Rebased onto main 0140c45.
+
+### Decisions to evaluate
+
+D1 The board reports its build as a new optional CFGINFO `src=` (last field) and mDNS TXT `src`, value `<40-hex commit>[-dirty]` from the same git provenance as the bundle manifest; EINF is untouched. Why: fits as a field old readers ignore. If overruled: drop src= and match by version only.
+D2 The Power switch is the Screen switch at the leading end of the Brightness row; the slider rests while the screen is off. Why: pwr= is a standing screen-off (backlight 0, plus the panel's display-off command where supported; the 4C's panel refuses it), board still on WiFi. If overruled: separate row named "Screen".
+D3 Flash progress and failure sit under the buttons in the floating footer of the update and Add Display sheets; the transcript stays in the form. Repair keeps its progress as its first section. If overruled: move Repair's into its footer too.
+D4 Text is selectable at the root of every form and footer; disclosure labels opt out so they still open. If overruled: per-message modifiers.
+D5 The installed revision is marked "- Installed"; the verb stays the version comparison, so every revision stays installable. If overruled: none needed for the standing rule.
+D6 A USB write fails when the board restarts into a different or dirty build, or answers without a build after an image that names itself. If overruled: version-only check.
+D7 Serial line buffer 512 -> 768 bytes so src= is never trimmed off the longest CFGINFO. If overruled: move src= earlier in the line.
+D8 1.5.0 shipping bundles regenerated from 367ddd3 (on main 0140c45) under the same version. If overruled: bump FW_VERSION, which was not asked for.
+D9 The hero placeholder and region footer use the panel's own mounted shape, not PixelConvert's 172x320; that was a code bug, not the fixture. If overruled: revert to the fixed aspect.
+
+### Open questions
+
+- Does selecting text in the detail pane get in the way of any click in the running app? Default: disclosure labels opt out; not checked in the live app (no app launched).
+- Copying evidence into the main checkout to capture it: answered "Copy in briefly, then delete". Done each time; main status left clean.
+- 4C power: answered "I will power it properly". Done; the board held steady for the flash and tests.
+
+### Gate facts
+
+- Publish: local commits on app-layout-cleanup only; not pushed, no CR cut.
+- packages/* call sites: none touched.
+- Lanes (gate-*.log): swift test, firmware run_tests, test_espdisp, generate --check, release-info, compile c3/c6/s3/p4, bundle regeneration, Release xcodebuild (derived data /Users/stepblk/Source/esp32-display-layout-build; /tmp tree deleted).
+- 4C hardware (hw-*.log): banner and CFGSHOW report src=367ddd3; CFGPOWER 0 gave pwr=off, then CFGPOWER 1 gave pwr=on. The panel's display-off command returned err=262 on this board. Backlight level unverified by serial: the firmware prints no level.
+- Adversarial review: 2 rounds (code-review.md); every should-fix fixed.
+
+### Evidence
+
+- 1-detail-top.png, 2-detail-full.png, 3-detail-screen-off-other-build.png: detail pane.
+- 4-update-writing.png, 5-update-failed.png, 6-update-ready.png: update sheet footer.
+- gate-*.log: gate lanes; hw-*.log: 4C flash and serial captures (SSID redacted).
+
+### Residuals
+
+- Captures draw glass opaque (glass is not composited offscreen), so the prominent button's label is invisible in them.
+- The human's look at the dark 4C screen was requested; no answer is recorded here.
+
 ## Audio on every capable board (audio-enable-boards)
 
 ### Outcome

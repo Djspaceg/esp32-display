@@ -769,6 +769,16 @@ def render_swift_catalog(
                 % (_q(profile), panel["width"], panel["height"])
             )
     lines.append("    ]\n\n")
+    # The descriptor's own name, which is what the app shows as the board
+    # model: "ESP32-C6-LCD-1.47 (ST7789)" rather than the profile token.
+    lines.append("    public static let boardNameByProfile: [String: String] = [\n")
+    for target in ("c3", "c6", "s3", "p4"):
+        for descriptor in grouped[target]:
+            lines.append(
+                "        %s: %s,\n"
+                % (_q(descriptor["identity"]["profile"]), _q(descriptor["name"]))
+            )
+    lines.append("    ]\n\n")
     lines.append("    public static let universalFamilyAliases: [String: Set<String>] = [\n")
     for target in ("c3", "c6", "s3", "p4"):
         aliases = {target}

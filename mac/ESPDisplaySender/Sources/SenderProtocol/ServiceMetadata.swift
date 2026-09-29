@@ -59,6 +59,9 @@ public struct ServiceMetadata: Hashable, Sendable {
     public let geometry: PanelGeometry?
     /// `fw`. See the note above about EINF being the authority.
     public let firmwareVersion: String?
+    /// `src`. Which build of `fw` this is; nil from firmware predating the
+    /// record and from a build that reports `unknown`.
+    public let firmwareSource: FirmwareSourceIdentity?
     /// `chip`. The IDF chip token, such as `esp32c6` or `esp32s3`.
     public let chip: String?
     /// `target`. The firmware release family (`c3`, `c6`, `s3`, or `p4`).
@@ -83,6 +86,7 @@ public struct ServiceMetadata: Hashable, Sendable {
         name: String? = nil,
         geometry: PanelGeometry? = nil,
         firmwareVersion: String? = nil,
+        firmwareSource: FirmwareSourceIdentity? = nil,
         chip: String? = nil,
         target: String? = nil,
         profile: String? = nil,
@@ -95,6 +99,7 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.name = name
         self.geometry = geometry
         self.firmwareVersion = firmwareVersion
+        self.firmwareSource = firmwareSource
         self.chip = chip
         self.target = target
         self.profile = profile
@@ -133,6 +138,7 @@ public struct ServiceMetadata: Hashable, Sendable {
         let records = Self.caseFolded(txtRecords)
         self.name = Self.nonEmpty(records["name"])
         self.firmwareVersion = Self.nonEmpty(records["fw"])
+        self.firmwareSource = FirmwareSourceIdentity(reported: records["src"])
         self.chip = Self.nonEmpty(records["chip"])
         self.target = Self.nonEmpty(records["target"])
         self.profile = Self.nonEmpty(records["profile"])

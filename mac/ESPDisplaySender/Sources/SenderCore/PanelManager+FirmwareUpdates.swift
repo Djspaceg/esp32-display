@@ -45,6 +45,11 @@ extension PanelManager {
         /// Nil for firmware that predates USB version reporting. That state may
         /// update only over a fully verified USB path.
         let firmwareVersion: String?
+        /// Which build of `firmwareVersion` is running, when the board names
+        /// one. Only ever used to say which bundled revision is already on it;
+        /// the upgrade/reinstall/downgrade verb stays a version comparison, so
+        /// every revision remains installable whatever this says.
+        var firmwareSource: FirmwareSourceIdentity? = nil
         /// A currently connected, positively identity-matched USB device.
         var usbDevice: WifiConfigUI.USBDeviceOption?
         /// Generation of that path when the sheet opened. A removal/reuse makes
@@ -61,6 +66,7 @@ extension PanelManager {
             address: String?, chip: String?, target: String? = nil,
             profile: String? = nil, partition: String? = nil,
             firmwareVersion: String?,
+            firmwareSource: FirmwareSourceIdentity? = nil,
             usbDevice: WifiConfigUI.USBDeviceOption? = nil,
             usbPathGeneration: Int? = nil,
             usbAllowsLegacyIdentity: Bool = false
@@ -74,6 +80,7 @@ extension PanelManager {
             self.profile = profile
             self.partition = partition
             self.firmwareVersion = firmwareVersion
+            self.firmwareSource = firmwareSource
             self.usbDevice = usbDevice
             self.usbPathGeneration = usbPathGeneration
             self.usbAllowsLegacyIdentity = usbAllowsLegacyIdentity
@@ -181,6 +188,9 @@ extension PanelManager {
             profile: panel.profile ?? usbDevice?.board,
             partition: panel.partition ?? usbDevice?.partition,
             firmwareVersion: version,
+            firmwareSource: panel.firmwareVersion != nil
+                ? panel.currentFirmwareSource
+                : usbCandidate?.serialStatus?.firmwareSource,
             usbDevice: usbDevice,
             usbPathGeneration: usbGeneration,
             usbAllowsLegacyIdentity: false))
@@ -234,6 +244,65 @@ extension PanelManager {
         } catch {
             return .failure("Update failed", error.localizedDescription)
         }
+    }
+
+    /// The failure to report when the board that answered after a USB write is
+    /// not running what was written, or nil when it is (or cannot be told).
+    ///
+    /// The version is compared first, as it always was. The build is compared
+    /// only when both sides name a clean one, which is what makes reinstalling
+    /// the same version provable: before builds were reported, a board that
+    /// rebooted into its old 1.5.0 after "reinstalling" 1.5.0 looked like success.
+    /// Firmware that does not report a build, and bundles that did not record
+    /// one, keep the version-only check.
+    nonisolated static func restartedIntoOtherFirmware(
+        bundle: FirmwareBundle, board: UsbOnboarder.SettledBoard
+    ) -> OperationOutcome? {
+        if let running = board.firmwareVersion,
+           FirmwareVersion.compare(running, to: bundle.firmwareVersion) != .same {
+            var outcome = OperationOutcome.failure(
+                "The board restarted into the old firmware",
+                "\(bundle.firmwareVersion) was written, but after restarting the board "
+                    + "reports \(running) on \(board.port).")
+            outcome.nextAction = "Run the USB update again. If it comes back on "
+                + "\(running) a second time, copy the transcript from Details and "
+                + "report it."
+            return outcome
+        }
+        // A clean bundle is written; anything else answering - another commit,
+        // or any build with uncommitted changes - is not what was written.
+        guard let written = FirmwareSourceIdentity(bundle: bundle), !written.dirty
+        else { return nil }
+        guard let running = board.firmwareSource else {
+            // Silence proves something only when the image written would have
+            // named itself: one that carries its commit reports it as src=.
+            // Then a board answering without src= is still on older firmware.
+            let commit = Data(written.commit.utf8)
+            let writtenNamesItself = bundle.images.contains { image in
+                image.targets.contains {
+                    bundle.payload(forTarget: $0)?.range(of: commit) != nil
+                }
+            }
+            guard writtenNamesItself else { return nil }
+            var outcome = OperationOutcome.failure(
+                "The board restarted into the old firmware",
+                "Build \(written.shortCommit) of \(bundle.firmwareVersion) was "
+                    + "written, but after restarting the board on \(board.port) "
+                    + "does not report a build, which only older firmware does.")
+            outcome.nextAction = "Run the USB update again. If it comes back the same "
+                + "way a second time, copy the transcript from Details and report it."
+            return outcome
+        }
+        guard running.dirty || running.commit != written.commit else { return nil }
+        var outcome = OperationOutcome.failure(
+            "The board restarted into a different build",
+            "Build \(written.shortCommit) of \(bundle.firmwareVersion) was written, "
+                + "but after restarting the board reports build "
+                + "\(running.summary) on \(board.port).")
+        outcome.nextAction = "Run the USB update again. If it comes back on build "
+            + "\(running.shortCommit) a second time, copy the transcript from "
+            + "Details and report it."
+        return outcome
     }
 
     /// Whether CFGSHOW's physical panel/controller profile belongs to an exact
@@ -581,15 +650,8 @@ extension PanelManager {
                     + "restarting.")
         }
         refreshUSBPorts()
-        if let running = answered.firmwareVersion,
-           FirmwareVersion.compare(running, to: bundle.firmwareVersion) != .same {
-            var outcome = OperationOutcome.failure(
-                "The board restarted into the old firmware",
-                "\(bundle.firmwareVersion) was written, but after restarting the board "
-                    + "reports \(running) on \(answered.port).")
-            outcome.nextAction = "Run the USB update again. If it comes back on "
-                + "\(running) a second time, copy the transcript from Details and "
-                + "report it."
+        if let outcome = Self.restartedIntoOtherFirmware(
+            bundle: bundle, board: answered) {
             return outcome
         }
         if case .fullFlashMigration(let oldLayout, let newLayout) =

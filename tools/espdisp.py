@@ -2921,7 +2921,39 @@ def validate_family_app_contract(board: Family, app: bytes) -> None:
         )
 
 
-def compile_board(board: Family, output_dir: Optional[str] = None) -> List[str]:
+BUILD_IDENTITY_HEADER = "build_identity.h"
+
+
+def build_identity_header(commit: Optional[str], dirty: bool) -> str:
+    """The header app_state.cpp includes to report which build it is.
+
+    The value is exactly the bundle manifest's provenance - `source_commit`, with
+    `-dirty` appended when `source_dirty` - so the app can hold what a board
+    reports against the bundles it carries. Anything short of a clean 40-hex
+    commit is written as "unknown", never interpolated: it lands in C source.
+    """
+    if commit is None or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        value = "unknown"
+    else:
+        value = commit + ("-dirty" if dirty else "")
+    return (
+        "#pragma once\n"
+        "// Written by tools/espdisp.py into its private sketch copy. Not source.\n"
+        '#define ESPDISP_SOURCE_ID "%s"\n' % value
+    )
+
+
+def compile_board(
+    board: Family,
+    output_dir: Optional[str] = None,
+    provenance: Optional[Tuple[Optional[str], bool]] = None,
+) -> List[str]:
+    """Compile one family from a private copy of the sketch.
+
+    `provenance` is the (commit, dirty) pair to embed; a bundle passes the pair
+    it also writes into its manifest, so the two cannot disagree. Omitted, it is
+    read from git here.
+    """
     validate_family_build_contract(board)
     if not os.path.isdir(SKETCH_DIR):
         raise Fail("sketch directory not found: %s" % SKETCH_DIR)
@@ -2962,6 +2994,10 @@ def compile_board(board: Family, output_dir: Optional[str] = None) -> List[str]:
         )
         with open(wifi_config, "w", encoding="utf-8") as out:
             out.write(EMPTY_WIFI_CONFIG)
+    commit, dirty = provenance if provenance is not None else git_provenance()
+    with open(os.path.join(build_sketch_dir, BUILD_IDENTITY_HEADER), "w",
+              encoding="utf-8") as out:
+        out.write(build_identity_header(commit, dirty))
 
     if board.extra_flags:
         flags = " ".join(board.extra_flags)
@@ -6054,7 +6090,8 @@ def cmd_bundle(args) -> int:
         for board in boards:
             out_dir = tempfile.mkdtemp(prefix="espdisp-bundle-%s-" % board.key)
             out_dirs.append(out_dir)
-            size_lines += compile_board(board, output_dir=out_dir)
+            size_lines += compile_board(
+                board, output_dir=out_dir, provenance=(commit, dirty))
             image = app_image(out_dir)
             blob = read_binary(image)
             parts, part_payloads = collect_flash_parts(board, out_dir)

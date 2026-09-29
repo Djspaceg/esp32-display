@@ -47,6 +47,22 @@ public enum GeneratedBoardCatalog {
         "jd9365-34c": PanelGeometry(width: 800, height: 800),
     ]
 
+    public static let boardNameByProfile: [String: String] = [
+        "gc9a01a-240": "ESP32-2424S012C-Y(B) (GC9A01A)",
+        "st7789": "ESP32-C6-LCD-1.47 (ST7789)",
+        "jd9853": "ESP32-C6-Touch-LCD-1.47 (JD9853)",
+        "gc9107": "ESP32-S3-LCD-0.85 (GC9107)",
+        "st7789-130": "ESP32-S3-LCD-1.3 (ST7789V2)",
+        "st7789-154": "ESP32-S3-Touch-LCD-1.54 (ST7789)",
+        "st7789-190": "ESP32-S3-LCD-1.9 (ST7789V2)",
+        "co5300": "ESP32-S3-Touch-AMOLED-1.75C (CO5300)",
+        "st77916": "ESP32-S3-Touch-LCD-1.85C (ST77916)",
+        "gc9a01-knob-128": "CrowPanel 1.28 Rotary Knob (GC9A01)",
+        "st7703-4b": "ESP32-P4-WIFI6-Touch-LCD-4B (ST7703)",
+        "jd9365-4c": "ESP32-P4-WIFI6-Touch-LCD-4C (JD9365)",
+        "jd9365-34c": "ESP32-P4-WIFI6-Touch-LCD-3.4C (JD9365)",
+    ]
+
     public static let universalFamilyAliases: [String: Set<String>] = [
         "c3": Set(["c3"]),
         "c6": Set(["c6"]),
