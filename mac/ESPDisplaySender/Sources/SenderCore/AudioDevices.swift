@@ -1,5 +1,3 @@
-import AVFoundation
-import AudioToolbox
 import CoreAudio
 import Foundation
 
@@ -17,6 +15,20 @@ struct CoreAudioRouteSnapshot: Equatable {
         options: [],
         defaultInputUID: nil,
         defaultOutputUID: nil)
+
+    /// What the display speaker's tap depends on: the output devices and the
+    /// default output. Inputs are left out, because nothing captures one, so
+    /// plugging in a microphone does not restart every display's audio.
+    var outputRoute: OutputRoute {
+        OutputRoute(
+            outputs: options.filter(\.supportsOutput),
+            defaultOutputUID: defaultOutputUID)
+    }
+
+    struct OutputRoute: Equatable {
+        let outputs: [AudioDeviceOption]
+        let defaultOutputUID: String?
+    }
 }
 
 enum CoreAudioDeviceCatalog {
@@ -53,6 +65,7 @@ enum CoreAudioDeviceCatalog {
         return ids.compactMap { id in
             guard let uid = stringProperty(
                 id, selector: kAudioDevicePropertyDeviceUID),
+                !SystemAudioTapIdentity.isOwnAggregate(uid: uid),
                 let name = stringProperty(
                     id, selector: kAudioObjectPropertyName)
             else { return nil }
@@ -81,51 +94,6 @@ enum CoreAudioDeviceCatalog {
                 for: .input, in: devices),
             defaultOutputUID: defaultDeviceUID(
                 for: .output, in: devices))
-    }
-
-    static func deviceID(
-        for uid: String?,
-        direction: AudioDeviceDirection,
-        in devices: [CoreAudioDevice]
-    ) -> AudioDeviceID? {
-        guard let uid else { return nil }
-        return devices.first {
-            $0.option.uid == uid && $0.option.supports(direction)
-        }?.id
-    }
-
-    static func setDevice(
-        _ deviceID: AudioDeviceID?,
-        on node: AVAudioIONode
-    ) throws {
-        guard var deviceID else { return }
-        guard let audioUnit = node.audioUnit else {
-            throw NSError(
-                domain: NSOSStatusErrorDomain,
-                code: Int(kAudio_ParamError),
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "CoreAudio did not expose an audio unit for device selection."
-                ])
-        }
-        let status = withUnsafePointer(to: &deviceID) { pointer in
-            AudioUnitSetProperty(
-                audioUnit,
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                pointer,
-                UInt32(MemoryLayout<AudioDeviceID>.size))
-        }
-        guard status == noErr else {
-            throw NSError(
-                domain: NSOSStatusErrorDomain,
-                code: Int(status),
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "CoreAudio could not select device \(deviceID)."
-                ])
-        }
     }
 
     private static func defaultDeviceUID(
@@ -194,7 +162,8 @@ enum CoreAudioDeviceCatalog {
         guard status == noErr,
             let value
         else { return nil }
-        return value.takeUnretainedValue() as String
+        // CoreAudio hands back a retained string; the caller releases it.
+        return value.takeRetainedValue() as String
     }
 }
 
@@ -202,8 +171,9 @@ extension PanelManager {
     func refreshAudioDevices() {
         let refreshed = CoreAudioDeviceCatalog.routeSnapshot()
         guard refreshed != audioRouteSnapshot else { return }
+        let outputChanged = refreshed.outputRoute != audioRouteSnapshot.outputRoute
         audioRouteSnapshot = refreshed
-        audioDevices = refreshed.options
+        guard outputChanged else { return }
         for session in sessions.values {
             session.audioDevicesChanged()
         }

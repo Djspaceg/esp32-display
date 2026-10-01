@@ -179,6 +179,13 @@ playback_rate_hz = 16000
 playback_channels = 2
 capture_rate_hz = 16000
 capture_channels = 2
+# Speaker DAC level: the lowest playback default in the vendor code, the
+# Arduino demo's es8311_voice_volume_set(75) (register 0x32 = 191, 0 dB). The
+# factory firmware plays at esp_codec_dev 100 (198, +3.5 dB).
+# https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.54/blob/5157db7c888e476fd57f8a95020800377447478f/examples/ESP32-S3-Touch-LCD-1.54-demo/Arduino-3.2.0/examples/01_i2s_audio/01_i2s_audio.ino#L53
+# https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.54/blob/5157db7c888e476fd57f8a95020800377447478f/examples/ESP32-S3-Touch-LCD-1.54-demo/ESP-IDF-5.5.1/01_factory/main/main.c#L238
+# The sender scales its samples down from this level; nothing raises it.
+dac_volume_percent = 75
 
 [capabilities]
 doom = true

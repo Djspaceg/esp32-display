@@ -860,3 +860,18 @@ extension PanelManager {
     }
 
 }
+
+extension PanelManager {
+    /// Set how loud a display plays this Mac's sound. Applied to the running
+    /// session at once; `persist: false` is for the steps of a slider drag,
+    /// which is saved once when it ends.
+    func setSpeakerVolume(
+        _ volume: Double, for serviceName: String, persist: Bool = true
+    ) {
+        guard panels.contains(where: { $0.serviceName == serviceName }) else { return }
+        let clamped = PanelSpeakerVolume.clamped(volume)
+        updatePanel(serviceName) { $0.speakerVolume = clamped }
+        sessions[serviceName]?.setSpeakerVolume(clamped)
+        if persist { persistIfNeeded(force: true) }
+    }
+}

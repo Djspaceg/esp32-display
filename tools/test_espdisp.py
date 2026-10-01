@@ -49,6 +49,19 @@ def check(condition, what):
         print("FAIL: %s" % what)
 
 
+# The vendor reference DAC level per audio board, as cited in its
+# descriptor. Keep in step with firmware/test/test_audio.cpp.
+EXPECTED_DAC_VOLUME_PERCENT = {
+    "p4-wifi6-touch-lcd-34c": 60,
+    "p4-wifi6-touch-lcd-4b": 62,
+    "p4-wifi6-touch-lcd-4c": 60,
+    "s3-lcd-085": 75,
+    "s3-touch-amoled-175c": 62,
+    "s3-touch-lcd-154": 75,
+    "s3-touch-lcd-185c": 50,
+}
+
+
 def check_equal(got, want, what):
     check(got == want, "%s: got %r, want %r" % (what, got, want))
 
@@ -4125,6 +4138,7 @@ def test_board_descriptor_validator():
         "playback_channels": 2,
         "capture_rate_hz": 16000,
         "capture_channels": 2,
+        "dac_volume_percent": 50,
     }
     lcd_185c = next(
         item for item in descriptors
@@ -4348,6 +4362,35 @@ def test_board_descriptor_validator():
         [control_without_audio],
         "audio capability is false but audio.pin_control_sda is declared",
         "an audio-absent row declares no control bus",
+    )
+
+    # The speaker's fixed DAC level comes from each board's vendor reference
+    # code, cited beside the value; the sender scales down from it. A board
+    # without a cited level keeps the firmware default (0 here).
+    check_equal(
+        {item["key"]: board_descriptor.dac_volume_percent(item)
+         for item in descriptors if item["capabilities"]["audio"]},
+        EXPECTED_DAC_VOLUME_PERCENT,
+        "each audio board declares its vendor reference DAC level",
+    )
+    check_equal(
+        board_descriptor.dac_volume_percent(absent_audio), 0,
+        "an audio-absent row has no DAC level",
+    )
+    for bad in (101, -1, True, "50"):
+        loud = copy.deepcopy(verified_audio)
+        loud["audio"]["dac_volume_percent"] = bad
+        check_descriptor_fails(
+            [loud],
+            "audio.dac_volume_percent must be 0..100",
+            "a DAC level of %r is refused" % (bad,),
+        )
+    level_without_audio = copy.deepcopy(absent_audio)
+    level_without_audio["audio"]["dac_volume_percent"] = 50
+    check_descriptor_fails(
+        [level_without_audio],
+        "audio.dac_volume_percent is only for an ES8311 speaker",
+        "an audio-absent row declares no DAC level",
     )
 
     knob = next(

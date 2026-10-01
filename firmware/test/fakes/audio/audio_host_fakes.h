@@ -55,6 +55,8 @@ void setRssiValue(int value);
 void setI2cDevice(uint8_t address, bool present, uint8_t idRegisterA = 0,
                   uint8_t idA = 0, uint8_t idRegisterB = 0, uint8_t idB = 0);
 unsigned wireRegisterWrites();
+// The last value written to `reg` on `address` since reset(), or -1.
+int lastRegisterWrite(uint8_t address, uint8_t reg);
 // Every I2S write and read returns 0 bytes at once, as the driver does on a
 // deleted or disabled channel. reset() clears it.
 void setI2sFailing(bool failing);

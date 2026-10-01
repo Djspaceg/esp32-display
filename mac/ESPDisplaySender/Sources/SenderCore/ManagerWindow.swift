@@ -976,13 +976,14 @@ struct PanelDetailView: View {
     @ViewBuilder
     private var audioSection: some View {
         Section {
+            speakerVolumeRow
             if let audio = panel.audioStatus {
                 LabeledContent("State", value: audio.state.label)
                 LabeledContent("Detail") {
                     Text(audio.message).textSelection(.enabled)
                 }
-                LabeledContent("Mac microphone", value: audio.inputName)
-                LabeledContent("Mac speakers", value: audio.outputName)
+                LabeledContent("Display speaker", value: audio.sourceName)
+                LabeledContent("Display microphone", value: audio.uplinkDestination)
                 DisclosureGroup(isExpanded: $showAudioDiagnostics) {
                     audioDiagnosticRows(audio)
                 } label: {
@@ -995,10 +996,44 @@ struct PanelDetailView: View {
             Text("Audio")
         } footer: {
             if let audio = panel.audioStatus {
-                Text(audioFooterText(audio.tuning))
+                Text("The display speaker plays this Mac's sound while the Mac's "
+                    + "own speakers keep playing. Volume scales what is sent; "
+                    + "100% is the loudest the display plays. "
+                    + audioFooterText(audio.tuning))
             } else {
                 Text("Audio starts only after the panel advertises a complete "
                     + "EAUD descriptor and its audio capability bits.")
+            }
+        }
+    }
+
+    /// Applied live while dragging and saved once the drag ends, so a drag is
+    /// one write to disk rather than one per step.
+    private var speakerVolumeRow: some View {
+        LabeledContent("Speaker volume") {
+            HStack(spacing: 10) {
+                Slider(
+                    value: Binding(
+                        get: { panel.speakerVolume },
+                        set: {
+                            manager.setSpeakerVolume(
+                                $0, for: panel.serviceName, persist: false)
+                        }),
+                    in: 0...1,
+                    onEditingChanged: { editing in
+                        guard !editing else { return }
+                        manager.setSpeakerVolume(
+                            panel.speakerVolume, for: panel.serviceName)
+                    })
+                    .frame(maxWidth: .infinity)
+                    .labelsHidden()
+                    .layoutPriority(1)
+                    .help("Set how loud this display plays this Mac's sound")
+                    .accessibilityLabel("Speaker volume")
+                Text("\(Int((panel.speakerVolume * 100).rounded()))%")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(width: 38, alignment: .trailing)
             }
         }
     }
@@ -1017,14 +1052,11 @@ struct PanelDetailView: View {
         LabeledContent(
             "Mac uplink loss",
             value: "\(audio.uplinkLostFrames) lost frames, "
-                + "\(audio.uplinkLatePackets) late, "
-                + "\(audio.playbackQueueDrops) queue drops")
+                + "\(audio.uplinkLatePackets) late")
         LabeledContent(
             "Active drift correction",
             value: String(
-                format: "%.1f ppm down / %.1f ppm up",
-                audio.downlinkCorrectionPPM,
-                audio.uplinkCorrectionPPM))
+                format: "%.1f ppm down", audio.downlinkCorrectionPPM))
 
         if let status = audio.panelStatus {
             LabeledContent(

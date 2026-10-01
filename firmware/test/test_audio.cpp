@@ -810,6 +810,55 @@ static int testIdentityEnablesEveryCodecBoard() {
   return 0;
 }
 
+// The speaker's fixed DAC level is the vendor reference cited in each board's
+// descriptor (the lowest playback default in that board's vendor code), written
+// once to ES8311 register 0x32 at start. Every board had been 35 (88, -51.5
+// dB), which the 1.85C's owner could not hear; Waveshare's demo for the 1.85C
+// uses 50 (127, -32 dB). Keep in step with tools/test_espdisp.py.
+static int testDacLevelIsTheVendorReference() {
+  const struct {
+    const board::Config *config;
+    uint8_t percent;
+    int reg;
+  } boards[] = {
+      {&board::CONFIG_AMOLED_CO5300, 62, 157},
+      {&board::CONFIG_LCD_ST77916, 50, 127},
+      {&board::CONFIG_LCD_GC9107, 75, 191},
+      {&board::CONFIG_TOUCH_ST7789, 75, 191},
+      {&board::CONFIG_P4_4B, 62, 157},
+      {&board::CONFIG_P4_4C, 60, 152},
+      {&board::CONFIG_P4_34C, 60, 152},
+  };
+  CHECK(audiobackend::es8311DacVolumeRegister(0) == 0);
+  CHECK(audiobackend::es8311DacVolumeRegister(35) == 88);
+  CHECK(audiobackend::es8311DacVolumeRegister(50) == 127);
+  CHECK(audiobackend::DEFAULT_DAC_VOLUME_PERCENT == 35);
+  board::AudioConfig uncited = *board::generatedAudioConfig(
+      board::Variant::LcdSt77916);
+  uncited.dacVolumePercent = 0;
+  CHECK(audiobackend::dacVolumePercent(uncited) == 35);
+  CHECK(audiobackend::es8311DacVolumeRegister(100) == 255);
+  CHECK(audiobackend::es8311DacVolumeRegister(200) == 255);
+  for (const auto &item : boards) {
+    const board::AudioConfig *audio =
+        board::generatedAudioConfig(item.config->variant);
+    CHECK(audio != nullptr);
+    CHECK(audiobackend::dacVolumePercent(*audio) == item.percent);
+    audiohost::reset();
+    audio::resetBoardAudioStatusForTest();
+    CHECK(audio::boardAudioStatus(*item.config) ==
+          audiobackend::DescriptorStatus::Ready);
+    audio::CodecSerialAudioBackend backend;
+    CHECK(backend.start(*item.config, *audio,
+                        audiobackend::descriptorFormat(*audio)));
+    CHECK(audiohost::lastRegisterWrite(audio->codecI2cAddress, 0x32) ==
+          item.reg);
+    backend.stop();
+  }
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
 int main() {
   const char *filter = std::getenv("AUDIO_TEST_FILTER");
   const struct {
@@ -828,6 +877,7 @@ int main() {
       {"identity-185c-v2", testIdentity185cV2},
       {"identity-impostors", testIdentityRejectsImpostors},
       {"identity-every-codec-board", testIdentityEnablesEveryCodecBoard},
+      {"dac-level-vendor-reference", testDacLevelIsTheVendorReference},
       {"control-bus-without-touch", testControlBusWithoutTouch},
       {"round3-peer-rejected", testRound3RejectedPeerOwnership},
       {"round3-peer-queue", testRound3QueueFullPeerOwnership},

@@ -150,6 +150,10 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// Which gesture bindings this panel uses. Persisted, so a preset chosen once
     /// still applies after a restart.
     var gesturePreset: GesturePreset = .standard
+    /// The display speaker's volume, 0...1, applied by scaling the samples
+    /// this Mac sends. 1 is the loudest the display plays; a display nobody
+    /// has set starts at `PanelSpeakerVolume.default`.
+    var speakerVolume: Double = PanelSpeakerVolume.default
     /// Orientation of the last frame sent to this panel. Reported by the session,
     /// and needed to read a swipe: which axis is the panel's long one depends on
     /// it, and so does what the settings window says a gesture will do.

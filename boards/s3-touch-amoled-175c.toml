@@ -170,6 +170,15 @@ playback_rate_hz = 16000
 playback_channels = 2
 capture_rate_hz = 16000
 capture_channels = 2
+# Speaker DAC level: the lowest playback default in the vendor code. Its BSP
+# extra layer declares CODEC_DEFAULT_VOLUME 60 for esp_codec_dev (with the
+# 5.0/3.3 V hardware gain that is register 0x32 = 158, -16.5 dB); 62 is the
+# largest level here at or under it. The only demo that plays sets 85 (216,
+# +12.5 dB), which is not used, to protect the speaker.
+# https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75C/blob/6d19f7e16fb9a3be219e9eed43ca9eb56c88d01c/examples/esp-idf/05_Spec_Analyzer/components/bsp_extra/include/bsp_board_extra.h#L26
+# https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75C/blob/6d19f7e16fb9a3be219e9eed43ca9eb56c88d01c/examples/arduino/examples/07_ES8311/15_ES8311.ino#L38
+# The sender scales its samples down from this level; nothing raises it.
+dac_volume_percent = 62
 
 [capabilities]
 doom = true

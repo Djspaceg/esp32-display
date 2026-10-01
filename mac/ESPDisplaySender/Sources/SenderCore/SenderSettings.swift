@@ -46,6 +46,11 @@ struct SenderSettings: Codable, Equatable {
     /// How the display sidebar is ordered.
     var deviceListSortOrder: DeviceListSortOrder = .alphabetical
     /// Stable CoreAudio UIDs. nil follows the current system default.
+    ///
+    /// Nothing reads these since panel audio stopped capturing the Mac
+    /// microphone and playing the panel microphone here; the display speaker
+    /// now plays this Mac's sound whatever device plays it. They are still
+    /// decoded and written back so a saved choice is not dropped from disk.
     var audioDevices = AudioDevicePreferences()
     /// Persisted so latency and drift experiments do not require a rebuild.
     var audioTuning = AudioRuntimeTuning()

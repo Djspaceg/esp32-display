@@ -24,8 +24,10 @@ enum PanelAudioState: Equatable, Sendable {
 struct PanelAudioSnapshot: Equatable, Sendable {
     let state: PanelAudioState
     let message: String
-    let inputName: String
-    let outputName: String
+    /// What the display speaker is sent.
+    let sourceName: String
+    /// Where the display's microphone goes once it arrives here.
+    let uplinkDestination: String
     let descriptor: AudioStreamDescriptor
     let tuning: AudioRuntimeTuning
     let panelStatus: AudioProtocol.Status?
@@ -33,9 +35,7 @@ struct PanelAudioSnapshot: Equatable, Sendable {
     let captureCallbackDrops: UInt64
     let uplinkLostFrames: UInt64
     let uplinkLatePackets: UInt64
-    let playbackQueueDrops: UInt64
     let downlinkCorrectionPPM: Double
-    let uplinkCorrectionPPM: Double
 }
 
 /// Accumulates arbitrary converted sizes into MTU-safe EAUD payloads.
@@ -62,7 +62,52 @@ struct AudioPCMChunker: Equatable, Sendable {
     }
 }
 
-/// How many silent packets to keep queued when there is no Mac microphone.
+/// The per-display speaker volume. The display's DAC stays at the fixed level
+/// the firmware takes from the board vendor's reference, so 100% is the
+/// loudest the display plays and lower settings scale the samples here before
+/// they are sent. A display nobody has set starts below that, so its first
+/// sound is not a blast: 70% is about 6 dB under the ceiling.
+enum PanelSpeakerVolume {
+    static let `default` = 0.7
+
+    static func clamped(_ volume: Double) -> Double {
+        volume.isFinite ? min(max(volume, 0), 1) : `default`
+    }
+
+    /// Squared, so equal slider steps sound roughly equally far apart rather
+    /// than the top half all sounding loud.
+    static func gain(_ volume: Double) -> Float {
+        let level = Float(clamped(volume))
+        return level * level
+    }
+}
+
+/// Float samples to the wire's PCM16 little-endian, scaled by `gain`.
+enum AudioDownlinkPCM {
+    static func encode(_ samples: [Float], gain: Float) -> Data {
+        var data = Data(capacity: samples.count * 2)
+        for value in samples {
+            let clamped = min(max(value * gain, -1), 1)
+            let signed = Int16(clamping: Int((clamped * 32_767).rounded()))
+            let bits = UInt16(bitPattern: signed)
+            data.append(UInt8(bits & 0xFF))
+            data.append(UInt8(bits >> 8))
+        }
+        return data
+    }
+}
+
+/// Where the display's microphone goes once it is out of the jitter buffer:
+/// interleaved Float32 at the descriptor's rate and capture channels. Nothing
+/// on this Mac plays it; a later audio driver makes the display a Mac input
+/// and plugs in here.
+struct PanelUplinkSink: Sendable {
+    let deliver: @Sendable (_ samples: [Float], _ frames: Int) -> Void
+
+    static let discard = PanelUplinkSink(deliver: { _, _ in })
+}
+
+/// How many silent packets to keep queued when this Mac's sound is not sent.
 /// Two keeps `AudioPacketPacer` from ever running dry, so its drift-corrected
 /// deadlines, not the generator, decide the rate.
 enum AudioSilenceFeed {
@@ -78,62 +123,45 @@ enum AudioSilenceFeed {
     }
 }
 
-/// Opens the Mac microphone: a capture engine on the chosen input device and
-/// the input format this session can convert. Injectable so a test can stand
-/// in a Mac with no usable input without opening a real one.
-struct MicrophoneCaptureSource: Sendable {
-    let open: @Sendable (AudioDeviceID?) throws -> (AVAudioEngine, AVAudioFormat)
-
-    static let system = MicrophoneCaptureSource(open: { deviceID in
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        try CoreAudioDeviceCatalog.setDevice(deviceID, on: input)
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0,
-              format.channelCount > 0,
-              format.channelCount <= 2,
-              format.commonFormat == .pcmFormatFloat32,
-              !format.isInterleaved
-        else {
-            throw NSError(
-                domain: "ESPDisplaySender.Audio",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "The selected microphone has no non-interleaved Float32 format."])
-        }
-        return (engine, format)
-    })
-}
-
-/// The TCC microphone check, injectable so a test can refuse it without
-/// touching the real permission.
-struct MicrophoneAccess: Sendable {
-    let status: @Sendable () -> AVAuthorizationStatus
-    let request: @Sendable (@escaping @Sendable (Bool) -> Void) -> Void
-
-    static let system = MicrophoneAccess(
-        status: { AVCaptureDevice.authorizationStatus(for: .audio) },
-        request: { AVCaptureDevice.requestAccess(for: .audio, completionHandler: $0) })
-}
-
 /// One queue owns every mutable adapter field. The only cross-queue operation
-/// is the input tap's bounded write into SenderAudioRT's preallocated SPSC ring.
+/// is the tap's bounded write into SenderAudioRT's preallocated SPSC ring.
+///
+/// Downlink: this Mac's sound, through a Core Audio process tap that excludes
+/// this app, scaled by the display's volume and sent to the display speaker.
+/// The Mac's own speakers keep playing; the tap only listens. Without
+/// permission to record it, the display speaker gets silence instead, because
+/// the panel starts its audio backend and learns where to send its
+/// microphone only from downlink packets (firmware audio_engine.cpp
+/// claimPeer).
+///
+/// Uplink: the display's microphone is received and de-jittered, then handed
+/// to `uplinkSink`. Nothing on this Mac plays it.
 final class PanelAudioSession: @unchecked Sendable {
+    static let tappedSourceName = "This Mac's sound"
+    static let uplinkDestination = "Received, not played on this Mac"
+
     private let descriptor: AudioStreamDescriptor
     private let peerAddress: PanelPeerAddress
     private let radioBudget: PanelRadioBudget
     private let onUpdate: @Sendable (PanelAudioSnapshot) -> Void
-    private let microphoneAccess: MicrophoneAccess
-    private let captureSource: MicrophoneCaptureSource
+    private let systemAudioAccess: SystemAudioAccess
+    private let systemAudioSource: SystemAudioCaptureSource
+    private let uplinkSink: PanelUplinkSink
     private let queue = DispatchQueue(label: "espdisp.audio")
 
-    private var preferences: AudioDevicePreferences
     private var tuning: AudioRuntimeTuning
+    private var speakerGain: Float
     private var requested = false
     private var enabled = true
     private var stopped = false
     private var permissionRequestInFlight = false
-    private var microphoneRefusal: MicrophoneRefusal?
+    /// Bumped whenever an in-flight request stops mattering, so its late
+    /// answer cannot restart a session that has already moved on.
+    private var permissionRequestGeneration: UInt64 = 0
+    /// The permission when this run began; a tap opened under `.authorized`
+    /// that later reads otherwise has had its permission taken away.
+    private var permissionAtStart = SystemAudioPermission.unknown
+    private var refusal: SystemAudioRefusal?
     private var restartPending = false
 
     private var connection: NWConnection?
@@ -142,26 +170,17 @@ final class PanelAudioSession: @unchecked Sendable {
     private var lastValidInboundNanos: UInt64?
     private var livenessTimer: DispatchSourceTimer?
 
-    private var captureEngine: AVAudioEngine?
-    private var playbackEngine: AVAudioEngine?
-    private var captureInput: AVAudioInputNode?
+    private var tap: SystemAudioTap?
+    private var captureWriter: SystemAudioRingWriter?
     private var captureConverter: AVAudioConverter?
     private var captureReadBuffer: AVAudioPCMBuffer?
     private var captureConvertedBuffer: AVAudioPCMBuffer?
     private var captureRingLifetime: AudioCaptureRingLifetime?
     private var captureWorkerTimer: DispatchSourceTimer?
-    private var captureTapInstalled = false
     private var lastRingDropped: UInt64 = 0
-    private var silenceLastPermissionCheckNanos: UInt64 = 0
-    private var outputUsedFallback = false
-    private static let outputFallbackNote =
-        " The saved output device vanished; using System Default."
-
-    private var player: AVAudioPlayerNode?
-    private var playbackFormat: AVAudioFormat?
-    private var playbackFramesEnqueued: UInt64 = 0
-    private var playbackScheduledFrames = 0
-    private var engineObservers = [NSObjectProtocol]()
+    private var lastWriterSkipped: UInt64 = 0
+    private var lastTapFramesNanos: UInt64 = 0
+    private var lastPermissionCheckNanos: UInt64 = 0
 
     private var chunker: AudioPCMChunker
     private var sequence = UInt16.random(in: 1...UInt16.max)
@@ -174,12 +193,9 @@ final class PanelAudioSession: @unchecked Sendable {
 
     private var jitter: AudioJitterBuffer
     private var downlinkDrift = AudioDriftController()
-    private var uplinkDrift = AudioDriftController()
     private var downlinkResampler = AudioVariableRateResampler()
-    private var uplinkResampler = AudioVariableRateResampler()
 
-    private var inputName = AudioDeviceResolver.systemDefaultName
-    private var outputName = AudioDeviceResolver.systemDefaultName
+    private var sourceName = PanelAudioSession.tappedSourceName
     private var message = "Waiting for the panel audio socket."
     private var state = PanelAudioState.waiting
     private var panelStatus: AudioProtocol.Status?
@@ -187,24 +203,25 @@ final class PanelAudioSession: @unchecked Sendable {
     private var captureCallbackDrops: UInt64 = 0
     private var uplinkLostFrames: UInt64 = 0
     private var uplinkLatePackets: UInt64 = 0
-    private var playbackQueueDrops: UInt64 = 0
     private var lastStatusPublishNanos: UInt64 = 0
 
     init(
         descriptor: AudioStreamDescriptor,
-        preferences: AudioDevicePreferences = AudioDevicePreferences(),
         tuning: AudioRuntimeTuning = AudioRuntimeTuning(),
         peerAddress: PanelPeerAddress,
         radioBudget: PanelRadioBudget,
-        microphoneAccess: MicrophoneAccess = .system,
-        captureSource: MicrophoneCaptureSource = .system,
+        speakerVolume: Double = PanelSpeakerVolume.default,
+        systemAudioAccess: SystemAudioAccess = .system,
+        systemAudioSource: SystemAudioCaptureSource = .system,
+        uplinkSink: PanelUplinkSink = .discard,
         onUpdate: @escaping @Sendable (PanelAudioSnapshot) -> Void
     ) {
         let validated = tuning.validated
         self.descriptor = descriptor
-        self.microphoneAccess = microphoneAccess
-        self.captureSource = captureSource
-        self.preferences = preferences
+        self.systemAudioAccess = systemAudioAccess
+        self.systemAudioSource = systemAudioSource
+        self.uplinkSink = uplinkSink
+        self.speakerGain = PanelSpeakerVolume.gain(speakerVolume)
         self.tuning = validated
         self.peerAddress = peerAddress
         self.radioBudget = radioBudget
@@ -247,17 +264,11 @@ final class PanelAudioSession: @unchecked Sendable {
         }
     }
 
-    func update(
-        preferences: AudioDevicePreferences,
-        tuning: AudioRuntimeTuning
-    ) {
+    func update(tuning: AudioRuntimeTuning) {
         queue.async { [weak self] in
             guard let self, !self.stopped else { return }
             let validated = tuning.validated
-            guard self.preferences != preferences || self.tuning != validated else {
-                return
-            }
-            self.preferences = preferences
+            guard self.tuning != validated else { return }
             self.tuning = validated
             self.radioBudget.update(tuning: validated)
             self.chunker = Self.makeChunker(
@@ -268,6 +279,17 @@ final class PanelAudioSession: @unchecked Sendable {
         }
     }
 
+    var speakerGainForTesting: Float { queue.sync { speakerGain } }
+
+    /// Takes effect on the next samples sent, without a restart.
+    func setSpeakerVolume(_ volume: Double) {
+        queue.async { [weak self] in
+            self?.speakerGain = PanelSpeakerVolume.gain(volume)
+        }
+    }
+
+    /// A route change, such as a new default output, rebuilds the tap on the
+    /// device that now plays the Mac's sound.
     func devicesChanged() {
         queue.async { [weak self] in
             guard let self, !self.stopped else { return }
@@ -304,22 +326,39 @@ final class PanelAudioSession: @unchecked Sendable {
 
     private func beginIfNeeded() {
         guard requested, enabled, !stopped, connection == nil else { return }
+        let status = systemAudioAccess.status()
+        permissionAtStart = status
+        // A grant in System Settings can land while the prompt's own answer
+        // is still outstanding. The status wins; the late answer is dropped.
+        if status == .authorized, permissionRequestInFlight {
+            permissionRequestInFlight = false
+            permissionRequestGeneration &+= 1
+        }
         // An unanswered prompt (it can sit behind a login-time launch) must not
         // hold the panel microphone hostage: stream silence until it resolves.
         if permissionRequestInFlight {
-            microphoneRefusal = .pending
+            refusal = .pending
             connect()
             return
         }
-        switch microphoneAccess.status() {
-        case .authorized:
-            microphoneRefusal = nil
-            connect()
+        switch status {
+        case .authorized, .unknown:
+            refusal = nil
         case .notDetermined:
+            guard let request = systemAudioAccess.request else {
+                // Starting the tap is what raises the prompt.
+                refusal = nil
+                break
+            }
             permissionRequestInFlight = true
-            microphoneAccess.request { [weak self] allowed in
+            permissionRequestGeneration &+= 1
+            let generation = permissionRequestGeneration
+            request { [weak self] allowed in
                 guard let self else { return }
                 self.queue.async {
+                    guard self.permissionRequestGeneration == generation else {
+                        return
+                    }
                     self.permissionRequestInFlight = false
                     guard !self.stopped, self.requested, self.enabled else {
                         return
@@ -327,51 +366,44 @@ final class PanelAudioSession: @unchecked Sendable {
                     self.resolvePermissionRequest(allowed: allowed)
                 }
             }
-            microphoneRefusal = .pending
-            connect()
-        case .restricted:
-            microphoneRefusal = .restricted
-            connect()
-        default:
-            microphoneRefusal = .denied
-            connect()
+            refusal = .pending
+        case .denied:
+            refusal = .denied
         }
+        connect()
     }
 
     /// A prompt answered while silence is already streaming: a grant restarts
-    /// into capture, a refusal only corrects the reason shown.
+    /// into the tap, a refusal only corrects the reason shown.
     private func resolvePermissionRequest(allowed: Bool) {
         if allowed {
             if connection == nil {
                 beginIfNeeded()
             } else {
-                restart(reason: "Microphone access was granted.")
+                restart(reason: "Permission to record this Mac's sound was granted.")
             }
             return
         }
         // Still undetermined after a refusal means macOS never showed the
-        // prompt, which is what a hardened build without the audio-input
-        // entitlement gets.
-        microphoneRefusal = microphoneAccess.status() == .notDetermined
-            ? .promptDisallowed
-            : .denied
+        // prompt.
+        let refusal: SystemAudioRefusal =
+            systemAudioAccess.status() == .notDetermined ? .promptNotShown : .denied
+        self.refusal = refusal
         if connection == nil {
             connect()
-        } else if state == .streaming, let microphoneRefusal {
-            message = microphoneRefusal.message
-                + (outputUsedFallback ? Self.outputFallbackNote : "")
+        } else if state == .streaming {
+            sourceName = refusal.sourceName
+            message = refusal.message
             publish()
         }
     }
 
-    /// Why the Mac microphone is not captured. Without it the panel speaker is
-    /// fed silence rather than nothing: the panel starts its audio backend and
-    /// learns where to send its own microphone only from downlink packets.
-    private enum MicrophoneRefusal {
+    /// Why this Mac's sound is not sent. A refusal is not a failure: the
+    /// panel speaker gets silence, so the panel keeps its audio running.
+    private enum SystemAudioRefusal {
         case pending
         case denied
-        case promptDisallowed
-        case restricted
+        case promptNotShown
         case captureUnavailable(String)
 
         var awaitsPermission: Bool {
@@ -379,32 +411,31 @@ final class PanelAudioSession: @unchecked Sendable {
             return true
         }
 
-        var inputName: String {
+        var sourceName: String {
             if case .captureUnavailable = self {
-                return "Not captured (microphone unavailable)"
+                return "Silence (this Mac's sound could not be recorded)"
             }
-            return "Not captured (no microphone access)"
+            return "Silence (no permission to record this Mac's sound)"
         }
 
+        private static let settingsPath = "turn on ESPDisplaySender in System "
+            + "Settings > Privacy & Security > Screen & System Audio Recording, "
+            + "under System Audio Recording Only."
+
         var message: String {
-            let lead = "Panel microphone plays on this Mac. The panel speaker gets "
-                + "silence "
+            let lead = "The display speaker gets silence "
             switch self {
             case .pending:
-                return lead + "until the macOS microphone prompt is answered."
+                return lead + "until the macOS prompt asking to record this "
+                    + "Mac's sound is answered."
             case .denied:
-                return lead + "because ESPDisplaySender does not have microphone "
-                    + "access; turn it on in System Settings > Privacy & Security "
-                    + "> Microphone."
-            case .promptDisallowed:
-                return lead + "because macOS did not let ESPDisplaySender ask for "
-                    + "microphone access; this build may be missing its "
-                    + "microphone entitlement."
-            case .restricted:
-                return lead + "because microphone access is restricted on this Mac "
-                    + "by a policy this app cannot change."
+                return lead + "because ESPDisplaySender is not allowed to record "
+                    + "this Mac's sound. To send it, " + Self.settingsPath
+            case .promptNotShown:
+                return lead + "because macOS did not ask whether ESPDisplaySender "
+                    + "may record this Mac's sound. To send it, " + Self.settingsPath
             case .captureUnavailable(let reason):
-                return lead + "because the Mac microphone could not be opened: "
+                return lead + "because this Mac's sound could not be recorded: "
                     + reason
             }
         }
@@ -485,241 +516,128 @@ final class PanelAudioSession: @unchecked Sendable {
 
     private func startEngine() {
         stopEngine()
-        let devices = CoreAudioDeviceCatalog.devices()
-        let inputResolution = AudioDeviceResolver.resolve(
-            preferredUID: preferences.inputUID,
-            direction: .input,
-            devices: devices.map(\.option))
-        let outputResolution = AudioDeviceResolver.resolve(
-            preferredUID: preferences.outputUID,
-            direction: .output,
-            devices: devices.map(\.option))
-        inputName = inputResolution.name
-        outputName = outputResolution.name
-        if let refusal = microphoneRefusal {
-            startWithoutMicrophone(
-                refusal: refusal,
-                devices: devices,
-                outputResolution: outputResolution)
+        if let refusal {
+            startSilence(refusal: refusal)
             return
         }
-
-        let playbackEngine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
-        self.playbackEngine = playbackEngine
-        self.player = player
-
         do {
-            let (captureEngine, inputFormat) = try capturing {
-                try captureSource.open(
-                    CoreAudioDeviceCatalog.deviceID(
-                        for: inputResolution.uid, direction: .input, in: devices))
-            }
-            let captureInput = captureEngine.inputNode
-            self.captureEngine = captureEngine
-            self.captureInput = captureInput
-            try CoreAudioDeviceCatalog.setDevice(
-                CoreAudioDeviceCatalog.deviceID(
-                    for: outputResolution.uid, direction: .output, in: devices),
-                on: playbackEngine.outputNode)
-
-            guard let captureFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: Double(descriptor.sampleRateHz),
-                channels: AVAudioChannelCount(descriptor.playbackChannels),
-                interleaved: false),
-                let playbackFormat = AVAudioFormat(
-                    commonFormat: .pcmFormatFloat32,
-                    sampleRate: Double(descriptor.sampleRateHz),
-                    channels: AVAudioChannelCount(descriptor.captureChannels),
-                    interleaved: false)
-            else {
-                throw audioError(
-                    code: 1,
-                    message:
-                        "The panel audio descriptor could not form an AVAudioFormat.")
-            }
-
-            guard let converter = AVAudioConverter(
-                from: inputFormat, to: captureFormat)
-            else {
-                throw MicrophoneCaptureFailure(
-                    reason: "The selected microphone format cannot be converted.")
-            }
-
-            let requestedInputFrames = max(
-                1,
-                Int(ceil(
-                    Double(chunker.packetFrames)
-                        * inputFormat.sampleRate
-                        / Double(descriptor.sampleRateHz))))
-            let slotFrames = max(
-                requestedInputFrames,
-                Int(ceil(
-                    inputFormat.sampleRate
-                        * tuning.captureRingSlotMilliseconds
-                        / 1_000)))
-            guard let ringLifetime = AudioCaptureRingLifetime(
-                slotCount: UInt32(tuning.captureRingSlots),
-                maximumFrames: UInt32(slotFrames),
-                channels: UInt32(inputFormat.channelCount)),
-                let readBuffer = AVAudioPCMBuffer(
-                    pcmFormat: inputFormat,
-                    frameCapacity: AVAudioFrameCount(slotFrames))
-            else {
-                throw MicrophoneCaptureFailure(
-                    reason: "The microphone capture ring could not be allocated.")
-            }
-            let convertedCapacity = max(
-                1,
-                Int(ceil(
-                    Double(slotFrames)
-                        * captureFormat.sampleRate
-                        / inputFormat.sampleRate)) + 8)
-            guard let convertedBuffer = AVAudioPCMBuffer(
-                pcmFormat: captureFormat,
-                frameCapacity: AVAudioFrameCount(convertedCapacity))
-            else {
-                throw MicrophoneCaptureFailure(
-                    reason: "The microphone conversion buffer could not be allocated.")
-            }
-
-            self.captureConverter = converter
-            self.captureReadBuffer = readBuffer
-            self.captureConvertedBuffer = convertedBuffer
-            self.captureRingLifetime = ringLifetime
-            self.playbackFormat = playbackFormat
-
-            playbackEngine.attach(player)
-            playbackEngine.connect(
-                player, to: playbackEngine.mainMixerNode, format: playbackFormat)
-
-            let inputChannels = Int(inputFormat.channelCount)
-            let callbackLease = ringLifetime.makeCallbackLease()
-            captureInput.installTap(
-                onBus: 0,
-                bufferSize: AVAudioFrameCount(requestedInputFrames),
-                format: inputFormat
-            ) { [callbackLease] buffer, _ in
-                guard buffer.frameLength > 0,
-                      let channels = buffer.floatChannelData
-                else { return }
-                let channelZero = UnsafePointer(channels[0])
-                let channelOne: UnsafePointer<Float>? = inputChannels > 1
-                    ? UnsafePointer(channels[1])
-                    : nil
-                _ = callbackLease.write(
-                    channelZero: channelZero,
-                    channelOne: channelOne,
-                    frameCount: UInt32(buffer.frameLength))
-            }
-            captureTapInstalled = true
-
-            resetStreamState()
-            playbackEngine.prepare()
-            captureEngine.prepare()
-            ringLifetime.setAccepting(true)
-            try playbackEngine.start()
-            try capturing { try captureEngine.start() }
-            observeEngine(captureEngine)
-            observeEngine(playbackEngine)
-            startCaptureWorker()
-
+            try startTap()
+            sourceName = Self.tappedSourceName
             state = .streaming
-            let fallbacks = [
-                inputResolution.usedFallback ? "input" : nil,
-                outputResolution.usedFallback ? "output" : nil,
-            ].compactMap { $0 }
-            message = fallbacks.isEmpty
-                ? "Mac capture and panel microphone playback are active."
-                : "The saved \(fallbacks.joined(separator: " and ")) device vanished; "
-                    + "using System Default."
+            message = "Sending this Mac's sound to the display speaker. The "
+                + "Mac's own speakers keep playing."
             publish()
-        } catch let failure as MicrophoneCaptureFailure {
-            // A missing or unconvertible microphone is a steady state, not a
-            // fault to retry every second: stream silence so the panel
-            // microphone still plays here. A CoreAudio device change restarts.
-            stopEngine()
-            let refusal = MicrophoneRefusal.captureUnavailable(failure.reason)
-            microphoneRefusal = refusal
-            startWithoutMicrophone(
-                refusal: refusal,
-                devices: devices,
-                outputResolution: outputResolution)
         } catch {
+            // A tap that cannot be opened is a steady state, not a fault to
+            // retry every second: stream silence so the panel microphone still
+            // arrives. A CoreAudio route change restarts and tries again.
             stopEngine()
-            restart(reason: "Audio engine failed: \(error.localizedDescription)")
+            let refusal = SystemAudioRefusal.captureUnavailable(
+                error.localizedDescription)
+            self.refusal = refusal
+            startSilence(refusal: refusal)
         }
     }
 
-    private struct MicrophoneCaptureFailure: Error {
-        let reason: String
-    }
-
-    private func capturing<T>(_ body: () throws -> T) throws -> T {
-        do {
-            return try body()
-        } catch let failure as MicrophoneCaptureFailure {
-            throw failure
-        } catch {
-            throw MicrophoneCaptureFailure(reason: error.localizedDescription)
+    private func startTap() throws {
+        let tap = try systemAudioSource.open()
+        let tapFormat = tap.format
+        guard tapFormat.commonFormat == .pcmFormatFloat32,
+              tapFormat.sampleRate > 0,
+              (1...2).contains(tapFormat.channelCount),
+              let inputFormat = AVAudioFormat(
+                  commonFormat: .pcmFormatFloat32,
+                  sampleRate: tapFormat.sampleRate,
+                  channels: tapFormat.channelCount,
+                  interleaved: false),
+              let captureFormat = AVAudioFormat(
+                  commonFormat: .pcmFormatFloat32,
+                  sampleRate: Double(descriptor.sampleRateHz),
+                  channels: AVAudioChannelCount(descriptor.playbackChannels),
+                  interleaved: false),
+              let converter = AVAudioConverter(from: inputFormat, to: captureFormat)
+        else {
+            throw audioError(
+                code: 2,
+                message: "This Mac's sound arrives in a format that cannot be "
+                    + "converted for the display.")
         }
+
+        let requestedInputFrames = max(
+            1,
+            Int(ceil(
+                Double(chunker.packetFrames)
+                    * inputFormat.sampleRate
+                    / Double(descriptor.sampleRateHz))))
+        let slotFrames = max(
+            requestedInputFrames,
+            Int(ceil(
+                inputFormat.sampleRate
+                    * tuning.captureRingSlotMilliseconds
+                    / 1_000)))
+        guard let ringLifetime = AudioCaptureRingLifetime(
+            slotCount: UInt32(tuning.captureRingSlots),
+            maximumFrames: UInt32(slotFrames),
+            channels: UInt32(inputFormat.channelCount)),
+            let readBuffer = AVAudioPCMBuffer(
+                pcmFormat: inputFormat,
+                frameCapacity: AVAudioFrameCount(slotFrames))
+        else {
+            throw audioError(
+                code: 4, message: "The capture ring could not be allocated.")
+        }
+        let convertedCapacity = max(
+            1,
+            Int(ceil(
+                Double(slotFrames)
+                    * captureFormat.sampleRate
+                    / inputFormat.sampleRate)) + 8)
+        guard let convertedBuffer = AVAudioPCMBuffer(
+            pcmFormat: captureFormat,
+            frameCapacity: AVAudioFrameCount(convertedCapacity))
+        else {
+            throw audioError(
+                code: 4, message: "The conversion buffer could not be allocated.")
+        }
+
+        let writer = SystemAudioRingWriter(
+            lease: ringLifetime.makeCallbackLease(),
+            channels: Int(inputFormat.channelCount),
+            slotFrames: slotFrames)
+        self.tap = tap
+        captureWriter = writer
+        captureConverter = converter
+        captureReadBuffer = readBuffer
+        captureConvertedBuffer = convertedBuffer
+        captureRingLifetime = ringLifetime
+
+        resetStreamState()
+        lastTapFramesNanos = DispatchTime.now().uptimeNanoseconds
+        ringLifetime.setAccepting(true)
+        // Weak, so teardown never waits on the IO block being released: once
+        // `captureWriter` is dropped, its lease goes with it and the ring's
+        // quiesce barrier only waits out a callback already in flight.
+        try tap.start { [weak writer] list in
+            writer?.write(list)
+        }
+        startCaptureWorker()
     }
 
     /// The uplink half of `startEngine`, with a silence generator standing in
-    /// for the Mac microphone so the panel keeps its backend running and keeps
+    /// for this Mac's sound so the panel keeps its backend running and keeps
     /// sending its microphone here.
-    private func startWithoutMicrophone(
-        refusal: MicrophoneRefusal,
-        devices: [CoreAudioDevice],
-        outputResolution: AudioDeviceResolution
-    ) {
-        inputName = refusal.inputName
-        let playbackEngine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
-        self.playbackEngine = playbackEngine
-        self.player = player
-        do {
-            try CoreAudioDeviceCatalog.setDevice(
-                CoreAudioDeviceCatalog.deviceID(
-                    for: outputResolution.uid, direction: .output, in: devices),
-                on: playbackEngine.outputNode)
-            guard let playbackFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: Double(descriptor.sampleRateHz),
-                channels: AVAudioChannelCount(descriptor.captureChannels),
-                interleaved: false)
-            else {
-                throw audioError(
-                    code: 1,
-                    message:
-                        "The panel audio descriptor could not form an AVAudioFormat.")
-            }
-            self.playbackFormat = playbackFormat
-            playbackEngine.attach(player)
-            playbackEngine.connect(
-                player, to: playbackEngine.mainMixerNode, format: playbackFormat)
-
-            resetStreamState()
-            playbackEngine.prepare()
-            try playbackEngine.start()
-            observeEngine(playbackEngine)
-            startSilenceWorker()
-
-            state = .streaming
-            outputUsedFallback = outputResolution.usedFallback
-            message = refusal.message
-                + (outputUsedFallback ? Self.outputFallbackNote : "")
-            publish()
-        } catch {
-            stopEngine()
-            restart(reason: "Audio engine failed: \(error.localizedDescription)")
-        }
+    private func startSilence(refusal: SystemAudioRefusal) {
+        resetStreamState()
+        startSilenceWorker()
+        sourceName = refusal.sourceName
+        state = .streaming
+        message = refusal.message
+        publish()
     }
 
-    /// Feeds the downlink the silence the Mac microphone would have supplied,
-    /// through the same chunker and pacer. The pacer alone sets the
-    /// drift-corrected rate; this only keeps it from running dry.
+    /// Feeds the downlink silence through the same chunker and pacer. The
+    /// pacer alone sets the drift-corrected rate; this only keeps it from
+    /// running dry.
     private func startSilenceWorker() {
         captureWorkerTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -736,15 +654,19 @@ final class PanelAudioSession: @unchecked Sendable {
 
     private func generateSilence() {
         let now = DispatchTime.now().uptimeNanoseconds
-        // Access granted in System Settings takes effect without a relaunch.
-        if now - silenceLastPermissionCheckNanos >= 1_000_000_000 {
-            silenceLastPermissionCheckNanos = now
-            if microphoneRefusal?.awaitsPermission == true,
-               microphoneAccess.status() == .authorized {
-                restart(reason: "Microphone access was granted.")
+        // Permission granted in System Settings takes effect without a relaunch.
+        if now - lastPermissionCheckNanos >= 1_000_000_000 {
+            lastPermissionCheckNanos = now
+            if refusal?.awaitsPermission == true,
+               systemAudioAccess.status() == .authorized {
+                restart(reason: "Permission to record this Mac's sound was granted.")
                 return
             }
         }
+        queueSilence()
+    }
+
+    private func queueSilence() {
         let packets = AudioSilenceFeed.packetsToQueue(
             pending: capturePending.count,
             ceilingFrames: AudioTiming.frames(
@@ -764,24 +686,6 @@ final class PanelAudioSession: @unchecked Sendable {
             userInfo: [NSLocalizedDescriptionKey: message])
     }
 
-    private func observeEngine(_ engine: AVAudioEngine) {
-        let observer = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: nil
-        ) { [weak self, weak engine] _ in
-            guard let self, let engine else { return }
-            self.queue.async {
-                guard self.captureEngine === engine
-                    || self.playbackEngine === engine
-                else { return }
-                self.restart(
-                    reason: "The selected audio device configuration changed.")
-            }
-        }
-        engineObservers.append(observer)
-    }
-
     private func startCaptureWorker() {
         captureWorkerTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -797,6 +701,24 @@ final class PanelAudioSession: @unchecked Sendable {
     }
 
     private func drainCaptureRing() {
+        // A refused tap records silence rather than failing, so a permission
+        // turned off while streaming is noticed here and said so.
+        let now = DispatchTime.now().uptimeNanoseconds
+        if now - lastPermissionCheckNanos >= 1_000_000_000 {
+            lastPermissionCheckNanos = now
+            // Removing the app from the list can read as undetermined rather
+            // than denied; either way the tap is recording silence.
+            if permissionAtStart == .authorized {
+                switch systemAudioAccess.status() {
+                case .denied, .notDetermined:
+                    restart(
+                        reason: "Permission to record this Mac's sound was turned off.")
+                    return
+                case .authorized, .unknown:
+                    break
+                }
+            }
+        }
         guard let ringLifetime = captureRingLifetime,
               let readBuffer = captureReadBuffer,
               let channels = readBuffer.floatChannelData
@@ -811,12 +733,28 @@ final class PanelAudioSession: @unchecked Sendable {
             frameCount: &frameCount)
         {
             readBuffer.frameLength = AVAudioFrameCount(frameCount)
+            lastTapFramesNanos = now
             convertCaptured(readBuffer)
         }
         let dropped = ringLifetime.dropped
         if dropped > lastRingDropped {
             captureCallbackDrops &+= dropped - lastRingDropped
             lastRingDropped = dropped
+        }
+        if let skipped = captureWriter?.skipped, skipped > lastWriterSkipped {
+            captureCallbackDrops &+= skipped - lastWriterSkipped
+            lastWriterSkipped = skipped
+        }
+        // A tap that goes quiet (no IO cycles, or cycles it cannot read) must
+        // not silence the downlink: the panel learns this Mac from downlink
+        // packets alone, and without them the session would time out and
+        // restart forever. Silence fills in until the tap delivers again.
+        // The 100 ms floor sits well above any tap IO cycle, so short packets
+        // or a large IO buffer never splice silence into real sound.
+        let packetNanos = UInt64(chunker.packetFrames) * 1_000_000_000
+            / UInt64(max(1, descriptor.sampleRateHz))
+        if now - lastTapFramesNanos > max(2 * packetNanos, 100_000_000) {
+            queueSilence()
         }
     }
 
@@ -842,7 +780,7 @@ final class PanelAudioSession: @unchecked Sendable {
             })
         if status == .error {
             restart(
-                reason: "Microphone conversion failed: "
+                reason: "Converting this Mac's sound failed: "
                     + (conversionError?.localizedDescription
                         ?? "CoreAudio returned a conversion error."))
             return
@@ -864,15 +802,7 @@ final class PanelAudioSession: @unchecked Sendable {
             interleavedSamples: interleaved,
             channels: channels,
             rateMultiplier: downlinkDrift.rateMultiplier)
-        var samples = Data(capacity: corrected.count * 2)
-        for value in corrected {
-            let clamped = min(max(value, -1), 1)
-            let signed = Int16(clamping: Int((clamped * 32_767).rounded()))
-            let bits = UInt16(bitPattern: signed)
-            samples.append(UInt8(bits & 0xFF))
-            samples.append(UInt8(bits >> 8))
-        }
-        sendCaptured(samples)
+        sendCaptured(AudioDownlinkPCM.encode(corrected, gain: speakerGain))
     }
 
     private func sendCaptured(_ samples: Data) {
@@ -984,8 +914,7 @@ final class PanelAudioSession: @unchecked Sendable {
                 lostBefore: lostBefore,
                 lateBefore: lateBefore,
                 nowNanos: now)
-            schedulePlayout(chunks)
-            updateUplinkDrift(nowNanos: now)
+            deliverUplink(chunks)
         }
     }
 
@@ -1016,30 +945,17 @@ final class PanelAudioSession: @unchecked Sendable {
         accountInferredUplinkLoss(frames: newlyLost, nowNanos: nowNanos)
     }
 
-    private func updateUplinkDrift(nowNanos: UInt64) {
-        refreshPlaybackScheduledFrames()
-        _ = uplinkDrift.observe(
-            timestampMicros: UInt32(truncatingIfNeeded: nowNanos / 1_000),
-            fillFrames: jitter.bufferedFrames + playbackScheduledFrames,
-            sampleRateHz: descriptor.sampleRateHz,
-            tuning: tuning,
-            targetFillFrames: AudioTiming.frames(
-                milliseconds: tuning.uplinkJitterMilliseconds,
-                sampleRateHz: descriptor.sampleRateHz))
-    }
-
-    private func schedulePlayout(_ chunks: [AudioPlayoutChunk]) {
-        guard !chunks.isEmpty else { return }
+    private func deliverUplink(_ chunks: [AudioPlayoutChunk]) {
         for chunk in chunks {
             switch chunk {
             case .pcm(let pcm):
-                schedulePlayback(samples: floatSamples(pcm), frames: Int(pcm.frameCount))
+                uplinkSink.deliver(floatSamples(pcm), Int(pcm.frameCount))
             case .silence(let frames):
-                schedulePlayback(
-                    samples: [Float](
+                uplinkSink.deliver(
+                    [Float](
                         repeating: 0,
                         count: frames * Int(descriptor.captureChannels)),
-                    frames: frames)
+                    frames)
             }
         }
     }
@@ -1053,66 +969,6 @@ final class PanelAudioSession: @unchecked Sendable {
             samples.append(Float(Int16(bitPattern: raw)) / 32_768)
         }
         return samples
-    }
-
-    private func schedulePlayback(samples: [Float], frames: Int) {
-        guard frames > 0,
-              let player,
-              let format = playbackFormat
-        else { return }
-        let channels = Int(format.channelCount)
-        let corrected = uplinkResampler.resample(
-            interleavedSamples: samples,
-            channels: channels,
-            rateMultiplier: uplinkDrift.rateMultiplier)
-        let outputFrames = corrected.count / channels
-        guard outputFrames > 0 else { return }
-
-        refreshPlaybackScheduledFrames()
-        let ceiling = AudioTiming.frames(
-            milliseconds: tuning.uplinkJitterCeilingMilliseconds,
-            sampleRateHz: descriptor.sampleRateHz)
-        guard AudioPlayoutCeiling.accepts(
-            scheduledFrames: playbackScheduledFrames,
-            incomingFrames: outputFrames,
-            ceilingFrames: ceiling)
-        else {
-            playbackQueueDrops &+= 1
-            publish()
-            return
-        }
-        guard let buffer = AVAudioPCMBuffer(
-            pcmFormat: format,
-            frameCapacity: AVAudioFrameCount(outputFrames)),
-            let output = buffer.floatChannelData
-        else {
-            playbackQueueDrops &+= 1
-            return
-        }
-        buffer.frameLength = AVAudioFrameCount(outputFrames)
-        for frame in 0..<outputFrames {
-            for channel in 0..<channels {
-                output[channel][frame] = corrected[frame * channels + channel]
-            }
-        }
-        player.scheduleBuffer(buffer, completionHandler: nil)
-        playbackFramesEnqueued &+= UInt64(outputFrames)
-        playbackScheduledFrames += outputFrames
-        if !player.isPlaying {
-            player.play()
-        }
-    }
-
-    private func refreshPlaybackScheduledFrames() {
-        guard let player,
-              let renderTime = player.lastRenderTime,
-              let playerTime = player.playerTime(forNodeTime: renderTime),
-              playerTime.sampleTime >= 0
-        else { return }
-        let rendered = UInt64(playerTime.sampleTime)
-        playbackScheduledFrames = rendered >= playbackFramesEnqueued
-            ? 0
-            : Int(playbackFramesEnqueued - rendered)
     }
 
     private func startLivenessTimer() {
@@ -1154,8 +1010,7 @@ final class PanelAudioSession: @unchecked Sendable {
             lostBefore: lostBefore,
             lateBefore: lateBefore,
             nowNanos: now)
-        schedulePlayout(chunks)
-        updateUplinkDrift(nowNanos: now)
+        deliverUplink(chunks)
     }
 
     private func resetStreamState() {
@@ -1169,11 +1024,7 @@ final class PanelAudioSession: @unchecked Sendable {
         captureSendScheduled = false
         jitter = Self.makeJitter(descriptor: descriptor, tuning: tuning)
         downlinkDrift.reset()
-        uplinkDrift.reset()
         downlinkResampler.reset()
-        uplinkResampler.reset()
-        playbackFramesEnqueued = 0
-        playbackScheduledFrames = 0
         panelStatus = nil
         lastStatusPublishNanos = 0
     }
@@ -1211,21 +1062,13 @@ final class PanelAudioSession: @unchecked Sendable {
     private func stopEngine() {
         captureWorkerTimer?.cancel()
         captureWorkerTimer = nil
-        for observer in engineObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        engineObservers.removeAll(keepingCapacity: true)
 
-        if let ringLifetime = captureRingLifetime {
-            ringLifetime.setAccepting(false)
-        }
-        if captureTapInstalled {
-            captureInput?.removeTap(onBus: 0)
-            captureTapInstalled = false
-        }
-        captureEngine?.stop()
-        playbackEngine?.stop()
-        player?.stop()
+        captureRingLifetime?.setAccepting(false)
+        tap?.stop()
+        tap = nil
+        // Dropping the writer releases the ring lease before the ring itself
+        // is released below, whose deinit waits for any callback in flight.
+        captureWriter = nil
         if let ringLifetime = captureRingLifetime {
             let dropped = ringLifetime.dropped
             if dropped > lastRingDropped {
@@ -1233,16 +1076,12 @@ final class PanelAudioSession: @unchecked Sendable {
             }
         }
 
-        captureEngine = nil
-        playbackEngine = nil
-        captureInput = nil
         captureConverter = nil
         captureReadBuffer = nil
         captureConvertedBuffer = nil
         captureRingLifetime = nil
-        player = nil
-        playbackFormat = nil
         lastRingDropped = 0
+        lastWriterSkipped = 0
         resetStreamState()
     }
 
@@ -1250,8 +1089,8 @@ final class PanelAudioSession: @unchecked Sendable {
         onUpdate(PanelAudioSnapshot(
             state: state,
             message: message,
-            inputName: inputName,
-            outputName: outputName,
+            sourceName: sourceName,
+            uplinkDestination: Self.uplinkDestination,
             descriptor: descriptor,
             tuning: tuning,
             panelStatus: panelStatus,
@@ -1259,8 +1098,6 @@ final class PanelAudioSession: @unchecked Sendable {
             captureCallbackDrops: captureCallbackDrops,
             uplinkLostFrames: uplinkLostFrames,
             uplinkLatePackets: uplinkLatePackets,
-            playbackQueueDrops: playbackQueueDrops,
-            downlinkCorrectionPPM: downlinkDrift.correctionPPM,
-            uplinkCorrectionPPM: uplinkDrift.correctionPPM))
+            downlinkCorrectionPPM: downlinkDrift.correctionPPM))
     }
 }

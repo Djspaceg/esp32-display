@@ -31,38 +31,3 @@ struct AudioDeviceOption: Identifiable, Equatable, Sendable {
         }
     }
 }
-
-struct AudioDeviceResolution: Equatable, Sendable {
-    let uid: String?
-    let name: String
-    let missingPreferredUID: String?
-
-    var usedFallback: Bool { missingPreferredUID != nil }
-}
-
-/// Pure preference resolution. CoreAudio enumeration is deliberately outside
-/// this type so vanished-device behavior is unit-testable without hardware.
-enum AudioDeviceResolver {
-    static let systemDefaultName = "System Default"
-
-    static func resolve(
-        preferredUID: String?,
-        direction: AudioDeviceDirection,
-        devices: [AudioDeviceOption]
-    ) -> AudioDeviceResolution {
-        guard let preferredUID, !preferredUID.isEmpty else {
-            return AudioDeviceResolution(
-                uid: nil, name: systemDefaultName, missingPreferredUID: nil)
-        }
-        if let device = devices.first(where: {
-            $0.uid == preferredUID && $0.supports(direction)
-        }) {
-            return AudioDeviceResolution(
-                uid: device.uid, name: device.name, missingPreferredUID: nil)
-        }
-        return AudioDeviceResolution(
-            uid: nil,
-            name: systemDefaultName,
-            missingPreferredUID: preferredUID)
-    }
-}

@@ -311,6 +311,22 @@ The facade exposes `start`, `writeFrames`, `readFrames`, `setGain`, and
 forcing direct hardware through fake codec operations or making a future P4
 codec look like an S3 special case.
 
+The ES8311 DAC level (register 0x32) is set once at `start` and never changed
+at run time. It is the board's vendor reference level, declared with its
+source as `audio.dac_volume_percent` in the descriptor, on Espressif's es8311
+driver scale (register = percent * 256 / 100 - 1). A board whose descriptor
+cites no level keeps the conservative default of 35 (88, -51.5 dB), which the
+1.85C owner could not hear; the 1.85C's vendor demo uses 50 (127, -32 dB).
+Firmware never goes above the cited level, to protect the small speakers.
+Volume is the sender's job: the Mac app scales its samples per display, from
+that ceiling down. There is no volume field in the wire protocol or CFG.
+
+The sender's downlink is this Mac's sound output, taken through a Core Audio
+process tap that excludes the sender itself; the Mac's speakers keep playing.
+Without the macOS "System Audio Recording Only" permission it sends silence,
+because the panel learns its uplink peer only from downlink packets. The
+panel microphone uplink is received and de-jittered but not played on the Mac.
+
 `dma_gate` continues to protect panel-transfer source ownership and the
 flash-write exclusion. Audio must never hold it for playout: a continuous I2S
 clock cannot wait for panel DMA. Conversely, panel code may not borrow audio

@@ -156,9 +156,11 @@ extension PanelManager {
         session.applyPacing(
             spacingMicros: settings.spacingMicros, adaptive: settings.adaptivePacing)
         session.applyTileQuality(settings.tileQuality)
-        session.applyAudio(
-            preferences: settings.audioDevices,
-            tuning: settings.audioTuning)
+        session.applyAudio(tuning: settings.audioTuning)
+        if let volume = panels.first(where: { $0.serviceName == session.name })?
+            .speakerVolume {
+            session.setSpeakerVolume(volume)
+        }
         // No frames leave until EINF proves this service is the owned hardware.
         session.setPaused(true)
         if session.name == previewFocus {
@@ -235,6 +237,13 @@ extension PanelManager {
         guard let session = sessions[serviceName],
               identityBoundSessionIDs.insert(session.id).inserted
         else { return }
+        // Bound to its record only now: a session that arrived under a new
+        // service name was registered before any record owned that name, so
+        // it is still at the default volume rather than the saved one.
+        if let volume = panels.first(where: { $0.serviceName == serviceName })?
+            .speakerVolume {
+            session.setSpeakerVolume(volume)
+        }
         session.setPaused(false)
     }
 

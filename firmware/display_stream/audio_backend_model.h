@@ -20,6 +20,27 @@ struct Format {
   uint8_t bitsPerSample;
 };
 
+// The speaker's fixed DAC level. Nothing changes it at run time: the sender
+// scales its samples for volume, so this is the loudest the speaker plays.
+// Boards whose descriptor cites a vendor reference level use it; the rest keep
+// the conservative level every board used before.
+constexpr uint8_t DEFAULT_DAC_VOLUME_PERCENT = 35;
+
+inline uint8_t dacVolumePercent(const board::AudioConfig &config) {
+  return config.dacVolumePercent != 0 ? config.dacVolumePercent
+                                      : DEFAULT_DAC_VOLUME_PERCENT;
+}
+
+// Espressif's es8311 driver mapping (es8311_voice_volume_set), the one the
+// vendor Arduino demos call: 0 is register 0, else percent * 256 / 100 - 1.
+// The datasheet scale is 0x00 = -95.5 dB in 0.5 dB steps, so 35 is 88
+// (-51.5 dB) and 50 is 127 (-32 dB).
+inline uint8_t es8311DacVolumeRegister(uint8_t percent) {
+  if (percent > 100) percent = 100;
+  return percent == 0 ? 0
+                      : (uint8_t)(((uint16_t)percent * 256U) / 100U - 1U);
+}
+
 enum class DescriptorStatus : uint8_t {
   NoAudio,
   UnsupportedTopology,

@@ -790,6 +790,26 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertFalse(session.senderPausedForTesting)
     }
 
+    /// The session arrives under the new name before any record owns it, so
+    /// registering it cannot apply the saved volume; binding must.
+    func testRenamedRecordsSavedVolumeReachesItsSession() throws {
+        var panel = controllablePanel(serviceName: "old-name")
+        panel.speakerVolume = 0.2
+        let manager = makeManager([panel])
+        let session = makeSession(name: "new-name")
+        manager.register(session, provisional: true)
+        XCTAssertEqual(session.speakerVolumeForTesting, PanelSpeakerVolume.default)
+
+        manager.update(
+            .info(try makeInfo(
+                name: "new-name", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])),
+            for: "new-name",
+            sessionID: session.id)
+
+        XCTAssertEqual(manager.panels.first?.serviceName, "new-name")
+        XCTAssertEqual(session.speakerVolumeForTesting, 0.2)
+    }
+
     func testUserPauseSurvivesRepeatedInfo() throws {
         // EINF repeats every 2 seconds and every arrival re-binds identity.
         // The provisional pause must lift on the FIRST bind only: unpausing

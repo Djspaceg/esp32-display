@@ -267,7 +267,7 @@ def render_audio(descriptors: Sequence[Dict[str, Any]]) -> str:
         lines.append(
             "    {Variant::%s, %s, %s, %s, %s, %s, "
             "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, "
-            "%d, %d, %d, %d, %d, %d, %d, %d},\n"
+            "%d, %d, %d, %d, %d, %d, %d, %d, %d},\n"
             % (
                 identity["variant"],
                 AUDIO_AMP_ENUMS[audio["amp"]],
@@ -295,6 +295,7 @@ def render_audio(descriptors: Sequence[Dict[str, Any]]) -> str:
                     descriptor, "audio.pin_control_sda"),
                 board_descriptor.optional_pin(
                     descriptor, "audio.pin_control_scl"),
+                board_descriptor.dac_volume_percent(descriptor),
             )
         )
     lines.extend([

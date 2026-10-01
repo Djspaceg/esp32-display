@@ -182,6 +182,14 @@ playback_rate_hz = 16000
 playback_channels = 2
 capture_rate_hz = 16000
 capture_channels = 2
+# Speaker DAC level: the lowest playback default in the vendor code for the
+# XC boards (4C and 3.4C), the I2SCodec example's es8311_voice_volume_set(60)
+# (register 0x32 = 152, -19.5 dB). The factory firmware plays at
+# esp_codec_dev 80 (178, -6.5 dB).
+# https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-XC/blob/6948676d64515b6273998236d98a643ead640735/examples/esp-idf/06_I2SCodec/main/Kconfig.projbuild#L52-L55
+# https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-XC/blob/6948676d64515b6273998236d98a643ead640735/firmware/brookesia/main/main.cpp#L501
+# The sender scales its samples down from this level; nothing raises it.
+dac_volume_percent = 60
 
 [capabilities]
 doom = true

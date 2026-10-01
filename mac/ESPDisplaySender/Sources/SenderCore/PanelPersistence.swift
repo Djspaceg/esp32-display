@@ -42,6 +42,9 @@ struct PersistedPanel: Codable, Equatable {
     /// only says "the default" is noise, and an older file that predates presets
     /// should load as the default rather than fail to decode.
     var gesturePreset: GesturePreset?
+    /// The display speaker's volume, absent for the default, the same way
+    /// `gesturePreset` records its default.
+    var speakerVolume: Double?
 
     init(snapshot: PanelSnapshot) {
         serviceName = snapshot.serviceName
@@ -58,6 +61,8 @@ struct PersistedPanel: Codable, Equatable {
         idleText = snapshot.idleText.isEmpty ? nil : snapshot.idleText
         gesturePreset = snapshot.gesturePreset == .standard
             ? nil : snapshot.gesturePreset
+        let volume = PanelSpeakerVolume.clamped(snapshot.speakerVolume)
+        speakerVolume = volume == PanelSpeakerVolume.default ? nil : volume
     }
 
     /// Rebuild a runtime snapshot. Everything not persisted starts at its
@@ -76,6 +81,8 @@ struct PersistedPanel: Codable, Equatable {
         panel.source = PanelSource(source)
         panel.idleText = idleText ?? ""
         panel.gesturePreset = gesturePreset ?? .standard
+        panel.speakerVolume = PanelSpeakerVolume.clamped(
+            speakerVolume ?? PanelSpeakerVolume.default)
         return panel
     }
 }

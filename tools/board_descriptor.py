@@ -221,6 +221,9 @@ OPTIONAL_FIELDS = {
     "detection.sense_max_mv": 0,
     "detection.panel_id": [],
     "detection.touch_resolution": [],
+    # The ES8311 DAC level from the vendor's reference code, on Espressif's
+    # es8311 driver percent scale. Absent (0) keeps the firmware default.
+    "audio.dac_volume_percent": 0,
 }
 # Carrier wiring only some boards have. Absent means -1 (no such line), so a
 # descriptor written before a field existed stays valid without restating it.
@@ -239,6 +242,12 @@ for required_path in (tuple(REQUIRED_FIELDS) + tuple(OPTIONAL_FIELDS)
     section, separator, field = required_path.partition(".")
     if separator:
         ALLOWED_SECTION_FIELDS.setdefault(section, set()).add(field)
+
+
+def dac_volume_percent(descriptor: Dict[str, Any]) -> int:
+    """The declared ES8311 DAC level, 0 when the descriptor cites none."""
+    return descriptor.get("audio", {}).get(
+        "dac_volume_percent", OPTIONAL_FIELDS["audio.dac_volume_percent"])
 
 
 def detection_sense(descriptor: Dict[str, Any]) -> Tuple[int, int, int]:
@@ -718,6 +727,15 @@ def _validate_audio(descriptor: Dict[str, Any]) -> None:
         field: optional_pin(descriptor, "audio." + field)
         for field in ("pin_control_sda", "pin_control_scl")
     }
+    dac_volume = dac_volume_percent(descriptor)
+    if (not isinstance(dac_volume, int) or isinstance(dac_volume, bool)
+            or not 0 <= dac_volume <= 100):
+        raise DescriptorError(
+            "%s: audio.dac_volume_percent must be 0..100" % source)
+    if dac_volume != 0 and (not capability or codec != "es8311"):
+        raise DescriptorError(
+            "%s: audio.dac_volume_percent is only for an ES8311 speaker"
+            % source)
     if not capability:
         for field, value in list(pins.items()) + list(control_bus.items()):
             if value != -1:

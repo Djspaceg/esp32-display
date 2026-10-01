@@ -52,8 +52,12 @@ struct FakeI2cDevice {
   uint8_t registers[256];
 };
 FakeI2cDevice i2cDevices[128] = {};
+// The last value written to each register, -1 for never; kept apart from
+// `registers` so a write cannot change what an ID read returns.
+int writtenRegisters[128][256];
 unsigned activeWireBytes = 0;
 uint8_t activeWireRegister = 0;
+int activeWireValue = -1;
 unsigned registerWrites = 0;
 int pendingRead = -1;
 
@@ -229,6 +233,7 @@ void TwoWire::beginTransmission(uint8_t address) {
 
 size_t TwoWire::write(uint8_t value) {
   if (activeWireBytes == 0) activeWireRegister = value;
+  if (activeWireBytes == 1) activeWireValue = value;
   activeWireBytes++;
   return 1;
 }
@@ -239,7 +244,10 @@ uint8_t TwoWire::endTransmission() {
   if (activeWireAddress >= 128 || !i2cDevices[activeWireAddress].present) {
     return 2;
   }
-  if (activeWireBytes > 1) registerWrites++;
+  if (activeWireBytes > 1) {
+    registerWrites++;
+    writtenRegisters[activeWireAddress][activeWireRegister] = activeWireValue;
+  }
   return 0;
 }
 
@@ -272,6 +280,10 @@ void reset() {
   activeWireBytes = 0;
   activeWireRegister = 0;
   registerWrites = 0;
+  activeWireValue = -1;
+  for (auto &device : writtenRegisters) {
+    for (int &value : device) value = -1;
+  }
   pendingRead = -1;
   installGenuineCodecs();
   rssiStallMs = 0;
@@ -295,6 +307,10 @@ void setI2cDevice(uint8_t address, bool present, uint8_t idRegisterA,
 }
 
 unsigned wireRegisterWrites() { return registerWrites; }
+
+int lastRegisterWrite(uint8_t address, uint8_t reg) {
+  return address < 128 ? writtenRegisters[address][reg] : -1;
+}
 
 void setMillis(uint32_t value) { nowMs = value; }
 

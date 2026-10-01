@@ -12,7 +12,6 @@ final class PanelManager: ObservableObject {
     @Published internal(set) var panels: [PanelSnapshot] = []
     @Published internal(set) var savedNetworkNames: [String] = []
     @Published internal(set) var usbDevices: [WifiConfigUI.USBDeviceOption] = []
-    @Published internal(set) var audioDevices: [AudioDeviceOption] = []
     var audioRouteSnapshot = CoreAudioRouteSnapshot.empty
     /// Current transport paths. Kept as a projection for flashing/configuration
     /// code that needs a path rather than a display label.
@@ -382,9 +381,7 @@ final class PanelManager: ObservableObject {
                 spacingMicros: validated.spacingMicros,
                 adaptive: validated.adaptivePacing)
             session.applyTileQuality(validated.tileQuality)
-            session.applyAudio(
-                preferences: validated.audioDevices,
-                tuning: validated.audioTuning)
+            session.applyAudio(tuning: validated.audioTuning)
         }
         saveSettings()
     }

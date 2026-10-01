@@ -69,7 +69,6 @@ namespace {
 I2SClass audioI2s;
 
 constexpr uint32_t CONTROL_I2C_HZ = 400000;
-constexpr uint8_t STARTUP_GAIN_PERCENT = 35;
 constexpr uint32_t CODEC_SETTLE_MS = 10;
 constexpr size_t PRIME_FRAMES = 80;
 
@@ -294,7 +293,7 @@ bool CodecSerialAudioBackend::start(
     return false;
   }
   if (!initializeEs8311() || !initializeEs7210() ||
-      !setGain(STARTUP_GAIN_PERCENT)) {
+      !setGain(audiobackend::dacVolumePercent(config_))) {
     stop();
     return false;
   }
@@ -328,10 +327,8 @@ size_t CodecSerialAudioBackend::readFrames(int16_t *samples,
 }
 
 bool CodecSerialAudioBackend::setGain(uint8_t percent) {
-  if (percent > 100) percent = 100;
-  const uint8_t reg =
-      percent == 0 ? 0 : (uint8_t)(((uint16_t)percent * 256U) / 100U - 1U);
-  return writeRegister(config_.codecI2cAddress, ES8311_DAC_VOLUME, reg);
+  return writeRegister(config_.codecI2cAddress, ES8311_DAC_VOLUME,
+                       audiobackend::es8311DacVolumeRegister(percent));
 }
 
 void CodecSerialAudioBackend::stop() {

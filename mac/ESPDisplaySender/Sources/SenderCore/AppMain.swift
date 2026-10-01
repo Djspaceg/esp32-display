@@ -467,7 +467,6 @@ public enum ESPDisplaySenderApp {
                     descriptor in
                     PanelAudioSession(
                         descriptor: descriptor,
-                        preferences: streaming.audioDevices,
                         tuning: streaming.audioTuning,
                         peerAddress: sender.peerAddressState,
                         radioBudget: sender.radioBudget,
@@ -498,9 +497,7 @@ public enum ESPDisplaySenderApp {
                                 sessionID: id)
                         }
                     })
-                session.applyAudio(
-                    preferences: streaming.audioDevices,
-                    tuning: streaming.audioTuning)
+                session.applyAudio(tuning: streaming.audioTuning)
                 // A provisional discovery must be unable to send even if its
                 // run task wins the scheduler race against manager registration.
                 if provisional { session.setPaused(true) }

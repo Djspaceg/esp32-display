@@ -81,7 +81,7 @@ final class DeviceSession {
     private var audioSession: PanelAudioSession?
     private var audioDescriptor: AudioStreamDescriptor?
     private let audioSessionFactory: ((AudioStreamDescriptor) -> PanelAudioSession)?
-    private var audioPreferences = AudioDevicePreferences()
+    private var speakerVolume = PanelSpeakerVolume.default
     private var audioTuning = AudioRuntimeTuning()
     private var audioRunStarted = false
     private var audioEnabled = true
@@ -377,6 +377,7 @@ final class DeviceSession {
     /// Test seam for proving provisional sessions cannot send before EINF binds
     /// them to an owned record.
     var senderPausedForTesting: Bool { sender.paused }
+    var speakerVolumeForTesting: Double { stateLock.withLock { speakerVolume } }
 
     func sendDisplaySleep() { sender.sendDisplaySleep() }
     func sendDisplayWake() { sender.sendDisplayWake() }
@@ -386,17 +387,22 @@ final class DeviceSession {
         setAudioEnabled(AudioSessionActivationPolicy.isEnabled(
             paused: paused, parked: sender.parked))
     }
-    func applyAudio(
-        preferences: AudioDevicePreferences,
-        tuning: AudioRuntimeTuning
-    ) {
+    func applyAudio(tuning: AudioRuntimeTuning) {
         let session = stateLock.withLock {
-            audioPreferences = preferences
             audioTuning = tuning.validated
             return audioSession
         }
         sender.radioBudget.update(tuning: tuning)
-        session?.update(preferences: preferences, tuning: tuning)
+        session?.update(tuning: tuning)
+    }
+    /// Kept here as well as on the running audio session, so a session
+    /// installed later by `reconcileAudio` starts at the same volume.
+    func setSpeakerVolume(_ volume: Double) {
+        let session = stateLock.withLock {
+            speakerVolume = volume
+            return audioSession
+        }
+        session?.setSpeakerVolume(volume)
     }
     func audioDevicesChanged() {
         currentAudioSession?.devicesChanged()
@@ -421,7 +427,7 @@ final class DeviceSession {
         var newSession: PanelAudioSession?
         var shouldStart = false
         var shouldEnable = false
-        var preferences = AudioDevicePreferences()
+        var volume = PanelSpeakerVolume.default
         var tuning = AudioRuntimeTuning()
 
         stateLock.lock()
@@ -447,13 +453,14 @@ final class DeviceSession {
             audioDescriptor = descriptor
             shouldStart = audioRunStarted
             shouldEnable = audioEnabled
-            preferences = audioPreferences
+            volume = speakerVolume
             tuning = audioTuning
         }
         stateLock.unlock()
 
         oldSession?.stop()
-        newSession?.update(preferences: preferences, tuning: tuning)
+        newSession?.update(tuning: tuning)
+        newSession?.setSpeakerVolume(volume)
         newSession?.setEnabled(shouldEnable)
         if shouldStart {
             newSession?.start()

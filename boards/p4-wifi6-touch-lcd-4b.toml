@@ -181,6 +181,14 @@ playback_rate_hz = 16000
 playback_channels = 2
 capture_rate_hz = 16000
 capture_channels = 2
+# Speaker DAC level: the lowest playback default in the vendor code, the
+# ESP-IDF audio-codec example's esp_codec_dev 60 (with the 5.0/3.3 V hardware
+# gain, register 0x32 = 158, -16.5 dB); 62 is the largest level here at or
+# under it. The factory firmware plays at esp_codec_dev 80 (178, -6.5 dB).
+# https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-4B/blob/5a7a9a2823d77983c15b44a72934a7699e5d2d8b/examples/esp-idf/audio-codec/main/Kconfig.projbuild#L17-L20
+# https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-4B/blob/5a7a9a2823d77983c15b44a72934a7699e5d2d8b/firmware/brookesia/main/main.cpp#L503
+# The sender scales its samples down from this level; nothing raises it.
+dac_volume_percent = 62
 
 [capabilities]
 doom = true

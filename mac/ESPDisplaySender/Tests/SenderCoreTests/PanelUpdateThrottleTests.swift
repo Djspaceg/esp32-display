@@ -44,8 +44,8 @@ final class PanelUpdateThrottleTests: XCTestCase {
         PanelAudioSnapshot(
             state: state,
             message: "m",
-            inputName: "in",
-            outputName: "out",
+            sourceName: "in",
+            uplinkDestination: "out",
             descriptor: AudioStreamDescriptor(
                 port: 5569, version: 1, sampleRateHz: 16_000,
                 playbackChannels: 2, captureChannels: 2),
@@ -55,9 +55,7 @@ final class PanelUpdateThrottleTests: XCTestCase {
             captureCallbackDrops: 0,
             uplinkLostFrames: 0,
             uplinkLatePackets: 0,
-            playbackQueueDrops: 0,
-            downlinkCorrectionPPM: 0,
-            uplinkCorrectionPPM: 0)
+            downlinkCorrectionPPM: 0)
     }
 
     func testAudioCounterBurstIsCoalescedToTwoUpdatesASecond() {

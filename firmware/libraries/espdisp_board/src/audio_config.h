@@ -39,6 +39,11 @@ struct AudioConfig {
   // bus. See audiobackend::controlBus().
   int8_t pinControlSda = -1;
   int8_t pinControlScl = -1;
+  // ES8311 DAC level on Espressif's es8311 driver scale (register 0x32 =
+  // percent * 256 / 100 - 1), taken from the vendor's reference code for the
+  // board. 0 means the descriptor cites none, and the firmware default
+  // applies. See audiobackend::dacVolumePercent().
+  uint8_t dacVolumePercent = 0;
 };
 
 }  // namespace board
