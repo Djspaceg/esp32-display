@@ -811,10 +811,11 @@ static int testIdentityEnablesEveryCodecBoard() {
 }
 
 // The speaker's fixed DAC level is the vendor reference cited in each board's
-// descriptor (the lowest playback default in that board's vendor code), written
-// once to ES8311 register 0x32 at start. Every board had been 35 (88, -51.5
-// dB), which the 1.85C's owner could not hear; Waveshare's demo for the 1.85C
-// uses 50 (127, -32 dB). Keep in step with tools/test_espdisp.py.
+// descriptor, written once to ES8311 register 0x32 at start. Every board had
+// been 35 (88, -51.5 dB), which the 1.85C's owner could not hear; at the
+// vendor speaker demo's 50 (127, -32 dB) it was still quiet, so the 1.85C
+// takes the vendor's loudest level, 65 (165, -13 dB). The others take the
+// lowest in their vendor code. Keep in step with tools/test_espdisp.py.
 static int testDacLevelIsTheVendorReference() {
   const struct {
     const board::Config *config;
@@ -822,7 +823,7 @@ static int testDacLevelIsTheVendorReference() {
     int reg;
   } boards[] = {
       {&board::CONFIG_AMOLED_CO5300, 62, 157},
-      {&board::CONFIG_LCD_ST77916, 50, 127},
+      {&board::CONFIG_LCD_ST77916, 65, 165},
       {&board::CONFIG_LCD_GC9107, 75, 191},
       {&board::CONFIG_TOUCH_ST7789, 75, 191},
       {&board::CONFIG_P4_4B, 62, 157},

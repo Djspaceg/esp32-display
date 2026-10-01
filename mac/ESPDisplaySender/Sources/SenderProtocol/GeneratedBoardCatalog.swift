@@ -10,7 +10,7 @@ public enum GeneratedBoardCatalog {
         public let bootloaderAddress: Int
     }
 
-    public static let sourceSHA256 = "2ee9de6fee646ac935c9e08ef0142357704bdb6539869a9d7aab27e3d348bb96"
+    public static let sourceSHA256 = "e08099a54cc12d1e5bca70d13ee9ac297e52540a289fe48afeaba97215923b79"
     public static let requiredFamilies: Set<String> = ["c3", "c6", "s3", "p4"]
     public static let expected: [String: Expected] = [
         "c3": Expected(chip: "esp32c3", profiles: ["gc9a01a-240"], flashBytes: [4194304], partition: "c3-4m-ota", bootloaderAddress: 0),

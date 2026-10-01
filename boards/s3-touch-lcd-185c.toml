@@ -187,14 +187,16 @@ playback_rate_hz = 16000
 playback_channels = 2
 capture_rate_hz = 16000
 capture_channels = 2
-# Speaker DAC level: the lowest playback default in the vendor code, the
-# speaker demo's es8311_voice_volume_set(50) (register 0x32 = 127, -32 dB).
-# The ESP-IDF demo's esp_codec_dev 50 is 148 (-21.5 dB) and the TF-card demo's
-# 65 is 165 (-13 dB).
+# Speaker DAC level: the loudest playback default in the vendor code, the
+# TF-card player demo's es8311_voice_volume_set(65) (register 0x32 = 165,
+# -13 dB). Its speaker demo uses 50 (127, -32 dB) and its ESP-IDF demo
+# esp_codec_dev 50 (148, -21.5 dB); at 50 the owner found it quiet even with
+# the sender at 100%, so this board takes the vendor's highest level.
+# https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/Arduino/examples/05_audio_out_tf/05_audio_out_tf.ino#L25
+# https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/Arduino/examples/05_audio_out_tf/05_audio_out_tf.ino#L39
 # https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/Arduino/examples/03_audio_out_no_tf/03_audio_out_no_tf.ino#L21
-# https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/blob/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880/Arduino/examples/03_audio_out_no_tf/03_audio_out_no_tf.ino#L46
 # The sender scales its samples down from this level; nothing raises it.
-dac_volume_percent = 50
+dac_volume_percent = 65
 
 [capabilities]
 doom = true

@@ -58,7 +58,7 @@ EXPECTED_DAC_VOLUME_PERCENT = {
     "s3-lcd-085": 75,
     "s3-touch-amoled-175c": 62,
     "s3-touch-lcd-154": 75,
-    "s3-touch-lcd-185c": 50,
+    "s3-touch-lcd-185c": 65,
 }
 
 
@@ -4138,7 +4138,7 @@ def test_board_descriptor_validator():
         "playback_channels": 2,
         "capture_rate_hz": 16000,
         "capture_channels": 2,
-        "dac_volume_percent": 50,
+        "dac_volume_percent": 65,
     }
     lcd_185c = next(
         item for item in descriptors

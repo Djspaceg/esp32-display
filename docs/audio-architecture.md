@@ -316,7 +316,10 @@ at run time. It is the board's vendor reference level, declared with its
 source as `audio.dac_volume_percent` in the descriptor, on Espressif's es8311
 driver scale (register = percent * 256 / 100 - 1). A board whose descriptor
 cites no level keeps the conservative default of 35 (88, -51.5 dB), which the
-1.85C owner could not hear; the 1.85C's vendor demo uses 50 (127, -32 dB).
+1.85C owner could not hear. Boards take the lowest playback level in their
+vendor code, except the 1.85C: at its speaker demo's 50 (127, -32 dB) it was
+still quiet with the sender at 100%, so it takes its TF-card demo's 65 (165,
+-13 dB), the loudest vendor level for that board.
 Firmware never goes above the cited level, to protect the small speakers.
 Volume is the sender's job: the Mac app scales its samples per display, from
 that ceiling down. There is no volume field in the wire protocol or CFG.
