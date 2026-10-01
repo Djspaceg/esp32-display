@@ -1,5 +1,5 @@
 {
-  "built_at": "2026-09-29T00:56:10Z",
+  "built_at": "2026-10-01T19:29:30Z",
   "chip": "esp32c6",
   "family": "c6",
   "format": 1,
@@ -27,12 +27,12 @@
     },
     {
       "address": 65536,
-      "bytes": 368816,
+      "bytes": 368800,
       "file": "app.bin",
       "role": "app",
-      "sha256": "83e8c7323081892e7b9675f68949639ab77c17adc854ef6bea066181903df548"
+      "sha256": "8c9ee53fd338f512a48fe435283d0fe61c1a20b63f887ca4da95c95bbea3aad6"
     }
   ],
-  "source_commit": "ba002276dea3dac78db19acbf5062c7d2d923f21",
+  "source_commit": "0112b953c51ae5458886b6f7cd0816d070263dd1",
   "source_dirty": false
 }
