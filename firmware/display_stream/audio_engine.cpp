@@ -301,6 +301,9 @@ void engineTask(void *) {
       tracker.reset();
       jitter.clear();
       cursor.reset();
+      for (uint8_t channel = 0; channel < MAX_CHANNELS; ++channel) {
+        lastOutput[channel] = 0;
+      }
       underrun.reset();
       playbackMetrics.reset();
       streamSeen = false;
@@ -376,6 +379,30 @@ void engineTask(void *) {
       written = backend.writeFrames(output, serviceFrames);
       suppressVideo = true;
     }
+    const size_t captured = written == 0
+        ? 0
+        : backend.readFrames(capture, serviceFrames);
+    if (written == 0 || captured == 0) {
+      // I2S that fails at once is a dead channel, not a busy one: a real
+      // write or read blocks for its DMA. Retrying here spun this priority-12
+      // task on the loop task's core until the loop watchdog rebooted the
+      // board, so mute the stream as a failed start does and sleep; the next
+      // packets restart it.
+      Serial.println("audio: ERROR I2S stopped responding; stream muted");
+      backend.stop();
+      tracker.reset();
+      jitter.clear();
+      cursor.reset();
+      for (uint8_t channel = 0; channel < MAX_CHANNELS; ++channel) {
+        lastOutput[channel] = 0;
+      }
+      underrun.reset();
+      playbackMetrics.reset();
+      streamSeen = false;
+      suppressVideo = false;
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
     if (written == serviceFrames) {
       for (uint8_t channel = 0; channel < outputChannels; ++channel) {
         lastOutput[channel] =
@@ -383,7 +410,6 @@ void engineTask(void *) {
       }
     }
 
-    const size_t captured = backend.readFrames(capture, serviceFrames);
     if (captured == serviceFrames) {
       audiotransport::sendCapture(
           capture, (uint16_t)captured, captureChannels,

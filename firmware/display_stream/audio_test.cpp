@@ -15,6 +15,12 @@ constexpr uint8_t MAX_CHANNELS = 2;
 
 audiobackend::ToneGenerator toneGenerator;
 uint32_t framesRemaining = 0;
+// The codec backend is shared with the network audio engine. Only a backend
+// this test started is the test's to service or stop: the loop task used to
+// stop any running backend with no tone pending, which tore I2S down under a
+// live sender stream and left the engine spinning until the loop watchdog
+// rebooted the board.
+bool toneOwnsBackend = false;
 int16_t samples[MAX_SERVICE_FRAMES * MAX_CHANNELS] = {};
 #endif
 
@@ -50,6 +56,7 @@ const char *startAudioToneTest(const board::Config &config,
     audioengine::setLocalTestActive(false);
     return "codec/I2S initialization failed; amp remains disabled";
   }
+  toneOwnsBackend = true;
   toneGenerator.reset(format.sampleRateHz, format.channels, TONE_FREQUENCY_HZ);
   framesRemaining =
       (uint32_t)(((uint64_t)format.sampleRateHz * durationMs) / 1000U);
@@ -70,10 +77,12 @@ const char *startAudioToneTest(const board::Config &config,
 
 void stopAudioToneTest(bool report) {
 #if defined(ESPDISP_AUDIO_RUNTIME)
+  framesRemaining = 0;
+  if (!toneOwnsBackend) return;
   audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
   const bool wasRunning = backend.running();
-  framesRemaining = 0;
   backend.stop();
+  toneOwnsBackend = false;
   audioengine::setLocalTestActive(false);
   if (report && wasRunning) {
     Serial.println("audio: tone stopped; amp disabled, codec muted");
@@ -86,7 +95,15 @@ void stopAudioToneTest(bool report) {
 void serviceAudioToneTest() {
 #if defined(ESPDISP_AUDIO_RUNTIME)
   audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
-  if (!backend.running()) return;
+  if (!toneOwnsBackend) return;
+  if (!backend.running()) {
+    // Stopped underneath the test (the engine's dead-I2S path): release the
+    // engine's local-test hold so a sender's stream can play again.
+    toneOwnsBackend = false;
+    framesRemaining = 0;
+    audioengine::setLocalTestActive(false);
+    return;
+  }
   if (framesRemaining == 0) {
     stopAudioToneTest(false);
     Serial.println("audio: tone complete; amp disabled, codec muted");
@@ -109,7 +126,8 @@ void serviceAudioToneTest() {
 
 bool audioToneTestRunning() {
 #if defined(ESPDISP_AUDIO_RUNTIME)
-  return framesRemaining > 0 && audio::sharedCodecBackend().running();
+  return toneOwnsBackend && framesRemaining > 0 &&
+         audio::sharedCodecBackend().running();
 #else
   return false;
 #endif

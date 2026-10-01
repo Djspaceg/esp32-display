@@ -195,6 +195,7 @@ static void processConfigLine(char *line) {
     }
     if (audioTest.command == serialcfg::AudioTestCommand::Stop) {
       if (!audioToneTestRunning()) {
+        stopAudioToneTest(false);  // releases a stale hold; else a no-op
         configSerial().println("CFGINFO audio test is not running");
         return;
       }

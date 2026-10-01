@@ -36,6 +36,7 @@ struct UdpDatagram {
 uint32_t nowMs = 0;
 unsigned taskDelayCalls = 0;
 unsigned taskYieldCalls = 0;
+bool i2sFailing = false;
 std::deque<UdpDatagram> udpDatagrams;
 std::vector<audiohost::HardwareEvent> events;
 std::vector<audiohost::SentDatagram> sentUdpDatagrams;
@@ -204,12 +205,12 @@ bool I2SClass::begin(int, uint32_t sampleRateHz, int, i2s_slot_mode_t) {
 size_t I2SClass::write(const void *, size_t bytes) {
   events.push_back(
       {audiohost::HardwareEventKind::I2sWrite, static_cast<int>(bytes)});
-  return bytes;
+  return i2sFailing ? 0 : bytes;
 }
 
 size_t I2SClass::readBytes(char *data, size_t bytes) {
   std::memset(data, 0, bytes);
-  return bytes;
+  return i2sFailing ? 0 : bytes;
 }
 
 void I2SClass::end() {
@@ -278,8 +279,11 @@ void reset() {
   linkCalls = 0;
   ssidCalls = 0;
   rssiValue = -42;
+  i2sFailing = false;
   WiFi.setStatus(WL_CONNECTED);
 }
+
+void setI2sFailing(bool failing) { i2sFailing = failing; }
 
 void setI2cDevice(uint8_t address, bool present, uint8_t idRegisterA,
                   uint8_t idA, uint8_t idRegisterB, uint8_t idB) {

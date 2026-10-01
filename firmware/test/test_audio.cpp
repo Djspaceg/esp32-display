@@ -464,6 +464,162 @@ static int testRound3EngineLoopObservesPlaybackMetrics() {
 }
 
 
+// The loop task's tone-test service must leave a backend it did not start
+// alone. It used to stop any running backend while no tone was pending, so the
+// moment a sender's stream started the codec on the 1.85C it tore I2S down
+// under the engine (TX deleted, RX left half-disabled), the engine spun on the
+// failed I2S calls at priority 12, and the loop-task watchdog rebooted the
+// board every ~13 s.
+static int testToneServiceLeavesNetworkStreamRunning() {
+  constexpr uint32_t senderIp = 0x01020304;
+  constexpr uint16_t senderPort = 6000;
+  constexpr uint16_t framesPerPacket = 320;
+
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
+  CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  for (uint16_t sequence = 0; sequence < 6; ++sequence) {
+    audiohost::enqueueUdp(
+        documentedPcm(sequence, sequence * framesPerPacket, framesPerPacket),
+        senderIp, senderPort);
+  }
+  audiotransport::hostReceiveBurst();
+  audiohost::setMillis(250);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
+  CHECK(backend.running());
+  const auto i2sEnds = [] {
+    return std::count_if(
+        audiohost::hardwareEvents().begin(), audiohost::hardwareEvents().end(),
+        [](const audiohost::HardwareEvent &event) {
+          return event.kind == audiohost::HardwareEventKind::I2sEnd;
+        });
+  };
+  const auto endsBefore = i2sEnds();
+
+  serviceAudioToneTest();
+
+  CHECK(backend.running());
+  CHECK(i2sEnds() == endsBefore);
+  CHECK(!audioToneTestRunning());
+
+  audioengine::stop();
+  audiotransport::stop();
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
+// A backend whose I2S calls fail at once (a deleted or disabled channel) must
+// be stopped and the engine must sleep, not retry. Before, the engine looped on
+// the failed calls at priority 12 on the loop task's core, starving it until
+// the 10 s loop watchdog rebooted the board.
+static int testFailedI2sStopsBackendAndYields() {
+  constexpr uint32_t senderIp = 0x01020304;
+  constexpr uint16_t senderPort = 6000;
+  constexpr uint16_t framesPerPacket = 320;
+
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
+  CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  for (uint16_t sequence = 0; sequence < 6; ++sequence) {
+    audiohost::enqueueUdp(
+        documentedPcm(sequence, sequence * framesPerPacket, framesPerPacket),
+        senderIp, senderPort);
+  }
+  audiotransport::hostReceiveBurst();
+  audiohost::setMillis(250);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
+  CHECK(backend.running());
+
+  audiohost::setI2sFailing(true);
+  const unsigned delaysBefore = audiohost::delayCalls();
+  CHECK(audioengine::host::runEngineTaskIterations(1));
+  CHECK(!backend.running());
+  CHECK(audiohost::delayCalls() > delaysBefore);
+  CHECK(!audioengine::streamActive());
+
+  audioengine::stop();
+  audiotransport::stop();
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
+static void queueSenderStream(uint16_t packets) {
+  constexpr uint16_t framesPerPacket = 320;
+  for (uint16_t sequence = 0; sequence < packets; ++sequence) {
+    audiohost::enqueueUdp(
+        documentedPcm(sequence, sequence * framesPerPacket, framesPerPacket),
+        0x01020304, 6000);
+  }
+  audiotransport::hostReceiveBurst();
+}
+
+// A tone runs to completion, then gives the codec back: ownership and the
+// engine's local-test hold are both released, so a sender's stream plays.
+static int testToneLifecycleReleasesTheBackend() {
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
+  CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  CHECK(startAudioToneTest(board::CONFIG_LCD_ST77916, 100) == nullptr);
+  CHECK(audioToneTestRunning());
+  for (int pass = 0; pass < 32 && audioToneTestRunning(); ++pass) {
+    serviceAudioToneTest();
+  }
+  serviceAudioToneTest();
+  CHECK(!audioToneTestRunning());
+  CHECK(!audio::sharedCodecBackend().running());
+
+  queueSenderStream(6);
+  audiohost::setMillis(250);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  CHECK(audioengine::streamActive());
+  CHECK(audio::sharedCodecBackend().running());
+
+  audioengine::stop();
+  audiotransport::stop();
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
+// A tone whose backend is stopped underneath it (the engine's dead-I2S path)
+// must not keep the engine on hold: the next service releases it.
+static int testStaleToneOwnershipIsReleased() {
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
+  CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  CHECK(startAudioToneTest(board::CONFIG_LCD_ST77916, 1000) == nullptr);
+  audio::sharedCodecBackend().stop();
+  serviceAudioToneTest();
+  CHECK(!audioToneTestRunning());
+
+  queueSenderStream(6);
+  audiohost::setMillis(250);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  CHECK(audioengine::streamActive());
+
+  audioengine::stop();
+  audiotransport::stop();
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
 static bool anyPinOrClockEvent() {
   for (const auto &event : audiohost::hardwareEvents()) {
     if (event.kind != audiohost::HardwareEventKind::WireBegin &&
@@ -678,6 +834,11 @@ int main() {
       {"round3-engine-loop", testRound3EngineLoopSkipsRejectedPacket},
       {"round3-engine-metrics",
        testRound3EngineLoopObservesPlaybackMetrics},
+      {"tone-service-leaves-stream",
+       testToneServiceLeavesNetworkStreamRunning},
+      {"failed-i2s-yields", testFailedI2sStopsBackendAndYields},
+      {"tone-lifecycle", testToneLifecycleReleasesTheBackend},
+      {"tone-stale-ownership", testStaleToneOwnershipIsReleased},
   };
   for (const auto &finding : findingTests) {
     if (filter == nullptr || std::strcmp(filter, finding.name) == 0) {
