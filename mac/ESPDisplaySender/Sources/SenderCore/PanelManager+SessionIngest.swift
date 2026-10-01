@@ -18,8 +18,72 @@ extension PanelManager {
         guard !supersededServiceNames.contains(serviceName),
               panels.contains(where: { $0.serviceName == serviceName })
         else { return }
+        let current = panels.first { $0.serviceName == serviceName }?.audioStatus
+        holdTelemetry(serviceName, sessionID: sessionID) { $0.audio = status }
+        offerTelemetry(
+            serviceName,
+            urgent: current == nil || current?.state != status.state)
+    }
+
+    /// Hold one field for `serviceName`. Data held for a different session is
+    /// discarded first, so it cannot ride along under the new session's id.
+    func holdTelemetry(
+        _ serviceName: String, sessionID: UUID?,
+        _ change: (inout PendingTelemetry) -> Void
+    ) {
+        var pending = pendingTelemetry[serviceName] ?? PendingTelemetry()
+        if let sessionID, let held = pending.sessionID, held != sessionID {
+            pending = PendingTelemetry()
+        }
+        if let sessionID { pending.sessionID = sessionID }
+        change(&pending)
+        pendingTelemetry[serviceName] = pending
+    }
+
+    /// Hold `serviceName`'s telemetry and write it when its budget allows.
+    func offerTelemetry(_ serviceName: String, urgent: Bool) {
+        let now = telemetryNow()
+        switch telemetryThrottle.offer(serviceName, now: now, urgent: urgent) {
+        case .flushNow:
+            flushTelemetry(serviceName)
+        case .flushAt(let date, let generation):
+            scheduleTelemetryFlush(max(0, date.timeIntervalSince(now))) {
+                [weak self] in
+                guard let self,
+                      self.telemetryThrottle.claim(serviceName, generation: generation)
+                else { return }
+                self.flushTelemetry(serviceName)
+            }
+        case .coalesced:
+            break
+        }
+    }
+
+    /// One write to `panels` carrying everything held for the panel.
+    func flushTelemetry(_ serviceName: String) {
+        guard let pending = pendingTelemetry.removeValue(forKey: serviceName),
+              pending.audio != nil || pending.heartbeat != nil,
+              !supersededServiceNames.contains(serviceName)
+        else { return }
+        // The guards in updateAudio and update(event) ran when the data
+        // arrived; the write can land up to `interval` later.
+        if let sessionID = pending.sessionID, sessions[serviceName]?.id != sessionID {
+            return
+        }
+        telemetryThrottle.wrote(serviceName, at: telemetryNow())
         updatePanel(serviceName) { panel in
-            panel.audioStatus = status
+            if let audio = pending.audio { panel.audioStatus = audio }
+            if let heartbeat = pending.heartbeat {
+                // Held up to `interval`: never move a newer event's time back.
+                panel.lastSeen = max(panel.lastSeen ?? heartbeat.at, heartbeat.at)
+                panel.lastHeartbeatAt = max(
+                    panel.lastHeartbeatAt ?? heartbeat.at, heartbeat.at)
+                panel.lastReplyAt = max(panel.lastReplyAt ?? heartbeat.at, heartbeat.at)
+                panel.lastError = nil
+                panel.framesShown = heartbeat.stats.shown
+                panel.framesDropped = heartbeat.stats.dropped
+                panel.freeHeap = heartbeat.stats.heap
+            }
         }
     }
 
@@ -27,6 +91,7 @@ extension PanelManager {
         guard !supersededServiceNames.contains(serviceName),
               panels.contains(where: { $0.serviceName == serviceName })
         else { return }
+        pendingTelemetry[serviceName]?.audio = nil
         updatePanel(serviceName) { panel in
             panel.audioStatus = nil
         }
@@ -95,19 +160,20 @@ extension PanelManager {
     ) {
         if let sessionID, sessions[serviceName]?.id != sessionID { return }
         guard !supersededServiceNames.contains(serviceName) else { return }
-        let now = Date()
+        let now = telemetryNow()
         var reconciledIdentity = false
         switch event {
         case .heartbeat(let stats):
-            updatePanel(serviceName) { panel in
-                panel.lastSeen = now
-                panel.lastHeartbeatAt = now
-                panel.lastReplyAt = now
-                panel.lastError = nil
-                panel.framesShown = stats.shown
-                panel.framesDropped = stats.dropped
-                panel.freeHeap = stats.heap
+            // A first heartbeat, or one after a gap, can change what the window
+            // says about the panel (online, an error cleared): show it at once.
+            let previous = panels.first { $0.serviceName == serviceName }?
+                .lastHeartbeatAt
+            holdTelemetry(serviceName, sessionID: sessionID) {
+                $0.heartbeat = (stats, now)
             }
+            offerTelemetry(
+                serviceName,
+                urgent: previous.map { now.timeIntervalSince($0) > 2 } ?? true)
         case .info(let info):
             guard let reconciled = bindSessionIdentity(
                 hardwareID: info.deviceID, serviceName: serviceName)

@@ -170,6 +170,8 @@ extension PanelManager {
     func retire(_ serviceName: String, sessionID: UUID? = nil) {
         if let sessionID, sessions[serviceName]?.id != sessionID { return }
         sessions[serviceName] = nil
+        pendingTelemetry[serviceName] = nil
+        telemetryThrottle.forget(serviceName)
         if previewFocus == serviceName { preview.clearFrame() }
         // No session left to preview from, so the stand-in takes over.
         defer { refreshPreviewDriver() }

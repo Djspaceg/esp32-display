@@ -82,6 +82,25 @@ final class PanelManager: ObservableObject {
     weak var picker: PickerSource?
     var pickerTarget: String?
     private var refreshTimer: Timer?
+    /// Clock and scheduler for coalescing per-panel telemetry, injectable so a
+    /// test can drive a burst without waiting on the main run loop.
+    var telemetryNow: () -> Date = { Date() }
+    var telemetryThrottle = PanelUpdateThrottle()
+    /// Telemetry held for a panel until its next coalesced write.
+    struct PendingTelemetry {
+        var audio: PanelAudioSnapshot?
+        var heartbeat: (stats: FrameSender.DeviceStats, at: Date)?
+        /// The session the held data came from; a write after it is replaced
+        /// or retired is dropped.
+        var sessionID: UUID?
+    }
+    var pendingTelemetry: [String: PendingTelemetry] = [:]
+    var scheduleTelemetryFlush: (TimeInterval, @escaping @MainActor () -> Void) -> Void = {
+        delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            MainActor.assumeIsolated { work() }
+        }
+    }
     /// Identity probes are blocking serial reads. Store the detached task itself
     /// so setup inspection and background refresh share one read per path rather
     /// than racing two readers on the same tty. The generation prevents a result
