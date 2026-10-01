@@ -40,10 +40,14 @@ struct SystemAudioAccess: Sendable {
     }()
 }
 
-private struct TCCAudioCapture: Sendable {
+/// TCC's own entry points, as `dlsym` finds them. Internal, with raw-pointer
+/// construction, so a test can stand in functions that behave as TCC does.
+struct TCCAudioCapture: Sendable {
     private typealias Preflight = @convention(c) (CFString, CFDictionary?) -> Int32
+    // @escaping: TCC keeps the block and answers when the user does. A
+    // non-escaping block trapped as soon as the call returned.
     private typealias Request = @convention(c) (
-        CFString, CFDictionary?, @convention(block) (Bool) -> Void
+        CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void
     ) -> Void
 
     private static let service = "kTCCServiceAudioCapture" as CFString
@@ -57,9 +61,12 @@ private struct TCCAudioCapture: Sendable {
             let preflight = dlsym(handle, "TCCAccessPreflight"),
             let request = dlsym(handle, "TCCAccessRequest")
         else { return nil }
-        return TCCAudioCapture(
-            preflightFunction: unsafeBitCast(preflight, to: Preflight.self),
-            requestFunction: unsafeBitCast(request, to: Request.self))
+        return TCCAudioCapture(preflight: preflight, request: request)
+    }
+
+    init(preflight: UnsafeMutableRawPointer, request: UnsafeMutableRawPointer) {
+        preflightFunction = unsafeBitCast(preflight, to: Preflight.self)
+        requestFunction = unsafeBitCast(request, to: Request.self)
     }
 
     func preflight() -> SystemAudioPermission {
