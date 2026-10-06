@@ -5327,10 +5327,31 @@ def test_s3_doom_build_contract():
             ):
                 return espdisp.compile_board(family, output_dir=output_dir)
 
+    # Both markers must be strings the firmware actually prints, or the contract
+    # refuses every canonical S3 and P4 bundle while every cheap lane stays
+    # green: this used the BOOT triple-press line, and the boot-mode menu took
+    # that entry over. Checked against the sources rather than a compiled image,
+    # so a renamed line fails here instead of 20 minutes into a bundle build.
+    doom_entry_paths = [
+        os.path.join(espdisp.SKETCH_DIR, "boot_menu.cpp"),
+        os.path.join(espdisp.SKETCH_DIR, "input_button.cpp"),
+        os.path.join(espdisp.REPO_ROOT, "firmware", "doom", "src", "platform",
+                     "doom_hw_bridge.cpp"),
+    ]
+    doom_entry_sources = ""
+    for entry_path in doom_entry_paths:
+        with open(entry_path, "r", encoding="utf-8") as handle:
+            doom_entry_sources += handle.read()
+    for marker in espdisp.DOOM_APP_MARKERS:
+        check(
+            marker.decode("ascii") in doom_entry_sources,
+            "Doom app marker %r is a line the firmware still prints"
+            % marker.decode("ascii"))
+
     check_fails(
         lambda: compile_export(espdisp.DOOM_APP_MARKERS[1]),
-        "button: Doom requested",
-        "an exported S3 app without the BOOT entry path is refused")
+        "boot menu: Doom chosen",
+        "an exported S3 app without the boot-menu entry path is refused")
     check_fails(
         lambda: compile_export(espdisp.DOOM_APP_MARKERS[0]),
         "[doom] Display bridge ready",
@@ -5485,7 +5506,7 @@ def test_s3_doom_build_contract():
             image = manifest["images"][0]
             wad = flash_payloads[key].get("doom_wad")
             satisfies_doom_contract = (
-                all(marker in payloads[key] for marker in espdisp.DOOM_APP_MARKERS)
+                espdisp.app_carries_doom_runtime(payloads[key])
                 and image.get("partition") == family.partition_scheme
                 and wad is not None
                 and len(wad) == espdisp._DOOM_WAD_SIZE

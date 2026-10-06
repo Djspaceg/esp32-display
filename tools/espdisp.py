@@ -2893,10 +2893,31 @@ def validate_family_build_contract(board: Family) -> None:
         )
 
 
+# Two seams that prove an exported canonical image really linked Doom: the entry
+# path a user reaches it by, and the library's own display bridge. The entry
+# marker follows the entry: it was the BOOT triple-press line until the boot-mode
+# menu took that over (display_stream/boot_menu.cpp), so it is now the menu's
+# Doom handoff.
 DOOM_APP_MARKERS = (
-    b"button: Doom requested; rebooting into isolated mode",
+    b"boot menu: Doom chosen; restarting into isolated mode",
     b"[doom] Display bridge ready (reusing existing panel)",
 )
+
+# Entry lines that have carried Doom's entry, newest first. A bundle committed
+# before the boot-mode menu says the older one and still genuinely carries the
+# runtime, so reading a committed bundle accepts any of these while exporting a
+# new image requires the current one (DOOM_APP_MARKERS above). Readers staying
+# compatible with what shipped is the same rule the bundle formats follow.
+HISTORICAL_DOOM_ENTRY_MARKERS = (
+    b"boot menu: Doom chosen; restarting into isolated mode",
+    b"button: Doom requested; rebooting into isolated mode",
+)
+
+
+def app_carries_doom_runtime(app: bytes) -> bool:
+    """Whether an app image, of any vintage, links Doom and an entry to it."""
+    return DOOM_APP_MARKERS[1] in app and any(
+        marker in app for marker in HISTORICAL_DOOM_ENTRY_MARKERS)
 
 EMPTY_WIFI_CONFIG = """\
 #pragma once
