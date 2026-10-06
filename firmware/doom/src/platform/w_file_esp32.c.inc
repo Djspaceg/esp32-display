@@ -26,6 +26,25 @@ static spi_flash_mmap_handle_t wad_map_handle;
 // Which API produced wad_map_handle, so structural-validation failure unmaps
 // with the matching function (esp_partition_munmap vs spi_flash_munmap).
 static bool wad_mapped_via_partition = false;
+// Why the last ensure_wad_mapped() refused, for the Doom boot's FATAL line.
+static const char* wad_failure = "WAD not checked";
+
+// The flash cache maps only 24-bit (16 MiB) flash addresses unless the
+// bootloader enables 32-bit cache addressing, which the prebuilt Arduino
+// bootloaders do not. esp_partition_mmap() refuses anything past it with
+// ESP_ERR_INVALID_ARG; that was the P4 Doom failure on a 4B, whose doom_wad
+// then sat at 0x1010000.
+#if defined(CONFIG_BOOTLOADER_CACHE_32BIT_ADDR_QUAD_FLASH) || \
+    defined(CONFIG_BOOTLOADER_CACHE_32BIT_ADDR_OCTAL_FLASH)
+#define DOOM_WAD_MAPPABLE_END 0xFFFFFFFFU
+#else
+#define DOOM_WAD_MAPPABLE_END 0x1000000U
+#endif
+
+static bool wad_partition_mappable(const esp_partition_t* part) {
+    return part->address <= DOOM_WAD_MAPPABLE_END &&
+           part->size <= DOOM_WAD_MAPPABLE_END - part->address;
+}
 
 static const esp_partition_t* find_wad_partition(void) {
     return esp_partition_find_first(
@@ -108,6 +127,16 @@ static bool ensure_wad_mapped(void) {
         // A real Doom partition exists: map it through the partition API.
         if (part->size < 12) {
             doom_log("WAD partition too small");
+            wad_failure = "doom_wad partition too small";
+            return false;
+        }
+        if (!wad_partition_mappable(part)) {
+            doom_log("doom_wad partition 0x%lx+0x%lx is past the 0x%lx bytes "
+                     "of flash the cache can map; a full USB flash of the "
+                     "current bundle moves it",
+                     (unsigned long)part->address, (unsigned long)part->size,
+                     (unsigned long)DOOM_WAD_MAPPABLE_END);
+            wad_failure = "doom_wad is past the 16 MiB flash map";
             return false;
         }
         esp_err_t err = esp_partition_mmap(
@@ -117,6 +146,7 @@ static bool ensure_wad_mapped(void) {
         if (err != ESP_OK) {
             doom_log("Failed to mmap WAD partition: %s",
                      esp_err_to_name(err));
+            wad_failure = "WAD partition could not be mapped";
             wad_mapped_ptr = NULL;
             return false;
         }
@@ -125,12 +155,14 @@ static bool ensure_wad_mapped(void) {
     } else {
         // No partition table entry: map the raw WAD region directly.
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
-        // The S3 raw fallback overlaps P4's app1 OTA slot. P4 must find the
-        // dedicated partition above both 8 MiB application slots.
+        // The S3 raw fallback overlaps P4's app1 OTA slot. P4 must find its
+        // dedicated partition after both application slots.
         doom_log("P4 Doom requires the doom_wad partition");
+        wad_failure = "no doom_wad partition";
         return false;
 #else
         if (!map_raw_wad_region(&wad_mapped_ptr, &wad_map_handle)) {
+            wad_failure = "raw WAD region could not be mapped";
             wad_mapped_ptr = NULL;
             return false;
         }
@@ -156,6 +188,7 @@ static bool ensure_wad_mapped(void) {
         }
         wad_mapped_ptr = NULL;
         wad_size = 0;
+        wad_failure = doom_wad_status_text(status);
         return false;
     }
 
@@ -168,6 +201,10 @@ static bool ensure_wad_mapped(void) {
 
 bool doom_wad_available(void) {
     return ensure_wad_mapped();
+}
+
+const char* doom_wad_failure(void) {
+    return wad_failure;
 }
 
 // --- Preflight for the normal firmware ---
@@ -196,6 +233,11 @@ const char* doom_wad_preflight(void) {
     doom_wad_status_t status;
     const esp_partition_t* part = find_wad_partition();
     if (part != NULL) {
+        // Reading works anywhere in flash; the Doom boot maps. Refuse what
+        // it cannot map, or a WAD past 16 MiB passes here and fails there.
+        if (!wad_partition_mappable(part)) {
+            return "doom_wad is past the 16 MiB flash map";
+        }
         status = doom_wad_check(read_partition_wad, (void*)part, part->size,
                                 &header);
     } else {

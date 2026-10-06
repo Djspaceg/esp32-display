@@ -5,6 +5,7 @@
 #include "doom_mode.h"
 
 #include <Arduino.h>
+#include <stdio.h>
 #include <string.h>
 #include <esp_log.h>
 #include <esp_partition.h>
@@ -36,6 +37,7 @@ extern "C" {
     void doomgeneric_Tick(void);
     bool doom_prepare_static_buffers(void);
     bool doom_wad_available(void);
+    const char* doom_wad_failure(void);
 }
 
 static const char* TAG = "doom_mode";
@@ -98,7 +100,10 @@ void doom_enter(void) {
         doom_fail_restart("Doom renderer PSRAM allocation failed", true);
     }
     if (!doom_wad_available()) {
-        doom_fail_restart("Doom WAD is missing or invalid", true);
+        static char reason[96];
+        snprintf(reason, sizeof(reason), "Doom WAD unusable: %s",
+                 doom_wad_failure());
+        doom_fail_restart(reason, true);
     }
     doom_log_stage("wad");
 

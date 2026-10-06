@@ -995,14 +995,14 @@ public struct FirmwareBundle: Equatable, Sendable {
                     doomWadFlashRole, 0x42, 0x06, 0x3FF000,
                     doomWadPartitionBytes)
         case .p4:
-            guard matches("app0", 0x00, 0x10, 0x010000, 0x800000),
-                  matches("app1", 0x00, 0x11, 0x810000, 0x800000),
+            guard matches("app0", 0x00, 0x10, 0x010000, 0x5F0000),
+                  matches("app1", 0x00, 0x11, 0x600000, 0x5F0000),
                   let wad = entries[doomWadFlashRole]
             else { return false }
             return wad.type == 0x42 && wad.subtype == 0x06
                 && wad.byteCount == doomWadPartitionBytes
                 && wad.address % 0x1000 == 0
-                && wad.address == 0x1010000
+                && wad.address == 0xBF0000
         }
     }
 

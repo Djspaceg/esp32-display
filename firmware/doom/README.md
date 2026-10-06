@@ -98,7 +98,7 @@ The bundle writer and both catalog readers require all of the following:
 * fit within the target's declared partition
 
 The partition address is read from the bundled partition table rather than
-hardcoded: S3 writes it at `0x3FF000`, while P4 writes it at `0x1010000`.
+hardcoded: S3 writes it at `0x3FF000`, while P4 writes it at `0xBF0000`.
 `firmware/partitions_s3_doom.csv` remains available as a manual 16 MiB developer
 layout with larger `0x5F0000` application slots; it is not the canonical build.
 

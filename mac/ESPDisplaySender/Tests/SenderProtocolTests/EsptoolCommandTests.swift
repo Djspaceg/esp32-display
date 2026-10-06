@@ -279,7 +279,7 @@ final class EsptoolCommandTests: XCTestCase {
             ["bootloader", "partitions", "boot_app0", "app", "doom_wad"])
         XCTAssertEqual(
             plan.map(\.address),
-            [0x2000, 0x8000, 0xE000, 0x10000, 0x1010000])
+            [0x2000, 0x8000, 0xE000, 0x10000, 0xBF0000])
     }
 
     func testStagedFilenamesAreOrderedAndNamedAfterTheirRole() {
@@ -470,10 +470,10 @@ final class EsptoolCommandTests: XCTestCase {
         writeEntry(0, "nvs", 0x01, 0x02, 0x9000, 0x5000)
         writeEntry(1, "otadata", 0x01, 0x00, 0xE000, 0x2000)
         if p4 {
-            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x800000)
-            writeEntry(3, "app1", 0x00, 0x11, 0x810000, 0x800000)
+            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x5F0000)
+            writeEntry(3, "app1", 0x00, 0x11, 0x600000, 0x5F0000)
             if doom {
-                writeEntry(4, "doom_wad", 0x42, 0x06, 0x1010000, 0x401000)
+                writeEntry(4, "doom_wad", 0x42, 0x06, 0xBF0000, 0x401000)
             }
         } else if canonicalS3 {
             writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x1F0000)
@@ -506,7 +506,7 @@ final class EsptoolCommandTests: XCTestCase {
         if hasDoom {
             parts.append((
                 "doom_wad",
-                isP4 ? 0x1010000 : 0x3FF000,
+                isP4 ? 0xBF0000 : 0x3FF000,
                 FirmwareBundleTests.canonicalDoomWad))
         }
         let image = FirmwareBundle.Image(

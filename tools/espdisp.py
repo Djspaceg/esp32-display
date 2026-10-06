@@ -5136,7 +5136,8 @@ def compile_rescue(family: Family, output_dir: str) -> List[str]:
 
     Built with the family's own board options and partition table, so the
     rescue image leaves NVS, the other OTA slot and the Doom WAD where the
-    real firmware expects them.
+    real firmware expects them. It also writes that table, so a rescue image
+    must be rebuilt whenever the family's table changes.
     """
     if not os.path.isdir(RESCUE_SKETCH_DIR):
         raise Fail("rescue sketch not found: %s" % RESCUE_SKETCH_DIR)
@@ -5792,6 +5793,10 @@ _DOOM_WAD_SIZE = 4196020
 _DOOM_WAD_SHA256 = "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771"
 _DOOM_WAD_PARTITION_SIZE = 0x401000
 _DOOM_WAD_FLASH_ROLE = "doom_wad"
+# The prebuilt bootloaders leave 32-bit cache addressing off, so the firmware
+# can esp_partition_mmap() only the first 16 MiB of flash
+# (firmware/doom/src/platform/w_file_esp32.c.inc).
+_DOOM_WAD_MAPPABLE_END = 0x1000000
 
 
 def _partition_entries(blob: bytes) -> List[Tuple[str, int, int, int, int]]:
@@ -5835,6 +5840,12 @@ def _doom_wad_partition(blob: bytes) -> Tuple[int, int]:
             "doom_wad partition is %d bytes, expected %d"
             % (size, _DOOM_WAD_PARTITION_SIZE)
         )
+    if address + size > _DOOM_WAD_MAPPABLE_END:
+        raise Fail(
+            "doom_wad partition 0x%X+0x%X ends past 0x%X: the firmware's flash "
+            "cache maps only 24-bit addresses, so Doom could not map it"
+            % (address, size, _DOOM_WAD_MAPPABLE_END)
+        )
     return address, size
 
 
@@ -5845,9 +5856,9 @@ def _verify_partition_payload(family: Family, blob: bytes) -> None:
         expected = {
             "nvs": (0x01, 0x02, 0x009000, 0x005000),
             "otadata": (0x01, 0x00, 0x00E000, 0x002000),
-            "app0": (0x00, 0x10, 0x010000, 0x800000),
-            "app1": (0x00, 0x11, 0x810000, 0x800000),
-            "doom_wad": (0x42, 0x06, 0x1010000, 0x401000),
+            "app0": (0x00, 0x10, 0x010000, 0x5F0000),
+            "app1": (0x00, 0x11, 0x600000, 0x5F0000),
+            "doom_wad": (0x42, 0x06, 0xBF0000, 0x401000),
         }
     elif family.key == "s3":
         expected = {

@@ -52,7 +52,7 @@ extern "C" void doom_log(const char *format, ...) {
 // ---- Fake flash -------------------------------------------------------------
 // Each family's canonical doom_wad partition address (tools/espdisp.py).
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
-static const uint32_t PARTITION_ADDRESS = 0x1010000;
+static const uint32_t PARTITION_ADDRESS = 0xBF0000;
 static const uint32_t FLASH_BYTES = PARTITION_ADDRESS + DOOM_WAD_PARTITION_BYTES;
 #else
 static const uint32_t PARTITION_ADDRESS = 0x3FF000;
@@ -189,6 +189,18 @@ static int refusesWhatTheBootRefuses() {
   writeValidWad();
   if (expectRefused("no doom_wad partition", "doom_wad partition") != 0) return 1;
   havePartition = true;
+
+  // A valid WAD in a partition the flash cache cannot map: the P4 layout
+  // before this move (0x1010000), which a WiFi update leaves in place. The
+  // old preflight read it fine and let the board reboot into a Doom boot
+  // that could not map it.
+  wadPartition.address = 0x1010000;
+  flash.resize(0x1010000 + DOOM_WAD_PARTITION_BYTES, 0xFF);
+  wadBase = 0x1010000;
+  writeValidWad();
+  if (expectRefused("16 MiB", "the cache can map") != 0) return 1;
+  wadPartition.address = PARTITION_ADDRESS;
+  wadBase = PARTITION_ADDRESS;
 #endif
 
   // The partition exists but nothing was ever written to it (erased flash).

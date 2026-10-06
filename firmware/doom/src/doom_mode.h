@@ -44,6 +44,9 @@ void doom_enter(void);
 /// rescue images write the app alone.
 const char* doom_wad_preflight(void);
 
+/// Why the Doom boot's own WAD check last refused, for its FATAL line.
+const char* doom_wad_failure(void);
+
 /// Check if Doom mode is currently active (for use by other subsystems
 /// that need to know whether to yield resources).
 bool doom_is_active(void);

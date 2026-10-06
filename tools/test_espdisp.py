@@ -3983,11 +3983,11 @@ def test_doom_partition_contracts():
     good = b"".join([
         entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
         entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
-        entry("app0", 0x00, 0x10, 0x10000, 0x800000),
-        entry("app1", 0x00, 0x11, 0x810000, 0x800000),
-        # The P4 Doom port reserves the WAD above app1 rather than reusing the
-        # S3 raw offset, which lands inside app1 on this table.
-        entry("doom_wad", 0x42, 0x06, 0x1010000, 0x401000),
+        entry("app0", 0x00, 0x10, 0x10000, 0x5F0000),
+        entry("app1", 0x00, 0x11, 0x600000, 0x5F0000),
+        # The P4 WAD follows app1 and ends inside the first 16 MiB, the most
+        # the firmware's flash cache can map.
+        entry("doom_wad", 0x42, 0x06, 0xBF0000, 0x401000),
     ]) + b"\xff" * 32
     check_accepts(
         lambda: espdisp._verify_partition_payload(
@@ -3995,8 +3995,20 @@ def test_doom_partition_contracts():
         "P4 dual-OTA partition table")
     check_equal(
         espdisp._doom_wad_partition(good),
-        (0x1010000, 0x401000),
+        (0xBF0000, 0x401000),
         "P4 WAD address comes from the partition table")
+    # The layout the 4B proved unmappable: 8 MiB slots, WAD at 0x1010000.
+    past_map = b"".join([
+        entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
+        entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
+        entry("app0", 0x00, 0x10, 0x10000, 0x800000),
+        entry("app1", 0x00, 0x11, 0x810000, 0x800000),
+        entry("doom_wad", 0x42, 0x06, 0x1010000, 0x401000),
+    ]) + b"\xff" * 32
+    check_fails(
+        lambda: espdisp._doom_wad_partition(past_map),
+        "ends past 0x1000000",
+        "a doom_wad past 16 MiB is refused: the firmware cannot map it")
     missing_app1 = good[:3 * 32] + b"\xff" * 32
     check_fails(
         lambda: espdisp._verify_partition_payload(
@@ -4036,7 +4048,7 @@ def test_doom_partition_contracts():
              unittest.mock.patch.object(
                 espdisp, "_DOOM_WAD_SHA256", espdisp.sha256_hex(wad)):
             for family_key, table, address in (
-                    ("p4", good, 0x1010000),
+                    ("p4", good, 0xBF0000),
                     ("s3", s3, 0x3FF000)):
                 parts = []
                 payloads = {}

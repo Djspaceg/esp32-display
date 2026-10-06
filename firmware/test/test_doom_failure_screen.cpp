@@ -98,7 +98,7 @@ static int textStaysOnTheGlass(const Panel &panel, const char *reason) {
 int main() {
   if (wrapsAndMarksTruncation() != 0) return 1;
   for (const Panel &panel : DOOM_PANELS) {
-    if (textStaysOnTheGlass(panel, "Doom WAD is missing or invalid") != 0 ||
+    if (textStaysOnTheGlass(panel, "Doom WAD unusable: doom_wad is past the 16 MiB flash map") != 0 ||
         textStaysOnTheGlass(panel, LONG_REASON) != 0 ||
         textStaysOnTheGlass(panel, "") != 0) {
       printf("  on a %dx%d%s panel\n", panel.width, panel.height,
