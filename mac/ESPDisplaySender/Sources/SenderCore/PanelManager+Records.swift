@@ -184,8 +184,12 @@ extension PanelManager {
             panel.captureStatus = .failed(
                 "No session is running for this display, so nothing is being sent.")
             panel.audioStatus = nil
-            panel.lastError = "Gave up trying to reach this display. It is retried "
-                + "automatically once it reappears on the network."
+            // Said as a schedule, because it is one: `SessionRegistry` offers
+            // the name again after its cooldown even if discovery never
+            // reports a change.
+            panel.lastError = "This display did not answer, so nothing is being sent. "
+                + "It is tried again every few minutes while it is listed on the "
+                + "network, and as soon as it reappears."
         }
     }
 

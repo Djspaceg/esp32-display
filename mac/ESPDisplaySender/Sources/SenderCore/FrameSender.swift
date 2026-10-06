@@ -257,6 +257,8 @@ final class FrameSender {
     let radioBudget = PanelRadioBudget()
     private var _paused = false
     private var _parked = false
+    /// Set by `stop()`, after which no connection is opened again.
+    private var _stopped = false
     /// Between ESLP and EWAK: the Mac's displays are asleep. The periodic
     /// repaint is skipped meanwhile, because the firmware reads any drawn
     /// frame as the Mac being awake and relights the panel on it.
@@ -541,6 +543,7 @@ final class FrameSender {
 
     func stop() {
         lock.withLock {
+            _stopped = true
             _paused = true
             _parked = true
             pendingFrame = nil
@@ -570,6 +573,10 @@ final class FrameSender {
     /// endpoints re-resolve on every connection attempt, so reconnects heal
     /// device address changes with no name/IP bookkeeping at all.
     private let serviceEndpoint: NWEndpoint?
+
+    /// Replaces the discovered endpoint for the next connects, so a test can
+    /// make a reconnect fail to resolve. Always nil in the app.
+    var endpointOverrideForTesting: NWEndpoint?
 
     init(host: String, port: UInt16, spacingMicros: UInt32 = 200,
          adaptivePacing: Bool = true,
@@ -740,12 +747,14 @@ final class FrameSender {
     }
 
     private func connect(to endpointHost: String?, timeoutSeconds: Double) async throws {
-        connection?.cancel()
+        // Stopping is final. The session reconnects from its own task, so a
+        // reconnect can still be under way when the session is stopped.
+        guard !lock.withLock({ _stopped }) else { throw CancellationError() }
 
         let params = NWParameters.udp
         params.serviceClass = .interactiveVideo
         let conn: NWConnection
-        if let service = serviceEndpoint {
+        if let service = endpointOverrideForTesting ?? serviceEndpoint {
             conn = NWConnection(to: service, using: params)
         } else {
             conn = NWConnection(
@@ -754,7 +763,10 @@ final class FrameSender {
                 using: params
             )
         }
-        connection = conn
+        // The link being replaced stays up until this one is ready. A board
+        // that reset keeps its IP but can take minutes to answer mDNS again,
+        // and the old link, still pointed at that IP, is what hears it return.
+        // Cancelling it first left a failed reconnect with no socket at all.
         conn.stateUpdateHandler = { state in
             switch state {
             case .failed(let error):
@@ -771,6 +783,13 @@ final class FrameSender {
         let deadline = Date(timeIntervalSinceNow: timeoutSeconds)
         while Date() < deadline {
             if conn.state == .ready {
+                guard !lock.withLock({ _stopped }) else {
+                    conn.cancel()
+                    throw CancellationError()
+                }
+                let replaced = connection
+                connection = conn
+                if replaced !== conn { replaced?.cancel() }
                 startReceiveLoop(on: conn)
                 startPingTimer()
                 startRefreshTimer()
@@ -784,9 +803,15 @@ final class FrameSender {
                 return
             }
             if case .failed(let error) = conn.state {
+                conn.cancel()
                 throw error
             }
-            try await Task.sleep(nanoseconds: 100_000_000)
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            } catch {
+                conn.cancel()
+                throw error
+            }
         }
         conn.cancel()
         throw NSError(
@@ -802,9 +827,32 @@ final class FrameSender {
             // The device may have rebooted with an empty framebuffer; the
             // diff would otherwise skip every unchanged band forever.
             forceKeyframe()
+        } catch is CancellationError {
+            // The session stopped while this was under way.
         } catch {
             FileHandle.standardError.write(Data("reconnect failed: \(error)\n".utf8))
+            let silence = lock.withLock {
+                (_lastReplyAt ?? _lastHeartbeatAt).map { Date().timeIntervalSince($0) }
+            }
+            if Self.shouldDropKeptLink(silentFor: silence) {
+                queue.async { [weak self] in
+                    self?.connection?.cancel()
+                    self?.connection = nil
+                }
+            }
         }
+    }
+
+    /// How long a link that has stopped hearing the panel is kept through
+    /// failed reconnects. Long enough to span a run of resets and reflashes at
+    /// the same IP; bounded, so a panel switched off for days does not keep
+    /// pinging an address DHCP may since have given to another board, whose
+    /// answer would read as this panel changing identity.
+    static let keptLinkLifetime: TimeInterval = 30 * 60
+
+    static func shouldDropKeptLink(silentFor silence: TimeInterval?) -> Bool {
+        guard let silence else { return false }
+        return silence > keptLinkLifetime
     }
 
     private func logResolvedPath(_ conn: NWConnection) {

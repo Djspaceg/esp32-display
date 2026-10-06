@@ -124,9 +124,6 @@ final class DeviceSession {
     /// (observed: 213,000 of them against one panel that was switched off).
     private static let parkAfterSilence: TimeInterval = 30
 
-    /// How often a parked session re-resolves the device while waiting.
-    private static let parkedRetryInterval: TimeInterval = 15
-
     /// Whether capture should be torn down, given how long the device has been
     /// silent. A nil age means nothing has ever been heard from it, which the
     /// connect retries in `run()` already handle, so it never parks here.
@@ -148,6 +145,8 @@ final class DeviceSession {
     private var lastReport = Date()
     private var lastCount: UInt64 = 0
 
+    private let linkTiming: LinkSupervisor.Timing
+
     /// Judges whether the running stream is still delivering frames. Touched
     /// only by the `run()` task, which is sequential, so it takes no lock.
     private var stallMonitor = CaptureStallMonitor()
@@ -158,10 +157,12 @@ final class DeviceSession {
         audioDescriptor: AudioStreamDescriptor? = nil,
         audioSessionFactory: ((AudioStreamDescriptor) -> PanelAudioSession)? = nil,
         source: Source, picker: PickerSource?, fps: Int,
+        linkTiming: LinkSupervisor.Timing = .standard,
         onStatus: ((Status) -> Void)? = nil,
         onPreview: ((CGImage, Bool) -> Void)? = nil
     ) {
         self.id = id
+        self.linkTiming = linkTiming
         self.name = name
         self.sender = sender
         self.audioSession = audioSession
@@ -675,6 +676,8 @@ final class DeviceSession {
     /// alongside the live "espdisplay-9050").
     @discardableResult
     func run() async -> Bool {
+        // Every way out, retiring included: nothing reuses this sender.
+        defer { sender.stop() }
         var attempts = 0
         let maxAttempts = 5
         while !isStopped {
@@ -686,7 +689,7 @@ final class DeviceSession {
                 attempts += 1
                 if attempts >= maxAttempts {
                     print("[\(name)] unreachable after \(maxAttempts) attempts - "
-                        + "retiring (will retry if it reappears)")
+                        + "retiring (retried after the cooldown, or when it reappears)")
                     return false
                 }
                 print("[\(name)] connect failed (\(error.localizedDescription)) - retrying in 5s")
@@ -701,13 +704,86 @@ final class DeviceSession {
         }
         audio?.start()
 
+        // The link is watched on its own, for the whole life of the session:
+        // capture can sit for as long as it likes waiting for a source, and a
+        // board that resets meanwhile must still be reconnected.
+        let linkSupervision = Task { [weak self] in await self?.superviseLink() }
+        if let override = captureLoopOverrideForTesting {
+            await override()
+        } else {
+            await superviseCapture()
+        }
+        // Finished before the sender stops, so a reconnect cannot reopen the
+        // link after it has been closed for good.
+        linkSupervision.cancel()
+        await linkSupervision.value
+        adopt(nil)
+        return true
+    }
+
+    /// Reopen the link whenever the panel goes quiet, until the session stops.
+    ///
+    /// Retries never stop and never give up: a parked session relies on this to
+    /// notice the panel coming back, and so does one whose capture has no
+    /// source. `LinkSupervisor` paces the attempts.
+    private func superviseLink() async {
+        var link = LinkSupervisor(timing: linkTiming)
+        let tick = UInt64(linkTiming.checkInterval * 1_000_000_000)
+        while !isStopped && !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: tick)
+            guard !isStopped, !Task.isCancelled else { return }
+            let age = sender.heartbeatAge
+            guard link.shouldReconnect(
+                heartbeatAge: age, now: Date().timeIntervalSinceReferenceDate)
+            else { continue }
+            // A parked session has already said the panel is gone.
+            if !sender.parked {
+                print(String(format: "[%@] no device heartbeat for %.0fs", name, age ?? 0))
+            }
+            stateLock.withLock { _reconnectInFlight = true }
+            await sender.reconnect()
+            stateLock.withLock {
+                _reconnectInFlight = false
+                _reconnectsFinished &+= 1
+            }
+        }
+    }
+
+    /// Link task progress, read by the watchdog's park decision.
+    private var _reconnectInFlight = false
+    private var _reconnectsFinished: UInt64 = 0
+
+    /// Whether to park now, and the reconnect count to keep waiting from.
+    ///
+    /// Silence alone is not enough. A reconnect may be under way on the link
+    /// task, and one that succeeds resets the silence - after every Mac wake,
+    /// for one. So parking waits until a reconnect that finished after the
+    /// silence was judged too long has not helped, which is the order the
+    /// watchdog kept when it reconnected inline.
+    static func parkDecision(
+        silentFor age: TimeInterval?, reconnectInFlight: Bool,
+        reconnectsFinished: UInt64, waitingSince: UInt64?
+    ) -> (park: Bool, waitingSince: UInt64?) {
+        guard shouldPark(silentFor: age) else { return (false, nil) }
+        guard let waitingSince else { return (false, reconnectsFinished) }
+        return (!reconnectInFlight && reconnectsFinished != waitingSince, waitingSince)
+    }
+
+    /// Stands in for `superviseCapture` in tests, which cannot drive
+    /// ScreenCaptureKit. Always nil in the app.
+    var captureLoopOverrideForTesting: (() async -> Void)?
+
+    /// Start, watch and restart capture until the session stops.
+    private func superviseCapture() async {
         let uuidCachePath = "/tmp/espdisplaysender-uuid-\(name)"
         var knownUUID = try? String(
             contentsOfFile: uuidCachePath, encoding: .utf8
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         var announced = false
-        var lastReconnectAt = Date.distantPast
         var pickerFailures = 0
+        /// Reconnects finished when the silence was first judged long enough
+        /// to park; see `parkDecision`.
+        var parkWaitingSince: UInt64?
         var parkRequested = false
 
         while !isStopped {
@@ -1046,18 +1122,16 @@ final class DeviceSession {
                     tracked = window
                     if !healthy { break }
                 }
-                // Device heartbeats stop when it rebooted onto a new address
-                // or dropped off WiFi; reconnecting re-resolves the service.
-                if let age = sender.heartbeatAge, age > 10,
-                    Date().timeIntervalSince(lastReconnectAt) > 15
-                {
-                    print(String(format: "[%@] no device heartbeat for %.0fs", name, age))
-                    lastReconnectAt = Date()
-                    await sender.reconnect()
+                // Reconnecting (`superviseLink`) has not helped for long enough
+                // that the device is gone rather than flapping. Stop capturing.
+                let (inFlight, finished) = stateLock.withLock {
+                    (_reconnectInFlight, _reconnectsFinished)
                 }
-                // Reconnecting has not helped for long enough that the device
-                // is gone rather than flapping. Stop capturing for it.
-                if Self.shouldPark(silentFor: sender.heartbeatAge) {
+                let decision = Self.parkDecision(
+                    silentFor: sender.heartbeatAge, reconnectInFlight: inFlight,
+                    reconnectsFinished: finished, waitingSince: parkWaitingSince)
+                parkWaitingSince = decision.waitingSince
+                if decision.park {
                     parkRequested = true
                     break
                 }
@@ -1068,11 +1142,9 @@ final class DeviceSession {
                 parkRequested = false
                 await waitForDeviceToReturn()
                 announced = false
+                parkWaitingSince = nil
             }
         }
-        adopt(nil)
-        sender.stop()
-        return true
     }
 
     /// Keep a running stream pointed at the window it is following, absorbing
@@ -1141,7 +1213,8 @@ final class DeviceSession {
     ///
     /// Waits on a reply counter rather than `heartbeatAge`, because a reconnect
     /// refreshes the heartbeat grace period: using the age here would unpark on
-    /// every retry and thrash capture up and down against a dead panel.
+    /// every retry and thrash capture up and down against a dead panel. The
+    /// reconnects themselves come from `superviseLink`, which keeps running.
     private func waitForDeviceToReturn() async {
         let repliesBeforeParking = sender.deviceRepliesReceived
         sender.setParked(true)
@@ -1154,16 +1227,11 @@ final class DeviceSession {
             "The panel stopped answering, so mirroring is paused. It resumes by "
                 + "itself as soon as the panel is back."))
 
-        var lastAttemptAt = Date()
         while !isStopped && !Self.hasDeviceReturned(
             repliesNow: sender.deviceRepliesReceived,
             repliesWhenParked: repliesBeforeParking)
         {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
-            if Date().timeIntervalSince(lastAttemptAt) > Self.parkedRetryInterval {
-                lastAttemptAt = Date()
-                await sender.reconnect()
-            }
         }
 
         sender.setParked(false)
@@ -1287,11 +1355,23 @@ final class SessionRegistry: @unchecked Sendable {
     /// How long a retired (unreachable) device is skipped before we try it
     /// again. Long enough that an mDNS ghost's TTL expires in the meantime,
     /// short enough that a device which was merely rebooting comes back.
-    private static let retryCooldown: TimeInterval = 120
+    static let standardRetryCooldown: TimeInterval = 120
 
+    private let retryCooldown: TimeInterval
     private let lock = NSLock()
     private var sessions: [String: DeviceSession] = [:]
     private var retiredAt: [String: Date] = [:]
+    private var _onRetryDue: ((String) -> Void)?
+
+    init(retryCooldown: TimeInterval = SessionRegistry.standardRetryCooldown) {
+        self.retryCooldown = retryCooldown
+    }
+
+    /// Called, off the main thread, when a retired name's cooldown has run out.
+    var onRetryDue: ((String) -> Void)? {
+        get { lock.withLock { _onRetryDue } }
+        set { lock.withLock { _onRetryDue = newValue } }
+    }
 
     func add(_ session: DeviceSession) {
         lock.lock()
@@ -1313,7 +1393,7 @@ final class SessionRegistry: @unchecked Sendable {
             }
         }
         if let failed = retiredAt[name],
-            Date().timeIntervalSince(failed) < Self.retryCooldown
+            Date().timeIntervalSince(failed) < retryCooldown
         {
             return true
         }
@@ -1327,8 +1407,30 @@ final class SessionRegistry: @unchecked Sendable {
             return
         }
         sessions[name] = nil
-        retiredAt[name] = Date()
+        let stamp = Date()
+        retiredAt[name] = stamp
         lock.unlock()
+        scheduleRetry(name, retiredAt: stamp)
+    }
+
+    /// Offer a retired name again once its cooldown is over.
+    ///
+    /// Discovery reports changes only. A name retired while its service stayed
+    /// listed, which is what a board that is reset and reflashed in place looks
+    /// like, would otherwise wait for a change that never comes.
+    private func scheduleRetry(_ name: String, retiredAt stamp: Date) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + retryCooldown) { [weak self] in
+            guard let self else { return }
+            let callback: ((String) -> Void)? = self.lock.withLock {
+                // Relaunched in the meantime, or retired again with a cooldown
+                // of its own.
+                guard self.retiredAt[name] == stamp, self.sessions[name] == nil
+                else { return nil }
+                self.retiredAt[name] = nil
+                return self._onRetryDue
+            }
+            callback?(name)
+        }
     }
 
     func reconcileAudio(

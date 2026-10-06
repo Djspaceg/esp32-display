@@ -546,10 +546,66 @@ public enum ESPDisplaySenderApp {
                 // Unknown hardware remains visible to Add Display over USB but
                 // does not stream or create a sidebar row on its own.
                 print("discovering recorded devices (_espdisp._udp)")
+                // The newest browse results. NWBrowser reports changes only, so
+                // a name retired while its service stayed listed is launched
+                // again from here once its cooldown is over.
+                let latestDiscovery = LatestDiscovery()
+                let launchDiscovered: @MainActor ([DeviceBrowser.Device]) -> Void = {
+                    devices in
+                    let currentSources = panelManager.persistedSources()
+                    for device in devices
+                        where panelManager.shouldLaunchDiscoveredService(device.name)
+                            && !registry.shouldSkip(device.name)
+                    {
+                        guard let geometry = panelManager.geometry(of: device.name)
+                            ?? device.geometry
+                        else {
+                            print("not streaming discovered device \"\(device.name)\""
+                                + " because its panel size is unknown")
+                            continue
+                        }
+                        let sessionID = UUID()
+                        print("probing discovered device \"\(device.name)\"")
+                        launchSession(
+                            id: sessionID,
+                            name: device.name,
+                            sender: FrameSender(
+                                endpoint: device.endpoint,
+                                spacingMicros: streaming.spacingMicros,
+                                adaptivePacing: streaming.adaptivePacing,
+                                geometry: geometry,
+                                onDeviceEvent: { event in
+                                    Task { @MainActor in
+                                        panelManager.update(
+                                            event, for: device.name,
+                                            sessionID: sessionID)
+                                    }
+                                }),
+                            source: currentSources[device.name]?
+                                .sessionSource(defaultDisplay: opts.displayName),
+                            audioDescriptor: device.metadata.audioDescriptor,
+                            provisional: true)
+                    }
+                }
+                registry.onRetryDue = { name in
+                    Task { @MainActor in
+                        let devices = latestDiscovery.devices
+                        // Not listed now: it is launched when it reappears.
+                        // A name no record owns (a ghost, or an unknown board)
+                        // is left to browse changes, as before.
+                        guard devices.contains(where: { $0.name == name }),
+                              panelManager.hasRecord(forServiceName: name)
+                        else { return }
+                        print("retrying \"\(name)\" after its cooldown")
+                        // Retiring marked the record undiscovered; it is listed.
+                        panelManager.noteDiscovery(devices)
+                        launchDiscovered(devices.filter { $0.name == name })
+                    }
+                }
                 let browser = DeviceBrowser { devices in
                     Task { @MainActor in
+                        latestDiscovery.devices = devices
                         panelManager.noteDiscovery(devices)
-                        let currentSources = panelManager.persistedSources()
                         for device in devices {
                             registry.reconcileAudio(
                                 device.name,
@@ -559,39 +615,7 @@ public enum ESPDisplaySenderApp {
                                 panelManager.clearAudio(for: device.name)
                             }
                         }
-                        for device in devices
-                            where panelManager.shouldLaunchDiscoveredService(device.name)
-                                && !registry.shouldSkip(device.name)
-                        {
-                            guard let geometry = panelManager.geometry(of: device.name)
-                                ?? device.geometry
-                            else {
-                                print("not streaming discovered device \"\(device.name)\""
-                                    + " because its panel size is unknown")
-                                continue
-                            }
-                            let sessionID = UUID()
-                            print("probing discovered device \"\(device.name)\"")
-                            launchSession(
-                                id: sessionID,
-                                name: device.name,
-                                sender: FrameSender(
-                                    endpoint: device.endpoint,
-                                    spacingMicros: streaming.spacingMicros,
-                                    adaptivePacing: streaming.adaptivePacing,
-                                    geometry: geometry,
-                                    onDeviceEvent: { event in
-                                        Task { @MainActor in
-                                            panelManager.update(
-                                                event, for: device.name,
-                                                sessionID: sessionID)
-                                        }
-                                    }),
-                                source: currentSources[device.name]?
-                                    .sessionSource(defaultDisplay: opts.displayName),
-                                audioDescriptor: device.metadata.audioDescriptor,
-                                provisional: true)
-                        }
+                        launchDiscovered(devices)
                     }
                 }
                 browser.start()
@@ -626,4 +650,11 @@ public enum ESPDisplaySenderApp {
             exit(2)
         }
     }
+}
+
+/// The newest browse results, held so a retry can be launched between them.
+@MainActor
+final class LatestDiscovery {
+    var devices: [DeviceBrowser.Device] = []
+    nonisolated init() {}
 }
