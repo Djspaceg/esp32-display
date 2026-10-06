@@ -166,6 +166,12 @@ public enum UsbOnboarding {
         public var alreadyAddedAs: String?
         /// The board model chosen in the sheet, when one is.
         public var chosenBoard: String?
+        /// The firmware version the board reported over CFGSHOW, exactly as it
+        /// reported it. Only names the direction of a flash; never refuses one.
+        public var boardFirmwareVersion: String?
+        /// The build the board reported (CFGINFO `src=`), which tells two
+        /// builds of one version apart.
+        public var boardFirmwareSource: FirmwareSourceIdentity?
 
         public init(
             port: String,
@@ -184,7 +190,9 @@ public enum UsbOnboarding {
             boardBeingRead: Bool = false,
             bundleProblem: String? = nil,
             alreadyAddedAs: String? = nil,
-            chosenBoard: String? = nil
+            chosenBoard: String? = nil,
+            boardFirmwareVersion: String? = nil,
+            boardFirmwareSource: FirmwareSourceIdentity? = nil
         ) {
             self.port = port
             self.availablePorts = availablePorts
@@ -203,6 +211,8 @@ public enum UsbOnboarding {
             self.bundleProblem = bundleProblem
             self.alreadyAddedAs = alreadyAddedAs
             self.chosenBoard = chosenBoard
+            self.boardFirmwareVersion = boardFirmwareVersion
+            self.boardFirmwareSource = boardFirmwareSource
         }
     }
 
@@ -323,6 +333,18 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
     public let headline: String
     public let detail: String
     public let action: Action
+    /// "Upgrade", "Reinstall" or "Downgrade" when a flash's direction against
+    /// the board's reported version is known.
+    public let direction: String?
+
+    public init(
+        headline: String, detail: String, action: Action, direction: String? = nil
+    ) {
+        self.headline = headline
+        self.detail = detail
+        self.action = action
+        self.direction = direction
+    }
 
     /// Whether the sheet's confirm button may do anything.
     public var canStart: Bool {
@@ -343,6 +365,7 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
     public var verb: String {
         switch action {
         case .configureOnly: return "Set Up WiFi"
+        case .flash: return "\(direction ?? "Flash") and Add"
         default: return "Flash and Add"
         }
     }
@@ -508,7 +531,7 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                         return UsbOnboardingPlan(
                             headline: "Nothing in this firmware for this board",
                             detail: "This board is an \(chip), and the firmware that "
-                                + "ships with the app has no image for it. Choose an "
+                                + "is loaded has no image for it. Choose an "
                                 + ".espdispfw file that includes \(chip).",
                             action: .noImageForChip)
                     }
@@ -573,16 +596,48 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                 }
                 if let plan = networkPlan(request) { return plan }
                 let bytes = writes.reduce(0) { $0 + $1.payload.count }
+                let version = bundle.firmwareBuild.map {
+                    "\(bundle.firmwareVersion)+\($0)"
+                } ?? bundle.firmwareVersion
+                let reported = request.boardFirmwareVersion?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .nilIfEmpty
+                let direction = reported.flatMap { reported -> String? in
+                    if request.boardFirmwareSource?.isExactly(bundle) == true {
+                        return "Reinstall"
+                    }
+                    return flashDirection(
+                        bundleVersion: bundle.firmwareVersion,
+                        bundleBuild: bundle.firmwareBuild, boardVersion: reported)
+                }
+                let headline: String
+                switch direction {
+                case "Upgrade": headline = "Upgrade to \(version) for \(target)"
+                case "Reinstall": headline = "Reinstall \(version) for \(target)"
+                case "Downgrade": headline = "Downgrade to \(version) for \(target)"
+                default: headline = "Write \(version) for \(target)"
+                }
+                let versionNote: String
+                if let reported {
+                    versionNote = direction == nil
+                        ? "The board reports \(reported), which cannot be placed "
+                            + "against \(version), so this may be either an upgrade "
+                            + "or a downgrade. "
+                        : "The board reports \(reported). "
+                } else {
+                    versionNote = ""
+                }
                 return UsbOnboardingPlan(
-                    headline: "Write \(bundle.firmwareVersion) for \(target)",
-                    detail: describeExisting(request.existing)
+                    headline: headline,
+                    detail: versionNote + describeExisting(request.existing)
                         + "\(writes.count) parts, \(bytes) bytes, are written in "
                         + "one go at the addresses the bundle carries. The image "
                         + "targets \(target) and its chip matches \(chip). Then the "
                         + "credentials for \"\(request.ssid)\" go over the same "
                         + "cable and the board restarts, joins, and appears in "
                         + "the sidebar by itself.",
-                    action: .flash)
+                    action: .flash,
+                    direction: direction)
             }
         }
     }
@@ -615,6 +670,33 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
         return nil
     }
 
+    /// "Upgrade", "Reinstall" or "Downgrade" for writing `bundleVersion` (with
+    /// its build number, when it has one) over what the board reports, or nil
+    /// when the two cannot be placed against each other. A reported
+    /// `2.0.0+369.g04ac678` is read as version 2.0.0, build 369.
+    public static func flashDirection(
+        bundleVersion: String, bundleBuild: UInt32?, boardVersion: String
+    ) -> String? {
+        let parts = boardVersion.split(separator: "+", maxSplits: 1)
+        guard let core = parts.first.map(String.init) else { return nil }
+        let boardBuild = parts.count > 1
+            ? UInt32(parts[1].prefix { $0.isASCII && $0.isNumber })
+            : nil
+        switch FirmwareVersion.compare(bundleVersion, to: core) {
+        case .newer: return "Upgrade"
+        case .older: return "Downgrade"
+        case .incomparable: return nil
+        case .same:
+            switch (bundleBuild, boardBuild) {
+            case (nil, nil): return "Reinstall"
+            case let (bundle?, board?):
+                return bundle == board ? "Reinstall"
+                    : bundle > board ? "Upgrade" : "Downgrade"
+            default: return nil
+            }
+        }
+    }
+
     private static func describeExisting(_ existing: UsbOnboarding.ExistingFirmware) -> String {
         switch existing {
         case .answered(let name, _) where !name.isEmpty:
@@ -645,4 +727,8 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
             return "images for \(rest) and \(last)"
         }
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

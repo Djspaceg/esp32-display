@@ -34,6 +34,17 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
         public let sha256: String
         public let byteCount: Int
 
+        public init(
+            version: String, build: UInt32?, artifact: String,
+            sha256: String, byteCount: Int
+        ) {
+            self.version = version
+            self.build = build
+            self.artifact = artifact
+            self.sha256 = sha256
+            self.byteCount = byteCount
+        }
+
         public var id: String { artifact }
     }
 

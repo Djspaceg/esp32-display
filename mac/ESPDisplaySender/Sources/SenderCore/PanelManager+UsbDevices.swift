@@ -540,6 +540,17 @@ extension PanelManager {
     func probeExistingFirmware(
         at path: String
     ) async -> UsbOnboarding.ExistingFirmware {
+        await probeExistingFirmwareReport(at: path).existing
+    }
+
+    /// The CFGSHOW answer plus the firmware version the board reported, as
+    /// reported: any version is a recognised, answering board.
+    func probeExistingFirmwareReport(
+        at path: String
+    ) async -> (
+        existing: UsbOnboarding.ExistingFirmware, version: String?,
+        source: FirmwareSourceIdentity?
+    ) {
         let deadline = Date(timeIntervalSinceNow: 3)
         var result = await probeUSBDevice(path, timeout: 3)
         if case .unavailable = result {
@@ -550,11 +561,13 @@ extension PanelManager {
         }
         switch result {
         case .identified(let identity):
-            return .answered(
+            return (.answered(
                 name: identity.name,
-                hardwareID: identity.hardwareID)
+                hardwareID: identity.hardwareID),
+                identity.status?.firmwareVersion,
+                identity.status?.firmwareSource)
         case .unavailable:
-            return .silent
+            return (.silent, nil, nil)
         }
     }
 

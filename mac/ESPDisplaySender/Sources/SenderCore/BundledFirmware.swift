@@ -439,6 +439,77 @@ enum BundledFirmware {
         case ready(ReleaseSet)
     }
 
+    /// A catalog folder on disk - `manifest.json` beside one folder per family,
+    /// the layout tools/espdisp.py writes for firmware-dev and
+    /// firmware-releases - so a dev build can be flashed without a new app.
+    ///
+    /// Unlike the app's own resources, the folder may hold more files than the
+    /// catalog names (firmware-dev keeps every build it retained), so extra
+    /// files are not a contradiction. A named artifact that is missing or does
+    /// not verify is still listed, with its reason, rather than dropped.
+    static func load(catalogDirectory directory: URL) -> Availability {
+        let catalogURL = directory.appendingPathComponent(FirmwareReleaseCatalog.fileName)
+        guard FileManager.default.fileExists(atPath: catalogURL.path) else {
+            return .unreadable(
+                path: directory.path,
+                reason: "there is no \(FirmwareReleaseCatalog.fileName) in this folder")
+        }
+        do {
+            let catalog = try FirmwareReleaseCatalog.read(contentsOf: catalogURL)
+            var revisionOptions = [String: [RevisionOption]]()
+            for entry in catalog.families.values {
+                revisionOptions[entry.family] = entry.revisions.map { revision in
+                    let url = directory.appendingPathComponent(revision.artifact)
+                    do {
+                        let data = try Data(contentsOf: url)
+                        do {
+                            let firmware = try catalog.bundle(
+                                for: revision, in: entry, data: data)
+                            return RevisionOption(
+                                revision: revision,
+                                selection: Selection(
+                                    catalogEntry: entry, revision: revision,
+                                    bundle: firmware, url: url),
+                                unavailableReason: nil)
+                        } catch {
+                            // A build rebuilt in place after its folder's
+                            // manifest was written is still that family's
+                            // firmware. It is offered as the file says it is -
+                            // its own version, build and hash - when it reads
+                            // as a bundle for this family and chip; the write
+                            // path re-reads the board's chip and MAC anyway.
+                            let firmware = try FirmwareBundle.read(data)
+                            guard firmware.targets == [entry.family],
+                                  firmware.images.count == 1,
+                                  firmware.images[0].chip == entry.chip,
+                                  firmware.flashPlan(forTarget: entry.family) != nil
+                            else { throw error }
+                            let actual = FirmwareReleaseCatalog.Revision(
+                                version: firmware.firmwareVersion,
+                                build: firmware.firmwareBuild,
+                                artifact: revision.artifact,
+                                sha256: FirmwareBundle.sha256Hex(data),
+                                byteCount: data.count)
+                            return RevisionOption(
+                                revision: actual,
+                                selection: Selection(
+                                    catalogEntry: entry, revision: actual,
+                                    bundle: firmware, url: url),
+                                unavailableReason: nil)
+                        }
+                    } catch {
+                        return RevisionOption(
+                            revision: revision, selection: nil,
+                            unavailableReason: error.localizedDescription)
+                    }
+                }
+            }
+            return .ready(ReleaseSet(catalog: catalog, revisionOptions: revisionOptions))
+        } catch {
+            return .unreadable(path: catalogURL.path, reason: error.localizedDescription)
+        }
+    }
+
     static func catalogURL(in bundle: Bundle = .main) -> URL? {
         bundle.url(forResource: catalogResourceName, withExtension: "json")
     }

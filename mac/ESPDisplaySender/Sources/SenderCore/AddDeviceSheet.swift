@@ -25,6 +25,9 @@ struct AddDeviceSheet: View {
     @State private var mode: UsbOnboarding.Mode = .flashAndConfigure
     @State private var detection: UsbOnboarding.ChipDetection = .notAttempted
     @State private var existing: UsbOnboarding.ExistingFirmware = .notChecked
+    /// The firmware version the board reported, shown as is.
+    @State private var boardVersion: String?
+    @State private var boardSource: FirmwareSourceIdentity?
     @State private var inspecting = false
     @State private var inspectionGeneration = 0
     @State private var inspectedPathGeneration: Int?
@@ -37,6 +40,9 @@ struct AddDeviceSheet: View {
     @State private var bundleProblem: String?
     @State private var selectedTarget = ""
     @State private var selectedProfile = ""
+    /// The catalog folder chosen with "Use Dev Builds…", remembered so the next
+    /// sheet opens on the same builds.
+    @AppStorage("AddDevice.devCatalogFolder") private var devCatalogFolder = ""
 
     /// Empty means the network is being typed in rather than chosen.
     @State private var savedSSID = ""
@@ -180,7 +186,8 @@ struct AddDeviceSheet: View {
                     if inspecting {
                         ProgressView().controlSize(.small)
                     }
-                    Text(boardDescription)
+                    Text(boardDescription
+                        + (boardVersion.map { " · runs \($0)" } ?? ""))
                         .foregroundStyle(detection.chip == nil ? .secondary : .primary)
                 }
             }
@@ -239,7 +246,19 @@ struct AddDeviceSheet: View {
                 .onChange(of: selectedProfile) { _, _ in preselectExactTarget() }
             }
             if let bundle {
-                LabeledContent("Version", value: bundle.firmwareVersion)
+                if let bundleProblem {
+                    Text(bundleProblem)
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // Shown as the bundle names it, with what it does to the
+                // version the board reports. Never hidden for being unknown.
+                LabeledContent("Version", value: (bundle.firmwareBuild.map {
+                    "\(bundle.firmwareVersion)+\($0)"
+                } ?? bundle.firmwareVersion) + (plan.direction.map { dir in
+                    " · \(dir)" + (boardVersion.map { " from \($0)" } ?? "")
+                } ?? ""))
                 LabeledContent("Built", value: bundle.builtAt)
                 LabeledContent("File", value: bundleLabel)
                 LabeledContent("Images", value: bundle.targets.joined(separator: ", "))
@@ -277,6 +296,11 @@ struct AddDeviceSheet: View {
                     chooseFile()
                 }
                 .disabled(running)
+                .help("Any .espdispfw bundle, from any build")
+                Button("Use Dev Builds…") { chooseDevCatalog() }
+                    .disabled(running)
+                    .help("A catalog folder such as the repo's firmware-dev, "
+                        + "with its manifest.json")
                 if !bundleIsShipped, BundledFirmware.catalogURL() != nil {
                     Button("Use the Bundled Firmware") { loadShippedBundle() }
                         .disabled(running)
@@ -474,7 +498,9 @@ struct AddDeviceSheet: View {
             boardBeingRead: inspecting,
             bundleProblem: bundleProblem,
             alreadyAddedAs: manager.associatedDisplayName(forUSBPath: port),
-            chosenBoard: selectedProfile.isEmpty ? nil : selectedProfile)
+            chosenBoard: selectedProfile.isEmpty ? nil : selectedProfile,
+            boardFirmwareVersion: boardVersion,
+            boardFirmwareSource: boardSource)
     }
 
     private var compatibleTargets: [String] {
@@ -686,6 +712,8 @@ struct AddDeviceSheet: View {
     private func inspect(preserveMode: Bool = false) {
         detection = .notAttempted
         existing = .notChecked
+        boardVersion = nil
+        boardSource = nil
         selectedTarget = ""
         selectedProfile = ""
         work?.cancel()
@@ -705,7 +733,8 @@ struct AddDeviceSheet: View {
             defer {
                 if generation == inspectionGeneration { inspecting = false }
             }
-            let answered = await manager.probeExistingFirmware(at: target)
+            let report = await manager.probeExistingFirmwareReport(at: target)
+            let answered = report.existing
             // The user may have changed the port, or closed the sheet, during the
             // three seconds CFGSHOW is allowed. Answers about a port nobody is
             // asking about any more are dropped rather than displayed.
@@ -713,6 +742,8 @@ struct AddDeviceSheet: View {
                   pathGeneration == manager.usbPathGeneration(target)
             else { return }
             existing = answered
+            boardVersion = report.version
+            boardSource = report.source
             if case .answered(let name, let hardwareID) = answered {
                 manager.noteUSBIdentity(
                     path: target,
@@ -787,17 +818,48 @@ struct AddDeviceSheet: View {
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
+            // Read first: a file that fails must not throw away the firmware
+            // that was already loaded.
+            let chosen = try FirmwareBundle.read(contentsOf: url)
             bundledReleases = nil
-            bundle = try FirmwareBundle.read(contentsOf: url)
+            bundle = chosen
             bundleLabel = url.lastPathComponent
             bundleIsShipped = false
             bundleProblem = nil
             preselectExactTarget()
         } catch {
+            bundleProblem = "\(url.lastPathComponent) could not be read: "
+                + error.localizedDescription
+        }
+    }
+
+    /// Load a catalog folder on disk - the repo's firmware-dev, or any folder
+    /// tools/espdisp.py wrote - so a dev build is flashable without a new app.
+    private func chooseDevCatalog() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.message = "Choose a firmware catalog folder (it holds manifest.json), "
+            + "such as the repo's firmware-dev."
+        panel.prompt = "Use Builds"
+        if !devCatalogFolder.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: devCatalogFolder)
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        switch BundledFirmware.load(catalogDirectory: url) {
+        case .ready(let releases):
+            devCatalogFolder = url.path
+            bundledReleases = releases
             bundle = nil
-            bundleLabel = ""
+            bundleLabel = FirmwareReleaseCatalog.fileName + " in " + url.lastPathComponent
             bundleIsShipped = false
-            bundleProblem = error.localizedDescription
+            bundleProblem = nil
+            preselectExactTarget()
+        case .unreadable(let path, let reason):
+            bundleProblem = "\(path) could not be used: \(reason)"
+        case .none:
+            bundleProblem = "\(url.path) has no firmware catalog."
         }
     }
 

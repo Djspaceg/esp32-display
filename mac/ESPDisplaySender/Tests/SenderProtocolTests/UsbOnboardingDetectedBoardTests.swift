@@ -97,3 +97,59 @@ final class UsbOnboardingDetectedBoardTests: XCTestCase {
         }
     }
 }
+
+/// What a flash does to the version the board reports: named, and never a
+/// reason to refuse.
+final class UsbOnboardingFlashDirectionTests: XCTestCase {
+    private func request(board: String?, bundleVersion: String) -> UsbOnboarding.Request {
+        UsbOnboarding.Request(
+            port: "/dev/cu.usbmodem101",
+            availablePorts: ["/dev/cu.usbmodem101"],
+            mode: .flashAndConfigure,
+            tool: .installed(path: "/core/esptool"),
+            bundle: EsptoolCommandTests.bundle(
+                chip: "esp32p4", bootloader: 0x2000, app: 0x10000,
+                version: bundleVersion, target: "p4"),
+            target: "p4",
+            detection: .detected(chip: "esp32p4", mac: "e8:f6:0a:e0:b5:5a"),
+            existing: .answered(name: "white-square-4b", hardwareID: "e8f60ae0b55a"),
+            ssid: "Home",
+            credential: .ready(.keepCurrent),
+            boardFirmwareVersion: board)
+    }
+
+    func testEachDirectionIsNamedAndStillStarts() {
+        let cases: [(String?, String, String)] = [
+            ("1.5.0", "2.0.0", "Upgrade"),
+            ("2.0.0+192.g04ac678", "2.0.0", "Reinstall"),
+            ("2.0.0+100", "2.0.0", "Upgrade"),
+            ("2.0.0+500", "2.0.0", "Downgrade"),
+            ("2.1.0", "2.0.0", "Downgrade"),
+        ]
+        for (board, bundle, word) in cases {
+            let plan = UsbOnboardingPlan.make(request(board: board, bundleVersion: bundle))
+            XCTAssertEqual(plan.action, .flash, word)
+            XCTAssertTrue(plan.canStart, word)
+            XCTAssertTrue(plan.headline.hasPrefix(word), plan.headline)
+            XCTAssertTrue(plan.verb.hasPrefix(word), plan.verb)
+            XCTAssertTrue(plan.detail.contains(board ?? ""), plan.detail)
+        }
+    }
+
+    /// A version the app cannot place - a dev build string, a newer release it
+    /// has never heard of - is shown as reported, and flashing stays offered.
+    func testAnUnplaceableBoardVersionIsShownAsIsAndStillStarts() {
+        for board in ["2.0.0+369.g04ac678", "9.9.9-local", "banana"] {
+            let plan = UsbOnboardingPlan.make(request(board: board, bundleVersion: "1.5.0"))
+            XCTAssertTrue(plan.canStart, board)
+            XCTAssertTrue(plan.detail.contains(board), plan.detail)
+        }
+    }
+
+    /// No reported version keeps the plain verb.
+    func testNoBoardVersionKeepsThePlainVerb() {
+        let plan = UsbOnboardingPlan.make(request(board: nil, bundleVersion: "2.0.0"))
+        XCTAssertEqual(plan.verb, "Flash and Add")
+        XCTAssertTrue(plan.canStart)
+    }
+}
