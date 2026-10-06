@@ -166,7 +166,8 @@ struct AddDeviceSheet: View {
 
                     Button {
                         manager.refreshUSBDevices()
-                        inspect()
+                        // The user's choice of what to do survives a re-read.
+                        inspect(preserveMode: true)
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
@@ -227,10 +228,11 @@ struct AddDeviceSheet: View {
     private var firmwareSection: some View {
         Section {
             if !compatibleProfiles.isEmpty {
-                Picker("Hardware profile", selection: $selectedProfile) {
+                Picker("Board model", selection: $selectedProfile) {
                     Text("Choose…").tag("")
                     ForEach(compatibleProfiles, id: \.self) { profile in
-                        Text(profile).tag(profile)
+                        Text(GeneratedBoardCatalog.boardNameByProfile[profile] ?? profile)
+                            .tag(profile)
                     }
                 }
                 .disabled(running)
@@ -250,6 +252,17 @@ struct AddDeviceSheet: View {
                     }
                     .disabled(running)
                 }
+            } else if bundledReleases != nil, bundleProblem == nil {
+                // The app ships firmware; it is picked once the board is read,
+                // or once its model is chosen above. Never "no firmware".
+                Text(compatibleProfiles.isEmpty
+                    ? "The firmware bundled with the app is chosen once the board "
+                        + "has been read."
+                    : "Choose the board model above, and the firmware bundled with "
+                        + "the app for it is used.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 Text(bundleProblem
                     ?? "This copy of the app was packaged without a firmware "
@@ -341,6 +354,20 @@ struct AddDeviceSheet: View {
 
     private var actionBar: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // WHY THE BUTTON IS GREY, next to the button. The verdict section
+            // says it too, but it scrolls under this footer, and a disabled
+            // button with its reason out of sight reads as no reason at all.
+            if !plan.canStart, !running {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(plan.headline)
+                        .font(.callout.weight(.semibold))
+                    Text(plan.detail)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             actionButtons
             // At the bottom of the floating footer, so it is on screen for the
             // whole run without scrolling.
@@ -385,9 +412,10 @@ struct AddDeviceSheet: View {
             }
             .buttonStyle(.glassProminent)
             .keyboardShortcut(.defaultAction)
-            .disabled(
-                !plan.canStart || running || selectedHardwareID == nil
-                    || manager.isUSBDeviceAssociated(port))
+            // Every reason this is off is a plan action with words: an
+            // associated device empties the request's port, and a missing
+            // hardware ID is `.identifyBoard`.
+            .disabled(!plan.canStart || running)
         }
     }
 
@@ -439,7 +467,14 @@ struct AddDeviceSheet: View {
             detection: detection,
             existing: existing,
             ssid: ssid,
-            credential: credential)
+            credential: credential,
+            shipsFirmware: bundledReleases != nil,
+            boardChoices: compatibleProfiles,
+            hardwareIDKnown: selectedHardwareID != nil,
+            boardBeingRead: inspecting,
+            bundleProblem: bundleProblem,
+            alreadyAddedAs: manager.associatedDisplayName(forUSBPath: port),
+            chosenBoard: selectedProfile.isEmpty ? nil : selectedProfile)
     }
 
     private var compatibleTargets: [String] {
@@ -768,6 +803,7 @@ struct AddDeviceSheet: View {
 
     private func start() {
         guard plan.canStart, !manager.isUSBDeviceAssociated(port),
+              !inspecting,
               let hardwareID = selectedHardwareID,
               let change = credential.passwordChange
         else { return }

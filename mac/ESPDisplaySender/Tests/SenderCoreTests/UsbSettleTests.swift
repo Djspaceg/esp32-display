@@ -267,4 +267,19 @@ final class UsbSettleTests: XCTestCase {
             return false
         })
     }
+
+    /// A WiFi-only run wrote nothing, so its give-up must not say it did.
+    func testAWifiOnlyTimeoutSaysNothingWasWritten() async {
+        let bench = Bench()
+        bench.ports = { [flashed] _ in [flashed] }
+        let result = await UsbOnboarder.sendConfiguration(
+            steps: UsbOnboarding.configurationSteps(
+                name: "", ssid: "Home", password: .set("hunter2hunter2")),
+            flashedPort: flashed, expectedHardwareID: id, wroteFirmware: false,
+            io: bench.io, onProgress: bench.record)
+        guard case .failure(let failure) = result else { return XCTFail("\(result)") }
+        XCTAssertFalse(failure.message.contains("firmware was written"), failure.message)
+        XCTAssertTrue(failure.message.contains("nothing was written"), failure.message)
+        XCTAssertTrue(bench.sends.isEmpty)
+    }
 }

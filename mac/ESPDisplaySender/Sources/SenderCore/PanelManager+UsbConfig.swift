@@ -439,7 +439,9 @@ extension PanelManager {
         let finalPort: String
         switch await UsbOnboarder.sendConfiguration(
             steps: steps, flashedPort: request.port,
-            expectedHardwareID: stableID, onProgress: progress)
+            expectedHardwareID: stableID,
+            wroteFirmware: request.mode == .flashAndConfigure,
+            onProgress: progress)
         {
         case .success(let port):
             finalPort = port

@@ -146,6 +146,26 @@ public enum UsbOnboarding {
         public var ssid: String
         /// Whether the credential for that network is complete.
         public var credential: Credential
+        /// Whether the app ships its own firmware catalog. When it does, a nil
+        /// `bundle` means "not chosen for this board yet", not "nothing to write".
+        public var shipsFirmware: Bool
+        /// Board profiles the shipped firmware can be written to for the detected
+        /// chip. Offered when the chip alone does not name the image (P4), so a
+        /// board whose model is unknown is a choice rather than a dead end.
+        public var boardChoices: [String]
+        /// Whether a stable hardware ID is known - from CFGSHOW or esptool's MAC
+        /// read - which every display record is keyed on.
+        public var hardwareIDKnown: Bool
+        /// A CFGSHOW or esptool read of this port is still running. Nothing
+        /// starts over it: both would compete for the port.
+        public var boardBeingRead: Bool
+        /// Why the firmware the app would use could not be loaded, when it
+        /// could not, so "no firmware" says the true reason.
+        public var bundleProblem: String?
+        /// The sidebar display this device already belongs to, when it does.
+        public var alreadyAddedAs: String?
+        /// The board model chosen in the sheet, when one is.
+        public var chosenBoard: String?
 
         public init(
             port: String,
@@ -157,7 +177,14 @@ public enum UsbOnboarding {
             detection: ChipDetection,
             existing: ExistingFirmware,
             ssid: String,
-            credential: Credential = .ready(.keepCurrent)
+            credential: Credential = .ready(.keepCurrent),
+            shipsFirmware: Bool = false,
+            boardChoices: [String] = [],
+            hardwareIDKnown: Bool = true,
+            boardBeingRead: Bool = false,
+            bundleProblem: String? = nil,
+            alreadyAddedAs: String? = nil,
+            chosenBoard: String? = nil
         ) {
             self.port = port
             self.availablePorts = availablePorts
@@ -169,6 +196,13 @@ public enum UsbOnboarding {
             self.existing = existing
             self.ssid = ssid
             self.credential = credential
+            self.shipsFirmware = shipsFirmware
+            self.boardChoices = boardChoices
+            self.hardwareIDKnown = hardwareIDKnown
+            self.boardBeingRead = boardBeingRead
+            self.bundleProblem = bundleProblem
+            self.alreadyAddedAs = alreadyAddedAs
+            self.chosenBoard = chosenBoard
         }
     }
 
@@ -255,6 +289,10 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
         /// No firmware bundle at all: the app shipped without one and none was
         /// chosen.
         case chooseBundle
+        /// The chip is known and the app's own firmware covers it, but which
+        /// board this is has to be chosen first (a P4 whose model it does not
+        /// report).
+        case chooseBoard
         /// The chip is known, but more than one exact target can use it.
         case chooseTarget
         /// The selected exact target is absent or belongs to another chip.
@@ -270,9 +308,16 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
         case chooseNetwork
         /// A network is chosen and its password has not been given.
         case enterPassword
-        /// Configure-only was asked for and the board never answered, so there is
-        /// nothing on the other end to configure.
+        /// Configure-only was asked for, the board never answered, and esptool -
+        /// which would verify it before anything is sent - is not installed.
         case boardNotAnswering
+        /// Ready otherwise, but no stable hardware ID is known to key the
+        /// display's record on.
+        case identifyBoard
+        /// The board is still being read; starting now would race that read.
+        case readingBoard
+        /// The chosen device already has a display in the sidebar.
+        case alreadyAdded
     }
 
     public let headline: String
@@ -285,9 +330,10 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
         case .flash, .configureOnly:
             return true
         case .chooseDevice, .connectDevice, .detectChip, .chipUnreadable,
-             .chooseBundle, .chooseTarget, .noImageForTarget, .noImageForChip,
-             .bundleIsOTAOnly, .esptoolMissing, .chooseNetwork, .enterPassword,
-             .boardNotAnswering:
+             .chooseBundle, .chooseBoard, .chooseTarget, .noImageForTarget,
+             .noImageForChip, .bundleIsOTAOnly, .esptoolMissing, .chooseNetwork,
+             .enterPassword, .boardNotAnswering, .identifyBoard, .readingBoard,
+             .alreadyAdded:
             return false
         }
     }
@@ -306,7 +352,44 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
     public var writesFlash: Bool { action == .flash }
 
     /// Classify.
+    ///
+    /// A READY PLAN STILL NEEDS A HARDWARE ID, checked last so the more specific
+    /// step is the one shown first, and checked here rather than as a separate
+    /// condition on the sheet's button, where it disabled the button and said
+    /// nothing.
     public static func make(_ request: UsbOnboarding.Request) -> UsbOnboardingPlan {
+        if let name = request.alreadyAddedAs {
+            return UsbOnboardingPlan(
+                headline: "Already added as \"\(name)\"",
+                detail: "This board already has a display in the sidebar. Select "
+                    + "\"\(name)\" there to change its WiFi or its firmware, or "
+                    + "choose another USB device here.",
+                action: .alreadyAdded)
+        }
+        let plan = classify(request)
+        guard plan.canStart else { return plan }
+        if request.boardBeingRead {
+            return UsbOnboardingPlan(
+                headline: "Reading the board…",
+                detail: "The board is being asked what it is. This takes a few "
+                    + "seconds, and starting meanwhile would talk over it.",
+                action: .readingBoard)
+        }
+        guard !request.hardwareIDKnown else { return plan }
+        var detail = "Every display is recorded under the board's own hardware "
+            + "ID, and neither the board's firmware nor esptool has reported one. "
+        if case .failed(let reason) = request.detection {
+            detail += "esptool could not read the board: \(reason) "
+        }
+        detail += "Press the refresh button (↻) beside the USB device to read it "
+            + "again."
+        return UsbOnboardingPlan(
+            headline: "Read the board's hardware ID",
+            detail: detail,
+            action: .identifyBoard)
+    }
+
+    private static func classify(_ request: UsbOnboarding.Request) -> UsbOnboardingPlan {
         // A port first, whatever the mode: everything below it talks to a board.
         if request.port.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard !request.availablePorts.isEmpty else {
@@ -329,16 +412,32 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
 
         switch request.mode {
         case .configureOnly:
-            if case .silent = request.existing {
+            // AN UNANSWERED FIRST PROBE IS NOT PROOF THAT NOTHING IS THERE. A
+            // board mid-boot, or one another program briefly held, looks the
+            // same. The run asks again and reads the chip and MAC with esptool
+            // before sending anything, so the only genuine block is having no
+            // esptool to do that with.
+            if case .silent = request.existing, case .missing = request.tool {
                 return UsbOnboardingPlan(
                     headline: "Nothing answered on that device",
-                    detail: "Setting up WiFi only needs a board that is already "
-                        + "running this firmware, and this one did not answer. "
-                        + "Choose \"\(UsbOnboarding.Mode.flashAndConfigure.label)\" "
-                        + "to write the firmware first.",
+                    detail: "The board did not answer, and the esptool that would "
+                        + "confirm which board it is before anything is sent is "
+                        + "not installed - and flashing needs it too. Install it "
+                        + "with \"arduino-cli core install esp32:esp32\".",
                     action: .boardNotAnswering)
             }
             if let plan = networkPlan(request) { return plan }
+            if case .silent = request.existing {
+                return UsbOnboardingPlan(
+                    headline: "Send the WiFi credentials",
+                    detail: "The board did not answer when it was first asked, so it "
+                        + "is asked again, and its chip and MAC are read, before "
+                        + "anything is sent. Its credentials for \"\(request.ssid)\" "
+                        + "then go over the cable and it restarts and joins. The "
+                        + "firmware on it is left alone; if it is blank or runs "
+                        + "something else, nothing is sent and the reason is shown.",
+                    action: .configureOnly)
+            }
             return UsbOnboardingPlan(
                 headline: "Send the WiFi credentials",
                 detail: describeExisting(request.existing)
@@ -361,12 +460,14 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                         + "the same job from a terminal.",
                     action: .esptoolMissing)
             }
-            guard let bundle = request.bundle else {
+            if request.bundle == nil, !request.shipsFirmware {
                 return UsbOnboardingPlan(
                     headline: "No firmware to write",
-                    detail: "This copy of the app did not come with a firmware "
+                    detail: request.bundleProblem.map {
+                        $0 + " Choose an .espdispfw file instead."
+                    } ?? ("This copy of the app did not come with a firmware "
                         + "bundle, so choose an .espdispfw file - or build one "
-                        + "with tools/espdisp.py bundle.",
+                        + "with tools/espdisp.py bundle."),
                     action: .chooseBundle)
             }
             switch request.detection {
@@ -383,10 +484,43 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                     detail: "esptool could not read the chip: \(reason) A board "
                         + "in the middle of booting, a cable that only carries "
                         + "power, or another program holding the port all look "
-                        + "like this. Nothing is written to a board that has not "
-                        + "said what it is.",
+                        + "like this. Press the refresh button (↻) to read it "
+                        + "again, or use "
+                        + "\"Repair a Board\", which writes the firmware through the "
+                        + "chip's own bootloader for the board you choose.",
                     action: .chipUnreadable)
             case .detected(let chip, _):
+                guard let bundle = request.bundle else {
+                    let boards = request.boardChoices.map {
+                        GeneratedBoardCatalog.boardNameByProfile[$0] ?? $0
+                    }
+                    if let chosen = request.chosenBoard, !chosen.isEmpty {
+                        let named = GeneratedBoardCatalog.boardNameByProfile[chosen]
+                            ?? chosen
+                        return UsbOnboardingPlan(
+                            headline: "No bundled image for \(named)",
+                            detail: "The firmware that ships with the app has no "
+                                + "\(chip) image for \(named). Choose another board "
+                                + "model, or an .espdispfw file that includes it.",
+                            action: .noImageForChip)
+                    }
+                    guard !boards.isEmpty else {
+                        return UsbOnboardingPlan(
+                            headline: "Nothing in this firmware for this board",
+                            detail: "This board is an \(chip), and the firmware that "
+                                + "ships with the app has no image for it. Choose an "
+                                + ".espdispfw file that includes \(chip).",
+                            action: .noImageForChip)
+                    }
+                    return UsbOnboardingPlan(
+                        headline: "Choose which board this is",
+                        detail: "esptool read an \(chip), and the chip alone does "
+                            + "not say which board's display this is, so the board "
+                            + "is named before anything is written. "
+                            + "Choose it under Board model: "
+                            + boards.joined(separator: ", ") + ".",
+                        action: .chooseBoard)
+                }
                 let compatibleTargets = Array(Set(bundle.images
                     .filter { $0.chip == chip }
                     .flatMap(\.targets))).sorted()

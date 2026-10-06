@@ -196,6 +196,7 @@ enum UsbOnboarder {
         steps: [UsbOnboarding.ConfigStep],
         flashedPort: String,
         expectedHardwareID: String? = nil,
+        wroteFirmware: Bool = true,
         io: SettleIO = .live,
         onProgress: @escaping @Sendable (Progress) -> Void
     ) async -> Result<String, WifiConfigUI.ConfigFailure> {
@@ -206,7 +207,7 @@ enum UsbOnboarder {
                 tries += 1
                 switch await settle(
                     flashedPort: port, expectedHardwareID: expectedHardwareID,
-                    io: io, onProgress: onProgress)
+                    wroteFirmware: wroteFirmware, io: io, onProgress: onProgress)
                 {
                 case .success(let board):
                     port = board.port
@@ -227,8 +228,8 @@ enum UsbOnboarder {
                 case .failure(let reason):
                     return .failure(WifiConfigUI.ConfigFailure(
                         title: "Could not finish setting up the board",
-                        message: "The firmware is on it, and \(step.label.lowercased()) "
-                            + "did not go through: \(reason)"))
+                        message: (wroteFirmware ? "The firmware is on it, and " : "")
+                            + "\(step.label.lowercased()) did not go through: \(reason)"))
                 }
                 break
             }
@@ -292,6 +293,7 @@ enum UsbOnboarder {
     static func settle(
         flashedPort: String,
         expectedHardwareID: String? = nil,
+        wroteFirmware: Bool = true,
         io: SettleIO = .live,
         onProgress: @escaping @Sendable (Progress) -> Void = { _ in }
     ) async -> Result<SettledBoard, WifiConfigUI.ConfigFailure> {
@@ -362,7 +364,8 @@ enum UsbOnboarder {
             case .ambiguous, .giveUp:
                 return .failure(WifiConfigUI.ConfigFailure(
                     title: "The board did not come back",
-                    message: SerialSettlePolicy.explain(step, flashedPort: flashedPort)
+                    message: SerialSettlePolicy.explain(
+                        step, flashedPort: flashedPort, wroteFirmware: wroteFirmware)
                         ?? "The board did not answer after restarting."))
             }
         }
@@ -372,7 +375,8 @@ enum UsbOnboarder {
         }
         return .failure(WifiConfigUI.ConfigFailure(
             title: "The board did not come back",
-            message: (SerialSettlePolicy.explain(.giveUp, flashedPort: flashedPort)
+            message: (SerialSettlePolicy.explain(
+                .giveUp, flashedPort: flashedPort, wroteFirmware: wroteFirmware)
                 ?? "The board did not answer after restarting.")
                 + (lastSeen.map { " Last seen: \($0)." } ?? "")))
     }

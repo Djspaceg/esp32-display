@@ -242,7 +242,9 @@ final class UsbOnboardingTests: XCTestCase {
         XCTAssertEqual(plan.action, .chipUnreadable)
         XCTAssertFalse(plan.canStart)
         XCTAssertTrue(plan.detail.contains("no serial data received"))
-        XCTAssertTrue(plan.detail.contains("Nothing is written to a board that has not said"))
+        // Never a dead end: an unreadable board can still be flashed through
+        // its own bootloader from Repair, for the board the user names.
+        XCTAssertTrue(plan.detail.contains("Repair a Board"))
     }
 
     // MARK: - definite contradictions refuse
@@ -393,15 +395,16 @@ final class UsbOnboardingTests: XCTestCase {
 
     // MARK: - adopting a board that already works
 
-    /// Configure-only against a board that answered nothing is the one contradiction
-    /// this mode has: there is nothing on the other end to configure.
+    /// Configure-only against a board that answered nothing is refused only when
+    /// there is no esptool to confirm the board with before anything is sent.
     func testConfigureOnlyAgainstASilentBoardIsRefusedAndOffersTheOtherMode() {
         var request = ready(mode: .configureOnly)
         request.existing = .silent
+        request.tool = .missing(searched: [])
         let plan = UsbOnboardingPlan.make(request)
         XCTAssertEqual(plan.action, .boardNotAnswering)
         XCTAssertFalse(plan.canStart)
-        XCTAssertTrue(plan.detail.contains(UsbOnboarding.Mode.flashAndConfigure.label))
+        XCTAssertTrue(plan.detail.contains("esptool"))
     }
 
     /// Not yet checked is not the same as checked and silent: the first must not
@@ -468,13 +471,19 @@ final class UsbOnboardingTests: XCTestCase {
         record { $0.tool = .missing(searched: []) }
         record { $0.ssid = "" }
         record { $0.credential = .incomplete }
-        record { $0.mode = .configureOnly; $0.existing = .silent }
+        record {
+            $0.mode = .configureOnly; $0.existing = .silent
+            $0.tool = .missing(searched: [])
+        }
+        record { $0.bundle = nil; $0.shipsFirmware = true; $0.boardChoices = ["st7703-4b"] }
+        record { $0.hardwareIDKnown = false }
 
         let expected: [UsbOnboardingPlan.Action] = [
             .flash, .configureOnly, .chooseDevice, .connectDevice, .detectChip,
-            .chipUnreadable, .chooseBundle, .chooseTarget, .noImageForTarget,
-            .noImageForChip, .bundleIsOTAOnly,
+            .chipUnreadable, .chooseBundle, .chooseBoard, .chooseTarget,
+            .noImageForTarget, .noImageForChip, .bundleIsOTAOnly,
             .esptoolMissing, .chooseNetwork, .enterPassword, .boardNotAnswering,
+            .identifyBoard,
         ]
         XCTAssertEqual(Set(reachable.keys), Set(expected))
         let headlines = expected.map { reachable[$0]?.headline ?? "" }
@@ -491,9 +500,9 @@ final class UsbOnboardingTests: XCTestCase {
         for action in [
             UsbOnboardingPlan.Action.flash, .configureOnly, .chooseDevice,
             .connectDevice, .detectChip, .chipUnreadable, .chooseBundle,
-            .chooseTarget, .noImageForTarget, .noImageForChip,
+            .chooseBoard, .chooseTarget, .noImageForTarget, .noImageForChip,
             .bundleIsOTAOnly, .esptoolMissing, .chooseNetwork,
-            .enterPassword, .boardNotAnswering,
+            .enterPassword, .boardNotAnswering, .identifyBoard,
         ] {
             let plan = UsbOnboardingPlan(headline: "", detail: "", action: action)
             XCTAssertEqual(plan.canStart, starts.contains(action), "\(action)")
