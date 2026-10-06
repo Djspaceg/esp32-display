@@ -19,20 +19,21 @@
 // --- i_system.c overrides ---
 // These are called by the engine for error handling and exit.
 
-#include <esp_log.h>
+#include "doom_log.h"
 
 void I_Error(char *error, ...) {
     static char buf[256];
+    static const char prefix[] = "I_Error: ";
+    memcpy(buf, prefix, sizeof(prefix));
     va_list args;
     va_start(args, error);
-    vsnprintf(buf, sizeof(buf), error, args);
+    vsnprintf(buf + sizeof(prefix) - 1, sizeof(buf) - (sizeof(prefix) - 1),
+              error, args);
     va_end(args);
-    ESP_LOGE("DOOM", "I_Error: %s", buf);
     // Fatal engine errors cannot unwind Doom's global state safely. The
     // one-shot boot flag was consumed before entry, so restart always returns
     // to the normal display firmware instead of looping back into Doom.
-    esp_restart();
-    while (1) { vTaskDelay(pdMS_TO_TICKS(100)); }
+    doom_fail_restart(buf, true);
 }
 
 // --- Sound/Music module definitions ---
@@ -118,7 +119,12 @@ int I_NetCmd(void) { return 0; }
 // --- exit() override ---
 // The engine's exit paths share the same restart boundary as fatal errors.
 void doom_exit_override(int status) {
-    (void)status;
+    if (status != 0) {
+        static char reason[32];
+        snprintf(reason, sizeof(reason), "engine exit(%d)", status);
+        doom_fail_restart(reason, true);
+    }
+    doom_log("Engine quit; restarting normal firmware");  // flushes
     esp_restart();
     while (1) { vTaskDelay(pdMS_TO_TICKS(100)); }
 }

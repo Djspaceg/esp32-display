@@ -358,8 +358,10 @@ void setup() {
       }
       applyPanelConfig(false);
       applyBacklight();
+      // A Doom start failure restarts from inside doom_enter() with its
+      // reason on Serial and the panel, so a return is the player leaving.
       doom_enter();
-      Serial.println("doom: exited or unavailable; restarting normal firmware");
+      Serial.println("doom: exited; restarting normal firmware");
       Serial.flush();
       delay(50);
       ESP.restart();

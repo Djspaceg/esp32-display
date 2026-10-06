@@ -7,6 +7,10 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_io.h>
 
@@ -17,11 +21,35 @@
 #include <touch_map.h>
 
 #include "doom_mode.h"
+#include "doom_log.h"
 
 // Settled by display_stream before Doom is entered.
 extern const board::Config* bcfg;
 extern int16_t PANEL_W;
 extern int16_t PANEL_H;
+
+// --- Serial diagnostics (doom_log.h) ---
+// A static line buffer rather than a stack one: these run on loopTask during
+// the stage whose stack margin they report. Every caller is on loopTask.
+static char s_log_line[256];
+
+extern "C" void doom_log(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(s_log_line, sizeof(s_log_line), format, args);
+    va_end(args);
+    Serial.print("[doom] ");
+    Serial.println(s_log_line);
+    // A panic or reset can follow any of these lines; do not leave the last
+    // one in the TX buffer.
+    Serial.flush();
+}
+
+extern "C" void doom_log_stage(const char* stage) {
+    // ESP-IDF reports the high-water mark in bytes.
+    doom_log("stage %s: %s stack min free %u bytes", stage,
+             pcTaskGetName(NULL), (unsigned)uxTaskGetStackHighWaterMark(NULL));
+}
 
 // --- Display bridge ---
 // The selected panel is already initialized by display_stream. Frame submission
@@ -60,11 +88,8 @@ extern "C" int doom_boot_pin(void) {
 
 extern "C" void doom_display_blit(const uint16_t* rgb565_buf, int width, int height) {
     if (!doom_display_blit_blocking(rgb565_buf, width, height)) {
-        Serial.println("[doom] FATAL: panel DMA did not complete; restarting");
-        Serial.flush();
-        delay(20);
-        ESP.restart();
-        while (true) delay(1000);
+        // The panel is what failed, so the reason goes to Serial only.
+        doom_fail_restart("panel DMA did not complete", false);
     }
 }
 
@@ -81,11 +106,7 @@ extern "C" void doom_imu_init(void) {
         return;
     }
     if (!boardmotion::init(*bcfg)) {
-        Serial.println("[doom] FATAL: QMI8658 unavailable; restarting normally");
-        Serial.flush();
-        delay(20);
-        ESP.restart();
-        while (true) delay(1000);
+        doom_fail_restart("QMI8658 motion sensor unavailable", true);
     }
     imu_initialized = true;
     Serial.println("[doom] IMU ready for tilt control");
@@ -202,9 +223,7 @@ extern "C" void doom_touch_init(void) {
     // Doom owns the controller for its isolated reboot session; initialize the
     // shared boardtouch state before any Doom input sampling begins.
     if (bcfg == nullptr) {
-        Serial.println("[doom] FATAL: board profile unavailable");
-        ESP.restart();
-        while (true) delay(1000);
+        doom_fail_restart("board profile unavailable", false);
     }
     s_touch_calibration = bcfg->variant == board::Variant::P4_4B
         ? touchmap::GT911_ON_ST7703_4B
@@ -215,11 +234,7 @@ extern "C" void doom_touch_init(void) {
         : touchmap::CST9217_ON_CO5300;
     bool available = boardtouch::init(*bcfg);
     if (!available) {
-        Serial.println("[doom] FATAL: touch unavailable; restarting normally");
-        Serial.flush();
-        delay(20);
-        ESP.restart();
-        while (true) delay(1000);
+        doom_fail_restart("touch unavailable", true);
     }
     doom_touch_reset_state();
     Serial.println("[doom] Touch bridge ready (boardtouch, gesture tracker)");

@@ -9,6 +9,9 @@ SEAM_OUT="$TMP/test_audio_identity_seam"
 STAGING_OUT="$TMP/test_panel_transfer_staging"
 STALL_OUT="$TMP/test_panel_transfer_stall_recovery"
 RESCUE_OUT="$TMP/test_rescue_model"
+DOOM_ENTRY_OUT="$TMP/test_doom_entry_gate"
+DOOM_WAD_OUT="$TMP/test_doom_wad"
+DOOM_FAILURE_OUT="$TMP/test_doom_failure_screen"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -93,5 +96,38 @@ clang++ "${CXXFLAGS[@]}" \
   -I"$HERE/../libraries/espdisp_board/src" \
   -o "$RESCUE_OUT" "$HERE/test_rescue_model.cpp"
 "$RESCUE_OUT"
+
+# The BOOT triple press refuses Doom, without rebooting, on a board whose WAD
+# the Doom boot would refuse (input_button.cpp, unmodified, against fakes).
+clang++ "${CXXFLAGS[@]}" \
+  -DCONFIG_IDF_TARGET_ESP32P4 -DESPDISP_BOARD_P4_4B -DESPDISP_DOOM_RUNTIME \
+  -I"$HERE/fakes/doom_entry" \
+  -I"$HERE/../libraries/espdisp_board/src" \
+  -I"$HERE/../doom/src" \
+  -o "$DOOM_ENTRY_OUT" \
+  "$HERE/test_doom_entry_gate.cpp" \
+  "$HERE/../display_stream/input_button.cpp"
+"$DOOM_ENTRY_OUT"
+
+# The WAD access layer on both storage layouts: every refusal reaches Serial,
+# and the preflight refuses exactly what the Doom boot refuses.
+for target in P4 S3; do
+  clang -std=c11 -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-sanitize-recover=all \
+    -DCONFIG_IDF_TARGET_ESP32$target \
+    -I"$HERE/fakes/doom_wad" -I"$HERE/../doom/src" \
+    -c -o "$TMP/doom_wad_unit_$target.o" "$HERE/doom_wad_unit.c"
+  clang++ "${CXXFLAGS[@]}" \
+    -DCONFIG_IDF_TARGET_ESP32$target \
+    -I"$HERE/fakes/doom_wad" -I"$HERE/../doom/src" \
+    -o "$DOOM_WAD_OUT-$target" \
+    "$HERE/test_doom_wad.cpp" "$TMP/doom_wad_unit_$target.o"
+  "$DOOM_WAD_OUT-$target"
+done
+
+# The card a Doom boot that cannot start shows before restarting.
+clang++ "${CXXFLAGS[@]}" \
+  -o "$DOOM_FAILURE_OUT" "$HERE/test_doom_failure_screen.cpp"
+"$DOOM_FAILURE_OUT"
 
 bash "$HERE/../../mac/ESPDisplaySender/Tests/SenderAudioRTHostTests/run_tests.sh"

@@ -36,6 +36,9 @@
 
 #include "d_iwad.h"
 
+// ESP32 port: stack high-water mark after each init stage.
+#include "platform/doom_log.h"
+
 #include "z_zone.h"
 #include "w_main.h"
 #include "w_wad.h"
@@ -1177,6 +1180,7 @@ void D_DoomMain (void)
 
     DEH_printf("Z_Init: Init zone memory allocation daemon. \n");
     Z_Init ();
+    doom_log_stage("Z_Init");
 
 #ifdef FEATURE_MULTIPLAYER
     //!
@@ -1352,12 +1356,14 @@ void D_DoomMain (void)
     // init subsystems
     DEH_printf("V_Init: allocate screens.\n");
     V_Init ();
+    doom_log_stage("V_Init");
 
     // Load configuration files before initialising other subsystems.
     DEH_printf("M_LoadDefaults: Load system defaults.\n");
     M_SetConfigFilenames("default.cfg", PROGRAM_PREFIX "doom.cfg");
     D_BindVariables();
     M_LoadDefaults();
+    doom_log_stage("M_LoadDefaults");
 
     // Save configuration at exit.
     I_AtExit(M_SaveDefaults, false);
@@ -1387,6 +1393,7 @@ void D_DoomMain (void)
     // we're playing and which version of Vanilla Doom we need to emulate.
     D_IdentifyVersion();
     InitGameVersion();
+    doom_log_stage("W_Init");
 
 #if ORIGCODE
     //!
@@ -1613,6 +1620,7 @@ void D_DoomMain (void)
     I_InitJoystick();
     I_InitSound(true);
     I_InitMusic();
+    doom_log_stage("I_Init");
 
 #ifdef FEATURE_MULTIPLAYER
     printf ("NET_Init: Init network subsystem.\n");
@@ -1759,15 +1767,19 @@ void D_DoomMain (void)
 
     DEH_printf("M_Init: Init miscellaneous info.\n");
     M_Init ();
+    doom_log_stage("M_Init");
 
     DEH_printf("R_Init: Init DOOM refresh daemon - ");
     R_Init ();
+    doom_log_stage("R_Init");
 
     DEH_printf("\nP_Init: Init Playloop state.\n");
     P_Init ();
+    doom_log_stage("P_Init");
 
     DEH_printf("S_Init: Setting up sound.\n");
     S_Init (sfxVolume * 8, musicVolume * 8);
+    doom_log_stage("S_Init");
 
     DEH_printf("D_CheckNetGame: Checking network game status.\n");
     D_CheckNetGame ();
@@ -1776,9 +1788,11 @@ void D_DoomMain (void)
 
     DEH_printf("HU_Init: Setting up heads up display.\n");
     HU_Init ();
+    doom_log_stage("HU_Init");
 
     DEH_printf("ST_Init: Init status bar.\n");
     ST_Init ();
+    doom_log_stage("ST_Init");
 
     // If Doom II without a MAP01 lump, this is a store demo.
     // Moved this here so that MAP01 isn't constantly looked up
@@ -1840,6 +1854,7 @@ void D_DoomMain (void)
 			D_StartTitle ();                // start up intro loop
     }
 
+    doom_log_stage("D_DoomMain");
     D_DoomLoop ();
 }
 

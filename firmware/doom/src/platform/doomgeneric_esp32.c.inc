@@ -36,6 +36,7 @@
 #include "doomstat.h"
 #include "m_controls.h"
 #include "doom_runtime_policy.h"
+#include "doom_log.h"
 
 #include <string.h>
 #include <math.h>
@@ -392,8 +393,8 @@ void DG_Init() {
     control_scheme = doom_motion_available()
         ? DOOM_CONTROLS_IMU_TOUCH
         : DOOM_CONTROLS_TOUCH_ONLY;
-    ESP_LOGI(GFX_TAG, "Initializing Doom Easter Egg...");
-    ESP_LOGI(GFX_TAG, "  Render: %dx%d -> %dx%d (letterboxed, y_offset=%d)",
+    doom_log("Initializing Doom Easter Egg...");
+    doom_log("  Render: %dx%d -> %dx%d (letterboxed, y_offset=%d)",
              DOOM_RENDER_WIDTH, DOOM_RENDER_HEIGHT,
              frame_layout.scaled_width, frame_layout.scaled_height,
              frame_layout.y_offset);
@@ -402,22 +403,29 @@ void DG_Init() {
     DG_ScreenBuffer = (pixel_t*)heap_caps_calloc(
         DOOM_RENDER_WIDTH * DOOM_RENDER_HEIGHT, sizeof(pixel_t),
         MALLOC_CAP_SPIRAM);
-    assert(DG_ScreenBuffer && "Failed to allocate DG_ScreenBuffer in PSRAM");
+    if (DG_ScreenBuffer == NULL) {
+        doom_fail_restart("Doom render buffer PSRAM allocation failed", true);
+    }
 
     // Allocate the full-panel RGB565 output buffer in PSRAM.
     scaled_buffer = (uint16_t*)heap_caps_calloc(
         frame_layout.panel_width * frame_layout.panel_height, sizeof(uint16_t),
         MALLOC_CAP_SPIRAM);
-    assert(scaled_buffer && "Failed to allocate scaled_buffer in PSRAM");
+    if (scaled_buffer == NULL) {
+        doom_fail_restart("Doom panel buffer PSRAM allocation failed", true);
+    }
 
     doom_display_init();
+    doom_log_stage("display bridge");
     // Touch starts Wire; the QMI8658 shares that bus and must follow it.
     doom_touch_init();
+    doom_log_stage("touch");
     doom_imu_init();
+    doom_log_stage("motion");
 
     last_frame_time = DG_GetTicksMs();
 
-    ESP_LOGI(GFX_TAG, "Doom initialized. PSRAM: render=256KB + scaled=434KB + zone=4MB");
+    doom_log("Doom initialized. PSRAM: render=256KB + scaled=434KB + zone=4MB");
 }
 
 void DG_DrawFrame() {

@@ -12,6 +12,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "platform/doom_log.h"
 #include "platform/doom_splash.h"
 
 // From the doomgeneric platform and the C engine unity build.
@@ -92,16 +93,16 @@ static bool should_exit(void) {
 }
 
 void doom_enter(void) {
+    doom_log_stage("enter");
     if (!doom_prepare_static_buffers()) {
-        ESP_LOGE(TAG, "Doom renderer PSRAM allocation failed; returning to normal boot");
-        return;
+        doom_fail_restart("Doom renderer PSRAM allocation failed", true);
     }
     if (!doom_wad_available()) {
-        ESP_LOGE(TAG, "Doom WAD is missing or invalid; returning to normal boot");
-        return;
+        doom_fail_restart("Doom WAD is missing or invalid", true);
     }
+    doom_log_stage("wad");
 
-    ESP_LOGI(TAG, "=== DOOM EASTER EGG ACTIVATED ===");
+    doom_log("=== DOOM EASTER EGG ACTIVATED ===");
     ESP_LOGI(TAG, "Panel rotation locked for Doom");
     ESP_LOGI(TAG, "Controls:");
     if (doom_motion_available()) {
@@ -136,6 +137,7 @@ void doom_enter(void) {
             doom_display_blit(splash, panel_width, panel_height);
             heap_caps_free(splash);
         }
+        doom_log_stage("splash");
     }
 
     // Initialize doomgeneric
@@ -148,8 +150,13 @@ void doom_enter(void) {
     doomgeneric_Create(argc, argv);
 
     // Game loop -- runs until exit requested
+    bool first_tick = true;
     while (!should_exit()) {
         doomgeneric_Tick();
+        if (first_tick) {
+            first_tick = false;
+            doom_log_stage("first tick");
+        }
 
         // Poll BOOT during Doom. Every short release is a normal Escape press:
         // the first opens the root menu and the next closes it. Touch tap owns
@@ -171,13 +178,13 @@ void doom_enter(void) {
             } else if (btn_down && btn_was_down && !btn_long_fired &&
                        (now - btn_down_at) >= 3000) {
                 btn_long_fired = true;
-                ESP_LOGI(TAG, "BOOT long-press (3s) -- exiting Doom");
+                doom_log("BOOT long-press (3s) -- exiting Doom");
                 doom_request_exit();
             } else if (!btn_down && btn_was_down) {
                 btn_was_down = false;
                 uint32_t held_ms = now - btn_down_at;
                 if (!btn_long_fired && held_ms >= 3000) {
-                    ESP_LOGI(TAG, "BOOT released at 3s -- exiting Doom");
+                    doom_log("BOOT released at 3s -- exiting Doom");
                     doom_request_exit();
                 } else if (!btn_long_fired && held_ms >= 30 && held_ms < 600) {
                     push_key(KEY_ESCAPE, 1);
@@ -197,5 +204,5 @@ void doom_enter(void) {
     // WAD mapping, and every upstream global. The caller restarts immediately;
     // partial in-process teardown would add use-after-free paths without ever
     // returning to normal operation.
-    ESP_LOGI(TAG, "Doom stopped. Restarting to normal firmware...");
+    doom_log("Doom stopped. Restarting to normal firmware...");
 }

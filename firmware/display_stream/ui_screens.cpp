@@ -664,6 +664,17 @@ void clearInfoBarIfExpired() {
   if (infoBarUntil == 0 || infoBarActive()) return;
   infoBarUntil = 0;
   if (bufB == nullptr || panel == nullptr) return;
+  // The bar's band was copied from bufA, the stream, so over a status card or
+  // the survey it would leave that band showing stream pixels. Repaint the
+  // screen that is up instead.
+  if (surveyActive) {
+    drawSurveyScreen();
+    return;
+  }
+  if (idleActive) {
+    drawIdleScreen();
+    return;
+  }
   const int w = bufLandscape ? PANEL_H : PANEL_W;
   if (!waitForDmaIdle(200)) return;
   size_t rowBytes = (size_t)w * 2;
@@ -728,6 +739,9 @@ void drawOtaScreen(const char *headline, int percent) {
     return;
   }
   if (!waitForDmaIdle(200)) return;
+  // This screen replaces the whole panel; an info bar still counting down
+  // must not repaint the idle card or survey over it when it expires.
+  infoBarUntil = 0;
 
   const int w = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int hgt = PANEL_GEOMETRY.frameHeight(panelLandscape);

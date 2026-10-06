@@ -33,7 +33,16 @@ bool doom_check_triple_tap(uint32_t now_ms, bool button_just_pressed);
 ///   - Initializes doomgeneric with DG_* platform functions
 ///   - Runs the game loop until exit is requested
 ///   - Cleans up and returns
+/// A failure to start does not return: it is reported on Serial and the
+/// panel through doom_fail_restart() (platform/doom_log.h), which restarts.
 void doom_enter(void);
+
+/// Check, from the normal firmware, that the Doom boot will find a usable
+/// WAD: the same partition rule and structural check the Doom boot applies.
+/// Returns NULL when it will, otherwise a short reason for the serial log.
+/// Only a full USB flash of the bundle writes the WAD; WiFi updates and
+/// rescue images write the app alone.
+const char* doom_wad_preflight(void);
 
 /// Check if Doom mode is currently active (for use by other subsystems
 /// that need to know whether to yield resources).

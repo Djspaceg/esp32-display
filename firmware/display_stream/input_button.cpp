@@ -40,6 +40,11 @@ static const uint32_t EXTRA_LONG_PRESS_MS = 3000;
 // feedback. A lone preview is persisted after this window closes.
 static const uint32_t DOUBLE_PRESS_MS = 800;
 static const uint32_t DEBOUNCE_MS = 30;
+#if defined(ESPDISP_DOOM_RUNTIME)
+// Short enough for the info bar to show unclipped on every Doom panel, the
+// 128 px square and the 360 px round included.
+static const char DOOM_NEEDS_USB_FLASH_TEXT[] = "Doom: full USB flash";
+#endif
 
 struct BootButtonEdge {
   uint32_t atMs;
@@ -58,6 +63,13 @@ static gpio_num_t bootButtonPin = GPIO_NUM_NC;
 static portMUX_TYPE bootButtonMux = portMUX_INITIALIZER_UNLOCKED;
 static buttonpress::DoublePressTracker shortPressTracker;
 static uint8_t shortPressPreviewOriginalBlLevel = 0;
+#if defined(ESPDISP_DOOM_RUNTIME)
+// The release time of the press whose double toggled the signal survey, so a
+// refused Doom triple press (whose second press is that double) can undo it.
+static uint32_t surveyToggledByDoubleAt = 0;
+static bool surveyToggledByDouble = false;
+static bool surveyBeforeDouble = false;
+#endif
 
 static uint32_t buttonClockMs() {
   return (uint32_t)xTaskGetTickCount() * (uint32_t)portTICK_PERIOD_MS;
@@ -161,14 +173,15 @@ void initializeButtonInput() {
                   onBootButtonEdge, CHANGE);
 }
 
-static void setSignalSurvey(bool active) {
+static void setSignalSurvey(bool active, const char *cause = "double press") {
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   (void)active;
+  (void)cause;
   Serial.println("button: signal survey unavailable on compact C3 framebuffer");
   return;
 #endif
   surveyActive = active;
-  Serial.printf("button: double press -> signal survey %s\n",
+  Serial.printf("button: %s -> signal survey %s\n", cause,
                 surveyActive ? "on" : "off");
   if (surveyActive) {
     drawSurveyScreen();
@@ -219,6 +232,28 @@ static void handleShortRelease(uint32_t releasedAt) {
   // because the flag has already been removed.
   if (board::supportsDoom(boardVariant) &&
       doom_check_triple_tap(releasedAt, true)) {
+    // Only a full USB flash of the bundle writes the WAD; a WiFi update or a
+    // rescue image writes the app alone. Refuse here, where the reason can be
+    // shown, rather than in a Doom boot that can only restart.
+    const char *wadProblem = doom_wad_preflight();
+    if (wadProblem != nullptr) {
+      // Presses one and two of the triple were also a double press, which
+      // toggled the signal survey. A reboot used to hide that; staying
+      // normal must undo it. Press times, not processing times, so a loop
+      // stall between presses cannot skip the undo.
+      if (surveyToggledByDouble &&
+          releasedAt - surveyToggledByDoubleAt <= DOOM_TRIPLE_TAP_WINDOW_MS &&
+          surveyActive != surveyBeforeDouble) {
+        setSignalSurvey(surveyBeforeDouble, "Doom refused, undo double press");
+      }
+      surveyToggledByDouble = false;
+      Serial.printf(
+          "button: Doom unavailable (%s); staying normal. Only a full USB "
+          "flash of the firmware bundle writes the Doom WAD.\n",
+          wadProblem);
+      showInfoBar(DOOM_NEEDS_USB_FLASH_TEXT);
+      return;
+    }
     Preferences prefs;
     bool saved = prefs.begin("espdisp", false);
     if (saved) {
@@ -242,8 +277,18 @@ static void handleShortRelease(uint32_t releasedAt) {
     Serial.printf("button: short press ignored (backlight fixed at %u)\n",
                   fixedBlLevel);
   }
-  applyShortPressDecision(
-      shortPressTracker.record(releasedAt, DOUBLE_PRESS_MS, previewEnabled));
+  const buttonpress::ShortPressDecision decision =
+      shortPressTracker.record(releasedAt, DOUBLE_PRESS_MS, previewEnabled);
+#if defined(ESPDISP_DOOM_RUNTIME)
+  for (uint8_t i = 0; i < decision.count; ++i) {
+    if (decision.effects[i] == buttonpress::ShortPressEffect::Double) {
+      surveyToggledByDouble = true;
+      surveyToggledByDoubleAt = releasedAt;
+      surveyBeforeDouble = surveyActive;
+    }
+  }
+#endif
+  applyShortPressDecision(decision);
 }
 
 // A turn this large between two loop passes is a stall, not intent; the
