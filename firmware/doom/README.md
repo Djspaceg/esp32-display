@@ -87,6 +87,40 @@ staging and UDP codec scratch.
 | Swipe up during play | Next weapon |
 | Swipe down during play | Previous weapon |
 
+### USB keyboard and mouse
+
+Alongside touch, tilt and BOOT, not instead of them. Only on the three P4
+carriers: no S3 board can host a device, because the chip's one USB pair is the
+connector the board is flashed and logged through. See `docs/usb-host-ports.md`.
+
+| Input | Action |
+| --- | --- |
+| W/S or Up/Down | Move forward/backward |
+| A/D | Strafe left/right |
+| Left/Right arrows | Turn |
+| Left Ctrl | Fire |
+| Space | Use/open |
+| Shift | Run modifier |
+| Alt with the arrows | Strafe instead of turn |
+| 1 to 7 | Select that weapon |
+| `/` and `.` | Next and previous weapon |
+| Escape | Open or close the menu |
+| Enter | Select the highlighted item |
+| Backspace | Return to the previous menu |
+| Tab | Automap |
+| F1 to F10, Pause, `-`/`=` | As in Doom |
+| Any letter with a menu open | Typed as itself, for save-game names |
+| Mouse left/right | Move to turn, forward/back to walk |
+| Mouse left button | Fire |
+| Mouse right button | Use/open |
+| Mouse wheel | Next and previous weapon |
+
+Power: the 4C and the 3.4C supply 5 V on their USB type A port, so a keyboard
+plugged straight in works. **The 4B does not supply 5 V on any port**, so a
+keyboard there needs its own power: a powered hub, a self-powered keyboard, or
+a cable that injects 5 V. The firmware says which case a board is in on the
+serial log when Doom starts.
+
 ## Firmware and WAD delivery
 
 The canonical universal S3 image uses `firmware/partitions_s3.csv`, which keeps

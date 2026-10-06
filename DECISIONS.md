@@ -375,3 +375,50 @@ Closed on branch p4-4c-gaps (aab2d3a): the 3.4C profile (D8), bootstrap accepts 
 - EINF over UDP is still not witnessed. The firmware now logs `net: EINF <n> bytes to <ip>:<port>` when its sender changes, but the running app sent the 4C nothing during the tests.
 - The 3.4C profile has not run on 3.4C hardware; the 4B has not run the touch-config read.
 - The loopTask watchdog on a stuck hosted RPC and P4 audio are tracked on their own rows.
+
+## USB keyboard and mouse for Doom (usb-input)
+
+### Outcome
+
+A USB keyboard and mouse now drive Doom alongside touch, tilt and BOOT, on the
+three P4 carriers only. The hardware question is settled from the schematics:
+the 4C and 3.4C power a device from a USB type A port; the 4B hosts one but
+supplies no 5 V, so a keyboard there needs a powered hub or its own supply; no
+S3 board can host, because its one USB pair is the connector it is flashed and
+logged through. Unverified on hardware: nothing was flashed and no port opened.
+
+### Decisions to evaluate
+
+D1 USB input lives only inside a Doom session, brought up by DG_Init. Why: Doom is entered by a one-shot reboot, so normal streaming never installs the host stack and a board with nothing plugged in is unchanged. If overruled: the host stack would have to run during streaming and share loopTask with the frame path.
+D2 Enabled on the 4B even though it cannot power a device, with a serial line saying so. Why: it can host a self-powered keyboard or a powered hub, and it is the only board attached. If overruled: the 4B refuses and the feature is untestable here.
+D3 The per-board gate is a hand-written table in the Doom platform layer, not a new board-descriptor capability. Why: the descriptor schema and catalog format are reserved. If overruled: add a capability key and regenerate the board headers.
+D4 In a menu every letter is itself; in play only W/A/S/D are mapped. Why: save names and the engine's y/n prompts need letters, while mapping them in play would turn stray typing into cheat codes. If overruled: map letters everywhere, or nowhere.
+D5 Mouse buttons become engine key events (Fire, Use) rather than Doom's mouse-button bitmask. Why: the key path already holds, releases and reaches menus, and the touch code drives Fire the same way. If overruled: route data1 through DG_GetMouse instead.
+D6 Vertical mouse movement walks rather than looking. Why: Doom has no free look; the engine adds the vertical delta to forward. If overruled: nothing to change in the engine, only the wording.
+
+### Open questions
+
+- Does a real keyboard enumerate on the 4B through a powered hub? Default: shipped unverified; the human will try one. Nothing was flashed, and the only board was in use by another worker.
+- Is the 4B's H2 VBUS truly dead when the board is powered through H1? Read from the AO3401 symbol and its gate circuit, not measured. Default: assume dead and say so on serial. A diode test on that contact, or reading it while powered through H1, settles it.
+- Keyboards with no boot HID interface are ignored with a serial line rather than having their report descriptor parsed. Default: boot protocol only.
+
+### Gate facts
+
+Publish: local branch only, GitHub remote, no CR/AutoSDE, no push.
+Call sites, packages/*: none touched; this repo has no packages/ tree.
+Lanes (at the final commit): gate-usb-input.log, all exit 0 -- run_tests.sh (test_usb_input 477 checks), test_espdisp.py 1954 checks, compile --family p4, s3, c3, c6. c3 and c6 are untouched and their image sizes are unchanged.
+Red first: red-first-usb-input.log (the suite fails as a runtime assertion against the pre-change behaviour). The stuck-key fix was separately shown load-bearing by reinstating the bug.
+Adversarial review rounds: 1 independent; it found 2 High and 11 lesser defects, all fixed. It changed D4 and the vertical mouse cap, and corrected four hardware facts.
+
+### Evidence
+
+- usb-host-hardware.md: which board can host and power a device, from the schematics, with the residual doubts named. Committed as docs/usb-host-ports.md.
+- gate-usb-input.log: the four lanes with their own exit codes, and the symbol check showing the S3 image links no host stack.
+- red-first-usb-input.log: the suite failing on the old behaviour.
+- code-review.md: the adversarial round and every disposition.
+
+### Residuals
+
+No hardware verification. No UX capture: the visible surface is Doom answering a
+keyboard, which needs a flashed board and a real keyboard, both out of reach
+here. The S3 half is reasoned from seven schematics, not measured.

@@ -22,6 +22,13 @@
 //   FULL SCREEN:
 //     - Second finger: run modifier
 //
+// USB keyboard and mouse (carriers whose USB port can host a device):
+//   W/A/S/D or arrows move and turn, Ctrl fires, Space uses, Shift runs,
+//   Alt strafes, 1-7 pick weapons, '.' and '/' cycle them, Escape/Enter/
+//   Backspace work the menu, Tab is the map, F1-F10 and Pause as usual.
+//   Mouse movement turns and walks, the left button fires, the right uses,
+//   and the wheel cycles weapons.
+//
 // Outside active gameplay (title/demo/menu):
 //     - Tap on title/demo: ESCAPE (open menu)
 //     - Tap in menu: ENTER (select)
@@ -59,6 +66,11 @@ extern void doom_imu_read(float* pitch, float* roll);
 // Touch state layout and doom_touch_init/sample/poll declarations. Shared with
 // doom_hw_bridge.cpp so the two halves cannot disagree about the struct.
 #include "doom_touch_bridge.h"
+
+// USB keyboard and mouse, where the carrier can host one. Alongside touch and
+// BOOT rather than instead of them: a board with nothing plugged in behaves
+// exactly as it did before, because doom_usb_input_init() brings nothing up.
+#include "doom_usb_input.h"
 
 static const char* GFX_TAG = "doom_gfx";
 
@@ -103,6 +115,7 @@ static bool key_strafe_l_held = false;
 static bool key_strafe_r_held = false;
 static bool key_run_held = false;
 static int dg_mouse_dx = 0;  // synthetic one-tic mouse movement from touch joystick
+static int dg_mouse_dy = 0;  // one-tic vertical mouse movement (USB mouse only)
 
 // Synthetic gameplay taps must remain down through one BuildTiccmd. Menu
 // responders act immediately on keydown, but gameplay samples held-key state
@@ -147,13 +160,21 @@ static dg_input_context_t dg_current_input_context(void) {
     return DG_INPUT_TITLE_OR_DEMO;
 }
 
+// Set whenever the touch or tilt path releases a key a USB keyboard or mouse
+// may also be holding, so the USB layer can press its own held keys again.
+// Those paths and the keyboard share one engine key space: KEY_UPARROW is
+// KEY_UPARROW whichever of them pressed it.
+static bool dg_shared_keys_released = false;
+
 static void dg_release_gameplay_keys(void) {
     if (key_forward_held) { push_key(KEY_UPARROW, 0); key_forward_held = false; }
     if (key_back_held) { push_key(KEY_DOWNARROW, 0); key_back_held = false; }
     if (key_strafe_l_held) { push_key(KEY_STRAFE_L, 0); key_strafe_l_held = false; }
     if (key_strafe_r_held) { push_key(KEY_STRAFE_R, 0); key_strafe_r_held = false; }
     if (key_run_held) { push_key(KEY_RSHIFT, 0); key_run_held = false; }
+    dg_shared_keys_released = true;
     dg_mouse_dx = 0;
+    dg_mouse_dy = 0;
     if (dg_pulse_key_held) {
         push_key(dg_pulse_key, 0);
         dg_pulse_key_held = false;
@@ -326,6 +347,9 @@ static void process_touch_input(void) {
     if (touch.second_pressed != key_run_held) {
         push_key(KEY_RSHIFT, touch.second_pressed ? 1 : 0);
         key_run_held = touch.second_pressed;
+        // Lifting the second finger releases Run, which a keyboard's Shift may
+        // also be holding down.
+        if (!touch.second_pressed) dg_shared_keys_released = true;
     }
 
     const doom_touch_zone_t touch_zone = doom_touch_zone_for_press(
@@ -383,6 +407,30 @@ static void process_touch_input(void) {
     if (gesture_ended) dg_reset_touch_gesture();
 }
 
+// Fold whatever the USB keyboard and mouse sent into the same engine queue the
+// touch and BOOT paths use. Keys and mouse buttons are pushed by the bridge;
+// movement is added to the one-tic mouse delta the engine reads below.
+//
+// Runs after process_touch_input(), which resets dg_mouse_dx at its start, so a
+// finger and a mouse used at once add up rather than cancelling.
+static void process_usb_input(void) {
+    doom_usb_input_poll(menuactive ? 1 : 0);
+
+    // Whatever the touch and tilt paths just released, a USB device may still be
+    // physically holding; it will send no new report to say so.
+    if (dg_shared_keys_released) {
+        dg_shared_keys_released = false;
+        doom_usb_input_reassert();
+    }
+
+    int usb_dx = 0;
+    int usb_dy = 0;
+    if (doom_usb_input_take_mouse(&usb_dx, &usb_dy)) {
+        dg_mouse_dx += usb_dx;
+        dg_mouse_dy += usb_dy;
+    }
+}
+
 // ==========================================================================
 // doomgeneric interface implementation
 // ==========================================================================
@@ -422,6 +470,10 @@ void DG_Init() {
     doom_log_stage("touch");
     doom_imu_init();
     doom_log_stage("motion");
+    // Never fatal: a carrier that cannot host, or a session with nothing
+    // plugged in, keeps touch and BOOT exactly as before.
+    doom_usb_input_init();
+    doom_log_stage("usb input");
 
     last_frame_time = DG_GetTicksMs();
 
@@ -454,6 +506,7 @@ void DG_DrawFrame() {
         // fast down/move/release from falling entirely between two polls.
         if ((dy & 63) == 0) {
             doom_touch_sample();
+            doom_usb_input_service();
         }
 
         uint16_t* dst_row = &scaled_buffer[dy * panel_w];
@@ -517,14 +570,17 @@ void DG_SleepMs(uint32_t ms) {
     uint32_t remaining = ms;
     while (remaining > step) {
         doom_touch_sample();
+        doom_usb_input_service();
         vTaskDelay(pdMS_TO_TICKS(step));
         remaining -= step;
     }
     doom_touch_sample();
+    doom_usb_input_service();
     if (remaining > 0) {
         vTaskDelay(pdMS_TO_TICKS(remaining));
     }
     doom_touch_sample();
+    doom_usb_input_service();
 }
 
 uint32_t DG_GetTicksMs() {
@@ -536,6 +592,7 @@ void DG_PollInput(void) {
     dg_release_gameplay_pulse_for_new_poll();
     process_imu_input();
     process_touch_input();
+    process_usb_input();
 }
 
 int DG_GetKey(int* pressed, unsigned char* key) {
@@ -551,10 +608,13 @@ int DG_GetKey(int* pressed, unsigned char* key) {
 }
 
 int DG_GetMouse(int* dx, int* dy) {
-    if (dg_mouse_dx == 0) return 0;
+    if (dg_mouse_dx == 0 && dg_mouse_dy == 0) return 0;
     *dx = dg_mouse_dx;
-    *dy = 0;
+    // Vertical movement is a USB mouse only; the touch joystick leaves it zero.
+    // Doom has no free look, so the engine walks on it (`forward += mousey`).
+    *dy = dg_mouse_dy;
     dg_mouse_dx = 0;
+    dg_mouse_dy = 0;
     return 1;
 }
 

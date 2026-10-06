@@ -93,6 +93,11 @@ void doom_enter(void) {
     ESP_LOGI(TAG, "  BOOT short     = Escape (open/close menu)");
     ESP_LOGI(TAG, "  BOOT 0.6-<3s   = Previous menu");
     ESP_LOGI(TAG, "  BOOT 3s hold   = Exit Doom");
+    ESP_LOGI(TAG, "  USB keyboard   = WASD/arrows move, Ctrl fire, Space use,");
+    ESP_LOGI(TAG, "                   Shift run, Alt strafe, 1-7 weapons,");
+    ESP_LOGI(TAG, "                   Esc/Enter/Backspace menu, Tab map");
+    ESP_LOGI(TAG, "  USB mouse      = move to turn and walk, buttons fire/use,");
+    ESP_LOGI(TAG, "                   wheel changes weapon");
 
     doom_active = true;
     doom_exit_requested = false;

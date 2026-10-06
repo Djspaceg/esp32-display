@@ -13,6 +13,7 @@ DOOM_ENTRY_OUT="$TMP/test_doom_entry_gate"
 DOOM_WAD_OUT="$TMP/test_doom_wad"
 DOOM_FAILURE_OUT="$TMP/test_doom_failure_screen"
 MEM_REPORT_OUT="$TMP/test_mem_report"
+USB_INPUT_OUT="$TMP/test_usb_input"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -133,6 +134,15 @@ done
 clang++ "${CXXFLAGS[@]}" \
   -o "$DOOM_FAILURE_OUT" "$HERE/test_doom_failure_screen.cpp"
 "$DOOM_FAILURE_OUT"
+
+# Which carriers can host a USB keyboard at all, and what a HID boot report
+# means to Doom: key and mouse-button edges, the movement letters inside a menu,
+# and nothing left held when the cable is pulled.
+clang++ "${CXXFLAGS[@]}" \
+  -I"$HERE/../libraries/espdisp_board/src" \
+  -I"$HERE/../doom/src" \
+  -o "$USB_INPUT_OUT" "$HERE/test_usb_input.cpp"
+"$USB_INPUT_OUT"
 
 # The 5 s status line is unchanged and the mem line after it parses.
 clang++ "${CXXFLAGS[@]}" \

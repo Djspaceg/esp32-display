@@ -28,6 +28,10 @@ esp_lcd_panel_handle_t doom_get_panel_handle(void) { return panel; }
 // here and accidentally polling a separate disabled copy.
 extern "C" void doom_touch_sample(void);
 
+// Same reasoning for the USB host stack: a full-panel transfer can occupy most
+// of a frame, and a keystroke that lands inside one must not wait for it.
+extern "C" void doom_usb_input_service(void);
+
 // Doom renders into one reusable full-panel buffer. esp_lcd queues the source
 // pointer rather than copying it, so every blit must block until the completion
 // ISR says DMA is done before Doom rewrites or frees that buffer. A timeout
@@ -42,9 +46,11 @@ extern "C" bool doom_display_blit_blocking(const uint16_t *pixels,
   uint32_t startedAt = millis();
   while (dmaInFlight != 0 && millis() - startedAt < 1000) {
     doom_touch_sample();
+    doom_usb_input_service();
     delay(1);
   }
   doom_touch_sample();
+  doom_usb_input_service();
   if (dmaInFlight != 0) return false;
 
   if (queuePanelBitmap(panel, *bcfg, 0, 0, width, height, pixels) != ESP_OK) {
@@ -54,9 +60,11 @@ extern "C" bool doom_display_blit_blocking(const uint16_t *pixels,
   startedAt = millis();
   while (dmaInFlight != 0 && millis() - startedAt < 1000) {
     doom_touch_sample();
+    doom_usb_input_service();
     delay(1);
   }
   doom_touch_sample();
+  doom_usb_input_service();
   return dmaInFlight == 0;
 }
 

@@ -526,3 +526,57 @@ Scope: `git diff main...p4-4c-gaps`, one independent adversarial round on 5d97e2
 | Info | - | Rescue hint lists all carriers; bootstrap picks glass by width; EINF log may once pair a stale IP and port; backlight helper also reaches C3. | Left as is: harmless. |
 
 Checked and not defects: the touch-config I2C read (repeated start, address order, bus handed back); JD9365 page tracking (only page-1 0x40 overridden); large-tile buffer sizes and init order; the backlight helper never touches a USB pad; `formatProfileHint` bounds under ASan; the Repair and rescue CLI guards; generator, validator and schema consistency.
+
+## Code review: USB keyboard and mouse for Doom (usb-input)
+
+One adversarial round by an independent reviewer agent, read-only on the repo,
+with no serial port and no flashing. It reviewed `git diff main...HEAD` at
+2d6ad3c. It read the installed Arduino core 3.3.11 and its prebuilt TinyUSB and
+usb archives, disassembled `usb_new_phy`, inspected both linked ELFs with `nm`,
+ran the host suite and both family compiles, and independently re-read the 4B
+and XC schematics. Every finding is addressed below; the suite afterwards goes
+from 138 to 477 checks for this layer.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | High | **The wrong USB PHY was brought up, and it would have seized the panel's pins.** `USB_PHY_TARGET_INT` is the P4's full-speed FSLS PHY, not the UTMI one belonging to the high-speed OTG controller on rhport 1. `usb_new_phy` promotes INT to UTMI only when `otg_mode == USB_OTG_MODE_DEVICE` (shown in the disassembly of `usb_phy.c.obj` in `libusb.a`), so in host mode it stayed INT and no device could ever enumerate -- silently, since the call still returns `ESP_OK`. That path also calls `gpio_set_drive_capability` on the OTG internal PHY's fixed pads, `USB_INT_PHY1_DM/DP` = GPIO26/GPIO27, which are `pin_bl` and `pin_rst` on all three P4 carriers. | Fixed: `USB_PHY_TARGET_UTMI`. Confirmed independently here from `usb_phy_types.h` (INT is documented "internal FSLS PHY"), from the same disassembly (`USB_OTG_MODE_DEVICE == 2`, and the branch at `usb_new_phy+0x1a` leaves host mode on the non-promotion path), and from `io_mux_reg.h` (`USB_OTG_INT_PHY_DM/DP` = 26/27) against the three board descriptors (`pin_rst = 27`, `pin_bl = 26`). The reason is now written into the code so it cannot be "simplified" back. |
+| 2 | High | **A key held across the gameplay/menu boundary was left stuck down forever** -- the exact failure the comment claimed to prevent. `apply()` rebuilt the held set from the current context each report, so W pressed in play was released as `'w'` while `KEY_UPARROW` stayed down and the player walked forever. The existing test only covered the case where the release report is the first one seen in the new context, which worked either way. | Fixed: a new `keyFor()` carries the engine key an id was *pressed* as, so a release always matches its press. `testMenuContextTypesLetters` now walks the real sequence (hold W, press Escape, menu opens, release Escape, release W). Verified load-bearing: reinstating the old behaviour fails at that assertion. |
+| 3 | Medium | Reports already queued when a device is unplugged were replayed after `releaseAll()`, pressing keys again that nothing was left to release. | Fixed: `ReportQueue::dropDevice()` on unmount, before the release. Host tested, including that the other device's reports survive in order. |
+| 4 | Medium | A full ring dropped the newest report; the stated reason was backwards. A boot report is an absolute set, not a transition, so the newest is authoritative and a dropped key-up is never resent. Reachable: one queue shared by keyboard and mouse, drained once per engine poll while a 1 kHz mouse fills it. | Fixed: the oldest is dropped. The comment now says why. Host tested at capacity and across a wrap. |
+| 5 | Medium | A USB key held while the touch or tilt path released the same engine key went dead until physically re-pressed: `dg_release_gameplay_keys()` pushes those keys up, and a keyboard sends no report while its key set is unchanged. | Fixed: `doom_usb_input_reassert()`, called from `process_usb_input` whenever the touch or tilt path released a shared key (leaving gameplay, or lifting the second finger that holds Run). Re-pressing a key the engine thinks is down is harmless because gameplay reads held state. |
+| 6 | Medium | "a save name can still be typed" was false: only w, a, s and d were mapped at all. | Fixed: inside a menu every letter is itself, which also makes the engine's own y/n prompts work. In play only the movement four are mapped, so stray typing still cannot reach a cheat code -- both halves tested over the whole alphabet. |
+| 7 | Low-Med | Undocumented dependency on the P4 FQBN's USB menu defaults: enabling CDC, MSC or DFU on boot would have the core take the same PHY in device mode first and the feature would silently vanish. Verified no conflict today. | Fixed: a `#error` on that combination, so it is a build failure rather than a silent loss. |
+| 8 | Low | The one-poll wheel hold was unnecessary -- `G_Responder` latches `next_weapon` from the key-down event, not from `gamekeydown[]` -- and it let the next poll cancel a real `/` press. The wheel accumulator was also unbounded, so one scroll cycled weapons for seconds. | Fixed both: a notch is a press and release in one poll, and the queue is bounded (`MOUSE_MAX_WHEEL_QUEUE`). Confirmed the event path independently at `g_game.c.inc:797-807`. One notch per poll is kept, because the engine can only act on one change per tic. |
+| 9 | Low | Vertical movement was capped at 160 while `forward` saturates at `MAXPLMOVE` (50), so any ordinary flick was full run speed, and nothing tied the constants to anything. | Fixed: `MOUSE_MAX_TURN_DELTA` 160 (matching the touch joystick) and `MOUSE_MAX_WALK_DELTA` 50 (citing MAXPLMOVE), both asserted by value in the test rather than against themselves. |
+| 10 | Low | Four factual errors in the comments: the high-speed pads are package pins 49 (DM) and 50 (DP), not 50/51 (51 is VCCA); what holds the 4B's pass FET off is its gate circuit, not only the body diode; `CFG_TUH_HID` is `3 * CFG_TUH_DEVICE_MAX` = 21 stack-wide, not 3 per device; and the XC carries three USB connectors, not two. | All four fixed, in the code comments and in `docs/usb-host-ports.md`. Pin numbers re-read from the 4B schematic's own pin list (`GPIO24 52, VCCA 51, DP 50, DM 49`). |
+| 11 | Low | The model pointed at `DECISIONS.md` for evidence that was not there, and `firmware/doom/README.md`'s Controls table had no keyboard or mouse rows and no power caveat. | Fixed: the comment points at `docs/usb-host-ports.md` (committed in this branch), and the README gained a USB section including that the 4B supplies no 5 V. |
+| 12 | Low | `doom_usb_input_device_present()` and the `s_mounted` counter it existed for had no caller. | Fixed: both removed. |
+| 13 | Low | Test gaps: the whole glue file untested, the clamp asserted against its own constant, the undersized-buffer truncation path unexercised, `doomKeyForModifier` never called with an unmapped bit, and the variant list hand-written against a generated enum. | Fixed: the report queue moved into the host-tested model (push, pop, oversize, ignored device, capacity, wrap, `dropDevice`); the caps asserted by value; an undersized buffer now refused outright and tested; unmapped modifier bits tested; the variant check sweeps the whole enum range so a future variant defaults to unsupported in both arms. |
+
+On the per-board claims, the reviewer independently confirmed from the
+schematics: the high-speed pads reach a connector on both board families; that
+connector is the 4B's H2 and the XC's J3, both silkscreened USB-OTG; both
+families flash and log through a separate CH343P on a separate connector; the
+4B's H2 is sink-only (R2/R3 5.1K, no Rp, no CC controller) with no boost, load
+switch or VBUS GPIO; and the XC's VBUS_OUT comes from U10 DIO7003HEST5 with its
+enable pulled up through R12 and R53 unpopulated. What remains a graphical read
+rather than a settled netlist, and what would need a meter, is now listed under
+"What was not read" in `docs/usb-host-ports.md`.
+
+Checked and not defects: the `#define CFG_TUSB_MCU 907` hack is necessary, not
+cosmetic (without it a sketch TU silently builds as an ESP32-S2 with the
+high-speed macros flipped off), it wins over `tusb_config.h`, and no
+sketch-visible struct layout depends on it, so there is no ABI hazard against
+the prebuilt archive; rhport 1 is the high-speed OTG core; the no-locking
+assumption holds because TinyUSB's host core spawns no task of its own and every
+call site is on loopTask, which is also where `tusb_init` is called as
+`usbh.h` requires; one poll of hold is enough for `gamekeydown` given
+`I_StartTic` then `D_ProcessEvents` then `G_BuildTiccmd`; the mouse sign
+conventions are right on both axes; `process_touch_input` zeroes the shared
+delta first, so touch and mouse add rather than cancel; the S3 image links no
+`tuh_`, `hidh_` or `usbh_` symbol at all; and nothing runs outside a Doom
+session.
+
+Nothing in this review or these fixes was verified on hardware. No board was
+flashed, no serial port opened, no Mac app launched. The two findings the
+reviewer would fix before touching hardware were 1 and 2, and both are fixed.
