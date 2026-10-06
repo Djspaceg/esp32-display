@@ -7,6 +7,7 @@
 #include <touch_map.h>
 
 #include "app_state.h"
+#include "boot_menu.h"
 #include "device_protocol.h"
 #include "display_power.h"
 #include "net_link.h"
@@ -94,7 +95,9 @@ void serviceTouch() {
   // only be noticed when the user moved or lifted, which is exactly what a hold
   // is not.
   touchgesture::Event held = touchTracker.tick(millis());
-  if (held.gesture != touchgesture::Gesture::None && !touchConsumed) {
+  // A hold means nothing on the boot menu, and there is no sender yet.
+  if (held.gesture != touchgesture::Gesture::None && !touchConsumed &&
+      !bootMenuActive) {
     if (held.gesture == touchgesture::Gesture::LongPress &&
         wifiSelectorActive) {
       closeWifiSelector();
@@ -127,6 +130,27 @@ void serviceTouch() {
   }
   touchgesture::Event event =
       touchTracker.onReport(sample.pressed, p.x, p.y, millis());
+
+  // The boot menu runs before WiFi, so nothing here is for a sender, and the
+  // panel is lit for the menu, so no press is spent waking it.
+  if (bootMenuActive) {
+    switch (event.gesture) {
+      case touchgesture::Gesture::SwipeUp:
+      case touchgesture::Gesture::SwipeLeft:
+        moveBootMenu(1);
+        break;
+      case touchgesture::Gesture::SwipeDown:
+      case touchgesture::Gesture::SwipeRight:
+        moveBootMenu(-1);
+        break;
+      case touchgesture::Gesture::Tap:
+        handleBootMenuTap(event.startX, event.startY);
+        break;
+      default:
+        break;
+    }
+    return;
+  }
 
   // Wake-swallow only while the panel is actually DIM: once a wake press has
   // lit the status card (touchWakeActive), or the survey meter is up at full

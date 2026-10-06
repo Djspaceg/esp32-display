@@ -1,22 +1,21 @@
 #include "input_button.h"
 
 #include <Arduino.h>
-#include <Preferences.h>
 #include <driver/gpio.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include "app_state.h"
+#include "boot_menu.h"  // also decides whether this image has a menu at all
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+#include "boot_menu_model.h"
+#endif
 #include "button_press_model.h"
 #include "display_power.h"
 #include "orientation.h"
 #include "prefs_store.h"
 #include "rotary_encoder_model.h"
 #include "ui_screens.h"
-
-#if defined(ESPDISP_DOOM_RUNTIME)
-#include <doom_mode.h>
-#endif
 
 
 // ---- BOOT button (plain input after boot) -------------------------------
@@ -62,6 +61,9 @@ static volatile bool haveBootEdge = false;
 static gpio_num_t bootButtonPin = GPIO_NUM_NC;
 static portMUX_TYPE bootButtonMux = portMUX_INITIALIZER_UNLOCKED;
 static buttonpress::DoublePressTracker shortPressTracker;
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+static bootmenu::TriplePress triplePressTracker;
+#endif
 static uint8_t shortPressPreviewOriginalBlLevel = 0;
 #if defined(ESPDISP_DOOM_RUNTIME)
 // The release time of the press whose double toggled the signal survey, so a
@@ -224,53 +226,47 @@ static void applyShortPressDecision(
 }
 
 static void handleShortRelease(uint32_t releasedAt) {
+  // A triple press reopens the boot-mode menu through a one-shot restart
+  // rather than tearing down a live stream; a game chosen there gets its own
+  // isolated boot. Boards whose image or profile runs no game keep all three
+  // presses as ordinary short presses.
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+  if (bootMenuMayOfferGames() && triplePressTracker.record(releasedAt)) {
+    const char *refusal = nullptr;
+    if (bootMenuOffered(&refusal)) {
+      requestBootMenuAndRestart();
+      return;
+    }
 #if defined(ESPDISP_DOOM_RUNTIME)
-  // Enter through a one-shot reboot rather than tearing down a live stream.
-  // The next setup consumes the flag before starting networking, allocating
-  // normal frame buffers, or subscribing loopTask to the watchdog, giving
-  // Doom exclusive panel and PSRAM ownership. Any crash then boots normally
-  // because the flag has already been removed.
-  if (board::supportsDoom(boardVariant) &&
-      doom_check_triple_tap(releasedAt, true)) {
-    // Only a full USB flash of the bundle writes the WAD; a WiFi update or a
-    // rescue image writes the app alone. Refuse here, where the reason can be
-    // shown, rather than in a Doom boot that can only restart.
-    const char *wadProblem = doom_wad_preflight();
-    if (wadProblem != nullptr) {
-      // Presses one and two of the triple were also a double press, which
-      // toggled the signal survey. A reboot used to hide that; staying
-      // normal must undo it. Press times, not processing times, so a loop
-      // stall between presses cannot skip the undo.
-      if (surveyToggledByDouble &&
-          releasedAt - surveyToggledByDoubleAt <= DOOM_TRIPLE_TAP_WINDOW_MS &&
-          surveyActive != surveyBeforeDouble) {
-        setSignalSurvey(surveyBeforeDouble, "Doom refused, undo double press");
-      }
-      surveyToggledByDouble = false;
-      Serial.printf(
-          "button: Doom unavailable (%s); staying normal. Only a full USB "
-          "flash of the firmware bundle writes the Doom WAD.\n",
-          wadProblem);
-      showInfoBar(DOOM_NEEDS_USB_FLASH_TEXT);
-      return;
+    // Doom is the only game, so a menu with nothing but streaming means its
+    // WAD is unusable. Only a full USB flash of the bundle writes the WAD; a
+    // WiFi update or a rescue image writes the app alone. Refuse here, where
+    // the reason can be shown.
+    //
+    // Presses one and two of the triple were also a double press, which
+    // toggled the signal survey. A reboot used to hide that; staying normal
+    // must undo it. Press times, not processing times, so a loop stall
+    // between presses cannot skip the undo.
+    if (surveyToggledByDouble &&
+        releasedAt - surveyToggledByDoubleAt <=
+            bootmenu::TRIPLE_PRESS_WINDOW_MS &&
+        surveyActive != surveyBeforeDouble) {
+      setSignalSurvey(surveyBeforeDouble, "Doom refused, undo double press");
     }
-    Preferences prefs;
-    bool saved = prefs.begin("espdisp", false);
-    if (saved) {
-      saved = prefs.putBool("doomonce", true) == sizeof(uint8_t);
-      prefs.end();
-    }
-    if (!saved) {
-      Serial.println("button: Doom request could not be saved; staying normal");
-      return;
-    }
-    Serial.println("button: Doom requested; rebooting into isolated mode");
-    Serial.flush();
-    delay(50);
-    ESP.restart();
+    surveyToggledByDouble = false;
+    Serial.printf(
+        "button: Doom unavailable (%s); staying normal. Only a full USB "
+        "flash of the firmware bundle writes the Doom WAD.\n",
+        refusal != nullptr ? refusal : "not offered");
+    showInfoBar(DOOM_NEEDS_USB_FLASH_TEXT);
+#else
+    // A game other than Doom refused. Say so rather than swallowing the press.
+    Serial.printf("button: no game available (%s); staying normal\n",
+                  refusal != nullptr ? refusal : "no runtime");
+#endif
     return;
   }
-#endif
+#endif  // ESPDISP_BOOT_MENU_RUNTIME
 
   const bool previewEnabled = fixedBlLevel == 0;
   if (!previewEnabled) {
@@ -291,6 +287,28 @@ static void handleShortRelease(uint32_t releasedAt) {
   applyShortPressDecision(decision);
 }
 
+// The boot-mode menu and the WiFi selector share one control scheme: a short
+// press or a detent moves the highlight and a long hold chooses it.
+static bool selectorOwnsInput() {
+  return bootMenuActive || wifiSelectorActive;
+}
+
+static void moveSelector(int direction) {
+  if (bootMenuActive) {
+    moveBootMenu(direction);
+  } else {
+    moveWifiSelector(direction);
+  }
+}
+
+static void activateSelector() {
+  if (bootMenuActive) {
+    activateBootMenu();
+  } else {
+    activateWifiSelector();
+  }
+}
+
 // A turn this large between two loop passes is a stall, not intent; the
 // selector still moves at most this many rows for it.
 static const int16_t MAX_SELECTOR_STEPS_PER_PASS = 4;
@@ -298,10 +316,10 @@ static const int16_t MAX_SELECTOR_STEPS_PER_PASS = 4;
 static void applyEncoderTurn(int16_t steps) {
   Serial.printf("knob: turn %+d\n", (int)steps);
   const int8_t direction = steps > 0 ? 1 : -1;
-  if (wifiSelectorActive) {
+  if (selectorOwnsInput()) {
     const int16_t count = steps > 0 ? steps : (int16_t)-steps;
     for (int16_t i = 0; i < count && i < MAX_SELECTOR_STEPS_PER_PASS; ++i) {
-      moveWifiSelector(direction);
+      moveSelector(direction);
     }
     return;
   }
@@ -415,14 +433,14 @@ void handleButton() {
       continue;
     }
 
-    if (wifiSelectorActive) {
+    if (selectorOwnsInput()) {
       if (!longFired && heldMs >= LONG_PRESS_MS) {
         longFired = true;
-        activateWifiSelector();
+        activateSelector();
       }
       wasDown = false;
       if (!longFired && heldMs >= DEBOUNCE_MS) {
-        moveWifiSelector(1);
+        moveSelector(1);
       }
       continue;
     }
@@ -448,10 +466,14 @@ void handleButton() {
   if (wasDown && !turnedWhileDown) {
     const uint32_t heldMs = buttonClockMs() - downAt;
     if (!selectorEntryHold) {
-      if (wifiSelectorActive) {
+      if (selectorOwnsInput()) {
         if (!longFired && heldMs >= LONG_PRESS_MS) {
           longFired = true;
-          activateWifiSelector();
+          // The rest of this hold belongs to the choice it just made. Choosing
+          // STREAMING closes the boot menu while BOOT is still down, and the
+          // release must not then count as a normal rotate or power press.
+          selectorEntryHold = true;
+          activateSelector();
         }
       } else if (surveyActive) {
         if (!longFired && heldMs >= LONG_PRESS_MS) {

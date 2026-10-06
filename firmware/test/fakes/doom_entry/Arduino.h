@@ -1,4 +1,4 @@
-// Host fake of the Arduino surface input_button.cpp touches. Serial output is
+// Host fake of the Arduino surface input_button.cpp and boot_menu.cpp touch. Serial output is
 // captured so a test can read the last line the firmware printed, and
 // ESP.restart() only records the call.
 #pragma once
@@ -46,10 +46,18 @@ class FakeSerial {
 };
 extern FakeSerial Serial;
 
+// A real restart never returns. A test that runs a loop which only a restart
+// leaves sets throwOnRestart and catches FakeRestart.
+struct FakeRestart {};
+
 class FakeEsp {
  public:
   int restarts = 0;
-  void restart() { restarts++; }
+  bool throwOnRestart = false;
+  void restart() {
+    restarts++;
+    if (throwOnRestart) throw FakeRestart();
+  }
 };
 extern FakeEsp ESP;
 

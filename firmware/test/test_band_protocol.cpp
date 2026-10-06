@@ -14,6 +14,7 @@
 #include "../display_stream/band_compress.h"
 #include "../display_stream/band_protocol.h"
 #include "../display_stream/bc1.h"
+#include "../display_stream/boot_menu_model.h"
 #include "../display_stream/button_press_model.h"
 #include "../display_stream/chip_identity.h"
 #include "../display_stream/control_queue.h"
@@ -626,6 +627,127 @@ int main() {
     CHECK(formatSaveFailedReply(reply, sizeof(reply), 7));
     CHECK(strcmp(reply, "CFGERR wifi slot=7 save failed") == 0);
     CHECK(!formatRosterReply(reply, 8, 0, 0, true));
+  }
+
+  // --- boot-mode menu model ------------------------------------------------
+  {
+    using namespace bootmenu;
+    // Streaming is always offered, always first. A game needs its image, its
+    // board, and its data; nothing offers Quake until a runtime exists.
+    Capabilities caps;
+    CHECK(offeredModes(caps).count == 1);
+    CHECK(offeredModes(caps).modes[0] == Mode::Streaming);
+    caps.doomBuild = true;
+    caps.doomBoard = true;
+    CHECK(offeredModes(caps).count == 1);
+    caps.doomWadReady = true;
+    Choices withDoom = offeredModes(caps);
+    CHECK(withDoom.count == 2);
+    CHECK(withDoom.modes[0] == Mode::Streaming);
+    CHECK(withDoom.modes[1] == Mode::Doom);
+    caps.doomBoard = false;
+    CHECK(offeredModes(caps).count == 1);
+    caps.doomBoard = true;
+    caps.doomBuild = false;
+    CHECK(offeredModes(caps).count == 1);
+    caps.doomBuild = true;
+    caps.quakeBuild = true;
+    CHECK(offeredModes(caps).count == 2);
+    caps.quakeBoard = true;
+    const Choices all = offeredModes(caps);
+    CHECK(all.count == 3);
+    CHECK(all.modes[2] == Mode::Quake);
+    // anyGameBuilt is what gates the triple press and the data read, so it must
+    // answer for every game, not just Doom: a Quake-only image still has a menu.
+    Capabilities none;
+    CHECK(!anyGameBuilt(none));
+    Capabilities doomOnly;
+    doomOnly.doomBuild = true;
+    CHECK(!anyGameBuilt(doomOnly));
+    doomOnly.doomBoard = true;
+    CHECK(anyGameBuilt(doomOnly));
+    // Deliberately WITHOUT its data: the press is still gated in, so the
+    // refusal can name a reason instead of the press being swallowed.
+    CHECK(!doomOnly.doomWadReady);
+    Capabilities quakeOnly;
+    quakeOnly.quakeBuild = true;
+    quakeOnly.quakeBoard = true;
+    CHECK(anyGameBuilt(quakeOnly));
+
+    CHECK(strcmp(modeLabel(Mode::Streaming), "STREAMING") == 0);
+    CHECK(strcmp(modeLabel(Mode::Doom), "DOOM") == 0);
+    CHECK(strcmp(modeLabel(Mode::Quake), "QUAKE") == 0);
+
+    CHECK(opening(ResetKind::User, false, 2, true, false) == Opening::Timed);
+    CHECK(opening(ResetKind::Automatic, false, 2, true, false) ==
+          Opening::None);
+    CHECK(opening(ResetKind::Automatic, true, 2, true, false) ==
+          Opening::Requested);
+    CHECK(opening(ResetKind::User, true, 1, true, false) == Opening::None);
+    CHECK(opening(ResetKind::User, false, 2, false, false) == Opening::None);
+    CHECK(opening(ResetKind::User, true, 2, false, false) == Opening::None);
+    CHECK(opening(ResetKind::User, false, 2, true, true) == Opening::None);
+    CHECK(opening(ResetKind::User, true, 2, true, true) ==
+          Opening::Requested);
+
+    Countdown timed;
+    timed.start(1000, Opening::Timed);
+    CHECK(timed.secondsLeft(1000) == 3);
+    CHECK(timed.secondsLeft(1001) == 3);
+    CHECK(timed.secondsLeft(2000) == 2);
+    CHECK(timed.secondsLeft(3999) == 1);
+    CHECK(!timed.expired(3999));
+    CHECK(timed.expired(4000));
+    CHECK(timed.secondsLeft(4000) == 0);
+    timed.start(1000, Opening::Timed);
+    timed.noteInput(3500);
+    CHECK(!timed.expired(18499));
+    CHECK(timed.expired(18500));
+    Countdown requested;
+    requested.start(0xFFFFF000u, Opening::Requested);
+    CHECK(requested.secondsLeft(0xFFFFF000u) == 15);
+    CHECK(!requested.expired(0xFFFFF000u + 14999u));
+    CHECK(requested.expired(0xFFFFF000u + 15000u));
+
+    // The ceiling: input cannot hold the menu open past MAX_OPEN_MS, so a
+    // board nobody is touching always reaches streaming.
+    Countdown held;
+    held.start(1000, Opening::Timed);
+    for (uint32_t at = 1000; at < 1000 + MAX_OPEN_MS; at += 1000) {
+      held.noteInput(at);
+      CHECK(!held.expired(at));
+    }
+    CHECK(held.expired(1000 + MAX_OPEN_MS));
+    held.noteInput(1000 + MAX_OPEN_MS + 5000);
+    CHECK(held.expired(1000 + MAX_OPEN_MS + 5000));
+    // And the title never promises time the ceiling will not give.
+    Countdown nearCeiling;
+    nearCeiling.start(0, Opening::Timed);
+    nearCeiling.noteInput(MAX_OPEN_MS - 2000);
+    CHECK(nearCeiling.secondsLeft(MAX_OPEN_MS - 2000) == 2);
+    CHECK(nearCeiling.secondsLeft(MAX_OPEN_MS - 1) == 1);
+    CHECK(nearCeiling.secondsLeft(MAX_OPEN_MS) == 0);
+    // Across wrap, both deadlines included.
+    Countdown wrappedHold;
+    wrappedHold.start(0xFFFFF000u, Opening::Timed);
+    wrappedHold.noteInput(0xFFFFF000u + 1000u);
+    CHECK(!wrappedHold.expired(0xFFFFF000u + 2000u));
+    CHECK(wrappedHold.expired(0xFFFFF000u + MAX_OPEN_MS));
+
+    TriplePress triple;
+    CHECK(!triple.record(100));
+    CHECK(!triple.record(400));
+    CHECK(triple.record(900));
+    CHECK(!triple.record(1000));
+    CHECK(!triple.record(1500));
+    // The third press lands 801 ms after the first: a fresh sequence.
+    CHECK(!triple.record(1801));
+    CHECK(!triple.record(1900));
+    CHECK(triple.record(2000));
+    TriplePress wrapped;
+    CHECK(!wrapped.record(0xFFFFFF00u));
+    CHECK(!wrapped.record(0xFFFFFF80u));
+    CHECK(wrapped.record(0x00000100u));
   }
 
   // --- on-device WiFi selector model -------------------------------------

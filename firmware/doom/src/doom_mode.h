@@ -1,8 +1,8 @@
 // Doom mode for supported ESP32 display profiles.
 //
-// Activated by triple-tapping the selected profile's BOOT button within 800ms.
-// Runs alongside the normal display_stream firmware -- suspends streaming,
-// launches Doom, and returns to normal on BOOT long-press (3s).
+// Chosen from the boot-mode menu (display_stream/boot_menu.h), which a power-on
+// or a triple press of BOOT opens. The choice restarts into an isolated Doom
+// boot that returns to normal firmware on BOOT long-press (3s).
 //
 // Compiled into family builds that define ESPDISP_DOOM_RUNTIME.
 #pragma once
@@ -13,13 +13,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/// Call from the button ISR or polling loop with the current press count
-/// and timing. Returns true when a triple-tap is detected.
-///
-/// Implementation: tracks up to 3 presses within TRIPLE_TAP_WINDOW_MS.
-/// Resets if the window expires without reaching 3.
-bool doom_check_triple_tap(uint32_t now_ms, bool button_just_pressed);
 
 /// Enter Doom mode. This function does not return until the player exits
 /// (BOOT long-press 3s). The caller should:
@@ -60,7 +53,6 @@ void doom_request_exit(void);
 #endif
 
 // Configuration
-#define DOOM_TRIPLE_TAP_WINDOW_MS  800   // 3 presses must complete within this
 #define DOOM_DOUBLE_TAP_WINDOW_MS  400   // Distinguish Fire from Use/Open
 #define DOOM_RENDER_WIDTH          320   // Native Doom resolution
 #define DOOM_RENDER_HEIGHT         200

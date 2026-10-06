@@ -1,6 +1,6 @@
 // Doom Easter Egg mode controller
 //
-// Triple-tap detection and mode lifecycle management.
+// Mode lifecycle management.
 // GPL-2.0 for the doomgeneric integration; this glue file is MIT.
 #include "doom_mode.h"
 
@@ -42,41 +42,10 @@ extern "C" {
 
 static const char* TAG = "doom_mode";
 
-// --- Triple-tap state machine ---
-static uint32_t tap_timestamps[3] = {0, 0, 0};
-static int tap_count = 0;
+// Entry is the boot-mode menu's (display_stream/boot_menu.cpp), which sets
+// the one-shot request this boot consumed.
 static volatile bool doom_active = false;
 static volatile bool doom_exit_requested = false;
-
-bool doom_check_triple_tap(uint32_t now_ms, bool button_just_pressed) {
-    if (!button_just_pressed) return false;
-    if (doom_active) return false;  // Already in Doom
-
-    // Record this press
-    if (tap_count == 0 || (now_ms - tap_timestamps[0]) > DOOM_TRIPLE_TAP_WINDOW_MS) {
-        // Start fresh sequence
-        tap_timestamps[0] = now_ms;
-        tap_count = 1;
-    } else {
-        // Add to sequence
-        tap_timestamps[tap_count] = now_ms;
-        tap_count++;
-    }
-
-    if (tap_count >= 3) {
-        // Triple-tap detected! Verify all 3 within the window.
-        if ((tap_timestamps[2] - tap_timestamps[0]) <= DOOM_TRIPLE_TAP_WINDOW_MS) {
-            tap_count = 0;
-            ESP_LOGI(TAG, "Triple-tap detected! Entering Doom mode...");
-            return true;
-        }
-        // Window expired between first and third -- reset
-        tap_timestamps[0] = now_ms;
-        tap_count = 1;
-    }
-
-    return false;
-}
 
 bool doom_is_active(void) {
     return doom_active;

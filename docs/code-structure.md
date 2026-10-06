@@ -25,7 +25,8 @@ mutex lives with all state it protects.
 | `serial_config.h/.cpp` | `CFG*`, including family/profile/chip/partition identity |
 | `input_button.h/.cpp` | BOOT press tiers and profile-gated developer behavior |
 | `input_touch.h/.cpp` | Touch polling, wake consumption, and gestures |
-| `ui_screens.h/.cpp` | Status, signal survey, info bar, and OTA progress screens |
+| `ui_screens.h/.cpp` | Status, signal survey, WiFi selector, boot-mode menu, info bar, and OTA progress screens |
+| `boot_menu.h/.cpp` | Pre-WiFi boot-mode menu (Streaming default, Doom, Quake slot), its triple-press request, and game one-shot handoff; choices and timing in `boot_menu_model.h` |
 | `dma_gate.h/.cpp` | Transfer completion accounting and stall recovery |
 | `ota_service.h/.cpp` | ArduinoOTA lifecycle and progress |
 | `prefs_store.h/.cpp` | NVS reads and writes |

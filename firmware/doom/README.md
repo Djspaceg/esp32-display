@@ -9,9 +9,12 @@ allocate from PSRAM only when Doom starts.
 
 ## Play Doom
 
-1. Start from the normal display firmware, then press BOOT three times within
-   800 ms. The panel restarts, shows the Doom splash, and enters the title/demo
-   loop.
+1. Open the boot-mode menu: it appears for 3 seconds after power-on or a
+   reset, and a triple press of BOOT within 800 ms from the running firmware
+   restarts into it. Highlight **DOOM** (tap it, or short-press BOOT) and choose
+   it (tap **START**, or hold BOOT for 0.6 seconds). The panel restarts, shows
+   the Doom splash, and enters the title/demo loop. Left alone, the menu starts
+   streaming. It offers Doom only when the WAD passes the Doom boot's check.
 2. Short-press BOOT or tap the screen to open the main menu.
 3. Swipe up or down to move the menu cursor. Swipe left or right to change a
    highlighted slider, such as screen size, mouse sensitivity, or sound volume.
@@ -39,8 +42,10 @@ use the repository's MIT license.
 ## Runtime architecture
 
 ```text
-Triple-tap BOOT
-  → save one-shot `doomonce` request in NVS
+Power-on/reset, or triple press BOOT → one-shot `bootmenu` request → restart
+  → boot-mode menu (display_stream/boot_menu.cpp), before WiFi starts;
+    untouched it starts streaming
+  → choose DOOM: save one-shot `doomonce` request in NVS
   → restart
   → consume and remove request before normal setup
   → detect and require a supported runtime profile
@@ -152,8 +157,10 @@ library and omits the recursive `platform/doom_hw_bridge.cpp` source.
 1. Use a recoverable CO5300-profile S3 device and USB, not OTA, for the first install.
 2. Confirm the development partition table contains `doom_wad` at `0xBFF000`.
 3. Flash only the listed development segments without whole-chip erase.
-4. After normal streaming starts, triple-tap BOOT and confirm one reboot into
-   the splash and title/demo loop.
+4. Power-cycle and confirm the boot-mode menu offers STREAMING and DOOM, counts
+   down from 3, and starts streaming if left alone. Triple-press BOOT while
+   streaming and confirm one reboot into the menu; choose DOOM and confirm one
+   more reboot into the splash and title/demo loop.
 5. Short-press BOOT and confirm the main menu opens from the title/demo.
 6. Swipe in all four directions; confirm up/down move the cursor and left/right
    adjust slider items. Short-press BOOT to select and hold it for at least
@@ -163,7 +170,8 @@ library and omits the recursive `platform/doom_hw_bridge.cpp` source.
 8. Hold BOOT for three seconds; confirm a reboot and normal streaming recovery.
 9. Perform an OTA application update and confirm Doom still starts, proving the
    WAD partition was preserved.
-10. Confirm non-CO5300 S3 profiles have no triple-tap activation.
+10. Confirm profiles that cannot run Doom show no boot-mode menu and have no
+    triple-press activation.
 
 ## Directory layout
 

@@ -92,6 +92,7 @@ using namespace bandproto;
 #include "audio_engine.h"
 #include "audio_test.h"
 #include "audio_transport.h"
+#include "boot_menu.h"
 #include "control_apply.h"
 #include "display_power.h"
 #include "dma_gate.h"
@@ -201,6 +202,9 @@ void setup() {
     doomPrefs.end();
   }
 #endif
+  // The boot-menu request a triple press saved, consumed just as early: a
+  // menu that crashed must not reopen on every boot.
+  const bool bootMenuRequested = takeBootMenuRequest();
 
   // Load persisted settings before anything is drawn or the radio starts:
   // orientation and brightness must be known for the very first fill, and
@@ -480,6 +484,14 @@ void setup() {
   // their host raster geometry cannot represent odd firmware-only quadrants.
   motionAvailable = boardmotion::init(*bcfg);
   boardmotion::dumpState(*bcfg);
+
+  // The boot-mode menu, after the panel, touch, and BOOT input are up and
+  // before the radio starts. It returns for streaming, the default and what
+  // an untouched countdown chooses; a game restarts through its one-shot
+  // flag and is entered by the Doom branch above on the next boot.
+  if (runBootMenuIfDue(bootMenuRequested)) {
+    fillPanel(0x2104);
+  }
   // The device name doubles as the DHCP hostname (option 12), so the router
   // lists this board by name instead of "esp32c6-XXXXXX". This MUST precede
   // WiFi.mode(): the core latches the hostname onto the STA netif inside

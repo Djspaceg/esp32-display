@@ -2,6 +2,166 @@
 
 Each finished branch keeps its own review record below, whole.
 
+## Code review: boot-mode menu (boot-mode-menu)
+
+Reviewed diff: branch `boot-mode-menu` against its base. One round, by an
+independent agent with none of the author's context, given the requirements but
+not the author's reasoning. It was asked to hunt correctness bugs, regressions
+of the previous Doom path, BOOT-only and touch-only operation, and test quality,
+and to verify its claims rather than speculate.
+
+Round 1 returned 2 blocking findings, 2 medium, 3 low, plus a list of things it
+checked and found sound. Every finding is dispositioned below. No finding was
+waived as wrong.
+
+### Blocking
+
+**R1-1 Any input reset the countdown to 15 s with no ceiling, so a board left
+alone could never reach streaming. CONFIRMED by the reviewer's own probe: 200
+stray taps outside every control, one every 14 s, held the menu open 47 minutes
+and would have continued forever.** This defeated the branch's core requirement.
+Scenarios named: a case or bezel pressing the glass, a noisy CST816/GT911
+emitting phantom taps (this codebase already carries a wake-swallow mechanism
+because of touch noise), a sticky BOOT button. Even one accidental brush turned
+the advertised 3 s into 15 s.
+
+FIXED. `bootmenu::Countdown` now keeps an absolute `openedAt_` alongside the
+renewable window and expires on either, with `MAX_OPEN_MS` 60 s
+(`boot_menu_model.h`). `secondsLeft()` reports the nearer deadline so the title
+never promises time the ceiling will not give. Covered by
+`strayInputCannotHoldTheMenuForEver` (integration, 200 stray taps) and a model
+block that renews input every second for the whole minute and asserts expiry
+anyway, including across millis() wrap.
+
+**R1-2 The headline invariant was asserted nowhere. CONFIRMED by mutation: the
+reviewer replaced the expiry branch with one that honours the highlight - so a
+board left alone with DOOM highlighted boots Doom - and the whole suite still
+passed.** Only the highlight-on-row-0 case was covered.
+
+FIXED. `doomHighlightedButLeftAloneStillStreams` moves the highlight to DOOM
+with a BOOT press, then idles past expiry and asserts no `doomonce`, no restart,
+and `streaming (countdown ended)`. The reviewer's exact mutation now fails it.
+Both mutations were re-run after the fix: mutation A (expiry honours highlight)
+fails, mutation B (ceiling removed) fails.
+
+A note on R1-2's second mutation: my first version of the stray-input test was
+vacuous - its first tap landed at 5 s, after the 3 s window had already closed,
+so the test passed with or without the ceiling. Caught by re-running the
+reviewer's mutation against it rather than trusting a green. The taps now start
+inside the opening window.
+
+### Medium
+
+**R1-3 The documented Quake extension point silently disables the whole menu.**
+`bootMenuMayOfferGames()` returned `doomBuild && doomBoard` despite the plural
+name, so a Quake-only build would open no menu and its triple press would be
+dead; `quakeBuild`/`quakeBoard` were permanently dead fields; and the triple-press
+refusal and its info bar sat inside `#if defined(ESPDISP_DOOM_RUNTIME)`, so a
+non-Doom game build refused a press in total silence. Today's behaviour was
+correct (Quake never appears) - a naming-versus-behaviour trap, not a live bug.
+
+FIXED. `bootmenu::anyGameBuilt()` in the model answers for every game and is the
+single place a Quake runtime adds its pair; `bootMenuMayOfferGames()` delegates
+to it. The header now says the marker alone is not enough and names
+`builtCapabilities()` too. A non-Doom refusal prints `button: no game available
+(<reason>)` instead of nothing. Model test covers the Doom-only, Quake-only, and
+neither cases, including Doom built but without its data.
+
+This finding got more valuable mid-review: main gained a `quake_pak` partition in
+the P4 layout while the review ran, so a Quake runtime is close.
+
+**R1-4 The automatic timed menu is a large, hardware-unverified, user-visible
+change on 10 of 13 board profiles.** It adds ~3 s before `WiFi.begin()` on every
+power-on and reset, lights the panel at `BL_SURVEY` regardless of a saved low
+backlight, and does a `doom_wad_preflight()` flash read and Serial line every
+boot where it previously did so only on a triple press.
+
+ACCEPTED, not changed, and surfaced to the human. The 3 s delay and the
+preflight read are what an opt-out menu costs, and the brightness matches the
+WiFi selector's own convention (that screen is the pattern this reuses). The
+reviewer is right that this is the one place real verification is owed, which is
+what the unverified residual in DECISIONS.md says; it now also names the per-boot
+delay, the backlight, and the 128x128 knob's legibility explicitly. The renders
+in boot-menu-screens.png cover every panel shape including that one, drawn by the
+firmware's own pixel code, but no panel has shown them.
+
+### Low
+
+**R1-5 The menu-exit check sat after `serviceTouch()`, so one normal-path touch
+pass could run before WiFi exists** - a gesture completing in that 10 ms window
+would reach `showInfoBar` and `sendTouchEvent` pre-`WiFi.mode()`. Small blast
+radius (`hbPort == 0` guards the send) but real. FIXED: the loop breaks between
+`handleButton()` and `serviceTouch()` as well as after.
+
+**R1-6 The request-save-failure path skips the signal-survey undo the refusal
+path performs.** Correctly identified as pre-existing, not a regression. NOT
+fixed as behaviour - it is a separate pre-existing gap and fixing it here would
+widen this diff - but it is now covered, so it cannot silently get worse:
+`menuRequestSaveFailureStaysNormal` asserts no restart and no flag, and
+`doomSaveFailureKeepsTheMenuUp` asserts the menu shows SAVE FAILED and still
+ends up streaming. Noted for the human as a residual.
+
+**R1-7 Dead code, misleading names, and the C6's only cost.** All FIXED:
+the unreachable C3 early-return in `drawBootMenuScreen` is gone (a C3 build has
+no such function) with a comment saying why; `startStreaming()` renamed
+`leaveMenuForStreaming()` because it does not start anything;
+`runBootMenuIfDue()`'s comment now says "opened" rather than "drawn"; and
+`boot_menu_model.h`'s include plus the `TriplePress` tracker - the only bytes the
+94%-full C6 image paid - are now inside `#if defined(ESPDISP_BOOT_MENU_RUNTIME)`.
+The unreachable `Mode::Quake` case stays: it is the slot the brief asked for.
+
+### What the reviewer checked and found sound
+
+Recorded because these are the properties most at risk in this change, and a
+future reader should know they were examined rather than assumed:
+
+- The `ea332f6` WAD-preflight refusal and its signal-survey undo survive intact;
+  the 800 ms window is preserved, `surveyBeforeDouble` is still captured before
+  `applyShortPressDecision`, and the ordering assertion genuinely constrains it.
+- No Doom reboot loop: every automatic reset reason maps to no menu, and
+  `doomonce` is still consumed before anything fallible, so a failed
+  `initDisplay()` or a Doom panic lands on a normal menu-free boot.
+- No watchdog interaction: the menu runs well before `esp_task_wdt_add(NULL)`,
+  and its loop yields.
+- BOOT-alone and touch-alone both work; the screen shows `BOOT NEXT` /
+  `HOLD START` when touch is absent. The new `selectorEntryHold` is correct and
+  tested, and incidentally closes a narrow pre-existing WiFi-selector hole where
+  holding BOOT past 3 s with no saved presets could toggle panel power.
+- Wrap safety is real and tested at the wrap for both `Countdown` and
+  `TriplePress`.
+- The partially-filled `labels[MODE_MAX]` is never over-read; ASan/UBSan agree.
+- Scope held: no wire-protocol, `CFG*`, or bundle-format change, no
+  `FW_VERSION` bump, no release-note edit.
+
+### Call sites
+
+No `packages/*` component exists in this repository. Shared symbols this diff
+touches, with every call site:
+
+- `doom_check_triple_tap` (was `firmware/doom/src/doom_mode.{h,cpp}`): REMOVED.
+  Its only production call site was `input_button.cpp`'s `handleShortRelease`,
+  now `bootmenu::TriplePress`. Its only other reference was a fake in
+  `test_doom_entry_gate.cpp`, removed with it. `DOOM_TRIPLE_TAP_WINDOW_MS` went
+  the same way, its value preserved as `bootmenu::TRIPLE_PRESS_WINDOW_MS`.
+  Verified no remaining references by `git grep`.
+- `wifiselector::selectorLayout`, `selectorHitTest`, `movedIndex`: unchanged,
+  and gain the boot menu as a second read-only caller beside the WiFi selector
+  (`ui_screens.cpp` `drawBootMenuScreen`, `boot_menu.cpp` `handleBootMenuTap` and
+  `moveBootMenu`). No behaviour change for the existing caller.
+- `drawBootMenuScreen` (new, `ui_screens.cpp`): called only from
+  `boot_menu.cpp`'s `drawBootMenu`.
+- `boot_menu.h`'s entry points: `takeBootMenuRequest` and `runBootMenuIfDue`
+  from `display_stream.ino`'s `setup()`; `bootMenuMayOfferGames`,
+  `bootMenuOffered`, `requestBootMenuAndRestart`, `bootMenuActive`,
+  `moveBootMenu`, `activateBootMenu` from `input_button.cpp`; `bootMenuActive`,
+  `moveBootMenu`, `handleBootMenuTap` from `input_touch.cpp`.
+
+### Rounds
+
+1 round. It changed the code (R1-1, R1-3, R1-5, R1-7), the tests (R1-1, R1-2,
+R1-6), and DECISIONS.md (D8 gained its measurement; the residual gained the
+per-boot cost R1-4 named). No decision was reversed.
+
 ## Integration review of p4-hosted-rpc-offloop (on integrate-main-0928)
 
 The branch was based on 93684af; main had since gained app-wifi-orientation, p4-4c-gaps, audio-enable-boards and app-layout-cleanup. Checked in the code before squashing, the branch's two High review findings:

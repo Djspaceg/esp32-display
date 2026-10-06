@@ -2,6 +2,66 @@
 
 Each finished branch keeps its own record below.
 
+## Boot-mode menu (boot-mode-menu)
+
+### Outcome
+
+An on-glass menu picks Streaming (the default), Doom, or a reserved Quake slot,
+replacing the hidden triple-press Doom handoff. It shows for 3 s after a user
+reset and 15 s when a triple press asks for it; left alone it streams. Driven by
+touch or by BOOT alone. Unverified on hardware: no board was attached.
+
+### Decisions to evaluate
+
+D1 The menu wraps the existing one-shot handoff: same `doomonce` flag, same restart, so Doom still owns panel and PSRAM alone and a failed game returns to streaming. Why: that reboot boundary is worth keeping. If overruled: enter in-process, reintroducing teardown paths.
+D2 A triple press of BOOT now requests the MENU (one-shot `bootmenu`), not Doom directly. Why: one gesture, one place, and the menu is where Quake will appear. If overruled: keep it a direct Doom entry, menu only at power-on.
+D3 The timed menu opens only after a user-caused reset (power-on, external pin, USB), never after a software restart, panic, or watchdog. Why: a board left alone must come up streaming, and a Doom exit or crash must not loop back into a menu. If overruled: change `bootResetKind()`.
+D4 Doom is offered only when its WAD passes the Doom boot's preflight, so a board with no WAD shows no menu and the triple press keeps the existing "full USB flash" refusal. Why: an entry that always fails is worse than none. Supersedes: offering Doom on build-and-board capability alone, which reintroduced the failure ea332f6 fixed. If overruled: list Doom and let it refuse on entry.
+D5 A panel the user turned off (`pwroff`) gets no timed menu; a triple press still opens one. Why: a standing "stay dark" instruction should survive a reboot, but an explicit gesture overrides it. If overruled: always light the menu.
+D6 The menu reuses the WiFi selector's layout, hit testing, and controls (`wifi_selector_model.h`). Why: one design, geometry already tested at every panel size. If overruled: give the menu its own layout.
+D7 Quake occupies a real enum slot, label, and capability pair that nothing sets, so it never appears. Why: a clean slot the runtime author fills in one place. If overruled: drop the slot until a runtime exists.
+D8 Menu, screen, and model compile only into images carrying a game runtime (`ESPDISP_BOOT_MENU_RUNTIME`, today from `ESPDISP_DOOM_RUNTIME`); other builds get inline no-op stubs, so call sites stay unconditional. Why: a C6 runs no game and its image is at 94% of flash. Measured: +5478 B unguarded, +76 B guarded. If overruled: compile everywhere and accept the bytes.
+D9 Input renews the countdown, never past a 60 s ceiling from when the menu opened. Why: without it a case pressing the glass or a noisy controller holds the menu open for ever and the board never streams; the review demonstrated 47 minutes. If overruled: change MAX_OPEN_MS.
+
+### Open questions
+
+- Doom's in-game BOOT tiers and controls are unchanged; the menu is the entry
+  only. Default: left untouched.
+
+### Gate facts
+
+Publish: committed straight to local main, GitHub remote, no push. Developed on
+a worktree, then carried onto main 2b3ba03 (after the P4 quake_pak layout) and
+gated again in the main checkout.
+packages/*: none touched. Shared symbols and their every call site: see the call
+sites section of code-review.md.
+Lanes, run in the main checkout with the usb-input worker's uncommitted files
+present: gate-run_tests.log exit 0 (107256 + 164 boot-menu/Doom-entry checks);
+gate-test_espdisp.log exit 0, 1973 checks; gate-compile-{c6,s3,p4}.log exit 0. Bundles are
+regenerated from the boot-menu commit (release-shipping.log). C6 flash +76 B
+over main, 94% either way.
+Red first: red-first-boot-menu.log, a runtime assertion failure against main's
+code (a triple press set doomonce and rebooted straight into Doom, no menu).
+Review rounds: 1 independent; 2 blocking findings, both fixed (code-review.md).
+
+### Evidence
+
+- gate-lanes.log and gate-*.log: the gate lanes and their verdicts.
+- red-first-boot-menu.log: the new assertions against pre-change code.
+- boot-menu-screens.png: the menu drawn by the firmware's own pixel code at every
+  panel shape, touch and BOOT-only.
+- code-review.md: the independent review and its dispositions.
+
+### Residuals
+
+Unverified on glass, and this is where verification is owed: the menu adds about
+3 s before WiFi on every power-on and reset of the 10 game-capable profiles,
+lights the panel at the survey brightness whatever level is saved, and reads the
+WAD once per boot. Also unverified: countdown timing, touch coordinates, and
+legibility on the 128x128 knob. Renders are host-side.
+Pre-existing and untouched: a triple press whose NVS write fails leaves the
+survey toggle from presses one and two in place (now covered by a test).
+
 ## P4 hosted-WiFi RPC watchdog (p4-hosted-rpc-offloop)
 
 ### Outcome

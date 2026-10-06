@@ -1,9 +1,12 @@
 // On-device screens: the idle/status card, signal survey, WiFi preset selector,
-// quick info bar, and OTA progress screen. All draw through bufB while bufA
-// remains the network path's always-current framebuffer.
+// boot-mode menu, quick info bar, and OTA progress screen. All draw through
+// bufB while bufA remains the network path's always-current framebuffer.
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
+
+#include "boot_menu.h"  // whether this image has a boot menu to draw
 
 // Idle/status card (composed over the last frame; repositions against
 // burn-in).
@@ -24,6 +27,15 @@ void moveWifiSelector(int direction);
 void activateWifiSelector();
 void drawWifiSelectorScreen();
 void handleWifiSelectorTap(int16_t x, int16_t y);
+
+// Boot-mode menu screen (state and input live in boot_menu.cpp, which also
+// decides whether this image has a menu at all). labels has count entries;
+// row 0 is the default and is marked as such.
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+void drawBootMenuScreen(const char *const *labels, size_t count,
+                        size_t selected, const char *title,
+                        const char *message);
+#endif
 
 // Quick info bar: a status line across the top of a lit panel for a couple
 // of seconds after a plain tap. The row range it currently covers is public

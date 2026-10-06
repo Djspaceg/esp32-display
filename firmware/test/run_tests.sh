@@ -99,7 +99,9 @@ clang++ "${CXXFLAGS[@]}" \
 "$RESCUE_OUT"
 
 # The BOOT triple press refuses Doom, without rebooting, on a board whose WAD
-# the Doom boot would refuse (input_button.cpp, unmodified, against fakes).
+# the Doom boot would refuse, and otherwise reopens the boot-mode menu; the menu
+# defaults to streaming and hands Doom its one-shot flag (input_button.cpp and
+# boot_menu.cpp, unmodified, against fakes).
 clang++ "${CXXFLAGS[@]}" \
   -DCONFIG_IDF_TARGET_ESP32P4 -DESPDISP_BOARD_P4_4B -DESPDISP_DOOM_RUNTIME \
   -I"$HERE/fakes/doom_entry" \
@@ -107,7 +109,8 @@ clang++ "${CXXFLAGS[@]}" \
   -I"$HERE/../doom/src" \
   -o "$DOOM_ENTRY_OUT" \
   "$HERE/test_doom_entry_gate.cpp" \
-  "$HERE/../display_stream/input_button.cpp"
+  "$HERE/../display_stream/input_button.cpp" \
+  "$HERE/../display_stream/boot_menu.cpp"
 "$DOOM_ENTRY_OUT"
 
 # The WAD access layer on both storage layouts: every refusal reaches Serial,

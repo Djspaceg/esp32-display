@@ -384,6 +384,74 @@ void drawWifiSelectorScreen() {
   driveBrightness(fixedBlLevel != 0 ? fixedBlLevel : BL_SURVEY);
 }
 
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+// The boot-mode menu, drawn with the WiFi selector's layout and controls so the
+// two read as one design. The default (STREAMING, row 0) carries the green
+// border the selector gives the active preset; the title is the countdown.
+void drawBootMenuScreen(const char *const *labels, size_t count,
+                        size_t selected, const char *title,
+                        const char *message) {
+  // No CONFIG_IDF_TARGET_ESP32C3 guard: a C3 image carries no game, so
+  // ESPDISP_BOOT_MENU_RUNTIME is undefined there and this function does not
+  // exist to be called.
+  if (bufB == nullptr || panel == nullptr || bcfg == nullptr) return;
+  if (!waitForDmaIdle(200)) return;
+
+  const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
+  const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
+  const int margin = wifiScreenMargin(width, height);
+  fillRect565(bufB, width, height, 0, 0, width, height, 0x0006);
+
+  const wifiselector::SelectorLayout layout = wifiselector::selectorLayout(
+      width, height, bcfg->panel->roundDisplay, count, selected);
+  const wifiselector::Rect titleRect = {
+      layout.back.x, layout.back.y,
+      (int16_t)(layout.title.x + layout.title.width - layout.back.x),
+      layout.back.height};
+  drawCenteredWifiTextInRect(width, height, titleRect, title, 2);
+
+  if (message != nullptr) {
+    int messageScale = 2;
+    if ((int)strlen(message) * 6 * messageScale > width - 2 * margin) {
+      messageScale = 1;
+    }
+    drawCenteredWifiText(width, height, (height - 9 * messageScale) / 2,
+                         message, messageScale);
+  } else {
+    for (size_t row = 0; row < layout.visibleCount; ++row) {
+      const size_t i = layout.firstVisible + row;
+      const wifiselector::Rect rowRect = layout.rowRect(row);
+      fillRect565(bufB, width, height, rowRect.x, rowRect.y, rowRect.width,
+                  rowRect.height, i == 0 ? 0x07E0 : 0x4208);
+      if (rowRect.width > 4 && rowRect.height > 4) {
+        fillRect565(bufB, width, height, rowRect.x + 2, rowRect.y + 2,
+                    rowRect.width - 4, rowRect.height - 4,
+                    i == selected ? 0x03EF : 0x1082);
+      }
+      drawCenteredWifiTextInRect(width, height, rowRect, labels[i], 2);
+    }
+  }
+
+  if (touchAvailable) {
+    drawWifiControl(width, height, layout.previous, "UP", false);
+    drawWifiControl(width, height, layout.next, "DOWN", false);
+    drawWifiControl(width, height, layout.connect, "START", true);
+  } else {
+    const wifiselector::Rect nextHint = {
+        layout.previous.x, layout.previous.y,
+        (int16_t)(layout.next.x + layout.next.width - layout.previous.x),
+        layout.previous.height};
+    drawWifiControl(width, height, nextHint, "BOOT NEXT", false);
+    drawWifiControl(width, height, layout.connect, "HOLD START", true);
+  }
+
+  if (queuePanelBitmap(panel, *bcfg, 0, 0, width, height, bufB) != ESP_OK) {
+    statDrawErrors = statDrawErrors + 1;
+  }
+  driveBrightness(fixedBlLevel != 0 ? fixedBlLevel : BL_SURVEY);
+}
+#endif  // ESPDISP_BOOT_MENU_RUNTIME
+
 void openWifiSelector() {
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   Serial.println("wifi selector unavailable on compact C3 framebuffer");
