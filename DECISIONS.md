@@ -394,7 +394,7 @@ D2 Enabled on the 4B even though it cannot power a device, with a serial line sa
 D3 The per-board gate is a hand-written table in the Doom platform layer, not a new board-descriptor capability. Why: the descriptor schema and catalog format are reserved. If overruled: add a capability key and regenerate the board headers.
 D4 In a menu every letter is itself; in play only W/A/S/D are mapped. Why: save names and the engine's y/n prompts need letters, while mapping them in play would turn stray typing into cheat codes. If overruled: map letters everywhere, or nowhere.
 D5 Mouse buttons become engine key events (Fire, Use) rather than Doom's mouse-button bitmask. Why: the key path already holds, releases and reaches menus, and the touch code drives Fire the same way. If overruled: route data1 through DG_GetMouse instead.
-D6 Vertical mouse movement walks rather than looking. Why: Doom has no free look; the engine adds the vertical delta to forward. If overruled: nothing to change in the engine, only the wording.
+D6 Vertical mouse movement walks, not looks. Why: Doom has no free look. If overruled: nothing in the engine to change.
 
 ### Open questions
 
@@ -404,11 +404,11 @@ D6 Vertical mouse movement walks rather than looking. Why: Doom has no free look
 
 ### Gate facts
 
-Publish: local branch only, GitHub remote, no CR/AutoSDE, no push.
+Publish: committed to local main (1db3a9e, bundles 55f6d5b); GitHub remote, no CR/AutoSDE, no push.
 Call sites, packages/*: none touched; this repo has no packages/ tree.
-Lanes (at the final commit): gate-usb-input.log, all exit 0 -- run_tests.sh (test_usb_input 477 checks), test_espdisp.py 1954 checks, compile --family p4, s3, c3, c6. c3 and c6 are untouched and their image sizes are unchanged.
-Red first: red-first-usb-input.log (the suite fails as a runtime assertion against the pre-change behaviour). The stuck-key fix was separately shown load-bearing by reinstating the bug.
-Adversarial review rounds: 1 independent; it found 2 High and 11 lesser defects, all fixed. It changed D4 and the vertical mouse cap, and corrected four hardware facts.
+Lanes, gate-usb-input.log, all exit 0: run_tests.sh (test_usb_input 477) and test_espdisp.py at 04ac678; compile --family p4, s3, c3, c6 in the main checkout; release --shipping --regenerate-existing 1.5.0 from a clean tree at 04ac678.
+Red first: red-first-usb-input.log fails at runtime on the old behaviour; the stuck-key fix was shown load-bearing by reinstating the bug.
+Adversarial review rounds: 1 independent; 2 High and 11 lesser findings, all fixed. It changed D4 and the vertical mouse cap.
 
 ### Evidence
 
@@ -419,6 +419,7 @@ Adversarial review rounds: 1 independent; it found 2 High and 11 lesser defects,
 
 ### Residuals
 
-No hardware verification. No UX capture: the visible surface is Doom answering a
-keyboard, which needs a flashed board and a real keyboard, both out of reach
-here. The S3 half is reasoned from seven schematics, not measured.
+No hardware verification and no UX capture: the visible surface needs a flashed
+board and a real keyboard. The S3 half is reasoned from seven schematics, not
+measured. A scratch clone at /private/tmp/usb-bundle-clone is left behind; its
+deletion was refused by the permission policy.
