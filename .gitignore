@@ -33,6 +33,13 @@ tools/__pycache__/
 firmware/doom/doom1.wad
 *.wad
 
+# Quake shareware data (18 MB). tools/fetch_game_data.sh fetches it and
+# `tools/espdisp.py write-data quake_pak` writes it to a P4 board; it is never
+# bundled or committed.
+firmware/quake/id1/
+# tools/fetch_game_data.sh's work directory beside each target, removed on exit.
+firmware/**/.fetch-*/
+
 # Xcode
 #
 # gitignore contributors: remember to update Global/Xcode.gitignore, Objective-C.gitignore & Swift.gitignore

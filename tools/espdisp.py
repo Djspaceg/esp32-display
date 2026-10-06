@@ -5856,9 +5856,12 @@ def _verify_partition_payload(family: Family, blob: bytes) -> None:
         expected = {
             "nvs": (0x01, 0x02, 0x009000, 0x005000),
             "otadata": (0x01, 0x00, 0x00E000, 0x002000),
-            "app0": (0x00, 0x10, 0x010000, 0x5F0000),
-            "app1": (0x00, 0x11, 0x600000, 0x5F0000),
-            "doom_wad": (0x42, 0x06, 0xBF0000, 0x401000),
+            "app0": (0x00, 0x10, 0x010000, 0x4F0000),
+            "app1": (0x00, 0x11, 0x500000, 0x4F0000),
+            "doom_wad": (0x42, 0x06, 0x9F0000, 0x401000),
+            # No bundle writes it; `write-data quake_pak` does.
+            _QUAKE_PAK_LABEL: (_QUAKE_PAK_TYPE, _QUAKE_PAK_SUBTYPE,
+                               0xE00000, _QUAKE_PAK_PARTITION_SIZE),
         }
     elif family.key == "s3":
         expected = {
@@ -6039,6 +6042,166 @@ def _ensure_doom_wad() -> Optional[str]:
     print("  doom1.wad ready (%d bytes, sha256 %s)"
           % (_DOOM_WAD_SIZE, _DOOM_WAD_SHA256))
     return _DOOM_WAD_PATH
+
+
+# --------------------------------------------------------------------------
+# write-data: put a local game data file into its own flash partition over USB
+#
+# The Quake pak is the user's own file, never part of a bundle or the catalog,
+# so it reaches a board by this separate write. The partition crosses 16 MiB,
+# which is fine because Quake reads its data rather than mapping it.
+# tools/fetch_game_data.sh fetches the shareware pak0.pak to the default path.
+_QUAKE_PAK_LABEL = "quake_pak"
+_QUAKE_PAK_TYPE = 0x42
+_QUAKE_PAK_SUBTYPE = 0x07
+_QUAKE_PAK_PARTITION_SIZE = 0x1200000
+_QUAKE_PAK_PATH = os.path.join(REPO_ROOT, "firmware", "quake", "id1", "pak0.pak")
+# The shareware id1/pak0.pak from quake106.zip (MD5
+# 5906e5998fc3d896ddaf5e6a62e03abb). Reported, not required: any
+# well-formed pack that fits the partition may be written.
+_QUAKE_PAK_SIZE = 18689235
+_QUAKE_PAK_SHA256 = "35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a946af"
+# Each Quake pack directory entry: 56-byte name, u32 offset, u32 length.
+_QUAKE_PACK_ENTRY_BYTES = 64
+
+
+class DataPartition(NamedTuple):
+    family: str
+    part_type: int
+    subtype: int
+    default_path: str
+
+
+DATA_PARTITIONS = {
+    _QUAKE_PAK_LABEL: DataPartition(
+        "p4", _QUAKE_PAK_TYPE, _QUAKE_PAK_SUBTYPE, _QUAKE_PAK_PATH),
+}
+
+
+def validate_quake_pak(data: bytes) -> None:
+    """Refuse anything that is not a structurally sound Quake pack."""
+    if len(data) < 12 or data[:4] != b"PACK":
+        raise Fail("not a Quake pack (magic %s, expected PACK)" % data[:4].hex())
+    directory, length = struct.unpack_from("<II", data, 4)
+    if (length == 0 or length % _QUAKE_PACK_ENTRY_BYTES
+            or directory < 12 or directory > len(data)
+            or length > len(data) - directory):
+        raise Fail(
+            "Quake pack directory 0x%X+0x%X does not fit the %d-byte file"
+            % (directory, length, len(data)))
+    for entry in range(directory, directory + length, _QUAKE_PACK_ENTRY_BYTES):
+        offset, size = struct.unpack_from("<II", data, entry + 56)
+        if offset > len(data) or size > len(data) - offset:
+            raise Fail(
+                "Quake pack entry at byte %d points past the end of the file"
+                % entry)
+
+
+def esptool_subcommand(names: Tuple[str, ...]) -> str:
+    """The first of `names` this esptool accepts, probed with --help only."""
+    tool = esptool_path()
+    if not tool:
+        raise Fail("esptool not found (install the esp32 Arduino core)")
+    prefix = [sys.executable, tool] if tool.endswith(".py") else [tool]
+    for subcommand in names:
+        if run_capture(prefix + [subcommand, "--help"], timeout=60.0).returncode == 0:
+            return subcommand
+    raise Fail("this esptool has none of: %s" % ", ".join(names))
+
+
+def read_device_partition_table(family: Family, port_address: str) -> bytes:
+    """Read the partition table the attached board actually boots with."""
+    subcommand = esptool_subcommand(("read-flash", "read_flash"))
+    directory = tempfile.mkdtemp(prefix="espdisp-table-%s-" % family.key)
+    try:
+        path = os.path.join(directory, "partitions.bin")
+        command = esptool_invocation(family, port_address, subcommand)
+        command.extend(["0x%X" % PARTITIONS_FLASH_ADDRESS, "0xC00", path])
+        proc = run_capture(command, timeout=VERIFY_FLASH_TIMEOUT)
+        if proc.returncode != 0 or not os.path.isfile(path):
+            raise Fail(
+                "could not read the partition table from %s:\n%s"
+                % (port_address, ((proc.stdout or "") + (proc.stderr or ""))
+                   .strip()[-600:]))
+        return read_binary(path)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def data_partition_target(
+    label: str, spec: DataPartition, family: Family, table: bytes,
+    payload_bytes: int,
+) -> int:
+    """Where `label` lives on this device's own table, refusing any surprise.
+
+    The device's table, not this repo's, decides where bytes land, so a board
+    still on an older layout (where that address belongs to an app slot or the
+    Doom WAD) is refused rather than overwritten.
+    """
+    try:
+        _verify_partition_payload(family, table)
+    except Fail as exc:
+        raise Fail(
+            "the board's partition table is not this repo's %s layout (%s); "
+            "flash the current bundle over USB first" % (family.key, exc))
+    matches = [entry for entry in _partition_entries(table) if entry[0] == label]
+    if len(matches) != 1:
+        raise Fail("the board's partition table has no %s partition" % label)
+    _, part_type, subtype, address, size = matches[0]
+    if (part_type, subtype) != (spec.part_type, spec.subtype):
+        raise Fail(
+            "%s has type/subtype 0x%02X/0x%02X, expected 0x%02X/0x%02X"
+            % (label, part_type, subtype, spec.part_type, spec.subtype))
+    if payload_bytes > size:
+        raise Fail(
+            "the file is %d bytes but %s holds %d" % (payload_bytes, label, size))
+    return address
+
+
+def cmd_write_data(args) -> int:
+    spec = DATA_PARTITIONS[args.partition]
+    path = args.file or spec.default_path
+    if not os.path.isfile(path):
+        raise Fail(
+            "%s not found; tools/fetch_game_data.sh --game quake fetches it"
+            % path)
+    data = read_binary(path)
+    validate_quake_pak(data)
+    digest = sha256_hex(data)
+    family = FAMILIES[spec.family]
+    port = resolve_port(args.port)
+    print("Reading the partition table on %s..." % port.address, flush=True)
+    table = read_device_partition_table(family, port.address)
+    address = data_partition_target(
+        args.partition, spec, family, table, len(data))
+    shareware = len(data) == _QUAKE_PAK_SIZE and digest == _QUAKE_PAK_SHA256
+    print("Writing %s (%d bytes, sha256 %s%s) to %s at 0x%X..."
+          % (path, len(data), digest,
+             ", the shareware pak0.pak" if shareware else "",
+             args.partition, address), flush=True)
+    # Write the bytes that were validated, not whatever the path holds now.
+    # esptool checks the device's own digest of the written region afterwards.
+    directory = tempfile.mkdtemp(prefix="espdisp-data-%s-" % family.key)
+    try:
+        staged = os.path.join(directory, "%s.bin" % args.partition)
+        with open(staged, "wb") as out:
+            out.write(data)
+        command = esptool_invocation(family, port.address, "write_flash")
+        command.extend(["0x%X" % address, staged])
+        run_streaming(command)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    # A flash or esptool that wrapped addresses past 16 MiB would land the
+    # top of the pack on the bootloader and table, and its digest check would
+    # wrap the same way. The table is the cheap tell.
+    if read_device_partition_table(family, port.address) != table:
+        raise Fail(
+            "the partition table on %s changed during the write; the board "
+            "needs a full USB flash of the current bundle" % port.address)
+    print("\nWrote %s to %s on %s: %d bytes at 0x%X, esptool verified the "
+          "device's hash and the partition table is unchanged."
+          % (path, args.partition, port.address, len(data), address))
+    return 0
 
 
 def cmd_ota(args) -> int:
@@ -6452,6 +6615,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --build, write every part without asking the device what it "
              "holds; use when the device's contents may not be what they claim")
     p_flash.set_defaults(func=cmd_flash)
+
+    p_write_data = subs.add_parser(
+        "write-data",
+        help="write a local game data file (the Quake pak) to its flash "
+             "partition over USB",
+        description="Write one local data file to its own partition on an "
+        "attached board. The board's partition table is read first and must "
+        "be this repo's layout for that partition's family, so an older "
+        "layout is refused instead of overwritten. The file never goes into a "
+        "bundle or the release catalog.",
+        epilog="quake_pak: a Quake pack, default firmware/quake/id1/pak0.pak\n"
+        "(tools/fetch_game_data.sh --game quake fetches the shareware one),\n"
+        "written to the P4 quake_pak partition at 0xE00000.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_write_data.add_argument("partition", choices=sorted(DATA_PARTITIONS))
+    p_write_data.add_argument(
+        "file", nargs="?", help="file to write (default: the partition's own path)")
+    p_write_data.add_argument(
+        "--port", help="serial device (default: the one matching %s)" %
+        ", ".join(PORT_GLOBS))
+    p_write_data.set_defaults(func=cmd_write_data)
 
     p_rescue = subs.add_parser(
         "rescue",

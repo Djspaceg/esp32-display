@@ -474,7 +474,7 @@ final class FirmwareBundleTests: XCTestCase {
             ["bootloader", "partitions", "boot_app0", "app", "doom_wad"])
         XCTAssertEqual(
             plan.map(\.address),
-            [0x2000, 0x8000, 0xE000, 0x10000, 0xBF0000])
+            [0x2000, 0x8000, 0xE000, 0x10000, 0x9F0000])
     }
 
     func testCanonicalDoomFixtureComesFromCommittedP4Bundle() {
@@ -530,7 +530,7 @@ final class FirmwareBundleTests: XCTestCase {
             version: "1.5.0", images: [p4], generation: FirmwareBundle.format)
         XCTAssertNil(
             bundle.flashPlan(forTarget: "p4"),
-            "canonical P4 pins the table-derived WAD address to 0xBF0000")
+            "canonical P4 pins the table-derived WAD address to 0x9F0000")
     }
 
     // The layout a P4 4B proved unusable: 8 MiB slots put the WAD at
@@ -543,7 +543,8 @@ final class FirmwareBundleTests: XCTestCase {
             role: "partitions", address: 0x8000,
             filename: "display_stream.ino.partitions.bin",
             payload: Self.p4PartitionTable(
-                wadAddress: wadAddress, legacyEightMiBSlots: true))
+                wadAddress: wadAddress, slotBytes: 0x800000,
+                quakeAddress: nil))
         p4.flashParts[3] = FlashPartSpec(
             role: "doom_wad", address: wadAddress,
             filename: "doom1.wad", payload: Self.canonicalDoomWad)
@@ -553,6 +554,42 @@ final class FirmwareBundleTests: XCTestCase {
         XCTAssertNil(
             bundle.flashPlan(forTarget: "p4"),
             "the former P4 table, WAD at 0x1010000, is never flashed")
+    }
+
+    // ced3042's table: 5.9 MiB slots, the WAD at 0xBF0000 and no room for
+    // the Quake pak. Its WAD was mappable, but it is no longer the layout.
+    func testP4RefusesTheLayoutWithoutTheQuakePak() throws {
+        let wadAddress = 0xBF0000
+        var p4 = Self.currentP4Spec
+        p4.flashParts[1] = FlashPartSpec(
+            role: "partitions", address: 0x8000,
+            filename: "display_stream.ino.partitions.bin",
+            payload: Self.p4PartitionTable(
+                wadAddress: wadAddress, slotBytes: 0x5F0000,
+                quakeAddress: nil))
+        p4.flashParts[3] = FlashPartSpec(
+            role: "doom_wad", address: wadAddress,
+            filename: "doom1.wad", payload: Self.canonicalDoomWad)
+
+        let bundle = try Self.readBundle(
+            version: "1.5.0", images: [p4], generation: FirmwareBundle.format)
+        XCTAssertNil(
+            bundle.flashPlan(forTarget: "p4"),
+            "the P4 table without quake_pak is never flashed")
+    }
+
+    func testP4RefusesAMisplacedQuakePak() throws {
+        var p4 = Self.currentP4Spec
+        p4.flashParts[1] = FlashPartSpec(
+            role: "partitions", address: 0x8000,
+            filename: "display_stream.ino.partitions.bin",
+            payload: Self.p4PartitionTable(quakeAddress: 0xDF1000))
+
+        let bundle = try Self.readBundle(
+            version: "1.5.0", images: [p4], generation: FirmwareBundle.format)
+        XCTAssertNil(
+            bundle.flashPlan(forTarget: "p4"),
+            "quake_pak is pinned at 0xE00000")
     }
 
     func testP4RefusesAMissingOrMisaddressedDoomPayload() throws {
@@ -584,7 +621,7 @@ final class FirmwareBundleTests: XCTestCase {
     func testCurrentP4RefusesNonCanonicalOrMisalignedDoomWAD() throws {
         var wrongDigest = Self.currentP4Spec
         wrongDigest.flashParts[3] = FlashPartSpec(
-            role: "doom_wad", address: 0xBF0000,
+            role: "doom_wad", address: 0x9F0000,
             filename: "doom1.wad", payload: Self.syntheticDoomWad)
         let wrongDigestBundle = try Self.readBundle(
             version: "1.5.0", images: [wrongDigest],
@@ -1934,8 +1971,9 @@ final class FirmwareBundleTests: XCTestCase {
     }
 
     private static func p4PartitionTable(
-        wadAddress: Int = 0xBF0000, includeApp1: Bool = true,
-        includeDoom: Bool = true, legacyEightMiBSlots: Bool = false
+        wadAddress: Int = 0x9F0000, includeApp1: Bool = true,
+        includeDoom: Bool = true, slotBytes: Int = 0x4F0000,
+        quakeAddress: Int? = 0xE00000
     ) -> Data {
         var bytes = [UInt8](repeating: 0xFF, count: 3072)
         func writeU32(_ value: Int, _ offset: Int) {
@@ -1961,13 +1999,19 @@ final class FirmwareBundleTests: XCTestCase {
         }
         entry(0, "nvs", 0x01, 0x02, 0x9000, 0x5000)
         entry(1, "otadata", 0x01, 0x00, 0xE000, 0x2000)
-        let slotBytes = legacyEightMiBSlots ? 0x800000 : 0x5F0000
         entry(2, "app0", 0x00, 0x10, 0x10000, slotBytes)
+        // The table ends at the first erased entry, so entries stay packed.
+        var next = 3
         if includeApp1 {
-            entry(3, "app1", 0x00, 0x11, 0x10000 + slotBytes, slotBytes)
+            entry(next, "app1", 0x00, 0x11, 0x10000 + slotBytes, slotBytes)
+            next += 1
         }
         if includeDoom {
-            entry(4, "doom_wad", 0x42, 0x06, wadAddress, 0x401000)
+            entry(next, "doom_wad", 0x42, 0x06, wadAddress, 0x401000)
+            next += 1
+        }
+        if let quakeAddress {
+            entry(next, "quake_pak", 0x42, 0x07, quakeAddress, 0x1200000)
         }
         return Data(bytes)
     }
@@ -2116,7 +2160,7 @@ final class FirmwareBundleTests: XCTestCase {
                 role: "boot_app0", address: 0xE000,
                 filename: "boot_app0.bin", payload: Data("p4 ota\n".utf8)),
             FlashPartSpec(
-                role: "doom_wad", address: 0xBF0000,
+                role: "doom_wad", address: 0x9F0000,
                 filename: "doom1.wad", payload: canonicalDoomWad),
         ], targets: ["p4"])
 

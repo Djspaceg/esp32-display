@@ -983,26 +983,29 @@ public struct FirmwareBundle: Equatable, Sendable {
             return entry.type == type && entry.subtype == subtype
                 && entry.address == address && entry.byteCount == byteCount
         }
-        guard entries.count == 5,
-              matches("nvs", 0x01, 0x02, 0x009000, 0x005000),
+        guard matches("nvs", 0x01, 0x02, 0x009000, 0x005000),
               matches("otadata", 0x01, 0x00, 0x00E000, 0x002000)
         else { return false }
         switch layout {
         case .universalS3:
-            return matches("app0", 0x00, 0x10, 0x010000, 0x1F0000)
+            return entries.count == 5
+                && matches("app0", 0x00, 0x10, 0x010000, 0x1F0000)
                 && matches("app1", 0x00, 0x11, 0x200000, 0x1F0000)
                 && matches(
                     doomWadFlashRole, 0x42, 0x06, 0x3FF000,
                     doomWadPartitionBytes)
         case .p4:
-            guard matches("app0", 0x00, 0x10, 0x010000, 0x5F0000),
-                  matches("app1", 0x00, 0x11, 0x600000, 0x5F0000),
+            // quake_pak is never in a bundle; the table only reserves it.
+            guard entries.count == 6,
+                  matches("app0", 0x00, 0x10, 0x010000, 0x4F0000),
+                  matches("app1", 0x00, 0x11, 0x500000, 0x4F0000),
+                  matches("quake_pak", 0x42, 0x07, 0xE00000, 0x1200000),
                   let wad = entries[doomWadFlashRole]
             else { return false }
             return wad.type == 0x42 && wad.subtype == 0x06
                 && wad.byteCount == doomWadPartitionBytes
                 && wad.address % 0x1000 == 0
-                && wad.address == 0xBF0000
+                && wad.address == 0x9F0000
         }
     }
 

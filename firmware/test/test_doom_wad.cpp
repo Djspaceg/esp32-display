@@ -52,7 +52,7 @@ extern "C" void doom_log(const char *format, ...) {
 // ---- Fake flash -------------------------------------------------------------
 // Each family's canonical doom_wad partition address (tools/espdisp.py).
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
-static const uint32_t PARTITION_ADDRESS = 0xBF0000;
+static const uint32_t PARTITION_ADDRESS = 0x9F0000;
 static const uint32_t FLASH_BYTES = PARTITION_ADDRESS + DOOM_WAD_PARTITION_BYTES;
 #else
 static const uint32_t PARTITION_ADDRESS = 0x3FF000;

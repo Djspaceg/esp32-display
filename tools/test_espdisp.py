@@ -17,6 +17,7 @@
 # Those guards were the only unguarded thing left in the change, and none of them
 # need hardware to exercise.
 import argparse
+import contextlib
 import copy
 import io
 import json
@@ -3973,6 +3974,148 @@ def test_bundle_release_notes_preflight_barriers():
             "release-note preflight blocks board, provenance, output, and compilation")
 
 
+def test_committed_bundles_pass_their_layout_check():
+    """Every committed shipping bundle's table is its family's pinned layout."""
+    catalog = espdisp.load_release_catalog(
+        os.path.join(espdisp.RELEASE_ROOT, espdisp.RELEASE_CATALOG_NAME))
+    for key, entry in sorted(catalog["families"].items()):
+        _, _, flash_payloads = espdisp.read_bundle(
+            os.path.join(espdisp.RELEASE_ROOT, entry["artifact"]))
+        check_accepts(
+            lambda key=key, flash_payloads=flash_payloads:
+                espdisp._verify_partition_payload(
+                    espdisp.FAMILIES[key],
+                    flash_payloads[key][espdisp.FLASH_ROLE_PARTITIONS]),
+            "committed %s bundle carries the pinned %s partition table"
+            % (key, key))
+
+
+def test_write_data_quake_pak():
+    """write-data puts a sound Quake pack only where the board's own table says."""
+    def entry(label, part_type, subtype, address, size):
+        return struct.pack(
+            "<HBBII16sI", 0x50AA, part_type, subtype, address, size,
+            label.encode("ascii").ljust(16, b"\0"), 0)
+
+    head = [
+        entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
+        entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
+    ]
+    current = b"".join(head + [
+        entry("app0", 0x00, 0x10, 0x10000, 0x4F0000),
+        entry("app1", 0x00, 0x11, 0x500000, 0x4F0000),
+        entry("doom_wad", 0x42, 0x06, 0x9F0000, 0x401000),
+        entry("quake_pak", 0x42, 0x07, 0xE00000, 0x1200000),
+    ]) + b"\xff" * 32
+    # ced3042's layout: 0xE00000 is inside its Doom WAD and app1 runs to it.
+    previous = b"".join(head + [
+        entry("app0", 0x00, 0x10, 0x10000, 0x5F0000),
+        entry("app1", 0x00, 0x11, 0x600000, 0x5F0000),
+        entry("doom_wad", 0x42, 0x06, 0xBF0000, 0x401000),
+    ]) + b"\xff" * 32
+    spec = espdisp.DATA_PARTITIONS["quake_pak"]
+    p4 = espdisp.FAMILIES["p4"]
+    check_equal(spec.family, "p4", "the Quake pak partition is a P4 one")
+    check_equal(
+        espdisp.data_partition_target("quake_pak", spec, p4, current, 18689235),
+        0xE00000, "the shareware pak lands at the board table's quake_pak")
+    check_fails(
+        lambda: espdisp.data_partition_target(
+            "quake_pak", spec, p4, previous, 18689235),
+        "not this repo's p4 layout",
+        "a board still on the previous layout is refused, not overwritten")
+    check_fails(
+        lambda: espdisp.data_partition_target(
+            "quake_pak", spec, p4, current, 0x1200001),
+        "holds 18874368",
+        "a file larger than quake_pak is refused")
+
+    def pack(entries, data=b"", directory_offset=None, directory_length=None):
+        body = b"PACK" + b"\0" * 8 + data
+        directory = b"".join(
+            name.ljust(56, b"\0") + struct.pack("<II", offset, size)
+            for name, offset, size in entries)
+        offset = len(body) if directory_offset is None else directory_offset
+        length = len(directory) if directory_length is None else directory_length
+        blob = body + directory
+        return blob[:4] + struct.pack("<II", offset, length) + blob[12:]
+
+    sound = pack([(b"progs.dat", 12, 4)], b"abcd")
+    check_accepts(lambda: espdisp.validate_quake_pak(sound), "a sound pack")
+    check_fails(lambda: espdisp.validate_quake_pak(b"IWAD" + sound[4:]),
+                "expected PACK", "a WAD is not a Quake pack")
+    check_fails(lambda: espdisp.validate_quake_pak(
+        pack([(b"x", 12, 4)], b"abcd", directory_length=64 * 2)),
+        "does not fit", "a directory running past the end")
+    check_fails(lambda: espdisp.validate_quake_pak(pack([], b"abcd")),
+                "does not fit", "an empty directory")
+    check_fails(lambda: espdisp.validate_quake_pak(
+        pack([(b"x", 12, 400)], b"abcd")),
+        "points past the end", "an entry running past the end")
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "pak0.pak")
+        with open(path, "wb") as out:
+            out.write(sound)
+        port = espdisp.PortInfo("/dev/cu.usbmodemP4", [], "unknown")
+
+        def run(before, after=None):
+            commands = []
+            written = []
+
+            def write(command):
+                commands.append(command[:-1])
+                with open(command[-1], "rb") as staged:
+                    written.append(staged.read())
+
+            args = argparse.Namespace(
+                partition="quake_pak", file=path, port=None)
+            with unittest.mock.patch.object(
+                    espdisp, "resolve_port", return_value=port), \
+                 unittest.mock.patch.object(
+                    espdisp, "read_device_partition_table",
+                    side_effect=[before, before if after is None else after]), \
+                 unittest.mock.patch.object(
+                    espdisp, "esptool_path", return_value="/x/esptool"), \
+                 unittest.mock.patch.object(
+                    espdisp, "run_streaming", side_effect=write), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                espdisp.cmd_write_data(args)
+            return commands, written
+
+        check_equal(
+            run(current),
+            ([["/x/esptool", "--chip", "esp32p4", "--port", port.address,
+               "--baud", p4.upload_speed, "write_flash", "0xE00000"]],
+             [sound]),
+            "write-data writes the validated bytes once, at the device's quake_pak")
+        check_fails(lambda: run(previous), "flash the current bundle",
+                    "write-data on the previous layout writes nothing")
+        check_fails(lambda: run(current, previous), "changed during the write",
+                    "a table that changed during the write (a wrapped "
+                    "address) is reported")
+
+        reads = []
+
+        def fake_read(command, timeout=60.0):
+            reads.append(command)
+            with open(command[-1], "wb") as out:
+                out.write(current)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with unittest.mock.patch.object(
+                espdisp, "esptool_subcommand", return_value="read-flash"), \
+             unittest.mock.patch.object(
+                espdisp, "esptool_path", return_value="/x/esptool"), \
+             unittest.mock.patch.object(
+                espdisp, "run_capture", side_effect=fake_read):
+            check_equal(
+                espdisp.read_device_partition_table(p4, port.address), current,
+                "the device's table is read from flash")
+        check_equal(reads[0][-4:-1], ["read-flash", "0x8000", "0xC00"],
+                    "the table read covers 0x8000+0xC00")
+
+
 def test_doom_partition_contracts():
     """Canonical Doom families package a verified WAD at their table address."""
     def entry(label, part_type, subtype, address, size):
@@ -3983,11 +4126,13 @@ def test_doom_partition_contracts():
     good = b"".join([
         entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
         entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
-        entry("app0", 0x00, 0x10, 0x10000, 0x5F0000),
-        entry("app1", 0x00, 0x11, 0x600000, 0x5F0000),
+        entry("app0", 0x00, 0x10, 0x10000, 0x4F0000),
+        entry("app1", 0x00, 0x11, 0x500000, 0x4F0000),
         # The P4 WAD follows app1 and ends inside the first 16 MiB, the most
         # the firmware's flash cache can map.
-        entry("doom_wad", 0x42, 0x06, 0xBF0000, 0x401000),
+        entry("doom_wad", 0x42, 0x06, 0x9F0000, 0x401000),
+        # The Quake pak is read, never mapped, so it may cross 16 MiB.
+        entry("quake_pak", 0x42, 0x07, 0xE00000, 0x1200000),
     ]) + b"\xff" * 32
     check_accepts(
         lambda: espdisp._verify_partition_payload(
@@ -3995,8 +4140,21 @@ def test_doom_partition_contracts():
         "P4 dual-OTA partition table")
     check_equal(
         espdisp._doom_wad_partition(good),
-        (0xBF0000, 0x401000),
+        (0x9F0000, 0x401000),
         "P4 WAD address comes from the partition table")
+    # ced3042's layout: 5.9 MiB slots and no room for the Quake pak.
+    no_quake = b"".join([
+        entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
+        entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
+        entry("app0", 0x00, 0x10, 0x10000, 0x5F0000),
+        entry("app1", 0x00, 0x11, 0x600000, 0x5F0000),
+        entry("doom_wad", 0x42, 0x06, 0xBF0000, 0x401000),
+    ]) + b"\xff" * 32
+    check_fails(
+        lambda: espdisp._verify_partition_payload(
+            espdisp.FAMILIES["p4"], no_quake),
+        "expected app0, app1, doom_wad, nvs, otadata, quake_pak",
+        "the P4 table before quake_pak is no longer the canonical layout")
     # The layout the 4B proved unmappable: 8 MiB slots, WAD at 0x1010000.
     past_map = b"".join([
         entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
@@ -4013,7 +4171,7 @@ def test_doom_partition_contracts():
     check_fails(
         lambda: espdisp._verify_partition_payload(
             espdisp.FAMILIES["p4"], missing_app1),
-        "expected app0, app1, doom_wad, nvs, otadata",
+        "expected app0, app1, doom_wad, nvs, otadata, quake_pak",
         "P4 table without its recovery OTA slot")
 
     s3 = b"".join([
@@ -4048,7 +4206,7 @@ def test_doom_partition_contracts():
              unittest.mock.patch.object(
                 espdisp, "_DOOM_WAD_SHA256", espdisp.sha256_hex(wad)):
             for family_key, table, address in (
-                    ("p4", good, 0xBF0000),
+                    ("p4", good, 0x9F0000),
                     ("s3", s3, 0x3FF000)):
                 parts = []
                 payloads = {}
@@ -8840,6 +8998,8 @@ def main():
     test_differential_flash_skip_decision()
     test_part_match_proof_is_exit_code_only()
     test_doom_partition_contracts()
+    test_write_data_quake_pak()
+    test_committed_bundles_pass_their_layout_check()
     test_discovery_command()
     test_password_policy()
     test_cfgotapw_line()

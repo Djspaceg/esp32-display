@@ -98,7 +98,14 @@ The bundle writer and both catalog readers require all of the following:
 * fit within the target's declared partition
 
 The partition address is read from the bundled partition table rather than
-hardcoded: S3 writes it at `0x3FF000`, while P4 writes it at `0xBF0000`.
+hardcoded: S3 writes it at `0x3FF000`, while P4 writes it at `0x9F0000`.
+`tools/fetch_game_data.sh --game doom` fetches the WAD to `firmware/doom/doom1.wad`
+and checks it. The P4 table also reserves `quake_pak` (`0xE00000`, 18 MiB) for
+the Quake shareware `pak0.pak`, which no bundle carries:
+`tools/fetch_game_data.sh --game quake` fetches it and
+`tools/espdisp.py write-data quake_pak` writes it to an attached P4 over USB.
+A P4 still on an older table (a WiFi update keeps the board's table) needs one
+full USB flash of the current bundle first; `write-data` refuses until then.
 `firmware/partitions_s3_doom.csv` remains available as a manual 16 MiB developer
 layout with larger `0x5F0000` application slots; it is not the canonical build.
 
