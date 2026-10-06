@@ -116,6 +116,32 @@ void emit(const doomusb::KeyEvent* events, size_t count) {
 
 }  // namespace
 
+#if DOOM_USB_HOST_AVAILABLE
+// The P4 link wraps dcd_int_handler onto this no-op (PLATFORM_LINK_FLAGS in
+// tools/espdisp.py). TinyUSB's DWC2 interrupt wrapper, which the host stack
+// installs, also calls the DEVICE controller's handler for a device-role port,
+// and that one edge keeps usbd.c and every device class driver reachable, with
+// about 48 KB of their endpoint buffers in static internal RAM on every boot.
+// That is the DMA-capable RAM the C6 WiFi link and the audio I2S descriptors
+// need while streaming: with it gone the 4C's DMA heap sat at 60 bytes free
+// and the C6 link died on the next failed allocation. The wrapped call can
+// never run: the host stack installs that interrupt with the host role, so the
+// wrapper only ever takes its host branch (and dcd_dwc2.c's own copy of it is
+// not redirected, since --wrap only rewrites references between objects). With
+// the wrap the linker drops the device side: its archive members still load,
+// but nothing reaches their sections.
+extern "C" void __wrap_dcd_int_handler(uint8_t rhport) { (void)rhport; }
+
+// The DFU runtime device driver still links (the archive member is pulled by
+// name even though the linker then drops it), and its one callback is what
+// pulls the core's USB.cpp in, whose global ESPUSB constructor starts an
+// "arduino_usb_events" task at every boot. Defined here, the core's copy is
+// never extracted. Nothing calls it: the device stack never runs. Weak, so a
+// future build that pulls USB.cpp in for its own sake gets the core's strong
+// copy instead of a multiple-definition error.
+extern "C" __attribute__((weak)) void tud_dfu_runtime_reboot_to_dfu_cb(void) {}
+#endif
+
 // ---- Lifecycle -----------------------------------------------------------
 
 extern "C" void doom_usb_input_init(void) {
@@ -164,10 +190,15 @@ extern "C" void doom_usb_input_init(void) {
   // plain byte arithmetic instead of a report-descriptor parser.
   tuh_hid_set_default_protocol(HID_PROTOCOL_BOOT);
 
+  // The host stack's own entry, never tusb_init(): that is TinyUSB's role
+  // dispatcher, which also calls the device stack's init, and that reference
+  // alone keeps the device class drivers' buffers in the image (see
+  // __wrap_dcd_int_handler above for the other edge and what they cost).
+  // test_usb_host_init.cpp holds this.
   tusb_rhport_init_t rh_init = {};
   rh_init.role = TUSB_ROLE_HOST;
   rh_init.speed = kHostSpeed;
-  if (!tusb_init(kHostRhPort, &rh_init)) {
+  if (!tuh_rhport_init(kHostRhPort, &rh_init)) {
     usb_del_phy(s_phy);
     s_phy = nullptr;
     Serial.println(

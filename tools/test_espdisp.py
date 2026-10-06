@@ -5244,6 +5244,40 @@ def test_firmware_output_root():
         "a development build cannot nest output under the release root")
 
 
+def test_p4_link_drops_usb_device_stack():
+    """The P4 link wraps TinyUSB's device interrupt handler onto a no-op.
+
+    Doom's USB host glue links TinyUSB, whose DWC2 interrupt wrapper also calls
+    the device controller's handler, and that edge alone kept the whole device
+    stack (about 48 KB of class buffers) in static internal RAM on every P4
+    boot, starving the C6 WiFi link of DMA memory while streaming.
+    """
+    wrap = "compiler.c.elf.extra_flags=-Wl,--wrap=dcd_int_handler"
+    commands = {}
+    for key in ("p4", "s3"):
+        family = espdisp.FAMILIES[key]
+        calls = []
+        with unittest.mock.patch.object(
+            espdisp, "arduino_cli", return_value="/bin/arduino-cli"
+        ), unittest.mock.patch.object(
+            espdisp, "run_streaming",
+            side_effect=lambda command, cwd=None: calls.append(command) or [],
+        ):
+            espdisp.compile_board(family)
+        check_equal(len(calls), 1, "the %s compile invokes Arduino once" % key)
+        commands[key] = calls[0] if calls else []
+    check(wrap in commands["p4"],
+          "the P4 link wraps dcd_int_handler so the USB device stack drops out")
+    check(not any("elf.extra_flags" in part for part in commands["s3"]),
+          "the S3 link carries no USB wrap: it links no USB host stack")
+    glue = os.path.join(espdisp.REPO_ROOT, "firmware", "doom", "src",
+                        "platform", "doom_usb_input.cpp")
+    with open(glue, encoding="utf-8") as source:
+        text = source.read()
+    check("void __wrap_dcd_int_handler(" in text,
+          "the firmware defines the no-op the P4 link wraps onto")
+
+
 def test_s3_doom_build_contract():
     family = espdisp.FAMILIES["s3"]
     p4_family = espdisp.FAMILIES["p4"]
@@ -9006,6 +9040,7 @@ def main():
     test_universal_family_catalog_and_cli()
     test_compile_wifi_config_staging()
     test_s3_doom_build_contract()
+    test_p4_link_drops_usb_device_stack()
     test_family_resolution_and_discovery()
     test_release_catalog_contract()
     test_release_writes_only_bare_shipping_bundles()

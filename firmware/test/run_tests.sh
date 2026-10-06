@@ -17,6 +17,7 @@ DOOM_PACE_OUT="$TMP/test_doom_audio_pace"
 DOOM_BRIDGE_OUT="$TMP/test_doom_audio_bridge"
 MEM_REPORT_OUT="$TMP/test_mem_report"
 USB_INPUT_OUT="$TMP/test_usb_input"
+USB_HOST_INIT_OUT="$TMP/test_usb_host_init"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -178,6 +179,20 @@ clang++ "${CXXFLAGS[@]}" \
   -I"$HERE/../doom/src" \
   -o "$USB_INPUT_OUT" "$HERE/test_usb_input.cpp"
 "$USB_INPUT_OUT"
+
+# The USB host stack starts through tuh_rhport_init(), not the tusb_init()
+# dispatcher, whose device-stack init reference keeps about 48 KB of device
+# class buffers in the P4's DMA-capable internal RAM, which the C6 WiFi link
+# needs while streaming.
+clang++ "${CXXFLAGS[@]}" \
+  -DESPDISP_BOARD_P4_4B -DESPDISP_DOOM_RUNTIME \
+  -I"$HERE/fakes/usb_host" \
+  -I"$HERE/../libraries/espdisp_board/src" \
+  -I"$HERE/../doom/src" \
+  -o "$USB_HOST_INIT_OUT" \
+  "$HERE/test_usb_host_init.cpp" \
+  "$HERE/../doom/src/platform/doom_usb_input.cpp"
+"$USB_HOST_INIT_OUT"
 
 # The 5 s status line is unchanged and the mem line after it parses.
 clang++ "${CXXFLAGS[@]}" \

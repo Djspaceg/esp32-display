@@ -226,6 +226,22 @@ DOOM_LIBRARIES_DIR = os.path.join(REPO_ROOT, "firmware")
 DOOM_PARTITIONS_CSV = os.path.join(REPO_ROOT, "firmware", "partitions_s3_doom.csv")
 P4_PARTITIONS_CSV = os.path.join(REPO_ROOT, "firmware", "partitions_p4_4b.csv")
 
+# Linker flags a platform's images need on top of the core's. On the P4, Doom's
+# USB host glue links TinyUSB, whose DWC2 interrupt wrapper also calls the
+# device controller's handler; that one edge kept the whole device stack and
+# about 48 KB of its class buffers in static internal RAM on every boot, the
+# DMA-capable RAM the C6 WiFi link needs while streaming. The wrap points it at
+# the no-op __wrap_dcd_int_handler in firmware/doom/src/platform/doom_usb_input.cpp
+# so the linker drops the device side. An image that links no TinyUSB never
+# references the symbol, so the flag is inert there. Keyed by platform although
+# the no-op is compiled only with -DESPDISP_DOOM_RUNTIME: true of the one P4
+# build target today, but a P4 target that links the USB host without Doom
+# would need the no-op too. compiler.c.elf.extra_flags is a single slot; any
+# other link flag must be merged into it here, not passed as a second property.
+PLATFORM_LINK_FLAGS = {
+    "p4": ("-Wl,--wrap=dcd_int_handler",),
+}
+
 # Native USB and CH343-style UART bridges both occur on supported carriers.
 PORT_GLOBS = ("/dev/cu.usbmodem*", "/dev/cu.usbserial*")
 
@@ -3047,6 +3063,12 @@ def compile_board(
         cmd += [
             "--build-property", "compiler.c.extra_flags=%s" % flags,
             "--build-property", "compiler.cpp.extra_flags=%s" % flags,
+        ]
+    link_flags = PLATFORM_LINK_FLAGS.get(board.platform, ())
+    if link_flags:
+        cmd += [
+            "--build-property",
+            "compiler.c.elf.extra_flags=%s" % " ".join(link_flags),
         ]
     if output_dir:
         # Arduino's default sketch cache is shared by every compile of this
