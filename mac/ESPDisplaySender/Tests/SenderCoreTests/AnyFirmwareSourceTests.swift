@@ -46,6 +46,7 @@ final class AnyFirmwareSourceTests: XCTestCase {
         guard case .ready(let releases) = BundledFirmware.load(catalogDirectory: folder)
         else { return XCTFail("\(BundledFirmware.load(catalogDirectory: folder))") }
         XCTAssertNotNil(releases.selections["p4"]?.bundle.firmwareBuild)
+        XCTAssertNotNil(releases.selections["p4"]?.bundle.flashPlan(forTarget: "p4"))
     }
 
     /// A folder with no catalog says so instead of loading nothing quietly.
@@ -80,6 +81,9 @@ final class AnyFirmwareSourceTests: XCTestCase {
         let selection = try XCTUnwrap(releases.selections["p4"])
         XCTAssertNotEqual(selection.revision.sha256, String(repeating: "0", count: 64))
         XCTAssertEqual(selection.bundle.images.first?.chip, "esp32p4")
+        // Flagged, never silent.
+        XCTAssertNotNil(selection.note)
+        XCTAssertNil(releases.selections["c6"]?.note)
     }
 
     /// A file that is not a bundle for that family is still refused, with why.
@@ -96,6 +100,35 @@ final class AnyFirmwareSourceTests: XCTestCase {
         let target = copy.appendingPathComponent(p4)
         try FileManager.default.removeItem(at: target)
         try FileManager.default.copyItem(at: copy.appendingPathComponent(c6), to: target)
+
+        guard case .ready(let releases) = BundledFirmware.load(catalogDirectory: copy)
+        else { return XCTFail("expected ready") }
+        XCTAssertNil(releases.selections["p4"])
+        XCTAssertNotNil(releases.revisions(for: "p4").first?.unavailableReason)
+    }
+
+    /// The fallback re-runs the whole family contract. A 4B-only P4 build
+    /// placed where the catalog names an all-carrier P4 image is refused, so
+    /// it can never be written to a 3.4C chosen from the catalog's list.
+    func testARebuiltFileThatBreaksTheFamilyContractIsRefused() throws {
+        let narrow = Self.repoRoot.appendingPathComponent(
+            "firmware-dev/p4/espdisp-p4-1.5.0+233.g0ecb29e.espdispfw")
+        guard FileManager.default.fileExists(atPath: narrow.path) else {
+            throw XCTSkip("no 4B-only P4 dev build in this checkout")
+        }
+        let header = try FirmwareBundle.read(Data(contentsOf: narrow))
+        XCTAssertEqual(header.images.first?.profiles, ["st7703-4b"])
+
+        let source = Self.repoRoot.appendingPathComponent("firmware-releases")
+        let copy = FileManager.default.temporaryDirectory
+            .appendingPathComponent("any-firmware-narrow-\(UUID().uuidString)")
+        try FileManager.default.copyItem(at: source, to: copy)
+        defer { try? FileManager.default.removeItem(at: copy) }
+        let catalog = try FirmwareReleaseCatalog.read(
+            contentsOf: copy.appendingPathComponent(FirmwareReleaseCatalog.fileName))
+        let target = copy.appendingPathComponent(try XCTUnwrap(catalog.families["p4"]?.artifact))
+        try FileManager.default.removeItem(at: target)
+        try FileManager.default.copyItem(at: narrow, to: target)
 
         guard case .ready(let releases) = BundledFirmware.load(catalogDirectory: copy)
         else { return XCTFail("expected ready") }

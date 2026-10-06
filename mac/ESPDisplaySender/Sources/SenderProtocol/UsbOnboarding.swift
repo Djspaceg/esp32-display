@@ -172,6 +172,9 @@ public enum UsbOnboarding {
         /// The build the board reported (CFGINFO `src=`), which tells two
         /// builds of one version apart.
         public var boardFirmwareSource: FirmwareSourceIdentity?
+        /// Why the loaded firmware's image for the detected chip could not be
+        /// used, when it is listed but failed to verify.
+        public var unavailableReason: String?
 
         public init(
             port: String,
@@ -192,7 +195,8 @@ public enum UsbOnboarding {
             alreadyAddedAs: String? = nil,
             chosenBoard: String? = nil,
             boardFirmwareVersion: String? = nil,
-            boardFirmwareSource: FirmwareSourceIdentity? = nil
+            boardFirmwareSource: FirmwareSourceIdentity? = nil,
+            unavailableReason: String? = nil
         ) {
             self.port = port
             self.availablePorts = availablePorts
@@ -213,6 +217,7 @@ public enum UsbOnboarding {
             self.chosenBoard = chosenBoard
             self.boardFirmwareVersion = boardFirmwareVersion
             self.boardFirmwareSource = boardFirmwareSource
+            self.unavailableReason = unavailableReason
         }
     }
 
@@ -521,8 +526,8 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                         let named = GeneratedBoardCatalog.boardNameByProfile[chosen]
                             ?? chosen
                         return UsbOnboardingPlan(
-                            headline: "No bundled image for \(named)",
-                            detail: "The firmware that ships with the app has no "
+                            headline: "No image for \(named) in this firmware",
+                            detail: "The firmware loaded here has no "
                                 + "\(chip) image for \(named). Choose another board "
                                 + "model, or an .espdispfw file that includes it.",
                             action: .noImageForChip)
@@ -531,8 +536,10 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                         return UsbOnboardingPlan(
                             headline: "Nothing in this firmware for this board",
                             detail: "This board is an \(chip), and the firmware that "
-                                + "is loaded has no image for it. Choose an "
-                                + ".espdispfw file that includes \(chip).",
+                                + "is loaded has no usable image for it"
+                                + (request.unavailableReason.map { ": \($0)" } ?? "")
+                                + ". Choose an .espdispfw file that includes \(chip), "
+                                + "or another catalog folder.",
                             action: .noImageForChip)
                     }
                     return UsbOnboardingPlan(
@@ -602,13 +609,13 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                 let reported = request.boardFirmwareVersion?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .nilIfEmpty
-                let direction = reported.flatMap { reported -> String? in
-                    if request.boardFirmwareSource?.isExactly(bundle) == true {
-                        return "Reinstall"
-                    }
-                    return flashDirection(
+                let direction = reported.flatMap {
+                    flashDirection(
                         bundleVersion: bundle.firmwareVersion,
-                        bundleBuild: bundle.firmwareBuild, boardVersion: reported)
+                        bundleBuild: bundle.firmwareBuild,
+                        bundleSource: FirmwareSourceIdentity(bundle: bundle),
+                        boardVersion: $0,
+                        boardSource: request.boardFirmwareSource)
                 }
                 let headline: String
                 switch direction {
@@ -619,11 +626,15 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                 }
                 let versionNote: String
                 if let reported {
+                    let build = request.boardFirmwareSource.map {
+                        " (build \($0.summary))"
+                    } ?? ""
                     versionNote = direction == nil
-                        ? "The board reports \(reported), which cannot be placed "
-                            + "against \(version), so this may be either an upgrade "
-                            + "or a downgrade. "
-                        : "The board reports \(reported). "
+                        ? "The board reports \(reported)\(build), which cannot be "
+                            + "placed against \(version): it may be a different "
+                            + "build of the same version, an upgrade or a "
+                            + "downgrade. Flashing is still offered. "
+                        : "The board reports \(reported)\(build). "
                 } else {
                     versionNote = ""
                 }
@@ -670,15 +681,25 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
         return nil
     }
 
-    /// "Upgrade", "Reinstall" or "Downgrade" for writing `bundleVersion` (with
-    /// its build number, when it has one) over what the board reports, or nil
-    /// when the two cannot be placed against each other. A reported
-    /// `2.0.0+369.g04ac678` is read as version 2.0.0, build 369.
+    /// "Upgrade", "Reinstall" or "Downgrade" for writing a bundle over what
+    /// the board reports, or nil when the two cannot honestly be placed.
+    ///
+    /// Different version cores order by number. The SAME core is only a
+    /// reinstall when it is provably the same build: the same clean commit
+    /// (`src=` against the bundle's `source_commit`), or the same build number,
+    /// or - with no build evidence on either side at all - the same release.
+    /// Two builds of one version are never ordered by build number: the board
+    /// does not report one, and `rev-list --count` numbers from different
+    /// branches do not order. A reported `2.0.0+369.g04ac678` reads as core
+    /// 2.0.0, build 369.
     public static func flashDirection(
-        bundleVersion: String, bundleBuild: UInt32?, boardVersion: String
+        bundleVersion: String, bundleBuild: UInt32?,
+        bundleSource: FirmwareSourceIdentity? = nil,
+        boardVersion: String, boardSource: FirmwareSourceIdentity? = nil
     ) -> String? {
-        let parts = boardVersion.split(separator: "+", maxSplits: 1)
-        guard let core = parts.first.map(String.init) else { return nil }
+        let parts = boardVersion.split(
+            separator: "+", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let core = parts.first.map(String.init), !core.isEmpty else { return nil }
         let boardBuild = parts.count > 1
             ? UInt32(parts[1].prefix { $0.isASCII && $0.isNumber })
             : nil
@@ -687,11 +708,14 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
         case .older: return "Downgrade"
         case .incomparable: return nil
         case .same:
+            if let bundleSource, let boardSource {
+                return bundleSource == boardSource && !boardSource.dirty
+                    ? "Reinstall" : nil
+            }
             switch (bundleBuild, boardBuild) {
-            case (nil, nil): return "Reinstall"
-            case let (bundle?, board?):
-                return bundle == board ? "Reinstall"
-                    : bundle > board ? "Upgrade" : "Downgrade"
+            case let (bundle?, board?): return bundle == board ? "Reinstall" : nil
+            case (nil, nil):
+                return bundleSource == nil && boardSource == nil ? "Reinstall" : nil
             default: return nil
             }
         }

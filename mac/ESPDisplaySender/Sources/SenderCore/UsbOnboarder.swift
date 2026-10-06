@@ -201,13 +201,15 @@ enum UsbOnboarder {
         onProgress: @escaping @Sendable (Progress) -> Void
     ) async -> Result<String, WifiConfigUI.ConfigFailure> {
         var port = flashedPort
+        var sentName = false
         for step in steps {
             var tries = 0
             while true {
                 tries += 1
                 switch await settle(
                     flashedPort: port, expectedHardwareID: expectedHardwareID,
-                    wroteFirmware: wroteFirmware, io: io, onProgress: onProgress)
+                    wroteFirmware: wroteFirmware, sentName: sentName,
+                    io: io, onProgress: onProgress)
                 {
                 case .success(let board):
                     port = board.port
@@ -233,6 +235,7 @@ enum UsbOnboarder {
                 }
                 break
             }
+            if step.kind == .name { sentName = true }
         }
         return .success(port)
     }
@@ -294,6 +297,7 @@ enum UsbOnboarder {
         flashedPort: String,
         expectedHardwareID: String? = nil,
         wroteFirmware: Bool = true,
+        sentName: Bool = false,
         io: SettleIO = .live,
         onProgress: @escaping @Sendable (Progress) -> Void = { _ in }
     ) async -> Result<SettledBoard, WifiConfigUI.ConfigFailure> {
@@ -365,7 +369,8 @@ enum UsbOnboarder {
                 return .failure(WifiConfigUI.ConfigFailure(
                     title: "The board did not come back",
                     message: SerialSettlePolicy.explain(
-                        step, flashedPort: flashedPort, wroteFirmware: wroteFirmware)
+                        step, flashedPort: flashedPort, wroteFirmware: wroteFirmware,
+                        sentName: sentName)
                         ?? "The board did not answer after restarting."))
             }
         }
@@ -376,7 +381,8 @@ enum UsbOnboarder {
         return .failure(WifiConfigUI.ConfigFailure(
             title: "The board did not come back",
             message: (SerialSettlePolicy.explain(
-                .giveUp, flashedPort: flashedPort, wroteFirmware: wroteFirmware)
+                .giveUp, flashedPort: flashedPort, wroteFirmware: wroteFirmware,
+                sentName: sentName)
                 ?? "The board did not answer after restarting.")
                 + (lastSeen.map { " Last seen: \($0)." } ?? "")))
     }

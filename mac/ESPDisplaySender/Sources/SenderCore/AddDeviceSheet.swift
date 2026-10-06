@@ -38,10 +38,17 @@ struct AddDeviceSheet: View {
     @State private var bundleLabel = ""
     @State private var bundleIsShipped = false
     @State private var bundleProblem: String?
+    /// Where the catalog in `bundledReleases` came from, in words.
+    @State private var sourceName = "bundled with the app"
+    /// The last file or folder the user picked that could not be used. Shown
+    /// beside whatever firmware is still loaded, and cleared by the next
+    /// successful load or a new board.
+    @State private var loadError: String?
     @State private var selectedTarget = ""
     @State private var selectedProfile = ""
-    /// The catalog folder chosen with "Use Dev Builds…", remembered so the next
-    /// sheet opens on the same builds.
+    /// The catalog folder chosen with "Use Dev Builds…", remembered so the
+    /// folder picker opens there next time. The shipped firmware stays the
+    /// default source.
     @AppStorage("AddDevice.devCatalogFolder") private var devCatalogFolder = ""
 
     /// Empty means the network is being typed in rather than chosen.
@@ -213,6 +220,14 @@ struct AddDeviceSheet: View {
                 .fixedSize()
                 .disabled(running)
             }
+            if requiresFirmwareForStableIdentity {
+                Text("Set up WiFi only is unavailable for this board: its firmware "
+                    + "does not report a hardware ID this app can record a display "
+                    + "under, so it is flashed first.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             LabeledContent("Not listed?") {
                 Button("Repair a Board…") { startRepair() }
                     .disabled(running)
@@ -234,6 +249,12 @@ struct AddDeviceSheet: View {
     @ViewBuilder
     private var firmwareSection: some View {
         Section {
+            if let loadError {
+                Text(loadError)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if !compatibleProfiles.isEmpty {
                 Picker("Board model", selection: $selectedProfile) {
                     Text("Choose…").tag("")
@@ -246,8 +267,8 @@ struct AddDeviceSheet: View {
                 .onChange(of: selectedProfile) { _, _ in preselectExactTarget() }
             }
             if let bundle {
-                if let bundleProblem {
-                    Text(bundleProblem)
+                if let bundleNote {
+                    Text(bundleNote)
                         .font(.callout)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -275,10 +296,10 @@ struct AddDeviceSheet: View {
                 // The app ships firmware; it is picked once the board is read,
                 // or once its model is chosen above. Never "no firmware".
                 Text(compatibleProfiles.isEmpty
-                    ? "The firmware bundled with the app is chosen once the board "
+                    ? "The firmware \(sourceName) is chosen once the board "
                         + "has been read."
-                    : "Choose the board model above, and the firmware bundled with "
-                        + "the app for it is used.")
+                    : "Choose the board model above, and the firmware "
+                        + "\(sourceName) for it is used.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -500,7 +521,8 @@ struct AddDeviceSheet: View {
             alreadyAddedAs: manager.associatedDisplayName(forUSBPath: port),
             chosenBoard: selectedProfile.isEmpty ? nil : selectedProfile,
             boardFirmwareVersion: boardVersion,
-            boardFirmwareSource: boardSource)
+            boardFirmwareSource: boardSource,
+            unavailableReason: unavailableReason)
     }
 
     private var compatibleTargets: [String] {
@@ -508,6 +530,27 @@ struct AddDeviceSheet: View {
         return Array(Set(bundle.images
             .filter { $0.chip == chip }
             .flatMap(\.targets))).sorted()
+    }
+
+    /// The note on the loaded selection, when it was offered as the file
+    /// describes itself rather than as its catalog named it.
+    private var bundleNote: String? {
+        guard let bundle, let releases = bundledReleases else { return nil }
+        return releases.selections.values.first { $0.bundle == bundle }?.note
+    }
+
+    /// Why the loaded catalog's image for the detected chip is listed but
+    /// unusable, so the plan can say it instead of "nothing for this board".
+    private var unavailableReason: String? {
+        guard let releases = bundledReleases, let chip = detection.chip else { return nil }
+        for entry in releases.catalog.families.values where entry.chip == chip {
+            let options = releases.revisions(for: entry.family)
+            if !options.contains(where: \.isAvailable),
+               let reason = options.compactMap(\.unavailableReason).first {
+                return reason
+            }
+        }
+        return nil
     }
 
     private var compatibleProfiles: [String] {
@@ -527,7 +570,7 @@ struct AddDeviceSheet: View {
                     transport: .usb) {
                 bundle = resolution.selection.bundle
                 bundleLabel = resolution.selection.url.lastPathComponent
-                    + " (bundled with the app)"
+                    + " (\(sourceName))"
                 selectedTarget = resolution.canonicalTarget
                 selectedProfile = identity.profile ?? ""
             } else if !selectedProfile.isEmpty,
@@ -539,7 +582,7 @@ struct AddDeviceSheet: View {
                         family: selection.catalogEntry.family,
                         profile: selectedProfile) {
                 bundle = recovered.bundle
-                bundleLabel = recovered.url.lastPathComponent + " (bundled with the app)"
+                bundleLabel = recovered.url.lastPathComponent + " (\(sourceName))"
                 selectedTarget = recovered.catalogEntry.family
             } else if let resolution = try? releases.resolveUpdate(
                 family: manager.usbTarget(for: port),
@@ -553,7 +596,7 @@ struct AddDeviceSheet: View {
                 // detected chip alone can identify.
                 bundle = resolution.selection.bundle
                 bundleLabel = resolution.selection.url.lastPathComponent
-                    + " (bundled with the app)"
+                    + " (\(sourceName))"
                 selectedTarget = resolution.canonicalTarget
             } else {
                 bundle = nil
@@ -683,7 +726,9 @@ struct AddDeviceSheet: View {
         case .ready(let releases):
             bundledReleases = releases
             bundle = nil
-            bundleLabel = FirmwareReleaseCatalog.fileName + " (bundled with the app)"
+            sourceName = "bundled with the app"
+            loadError = nil
+            bundleLabel = FirmwareReleaseCatalog.fileName + " (\(sourceName))"
             bundleIsShipped = true
             bundleProblem = nil
             preselectExactTarget()
@@ -712,6 +757,7 @@ struct AddDeviceSheet: View {
     private func inspect(preserveMode: Bool = false) {
         detection = .notAttempted
         existing = .notChecked
+        loadError = nil
         boardVersion = nil
         boardSource = nil
         selectedTarget = ""
@@ -826,9 +872,10 @@ struct AddDeviceSheet: View {
             bundleLabel = url.lastPathComponent
             bundleIsShipped = false
             bundleProblem = nil
+            loadError = nil
             preselectExactTarget()
         } catch {
-            bundleProblem = "\(url.lastPathComponent) could not be read: "
+            loadError = "\(url.lastPathComponent) could not be read: "
                 + error.localizedDescription
         }
     }
@@ -852,14 +899,16 @@ struct AddDeviceSheet: View {
             devCatalogFolder = url.path
             bundledReleases = releases
             bundle = nil
-            bundleLabel = FirmwareReleaseCatalog.fileName + " in " + url.lastPathComponent
+            sourceName = "from \(url.lastPathComponent)"
+            bundleLabel = FirmwareReleaseCatalog.fileName + " (\(sourceName))"
             bundleIsShipped = false
             bundleProblem = nil
+            loadError = nil
             preselectExactTarget()
         case .unreadable(let path, let reason):
-            bundleProblem = "\(path) could not be used: \(reason)"
+            loadError = "\(path) could not be used: \(reason)"
         case .none:
-            bundleProblem = "\(url.path) has no firmware catalog."
+            loadError = "\(url.path) has no firmware catalog."
         }
     }
 

@@ -118,32 +118,58 @@ final class UsbOnboardingFlashDirectionTests: XCTestCase {
             boardFirmwareVersion: board)
     }
 
+    /// The fixture bundle is build 192 with no recorded commit.
     func testEachDirectionIsNamedAndStillStarts() {
-        let cases: [(String?, String, String)] = [
+        let cases: [(String, String, String?)] = [
             ("1.5.0", "2.0.0", "Upgrade"),
-            ("2.0.0+192.g04ac678", "2.0.0", "Reinstall"),
-            ("2.0.0+100", "2.0.0", "Upgrade"),
-            ("2.0.0+500", "2.0.0", "Downgrade"),
             ("2.1.0", "2.0.0", "Downgrade"),
+            ("2.0.0+192.g04ac678", "2.0.0", "Reinstall"),
+            // Two builds of one version are not ordered by build number.
+            ("2.0.0+100", "2.0.0", nil),
+            ("2.0.0+500", "2.0.0", nil),
+            // What real firmware sends: the bare version, no build.
+            ("2.0.0", "2.0.0", nil),
+            ("2.0.0+369.g04ac678", "1.5.0", "Downgrade"),
+            ("9.9.9-local", "1.5.0", nil),
+            ("banana", "1.5.0", nil),
+            ("+369", "1.5.0", nil),
         ]
         for (board, bundle, word) in cases {
             let plan = UsbOnboardingPlan.make(request(board: board, bundleVersion: bundle))
-            XCTAssertEqual(plan.action, .flash, word)
-            XCTAssertTrue(plan.canStart, word)
-            XCTAssertTrue(plan.headline.hasPrefix(word), plan.headline)
-            XCTAssertTrue(plan.verb.hasPrefix(word), plan.verb)
-            XCTAssertTrue(plan.detail.contains(board ?? ""), plan.detail)
+            XCTAssertEqual(plan.action, .flash, board)
+            XCTAssertTrue(plan.canStart, board)
+            XCTAssertEqual(plan.direction, word, board)
+            XCTAssertEqual(plan.verb, "\(word ?? "Flash") and Add", board)
+            XCTAssertTrue(plan.detail.contains(board), plan.detail)
+            if let word { XCTAssertTrue(plan.headline.hasPrefix(word), plan.headline) }
         }
     }
 
-    /// A version the app cannot place - a dev build string, a newer release it
-    /// has never heard of - is shown as reported, and flashing stays offered.
-    func testAnUnplaceableBoardVersionIsShownAsIsAndStillStarts() {
-        for board in ["2.0.0+369.g04ac678", "9.9.9-local", "banana"] {
-            let plan = UsbOnboardingPlan.make(request(board: board, bundleVersion: "1.5.0"))
-            XCTAssertTrue(plan.canStart, board)
-            XCTAssertTrue(plan.detail.contains(board), plan.detail)
-        }
+    /// The same version is a reinstall only when it is provably the same build.
+    func testSameVersionUsesTheReportedCommit() {
+        let commit = String(repeating: "ab", count: 20)
+        let other = String(repeating: "cd", count: 20)
+        let source = FirmwareSourceIdentity(commit: commit, dirty: false)
+        XCTAssertEqual(UsbOnboardingPlan.flashDirection(
+            bundleVersion: "2.0.0", bundleBuild: 370, bundleSource: source,
+            boardVersion: "2.0.0", boardSource: source), "Reinstall")
+        XCTAssertNil(UsbOnboardingPlan.flashDirection(
+            bundleVersion: "2.0.0", bundleBuild: 370, bundleSource: source,
+            boardVersion: "2.0.0",
+            boardSource: FirmwareSourceIdentity(commit: other, dirty: false)))
+        XCTAssertNil(UsbOnboardingPlan.flashDirection(
+            bundleVersion: "2.0.0", bundleBuild: nil, bundleSource: source,
+            boardVersion: "2.0.0",
+            boardSource: FirmwareSourceIdentity(commit: commit, dirty: true)))
+        // A shipped release (no build) over a dev board of the same version.
+        XCTAssertNil(UsbOnboardingPlan.flashDirection(
+            bundleVersion: "1.5.0", bundleBuild: nil, bundleSource: source,
+            boardVersion: "1.5.0",
+            boardSource: FirmwareSourceIdentity(commit: other, dirty: false)))
+        // No build evidence anywhere: the same release.
+        XCTAssertEqual(UsbOnboardingPlan.flashDirection(
+            bundleVersion: "1.5.0", bundleBuild: nil,
+            boardVersion: "1.5.0"), "Reinstall")
     }
 
     /// No reported version keeps the plain verb.

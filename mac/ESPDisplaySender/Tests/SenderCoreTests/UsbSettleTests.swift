@@ -282,4 +282,25 @@ final class UsbSettleTests: XCTestCase {
         XCTAssertTrue(failure.message.contains("nothing was written"), failure.message)
         XCTAssertTrue(bench.sends.isEmpty)
     }
+
+    /// A WiFi-only run whose name went through before the board went quiet
+    /// says the name was saved, not that nothing was sent.
+    func testAWifiOnlyTimeoutAfterTheNameSaysTheNameWasSaved() async {
+        let bench = Bench()
+        bench.ports = { [flashed] _ in [flashed] }
+        bench.answer = { [id] _, _ in
+            bench.sends.isEmpty ? self.answered(id)
+                : UsbOnboarder.PortAnswer(existing: .silent, lastLine: nil)
+        }
+        let result = await UsbOnboarder.sendConfiguration(
+            steps: UsbOnboarding.configurationSteps(
+                name: "white-square-4b", ssid: "Home", password: .set("hunter2hunter2")),
+            flashedPort: flashed, expectedHardwareID: id, wroteFirmware: false,
+            io: bench.io, onProgress: bench.record)
+        guard case .failure(let failure) = result else { return XCTFail("\(result)") }
+        XCTAssertEqual(bench.sends.count, 1)
+        XCTAssertTrue(failure.message.contains("name was saved"), failure.message)
+        XCTAssertFalse(failure.message.contains("nothing was sent"), failure.message)
+        XCTAssertFalse(failure.message.contains("firmware was written"), failure.message)
+    }
 }

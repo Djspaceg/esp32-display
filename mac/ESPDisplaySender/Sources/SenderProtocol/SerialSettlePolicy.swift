@@ -91,7 +91,8 @@ public enum SerialSettlePolicy {
     /// thing. `wroteFirmware` is false for a WiFi-only run, where nothing was
     /// written and saying "the firmware was written" would be false.
     public static func explain(
-        _ step: Step, flashedPort: String, wroteFirmware: Bool = true
+        _ step: Step, flashedPort: String, wroteFirmware: Bool = true,
+        sentName: Bool = false
     ) -> String? {
         switch step {
         case .use, .waitAndRetry, .identify:
@@ -102,6 +103,12 @@ public enum SerialSettlePolicy {
                 + "no way to tell which one is this board. Unplug the others and "
                 + "try again, or set the network from the display's own "
                 + "Connection section once it appears."
+        case .giveUp where !wroteFirmware && sentName:
+            return "The board did not answer within "
+                + "\(Int(budgetSeconds.rounded())) seconds of the restart. Its "
+                + "name was saved; only the WiFi credentials are missing. "
+                + "Unplug and reconnect the board and use Set Up WiFi only, or "
+                + "send them with tools/espdisp.py config."
         case .giveUp where !wroteFirmware:
             return "The board did not answer as this firmware within "
                 + "\(Int(budgetSeconds.rounded())) seconds, so nothing was sent "
@@ -110,7 +117,8 @@ public enum SerialSettlePolicy {
         case .giveUp:
             return "The board did not answer within "
                 + "\(Int(budgetSeconds.rounded())) seconds of the restart. The "
-                + "firmware was written; only the WiFi credentials are missing. "
+                + "firmware was written\(sentName ? " and the name was saved" : "")"
+                + "; only the WiFi credentials are missing. "
                 + "Unplug and reconnect the board and use Set Up WiFi only, or "
                 + "send them with tools/espdisp.py config."
         }

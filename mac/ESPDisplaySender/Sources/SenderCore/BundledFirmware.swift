@@ -22,6 +22,9 @@ enum BundledFirmware {
         let revision: FirmwareReleaseCatalog.Revision
         let bundle: FirmwareBundle
         let url: URL
+        /// Set when the file was offered as it describes itself rather than as
+        /// the catalog named it; shown beside the version.
+        var note: String? = nil
     }
 
     struct RevisionOption: Equatable, Identifiable {
@@ -268,7 +271,8 @@ enum BundledFirmware {
         /// Pure and evidence-only: it returns a verified selection only when
         /// exactly one catalog entry claims `chip`, so a chip shared by more
         /// than one family never resolves. Every entry in `selections` was
-        /// already byte/hash/metadata verified by `load`, so a returned
+        /// already byte/hash/metadata verified by `load` (a folder entry rebuilt
+        /// in place is verified against its own hash), so a returned
         /// selection is always a verified one. This is weaker than
         /// `select(...)`, which needs complete family/chip/profile/partition
         /// runtime identity, and than `selectForRecovery(...)`, which needs an
@@ -471,30 +475,38 @@ enum BundledFirmware {
                                     catalogEntry: entry, revision: revision,
                                     bundle: firmware, url: url),
                                 unavailableReason: nil)
-                        } catch {
+                        } catch let mismatch as FirmwareReleaseCatalogError {
                             // A build rebuilt in place after its folder's
-                            // manifest was written is still that family's
-                            // firmware. It is offered as the file says it is -
-                            // its own version, build and hash - when it reads
-                            // as a bundle for this family and chip; the write
-                            // path re-reads the board's chip and MAC anyway.
-                            let firmware = try FirmwareBundle.read(data)
-                            guard firmware.targets == [entry.family],
-                                  firmware.images.count == 1,
-                                  firmware.images[0].chip == entry.chip,
-                                  firmware.flashPlan(forTarget: entry.family) != nil
-                            else { throw error }
+                            // manifest was written is still offered, as the
+                            // file describes itself - its own version, build
+                            // and hash - but ONLY for a hash or size mismatch,
+                            // and only once the whole family contract
+                            // (profiles, flash size, partition, addresses,
+                            // Doom WAD) passes again against that description.
+                            switch mismatch {
+                            case .artifactHashMismatch, .artifactSizeMismatch: break
+                            default: throw mismatch
+                            }
+                            let header = try FirmwareBundle.read(data)
                             let actual = FirmwareReleaseCatalog.Revision(
-                                version: firmware.firmwareVersion,
-                                build: firmware.firmwareBuild,
+                                version: header.firmwareVersion,
+                                build: header.firmwareBuild,
                                 artifact: revision.artifact,
                                 sha256: FirmwareBundle.sha256Hex(data),
                                 byteCount: data.count)
+                            let firmware = try catalog.bundle(
+                                for: actual, in: entry, data: data)
+                            let dirty = firmware.sourceDirty
+                                ? ", built with uncommitted changes" : ""
                             return RevisionOption(
                                 revision: actual,
                                 selection: Selection(
                                     catalogEntry: entry, revision: actual,
-                                    bundle: firmware, url: url),
+                                    bundle: firmware, url: url,
+                                    note: "Rebuilt after this folder's "
+                                        + "\(FirmwareReleaseCatalog.fileName) was "
+                                        + "written, so it is offered as the file "
+                                        + "describes itself\(dirty)."),
                                 unavailableReason: nil)
                         }
                     } catch {
