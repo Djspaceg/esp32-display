@@ -244,9 +244,25 @@ final class FirmwarePusher {
     /// of its own rather than binding the real one, which is a shared resource on
     /// the machine running the tests.
     private let otaPort: UInt16
+    /// The local address the invitation and the authentication go out from,
+    /// for a given panel address, or nil to leave it to the kernel.
+    private let sourceAddress: (String) -> String?
 
-    init(otaPort: UInt16 = EspotaProtocol.port) {
+    /// Per-invitation wait. espota's ten seconds in the app; shorter in tests.
+    private let invitationTimeout: Double
+
+    /// How many invitations go out from the chosen source before the rest fall
+    /// back to the kernel's default route.
+    static let sourceAttempts = 3
+
+    init(
+        otaPort: UInt16 = EspotaProtocol.port,
+        sourceAddress: @escaping (String) -> String? = LocalInterfaces.otaSourceAddress(toward:),
+        invitationTimeout: Double = FirmwarePusher.invitationTimeout
+    ) {
         self.otaPort = otaPort
+        self.sourceAddress = sourceAddress
+        self.invitationTimeout = invitationTimeout
     }
 
     /// Push `image` to `address`.
@@ -282,9 +298,18 @@ final class FirmwarePusher {
         defer { server.close() }
         let hostPort = server.port
 
+        // The panel dials back to the source address of the authentication
+        // datagram, so the invitation goes out from a chosen address - this
+        // Mac's WiFi on the panel's subnet when it has one - rather than from
+        // whatever the default route owns, and the authentication follows from
+        // whichever address the panel answered. See `OTASourceAddress`.
+        let source = sourceAddress(address)
+        print("OTA: inviting \(address) from \(source ?? "the default route")")
+
         let invitation = EspotaProtocol.invitationLine(
             hostPort: hostPort, imageBytes: image.count, md5Hex: md5)
-        let reply = try await invite(invitation, to: address, progress: progress)
+        let (reply, answeredFrom) = try await invite(
+            invitation, to: address, from: source, progress: progress)
 
         switch reply {
         case .accepted:
@@ -294,7 +319,7 @@ final class FirmwarePusher {
         case .challenge(let nonce):
             progress(.authenticating)
             try await authenticate(
-                nonce: nonce, password: password, address: address,
+                nonce: nonce, password: password, address: address, from: answeredFrom,
                 filename: filename, imageBytes: image.count, md5Hex: md5)
         }
 
@@ -333,16 +358,28 @@ final class FirmwarePusher {
     private func invite(
         _ invitation: String,
         to address: String,
+        from chosen: String?,
         progress: @escaping @Sendable (Progress) -> Void
-    ) async throws -> EspotaProtocol.InvitationReply {
+    ) async throws -> (EspotaProtocol.InvitationReply, answeredFrom: String?) {
         for attempt in 1...Self.invitationAttempts {
             progress(.inviting(attempt: attempt, of: Self.invitationAttempts))
+            // The chosen source gets the first few attempts and the default route
+            // the rest, so a WiFi address the panel cannot hear (another network
+            // numbered the same, or an access point isolating clients) costs a
+            // few seconds rather than the push.
+            let source = attempt <= Self.sourceAttempts ? chosen : nil
             do {
                 let data = try await UDPExchange.perform(
                     payload: Data(invitation.utf8), host: address, port: otaPort,
-                    timeout: Self.invitationTimeout, on: udpQueue)
-                return EspotaProtocol.parseInvitationReply(
-                    String(decoding: data, as: UTF8.self))
+                    source: source, timeout: invitationTimeout, on: udpQueue)
+                return (EspotaProtocol.parseInvitationReply(
+                    String(decoding: data, as: UTF8.self)), source)
+            } catch let UDPExchange.TransportError.failed(reason) where source != nil {
+                // The chosen address could not be sent from at all - it left this
+                // Mac after it was chosen. The default route is still worth a try.
+                print("OTA: could not invite from \(source!): \(reason); using the default route")
+                return try await invite(
+                    invitation, to: address, from: nil, progress: progress)
             } catch UDPExchange.TransportError.timedOut {
                 continue
             } catch UDPExchange.TransportError.unreachable {
@@ -365,6 +402,7 @@ final class FirmwarePusher {
         nonce: String,
         password: String?,
         address: String,
+        from source: String?,
         filename: String,
         imageBytes: Int,
         md5Hex: String
@@ -394,7 +432,7 @@ final class FirmwarePusher {
         do {
             data = try await UDPExchange.perform(
                 payload: Data(line.utf8), host: address, port: otaPort,
-                timeout: Self.authTimeout, on: udpQueue)
+                source: source, timeout: Self.authTimeout, on: udpQueue)
         } catch UDPExchange.TransportError.timedOut {
             // The panel stayed silent. Distinct from the transport failure below,
             // which is this Mac being unable to send at all.
@@ -1049,14 +1087,15 @@ enum UDPExchange {
     /// continuation. `poll` carries the timeout itself, so the block cannot park
     /// indefinitely and there is no separate timer racing the recv.
     static func perform(
-        payload: Data, host: String, port: UInt16, timeout: Double,
-        on queue: DispatchQueue
+        payload: Data, host: String, port: UInt16, source: String? = nil,
+        timeout: Double, on queue: DispatchQueue
     ) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 continuation.resume(with: Result {
                     try exchange(
-                        payload: payload, host: host, port: port, timeout: timeout)
+                        payload: payload, host: host, port: port, source: source,
+                        timeout: timeout)
                 })
             }
         }
@@ -1065,7 +1104,7 @@ enum UDPExchange {
     /// The blocking body. Every path closes the socket exactly once through the
     /// `defer`, including the throwing ones.
     private static func exchange(
-        payload: Data, host: String, port: UInt16, timeout: Double
+        payload: Data, host: String, port: UInt16, source: String?, timeout: Double
     ) throws -> Data {
         var hints = addrinfo()
         // Numeric host and numeric service only: the address handed in is the
@@ -1098,9 +1137,35 @@ enum UDPExchange {
         }
         defer { close(fd) }
 
+        if let source, resolved.pointee.ai_family == AF_INET {
+            try bindSource(fd, source)
+        }
         try connectSocket(fd, addr, resolved.pointee.ai_addrlen)
         try sendDatagram(fd, payload)
         return try receiveDatagram(fd, timeout: timeout)
+    }
+
+    /// Bind to `source` on an ephemeral port, so the datagram - and therefore
+    /// the panel's dial-back - uses that address and the interface that owns
+    /// it. Failing to bind is a local failure like a failed connect: the
+    /// address left this Mac between choosing it and using it.
+    private static func bindSource(_ fd: Int32, _ source: String) throws {
+        var local = sockaddr_in()
+        local.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        local.sin_family = sa_family_t(AF_INET)
+        local.sin_port = 0
+        guard inet_pton(AF_INET, source, &local.sin_addr) == 1 else {
+            throw TransportError.failed(reason: "\(source) is not an IPv4 address")
+        }
+        let bound = withUnsafePointer(to: &local) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0 else {
+            throw TransportError.failed(
+                reason: "could not send from \(source): \(posixMessage(errno))")
+        }
     }
 
     /// `connect`, retrying on EINTR. On a datagram socket this only records the

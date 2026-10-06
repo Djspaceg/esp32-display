@@ -52,6 +52,98 @@ final class FirmwarePusherTests: XCTestCase {
         XCTAssertEqual(panel.chunkSizes, [1024, 1024, 552])
     }
 
+    /// The invitation and the authentication leave from the address the pusher
+    /// was told to use, because that is the address a real panel dials back to.
+    /// Run against loopback from this Mac's own LAN address, which the kernel
+    /// would never pick on its own for a 127.0.0.1 destination.
+    func testDatagramsLeaveFromTheChosenSourceAddress() async throws {
+        guard let lanAddress = Self.firstLANIPv4() else {
+            throw XCTSkip("no non-loopback IPv4 address on this machine")
+        }
+        let image = Self.image(bytes: 2_600)
+        let panel = try FakePanel(password: "a-real-password")
+        defer { panel.stop() }
+
+        try await FirmwarePusher(
+            otaPort: panel.port, sourceAddress: { _ in lanAddress }
+        ).push(
+            image: image, filename: "display_stream.ino.bin",
+            to: "127.0.0.1", password: "a-real-password"
+        ) { _ in }
+
+        XCTAssertEqual(panel.receivedImage, image)
+        XCTAssertEqual(panel.datagramSources, [lanAddress, lanAddress],
+                       "invitation and authentication both from the chosen address")
+    }
+
+    /// A chosen address that cannot be sent from - it left this Mac between
+    /// being chosen and being used - falls back to the kernel's default rather
+    /// than failing a push that would otherwise work.
+    func testAnUnusableSourceFallsBackToTheDefaultRoute() async throws {
+        let image = Self.image(bytes: 2_600)
+        let panel = try FakePanel(password: "a-real-password")
+        defer { panel.stop() }
+
+        try await FirmwarePusher(
+            otaPort: panel.port, sourceAddress: { _ in "203.0.113.7" }
+        ).push(
+            image: image, filename: "display_stream.ino.bin",
+            to: "127.0.0.1", password: "a-real-password"
+        ) { _ in }
+
+        XCTAssertEqual(panel.receivedImage, image)
+        XCTAssertEqual(panel.datagramSources, ["127.0.0.1", "127.0.0.1"])
+    }
+
+    /// A WiFi address the panel cannot hear (another network numbered the same,
+    /// or an access point isolating clients) costs a few attempts, not the push:
+    /// after them the invitation goes out on the default route, and the
+    /// authentication follows from wherever the answer came.
+    func testASilentSourceFallsBackAfterAFewAttempts() async throws {
+        guard let lanAddress = Self.firstLANIPv4() else {
+            throw XCTSkip("no non-loopback IPv4 address on this machine")
+        }
+        let image = Self.image(bytes: 2_600)
+        let panel = try FakePanel(password: "a-real-password", ignoring: lanAddress)
+        defer { panel.stop() }
+        var invitations = 0
+
+        try await FirmwarePusher(
+            otaPort: panel.port, sourceAddress: { _ in lanAddress },
+            invitationTimeout: 0.2
+        ).push(
+            image: image, filename: "display_stream.ino.bin",
+            to: "127.0.0.1", password: "a-real-password"
+        ) { update in
+            if case .inviting = update { invitations += 1 }
+        }
+
+        XCTAssertEqual(panel.receivedImage, image)
+        XCTAssertEqual(invitations, FirmwarePusher.sourceAttempts + 1)
+        XCTAssertEqual(panel.datagramSources.last, "127.0.0.1",
+                       "authentication follows the source that was answered")
+    }
+
+    private static func firstLANIPv4() -> String? {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return nil }
+        defer { freeifaddrs(head) }
+        for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(entry.pointee.ifa_flags)
+            guard let addr = entry.pointee.ifa_addr,
+                  addr.pointee.sa_family == sa_family_t(AF_INET),
+                  flags & IFF_UP != 0, flags & IFF_RUNNING != 0,
+                  flags & IFF_LOOPBACK == 0, flags & IFF_POINTOPOINT == 0
+            else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host,
+                              socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0
+            else { continue }
+            return String(cString: host)
+        }
+        return nil
+    }
+
     /// Progress is throttled by bytes, not by chunks, and still lands exactly on
     /// the total.
     ///
@@ -427,6 +519,9 @@ private final class FakePanel: @unchecked Sendable {
     /// times - which shifts the phase and puts a stale count in front of the
     /// verdict the host is waiting for.
     private let repeatFinalCount: Bool
+    /// A source address whose datagrams are dropped unanswered, as a panel on
+    /// another network would never hear them.
+    private let ignoredSource: String?
     private let nonce: String
     private let lock = NSLock()
     /// Retained because Network drops a connection with no strong reference.
@@ -439,6 +534,9 @@ private final class FakePanel: @unchecked Sendable {
     private var _expectedBytes = 0
     private var _dialledBackPort: UInt16?
     private var _complete = false
+    /// Where each invitation and authentication datagram came from - the
+    /// address a real panel dials the update back to.
+    private var _datagramSources: [String] = []
 
     /// What `Update.end()` decided, once the whole image has arrived.
     ///
@@ -462,8 +560,10 @@ private final class FakePanel: @unchecked Sendable {
         refusal: String? = nil,
         ending: Ending = .ok,
         endingDelay: Double = 0,
-        repeatFinalCount: Bool = false
+        repeatFinalCount: Bool = false,
+        ignoring ignoredSource: String? = nil
     ) throws {
+        self.ignoredSource = ignoredSource
         self.password = password
         self.refusal = refusal
         self.ending = ending
@@ -496,6 +596,7 @@ private final class FakePanel: @unchecked Sendable {
     var receivedResponse: String? { withLock { _response } }
     var chunkSizes: [Int] { withLock { _chunkSizes } }
     var dialledBackPort: UInt16? { withLock { _dialledBackPort } }
+    var datagramSources: [String] { withLock { _datagramSources } }
     /// The image, once all of it has arrived. nil while nothing or only part of it
     /// has, so a test cannot pass on a partial transfer.
     var receivedImage: Data? { withLock { _complete ? _image : nil } }
@@ -520,6 +621,17 @@ private final class FakePanel: @unchecked Sendable {
         connection.receiveMessage { [weak self] data, _, _, _ in
             guard let self, let data else { return }
             let text = String(decoding: data, as: UTF8.self)
+            if case .hostPort(let host, _) = connection.endpoint {
+                let source: String
+                switch host {
+                case .ipv4(let value): source = "\(value)"
+                case .ipv6(let value): source = "\(value)"
+                case .name(let value, _): source = value
+                @unknown default: source = "\(host)"
+                }
+                if source == self.ignoredSource { return }
+                self.withLock { self._datagramSources.append(source) }
+            }
             if text.hasPrefix("\(EspotaProtocol.flashCommand) ") {
                 self.onInvitation(text, over: connection)
             } else if text.hasPrefix("\(EspotaProtocol.authCommand) ") {
