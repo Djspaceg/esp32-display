@@ -42,6 +42,11 @@ bool ssid(char *out, size_t len);
 // True while associated with no RSSI answer for COPROCESSOR_SILENT_MS.
 bool coprocessorSilent();
 
+// While associated: sets ageMs to the time since the later of the last RSSI
+// answer and the association, and returns true. Returns false when not
+// associated. An answer newer than now reads as zero. Never blocks.
+bool lastAnswerAgeMs(uint32_t now, uint32_t &ageMs);
+
 // WiFi.reconnect(), run on the worker. The command's result arrives later
 // through takeReconnectResult(). If the worker never started, both requests
 // run on the caller, as they did before the worker existed.

@@ -88,11 +88,26 @@ static void testSilentCoprocessorIsReported() {
   wifiworker::serviceOnce(0);
   check(!wifiworker::coprocessorSilent() && wifiworker::rssi() == -50,
         "one answer clears it");
+  // The SSID read that follows an answer may itself stall the fake clock,
+  // so the age right after is small rather than exactly zero.
+  uint32_t answerAge = 0;
+  check(wifiworker::lastAnswerAgeMs(millis(), answerAge) &&
+            answerAge <= HOSTED_RPC_TIMEOUT_MS,
+        "the mem line's rpcage is small right after an answer");
+  uint32_t laterAge = 0;
+  check(wifiworker::lastAnswerAgeMs(millis() + 750, laterAge) &&
+            laterAge == answerAge + 750,
+        "rpcage counts from the last answer");
+  check(wifiworker::lastAnswerAgeMs(millis() - answerAge - 5, laterAge) &&
+            laterAge == 0,
+        "an answer newer than the caller's clock reads as zero, not a wrap");
   WiFi.setStatus(0);
   audiohost::setRssiValue(0);
   audiohost::setMillis(millis() + 1000);
   wifiworker::serviceOnce(0);
   check(!wifiworker::coprocessorSilent(), "never silent while not associated");
+  check(!wifiworker::lastAnswerAgeMs(millis(), answerAge),
+        "no rpcage while not associated");
   check(wifiworker::rssi() == 0, "a dropped link keeps no RSSI sample");
 }
 

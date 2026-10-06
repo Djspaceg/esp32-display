@@ -86,6 +86,18 @@ bool ssid(char *out, size_t len) {
   return have;
 }
 
+bool lastAnswerAgeMs(uint32_t now, uint32_t &ageMs) {
+  portENTER_CRITICAL(&stateMux);
+  const bool linked = associated;
+  const uint32_t at = lastAnswerAt;
+  portEXIT_CRITICAL(&stateMux);
+  // The worker on the other core can store an answer newer than the
+  // caller's now; that is an age of zero, not a wrap to ~49 days.
+  const int32_t age = (int32_t)(now - at);
+  ageMs = linked && age > 0 ? (uint32_t)age : 0;
+  return linked;
+}
+
 bool coprocessorSilent() {
   portENTER_CRITICAL(&stateMux);
   const bool linked = associated;

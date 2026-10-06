@@ -12,6 +12,7 @@ RESCUE_OUT="$TMP/test_rescue_model"
 DOOM_ENTRY_OUT="$TMP/test_doom_entry_gate"
 DOOM_WAD_OUT="$TMP/test_doom_wad"
 DOOM_FAILURE_OUT="$TMP/test_doom_failure_screen"
+MEM_REPORT_OUT="$TMP/test_mem_report"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -129,5 +130,10 @@ done
 clang++ "${CXXFLAGS[@]}" \
   -o "$DOOM_FAILURE_OUT" "$HERE/test_doom_failure_screen.cpp"
 "$DOOM_FAILURE_OUT"
+
+# The 5 s status line is unchanged and the mem line after it parses.
+clang++ "${CXXFLAGS[@]}" \
+  -o "$MEM_REPORT_OUT" "$HERE/test_mem_report.cpp"
+"$MEM_REPORT_OUT"
 
 bash "$HERE/../../mac/ESPDisplaySender/Tests/SenderAudioRTHostTests/run_tests.sh"

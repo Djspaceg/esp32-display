@@ -110,6 +110,7 @@ using namespace bandproto;
 #include "telemetry.h"
 #include "ui_screens.h"
 #include "wifi_worker.h"
+#include "mem_diag.h"
 
 namespace {
 
@@ -152,6 +153,9 @@ void setup() {
   Serial.setTxBufferSize(2048);
   Serial.begin(115200);
   serialout::begin();
+  // Before anything starts the WiFi or ESP-Hosted link, so the mem line's
+  // allocation-failure count covers their buffers.
+  memdiag::begin();
   // A host that opens the CDC port but stops draining it would otherwise
   // block every Serial write and hang the whole loop task (observed as
   // total silence + frozen pipeline). Never wait on USB.
@@ -928,6 +932,13 @@ void loop() {
                   (unsigned long)statFramesPartial, (unsigned long)statPackets,
                   (unsigned long)statBadLen, (unsigned long)statDrawErrors,
                   (unsigned long)ESP.getFreeHeap(), wifiworker::rssi());
+    {
+      // A separate line, so the status line above stays exactly as the
+      // app's and the tools' parsers read it.
+      char memLine[192];
+      memreport::formatLine(memLine, sizeof(memLine), memdiag::sample());
+      serialout::printfLine(Serial, "%s", memLine);
+    }
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
     reportTileDrawStats();
 #endif
