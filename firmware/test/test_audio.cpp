@@ -860,6 +860,74 @@ static int testDacLevelIsTheVendorReference() {
   return 0;
 }
 
+// Doom's playback-only start: same safe power-up and amplifier last, but a
+// transmit-only channel, the ES7210 left powered down, and nothing to read.
+// The streaming start() after it still captures.
+static int testPlaybackOnlyStart() {
+  const board::AudioConfig *audio =
+      board::generatedAudioConfig(board::Variant::AmoledCo5300);
+  CHECK(audio != nullptr);
+  audio::CodecSerialAudioBackend backend;
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  CHECK(backend.startPlaybackOnly(board::CONFIG_AMOLED_CO5300, *audio,
+                                  audiobackend::descriptorFormat(*audio)));
+  const auto &events = audiohost::hardwareEvents();
+  int din = 0;
+  for (const auto &event : events) {
+    if (event.kind == audiohost::HardwareEventKind::I2sSetPins) {
+      din = event.value;
+    }
+  }
+  CHECK(din == board::NO_PIN);
+  // The prime, the I2S writes before the first codec register write, is one
+  // whole 240-frame DMA buffer of stereo silence.
+  auto primeBytesOf = [](const std::vector<audiohost::HardwareEvent> &all) {
+    int bytes = 0;
+    bool begun = false;
+    for (const auto &event : all) {
+      if (event.kind == audiohost::HardwareEventKind::I2sBegin) begun = true;
+      if (!begun) continue;
+      if (event.kind == audiohost::HardwareEventKind::I2sWrite) {
+        bytes += event.value;
+      } else if (event.kind ==
+                 audiohost::HardwareEventKind::WireTransmission) {
+        break;
+      }
+    }
+    return bytes;
+  };
+  int primeBytes = primeBytesOf(events);
+  CHECK(primeBytes == 240 * 2 * 2);
+  CHECK(audiohost::lastRegisterWrite(audio->micI2cAddress, 0x47) == 0xFF);
+  CHECK(audiohost::lastRegisterWrite(audio->micI2cAddress, 0x48) == 0xFF);
+  CHECK(audiohost::lastRegisterWrite(audio->micI2cAddress, 0x4B) == 0xFF);
+  CHECK(audiohost::lastRegisterWrite(audio->micI2cAddress, 0x06) == 0x07);
+  CHECK(audiohost::lastRegisterWrite(audio->codecI2cAddress, 0x31) == 0x00);
+  CHECK(events.back().kind == audiohost::HardwareEventKind::DigitalWrite);
+  CHECK(events.back().value == audio->pinAmpEnable * 10 + HIGH);
+  int16_t samples[16] = {};
+  CHECK(backend.readFrames(samples, 4) == 0);
+  CHECK(backend.writeFrames(samples, 4) == 4);
+  backend.stop();
+
+  audiohost::reset();
+  CHECK(backend.start(board::CONFIG_AMOLED_CO5300, *audio,
+                      audiobackend::descriptorFormat(*audio)));
+  for (const auto &event : audiohost::hardwareEvents()) {
+    if (event.kind == audiohost::HardwareEventKind::I2sSetPins) {
+      din = event.value;
+    }
+  }
+  CHECK(din == audio->pinDin);
+  primeBytes = primeBytesOf(audiohost::hardwareEvents());
+  CHECK(primeBytes == 80 * 2 * 2);  // streaming's prime is unchanged
+  CHECK(audiohost::lastRegisterWrite(audio->micI2cAddress, 0x47) == 0x00);
+  CHECK(backend.readFrames(samples, 4) == 4);
+  backend.stop();
+  return 0;
+}
+
 int main() {
   const char *filter = std::getenv("AUDIO_TEST_FILTER");
   const struct {
@@ -890,6 +958,7 @@ int main() {
       {"failed-i2s-yields", testFailedI2sStopsBackendAndYields},
       {"tone-lifecycle", testToneLifecycleReleasesTheBackend},
       {"tone-stale-ownership", testStaleToneOwnershipIsReleased},
+      {"playback-only-start", testPlaybackOnlyStart},
   };
   for (const auto &finding : findingTests) {
     if (filter == nullptr || std::strcmp(filter, finding.name) == 0) {

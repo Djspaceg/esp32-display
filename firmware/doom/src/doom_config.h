@@ -30,9 +30,9 @@
 // The network headers are still included for variable declarations
 // (net_client_connected, drone), which are defined in net_sdl.c as false.
 
-// Disable sound (no audio hardware; stubs in doom_esp32_stubs.c)
-// Note: FEATURE_SOUND is NOT defined, which disables the sound system.
-// If we later add I2S audio, define it and implement the sound module.
+// Sound effects play through platform/doom_sound_esp32.c.inc on boards with
+// a codec. FEATURE_SOUND stays undefined: it would pull in SDL_mixer and the
+// music module, and music (MUS through a synthesizer) is not implemented.
 
 // Override exit() in Doom engine C files only.
 // This cannot be a global macro because it conflicts with C++ <cstdlib>.

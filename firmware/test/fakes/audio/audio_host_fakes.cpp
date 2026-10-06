@@ -10,6 +10,7 @@
 #include "ESPmDNS.h"
 #include "WiFi.h"
 #include "Wire.h"
+#include "esp_timer.h"
 #include "lwip/sockets.h"
 
 #include "../../../display_stream/app_state.h"
@@ -35,6 +36,10 @@ struct UdpDatagram {
 
 uint32_t nowMs = 0;
 unsigned taskDelayCalls = 0;
+bool taskCreateFailing = false;
+std::vector<audiohost::CreatedTask> createdTaskList;
+int liveMutexCount = 0;
+bool anyMutexMisuse = false;
 unsigned taskYieldCalls = 0;
 bool i2sFailing = false;
 std::deque<UdpDatagram> udpDatagrams;
@@ -142,12 +147,46 @@ void vQueueDelete(QueueHandle_t handle) {
   delete static_cast<FakeQueue *>(handle);
 }
 
-BaseType_t xTaskCreatePinnedToCore(TaskFunction_t, const char *, uint32_t,
-                                  void *, UBaseType_t, TaskHandle_t *handle,
-                                  BaseType_t) {
+BaseType_t xTaskCreatePinnedToCore(TaskFunction_t, const char *name,
+                                  uint32_t, void *, UBaseType_t priority,
+                                  TaskHandle_t *handle, BaseType_t core) {
+  if (taskCreateFailing) return 0;  // pdFAIL
+  createdTaskList.push_back({name, priority, core});
   if (handle != nullptr) *handle = reinterpret_cast<TaskHandle_t>(1);
   return pdPASS;
 }
+
+SemaphoreHandle_t xSemaphoreCreateMutex() {
+  liveMutexCount++;
+  return new int(0);  // the holder count
+}
+
+BaseType_t xSemaphoreTake(SemaphoreHandle_t semaphore, TickType_t) {
+  int *held = static_cast<int *>(semaphore);
+  if (held == nullptr || *held != 0) {
+    anyMutexMisuse = true;
+    return pdFALSE;
+  }
+  *held = 1;
+  return pdTRUE;
+}
+
+BaseType_t xSemaphoreGive(SemaphoreHandle_t semaphore) {
+  int *held = static_cast<int *>(semaphore);
+  if (held == nullptr || *held != 1) {
+    anyMutexMisuse = true;
+    return pdFALSE;
+  }
+  *held = 0;
+  return pdTRUE;
+}
+
+void vSemaphoreDelete(SemaphoreHandle_t semaphore) {
+  liveMutexCount--;
+  delete static_cast<int *>(semaphore);
+}
+
+int64_t esp_timer_get_time() { return (int64_t)nowMs * 1000; }
 
 void vTaskDelete(TaskHandle_t) {}
 
@@ -196,8 +235,9 @@ int lwip_recvfrom(int, void *buffer, size_t capacity, int,
   return static_cast<int>(copied);
 }
 
-void I2SClass::setPins(int8_t, int8_t, int8_t, int8_t, int8_t) {
-  events.push_back({audiohost::HardwareEventKind::I2sSetPins, 0});
+// Records the receive pin: -1 is a transmit-only channel.
+void I2SClass::setPins(int8_t, int8_t, int8_t, int8_t din, int8_t) {
+  events.push_back({audiohost::HardwareEventKind::I2sSetPins, din});
 }
 
 bool I2SClass::begin(int, uint32_t sampleRateHz, int, i2s_slot_mode_t) {
@@ -272,6 +312,10 @@ namespace audiohost {
 void reset() {
   nowMs = 0;
   taskDelayCalls = 0;
+  taskCreateFailing = false;
+  createdTaskList.clear();
+  liveMutexCount = 0;
+  anyMutexMisuse = false;
   taskYieldCalls = 0;
   udpDatagrams.clear();
   events.clear();
@@ -321,6 +365,10 @@ void enqueueUdp(const std::vector<uint8_t> &data, uint32_t remoteIp,
 
 size_t pendingUdp() { return udpDatagrams.size(); }
 unsigned delayCalls() { return taskDelayCalls; }
+void setTaskCreateFailing(bool failing) { taskCreateFailing = failing; }
+const std::vector<CreatedTask> &createdTasks() { return createdTaskList; }
+int liveMutexes() { return liveMutexCount; }
+bool mutexMisuse() { return anyMutexMisuse; }
 unsigned yieldCalls() { return taskYieldCalls; }
 const std::vector<HardwareEvent> &hardwareEvents() { return events; }
 const std::vector<SentDatagram> &sentDatagrams() {

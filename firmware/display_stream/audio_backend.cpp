@@ -71,6 +71,10 @@ I2SClass audioI2s;
 constexpr uint32_t CONTROL_I2C_HZ = 400000;
 constexpr uint32_t CODEC_SETTLE_MS = 10;
 constexpr size_t PRIME_FRAMES = 80;
+// Playback-only primes one whole I2SClass DMA buffer (240 frames), so a
+// caller that writes whole buffers starts aligned to them: ESP-IDF drops a
+// partly filled buffer when its free queue runs short, which is a hole.
+constexpr size_t PLAYBACK_ONLY_PRIME_FRAMES = 240;
 
 // ES8311 registers used by the vendor initialization sequence.
 constexpr uint8_t ES8311_RESET = 0x00;
@@ -251,6 +255,29 @@ bool CodecSerialAudioBackend::initializeEs7210() {
 bool CodecSerialAudioBackend::start(
     const board::Config &boardConfig, const board::AudioConfig &audioConfig,
     const audiobackend::Format &format) {
+  return startWith(boardConfig, audioConfig, format, true);
+}
+
+bool CodecSerialAudioBackend::startPlaybackOnly(
+    const board::Config &boardConfig, const board::AudioConfig &audioConfig,
+    const audiobackend::Format &format) {
+  return startWith(boardConfig, audioConfig, format, false);
+}
+
+void CodecSerialAudioBackend::powerDownEs7210() {
+  writeRegister(config_.micI2cAddress, ES7210_MIC1_POWER, 0xFF);
+  writeRegister(config_.micI2cAddress, ES7210_MIC2_POWER, 0xFF);
+  writeRegister(config_.micI2cAddress, ES7210_MIC3_POWER, 0xFF);
+  writeRegister(config_.micI2cAddress, ES7210_MIC4_POWER, 0xFF);
+  writeRegister(config_.micI2cAddress, ES7210_MIC12_POWER, 0xFF);
+  writeRegister(config_.micI2cAddress, ES7210_MIC34_POWER, 0xFF);
+  writeRegister(config_.micI2cAddress, ES7210_CLOCK_OFF, 0x7F);
+  writeRegister(config_.micI2cAddress, ES7210_POWER_DOWN, 0x07);
+}
+
+bool CodecSerialAudioBackend::startWith(
+    const board::Config &boardConfig, const board::AudioConfig &audioConfig,
+    const audiobackend::Format &format, bool capture) {
   if (!audiobackend::matchesBoard(boardConfig, audioConfig) ||
       audiobackend::classify(audioConfig) !=
           audiobackend::DescriptorStatus::Ready ||
@@ -273,10 +300,11 @@ bool CodecSerialAudioBackend::start(
   config_ = audioConfig;
   format_ = format;
   configured_ = true;
+  capture_ = capture;
   disableAmp();
 
   audioI2s.setPins(config_.pinPlaybackBclk, config_.pinPlaybackLrck,
-                   config_.pinDout, config_.pinDin,
+                   config_.pinDout, capture_ ? config_.pinDin : board::NO_PIN,
                    config_.pinPlaybackMclk);
   const i2s_slot_mode_t slots =
       format_.channels == 1 ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
@@ -285,14 +313,23 @@ bool CodecSerialAudioBackend::start(
     return false;
   }
 
+  // Written in PRIME_FRAMES pieces, so the stack holds the streaming
+  // prime's buffer whichever path runs.
   int16_t silence[PRIME_FRAMES * 2] = {};
   const size_t silenceBytes =
       PRIME_FRAMES * format_.channels * sizeof(int16_t);
-  if (audioI2s.write(silence, silenceBytes) != silenceBytes) {
-    audioI2s.end();
-    return false;
+  const size_t primeFrames =
+      capture_ ? PRIME_FRAMES : PLAYBACK_ONLY_PRIME_FRAMES;
+  static_assert(PLAYBACK_ONLY_PRIME_FRAMES % PRIME_FRAMES == 0,
+                "the playback-only prime is whole streaming primes");
+  for (size_t primed = 0; primed < primeFrames; primed += PRIME_FRAMES) {
+    if (audioI2s.write(silence, silenceBytes) != silenceBytes) {
+      audioI2s.end();
+      return false;
+    }
   }
-  if (!initializeEs8311() || !initializeEs7210() ||
+  if (!capture_) powerDownEs7210();
+  if (!initializeEs8311() || (capture_ && !initializeEs7210()) ||
       !setGain(audiobackend::dacVolumePercent(config_))) {
     stop();
     return false;
@@ -319,7 +356,7 @@ size_t CodecSerialAudioBackend::writeFrames(const int16_t *samples,
 
 size_t CodecSerialAudioBackend::readFrames(int16_t *samples,
                                            size_t frameCount) {
-  if (!running_ || samples == nullptr) return 0;
+  if (!running_ || !capture_ || samples == nullptr) return 0;
   const size_t bytes =
       frameCount * config_.captureChannels * sizeof(int16_t);
   return audioI2s.readBytes(reinterpret_cast<char *>(samples), bytes) /
@@ -337,21 +374,13 @@ void CodecSerialAudioBackend::stop() {
   if (config_.codecI2cAddress != 0) {
     setCodecMuted(true);
   }
-  if (config_.micI2cAddress != 0) {
-    writeRegister(config_.micI2cAddress, ES7210_MIC1_POWER, 0xFF);
-    writeRegister(config_.micI2cAddress, ES7210_MIC2_POWER, 0xFF);
-    writeRegister(config_.micI2cAddress, ES7210_MIC3_POWER, 0xFF);
-    writeRegister(config_.micI2cAddress, ES7210_MIC4_POWER, 0xFF);
-    writeRegister(config_.micI2cAddress, ES7210_MIC12_POWER, 0xFF);
-    writeRegister(config_.micI2cAddress, ES7210_MIC34_POWER, 0xFF);
-    writeRegister(config_.micI2cAddress, ES7210_CLOCK_OFF, 0x7F);
-    writeRegister(config_.micI2cAddress, ES7210_POWER_DOWN, 0x07);
-  }
+  if (config_.micI2cAddress != 0) powerDownEs7210();
   audioI2s.end();
   config_ = {};
   format_ = {};
   configured_ = false;
   running_ = false;
+  capture_ = false;
 }
 
 #else
@@ -372,6 +401,20 @@ bool CodecSerialAudioBackend::setCodecMuted(bool) { return false; }
 bool CodecSerialAudioBackend::initializeEs8311() { return false; }
 
 bool CodecSerialAudioBackend::initializeEs7210() { return false; }
+
+void CodecSerialAudioBackend::powerDownEs7210() {}
+
+bool CodecSerialAudioBackend::startWith(const board::Config &,
+                                        const board::AudioConfig &,
+                                        const audiobackend::Format &, bool) {
+  return false;
+}
+
+bool CodecSerialAudioBackend::startPlaybackOnly(
+    const board::Config &, const board::AudioConfig &,
+    const audiobackend::Format &) {
+  return false;
+}
 
 bool CodecSerialAudioBackend::start(
     const board::Config &, const board::AudioConfig &,

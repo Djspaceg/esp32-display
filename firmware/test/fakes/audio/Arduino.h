@@ -99,5 +99,12 @@ BaseType_t xTaskCreatePinnedToCore(TaskFunction_t task, const char *name,
                                   UBaseType_t priority,
                                   TaskHandle_t *handle, BaseType_t core);
 void vTaskDelete(TaskHandle_t task);
+
+using SemaphoreHandle_t = void *;
+static constexpr TickType_t portMAX_DELAY = 0xFFFFFFFFu;
+SemaphoreHandle_t xSemaphoreCreateMutex();
+BaseType_t xSemaphoreTake(SemaphoreHandle_t semaphore, TickType_t waitTicks);
+BaseType_t xSemaphoreGive(SemaphoreHandle_t semaphore);
+void vSemaphoreDelete(SemaphoreHandle_t semaphore);
 void vTaskDelay(TickType_t ticks);
 void taskYIELD();

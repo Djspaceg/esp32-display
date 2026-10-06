@@ -61,4 +61,17 @@ int lastRegisterWrite(uint8_t address, uint8_t reg);
 // deleted or disabled channel. reset() clears it.
 void setI2sFailing(bool failing);
 
+// xTaskCreatePinnedToCore refuses (pdFAIL) while set. reset() clears it.
+void setTaskCreateFailing(bool failing);
+struct CreatedTask {
+  const char *name;
+  unsigned priority;
+  int core;
+};
+// Tasks created since reset().
+const std::vector<CreatedTask> &createdTasks();
+// Mutexes created and not deleted, and whether any take/give was unpaired.
+int liveMutexes();
+bool mutexMisuse();
+
 }  // namespace audiohost

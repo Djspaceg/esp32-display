@@ -13,3 +13,5 @@ inline void *heap_caps_malloc(size_t bytes, unsigned) {
 inline void heap_caps_free(void *allocation) {
   free(allocation);
 }
+
+inline size_t heap_caps_get_free_size(unsigned) { return 123456; }

@@ -31,6 +31,27 @@ allocate from PSRAM only when Doom starts.
 7. Hold BOOT for 3 seconds to exit Doom. The panel restarts into the normal
    streaming firmware; release is not required once the threshold is reached.
 
+## Sound
+
+Sound effects play on boards with a speaker codec (the ES8311/ES7210
+descriptors that pass the codec chip-ID probe); every other board stays
+silent exactly as before. The menu's sound volume controls them. Music is not
+implemented: Doom stores it as MUS, which needs a synthesizer.
+
+`platform/doom_sound_esp32.c.inc` mixes the engine's channels from the
+memory-mapped WAD, resamples each 11025 Hz lump to the codec's rate and sends
+one mono mix to every output channel, because the ES8311 plays only the left
+I2S slot to its one speaker. `display_stream/doom_audio.cpp` starts the codec
+with the streaming backend's power-up sequence, transmit-only with the
+microphones powered down, and feeds it from a task on the core loopTask does
+not use. The task writes whole DMA buffers and paces itself
+(`display_stream/doom_audio_pace.h`), so a sound is heard 16 to 35 ms after
+the game starts it instead of about 90 ms behind a full I2S ring; for about
+90 ms in every 30 s, while the pacer re-measures the ring, up to 100 ms.
+Quitting from the menu lets the quit sound play out first, as vanilla's 1.5 s
+wait did. A Doom boot never starts the streaming audio engine, so the two
+never share the codec.
+
 ## License
 
 The engine under `src/` is based on
@@ -224,6 +245,8 @@ firmware/doom/
     │   ├── w_file_esp32.c.inc
     │   ├── doom_hw_bridge.cpp
     │   ├── doom_esp32_stubs.c.inc
+    │   ├── doom_sound_esp32.c.inc
+    │   ├── doom_audio_bridge.h
     │   └── doom_splash.h
     └── upstream Doom engine sources and headers
 ```

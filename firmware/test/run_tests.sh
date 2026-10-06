@@ -12,6 +12,9 @@ RESCUE_OUT="$TMP/test_rescue_model"
 DOOM_ENTRY_OUT="$TMP/test_doom_entry_gate"
 DOOM_WAD_OUT="$TMP/test_doom_wad"
 DOOM_FAILURE_OUT="$TMP/test_doom_failure_screen"
+DOOM_SOUND_OUT="$TMP/test_doom_sound"
+DOOM_PACE_OUT="$TMP/test_doom_audio_pace"
+DOOM_BRIDGE_OUT="$TMP/test_doom_audio_bridge"
 MEM_REPORT_OUT="$TMP/test_mem_report"
 USB_INPUT_OUT="$TMP/test_usb_input"
 CXXFLAGS=(
@@ -129,6 +132,38 @@ for target in P4 S3; do
     "$HERE/test_doom_wad.cpp" "$TMP/doom_wad_unit_$target.o"
   "$DOOM_WAD_OUT-$target"
 done
+
+# Doom's sound effects: what the engine starts is what the codec is sent
+# (the sound module and i_sound.c.inc, unmodified, against fakes/doom_sound).
+# The upstream music-module table leaves its optional Poll hook implicit.
+clang -std=c11 -Wall -Wextra -Werror -Wno-missing-field-initializers \
+  -fsanitize=address,undefined -fno-sanitize-recover=all \
+  -I"$HERE/fakes/doom_sound" -I"$HERE/../doom/src" \
+  -c -o "$TMP/doom_sound_unit.o" "$HERE/doom_sound_unit.c"
+clang++ "${CXXFLAGS[@]}" \
+  -I"$HERE/fakes/doom_sound" -I"$HERE/../doom/src" \
+  -o "$DOOM_SOUND_OUT" \
+  "$HERE/test_doom_sound.cpp" "$TMP/doom_sound_unit.o"
+"$DOOM_SOUND_OUT"
+
+# Doom's sound-output pacing keeps the I2S queue short without running dry.
+clang++ "${CXXFLAGS[@]}" \
+  -o "$DOOM_PACE_OUT" "$HERE/test_doom_audio_pace.cpp"
+"$DOOM_PACE_OUT"
+
+# The board side of Doom's sound (doom_audio.cpp and the real codec backend,
+# unmodified, against fakes/audio): nothing on boards without audio parts.
+clang++ "${CXXFLAGS[@]}" \
+  -DCONFIG_IDF_TARGET_ESP32S3 -DESPDISP_HOST_AUDIO_TEST -DESPDISP_DOOM_RUNTIME \
+  -I"$HERE/fakes/audio" \
+  -I"$HERE/../libraries/espdisp_board/src" \
+  -I"$HERE/../doom/src" \
+  -o "$DOOM_BRIDGE_OUT" \
+  "$HERE/test_doom_audio_bridge.cpp" \
+  "$HERE/fakes/audio/audio_host_fakes.cpp" \
+  "$HERE/../display_stream/audio_backend.cpp" \
+  "$HERE/../display_stream/doom_audio.cpp"
+"$DOOM_BRIDGE_OUT"
 
 # The card a Doom boot that cannot start shows before restarting.
 clang++ "${CXXFLAGS[@]}" \

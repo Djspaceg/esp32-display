@@ -14,6 +14,7 @@
 
 #if defined(ESPDISP_DOOM_RUNTIME)
 #include <doom_mode.h>
+#include <platform/doom_audio_bridge.h>
 #include <platform/doom_log.h>
 #endif
 
@@ -114,6 +115,7 @@ static void printDoomFatal(const char *reason) {
 // again after the panel attempt because a failed panel queue logs its own
 // line, and the last line before the restart must name the reason.
 extern "C" void doom_fail_restart(const char *reason, bool showOnPanel) {
+  doom_audio_end();
   printDoomFatal(reason);
   if (showOnPanel) {
     if (showDoomFailure(reason)) delay(DOOM_FAILURE_SHOW_MS);

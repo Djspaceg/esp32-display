@@ -71,11 +71,14 @@ static int snd_mport = 0;
 
 // Compiled-in sound modules:
 
+// ESP32 port: the sound-effect module is always compiled in. Its Init
+// declines on a board without usable audio, which leaves sound_module NULL
+// and every I_* call below a no-op, as before. FEATURE_SOUND (SDL_mixer and
+// music) stays off.
+
 static sound_module_t *sound_modules[] = 
 {
-    #ifdef FEATURE_SOUND
     &DG_sound_module,
-    #endif
     NULL,
 };
 

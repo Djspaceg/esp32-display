@@ -30,6 +30,12 @@ class CodecSerialAudioBackend final : public AudioBackend {
   size_t readFrames(int16_t *samples, size_t frameCount) override;
   bool setGain(uint8_t percent) override;
   void stop() override;
+  // start() without capture, for a caller that never reads: the ES7210 is
+  // left powered down, the I2S channel is transmit-only, and readFrames()
+  // returns nothing. Doom's sound effects use it.
+  bool startPlaybackOnly(const board::Config &boardConfig,
+                         const board::AudioConfig &audioConfig,
+                         const audiobackend::Format &format);
 
   bool running() const { return running_; }
   const audiobackend::Format &format() const { return format_; }
@@ -38,6 +44,10 @@ class CodecSerialAudioBackend final : public AudioBackend {
   bool writeRegister(uint8_t address, uint8_t reg, uint8_t value);
   bool initializeEs8311();
   bool initializeEs7210();
+  void powerDownEs7210();
+  bool startWith(const board::Config &boardConfig,
+                 const board::AudioConfig &audioConfig,
+                 const audiobackend::Format &format, bool capture);
   bool setCodecMuted(bool muted);
   void disableAmp();
 
@@ -45,6 +55,7 @@ class CodecSerialAudioBackend final : public AudioBackend {
   audiobackend::Format format_ = {};
   bool configured_ = false;
   bool running_ = false;
+  bool capture_ = false;
 };
 
 CodecSerialAudioBackend &sharedCodecBackend();

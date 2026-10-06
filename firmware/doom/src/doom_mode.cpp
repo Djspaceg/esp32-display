@@ -13,6 +13,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "platform/doom_audio_bridge.h"
 #include "platform/doom_log.h"
 #include "platform/doom_splash.h"
 
@@ -182,6 +183,8 @@ void doom_enter(void) {
     // A restart is the ownership boundary for the engine zone, scaled buffer,
     // WAD mapping, and every upstream global. The caller restarts immediately;
     // partial in-process teardown would add use-after-free paths without ever
-    // returning to normal operation.
+    // returning to normal operation. The amplifier goes off first so the
+    // restart does not pop the speaker.
+    doom_audio_end();
     doom_log("Doom stopped. Restarting to normal firmware...");
 }

@@ -38,42 +38,11 @@ void I_Error(char *error, ...) {
 
 // --- Sound/Music module definitions ---
 // doomgeneric expects DG_sound_module and DG_music_module to be defined.
-// These are no-op implementations since there's no audio hardware.
+// Sound effects play on the board's codec when it has one; music is not
+// implemented, so its module stays a no-op that i_sound.c never selects.
 
 #include "i_sound.h"
-
-static boolean DG_InitSound(boolean use_sfx_prefix) { (void)use_sfx_prefix; return true; }
-static void DG_ShutdownSound(void) {}
-static int DG_GetSfxLumpNum(sfxinfo_t* sfx) { (void)sfx; return 0; }
-static void DG_UpdateSound(void) {}
-static void DG_UpdateSoundParams(int channel, int vol, int sep) {
-    (void)channel; (void)vol; (void)sep;
-}
-static int DG_StartSound(sfxinfo_t* sfx, int channel, int vol, int sep) {
-    (void)sfx; (void)channel; (void)vol; (void)sep;
-    return channel;
-}
-static void DG_StopSound(int channel) { (void)channel; }
-static boolean DG_SoundIsPlaying(int channel) { (void)channel; return false; }
-static void DG_CacheSounds(sfxinfo_t* sounds, int num_sounds) {
-    (void)sounds; (void)num_sounds;
-}
-
-static snddevice_t sound_esp32_devices[] = { SNDDEVICE_SB };
-
-sound_module_t DG_sound_module = {
-    sound_esp32_devices,
-    1,  // num_sound_devices
-    DG_InitSound,
-    DG_ShutdownSound,
-    DG_GetSfxLumpNum,
-    DG_UpdateSound,
-    DG_UpdateSoundParams,
-    DG_StartSound,
-    DG_StopSound,
-    DG_SoundIsPlaying,
-    DG_CacheSounds,
-};
+#include "doom_sound_esp32.c.inc"
 
 // Music module
 static boolean DG_InitMusic(void) { return true; }
@@ -125,6 +94,7 @@ void doom_exit_override(int status) {
         doom_fail_restart(reason, true);
     }
     doom_log("Engine quit; restarting normal firmware");  // flushes
+    doom_audio_end();
     esp_restart();
     while (1) { vTaskDelay(pdMS_TO_TICKS(100)); }
 }
