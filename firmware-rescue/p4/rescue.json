@@ -1,5 +1,5 @@
 {
-  "built_at": "2026-10-06T19:58:10Z",
+  "built_at": "2026-10-06T21:11:28Z",
   "chip": "esp32p4",
   "family": "p4",
   "format": 1,
@@ -16,7 +16,7 @@
       "bytes": 3072,
       "file": "partitions.bin",
       "role": "partitions",
-      "sha256": "3e5df59722d5ea1689e969ef9ecabaaf750b1d73378473b6cb8f09deafdf6d80"
+      "sha256": "f09e3243438480328ce5079ef78d56614a21dbd9e32ae6763438e50e8f90aea4"
     },
     {
       "address": 57344,
@@ -30,9 +30,9 @@
       "bytes": 450256,
       "file": "app.bin",
       "role": "app",
-      "sha256": "da019d5b1653a6440675337acf9c70758955684797a54551ae2603d5e27d8b05"
+      "sha256": "df48df672cfd1f57f6869b3e70cd9612bc7725e300bd245993964f6e5c5977f7"
     }
   ],
-  "source_commit": "ced304287f43f89559f44a9a7953094608bf6d68",
+  "source_commit": "f15b97061dadad145fc8037a55d50ead16db49f3",
   "source_dirty": false
 }
