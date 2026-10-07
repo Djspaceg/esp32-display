@@ -1,6 +1,6 @@
 // TinyUSB host glue for the USB keyboard and mouse.
 //
-// The installed Arduino core (3.3.11) already ships the whole stack: TinyUSB's
+// The installed Arduino core (3.3.12) already ships the whole stack: TinyUSB's
 // host core and its HID class driver are compiled into libarduino_tinyusb.a for
 // both the S3 and the P4 (CFG_TUH_ENABLED follows CFG_TUD_ENABLED, which the
 // prebuilt sdkconfig turns on), and the core even defines the tuh_hid_* callback

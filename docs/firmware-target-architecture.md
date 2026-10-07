@@ -143,9 +143,13 @@ backlight control. Registering the DPI completion callback before panel
 initialization was required to release the first draw buffer; GT911 point
 records begin at `0x814F`.
 
-Hosted networking remains blocked before association because Arduino-ESP32
-3.3.11 (`esp_hosted` 2.12.11 and `esp_wifi_remote` 1.6.3) receives no response
-to `Req_GetCoprocessorFwVersion` from the factory C6. The C6 module exposes a
+Hosted WiFi associates and streams with the factory C6 firmware. On
+Arduino-ESP32 3.3.11 (`esp_hosted` 2.12.11) the link deadlocked seconds into a
+stream: one failed SDIO receive-buffer allocation stopped the host reading, and
+only the 90 s watchdog restart recovered it. The project builds on 3.3.12
+(`esp_hosted` 2.12.13), which recovers a dropped read and leaves about 225 KB of
+internal DMA-capable RAM free on the 4C after WiFi comes up, against 28-44 KB on
+3.3.11. The C6 module exposes a
 separate 3.3 V UART on four programming pads; that programmer is not connected
 to this host, and the P4 UART cannot recover or identify the C6 image. No C6
 write was attempted. ETL1 over WiFi, reachable mDNS, reconnect, OTA, tearing

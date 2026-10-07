@@ -13,7 +13,7 @@ import Foundation
 ///     host sends and how it reads what comes back.
 ///   - `<core>/libraries/ArduinoOTA/src/ArduinoOTA.cpp` - the panel, and the
 ///     reference for what it actually requires. Line numbers below are from
-///     esp32 core 3.3.11, which is the core this repo's firmware is built with.
+///     esp32 core 3.3.12, which is the core this repo's firmware is built with.
 ///
 /// THE EIGHT STEPS, in order, with the two things about them that are easy to
 /// get wrong called out where they arise:
@@ -23,28 +23,28 @@ import Foundation
 ///     `"<FLASH> <hostTcpPort> <imageBytes> <md5hex>\n"`. `espota` retries this
 ///     up to ten times, one fresh socket per attempt, with a per-attempt
 ///     timeout. Only the port travels: the panel dials back to the UDP source
-///     address (`_ota_ip = _udp_ota.remoteIP()`, ArduinoOTA.cpp:259 and :305),
+///     address (`_ota_ip = _udp_ota.remoteIP()`, ArduinoOTA.cpp:264 and :311),
 ///     so the host never has to know or state its own address.
 ///  3. The panel replies by UDP with `OK` when it has no password, or
-///     `AUTH <nonce>`. Core 3.3.11 builds the nonce with SHA256 (line 244-248),
+///     `AUTH <nonce>`. Core 3.3.12 builds the nonce with SHA256 (line 249-253),
 ///     so it is 64 hex characters; a 32-character nonce is pre-3.3.1 firmware
 ///     doing MD5 challenge/response, which this app refuses rather than
 ///     implements - see `ChallengeKind`.
 ///  4. The host answers `"<AUTH> <cnonce> <response>\n"`, computed as in
-///     `authResponse`. The panel recomputes exactly that (lines 285-300) and
-///     requires cnonce and response to be 64 characters each (line 272).
-///  5. The panel replies `OK`, or `Authentication Failed` (line 309) and returns
+///     `authResponse`. The panel recomputes exactly that (lines 290-305) and
+///     requires cnonce and response to be 64 characters each (line 277).
+///  5. The panel replies `OK`, or `Authentication Failed` (line 314) and returns
 ///     to its idle state.
 ///  6. The panel then opens a TCP connection to the host's listener. `espota`
 ///     allows ten seconds for the accept.
 ///  7. The host sends the image in 1024-byte chunks, waiting for a reply after
 ///     each one. The reply is the DECIMAL COUNT of bytes the panel wrote
-///     (`client.printf("%" PRIu32, written)`, line 426), not `OK`. Only after
-///     `Update.end()` succeeds does it print `OK` (line 436), so `OK` means
+///     (`client.printf("%" PRIu32, written)`, line 431), not `OK`. Only after
+///     `Update.end()` succeeds does it print `OK` (line 441), so `OK` means
 ///     finished and a number means keep going - and because both arrive on one
 ///     stream, a single read can legitimately return `1024OK`. That is why
 ///     `classifyChunkReply` looks for `OK` before it looks for a number.
-///  8. A successful push reboots the panel (line 441-444).
+///  8. A successful push reboots the panel (line 446-449).
 ///
 /// Everything here is pure: same inputs, same string out, no sockets and no
 /// clock. `FirmwarePusher` in SenderCore owns the I/O half.
@@ -65,7 +65,7 @@ public enum EspotaProtocol {
     /// reads whatever is available up to 1460 bytes - but the transfer is
     /// lock-step, one reply per chunk, so this is the round-trip size.
     public static let chunkBytes = 1024
-    /// PBKDF2 rounds. Hardcoded on the panel (ArduinoOTA.cpp:288), so it is not
+    /// PBKDF2 rounds. Hardcoded on the panel (ArduinoOTA.cpp:293), so it is not
     /// negotiable and a mismatch fails as a wrong password would.
     public static let pbkdf2Iterations = 10_000
     /// Length of the PBKDF2 output, in bytes. Matches SHA256's digest size,
@@ -76,7 +76,7 @@ public enum EspotaProtocol {
     /// cnonce and the response.
     public static let sha256HexLength = 64
     /// Hex digits in an MD5 digest. The panel refuses an invitation whose md5
-    /// field is not this long (ArduinoOTA.cpp:237).
+    /// field is not this long (ArduinoOTA.cpp:242).
     public static let md5HexLength = 32
 
     // MARK: - step 2: the invitation
@@ -84,7 +84,7 @@ public enum EspotaProtocol {
     /// The invitation datagram's payload, newline included.
     ///
     /// The panel parses this field by field with `parseInt`/`readStringUntil`
-    /// (ArduinoOTA.cpp:227-236), so the single spaces and the trailing newline
+    /// (ArduinoOTA.cpp:232-241), so the single spaces and the trailing newline
     /// are structural: without the newline `_md5` would swallow whatever
     /// followed in the datagram and fail the 32-character check.
     public static func invitationLine(
@@ -114,7 +114,7 @@ public enum EspotaProtocol {
     /// Classify the panel's UDP reply to an invitation.
     ///
     /// Trimmed first because the panel writes `OK` and `AUTH %s` with no
-    /// terminator (`_udp_ota.print`/`printf`, ArduinoOTA.cpp:255-266) while a
+    /// terminator (`_udp_ota.print`/`printf`, ArduinoOTA.cpp:260-271) while a
     /// datagram may still arrive with trailing whitespace from a future core; a
     /// reply that differs only in a newline is not a refusal.
     ///
@@ -148,7 +148,7 @@ public enum EspotaProtocol {
         /// 32 characters: core older than 3.3.1, MD5 challenge/response.
         ///
         /// Not implemented here on purpose. Every panel this app can update is
-        /// running firmware from this repo, which is built against 3.3.11, so
+        /// running firmware from this repo, which is built against 3.3.12, so
         /// reaching this case means the panel is running something much older
         /// than the app - and MD5 is the reason the core changed it. Refusing
         /// with a message that names the situation beats carrying a second
@@ -173,7 +173,7 @@ public enum EspotaProtocol {
     ///
     /// `filename` and `panelAddress` CONTRIBUTE NOTHING BUT ENTROPY. The panel
     /// never recomputes the cnonce - it reads it off the wire
-    /// (ArduinoOTA.cpp:270) and feeds it into the salt as given - so it cannot
+    /// (ArduinoOTA.cpp:275) and feeds it into the salt as given - so it cannot
     /// check, and would not care, what went into it. The composition is kept
     /// byte-identical to `espota.py`'s `"%s%u%s%s" % (filename, content_size,
     /// file_md5, remote_addr)` anyway, so that anyone holding both files can diff
@@ -205,7 +205,7 @@ public enum EspotaProtocol {
     /// ASCII SHA256 HEX STRING of the password. The panel stores
     /// `sha256hex(password)` in `_password` (`setPassword`, ArduinoOTA.cpp:82-90,
     /// which the firmware calls at display_stream.ino:1528) and hands that
-    /// String straight to `PBKDF2_HMACBuilder` (line 288). Deriving from the raw
+    /// String straight to `PBKDF2_HMACBuilder` (line 293). Deriving from the raw
     /// password instead produces a well-formed response that always fails, with
     /// the panel reporting nothing more specific than `Authentication Failed`.
     ///
@@ -241,7 +241,7 @@ public enum EspotaProtocol {
     /// The authentication datagram's payload, newline included.
     ///
     /// The panel reads the cnonce up to a space and the response up to the
-    /// newline (ArduinoOTA.cpp:269-271), so both separators are structural here
+    /// newline (ArduinoOTA.cpp:274-276), so both separators are structural here
     /// in the same way the invitation's are.
     public static func authLine(cnonce: String, response: String) -> String {
         "\(authCommand) \(cnonce) \(response)\n"
@@ -318,7 +318,7 @@ public enum EspotaProtocol {
     /// What everything read since the last chunk adds up to.
     ///
     /// THE PANEL HAS EXACTLY TWO ENDINGS, and this is the type that keeps them
-    /// apart. `ArduinoOTA.cpp:433-453`:
+    /// apart. `ArduinoOTA.cpp:438-458`:
     ///
     /// ```cpp
     /// if (_updater->end()) {
@@ -394,7 +394,7 @@ public enum EspotaProtocol {
     ///
     /// MD5 here is not authentication: it is the integrity check the Update
     /// library runs over the received image (`_updater->setMD5`,
-    /// ArduinoOTA.cpp:354), and the panel refuses an invitation that does not
+    /// ArduinoOTA.cpp:359), and the panel refuses an invitation that does not
     /// carry one. Insecure by name in CryptoKit, and correctly so, but this is
     /// the panel's format and not a choice this app gets to make.
     public static func md5Hex(_ data: Data) -> String {

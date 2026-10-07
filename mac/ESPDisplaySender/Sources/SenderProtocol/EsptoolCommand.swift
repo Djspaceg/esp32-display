@@ -16,7 +16,7 @@ import Foundation
 /// the esp32 core installed, which the OTA path does not. `UsbOnboardingPlan`
 /// has a case for its absence that names the fix, and the sheet shows it.
 ///
-/// THE ARGV IS THE CORE'S OWN, from esp32 core 3.3.11 platform.txt line 346
+/// THE ARGV IS THE CORE'S OWN, from esp32 core 3.3.12 platform.txt line 348
 /// (`tools.esptool_py.upload.pattern_args`), read off this machine and reproduced
 /// here verbatim so the two can be compared:
 ///
@@ -36,7 +36,7 @@ import Foundation
 ///
 /// FOUR DELIBERATE DIFFERENCES FROM THE RECIPE, each with a reason:
 ///
-///   - platform.txt line 347 wraps all of it in `python3
+///   - platform.txt line 349 wraps all of it in `python3
 ///     {runtime.platform.path}/tools/flasher.py`. This does not use that wrapper.
 ///     It only resolves `--esptool` and `--build-dir`, both of which are already
 ///     known here, and it would reintroduce a python3 dependency on a path whose

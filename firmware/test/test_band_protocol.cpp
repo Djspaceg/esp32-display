@@ -5067,9 +5067,9 @@ int main() {
     CHECK(!chipidentity::buildTargetsEsp32S3());
 
     // The IDF's own string, which is what a real build supplies. Verified on
-    // disk for core 3.3.11: CONFIG_IDF_TARGET is "esp32c6" at
-    // esp32c6-libs/3.3.11/qio_qspi/include/sdkconfig.h:429 and "esp32s3" at
-    // esp32s3-libs/3.3.11/*/include/sdkconfig.h:394.
+    // disk for core 3.3.12: CONFIG_IDF_TARGET is "esp32c6" at
+    // esp32c6-libs/3.3.12/qio_qspi/include/sdkconfig.h:429 and "esp32s3" at
+    // esp32s3-libs/3.3.12/*/include/sdkconfig.h:394.
     CHECK(strcmp(chipidentity::selectToken("esp32c3", false, false),
                  "esp32c3") == 0);
     CHECK(strcmp(chipidentity::selectToken("esp32c6", false, false),

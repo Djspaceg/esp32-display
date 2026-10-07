@@ -772,7 +772,7 @@ def espota_path() -> str:
 def core_hardware_dir() -> str:
     """The installed esp32 core's platform directory ({runtime.platform.path}).
 
-    Globbed, never pinned: 3.3.11 is what is installed here today and the core
+    Globbed, never pinned: 3.3.12 is what is installed here today and the core
     upgrades itself. Newest directory wins, same lexicographic caveat as
     esptool_path() - and unlike there it matters slightly more, because the files
     read out of it (boot_app0.bin, boards.txt) belong to a specific core version.
@@ -797,7 +797,7 @@ def core_boot_app0() -> str:
     This one is NOT in an --output-dir export: arduino-cli exports what the
     compile produced, and boot_app0 is a fixed 8192-byte file shipped with the
     core ({runtime.platform.path}/tools/partitions/boot_app0.bin in the recipe at
-    platform.txt:346). It is what makes a freshly flashed board boot the app at
+    platform.txt:348). It is what makes a freshly flashed board boot the app at
     0x10000 rather than an empty ota slot, so a bundle that means to bring up a
     blank board has to carry it.
     """
@@ -1238,7 +1238,7 @@ REQUIRED_FLASH_ROLES = (
     FLASH_ROLE_BOOT_APP0,
 )
 
-# Flash addresses, from the core's own upload recipe (platform.txt:346,
+# Flash addresses, from the core's own upload recipe (platform.txt:348,
 # tools.esptool_py.upload.pattern_args). These three are the same for every
 # chip. THE BOOTLOADER ADDRESS IS NOT: boards.txt gives esp32c6 (:812) and
 # esp32s3 (:1183) a bootloader at 0x0 while the classic ESP32 uses 0x1000, so it
@@ -3152,7 +3152,7 @@ def collect_flash_parts(
 
     Two come out of the compile's export; boot_app0.bin comes out of the installed
     core, because that is where the core's own upload recipe gets it
-    (platform.txt:346). Returns pre-offset manifest entries in write order and
+    (platform.txt:348). Returns pre-offset manifest entries in write order and
     {role: bytes} - bundle_manifest fills the offsets in.
     """
     bootloader_address = core_bootloader_address(board.chip)
@@ -3360,7 +3360,7 @@ def espota_command(
     """Build the espota.py invocation.
 
     Kept as a pure function so the command line can be checked without a panel to
-    push to. Mirrors the core's own recipe (platform.txt line 384: `-i <address>
+    push to. Mirrors the core's own recipe (platform.txt line 386: `-i <address>
     -p <port> --auth=<password> -f <image>`), with -r for a progress bar and -t
     for how long to wait on the invitation.
 

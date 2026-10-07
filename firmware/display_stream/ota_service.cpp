@@ -41,7 +41,7 @@ otapolicy::Status currentOtaStatus() {
 // screen and no DMA is queued underneath the flash writes.
 volatile bool otaInProgress = false;
 static uint8_t otaShownPercent = 0;
-// First ArduinoOTA error from the current attempt. Core 3.3.11 invokes
+// First ArduinoOTA error from the current attempt. Core 3.3.12 invokes
 // OTA_CONNECT_ERROR and then falls through to Update.end(), which invokes
 // OTA_END_ERROR with "Aborted". Without remembering the first callback, the
 // second one overwrites the useful "connect lost" screen with "bad image".
@@ -102,7 +102,7 @@ bool startOtaIfConfigured() {
     // erases nothing. The erase is per-64KB block inside _writeBuffer()
     // (Updater.cpp:665) as data arrives, so it falls between two progress
     // callbacks, each of which already feeds the watchdog. And _runUpdate calls
-    // _updater->begin() at ArduinoOTA.cpp:343, before _start_callback() at 357,
+    // _updater->begin() at ArduinoOTA.cpp:348, before _start_callback() at 362,
     // so a reset here could not have covered it even if it did erase - a panic
     // would have happened inside begin(), upstream of this callback.
     esp_task_wdt_reset();
@@ -122,7 +122,7 @@ bool startOtaIfConfigured() {
     Serial.println("ota: update starting");
     drawOtaScreen("updating", 0);
     // Belt and braces. _runUpdate calls _progress_callback(0, _size) immediately
-    // after _start_callback() returns (ArduinoOTA.cpp:359), and onProgress resets
+    // after _start_callback() returns (ArduinoOTA.cpp:364), and onProgress resets
     // the watchdog as its first statement, ahead of its own early return - so
     // this interval is already ended microseconds from now and this line changes
     // nothing today. It is here so the draw above stays covered if a future core
@@ -171,7 +171,7 @@ bool startOtaIfConfigured() {
     otaInProgress = false;
     const char *detail = error == OTA_END_ERROR ? Update.errorString() : "";
 
-    // Core 3.3.11 does not return after its reverse TCP connect fails. It first
+    // Core 3.3.12 does not return after its reverse TCP connect fails. It first
     // reports OTA_CONNECT_ERROR, then calls Update.end() with zero bytes written,
     // which reports OTA_END_ERROR / Aborted. The second callback is fallout from
     // the first failure, not an image verdict, and must not replace the useful
@@ -242,7 +242,7 @@ bool startOtaIfConfigured() {
     }
   });
 
-  // begin() returns void in core 3.3.11 (verified in ArduinoOTA.cpp: on a failed
+  // begin() returns void in core 3.3.12 (verified in ArduinoOTA.cpp: on a failed
   // UDP bind it logs "udp bind failed" and returns with itself uninitialised),
   // and there is no accessor for that state. So the preconditions above - a
   // stored password and an associated radio - are the whole of what can be

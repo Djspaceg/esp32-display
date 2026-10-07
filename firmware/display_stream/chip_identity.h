@@ -235,7 +235,7 @@ static_assert(!(sameToken(CONFIG_IDF_TARGET, TOKEN_ESP32C3) ||
 #endif
 
 // And on any ESP build, that the ladder found an answer at all. ESP_PLATFORM is
-// defined by the core's own compile flags (esp32c6-libs/3.3.11/flags/defines),
+// defined by the core's own compile flags (esp32c6-libs/3.3.12/flags/defines),
 // so this fires for the firmware and not for the host test, where "unknown" is
 // the correct and expected answer.
 //

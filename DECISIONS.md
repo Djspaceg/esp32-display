@@ -439,8 +439,8 @@ deletion was refused by the permission policy.
 No power loss reproduced in 30+ min of USB logging. The rst:0x1 "power-on" resets were the serial
 capture: pyserial with DTR/RTS set low resets a CH343 board 4 times out of 4, and leaving the lines
 alone resets it 0 times out of 4. The real fault is the C6 WiFi link dying seconds into each stream. The cause is ESP-Hosted
-2.12.11 in core 3.3.11, which deadlocks after one failed DMA allocation. Core 3.3.12 fixes it but is
-the human's call. Committed: audio no longer leaks its I2S channel or retries every 120 ms, and the
+2.12.11 in core 3.3.11, which deadlocks after one failed DMA allocation. The human chose core
+3.3.12 (ESP-Hosted 2.12.13), which fixes it; the project now builds on it. Committed: audio no longer leaks its I2S channel or retries every 120 ms, and the
 P4's audio jitter buffer moves to PSRAM (+16 KB DMA RAM).
 
 ### Decisions to evaluate
@@ -449,10 +449,11 @@ D1 Free a channel the core's I2SClass leaks after a failed begin() ourselves: de
 D2 Back off failed audio starts 1 s doubling to 16 s, muted, never holding video. Why: each retry ran I2C and I2S work on the engine core and flooded serial. If overruled: change StartBackoff in audio_engine_model.h.
 D3 P4 audio jitter buffer in PSRAM first. Why: P4 internal RAM is all DMA-capable and the C6 link needs it. If overruled: one #if in audio_engine.cpp.
 D4 No socket-buffer caps committed. Why: capping the P4 sockets only delayed the stall (34 to 724 packets) and costs burst tolerance. If overruled: 12 KB video, 16 KB audio on P4 was the tested value.
+D5 Build on Espressif core 3.3.12 (ESP-Hosted 2.12.13). Why: the human chose "Upgrade the core to 3.3.12"; it carries the SDIO deadlock fix and frees ~180 KB of P4 internal RAM. If overruled: reinstall 3.3.11 and regenerate the bundles, and P4 WiFi drops seconds into a stream again.
 
 ### Open questions
 
-- Upgrade the project to Espressif core 3.3.12 (ESP-Hosted 2.12.13)? Raised to the human. Default: stay on 3.3.11, so P4 WiFi still drops seconds into a stream.
+- Upgrade the project to Espressif core 3.3.12? Answered by the human: "Upgrade the core to 3.3.12" (D5).
 - Does the speaker amp brown out the board? Default: no. No reset occurred with the backend running, but no on-demand amp test was possible while the Mac streamed audio.
 
 ### Gate facts
