@@ -277,6 +277,12 @@ struct Config {
   /// vendor, otherwise the RGB order measured on the C6.
   bool rgbLedGrb = false;
 
+  /// The lowest backlight PWM duty, in thousandths of full, at which the glass
+  /// shows anything. Zero means the backlight lights at any duty. A lit level
+  /// whose duty would fall below it is raised to it (backlight_curve.h), so no
+  /// lit level is black; level 0 still turns it off.
+  uint16_t backlightFloorPermille = 0;
+
   SerialTransport serialTransport() const {
     return pinSerialRx != NO_PIN && pinSerialTx != NO_PIN
                ? SerialTransport::UartBridge
@@ -684,6 +690,13 @@ static const Config CONFIG_P4_4C = {
     /* touchResetExio */ 0,
     /* pinBlEnable */ 33,
     /* backlightInverted */ true,
+    /* serialRx */ NO_PIN,
+    /* serialTx */ NO_PIN,
+    /* panelPower */ NO_PIN,
+    /* encoderA */ NO_PIN,
+    /* encoderB */ NO_PIN,
+    /* rgbLedGrb */ false,
+    /* backlightFloorPermille */ 510,
 };
 
 /// Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C: the 4C's XC carrier with 3.4-inch
@@ -725,6 +738,13 @@ static const Config CONFIG_P4_34C = {
     /* touchResetExio */ 0,
     /* pinBlEnable */ 33,
     /* backlightInverted */ true,
+    /* serialRx */ NO_PIN,
+    /* serialTx */ NO_PIN,
+    /* panelPower */ NO_PIN,
+    /* encoderA */ NO_PIN,
+    /* encoderB */ NO_PIN,
+    /* rgbLedGrb */ false,
+    /* backlightFloorPermille */ 510,
 };
 
 #include "generated_board_config_lookup.h"

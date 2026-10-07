@@ -520,3 +520,42 @@ Red first: usb-retry-red-green.log (old code asks once, stays unverified) and us
 ### Residuals
 
 The behaviour on screen is unverified until the human plugs in a board on the new build. The lock check was exercised on real boards only through read-board.py, not through the app. A tool that takes no lock (screen, an unlocked pyserial script) still gets a CFGSHOW at most every 30 s on a display's port.
+
+## P4 backlight floor (p4-display-goes-black)
+
+### Outcome
+
+With no sender, a P4 shows its status card at level 10 of 255, about 4% duty, and a touch lights it for 10 s. The P4 glass is dark below about 47% duty (measured on the 4B), so the card read as black and the panel looked like it timed out. A P4 now raises any lit level below 51% duty to 51%, so the card shows; brighter levels keep their duty.
+
+### Decisions to evaluate
+
+D1 A per-board descriptor field `backlight.floor_permille` (default 0) raises a lit level whose duty would fall below it to the floor, in the DSI and pin-PWM sinks; other boards are byte-identical. Why: no level that already lit changes duty or current, on boards with a brownout history. Costs on a P4: levels 1-130 all look the same, the card is no dimmer than the low preset, and the 4C's saved level 61 goes from 24% to 51%. Supersedes: remapping 1-255 onto [floor, full], because review showed that raised every P4 level's duty (128 from 50% to 74%). If overruled: restore the remap in backlight_curve.h.
+D2 The floor is 510 (51%, the 4B's own saved level 130, seen lit while streaming), not the bare 47% threshold. Why: under the clamp the floor is the card's brightness, and 47% was a single at-threshold reading. Supersedes: 470, because it left no margin. If overruled: change floor_permille in the three P4 descriptors and CONFIG_P4_4C/34C.
+D3 The 4C and 3.4C take the 4B's floor. Why: the 4C was dark at 9% duty too, and the 3.4C shares the 4C's carrier; neither threshold was measured. If overruled: set their floor_permille to 0.
+D4 The rescue image ignores the floor and keeps its raw 32/255. Why: its stated invariant is never to draw more than that on a board that browns out. If overruled: drop the override in rescue.ino; a P4 rescue screen then lights at 51%.
+D5 The fix is one commit, and the regenerated bundles and rescue images follow in a second, artifacts-only commit. Why: each image records the commit it was built from, which a squash would orphan, and test_espdisp checks that. If overruled: not possible without changing that check.
+
+### Open questions
+
+- The 4C and 3.4C thresholds are unmeasured. Default: the 4B's floor, 510.
+- The P4 rescue screen stays dark at 32/255, as before. Default: unchanged, for power.
+- After 13:13 the app could not reach the 4C, though the 4C's own WiFi link answered (rssi -42, RPC under 1 s). Default: not this defect.
+
+### Gate facts
+
+Publish: local main only, GitHub remote, no push; no CR (not a CRUX package), so no AutoSDE. packages/*: none touched. Board-library call sites: code-review.md.
+Lanes: gate-run_tests.log exit 0; gate-test_espdisp.log 4 of 1991 failing before the artifacts commit (the four rescue images), 0 failing after it (gate-test_espdisp-final.log); gate-compile-{p4,s3,c6,c3}.log exit 0 (c6 96%, as before; built with another worker's uncommitted serial-config edits in the tree); release-shipping.log exit 0 from a clean clone of the fix commit (the artifacts commit).
+Red first: red-first-dsi-backlight.log. test_dsi_backlight fails 357 checks on main 44cd057 (card at 40/1023), then passes (card at 522/1023).
+Review rounds: 2 independent; 1 blocking finding (on-glass margin), which changed D1 and D2.
+
+### Evidence
+
+- p4-dark-investigation.log: serial readouts that pinned the cause, and the human's answers.
+- red-first-dsi-backlight.log: the new test failing on old code, then passing.
+- gate-*.log, release-shipping.log: the gate lanes.
+- code-review.md: both review rounds, their dispositions, and every backlight call site.
+- hw-final.log: both P4s on the shipping image, status card lit at 522/1023 with no sender.
+
+### Residuals
+
+The floor is checked by eye on a 4B only; the 4C and 3.4C share it unmeasured. On a P4 the slider's bottom half (levels 1-130) all show at 51%. The rescue log still says it shows RESCUE on a P4 whose glass stays dark (unchanged).

@@ -21,6 +21,7 @@ USB_HOST_INIT_OUT="$TMP/test_usb_host_init"
 QUAKE_PAK_OUT="$TMP/test_quake_pak"
 QUAKE_INPUT_OUT="$TMP/test_quake_input"
 BOOT_SCREEN_OUT="$TMP/test_boot_screen"
+DSI_BACKLIGHT_OUT="$TMP/test_dsi_backlight"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -223,6 +224,17 @@ clang++ "${CXXFLAGS[@]}" \
   -o "$BOOT_SCREEN_OUT" "$HERE/test_boot_screen.cpp"
 "$BOOT_SCREEN_OUT"
 python3 "$HERE/../../tools/generate_boot_image.py" --check
+
+# The P4 boards' backlight through the real DSI backend: every lit level,
+# the dimmed status card included, reaches a duty the glass shows.
+clang++ "${CXXFLAGS[@]}" \
+  -DCONFIG_IDF_TARGET_ESP32P4 -DESPDISP_BOARD_P4_4B \
+  -I"$HERE/fakes/dsi_backlight" \
+  -I"$HERE/../libraries/espdisp_board/src" \
+  -I"$HERE/../libraries/esp_lcd_jd9365/src" \
+  -I"$HERE/../libraries/esp_lcd_st7703/src" \
+  -o "$DSI_BACKLIGHT_OUT" "$HERE/test_dsi_backlight.cpp"
+"$DSI_BACKLIGHT_OUT"
 
 # The 5 s status line is unchanged and the mem line after it parses.
 clang++ "${CXXFLAGS[@]}" \

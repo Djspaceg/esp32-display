@@ -224,6 +224,9 @@ OPTIONAL_FIELDS = {
     # The ES8311 DAC level from the vendor's reference code, on Espressif's
     # es8311 driver percent scale. Absent (0) keeps the firmware default.
     "audio.dac_volume_percent": 0,
+    # The lowest PWM duty, in thousandths, at which the glass shows anything.
+    # Absent (0) means it lights at any duty; see Config::backlightFloorPermille.
+    "backlight.floor_permille": 0,
 }
 # Carrier wiring only some boards have. Absent means -1 (no such line), so a
 # descriptor written before a field existed stays valid without restating it.
@@ -248,6 +251,24 @@ def dac_volume_percent(descriptor: Dict[str, Any]) -> int:
     """The declared ES8311 DAC level, 0 when the descriptor cites none."""
     return descriptor.get("audio", {}).get(
         "dac_volume_percent", OPTIONAL_FIELDS["audio.dac_volume_percent"])
+
+
+def backlight_floor_permille(descriptor: Dict[str, Any]) -> int:
+    """The measured backlight floor in thousandths of full duty, 0 when none."""
+    return descriptor["backlight"].get(
+        "floor_permille", OPTIONAL_FIELDS["backlight.floor_permille"])
+
+
+def _validate_backlight_floor(descriptor: Dict[str, Any]) -> None:
+    source = _source_name(descriptor)
+    floor = backlight_floor_permille(descriptor)
+    if (not isinstance(floor, int) or isinstance(floor, bool)
+            or not 0 <= floor <= 999):
+        raise DescriptorError(
+            "%s: backlight.floor_permille must be 0..999" % source)
+    if floor != 0 and descriptor["backlight"]["kind"] not in ("pwm", "dsi_pwm"):
+        raise DescriptorError(
+            "%s: backlight.floor_permille is only for a PWM backlight" % source)
 
 
 def detection_sense(descriptor: Dict[str, Any]) -> Tuple[int, int, int]:
@@ -1278,6 +1299,7 @@ def validate_descriptors(
             descriptor, "motion.controller", MOTION_CONTROLLERS)
         _validate_audio(descriptor)
         _validate_optional_pins(descriptor)
+        _validate_backlight_floor(descriptor)
         panel_symbol = descriptor["panel"]["symbol"]
         if panel_symbol in panels:
             shared, owner = panels[panel_symbol]

@@ -133,6 +133,11 @@ touch_output = 0
 kind = "dsi_pwm"
 enable_pin = 33
 inverted = true
+# The glass is dark below about 47% PWM duty and visible from 47% (measured
+# on a 4B, 2026-10-07). A lit level below the floor is raised to it, so the
+# floor is also the dimmed status card's level: 51%, this board's own level
+# 130, which was seen lit, for margin over the threshold.
+floor_permille = 510
 
 [power]
 controller = "none"

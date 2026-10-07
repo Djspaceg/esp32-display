@@ -32,6 +32,7 @@
 #include "../doom/src/platform/doom_runtime_policy.h"
 #include "../board_bootstrap/bootstrap_protocol.h"
 #include "../libraries/espdisp_board/src/axp2101_status.h"
+#include "../libraries/espdisp_board/src/backlight_curve.h"
 #include "../libraries/espdisp_board/src/battery_estimate.h"
 #include "../libraries/espdisp_board/src/board_config.h"
 #include "../libraries/espdisp_board/src/gt911_protocol.h"
@@ -1872,6 +1873,27 @@ int main() {
       char tiny[4];
       CHECK(deviceproto::encodeIdleTextForStorage(msg, tiny, sizeof(tiny)) == 0);
     }
+  }
+
+  // --- backlight curve: with no floor, the old linear duty exactly; with one,
+  // the same duty for every level already above it, and the floor below it
+  {
+    for (int level = 0; level <= 255; ++level) {
+      const uint32_t linear10 = (uint32_t)level * 1023u / 255u;
+      CHECK(backlightcurve::duty((uint8_t)level, 0, 1023) == linear10);
+      CHECK(backlightcurve::duty((uint8_t)level, 0, 255) == (uint32_t)level);
+      const uint32_t floored = backlightcurve::duty((uint8_t)level, 470, 1023);
+      if (level == 0) {
+        CHECK(floored == 0);
+      } else {
+        CHECK(floored == (linear10 < 481 ? 481u : linear10));
+      }
+    }
+    CHECK(backlightcurve::duty(10, 470, 1023) == 481);   // the status card
+    CHECK(backlightcurve::duty(130, 470, 1023) == 521);  // unchanged
+    CHECK(backlightcurve::duty(255, 470, 1023) == 1023);
+    CHECK(backlightcurve::duty(1, 470, 255) == 120);
+    CHECK(backlightcurve::duty(1, 5000, 1023) == 1023);  // clamped to full
   }
 
   // --- backlight priority: sleep beats idle beats the user's level

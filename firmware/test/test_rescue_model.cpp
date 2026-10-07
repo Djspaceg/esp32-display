@@ -195,6 +195,12 @@ int main() {
     CHECK(sketch.find("setBrightness(panel, *cfg, rescuemodel::BACKLIGHT_LEVEL)") !=
           std::string::npos);
     CHECK(sketch.find("rescuemodel::backlightDuty(") != std::string::npos);
+    // A board's backlight floor would light a P4 near half duty; the rescue
+    // image drives its configs with the floor zeroed.
+    CHECK(sketch.find("rescueConfig.backlightFloorPermille = 0;") !=
+          std::string::npos);
+    CHECK(sketch.find("cfg = &rescueConfig;") != std::string::npos);
+    CHECK(sketch.find("cfg = &board::configFor(") == std::string::npos);
     CHECK(sketch.find("digitalWrite(cfg->pinBl") == std::string::npos);
     CHECK(sketch.find("setBrightness(panel, *cfg, 2") == std::string::npos);
     CHECK(sketch.find("WiFi.") == std::string::npos);

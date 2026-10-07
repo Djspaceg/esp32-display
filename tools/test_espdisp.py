@@ -4882,6 +4882,53 @@ def test_board_descriptor_validator():
                 "the 3.4C requires an 800x800 touch config")
     check_equal(board_descriptor.detection_touch_resolution(p4_4b), (),
                 "the 4B does not consult its touch controller")
+    # The P4 backlight floor: dark below 47% duty on a real 4B, so a floor of
+    # 51% (the 4B's own level 130, seen lit); the 4C and 3.4C carry the same
+    # until theirs is measured. Every other board lights at any duty.
+    for item in (p4_4b, p4_4c, p4_34c):
+        check_equal(board_descriptor.backlight_floor_permille(item), 510,
+                    "%s maps lit levels onto the visible duty range"
+                    % item["key"])
+    check_equal(
+        sorted(item["key"] for item in descriptors
+               if board_descriptor.backlight_floor_permille(item) != 0),
+        ["p4-wifi6-touch-lcd-34c", "p4-wifi6-touch-lcd-4b",
+         "p4-wifi6-touch-lcd-4c"],
+        "only the P4 carriers declare a backlight floor")
+    # The 4C and 3.4C configs are hand-written (migration "legacy"), so the
+    # firmware's floor must be checked against the descriptor's directly.
+    with open(os.path.join(espdisp.REPO_ROOT, "firmware", "libraries",
+                           "espdisp_board", "src", "board_config.h"),
+              encoding="utf-8") as source:
+        board_config_text = source.read()
+    for item in (p4_4c, p4_34c):
+        symbol = item["migration"]["config_symbol"]
+        body = board_config_text.split(
+            "static const Config %s = {" % symbol, 1)[-1].split("};", 1)[0]
+        written = re.findall(
+            r"/\* backlightFloorPermille \*/ (\d+),", body)
+        check_equal(
+            [int(value) for value in written],
+            [board_descriptor.backlight_floor_permille(item)],
+            "%s's hand-written floor matches its descriptor" % symbol)
+    floor_too_high = copy.deepcopy(p4_4b)
+    floor_too_high["backlight"]["floor_permille"] = 1000
+    check_descriptor_fails(
+        [floor_too_high], "backlight.floor_permille must be 0..999",
+        "a floor at full duty would leave no range to dim through")
+    floor_not_int = copy.deepcopy(p4_4b)
+    floor_not_int["backlight"]["floor_permille"] = True
+    check_descriptor_fails(
+        [floor_not_int], "backlight.floor_permille must be 0..999",
+        "a boolean is not a floor")
+    amoled = next(item for item in descriptors
+                  if item["backlight"]["kind"] == "panel_command")
+    floor_on_command = copy.deepcopy(amoled)
+    floor_on_command["backlight"]["floor_permille"] = 100
+    check_descriptor_fails(
+        [floor_on_command],
+        "backlight.floor_permille is only for a PWM backlight",
+        "a panel-command backlight has no PWM duty to floor")
     check_equal(p4_4c["detection"]["resolution"], "exactly_one",
                 "P4 panel-ID detection requires exactly one candidate")
 
@@ -7486,6 +7533,14 @@ def test_bootstrap_full_synthetic_session():
         # This session templates from the 1.3-inch board, whose MOSI is the
         # knob carrier's press switch; see the test above for that refusal.
         repo_root = repo_root_without_boards(tmp, "s3-elecrow-knob-128")
+        # Give the template a backlight floor, which bootstrap never measures,
+        # so the draft must not inherit it.
+        template_path = os.path.join(repo_root, "boards", "s3-lcd-130.toml")
+        with open(template_path, encoding="utf-8") as source:
+            template_text = source.read()
+        with open(template_path, "w", encoding="utf-8") as source:
+            source.write(template_text.replace(
+                'kind = "pwm"\n', 'kind = "pwm"\nfloor_permille = 300\n', 1))
         output = os.path.join(tmp, "synthetic-s3.toml")
         stream = BootstrapFakeStream(tty=True)
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
@@ -7520,6 +7575,12 @@ def test_bootstrap_full_synthetic_session():
                     "unmeasured RGB LED wiring is emitted inert")
         check_equal(draft["serial"]["rx"], -1,
                     "unmeasured serial RX wiring is emitted inert")
+        check_equal(
+            board_descriptor.backlight_floor_permille(next(
+                item for item in descriptors if item["key"] == "s3-lcd-130")),
+            300, "the bootstrap template carries a floor")
+        check_equal(board_descriptor.backlight_floor_permille(draft), 0,
+                    "an unmeasured backlight floor is emitted inert")
         check_equal(draft["panel"]["color_order"], "rgb",
                     "full bootstrap retains the applied RGB order")
         check_equal(draft["panel"]["invert_color"], True,

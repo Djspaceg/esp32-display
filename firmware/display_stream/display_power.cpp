@@ -2,13 +2,14 @@
 
 #include <Arduino.h>
 
+#include <backlight_curve.h>
 #include <display_backend.h>
 
 #include "app_state.h"
 #include "panel_state.h"
 
 uint8_t BL_HIGH = 128;   // 50%, Waveshare's recommended ceiling
-uint8_t BL_LOW = 24;     // ~10%
+uint8_t BL_LOW = 24;     // ~10% (a P4 lights it at its backlight floor)
 uint8_t BL_IDLE = 10;
 uint8_t BL_SURVEY = 255;
 
@@ -107,7 +108,9 @@ void driveBrightness(uint8_t level) {
     boarddisplay::setBrightness(panel, *bcfg, level);
   } else if (bcfg->hasBacklightPin()) {
     // An active-low backlight (a P-FET gate) takes the complementary duty.
-    analogWrite(bcfg->pinBl, bcfg->backlightInverted ? 255 - level : level);
+    const uint8_t duty = (uint8_t)backlightcurve::duty(
+        level, bcfg->backlightFloorPermille, 255u);
+    analogWrite(bcfg->pinBl, bcfg->backlightInverted ? 255 - duty : duty);
   } else if (panel != nullptr) {
     boarddisplay::setBrightness(panel, *bcfg, level);
   }

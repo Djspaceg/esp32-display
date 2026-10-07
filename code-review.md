@@ -721,3 +721,65 @@ Scope: the round-3 changes only. Verdict: approved, no new findings.
 - R3-4 verified. There is no recursion. The new clause runs on the main actor and is harmless.
 
 Final gate on this code: swift test 822 tests 0 failures; run_tests.sh exit 0; test_espdisp.py 1980 checks passed (gate-*.log).
+
+## P4 backlight floor (p4-display-goes-black)
+
+Two rounds by an independent review agent (read-only; no builds, flashing or
+serial). Full texts: review-round1.md and review-round2.md in the scratch folder
+/Users/stepblk/Source/esp32-display-p4dark. No CR: this repo is not a CRUX
+package, so there is no AutoSDE session.
+
+### Round 1 (on a remap of 1-255 onto [47%, full])
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| F1 not checked on glass; 47% margin thin | blocking | Carried into round 2 (R2-1); verified on hardware after the floor change. |
+| F2 every P4 level brighter, more LED current on boards with POWERON history | non-blocking | Fixed: the curve is now a clamp, max(floor, old linear duty), so levels that already lit keep their duty. DECISIONS D1. |
+| F3 rescue-image staleness gate red | non-blocking | Planned: artifacts-only second commit built from a clean clone of the fix commit (D5). |
+| F4 4C/3.4C descriptor floor not tied to their hand-written configs | non-blocking | Fixed: test_espdisp parses board_config.h and compares both floors with the descriptors (mutation-checked by the reviewer). |
+| F5 bootstrap drafts inherit an unmeasured floor | non-blocking | Fixed: the draft builder pops floor_permille. |
+| F6 only p4 compiled after display_power.cpp changed | non-blocking | Fixed: p4, s3, c6, c3 compiled on the final sources; both suites re-run. |
+| F7 nothing guards rescue's floor reset | nit | Fixed: test_rescue_model checks rescue.ino zeroes the floor and uses its copy. |
+| F8 rescue says "shows RESCUE" on a P4 whose glass is dark | nit | Accepted as a residual (pre-existing darkness, unchanged by design). |
+| F9 three stale comments | nit | Fixed. |
+
+### Round 2 (on the clamp at 470)
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| R2-1 the card sits exactly on the single 47% reading | blocking | Fixed: floor 510 (51%, the 4B's own level 130, seen lit). DECISIONS D2. Verified on both boards' glass by the human (see DECISIONS evidence). |
+| R2-2 the bootstrap inert check passed with or without the fix | non-blocking | Fixed: the synthetic session's template now carries floor 300; with the pop removed the check fails ("got 300, want 0"). |
+| R2-3 DECISIONS draft described the remap | non-blocking | Fixed: D1/D2 rewritten to the clamp with its visible costs. |
+| R2-4 host suite log older than the last test edit | nit | Fixed: run_tests.sh re-run on the final tree. Compiles in the shared tree included another worker's edits; the clean-clone release build is the authoritative one. |
+| R2-5 hand-written floor check covers 4C/3.4C only | nit | Accepted: the 4B is generated, and another check pins the set of boards with a floor. |
+
+The reviewer confirmed the clamp math for every floor 0..65535 at 8 and 10 bit
+(monotonic, 255 is full, floor 0 byte-identical to the old duty, no overflow),
+the Config initializers, rescue's config copy, and that brightness reporting
+(EINF/EACK, CFGSHOW) still reports the level.
+
+### Call sites
+
+Every backlight writer in firmware/, with its verdict under the final clamp
+(floor 510 on P4 = 522/1023; floor 0 everywhere else, byte-identical).
+
+Sinks:
+- libraries/espdisp_board/src/panel_init_dsi.h boardpaneldsi::setBrightness (ledc_set_duty): floored, floor latched at init. The only LEDC writer.
+- panel_init_dsi.h ledc_channel_config duty 0: initial off, unaffected.
+- libraries/espdisp_board/src/display_backend.h boarddisplay::setBrightness: DSI to the floored path; CO5300 panel command unfloored (validator forbids a floor there).
+- display_stream/display_power.cpp driveBrightness: DSI branch floored; analogWrite branch floored at 8 bit, inverted after the curve.
+- libraries/espdisp_board/src/board_detect.h darkenUnresolvedBacklight: digital off, unaffected.
+
+display_stream (all through driveBrightness/applyBacklight, so floored on P4):
+- display_stream.ino boot screen applyBacklight, driveBrightness(0) before and after panel init, ESLP/EWAK, status card on/off: floored; the card is the fix.
+- display_power.cpp DISPOFF driveBrightness(0), applyBacklight, updateIdentify (255 vs BL_LOW, now 1023 vs 522 on P4).
+- control_apply.cpp brightness, level, power; input_touch.cpp touch-wake start/expiry (the reported "dark again after 10 s" path); input_button.cpp BOOT/knob; frame_pipeline.cpp first frame; ota_service.cpp; serial_config.cpp CFGFIXEDBL, CFGPOWER, CFGBRIGHTLEVELS, CFGBRIGHT; boot_menu.cpp; ui_screens.cpp selector, menu and survey at BL_SURVEY 255 (full either way).
+- doom and quake bridges: no backlight writes; a game boot sets BL_HIGH 128, 513/1023 linear, so 522 on a P4.
+
+Other sketches:
+- rescue/rescue.ino setBrightness(32/0) and analogWrite(backlightDuty): floor zeroed in rescueConfig, so 128/1023 as before (D4).
+- display_test/display_test.ino setBrightness(128) on DSI: 513 linear, raised to 522; analogWrite(128) non-DSI raw.
+- board_bootstrap/board_bootstrap.ino setBrightness on candidateConfig ({} so floor 0) and analogWrite: raw, by design for a measuring tool.
+- tools/espdisp_bootstrap.py: drafts drop floor_permille; retune keeps it.
+
+No stream-firmware path writes a lit duty below the floor on a P4.

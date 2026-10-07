@@ -14,6 +14,7 @@
 #include <esp_lcd_jd9365.h>
 #include <esp_lcd_st7703.h>
 
+#include "backlight_curve.h"
 #include "board_config.h"
 #include "panel_orientation.h"
 
@@ -39,6 +40,7 @@ inline uint16_t panelWidth = 0;
 inline uint16_t panelHeight = 0;
 inline int8_t backlightPin = board::NO_PIN;
 inline int8_t backlightEnablePin = board::NO_PIN;
+inline uint16_t backlightFloorPermille = 0;
 
 static bool IRAM_ATTR onColorDone(esp_lcd_panel_handle_t,
                                   esp_lcd_dpi_panel_event_data_t *, void *) {
@@ -68,6 +70,7 @@ inline bool init(const board::Config &cfg, size_t maxTransfer,
   panelHeight = cfg.panel->height;
   backlightPin = cfg.pinBl;
   backlightEnablePin = cfg.pinBlEnable;
+  backlightFloorPermille = cfg.backlightFloorPermille;
 
   if (backlightEnablePin != board::NO_PIN) {
     pinMode(backlightEnablePin, OUTPUT);
@@ -335,7 +338,8 @@ inline void applyOrientation(const board::Config &cfg, bool landscape,
 
 inline bool setBrightness(uint8_t level) {
   if (backlightPin == board::NO_PIN) return false;
-  const uint32_t duty = ((uint32_t)level * 1023u) / 255u;
+  const uint32_t duty =
+      backlightcurve::duty(level, backlightFloorPermille, 1023u);
   if (backlightEnablePin != board::NO_PIN) {
     digitalWrite(backlightEnablePin, level == 0 ? LOW : HIGH);
   }

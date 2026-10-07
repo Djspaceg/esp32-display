@@ -372,6 +372,7 @@ def _config_initializer(descriptor: Dict[str, Any]) -> str:
         *(str(board_descriptor.optional_pin(descriptor, "carrier." + key))
           for key in ("pin_panel_power", "pin_encoder_a", "pin_encoder_b")),
         _bool(descriptor["led"]["channel_order"] == "grb"),
+        str(board_descriptor.backlight_floor_permille(descriptor)),
     ]
     rendered = []
     for index in range(0, len(values), 6):

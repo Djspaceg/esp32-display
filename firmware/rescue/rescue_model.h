@@ -96,11 +96,14 @@ static const char *const BRIDGE_PIN_FIELDS[] = {"pinSerialRx", "pinSerialTx"};
 /// its panel at: enough to read RESCUE, about an eighth of full. A board that
 /// browns out under the stream firmware's draw (a P4 restarting on POWERON
 /// every few seconds) must not hit the same limit on the image meant to save
-/// it, so the rescue image never drives its backlight any brighter.
+/// it, so the rescue image never drives its backlight any brighter. That
+/// includes a board's backlight floor (Config::backlightFloorPermille), which
+/// the rescue image ignores: on a P4 the glass stays dark at this level.
 static const uint8_t BACKLIGHT_LEVEL = 32;
 
 /// The PWM duty for a level; an active-low backlight (a P-FET gate) takes the
-/// complement, as display_stream's driveBrightness() does.
+/// complement, as display_stream's driveBrightness() does (which also applies
+/// a board's backlight floor; this does not, see BACKLIGHT_LEVEL).
 constexpr uint8_t backlightDuty(uint8_t level, bool inverted) {
   return inverted ? (uint8_t)(255 - level) : level;
 }

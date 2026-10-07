@@ -399,7 +399,12 @@
       "properties": {
         "kind": {"enum": ["none", "pwm", "panel_command", "dsi_pwm"]},
         "enable_pin": {"$ref": "#/$defs/pin"},
-        "inverted": {"type": "boolean"}
+        "inverted": {"type": "boolean"},
+        "floor_permille": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        }
       }
     },
     "power": {

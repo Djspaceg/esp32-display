@@ -133,6 +133,11 @@ touch_output = 0
 kind = "dsi_pwm"
 enable_pin = 33
 inverted = true
+# The PWM feeds the AP3032 boost's feedback node, so low duty shuts the boost
+# off: a lit level below the floor is raised to it.
+# The 4B's floor. This 4C was dark at 9% duty too; its own threshold is not
+# yet measured.
+floor_permille = 510
 
 [power]
 controller = "none"

@@ -264,7 +264,12 @@ void setup() {
     return;
   }
 
-  cfg = &board::configFor(variant);
+  // Without the backlight floor, so BACKLIGHT_LEVEL is the raw duty it has
+  // always been: on a P4 the floor would light it near half (see rescue_model.h).
+  static board::Config rescueConfig;
+  rescueConfig = board::configFor(variant);
+  rescueConfig.backlightFloorPermille = 0;
+  cfg = &rescueConfig;
   pins = rescuemodel::planPins(*cfg);
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   if (pins.uartBridge) {

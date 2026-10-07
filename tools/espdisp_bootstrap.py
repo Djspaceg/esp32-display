@@ -1132,6 +1132,9 @@ def _descriptor_from_evidence(
         if backlight_enable_active_high is not None
         else -1
     )
+    # The floor is measured on the glass, which bootstrap does not do, so a
+    # draft never inherits its candidate's.
+    draft["backlight"].pop("floor_permille", None)
     draft["power"].update(
         {
             "controller": "none",
