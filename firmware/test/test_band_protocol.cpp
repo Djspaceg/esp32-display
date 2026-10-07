@@ -633,7 +633,7 @@ int main() {
   {
     using namespace bootmenu;
     // Streaming is always offered, always first. A game needs its image, its
-    // board, and its data; nothing offers Quake until a runtime exists.
+    // board, and its data: Quake's data is a valid pack in quake_pak.
     Capabilities caps;
     CHECK(offeredModes(caps).count == 1);
     CHECK(offeredModes(caps).modes[0] == Mode::Streaming);
@@ -654,9 +654,24 @@ int main() {
     caps.quakeBuild = true;
     CHECK(offeredModes(caps).count == 2);
     caps.quakeBoard = true;
+    // A Quake image on a Quake board without a usable pak: not offered.
+    CHECK(offeredModes(caps).count == 2);
+    caps.quakePakReady = true;
     const Choices all = offeredModes(caps);
     CHECK(all.count == 3);
     CHECK(all.modes[2] == Mode::Quake);
+    // Each of the three is required on its own.
+    caps.quakeBuild = false;
+    CHECK(offeredModes(caps).count == 2);
+    caps.quakeBuild = true;
+    caps.quakeBoard = false;
+    CHECK(offeredModes(caps).count == 2);
+    caps.quakeBoard = true;
+    // Quake without Doom's WAD is still a menu of two.
+    caps.doomWadReady = false;
+    const Choices quakeAlone = offeredModes(caps);
+    CHECK(quakeAlone.count == 2);
+    CHECK(quakeAlone.modes[1] == Mode::Quake);
     // anyGameBuilt is what gates the triple press and the data read, so it must
     // answer for every game, not just Doom: a Quake-only image still has a menu.
     Capabilities none;
@@ -673,6 +688,8 @@ int main() {
     quakeOnly.quakeBuild = true;
     quakeOnly.quakeBoard = true;
     CHECK(anyGameBuilt(quakeOnly));
+    // Like Doom's WAD, the pak is not part of what is built.
+    CHECK(!quakeOnly.quakePakReady);
 
     CHECK(strcmp(modeLabel(Mode::Streaming), "STREAMING") == 0);
     CHECK(strcmp(modeLabel(Mode::Doom), "DOOM") == 0);

@@ -21,15 +21,16 @@ static const size_t MODE_MAX = 3;
 
 // What this image, this resolved board, and this flash can run. A game is
 // offered only when all of them hold. Doom also needs a WAD that passes the
-// Doom boot's own check, which only a full USB flash writes. No Quake runtime
-// exists yet, so nothing sets quakeBuild; a Quake runtime supplies its own
-// build flag, board predicate, and data check here.
+// Doom boot's own check, which only a full USB flash writes. Quake likewise
+// needs a pack in its quake_pak partition that passes the Quake boot's own
+// check, which only `tools/espdisp.py write-data quake_pak` writes.
 struct Capabilities {
   bool doomBuild = false;
   bool doomBoard = false;
   bool doomWadReady = false;
   bool quakeBuild = false;
   bool quakeBoard = false;
+  bool quakePakReady = false;
 };
 
 struct Choices {
@@ -51,7 +52,7 @@ inline Choices offeredModes(const Capabilities &caps) {
   if (caps.doomBuild && caps.doomBoard && caps.doomWadReady) {
     choices.modes[choices.count++] = Mode::Doom;
   }
-  if (caps.quakeBuild && caps.quakeBoard) {
+  if (caps.quakeBuild && caps.quakeBoard && caps.quakePakReady) {
     choices.modes[choices.count++] = Mode::Quake;
   }
   return choices;

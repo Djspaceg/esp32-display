@@ -81,6 +81,8 @@
 // Doom remains a developer/profile-gated feature inside supported family images.
 #if defined(ESPDISP_DOOM_RUNTIME)
 #include <doom_mode.h>
+// Quake rides on the Doom runtime on the P4 carriers (quake_build.h decides).
+#include <quake_mode.h>
 #endif
 
 using namespace bandproto;
@@ -200,6 +202,27 @@ void setup() {
       }
     }
     doomPrefs.end();
+  }
+#endif
+#if defined(ESPDISP_QUAKE_RUNTIME)
+  // Quake's one-shot request, consumed as early and for the same reason: a
+  // missing pak or a Quake crash comes back up streaming instead of looping.
+  bool quakeRequested = false;
+  {
+    Preferences quakePrefs;
+    if (!quakePrefs.begin("espdisp", false)) {
+      Serial.println("quake: NVS unavailable; ignoring one-shot request");
+    } else {
+      if (quakePrefs.getBool("quakeonce", false)) {
+        quakeRequested = quakePrefs.remove("quakeonce") &&
+                         !quakePrefs.isKey("quakeonce");
+        if (!quakeRequested) {
+          Serial.println(
+              "quake: could not consume one-shot request; staying normal");
+        }
+      }
+      quakePrefs.end();
+    }
   }
 #endif
   // The boot-menu request a triple press saved, consumed just as early: a
@@ -374,6 +397,33 @@ void setup() {
       delay(50);
       ESP.restart();
       return;
+    }
+  }
+#endif
+#if defined(ESPDISP_QUAKE_RUNTIME)
+  if (quakeRequested) {
+    if (!quakeSupportsBoard(boardVariant)) {
+      Serial.printf("quake: profile %s is not eligible; continuing normal boot\n",
+                    board::variantToken(boardVariant));
+    } else {
+      // The same isolated boot as Doom's above: no frame buffers, WiFi,
+      // mDNS, OTA, UDP receive or loop-task watchdog.
+      panelRotation = 0;
+      panelManuallyOff = false;
+      displaySleeping = false;
+      userBlLevel = BL_HIGH;
+      pinMode(bcfg->pinBootButton, INPUT_PULLUP);
+      if (!initDisplay()) {
+        Serial.println("quake: display init failed; restarting normal firmware");
+        delay(50);
+        ESP.restart();
+        return;
+      }
+      applyPanelConfig(false);
+      applyBacklight();
+      // Every way out of quake_enter() restarts: the player leaving, or a
+      // failure with its reason on Serial and the panel.
+      quake_enter();
     }
   }
 #endif

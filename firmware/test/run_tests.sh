@@ -18,6 +18,8 @@ DOOM_BRIDGE_OUT="$TMP/test_doom_audio_bridge"
 MEM_REPORT_OUT="$TMP/test_mem_report"
 USB_INPUT_OUT="$TMP/test_usb_input"
 USB_HOST_INIT_OUT="$TMP/test_usb_host_init"
+QUAKE_PAK_OUT="$TMP/test_quake_pak"
+QUAKE_INPUT_OUT="$TMP/test_quake_input"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -112,6 +114,7 @@ clang++ "${CXXFLAGS[@]}" \
   -I"$HERE/fakes/doom_entry" \
   -I"$HERE/../libraries/espdisp_board/src" \
   -I"$HERE/../doom/src" \
+  -I"$HERE/../quake/src" \
   -o "$DOOM_ENTRY_OUT" \
   "$HERE/test_doom_entry_gate.cpp" \
   "$HERE/../display_stream/input_button.cpp" \
@@ -194,6 +197,23 @@ clang++ "${CXXFLAGS[@]}" \
   "$HERE/test_usb_host_init.cpp" \
   "$HERE/../doom/src/platform/doom_usb_input.cpp"
 "$USB_HOST_INIT_OUT"
+
+# Quake's read-only data file: which partition contents are a usable pack and
+# how the one file it serves reads and seeks. Checks the real shareware pak0
+# too where tools/fetch_game_data.sh has put it.
+clang++ "${CXXFLAGS[@]}" \
+  -DQUAKE_TEST_PAK_PATH="\"$HERE/../quake/id1/pak0.pak\"" \
+  -o "$QUAKE_PAK_OUT" "$HERE/test_quake_pak.cpp"
+"$QUAKE_PAK_OUT"
+
+# Quake's touch, BOOT and USB key meanings and its frame placement.
+clang++ "${CXXFLAGS[@]}" \
+  -I"$HERE/../doom/src" \
+  -o "$QUAKE_INPUT_OUT" "$HERE/test_quake_input.cpp"
+"$QUAKE_INPUT_OUT"
+
+# Quake's PSRAM relocation lists agree with themselves and the engine sources.
+bash "$HERE/test_quake_statics.sh"
 
 # The 5 s status line is unchanged and the mem line after it parses.
 clang++ "${CXXFLAGS[@]}" \

@@ -95,8 +95,27 @@ static int textStaysOnTheGlass(const Panel &panel, const char *reason) {
   return 0;
 }
 
+// The Quake boot shows the same card under its own headline: what is drawn
+// differs from Doom's card for the same reason, and stays on the glass.
+static int quakeHeadlineReplacesDoomsOnly() {
+  const int w = 720, h = 720;
+  std::vector<uint8_t> doomCard((size_t)w * h * 2, 0);
+  std::vector<uint8_t> quakeCard((size_t)w * h * 2, 0);
+  std::vector<uint8_t> defaultCard((size_t)w * h * 2, 0);
+  const char *reason = "Quake data unusable: no PACK header";
+  doomfail::compose(doomCard.data(), w, h, false, reason,
+                    doomfail::HEADLINE);
+  doomfail::compose(defaultCard.data(), w, h, false, reason);
+  doomfail::compose(quakeCard.data(), w, h, false, reason,
+                    "Quake could not start");
+  CHECK(defaultCard == doomCard);
+  CHECK(quakeCard != doomCard);
+  return 0;
+}
+
 int main() {
   if (wrapsAndMarksTruncation() != 0) return 1;
+  if (quakeHeadlineReplacesDoomsOnly() != 0) return 1;
   for (const Panel &panel : DOOM_PANELS) {
     if (textStaysOnTheGlass(panel, "Doom WAD unusable: doom_wad is past the 16 MiB flash map") != 0 ||
         textStaysOnTheGlass(panel, LONG_REASON) != 0 ||

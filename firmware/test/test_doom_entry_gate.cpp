@@ -279,6 +279,18 @@ extern "C" const char *doom_wad_preflight(void) {
   return wadProblem;
 }
 
+// ---- Fakes for the Quake library ------------------------------------------
+// The test profile is a P4 carrier, so this image carries Quake. Its pak is
+// missing unless a test says otherwise, which keeps every Doom-only case
+// above exactly as it was.
+static const char *const NO_PAK = "no quake_pak partition";
+static const char *pakProblem = NO_PAK;
+static int pakPreflightCalls = 0;
+extern "C" const char *quake_pak_preflight(void) {
+  pakPreflightCalls++;
+  return pakProblem;
+}
+
 static void bootIsrAt(bool down) {
   fakeBootLevel = down ? 0 : 1;
   bootIsr();
@@ -313,6 +325,8 @@ static void resetObservations() {
   fakeNvsBools.clear();
   infoBarShown.clear();
   preflightCalls = 0;
+  pakProblem = NO_PAK;
+  pakPreflightCalls = 0;
   displayPrefSaves = 0;
   fakeNvsWritesFail = false;
   menuDraws = 0;
@@ -350,11 +364,13 @@ static MenuRun runMenu(bool requested) {
   return result;
 }
 
-static wifiselector::SelectorLayout menuLayout() {
+// The menu's layout for `rows` choices: STREAMING and DOOM unless a test also
+// offers QUAKE.
+static wifiselector::SelectorLayout menuLayout(size_t rows = 2) {
   return wifiselector::selectorLayout(
       PANEL_GEOMETRY.frameWidth(panelLandscape),
       PANEL_GEOMETRY.frameHeight(panelLandscape), bcfg->panel->roundDisplay,
-      2, 0);
+      rows, 0);
 }
 
 // The raw controller coordinate the board's own calibration maps onto (x, y),
@@ -1196,6 +1212,112 @@ static int ineligibleProfileNeverChecksWad() {
   return 0;
 }
 
+// Rule: with a usable pak the menu offers Quake third, and an untouched menu
+// still streams without saving any game request.
+static int validPakOffersQuake() {
+  resetObservations();
+  wadProblem = nullptr;
+  pakProblem = nullptr;
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(menuLabels == "STREAMING,DOOM,QUAKE");
+  CHECK(pakPreflightCalls == 1);
+  CHECK(fakeNvsBools.count("quakeonce") == 0);
+  CHECK(fakeNvsBools.count("doomonce") == 0);
+  CHECK(Serial.captured.find("boot menu: power-on, 3 modes, streaming in 5s") !=
+        std::string::npos);
+  return 0;
+}
+
+// Rule: an unusable pak is reported and Quake is left out; Doom is unaffected.
+static int unusablePakLeavesQuakeOut() {
+  resetObservations();
+  wadProblem = nullptr;
+  pakProblem = "no PACK header";
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(menuLabels == "STREAMING,DOOM");
+  CHECK(Serial.captured.find("boot menu: Quake not offered (no PACK header)") !=
+        std::string::npos);
+  return 0;
+}
+
+// Rule: Quake alone is a menu: no WAD, a usable pak.
+static int quakeWithoutWadStillOpensTheMenu() {
+  resetObservations();
+  wadProblem = "no doom_wad partition";
+  pakProblem = nullptr;
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(menuLabels == "STREAMING,QUAKE");
+  CHECK(Serial.captured.find("boot menu: Doom not offered") !=
+        std::string::npos);
+  return 0;
+}
+
+// Rule: choosing QUAKE saves its own one-shot request and restarts, exactly as
+// DOOM does; nothing asks for Doom.
+static int bootPressesThenHoldChooseQuake() {
+  resetObservations();
+  wadProblem = nullptr;
+  pakProblem = nullptr;
+  const uint32_t t = fakeNow;
+  script = {{t + 500, ScriptedInput::BootDown, 0, 0},   // cancels only
+            {t + 600, ScriptedInput::BootUp, 0, 0},
+            {t + 800, ScriptedInput::BootDown, 0, 0},   // moves to DOOM
+            {t + 900, ScriptedInput::BootUp, 0, 0},
+            {t + 1100, ScriptedInput::BootDown, 0, 0},  // moves to QUAKE
+            {t + 1200, ScriptedInput::BootUp, 0, 0},
+            {t + 1500, ScriptedInput::BootDown, 0, 0},  // held: chooses
+            {t + 2500, ScriptedInput::BootUp, 0, 0}};
+  CHECK(runMenu(false) == MenuRun::Restarted);
+  CHECK(menuSelected == 2);
+  CHECK(menuMessage == "STARTING QUAKE");
+  CHECK(fakeNvsBools.count("quakeonce") == 1);
+  CHECK(fakeNvsBools["quakeonce"]);
+  CHECK(fakeNvsBools.count("doomonce") == 0);
+  CHECK(ESP.restarts == 1);
+  CHECK(Serial.captured.find(
+            "boot menu: Quake chosen; restarting into isolated mode") !=
+        std::string::npos);
+  releaseBoot(t + 2500);
+  return 0;
+}
+
+// Rule: a Quake request that cannot be saved keeps the menu up, as Doom's does.
+static int quakeSaveFailureKeepsTheMenuUp() {
+  resetObservations();
+  wadProblem = nullptr;
+  pakProblem = nullptr;
+  touchAvailable = true;
+  const wifiselector::SelectorLayout layout = menuLayout(3);
+  const uint32_t t = fakeNow;
+  touchTap(t + 300, layout.rowRect(2));   // cancels
+  touchTap(t + 500, layout.rowRect(2));   // highlights QUAKE
+  touchTap(t + 900, layout.connect);      // fails to save
+  touchTap(t + 1300, layout.rowRect(0));  // highlights STREAMING
+  touchTap(t + 1700, layout.connect);     // streams
+  fakeNvsWritesFail = true;
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(ESP.restarts == 0);
+  CHECK(fakeNvsBools.count("quakeonce") == 0);
+  CHECK(Serial.captured.find("boot menu: Quake request could not be saved") !=
+        std::string::npos);
+  return 0;
+}
+
+// Rule: a board Quake does not run on never reads the quake_pak partition,
+// even in an image that carries Quake (an S3 Doom board here).
+static int nonQuakeBoardNeverReadsThePak() {
+  resetObservations();
+  const board::Variant saved = boardVariant;
+  boardVariant = board::Variant::AmoledCo5300;
+  wadProblem = nullptr;
+  pakProblem = nullptr;
+  CHECK(runMenu(false) == MenuRun::Returned);
+  boardVariant = saved;
+  CHECK(menuLabels == "STREAMING,DOOM");
+  CHECK(pakPreflightCalls == 0);
+  return 0;
+}
+
 int main() {
   bcfg = &board::configFor(boardVariant);
   PANEL_GEOMETRY = {bcfg->panel->width, bcfg->panel->height};
@@ -1242,6 +1364,12 @@ int main() {
   if (doomSaveFailureKeepsTheMenuUp() != 0) return 1;
   if (menuRequestSaveFailureStaysNormal() != 0) return 1;
   if (touchRoutingReachesTheMenuFirst() != 0) return 1;
+  if (validPakOffersQuake() != 0) return 1;
+  if (unusablePakLeavesQuakeOut() != 0) return 1;
+  if (quakeWithoutWadStillOpensTheMenu() != 0) return 1;
+  if (bootPressesThenHoldChooseQuake() != 0) return 1;
+  if (quakeSaveFailureKeepsTheMenuUp() != 0) return 1;
+  if (nonQuakeBoardNeverReadsThePak() != 0) return 1;
   printf("test_doom_entry_gate: %d checks passed\n", checks);
   return 0;
 }

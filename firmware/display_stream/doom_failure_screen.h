@@ -70,9 +70,10 @@ inline int wrapText(const char *text, int columns, char lines[][LINE_CAP],
   return count;
 }
 
-// Compose the card into an RGB565 big-endian buffer of width x height.
+// Compose the card into an RGB565 big-endian buffer of width x height. Quake's
+// boot shows the same card under its own headline.
 inline void compose(uint8_t *buf, int width, int height, bool roundDisplay,
-                    const char *reason) {
+                    const char *reason, const char *headline = HEADLINE) {
   const uint8_t hi = BACKGROUND >> 8, lo = BACKGROUND & 0xFF;
   const size_t bytes = (size_t)width * (size_t)height * 2;
   for (size_t i = 0; i < bytes; i += 2) {
@@ -83,7 +84,7 @@ inline void compose(uint8_t *buf, int width, int height, bool roundDisplay,
   const int margin = textMargin(width, height, roundDisplay);
   const int textWidth = width - 2 * margin;
   int scale = 2;
-  if ((int)strlen(HEADLINE) * 6 * scale > textWidth) scale = 1;
+  if ((int)strlen(headline) * 6 * scale > textWidth) scale = 1;
   const int columns = textWidth / (6 * scale);
 
   char lines[MAX_REASON_LINES][LINE_CAP];
@@ -101,7 +102,7 @@ inline void compose(uint8_t *buf, int width, int height, bool roundDisplay,
     const int x = (width - (int)strlen(text) * 6 * scale) / 2;
     drawOutlinedText(buf, width, height, x, atY, text, scale);
   };
-  centered(HEADLINE, y);
+  centered(headline, y);
   y += lineH * 2;
   for (int i = 0; i < reasonLines; i++) {
     centered(lines[i], y);

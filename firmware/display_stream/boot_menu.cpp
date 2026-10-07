@@ -21,6 +21,8 @@
 
 #if defined(ESPDISP_DOOM_RUNTIME)
 #include <doom_mode.h>
+// Defines ESPDISP_QUAKE_RUNTIME where this image carries Quake.
+#include <quake_mode.h>
 #endif
 
 bool bootMenuActive = false;
@@ -42,6 +44,8 @@ static uint32_t menuClockMs() {
 static const char *BOOT_MENU_REQUEST_KEY = "bootmenu";
 // Read by setup() before the normal boot; see the Doom branch there.
 static const char *DOOM_REQUEST_KEY = "doomonce";
+// Read by setup() likewise; see the Quake branch there.
+static const char *QUAKE_REQUEST_KEY = "quakeonce";
 
 // Without the WAD check, which reads flash; see bootMenuCapabilities().
 static bootmenu::Capabilities builtCapabilities() {
@@ -50,6 +54,10 @@ static bootmenu::Capabilities builtCapabilities() {
   caps.doomBuild = true;
 #endif
   caps.doomBoard = board::supportsDoom(boardVariant);
+#if defined(ESPDISP_QUAKE_RUNTIME)
+  caps.quakeBuild = true;
+  caps.quakeBoard = quakeSupportsBoard(boardVariant);
+#endif
   return caps;
 }
 
@@ -65,6 +73,18 @@ static bootmenu::Capabilities bootMenuCapabilities(const char **refusal) {
     if (wadProblem != nullptr) {
       if (refusal != nullptr) *refusal = wadProblem;
       Serial.printf("boot menu: Doom not offered (%s)\n", wadProblem);
+    }
+  }
+#endif
+#if defined(ESPDISP_QUAKE_RUNTIME)
+  if (caps.quakeBuild && caps.quakeBoard) {
+    // The Quake boot's own check, read with esp_partition_read(); the pak
+    // crosses 16 MiB, so it is never mapped.
+    const char *pakProblem = quake_pak_preflight();
+    caps.quakePakReady = pakProblem == nullptr;
+    if (pakProblem != nullptr) {
+      if (refusal != nullptr && *refusal == nullptr) *refusal = pakProblem;
+      Serial.printf("boot menu: Quake not offered (%s)\n", pakProblem);
     }
   }
 #endif
@@ -253,9 +273,20 @@ static void chooseHighlighted() {
       ESP.restart();
       return;
     case bootmenu::Mode::Quake:
-      // Never offered until a Quake runtime exists. Its handoff goes here, a
-      // one-shot flag and restart like Doom's above.
-      leaveMenuForStreaming("no Quake runtime in this image");
+      // Doom's handoff: a one-shot flag the next boot consumes before
+      // anything fallible, then a restart.
+      if (!saveOneShotFlag(QUAKE_REQUEST_KEY)) {
+        bootMenuMessage = "SAVE FAILED";
+        Serial.println("boot menu: Quake request could not be saved");
+        drawBootMenu();
+        return;
+      }
+      bootMenuMessage = "STARTING QUAKE";
+      Serial.println("boot menu: Quake chosen; restarting into isolated mode");
+      drawBootMenu();
+      Serial.flush();
+      delay(50);
+      ESP.restart();
       return;
   }
 }

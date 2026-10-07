@@ -1,4 +1,4 @@
-// Early boot-mode menu: Streaming (the default), Doom, and a slot for Quake.
+// Early boot-mode menu: Streaming (the default), Doom, and Quake.
 // Runs inside setup() after the panel, touch, and BOOT input are up and before
 // WiFi starts. Driven by touch and by BOOT the same way as the WiFi selector:
 // tap or short press moves, START or a BOOT hold chooses. A power-on menu
@@ -15,9 +15,10 @@
 // loop, and the model out of those builds keeps them off an image that is
 // already near its flash limit.
 //
-// A Quake runtime adds its flag to this condition AND its build/board pair to
-// builtCapabilities() in boot_menu.cpp, which bootmenu::anyGameBuilt() reads.
-// This marker alone would compile the menu in without offering anything.
+// The Quake runtime rides on Doom's (firmware/quake/src/quake_build.h), so
+// this condition covers it too; its build/board pair is in builtCapabilities()
+// in boot_menu.cpp, which bootmenu::anyGameBuilt() reads. This marker alone
+// would compile the menu in without offering anything.
 #if defined(ESPDISP_DOOM_RUNTIME)
 #define ESPDISP_BOOT_MENU_RUNTIME 1
 #endif
