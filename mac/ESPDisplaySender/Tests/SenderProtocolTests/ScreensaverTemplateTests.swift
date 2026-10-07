@@ -50,16 +50,43 @@ final class ScreensaverTemplateTests: XCTestCase {
         XCTAssertEqual(expand("{ name }", values: values).lines, ["kitchen"])
     }
 
-    /// The standard template has to reproduce the card the firmware draws by
-    /// itself, or "Use Default" would quietly change what the panel shows.
-    func testStandardTemplateIsTheFirmwareCard() {
-        let values = ScreensaverTemplate.Values(
-            name: "blakes-teeny-touch", address: "192.168.1.69", rssi: "-59 dBm")
+    /// The app's default card, as the user asked for it, with every token
+    /// substituted and every line inside the panel's budget.
+    func testStandardTemplateIsTheAppDefaultCard() {
+        XCTAssertEqual(
+            ScreensaverTemplate.standard,
+            "{name}\n{address}\n{signal} wifi ({rssi})\nup for {uptime}")
 
-        let result = expand(ScreensaverTemplate.standard, values: values)
+        let result = expand(ScreensaverTemplate.standard, values: .example)
+
+        XCTAssertEqual(result.unknownTokens, [])
+        XCTAssertEqual(result.lines, [
+            "blakes-teeny-touch", "192.168.1.69", "Good wifi (-59 dBm)", "up for 10m",
+        ])
+    }
+
+    /// Words around tokens that all came out empty are dropped with them, so
+    /// an unknown signal does not leave "wifi ()" on the panel.
+    func testLineWhoseTokensAreAllEmptyIsDropped() {
+        let values = ScreensaverTemplate.Values(name: "desk", uptime: "5m")
 
         XCTAssertEqual(
-            result.lines, ["blakes-teeny-touch", "192.168.1.69", "wifi -59 dBm"])
+            expand(ScreensaverTemplate.standard, values: values).lines,
+            ["desk", "up for 5m"])
+        XCTAssertEqual(
+            expand("{signal} wifi ({rssi})", values: .init(rssi: "-60 dBm")).lines,
+            ["wifi (-60 dBm)"])
+        XCTAssertEqual(expand("no tokens here", values: .init()).lines, ["no tokens here"])
+    }
+
+    /// A token cannot span a newline: each line is expanded on its own, so a
+    /// stray brace stays literal and cannot swallow the next line's token.
+    func testTokensDoNotSpanLines() {
+        let values = ScreensaverTemplate.Values(name: "desk")
+
+        XCTAssertEqual(expand("{na\nme}", values: values).lines, ["{na", "me}"])
+        XCTAssertEqual(expand("{na\nme}", values: values).unknownTokens, [])
+        XCTAssertEqual(expand("50% {off\n{name}", values: values).lines, ["50% {off", "desk"])
     }
 
     // MARK: unknown tokens

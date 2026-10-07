@@ -476,13 +476,13 @@ struct PanelDetailView: View {
         }
         .onAppear {
             editedName = panel.displayName
-            editedIdleText = panel.idleText
+            editedIdleText = panel.screensaverTemplate
             // CFGSHOW is asynchronous. `selectedSSID` remains derived from the
             // optional explicit choice, so this reply can fill the empty
             // default without being mistaken for a user selection.
             manager.refreshCurrentSSID(for: panel.serviceName)
         }
-        .onChange(of: panel.idleText) { _, newValue in
+        .onChange(of: panel.screensaverTemplate) { _, newValue in
             editedIdleText = newValue
         }
         .onChange(of: panel.displayName) { _, newValue in
@@ -1184,9 +1184,10 @@ struct PanelDetailView: View {
                         .accessibilityLabel("Screensaver template")
                     HStack(spacing: 8) {
                         Button("Save") {
+                            editedIdleText = ScreensaverTemplate.effective(editedIdleText)
                             manager.setIdleText(editedIdleText, for: panel.serviceName)
                         }
-                        .disabled(editedIdleText == panel.idleText)
+                        .disabled(editedIdleText == panel.screensaverTemplate)
                         Menu("Insert Token") {
                             ForEach(ScreensaverTemplate.tokens) { token in
                                 Button("\(token.placeholder) — \(token.summary)") {
@@ -1199,12 +1200,7 @@ struct PanelDetailView: View {
                             editedIdleText = ScreensaverTemplate.standard
                         }
                         .disabled(editedIdleText == ScreensaverTemplate.standard)
-                        .help("The card the panel draws on its own, as a template you can edit")
-                        Button("Clear") {
-                            editedIdleText = ""
-                            manager.setIdleText("", for: panel.serviceName)
-                        }
-                        .disabled(panel.idleText.isEmpty && editedIdleText.isEmpty)
+                        .help("The app's default card, as a template you can edit")
                     }
                 }
             }

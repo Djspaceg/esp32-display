@@ -116,7 +116,7 @@ final class CocoaScriptingHandler {
             "rotationDegrees": panel.rotation * 90,
             "source": panel.source.label,
             "sourceDescription": panel.sourceDescription,
-            "idleText": panel.idleText,
+            "idleText": panel.screensaverTemplate,
             "gesturePreset": panel.gesturePreset.rawValue,
             "firmwareVersion": panel.firmwareVersion ?? NSNull(),
             "address": panel.address ?? NSNull(),

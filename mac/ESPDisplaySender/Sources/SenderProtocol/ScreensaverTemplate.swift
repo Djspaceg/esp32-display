@@ -5,9 +5,9 @@ import Foundation
 /// The panel shows this card whenever no sender is driving it. The firmware used
 /// to hardcode three lines - name, address, signal - which was the only thing it
 /// could do, since it has no clock, no storage for text, and no idea what the
-/// user cares about. Those three lines are now expressed as a template instead
-/// (see `standard`), so the built-in card and a user's own card go through the
-/// same code path and the user can keep, reorder, reword, or drop any part of it.
+/// user cares about. The app's default card is now a template instead (see
+/// `standard`), so the default and a user's own card go through the same code
+/// path and the user can keep, reorder, reword, or drop any part of it.
 ///
 /// Tokens are wrapped in braces - `{name}` - which is the convention most people
 /// have already met in other templating systems, and both brace characters are
@@ -40,16 +40,17 @@ public enum ScreensaverTemplate {
         Token(name: "uptime", summary: "How long the panel has been up", example: "10m"),
     ]
 
-    /// The card the firmware draws when it has been sent nothing, expressed as a
-    /// template. Offered in the UI as the starting point, so "what it shows by
-    /// default" and "what you can edit" are the same thing.
-    public static let standard = "{name}\n{address}\nwifi {rssi}"
+    /// The app's default card. A panel that was never given a template of its
+    /// own is given this one when it connects, and the editor shows it in place
+    /// of a blank, so "what it shows by default" and "what you can edit" are the
+    /// same thing.
+    public static let standard = "{name}\n{address}\n{signal} wifi ({rssi})\nup for {uptime}"
 
     /// What the tokens stand for, for one panel at one moment.
     ///
     /// Every field is a plain string, already formatted, because the panel font
     /// has no notion of anything else. An empty string means "not known yet",
-    /// which drops the line if the token was all that was on it.
+    /// which drops the line if no token on it produced anything.
     public struct Values: Sendable, Equatable {
         public var name: String
         public var address: String
@@ -131,13 +132,35 @@ public enum ScreensaverTemplate {
     ///
     /// An unrecognised token is left exactly as written rather than blanked:
     /// blanking it would leave the user staring at a panel with a missing word
-    /// and nothing to explain why.
+    /// and nothing to explain why. A line whose tokens all came out empty is
+    /// dropped, words around them included: "wifi ()" with no signal known
+    /// says nothing.
     public static func expand(_ template: String, values: Values) -> Expansion {
         var unknown: [String] = []
-        var substituted = ""
-        substituted.reserveCapacity(template.count)
+        var kept: [String] = []
+        for line in template.split(
+            omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        {
+            let result = expandLine(line, values: values, unknown: &unknown)
+            if result.tokens > 0 && result.filled == 0 { continue }
+            kept.append(result.text)
+        }
+        return Expansion(
+            lines: IdleText.sanitize(kept.joined(separator: "\n")),
+            unknownTokens: unknown)
+    }
 
-        var rest = Substring(template)
+    /// One line of a template, with how many tokens it held and how many of
+    /// those produced text. An unknown token counts as filled, since it is
+    /// kept as written.
+    private static func expandLine(
+        _ line: Substring, values: Values, unknown: inout [String]
+    ) -> (text: String, tokens: Int, filled: Int) {
+        var substituted = ""
+        var tokens = 0
+        var filled = 0
+
+        var rest = line
         while let open = rest.firstIndex(of: "{") {
             substituted += rest[rest.startIndex..<open]
             let afterOpen = rest.index(after: open)
@@ -157,23 +180,30 @@ public enum ScreensaverTemplate {
 
             let rawName = rest[afterOpen..<close]
             let name = rawName.trimmingCharacters(in: .whitespaces).lowercased()
+            tokens += 1
             if let value = values[name] {
                 substituted += value
+                if !value.isEmpty { filled += 1 }
             } else {
                 substituted += "{\(rawName)}"
+                filled += 1
                 if !unknown.contains(String(rawName)) { unknown.append(String(rawName)) }
             }
             rest = rest[rest.index(after: close)...]
         }
         substituted += rest
-
-        return Expansion(
-            lines: IdleText.sanitize(substituted), unknownTokens: unknown)
+        return (substituted, tokens, filled)
     }
 
     /// Whether a template asks for anything at all. A template of only
-    /// whitespace clears the card and lets the panel fall back to its own.
+    /// whitespace was never really set.
     public static func isEmpty(_ template: String) -> Bool {
         template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The template in effect for a stored one: the stored text, or `standard`
+    /// when it is blank.
+    public static func effective(_ template: String) -> String {
+        isEmpty(template) ? standard : template
     }
 }

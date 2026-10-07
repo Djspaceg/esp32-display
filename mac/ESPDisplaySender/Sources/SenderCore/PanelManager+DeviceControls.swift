@@ -827,10 +827,11 @@ extension PanelManager {
     /// Stored as the user typed it, tokens and all, so the editor round-trips and
     /// the values are re-substituted with fresh ones every time the panel is
     /// pushed to. Expansion and sanitizing happen on the way to the device,
-    /// whose font is a 5x7 ASCII bitmap.
+    /// whose font is a 5x7 ASCII bitmap. A blank template stores the default,
+    /// since blank is what "never set" looks like.
     func setIdleText(_ text: String, for serviceName: String) {
         guard panels.contains(where: { $0.serviceName == serviceName }) else { return }
-        updatePanel(serviceName) { $0.idleText = text }
+        updatePanel(serviceName) { $0.idleText = ScreensaverTemplate.effective(text) }
         persistIfNeeded(force: true)
         pushIdleText(to: serviceName)
     }
@@ -846,7 +847,21 @@ extension PanelManager {
             return ScreensaverTemplate.Expansion(lines: [], unknownTokens: [])
         }
         return ScreensaverTemplate.expand(
-            template ?? panel.idleText, values: panel.screensaverValues)
+            ScreensaverTemplate.effective(template ?? panel.idleText),
+            values: panel.screensaverValues)
+    }
+
+    /// Give a panel that was never assigned a screensaver the app's default, so
+    /// the record, the editor and the panel all carry the same text. A panel
+    /// with a template of its own keeps it, and one whose firmware cannot show
+    /// a template is left alone.
+    func assignDefaultScreensaverIfUnset(_ serviceName: String) {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }),
+              panel.capabilities.contains(.idleText),
+              ScreensaverTemplate.isEmpty(panel.idleText)
+        else { return }
+        updatePanel(serviceName) { $0.idleText = ScreensaverTemplate.standard }
+        persistIfNeeded(force: true)
     }
 
     func pushIdleText(to serviceName: String) {
@@ -854,11 +869,9 @@ extension PanelManager {
               let panel = panels.first(where: { $0.serviceName == serviceName }),
               panel.capabilities.contains(.idleText)
         else { return }
-        // An empty template sends an empty packet, which clears the card and
-        // lets the panel fall back to drawing its own.
         session.sendIdleText(
             ScreensaverTemplate.expand(
-                panel.idleText, values: panel.screensaverValues).lines)
+                panel.screensaverTemplate, values: panel.screensaverValues).lines)
     }
 
 }

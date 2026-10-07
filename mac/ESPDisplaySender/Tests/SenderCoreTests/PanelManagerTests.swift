@@ -567,6 +567,49 @@ final class PanelManagerTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 50_000_000)
     }
 
+    // MARK: screensaver default
+
+    /// A board nobody gave a screensaver is assigned the app's default when it
+    /// connects; one with a template of its own keeps it, and one whose
+    /// firmware cannot show a template is left alone.
+    func testConnectingAssignsTheDefaultScreensaverOnlyWhenUnset() throws {
+        var blank = controllablePanel(
+            serviceName: "blank-panel", capabilities: allControls.union(.idleText))
+        blank.hardwareID = "020000000001"
+        var spaces = controllablePanel(
+            serviceName: "spaces-panel", capabilities: allControls.union(.idleText))
+        spaces.hardwareID = "020000000002"
+        spaces.idleText = " \n "
+        var custom = controllablePanel(
+            serviceName: "custom-panel", capabilities: allControls.union(.idleText))
+        custom.hardwareID = "020000000003"
+        custom.idleText = "Studio\nback at {uptime}"
+        var incapable = controllablePanel(serviceName: "incapable-panel")
+        incapable.hardwareID = "020000000004"
+        let manager = makeManager([blank, spaces, custom, incapable])
+
+        for (index, panel) in [blank, spaces, custom, incapable].enumerated() {
+            manager.register(makeSession(name: panel.serviceName))
+            manager.update(
+                .info(try makeInfo(
+                    name: panel.serviceName,
+                    deviceID: [2, 0, 0, 0, 0, UInt8(index + 1)],
+                    capabilities: panel.capabilities)),
+                for: panel.serviceName)
+        }
+
+        func stored(_ name: String) -> String? {
+            manager.panels.first { $0.serviceName == name }?.idleText
+        }
+        XCTAssertEqual(stored("blank-panel"), ScreensaverTemplate.standard)
+        XCTAssertEqual(stored("spaces-panel"), ScreensaverTemplate.standard)
+        XCTAssertEqual(stored("custom-panel"), "Studio\nback at {uptime}")
+        XCTAssertEqual(stored("incapable-panel"), "")
+        XCTAssertEqual(
+            manager.screensaverPreview(for: "blank-panel").lines,
+            ["blank-panel", "Excellent wifi (-52 dBm)", "up for 1m"])
+    }
+
     // MARK: firmware updates
 
     /// OTA gets its own refusal because the generic one is true and useless:

@@ -176,10 +176,30 @@ final class IdleTextManagerTests: XCTestCase {
             ["caf", "second line"])
     }
 
-    func testPreviewIsEmptyWithoutText() {
+    /// A panel that was never given a template shows the app's default rather
+    /// than a blank card.
+    func testBlankTemplateShowsTheDefault() throws {
+        let manager = makeManager(capabilities: .idleText)
+        let values = try XCTUnwrap(manager.panels.first).screensaverValues
+        let standard = ScreensaverTemplate.expand(
+            ScreensaverTemplate.standard, values: values).lines
+
+        XCTAssertFalse(standard.isEmpty)
+        XCTAssertEqual(manager.screensaverPreview(for: "studio-display").lines, standard)
+        XCTAssertEqual(
+            manager.screensaverPreview(for: "studio-display", template: "  \n").lines,
+            standard)
+    }
+
+    /// Saving a blank editor stores the default, so the editor shows it again
+    /// and the record says what the panel is showing.
+    func testSavingBlankStoresTheDefault() {
         let manager = makeManager(capabilities: .idleText)
 
-        XCTAssertEqual(manager.screensaverPreview(for: "studio-display").lines, [])
+        manager.setIdleText("custom", for: "studio-display")
+        manager.setIdleText(" \n", for: "studio-display")
+
+        XCTAssertEqual(manager.panels.first?.idleText, ScreensaverTemplate.standard)
     }
 
     func testUnknownPanelIsIgnored() {

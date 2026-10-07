@@ -240,6 +240,26 @@ final class CocoaScriptingHandlerTests: XCTestCase {
         XCTAssertEqual(manager.panels.first?.gesturePreset, .windowCycling)
     }
 
+    /// A display that was never given a screensaver reports the app's default
+    /// rather than a blank template.
+    func testBlankIdleTextReportsTheDefault() throws {
+        let (handler, _, _) = subject()
+
+        let status = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(handler.displayStatus("panel-a").utf8))
+                as? [String: Any])
+        XCTAssertEqual(status["idleText"] as? String, ScreensaverTemplate.standard)
+
+        try handler.setIdleText("custom", display: "panel-a")
+        try handler.setIdleText("", display: "panel-a")
+        let cleared = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(handler.displayStatus("panel-a").utf8))
+                as? [String: Any])
+        XCTAssertEqual(cleared["idleText"] as? String, ScreensaverTemplate.standard)
+    }
+
     func testInvalidIdleTextAndGesturePresetAreRejected() {
         let (handler, _, _) = subject()
 

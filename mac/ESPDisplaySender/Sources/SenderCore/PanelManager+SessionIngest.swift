@@ -192,9 +192,11 @@ extension PanelManager {
                 Self.apply(info, to: &panel, keepBrightness: keepBrightness)
             }
             followReportedRotation(from: previousRotation, for: serviceName)
-            // EINF means the device just connected or rebooted, so anything it
-            // was told before is gone. This is the only moment the sender knows
-            // to push it again.
+            // EINF arrives on connect, after a reboot, and every 2s after
+            // that, so pushing here both restores what a rebooted panel lost
+            // and keeps live tokens fresh. It is also where a panel nobody
+            // has set up a screensaver for is given the default one.
+            assignDefaultScreensaverIfUnset(serviceName)
             pushIdleText(to: serviceName)
         case .acknowledgement(let acknowledgement):
             let keepBrightness = ignoreReportedBrightness(

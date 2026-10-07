@@ -145,8 +145,12 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// `source` while a display is being resolved or a window is missing.
     var sourceDescription = "Automatic"
     /// Lines to show on the panel's own status card while no sender is driving
-    /// it. Persisted, and pushed to the device whenever it reports in.
+    /// it. Persisted, and pushed to the device whenever it reports in. Blank
+    /// means never set; read `screensaverTemplate` for what is in effect.
     var idleText = ""
+    /// The screensaver template in effect: the stored one, or the app's default
+    /// for a panel that was never given one.
+    var screensaverTemplate: String { ScreensaverTemplate.effective(idleText) }
     /// Which gesture bindings this panel uses. Persisted, so a preset chosen once
     /// still applies after a restart.
     var gesturePreset: GesturePreset = .standard

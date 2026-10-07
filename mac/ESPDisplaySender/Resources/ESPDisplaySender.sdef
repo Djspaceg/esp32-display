@@ -69,7 +69,7 @@
         <command name="set display idle text" code="ESPDidle" description="Set the template shown by a panel while no frames are arriving.">
             <cocoa class="ESPDisplaySetIdleTextCommand"/>
             <direct-parameter type="text" description="A service name or unique display name."/>
-            <parameter name="text" code="idtx" type="text" description="Screensaver template text; an empty string clears it.">
+            <parameter name="text" code="idtx" type="text" description="Screensaver template text; an empty string restores the default.">
                 <cocoa key="text"/>
             </parameter>
         </command>
