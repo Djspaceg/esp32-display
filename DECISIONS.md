@@ -454,7 +454,8 @@ D5 Build on Espressif core 3.3.12 (ESP-Hosted 2.12.13). Why: the human chose "Up
 ### Open questions
 
 - Upgrade the project to Espressif core 3.3.12? Answered by the human: "Upgrade the core to 3.3.12" (D5).
-- Which WiFi should the 4C join for the final check? Its NVS now holds "Office", which it cannot reach; it joined "Stephens Manor" before. Raised to the human. Default: board WiFi left untouched, so the shipping-build WiFi check waits.
+- Which WiFi should the 4C join for the final check? Its NVS now holds "Office", which it cannot reach. Answered by the human: Stephens Manor, "if the button wasn't disabled and the app showed the board was connected" - the Mac app would not let them change it. Asked them to refresh the board's USB port in the app and apply it; the check waits on that.
+- The Mac app probes a newly seen USB port once (refreshUSBPorts, 2 s CFGSHOW) and never again on its own, so one missed probe greys out Apply until a manual refresh or replug. Likely missed here because my serial log held the 4C's port; the board answers CFGSHOW 5/5 in ~1.5 s. Default: not fixed in this task.
 - Does the speaker amp brown out the board? Default: no. No reset occurred with the backend running, but no on-demand amp test was possible while the Mac streamed audio.
 
 ### Gate facts
