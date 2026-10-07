@@ -492,14 +492,15 @@ The Mac app now asks an unanswered USB board again (2, 4, 8, 16 s, then every 30
 
 D1 Retry a display's own port (matched by hardware ID or saved path) until it answers or is unplugged, at most once every 30 s. Let any other serial device go after about 2 minutes. Why: otherwise every Arduino or printer gets CFGSHOW forever. If overruled: change usbUnknownPortRetryAttempts. Supersedes: retry every port forever, because review round 2 showed that disturbs other serial devices.
 D6 Count a record's saved path as ownership even when the record has a hardware ID. Why: a silent board has reported no ID, so the path is its only link to its display; the 4C's record is this case. If overruled: a reused path is no longer asked forever, but a silent 4C is let go after 2 minutes.
-D2 Pause retries app-wide while any flash, onboarding, repair, preset sheet, preset sync, USB control write or the Add sheet's esptool read is running. Why: a silent board may have no hardware ID to match a run against, so per-board matching could write CFGSHOW over esptool. If overruled: match per board and accept that risk.
+D2 Pause retries app-wide while any flash, onboarding, repair, preset sheet or sync, USB control write or the Add sheet's esptool read runs. Why: a silent board may have no hardware ID to match a run against. If overruled: match per board and risk writing over esptool.
 D3 Probes never write to a port another program holds under an exclusive lock, and only a CFGINFO reply counts as an identity. Why: the bundled esptool 5.3.1 locks the port (esptool-lock-check.log), and a CFGOK read off a shared tty used to wipe the board's identity. If overruled: drop refuseIfLocked in probePort.
-D4 No banner for a board that does not answer. Why: mid-boot, blank and foreign-firmware boards look the same; the disabled control already says it is not verified yet. If overruled: a standing issue after a few minutes that resolves itself on answer or unplug.
+D4 No banner for a silent board. Why: mid-boot, blank and foreign-firmware boards look alike; the disabled control already says it is unverified. If overruled: a self-clearing standing issue after a few minutes.
 D5 The Add sheet takes a later answer for a board it found silent, but leaves the chosen mode alone. Why: switching the mode under the user is worse than a stale suggestion. If overruled: re-suggest the mode on that answer.
 
 ### Open questions
 
 - Live report "the app can't reconnect to either board": not this defect. The 4B (id e8f60ae0b55a) still runs 1.5.0 from db534a4 on core 3.3.11, and its C6 WiFi link is dead (rpcage 23 min, Req_WifiStaGetApInfo unanswered), the deadlock 3.3.12 fixes. The 4C (id e8f60ae0a0e4, 80bfd51) reports connected=1 at 192.168.1.137 with rssi -45, but the Mac gets no ARP reply on either interface. Default: nothing changed here. Reflash the 4B with the 3.3.12 bundle; the 4C's network path needs its own look (board-serial-reads.log).
+- Untracked mac-bench-bridge.py kept the tree dirty. Answered by the human: "Move it beside the checkout"; moved unchanged to /Users/stepblk/Source/.
 
 ### Gate facts
 
@@ -510,8 +511,7 @@ Red first: usb-retry-red-green.log (old code asks once, stays unverified) and us
 
 ### Evidence
 
-- usb-retry-red-green.log: the end-to-end test failing on old code, then passing.
-- usb-retry-review-red-green.log: the lock and CFGOK tests, red then green.
+- usb-retry-red-green.log, usb-retry-review-red-green.log: red then green.
 - gate-swift-test.log, gate-firmware-tests.log, gate-test-espdisp.log: the gate.
 - esptool-lock-check.log: esptool 5.3.1 holds an exclusive flock while it runs.
 - board-serial-reads.log: both P4 boards' CFGSHOW and logs for the live report.
