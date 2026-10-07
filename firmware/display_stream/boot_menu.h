@@ -1,7 +1,9 @@
 // Early boot-mode menu: Streaming (the default), Doom, and a slot for Quake.
 // Runs inside setup() after the panel, touch, and BOOT input are up and before
 // WiFi starts. Driven by touch and by BOOT the same way as the WiFi selector:
-// tap or short press moves, START or a BOOT hold chooses. A game is entered
+// tap or short press moves, START or a BOOT hold chooses. A power-on menu
+// counts down 5 s to streaming until the first press stops it; a triple-press
+// menu never counts down. A game is entered
 // through its existing one-shot flag and a restart, so it still owns the panel
 // and PSRAM alone, and a failed or missing game boots back into streaming.
 #pragma once
@@ -44,11 +46,21 @@ void requestBootMenuAndRestart();
 // knows to repaint what it drew over. A game choice restarts and never returns.
 bool runBootMenuIfDue(bool requested);
 
-// While true, handleButton() and serviceTouch() route input here.
+// While true, handleButton() and serviceTouch() route input here. Each takes
+// the time the press went down: a press that began before the menu opened is
+// ignored, and the first press on a counting menu only stops the countdown.
+//
+// Times are on bootMenuClockMs(), the clock BOOT edges are stamped with.
+// bootMenuPressDown() must be called when a press goes down: that is what stops
+// the countdown, so a press still held when it would have run out cannot leak
+// into the streaming firmware. A knob turn is one press: turnBootMenu().
 extern bool bootMenuActive;
-void moveBootMenu(int direction);
-void activateBootMenu();
-void handleBootMenuTap(int16_t x, int16_t y);
+uint32_t bootMenuClockMs();
+void bootMenuPressDown(uint32_t at);
+void moveBootMenu(int direction, uint32_t pressStartedAt);
+void turnBootMenu(int direction, int steps, uint32_t at);
+void activateBootMenu(uint32_t pressStartedAt);
+void handleBootMenuTap(int16_t x, int16_t y, uint32_t pressStartedAt);
 
 #else
 
@@ -62,8 +74,11 @@ inline bool bootMenuOffered(const char **refusal) {
 inline void requestBootMenuAndRestart() {}
 inline bool runBootMenuIfDue(bool) { return false; }
 inline constexpr bool bootMenuActive = false;
-inline void moveBootMenu(int) {}
-inline void activateBootMenu() {}
-inline void handleBootMenuTap(int16_t, int16_t) {}
+inline uint32_t bootMenuClockMs() { return 0; }
+inline void bootMenuPressDown(uint32_t) {}
+inline void moveBootMenu(int, uint32_t) {}
+inline void turnBootMenu(int, int, uint32_t) {}
+inline void activateBootMenu(uint32_t) {}
+inline void handleBootMenuTap(int16_t, int16_t, uint32_t) {}
 
 #endif

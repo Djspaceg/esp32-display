@@ -18,6 +18,9 @@ static touchgesture::Tracker touchTracker;
 static uint16_t touchSequence = 0;
 // True while the current press has already been spent waking the panel.
 static bool touchConsumed = false;
+// When the current or last press went down. The gesture is only known on
+// release, but the boot menu judges a press by when it began.
+static uint32_t touchPressStartedAt = 0;
 // Report a completed gesture to whoever is driving this panel.
 //
 // The internal gesture enum and the wire one are separate types: touch_gesture.h
@@ -131,20 +134,28 @@ void serviceTouch() {
   touchgesture::Event event =
       touchTracker.onReport(sample.pressed, p.x, p.y, millis());
 
+  if (event.pressStarted) {
+    // On the boot menu's clock, the one BOOT edges use. A press stops a
+    // counting menu as it lands: a hold too long to be a tap classifies as no
+    // gesture at all, so waiting for the gesture would never stop it.
+    touchPressStartedAt = bootMenuClockMs();
+    if (bootMenuActive) bootMenuPressDown(touchPressStartedAt);
+  }
+
   // The boot menu runs before WiFi, so nothing here is for a sender, and the
   // panel is lit for the menu, so no press is spent waking it.
   if (bootMenuActive) {
     switch (event.gesture) {
       case touchgesture::Gesture::SwipeUp:
       case touchgesture::Gesture::SwipeLeft:
-        moveBootMenu(1);
+        moveBootMenu(1, touchPressStartedAt);
         break;
       case touchgesture::Gesture::SwipeDown:
       case touchgesture::Gesture::SwipeRight:
-        moveBootMenu(-1);
+        moveBootMenu(-1, touchPressStartedAt);
         break;
       case touchgesture::Gesture::Tap:
-        handleBootMenuTap(event.startX, event.startY);
+        handleBootMenuTap(event.startX, event.startY, touchPressStartedAt);
         break;
       default:
         break;

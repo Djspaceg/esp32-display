@@ -293,17 +293,20 @@ static bool selectorOwnsInput() {
   return bootMenuActive || wifiSelectorActive;
 }
 
-static void moveSelector(int direction) {
+// pressStartedAt is when the press went down, on the tick clock BOOT edges are
+// stamped with (bootMenuClockMs()). The boot menu ignores a press that began
+// before it opened; the WiFi selector does not need it.
+static void moveSelector(int direction, uint32_t pressStartedAt) {
   if (bootMenuActive) {
-    moveBootMenu(direction);
+    moveBootMenu(direction, pressStartedAt);
   } else {
     moveWifiSelector(direction);
   }
 }
 
-static void activateSelector() {
+static void activateSelector(uint32_t pressStartedAt) {
   if (bootMenuActive) {
-    activateBootMenu();
+    activateBootMenu(pressStartedAt);
   } else {
     activateWifiSelector();
   }
@@ -317,10 +320,15 @@ static void applyEncoderTurn(int16_t steps) {
   Serial.printf("knob: turn %+d\n", (int)steps);
   const int8_t direction = steps > 0 ? 1 : -1;
   if (selectorOwnsInput()) {
-    const int16_t count = steps > 0 ? steps : (int16_t)-steps;
-    for (int16_t i = 0; i < count && i < MAX_SELECTOR_STEPS_PER_PASS; ++i) {
-      moveSelector(direction);
+    int16_t count = steps > 0 ? steps : (int16_t)-steps;
+    if (count > MAX_SELECTOR_STEPS_PER_PASS) count = MAX_SELECTOR_STEPS_PER_PASS;
+    if (bootMenuActive) {
+      // One turn is one press, however many detents it crossed, so the turn
+      // that stops the countdown does not also move the highlight.
+      turnBootMenu(direction, count, buttonClockMs());
+      return;
     }
+    for (int16_t i = 0; i < count; ++i) moveWifiSelector(direction);
     return;
   }
   if (surveyActive) {
@@ -409,6 +417,10 @@ void handleButton() {
         extraLongFired = false;
         turnedWhileDown = false;
         downAt = edge.atMs;
+        // The press going down is what stops a counting boot menu, so one
+        // still held when the countdown would have run out cannot have its
+        // release land on the streaming firmware.
+        if (bootMenuActive) bootMenuPressDown(downAt);
       }
       continue;
     }
@@ -436,11 +448,11 @@ void handleButton() {
     if (selectorOwnsInput()) {
       if (!longFired && heldMs >= LONG_PRESS_MS) {
         longFired = true;
-        activateSelector();
+        activateSelector(downAt);
       }
       wasDown = false;
       if (!longFired && heldMs >= DEBOUNCE_MS) {
-        moveSelector(1);
+        moveSelector(1, downAt);
       }
       continue;
     }
@@ -473,7 +485,7 @@ void handleButton() {
           // STREAMING closes the boot menu while BOOT is still down, and the
           // release must not then count as a normal rotate or power press.
           selectorEntryHold = true;
-          activateSelector();
+          activateSelector(downAt);
         }
       } else if (surveyActive) {
         if (!longFired && heldMs >= LONG_PRESS_MS) {

@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 using TickType_t = uint32_t;
+using TaskHandle_t = void *;
 static constexpr uint32_t portTICK_PERIOD_MS = 1;
 struct portMUX_TYPE {};
 #define portMUX_INITIALIZER_UNLOCKED {}

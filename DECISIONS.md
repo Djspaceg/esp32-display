@@ -7,9 +7,10 @@ Each finished branch keeps its own record below.
 ### Outcome
 
 An on-glass menu picks Streaming (the default), Doom, or a reserved Quake slot,
-replacing the hidden triple-press Doom handoff. It shows for 3 s after a user
-reset and 15 s when a triple press asks for it; left alone it streams. Driven by
-touch or by BOOT alone. Unverified on hardware: no board was attached.
+replacing the hidden triple-press Doom handoff. After a user reset it counts down
+5 s to streaming, shown on its title; the first touch or BOOT press stops the
+countdown and the menu then waits for a choice. A triple press opens it with no
+countdown. Left untouched, it streams. Driven by touch or by BOOT alone.
 
 ### Decisions to evaluate
 
@@ -21,7 +22,7 @@ D5 A panel the user turned off (`pwroff`) gets no timed menu; a triple press sti
 D6 The menu reuses the WiFi selector's layout, hit testing, and controls (`wifi_selector_model.h`). Why: one design, geometry already tested at every panel size. If overruled: give the menu its own layout.
 D7 Quake occupies a real enum slot, label, and capability pair that nothing sets, so it never appears. Why: a clean slot the runtime author fills in one place. If overruled: drop the slot until a runtime exists.
 D8 Menu, screen, and model compile only into images carrying a game runtime (`ESPDISP_BOOT_MENU_RUNTIME`, today from `ESPDISP_DOOM_RUNTIME`); other builds get inline no-op stubs, so call sites stay unconditional. Why: a C6 runs no game and its image is at 94% of flash. Measured: +5478 B unguarded, +76 B guarded. If overruled: compile everywhere and accept the bytes.
-D9 Input renews the countdown, never past a 60 s ceiling from when the menu opened. Why: without it a case pressing the glass or a noisy controller holds the menu open for ever and the board never streams; the review demonstrated 47 minutes. If overruled: change MAX_OPEN_MS.
+D9 The first press on a counting menu only stops the countdown (it does not also move or choose), and after that the menu stays until a choice, with no ceiling; a triple-press menu never counts down; a press that went down before the menu opened is ignored. Why: the human found the 3 s menu gone before it could be used, and asked for exactly these rules. Supersedes: input renewing a 15 s idle window under a 60 s ceiling, because that still dismissed a menu someone was reading. If overruled: restore a ceiling in bootmenu::Countdown.
 
 ### Open questions
 
@@ -61,6 +62,11 @@ WAD once per boot. Also unverified: countdown timing, touch coordinates, and
 legibility on the 128x128 knob. Renders are host-side.
 Pre-existing and untouched: a triple press whose NVS write fails leaves the
 survey toggle from presses one and two in place (now covered by a test).
+- With no ceiling, a touch controller that reports a phantom press at boot leaves
+  the menu up until someone chooses; the board does not stream until then.
+- A finger already on the glass when the menu opens is first seen by the touch
+  poll inside the menu, so it counts as a menu press. The press that opens the
+  menu is BOOT, which is ignored correctly.
 
 ## P4 hosted-WiFi RPC watchdog (p4-hosted-rpc-offloop)
 

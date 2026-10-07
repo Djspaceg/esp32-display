@@ -690,49 +690,105 @@ int main() {
     CHECK(opening(ResetKind::User, true, 2, true, true) ==
           Opening::Requested);
 
-    Countdown timed;
-    timed.start(1000, Opening::Timed);
-    CHECK(timed.secondsLeft(1000) == 3);
-    CHECK(timed.secondsLeft(1001) == 3);
-    CHECK(timed.secondsLeft(2000) == 2);
-    CHECK(timed.secondsLeft(3999) == 1);
-    CHECK(!timed.expired(3999));
-    CHECK(timed.expired(4000));
-    CHECK(timed.secondsLeft(4000) == 0);
-    timed.start(1000, Opening::Timed);
-    timed.noteInput(3500);
-    CHECK(!timed.expired(18499));
-    CHECK(timed.expired(18500));
-    Countdown requested;
-    requested.start(0xFFFFF000u, Opening::Requested);
-    CHECK(requested.secondsLeft(0xFFFFF000u) == 15);
-    CHECK(!requested.expired(0xFFFFF000u + 14999u));
-    CHECK(requested.expired(0xFFFFF000u + 15000u));
+    // A countdown that ran out reads 0 and stays expired; across millis()
+    // wrap it still expires 5 s after opening.
+    Countdown ranOut;
+    ranOut.start(0xFFFFF000u, Opening::Timed);
+    CHECK(!ranOut.expired(0xFFFFF000u + 4999u));
+    CHECK(ranOut.expired(0xFFFFF000u + 5000u));
+    CHECK(ranOut.secondsLeft(0xFFFFF000u + 5000u) == 0);
 
-    // The ceiling: input cannot hold the menu open past MAX_OPEN_MS, so a
-    // board nobody is touching always reaches streaming.
-    Countdown held;
-    held.start(1000, Opening::Timed);
-    for (uint32_t at = 1000; at < 1000 + MAX_OPEN_MS; at += 1000) {
-      held.noteInput(at);
-      CHECK(!held.expired(at));
+    // ---- Boot menu interaction rules (human feedback: it dismissed in about
+    // two seconds, too fast to use) ----
+    // Rule 1: the power-on countdown is 5 s, shown counting down from 5, and a
+    // board nobody touches still ends up streaming.
+    {
+      Countdown power;
+      power.start(1000, Opening::Timed);
+      CHECK(power.counting());
+      CHECK_EQ(power.secondsLeft(1000), 5u);
+      CHECK_EQ(power.secondsLeft(1999), 5u);
+      CHECK_EQ(power.secondsLeft(2000), 4u);
+      CHECK_EQ(power.secondsLeft(5999), 1u);
+      CHECK(!power.expired(5999));
+      CHECK(power.expired(6000));
     }
-    CHECK(held.expired(1000 + MAX_OPEN_MS));
-    held.noteInput(1000 + MAX_OPEN_MS + 5000);
-    CHECK(held.expired(1000 + MAX_OPEN_MS + 5000));
-    // And the title never promises time the ceiling will not give.
-    Countdown nearCeiling;
-    nearCeiling.start(0, Opening::Timed);
-    nearCeiling.noteInput(MAX_OPEN_MS - 2000);
-    CHECK(nearCeiling.secondsLeft(MAX_OPEN_MS - 2000) == 2);
-    CHECK(nearCeiling.secondsLeft(MAX_OPEN_MS - 1) == 1);
-    CHECK(nearCeiling.secondsLeft(MAX_OPEN_MS) == 0);
-    // Across wrap, both deadlines included.
-    Countdown wrappedHold;
-    wrappedHold.start(0xFFFFF000u, Opening::Timed);
-    wrappedHold.noteInput(0xFFFFF000u + 1000u);
-    CHECK(!wrappedHold.expired(0xFFFFF000u + 2000u));
-    CHECK(wrappedHold.expired(0xFFFFF000u + MAX_OPEN_MS));
+    // Rule 2: the FIRST press cancels the countdown and does nothing else; the
+    // menu then stays up, however long, until something is chosen.
+    {
+      Countdown power;
+      power.start(1000, Opening::Timed);
+      CHECK(power.onPress(2500) == PressEffect::CancelOnly);
+      CHECK(!power.counting());
+      CHECK(!power.expired(6000));
+      CHECK(!power.expired(1000 + 3600000u));
+      CHECK(!power.expired(1000 + 0x7FFFFFFFu));
+      // Every later press acts, and none restarts a countdown.
+      CHECK(power.onPress(3000) == PressEffect::Act);
+      CHECK(power.onPress(9000) == PressEffect::Act);
+      CHECK(!power.counting());
+      CHECK(!power.expired(1000 + 3600000u));
+    }
+    // Rule 3: a menu opened on purpose (the triple press) has no countdown at
+    // all, so its first press acts rather than merely cancelling.
+    {
+      Countdown asked;
+      asked.start(1000, Opening::Requested);
+      CHECK(!asked.counting());
+      CHECK(!asked.expired(1000 + 3600000u));
+      CHECK(asked.onPress(1500) == PressEffect::Act);
+      CHECK(!asked.expired(1000 + 3600000u));
+    }
+    // Rule 4: a press that went down before the menu opened (pressed during
+    // boot) is neither a cancel nor a selection, and leaves the countdown
+    // running.
+    {
+      Countdown power;
+      power.start(1000, Opening::Timed);
+      CHECK(power.onPress(900) == PressEffect::Ignore);
+      CHECK(power.counting());
+      CHECK(power.expired(6000));
+      Countdown asked;
+      asked.start(1000, Opening::Requested);
+      CHECK(asked.onPress(999) == PressEffect::Ignore);
+      // A press starting exactly as the menu opens is the menu's.
+      CHECK(asked.onPress(1000) == PressEffect::Act);
+      // Across millis() wrap the same rules hold.
+      Countdown wrapped;
+      wrapped.start(0xFFFFFF00u, Opening::Timed);
+      CHECK(wrapped.onPress(0xFFFFFE00u) == PressEffect::Ignore);
+      CHECK(wrapped.counting());
+      CHECK(wrapped.onPress(0x00000020u) ==
+            PressEffect::CancelOnly);
+      CHECK(!wrapped.expired(0x00000020u + 3600000u));
+    }
+
+    // Review finding: a press cancels when it goes DOWN, so one made late in
+    // the countdown can never still be down when it runs out, and a touch held
+    // too long to be a tap still cancels. Its own completion is then spent.
+    {
+      Countdown power;
+      power.start(1000, Opening::Timed);
+      CHECK(power.onPressDown(5900) == PressEffect::CancelOnly);
+      CHECK(!power.counting());
+      CHECK(!power.expired(6000));
+      CHECK(!power.expired(1000 + 3600000u));
+      // Released after the deadline: spent on the cancel, no action.
+      CHECK(power.onPress(5900) == PressEffect::CancelOnly);
+      // The next press, down and completed, acts.
+      CHECK(power.onPressDown(7000) == PressEffect::Act);
+      CHECK(power.onPress(7000) == PressEffect::Act);
+      // A down before the menu opened is ignored and leaves the clock running.
+      Countdown early;
+      early.start(1000, Opening::Timed);
+      CHECK(early.onPressDown(999) == PressEffect::Ignore);
+      CHECK(early.counting());
+      // A triple-press menu: a down is just a press.
+      Countdown asked;
+      asked.start(1000, Opening::Requested);
+      CHECK(asked.onPressDown(1200) == PressEffect::Act);
+      CHECK(asked.onPress(1200) == PressEffect::Act);
+    }
 
     TriplePress triple;
     CHECK(!triple.record(100));

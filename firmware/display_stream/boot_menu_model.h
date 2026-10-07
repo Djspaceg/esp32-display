@@ -80,8 +80,8 @@ enum class ResetKind : uint8_t {
 
 enum class Opening : uint8_t {
   None,
-  Timed,      // after a user reset: a short countdown, then streaming
-  Requested,  // after a triple press: a longer countdown, then streaming
+  Timed,      // after a user reset: a 5 s countdown, then streaming
+  Requested,  // after a triple press: no countdown; stays until chosen
 };
 
 inline Opening opening(ResetKind reset, bool requested, size_t offeredCount,
@@ -96,51 +96,90 @@ inline Opening opening(ResetKind reset, bool requested, size_t offeredCount,
   return Opening::None;
 }
 
-static const uint32_t TIMED_WINDOW_MS = 3000;
-static const uint32_t IDLE_WINDOW_MS = 15000;
-// A ceiling on the whole menu, independent of input. Streaming is the default,
-// and the default has to be reachable without a person present: a case pressing
-// the glass, a noisy touch controller, or a sticky BOOT button would otherwise
-// extend the idle window forever and the board would never stream. Generous
-// next to the seconds a real choice takes.
-static const uint32_t MAX_OPEN_MS = 60000;
+// The power-on countdown, shown on the title counting down to streaming. Long
+// enough to read the menu and reach for it: the first version was 3 s and was
+// gone before a person could use it.
+static const uint32_t TIMED_WINDOW_MS = 5000;
 
-// Counts down to streaming. Input restarts it at the idle window, so a person
-// reading the menu is not cut off and a menu walked away from mid-way still ends
-// up streaming - but never past MAX_OPEN_MS from the moment it opened. Unsigned
-// subtraction keeps both deadlines valid across wrap.
+// What one press on the menu does.
+enum class PressEffect : uint8_t {
+  Ignore,      // began before the menu opened: not this menu's press
+  CancelOnly,  // stopped the countdown and did nothing else
+  Act,         // moves or chooses as usual
+};
+
+// The menu's clock. A power-on menu counts down TIMED_WINDOW_MS to streaming,
+// so a board nobody touches comes up streaming. A press stops that countdown
+// the moment it goes down - not when it is released, or a press made late in
+// the countdown would still be down when it ran out and its release would land
+// on the streaming firmware as a rotate or power press. That press does nothing
+// else, so stopping the clock is never also a selection; from then on the menu
+// stays until something is chosen. A menu asked for by a triple press never
+// counts down, so its first press acts. A press that went down before the menu
+// opened (one made during boot) is ignored outright.
+//
+// Every time here is from one clock, the one BOOT edges are stamped with; the
+// caller must not mix in another. Signed differences keep every comparison
+// valid across wrap.
 class Countdown {
  public:
   void start(uint32_t now, Opening how) {
     openedAt_ = now;
-    startedAt_ = now;
-    windowMs_ = how == Opening::Requested ? IDLE_WINDOW_MS : TIMED_WINDOW_MS;
+    counting_ = how == Opening::Timed;
+    cancelPending_ = false;
   }
 
-  void noteInput(uint32_t now) {
-    startedAt_ = now;
-    windowMs_ = IDLE_WINDOW_MS;
+  // A press went down at `at`. Stops a running countdown at once.
+  PressEffect onPressDown(uint32_t at) {
+    if (beganBeforeOpen(at)) return PressEffect::Ignore;
+    if (counting_) {
+      counting_ = false;
+      cancelPending_ = true;
+      cancelledAt_ = at;
+      return PressEffect::CancelOnly;
+    }
+    return PressEffect::Act;
   }
+
+  // A press that went down at pressStartedAt completed (released, or held long
+  // enough to choose). The press whose down stopped the countdown is spent on
+  // that and does nothing more. A completion whose down was never reported
+  // still stops the countdown rather than acting.
+  PressEffect onPress(uint32_t pressStartedAt) {
+    if (beganBeforeOpen(pressStartedAt)) return PressEffect::Ignore;
+    if (cancelPending_ && pressStartedAt == cancelledAt_) {
+      cancelPending_ = false;
+      return PressEffect::CancelOnly;
+    }
+    if (counting_) {
+      counting_ = false;
+      return PressEffect::CancelOnly;
+    }
+    return PressEffect::Act;
+  }
+
+  bool counting() const { return counting_; }
 
   bool expired(uint32_t now) const {
-    return now - startedAt_ >= windowMs_ || now - openedAt_ >= MAX_OPEN_MS;
+    return counting_ && now - openedAt_ >= TIMED_WINDOW_MS;
   }
 
-  // Whole seconds left on whichever deadline falls first, rounded up, so the
-  // display never reads 0 while the menu is still up and never promises time
-  // the ceiling will not give.
+  // Whole seconds left, rounded up, so the title never reads 0 while the menu
+  // is still up. Zero once the countdown has stopped or run out.
   uint32_t secondsLeft(uint32_t now) const {
-    if (expired(now)) return 0;
-    const uint32_t idleLeft = windowMs_ - (now - startedAt_);
-    const uint32_t ceilingLeft = MAX_OPEN_MS - (now - openedAt_);
-    const uint32_t left = idleLeft < ceilingLeft ? idleLeft : ceilingLeft;
-    return (left + 999) / 1000;
+    if (expired(now) || !counting_) return 0;
+    return (TIMED_WINDOW_MS - (now - openedAt_) + 999) / 1000;
   }
 
  private:
+  bool beganBeforeOpen(uint32_t at) const {
+    return (int32_t)(at - openedAt_) < 0;
+  }
+
   uint32_t openedAt_ = 0;
-  uint32_t startedAt_ = 0;
-  uint32_t windowMs_ = TIMED_WINDOW_MS;
+  uint32_t cancelledAt_ = 0;
+  bool counting_ = false;
+  bool cancelPending_ = false;
 };
 
 // Three short BOOT releases inside the window request the menu from a running

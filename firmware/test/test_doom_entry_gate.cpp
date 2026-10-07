@@ -22,8 +22,12 @@
 
 #include <board_config.h>
 
+#include <board_touch.h>
+#include <touch_map.h>
+
 #include "../display_stream/app_state.h"
 #include "../display_stream/boot_menu.h"
+#include "../display_stream/input_touch.h"
 #include "../display_stream/boot_menu_model.h"
 #include "../display_stream/input_button.h"
 #include "../display_stream/wifi_selector_model.h"
@@ -75,14 +79,30 @@ const board::Config *bcfg = nullptr;
 void delay(uint32_t ms) { fakeNow += ms; }
 uint32_t millis() { return fakeNow; }
 void pinMode(int, int) {}
-int digitalRead(int) { return fakeBootLevel; }
+// Every other pin (the knob's encoder pair) keeps its own level and interrupt.
+static std::map<int, int> fakePinLevel;
+static std::map<int, void (*)()> fakePinIsr;
+static int levelOf(int pin) {
+  if (bcfg != nullptr && pin == bcfg->pinBootButton) return fakeBootLevel;
+  const auto found = fakePinLevel.find(pin);
+  return found == fakePinLevel.end() ? 1 : found->second;
+}
+int digitalRead(int pin) { return levelOf(pin); }
 int digitalPinToInterrupt(int pin) { return pin; }
 void attachInterrupt(int interrupt, void (*isr)(), int) {
-  if (bcfg != nullptr && interrupt == bcfg->pinBootButton) bootIsr = isr;
+  if (bcfg != nullptr && interrupt == bcfg->pinBootButton) {
+    bootIsr = isr;
+  } else {
+    fakePinIsr[interrupt] = isr;
+  }
 }
-int gpio_get_level(gpio_num_t) { return fakeBootLevel; }
-TickType_t xTaskGetTickCount() { return fakeNow; }
-TickType_t xTaskGetTickCountFromISR() { return fakeNow; }
+int gpio_get_level(gpio_num_t pin) { return levelOf((int)pin); }
+// On a board the FreeRTOS tick count starts when the scheduler does, after
+// esp_timer, so it always trails millis(). Modelled here, or code that mixes
+// the two clocks would pass on the host and misjudge presses on the glass.
+static const uint32_t TICK_LAG_MS = 700;
+TickType_t xTaskGetTickCount() { return fakeNow - TICK_LAG_MS; }
+TickType_t xTaskGetTickCountFromISR() { return fakeNow - TICK_LAG_MS; }
 
 // ---- Fakes for the sketch modules input_button.cpp calls -----------------
 uint8_t BL_HIGH = 200;
@@ -138,30 +158,87 @@ void drawBootMenuScreen(const char *const *labels, size_t count,
 
 // Input scripted against the fake clock and delivered from inside the menu's
 // own loop: BOOT edges through the real ISR, taps through the real handler.
+// A tap completes at `at`; its finger went down TAP_MS earlier.
 struct ScriptedInput {
   uint32_t at;
-  enum Kind { BootDown, BootUp, Tap } kind;
+  enum Kind { BootDown, BootUp, Tap, KnobTurn } kind;
   int16_t x;
   int16_t y;
 };
+static const uint32_t TAP_MS = 80;
 static std::vector<ScriptedInput> script;
 static void bootIsrAt(bool down);
+
+// A menu that is never left would spin forever on the fake clock. The menu loop
+// polls these fakes every pass, so the guard fires there and the test fails
+// with a message instead of hanging the suite.
+struct FakeHang {};
+static uint32_t fakeHangAt = 0;
 static void deliverScript(ScriptedInput::Kind wanted) {
+  if ((int32_t)(fakeNow - fakeHangAt) >= 0) throw FakeHang();
   while (!script.empty() && script.front().at <= fakeNow) {
     const ScriptedInput next = script.front();
-    if ((next.kind == ScriptedInput::Tap) != (wanted == ScriptedInput::Tap)) {
-      return;
-    }
+    (void)wanted;
     script.erase(script.begin());
-    if (next.kind == ScriptedInput::Tap) {
-      handleBootMenuTap(next.x, next.y);
+    if (next.kind == ScriptedInput::KnobTurn) {
+      // x detents clockwise, through the real encoder interrupt: the decoder
+      // counts a detent on each A change, clockwise when A and B then differ,
+      // and a B-only change counts nothing.
+      for (int16_t i = 0; i < next.x; ++i) {
+        const int a = bcfg->pinEncoderA, b = bcfg->pinEncoderB;
+        // Line B up with A first (counts nothing), so the A change that
+        // follows leaves them different: one clockwise detent.
+        if (levelOf(a) != levelOf(b)) {
+          fakePinLevel[b] = levelOf(b) ? 0 : 1;
+          fakePinIsr[b]();
+        }
+        fakePinLevel[a] = levelOf(a) ? 0 : 1;
+        fakePinIsr[a]();
+      }
     } else {
       bootIsrAt(next.kind == ScriptedInput::BootDown);
     }
   }
 }
 void handleSerialConfig() { deliverScript(ScriptedInput::BootDown); }
-void serviceTouch() { deliverScript(ScriptedInput::Tap); }
+
+// ---- The touch controller, for the REAL serviceTouch() (input_touch.cpp) ----
+// Reports are handed out one per poll once their time comes, the way the
+// controller's interrupt-raised flag hands them to the loop.
+struct TouchReport {
+  uint32_t at;
+  bool pressed;
+  uint16_t rawX;
+  uint16_t rawY;
+};
+static std::vector<TouchReport> touchReports;
+namespace boardtouch {
+bool poll(Sample &sample) {
+  if (touchReports.empty() || touchReports.front().at > fakeNow) return false;
+  const TouchReport report = touchReports.front();
+  touchReports.erase(touchReports.begin());
+  sample.pressed = report.pressed;
+  sample.rawX = report.rawX;
+  sample.rawY = report.rawY;
+  sample.points = report.pressed ? 1 : 0;
+  return true;
+}
+}  // namespace boardtouch
+
+// Fakes for what input_touch.cpp reaches outside the menu path.
+uint32_t touchWakeUntil = 0;
+bool touchWakeActive() { return false; }
+bool displaySleeping = false;
+extern const uint32_t TOUCH_WAKE_MS = 8000;
+uint16_t hbPort = 0;
+void sendToSender(const uint8_t *, size_t) {}
+touchmap::Calibration touchCalibration = touchmap::GT911_ON_JD9365_4C;
+bool panelMirrorX = false;
+uint8_t addressedPanelRotation() { return 0; }
+void closeWifiSelector() {}
+void handleWifiSelectorTap(int16_t, int16_t) {}
+bool handleSurveyTap(int16_t, int16_t) { return false; }
+const char *defaultInfoBarText() { return ""; }
 
 // ---- Fakes for the Doom library -------------------------------------------
 static const char *wadProblem = nullptr;
@@ -201,11 +278,89 @@ static void resetObservations() {
   menuTitle.clear();
   menuMessage.clear();
   script.clear();
+  touchReports.clear();
   touchAvailable = false;
   fakeResetReason = ESP_RST_POWERON;
   // Let the double-press tracker and the triple-press window close.
   fakeNow += 5000;
   handleButton();
+  // Far past any menu a test means to run: an hour of fake time.
+  fakeHangAt = fakeNow + 3600000u;
+}
+
+// How a menu run ended: it returned (streaming), it restarted (a game was
+// chosen; a real restart never returns), or it never ended.
+enum class MenuRun { Returned, Restarted, Hung };
+static MenuRun runMenu(bool requested) {
+  ESP.throwOnRestart = true;
+  MenuRun result = MenuRun::Returned;
+  try {
+    runBootMenuIfDue(requested);
+  } catch (const FakeRestart &) {
+    result = MenuRun::Restarted;
+  } catch (const FakeHang &) {
+    result = MenuRun::Hung;
+  }
+  ESP.throwOnRestart = false;
+  bootMenuActive = false;
+  return result;
+}
+
+static wifiselector::SelectorLayout menuLayout() {
+  return wifiselector::selectorLayout(
+      PANEL_GEOMETRY.frameWidth(panelLandscape),
+      PANEL_GEOMETRY.frameHeight(panelLandscape), bcfg->panel->roundDisplay,
+      2, 0);
+}
+
+// The raw controller coordinate the board's own calibration maps onto (x, y),
+// found by search rather than by inverting the transform here, so the test
+// cannot share a mistake with the code under test.
+static void rawFor(int16_t x, int16_t y, uint16_t &rawX, uint16_t &rawY) {
+  int best = 1 << 30;
+  for (int rx = 0; rx < 1024; rx += 2) {
+    for (int ry = 0; ry < 1024; ry += 2) {
+      const touchmap::Point p = touchmap::map(
+          (int16_t)rx, (int16_t)ry, panelLandscape, addressedPanelRotation(),
+          touchCalibration);
+      const int d = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
+      if (d < best) {
+        best = d;
+        rawX = (uint16_t)rx;
+        rawY = (uint16_t)ry;
+      }
+    }
+  }
+}
+
+// A finger down at `at - heldMs` and lifted at `at`, at the centre of rect.
+static void touchPress(uint32_t at, uint32_t heldMs, int16_t x, int16_t y) {
+  uint16_t rawX = 0, rawY = 0;
+  rawFor(x, y, rawX, rawY);
+  touchReports.push_back({at - heldMs, true, rawX, rawY});
+  touchReports.push_back({at, false, rawX, rawY});
+}
+// A finger held from `from` to `until`, reported every 10 ms the way a polled
+// GT911 keeps reporting a resting finger, then lifted (unless until is 0).
+static void touchHeld(uint32_t from, uint32_t until, int16_t x, int16_t y) {
+  uint16_t rawX = 0, rawY = 0;
+  rawFor(x, y, rawX, rawY);
+  const uint32_t end = until != 0 ? until : from + 7200000u;
+  for (uint32_t at = from; (int32_t)(end - at) > 0; at += 10) {
+    touchReports.push_back({at, true, rawX, rawY});
+  }
+  if (until != 0) touchReports.push_back({until, false, rawX, rawY});
+}
+
+static void touchTap(uint32_t at, const wifiselector::Rect &rect) {
+  touchPress(at, TAP_MS, (int16_t)(rect.x + rect.width / 2),
+             (int16_t)(rect.y + rect.height / 2));
+}
+
+// Let the real handler see a release so the next test starts clean.
+static void releaseBoot(uint32_t at) {
+  fakeNow = at;
+  bootEdge(false);
 }
 
 static int tripleWithInvalidWadStaysNormal() {
@@ -320,6 +475,8 @@ static int automaticRestartSkipsMenu() {
   return 0;
 }
 
+// Rule: a board nobody touches comes up streaming after a 5 s countdown shown
+// counting 5, 4, 3, 2, 1.
 static int untouchedPowerOnMenuStreams() {
   const esp_reset_reason_t user[] = {ESP_RST_POWERON, ESP_RST_EXT,
                                      ESP_RST_USB};
@@ -328,17 +485,17 @@ static int untouchedPowerOnMenuStreams() {
     wadProblem = nullptr;
     fakeResetReason = reason;
     const uint32_t startedAt = fakeNow;
-    CHECK(runBootMenuIfDue(false));
-    CHECK(!bootMenuActive);
+    CHECK(runMenu(false) == MenuRun::Returned);
     CHECK(menuLabels == "STREAMING,DOOM");
     CHECK(menuSelected == 0);
-    CHECK(fakeNow - startedAt >= 3000);
-    CHECK(fakeNow - startedAt < 3100);
-    // The title counted 3, 2, 1 down to streaming.
-    CHECK(menuDraws == 3);
+    CHECK(fakeNow - startedAt >= 5000);
+    CHECK(fakeNow - startedAt < 5100);
+    CHECK(menuDraws == 5);
     CHECK(menuTitle == "STREAMING IN 1");
     CHECK(ESP.restarts == 0);
     CHECK(fakeNvsBools.count("doomonce") == 0);
+    CHECK(Serial.captured.find("boot menu: power-on, 2 modes, streaming in 5s") !=
+          std::string::npos);
     CHECK(Serial.captured.find("boot menu: streaming (countdown ended)") !=
           std::string::npos);
   }
@@ -362,49 +519,403 @@ static int manuallyOffPanelSkipsTimedMenuOnly() {
   resetObservations();
   wadProblem = nullptr;
   panelManuallyOff = true;
-  CHECK(!runBootMenuIfDue(false));
+  CHECK(runMenu(false) == MenuRun::Returned);
   CHECK(menuDraws == 0);
-  // A triple press is someone asking for it.
-  CHECK(runBootMenuIfDue(true));
+  // A triple press is someone asking for it. It has no countdown, so a hold
+  // on STREAMING is what ends it.
+  const uint32_t t = fakeNow;
+  script = {{t + 500, ScriptedInput::BootDown, 0, 0}};
+  CHECK(runMenu(true) == MenuRun::Returned);
   CHECK(menuDraws > 0);
+  releaseBoot(t + 1500);
   panelManuallyOff = false;
   return 0;
 }
 
-static int requestedMenuWaitsLongerThenStreams() {
+// Rule: a menu opened on purpose (the triple press) has no countdown. It is
+// still up after an hour less a minute of nobody touching it, and its FIRST
+// press acts - here, moving straight to DOOM - instead of only cancelling.
+static int requestedMenuHasNoCountdown() {
   resetObservations();
   wadProblem = nullptr;
   fakeResetReason = ESP_RST_SW;
-  const uint32_t startedAt = fakeNow;
-  CHECK(runBootMenuIfDue(true));
-  CHECK(fakeNow - startedAt >= 15000);
-  CHECK(fakeNow - startedAt < 15100);
-  CHECK(ESP.restarts == 0);
-  CHECK(fakeNvsBools.count("doomonce") == 0);
+  const uint32_t t = fakeNow;
+  const uint32_t late = t + 3540000u;
+  script = {{late, ScriptedInput::BootDown, 0, 0},
+            {late + 100, ScriptedInput::BootUp, 0, 0},
+            {late + 500, ScriptedInput::BootDown, 0, 0}};
+  CHECK(runMenu(true) == MenuRun::Restarted);
+  CHECK(Serial.captured.find("boot menu: requested, 2 modes, no countdown") !=
+        std::string::npos);
+  CHECK(menuTitle == "CHOOSE A MODE");
+  CHECK(Serial.captured.find("countdown ended") == std::string::npos);
+  CHECK(Serial.captured.find("cancelled the countdown") == std::string::npos);
+  CHECK(Serial.captured.find("boot menu: DOOM highlighted") !=
+        std::string::npos);
+  CHECK(fakeNvsBools.count("doomonce") == 1);
+  CHECK(fakeNow - late >= 1100);
+  releaseBoot(late + 1600);
   return 0;
 }
 
-static int bootPressThenHoldChoosesDoom() {
+// Rule: the FIRST press on a counting menu stops the countdown and does
+// nothing else - the highlight does not move - and the menu then stays up
+// until something is chosen, however long that takes.
+static int firstBootPressOnlyCancels() {
   resetObservations();
   wadProblem = nullptr;
   const uint32_t t = fakeNow;
-  script = {{t + 500, ScriptedInput::BootDown, 0, 0},
-            {t + 600, ScriptedInput::BootUp, 0, 0},
-            {t + 1000, ScriptedInput::BootDown, 0, 0},
-            {t + 2000, ScriptedInput::BootUp, 0, 0}};
-  ESP.throwOnRestart = true;
-  bool restarted = false;
-  try {
-    runBootMenuIfDue(false);
-  } catch (const FakeRestart &) {
-    restarted = true;
+  const uint32_t late = t + 3540000u;
+  script = {{t + 1000, ScriptedInput::BootDown, 0, 0},
+            {t + 1100, ScriptedInput::BootUp, 0, 0},
+            // Long after the countdown would have ended, a hold on the
+            // still-highlighted STREAMING chooses it.
+            {late, ScriptedInput::BootDown, 0, 0}};
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(Serial.captured.find("boot menu: press cancelled the countdown") !=
+        std::string::npos);
+  CHECK(Serial.captured.find("boot menu: move spent on the cancel") !=
+        std::string::npos);
+  CHECK(Serial.captured.find("highlighted") == std::string::npos);
+  CHECK(Serial.captured.find("countdown ended") == std::string::npos);
+  CHECK(menuSelected == 0);
+  CHECK(menuTitle == "CHOOSE A MODE");
+  CHECK(fakeNow - late >= 600);
+  CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
+        std::string::npos);
+  CHECK(ESP.restarts == 0);
+  releaseBoot(late + 1000);
+  return 0;
+}
+
+// The same rule for a hold: a hold during the countdown only cancels it, and
+// the rest of that hold cannot rotate or power off the panel either.
+static int firstHoldOnlyCancelsAndLeavesNoNormalPress() {
+  resetObservations();
+  wadProblem = nullptr;
+  const uint32_t t = fakeNow;
+  script = {{t + 300, ScriptedInput::BootDown, 0, 0},
+            {t + 4300, ScriptedInput::BootUp, 0, 0},
+            {t + 9000, ScriptedInput::BootDown, 0, 0}};
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(Serial.captured.find("boot menu: press cancelled the countdown") !=
+        std::string::npos);
+  CHECK(Serial.captured.find("boot menu: choose spent on the cancel") !=
+        std::string::npos);
+  // Still up past where the 5 s countdown would have ended, then chosen.
+  CHECK(fakeNow - t >= 9600);
+  CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
+        std::string::npos);
+  releaseBoot(t + 13000);
+  CHECK(!panelManuallyOff);
+  CHECK(panelRotation == 0);
+  CHECK(displayPrefSaves == 0);
+  return 0;
+}
+
+// Rule: a press that went down before the menu opened - pressed during boot,
+// after the BOOT interrupt is attached and before the menu is up - is neither a
+// cancel nor a selection. (The triple press that requests a menu acts on its
+// third release and then restarts, so none of its presses reach the new boot.)
+static int pressBegunBeforeTheMenuIsIgnored() {
+  resetObservations();
+  wadProblem = nullptr;
+  const uint32_t t = fakeNow;
+  // Down before the menu opens; released inside it.
+  bootIsrAt(true);
+  fakeNow += 200;
+  script = {{fakeNow + 300, ScriptedInput::BootUp, 0, 0}};
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(Serial.captured.find("ignored (began before the menu)") !=
+        std::string::npos);
+  CHECK(Serial.captured.find("cancelled the countdown") == std::string::npos);
+  CHECK(Serial.captured.find("highlighted") == std::string::npos);
+  // The countdown ran on and still started streaming at 5 s.
+  CHECK(Serial.captured.find("boot menu: streaming (countdown ended)") !=
+        std::string::npos);
+  CHECK(fakeNow - t >= 5200);
+  CHECK(menuSelected == 0);
+  return 0;
+}
+
+// Review finding: a press made late in the countdown, still down when 5 s ran
+// out, escaped into the normal firmware - the menu streamed and the release then
+// rotated, dimmed, or powered off the panel and saved it. A press that goes down
+// inside a counting menu stops the countdown at once, so the menu waits and the
+// release is spent on the menu.
+static int pressDownLateInTheCountdownStaysInTheMenu() {
+  struct Case {
+    uint32_t down, up;
+  };
+  // A short release over the deadline (backlight), a long one (rotate), and an
+  // extra-long one (power).
+  const Case cases[] = {{4900, 5100}, {4700, 5500}, {4700, 8000}};
+  for (const Case &c : cases) {
+    resetObservations();
+    wadProblem = nullptr;
+    const uint32_t t = fakeNow;
+    const uint32_t savedRotation = panelRotation;
+    const uint8_t savedLevel = userBlLevel;
+    script = {{t + c.down, ScriptedInput::BootDown, 0, 0},
+              {t + c.up, ScriptedInput::BootUp, 0, 0},
+              // Then a deliberate hold on STREAMING ends the menu.
+              {t + c.up + 2000, ScriptedInput::BootDown, 0, 0}};
+    CHECK(runMenu(false) == MenuRun::Returned);
+    CHECK(Serial.captured.find("countdown ended") == std::string::npos);
+    CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
+          std::string::npos);
+    releaseBoot(t + c.up + 3000);
+    CHECK(Serial.captured.find("button: long press") == std::string::npos);
+    CHECK(Serial.captured.find("button: short press") == std::string::npos);
+    CHECK(Serial.captured.find("button: extra-long press") == std::string::npos);
+    CHECK(panelRotation == savedRotation);
+    CHECK(userBlLevel == savedLevel);
+    CHECK(!panelManuallyOff);
+    CHECK(displayPrefSaves == 0);
   }
-  ESP.throwOnRestart = false;
-  bootMenuActive = false;
-  CHECK(restarted);
+  return 0;
+}
+
+// Review finding: BOOT press times come from the tick clock and the menu's
+// opening time came from millis(), so a press in the first moments of the menu
+// was wrongly "ignored (began before the menu)".
+static int pressJustAfterTheMenuOpensCounts() {
+  resetObservations();
+  wadProblem = nullptr;
+  const uint32_t t = fakeNow;
+  script = {{t + 100, ScriptedInput::BootDown, 0, 0},
+            {t + 200, ScriptedInput::BootUp, 0, 0},
+            {t + 2000, ScriptedInput::BootDown, 0, 0}};
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(Serial.captured.find("ignored (began before the menu)") ==
+        std::string::npos);
+  CHECK(Serial.captured.find("cancelled the countdown") != std::string::npos);
+  CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
+        std::string::npos);
+  releaseBoot(t + 3000);
+  return 0;
+}
+
+// Review finding: a press held 400-600 ms classifies as no gesture and a
+// long press is dropped on the menu, so a touch held on the glass never
+// stopped the countdown and the board streamed anyway. Through the REAL
+// serviceTouch(): the finger landing is what stops it.
+static int touchHeldTooLongForATapStillCancels() {
+  resetObservations();
+  wadProblem = nullptr;
+  touchAvailable = true;
+  const wifiselector::SelectorLayout layout = menuLayout();
+  const wifiselector::Rect row = layout.rowRect(1);
+  const uint32_t t = fakeNow;
+  // 500 ms and 2 s holds: no tap, and a long press the menu ignores.
+  touchPress(t + 1500, 500, (int16_t)(row.x + row.width / 2),
+             (int16_t)(row.y + row.height / 2));
+  touchPress(t + 4500, 2000, (int16_t)(row.x + row.width / 2),
+             (int16_t)(row.y + row.height / 2));
+  touchTap(t + 20000, layout.connect);
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(Serial.captured.find("boot menu: press cancelled the countdown") !=
+        std::string::npos);
+  CHECK(Serial.captured.find("countdown ended") == std::string::npos);
+  CHECK(fakeNow - t >= 20000);
+  CHECK(menuSelected == 0);
+  CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
+        std::string::npos);
+  return 0;
+}
+
+// The hold path judges a press by when it went down too: BOOT down during boot
+// and held past the choose threshold inside the menu chooses nothing.
+static int holdBegunBeforeTheMenuChoosesNothing() {
+  resetObservations();
+  wadProblem = nullptr;
+  const uint32_t t = fakeNow;
+  bootIsrAt(true);
+  fakeNow += 100;
+  script = {{fakeNow + 1500, ScriptedInput::BootUp, 0, 0}};
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(Serial.captured.find("boot menu: choose ignored (began before the menu)") !=
+        std::string::npos);
+  CHECK(Serial.captured.find("cancelled the countdown") == std::string::npos);
+  CHECK(Serial.captured.find("boot menu: streaming (countdown ended)") !=
+        std::string::npos);
+  CHECK(fakeNow - t >= 5100);
+  CHECK(ESP.restarts == 0);
+  return 0;
+}
+
+// Runs one menu on the Elecrow knob's real profile with the script already set,
+// returning the serial log, and puts the 4C back for whatever runs next.
+static MenuRun runMenuOnKnob(std::string &serial) {
+  const board::Variant savedVariant = boardVariant;
+  const board::Config *savedConfig = bcfg;
+  boardVariant = board::Variant::ElecrowKnob128;
+  bcfg = &board::configFor(boardVariant);
+  fakePinLevel.clear();
+  fakePinIsr.clear();
+  initializeButtonInput();
+  const MenuRun run = runMenu(false);
+  serial = Serial.captured;
+  boardVariant = savedVariant;
+  bcfg = savedConfig;
+  fakePinIsr.clear();
+  initializeButtonInput();
+  return run;
+}
+
+// Round-2 finding 2: a real flick spreads its detents over several loop passes.
+// The first detent stopped the countdown and the next, 30 ms later, moved the
+// highlight. A flick is one gesture.
+static int knobFlickSpreadOverPassesOnlyCancels() {
+  resetObservations();
+  wadProblem = nullptr;
+  const uint32_t t = fakeNow;
+  // Three detents 30 ms apart: one flick across several loop passes.
+  script = {{t + 1000, ScriptedInput::KnobTurn, 1, 0},
+            {t + 1030, ScriptedInput::KnobTurn, 1, 0},
+            {t + 1060, ScriptedInput::KnobTurn, 1, 0},
+            // Long after, a deliberate hold on the untouched STREAMING.
+            {t + 5000, ScriptedInput::BootDown, 0, 0}};
+  std::string serial;
+  const MenuRun run = runMenuOnKnob(serial);
+  releaseBoot(t + 6000);
+  CHECK(run == MenuRun::Returned);
+  CHECK(serial.find("boot menu: press cancelled the countdown") !=
+        std::string::npos);
+  CHECK(serial.find("highlighted") == std::string::npos);
+  CHECK(serial.find("boot menu: streaming (chosen)") != std::string::npos);
+  return 0;
+}
+
+// Round-2 finding 2: press-and-turn is one gesture. BOOT going down stopped the
+// countdown, and the turn made while it was held then moved the highlight.
+static int knobPressAndTurnOnlyCancels() {
+  resetObservations();
+  wadProblem = nullptr;
+  const uint32_t t = fakeNow;
+  script = {{t + 1000, ScriptedInput::BootDown, 0, 0},
+            {t + 1200, ScriptedInput::KnobTurn, 1, 0},
+            {t + 1400, ScriptedInput::BootUp, 0, 0},
+            {t + 5000, ScriptedInput::BootDown, 0, 0}};
+  std::string serial;
+  const MenuRun run = runMenuOnKnob(serial);
+  releaseBoot(t + 6000);
+  CHECK(run == MenuRun::Returned);
+  CHECK(serial.find("boot menu: press cancelled the countdown") !=
+        std::string::npos);
+  CHECK(serial.find("highlighted") == std::string::npos);
+  CHECK(serial.find("boot menu: streaming (chosen)") != std::string::npos);
+  return 0;
+}
+
+// Review finding: a fast knob turn crossing several detents both cancelled the
+// countdown and moved the highlight. One turn is one press. On the knob
+// carrier's real profile, through its encoder interrupt and applyEncoderTurn.
+static int fastKnobTurnOnlyCancels() {
+  const board::Variant savedVariant = boardVariant;
+  const board::Config *savedConfig = bcfg;
+  boardVariant = board::Variant::ElecrowKnob128;
+  bcfg = &board::configFor(boardVariant);
+  if (!bcfg->hasEncoder() || !bcfg->hasBootButton()) {
+    printf("FAIL: knob profile has no encoder or BOOT\n");
+    return 1;
+  }
+  fakePinLevel.clear();
+  fakePinIsr.clear();
+  initializeButtonInput();
+  resetObservations();
+  wadProblem = nullptr;
+  const uint32_t t = fakeNow;
+  script = {{t + 1000, ScriptedInput::KnobTurn, 2, 0},
+            // A later one-detent turn moves; then a hold chooses DOOM.
+            {t + 2000, ScriptedInput::KnobTurn, 1, 0},
+            {t + 3000, ScriptedInput::BootDown, 0, 0}};
+  const MenuRun run = runMenu(false);
+  releaseBoot(t + 4000);
+  const std::string serial = Serial.captured;
+  // Back to the 4C for whatever runs next.
+  boardVariant = savedVariant;
+  bcfg = savedConfig;
+  fakePinIsr.clear();
+  initializeButtonInput();
+  CHECK(run == MenuRun::Restarted);
+  CHECK(serial.find("knob: turn +2") != std::string::npos);
+  CHECK(serial.find("boot menu: press cancelled the countdown") !=
+        std::string::npos);
+  CHECK(serial.find("boot menu: turn spent on the cancel") !=
+        std::string::npos);
+  // Exactly one highlight move: the second turn's.
+  const size_t first = serial.find("highlighted");
+  CHECK(first != std::string::npos);
+  CHECK(serial.find("highlighted", first + 1) == std::string::npos);
+  CHECK(serial.rfind("spent on the cancel") < first);
+  CHECK(fakeNvsBools.count("doomonce") == 1);
+  return 0;
+}
+
+// Round-2 finding 1 (blocking): the touch controller is first polled inside
+// the menu, so a finger already on the glass at power-on was taken for a menu
+// press, cancelled the countdown, and - with no ceiling - the board never
+// streamed. A resting hand or a case pressing the glass must not do that.
+static int touchAlreadyDownAtOpenStillStreams() {
+  const bool lifts[] = {false, true};
+  for (const bool lift : lifts) {
+    resetObservations();
+    wadProblem = nullptr;
+    touchAvailable = true;
+    const wifiselector::SelectorLayout layout = menuLayout();
+    const wifiselector::Rect row = layout.rowRect(1);
+    const uint32_t t = fakeNow;
+    touchHeld(t - 300, lift ? t + 2000 : 0, (int16_t)(row.x + row.width / 2),
+              (int16_t)(row.y + row.height / 2));
+    CHECK(runMenu(false) == MenuRun::Returned);
+    CHECK(Serial.captured.find("boot menu: streaming (countdown ended)") !=
+          std::string::npos);
+    CHECK(Serial.captured.find("cancelled the countdown") == std::string::npos);
+    CHECK(fakeNow - t < 5300);
+  }
+  return 0;
+}
+
+// Round-2 finding 3: a touch that chooses while BOOT is still held ended the
+// menu with BOOT down, and its release then landed on the streaming firmware
+// as a long press: rotation changed and saved.
+static int touchChoiceWhileBootHeldLeavesNoNormalPress() {
+  resetObservations();
+  wadProblem = nullptr;
+  touchAvailable = true;
+  const wifiselector::SelectorLayout layout = menuLayout();
+  const uint32_t t = fakeNow;
+  const uint32_t savedRotation = panelRotation;
+  script = {{t + 500, ScriptedInput::BootDown, 0, 0}};
+  // START tapped 300 ms later, BOOT still down: chooses STREAMING.
+  touchTap(t + 800, layout.connect);
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
+        std::string::npos);
+  // BOOT released after the menu has gone, 1.5 s after it went down.
+  releaseBoot(t + 2000);
+  CHECK(Serial.captured.find("button: long press") == std::string::npos);
+  CHECK(Serial.captured.find("button: short press") == std::string::npos);
+  CHECK(panelRotation == savedRotation);
+  CHECK(displayPrefSaves == 0);
+  return 0;
+}
+
+static int bootPressesThenHoldChooseDoom() {
+  resetObservations();
+  wadProblem = nullptr;
+  const uint32_t t = fakeNow;
+  script = {{t + 500, ScriptedInput::BootDown, 0, 0},   // cancels only
+            {t + 600, ScriptedInput::BootUp, 0, 0},
+            {t + 800, ScriptedInput::BootDown, 0, 0},   // moves to DOOM
+            {t + 900, ScriptedInput::BootUp, 0, 0},
+            {t + 1200, ScriptedInput::BootDown, 0, 0},  // held: chooses
+            {t + 2200, ScriptedInput::BootUp, 0, 0}};
+  CHECK(runMenu(false) == MenuRun::Restarted);
   // Chosen while still held, at the long-press threshold.
-  CHECK(fakeNow - t >= 1600);
-  CHECK(fakeNow - t < 1700);
+  CHECK(fakeNow - t >= 1800);
+  CHECK(fakeNow - t < 1900);
   CHECK(menuSelected == 1);
   CHECK(menuMessage == "STARTING DOOM");
   CHECK(fakeNvsBools.count("doomonce") == 1);
@@ -412,145 +923,75 @@ static int bootPressThenHoldChoosesDoom() {
   CHECK(ESP.restarts == 1);
   CHECK(Serial.captured.find("boot menu: DOOM highlighted") !=
         std::string::npos);
-  // Let the real handler see the release so later tests start clean.
-  fakeNow = t + 2000;
-  bootEdge(false);
+  releaseBoot(t + 2200);
   return 0;
 }
 
-static int holdOnStreamingLeavesNoNormalPressBehind() {
-  resetObservations();
-  wadProblem = nullptr;
-  const uint32_t t = fakeNow;
-  // Held well past the power threshold: the rest of the hold belongs to the
-  // STREAMING choice, so neither a rotate nor a power toggle may follow.
-  script = {{t + 300, ScriptedInput::BootDown, 0, 0}};
-  CHECK(runBootMenuIfDue(false));
-  CHECK(fakeNow - t < 1000);
-  CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
-        std::string::npos);
-  fakeNow = t + 4000;
-  handleButton();
-  bootEdge(false);
-  CHECK(!panelManuallyOff);
-  CHECK(panelRotation == 0);
-  CHECK(displayPrefSaves == 0);
-  return 0;
-}
-
-static int touchRowThenStartChoosesDoom() {
+static int touchCancelRowThenStartChoosesDoom() {
   resetObservations();
   wadProblem = nullptr;
   touchAvailable = true;
-  const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
-  const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
-  const wifiselector::SelectorLayout layout = wifiselector::selectorLayout(
-      width, height, bcfg->panel->roundDisplay, 2, 0);
+  const wifiselector::SelectorLayout layout = menuLayout();
   CHECK(layout.visibleCount == 2);
-  const wifiselector::Rect doomRow = layout.rowRect(1);
   const uint32_t t = fakeNow;
-  script = {{t + 500, ScriptedInput::Tap,
-             (int16_t)(doomRow.x + doomRow.width / 2),
-             (int16_t)(doomRow.y + doomRow.height / 2)},
-            {t + 900, ScriptedInput::Tap,
-             (int16_t)(layout.connect.x + layout.connect.width / 2),
-             (int16_t)(layout.connect.y + layout.connect.height / 2)}};
-  ESP.throwOnRestart = true;
-  bool restarted = false;
-  try {
-    runBootMenuIfDue(false);
-  } catch (const FakeRestart &) {
-    restarted = true;
-  }
-  ESP.throwOnRestart = false;
-  bootMenuActive = false;
-  CHECK(restarted);
-  CHECK(fakeNvsBools.count("doomonce") == 1);
+  // The first tap - even on the DOOM row - only cancels the countdown.
+  touchTap(t + 500, layout.rowRect(1));
+  touchTap(t + 900, layout.rowRect(1));
+  touchTap(t + 1300, layout.connect);
+  CHECK(runMenu(false) == MenuRun::Restarted);
+  CHECK(Serial.captured.find("boot menu: press cancelled the countdown") !=
+        std::string::npos);
+  CHECK(Serial.captured.find("boot menu: tap spent on the cancel") !=
+        std::string::npos);
   CHECK(Serial.captured.find("boot menu: touch highlighted DOOM") !=
         std::string::npos);
+  CHECK(Serial.captured.rfind("cancelled the countdown") <
+        Serial.captured.find("touch highlighted DOOM"));
+  CHECK(fakeNvsBools.count("doomonce") == 1);
   return 0;
 }
 
-// The branch's headline invariant: whatever is highlighted, a menu nobody
-// chooses from starts STREAMING. Without this, an expiry that honoured the
-// highlight would boot Doom on a board left alone.
-static int doomHighlightedButLeftAloneStillStreams() {
-  resetObservations();
-  wadProblem = nullptr;
-  const uint32_t t = fakeNow;
-  // One short BOOT press moves the highlight to DOOM, then nobody touches it.
-  script = {{t + 500, ScriptedInput::BootDown, 0, 0},
-            {t + 600, ScriptedInput::BootUp, 0, 0}};
-  CHECK(runBootMenuIfDue(false));
-  CHECK(menuSelected == 1);
-  CHECK(menuLabels == "STREAMING,DOOM");
-  CHECK(Serial.captured.find("boot menu: DOOM highlighted") !=
-        std::string::npos);
-  CHECK(!bootMenuActive);
-  CHECK(ESP.restarts == 0);
-  CHECK(fakeNvsBools.count("doomonce") == 0);
-  CHECK(Serial.captured.find("boot menu: streaming (countdown ended)") !=
-        std::string::npos);
-  return 0;
-}
-
-// Stray input must not hold the menu open for ever: a case pressing the glass or
-// a noisy controller would otherwise mean the board never streams.
-static int strayInputCannotHoldTheMenuForEver() {
+static int touchAloneDrivesTheMenuToStreaming() {
   resetObservations();
   wadProblem = nullptr;
   touchAvailable = true;
+  const wifiselector::SelectorLayout layout = menuLayout();
   const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
   const uint32_t t = fakeNow;
-  // A tap outside every control, the first inside the opening 3 s window and
-  // the rest inside each renewed 15 s window, for far longer than any ceiling.
-  script.push_back({t + 2000, ScriptedInput::Tap, 0, (int16_t)(height / 2)});
-  for (uint32_t i = 1; i <= 200; ++i) {
-    script.push_back({t + 2000 + i * 5000, ScriptedInput::Tap, 0,
-                      (int16_t)(height / 2)});
-  }
-  CHECK(runBootMenuIfDue(false));
-  CHECK(!bootMenuActive);
+  // A tap outside every control cancels; START, much later, chooses.
+  touchPress(t + 2500, TAP_MS, 2, (int16_t)(height / 2));
+  touchTap(t + 600000u, layout.connect);
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(fakeNow - t >= 600000u);
+  CHECK(fakeNow - t < 600100u);
   CHECK(ESP.restarts == 0);
   CHECK(fakeNvsBools.count("doomonce") == 0);
-  CHECK(Serial.captured.find("boot menu: streaming (countdown ended)") !=
+  CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
         std::string::npos);
-  // Bounded by the ceiling, not by the taps running out.
-  CHECK(fakeNow - t <= bootmenu::MAX_OPEN_MS + 100);
-  CHECK(!script.empty());
-  // The title never promises time the ceiling will not give.
-  CHECK(menuTitle == "STREAMING IN 1");
   return 0;
 }
 
 // NVS refusing the handoff must leave the board on the menu, saying so, rather
-// than restarting into a Doom boot that will find no request.
+// than restarting into a Doom boot that will find no request. The user can then
+// still choose STREAMING.
 static int doomSaveFailureKeepsTheMenuUp() {
   resetObservations();
   wadProblem = nullptr;
   touchAvailable = true;
-  const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
-  const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
-  const wifiselector::SelectorLayout layout = wifiselector::selectorLayout(
-      width, height, bcfg->panel->roundDisplay, 2, 0);
-  const wifiselector::Rect doomRow = layout.rowRect(1);
+  const wifiselector::SelectorLayout layout = menuLayout();
   const uint32_t t = fakeNow;
-  script = {{t + 500, ScriptedInput::Tap,
-             (int16_t)(doomRow.x + doomRow.width / 2),
-             (int16_t)(doomRow.y + doomRow.height / 2)},
-            {t + 900, ScriptedInput::Tap,
-             (int16_t)(layout.connect.x + layout.connect.width / 2),
-             (int16_t)(layout.connect.y + layout.connect.height / 2)}};
+  touchTap(t + 300, layout.rowRect(1));   // cancels
+  touchTap(t + 500, layout.rowRect(1));   // highlights DOOM
+  touchTap(t + 900, layout.connect);      // fails to save
+  touchTap(t + 1300, layout.rowRect(0));  // highlights STREAMING
+  touchTap(t + 1700, layout.connect);     // streams
   fakeNvsWritesFail = true;
-  CHECK(runBootMenuIfDue(false));
+  CHECK(runMenu(false) == MenuRun::Returned);
   CHECK(ESP.restarts == 0);
   CHECK(fakeNvsBools.count("doomonce") == 0);
-  CHECK(menuMessage == "SAVE FAILED");
   CHECK(Serial.captured.find("boot menu: Doom request could not be saved") !=
         std::string::npos);
-  // And it still ends up streaming rather than stuck.
-  CHECK(!bootMenuActive);
-  CHECK(Serial.captured.find("boot menu: streaming (countdown ended)") !=
+  CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
         std::string::npos);
   return 0;
 }
@@ -579,7 +1020,7 @@ static int touchRoutingReachesTheMenuFirst() {
   const std::string touchSource = readFirmwareSource("input_touch.cpp");
   const size_t routing = touchSource.find("if (bootMenuActive) {");
   const size_t tap =
-      touchSource.find("handleBootMenuTap(event.startX, event.startY)");
+      touchSource.find("handleBootMenuTap(event.startX, event.startY,");
   const size_t wakeSwallow = touchSource.find("touchConsumed = true;");
   const size_t senderReport =
       touchSource.find("sendTouchEvent(event.gesture, event.startX");
@@ -593,30 +1034,6 @@ static int touchRoutingReachesTheMenuFirst() {
   // panel instead of choosing, and ahead of the report to a sender that does not
   // exist yet at menu time.
   CHECK(routing < wakeSwallow);
-  return 0;
-}
-
-static int touchStartOnStreamingStreams() {
-  resetObservations();
-  wadProblem = nullptr;
-  touchAvailable = true;
-  const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
-  const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
-  const wifiselector::SelectorLayout layout = wifiselector::selectorLayout(
-      width, height, bcfg->panel->roundDisplay, 2, 0);
-  const uint32_t t = fakeNow;
-  // A tap outside every control restarts the countdown at the idle window.
-  script = {{t + 2500, ScriptedInput::Tap, 0, (int16_t)(height / 2)},
-            {t + 5000, ScriptedInput::Tap,
-             (int16_t)(layout.connect.x + layout.connect.width / 2),
-             (int16_t)(layout.connect.y + layout.connect.height / 2)}};
-  CHECK(runBootMenuIfDue(false));
-  CHECK(fakeNow - t >= 5000);
-  CHECK(fakeNow - t < 5100);
-  CHECK(ESP.restarts == 0);
-  CHECK(fakeNvsBools.count("doomonce") == 0);
-  CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
-        std::string::npos);
   return 0;
 }
 
@@ -658,13 +1075,22 @@ int main() {
   if (untouchedPowerOnMenuStreams() != 0) return 1;
   if (unusableWadOffersNoMenu() != 0) return 1;
   if (manuallyOffPanelSkipsTimedMenuOnly() != 0) return 1;
-  if (requestedMenuWaitsLongerThenStreams() != 0) return 1;
-  if (bootPressThenHoldChoosesDoom() != 0) return 1;
-  if (holdOnStreamingLeavesNoNormalPressBehind() != 0) return 1;
-  if (touchRowThenStartChoosesDoom() != 0) return 1;
-  if (touchStartOnStreamingStreams() != 0) return 1;
-  if (doomHighlightedButLeftAloneStillStreams() != 0) return 1;
-  if (strayInputCannotHoldTheMenuForEver() != 0) return 1;
+  if (requestedMenuHasNoCountdown() != 0) return 1;
+  if (firstBootPressOnlyCancels() != 0) return 1;
+  if (firstHoldOnlyCancelsAndLeavesNoNormalPress() != 0) return 1;
+  if (pressBegunBeforeTheMenuIsIgnored() != 0) return 1;
+  if (pressDownLateInTheCountdownStaysInTheMenu() != 0) return 1;
+  if (pressJustAfterTheMenuOpensCounts() != 0) return 1;
+  if (touchHeldTooLongForATapStillCancels() != 0) return 1;
+  if (holdBegunBeforeTheMenuChoosesNothing() != 0) return 1;
+  if (fastKnobTurnOnlyCancels() != 0) return 1;
+  if (touchAlreadyDownAtOpenStillStreams() != 0) return 1;
+  if (knobFlickSpreadOverPassesOnlyCancels() != 0) return 1;
+  if (knobPressAndTurnOnlyCancels() != 0) return 1;
+  if (touchChoiceWhileBootHeldLeavesNoNormalPress() != 0) return 1;
+  if (bootPressesThenHoldChooseDoom() != 0) return 1;
+  if (touchCancelRowThenStartChoosesDoom() != 0) return 1;
+  if (touchAloneDrivesTheMenuToStreaming() != 0) return 1;
   if (doomSaveFailureKeepsTheMenuUp() != 0) return 1;
   if (menuRequestSaveFailureStaysNormal() != 0) return 1;
   if (touchRoutingReachesTheMenuFirst() != 0) return 1;

@@ -5,6 +5,8 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <esp_system.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "app_state.h"
 #include "boot_menu_model.h"
@@ -28,6 +30,14 @@ static size_t bootMenuIndex = 0;
 static bootmenu::Countdown bootMenuCountdown;
 static uint32_t bootMenuShownSeconds = 0;
 static const char *bootMenuMessage = nullptr;
+
+// Every menu time is on the FreeRTOS tick clock, because that is what the BOOT
+// interrupt stamps edges with. millis() runs ahead of it by however long the
+// scheduler took to start, so mixing the two misjudged a press made just after
+// the menu opened as one from before it.
+static uint32_t menuClockMs() {
+  return (uint32_t)xTaskGetTickCount() * (uint32_t)portTICK_PERIOD_MS;
+}
 
 static const char *BOOT_MENU_REQUEST_KEY = "bootmenu";
 // Read by setup() before the normal boot; see the Doom branch there.
@@ -119,23 +129,79 @@ static void drawBootMenu() {
   for (size_t i = 0; i < bootMenuChoices.count; ++i) {
     labels[i] = bootmenu::modeLabel(bootMenuChoices.modes[i]);
   }
-  bootMenuShownSeconds = bootMenuCountdown.secondsLeft(millis());
+  bootMenuShownSeconds = bootMenuCountdown.secondsLeft(menuClockMs());
   char title[24];
-  snprintf(title, sizeof(title), "STREAMING IN %lu",
-           (unsigned long)bootMenuShownSeconds);
+  if (bootMenuCountdown.counting()) {
+    snprintf(title, sizeof(title), "STREAMING IN %lu",
+             (unsigned long)bootMenuShownSeconds);
+  } else {
+    snprintf(title, sizeof(title), "CHOOSE A MODE");
+  }
   drawBootMenuScreen(labels, bootMenuChoices.count, bootMenuIndex, title,
                      bootMenuMessage);
 }
 
-void moveBootMenu(int direction) {
-  if (!bootMenuActive || bootMenuChoices.count == 0) return;
-  bootMenuCountdown.noteInput(millis());
+// The one gate every completed press passes, so no input path can skip a rule.
+// Returns whether the press should go on to move or choose.
+static bool admitPress(uint32_t pressStartedAt, const char *what) {
+  const bool wasCounting = bootMenuCountdown.counting();
+  switch (bootMenuCountdown.onPress(pressStartedAt)) {
+    case bootmenu::PressEffect::Ignore:
+      Serial.printf("boot menu: %s ignored (began before the menu)\n", what);
+      return false;
+    case bootmenu::PressEffect::CancelOnly:
+      if (wasCounting) {
+        Serial.printf("boot menu: %s cancelled the countdown\n", what);
+        drawBootMenu();
+      } else {
+        // Its press going down already stopped the countdown.
+        Serial.printf("boot menu: %s spent on the cancel\n", what);
+      }
+      return false;
+    case bootmenu::PressEffect::Act:
+      return true;
+  }
+  return false;
+}
+
+static void moveHighlight(int direction) {
   bootMenuIndex = wifiselector::movedIndex(bootMenuIndex,
                                            bootMenuChoices.count, direction);
   bootMenuMessage = nullptr;
   Serial.printf("boot menu: %s highlighted\n",
                 bootmenu::modeLabel(bootMenuChoices.modes[bootMenuIndex]));
   drawBootMenu();
+}
+
+uint32_t bootMenuClockMs() { return menuClockMs(); }
+
+void bootMenuPressDown(uint32_t at) {
+  if (!bootMenuActive) return;
+  switch (bootMenuCountdown.onPressDown(at)) {
+    case bootmenu::PressEffect::CancelOnly:
+      Serial.println("boot menu: press cancelled the countdown");
+      drawBootMenu();
+      break;
+    case bootmenu::PressEffect::Ignore:
+    case bootmenu::PressEffect::Act:
+      // Judged again when the press completes.
+      break;
+  }
+}
+
+void turnBootMenu(int direction, int steps, uint32_t at) {
+  if (!bootMenuActive || bootMenuChoices.count == 0 || steps <= 0) return;
+  // A turn is one press however many detents it crossed: down and completed
+  // at once. So the turn that stops the countdown moves nothing.
+  bootMenuPressDown(at);
+  if (!admitPress(at, "turn")) return;
+  for (int i = 0; i < steps; ++i) moveHighlight(direction);
+}
+
+void moveBootMenu(int direction, uint32_t pressStartedAt) {
+  if (!bootMenuActive || bootMenuChoices.count == 0) return;
+  if (!admitPress(pressStartedAt, "move")) return;
+  moveHighlight(direction);
 }
 
 // Leaves the menu; setup() then carries on into the streaming firmware. Does not
@@ -145,9 +211,7 @@ static void leaveMenuForStreaming(const char *why) {
   bootMenuActive = false;
 }
 
-void activateBootMenu() {
-  if (!bootMenuActive || bootMenuChoices.count == 0) return;
-  bootMenuCountdown.noteInput(millis());
+static void chooseHighlighted() {
   const bootmenu::Mode mode = bootMenuChoices.modes[bootMenuIndex];
   switch (mode) {
     case bootmenu::Mode::Streaming:
@@ -178,9 +242,15 @@ void activateBootMenu() {
   }
 }
 
-void handleBootMenuTap(int16_t x, int16_t y) {
+void activateBootMenu(uint32_t pressStartedAt) {
+  if (!bootMenuActive || bootMenuChoices.count == 0) return;
+  if (!admitPress(pressStartedAt, "choose")) return;
+  chooseHighlighted();
+}
+
+void handleBootMenuTap(int16_t x, int16_t y, uint32_t pressStartedAt) {
   if (!bootMenuActive || bcfg == nullptr) return;
-  bootMenuCountdown.noteInput(millis());
+  if (!admitPress(pressStartedAt, "tap")) return;
   const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
   const wifiselector::SelectorLayout layout = wifiselector::selectorLayout(
@@ -190,14 +260,14 @@ void handleBootMenuTap(int16_t x, int16_t y) {
       layout, bootMenuChoices.count, x, y);
   switch (hit.target) {
     case wifiselector::HitTarget::Previous:
-      moveBootMenu(-1);
+      moveHighlight(-1);
       break;
     case wifiselector::HitTarget::Next:
-      moveBootMenu(1);
+      moveHighlight(1);
       break;
     case wifiselector::HitTarget::Connect:
       Serial.printf("boot menu: touch start at (%d,%d)\n", x, y);
-      activateBootMenu();
+      chooseHighlighted();
       break;
     case wifiselector::HitTarget::Row:
       bootMenuIndex = hit.rowIndex;
@@ -209,8 +279,7 @@ void handleBootMenuTap(int16_t x, int16_t y) {
       break;
     default:
       // The selector's Back corner has no meaning here: the title spans it,
-      // and leaving the menu is START on STREAMING or waiting.
-      // The countdown still restarted; the run loop redraws its title.
+      // and leaving the menu is START on STREAMING.
       Serial.printf("boot menu: touch outside controls at (%d,%d)\n", x, y);
       break;
   }
@@ -239,12 +308,16 @@ bool runBootMenuIfDue(bool requested) {
 
   bootMenuIndex = 0;
   bootMenuMessage = nullptr;
-  bootMenuCountdown.start(millis(), how);
+  bootMenuCountdown.start(menuClockMs(), how);
   bootMenuActive = true;
-  Serial.printf("boot menu: %s, %u modes, streaming in %lus\n",
-                how == bootmenu::Opening::Requested ? "requested" : "power-on",
-                (unsigned)bootMenuChoices.count,
-                (unsigned long)bootMenuCountdown.secondsLeft(millis()));
+  if (how == bootmenu::Opening::Requested) {
+    Serial.printf("boot menu: requested, %u modes, no countdown\n",
+                  (unsigned)bootMenuChoices.count);
+  } else {
+    Serial.printf("boot menu: power-on, %u modes, streaming in %lus\n",
+                  (unsigned)bootMenuChoices.count,
+                  (unsigned long)bootMenuCountdown.secondsLeft(menuClockMs()));
+  }
   drawBootMenu();
 
   while (bootMenuActive) {
@@ -255,9 +328,9 @@ bool runBootMenuIfDue(bool requested) {
     if (!bootMenuActive) break;
     serviceTouch();
     if (!bootMenuActive) break;
-    const uint32_t now = millis();
+    const uint32_t now = menuClockMs();
     if (bootMenuCountdown.expired(now)) {
-      // Whatever is highlighted, the default is what an expiring menu starts.
+      // Only an untouched menu expires, so its highlight is still STREAMING.
       leaveMenuForStreaming("countdown ended");
       break;
     }

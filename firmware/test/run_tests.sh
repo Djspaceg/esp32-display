@@ -115,6 +115,7 @@ clang++ "${CXXFLAGS[@]}" \
   -o "$DOOM_ENTRY_OUT" \
   "$HERE/test_doom_entry_gate.cpp" \
   "$HERE/../display_stream/input_button.cpp" \
+  "$HERE/../display_stream/input_touch.cpp" \
   "$HERE/../display_stream/boot_menu.cpp"
 "$DOOM_ENTRY_OUT"
 

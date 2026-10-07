@@ -10,6 +10,9 @@
 #include <cstdio>
 #include <string>
 
+// The real Arduino.h brings FreeRTOS types along; net_link.h relies on that.
+#include <freertos/FreeRTOS.h>
+
 #define IRAM_ATTR
 static constexpr int LOW = 0;
 static constexpr int HIGH = 1;
