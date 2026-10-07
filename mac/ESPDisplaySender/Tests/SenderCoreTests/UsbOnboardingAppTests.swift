@@ -382,13 +382,17 @@ final class UsbOnboardingAppTests: XCTestCase {
         }
         XCTAssertNotNil(releases.selections["c6"])
         for family in ["s3", "p4"] {
+            // Every revision of the family is corrupted; none poisons c6.
             let options = releases.revisions(for: family)
-            XCTAssertEqual(options.count, 1, family)
-            XCTAssertFalse(try XCTUnwrap(options.first).isAvailable, family)
-            XCTAssertTrue(
-                try XCTUnwrap(options.first?.unavailableReason)
-                    .contains("artifact hash does not match"),
-                "\(family): \(String(describing: options.first?.unavailableReason))")
+            XCTAssertEqual(
+                options.count, catalog.families[family]?.revisions.count, family)
+            for option in options {
+                XCTAssertFalse(option.isAvailable, family)
+                XCTAssertTrue(
+                    try XCTUnwrap(option.unavailableReason)
+                        .contains("artifact hash does not match"),
+                    "\(family): \(String(describing: option.unavailableReason))")
+            }
             XCTAssertNil(releases.selections[family], family)
             let entry = try XCTUnwrap(catalog.families[family])
             let live = FirmwareReleaseCatalog.Identity(

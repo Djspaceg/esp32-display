@@ -86,7 +86,8 @@ final class LayoutReworkTests: XCTestCase {
             XCTAssertEqual(installed.match, expected)
         }
         XCTAssertEqual(Set(cases.map(\.0.matchText)).count, cases.count)
-        XCTAssertTrue(cases[0].0.matchText.contains("Bundled: c6 1.5.0"), cases[0].0.matchText)
+        // An unrecognised build names the newest bundled release.
+        XCTAssertTrue(cases[0].0.matchText.contains("Bundled: c6 2.0.0"), cases[0].0.matchText)
         XCTAssertEqual(cases[2].0.runningText, "1.5.0")
         XCTAssertEqual(cases[4].0.runningText, "Legacy firmware")
     }
@@ -106,7 +107,11 @@ final class LayoutReworkTests: XCTestCase {
 
     func testInstalledRevisionKeepsItsVerb() throws {
         let releases = try Self.releaseSet()
-        let option = try XCTUnwrap(releases.revisions(for: "c6").first)
+        // The 1.5.0 revision, which shippedCommit was read from; 2.0.0 is
+        // listed above it.
+        let option = try XCTUnwrap(releases.revisions(for: "c6").first {
+            $0.revision.version == "1.5.0"
+        })
         let selection = try XCTUnwrap(option.selection)
         let plan = FirmwareUpdatePlan.make(
             selection.bundle.availability(

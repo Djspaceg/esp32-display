@@ -529,23 +529,23 @@ With no sender a P4 shows its status card at level 10 (about 4% duty), and a tou
 
 ### Decisions to evaluate
 
-D1 A per-board descriptor field `backlight.floor_permille` (default 0) raises a lit level whose duty would fall below it to the floor, in the DSI and pin-PWM sinks; other boards are byte-identical. Why: no level that already lit changes duty or current, on boards with a brownout history. Costs on a P4: levels 1-130 all look the same, the card is no dimmer than the low preset, and the 4C's saved level 61 goes from 24% to 51%. Supersedes: remapping 1-255 onto [floor, full], because review showed that raised every P4 level's duty (128 from 50% to 74%). If overruled: restore the remap in backlight_curve.h.
+D1 A per-board descriptor field `backlight.floor_permille` (default 0) raises a lit level whose duty would fall below it to the floor, in the DSI and pin-PWM sinks; other boards are byte-identical. Why: no level that already lit changes duty or current, on boards with a brownout history. Cost on a P4: levels 1-130 all look alike. Supersedes: remapping 1-255 onto [floor, full], because review showed it raised every P4 level (128 from 50% to 74%). If overruled: restore the remap in backlight_curve.h.
 D2 The floor is 510 (51%, the 4B's own saved level 130, seen lit while streaming), not the bare 47% threshold. Why: under the clamp the floor is the card's brightness, and 47% was a single at-threshold reading. Supersedes: 470, because it left no margin. If overruled: change floor_permille in the three P4 descriptors and CONFIG_P4_4C/34C.
-D3 The 4C and 3.4C take the 4B's floor. Why: the 4C was dark at 9% duty too, and the 3.4C shares the 4C's carrier; neither threshold was measured. If overruled: set their floor_permille to 0.
+D3 The 4C and 3.4C take the 4B's floor. Why: the 4C was dark at 9% too; the 3.4C shares its carrier. If overruled: set their floor_permille to 0.
 D4 The rescue image ignores the floor and keeps its raw 32/255. Why: its stated invariant is never to draw more than that on a board that browns out. If overruled: drop the override in rescue.ino; a P4 rescue screen then lights at 51%.
 D5 The fix is one commit, and the regenerated bundles and rescue images follow in a second, artifacts-only commit. Why: each image records the commit it was built from, which a squash would orphan, and test_espdisp checks that. If overruled: not possible without changing that check.
-D6 The bundles are the first 2.0.0 shipping release (FW_VERSION was already 2.0.0); the catalog now names 2.0.0 and the 1.5.0 files stay beside it. Why: asked to regenerate the bundles for this change, and release --shipping cuts the current FW_VERSION. If overruled: revert the artifacts commit, which leaves the catalog at 1.5.0 without this fix.
+D6 The bundles are the first 2.0.0 shipping release; the catalog names 2.0.0 and keeps 1.5.0 beside it, and the app's catalog tests now expect both. Why: answered by the human, "Ship 2.0.0 now", after the cut broke 10 app tests pinned to 1.5.0. If overruled: revert the artifacts and test commits; the app then ships 1.5.0 without this fix.
 
 ### Open questions
 
 - The 4C and 3.4C thresholds are unmeasured. Default: the 4B's floor, 510.
 - The P4 rescue screen stays dark at 32/255, as before. Default: unchanged, for power.
-- After 13:13 the app could not reach the 4C, though the 4C's own WiFi link answered (rssi -42, RPC under 1 s). Default: not this defect.
+- At 13:13 the app lost the 4C while its WiFi link answered; at 16:20 the app streamed to both (4C 12,862 frames). Default: not this defect.
 
 ### Gate facts
 
 Publish: local main, GitHub remote, no push; no CR or AutoSDE (not a CRUX package). packages/*: none touched; call sites in code-review.md.
-Lanes: gate-run_tests-clean.log exit 0 and gate-test_espdisp-final.log 1993 OK, both in a clean clone of the fix commit with the artifacts; gate-compile-{p4,s3,c6,c3}.log exit 0 (c6 96%, as before); release-shipping.log exit 0, every image from 56a9d21, not dirty.
+Lanes: gate-run_tests-clean.log exit 0 and gate-test_espdisp-final.log 1993 OK, in a clean clone with the artifacts; swift-test-final.log 1301 tests, 0 failures, on 094ec7d plus the test commit; gate-compile-{p4,s3,c6,c3}.log exit 0 (c6 96%, as before); release-shipping.log exit 0, every image from 56a9d21, not dirty.
 Red first: red-first-dsi-backlight.log. test_dsi_backlight fails 357 checks on main 44cd057 (card at 40/1023), then passes (card at 522/1023).
 Review rounds: 2 independent; 1 blocking finding (on-glass margin), which changed D1 and D2 and was closed on hardware.
 
@@ -555,7 +555,7 @@ Review rounds: 2 independent; 1 blocking finding (on-glass margin), which change
 - red-first-dsi-backlight.log: the new test failing on old code, then passing.
 - code-review.md: both rounds, dispositions, every backlight call site.
 - hw-validate-floor.log: both P4s on the fix at level 24 with no sender, backlight 522/1023 from boot through the status card; the human read both panels ("Both readable").
-- hw-final.log: both P4s on the committed shipping image.
+- hw-final.log: both P4s on the committed shipping image; app-connect-check.log: the app streaming to both.
 
 ### Residuals
 

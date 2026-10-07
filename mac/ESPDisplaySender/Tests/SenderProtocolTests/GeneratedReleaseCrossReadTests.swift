@@ -24,7 +24,12 @@ final class GeneratedReleaseCrossReadTests: XCTestCase {
                 XCTAssertEqual(bundle.firmwareVersion, revision.version)
                 XCTAssertNil(bundle.firmwareBuild)
                 XCTAssertFalse(revision.artifact.contains("+"))
-                XCTAssertEqual(bundle.releaseNotes?.count, 10)
+                // Each shipping version carries its own release-notes.md
+                // section: ten items for 1.5.0, three for 2.0.0.
+                let noteCounts = ["1.5.0": 10, "2.0.0": 3]
+                XCTAssertEqual(
+                    bundle.releaseNotes?.count, noteCounts[revision.version],
+                    revision.version)
                 let verified = try catalog.bundle(
                     for: revision, in: entry, data: data)
                 if family == "c3" || family == "c6" {

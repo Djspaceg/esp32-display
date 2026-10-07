@@ -49,14 +49,19 @@ final class ShippingRevisionIsolationTests: XCTestCase {
         }
         XCTAssertNotNil(releases.selections["c6"])
         for family in ["s3", "p4"] {
+            // Every revision of the family is corrupted, and each is refused
+            // on its own.
             let options = releases.revisions(for: family)
-            let option = try XCTUnwrap(options.only)
-            XCTAssertFalse(option.isAvailable, family)
-            XCTAssertNil(option.selection, family)
-            XCTAssertTrue(
-                try XCTUnwrap(option.unavailableReason)
-                    .contains("artifact hash does not match"),
-                "\(family): \(String(describing: option.unavailableReason))")
+            XCTAssertEqual(
+                options.count, catalog.families[family]?.revisions.count, family)
+            for option in options {
+                XCTAssertFalse(option.isAvailable, family)
+                XCTAssertNil(option.selection, family)
+                XCTAssertTrue(
+                    try XCTUnwrap(option.unavailableReason)
+                        .contains("artifact hash does not match"),
+                    "\(family): \(String(describing: option.unavailableReason))")
+            }
             XCTAssertNil(releases.selections[family], family)
         }
     }

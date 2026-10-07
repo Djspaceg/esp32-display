@@ -103,8 +103,8 @@ final class AnyFirmwareSourceTests: XCTestCase {
 
         guard case .ready(let releases) = BundledFirmware.load(catalogDirectory: copy)
         else { return XCTFail("expected ready") }
-        XCTAssertNil(releases.selections["p4"])
-        XCTAssertNotNil(releases.revisions(for: "p4").first?.unavailableReason)
+        try Self.assertNewestP4Refused(
+            releases, artifact: try XCTUnwrap(catalog.families["p4"]?.artifact))
     }
 
     /// The fallback re-runs the whole family contract. A 4B-only P4 build
@@ -132,7 +132,24 @@ final class AnyFirmwareSourceTests: XCTestCase {
 
         guard case .ready(let releases) = BundledFirmware.load(catalogDirectory: copy)
         else { return XCTFail("expected ready") }
-        XCTAssertNil(releases.selections["p4"])
-        XCTAssertNotNil(releases.revisions(for: "p4").first?.unavailableReason)
+        try Self.assertNewestP4Refused(
+            releases, artifact: try XCTUnwrap(catalog.families["p4"]?.artifact))
+    }
+
+    /// The newest p4 revision, replaced by a file that is not a valid p4
+    /// bundle, is refused with why. An older valid revision may still be
+    /// offered as the selection, but never the replaced file.
+    private static func assertNewestP4Refused(
+        _ releases: BundledFirmware.ReleaseSet, artifact: String,
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let newest = try XCTUnwrap(
+            releases.revisions(for: "p4").first, file: file, line: line)
+        XCTAssertEqual(newest.revision.artifact, artifact, file: file, line: line)
+        XCTAssertNil(newest.selection, file: file, line: line)
+        XCTAssertNotNil(newest.unavailableReason, file: file, line: line)
+        XCTAssertNotEqual(
+            releases.selections["p4"]?.revision.artifact, artifact,
+            file: file, line: line)
     }
 }

@@ -753,6 +753,12 @@ package, so there is no AutoSDE session.
 | R2-4 host suite log older than the last test edit | nit | Fixed: run_tests.sh re-run on the final tree. Compiles in the shared tree included another worker's edits; the clean-clone release build is the authoritative one. |
 | R2-5 hand-written floor check covers 4C/3.4C only | nit | Accepted: the 4B is generated, and another check pins the set of boards with a floor. |
 
+### After commit
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| The screensaver worker's swift test at d767428: 16 assertions in 10 tests pinned to a 1.5.0-only shipping catalog | blocking for the release cut | The human chose "Ship 2.0.0 now". Six test files now expect 2.0.0 and 1.5.0 together; the app's own behavior (2.0.0 Upgrade, 1.5.0 Reinstall, a refused newest revision listed with its reason) was correct and is unchanged. swift test 1301 / 0 on 094ec7d plus the fix. |
+
 The reviewer confirmed the clamp math for every floor 0..65535 at 8 and 10 bit
 (monotonic, 255 is full, floor 0 byte-identical to the old duty, no overflow),
 the Config initializers, rescue's config copy, and that brightness reporting
