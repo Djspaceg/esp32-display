@@ -1,5 +1,11 @@
 # Release Notes
 
+## 2.0.0
+
+- Added an early boot menu that chooses Streaming, Doom, or Quake when a runtime exists, by touch or by the BOOT button.
+- Changed the triple press of BOOT to open that menu instead of starting Doom directly.
+- Changed a board left alone at boot to start streaming, which stays the default.
+
 ## 1.5.0
 
 - Added family-universal c6, s3, and p4 firmware releases with runtime hardware-profile selection.
