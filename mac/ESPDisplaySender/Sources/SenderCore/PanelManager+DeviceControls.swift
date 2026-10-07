@@ -536,6 +536,8 @@ extension PanelManager {
         path: String,
         serviceName: String
     ) async {
+        usbControlsInFlight += 1
+        defer { usbControlsInFlight -= 1 }
         let generation = usbPathGeneration(path)
         let sender = usbControlSender
         let result = await Task.detached(priority: .utility) {

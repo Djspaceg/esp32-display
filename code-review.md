@@ -669,3 +669,55 @@ session.
 Nothing in this review or these fixes was verified on hardware. No board was
 flashed, no serial port opened, no Mac app launched. The two findings the
 reviewer would fix before touching hardware were 1 and 2, and both are fixed.
+
+## Code review: retry the USB identity check (usb-identify-retry)
+
+Reviewer: a separate review agent, read-only, two rounds. Scope: mac/ESPDisplaySender only (AddDeviceSheet, PanelManager, PanelManager+UsbDevices, PanelManager+DeviceControls, WifiConfigUI, two new test files). No firmware touched.
+
+Call sites checked (round 1, re-checked round 2): refreshUSBPorts callers (2 s timer, releaseUSBProbes, refreshUSBDevices, configureUSB, onboarding end, FirmwareUpdates x2, AddDeviceSheet after a run) all reach identifyUSBPorts; every probeUSBDevice caller (background identify, sheet inspection via probeExistingFirmwareReport, control reprobe, finishUSBFlash reprobe, onboarding) feeds the retry schedule on silence; probePort callers (probeUSBDevice, UsbOnboarder.probeExistingFirmware and settle) get the lock check and the CFGINFO-only rule.
+
+### Round 1
+
+Verdict: correct for the bug, nothing blocking. Findings and dispositions:
+
+- R1-1 (non-blocking) A port that never answers gets CFGSHOW every 30 s forever, including while another program (esptool from Terminal, a serial monitor) drives it. FIXED: probePort opens with refuseIfLocked and tests flock(LOCK_EX|LOCK_NB) before any termios or modem change, sending nothing to a locked port. esptool 5.3.1 was shown to hold that lock (esptool-lock-check.log). A monitor that takes no lock is still asked at most every 30 s (D1).
+- R1-2 (non-blocking) Hold-off misses some USB writers; a setter's CFGOK read by a retry was taken as an identity with no hardware ID, wiping the board's identity and ending retries. FIXED: probePort accepts only CFGINFO; performUSBControl counts usbControlsInFlight into the hold-off; retries skip a board verified at this connection unless it is restarting, the only kind the synchronous rename/WiFi/OTA setters will drive. Tests: testACFGOKIsNotAnIdentity, testAProbeSendsNothingToAPortAnotherProgramHasLocked (both red on HEAD, usb-retry-review-red-green.log).
+- R1-3 (non-blocking) A restarting board whose tty survives the restart is never asked again. FIXED: markUSBRestarting seeds a retry. Test: testARestartingBoardIsAskedAgainWithoutANewPort.
+- R1-4 (nit) Add sheet could adopt an answer from before its inspection. FIXED: the sheet records the device at inspection and adopts only a changed verifiedGeneration or serialStatus.
+- R1-5 (nit) hold/release not paired with defer. FIXED.
+- R1-6 (nit) schedule on wall clock. FIXED: systemUptime.
+- R1-7 (nit) timing-dependent schedule test. FIXED: delays set to [60] there.
+- R1-8 (nit) hold-off branches untested. FIXED for control writes, preset sheet, preset sync, brightness; the sheet's adoption logic stays in the View, untested (residual).
+
+### Round 2
+
+Verdict: the R1 fixes are correct; no blocking regression. R1-1 partly fixed (N1, N2), R1-2 to R1-8 verified fixed; usbControlsInFlight balanced; the answered-board filter is correct for the setter race. New findings and dispositions:
+
+- N1 (non-blocking) Every unrelated USB serial device (Arduino, printer, another project) was probed every 30 s while plugged in, switching a foreign session's baud and modem lines each time. FIXED: a port that no display record points at (by reported hardware ID or saved path) is let go after 7 unanswered asks, about 2 minutes; a display's own port, or a restarting one, is asked until it answers or is unplugged. Opening the Add sheet on a port starts its schedule again. Test: testOnlyADisplaysOwnPortIsAskedForever.
+- N2 (non-blocking) esptool run against /dev/tty.X locks that node, not /dev/cu.X. Fix attempted (open and test the tty sibling), then REVERTED in round 3 (R3-1): with our cu.X open the driver refuses tty.X with EBUSY, so every real port looked busy. A program holding tty.X already makes our cu.X open fail with EBUSY, so the case is covered without the sibling.
+- N3 (non-blocking, partly pre-existing) Probes took any CFGINFO (CFGINFO wifi, pmu, lowms, rxyield) as the identity and stopped at the first non-identity reply. FIXED: sendCommand takes an accepts predicate; probePort accepts only WifiConfigUI.isIdentityReply (CFGINFO, not "CFGINFO wifi ", carrying id=, ssid64=, ssid= or name64=) and reads on past anything else. Checked against every CFGINFO the stream and rescue firmware print. Test: testAProbeSkipsAnotherCommandsCFGINFO.
+- N4 (nit) A board with no display record that answered and then went quiet was never retried. FIXED: an unanswered probe clears the earlier answer for a port no display owns (no setter can be driving it). Test: testAnUnownedBoardThatGoesQuietIsAskedAgain.
+- N5 (nit) A restart left an existing far-off retry in place. FIXED: the restart pulls it forward to 2 s. Test: testARestartBringsAFarOffRetryForward.
+- N6 (nit) Comment overstated that the lock test never keeps anyone out. FIXED: the comment states the microsecond window and that the other program is told the port is busy.
+
+The round-2 tests exercise new API (the cap, isIdentityReply, usbPortBelongsToADisplay), so they have no red run against the earlier code; R1's red runs are in usb-retry-red-green.log and usb-retry-review-red-green.log.
+
+### Round 3
+
+Scope: the N1-N5 fixes. The reviewer read Apple's IOSerialBSDClient open and close paths for N2. Verdict: not ready because of R3-1; the rest are non-blocking. N3's identity rule was checked against every CFGSHOW answer in the firmware's history and every test fixture, and passed. N4 was checked for mid-onboarding effects and is clean.
+
+- R3-1 (blocking) The N2 sibling check opened /dev/tty.X while our /dev/cu.X was open; the driver returns EBUSY for that whoever else is there, so every real board would have read as busy and never been identified. The pty tests could not see it (no cu/tty pair). FIXED: the sibling check is removed and only our own descriptor's lock is tested. Opening the sibling first instead would raise and then drop DTR/RTS and reset an ESP32, so that is not done either. The flock test on a real cu node was exercised on both P4 boards (board-serial-reads.log: read-board.py takes the lock and gets CFGINFO).
+- R3-2 (non-blocking) The restart pull-forward kept a high attempt count, so a miss mid-reboot waited 30 s. FIXED: a restart starts the schedule at attempt 0. Asserted in testARestartBringsAFarOffRetryForward.
+- R3-3 (nit) A stale saved path keeps a foreign device on the endless schedule. NOT TAKEN: a silent board has reported no hardware ID, so a record's saved path is the only link from it to its display. The reported 4C record has both an ID and a saved path, and under the suggested rule it would have been capped. The cost is at most one CFGSHOW every 30 s on a reused path.
+- R3-4 (nit) The comment said restarting boards count as owned, but the code did not check. FIXED: a restarting record's device path counts.
+
+### Round 4
+
+Scope: the round-3 changes only. Verdict: approved, no new findings.
+
+- R3-1 verified. Nothing opens a /dev/tty.* node any more. The lock test runs before any termios or DTR/RTS change, and a refused open writes nothing.
+- R3-2 verified. A restart resets the schedule to attempt 0. A probe that was already in flight when the reset happened leaves the fresh schedule alone.
+- R3-3: the reviewer agrees it should not be taken. The saved path is the only link from a silent board to its display.
+- R3-4 verified. There is no recursion. The new clause runs on the main actor and is harmless.
+
+Final gate on this code: swift test 822 tests 0 failures; run_tests.sh exit 0; test_espdisp.py 1980 checks passed (gate-*.log).

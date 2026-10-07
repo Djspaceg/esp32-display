@@ -112,6 +112,25 @@ final class PanelManager: ObservableObject {
     /// background. A repair holds this: the board it is catching must be
     /// opened by esptool alone, in the moment it is on USB.
     var usbProbeHolds = 0
+    /// Ports whose last CFGSHOW at this path generation went unanswered, and
+    /// when to ask again. A board still booting misses its first probe; without
+    /// this it stayed unverified until a manual refresh or a replug.
+    /// `nextAt` is system uptime, so a clock change does not stall it.
+    var usbIdentifyRetries: [
+        String: (generation: Int, attempts: Int, nextAt: TimeInterval)
+    ] = [:]
+    /// Wait before each retry; the last value repeats until the board answers
+    /// or is unplugged.
+    var usbIdentifyRetryDelays: [TimeInterval] = [2, 4, 8, 16, 30]
+    /// Unanswered asks after which a port no display record points at is let
+    /// go: seven is about two minutes on the delays above.
+    var usbUnknownPortRetryAttempts = 7
+    /// While above zero, unanswered ports are not asked again: something in the
+    /// app (the Add sheet's esptool read) has the port.
+    var usbIdentifyRetryHolds = 0
+    /// USB control writes (flip, rotate, power, brightness) being sent now,
+    /// with the reprobe that follows each.
+    var usbControlsInFlight = 0
     /// A path-only USB choice made during this app run. Legacy firmware cannot
     /// report CFGSHOW id=, so this is the narrow bridge that lets the user choose
     /// among several name-only devices. It is never persisted and expires when

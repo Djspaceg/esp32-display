@@ -31,6 +31,9 @@ struct AddDeviceSheet: View {
     @State private var inspecting = false
     @State private var inspectionGeneration = 0
     @State private var inspectedPathGeneration: Int?
+    /// The inspected device as the manager listed it when the inspection's
+    /// CFGSHOW finished, so a later answer can be told from an earlier one.
+    @State private var deviceAtInspection: WifiConfigUI.USBDeviceOption?
     @State private var tool: UsbOnboarding.ToolAvailability = .missing(searched: [])
 
     @State private var bundle: FirmwareBundle?
@@ -788,6 +791,7 @@ struct AddDeviceSheet: View {
                   pathGeneration == manager.usbPathGeneration(target)
             else { return }
             existing = answered
+            deviceAtInspection = manager.usbDevices.first { $0.path == target }
             boardVersion = report.version
             boardSource = report.source
             if case .answered(let name, let hardwareID) = answered {
@@ -805,8 +809,15 @@ struct AddDeviceSheet: View {
                     || needsHardwareID),
                   case .installed(let path) = tool
             else { return }
-            let read = await UsbOnboarder.detectChip(
-                port: target, tool: EsptoolCommand.Tool(path: path))
+            // esptool has the port: the manager's retry of an unanswered
+            // CFGSHOW must not write over it.
+            let read: UsbOnboarding.ChipDetection
+            do {
+                manager.holdUSBIdentifyRetries()
+                defer { manager.releaseUSBIdentifyRetries() }
+                read = await UsbOnboarder.detectChip(
+                    port: target, tool: EsptoolCommand.Tool(path: path))
+            }
             guard !Task.isCancelled, target == port,
                   pathGeneration == manager.usbPathGeneration(target)
             else { return }
@@ -849,6 +860,22 @@ struct AddDeviceSheet: View {
         }
         if inspectedPathGeneration != manager.usbPathGeneration(port) {
             inspect()
+            return
+        }
+        // The board was silent when inspected and has since answered the
+        // manager's retry at this same connection: take that answer rather than
+        // keep saying nothing answered. An answer from before the inspection
+        // is not one. The chosen mode is left alone.
+        if case .silent = existing, !inspecting,
+           let device = manager.usbDevices.first(where: { $0.path == port }),
+           let answeredAt = device.verifiedGeneration,
+           answeredAt == inspectedPathGeneration,
+           device.verifiedGeneration != deviceAtInspection?.verifiedGeneration
+               || device.serialStatus != deviceAtInspection?.serialStatus {
+            existing = .answered(name: device.name ?? "", hardwareID: device.hardwareID)
+            boardVersion = device.serialStatus?.firmwareVersion
+            boardSource = device.serialStatus?.firmwareSource
+            preselectExactTarget()
         }
     }
 

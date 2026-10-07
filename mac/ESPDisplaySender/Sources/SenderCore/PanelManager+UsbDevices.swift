@@ -249,9 +249,10 @@ extension PanelManager {
         setUSBDeviceSelection(selection, for: serviceName)
     }
 
-    /// Refresh transport paths without blocking the main actor. Only newly seen
-    /// paths are identified automatically; the explicit refresh action below
-    /// re-probes every connected device.
+    /// Refresh transport paths without blocking the main actor. Newly seen paths
+    /// are identified automatically, and a path whose answer was missed is asked
+    /// again on the retry schedule; the explicit refresh action below re-probes
+    /// every connected device.
     func refreshUSBPorts() {
         let added = updateUSBPorts(WifiConfigUI.candidatePorts())
         identifyUSBPorts(added)
@@ -287,6 +288,7 @@ extension PanelManager {
         usbPathGenerations[path, default: 0] += 1
         usbProbeTasks[path]?.task.cancel()
         usbProbeTasks[path] = nil
+        usbIdentifyRetries[path] = nil
         if let index = usbDevices.firstIndex(where: { $0.path == path }) {
             // Unplugged or renumbered: the next time this board is verified it
             // is a fresh USB connection, and the user asked for a copy on every
@@ -497,6 +499,22 @@ extension PanelManager {
         objectWillChange.send()
         usbRestartingServices.insert(serviceName)
         sortPanels()
+        // A board whose tty survives its restart is never seen as a new port,
+        // so ask it again on the retry schedule rather than waiting on a refresh.
+        if let path = usbUpdateDevice(for: serviceName)?.path {
+            let generation = usbPathGeneration(path)
+            let soon = ProcessInfo.processInfo.systemUptime
+                + usbIdentifyRetryDelay(afterAttempt: 1)
+            if let pending = usbIdentifyRetries[path], pending.generation == generation {
+                // Already scheduled, perhaps far out after earlier misses: the
+                // restart is a reason to ask soon.
+                // A fresh schedule too, so a miss mid-reboot is asked again in
+                // seconds, not at the long end of the backoff.
+                usbIdentifyRetries[path] = (generation, 0, min(pending.nextAt, soon))
+            } else {
+                usbIdentifyRetries[path] = (generation, 0, soon)
+            }
+        }
     }
 
     /// Return one coalesced CFGSHOW probe for this path and publish its identity.
@@ -522,7 +540,11 @@ extension PanelManager {
         else {
             return .unavailable("USB device changed while it was being identified")
         }
-        guard case .identified(let identity) = result else { return result }
+        guard case .identified(let identity) = result else {
+            noteUnansweredUSBProbe(path, generation: generation)
+            return result
+        }
+        usbIdentifyRetries[path] = nil
         if let index = usbDevices.firstIndex(where: { $0.path == path }) {
             // A completed CFGSHOW probe is authoritative for discovery-scoped
             // facts. Clear an older value when current firmware omits it.
@@ -577,8 +599,121 @@ extension PanelManager {
         usbProbeHolds == 0 ? ports : []
     }
 
+    /// Schedule the next ask for a port that did not answer. Silence is not
+    /// reported: a board mid-boot, a blank board and one running other firmware
+    /// all look like this, and every one of them can still be flashed.
+    ///
+    /// Coalesced awaiters of one probe all land here; only the first of them,
+    /// or a retry whose time had come, moves the schedule on.
+    ///
+    /// A port that belongs to a display is asked until it answers or is
+    /// unplugged. Any other serial device (an Arduino, a printer, a board with
+    /// other firmware) is let go after `usbUnknownPortRetryAttempts`, about two
+    /// minutes: past that, each ask only disturbs whoever else is using it.
+    private func noteUnansweredUSBProbe(_ path: String, generation: Int) {
+        let now = ProcessInfo.processInfo.systemUptime
+        var attempts = 1
+        if let pending = usbIdentifyRetries[path], pending.generation == generation {
+            guard pending.nextAt <= now else { return }
+            attempts = pending.attempts + 1
+        }
+        let belongs = usbPortBelongsToADisplay(path)
+        if !belongs, let index = usbDevices.firstIndex(where: { $0.path == path }),
+           usbDevices[index].verifiedGeneration != nil {
+            // No display record means no setter can be driving it, so an
+            // earlier answer at this connection need not keep it off the
+            // schedule: it has gone quiet (reset, crash loop) and is asked again.
+            usbDevices[index].serialStatus = nil
+            usbDevices[index].verifiedGeneration = nil
+        }
+        guard belongs || attempts <= usbUnknownPortRetryAttempts else {
+            usbIdentifyRetries[path] = nil
+            return
+        }
+        usbIdentifyRetries[path] = (
+            generation, attempts,
+            now + usbIdentifyRetryDelay(afterAttempt: attempts))
+    }
+
+    /// Whether a display record points at this port: by the hardware ID the
+    /// board reported, by a record's saved path, or as a restarting record's
+    /// device. The saved path counts even for a record with a hardware ID,
+    /// because a board that has not answered has reported no ID: it is the
+    /// only link from a silent board to its display. A path macOS reused for
+    /// something else is asked on too, at most every 30 s.
+    func usbPortBelongsToADisplay(_ path: String) -> Bool {
+        if panels.contains(where: { $0.usbPort == path }) { return true }
+        if panels.contains(where: {
+            usbRestartingServices.contains($0.serviceName)
+                && usbUpdateDevice(for: $0.serviceName)?.path == path
+        }) { return true }
+        guard let hardwareID = ConfigCommands.canonicalHardwareID(
+            usbDevices.first(where: { $0.path == path })?.hardwareID)
+        else { return false }
+        return panelAssociated(withHardwareID: hardwareID) != nil
+    }
+
+    func usbIdentifyRetryDelay(afterAttempt attempts: Int) -> TimeInterval {
+        guard let last = usbIdentifyRetryDelays.last else { return 30 }
+        let index = attempts - 1
+        return usbIdentifyRetryDelays.indices.contains(index)
+            ? usbIdentifyRetryDelays[index] : last
+    }
+
+    /// Unanswered ports whose next ask is due. None while anything in the app
+    /// has a USB port: a CFGSHOW written over esptool, a flash, the preset
+    /// sheet, a preset sync or a control write would talk over it. Ownership
+    /// is checked app-wide rather than per board because a board that has not
+    /// answered may not have a hardware ID to match a run against. Another
+    /// program's esptool is kept out by its lock (`WifiConfigUI.probePort`).
+    ///
+    /// A board that answered at this connection and is not restarting is not
+    /// asked again: it is the only kind the synchronous setters (rename, WiFi,
+    /// OTA password) will drive, so a retry can never be reading their port.
+    func usbPortsDueForIdentifyRetry(
+        now: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> [String] {
+        guard usbProbeHolds == 0, usbIdentifyRetryHolds == 0,
+              usbControlsInFlight == 0,
+              usbFlashesInFlight.isEmpty, wifiPresetSheetOperations.isEmpty,
+              wifiPresetSyncTasks.isEmpty, usbBrightnessTasks.isEmpty
+        else { return [] }
+        let restartingIDs = Set(panels.compactMap { panel in
+            usbRestartingServices.contains(panel.serviceName)
+                ? stableHardwareID(of: panel) : nil
+        })
+        return usbDevices.compactMap { device in
+            let answered = device.verifiedGeneration == usbPathGeneration(device.path)
+                && device.serialStatus != nil
+            let restarting = ConfigCommands.canonicalHardwareID(device.hardwareID)
+                .map(restartingIDs.contains) ?? false
+            guard device.isConnected, !device.path.isEmpty,
+                  !answered || restarting,
+                  let pending = usbIdentifyRetries[device.path],
+                  pending.generation == usbPathGeneration(device.path),
+                  pending.nextAt <= now,
+                  usbProbeTasks[device.path] == nil
+            else { return nil }
+            return device.path
+        }
+    }
+
+    func holdUSBIdentifyRetries() {
+        usbIdentifyRetryHolds += 1
+    }
+
+    func releaseUSBIdentifyRetries() {
+        usbIdentifyRetryHolds = max(0, usbIdentifyRetryHolds - 1)
+    }
+
+    /// Ask these ports what they are, and ask again any port whose answer was
+    /// missed and is due. Called on every two-second port refresh.
     func identifyUSBPorts(_ ports: [String]) {
-        for path in portsToIdentify(ports) {
+        var paths = portsToIdentify(ports)
+        for path in usbPortsDueForIdentifyRetry() where !paths.contains(path) {
+            paths.append(path)
+        }
+        for path in paths {
             Task { @MainActor [weak self] in
                 _ = await self?.probeUSBDevice(path)
             }

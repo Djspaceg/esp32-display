@@ -322,9 +322,33 @@ enum WifiConfigUI {
         }.sorted().map { "/dev/" + $0 }
     }
 
-    private static func openSerial(_ path: String) -> Int32? {
+    /// Whether another program holds the tty's exclusive lock, as esptool does
+    /// for its whole run (pyserial `exclusive=True`). Tested and released at
+    /// once; only a program taking its own lock in that same instant is kept
+    /// out, and it is told the port is busy rather than sharing it.
+    ///
+    /// The /dev/tty.X sibling is deliberately not opened: with our cu.X open,
+    /// the serial driver refuses it with EBUSY whoever else is there, and
+    /// opened first it raises and then drops DTR/RTS, which resets an ESP32. A
+    /// program holding tty.X already makes our cu.X open fail with EBUSY.
+    private static func isLockedElsewhere(_ fd: Int32) -> Bool {
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+            _ = flock(fd, LOCK_UN)
+            return false
+        }
+        return errno == EWOULDBLOCK
+    }
+
+    private static func openSerial(
+        _ path: String, refuseIfLocked: Bool = false
+    ) -> Int32? {
         let fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
         guard fd >= 0 else { return nil }
+        // Before any line or mode change: the holder's settings are left alone.
+        if refuseIfLocked, isLockedElsewhere(fd) {
+            close(fd)
+            return nil
+        }
         var tty = termios()
         guard tcgetattr(fd, &tty) == 0 else {
             close(fd)
@@ -355,13 +379,21 @@ enum WifiConfigUI {
     /// `acceptInfo: false` is for setting commands, whose reply is always a CFGOK
     /// or CFGERR: a CFGINFO left unread by an earlier CFGSHOW (a background
     /// identity probe racing this one) is then not mistaken for the answer.
+    ///
+    /// `refuseIfLocked` sends nothing to a port another program holds
+    /// exclusively, such as esptool mid-flash.
     static func sendCommand(
         _ command: String, port: String, timeout: TimeInterval = 6,
-        log: SerialLog? = nil, acceptInfo: Bool = true
+        log: SerialLog? = nil, acceptInfo: Bool = true,
+        refuseIfLocked: Bool = false,
+        accepts: ((String) -> Bool)? = nil
     ) -> CommandResult {
-        guard let fd = openSerial(port) else {
-            log?(.app, "could not open \(port)")
-            return .failure("could not open \(port)")
+        guard let fd = openSerial(port, refuseIfLocked: refuseIfLocked) else {
+            let reason = refuseIfLocked
+                ? "could not open \(port), or another program is using it"
+                : "could not open \(port)"
+            log?(.app, reason)
+            return .failure(reason)
         }
         defer { close(fd) }
 
@@ -378,7 +410,8 @@ enum WifiConfigUI {
 
         func decide(_ line: String) -> CommandResult? {
             switch ConfigCommands.reply(in: line) {
-            case .accepted(let reply) where acceptInfo || !reply.hasPrefix("CFGINFO"):
+            case .accepted(let reply) where accepts.map({ $0(reply) })
+                    ?? (acceptInfo || !reply.hasPrefix("CFGINFO")):
                 return .success(reply)
             case .refused(let reply):
                 return .failure(reply)
@@ -885,8 +918,25 @@ enum WifiConfigUI {
             status: status)
     }
 
+    /// CFGSHOW's own reply, told apart from other CFGINFO lines on a shared tty
+    /// (`CFGINFO wifi ...` for CFGWIFISHOW, and the diagnostic ones): it names
+    /// the network or the board. Anything else is skipped and reading goes on.
+    static func isIdentityReply(_ reply: String) -> Bool {
+        guard reply.hasPrefix("CFGINFO "), !reply.hasPrefix("CFGINFO wifi ") else {
+            return false
+        }
+        let fields = reply.split(separator: " ")
+        return fields.contains { $0.hasPrefix("id=") || $0.hasPrefix("ssid64=")
+            || $0.hasPrefix("ssid=") || $0.hasPrefix("name64=") }
+    }
+
     /// Ask a port to identify itself. CFGSHOW answering at all is what proves
     /// the path speaks our configuration protocol.
+    ///
+    /// Only CFGSHOW's own CFGINFO is its answer (`isIdentityReply`): a CFGOK or
+    /// another CFGINFO read here is some other command's reply taken off the
+    /// same tty, and says nothing about which board this is. Nothing is written
+    /// to a port another program holds exclusively.
     static func probePort(_ port: String, timeout: TimeInterval) -> PortProbe {
         probePort(port, timeout: timeout, log: nil)
     }
@@ -894,7 +944,10 @@ enum WifiConfigUI {
     static func probePort(
         _ port: String, timeout: TimeInterval, log: SerialLog?
     ) -> PortProbe {
-        switch sendCommand("CFGSHOW", port: port, timeout: timeout, log: log) {
+        switch sendCommand(
+            "CFGSHOW", port: port, timeout: timeout, log: log, refuseIfLocked: true,
+            accepts: isIdentityReply)
+        {
         case .success(let info):
             return .identified(usbIdentity(from: info))
         case .failure(let reason):
