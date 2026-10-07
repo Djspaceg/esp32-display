@@ -2,6 +2,95 @@
 
 Each finished branch keeps its own review record below, whole.
 
+## Code review: boot-menu countdown fix (boot-mode-menu, follow-up)
+
+The human found the first menu "dismisses in ~2 seconds so it's impossible to
+meaningfully interact with". Required: the first touch or BOOT press cancels the
+countdown and the menu then waits for a choice; the power-on countdown is 5 s
+and visible; a triple-press menu has no countdown; the opening press is not
+counted as input. Reviewed by independent agents with no context, read-only on
+the repository, mutating only scratch copies.
+
+### Round 1: nothing blocking; two real escapes
+
+| ID | Finding | Verdict | Disposition |
+| --- | --- | --- | --- |
+| F1 | A BOOT press made late in the countdown, still down when 5 s ran out, escaped into the normal firmware: the menu streamed, then the release rotated (`rotation=2 (saved)`), dimmed, or powered off (`pwr=off (saved)`) the panel. | CONFIRMED (harness on real input_button.cpp + boot_menu.cpp) | FIXED. The countdown stops when a press goes DOWN: `bootMenuPressDown()` from the BOOT down edge in `handleButton` and from touch `pressStarted` in `serviceTouch`. That press's own completion is then spent on the cancel (`Countdown::onPressDown`, `cancelPending_`). Red first: `pressDownLateInTheCountdownStaysInTheMenu` failed on the pre-fix code with `streaming (countdown ended)` (red-first-review-findings.log). |
+| F2 | A touch held 400-600 ms classifies as no gesture, and a long press is dropped on the menu, so a held touch never cancelled and the board streamed anyway. | CONFIRMED (trace) | FIXED by the same press-down hook. `touchHeldTooLongForATapStillCancels`, through the REAL `serviceTouch()`; the pre-fix touch path (mutation M1) fails it. |
+| F3 | BOOT press times are on the FreeRTOS tick clock, the menu opened on `millis()`; ticks trail esp_timer, so a press just after the menu appeared was "ignored (began before the menu)". The fakes used one clock, so no test could see it. | PLAUSIBLE (offset assumed) | FIXED. Every menu time is on the tick clock (`menuClockMs`, exported as `bootMenuClockMs`). The fake tick clock now trails `millis()` by 700 ms, as on a board. Red first: `pressJustAfterTheMenuOpensCounts`, and an existing triple-press test, failed with `choose ignored (began before the menu)` (red-first-review-findings.log). |
+| F4 | A fast knob turn of several detents both cancelled and moved the highlight (live on the Elecrow knob, which runs Doom). | CONFIRMED (trace) | FIXED. `turnBootMenu()`: one turn is one press, however many detents. `fastKnobTurnOnlyCancels` runs on the knob's real profile through its encoder interrupt and `applyEncoderTurn`; the pre-fix per-detent loop (M6) fails it. |
+| F5 | Test gaps: the touch path was not compiled into any test (deleting the press-start line survived); the hold-path ignore was untested; no knob test; single-clock fakes. | CONFIRMED (mutation) | FIXED. `input_touch.cpp` is now compiled into test_doom_entry_gate against a fake controller (`fakes/doom_entry/board_touch.h`), with raw coordinates found by search through the board's real calibration. New: hold-path ignore, knob, touch hold. Mutations (mutations-review-round2.log): 6 of 7 caught. M3, stamping touch starts with `millis()`, survives and is equivalent: the controller is first polled inside the menu, so no touch can appear to begin before it opens, the only case the clock affects. |
+| F6 | Misleading or dead text: an unused `now` parameter; "the tail of the press that opened it" (that case cannot reach a new boot: the triple press acts on its third release, then restarts); "Whatever is highlighted" at expiry (only an untouched menu expires). | CONFIRMED | FIXED: `onPress(pressStartedAt)` lost `now`; comments now name the real case (a press made during boot, after the BOOT interrupt is attached and before the menu opens); the expiry comment says the highlight is still STREAMING. |
+| Risk | With the 60 s ceiling gone, a phantom touch, a stuck BOOT pressed after the menu opens, or an accidental triple press leaves the board on the menu until someone chooses. | Design | ACCEPTED as asked ("stays up until the user picks something"); recorded as a residual in DECISIONS.md D9. |
+
+Checked and sound in round 1: the hold that cancels sets `selectorEntryHold`, so
+its release does nothing; choosing STREAMING by a hold leaves no rotate or power
+press; the WiFi selector is unchanged; wrap arithmetic is right; a board left
+alone streams.
+
+The round-1 fixes were committed to main as ac64531 by someone other than me (its
+message says the human tested it on a board), before round 2 reported. The
+round-2 fixes below are a follow-up commit on top of it.
+
+### Round 2: one blocking finding; all fixed
+
+| ID | Finding | Verdict | Disposition |
+| --- | --- | --- | --- |
+| R2-1 (blocking) | The touch controller is first polled inside the menu, so a finger already on the glass at power-on (a resting hand, a case pressing the panel) looked like a fresh press, cancelled the countdown, and with no ceiling the board never streamed. The probe was still on the menu at 120 s. | CONFIRMED (probe) | FIXED. `primeTouchForBootMenu()` reads the controller for 60 ms before the menu opens; a finger found down is ignored, every report, until it lifts. Red first: `touchAlreadyDownAtOpenStillStreams` hung on the round-1 code (red-first-review2.log). The test fake now reports a resting finger every 10 ms, as a polled GT911 does. |
+| R2-2 | F4 was fixed only when every detent landed in one loop pass. A real flick spreads its detents over several passes, so it still cancelled and moved; so did press-and-turn. | CONFIRMED (probe) | FIXED. `Countdown::onTurn`: detents within 250 ms (`KNOB_GESTURE_MS`) are one gesture, and a turn while the cancelling BOOT or touch press is still down is spent. Red first: `knobFlickSpreadOverPassesOnlyCancels` and `knobPressAndTurnOnlyCancels` failed on the round-1 code; model rules red on the round-1 model. |
+| R2-3 | A BOOT press could still leak into the normal press tiers by two routes: a touch choosing while BOOT was held, and a down edge arriving in the menu's last pass after its button handling. | CONFIRMED (harness) | FIXED. `swallowBootPressAcrossMenuEnd()`, called as the menu ends: a press already down, or one whose down edge is stamped at or before the end, is swallowed whole. Red first: `touchChoiceWhileBootHeldLeavesNoNormalPress` failed with `long press -> rotation=2 (saved)`. `bootDownInTheLastPassLeavesNoNormalPress` injects BOOT inside the last pass's touch poll and checks the next real press is normal again. |
+| R2-4 | A menu left open 2^31 ms or more read every press as from before it (signed difference), and nothing ended it. | CONFIRMED (model) | FIXED. `tick()` retires the before-open test 10 min after opening (`BEFORE_OPEN_HORIZON_MS`); before that, an unsigned horizon test. Red first on the round-1 model. |
+| R2-5 | The cancelling press was matched by timestamp alone, so a BOOT press and a tap in the same millisecond could swap roles; a pending cancel from a press that never completed stayed set. | CONFIRMED (probe) | FIXED. Matched by `PressSource` as well; a new press from the same source clears a stale pending cancel. Red first on the round-1 model. |
+| R2-6 | Design risk: with no ceiling, any stray press during the countdown keeps the board off streaming. | PLAUSIBLE | ACCEPTED as the human's rule 1; R2-1, its concrete instance, is fixed. Residual in DECISIONS.md D9. |
+| Nits | `ui_screens.cpp` comment "the title is the countdown"; code-review.md still describes `MAX_OPEN_MS`. | CONFIRMED | Comment FIXED. The `MAX_OPEN_MS` text is the record of the first review round and stays as history; D9 records the supersession. |
+
+Also fixed, found while checking mutation R4: `surveyActive` leaked from an
+earlier test (a double press turns the survey on), which made
+`touchChoiceWhileBootHeldLeavesNoNormalPress` pass vacuously: its release took
+the survey branch, so the rotate it guards could not happen. `resetObservations()`
+now resets all shared button and display state.
+
+Mutations after round 2 (mutations-review-round2.log): 13 of 14 caught. M3
+(touch press starts on `millis()`) survives and is equivalent: the controller is
+first read just before the menu opens and touches from before are filtered by
+the prime, so no touch time can fall before the opening on either clock.
+
+### Round 3: nothing confirmed blocking; two fixed, rest recorded
+
+| ID | Finding | Verdict | Disposition |
+| --- | --- | --- | --- |
+| R3-1 | The prime only waited for reports, but the CST816 (three Doom boards: LcdSt77916, TouchSt7789, ElecrowKnob128) reports by interrupt and need not raise one for a finger holding still; `board_touch.h` reads it only when the flag is set. A finger resting since boot could slip past the prime, then a slight shift in the menu would cancel the countdown, and the board would never stream. | PLAUSIBLE (hardware-dependent) | FIXED. New `boardtouch::readNow()` reads the CST816 report register directly, whatever its interrupt says (a controller asleep with nothing on it reads as no report); other controllers fall through to `poll()`. The prime calls it first, then watches reports for 60 ms. Red first: `silentRestingFingerStillStreams` (finger down since boot, one report a second in) hung on the round-2 code (red-first-review3.log). The fake controller now knows where a finger is independent of its reports, so a direct read can be modelled. Unverified on CST816 hardware. |
+| R3-2 | A press-and-turn's BOOT release never reaches the menu as a press, so the turn rule went on treating it as held and every later turn was spent: the knob went dead. Same after a touch held too long to be a tap. | CONFIRMED (probe) | FIXED. `onTurn(at, pressHeld)`: the caller says whether BOOT or a finger is physically down now (`gpio_get_level` on BOOT, `touchPressHeld()`); a pending cancel with nothing held has ended. Red first: `knobWorksAfterPressAndTurn` failed on the round-2 code; model cases for the BOOT and touch variants. |
+| R3-3 | If a GT911 holds its last report until cleared, a tap during boot could be read at the prime as a resting finger, and the user's first real tap would only clear it. | PLAUSIBLE, minor | NOT CHANGED. The countdown still runs and the board still streams; the cost is one eaten tap. Residual. |
+| R3-4 | `bootDownInTheLastPassLeavesNoNormalPress` depended on exact timing and could pass without its hook firing. | CONFIRMED | FIXED: the test now asserts the hook fired inside the menu. |
+| R3-5 | The fake controller handed out every queued report with no gating, so a resting finger always had a stale report waiting; prime-length and lift-during-prime mutations survived. | CONFIRMED | FIXED in part: resting fingers now report every 10 ms like a polled GT911, a silent resting finger exists for the CST816 case, and `fingerLiftedDuringPrimeThenTapCounts` covers a lift during the prime. A 1 ms prime is still not distinguished in the fake (the direct read covers it); recorded. |
+| Nits | Orphaned "one gate" comment; "a knob turn is one press" in `boot_menu.h` and `input_button.cpp`; dead `!= Knob` check. | CONFIRMED | FIXED. |
+| Checked sound | Swallow: cleared by the first `handleButton()` after the menu, which nothing in setup calls earlier; a full long press during the WiFi wait still rotates; old-release/new-down/new-up queues are right; the WiFi selector is unaffected. Tick latch runs every pass. Source matching holds. M3 (touch on `millis()`) is equivalent. Non-game builds (no `ESPDISP_BOOT_MENU_RUNTIME`) syntax-check for plain, C6 and C3. | | |
+
+Mutations after round 3 (mutations.log): 15 of 16 caught; M3 survives, equivalent.
+
+Also found while gating: my build-wait loop (`while pgrep -f "arduino-cli compile"`)
+matched another worker's identical loop, and theirs matched mine, so both waited
+forever. My stale job was stopped (it predated round 3, so nothing was lost) and
+the gate now waits on the exact process name (`pgrep -x arduino-cli`).
+
+### Call sites (shared component)
+
+`firmware/libraries/espdisp_board/src/board_touch.h` gains `boardtouch::readNow()`.
+It is new; no existing caller changes. Its only caller is
+`firmware/display_stream/input_touch.cpp` `primeTouchForBootMenu()`, which is
+compiled only with `ESPDISP_BOOT_MENU_RUNTIME`. The library's other users
+(`display_test`, `board_bootstrap`, `display_stream` beyond that function) do not
+call it. `poll()`, `init()` and `available()` are unchanged.
+
+### Rounds
+
+3 independent rounds on the countdown fix. Round 1 changed the press semantics
+(cancel on press-down, one clock). Round 2 added the touch prime, the BOOT
+swallow, press sources, the tick latch and the knob gesture. Round 3 added
+`readNow()` and the held-press flag for turns. No decision in DECISIONS.md was
+reversed; D9 stands.
+
 ## Code review: boot-mode menu (boot-mode-menu)
 
 Reviewed diff: branch `boot-mode-menu` against its base. One round, by an

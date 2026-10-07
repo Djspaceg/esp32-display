@@ -212,8 +212,24 @@ struct TouchReport {
   uint16_t rawY;
 };
 static std::vector<TouchReport> touchReports;
+// Where a finger actually is, independent of what the controller has reported:
+// an interrupt-driven controller (CST816) need not report a finger holding
+// still, but answers a direct read with it.
+struct Finger {
+  uint32_t from, until;  // until == 0: never lifted
+  uint16_t rawX, rawY;
+};
+static std::vector<Finger> fingers;
+// When set, BOOT goes down from inside the touch poll at that time - after the
+// pass's handleButton() has drained the edge queue, before its expiry check.
+static uint32_t bootDownInsideTouchPollAt = 0;
 namespace boardtouch {
 bool poll(Sample &sample) {
+  if (bootDownInsideTouchPollAt != 0 &&
+      (int32_t)(fakeNow - bootDownInsideTouchPollAt) >= 0) {
+    bootDownInsideTouchPollAt = 0;
+    bootIsrAt(true);
+  }
   if (touchReports.empty() || touchReports.front().at > fakeNow) return false;
   const TouchReport report = touchReports.front();
   touchReports.erase(touchReports.begin());
@@ -221,6 +237,21 @@ bool poll(Sample &sample) {
   sample.rawX = report.rawX;
   sample.rawY = report.rawY;
   sample.points = report.pressed ? 1 : 0;
+  return true;
+}
+bool readNow(Sample &sample) {
+  for (const Finger &f : fingers) {
+    if ((int32_t)(fakeNow - f.from) >= 0 &&
+        (f.until == 0 || (int32_t)(fakeNow - f.until) < 0)) {
+      sample.pressed = true;
+      sample.rawX = f.rawX;
+      sample.rawY = f.rawY;
+      sample.points = 1;
+      return true;
+    }
+  }
+  sample.pressed = false;
+  sample.points = 0;
   return true;
 }
 }  // namespace boardtouch
@@ -266,6 +297,17 @@ static void shortPress() {
 }
 
 static void resetObservations() {
+  // Shared state an earlier test may have left behind. A survey left on once
+  // made a later test pass vacuously: its release took the survey branch, so
+  // the rotate it was meant to catch could never happen.
+  surveyActive = false;
+  idleActive = false;
+  wifiSelectorActive = false;
+  bootMenuActive = false;
+  fixedBlLevel = 0;
+  userBlLevel = BL_HIGH;
+  panelManuallyOff = false;
+  panelRotation = 0;
   Serial.captured.clear();
   ESP.restarts = 0;
   fakeNvsBools.clear();
@@ -279,6 +321,8 @@ static void resetObservations() {
   menuMessage.clear();
   script.clear();
   touchReports.clear();
+  fingers.clear();
+  bootDownInsideTouchPollAt = 0;
   touchAvailable = false;
   fakeResetReason = ESP_RST_POWERON;
   // Let the double-press tracker and the triple-press window close.
@@ -339,12 +383,14 @@ static void touchPress(uint32_t at, uint32_t heldMs, int16_t x, int16_t y) {
   rawFor(x, y, rawX, rawY);
   touchReports.push_back({at - heldMs, true, rawX, rawY});
   touchReports.push_back({at, false, rawX, rawY});
+  fingers.push_back({at - heldMs, at, rawX, rawY});
 }
 // A finger held from `from` to `until`, reported every 10 ms the way a polled
 // GT911 keeps reporting a resting finger, then lifted (unless until is 0).
 static void touchHeld(uint32_t from, uint32_t until, int16_t x, int16_t y) {
   uint16_t rawX = 0, rawY = 0;
   rawFor(x, y, rawX, rawY);
+  fingers.push_back({from, until, rawX, rawY});
   const uint32_t end = until != 0 ? until : from + 7200000u;
   for (uint32_t at = from; (int32_t)(end - at) > 0; at += 10) {
     touchReports.push_back({at, true, rawX, rawY});
@@ -842,13 +888,11 @@ static int fastKnobTurnOnlyCancels() {
   CHECK(serial.find("knob: turn +2") != std::string::npos);
   CHECK(serial.find("boot menu: press cancelled the countdown") !=
         std::string::npos);
-  CHECK(serial.find("boot menu: turn spent on the cancel") !=
-        std::string::npos);
-  // Exactly one highlight move: the second turn's.
+  // Exactly one highlight move: the second turn's, after the cancel.
   const size_t first = serial.find("highlighted");
   CHECK(first != std::string::npos);
   CHECK(serial.find("highlighted", first + 1) == std::string::npos);
-  CHECK(serial.rfind("spent on the cancel") < first);
+  CHECK(serial.find("press cancelled the countdown") < first);
   CHECK(fakeNvsBools.count("doomonce") == 1);
   return 0;
 }
@@ -899,6 +943,106 @@ static int touchChoiceWhileBootHeldLeavesNoNormalPress() {
   CHECK(Serial.captured.find("button: short press") == std::string::npos);
   CHECK(panelRotation == savedRotation);
   CHECK(displayPrefSaves == 0);
+  return 0;
+}
+
+// Round-2 finding 3: BOOT going down inside the menu's last pass, after its
+// button handling but before the expiry check, escaped the menu and its release
+// then rotated the panel. Such a press is the menu's and is swallowed.
+static int bootDownInTheLastPassLeavesNoNormalPress() {
+  resetObservations();
+  wadProblem = nullptr;
+  touchAvailable = true;
+  const uint32_t t = fakeNow;
+  const uint32_t savedRotation = panelRotation;
+  // The menu opens after the 60 ms touch prime, so its countdown runs out in
+  // the pass at t + 5060; aim just inside that pass. An earlier hit cancels the
+  // countdown instead, which the "countdown ended" check below catches.
+  bootDownInsideTouchPollAt = t + 5055;
+  CHECK(runMenu(false) == MenuRun::Returned);
+  // The hook fired inside the menu, or this test proves nothing.
+  CHECK(bootDownInsideTouchPollAt == 0);
+  CHECK(Serial.captured.find("boot menu: streaming (countdown ended)") !=
+        std::string::npos);
+  releaseBoot(t + 6200);
+  CHECK(Serial.captured.find("button: long press") == std::string::npos);
+  CHECK(panelRotation == savedRotation);
+  CHECK(displayPrefSaves == 0);
+  // And the next real press after the menu is a normal one again.
+  fakeNow += 3000;
+  shortPress();
+  CHECK(Serial.captured.find("button: short press") != std::string::npos);
+  return 0;
+}
+
+// Round-3 finding 1: an interrupt-driven controller (CST816, on three Doom
+// boards) need not report a finger that is holding still, so a prime that only
+// waits for reports can miss one resting since boot. A later slight shift then
+// looked like a fresh press, cancelled the countdown, and the board never
+// streamed.
+static int silentRestingFingerStillStreams() {
+  resetObservations();
+  wadProblem = nullptr;
+  touchAvailable = true;
+  const wifiselector::SelectorLayout layout = menuLayout();
+  const wifiselector::Rect row = layout.rowRect(1);
+  const int16_t x = (int16_t)(row.x + row.width / 2);
+  const int16_t y = (int16_t)(row.y + row.height / 2);
+  uint16_t rawX = 0, rawY = 0;
+  rawFor(x, y, rawX, rawY);
+  const uint32_t t = fakeNow;
+  // On the glass since before the menu, never lifted, and reported only once,
+  // when it shifts a little a second into the menu.
+  fingers.push_back({t - 300, 0, rawX, rawY});
+  touchReports.push_back({t + 1000, true, (uint16_t)(rawX + 4), rawY});
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(Serial.captured.find("cancelled the countdown") == std::string::npos);
+  CHECK(Serial.captured.find("boot menu: streaming (countdown ended)") !=
+        std::string::npos);
+  return 0;
+}
+
+// The other side of the prime: a finger that lifts while it is looking is
+// gone, and the next real tap on the menu counts.
+static int fingerLiftedDuringPrimeThenTapCounts() {
+  resetObservations();
+  wadProblem = nullptr;
+  touchAvailable = true;
+  const wifiselector::SelectorLayout layout = menuLayout();
+  const wifiselector::Rect row = layout.rowRect(1);
+  const uint32_t t = fakeNow;
+  touchHeld(t - 300, t + 30, (int16_t)(row.x + row.width / 2),
+            (int16_t)(row.y + row.height / 2));
+  touchTap(t + 1500, layout.rowRect(0));
+  touchTap(t + 3000, layout.connect);
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(Serial.captured.find("boot menu: press cancelled the countdown") !=
+        std::string::npos);
+  CHECK(Serial.captured.find("countdown ended") == std::string::npos);
+  CHECK(Serial.captured.find("boot menu: streaming (chosen)") !=
+        std::string::npos);
+  return 0;
+}
+
+// Round-3 finding 2: after a press-and-turn the BOOT release never reaches the
+// menu as a press, so the turn rule went on treating that press as held and
+// every later turn was spent - the knob was dead.
+static int knobWorksAfterPressAndTurn() {
+  resetObservations();
+  wadProblem = nullptr;
+  const uint32_t t = fakeNow;
+  script = {{t + 1000, ScriptedInput::BootDown, 0, 0},
+            {t + 1200, ScriptedInput::KnobTurn, 1, 0},
+            {t + 1400, ScriptedInput::BootUp, 0, 0},
+            // Later, separate turns move the highlight, then a hold chooses.
+            {t + 2500, ScriptedInput::KnobTurn, 1, 0},
+            {t + 4000, ScriptedInput::BootDown, 0, 0}};
+  std::string serial;
+  const MenuRun run = runMenuOnKnob(serial);
+  releaseBoot(t + 5000);
+  CHECK(run == MenuRun::Restarted);
+  CHECK(serial.find("boot menu: DOOM highlighted") != std::string::npos);
+  CHECK(fakeNvsBools.count("doomonce") == 1);
   return 0;
 }
 
@@ -1088,6 +1232,10 @@ int main() {
   if (knobFlickSpreadOverPassesOnlyCancels() != 0) return 1;
   if (knobPressAndTurnOnlyCancels() != 0) return 1;
   if (touchChoiceWhileBootHeldLeavesNoNormalPress() != 0) return 1;
+  if (bootDownInTheLastPassLeavesNoNormalPress() != 0) return 1;
+  if (silentRestingFingerStillStreams() != 0) return 1;
+  if (fingerLiftedDuringPrimeThenTapCounts() != 0) return 1;
+  if (knobWorksAfterPressAndTurn() != 0) return 1;
   if (bootPressesThenHoldChooseDoom() != 0) return 1;
   if (touchCancelRowThenStartChoosesDoom() != 0) return 1;
   if (touchAloneDrivesTheMenuToStreaming() != 0) return 1;

@@ -718,14 +718,14 @@ int main() {
     {
       Countdown power;
       power.start(1000, Opening::Timed);
-      CHECK(power.onPress(2500) == PressEffect::CancelOnly);
+      CHECK(power.onPress(2500, PressSource::Boot) == PressEffect::CancelOnly);
       CHECK(!power.counting());
       CHECK(!power.expired(6000));
       CHECK(!power.expired(1000 + 3600000u));
       CHECK(!power.expired(1000 + 0x7FFFFFFFu));
       // Every later press acts, and none restarts a countdown.
-      CHECK(power.onPress(3000) == PressEffect::Act);
-      CHECK(power.onPress(9000) == PressEffect::Act);
+      CHECK(power.onPress(3000, PressSource::Boot) == PressEffect::Act);
+      CHECK(power.onPress(9000, PressSource::Boot) == PressEffect::Act);
       CHECK(!power.counting());
       CHECK(!power.expired(1000 + 3600000u));
     }
@@ -736,7 +736,7 @@ int main() {
       asked.start(1000, Opening::Requested);
       CHECK(!asked.counting());
       CHECK(!asked.expired(1000 + 3600000u));
-      CHECK(asked.onPress(1500) == PressEffect::Act);
+      CHECK(asked.onPress(1500, PressSource::Boot) == PressEffect::Act);
       CHECK(!asked.expired(1000 + 3600000u));
     }
     // Rule 4: a press that went down before the menu opened (pressed during
@@ -745,20 +745,20 @@ int main() {
     {
       Countdown power;
       power.start(1000, Opening::Timed);
-      CHECK(power.onPress(900) == PressEffect::Ignore);
+      CHECK(power.onPress(900, PressSource::Boot) == PressEffect::Ignore);
       CHECK(power.counting());
       CHECK(power.expired(6000));
       Countdown asked;
       asked.start(1000, Opening::Requested);
-      CHECK(asked.onPress(999) == PressEffect::Ignore);
+      CHECK(asked.onPress(999, PressSource::Boot) == PressEffect::Ignore);
       // A press starting exactly as the menu opens is the menu's.
-      CHECK(asked.onPress(1000) == PressEffect::Act);
+      CHECK(asked.onPress(1000, PressSource::Boot) == PressEffect::Act);
       // Across millis() wrap the same rules hold.
       Countdown wrapped;
       wrapped.start(0xFFFFFF00u, Opening::Timed);
-      CHECK(wrapped.onPress(0xFFFFFE00u) == PressEffect::Ignore);
+      CHECK(wrapped.onPress(0xFFFFFE00u, PressSource::Boot) == PressEffect::Ignore);
       CHECK(wrapped.counting());
-      CHECK(wrapped.onPress(0x00000020u) ==
+      CHECK(wrapped.onPress(0x00000020u, PressSource::Boot) ==
             PressEffect::CancelOnly);
       CHECK(!wrapped.expired(0x00000020u + 3600000u));
     }
@@ -769,25 +769,109 @@ int main() {
     {
       Countdown power;
       power.start(1000, Opening::Timed);
-      CHECK(power.onPressDown(5900) == PressEffect::CancelOnly);
+      CHECK(power.onPressDown(5900, PressSource::Boot) == PressEffect::CancelOnly);
       CHECK(!power.counting());
       CHECK(!power.expired(6000));
       CHECK(!power.expired(1000 + 3600000u));
       // Released after the deadline: spent on the cancel, no action.
-      CHECK(power.onPress(5900) == PressEffect::CancelOnly);
+      CHECK(power.onPress(5900, PressSource::Boot) == PressEffect::CancelOnly);
       // The next press, down and completed, acts.
-      CHECK(power.onPressDown(7000) == PressEffect::Act);
-      CHECK(power.onPress(7000) == PressEffect::Act);
+      CHECK(power.onPressDown(7000, PressSource::Boot) == PressEffect::Act);
+      CHECK(power.onPress(7000, PressSource::Boot) == PressEffect::Act);
       // A down before the menu opened is ignored and leaves the clock running.
       Countdown early;
       early.start(1000, Opening::Timed);
-      CHECK(early.onPressDown(999) == PressEffect::Ignore);
+      CHECK(early.onPressDown(999, PressSource::Boot) == PressEffect::Ignore);
       CHECK(early.counting());
       // A triple-press menu: a down is just a press.
       Countdown asked;
       asked.start(1000, Opening::Requested);
-      CHECK(asked.onPressDown(1200) == PressEffect::Act);
-      CHECK(asked.onPress(1200) == PressEffect::Act);
+      CHECK(asked.onPressDown(1200, PressSource::Boot) == PressEffect::Act);
+      CHECK(asked.onPress(1200, PressSource::Boot) == PressEffect::Act);
+    }
+
+    // Round-2 finding 4: a menu that never counts down can be open for weeks.
+    // A press 2^31 ms or more after opening must still be the menu's, not
+    // "before" it - the signed test it replaced flipped there and the menu then
+    // ignored everything.
+    {
+      Countdown asked;
+      asked.start(1000, Opening::Requested);
+      asked.tick(1000 + 0x80000000u);
+      CHECK(asked.onPressDown(1000 + 0x80000000u, PressSource::Boot) ==
+            PressEffect::Act);
+      CHECK(asked.onPress(1000 + 0x80000000u, PressSource::Boot) ==
+            PressEffect::Act);
+      CHECK(asked.onPress(1000 + 0xFFFFFFF0u, PressSource::Touch) ==
+            PressEffect::Act);
+      // Before the horizon passes, a press from boot is still recognised.
+      Countdown fresh;
+      fresh.start(0x00000100u, Opening::Requested);
+      fresh.tick(0x00000200u);
+      CHECK(fresh.onPress(0xFFFFFF00u, PressSource::Boot) ==
+            PressEffect::Ignore);
+      CHECK(fresh.onPress(0x00000180u, PressSource::Boot) == PressEffect::Act);
+    }
+    // Round-2 finding 5: the cancelling press is matched by source as well as
+    // time. A tap in the same millisecond as the BOOT press that cancelled must
+    // act, and that BOOT press is the one spent.
+    {
+      Countdown power;
+      power.start(1000, Opening::Timed);
+      CHECK(power.onPressDown(2000, PressSource::Boot) ==
+            PressEffect::CancelOnly);
+      CHECK(power.onPress(2000, PressSource::Touch) == PressEffect::Act);
+      CHECK(power.onPress(2000, PressSource::Boot) == PressEffect::CancelOnly);
+      CHECK(power.onPress(2000, PressSource::Boot) == PressEffect::Act);
+      // A cancelling press that never completes (a touch held long enough to be
+      // dropped) does not hang over the next press from the same source.
+      Countdown held;
+      held.start(1000, Opening::Timed);
+      CHECK(held.onPressDown(2000, PressSource::Touch) ==
+            PressEffect::CancelOnly);
+      CHECK(held.onPressDown(3000, PressSource::Touch) == PressEffect::Act);
+      CHECK(held.onPress(3000, PressSource::Touch) == PressEffect::Act);
+    }
+    // Round-2 finding 2: a knob flick is one gesture even over several passes,
+    // and a turn while the cancelling BOOT press is still down is part of it.
+    {
+      Countdown flick;
+      flick.start(1000, Opening::Timed);
+      CHECK(flick.onTurn(2000, false) == PressEffect::CancelOnly);
+      CHECK(flick.onTurn(2030, false) == PressEffect::CancelOnly);
+      CHECK(flick.onTurn(2260, false) == PressEffect::CancelOnly);  // 230 ms on
+      CHECK(flick.onTurn(2600, false) == PressEffect::Act);         // a new turn
+      CHECK(flick.onTurn(2610, false) == PressEffect::Act);
+      Countdown pressTurn;
+      pressTurn.start(1000, Opening::Timed);
+      CHECK(pressTurn.onPressDown(2000, PressSource::Boot) ==
+            PressEffect::CancelOnly);
+      CHECK(pressTurn.onTurn(2100, true) == PressEffect::CancelOnly);
+      CHECK(pressTurn.onTurn(4000, true) == PressEffect::CancelOnly);  // still held
+      CHECK(pressTurn.onPress(2000, PressSource::Boot) ==
+            PressEffect::CancelOnly);
+      CHECK(pressTurn.onTurn(4100, false) == PressEffect::Act);
+      // Round-3 finding 2: a press-and-turn whose BOOT release never reaches
+      // the menu as a press. Once nothing is held, turns act again: the knob
+      // must not stay dead.
+      Countdown released;
+      released.start(1000, Opening::Timed);
+      CHECK(released.onPressDown(2000, PressSource::Boot) ==
+            PressEffect::CancelOnly);
+      CHECK(released.onTurn(2100, true) == PressEffect::CancelOnly);
+      CHECK(released.onTurn(3000, false) == PressEffect::Act);
+      CHECK(released.onTurn(3500, false) == PressEffect::Act);
+      // The same after a touch held too long to be a tap, which never
+      // completes either.
+      Countdown longTouch;
+      longTouch.start(1000, Opening::Timed);
+      CHECK(longTouch.onPressDown(2000, PressSource::Touch) ==
+            PressEffect::CancelOnly);
+      CHECK(longTouch.onTurn(4000, false) == PressEffect::Act);
+      Countdown early;
+      early.start(1000, Opening::Timed);
+      CHECK(early.onTurn(900, false) == PressEffect::Ignore);
+      CHECK(early.counting());
     }
 
     TriplePress triple;

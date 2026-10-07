@@ -64,9 +64,11 @@ Pre-existing and untouched: a triple press whose NVS write fails leaves the
 survey toggle from presses one and two in place (now covered by a test).
 - With no ceiling, a touch controller that reports a phantom press at boot leaves
   the menu up until someone chooses; the board does not stream until then.
-- A finger already on the glass when the menu opens is first seen by the touch
-  poll inside the menu, so it counts as a menu press. The press that opens the
-  menu is BOOT, which is ignored correctly.
+- A finger already on the glass when the menu opens is read just before it
+  opens and ignored until lifted. On CST816 boards that read is a direct register
+  read (`boardtouch::readNow`), unverified on that hardware.
+- If a GT911 holds a boot-time tap as a resting finger, the first real tap on the
+  menu only clears it; the countdown still runs.
 
 ## P4 hosted-WiFi RPC watchdog (p4-hosted-rpc-offloop)
 

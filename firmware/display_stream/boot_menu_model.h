@@ -104,9 +104,27 @@ static const uint32_t TIMED_WINDOW_MS = 5000;
 // What one press on the menu does.
 enum class PressEffect : uint8_t {
   Ignore,      // began before the menu opened: not this menu's press
-  CancelOnly,  // stopped the countdown and did nothing else
+  CancelOnly,  // stopped the countdown, or was spent on doing so; nothing else
   Act,         // moves or chooses as usual
 };
+
+// Where a press came from. A cancelling press is matched by source as well as
+// time: BOOT, touch and knob are stamped at different moments, so two of them
+// can share a millisecond.
+enum class PressSource : uint8_t {
+  Boot,
+  Touch,
+  Knob,
+};
+
+// Detents closer together than this are one knob gesture (a flick), even when
+// they arrive over several loop passes.
+static const uint32_t KNOB_GESTURE_MS = 250;
+
+// How far before the menu a press can have gone down. Setup reaches the menu
+// well inside this; past it the before-open test is switched off for good, so
+// a menu left open for weeks cannot read a press as one from before it.
+static const uint32_t BEFORE_OPEN_HORIZON_MS = 600000;
 
 // The menu's clock. A power-on menu counts down TIMED_WINDOW_MS to streaming,
 // so a board nobody touches comes up streaming. A press stops that countdown
@@ -119,23 +137,38 @@ enum class PressEffect : uint8_t {
 // opened (one made during boot) is ignored outright.
 //
 // Every time here is from one clock, the one BOOT edges are stamped with; the
-// caller must not mix in another. Signed differences keep every comparison
-// valid across wrap.
+// caller must not mix in another. tick() must be called as the menu runs.
 class Countdown {
  public:
   void start(uint32_t now, Opening how) {
     openedAt_ = now;
     counting_ = how == Opening::Timed;
     cancelPending_ = false;
+    turnSpentAt_ = 0;
+    turnSpent_ = false;
+    beforeOpenPossible_ = true;
+  }
+
+  // Called every pass. Retires the before-open test once no press stamped
+  // before the menu can still arrive.
+  void tick(uint32_t now) {
+    if (beforeOpenPossible_ && now - openedAt_ >= BEFORE_OPEN_HORIZON_MS) {
+      beforeOpenPossible_ = false;
+    }
   }
 
   // A press went down at `at`. Stops a running countdown at once.
-  PressEffect onPressDown(uint32_t at) {
+  PressEffect onPressDown(uint32_t at, PressSource source) {
     if (beganBeforeOpen(at)) return PressEffect::Ignore;
+    // A new press from this source means its earlier one has ended.
+    if (cancelPending_ && cancelSource_ == source && at != cancelledAt_) {
+      cancelPending_ = false;
+    }
     if (counting_) {
       counting_ = false;
       cancelPending_ = true;
       cancelledAt_ = at;
+      cancelSource_ = source;
       return PressEffect::CancelOnly;
     }
     return PressEffect::Act;
@@ -145,14 +178,41 @@ class Countdown {
   // enough to choose). The press whose down stopped the countdown is spent on
   // that and does nothing more. A completion whose down was never reported
   // still stops the countdown rather than acting.
-  PressEffect onPress(uint32_t pressStartedAt) {
+  PressEffect onPress(uint32_t pressStartedAt, PressSource source) {
     if (beganBeforeOpen(pressStartedAt)) return PressEffect::Ignore;
-    if (cancelPending_ && pressStartedAt == cancelledAt_) {
+    if (isCancellingPress(pressStartedAt, source)) {
       cancelPending_ = false;
       return PressEffect::CancelOnly;
     }
     if (counting_) {
       counting_ = false;
+      return PressEffect::CancelOnly;
+    }
+    return PressEffect::Act;
+  }
+
+  // A knob turn at `at`, down and completed at once. Spent, not acted on, while
+  // it continues a flick that stopped the countdown, or while the BOOT or touch
+  // press that stopped it is still down (press-and-turn is one gesture).
+  // pressHeld says whether a BOOT or touch press is physically down now: a press
+  // that ended without completing on the menu (released after a turn, or a
+  // touch held too long to be a tap) never reports its end here, so the pending
+  // cancel alone cannot say it is still held.
+  PressEffect onTurn(uint32_t at, bool pressHeld) {
+    if (beganBeforeOpen(at)) return PressEffect::Ignore;
+    if (turnSpent_ && at - turnSpentAt_ < KNOB_GESTURE_MS) {
+      turnSpentAt_ = at;  // the flick goes on
+      return PressEffect::CancelOnly;
+    }
+    turnSpent_ = false;
+    if (cancelPending_) {
+      if (pressHeld) return PressEffect::CancelOnly;
+      cancelPending_ = false;  // that press has ended
+    }
+    if (counting_) {
+      counting_ = false;
+      turnSpent_ = true;
+      turnSpentAt_ = at;
       return PressEffect::CancelOnly;
     }
     return PressEffect::Act;
@@ -167,19 +227,31 @@ class Countdown {
   // Whole seconds left, rounded up, so the title never reads 0 while the menu
   // is still up. Zero once the countdown has stopped or run out.
   uint32_t secondsLeft(uint32_t now) const {
-    if (expired(now) || !counting_) return 0;
+    if (!counting_ || expired(now)) return 0;
     return (TIMED_WINDOW_MS - (now - openedAt_) + 999) / 1000;
   }
 
  private:
+  // Up to BEFORE_OPEN_HORIZON_MS before the opening, and only while that test
+  // is still live. Unsigned throughout, so it holds across clock wrap.
   bool beganBeforeOpen(uint32_t at) const {
-    return (int32_t)(at - openedAt_) < 0;
+    if (!beforeOpenPossible_) return false;
+    const uint32_t ahead = openedAt_ - at;  // how far before opening, if any
+    return ahead != 0 && ahead <= BEFORE_OPEN_HORIZON_MS;
+  }
+
+  bool isCancellingPress(uint32_t at, PressSource source) const {
+    return cancelPending_ && cancelSource_ == source && cancelledAt_ == at;
   }
 
   uint32_t openedAt_ = 0;
   uint32_t cancelledAt_ = 0;
+  uint32_t turnSpentAt_ = 0;
+  PressSource cancelSource_ = PressSource::Boot;
   bool counting_ = false;
   bool cancelPending_ = false;
+  bool turnSpent_ = false;
+  bool beforeOpenPossible_ = true;
 };
 
 // Three short BOOT releases inside the window request the menu from a running

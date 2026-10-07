@@ -24,6 +24,8 @@
 
 #if defined(ESPDISP_BOOT_MENU_RUNTIME)
 
+#include "boot_menu_model.h"
+
 // Consumes the one-shot menu request a triple press saved. Call once, early in
 // setup(), before anything fallible, so a request can never repeat.
 bool takeBootMenuRequest();
@@ -53,12 +55,14 @@ bool runBootMenuIfDue(bool requested);
 // Times are on bootMenuClockMs(), the clock BOOT edges are stamped with.
 // bootMenuPressDown() must be called when a press goes down: that is what stops
 // the countdown, so a press still held when it would have run out cannot leak
-// into the streaming firmware. A knob turn is one press: turnBootMenu().
+// into the streaming firmware. A knob turn goes to turnBootMenu(), which treats a
+// flick, or a turn made while the cancelling press is held, as one gesture.
 extern bool bootMenuActive;
 uint32_t bootMenuClockMs();
-void bootMenuPressDown(uint32_t at);
-void moveBootMenu(int direction, uint32_t pressStartedAt);
-void turnBootMenu(int direction, int steps, uint32_t at);
+void bootMenuPressDown(uint32_t at, bootmenu::PressSource source);
+void moveBootMenu(int direction, uint32_t pressStartedAt,
+                  bootmenu::PressSource source);
+void turnBootMenu(int direction, int steps, uint32_t at, bool pressHeld);
 void activateBootMenu(uint32_t pressStartedAt);
 void handleBootMenuTap(int16_t x, int16_t y, uint32_t pressStartedAt);
 
@@ -75,9 +79,12 @@ inline void requestBootMenuAndRestart() {}
 inline bool runBootMenuIfDue(bool) { return false; }
 inline constexpr bool bootMenuActive = false;
 inline uint32_t bootMenuClockMs() { return 0; }
-inline void bootMenuPressDown(uint32_t) {}
-inline void moveBootMenu(int, uint32_t) {}
-inline void turnBootMenu(int, int, uint32_t) {}
+namespace bootmenu {
+enum class PressSource : uint8_t { Boot, Touch, Knob };
+}
+inline void bootMenuPressDown(uint32_t, bootmenu::PressSource) {}
+inline void moveBootMenu(int, uint32_t, bootmenu::PressSource) {}
+inline void turnBootMenu(int, int, uint32_t, bool) {}
 inline void activateBootMenu(uint32_t) {}
 inline void handleBootMenuTap(int16_t, int16_t, uint32_t) {}
 

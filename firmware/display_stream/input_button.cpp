@@ -12,6 +12,7 @@
 #endif
 #include "button_press_model.h"
 #include "display_power.h"
+#include "input_touch.h"
 #include "orientation.h"
 #include "prefs_store.h"
 #include "rotary_encoder_model.h"
@@ -63,6 +64,15 @@ static portMUX_TYPE bootButtonMux = portMUX_INITIALIZER_UNLOCKED;
 static buttonpress::DoublePressTracker shortPressTracker;
 #if defined(ESPDISP_BOOT_MENU_RUNTIME)
 static bootmenu::TriplePress triplePressTracker;
+// Set as the boot menu ends: a BOOT press that went down by then belongs to the
+// menu, and its release must not reach the normal press tiers.
+static bool swallowPressFromMenu = false;
+static uint32_t menuEndedAt = 0;
+
+void swallowBootPressAcrossMenuEnd(uint32_t endedAt) {
+  swallowPressFromMenu = true;
+  menuEndedAt = endedAt;
+}
 #endif
 static uint8_t shortPressPreviewOriginalBlLevel = 0;
 #if defined(ESPDISP_DOOM_RUNTIME)
@@ -298,7 +308,7 @@ static bool selectorOwnsInput() {
 // before it opened; the WiFi selector does not need it.
 static void moveSelector(int direction, uint32_t pressStartedAt) {
   if (bootMenuActive) {
-    moveBootMenu(direction, pressStartedAt);
+    moveBootMenu(direction, pressStartedAt, bootmenu::PressSource::Boot);
   } else {
     moveWifiSelector(direction);
   }
@@ -322,12 +332,18 @@ static void applyEncoderTurn(int16_t steps) {
   if (selectorOwnsInput()) {
     int16_t count = steps > 0 ? steps : (int16_t)-steps;
     if (count > MAX_SELECTOR_STEPS_PER_PASS) count = MAX_SELECTOR_STEPS_PER_PASS;
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
     if (bootMenuActive) {
-      // One turn is one press, however many detents it crossed, so the turn
-      // that stops the countdown does not also move the highlight.
-      turnBootMenu(direction, count, buttonClockMs());
+      // A turn is a gesture, however many detents it crossed: the turn that
+      // stops the countdown does not also move the highlight. Whether BOOT or
+      // a finger is down now tells it whether a press-and-turn is still going.
+      const bool bootDown = bootButtonPin != GPIO_NUM_NC &&
+                            gpio_get_level(bootButtonPin) == 0;
+      turnBootMenu(direction, count, buttonClockMs(),
+                   bootDown || touchPressHeld());
       return;
     }
+#endif
     for (int16_t i = 0; i < count; ++i) moveWifiSelector(direction);
     return;
   }
@@ -408,6 +424,10 @@ void handleButton() {
                   panelManuallyOff ? "off" : "on");
   };
 
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+  // Held as the menu ended: the rest of this press is the menu's.
+  if (swallowPressFromMenu && wasDown) selectorEntryHold = true;
+#endif
   BootButtonEdge edge;
   while (takeBootButtonEdge(edge)) {
     if (edge.down) {
@@ -420,7 +440,16 @@ void handleButton() {
         // The press going down is what stops a counting boot menu, so one
         // still held when the countdown would have run out cannot have its
         // release land on the streaming firmware.
-        if (bootMenuActive) bootMenuPressDown(downAt);
+        if (bootMenuActive) {
+          bootMenuPressDown(downAt, bootmenu::PressSource::Boot);
+        }
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+        // Down before the menu ended, though only seen now (the menu's last
+        // pass): the menu's press, so the rest of it is swallowed.
+        if (swallowPressFromMenu && (int32_t)(downAt - menuEndedAt) <= 0) {
+          selectorEntryHold = true;
+        }
+#endif
       }
       continue;
     }
@@ -474,6 +503,10 @@ void handleButton() {
     wasDown = false;
   }
 
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+  // Every edge from before the menu ended has now been seen.
+  swallowPressFromMenu = false;
+#endif
   if (wasDown && knobTurned) turnedWhileDown = true;
   if (wasDown && !turnedWhileDown) {
     const uint32_t heldMs = buttonClockMs() - downAt;

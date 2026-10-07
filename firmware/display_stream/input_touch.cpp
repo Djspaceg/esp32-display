@@ -21,6 +21,10 @@ static bool touchConsumed = false;
 // When the current or last press went down. The gesture is only known on
 // release, but the boot menu judges a press by when it began.
 static uint32_t touchPressStartedAt = 0;
+// A finger that was already on the glass when the boot menu opened. Every
+// report is ignored until it lifts, so a resting hand or a case pressing the
+// panel at power-on is not taken for a press on the menu.
+static bool touchHeldThroughMenuOpen = false;
 // Report a completed gesture to whoever is driving this panel.
 //
 // The internal gesture enum and the wire one are separate types: touch_gesture.h
@@ -81,6 +85,33 @@ static void sendTouchEvent(touchgesture::Gesture gesture, int16_t x, int16_t y) 
 // slept - a touch lights it and is *consumed*, so waking a panel never also
 // toggles whatever the sender maps a tap to. Once the panel is lit, completed
 // gestures go to the sender and it decides what they mean.
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+bool touchPressHeld() { return touchTracker.pressActive(); }
+
+// The controller is first polled inside the menu, so a finger that landed during
+// boot would otherwise arrive looking like a fresh press on it. Before the menu
+// opens, ask the controller directly - an interrupt-driven one (CST816) need not
+// report a finger that is holding still - then watch its reports for a moment,
+// which is how a polled one (GT911, every 10 ms) shows a resting finger, and how
+// a finger lifting just now is seen.
+static const uint32_t TOUCH_PRIME_MS = 60;
+
+void primeTouchForBootMenu() {
+  touchHeldThroughMenuOpen = false;
+  if (!touchAvailable) return;
+  boardtouch::Sample sample;
+  if (boardtouch::readNow(sample)) touchHeldThroughMenuOpen = sample.pressed;
+  const uint32_t startedAt = millis();
+  while (millis() - startedAt < TOUCH_PRIME_MS) {
+    if (boardtouch::poll(sample)) touchHeldThroughMenuOpen = sample.pressed;
+    delay(5);
+  }
+  if (touchHeldThroughMenuOpen) {
+    Serial.println("touch: finger down as the boot menu opens; ignored until lifted");
+  }
+}
+#endif
+
 void serviceTouch() {
   if (!touchAvailable) {
     return;
@@ -117,6 +148,13 @@ void serviceTouch() {
   if (!boardtouch::poll(sample)) {
     return;
   }
+  if (touchHeldThroughMenuOpen) {
+    if (!sample.pressed) {
+      touchHeldThroughMenuOpen = false;
+      Serial.println("touch: finger from before the boot menu lifted");
+    }
+    return;
+  }
 
   // Through the same orientation transform the pixels went through, so a swipe
   // means the direction the user actually swiped. Calibration is per board:
@@ -139,7 +177,9 @@ void serviceTouch() {
     // counting menu as it lands: a hold too long to be a tap classifies as no
     // gesture at all, so waiting for the gesture would never stop it.
     touchPressStartedAt = bootMenuClockMs();
-    if (bootMenuActive) bootMenuPressDown(touchPressStartedAt);
+    if (bootMenuActive) {
+      bootMenuPressDown(touchPressStartedAt, bootmenu::PressSource::Touch);
+    }
   }
 
   // The boot menu runs before WiFi, so nothing here is for a sender, and the
@@ -148,11 +188,11 @@ void serviceTouch() {
     switch (event.gesture) {
       case touchgesture::Gesture::SwipeUp:
       case touchgesture::Gesture::SwipeLeft:
-        moveBootMenu(1, touchPressStartedAt);
+        moveBootMenu(1, touchPressStartedAt, bootmenu::PressSource::Touch);
         break;
       case touchgesture::Gesture::SwipeDown:
       case touchgesture::Gesture::SwipeRight:
-        moveBootMenu(-1, touchPressStartedAt);
+        moveBootMenu(-1, touchPressStartedAt, bootmenu::PressSource::Touch);
         break;
       case touchgesture::Gesture::Tap:
         handleBootMenuTap(event.startX, event.startY, touchPressStartedAt);

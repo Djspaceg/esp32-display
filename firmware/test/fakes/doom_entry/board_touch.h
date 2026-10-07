@@ -19,6 +19,9 @@ struct Sample {
 // The test owns the reports: one is handed out per poll once its time comes.
 bool poll(Sample &sample);
 
+// A direct read of where the finger is now, whatever has been reported.
+bool readNow(Sample &sample);
+
 inline bool init(const board::Config &) { return true; }
 
 }  // namespace boardtouch

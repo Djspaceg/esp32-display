@@ -521,6 +521,23 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
 
 inline bool available() { return enabled; }
 
+/// Read the controller once, now, whether or not it has raised a report: for
+/// telling whether a finger is already resting on the glass. The CST816 reports
+/// by interrupt and need not raise one for a finger holding still, so poll()
+/// can miss it; its report register is read directly here. A controller that
+/// does not answer (one asleep with nothing on it) reads as no report. The
+/// others report a resting finger on their own schedule, so this is poll().
+inline bool poll(Sample &out);
+inline bool readNow(Sample &out) {
+  if (!enabled) return false;
+  if (activeController == board::TouchController::Cst816) {
+    const bool ok = pollCst816(out);
+    if (ok) pressed = out.pressed;
+    return ok;
+  }
+  return poll(out);
+}
+
 /// Fetch a report if the controller has raised one.
 ///
 /// Returns true only when a new report was read, so the caller can distinguish

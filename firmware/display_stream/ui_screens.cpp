@@ -387,7 +387,8 @@ void drawWifiSelectorScreen() {
 #if defined(ESPDISP_BOOT_MENU_RUNTIME)
 // The boot-mode menu, drawn with the WiFi selector's layout and controls so the
 // two read as one design. The default (STREAMING, row 0) carries the green
-// border the selector gives the active preset; the title is the countdown.
+// border the selector gives the active preset; the title is the countdown
+// ("STREAMING IN 5"), or "CHOOSE A MODE" once it has stopped.
 void drawBootMenuScreen(const char *const *labels, size_t count,
                         size_t selected, const char *title,
                         const char *message) {

@@ -6,5 +6,12 @@
 // backlight controls. The WiFi selector and the boot menu share one scheme.
 #pragma once
 
+#include <stdint.h>
+
 void initializeButtonInput();
 void handleButton();
+
+// Called as the boot menu ends: the rest of a BOOT press that went down while
+// it was up is swallowed, so it cannot reach the normal press tiers. Defined
+// only in images that have a boot menu.
+void swallowBootPressAcrossMenuEnd(uint32_t endedAt);

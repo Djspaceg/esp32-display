@@ -141,11 +141,11 @@ static void drawBootMenu() {
                      bootMenuMessage);
 }
 
-// The one gate every completed press passes, so no input path can skip a rule.
-// Returns whether the press should go on to move or choose.
-static bool admitPress(uint32_t pressStartedAt, const char *what) {
-  const bool wasCounting = bootMenuCountdown.counting();
-  switch (bootMenuCountdown.onPress(pressStartedAt)) {
+// The effect of one press, logged and drawn the same way whichever input made
+// it. Returns whether it should go on to move or choose.
+static bool applyEffect(bootmenu::PressEffect effect, bool wasCounting,
+                        const char *what) {
+  switch (effect) {
     case bootmenu::PressEffect::Ignore:
       Serial.printf("boot menu: %s ignored (began before the menu)\n", what);
       return false;
@@ -164,6 +164,15 @@ static bool admitPress(uint32_t pressStartedAt, const char *what) {
   return false;
 }
 
+// The one gate every completed press passes, so no input path can skip a rule.
+// Returns whether the press should go on to move or choose.
+static bool admitPress(uint32_t pressStartedAt, bootmenu::PressSource source,
+                       const char *what) {
+  const bool wasCounting = bootMenuCountdown.counting();
+  return applyEffect(bootMenuCountdown.onPress(pressStartedAt, source),
+                     wasCounting, what);
+}
+
 static void moveHighlight(int direction) {
   bootMenuIndex = wifiselector::movedIndex(bootMenuIndex,
                                            bootMenuChoices.count, direction);
@@ -175,9 +184,9 @@ static void moveHighlight(int direction) {
 
 uint32_t bootMenuClockMs() { return menuClockMs(); }
 
-void bootMenuPressDown(uint32_t at) {
+void bootMenuPressDown(uint32_t at, bootmenu::PressSource source) {
   if (!bootMenuActive) return;
-  switch (bootMenuCountdown.onPressDown(at)) {
+  switch (bootMenuCountdown.onPressDown(at, source)) {
     case bootmenu::PressEffect::CancelOnly:
       Serial.println("boot menu: press cancelled the countdown");
       drawBootMenu();
@@ -189,18 +198,27 @@ void bootMenuPressDown(uint32_t at) {
   }
 }
 
-void turnBootMenu(int direction, int steps, uint32_t at) {
+void turnBootMenu(int direction, int steps, uint32_t at, bool pressHeld) {
   if (!bootMenuActive || bootMenuChoices.count == 0 || steps <= 0) return;
-  // A turn is one press however many detents it crossed: down and completed
-  // at once. So the turn that stops the countdown moves nothing.
-  bootMenuPressDown(at);
-  if (!admitPress(at, "turn")) return;
+  // A turn is a gesture, however many detents and loop passes it spans: the
+  // flick that stops the countdown moves nothing, nor does a turn made while
+  // the press that stopped it is still down (see Countdown::onTurn).
+  const bool wasCounting = bootMenuCountdown.counting();
+  const bootmenu::PressEffect effect =
+      bootMenuCountdown.onTurn(at, pressHeld);
+  if (effect == bootmenu::PressEffect::CancelOnly && wasCounting) {
+    Serial.println("boot menu: press cancelled the countdown");
+    drawBootMenu();
+    return;
+  }
+  if (!applyEffect(effect, false, "turn")) return;
   for (int i = 0; i < steps; ++i) moveHighlight(direction);
 }
 
-void moveBootMenu(int direction, uint32_t pressStartedAt) {
+void moveBootMenu(int direction, uint32_t pressStartedAt,
+                  bootmenu::PressSource source) {
   if (!bootMenuActive || bootMenuChoices.count == 0) return;
-  if (!admitPress(pressStartedAt, "move")) return;
+  if (!admitPress(pressStartedAt, source, "move")) return;
   moveHighlight(direction);
 }
 
@@ -244,13 +262,15 @@ static void chooseHighlighted() {
 
 void activateBootMenu(uint32_t pressStartedAt) {
   if (!bootMenuActive || bootMenuChoices.count == 0) return;
-  if (!admitPress(pressStartedAt, "choose")) return;
+  if (!admitPress(pressStartedAt, bootmenu::PressSource::Boot, "choose")) {
+    return;
+  }
   chooseHighlighted();
 }
 
 void handleBootMenuTap(int16_t x, int16_t y, uint32_t pressStartedAt) {
   if (!bootMenuActive || bcfg == nullptr) return;
-  if (!admitPress(pressStartedAt, "tap")) return;
+  if (!admitPress(pressStartedAt, bootmenu::PressSource::Touch, "tap")) return;
   const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
   const wifiselector::SelectorLayout layout = wifiselector::selectorLayout(
@@ -308,6 +328,9 @@ bool runBootMenuIfDue(bool requested) {
 
   bootMenuIndex = 0;
   bootMenuMessage = nullptr;
+  // Before the menu exists: a finger already on the glass is read now, so the
+  // touch poll inside the menu cannot take it for a press made on the menu.
+  primeTouchForBootMenu();
   bootMenuCountdown.start(menuClockMs(), how);
   bootMenuActive = true;
   if (how == bootmenu::Opening::Requested) {
@@ -329,6 +352,7 @@ bool runBootMenuIfDue(bool requested) {
     serviceTouch();
     if (!bootMenuActive) break;
     const uint32_t now = menuClockMs();
+    bootMenuCountdown.tick(now);
     if (bootMenuCountdown.expired(now)) {
       // Only an untouched menu expires, so its highlight is still STREAMING.
       leaveMenuForStreaming("countdown ended");
@@ -340,6 +364,11 @@ bool runBootMenuIfDue(bool requested) {
     delay(10);
   }
   bootMenuMessage = nullptr;
+  // A BOOT press still down as the menu ends - one that went down while a
+  // touch chose, or in the menu's last pass - belongs to the menu. Without
+  // this its release would land on the streaming firmware as a rotate or
+  // power press.
+  swallowBootPressAcrossMenuEnd(menuClockMs());
   applyBacklight();
   return true;
 }
