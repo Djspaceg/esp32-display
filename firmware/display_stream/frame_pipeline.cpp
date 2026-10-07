@@ -12,6 +12,7 @@
 #include "band_compress.h"
 #include "band_protocol.h"
 #include "bc1.h"
+#include "boot_screen.h"
 #include "display_power.h"
 #include "dma_gate.h"
 #include "orientation.h"
@@ -734,46 +735,6 @@ static void serviceLargeTileDraw() {
 }
 #endif
 
-// Fill the whole panel with one RGB565 color (used for status feedback).
-// Draws from staging (bufB) - bufA belongs to the network path.
-void fillPanel(uint16_t rgb565) {
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-  const uint8_t hi = rgb565 >> 8, lo = rgb565 & 0xFF;
-  for (int y = 0; y < PANEL_H; ++y) {
-    const int x0 = c3RowStart[y];
-    const int x1 = x0 + c3RowPixels[y];
-    const size_t bytes = (size_t)c3RowPixels[y] * 2;
-    for (size_t i = 0; i < bytes; i += 2) {
-      bufB[i] = hi;
-      bufB[i + 1] = lo;
-    }
-    if (queuePanelBitmap(panel, *bcfg, x0, y, x1, y + 1, bufB) != ESP_OK) {
-      statDrawErrors++;
-    }
-    if (!waitForDmaIdle(500)) {
-      statDrawErrors++;
-      break;
-    }
-  }
-#else
-  uint8_t hi = rgb565 >> 8, lo = rgb565 & 0xFF;
-  for (size_t i = 0; i < FRAME_BYTES; i += 2) {
-    bufB[i] = hi;
-    bufB[i + 1] = lo;
-  }
-  // In the shape MADCTL currently addresses: after a landscape frame, or on
-  // rectangular glass mounted at rotation 1/3, the window is the panel's
-  // height wide. Same byte count either way.
-  if (queuePanelBitmap(panel, *bcfg, 0, 0,
-                       PANEL_GEOMETRY.frameWidth(panelLandscape),
-                       PANEL_GEOMETRY.frameHeight(panelLandscape),
-                       bufB) != ESP_OK) {
-    statDrawErrors = statDrawErrors + 1;
-  }
-  waitForDmaIdle(500);
-#endif
-}
-
 bool adoptLocalFrameShape(bool reshape) {
   if (!panelIsRectangular()) return false;
   // Only a change of mount re-shapes. A flip, a mirror or an automatic
@@ -848,6 +809,11 @@ void serviceRotationRepaint() {
     } else if (idleActive) {
       drawIdleScreen();  // composes the card over bufA and pushes all of it
       repainted = "status card";
+    } else if (bootscreen::showing()) {
+      // Nothing has replaced the boot screen yet; it lays itself out again for
+      // the new shape.
+      bootscreen::redraw();
+      repainted = "boot screen";
     } else if (orientationSettled && statFramesShown != 0) {
       // Mark every band and hand it to the existing draw path rather than
       // duplicating the staging and DMA logic. Bits past bandCount are ignored:
@@ -858,9 +824,7 @@ void serviceRotationRepaint() {
       framesCompleted = framesCompleted + 1;  // drawn below, same iteration
       repainted = "cached frame";
     } else {
-      // Either a landscape change is mid-flight (the sender's keyframe repaints
-      // it), or nothing but a boot fill has ever been on screen - and a uniform
-      // fill looks the same either way up, so there is nothing to correct.
+      // A landscape change is mid-flight; the sender's keyframe repaints it.
       repainted = "nothing to repaint";
     }
     Serial.printf("rotation manual=%u auto=%u effective=%u applied (%s)\n",

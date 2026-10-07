@@ -26,6 +26,7 @@ mutex lives with all state it protects.
 | `input_button.h/.cpp` | BOOT press tiers and profile-gated developer behavior |
 | `input_touch.h/.cpp` | Touch polling, wake consumption, and gestures |
 | `ui_screens.h/.cpp` | Status, signal survey, WiFi selector, boot-mode menu, info bar, and OTA progress screens |
+| `boot_screen.h/.cpp` | Boot screen from first pixel to hand-over (image, progress bar, status line); layout and pixels in `boot_screen_model.h`, image in `boot_image.h` from `boot_image.png` via `tools/generate_boot_image.py` |
 | `boot_menu.h/.cpp` | Pre-WiFi boot-mode menu (Streaming default, Doom, Quake slot), its triple-press request, and game one-shot handoff; choices and timing in `boot_menu_model.h` |
 | `dma_gate.h/.cpp` | Transfer completion accounting and stall recovery |
 | `ota_service.h/.cpp` | ArduinoOTA lifecycle and progress |

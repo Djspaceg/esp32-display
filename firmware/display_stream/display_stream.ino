@@ -95,6 +95,7 @@ using namespace bandproto;
 #include "audio_test.h"
 #include "audio_transport.h"
 #include "boot_menu.h"
+#include "boot_screen.h"
 #include "control_apply.h"
 #include "display_power.h"
 #include "dma_gate.h"
@@ -145,6 +146,7 @@ void clearWifiRestartAttempted() {
 }  // namespace
 
 void setup() {
+  const uint32_t setupEnteredAtMs = millis();
   // Size the TX ring deliberately, BEFORE begin(), which is the only point it
   // can be changed. Left unset, HWCDC installs a 256-byte ring, and the CFGSHOW
   // identity reply is longer than that: a raw capture showed it cut at exactly
@@ -169,10 +171,9 @@ void setup() {
     Serial.setTxTimeoutMs(0);
   }
 #endif
-  unsigned long start = millis();
-  while (!Serial && millis() - start < 5000) {
-    delay(50);
-  }
+  // No wait for a USB host here: that is up to 5 s on a board running from a
+  // charger, and the boot screen goes first (see below). The core keeps what is
+  // printed until then in the TX ring sized above.
   Serial.println("=== display_stream (esp_lcd DMA) ===");
   faultinject::announce();
   Serial.printf("firmware %s (source %s), frame protocol %u, control protocol %u\n",
@@ -368,67 +369,109 @@ void setup() {
     }
   }
   configurePanelGeometry(*bcfg);
+
+  // A game boot takes the panel as the game wants it, so its first pixel is
+  // already the right way up and lit.
 #if defined(ESPDISP_DOOM_RUNTIME)
-  if (doomRequested) {
-    if (!board::supportsDoom(boardVariant)) {
-      Serial.printf("doom: profile %s is not eligible; continuing normal boot\n",
-                    board::variantToken(boardVariant));
-    } else {
-      // This boot intentionally skips normal frame buffers, WiFi, mDNS, OTA,
-      // UDP receive, and loop-task watchdog enrollment.
-      panelRotation = 0;
-      panelManuallyOff = false;
-      displaySleeping = false;
-      userBlLevel = BL_HIGH;
-      pinMode(bcfg->pinBootButton, INPUT_PULLUP);
-      if (!initDisplay()) {
-        Serial.println("doom: display init failed; restarting normal firmware");
-        delay(50);
-        ESP.restart();
-        return;
-      }
-      applyPanelConfig(false);
-      applyBacklight();
-      // A Doom start failure restarts from inside doom_enter() with its
-      // reason on Serial and the panel, so a return is the player leaving.
-      doom_enter();
-      Serial.println("doom: exited; restarting normal firmware");
-      Serial.flush();
+  const bool doomBoot = doomRequested && board::supportsDoom(boardVariant);
+  if (doomRequested && !doomBoot) {
+    Serial.printf("doom: profile %s is not eligible; continuing normal boot\n",
+                  board::variantToken(boardVariant));
+  }
+#else
+  const bool doomBoot = false;
+#endif
+#if defined(ESPDISP_QUAKE_RUNTIME)
+  const bool quakeBoot =
+      !doomBoot && quakeRequested && quakeSupportsBoard(boardVariant);
+  if (quakeRequested && !doomBoot && !quakeBoot) {
+    Serial.printf("quake: profile %s is not eligible; continuing normal boot\n",
+                  board::variantToken(boardVariant));
+  }
+#else
+  const bool quakeBoot = false;
+#endif
+  if (doomBoot || quakeBoot) {
+    panelRotation = 0;
+    panelManuallyOff = false;
+    displaySleeping = false;
+    userBlLevel = BL_HIGH;
+    pinMode(bcfg->pinBootButton, INPUT_PULLUP);
+  }
+
+  // The boot screen, as early as the hardware allows: the profile (and so the
+  // pin map) is known, and nothing else has started - no frame buffers, WiFi,
+  // C6 link, mDNS or audio. The backlight stays dark until the first full
+  // screen is on the panel, so what lights up is the boot screen rather than
+  // whatever the panel's memory held.
+  if (bcfg->hasBacklightPin() && !bcfg->isDsi()) {
+    pinMode(bcfg->pinBl, OUTPUT);
+    driveBrightness(0);
+  }
+  const uint32_t panelInitStartedAtMs = millis();
+  if (!initDisplay()) {
+    if (doomBoot || quakeBoot) {
+      Serial.println("game: display init failed; restarting normal firmware");
       delay(50);
       ESP.restart();
       return;
     }
+    Serial.println("FATAL: display init failed");
+    while (true) delay(1000);
+  }
+  // Panel-command brightness (the AMOLED) ends its init table at full
+  // brightness; dark until the screen is drawn.
+  driveBrightness(0);
+  // Apply the saved rotation up front so even the boot screen lands the right
+  // way up - landscape-shaped on rectangular glass mounted at rotation 1 or 3.
+  adoptLocalFrameShape();
+  applyPanelConfig(bufLandscape);
+  const uint32_t bootScreenStartedAtMs = millis();
+  bootscreen::show(bootscreen::Stage::Starting);
+  // Restores the user's saved level (or keeps a panel the user turned off,
+  // off).
+  applyBacklight();
+  // The time before setup() is the bootloader's and the core's.
+  Serial.printf("boot screen: first pixel %lu ms after app start (setup() "
+                "entered at %lu ms, panel init %lu ms, drawing %lu ms)\n",
+                (unsigned long)millis(), (unsigned long)setupEnteredAtMs,
+                (unsigned long)(bootScreenStartedAtMs - panelInitStartedAtMs),
+                (unsigned long)(millis() - bootScreenStartedAtMs));
+
+  // Bench logging: wait (bounded) for a USB host to open the port, now that
+  // the panel is not waiting on it.
+  const unsigned long serialWaitStart = millis();
+  while (!Serial && millis() - serialWaitStart < 5000) {
+    delay(50);
+  }
+
+#if defined(ESPDISP_DOOM_RUNTIME)
+  if (doomBoot) {
+    // This boot intentionally skips normal frame buffers, WiFi, mDNS, OTA,
+    // UDP receive, and loop-task watchdog enrollment.
+    // A Doom start failure restarts from inside doom_enter() with its
+    // reason on Serial and the panel, so a return is the player leaving.
+    doom_enter();
+    Serial.println("doom: exited; restarting normal firmware");
+    Serial.flush();
+    delay(50);
+    ESP.restart();
+    return;
   }
 #endif
 #if defined(ESPDISP_QUAKE_RUNTIME)
-  if (quakeRequested) {
-    if (!quakeSupportsBoard(boardVariant)) {
-      Serial.printf("quake: profile %s is not eligible; continuing normal boot\n",
-                    board::variantToken(boardVariant));
-    } else {
-      // The same isolated boot as Doom's above: no frame buffers, WiFi,
-      // mDNS, OTA, UDP receive or loop-task watchdog.
-      panelRotation = 0;
-      panelManuallyOff = false;
-      displaySleeping = false;
-      userBlLevel = BL_HIGH;
-      pinMode(bcfg->pinBootButton, INPUT_PULLUP);
-      if (!initDisplay()) {
-        Serial.println("quake: display init failed; restarting normal firmware");
-        delay(50);
-        ESP.restart();
-        return;
-      }
-      applyPanelConfig(false);
-      applyBacklight();
-      // Every way out of quake_enter() restarts: the player leaving, or a
-      // failure with its reason on Serial and the panel.
-      quake_enter();
-    }
+  if (quakeBoot) {
+    // The same isolated boot as Doom's above: no frame buffers, WiFi,
+    // mDNS, OTA, UDP receive or loop-task watchdog.
+    // Every way out of quake_enter() restarts: the player leaving, or a
+    // failure with its reason on Serial and the panel.
+    quake_enter();
   }
 #endif
+  bootscreen::advance(bootscreen::Stage::Preparing);
   if (!initializeFramePipeline()) {
     Serial.println("FATAL: could not initialize runtime frame geometry");
+    bootscreen::fail("start failed");
     while (true) delay(1000);
   }
   bufB = (uint8_t *)heap_caps_malloc(frameDrawBytes(), FRAME_BUF_CAPS);
@@ -442,6 +485,7 @@ void setup() {
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
         (unsigned)heap_caps_get_largest_free_block(FRAME_SOURCE_BUF_CAPS),
         (unsigned)heap_caps_get_largest_free_block(FRAME_BUF_CAPS));
+    bootscreen::fail("memory error");
     while (true) delay(1000);
   }
   memset(bufA, 0, frameSourceBytes());
@@ -483,27 +527,8 @@ void setup() {
   if (bcfg->hasBootButton() || bcfg->hasEncoder()) {
     initializeButtonInput();
   }
-  if (bcfg->hasBacklightPin() && !bcfg->isDsi()) {
-    // A PWM backlight exists independently of the panel, so light it early -
-    // the boot status fills are pointless over a dark backlight.
-    pinMode(bcfg->pinBl, OUTPUT);
-    applyBacklight();
-  }
-  if (!initDisplay()) {
-    Serial.println("FATAL: display init failed");
-    while (true) delay(1000);
-  }
-  // Apply the saved rotation up front so even the boot status fills land the
-  // right way up, not just streamed frames - landscape-shaped on rectangular
-  // glass mounted at rotation 1 or 3.
-  adoptLocalFrameShape();
-  applyPanelConfig(bufLandscape);
-  // Panel-command brightness (the AMOLED) needs the panel up before it can
-  // apply; its init table ends at full brightness, so this restores the
-  // user's saved level. A harmless repeat on PWM boards.
-  applyBacklight();
-  fillPanel(0x2104);  // dark gray: display alive, waiting for WiFi
 
+  bootscreen::advance(bootscreen::Stage::Sensors);
   // Touch, before WiFi: the capability bits mDNS advertises depend on whether
   // the controller answered, so this has to be settled before we announce.
   touchCalibration = bcfg->variant == board::Variant::P4_4B
@@ -540,7 +565,7 @@ void setup() {
   // an untouched countdown chooses; a game restarts through its one-shot
   // flag and is entered by the Doom branch above on the next boot.
   if (runBootMenuIfDue(bootMenuRequested)) {
-    fillPanel(0x2104);
+    bootscreen::redraw();
   }
   // The device name doubles as the DHCP hostname (option 12), so the router
   // lists this board by name instead of "esp32c6-XXXXXX". This MUST precede
@@ -549,6 +574,7 @@ void setup() {
   WiFi.setHostname(cfgName.c_str());
 
   if (bcfg->platform->wifi == board::WifiTopology::HostedCoprocessor) {
+    bootscreen::advance(bootscreen::Stage::WifiLink);
     Serial.println("WiFi: starting ESP-Hosted link to the carrier C6 coprocessor");
   }
   WiFi.mode(WIFI_STA);
@@ -559,9 +585,11 @@ void setup() {
   // (mistyped, or the board moved to a new network) an unbounded wait would
   // make the device unconfigurable - CFGWIFI over USB must always work.
   uint32_t wifiWaitStart = millis();
+  bootscreen::advance(bootscreen::Stage::JoiningWifi);
   while (WiFi.status() != WL_CONNECTED) {
     handleSerialConfig();
     delay(100);
+    bootscreen::joining(millis() - wifiWaitStart, 30000);
     if (millis() - wifiWaitStart > 30000) {
       Serial.printf("WiFi connect timeout for \"%s\" - continuing; fix via "
                     "CFGWIFI over USB or wait for auto-reconnect\n",
@@ -576,6 +604,7 @@ void setup() {
                   WiFi.localIP().toString().c_str(), WiFi.getHostname());
   }
 
+  bootscreen::advance(bootscreen::Stage::Audio);
   const bool audioTransportReady = audiotransport::start(*bcfg);
   const bool audioEngineReady =
       audioTransportReady && audioengine::start(*bcfg);
@@ -597,6 +626,7 @@ void setup() {
     Serial.println("audio: disabled for this runtime profile");
   }
 
+  bootscreen::advance(bootscreen::Stage::Services);
   // OTA before the announce, not after, even though ArduinoOTA is the later
   // arrival here: addMdnsService() bakes deviceCapabilities() into the caps TXT
   // record and registers _arduino._tcp, so both would be wrong if OTA came up
@@ -616,15 +646,7 @@ void setup() {
   } else {
     Serial.println("WARN: mDNS failed to start");
   }
-
-  // Ready fill, honest about the radio. The WiFi wait above is bounded and
-  // falls through on timeout, so painting "connected" unconditionally told
-  // you the network was fine on a board that never associated.
-  if (WiFi.status() == WL_CONNECTED) {
-    fillPanel(0x0210);  // dark teal: WiFi up, waiting for stream
-  } else {
-    fillPanel(0x9000);  // dark red: no WiFi - fix with CFGWIFI over USB
-  }
+  const bool wifiUpAtReady = WiFi.status() == WL_CONNECTED;
 
   // Before the watchdog below: from here on loop() never waits on the WiFi
   // driver itself (see wifi_worker.h).
@@ -638,8 +660,16 @@ void setup() {
     Serial.println("FATAL: UDP listen failed");
   }
 
+  // Ready, honest about the radio. The WiFi wait above is bounded and falls
+  // through on timeout, so saying "ready" unconditionally would tell you the
+  // network was fine on a board that never associated (fix with CFGWIFI over
+  // USB). Stays up until a stream, the status card or another screen replaces
+  // it.
+  bootscreen::advance(wifiUpAtReady ? bootscreen::Stage::Ready
+                                    : bootscreen::Stage::NoWifi);
+
   // Arm the status card: if no sender ever appears, the device announces
-  // its name/IP/signal over the ready fill instead of sitting mute.
+  // its name/IP/signal in place of the boot screen instead of sitting mute.
   lastSenderPacketAt = millis();
 
   // Task watchdog on the loop task: any unforeseen hang panics and reboots;
@@ -786,6 +816,8 @@ void loop() {
   if (wifiConnectionRestored) {
     wifiLegacyMirrorPending = wifiCredentialPresetSlot != 0;
     restartMdnsService();
+    // A board that came up without WiFi and joined later stops saying so.
+    if (bootscreen::showing()) bootscreen::advance(bootscreen::Stage::Ready);
   }
   wifiWasConnected = wifiConnected;
   // A join the edge above never saw - between setup's announce and the first

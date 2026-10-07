@@ -57,9 +57,6 @@ extern uint32_t tunePartialDrawMs;
 void reportTileDrawStats();
 #endif
 
-// Fill the whole panel with one RGB565 color (boot status feedback).
-void fillPanel(uint16_t rgb565);
-
 // On rectangular glass, give bufA the frame shape the mounting rotation calls
 // for (localFrameLandscape) when no sender frame is deciding it, clearing what
 // it held. Acts only when that shape changed since the last call, i.e. on a

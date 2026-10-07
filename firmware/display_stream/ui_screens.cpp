@@ -9,6 +9,7 @@
 #include <board_power.h>
 
 #include "app_state.h"
+#include "boot_screen.h"
 #include "control_apply.h"
 #include "device_protocol.h"
 #include "display_power.h"
@@ -76,6 +77,7 @@ void drawIdleScreen() {
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   return;
 #endif
+  bootscreen::release();
   int w = bufLandscape ? PANEL_H : PANEL_W;
   int hgt = bufLandscape ? PANEL_W : PANEL_H;
 
@@ -283,6 +285,7 @@ void drawWifiSelectorScreen() {
 #endif
   if (!wifiSelectorActive || bufB == nullptr || panel == nullptr) return;
   if (!waitForDmaIdle(200)) return;
+  bootscreen::release();
 
   const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
@@ -397,6 +400,7 @@ void drawBootMenuScreen(const char *const *labels, size_t count,
   // exist to be called.
   if (bufB == nullptr || panel == nullptr || bcfg == nullptr) return;
   if (!waitForDmaIdle(200)) return;
+  bootscreen::release();
 
   const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
@@ -593,6 +597,7 @@ void drawSurveyScreen() {
   // is set no new stream DMA is queued, so waiting drains only the pass that
   // was already in flight when BOOT was pressed.
   if (!waitForDmaIdle(200)) return;
+  bootscreen::release();
   const int w = bufLandscape ? PANEL_H : PANEL_W;
   const int hgt = bufLandscape ? PANEL_W : PANEL_H;
   const bool connected = WiFi.status() == WL_CONNECTED;
@@ -706,7 +711,11 @@ void showInfoBar(const char *text) {
   size_t rowBytes = (size_t)w * 2;
   size_t off = (size_t)infoBarY0 * rowBytes;
   size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
-  memcpy(bufB + off, bufA + off, bytes);  // bufA stays pristine for the overlay
+  // Over the boot screen the bar sits on the boot screen, not on bufA's
+  // empty frame.
+  if (!bootscreen::composeRows(bufB + off, w, infoBarY0, infoBarY1)) {
+    memcpy(bufB + off, bufA + off, bytes);  // bufA stays pristine for the overlay
+  }
   int textX = panelstate::centeredX(
       w, (int)strlen(infoBarText) * 6 * infoBarScale);
   drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
@@ -749,7 +758,9 @@ void clearInfoBarIfExpired() {
   size_t rowBytes = (size_t)w * 2;
   size_t off = (size_t)infoBarY0 * rowBytes;
   size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
-  memcpy(bufB + off, bufA + off, bytes);
+  if (!bootscreen::composeRows(bufB + off, w, infoBarY0, infoBarY1)) {
+    memcpy(bufB + off, bufA + off, bytes);
+  }
   if (queuePanelBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1, bufB + off) !=
       ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
@@ -795,8 +806,9 @@ void redrawInfoBarOverRun() {
 // that simply freezes mid-picture looks broken rather than busy - so it says what
 // is happening on the device, not only in the terminal doing the pushing.
 //
-// Composed in staging (bufB) like fillPanel does: bufA holds the last streamed
-// frame and belongs to the network path, which keeps writing into it throughout.
+// Composed in staging (bufB) like the other screens: bufA holds the last
+// streamed frame and belongs to the network path, which keeps writing into it
+// throughout.
 // percent < 0 draws no bar, for the states where there is no meaningful figure.
 void drawOtaScreen(const char *headline, int percent) {
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
@@ -808,6 +820,7 @@ void drawOtaScreen(const char *headline, int percent) {
     return;
   }
   if (!waitForDmaIdle(200)) return;
+  bootscreen::release();
   // This screen replaces the whole panel; an info bar still counting down
   // must not repaint the idle card or survey over it when it expires.
   infoBarUntil = 0;

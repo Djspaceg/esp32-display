@@ -20,6 +20,7 @@ USB_INPUT_OUT="$TMP/test_usb_input"
 USB_HOST_INIT_OUT="$TMP/test_usb_host_init"
 QUAKE_PAK_OUT="$TMP/test_quake_pak"
 QUAKE_INPUT_OUT="$TMP/test_quake_input"
+BOOT_SCREEN_OUT="$TMP/test_boot_screen"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -214,6 +215,14 @@ clang++ "${CXXFLAGS[@]}" \
 
 # Quake's PSRAM relocation lists agree with themselves and the engine sources.
 bash "$HERE/test_quake_statics.sh"
+
+# The boot screen on every board profile, and its image asset matching the PNG
+# it is generated from.
+clang++ "${CXXFLAGS[@]}" \
+  -I"$HERE/../libraries/espdisp_board/src" \
+  -o "$BOOT_SCREEN_OUT" "$HERE/test_boot_screen.cpp"
+"$BOOT_SCREEN_OUT"
+python3 "$HERE/../../tools/generate_boot_image.py" --check
 
 # The 5 s status line is unchanged and the mem line after it parses.
 clang++ "${CXXFLAGS[@]}" \
