@@ -454,25 +454,29 @@ D5 Build on Espressif core 3.3.12 (ESP-Hosted 2.12.13). Why: the human chose "Up
 ### Open questions
 
 - Upgrade the project to Espressif core 3.3.12? Answered by the human: "Upgrade the core to 3.3.12" (D5).
+- Which WiFi should the 4C join for the final check? Its NVS now holds "Office", which it cannot reach; it joined "Stephens Manor" before. Raised to the human. Default: board WiFi left untouched, so the shipping-build WiFi check waits.
 - Does the speaker amp brown out the board? Default: no. No reset occurred with the backend running, but no on-demand amp test was possible while the Mac streamed audio.
 
 ### Gate facts
 
-Publish: committed to local main; GitHub remote, so no CR or AutoSDE; no push.
+Publish: committed to local main (ca677e3 audio fix; 80bfd51 core 3.3.12; 3dedc1a bundles and rescue images); GitHub remote, so no CR or AutoSDE; no push.
 Call sites, packages/*: none touched; this repo has no packages/ tree.
-Lanes, in a clean export of HEAD plus this change (gate-p4-power.log): run_tests.sh exit 0; compile p4, s3, c6, c3 exit 0. test_espdisp.py exit 1, only on its 4 rescue-image freshness checks: they diff firmware/rescue and firmware/libraries, which this change does not touch, and HEAD's board_touch.h edit (b8b7789) makes them stale.
+Lanes on core 3.3.12, clean clone at 3dedc1a (source-gate.log): run_tests.sh exit 0; test_espdisp.py 1980 checks, exit 0 (also in the main checkout); compile p4, s3, c6, c3 exit 0.
 Red first: red-audio-tests.log. Adversarial review rounds: 1, no blocking findings, 4 hardening findings fixed.
 
 ### Evidence
 
 - serial-open-resets-p4.md: the open-recipe reset counts.
 - c6-link-stall-core-3.3.12.md: runs on both cores, the memory, the upstream fix.
-- serial-4c-final.log: the 4C up 148 s on 3.3.12 with WiFi connected.
+- serial-4c-final.log: a scratch 3.3.12 build, up 148 s with WiFi connected.
+- serial-4c-shipping-nowifi.log: the committed shipping bundle on the 4C, no resets, WiFi blocked on the "Office" SSID.
 - code-review.md: the review and its dispositions.
 
 ### Residuals
 
-The 4C runs a scratch 3.3.12 build of this commit, not a project build; on 3.3.11 it restarts every
-~110 s. One real USB drop, both boards together but not their hub, at 17:15 before logging began,
-is unexplained. The human's bench bridge had switched itself onto the 4C's port; the human stopped it. Rescue images are stale on HEAD (the boot-menu worker's b8b7789). The scratch folder
-/Users/stepblk/Source/powerloss-scratch holds a 5.5 GB core install.
+The 4C runs the committed 3.3.12 shipping p4 bundle with no resets or allocation failures, but no WiFi
+until its saved network is fixed. Only the 4C was run on 3.3.12; s3, c6 and c3 are compile-verified
+only, and the c6 image grew from 94% to 96% of its app partition. One real USB drop, both boards
+together but not their hub, at 17:15 on 10-06, is unexplained. The human's bench bridge had switched
+itself onto the 4C's port; the human stopped it. /Users/stepblk/Source/powerloss-scratch holds two
+scratch clones and a 5.5 GB scratch core install, left in place as asked.
