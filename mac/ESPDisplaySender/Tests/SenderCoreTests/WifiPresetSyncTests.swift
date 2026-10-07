@@ -6,9 +6,11 @@ import XCTest
 @MainActor
 final class WifiPresetSyncTests: XCTestCase {
 
-    // MARK: slot assignment - alphabetical order, truncation, active slot
+    // MARK: slot assignment - saved order, truncation, active slot
 
-    func testSavedNetworksAreSortedAlphabeticallyAndTruncatedToTenSlots() {
+    /// The slots follow the order chosen in Settings, not the alphabet, and
+    /// truncation drops the tail of that order.
+    func testSavedNetworksKeepTheirOrderAndAreTruncatedToTenSlots() {
         let saved = [
             "Zeta", "Mango", "alpha", "Delta", "echo", "Foxtrot", "Golf",
             "hotel", "India", "Juliet", "Kilo", "Lima",
@@ -18,11 +20,10 @@ final class WifiPresetSyncTests: XCTestCase {
 
         XCTAssertEqual(assignment.protectedSlot, nil)
         XCTAssertEqual(assignment.slots, [
-            "alpha", "Delta", "echo", "Foxtrot", "Golf",
-            "hotel", "India", "Juliet", "Kilo", "Lima",
+            "Zeta", "Mango", "alpha", "Delta", "echo",
+            "Foxtrot", "Golf", "hotel", "India", "Juliet",
         ])
-        // Truncation drops the alphabetical tail, not an arbitrary ten.
-        XCTAssertEqual(assignment.omitted, ["Mango", "Zeta"])
+        XCTAssertEqual(assignment.omitted, ["Kilo", "Lima"])
     }
 
     func testFewerSavedNetworksThanSlotsLeavesTheRestEmpty() {
@@ -31,11 +32,27 @@ final class WifiPresetSyncTests: XCTestCase {
 
         XCTAssertEqual(
             assignment.slots,
-            ["alpha", "Beta"] + [String?](repeating: nil, count: 8))
+            ["Beta", "alpha"] + [String?](repeating: nil, count: 8))
         XCTAssertTrue(assignment.omitted.isEmpty)
     }
 
-    /// The rule that outranks alphabetical order: the slot the display is
+    /// A migrated order is the alphabetical one every earlier build synced in,
+    /// so a board receives exactly the slots it did before the migration.
+    func testAMigratedOrderPlacesTheSlotsTheAlphabeticalSyncDid() {
+        let keychain = ["Zeta", "Mango", "alpha", "Delta", "echo"]
+        let migrated = WifiPresetOrder.reconciled(
+            stored: nil, keychainNames: keychain)
+
+        XCTAssertEqual(
+            WifiPresetSlotPlan.assignment(
+                savedSSIDs: migrated, snapshot: directSnapshot()).slots,
+            WifiPresetSlotPlan.assignment(
+                savedSSIDs: WifiPresetSlotPlan.sortedSSIDs(keychain),
+                snapshot: directSnapshot()).slots)
+        XCTAssertEqual(migrated, ["alpha", "Delta", "echo", "Mango", "Zeta"])
+    }
+
+    /// The rule that outranks the saved order: the slot the display is
     /// joined through keeps its content, in place. Everything else sorts around
     /// it, so no reactivation is needed and the board cannot reboot as a side
     /// effect of a sync.
@@ -81,9 +98,9 @@ final class WifiPresetSyncTests: XCTestCase {
         XCTAssertEqual(assignment.omitted, ["Juliet"])
     }
 
-    /// An active SSID that alphabetical order would have placed in a different
+    /// An active SSID that the saved order would have placed in a different
     /// slot is not moved. Moving it means clearing the slot it is active in.
-    func testActiveNetworkIsNotMovedIntoItsAlphabeticalSlot() {
+    func testActiveNetworkIsNotMovedIntoItsSavedSlot() {
         let assignment = WifiPresetSlotPlan.assignment(
             savedSSIDs: ["alpha", "Bravo", "Charlie"],
             snapshot: snapshot(slots: [9: "alpha"], activeSlot: 9))
@@ -282,8 +299,9 @@ final class WifiPresetSyncTests: XCTestCase {
         XCTAssertEqual(device.commands.last, "CFGWIFISHOW 3")
     }
 
-    /// The whole automatic path: read, sort, truncate, write, read back.
-    func testAutomaticSyncCopiesTheSavedCollectionInAlphabeticalOrder() throws {
+    /// The whole automatic path: read, lay out in the saved order, truncate,
+    /// write, read back.
+    func testAutomaticSyncCopiesTheSavedCollectionInItsSavedOrder() throws {
         let device = FakePresetDevice(slots: [1: ("Leftover", true)])
         let saved = [
             "Zeta", "alpha", "Bravo", "Charlie", "Delta", "echo",
@@ -298,9 +316,9 @@ final class WifiPresetSyncTests: XCTestCase {
 
         XCTAssertEqual(
             (1...10).map { report.snapshot.slots[$0]?.ssid },
-            ["alpha", "Bravo", "Charlie", "Delta", "echo",
-             "Foxtrot", "Golf", "hotel", "India", "Juliet"])
-        XCTAssertEqual(report.omitted, ["Zeta"])
+            ["Zeta", "alpha", "Bravo", "Charlie", "Delta",
+             "echo", "Foxtrot", "Golf", "hotel", "India"])
+        XCTAssertEqual(report.omitted, ["Juliet"])
         XCTAssertTrue(report.unusable.isEmpty)
     }
 
@@ -498,6 +516,180 @@ final class WifiPresetSyncTests: XCTestCase {
 
         XCTAssertEqual(device.mutations, afterFirst)
         XCTAssertEqual(afterFirst.count, 2)
+    }
+
+    /// Reordering in Settings moves networks between slots, so every attached
+    /// board receives the new order - through the same SET and CLEAR commands.
+    func testReorderingInSettingsRecopiesInTheNewOrder() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(
+            path: path, saved: ["alpha", "Bravo"], device: device)
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+
+        manager.moveSavedNetwork("Bravo", by: -1)
+        try await waitForSyncToSettle(manager)
+
+        let report = try XCTUnwrap(manager.wifiPresetSyncReport(for: "studio-display"))
+        XCTAssertEqual(
+            (1...2).map { report.snapshot.slots[$0]?.ssid }, ["Bravo", "alpha"])
+        XCTAssertTrue(device.mutations.allSatisfy {
+            $0.hasPrefix("CFGWIFISET ") || $0.hasPrefix("CFGWIFICLEAR ")
+        }, device.mutations.description)
+        XCTAssertFalse(device.commands.contains { $0.hasPrefix("CFGWIFIUSE") })
+    }
+
+    /// A new password under the same name is still a change the boards need,
+    /// and it is the new password that arrives.
+    func testAPasswordChangeInSettingsRecopiesAnUnchangedList() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+        manager.useWifiCredentials(InMemoryWifiCredentials([
+            SavedWiFiCredential(ssid: "alpha", password: "original"),
+        ]))
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(device.mutations.count, 1)
+
+        XCTAssertNil(manager.saveNetwork(
+            ssid: "alpha", password: "rotated", isOpenNetwork: false))
+        try await waitForSyncToSettle(manager)
+
+        XCTAssertEqual(device.mutations.count, 2, device.mutations.description)
+        XCTAssertEqual(
+            device.mutations.last,
+            "CFGWIFISET 1 \(Data("alpha".utf8).base64EncodedString()) "
+                + Data("rotated".utf8).base64EncodedString())
+    }
+
+    /// Onboarding or the WiFi dialog can re-save a name with a new password.
+    /// The other attached boards are told, as they are for an edit in Settings.
+    func testACredentialWrittenElsewhereRecopiesAnUnchangedList() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(device.mutations.count, 1)
+
+        manager.savedCredentialsWereWritten()
+        try await waitForSyncToSettle(manager)
+
+        XCTAssertEqual(device.mutations.count, 2, device.mutations.description)
+    }
+
+    // MARK: Copy Now, from the preset sheet
+
+    /// Copy Now is the automatic copy on request: the same commands, and it
+    /// records what it copied so the next probe does not copy it again.
+    func testCopyNowCopiesTheSavedOrderAndIsNotRepeatedByTheNextProbe() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [1: ("Leftover", true)])
+        let manager = manager(path: path, saved: ["Zeta", "alpha"], device: device)
+        manager.wifiPresetPortResolver = { _, _, _ in .success(path) }
+
+        let report = try resultValue(
+            await manager.copySavedWifiPresets(to: "studio-display"))
+
+        XCTAssertEqual(
+            (1...2).map { report.snapshot.slots[$0]?.ssid }, ["alpha", "Zeta"])
+        XCTAssertTrue(device.mutations.allSatisfy {
+            $0.hasPrefix("CFGWIFISET ") || $0.hasPrefix("CFGWIFICLEAR ")
+        }, device.mutations.description)
+        XCTAssertNotNil(manager.wifiPresetSyncReport(for: "studio-display"))
+        let afterCopy = device.mutations
+
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(device.mutations, afterCopy)
+    }
+
+    /// The empty-password rule holds on this path too: an unmarked empty
+    /// credential is skipped, never written as an open preset.
+    func testCopyNowSkipsAnUnmarkedEmptyPassword() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["Office"], device: device)
+        manager.wifiPresetPortResolver = { _, _, _ in .success(path) }
+        manager.wifiCredentialLookup = { ssid in
+            SavedWiFiCredential(ssid: ssid, password: "")
+        }
+
+        let report = try resultValue(
+            await manager.copySavedWifiPresets(to: "studio-display"))
+
+        XCTAssertEqual(report.unusable, ["Office"])
+        XCTAssertTrue(device.mutations.isEmpty, device.mutations.description)
+    }
+
+    /// While an automatic copy holds the board, Copy Now waits its turn rather
+    /// than sharing the serial port with it.
+    func testCopyNowIsRefusedWhileAnAutomaticCopyRuns() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["alpha"], device: device)
+        manager.wifiPresetPortResolver = { _, _, _ in .success(path) }
+        manager.wifiPresetSyncTasks["020000123456"] = Task {}
+
+        let failure = try copyFailure(
+            await manager.copySavedWifiPresets(to: "studio-display"))
+
+        XCTAssertEqual(failure.title, "Already copying")
+        XCTAssertTrue(device.commands.isEmpty, device.commands.description)
+    }
+
+    func testCopyNowWithNothingSavedLeavesTheDisplayAlone() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [1: ("Studio", true)])
+        let manager = manager(path: path, saved: [], device: device)
+        manager.wifiPresetPortResolver = { _, _, _ in .success(path) }
+
+        let failure = try copyFailure(
+            await manager.copySavedWifiPresets(to: "studio-display"))
+
+        XCTAssertEqual(failure.title, "No saved networks")
+        XCTAssertTrue(device.commands.isEmpty)
+    }
+
+    /// An edit that lands while a copy is already running is not lost: the
+    /// copy that finishes sees the list moved on and copies again.
+    func testAnEditDuringACopyIsCopiedWhenItFinishes() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(
+            path: path, saved: ["alpha", "Bravo"], device: device)
+        let gate = DispatchSemaphore(value: 0)
+        let first = LockedCounter(0)
+        manager.usbControlSender = { command, _, _ in
+            first.count()
+            if first.total == 1 { gate.wait() }
+            return device.send(command)
+        }
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitUntil { first.total == 1 }
+
+        manager.moveSavedNetwork("Bravo", by: -1)
+        gate.signal()
+        try await waitUntil {
+            manager.wifiPresetSyncReport(for: "studio-display")?
+                .snapshot.slots[1]?.ssid == "Bravo"
+        }
+        try await waitForSyncToSettle(manager)
+        XCTAssertEqual(
+            manager.wifiPresetSyncReport(for: "studio-display")?
+                .snapshot.slots[2]?.ssid, "alpha")
     }
 
     /// Nothing saved means nothing to copy. It must never be read as an
@@ -1079,6 +1271,16 @@ final class WifiPresetSyncTests: XCTestCase {
         case .success(let value): return value
         case .failure(let error): throw error
         }
+    }
+
+    private func copyFailure(
+        _ result: Result<WifiPresetSyncReport, WifiConfigUI.ConfigFailure>
+    ) throws -> WifiConfigUI.ConfigFailure {
+        guard case .failure(let failure) = result else {
+            XCTFail("expected a failure, got \(result)")
+            throw CancellationError()
+        }
+        return failure
     }
 
     private func failureValue<T>(

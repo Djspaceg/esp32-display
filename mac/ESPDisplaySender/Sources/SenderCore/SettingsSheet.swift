@@ -4,6 +4,9 @@ import SwiftUI
 /// Streaming settings that used to be command-line flags only. The app normally
 /// runs as a LaunchAgent, so those flags were unreachable in practice: changing
 /// the frame rate meant editing a plist and reloading the agent.
+///
+/// Also the one place the app's saved WiFi networks and their preset order are
+/// edited, for every display at once.
 struct SettingsSheet: View {
     @ObservedObject var manager: PanelManager
     @Environment(\.dismiss) private var dismiss
@@ -11,6 +14,8 @@ struct SettingsSheet: View {
     /// Edited locally and applied on Done, so dragging a slider does not
     /// restart every panel's capture on the way past each intermediate value.
     @State private var draft = SenderSettings()
+    /// The WiFi form is open and owns Return and Escape.
+    @State private var editingNetwork = false
 
     var body: some View {
         Form {
@@ -96,6 +101,10 @@ struct SettingsSheet: View {
             } footer: {
                 Text("How long Identify lights the panel's LED.")
             }
+
+            // Not part of the draft: these are Keychain writes and apply as
+            // they are made. See `WifiNetworksSection`.
+            WifiNetworksSection(manager: manager, isEditing: $editingNetwork)
         }
         .formStyle(.grouped)
         // Every message in here - errors above all - can be selected and
@@ -110,20 +119,20 @@ struct SettingsSheet: View {
                 Button("Restore Defaults") { draft = SenderSettings() }
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
-                    .keyboardShortcut(.cancelAction)
+                    .keyboardShortcut(editingNetwork ? nil : .cancelAction)
                 Button("Done") {
                     manager.updateSettings(draft)
                     dismiss()
                 }
                 .buttonStyle(.glassProminent)
-                .keyboardShortcut(.defaultAction)
+                .keyboardShortcut(editingNetwork ? nil : .defaultAction)
             }
             .padding(12)
             .glassCard(cornerRadius: 16)
             .padding(.horizontal, 16)
             .padding(.bottom, 14)
         }
-        .frame(width: 560, height: 620)
+        .frame(width: 560, height: 680)
         .onAppear { draft = manager.settings }
     }
 }

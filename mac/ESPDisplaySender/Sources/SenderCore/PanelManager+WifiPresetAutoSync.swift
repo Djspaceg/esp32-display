@@ -109,12 +109,21 @@ extension PanelManager {
     }
 
     /// What a sync would be copying. Compared against the last successful sync
-    /// so a repeat probe is not a repeat write.
+    /// so a repeat probe is not a repeat write. In the saved order, not sorted:
+    /// reordering the networks in Settings moves them between slots, so it is
+    /// a change every attached board has to receive.
     static func wifiPresetSyncSignature(
-        hardwareID: String, ssids: [String]
+        hardwareID: String, ssids: [String], credentialRevision: Int = 0
     ) -> String {
-        ([hardwareID] + WifiPresetSlotPlan.sortedSSIDs(ssids))
+        ([hardwareID, "\(credentialRevision)"] + WifiPresetOrder.cleaned(ssids))
             .joined(separator: "\n")
+    }
+
+    /// The signature of what the app would copy to this board right now.
+    func currentWifiPresetSyncSignature(hardwareID: String) -> String {
+        Self.wifiPresetSyncSignature(
+            hardwareID: hardwareID, ssids: savedNetworkNames,
+            credentialRevision: wifiCredentialRevision)
     }
 
     /// Push the saved collection to every board that is attached and verified.
@@ -149,8 +158,7 @@ extension PanelManager {
         else { return }
         let savedSSIDs = savedNetworkNames
         guard !savedSSIDs.isEmpty else { return }
-        let signature = Self.wifiPresetSyncSignature(
-            hardwareID: hardwareID, ssids: savedSSIDs)
+        let signature = currentWifiPresetSyncSignature(hardwareID: hardwareID)
         guard syncedWifiPresetSignatures[hardwareID] != signature,
               wifiPresetSyncTasks[hardwareID] == nil
         else { return }
@@ -211,6 +219,14 @@ extension PanelManager {
                 self.wifiPresetSyncRechecks.removeValue(forKey: hardwareID)?.cancel()
                 self.resolve(.wifiPresetSync, source: hardwareID)
                 self.objectWillChange.send()
+                // The collection changed while this ran - the sync an edit in
+                // Settings asks for is turned away while this one holds the
+                // board - so what landed is already out of date. Copy the
+                // current one.
+                if self.currentWifiPresetSyncSignature(hardwareID: hardwareID)
+                    != signature {
+                    self.syncWifiPresetsIfNeeded(for: serviceName)
+                }
             case .failure(let failure):
                 // Cleared so the next probe retries. A half-written collection
                 // must not look synchronized.

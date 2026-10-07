@@ -721,9 +721,9 @@ extension PanelManager {
     }
 
     func refreshSavedNetworks() {
-        let updated = WifiCredentialStore.savedNetworkNames()
-        guard updated != savedNetworkNames else { return }
-        savedNetworkNames = updated
+        // Reconciled with the stored preset order, so a network another path
+        // saved (onboarding, the standalone WiFi dialog) joins the end of it.
+        guard applySavedNetworkNames(wifiNetworkNamesReader()) else { return }
         // The app's own collection changed. Every board still attached gets it.
         syncWifiPresetsToAttachedDevices()
     }

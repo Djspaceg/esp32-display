@@ -4,6 +4,9 @@ import SwiftUI
 /// itself reports, and the Mac's saved networks to apply to it. Kept as two
 /// separate rows so the Mac's list can never read as the board's network.
 ///
+/// The saved list itself is edited in Settings, for every display at once;
+/// the button here opens it rather than editing anything per display.
+///
 /// Takes plain values rather than the manager, so a test can render it for a
 /// given state without a window or a board.
 struct WifiNetworkRows: View {
@@ -14,7 +17,7 @@ struct WifiNetworkRows: View {
     let canApply: Bool
     let canEdit: Bool
     var applyHelp = "Apply this saved network"
-    var editHelp = "Add or edit saved WiFi credentials"
+    var editHelp = "Add, edit or reorder the saved networks in Settings"
     var onApply: () -> Void = {}
     var onEdit: () -> Void = {}
 
@@ -36,7 +39,7 @@ struct WifiNetworkRows: View {
                     .disabled(selection.isEmpty || !canApply)
                     .help(applyHelp)
 
-                Button(savedNetworkNames.isEmpty ? "Add…" : "Edit…", action: onEdit)
+                Button(savedNetworkNames.isEmpty ? "Add…" : "Manage…", action: onEdit)
                     .disabled(!canEdit)
                     .help(editHelp)
             }

@@ -54,6 +54,16 @@ struct SenderSettings: Codable, Equatable {
     var audioDevices = AudioDevicePreferences()
     /// Persisted so latency and drift experiments do not require a rebuild.
     var audioTuning = AudioRuntimeTuning()
+    /// The app's saved WiFi networks, by SSID, in the order they are copied
+    /// into every board's ten preset slots. Passwords are not here: they stay
+    /// in the login Keychain (`WifiCredentialStore`), which is also what says
+    /// which networks exist. This only orders them.
+    ///
+    /// nil means never migrated: builds before this setting sorted the
+    /// Keychain's networks alphabetically on every sync, and the first launch
+    /// that finds nil seeds this from exactly that order, so a board receives
+    /// the same slots it did before (`WifiPresetOrder.reconciled`).
+    var wifiPresetOrder: [String]?
 
     /// Default capture rate; see `fps` for why this is a named constant
     /// rather than three repeated literals.
@@ -64,7 +74,8 @@ struct SenderSettings: Codable, Equatable {
          identifySeconds: Int = 8, tileQuality: TileLossyPolicy = .auto,
          deviceListSortOrder: DeviceListSortOrder = .alphabetical,
          audioDevices: AudioDevicePreferences = AudioDevicePreferences(),
-         audioTuning: AudioRuntimeTuning = AudioRuntimeTuning()) {
+         audioTuning: AudioRuntimeTuning = AudioRuntimeTuning(),
+         wifiPresetOrder: [String]? = nil) {
         self.fps = fps
         self.spacingMicros = spacingMicros
         self.adaptivePacing = adaptivePacing
@@ -73,6 +84,7 @@ struct SenderSettings: Codable, Equatable {
         self.deviceListSortOrder = deviceListSortOrder
         self.audioDevices = audioDevices
         self.audioTuning = audioTuning.validated
+        self.wifiPresetOrder = wifiPresetOrder.map(WifiPresetOrder.cleaned)
     }
 
     /// Every field decodes independently with its default as the fallback,
@@ -97,6 +109,10 @@ struct SenderSettings: Codable, Equatable {
         let tuning = try? c.decodeIfPresent(
             AudioRuntimeTuning.self, forKey: .audioTuning)
         audioTuning = tuning.flatMap { $0 }?.validated ?? AudioRuntimeTuning()
+        // A malformed value reads as never migrated, which re-seeds from the
+        // Keychain rather than failing the whole file.
+        let order = try? c.decodeIfPresent([String].self, forKey: .wifiPresetOrder)
+        wifiPresetOrder = order.flatMap { $0 }.map(WifiPresetOrder.cleaned)
     }
 
     static let fpsRange = 5...60
@@ -119,7 +135,8 @@ struct SenderSettings: Codable, Equatable {
             tileQuality: tileQuality,
             deviceListSortOrder: deviceListSortOrder,
             audioDevices: audioDevices,
-            audioTuning: audioTuning.validated)
+            audioTuning: audioTuning.validated,
+            wifiPresetOrder: wifiPresetOrder)
     }
 }
 

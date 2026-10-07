@@ -163,40 +163,68 @@ extension PanelManager {
         }.value
     }
 
-    /// Apply an explicit slot collection from the preset sheet.
+    /// Copy the saved networks to one board now, from its preset sheet.
     ///
-    /// `protectedSlot` carries the slot the display is currently joined
-    /// through. It is passed rather than inferred so that the sheet's own view
-    /// of which slot is active - the one it shows as Active and refuses to let
-    /// the user edit - is the same one the write refuses to touch.
-    func syncWifiPresets(
-        _ desired: [String?],
-        protectedSlot: Int? = nil,
-        for serviceName: String
-    ) async -> Result<WifiPresetSnapshot, WifiConfigUI.ConfigFailure> {
+    /// The same copy the automatic sync makes - the same order, the same
+    /// commands, the same active-slot and empty-password rules - only on
+    /// request and over whichever port the record resolves to, so a board the
+    /// automatic path is still waiting on can be brought up to date by hand.
+    func copySavedWifiPresets(
+        to serviceName: String
+    ) async -> Result<WifiPresetSyncReport, WifiConfigUI.ConfigFailure> {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
             return .failure(WifiConfigUI.ConfigFailure(
                 title: "Display not found",
                 message: "The selected display is no longer available."))
         }
+        let savedSSIDs = savedNetworkNames
+        guard !savedSSIDs.isEmpty else {
+            return .failure(WifiConfigUI.ConfigFailure(
+                title: "No saved networks",
+                message: "Add a network in Settings first. With none saved, "
+                    + "the display's presets are left as they are."))
+        }
+        let hardwareID = stableHardwareID(of: panel)
+        // The sheet's hold only keeps a NEW automatic sync from starting; one
+        // already running would share the serial port with this copy and each
+        // could read the other's replies. It is asked to wait instead.
+        if let hardwareID, wifiPresetSyncTasks[hardwareID] != nil {
+            return .failure(WifiConfigUI.ConfigFailure(
+                title: "Already copying",
+                message: "The saved networks are already being copied to this "
+                    + "display, or a copy is waiting to retry. Try again in a "
+                    + "moment."))
+        }
         let currentName = panel.displayName
         let preferredPort = panel.usbPort
         let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
+        let lookup = wifiCredentialLookup
+        let sender = usbControlSender
+        let resolvePort = wifiPresetPortResolver
+        let signature = hardwareID.map {
+            currentWifiPresetSyncSignature(hardwareID: $0)
+        }
         let held = beginWifiPresetSheetOperation(for: panel)
         defer { endWifiPresetSheetOperation(held) }
         let result = await Task.detached(priority: .userInitiated) {
-            WifiConfigUI.syncWifiPresets(
-                desired,
-                currentName: currentName,
-                protectedSlot: protectedSlot,
-                preferredPort: preferredPort,
-                expectedHardwareID: expectedHardwareID)
+            resolvePort(currentName, preferredPort, expectedHardwareID)
+                .flatMap { port in
+                    WifiConfigUI.syncSavedWifiPresets(
+                        savedSSIDs: savedSSIDs, lookup: lookup,
+                        port: port, send: sender)
+                }
         }.value
-        // A hand-edited collection is now what the board holds, which is not
-        // what the automatic sync last recorded. Forget the signature so the
-        // next verified probe reconciles the board with the saved collection.
-        if let hardwareID = stableHardwareID(of: panel) {
-            forgetWifiPresetSync(hardwareID: hardwareID)
+        if let hardwareID {
+            switch result {
+            case .success(let report):
+                // What the automatic path would have recorded, so the next
+                // probe does not copy the same collection again.
+                syncedWifiPresetSignatures[hardwareID] = signature
+                wifiPresetSyncReports[hardwareID] = report
+                resolve(.wifiPresetSync, source: hardwareID)
+            case .failure:
+                syncedWifiPresetSignatures[hardwareID] = nil
+            }
         }
         return result
     }
@@ -215,37 +243,6 @@ extension PanelManager {
         else { return }
         wifiPresetSheetOperations[hardwareID] = count > 1 ? count - 1 : nil
     }
-
-    func configureUSB(preferredSSID: String? = nil) {
-        guard let panel = selectedPanel else {
-            operationOutcome = .failure(
-                "No display selected", "Select a display before configuring WiFi.")
-            return
-        }
-        guard requireOperation(
-            .savedWiFi, for: panel.serviceName, title: "WiFi configuration")
-        else { return }
-        let result = WifiConfigUI.run(
-            currentName: panel.displayName,
-            expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID,
-            preferredPort: panel.usbPort,
-            preferredSSID: preferredSSID)
-        refreshSavedNetworks()
-        refreshUSBPorts()
-        switch result {
-        case .success(let confirmation):
-            // nil means the user cancelled, which needs no announcement.
-            if let confirmation {
-                if confirmation.restartsDisplay {
-                    markUSBRestarting(panel.serviceName)
-                }
-                operationOutcome = .success(confirmation.title, confirmation.message)
-            }
-        case .failure(let failure):
-            operationOutcome = .failure(failure)
-        }
-    }
-
 
     // MARK: adding a display over USB
 
@@ -467,7 +464,11 @@ extension PanelManager {
         case .keepCurrent:
             break
         }
-        refreshSavedNetworks()
+        if request.password == .keepCurrent {
+            refreshSavedNetworks()
+        } else {
+            savedCredentialsWereWritten()
+        }
         refreshUSBPorts()
 
         // Recheck after the write/configuration window: another Add sheet or a

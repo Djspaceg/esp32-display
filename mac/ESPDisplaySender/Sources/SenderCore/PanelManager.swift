@@ -199,6 +199,27 @@ final class PanelManager: ObservableObject {
     var wifiCredentialLookup: @Sendable (String) -> SavedWiFiCredential? = { ssid in
         WifiCredentialStore.credential(for: ssid)
     }
+    /// Which serial port a record's board is on, for the preset sheet's Copy
+    /// Now. Injectable so a test can name a fake port instead of probing /dev.
+    var wifiPresetPortResolver: @Sendable (
+        _ name: String, _ preferredPort: String?, _ expectedHardwareID: String?
+    ) -> Result<String, WifiConfigUI.ConfigFailure> = { name, preferred, hardwareID in
+        WifiConfigUI.matchingPort(
+            for: name, expectedHardwareID: hardwareID, preferredPort: preferred)
+    }
+    /// The Keychain's saved network names, and writing and removing one, for
+    /// the Settings list. Injectable for the same reason as the lookup.
+    var wifiNetworkNamesReader: @Sendable () -> [String] = {
+        WifiCredentialStore.savedNetworkNames()
+    }
+    var wifiCredentialWriter: @Sendable (SavedWiFiCredential) -> Bool = { credential in
+        WifiCredentialStore.save(
+            ssid: credential.ssid, password: credential.password,
+            isOpenNetwork: credential.isOpenNetwork)
+    }
+    var wifiCredentialRemover: @Sendable (String) -> Bool = { ssid in
+        WifiCredentialStore.remove(ssid: ssid)
+    }
     /// One automatic preset sync in flight per board, keyed by hardware ID
     /// rather than by service name: the sync writes to a physical board.
     var wifiPresetSyncTasks: [String: Task<Void, Never>] = [:]
@@ -206,6 +227,10 @@ final class PanelManager: ObservableObject {
     /// control re-enters the sync path, so without this a brightness change
     /// would rewrite ten slots.
     var syncedWifiPresetSignatures: [String: String] = [:]
+    /// Bumped when a saved network's password changes in Settings. Part of the
+    /// sync signature, because a new password under an unchanged list of names
+    /// is still a collection every board has to receive.
+    var wifiCredentialRevision = 0
     /// The last completed sync per board, so the UI can say what did not fit
     /// without re-reading the display.
     var wifiPresetSyncReports: [String: WifiPresetSyncReport] = [:]
@@ -254,7 +279,7 @@ final class PanelManager: ObservableObject {
             .map(\.snapshot)
         sortPanels()
         selectedServiceName = panels.first?.serviceName
-        savedNetworkNames = WifiCredentialStore.savedNetworkNames()
+        applySavedNetworkNames(WifiCredentialStore.savedNetworkNames())
         usbDevices = WifiConfigUI.candidatePorts().map {
             WifiConfigUI.USBDeviceOption(path: $0)
         }
@@ -364,7 +389,15 @@ final class PanelManager: ObservableObject {
         self.settings = settings.validated
         panels = previewPanels
         sortPanels()
-        self.savedNetworkNames = savedNetworkNames
+        // Never the Keychain from here, for the same reason as the OTA store:
+        // every saved-network read and write in a preview or test stays in
+        // memory. The sync tests replace the lookup with their own.
+        useWifiCredentials(InMemoryWifiCredentials(savedNetworkNames.map {
+            SavedWiFiCredential(ssid: $0, password: "preview")
+        }))
+        // Treated as what the Keychain holds, so the preset order is migrated
+        // here exactly as it is at launch.
+        applySavedNetworkNames(savedNetworkNames)
         usbDevices = usbSerialPorts.map { WifiConfigUI.USBDeviceOption(path: $0) }
         selectedServiceName = panels.first?.serviceName
     }
@@ -388,7 +421,11 @@ final class PanelManager: ObservableObject {
     /// handed to ScreenCaptureKit when a stream starts, so each session
     /// restarts its capture to pick it up.
     func updateSettings(_ new: SenderSettings) {
-        let validated = new.validated
+        var validated = new.validated
+        // The preset order is edited live from the WiFi section, not through
+        // the sheet's draft, so a draft taken before an edit - or Restore
+        // Defaults - must not put the old order back.
+        validated.wifiPresetOrder = settings.wifiPresetOrder
         guard validated != settings else { return }
         let sortOrderChanged =
             validated.deviceListSortOrder != settings.deviceListSortOrder
@@ -412,6 +449,77 @@ final class PanelManager: ObservableObject {
         settings.deviceListSortOrder = order
         sortPanels()
         saveSettings()
+    }
+
+    /// Bring the saved networks up to date with what the Keychain holds: the
+    /// first-launch migration of the preset order, and every refresh after.
+    /// Returns whether the published list changed, which is what the attached
+    /// boards have to be told about.
+    ///
+    /// The order is written back only when reconciling actually added a name,
+    /// so a launch that finds nothing new leaves settings.json untouched and
+    /// running this twice writes at most once.
+    @discardableResult
+    func applySavedNetworkNames(_ keychainNames: [String]) -> Bool {
+        let order = WifiPresetOrder.reconciled(
+            stored: settings.wifiPresetOrder, keychainNames: keychainNames)
+        // Nothing saved and nothing stored stays nil rather than writing an
+        // empty list, so a first run with no networks creates no file.
+        if order != (settings.wifiPresetOrder ?? []) {
+            settings.wifiPresetOrder = order
+            saveWifiPresetOrder()
+        }
+        return publishSavedNetworks(order: order, keychainNames: keychainNames)
+    }
+
+    /// Replace the preset order with one the user chose in Settings. Names the
+    /// order no longer mentions keep their Keychain items; see
+    /// `removeSavedNetwork` for the one path that deletes.
+    func setWifiPresetOrder(_ order: [String], keychainNames: [String]) {
+        let cleaned = WifiPresetOrder.reconciled(
+            stored: order, keychainNames: keychainNames)
+        if cleaned != settings.wifiPresetOrder {
+            settings.wifiPresetOrder = cleaned
+            saveWifiPresetOrder()
+        }
+        if publishSavedNetworks(order: cleaned, keychainNames: keychainNames) {
+            syncWifiPresetsToAttachedDevices()
+        }
+    }
+
+    /// Write the preset order and nothing else. The file on disk is read back
+    /// and only its order replaced, because what is in memory can differ from
+    /// it on purpose: `--fps` and the other command-line overrides apply for
+    /// one run without being written back. A file that cannot be read is left
+    /// alone - the launch has already said the defaults are in use, and
+    /// writing over it would turn that warning into the loss it warns of. The
+    /// order stays in memory and is seeded again next launch.
+    private func saveWifiPresetOrder() {
+        guard let settingsURL else { return }
+        let onDisk = SettingsStore.load(from: settingsURL)
+        guard onDisk.failure == nil else {
+            report(.persistence, source: Self.settingsIssueSource,
+                   detail: "The WiFi preset order was not saved, because "
+                + "\(settingsURL.path) could not be read: \(onDisk.failure ?? "")")
+            return
+        }
+        var updated = onDisk.settings
+        updated.wifiPresetOrder = settings.wifiPresetOrder
+        do {
+            try SettingsStore.save(updated, to: settingsURL)
+            resolve(.persistence, source: Self.settingsIssueSource)
+        } catch {
+            report(.persistence, source: Self.settingsIssueSource,
+                   detail: "App settings could not be saved to "
+                + "\(settingsURL.path): \(error.localizedDescription)")
+        }
+    }
+
+    private func publishSavedNetworks(order: [String], keychainNames: [String]) -> Bool {
+        let present = WifiPresetOrder.present(order, keychainNames: keychainNames)
+        guard present != savedNetworkNames else { return false }
+        savedNetworkNames = present
+        return true
     }
 
     private func saveSettings() {

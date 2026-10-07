@@ -188,15 +188,6 @@ final class OperationOutcomeTests: XCTestCase {
         XCTAssertEqual(manager.operationOutcome?.title, "No network selected")
     }
 
-    func testConfiguringWithNoSelectionFails() {
-        let manager = makeManager()
-
-        manager.configureUSB()
-
-        XCTAssertEqual(manager.operationOutcome?.kind, .failure)
-        XCTAssertEqual(manager.operationOutcome?.title, "No display selected")
-    }
-
     /// An action for a panel that is not in the list does nothing at all, rather
     /// than reporting a confusing outcome about a display the user cannot see.
     func testActionForUnknownPanelIsIgnored() {
@@ -209,8 +200,10 @@ final class OperationOutcomeTests: XCTestCase {
     }
 
     func testClearingRemovesTheOutcome() {
-        let manager = makeManager()
-        manager.configureUSB()
+        let manager = makeManager([
+            PanelSnapshot(serviceName: "studio-display", displayName: "studio-display"),
+        ])
+        manager.applySavedNetwork("", to: "studio-display")
         XCTAssertNotNil(manager.operationOutcome)
 
         manager.clearOperationOutcome()

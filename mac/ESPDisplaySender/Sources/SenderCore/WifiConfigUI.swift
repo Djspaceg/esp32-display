@@ -105,6 +105,19 @@ enum WifiCredentialStore {
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
     }
+
+    /// Delete one saved network. An item that is already gone counts as
+    /// removed, so a second removal is not reported as a failure.
+    @discardableResult
+    static func remove(ssid: String) -> Bool {
+        let identity: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: ssid,
+        ]
+        let status = SecItemDelete(identity as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
 }
 
 /// WiFi and device-name configuration over the board's USB serial protocol.
@@ -688,33 +701,6 @@ enum WifiConfigUI {
         return readWifiPresets(port: port)
     }
 
-    static func syncWifiPresets(
-        _ desired: [String?],
-        currentName: String,
-        protectedSlot: Int? = nil,
-        preferredPort: String? = nil,
-        expectedHardwareID: String? = nil
-    ) -> Result<WifiPresetSnapshot, ConfigFailure> {
-        var credentials: [String: SavedWiFiCredential] = [:]
-        for ssid in Set(desired.compactMap { $0 }) {
-            if let credential = WifiCredentialStore.credential(for: ssid) {
-                credentials[ssid] = credential
-            }
-        }
-
-        let port: String
-        switch matchingPort(
-            for: currentName, expectedHardwareID: expectedHardwareID,
-            preferredPort: preferredPort)
-        {
-        case .success(let resolved): port = resolved
-        case .failure(let failure): return .failure(failure)
-        }
-        return syncWifiPresets(
-            desired, credentials: credentials, port: port,
-            protectedSlot: protectedSlot)
-    }
-
     /// Set a panel's OTA password over USB. The panel restarts on success -
     /// see the `CFGOTAPW` handler in display_stream.ino - so the caller
     /// should not expect an immediate second command to reach the same
@@ -764,7 +750,7 @@ enum WifiConfigUI {
         }
     }
 
-    private static func matchingPort(
+    static func matchingPort(
         for currentName: String?,
         expectedHardwareID: String? = nil,
         preferredPort: String? = nil

@@ -16,13 +16,55 @@ struct WifiPresetSnapshot: Equatable, Sendable {
     }
 }
 
+/// The order of the app's saved networks, which is the order they go into a
+/// board's slots. One list for the whole app, kept in `SenderSettings`.
+///
+/// The Keychain decides which networks exist and this decides only where each
+/// one goes, so nothing here can lose a credential: a network the Keychain has
+/// and the order does not is appended, and a name the order keeps after its
+/// Keychain item went away is skipped rather than deleted. Only an explicit
+/// removal in Settings takes a name out (`PanelManager.removeSavedNetwork`).
+/// That is also what makes the first-launch migration safe to run on every
+/// launch: a Keychain that read as empty because it was locked leaves the
+/// stored order exactly as it was.
+enum WifiPresetOrder {
+    /// The stored order brought up to date with the Keychain's names.
+    ///
+    /// The migration and the steady state are one rule. A nil order (never
+    /// migrated) is seeded from the Keychain in the alphabetical order every
+    /// earlier build synced in, and networks saved since - by onboarding or the
+    /// standalone WiFi dialog, which write the Keychain directly - are appended
+    /// alphabetically after whatever order the user chose. Applying it to its
+    /// own output changes nothing.
+    static func reconciled(stored: [String]?, keychainNames: [String]) -> [String] {
+        let existing = cleaned(stored ?? [])
+        let known = Set(existing)
+        let added = WifiPresetSlotPlan.sortedSSIDs(
+            keychainNames.filter { !known.contains($0) })
+        return existing + added
+    }
+
+    /// The networks to show and copy: the order, limited to names the
+    /// Keychain actually holds.
+    static func present(_ order: [String], keychainNames: [String]) -> [String] {
+        let available = Set(keychainNames)
+        return order.filter(available.contains)
+    }
+
+    /// No empty names and no repeats, first occurrence winning.
+    static func cleaned(_ order: [String]) -> [String] {
+        var seen = Set<String>()
+        return order.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+}
+
 /// Which saved network goes in which device slot.
 ///
 /// Two rules meet here and can disagree, so the order they are applied in is
 /// the whole point of this type:
 ///
-/// 1. The app's saved networks are sorted by SSID and truncated to the ten
-///    slots the device has.
+/// 1. The app's saved networks, in the order chosen in Settings
+///    (`WifiPresetOrder`), are truncated to the ten slots the device has.
 /// 2. The slot the device reports as ACTIVE is not touched. Its content stays
 ///    exactly where it is, so the board never has to be reactivated and never
 ///    reboots as a side effect of a sync.
@@ -30,11 +72,11 @@ struct WifiPresetSnapshot: Equatable, Sendable {
 /// Rule 2 wins, because the cost of getting it wrong is a display that reboots
 /// every couple of minutes trying to join a preset that is no longer there.
 /// The active SSID is therefore pinned to the slot it already occupies and is
-/// always retained, even when alphabetical order would have placed it
-/// elsewhere or truncation would have dropped it. The remaining saved networks
-/// are then sorted and laid into the slots that are left, in ascending slot
-/// order. Sorting is total across the sync and only the pinned slot is an
-/// exception to it, rather than the ordering being abandoned.
+/// always retained, even when the saved order would have placed it elsewhere
+/// or truncation would have dropped it. The remaining saved networks are then
+/// laid, in order, into the slots that are left, in ascending slot order. The
+/// order holds across the sync and only the pinned slot is an exception to
+/// it, rather than the ordering being abandoned.
 enum WifiPresetSlotPlan {
     static var capacity: Int { ConfigCommands.wifiPresetSlotRange.count }
 
@@ -47,8 +89,9 @@ enum WifiPresetSlotPlan {
         var omitted: [String]
     }
 
-    /// Case-insensitive SSID order, matching how the app already lists saved
-    /// networks, with an exact tiebreak so the result is stable.
+    /// Case-insensitive SSID order, with an exact tiebreak so the result is
+    /// stable. What every build before `WifiPresetOrder` synced in, and so what
+    /// the migration seeds from.
     static func sortedSSIDs(_ ssids: [String]) -> [String] {
         var seen = Set<String>()
         return ssids
@@ -67,7 +110,7 @@ enum WifiPresetSlotPlan {
         snapshot: WifiPresetSnapshot
     ) -> Assignment {
         var slots = [String?](repeating: nil, count: capacity)
-        var remaining = sortedSSIDs(savedSSIDs)
+        var remaining = WifiPresetOrder.cleaned(savedSSIDs)
 
         // Pin the active slot first, before anything is allowed to compete for
         // it. When the roster names an active slot whose contents could not be
@@ -249,8 +292,8 @@ extension WifiConfigUI {
 
     /// Copy the app's saved networks into the display's slots.
     ///
-    /// This is the automatic path: it reads the display first, sorts and
-    /// truncates around whatever slot the display reports as active, writes,
+    /// This is the automatic path: it reads the display first, lays the saved
+    /// order out around whatever slot the display reports as active, writes,
     /// and reads back to confirm. It never activates a slot - activation
     /// restarts the board and belongs to the on-device picker.
     static func syncSavedWifiPresets(
@@ -273,7 +316,7 @@ extension WifiConfigUI {
         // named in the report instead.
         var usable: [String] = []
         var unusable: [String] = []
-        for ssid in WifiPresetSlotPlan.sortedSSIDs(savedSSIDs) {
+        for ssid in WifiPresetOrder.cleaned(savedSSIDs) {
             if let credential = credentials[ssid],
                credential.ssid == ssid,
                let password = credential.presetPassword,
@@ -306,6 +349,24 @@ extension WifiConfigUI {
         case .failure(let failure):
             return .failure(failure)
         }
+    }
+
+    /// `syncSavedWifiPresets` with credentials read through `lookup`, for the
+    /// preset sheet's Copy Now. Read here, off the main actor, exactly as the
+    /// automatic path reads them.
+    static func syncSavedWifiPresets(
+        savedSSIDs: [String],
+        lookup: (String) -> SavedWiFiCredential?,
+        port: String,
+        send: WifiPresetCommandSender
+    ) -> Result<WifiPresetSyncReport, ConfigFailure> {
+        var credentials: [String: SavedWiFiCredential] = [:]
+        for ssid in savedSSIDs {
+            if let credential = lookup(ssid) { credentials[ssid] = credential }
+        }
+        return syncSavedWifiPresets(
+            savedSSIDs: savedSSIDs, credentials: credentials,
+            port: port, send: send)
     }
 
     static func syncWifiPresets(

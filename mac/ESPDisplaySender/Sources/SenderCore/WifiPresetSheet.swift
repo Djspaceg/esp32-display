@@ -1,15 +1,21 @@
 import SenderProtocol
 import SwiftUI
 
+/// What one display holds in its ten preset slots, read over USB.
+///
+/// Read-only on purpose. The saved networks and their order are edited once,
+/// for every display, in Settings (`WifiNetworksSection`); this sheet shows
+/// what reached this display and can copy the saved list to it now, through
+/// the same copy the automatic sync makes.
 struct WifiPresetSheet: View {
     @ObservedObject var manager: PanelManager
     let panel: PanelSnapshot
 
     @Environment(\.dismiss) private var dismiss
-    @State private var slots = [String?](
-        repeating: nil, count: ConfigCommands.wifiPresetSlotRange.count)
     @State private var snapshot: WifiPresetSnapshot?
     @State private var isBusy = false
+    /// The last read or copy that failed. Cleared when the next one starts and
+    /// replaced by its result, so it is never shown over a newer answer.
     @State private var failure: WifiConfigUI.ConfigFailure?
     @State private var confirmation: String?
 
@@ -20,18 +26,14 @@ struct WifiPresetSheet: View {
                     slotRow(slot)
                 }
             } header: {
-                Text("Device Slots")
+                Text("On This Display")
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Only the first 10 access points are selectable from "
-                        + "the device.")
-                    Text("Saved networks are copied here automatically, in "
-                        + "alphabetical order, whenever this display is "
-                        + "connected by USB. Choose from credentials saved in "
-                        + "the app's login Keychain; a network can occupy only "
-                        + "one device slot. The slot the display is currently "
-                        + "joined through is left alone, so a sync never "
-                        + "restarts it.")
+                    Text("The app's saved networks are copied here automatically, "
+                        + "in the order set in Settings, whenever this display is "
+                        + "connected by USB. Only the first 10 are selectable from "
+                        + "the device. The slot the display is currently joined "
+                        + "through is left alone, so a copy never restarts it.")
                     if let omitted = manager.wifiPresetSyncReport(
                         for: panel.serviceName)?.omitted, !omitted.isEmpty {
                         Text("Beyond the first 10, these saved networks are not "
@@ -66,10 +68,8 @@ struct WifiPresetSheet: View {
                     Label(failure.title, systemImage: "exclamationmark.triangle.fill")
                         .fontWeight(.semibold)
                         .foregroundStyle(.red)
-                        .textSelection(.enabled)
                     Text(failure.message)
                         .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
                 }
             } else if let confirmation {
                 Section {
@@ -90,16 +90,29 @@ struct WifiPresetSheet: View {
                     Task { await load() }
                 }
                 .disabled(isBusy)
+                Button("Edit Saved Networks…") {
+                    dismiss()
+                    // The manager window owns the Settings sheet; this one has
+                    // to be gone before it can open.
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(
+                            name: .espDisplayShowSettings, object: nil)
+                    }
+                }
+                .disabled(isBusy)
+                .help("Saved networks and their order are set once, in Settings, "
+                    + "for every display")
                 Spacer()
                 Button("Close", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                     .disabled(isBusy)
-                Button("Send to Display") {
-                    Task { await synchronize() }
+                Button("Copy Now") {
+                    Task { await copy() }
                 }
                 .buttonStyle(.glassProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(isBusy || snapshot == nil)
+                .disabled(isBusy || snapshot == nil || manager.savedNetworkNames.isEmpty)
+                .help("Copy the saved networks to this display now")
             }
             .padding(12)
             .glassCard(cornerRadius: 16)
@@ -108,7 +121,7 @@ struct WifiPresetSheet: View {
         }
         .overlay {
             if isBusy {
-                ProgressView(snapshot == nil ? "Reading display..." : "Synchronizing...")
+                ProgressView(snapshot == nil ? "Reading display..." : "Copying...")
                     .padding(24)
                     .glassCard(cornerRadius: 16)
             }
@@ -118,34 +131,28 @@ struct WifiPresetSheet: View {
         .task(id: panel.serviceName) {
             await load()
         }
+        // A copy the automatic sync finished is a fresh reading of this
+        // display, and the board answering is what resolves an earlier read
+        // failure, so it replaces both rather than waiting for Reload.
+        .onChange(of: manager.wifiPresetSyncReport(for: panel.serviceName)?.snapshot) {
+            _, fresh in
+            guard let fresh, !isBusy else { return }
+            snapshot = fresh
+            failure = nil
+        }
     }
 
     private func slotRow(_ slot: Int) -> some View {
-        let index = slot - 1
-        let deviceOnlySSID = snapshot?.slots[slot]?.ssid
+        let ssid = snapshot?.slots[slot]?.ssid
         return LabeledContent {
             HStack(spacing: 10) {
-                Picker("Slot \(slot)", selection: slotBinding(index)) {
-                    Text("Empty").tag(String?.none)
-                    ForEach(manager.savedNetworkNames, id: \.self) { ssid in
-                        Text(ssid)
-                            .tag(String?.some(ssid))
-                            .disabled(isSelectedElsewhere(ssid, except: index))
-                    }
-                    if let deviceOnlySSID,
-                       !manager.savedNetworkNames.contains(deviceOnlySSID) {
-                        Text("\(deviceOnlySSID) (on display)")
-                            .tag(String?.some(deviceOnlySSID))
-                    }
+                Text(ssid ?? (snapshot == nil ? "—" : "Empty"))
+                    .foregroundStyle(ssid == nil ? .secondary : .primary)
+                if let ssid, !manager.savedNetworkNames.contains(ssid) {
+                    Text("(only on display)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .labelsHidden()
-                .frame(maxWidth: 330)
-                // The active slot is not editable here for the same reason the
-                // automatic sync will not write it: replacing the credential
-                // the display is joined through leaves it rejoining a network
-                // that is no longer in that slot, and it reboots on the way.
-                .disabled(snapshot?.activeSlot == slot)
-
                 if snapshot?.activeSlot == slot {
                     Label("Active", systemImage: "checkmark.circle.fill")
                         .font(.caption)
@@ -158,20 +165,6 @@ struct WifiPresetSheet: View {
         }
     }
 
-    private func slotBinding(_ index: Int) -> Binding<String?> {
-        Binding(
-            get: { slots[index] },
-            set: {
-                slots[index] = $0
-                failure = nil
-                confirmation = nil
-            })
-    }
-
-    private func isSelectedElsewhere(_ ssid: String, except index: Int) -> Bool {
-        slots.enumerated().contains { $0.offset != index && $0.element == ssid }
-    }
-
     @MainActor
     private func load() async {
         guard !isBusy else { return }
@@ -182,33 +175,28 @@ struct WifiPresetSheet: View {
         switch await manager.wifiPresets(for: panel.serviceName) {
         case .success(let loaded):
             snapshot = loaded
-            slots = ConfigCommands.wifiPresetSlotRange.map {
-                loaded.slots[$0]?.ssid
-            }
         case .failure(let problem):
             failure = problem
         }
     }
 
     @MainActor
-    private func synchronize() async {
+    private func copy() async {
         guard !isBusy else { return }
         isBusy = true
         failure = nil
         confirmation = nil
         defer { isBusy = false }
-        switch await manager.syncWifiPresets(
-            slots, protectedSlot: snapshot?.activeSlot, for: panel.serviceName)
-        {
-        case .success(let updated):
-            snapshot = updated
-            slots = ConfigCommands.wifiPresetSlotRange.map {
-                updated.slots[$0]?.ssid
-            }
-            let count = updated.slots.count
-            confirmation = count == 1
-                ? "1 WiFi preset is synchronized."
-                : "\(count) WiFi presets are synchronized."
+        switch await manager.copySavedWifiPresets(to: panel.serviceName) {
+        case .success(let report):
+            snapshot = report.snapshot
+            let count = report.storedCount
+            confirmation = (count == 1
+                ? "1 WiFi preset is on the display."
+                : "\(count) WiFi presets are on the display.")
+                + (report.unusable.isEmpty ? "" : " Skipped, because the saved "
+                    + "credential is unusable: "
+                    + report.unusable.joined(separator: ", ") + ".")
         case .failure(let problem):
             failure = problem
         }

@@ -939,25 +939,27 @@ struct PanelDetailView: View {
                 savedNetworkNames: manager.savedNetworkNames,
                 selection: wifiSelection,
                 canApply: manager.canPerform(.savedWiFi, for: panel.serviceName),
-                canEdit: manager.canPerform(.savedWiFi, for: panel.serviceName),
+                // Editing the saved list is app-wide, in Settings, and needs no
+                // board, so it is never disabled by this display's state.
+                canEdit: true,
                 applyHelp: operationHelp(.savedWiFi, "Apply this saved network"),
-                editHelp: operationHelp(
-                    .savedWiFi, "Add or edit saved WiFi credentials"),
+                editHelp: "Add, edit or reorder the saved networks in Settings, "
+                    + "for every display",
                 onApply: {
                     manager.applySavedNetwork(selectedSSID, to: panel.serviceName)
                 },
                 onEdit: {
-                    manager.configureUSB(
-                        preferredSSID: selectedSSID.isEmpty ? nil : selectedSSID)
+                    NotificationCenter.default.post(
+                        name: .espDisplayShowSettings, object: nil)
                 })
             LabeledContent("On-device picker") {
-                Button("Manage Presets...") {
+                Button("Show Presets...") {
                     showingWifiPresets = true
                 }
                 .disabled(!manager.canPerform(.savedWiFi, for: panel.serviceName))
                 .help(operationHelp(
                     .savedWiFi,
-                    "Choose which saved networks appear on this display's signal screen"))
+                    "See which saved networks this display's signal screen offers"))
             }
         } header: {
             Text("Network Connection")
@@ -966,8 +968,9 @@ struct PanelDetailView: View {
                 + "over WiFi or USB. "
                 + "WiFi credentials are stored in your login Keychain and applied "
                 + "to this physical display over its current USB connection. "
-                + "Saved networks are copied to the display automatically "
-                + "whenever it is connected by USB, in alphabetical order. "
+                + "The saved networks are edited and ordered in Settings, once "
+                + "for every display, and copied to this display automatically "
+                + "whenever it is connected by USB. "
                 + "Only the first 10 access points are selectable from the "
                 + "device.")
         }
