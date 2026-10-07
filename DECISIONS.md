@@ -454,7 +454,7 @@ D5 Build on Espressif core 3.3.12 (ESP-Hosted 2.12.13). Why: the human chose "Up
 ### Open questions
 
 - Upgrade the project to Espressif core 3.3.12? Answered by the human: "Upgrade the core to 3.3.12" (D5).
-- Which WiFi should the 4C join for the final check? Its NVS now holds "Office", which it cannot reach. Answered by the human: Stephens Manor, "if the button wasn't disabled and the app showed the board was connected" - the Mac app would not let them change it. Asked them to refresh the board's USB port in the app and apply it; the check waits on that.
+- Which WiFi should the 4C join for the final check? Its NVS now holds "Office", which it cannot reach. Answered by the human: Stephens Manor; after refreshing the USB port in the app they applied it: "Done, it's on Stephens Manor - It has rebooted and works now!" The 4C then held WiFi 150 s on the shipping build (serial-4c-shipping-wifi.log).
 - The Mac app probes a newly seen USB port once (refreshUSBPorts, 2 s CFGSHOW) and never again on its own, so one missed probe greys out Apply until a manual refresh or replug. Likely missed here because my serial log held the 4C's port; the board answers CFGSHOW 5/5 in ~1.5 s. Default: not fixed in this task.
 - Does the speaker amp brown out the board? Default: no. No reset occurred with the backend running, but no on-demand amp test was possible while the Mac streamed audio.
 
@@ -471,12 +471,12 @@ Red first: red-audio-tests.log. Adversarial review rounds: 1, no blocking findin
 - c6-link-stall-core-3.3.12.md: runs on both cores, the memory, the upstream fix.
 - serial-4c-final.log: a scratch 3.3.12 build, up 148 s with WiFi connected.
 - serial-4c-shipping-nowifi.log: the committed shipping bundle on the 4C, no resets, WiFi blocked on the "Office" SSID.
+- serial-4c-shipping-wifi.log: the same build on Stephens Manor, 150 s, 0 resets, 0 allocation failures, C6 answering within 0.5 s.
 - code-review.md: the review and its dispositions.
 
 ### Residuals
 
-The 4C runs the committed 3.3.12 shipping p4 bundle with no resets or allocation failures, but no WiFi
-until its saved network is fixed. Only the 4C was run on 3.3.12; s3, c6 and c3 are compile-verified
+The 4C runs the committed 3.3.12 shipping p4 bundle (src 80bfd51) on Stephens Manor. Only the 4C was run on 3.3.12; s3, c6 and c3 are compile-verified
 only, and the c6 image grew from 94% to 96% of its app partition. One real USB drop, both boards
 together but not their hub, at 17:15 on 10-06, is unexplained. The human's bench bridge had switched
 itself onto the 4C's port; the human stopped it. /Users/stepblk/Source/powerloss-scratch holds two
