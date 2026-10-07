@@ -38,6 +38,8 @@ volatile bool engineAvailable = false;
 volatile bool suppressVideo = false;
 volatile bool streamSeen = false;
 volatile bool localTestActive = false;
+// Engine-task state, file scope so a host test's re-entered task keeps it.
+StartBackoff startBackoff;
 
 #if defined(ESPDISP_HOST_AUDIO_TEST)
 uint32_t hostIterationsRemaining = 0;
@@ -318,17 +320,32 @@ void engineTask(void *) {
     const uint32_t highFrames =
         framesForMs(sampleRateHz, tuneHighWatermarkMs);
     if (!backend.running()) {
-      if (streamSeen && jitter.fillFrames() >= targetFrames) {
+      if (!startBackoff.ready(millis())) {
+        // Waiting out a failed start: the stream stays muted, and a stream
+        // that cannot play must not hold video back meanwhile.
+        if (streamSeen) {
+          streamSeen = false;
+          suppressVideo = false;
+          tracker.reset();
+          jitter.clear();
+          playbackMetrics.reset();
+        }
+      } else if (streamSeen && jitter.fillFrames() >= targetFrames) {
         const audiobackend::Format backendFormat =
             audiobackend::descriptorFormat(*activeAudio);
         if (!backend.start(*activeBoard, *activeAudio, backendFormat)) {
-          Serial.println("audio: ERROR backend start failed; stream muted");
+          startBackoff.failed(millis());
+          Serial.printf(
+              "audio: ERROR backend start failed; stream muted, retry in "
+              "%lu ms\n",
+              (unsigned long)startBackoff.delayMs());
           streamSeen = false;
           suppressVideo = false;
           tracker.reset();
           jitter.clear();
           playbackMetrics.reset();
         } else {
+          startBackoff.succeeded();
           playbackMetrics.start(
               (uint32_t)jitter.fillFrames(), millis());
         }
@@ -581,9 +598,21 @@ bool start(const board::Config &config) {
   const size_t capacityFrames =
       framesForMs(activeAudio->playbackRateHz, MAX_JITTER_MS) + 2;
   const size_t samples = capacityFrames * MAX_CHANNELS;
-  jitterStorage = static_cast<int16_t *>(heap_caps_malloc(
-      samples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (jitterStorage == nullptr) return false;
+  int16_t *storage = nullptr;
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+  // All of a P4's internal RAM is DMA-capable, and the C6 link and I2S
+  // start both need it: the hosted RX path's buffers come from it, and one
+  // failed allocation there stalls WiFi until the 90 s watchdog. This
+  // buffer is only touched by the engine task, at 16 kHz, so PSRAM serves.
+  storage = static_cast<int16_t *>(heap_caps_malloc(
+      samples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#endif
+  if (storage == nullptr) {
+    storage = static_cast<int16_t *>(heap_caps_malloc(
+        samples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  }
+  if (storage == nullptr) return false;
+  jitterStorage = storage;
   ownsJitterStorage = true;
   jitterCapacityFrames = capacityFrames;
   activeBoard = &config;
@@ -608,6 +637,8 @@ void stop() {
     vTaskDelete(engineTaskHandle);
     engineTaskHandle = nullptr;
   }
+  // After the delete: the engine task is the only other writer.
+  startBackoff = StartBackoff();
   audio::sharedCodecBackend().stop();
   if (jitterStorage != nullptr && ownsJitterStorage) {
     heap_caps_free(jitterStorage);

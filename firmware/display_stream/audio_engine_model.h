@@ -327,6 +327,32 @@ class UnderrunController {
   uint32_t underruns_ = 0;
 };
 
+// Paces backend start attempts after a failure. A start that cannot succeed
+// - no I2S DMA memory - would otherwise be retried every time the jitter
+// buffer refills, about every 120 ms, for as long as a sender streams. The
+// wait doubles from FIRST_MS to MAX_MS and a successful start clears it.
+class StartBackoff {
+ public:
+  static const uint32_t FIRST_MS = 1000;
+  static const uint32_t MAX_MS = 16000;
+
+  bool ready(uint32_t nowMs) const {
+    return delayMs_ == 0 || nowMs - failedAtMs_ >= delayMs_;
+  }
+  void failed(uint32_t nowMs) {
+    failedAtMs_ = nowMs;
+    delayMs_ = delayMs_ == 0 ? FIRST_MS
+               : delayMs_ >= MAX_MS / 2 ? MAX_MS
+                                        : delayMs_ * 2;
+  }
+  void succeeded() { delayMs_ = 0; }
+  uint32_t delayMs() const { return delayMs_; }
+
+ private:
+  uint32_t failedAtMs_ = 0;
+  uint32_t delayMs_ = 0;
+};
+
 class PlaybackMetrics {
  public:
   void reset() {

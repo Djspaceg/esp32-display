@@ -4,6 +4,8 @@
 #if defined(ESPDISP_AUDIO_RUNTIME)
 #include <ESP_I2S.h>
 #include <Wire.h>
+
+#include <new>
 #endif
 
 namespace audio {
@@ -66,7 +68,52 @@ void resetBoardAudioStatusForTest() {
 #if defined(ESPDISP_AUDIO_RUNTIME)
 namespace {
 
-I2SClass audioI2s;
+// Fixed storage rather than a plain global, so releaseI2s() can rebuild the
+// object in place, at the same address, after deleting channels behind its
+// back.
+alignas(I2SClass) uint8_t audioI2sStorage[sizeof(I2SClass)];
+I2SClass *audioI2sObject = nullptr;
+
+I2SClass &audioI2s() {
+  if (audioI2sObject == nullptr) {
+    audioI2sObject = new (audioI2sStorage) I2SClass();
+  }
+  return *audioI2sObject;
+}
+
+// The core's begin() creates the channel before configuring it, so a
+// configuration that fails - an I2S DMA descriptor allocation, on a P4 short
+// of internal DMA RAM - returns false with the channel still allocated. Its
+// end() disables each channel before deleting it and returns on the first
+// error, and a channel that was never enabled cannot be disabled, so end()
+// leaves it allocated too. Every later begin() then fails with "no available
+// channel found" until a reboot. end() clears a handle only once it has
+// deleted it, so a handle still set after end() is a live channel: delete it
+// here, then rebuild the object so it forgets the deleted handles. Disable
+// first (an error there just means it never ran): the driver refuses to
+// delete a running channel, and a refused delete keeps its handle, so the
+// object is rebuilt only once every live handle is really gone.
+bool deleteChannel(i2s_chan_handle_t channel) {
+  if (channel == nullptr) return true;
+  i2s_channel_disable(channel);
+  return i2s_del_channel(channel) == ESP_OK;
+}
+
+void releaseI2s() {
+  I2SClass &i2s = audioI2s();
+  i2s.end();
+  i2s_chan_handle_t tx = i2s.txChan();
+  i2s_chan_handle_t rx = i2s.rxChan();
+  if (tx == nullptr && rx == nullptr) return;
+  const bool txGone = deleteChannel(tx);
+  const bool rxGone = deleteChannel(rx);
+  if (!txGone || !rxGone) {
+    Serial.println("audio: ERROR could not release the I2S channel");
+    return;
+  }
+  i2s.~I2SClass();
+  audioI2sObject = new (audioI2sStorage) I2SClass();
+}
 
 constexpr uint32_t CONTROL_I2C_HZ = 400000;
 constexpr uint32_t CODEC_SETTLE_MS = 10;
@@ -303,13 +350,14 @@ bool CodecSerialAudioBackend::startWith(
   capture_ = capture;
   disableAmp();
 
-  audioI2s.setPins(config_.pinPlaybackBclk, config_.pinPlaybackLrck,
+  audioI2s().setPins(config_.pinPlaybackBclk, config_.pinPlaybackLrck,
                    config_.pinDout, capture_ ? config_.pinDin : board::NO_PIN,
                    config_.pinPlaybackMclk);
   const i2s_slot_mode_t slots =
       format_.channels == 1 ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
-  if (!audioI2s.begin(I2S_MODE_STD, format_.sampleRateHz,
-                      I2S_DATA_BIT_WIDTH_16BIT, slots)) {
+  if (!audioI2s().begin(I2S_MODE_STD, format_.sampleRateHz,
+                        I2S_DATA_BIT_WIDTH_16BIT, slots)) {
+    stop();
     return false;
   }
 
@@ -323,8 +371,8 @@ bool CodecSerialAudioBackend::startWith(
   static_assert(PLAYBACK_ONLY_PRIME_FRAMES % PRIME_FRAMES == 0,
                 "the playback-only prime is whole streaming primes");
   for (size_t primed = 0; primed < primeFrames; primed += PRIME_FRAMES) {
-    if (audioI2s.write(silence, silenceBytes) != silenceBytes) {
-      audioI2s.end();
+    if (audioI2s().write(silence, silenceBytes) != silenceBytes) {
+      stop();
       return false;
     }
   }
@@ -351,7 +399,7 @@ size_t CodecSerialAudioBackend::writeFrames(const int16_t *samples,
   if (!running_ || samples == nullptr) return 0;
   const size_t bytes =
       frameCount * format_.channels * sizeof(int16_t);
-  return audioI2s.write(samples, bytes) / (format_.channels * sizeof(int16_t));
+  return audioI2s().write(samples, bytes) / (format_.channels * sizeof(int16_t));
 }
 
 size_t CodecSerialAudioBackend::readFrames(int16_t *samples,
@@ -359,7 +407,7 @@ size_t CodecSerialAudioBackend::readFrames(int16_t *samples,
   if (!running_ || !capture_ || samples == nullptr) return 0;
   const size_t bytes =
       frameCount * config_.captureChannels * sizeof(int16_t);
-  return audioI2s.readBytes(reinterpret_cast<char *>(samples), bytes) /
+  return audioI2s().readBytes(reinterpret_cast<char *>(samples), bytes) /
          (config_.captureChannels * sizeof(int16_t));
 }
 
@@ -375,7 +423,7 @@ void CodecSerialAudioBackend::stop() {
     setCodecMuted(true);
   }
   if (config_.micI2cAddress != 0) powerDownEs7210();
-  audioI2s.end();
+  releaseI2s();
   config_ = {};
   format_ = {};
   configured_ = false;

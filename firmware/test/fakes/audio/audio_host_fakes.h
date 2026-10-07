@@ -60,6 +60,19 @@ int lastRegisterWrite(uint8_t address, uint8_t reg);
 // Every I2S write and read returns 0 bytes at once, as the driver does on a
 // deleted or disabled channel. reset() clears it.
 void setI2sFailing(bool failing);
+// I2SClass::begin() creates the channel, then fails to allocate its DMA
+// descriptors and returns false, as the core does on a P4 short of internal
+// DMA RAM. reset() clears it.
+void setI2sDmaFailing(bool failing);
+// The same failure on the receive channel only: transmit is configured and
+// enabled first, as in the core. reset() clears it.
+void setI2sRxDmaFailing(bool failing);
+// I2S channels currently allocated on the fake port (0-2), whether any
+// i2s_del_channel() was given a stale or already deleted handle, and how many
+// I2SClass::begin() calls were made since reset().
+int liveI2sChannels();
+bool i2sChannelMisused();
+unsigned i2sBeginCalls();
 
 // xTaskCreatePinnedToCore refuses (pdFAIL) while set. reset() clears it.
 void setTaskCreateFailing(bool failing);

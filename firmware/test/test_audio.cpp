@@ -553,6 +553,100 @@ static int testFailedI2sStopsBackendAndYields() {
   return 0;
 }
 
+// On a P4 short of internal DMA RAM the core's I2SClass::begin() creates the
+// channel, fails to allocate its DMA descriptors and returns false; its end()
+// then fails to disable the never-enabled channel and returns before deleting
+// it. The backend must hand that channel back itself, or every later start
+// finds the port taken ("no available channel found") until a reboot.
+static int testFailedI2sStartReleasesItsChannel() {
+  const board::AudioConfig *valid =
+      board::generatedAudioConfig(board::Variant::AmoledCo5300);
+  CHECK(valid != nullptr);
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audio::CodecSerialAudioBackend backend;
+
+  audiohost::setI2sDmaFailing(true);
+  CHECK(!backend.start(board::CONFIG_AMOLED_CO5300, *valid,
+                       audiobackend::descriptorFormat(*valid)));
+  CHECK(!backend.running());
+  CHECK(audiohost::liveI2sChannels() == 0);
+  // A second failure leaks nothing either, and stop() after it is harmless.
+  CHECK(!backend.start(board::CONFIG_AMOLED_CO5300, *valid,
+                       audiobackend::descriptorFormat(*valid)));
+  CHECK(audiohost::liveI2sChannels() == 0);
+  backend.stop();
+
+  // Transmit configured and running, receive failed: end() deletes the
+  // transmit channel itself and leaves only the receive one to release.
+  audiohost::setI2sDmaFailing(false);
+  audiohost::setI2sRxDmaFailing(true);
+  CHECK(!backend.start(board::CONFIG_AMOLED_CO5300, *valid,
+                       audiobackend::descriptorFormat(*valid)));
+  CHECK(audiohost::liveI2sChannels() == 0);
+
+  audiohost::setI2sRxDmaFailing(false);
+  CHECK(backend.start(board::CONFIG_AMOLED_CO5300, *valid,
+                      audiobackend::descriptorFormat(*valid)));
+  CHECK(backend.running());
+  backend.stop();
+  CHECK(audiohost::liveI2sChannels() == 0);
+  CHECK(!audiohost::i2sChannelMisused());
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
+// A backend that cannot start must not be retried every time the jitter
+// buffer refills (about every 120 ms): each attempt spends I2C and I2S work
+// on the engine's core and floods the console. Retries back off, and a start
+// that becomes possible again still happens.
+static int testFailedBackendStartBacksOff() {
+  constexpr uint16_t framesPerPacket = 320;
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
+  CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
+
+  audiohost::setI2sDmaFailing(true);
+  uint16_t sequence = 0;
+  uint32_t now = 250;
+  auto feed = [&](uint32_t atMs) {
+    audiohost::setMillis(atMs);
+    for (int i = 0; i < 6; ++i, ++sequence) {
+      audiohost::enqueueUdp(documentedPcm(sequence, sequence * framesPerPacket,
+                                          framesPerPacket),
+                            0x01020304, 6000);
+    }
+    audiotransport::hostReceiveBurst();
+    return audioengine::host::runEngineTaskIterations(2);
+  };
+  // 900 ms of a sender's stream with the backend unable to start.
+  for (int round = 0; round < 7; ++round, now += 150) {
+    CHECK(feed(now));
+  }
+  CHECK(!backend.running());
+  CHECK(audiohost::i2sBeginCalls() >= 1);
+  CHECK(audiohost::i2sBeginCalls() <= 2);
+  CHECK(audiohost::liveI2sChannels() == 0);
+
+  // Memory comes back: within the back-off ceiling the stream plays.
+  audiohost::setI2sDmaFailing(false);
+  for (int round = 0; round < 120 && !backend.running(); ++round, now += 150) {
+    CHECK(feed(now));
+  }
+  CHECK(backend.running());
+
+  audioengine::stop();
+  audiotransport::stop();
+  CHECK(!audiohost::i2sChannelMisused());
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
 static void queueSenderStream(uint16_t packets) {
   constexpr uint16_t framesPerPacket = 320;
   for (uint16_t sequence = 0; sequence < packets; ++sequence) {
@@ -956,6 +1050,9 @@ int main() {
       {"tone-service-leaves-stream",
        testToneServiceLeavesNetworkStreamRunning},
       {"failed-i2s-yields", testFailedI2sStopsBackendAndYields},
+      {"failed-i2s-start-releases-channel",
+       testFailedI2sStartReleasesItsChannel},
+      {"failed-start-backs-off", testFailedBackendStartBacksOff},
       {"tone-lifecycle", testToneLifecycleReleasesTheBackend},
       {"tone-stale-ownership", testStaleToneOwnershipIsReleased},
       {"playback-only-start", testPlaybackOnlyStart},

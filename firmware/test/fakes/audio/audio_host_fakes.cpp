@@ -42,6 +42,9 @@ int liveMutexCount = 0;
 bool anyMutexMisuse = false;
 unsigned taskYieldCalls = 0;
 bool i2sFailing = false;
+bool i2sDmaFailing = false;
+bool i2sRxDmaFailing = false;
+bool i2sChannelMisuse = false;
 std::deque<UdpDatagram> udpDatagrams;
 std::vector<audiohost::HardwareEvent> events;
 std::vector<audiohost::SentDatagram> sentUdpDatagrams;
@@ -235,14 +238,70 @@ int lwip_recvfrom(int, void *buffer, size_t capacity, int,
   return static_cast<int>(copied);
 }
 
+// The fake port's one channel pair. Handles are addresses inside it, so a
+// stale or doubly deleted handle is detectable rather than a crash.
+struct FakeI2sChannel {
+  bool allocated;
+  bool enabled;
+};
+static FakeI2sChannel fakeI2sChannels[2] = {};
+
+static bool fakeI2sHandleValid(i2s_chan_handle_t handle) {
+  return handle == &fakeI2sChannels[0] || handle == &fakeI2sChannels[1];
+}
+
+int i2s_channel_disable(i2s_chan_handle_t handle) {
+  if (!fakeI2sHandleValid(handle) || !handle->allocated) {
+    i2sChannelMisuse = true;
+    return -1;
+  }
+  if (!handle->enabled) return -1;  // "the channel has not been enabled yet"
+  handle->enabled = false;
+  return 0;
+}
+
+// Like the driver: a stale handle is misuse, and a running channel is refused.
+int i2s_del_channel(i2s_chan_handle_t handle) {
+  if (!fakeI2sHandleValid(handle) || !handle->allocated) {
+    i2sChannelMisuse = true;
+    return -1;
+  }
+  if (handle->enabled) {
+    i2sChannelMisuse = true;
+    return -1;
+  }
+  handle->allocated = false;
+  return 0;
+}
+
 // Records the receive pin: -1 is a transmit-only channel.
 void I2SClass::setPins(int8_t, int8_t, int8_t, int8_t din, int8_t) {
   events.push_back({audiohost::HardwareEventKind::I2sSetPins, din});
+  capture_ = din >= 0;
 }
 
 bool I2SClass::begin(int, uint32_t sampleRateHz, int, i2s_slot_mode_t) {
   events.push_back(
       {audiohost::HardwareEventKind::I2sBegin, static_cast<int>(sampleRateHz)});
+  begun_ = true;
+  // i2s_new_channel: "no available channel found" while either half is held.
+  if (fakeI2sChannels[0].allocated || fakeI2sChannels[1].allocated) {
+    return false;
+  }
+  fakeI2sChannels[0].allocated = true;
+  tx_ = &fakeI2sChannels[0];
+  if (capture_) {
+    fakeI2sChannels[1].allocated = true;
+    rx_ = &fakeI2sChannels[1];
+  }
+  // The core configures and enables tx, then rx; a DMA descriptor failure
+  // stops it at the first channel it hits, leaving the rest unenabled.
+  if (i2sDmaFailing) return false;
+  tx_->enabled = true;
+  if (rx_ != nullptr) {
+    if (i2sRxDmaFailing) return false;
+    rx_->enabled = true;
+  }
   return true;
 }
 
@@ -257,8 +316,25 @@ size_t I2SClass::readBytes(char *data, size_t bytes) {
   return i2sFailing ? 0 : bytes;
 }
 
-void I2SClass::end() {
+// The core's end(): disable then delete each channel, returning at the first
+// error, and clearing a handle only once it is deleted.
+bool I2SClass::end() {
   events.push_back({audiohost::HardwareEventKind::I2sEnd, 0});
+  if (!begun_) return true;
+  begun_ = false;
+  if (tx_ != nullptr) {
+    if (i2s_channel_disable(tx_) != 0 || i2s_del_channel(tx_) != 0) {
+      return false;
+    }
+    tx_ = nullptr;
+  }
+  if (rx_ != nullptr) {
+    if (i2s_channel_disable(rx_) != 0 || i2s_del_channel(rx_) != 0) {
+      return false;
+    }
+    rx_ = nullptr;
+  }
+  return true;
 }
 
 bool TwoWire::begin(int8_t sda, int8_t scl, uint32_t) {
@@ -336,10 +412,26 @@ void reset() {
   ssidCalls = 0;
   rssiValue = -42;
   i2sFailing = false;
+  i2sDmaFailing = false;
+  i2sRxDmaFailing = false;
+  i2sChannelMisuse = false;
+  for (auto &channel : fakeI2sChannels) channel = {};
   WiFi.setStatus(WL_CONNECTED);
 }
 
 void setI2sFailing(bool failing) { i2sFailing = failing; }
+void setI2sDmaFailing(bool failing) { i2sDmaFailing = failing; }
+void setI2sRxDmaFailing(bool failing) { i2sRxDmaFailing = failing; }
+int liveI2sChannels() {
+  return (fakeI2sChannels[0].allocated ? 1 : 0) +
+         (fakeI2sChannels[1].allocated ? 1 : 0);
+}
+bool i2sChannelMisused() { return i2sChannelMisuse; }
+unsigned i2sBeginCalls() {
+  return (unsigned)std::count_if(events.begin(), events.end(), [](const audiohost::HardwareEvent &event) {
+    return event.kind == audiohost::HardwareEventKind::I2sBegin;
+  });
+}
 
 void setI2cDevice(uint8_t address, bool present, uint8_t idRegisterA,
                   uint8_t idA, uint8_t idRegisterB, uint8_t idB) {
