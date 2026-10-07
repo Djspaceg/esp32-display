@@ -1,5 +1,5 @@
 {
-  "built_at": "2026-10-07T02:18:34Z",
+  "built_at": "2026-10-07T16:34:58Z",
   "chip": "esp32s3",
   "family": "s3",
   "format": 1,
@@ -9,7 +9,7 @@
       "bytes": 19968,
       "file": "bootloader.bin",
       "role": "bootloader",
-      "sha256": "73bd425e380c709f6abd83aa987cb51c042a9aa8de44a37a9edb22d53bca08dd"
+      "sha256": "883bb1e4765f12902e56b4bb901d0504df2ea2396bba8d79a7b29ae87d4b3658"
     },
     {
       "address": 32768,
@@ -27,12 +27,12 @@
     },
     {
       "address": 65536,
-      "bytes": 418944,
+      "bytes": 419008,
       "file": "app.bin",
       "role": "app",
-      "sha256": "f2d0048feaf7f63463e11a831ed051d3408c5c5ec996c192be122109c66d5a19"
+      "sha256": "9adde48cfe12606b0462a5655aa1c293c00a1b6e6962259e1c9df2a1ee8066d2"
     }
   ],
-  "source_commit": "58ff120445ab0068770f365a449e5bdb057cc136",
+  "source_commit": "80bfd5112430ae6b12c0cb1e9255766453f9420b",
   "source_dirty": false
 }

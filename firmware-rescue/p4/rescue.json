@@ -1,5 +1,5 @@
 {
-  "built_at": "2026-10-07T02:18:08Z",
+  "built_at": "2026-10-07T16:34:31Z",
   "chip": "esp32p4",
   "family": "p4",
   "format": 1,
@@ -9,7 +9,7 @@
       "bytes": 21488,
       "file": "bootloader.bin",
       "role": "bootloader",
-      "sha256": "97ee245b4410d4c225761bc6ea8a8977f09e4878bf40973576e027c03c2e8a0c"
+      "sha256": "38a6d4bc6baf3b2896285bec680024a0c261ccfa9674402014664d560edbe9ac"
     },
     {
       "address": 32768,
@@ -27,12 +27,12 @@
     },
     {
       "address": 65536,
-      "bytes": 450256,
+      "bytes": 450368,
       "file": "app.bin",
       "role": "app",
-      "sha256": "a4ad26f1443c68fcac90873ac8770026c4f5c5c710518931e7ea7b776598005f"
+      "sha256": "87281d6b8a0c8172bea4ff95e783ce357d7f21453c980b69391b647f58a2854e"
     }
   ],
-  "source_commit": "58ff120445ab0068770f365a449e5bdb057cc136",
+  "source_commit": "80bfd5112430ae6b12c0cb1e9255766453f9420b",
   "source_dirty": false
 }
