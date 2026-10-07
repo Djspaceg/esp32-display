@@ -31,9 +31,14 @@ final class BoardScreensaverHarnessTests: XCTestCase {
         let hold = requested.isFinite ? min(max(requested, 0), 600) : 75
 
         // The hardware ID makes the manager reject any other board that
-        // answers, such as one at a stale cached address.
+        // answers, such as one at a stale cached address. A malformed one
+        // would read as no ID at all and let any board through, so it stops
+        // the run instead; the USB serial number is not this ID.
+        let expectedID = try XCTUnwrap(
+            ConfigCommands.canonicalHardwareID(hardwareID),
+            "ESPDISP_BOARD_ID must be the board's 12-hex-digit id= value")
         var record = PanelSnapshot(serviceName: service, displayName: service)
-        record.hardwareID = hardwareID.lowercased()
+        record.hardwareID = expectedID
         let manager = PanelManager(
             previewPanels: [record], savedNetworkNames: [], usbSerialPorts: [])
         manager.serialIODisabled = true
@@ -55,7 +60,9 @@ final class BoardScreensaverHarnessTests: XCTestCase {
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         let panel = try XCTUnwrap(manager.panels.first)
-        print("harness: board reported id=\(panel.hardwareID ?? "?") "
+        // firmwareVersion and address come only from the board's EINF, so
+        // "?" here means the board never answered.
+        print("harness: expected id=\(expectedID), board reported "
             + "fw=\(panel.firmwareVersion ?? "?") address=\(panel.address ?? "?")")
         XCTAssertTrue(panel.capabilities.contains(.idleText), "board lacks idleText")
         XCTAssertEqual(panel.idleText, ScreensaverTemplate.standard)
