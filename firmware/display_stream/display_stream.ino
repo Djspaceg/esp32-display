@@ -97,6 +97,7 @@ using namespace bandproto;
 #include "boot_menu.h"
 #include "boot_screen.h"
 #include "control_apply.h"
+#include "coprocessor_service.h"
 #include "display_power.h"
 #include "dma_gate.h"
 #include "fault_inject.h"
@@ -596,6 +597,9 @@ void setup() {
                     cfgSsid.c_str());
       break;
     }
+  }
+  if (bcfg->platform->wifi == board::WifiTopology::HostedCoprocessor) {
+    coprocessorsvc::probe();
   }
   if (WiFi.status() == WL_CONNECTED) {
     wifiLegacyMirrorPending =

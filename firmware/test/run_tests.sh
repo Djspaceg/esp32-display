@@ -22,6 +22,7 @@ QUAKE_PAK_OUT="$TMP/test_quake_pak"
 QUAKE_INPUT_OUT="$TMP/test_quake_input"
 BOOT_SCREEN_OUT="$TMP/test_boot_screen"
 DSI_BACKLIGHT_OUT="$TMP/test_dsi_backlight"
+COPROCESSOR_OUT="$TMP/test_coprocessor_update"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -235,6 +236,13 @@ clang++ "${CXXFLAGS[@]}" \
   -I"$HERE/../libraries/esp_lcd_st7703/src" \
   -o "$DSI_BACKLIGHT_OUT" "$HERE/test_dsi_backlight.cpp"
 "$DSI_BACKLIGHT_OUT"
+
+# The C6 coprocessor's ESP-Hosted pairing: a silent coprocessor is outdated,
+# only the image pinned for the host is offered, and only a whole transfer
+# with the pinned digest is finalized.
+clang++ "${CXXFLAGS[@]}" \
+  -o "$COPROCESSOR_OUT" "$HERE/test_coprocessor_update.cpp"
+"$COPROCESSOR_OUT"
 
 # The 5 s status line is unchanged and the mem line after it parses.
 clang++ "${CXXFLAGS[@]}" \

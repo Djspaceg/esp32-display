@@ -11,6 +11,7 @@
 #include "audio_engine.h"
 #include "audio_test.h"
 #include "audio_transport.h"
+#include "coprocessor_service.h"
 #include "display_power.h"
 #include "fault_inject.h"
 #include "frame_pipeline.h"
@@ -265,6 +266,19 @@ static void processConfigLine(char *line) {
         (long)audioengine::tuneMaxCorrectionPpm,
         audiotransport::tuneReceiveBufferBytes / 1024,
         (unsigned)audiotransport::QUEUE_DEPTH);
+    return;
+  }
+
+  if (strcmp(line, "CFGC6UPDATE") == 0) {
+    // Install the official ESP-Hosted coprocessor image pinned for this
+    // host (coprocessor_update.h). The reply only says whether it started;
+    // C6UPDATE lines follow, and the board restarts when the C6 has it.
+    const char *refused = coprocessorsvc::startUpdate();
+    if (refused != nullptr) {
+      configSerial().printf("CFGERR c6update %s\n", refused);
+    } else {
+      configSerial().println("CFGOK c6update started");
+    }
     return;
   }
 
@@ -785,10 +799,20 @@ static void processConfigLine(char *line) {
     mbedtls_base64_encode(name64, sizeof(name64) - 1, &name64Len,
                           (const unsigned char *)cfgName.c_str(), cfgName.length());
     name64[name64Len] = 0;
-    char extension[128];
-    serialcfg::formatShowExtension(
+    char extension[160];
+    const int extensionLength = serialcfg::formatShowExtension(
         extension, sizeof(extension), deviceCapabilities(), userBlLevel,
         FW_VERSION, FW_SOURCE);
+    if (bcfg->platform->wifi == board::WifiTopology::HostedCoprocessor &&
+        extensionLength > 0 && (size_t)extensionLength < sizeof(extension)) {
+      // The C6's own ESP-Hosted version and how it pairs with the host's;
+      // new keys at the end, which every reader here takes by name.
+      char c6Version[16];
+      coprocessorsvc::coprocessorVersionText(c6Version, sizeof(c6Version));
+      snprintf(extension + extensionLength,
+               sizeof(extension) - extensionLength, " c6fw=%s c6=%s",
+               c6Version, coprocessor::statusToken(coprocessorsvc::status()));
+    }
     // ota= is three-valued on purpose: "off" (no password stored), "pending" (a
     // password is stored but the radio was not ready when setup ran, so nothing
     // is listening yet), "on" (listening). Reporting only on/off would make a

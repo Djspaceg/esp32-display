@@ -35,9 +35,9 @@ void line(Stream &port, const char *text);
 // Formatting buffer size. The CFGINFO identity reply is the longest line this
 // firmware emits: with a 32-byte SSID (twice, once base64), a 32-byte name, the
 // longest profile, target and partition tokens and the src= build identity it
-// reaches about 550 bytes. A trimmed line loses its LAST fields first, and
-// src= is last, so this is sized with headroom rather than to the byte. Both
-// uses are on the loop task's stack, one at a time.
+// reaches about 550 bytes, and a hosted board's c6fw= and c6= after src= add
+// about 30. A trimmed line loses its LAST fields first, so this is sized with
+// headroom rather than to the byte. The buffer is on the caller's stack.
 static const size_t LINE_BYTES = 768;
 
 void printfLine(Stream &port, const char *format, ...)

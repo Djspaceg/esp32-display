@@ -244,13 +244,20 @@ static const std::regex HOSTED_RPC_CALL(
     R"((RSSI|reconnect|disconnect\w*|SSID|BSSID\w*|channel|scanNetworks\w*|)"
     R"(setTxPower|getTxPower)\s*\()"
     R"(|\bSTA\s*\.\s*(RSSI|reconnect|disconnect|SSID|BSSID\w*|channel)\s*\()"
-    R"(|\besp_wifi_\w+\s*\(|\besp_hosted_\w+\s*\(|\bhostedGet\w+\s*\())");
+    R"(|\besp_wifi_\w+\s*\(|\besp_hosted_\w+\s*\()"
+    // hostedGetHostVersion and hostedGetSlaveVersion only read structs the
+    // core filled in (esp32-hal-hosted.c); every other hosted* helper here
+    // asks the coprocessor.
+    R"(|\bhostedGet(?!HostVersion\b|SlaveVersion\b)\w+\s*\()"
+    R"(|\bhosted(Begin|Write|End|Activate)Update\s*\(|\bhostedHasUpdate\s*\())");
 
 // Files allowed to issue those calls, and why.
 static const std::set<std::string> OFF_LOOP_RPC_FILES = {
     "wifi_worker.cpp",   // the worker task itself
     "fault_inject.cpp",  // bench-only, compiled in only on request; its RPCs
                          // run on side tasks it spawns
+    "coprocessor_ota.cpp",  // CFGC6UPDATE: every RPC runs on the c6update
+                            // task it spawns
 };
 
 // The source with // and /* */ comments and string contents blanked out (newlines kept, so
@@ -319,7 +326,10 @@ static void testScannerCatchesSpellings() {
   const char *hits[] = {"WiFi\n  .RSSI()", "WiFi . reconnect()",
                         "WiFi.STA.RSSI()", "STA.disconnect()",
                         "esp_wifi_sta_get_ap_info(&i)",
-                        "esp_hosted_get_cp_info(a, b, c)", "hostedGetSlaveVersion(",
+                        "esp_hosted_get_cp_info(a, b, c)", "hostedGetUpdateURL(",
+                        "hostedBeginUpdate()", "hostedWriteUpdate(b, n)",
+                        "hostedEndUpdate()", "hostedActivateUpdate()",
+                        "hostedHasUpdate()",
                         "WiFi.disconnectAsync()", "WiFi.setTxPower(x)"};
   for (const char *hit : hits) {
     const std::string code = withoutComments(hit);
@@ -327,7 +337,9 @@ static void testScannerCatchesSpellings() {
   }
   const char *misses[] = {"// WiFi.RSSI()", "/* WiFi.reconnect() */",
                           "\"WiFi.RSSI()\"", "WiFi.status()",
-                          "WiFi.localIP()", "wifiworker::rssi()"};
+                          "WiFi.localIP()", "wifiworker::rssi()",
+                          "hostedGetSlaveVersion(&a, &b, &c)",
+                          "hostedGetHostVersion(&a, &b, &c)"};
   for (const char *miss : misses) {
     const std::string code = withoutComments(miss);
     check(!std::regex_search(code, HOSTED_RPC_CALL), miss);
