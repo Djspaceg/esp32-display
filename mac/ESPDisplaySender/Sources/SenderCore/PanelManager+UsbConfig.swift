@@ -23,6 +23,7 @@ extension PanelManager {
                 supersededServiceNames.insert(serviceName)
                 supersededServiceNames.remove(appliedName)
                 sessions.removeValue(forKey: serviceName)?.stop()
+                panels[index].awaitingIdentity = false
                 panels[index].serviceName = appliedName
                 panels[index].displayName = appliedName
                 if selectedServiceName == serviceName {

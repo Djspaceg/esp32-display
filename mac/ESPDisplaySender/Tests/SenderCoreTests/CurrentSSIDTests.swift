@@ -241,12 +241,27 @@ final class BoardNetworkFreshnessTests: XCTestCase {
         return panel
     }
 
-    /// The residual: EINF said connected, then the board dropped off WiFi.
-    func testABoardThatWentQuietOverWiFiIsNoLongerShownConnected() {
+    /// EINF said connected, then the board went quiet. Silence is all the Mac
+    /// knows: on the bench a 4B stayed joined to its network (it pinged the
+    /// router) while nothing it sent reached the Mac, and the row read "Not
+    /// connected". So it says the board is not answering, not that it left.
+    func testABoardThatWentQuietOverWiFiIsNotAnsweringRatherThanDisconnected() {
         XCTAssertEqual(
             panel(connected: true, reportedSecondsAgo: 300, heartbeatSecondsAgo: 60)
                 .boardNetworkDescription(asOf: now),
-            "Not connected (set to \"Studio WiFi\")")
+            "Not answering (set to \"Studio WiFi\")")
+    }
+
+    /// The same silence for a board known only by its announcement.
+    func testAQuietBoardKnownOnlyByItsAnnouncementIsNotAnswering() {
+        var quiet = panel(connected: nil, reportedSecondsAgo: nil, heartbeatSecondsAgo: 60)
+        quiet.currentSSID = nil
+        quiet.announcedSSID = "Studio WiFi"
+        XCTAssertEqual(
+            quiet.boardNetworkDescription(asOf: now),
+            "Not answering (last on \"Studio WiFi\")")
+        quiet.announcedSSID = nil
+        XCTAssertEqual(quiet.boardNetworkDescription(asOf: now), "Not answering")
     }
 
     /// Heartbeats outrank a boot-time `connected=0` read over USB.
@@ -265,6 +280,12 @@ final class BoardNetworkFreshnessTests: XCTestCase {
             "Studio WiFi")
         XCTAssertEqual(
             panel(connected: false, reportedSecondsAgo: 1, heartbeatSecondsAgo: nil)
+                .boardNetworkDescription(asOf: now),
+            "Not connected (set to \"Studio WiFi\")")
+        // After a silence, the board's own connected=0 is its word, so the row
+        // says it left rather than that it is not answering.
+        XCTAssertEqual(
+            panel(connected: false, reportedSecondsAgo: 1, heartbeatSecondsAgo: 60)
                 .boardNetworkDescription(asOf: now),
             "Not connected (set to \"Studio WiFi\")")
     }

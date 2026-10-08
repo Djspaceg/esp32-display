@@ -111,6 +111,8 @@ extension PanelManager {
             else { return }
             reconciledIdentity = false
         }
+        let awaitingIdentity = sessionAwaitsIdentity(status.serviceName)
+        let liveCapture = sessions[status.serviceName]?.captureStatus
         updatePanel(status.serviceName) { panel in
             panel.lastSeen = status.updatedAt
             panel.lastHeartbeatAt = status.heartbeatAge.map {
@@ -127,10 +129,22 @@ extension PanelManager {
             panel.framesDropped = status.stats.dropped
             panel.freeHeap = status.stats.heap
             panel.spacingMicros = status.spacingMicros
-            panel.paused = status.paused
+            panel.awaitingIdentity = awaitingIdentity
+            // `paused` is the user's choice and only `applyPaused` sets it. The
+            // sender is also paused by the identity hold, and a status built
+            // during the hold can arrive after the bind, so its pause is not
+            // evidence of what the user wants.
             panel.sourceDescription = status.sourceDescription
             panel.landscape = status.landscape
-            panel.captureStatus = status.captureStatus
+            if status.paused && !panel.paused {
+                // The hold, or a status built during it: say what capture is
+                // really doing instead of the session's "Paused".
+                panel.captureStatus = awaitingIdentity
+                    ? .waiting("Waiting for the display to confirm its identity.")
+                    : liveCapture ?? status.captureStatus
+            } else {
+                panel.captureStatus = status.captureStatus
+            }
             panel.lastFrameAt = status.lastFrameAt
             // A parked session is alive but deliberately not capturing, which
             // otherwise looks identical to a panel that is simply idle.

@@ -872,6 +872,148 @@ final class PanelManagerTests: XCTestCase {
                       "a repeated EINF must not undo a user pause")
     }
 
+    /// What a session reports while its sender is held or paused, as
+    /// `DeviceSession` builds it: a paused sender reads as suspended.
+    private func sessionStatus(
+        paused: Bool, info: DeviceProtocol.DeviceInfo? = nil
+    ) -> DeviceSession.Status {
+        DeviceSession.Status(
+            serviceName: "studio-display", displayFPS: 0, framesSent: 0,
+            sendErrors: 0, diffPercent: 0, heartbeatAge: 0.5,
+            stats: BandProtocol.DeviceStats(), info: info,
+            resolvedAddress: "192.168.1.42", spacingMicros: 200, paused: paused,
+            parked: false, sourceDescription: "", landscape: false,
+            captureStatus: paused
+                ? .suspended("Paused. Frames are not being sent.") : .streaming,
+            lastFrameAt: nil, updatedAt: Date())
+    }
+
+    /// Every new session is held paused until EINF binds it to its record, so
+    /// no frame leaves before the hardware is proven. That hold is not the
+    /// user's pause: at every launch the sidebar read "Paused", with the pause
+    /// icon, until the first EINF arrived - 25 s for a board that had just
+    /// restarted.
+    func testTheIdentityHoldReadsAsConnectingNotPaused() throws {
+        let manager = makeManager([controllablePanel()])
+        let session = makeSession(name: "studio-display")
+        manager.register(session)
+        XCTAssertTrue(session.senderPausedForTesting, "the hold still stops frames")
+
+        manager.update(sessionStatus(paused: true), sessionID: session.id)
+
+        let panel = try XCTUnwrap(manager.panels.first)
+        XCTAssertFalse(panel.paused)
+        XCTAssertEqual(
+            panel.statusText(asOf: Date(), connectedViaUSB: false), "Connecting")
+        XCTAssertNotEqual(
+            panel.captureStatus, .suspended("Paused. Frames are not being sent."))
+    }
+
+    /// The status that carries the binding EINF was built while the hold was
+    /// still on, so it must not flash "Paused" either. A pause the user makes
+    /// after the bind still reads as one.
+    func testTheBindingStatusIsNotAPauseButAUserPauseAfterItIs() throws {
+        let manager = makeManager([controllablePanel()])
+        let session = makeSession(name: "studio-display")
+        manager.register(session)
+        let info = try makeInfo(
+            name: "studio-display", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])
+
+        manager.update(sessionStatus(paused: true, info: info), sessionID: session.id)
+
+        XCTAssertFalse(session.senderPausedForTesting)
+        XCTAssertFalse(try XCTUnwrap(manager.panels.first).paused)
+        XCTAssertNotEqual(
+            manager.panels.first?.statusText(asOf: Date(), connectedViaUSB: false),
+            "Paused")
+
+        manager.setPaused(true, for: "studio-display")
+        manager.update(sessionStatus(paused: true, info: info), sessionID: session.id)
+
+        XCTAssertTrue(try XCTUnwrap(manager.panels.first).paused)
+        XCTAssertEqual(
+            manager.panels.first?.statusText(asOf: Date(), connectedViaUSB: false),
+            "Paused")
+    }
+
+    /// Pause stays available during the hold, so a pause made there is the
+    /// user's and must outlast the hold: neither a held status nor the bind
+    /// that lifts the hold may undo it.
+    func testAPauseMadeDuringTheHoldSurvivesTheBind() throws {
+        let manager = makeManager([controllablePanel()])
+        let session = makeSession(name: "studio-display")
+        manager.register(session)
+        manager.update(sessionStatus(paused: true), sessionID: session.id)
+
+        manager.setPaused(true, for: "studio-display")
+        manager.update(sessionStatus(paused: true), sessionID: session.id)
+        XCTAssertTrue(try XCTUnwrap(manager.panels.first).paused,
+                      "a held status must not clear the user's pause")
+
+        let info = try makeInfo(
+            name: "studio-display", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])
+        manager.update(.info(info), for: "studio-display", sessionID: session.id)
+        XCTAssertTrue(session.senderPausedForTesting, "the bind must keep the user's pause")
+        XCTAssertEqual(
+            manager.panels.first?.statusText(asOf: Date(), connectedViaUSB: false),
+            "Paused")
+    }
+
+    /// Resume during the hold is the user's choice too, but it must not lift
+    /// the hold: frames still wait for EINF.
+    func testAResumeDuringTheHoldDoesNotSendBeforeTheBind() throws {
+        let manager = makeManager([controllablePanel()])
+        let session = makeSession(name: "studio-display")
+        manager.register(session)
+        manager.update(sessionStatus(paused: true), sessionID: session.id)
+
+        manager.setPaused(true, for: "studio-display")
+        manager.setPaused(false, for: "studio-display")
+
+        XCTAssertTrue(session.senderPausedForTesting, "still held until EINF")
+        let info = try makeInfo(
+            name: "studio-display", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])
+        manager.update(.info(info), for: "studio-display", sessionID: session.id)
+        XCTAssertFalse(session.senderPausedForTesting)
+    }
+
+    /// A session retired while held leaves nothing waiting on the record.
+    func testRetiringAHeldSessionClearsTheHold() throws {
+        let manager = makeManager([controllablePanel()])
+        let session = makeSession(name: "studio-display")
+        manager.register(session)
+        manager.update(sessionStatus(paused: true), sessionID: session.id)
+
+        manager.retire("studio-display", sessionID: session.id)
+
+        XCTAssertFalse(try XCTUnwrap(manager.panels.first).awaitingIdentity)
+    }
+
+    /// The usual first bind is the EINF event itself; status reports trail it
+    /// by up to five seconds. Neither the identity text nor a status built
+    /// while the hold was on may outlive the bind.
+    func testAnEventBindEndsTheWaitAndALateHeldStatusIsNotAPause() throws {
+        let manager = makeManager([controllablePanel()])
+        let session = makeSession(name: "studio-display")
+        manager.register(session)
+        manager.update(sessionStatus(paused: true), sessionID: session.id)
+        let info = try makeInfo(
+            name: "studio-display", deviceID: [2, 0, 0, 0x12, 0x34, 0x56])
+
+        manager.update(.info(info), for: "studio-display", sessionID: session.id)
+        let bound = try XCTUnwrap(manager.panels.first)
+        XCTAssertFalse(bound.awaitingIdentity)
+        // What capture is really doing, not a guess: capture that is stuck
+        // with an unchanged state publishes nothing more to correct one.
+        XCTAssertEqual(bound.captureStatus, session.captureStatus)
+
+        manager.update(sessionStatus(paused: true, info: info), sessionID: session.id)
+        let late = try XCTUnwrap(manager.panels.first)
+        XCTAssertFalse(late.paused)
+        XCTAssertNotEqual(late.statusText(asOf: Date(), connectedViaUSB: false), "Paused")
+        XCTAssertEqual(late.captureStatus, session.captureStatus)
+    }
+
     func testProvisionalUnownedSessionIsStoppedAfterIdentity() throws {
         let manager = makeManager([controllablePanel()])
         let session = makeSession(name: "unowned-display")

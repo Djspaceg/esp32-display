@@ -138,6 +138,10 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// panel back on. See `DeviceProtocol.Capabilities.power`.
     var manuallyOff = false
     var paused = false
+    /// The session is held, not sending, until the board's EINF proves it is
+    /// this record's hardware (`PanelManager.register`). Reported apart from
+    /// `paused`, which is only ever the user's choice.
+    var awaitingIdentity = false
     /// What the user chose this panel should show. Persisted, so a source picked
     /// once is still in effect after a restart.
     var source: PanelSource = .automatic
@@ -208,7 +212,9 @@ struct PanelSnapshot: Identifiable, Equatable {
     ///
     /// A reply over WiFi within the online window is the board on WiFi, named
     /// by its announcement (the network joined) or else by USB. Replies that
-    /// stopped after the last USB report mean it dropped off. Otherwise the USB
+    /// stopped after the last USB report mean the Mac no longer hears it - not
+    /// that it left its network, which only the board can say: a board can
+    /// stay joined while nothing it sends reaches the Mac. Otherwise the USB
     /// report stands: it is newer than anything heard over WiFi, and a cached
     /// announcement from before a change over USB must not outrank it.
     func boardNetworkDescription(asOf now: Date) -> String {
@@ -221,9 +227,9 @@ struct PanelSnapshot: Identifiable, Equatable {
             return announcedSSID ?? "Connected (name not reported)"
         }
         if let lastReplyAt, networkReportedAt.map({ lastReplyAt > $0 }) ?? true {
-            if let usbName { return "Not connected (set to \"\(usbName)\")" }
-            if let announcedSSID { return "Not connected (last on \"\(announcedSSID)\")" }
-            return "Not connected"
+            if let usbName { return "Not answering (set to \"\(usbName)\")" }
+            if let announcedSSID { return "Not answering (last on \"\(announcedSSID)\")" }
+            return "Not answering"
         }
         return PanelManager.boardNetworkDescription(
             reportedSSID: currentSSID, connected: networkConnected)
@@ -243,6 +249,7 @@ struct PanelSnapshot: Identifiable, Equatable {
             if connectedViaUSB { return .connectedViaUSB }
             return .offline
         }
+        if awaitingIdentity { return .connecting }
         if paused { return .paused }
         return captureStatus.isStreaming ? .streaming : .connected
     }

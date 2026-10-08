@@ -401,7 +401,11 @@ extension PanelManager {
     }
 
     private func applyPaused(_ paused: Bool, for serviceName: String) {
-        sessions[serviceName]?.setPaused(paused)
+        // During the identity hold the sender stays paused whatever the user
+        // chooses; the choice is recorded and applied when the hold lifts.
+        if !sessionAwaitsIdentity(serviceName) {
+            sessions[serviceName]?.setPaused(paused)
+        }
         updatePanel(serviceName) { $0.paused = paused }
     }
 

@@ -93,7 +93,7 @@ final class WifiNetworkRowsRenderTests: XCTestCase {
         // What each state reads as, so the picture and the words cannot drift.
         XCTAssertEqual(
             cases.map { $0.panel.boardNetworkDescription(asOf: now) },
-            ["Studio WiFi", "Not connected (set to \"Studio WiFi\")",
+            ["Studio WiFi", "Not answering (set to \"Studio WiFi\")",
              "Neighbours WiFi", "Connected (name not reported)",
              "Unknown (not reported yet)", "None configured"])
 

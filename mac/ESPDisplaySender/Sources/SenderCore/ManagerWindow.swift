@@ -310,7 +310,9 @@ private struct PanelRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Circle()
-                .fill(panel.isOnline ? Color.green : panel.discovered ? Color.orange : Color.secondary)
+                .fill(panel.isOnline && !panel.awaitingIdentity ? Color.green
+                    : panel.discovered || panel.awaitingIdentity ? Color.orange
+                    : Color.secondary)
                 .frame(width: 9, height: 9)
             VStack(alignment: .leading, spacing: 2) {
                 Text(panel.displayName)

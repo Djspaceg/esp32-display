@@ -180,6 +180,7 @@ extension PanelManager {
         guard !supersededServiceNames.contains(serviceName) else { return }
         updatePanel(serviceName) { panel in
             panel.discovered = false
+            panel.awaitingIdentity = false
             panel.displayFPS = 0
             panel.captureStatus = .failed(
                 "No session is running for this display, so nothing is being sent.")
@@ -233,6 +234,13 @@ extension PanelManager {
 
 
 
+    /// Whether this service's session is still under the identity hold that
+    /// `register` puts on every new session. No session, nothing held.
+    func sessionAwaitsIdentity(_ serviceName: String) -> Bool {
+        guard let session = sessions[serviceName] else { return false }
+        return !identityBoundSessionIDs.contains(session.id)
+    }
+
     /// Lift a session's provisional pause on its FIRST identity bind only.
     /// EINF repeats every 2 seconds and every arrival re-binds, so unpausing
     /// unconditionally here silently undid any user pause within seconds of
@@ -248,7 +256,18 @@ extension PanelManager {
             .speakerVolume {
             session.setSpeakerVolume(volume)
         }
-        session.setPaused(false)
+        // A pause the user made during the hold is kept (`applyPaused`).
+        let userPaused = panels.first(where: { $0.serviceName == serviceName })?
+            .paused ?? false
+        session.setPaused(userPaused)
+        // What capture is really doing, read now: the status that follows can
+        // be up to five seconds away, or never come while capture is stuck on
+        // an unchanged state.
+        let capture = session.captureStatus
+        updatePanel(serviceName) { panel in
+            panel.awaitingIdentity = false
+            if !panel.paused { panel.captureStatus = capture }
+        }
     }
 
     /// Bind a paused discovery session to one owned hardware record. Returns
@@ -284,6 +303,7 @@ extension PanelManager {
     private func rejectProvisionalSession(_ serviceName: String) {
         unownedServiceNames.insert(serviceName)
         sessions.removeValue(forKey: serviceName)?.stop()
+        updatePanel(serviceName) { $0.awaitingIdentity = false }
     }
 
     /// Migrate a persisted record when the same hardware reappears under a
