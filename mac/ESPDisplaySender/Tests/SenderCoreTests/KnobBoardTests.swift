@@ -102,9 +102,14 @@ final class KnobGrantRowViewTests: XCTestCase {
         _ = NSApplication.shared
     }
 
-    private func page(profile: String, authorized: Bool) -> ViewReading {
+    private func page(
+        profile: String, authorized: Bool,
+        preset: GesturePreset = .standard, touch: Bool = false
+    ) -> ViewReading {
         var panel = PanelSnapshot(serviceName: "panel", displayName: "Panel")
         panel.profile = profile
+        panel.gesturePreset = preset
+        if touch { panel.capabilitiesRaw = DeviceProtocol.Capabilities.touch.rawValue }
         let manager = PanelManager(
             previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
         manager.serialIODisabled = true
@@ -125,6 +130,13 @@ final class KnobGrantRowViewTests: XCTestCase {
         XCTAssertNil(
             page(profile: "gc9a01-knob-128", authorized: true)
                 .button("Open System Settings…"))
+    }
+
+    func testAGlassBoardsPageOffersTheWayBackUnderMultimedia() {
+        let glass = page(
+            profile: "co5300", authorized: false, preset: .multimedia, touch: true)
+        XCTAssertNotNil(glass.button("Open System Settings…"))
+        XCTAssertTrue(glass.strings.contains("Playback control needs Accessibility permission."))
     }
 
     func testAGlassBoardsPageOffersNothingUnderTheDefaultPreset() {

@@ -303,7 +303,12 @@ extension PanelManager {
     private func rejectProvisionalSession(_ serviceName: String) {
         unownedServiceNames.insert(serviceName)
         sessions.removeValue(forKey: serviceName)?.stop()
-        updatePanel(serviceName) { $0.awaitingIdentity = false }
+        // The board behind this session was not this record's, so a knob it
+        // reported is not this record's either.
+        updatePanel(serviceName) {
+            $0.awaitingIdentity = false
+            $0.knobReported = false
+        }
     }
 
     /// Migrate a persisted record when the same hardware reappears under a

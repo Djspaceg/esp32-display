@@ -695,6 +695,23 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertEqual(panel.hardwareID, "020000123456")
     }
 
+    /// A provisional session rejected for the wrong hardware was another board
+    /// using this record's name, so the knob it reported is not this board's.
+    func testARejectedProvisionalSessionTakesBackTheKnobItReported() throws {
+        let manager = makeManager([controllablePanel(serviceName: "desk")])
+        manager.updatePanel("desk") { $0.profile = "gc9a01-knob-128" }
+        let session = makeSession(name: "desk")
+        manager.register(session, provisional: true)
+
+        manager.update(
+            .info(try makeInfo(name: "desk", deviceID: [2, 0, 0, 0x65, 0x43, 0x21])),
+            for: "desk",
+            sessionID: session.id)
+
+        let panel = try XCTUnwrap(manager.panels.first { $0.serviceName == "desk" })
+        XCTAssertFalse(panel.knobReported)
+    }
+
     /// mDNS keeps advertising the old name until its TTL expires. Those updates
     /// must not resurrect the record that was just migrated away.
     func testSupersededServiceNameIsIgnoredAfterMigration() throws {
