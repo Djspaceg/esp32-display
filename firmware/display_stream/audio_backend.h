@@ -39,6 +39,10 @@ class CodecSerialAudioBackend final : public AudioBackend {
 
   bool running() const { return running_; }
   const audiobackend::Format &format() const { return format_; }
+  // Readback for the speaker test's report: an ES8311 register, and the
+  // amplifier enable pin's pad level (-1 when not running).
+  bool readCodecRegister(uint8_t reg, uint8_t &value);
+  int ampEnableLevel() const;
 
  private:
   bool writeRegister(uint8_t address, uint8_t reg, uint8_t value);

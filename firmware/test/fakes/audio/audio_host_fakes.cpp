@@ -38,6 +38,8 @@ struct UdpDatagram {
 uint32_t nowMs = 0;
 unsigned taskDelayCalls = 0;
 void (*taskDelayHook)() = nullptr;
+bool i2sLoopback = false;
+std::deque<uint8_t> i2sLoopbackBytes;
 bool inTaskDelayHook = false;
 bool taskCreateFailing = false;
 std::vector<audiohost::CreatedTask> createdTaskList;
@@ -127,6 +129,17 @@ void pinMode(int pin, int) {
 void digitalWrite(int pin, int value) {
   events.push_back(
       {audiohost::HardwareEventKind::DigitalWrite, pin * 10 + value});
+}
+
+// The level last driven on the pin, as an output pad reads back.
+int digitalRead(int pin) {
+  for (auto event = events.rbegin(); event != events.rend(); ++event) {
+    if (event->kind == audiohost::HardwareEventKind::DigitalWrite &&
+        event->value / 10 == pin) {
+      return event->value % 10;
+    }
+  }
+  return 0;
 }
 
 QueueHandle_t xQueueCreate(UBaseType_t depth, UBaseType_t itemSize) {
@@ -314,14 +327,23 @@ bool I2SClass::begin(int, uint32_t sampleRateHz, int, i2s_slot_mode_t) {
   return true;
 }
 
-size_t I2SClass::write(const void *, size_t bytes) {
+size_t I2SClass::write(const void *data, size_t bytes) {
   events.push_back(
       {audiohost::HardwareEventKind::I2sWrite, static_cast<int>(bytes)});
+  if (i2sLoopback && !i2sFailing) {
+    const auto *begin = static_cast<const uint8_t *>(data);
+    i2sLoopbackBytes.insert(i2sLoopbackBytes.end(), begin, begin + bytes);
+  }
   return i2sFailing ? 0 : bytes;
 }
 
 size_t I2SClass::readBytes(char *data, size_t bytes) {
   std::memset(data, 0, bytes);
+  const size_t looped = std::min(bytes, i2sLoopbackBytes.size());
+  std::copy(i2sLoopbackBytes.begin(), i2sLoopbackBytes.begin() + looped,
+            data);
+  i2sLoopbackBytes.erase(i2sLoopbackBytes.begin(),
+                         i2sLoopbackBytes.begin() + looped);
   return i2sFailing ? 0 : bytes;
 }
 
@@ -398,6 +420,8 @@ void reset() {
   nowMs = 0;
   taskDelayCalls = 0;
   taskDelayHook = nullptr;
+  i2sLoopback = false;
+  i2sLoopbackBytes.clear();
   taskCreateFailing = false;
   createdTaskList.clear();
   liveMutexCount = 0;
@@ -469,6 +493,11 @@ size_t pendingUdp() { return udpDatagrams.size(); }
 unsigned delayCalls() { return taskDelayCalls; }
 
 void setTaskDelayHook(void (*hook)()) { taskDelayHook = hook; }
+
+void setI2sLoopback(bool loopback) {
+  i2sLoopback = loopback;
+  i2sLoopbackBytes.clear();
+}
 void setTaskCreateFailing(bool failing) { taskCreateFailing = failing; }
 const std::vector<CreatedTask> &createdTasks() { return createdTaskList; }
 int liveMutexes() { return liveMutexCount; }

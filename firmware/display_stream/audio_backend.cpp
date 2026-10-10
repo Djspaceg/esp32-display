@@ -402,6 +402,17 @@ size_t CodecSerialAudioBackend::writeFrames(const int16_t *samples,
   return audioI2s().write(samples, bytes) / (format_.channels * sizeof(int16_t));
 }
 
+bool CodecSerialAudioBackend::readCodecRegister(uint8_t reg,
+                                                uint8_t &value) {
+  return running_ && readRegister(config_.codecI2cAddress, reg, value);
+}
+
+int CodecSerialAudioBackend::ampEnableLevel() const {
+  // pinMode(OUTPUT) keeps the pad's input enabled, so this reads the level
+  // actually on the amplifier's enable net.
+  return running_ ? digitalRead(config_.pinAmpEnable) : -1;
+}
+
 size_t CodecSerialAudioBackend::readFrames(int16_t *samples,
                                            size_t frameCount) {
   if (!running_ || !capture_ || samples == nullptr) return 0;
@@ -475,6 +486,12 @@ size_t CodecSerialAudioBackend::writeFrames(const int16_t *, size_t) {
 }
 
 size_t CodecSerialAudioBackend::readFrames(int16_t *, size_t) { return 0; }
+
+bool CodecSerialAudioBackend::readCodecRegister(uint8_t, uint8_t &) {
+  return false;
+}
+
+int CodecSerialAudioBackend::ampEnableLevel() const { return -1; }
 
 bool CodecSerialAudioBackend::setGain(uint8_t) { return false; }
 

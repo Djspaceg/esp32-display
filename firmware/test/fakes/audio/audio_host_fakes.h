@@ -87,6 +87,9 @@ const std::vector<CreatedTask> &createdTasks();
 // under test sleeps waiting on it. Not re-entered from a delay inside the
 // hook itself. reset() clears it.
 void setTaskDelayHook(void (*hook)());
+// Every I2S read returns the bytes written before it, in order, then zeros:
+// a speaker heard by the microphones. reset() clears it.
+void setI2sLoopback(bool loopback);
 // Mutexes created and not deleted, and whether any take/give was unpaired.
 int liveMutexes();
 bool mutexMisuse();

@@ -1,9 +1,12 @@
 #include "audio_test.h"
 
 #include <Arduino.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "audio_backend.h"
 #include "audio_engine.h"
+#include "audio_tone_meter.h"
 
 namespace {
 
@@ -15,9 +18,26 @@ constexpr uint8_t MAX_CHANNELS = 2;
 // The engine task parks within one service block (10 ms) unless an I2S write
 // is stuck; past this the tone gives up rather than share the backend.
 constexpr uint32_t ENGINE_PARK_WAIT_MS = 200;
+// The tone follows this much silence, so the microphones' level at the tone's
+// frequency can be compared with the same amplifier and codec state. Each
+// window's start is skipped: the I2S DMA queues about 90 ms each way, so the
+// first reads of a window still hold the one before.
+constexpr uint32_t LEAD_SILENCE_MS = 500;
+constexpr uint32_t WINDOW_SETTLE_MS = 200;
+// 25 ms blocks put 440 Hz on a whole bin (11 cycles).
+constexpr uint32_t METER_BLOCK_MS = 25;
+constexpr uint8_t ES8311_REPORTED_REGISTERS[] = {0x12, 0x13, 0x31, 0x32};
 
 audiobackend::ToneGenerator toneGenerator;
+uint32_t leadFramesRemaining = 0;
 uint32_t framesRemaining = 0;
+uint32_t windowFrames = 0;
+uint32_t settleFrames = 0;
+uint8_t captureChannels = 0;
+audiometer::ToneMeter silenceMeter;
+audiometer::ToneMeter toneMeter;
+AudioToneLoopback loopback = {};
+int16_t captured[MAX_SERVICE_FRAMES * MAX_CHANNELS] = {};
 // The codec backend is shared with the network audio engine. Only a backend
 // this test started is the test's to service or stop: the loop task used to
 // stop any running backend with no tone pending, which tore I2S down under a
@@ -73,6 +93,7 @@ const char *startAudioToneTest(const board::Config &config,
     // Ownership goes with the hold, so a tone owning the backend always means
     // the engine is held: a re-sent tone relies on that to skip the wait.
     toneOwnsBackend = false;
+    leadFramesRemaining = 0;
     framesRemaining = 0;
     audioengine::setLocalTestActive(false);
     return "codec/I2S initialization failed; amp remains disabled";
@@ -82,13 +103,29 @@ const char *startAudioToneTest(const board::Config &config,
     Serial.println("audio: network stream paused for the tone");
   }
   toneGenerator.reset(format.sampleRateHz, format.channels, TONE_FREQUENCY_HZ);
+  leadFramesRemaining =
+      (uint32_t)(((uint64_t)format.sampleRateHz * LEAD_SILENCE_MS) / 1000U);
   framesRemaining =
       (uint32_t)(((uint64_t)format.sampleRateHz * durationMs) / 1000U);
+  windowFrames = 0;
+  settleFrames =
+      (uint32_t)(((uint64_t)format.sampleRateHz * WINDOW_SETTLE_MS) / 1000U);
+  captureChannels = audioConfig->captureChannels <= MAX_CHANNELS
+      ? audioConfig->captureChannels
+      : 0;
+  const size_t blockFrames =
+      (format.sampleRateHz * METER_BLOCK_MS) / 1000U;
+  silenceMeter.reset(format.sampleRateHz, captureChannels, TONE_FREQUENCY_HZ,
+                     blockFrames);
+  toneMeter.reset(format.sampleRateHz, captureChannels, TONE_FREQUENCY_HZ,
+                  blockFrames);
+  loopback = {};
   Serial.printf(
       "audio: tone started rate=%lu channels=%u bits=%u duration=%lums "
-      "mclk=%d bclk=%d lrck=%d dout=%d amp=%d\n",
+      "after %lums silence mclk=%d bclk=%d lrck=%d dout=%d amp=%d\n",
       (unsigned long)format.sampleRateHz, (unsigned)format.channels,
       (unsigned)format.bitsPerSample, (unsigned long)durationMs,
+      (unsigned long)LEAD_SILENCE_MS,
       audioConfig->pinPlaybackMclk, audioConfig->pinPlaybackBclk,
       audioConfig->pinPlaybackLrck, audioConfig->pinDout,
       audioConfig->pinAmpEnable);
@@ -99,8 +136,54 @@ const char *startAudioToneTest(const board::Config &config,
 #endif
 }
 
+#if defined(ESPDISP_AUDIO_RUNTIME)
+namespace {
+
+// The readback and the microphones' verdict, printed while the amplifier is
+// still enabled so the readback shows the state the tone played in.
+void reportLoopback(audio::CodecSerialAudioBackend &backend) {
+  char registers[64] = {};
+  size_t used = 0;
+  for (uint8_t reg : ES8311_REPORTED_REGISTERS) {
+    uint8_t value = 0;
+    const bool read = backend.readCodecRegister(reg, value);
+    const int written = read
+        ? snprintf(registers + used, sizeof(registers) - used,
+                   " 0x%02x=0x%02x", reg, value)
+        : snprintf(registers + used, sizeof(registers) - used,
+                   " 0x%02x=??", reg);
+    if (written > 0) used += (size_t)written;
+    if (used >= sizeof(registers)) break;
+  }
+  Serial.printf("audio: readback amp enable=%d es8311%s\n",
+                backend.ampEnableLevel(), registers);
+  if (captureChannels == 0 || silenceMeter.blocks() == 0 ||
+      toneMeter.blocks() == 0) {
+    Serial.println("audio: mic loopback not measured (no microphone data)");
+    return;
+  }
+  loopback.measured = true;
+  loopback.channels = captureChannels;
+  for (uint8_t channel = 0; channel < captureChannels; ++channel) {
+    loopback.silenceDbfs[channel] = silenceMeter.levelDbfs(channel);
+    loopback.toneDbfs[channel] = toneMeter.levelDbfs(channel);
+    Serial.printf(
+        "audio: mic%u loopback %lu Hz: silence %.1f dBFS, tone %.1f dBFS, "
+        "rise %+.1f dB (%lu+%lu blocks)\n",
+        (unsigned)(channel + 1), (unsigned long)TONE_FREQUENCY_HZ,
+        loopback.silenceDbfs[channel], loopback.toneDbfs[channel],
+        loopback.toneDbfs[channel] - loopback.silenceDbfs[channel],
+        (unsigned long)silenceMeter.blocks(),
+        (unsigned long)toneMeter.blocks());
+  }
+}
+
+}  // namespace
+#endif
+
 void stopAudioToneTest(bool report) {
 #if defined(ESPDISP_AUDIO_RUNTIME)
+  leadFramesRemaining = 0;
   framesRemaining = 0;
   if (!toneOwnsBackend) return;
   audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
@@ -124,35 +207,67 @@ void serviceAudioToneTest() {
     // Stopped underneath the test (the engine's dead-I2S path): release the
     // engine's local-test hold so a sender's stream can play again.
     toneOwnsBackend = false;
+    leadFramesRemaining = 0;
     framesRemaining = 0;
     audioengine::setLocalTestActive(false);
     return;
   }
-  if (framesRemaining == 0) {
+  if (leadFramesRemaining == 0 && framesRemaining == 0) {
+    reportLoopback(backend);
     stopAudioToneTest(false);
     Serial.println("audio: tone complete; amp disabled, codec muted");
     return;
   }
+  const bool lead = leadFramesRemaining > 0;
   const audiobackend::Format &format = backend.format();
   const size_t intervalFrames =
       (format.sampleRateHz * SERVICE_INTERVAL_MS) / 1000U;
   const size_t frames =
-      min((size_t)framesRemaining, min(intervalFrames, MAX_SERVICE_FRAMES));
-  if (toneGenerator.fill(samples, frames) != frames ||
-      backend.writeFrames(samples, frames) != frames) {
+      min((size_t)(lead ? leadFramesRemaining : framesRemaining),
+          min(intervalFrames, MAX_SERVICE_FRAMES));
+  if (lead) {
+    memset(samples, 0, frames * format.channels * sizeof(int16_t));
+  } else if (toneGenerator.fill(samples, frames) != frames) {
     stopAudioToneTest(false);
     Serial.println("audio: ERROR tone write failed; amp disabled");
     return;
   }
-  framesRemaining -= (uint32_t)frames;
+  if (backend.writeFrames(samples, frames) != frames) {
+    stopAudioToneTest(false);
+    Serial.println("audio: ERROR tone write failed; amp disabled");
+    return;
+  }
+  // One read per write keeps the microphones in step with the speaker; the
+  // backend's capture runs at the playback rate.
+  if (captureChannels > 0) {
+    const size_t heard = backend.readFrames(captured, frames);
+    if (windowFrames >= settleFrames) {
+      (lead ? silenceMeter : toneMeter).add(captured, heard, captureChannels);
+    }
+  }
+  windowFrames += (uint32_t)frames;
+  if (lead) {
+    leadFramesRemaining -= (uint32_t)frames;
+    if (leadFramesRemaining == 0) windowFrames = 0;
+  } else {
+    framesRemaining -= (uint32_t)frames;
+  }
 #endif
 }
 
 bool audioToneTestRunning() {
 #if defined(ESPDISP_AUDIO_RUNTIME)
-  return toneOwnsBackend && framesRemaining > 0 &&
+  return toneOwnsBackend && (leadFramesRemaining > 0 || framesRemaining > 0) &&
          audio::sharedCodecBackend().running();
 #else
   return false;
+#endif
+}
+
+AudioToneLoopback lastAudioToneLoopback() {
+#if defined(ESPDISP_AUDIO_RUNTIME)
+  return loopback;
+#else
+  return {};
 #endif
 }

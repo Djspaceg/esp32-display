@@ -87,6 +87,7 @@ uint32_t micros();
 void delay(uint32_t milliseconds);
 void pinMode(int pin, int mode);
 void digitalWrite(int pin, int value);
+int digitalRead(int pin);
 
 QueueHandle_t xQueueCreate(UBaseType_t depth, UBaseType_t itemSize);
 BaseType_t xQueueSend(QueueHandle_t queue, const void *item,

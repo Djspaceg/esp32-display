@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -14,6 +15,7 @@
 #include "../display_stream/audio_engine_model.h"
 #include "../display_stream/audio_protocol.h"
 #include "../display_stream/audio_test.h"
+#include "../display_stream/audio_tone_meter.h"
 #include "../display_stream/audio_transport.h"
 #include "../display_stream/app_state.h"
 #include "../display_stream/device_protocol.h"
@@ -674,10 +676,96 @@ static const char *startToneWithEngineRunning(uint32_t durationMs) {
 }
 
 static void finishTone() {
-  for (int pass = 0; pass < 32 && audioToneTestRunning(); ++pass) {
+  // 500 ms of lead silence plus the tone, 10 ms per pass.
+  for (int pass = 0; pass < 800 && audioToneTestRunning(); ++pass) {
     serviceAudioToneTest();
   }
   serviceAudioToneTest();
+}
+
+static std::vector<int16_t> sine(uint32_t rateHz, uint8_t channels,
+                                 uint32_t frames, double hz,
+                                 double amplitude) {
+  std::vector<int16_t> pcm(frames * channels);
+  for (uint32_t frame = 0; frame < frames; ++frame) {
+    const double value =
+        amplitude * 32767.0 * std::sin(2.0 * M_PI * hz * frame / rateHz);
+    for (uint8_t channel = 0; channel < channels; ++channel) {
+      pcm[frame * channels + channel] =
+          (int16_t)(channel == 0 ? value : value / 10.0);
+    }
+  }
+  return pcm;
+}
+
+// The meter reads a sine's own level at its frequency, per channel, and next
+// to nothing for silence or another frequency.
+static int testToneMeterLevels() {
+  audiometer::ToneMeter meter;
+  meter.reset(16000, 2, 440, 400);
+  const std::vector<int16_t> tone = sine(16000, 2, 4000, 440, 0.5);
+  meter.add(tone.data(), 4000, 2);
+  CHECK(meter.blocks() == 10);
+  CHECK(std::fabs(meter.levelDbfs(0) - -6.02f) < 0.1f);
+  CHECK(std::fabs(meter.levelDbfs(1) - -26.02f) < 0.1f);
+
+  meter.reset(16000, 2, 440, 400);
+  const std::vector<int16_t> silence(4000 * 2, 0);
+  meter.add(silence.data(), 4000, 2);
+  CHECK(meter.levelDbfs(0) == audiometer::ToneMeter::FLOOR_DBFS);
+
+  meter.reset(16000, 2, 440, 400);
+  const std::vector<int16_t> other = sine(16000, 2, 4000, 1000, 0.5);
+  meter.add(other.data(), 4000, 2);
+  CHECK(meter.levelDbfs(0) < -60.0f);
+
+  // An incomplete block counts for nothing.
+  meter.reset(16000, 2, 440, 400);
+  meter.add(tone.data(), 399, 2);
+  CHECK(meter.blocks() == 0);
+  CHECK(meter.levelDbfs(0) == audiometer::ToneMeter::FLOOR_DBFS);
+  return 0;
+}
+
+// The speaker test hears itself: with the microphones receiving what the
+// speaker plays, the tone stands far above the silence played before it, and
+// the report reads the amplifier enable back high. With nothing reaching
+// the microphones (no speaker), the tone does not rise at all.
+static int testToneMeasuresItsOwnLoopback() {
+  const board::AudioConfig *audio =
+      board::generatedAudioConfig(board::Variant::LcdSt77916);
+  CHECK(audio != nullptr);
+  CHECK(audio->captureChannels == audio->playbackChannels);
+  for (int heard = 1; heard >= 0; --heard) {
+    audiohost::reset();
+    audio::resetBoardAudioStatusForTest();
+    audioengine::stop();
+    audiotransport::stop();
+    CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
+    CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+    audiohost::setI2sLoopback(heard == 1);
+    CHECK(startToneWithEngineRunning(1000) == nullptr);
+    CHECK(audio::sharedCodecBackend().ampEnableLevel() == HIGH);
+    finishTone();
+    CHECK(!audioToneTestRunning());
+    const AudioToneLoopback result = lastAudioToneLoopback();
+    CHECK(result.measured);
+    CHECK(result.channels == audio->captureChannels);
+    for (uint8_t channel = 0; channel < result.channels; ++channel) {
+      CHECK(result.silenceDbfs[channel] ==
+            audiometer::ToneMeter::FLOOR_DBFS);
+      if (heard == 1) {
+        CHECK(result.toneDbfs[channel] > -40.0f);
+      } else {
+        CHECK(result.toneDbfs[channel] ==
+              audiometer::ToneMeter::FLOOR_DBFS);
+      }
+    }
+    audioengine::stop();
+    audiotransport::stop();
+  }
+  audio::resetBoardAudioStatusForTest();
+  return 0;
 }
 
 // A tone runs to completion, then gives the codec back: ownership and the
@@ -1209,6 +1297,8 @@ int main() {
        testToneTakesPrecedenceOverSenderStream},
       {"tone-refused-without-park", testToneRefusedWhenEngineDoesNotPark},
       {"tone-failed-resend-releases", testFailedReSentToneGivesUpTheBackend},
+      {"tone-meter-levels", testToneMeterLevels},
+      {"tone-measures-loopback", testToneMeasuresItsOwnLoopback},
       {"playback-only-start", testPlaybackOnlyStart},
   };
   for (const auto &finding : findingTests) {
