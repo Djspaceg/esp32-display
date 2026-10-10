@@ -700,6 +700,7 @@ final class PanelManagerTests: XCTestCase {
     func testARejectedProvisionalSessionTakesBackTheKnobItReported() throws {
         let manager = makeManager([controllablePanel(serviceName: "desk")])
         manager.updatePanel("desk") { $0.profile = "gc9a01-knob-128" }
+        XCTAssertTrue(try XCTUnwrap(manager.panels.first).knobReported)
         let session = makeSession(name: "desk")
         manager.register(session, provisional: true)
 
