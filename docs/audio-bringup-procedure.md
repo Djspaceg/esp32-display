@@ -117,7 +117,9 @@ before muting the codec and stopping I2S.
    its next packets.
 7. The ESP32-P4-WIFI6-Touch-LCD-4B ships with no speaker, only an empty
    1.25 mm 2-pin AUDIO connector (8 ohm 2 W). Check one is plugged in before
-   reading silence as a fault.
+   reading silence as a fault. Package content and speaker header:
+   https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-4b.htm and
+   https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-4B
 8. A click/pop without the tone is likewise insufficient to distinguish an
    I2S, codec-routing, amplifier, speaker, or revision problem. Preserve the
    serial log and clock/GPIO captures for diagnosis.

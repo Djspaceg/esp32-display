@@ -43,6 +43,11 @@ volatile bool localTestActive = false;
 // Plain volatile flags suffice because the engine task and the loop task that
 // runs the tone are both pinned to core 1 (CONFIG_ARDUINO_RUNNING_CORE).
 volatile bool localTestParked = false;
+#if defined(CONFIG_ARDUINO_RUNNING_CORE)
+static_assert(CONFIG_ARDUINO_RUNNING_CORE == 1,
+              "the local-test park handshake needs loopTask on the engine's "
+              "core 1");
+#endif
 // Engine-task state, file scope so a host test's re-entered task keeps it.
 StartBackoff startBackoff;
 

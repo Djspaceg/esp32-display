@@ -760,6 +760,48 @@ static int testToneTakesPrecedenceOverSenderStream() {
   return 0;
 }
 
+// A tone re-sent while one plays skips the wait, which is safe only while a
+// tone owning the backend means the engine is held. A re-send whose codec
+// start fails releases the hold, so it must give up ownership with it, or
+// the next re-send takes the backend under a live engine.
+static int testFailedReSentToneGivesUpTheBackend() {
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
+  CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  queueSenderStream(6);
+  audiohost::setMillis(250);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  CHECK(startToneWithEngineRunning(1000) == nullptr);
+  CHECK(audioToneTestRunning());
+
+  audiohost::setI2sDmaFailing(true);
+  const char *error = startToneWithEngineRunning(1000);
+  audiohost::setI2sDmaFailing(false);
+  CHECK(error != nullptr);
+  CHECK(!audioToneTestRunning());
+
+  // Released: the sender's stream plays again.
+  queueSenderStream(6, 6);
+  audiohost::setMillis(500);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  CHECK(audioengine::streamActive());
+
+  CHECK(startToneWithEngineRunning(1000) == nullptr);
+  CHECK(audioToneTestRunning());
+  CHECK(!audioengine::streamActive());
+
+  stopAudioToneTest(false);
+  audioengine::stop();
+  audiotransport::stop();
+  CHECK(!audiohost::i2sChannelMisused());
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
 // An engine that never lets go of the codec (stuck in an I2S call) refuses the
 // tone rather than share the backend with it, and keeps its stream.
 static int testToneRefusedWhenEngineDoesNotPark() {
@@ -1166,6 +1208,7 @@ int main() {
       {"tone-precedes-sender-stream",
        testToneTakesPrecedenceOverSenderStream},
       {"tone-refused-without-park", testToneRefusedWhenEngineDoesNotPark},
+      {"tone-failed-resend-releases", testFailedReSentToneGivesUpTheBackend},
       {"playback-only-start", testPlaybackOnlyStart},
   };
   for (const auto &finding : findingTests) {

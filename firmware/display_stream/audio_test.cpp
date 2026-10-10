@@ -70,6 +70,10 @@ const char *startAudioToneTest(const board::Config &config,
   const audiobackend::Format format =
       audiobackend::descriptorFormat(*audioConfig);
   if (!backend.start(config, *audioConfig, format)) {
+    // Ownership goes with the hold, so a tone owning the backend always means
+    // the engine is held: a re-sent tone relies on that to skip the wait.
+    toneOwnsBackend = false;
+    framesRemaining = 0;
     audioengine::setLocalTestActive(false);
     return "codec/I2S initialization failed; amp remains disabled";
   }
