@@ -58,6 +58,9 @@ void quake_display_render_size(int* width, int* height);
 /// the engine draws into two pages in turn; else 1.
 int quake_display_pages(void);
 
+/// Stops frames going to the panel (the failure card's writes come next).
+void quake_display_quiesce(void);
+
 /// Converts one 8-bit frame through `palette565` (256 big-endian RGB565
 /// entries) and puts it on the panel. With one page it returns once DMA is
 /// done with it; with two it returns once the previous frame is on the panel,

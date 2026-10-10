@@ -82,6 +82,7 @@ constexpr bool ASYNC_PRESENT = false;
 constexpr uint32_t PRESENT_TASK_STACK = 4096;
 constexpr UBaseType_t PRESENT_TASK_PRIORITY = 5;  // below the sound output's 10
 constexpr BaseType_t PRESENT_TASK_CORE = 0;
+TaskHandle_t s_present_task = nullptr;
 SemaphoreHandle_t s_present_go = nullptr;
 SemaphoreHandle_t s_present_done = nullptr;
 const uint8_t* s_present_pixels = nullptr;
@@ -249,7 +250,7 @@ extern "C" const char* quake_display_setup(void) {
         s_present_done == nullptr ||
         xTaskCreatePinnedToCore(presentTask, "quake_present",
                                 PRESENT_TASK_STACK, nullptr,
-                                PRESENT_TASK_PRIORITY, nullptr,
+                                PRESENT_TASK_PRIORITY, &s_present_task,
                                 PRESENT_TASK_CORE) != pdPASS) {
       return "no internal RAM for the panel task";
     }
@@ -269,6 +270,18 @@ extern "C" void quake_display_render_size(int* width, int* height) {
 }
 
 extern "C" int quake_display_pages(void) { return ASYNC_PRESENT ? 2 : 1; }
+
+// For the failure card (display_stream/quake_bridge.cpp): waits up to a
+// second for the panel task's frame to finish and keeps it from starting
+// another, so the card's writes are the panel's only ones. A no-op on the
+// panel task itself, whose frame is what failed.
+extern "C" void quake_display_quiesce(void) {
+  if (!ASYNC_PRESENT || s_present_done == nullptr ||
+      xTaskGetCurrentTaskHandle() == s_present_task) {
+    return;
+  }
+  (void)xSemaphoreTake(s_present_done, pdMS_TO_TICKS(1000));
+}
 
 // Before the Quake task starts, on loopTask, as doom_audio_begin() asks: it
 // brings up the codec over I2C, which touch shares.

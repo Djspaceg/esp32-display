@@ -163,7 +163,7 @@ struct QuakeDataSheet: View {
         let common = "The data is written over USB, after the board's hardware ID, "
             + "chip and MAC are re-verified, into flash kept for Quake alone; "
             + "firmware and settings are not touched. Once the data is on the "
-            + "board, its boot menu offers QUAKE."
+            + "board, its boot menu offers QUAKE if its firmware carries Quake."
         switch target.chip {
         case QuakePak.s3Chip?:
             return "An ESP32-S3 board needs 32 MiB of flash to hold Quake's data; "

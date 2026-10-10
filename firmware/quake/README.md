@@ -2,16 +2,18 @@
 
 Quake shareware (id1/pak0.pak) on the three ESP32-P4 carriers (the 4B, the 4C
 and the 3.4C) and on the ESP32-S3 boards with 32 MiB of flash and a panel that
-holds a 320x240 frame (the AMOLED 1.75C and the LCD 1.85C). It sits beside Doom and starts the same way, from the boot-mode
-menu, into an isolated boot with WiFi and streaming off. Any failure, and a
+holds a 320x240 frame (the AMOLED 1.75C and the LCD 1.85C). It sits beside
+Doom and starts the same way, from the boot-mode menu, into an isolated boot with WiFi and streaming off. Any failure, and a
 3 s BOOT hold, restarts into the normal firmware.
 
 The engine is id's WinQuake software renderer through
 [quakegeneric](https://github.com/erysdren/quakegeneric) at a pinned commit;
 see `src/engine/UPSTREAM.md`. It is GPL-2.0 (`LICENSE-GPL2`); the P4 glue
 (`quake_mode.cpp`, `platform/quake_hw_bridge.cpp`, the models) is MIT like the
-rest of the repository, and `platform/quake_sys_esp32.c`, adapted from
-upstream's system and video drivers, is GPL-2.0.
+rest of the repository, and `platform/quake_sys_esp32.c` and
+`platform/quake_snd_esp32.c`, adapted from upstream's system, video and sound
+drivers, are GPL-2.0. The sound mixer is id's own WinQuake code, which
+quakegeneric leaves out.
 
 ## Game data
 
@@ -23,6 +25,9 @@ region of 18 MiB at 0x800000, just past the universal 8 MiB layout):
 tools/fetch_game_data.sh --game quake
 python3 tools/espdisp.py write-data quake_pak --port /dev/cu.usbmodemXXXX
 ```
+
+The Mac app does the same over USB: a P4 or S3 display's Firmware section has
+**Install Quake Data…**, which takes your pak0.pak and applies the same checks.
 
 A board on an older partition table needs one full USB flash of the current
 bundle first; `write-data` refuses until then. On an S3 it also reads the chip's
@@ -107,7 +112,16 @@ P4 link map): small globals and the 153 initialised cvars.
 
 A Quake boot allocates a 16 MB engine heap, the 320x240 frame and depth
 buffers, a ~600 KB surface cache, a 640x480 scaled frame and a 320 KB task
-stack, the last three in PSRAM.
+stack, the last three in PSRAM. On an S3 the heap is what the 8 MB of PSRAM
+has left after the frame buffers and 192 KB of slack, about 6 MB.
+
+## Sound
+
+Quake's own mixer (`snd_dma.c`, `snd_mix.c`, `snd_mem.c`) mixes into a
+4096-frame ring in PSRAM, 200 ms ahead of where Doom's sound bridge
+(`display_stream/doom_audio.cpp`) is reading it out to the codec from core 0.
+Sounds play at the codec's rate, resampled from Quake's 11 kHz when a level
+loads. A board without usable audio plays silent.
 
 ## Layout
 

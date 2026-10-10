@@ -90,6 +90,7 @@ static void printQuakeFatal(const char *reason) {
 extern "C" void quake_fail_restart(const char *reason, bool showOnPanel) {
   printQuakeFatal(reason);
   if (showOnPanel) {
+    quake_display_quiesce();
     if (showQuakeFailure(reason)) delay(QUAKE_FAILURE_SHOW_MS);
     printQuakeFatal(reason);
   }

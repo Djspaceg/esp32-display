@@ -228,7 +228,9 @@ void S_Init (void)
 		shm->buffer = Hunk_AllocName(1<<16, "shmbuf");
 	}
 
-	Con_Printf ("Sound sampling rate: %i\n", shm->speed);
+	// espdisp: guarded; shm is still NULL when SNDDMA_Init failed.
+	if (shm)
+		Con_Printf ("Sound sampling rate: %i\n", shm->speed);
 
 	// provides a tick sound until washed clean
 
