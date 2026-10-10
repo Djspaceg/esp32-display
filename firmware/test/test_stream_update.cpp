@@ -421,6 +421,51 @@ static void testFullWindowIsAckedAtOnce() {
         "the chunk that fills the window is acknowledged without waiting on loop()");
 }
 
+static void testNewerReceiveTimestampIsNotSilence() {
+  // Hardware finding (4C, 2026-10-10): both WiFi attempts ended "the sender
+  // went silent" 4.9 s and 0.8 s in, mid-stream. loop() samples millis()
+  // before taking the lock; the receive task, meanwhile, files a chunk
+  // stamped a few ms LATER. now - lastHeard then wraps to ~4.29e9 and the
+  // 10 s idle timeout fires on a sender that is flooding the panel.
+  Panel p;
+  const auto image = makeImage(20 * 1024, 21);
+  check(authenticate(p, 16, image, 1024), "auth for the clock-race run");
+  const uint32_t loopSampledAt = p.now;
+  p.now += 3;  // the receive task runs between the sample and the lock
+  p.deliver(dataPacket(16, 0, image, 1024));
+  WorkItem w = p.rx.takeWork(loopSampledAt);
+  StatusReply st;
+  const bool aborted = p.lastStatus(st) && st.code == Status::Aborted;
+  check(!aborted && p.rx.phase() == Phase::Receiving,
+        "a chunk stamped after loop() sampled its clock is not a silent sender");
+  check(w.kind == Work::Write, "and the chunk is offered for writing");
+  // Real silence still times out, measured from the last chunk.
+  if (w.kind == Work::Write) p.rx.finishWrite(w.seq, true, nullptr, p.now);
+  p.now += SESSION_IDLE_TIMEOUT_MS + 1;
+  p.pump();
+  check(p.lastStatus(st) && st.code == Status::Aborted,
+        "ten seconds of real silence still aborts");
+}
+
+static void testOldStampsStillReadAsOld() {
+  // Review finding on the clock fix: an unbounded clamp read any stamp more
+  // than 2^31 ms old as "0 ms ago", which silenced the rate-limited replies
+  // on a panel up for more than 24.8 days. Only a short skew is clamped now.
+  check(elapsedMs(1000, 1003) == 0, "a few ms of backward skew reads as 0");
+  check(elapsedMs(1000, 400) == 600, "ordinary elapsed time is unchanged");
+  check(elapsedMs(5, 0xFFFFFFF0u) == 21, "the 49-day rollover still counts forward");
+  const uint32_t ancient = 1000u + 0x80000000u + 5u;
+  check(elapsedMs(ancient, 1000) > 0x80000000u,
+        "a stamp more than 24.8 days old reads as long ago, not as 0");
+  Panel p;
+  const auto image = makeImage(4096, 22);
+  p.now = ancient;  // nothing repeated since boot, 24.8+ days ago
+  p.deliver(dataPacket(77, 0, image, 1024));
+  StatusReply st;
+  check(p.lastStatus(st) && st.code == Status::UnknownSession,
+        "an unknown session is still told so on a panel up for 25 days");
+}
+
 static void testRetransmittedBeginKeepsNonce() {
   Panel p;
   const auto image = makeImage(4096, 4);
@@ -741,6 +786,8 @@ int main() {
   testDataBeforeAuthIsRefused();
   testWrongPassword();
   testRetransmittedBeginKeepsNonce();
+  testNewerReceiveTimestampIsNotSilence();
+  testOldStampsStillReadAsOld();
   testLostRefusalIsRepeated();
   testCnonceMustCommitToTheImage();
   testAbortDuringBeginReleasesUpdate();

@@ -193,13 +193,15 @@ const char *statusWord(Status s) {
 }
 
 // One unit of loop-side work, outside the lock. Returns false when idle.
-bool doOneWork(uint32_t now) {
+bool doOneWork() {
   streamupdate::WorkItem w;
   // The digest is copied here, under the lock, for the log line below.
   char digestHex[streamupdate::HEX_DIGEST_CHARS + 1] = {};
   {
     Lock held;
-    w = rx.takeWork(now);
+    // The clock is read under the lock, so no chunk filed by the receive task
+    // can carry a later stamp than this "now" (elapsedMs guards it anyway).
+    w = rx.takeWork(millis());
     if (w.kind == Work::Activate) {
       memcpy(digestHex, rx.actualHex(), sizeof(digestHex));
     }
@@ -334,7 +336,7 @@ void reflectState(uint32_t now) {
   if (phase == Phase::Done && hasResult &&
       (was == Phase::Receiving || was == Phase::Finalizing ||
        was == Phase::Beginning)) {
-    const uint32_t ms = now - receivingAtMs;
+    const uint32_t ms = streamupdate::elapsedMs(now, receivingAtMs);
     Serial.printf(
         "supd: transfer %lu bytes in %lu ms; filed=%lu dup=%lu ooo=%lu "
         "window=%lu bad=%lu\n",
@@ -422,7 +424,7 @@ bool service() {
   const uint32_t start = millis();
   // takeWork() also runs the timeouts and keepalive acks, so this runs every
   // pass even with nothing to write.
-  while (doOneWork(millis())) {
+  while (doOneWork()) {
     flushOutgoing();
     if (millis() - start >= SERVICE_BUDGET_MS) break;
   }

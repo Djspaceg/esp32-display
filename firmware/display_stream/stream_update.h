@@ -157,6 +157,24 @@ inline uint32_t crc32(const uint8_t *data, size_t len) {
   return ~crc;
 }
 
+/// Bound on how far a stamp may run ahead of "now" and still read as 0 ms.
+static const int32_t CLOCK_SKEW_MS = 1000;
+
+/// Milliseconds from `then` to `now`, with a short backward skew read as 0.
+///
+/// The receiver is stamped from two tasks. Before this was fixed, loop()
+/// sampled millis() before taking the lock, so a chunk the receive task filed
+/// in between was stamped AFTER the loop's "now", and a plain `now - then`
+/// wrapped to ~4.29e9: ten seconds of silence, read off a flooding sender,
+/// which ended both WiFi updates on the 4C (2026-10-10). The service now reads
+/// the clock under the lock, and this guards any skew that remains. Only a
+/// skew under a second is clamped: a stamp more than 24.8 days old also looks
+/// "ahead" in signed terms, and it must read as the long time it is.
+inline uint32_t elapsedMs(uint32_t now, uint32_t then) {
+  const int32_t d = (int32_t)(now - then);
+  return (d < 0 && d > -CLOCK_SKEW_MS) ? 0u : now - then;
+}
+
 inline bool isLowerHex(const char *text, size_t len) {
   for (size_t i = 0; i < len; i++) {
     const char c = text[i];
@@ -791,7 +809,7 @@ class Receiver {
     Auth auth;
     if (!parseAuth(data, len, auth)) return;
     if (refusedSession_ != 0 && auth.session == refusedSession_ &&
-        from == refusedPeer_ && nowMs - refusedAtMs_ <= RESULT_HOLD_MS &&
+        from == refusedPeer_ && elapsedMs(nowMs, refusedAtMs_) <= RESULT_HOLD_MS &&
         sameDigestHex(auth.response, refusedResponse_)) {
       queueStatusTo(from, Status::AuthRefused, auth.session, 0,
                     "Authentication Failed");
@@ -952,17 +970,17 @@ class Receiver {
 
   void expire(uint32_t nowMs) {
     if (phase_ == Phase::AwaitingAuth &&
-        nowMs - lastHeardMs_ > SESSION_IDLE_TIMEOUT_MS) {
+        elapsedMs(nowMs, lastHeardMs_) > SESSION_IDLE_TIMEOUT_MS) {
       resetSession();
       return;
     }
     if ((phase_ == Phase::Receiving || phase_ == Phase::Beginning) &&
-        !workInFlight_ && nowMs - lastHeardMs_ > SESSION_IDLE_TIMEOUT_MS) {
+        !workInFlight_ && elapsedMs(nowMs, lastHeardMs_) > SESSION_IDLE_TIMEOUT_MS) {
       fail(Status::Aborted, "the sender went silent", nowMs);
       return;
     }
     if (phase_ == Phase::Done && !abortOwed_ && !rebootPending_ &&
-        !workInFlight_ && nowMs - doneAtMs_ > RESULT_HOLD_MS) {
+        !workInFlight_ && elapsedMs(nowMs, doneAtMs_) > RESULT_HOLD_MS) {
       resetSession();
     }
   }
@@ -1006,8 +1024,8 @@ class Receiver {
 
   void maybeKeepaliveAck(uint32_t nowMs) {
     if (slotsFreedSinceAck_ >= ACK_EVERY_CHUNKS ||
-        (windowMoved_ && nowMs - lastAckMs_ >= ACK_WINDOW_BATCH_MS) ||
-        nowMs - lastAckMs_ >= ACK_KEEPALIVE_MS) {
+        (windowMoved_ && elapsedMs(nowMs, lastAckMs_) >= ACK_WINDOW_BATCH_MS) ||
+        elapsedMs(nowMs, lastAckMs_) >= ACK_KEEPALIVE_MS) {
       queueAck(nowMs);
     }
   }
@@ -1046,7 +1064,7 @@ class Receiver {
 
   void repeatStatus(Endpoint to, Status code, uint16_t session,
                     uint32_t nowMs) {
-    if (nowMs - lastRepeatMs_ < REPEAT_STATUS_MS) return;
+    if (elapsedMs(nowMs, lastRepeatMs_) < REPEAT_STATUS_MS) return;
     lastRepeatMs_ = nowMs;
     if (code == result_ && session == session_ && hasResult_) {
       queueStatusTo(to, code, session, resultValue_, resultDetail_);
