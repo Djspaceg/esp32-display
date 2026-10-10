@@ -41,10 +41,11 @@ volatile bool localTestActive = false;
 // Set by the engine task once it has seen localTestActive and let go of the
 // codec backend, so a local tone can take the backend over a live stream.
 // Plain volatile flags suffice because the engine task and the loop task that
-// runs the tone are both pinned to core 1 (CONFIG_ARDUINO_RUNNING_CORE).
+// runs the tone are both pinned to core 1 (loopTask by ARDUINO_RUNNING_CORE,
+// which a board menu's LoopCore option overrides).
 volatile bool localTestParked = false;
-#if defined(CONFIG_ARDUINO_RUNNING_CORE)
-static_assert(CONFIG_ARDUINO_RUNNING_CORE == 1,
+#if defined(ARDUINO_RUNNING_CORE)
+static_assert(ARDUINO_RUNNING_CORE == 1,
               "the local-test park handshake needs loopTask on the engine's "
               "core 1");
 #endif
