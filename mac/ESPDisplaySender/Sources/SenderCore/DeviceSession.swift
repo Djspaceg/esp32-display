@@ -1216,9 +1216,10 @@ final class DeviceSession {
 
         guard let window else { return false }
         tracked.onScreen = window.isOnScreen
-        // A resize that flips the window between portrait and landscape needs
-        // nothing here: the frame shape follows the panel's rotation, not the
-        // window, and the stream fits whatever shape the window has into it.
+        // A resize that flips the window between portrait and landscape keeps
+        // the frame shape, which follows the panel's rotation, not the window.
+        // The window's new shape is only re-centred inside it.
+        await capture.updateContentSize(window.frame.size)
         markStreaming()
         return true
     }

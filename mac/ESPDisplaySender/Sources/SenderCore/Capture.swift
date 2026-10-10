@@ -37,6 +37,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// old frame shape back.
     private var _pendingRect: CGRect?
     private var _pendingLandscape: Bool?
+    private var _pendingContentSize: CGSize?
     private var _reconfiguring = false
     private var _framesCaptured: UInt64 = 0
     private var _stopped = false
@@ -53,6 +54,9 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var _configuredFPS = 30
     /// The sub-rectangle being captured, or nil for the whole source.
     private var _sourceRect: CGRect?
+    /// The captured content's size, whose shape decides where it is centred
+    /// in the frame (`letterbox`). Nil when it is not known.
+    private var _contentSize: CGSize?
 
     /// Preview cadence. Frames go to the panel as fast as they arrive; the UI
     /// only needs enough to look live, and each preview image costs a
@@ -636,14 +640,16 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func start(display: SCDisplay, fps: Int) async throws {
         try await start(
             filter: SCContentFilter(display: display, excludingWindows: []),
-            fps: fps)
+            fps: fps,
+            contentSize: CGSize(width: display.width, height: display.height))
     }
 
     /// Start capturing a single window, independent of any display - works
     /// even when the window is occluded or the virtual display is gone.
     func start(window: SCWindow, fps: Int) async throws {
         try await start(
-            filter: SCContentFilter(desktopIndependentWindow: window), fps: fps)
+            filter: SCContentFilter(desktopIndependentWindow: window), fps: fps,
+            contentSize: window.frame.size)
     }
 
     /// Start capturing a rectangle of a display rather than the whole thing.
@@ -656,21 +662,24 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         try await start(
             filter: SCContentFilter(display: display, excludingWindows: []),
             fps: fps,
-            sourceRect: sourceRect)
+            sourceRect: sourceRect,
+            contentSize: sourceRect.size)
     }
 
     /// Start capturing whatever the user chose in macOS's content picker.
     func start(contentFilter: SCContentFilter, fps: Int) async throws {
-        try await start(filter: contentFilter, fps: fps)
+        try await start(
+            filter: contentFilter, fps: fps, contentSize: contentFilter.contentRect.size)
     }
 
     private func start(
-        filter: SCContentFilter, fps: Int, sourceRect: CGRect? = nil
+        filter: SCContentFilter, fps: Int, sourceRect: CGRect? = nil, contentSize: CGSize
     ) async throws {
         let (width, height) = stateLock.withLock { (_outW, _outH) }
         stateLock.withLock {
             _configuredFPS = fps
             _sourceRect = sourceRect
+            _contentSize = contentSize
             _stopped = false
             _stopReason = nil
             _lastSampleAt = Date()
@@ -679,7 +688,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let stream = SCStream(
             filter: filter,
             configuration: Self.configuration(
-                width: width, height: height, fps: fps, sourceRect: sourceRect),
+                width: width, height: height, fps: fps, sourceRect: sourceRect,
+                contentSize: contentSize),
             delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
         let identity = ObjectIdentifier(stream)
@@ -700,8 +710,9 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         self.stream = stream
     }
 
-    private static func configuration(
-        width: Int, height: Int, fps: Int, sourceRect: CGRect? = nil
+    static func configuration(
+        width: Int, height: Int, fps: Int, sourceRect: CGRect? = nil,
+        contentSize: CGSize? = nil
     ) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.width = width
@@ -715,7 +726,33 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // explicit that an unset sourceRect streams the entire display or
         // window, and a zero rect is not the same thing.
         if let sourceRect { config.sourceRect = sourceRect }
+        if let contentSize,
+            let destination = letterbox(content: contentSize, width: width, height: height)
+        {
+            config.destinationRect = destination
+        }
         return config
+    }
+
+    /// Where content of `content`'s shape sits, fitted and centred, in a
+    /// `width` x `height` frame, in whole pixels. Nil for an unusable size.
+    ///
+    /// Needed because ScreenCaptureKit fits the source into the frame but pins
+    /// it to the top-left corner, so a wide window on square glass sat at the
+    /// top with all the black below it instead of split above and below.
+    static func letterbox(content: CGSize, width: Int, height: Int) -> CGRect? {
+        guard content.width > 0, content.height > 0, width > 0, height > 0 else {
+            return nil
+        }
+        let frameW = Double(width)
+        let frameH = Double(height)
+        let fit = min(frameW / content.width, frameH / content.height)
+        let fittedW = min(frameW, max(1, (content.width * fit).rounded()))
+        let fittedH = min(frameH, max(1, (content.height * fit).rounded()))
+        return CGRect(
+            x: ((frameW - fittedW) / 2).rounded(),
+            y: ((frameH - fittedH) / 2).rounded(),
+            width: fittedW, height: fittedH)
     }
 
     /// Point a running stream at a different rectangle of the same display.
@@ -728,7 +765,16 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// - Returns: false when the stream could not be reconfigured.
     @discardableResult
     func updateRegion(_ rect: CGRect) async -> Bool {
-        await reconfigure(rect: rect, landscape: nil)
+        await reconfigure(rect: rect, landscape: nil, contentSize: rect.size)
+    }
+
+    /// Re-centre a running stream for content that changed size, such as a
+    /// window being resized. Nothing is sent when the size is unchanged.
+    ///
+    /// - Returns: false when the stream could not be reconfigured.
+    @discardableResult
+    func updateContentSize(_ size: CGSize) async -> Bool {
+        await reconfigure(rect: nil, landscape: nil, contentSize: size)
     }
 
     /// Change the frame shape of a running stream in place, for a rotation that
@@ -743,7 +789,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     ///   caller should restart capture instead.
     @discardableResult
     func reshape(landscape: Bool) async -> Bool {
-        await reconfigure(rect: nil, landscape: landscape)
+        await reconfigure(rect: nil, landscape: landscape, contentSize: nil)
     }
 
     /// Stands in for ScreenCaptureKit's reconfigure in tests, so the drain can
@@ -755,11 +801,14 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         stateLock.withLock { (_outW, _outH) }
     }
 
-    private func reconfigure(rect: CGRect?, landscape: Bool?) async -> Bool {
+    private func reconfigure(
+        rect: CGRect?, landscape: Bool?, contentSize: CGSize?
+    ) async -> Bool {
         guard stream != nil || configureForTesting != nil else { return false }
         let drains = stateLock.withLock { () -> Bool in
             if let rect { _pendingRect = rect }
             if let landscape { _pendingLandscape = landscape }
+            if let contentSize { _pendingContentSize = contentSize }
             guard !_reconfiguring else { return false }
             _reconfiguring = true
             return true
@@ -768,16 +817,20 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard drains else { return true }
         while true {
             let next = stateLock.withLock {
-                () -> (rect: CGRect?, landscape: Bool, fps: Int)? in
+                () -> (rect: CGRect?, landscape: Bool, content: CGSize?, fps: Int)? in
                 let rect = _pendingRect ?? _sourceRect
                 let landscape = _pendingLandscape ?? _landscape
+                let content = _pendingContentSize ?? _contentSize
                 _pendingRect = nil
                 _pendingLandscape = nil
-                guard rect != _sourceRect || landscape != _landscape else {
+                _pendingContentSize = nil
+                guard rect != _sourceRect || landscape != _landscape
+                    || content != _contentSize
+                else {
                     _reconfiguring = false
                     return nil
                 }
-                return (rect, landscape, _configuredFPS)
+                return (rect, landscape, content, _configuredFPS)
             }
             guard let next else { return true }
             // Read each pass: stop() can take the stream away mid-drain, and
@@ -810,7 +863,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                         try await stream.updateConfiguration(
                             Self.configuration(
                                 width: width, height: height, fps: next.fps,
-                                sourceRect: next.rect))
+                                sourceRect: next.rect, contentSize: next.content))
                     }
                 }
             } catch {
@@ -830,6 +883,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                     let queuedShape = _pendingLandscape.map { $0 != before.landscape } ?? false
                     _pendingRect = nil
                     _pendingLandscape = nil
+                    _pendingContentSize = nil
                     if next.landscape != before.landscape || queuedShape {
                         _stopped = true
                         _stopReason = "the frame shape could not be changed"
@@ -838,7 +892,10 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 markWedgedIfExpired(error)
                 return false
             }
-            stateLock.withLock { _sourceRect = next.rect }
+            stateLock.withLock {
+                _sourceRect = next.rect
+                _contentSize = next.content
+            }
         }
     }
 
