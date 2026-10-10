@@ -6259,7 +6259,11 @@ def cmd_write_data(args) -> int:
     digest = sha256_hex(data)
     port = resolve_port(args.port)
     # The chip decides the family: a P4 has the partition, an S3 the region.
-    s3 = probe_chip(port.address) == FAMILIES["s3"].chip
+    chip = probe_chip(port.address)
+    if chip not in (FAMILIES["s3"].chip, FAMILIES[spec.family].chip):
+        raise Fail("could not identify a P4 or S3 chip on %s (esptool read %s); "
+                   "nothing was written" % (port.address, chip or "nothing"))
+    s3 = chip == FAMILIES["s3"].chip
     family = FAMILIES["s3" if s3 else spec.family]
     print("Reading the partition table on %s..." % port.address, flush=True)
     table = read_device_partition_table(family, port.address)

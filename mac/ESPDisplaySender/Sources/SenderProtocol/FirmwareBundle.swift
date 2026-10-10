@@ -212,7 +212,9 @@ public struct FirmwareBundle: Equatable, Sendable {
         "p4-4b": "esp32p4",
     ]
 
-    private struct PartitionEntry {
+    /// Internal rather than private so `QuakePak` judges a board's table with
+    /// the same parse and the same layout rules a bundle is held to.
+    struct PartitionEntry {
         let type: UInt8
         let subtype: UInt8
         let address: Int
@@ -910,7 +912,7 @@ public struct FirmwareBundle: Equatable, Sendable {
 
     // MARK: - helpers
 
-    private static func partitionEntries(
+    static func partitionEntries(
         _ data: Data
     ) -> [String: PartitionEntry]? {
         let bytes = [UInt8](data)
@@ -970,7 +972,7 @@ public struct FirmwareBundle: Equatable, Sendable {
         return true
     }
 
-    private static func matchesDoomPartitionLayout(
+    static func matchesDoomPartitionLayout(
         _ entries: [String: PartitionEntry], targets: [String]
     ) -> Bool {
         let layouts = Set(targets.compactMap { doomPartitionLayoutByTarget[$0] })

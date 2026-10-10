@@ -4121,6 +4121,10 @@ def test_write_data_quake_pak():
             lambda: run(current, chip="esp32s3", flash_bytes=32 * 0x100000),
             "not this repo's s3 layout",
             "an S3 whose table is not the universal one is refused")
+        check_fails(lambda: run(current, chip=None), "could not identify",
+                    "a chip esptool cannot name is refused before any read")
+        check_fails(lambda: run(current, chip="esp32c6"), "could not identify",
+                    "a chip Quake does not run on is refused")
         check_equal(
             espdisp.quake_pak_s3_target(s3_table, 32 * 0x100000, 18689235),
             0x800000, "the shareware pak fits the S3 region")

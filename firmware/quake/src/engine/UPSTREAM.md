@@ -15,8 +15,15 @@ this port replaces; the few edits are listed below:
 | `vid_null.c` | `../platform/quake_sys_esp32.c` (buffers allocated, RGB565 palette) |
 | `quakegeneric.c` | `../platform/quake_sys_esp32.c` (`quake_engine_start`) |
 | `quakegeneric_*.c` | `../platform/quake_hw_bridge.cpp` |
+| `snd_null.c` | `snd_dma.c`, `snd_mix.c`, `snd_mem.c` (below), and `../platform/quake_snd_esp32.c` as the sound device |
 
-All headers are upstream's, unedited. Most of what the port needs is done
+The three sound sources are not in quakegeneric, which builds silent: they are
+id's own, from [id-Software/Quake](https://github.com/id-Software/Quake)
+`WinQuake/` at commit `bf4ac424ce754894ac8f1dae6a3981954bc9852d` (GPL-2.0, the
+same code quakegeneric's engine came from), with line endings made LF. Their
+one edit is in the list below.
+
+All headers are upstream's, unedited, bar `sound.h`'s one rename below. Most of what the port needs is done
 from outside, in the prelude every engine unit includes first
 (`../platform/quake_prelude.h`):
 
@@ -31,7 +38,7 @@ from outside, in the prelude every engine unit includes first
   the replaced `vid_null.c` are allocated by the platform layer instead).
 - `quake_renames.h` renames the globals Doom's engine also defines.
 
-The engine sources carry three kinds of small edit, each marked `espdisp:`, for
+The engine sources carry four kinds of small edit, each marked `espdisp:`, for
 the same reason (internal RAM in the streaming firmware):
 
 - Nine function-local static buffers moved to file scope under their own
@@ -39,6 +46,9 @@ the same reason (internal RAM in the streaming firmware):
   `MSG_ReadString`, `va`, `Mod_DecompressVis`, `PF_VarString`,
   `PR_ValueString`, `PR_UglyValueString`, `PR_GlobalString`,
   `PR_GlobalStringNoContents`.
+- The global `channels` array of `snd_dma.c` renamed `sound_channels`, in
+  `sound.h`, `snd_dma.c` and `snd_mix.c`: `channels` is also a member of two
+  sound structs, which the relocation would rename too.
 - `Host_Please_f`'s local `cl` renamed `client` (it is compiled only with
   IDGODS, but the relocation renames every `cl`).
 - Read-only tables made `const`, so they stay in flash: `r_avertexnormals`,

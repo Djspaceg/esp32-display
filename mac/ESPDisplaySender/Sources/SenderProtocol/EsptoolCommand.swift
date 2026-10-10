@@ -121,6 +121,8 @@ public struct EsptoolCommand: Equatable, Sendable {
         var leadingArguments: [String] { isPythonScript ? [path] : [] }
         var writeFlashSubcommand: String { isPythonScript ? "write_flash" : "write-flash" }
         var chipIDSubcommand: String { isPythonScript ? "chip_id" : "chip-id" }
+        var readFlashSubcommand: String { isPythonScript ? "read_flash" : "read-flash" }
+        var flashIDSubcommand: String { isPythonScript ? "flash_id" : "flash-id" }
     }
 
     /// One payload staged on disk, ready to be named in the argv. esptool takes
@@ -289,6 +291,70 @@ public struct EsptoolCommand: Equatable, Sendable {
         ]
         return EsptoolCommand(executable: tool.executable, arguments: arguments)
     }
+
+    /// The leading options every chip-pinned command shares, `writeFlash`'s
+    /// refusals included: a tool, a chip that is never `auto`, a port that is
+    /// never empty, and a usable speed.
+    private static func pinnedArguments(
+        tool: Tool, chip: String, port: String, baud: Int
+    ) throws -> [String] {
+        let chip = chip.trimmingCharacters(in: .whitespacesAndNewlines)
+        let port = port.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tool.path.isEmpty else { throw EsptoolCommandError.noTool }
+        guard !chip.isEmpty else { throw EsptoolCommandError.noChip }
+        guard !port.isEmpty else { throw EsptoolCommandError.noPort }
+        guard baud > 0 else { throw EsptoolCommandError.badBaud(baud) }
+        return tool.leadingArguments + [
+            "--chip", chip,
+            "--port", port,
+            "--baud", String(baud),
+            "--before", beforeReset,
+            "--after", afterReset,
+        ]
+    }
+
+    /// Read `byteCount` bytes of flash at `address` into a file, read-only.
+    ///
+    /// What `read_device_partition_table` in tools/espdisp.py runs to read the
+    /// partition table a board actually boots with (0x8000, 0xC00 bytes), so a
+    /// data write is placed by the board's table rather than by this repo's.
+    /// Chip pinned like a write: the table read decides where bytes land, so it
+    /// must come from the board the write will go to.
+    public static func readFlash(
+        tool: Tool,
+        chip: String,
+        port: String,
+        baud: Int = defaultBaud,
+        address: Int,
+        byteCount: Int,
+        outputPath: String
+    ) throws -> EsptoolCommand {
+        var arguments = try pinnedArguments(
+            tool: tool, chip: chip, port: port, baud: baud)
+        guard address >= 0, byteCount > 0 else {
+            throw EsptoolCommandError.badReadExtent(address: address, byteCount: byteCount)
+        }
+        guard !outputPath.isEmpty else { throw EsptoolCommandError.noOutputPath }
+        arguments += [
+            tool.readFlashSubcommand,
+            hexAddress(address), hexAddress(byteCount), outputPath,
+        ]
+        return EsptoolCommand(executable: tool.executable, arguments: arguments)
+    }
+
+    /// Ask the chip for its flash size, read-only: `detect_flash_bytes` in
+    /// tools/espdisp.py, whose answer `EsptoolOutput.detectedFlashBytes` reads.
+    public static func flashID(
+        tool: Tool,
+        chip: String,
+        port: String,
+        baud: Int = defaultBaud
+    ) throws -> EsptoolCommand {
+        var arguments = try pinnedArguments(
+            tool: tool, chip: chip, port: port, baud: baud)
+        arguments.append(tool.flashIDSubcommand)
+        return EsptoolCommand(executable: tool.executable, arguments: arguments)
+    }
 }
 
 /// Why an invocation was refused before it ran.
@@ -307,6 +373,8 @@ public enum EsptoolCommandError: Error, LocalizedError, Equatable {
     case negativeAddress(role: String, address: Int)
     case badBaud(Int)
     case badConnectAttempts(Int)
+    case badReadExtent(address: Int, byteCount: Int)
+    case noOutputPath
 
     public var errorDescription: String? {
         switch self {
@@ -333,6 +401,10 @@ public enum EsptoolCommandError: Error, LocalizedError, Equatable {
             return "\(baud) is not a usable serial speed."
         case .badConnectAttempts(let attempts):
             return "\(attempts) connection attempts is not a usable number."
+        case .badReadExtent(let address, let byteCount):
+            return "\(byteCount) bytes at \(address) is not a flash range to read."
+        case .noOutputPath:
+            return "No file was given for esptool to read flash into."
         }
     }
 }

@@ -110,6 +110,7 @@ public struct FlashPartProgress: Equatable, Sendable {
         case "bootloader": return "the bootloader"
         case "partitions": return "the partition table"
         case "boot_app0": return "the boot selector"
+        case "quake_pak": return "Quake's data"
         default: return role
         }
     }

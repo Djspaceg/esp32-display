@@ -82,6 +82,26 @@ public enum EsptoolOutput {
         return String(output[macRange]).lowercased()
     }
 
+    // MARK: - flash size
+
+    /// The chip's flash size in bytes, from `flash-id`'s
+    /// `Detected flash size: 32MB` line, or nil if it did not say.
+    ///
+    /// The last such line wins and only whole megabytes are read, the same
+    /// parse as `detect_flash_bytes` in tools/espdisp.py, so the app and the CLI
+    /// refuse the same 16 MiB board for Quake's 32 MiB region.
+    public static func detectedFlashBytes(in output: String) -> Int? {
+        guard let regex = try? NSRegularExpression(
+            pattern: "Detected flash size:\\s*(\\d+)\\s*MB")
+        else { return nil }
+        let range = NSRange(output.startIndex..<output.endIndex, in: output)
+        guard let match = regex.matches(in: output, range: range).last,
+              let sizeRange = Range(match.range(at: 1), in: output),
+              let megabytes = Int(output[sizeRange]), megabytes <= 1 << 20
+        else { return nil }
+        return megabytes * 0x100000
+    }
+
     // MARK: - progress
 
     /// A percentage esptool put in a line, 0...100, or nil.

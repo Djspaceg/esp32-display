@@ -1238,6 +1238,9 @@ struct PanelDetailView: View {
                     }
                 }
             }
+            if QuakeDataRow.isOffered(for: panel, manager: manager) {
+                QuakeDataRow(panel: panel, manager: manager)
+            }
             LabeledContent("Wireless updates") {
                 Text(manager.canPerform(
                     .wirelessFirmwareUpdate, for: panel.serviceName)
