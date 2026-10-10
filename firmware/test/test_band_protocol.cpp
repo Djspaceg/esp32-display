@@ -4444,7 +4444,7 @@ int main() {
 
     // Round-trip every gesture, so no value is unrepresentable on the wire.
     for (uint8_t raw = (uint8_t)deviceproto::TouchGesture::Tap;
-         raw <= (uint8_t)deviceproto::TouchGesture::LongPress; raw++) {
+         raw <= (uint8_t)deviceproto::TouchGesture::KnobPress; raw++) {
       uint8_t buf[deviceproto::TOUCH_PACKET_BYTES] = {0};
       deviceproto::writeTouch(buf, (deviceproto::TouchGesture)raw, raw, 1, 2, 0);
       deviceproto::TouchEvent got;
@@ -4470,8 +4470,14 @@ int main() {
     memcpy(badGesture, packet, sizeof(badGesture));
     badGesture[5] = 0;
     CHECK(!deviceproto::parseTouch(badGesture, sizeof(badGesture), ignored));
-    badGesture[5] = (uint8_t)deviceproto::TouchGesture::LongPress + 1;
+    badGesture[5] = (uint8_t)deviceproto::TouchGesture::KnobPress + 1;
     CHECK(!deviceproto::parseTouch(badGesture, sizeof(badGesture), ignored));
+
+    // The knob carrier's turn and press follow the touch gestures, as the
+    // sender numbers them; a sender that predates them refuses all three.
+    CHECK((uint8_t)deviceproto::TouchGesture::KnobClockwise == 7);
+    CHECK((uint8_t)deviceproto::TouchGesture::KnobCounterclockwise == 8);
+    CHECK((uint8_t)deviceproto::TouchGesture::KnobPress == 9);
 
     // CAP_TOUCH must not collide with an existing capability bit.
     CHECK(deviceproto::CAP_TOUCH == 1u << 9);

@@ -3,7 +3,15 @@
 // completed gestures to the sender.
 #pragma once
 
+#include <stdint.h>
+
 void serviceTouch();
+
+// The knob carrier's encoder detents and push-switch click, which the sender
+// maps to its own volume and mute. Sent on the touch gesture sequence, so the
+// sender's duplicate filter covers both.
+enum class KnobGesture : uint8_t { Clockwise, Counterclockwise, Press };
+void sendKnobGesture(KnobGesture gesture);
 
 // Reads any finger already on the glass just before the boot menu opens, so it
 // is ignored until lifted instead of being taken for a press on the menu.

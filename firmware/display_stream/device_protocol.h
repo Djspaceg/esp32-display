@@ -314,6 +314,13 @@ enum class TouchGesture : uint8_t {
   // it refuses the unknown value and drops the datagram, so no version bump is
   // needed in either direction.
   LongPress = 6,
+  // The knob carrier's encoder (one datagram per detent) and its push switch.
+  // A sender maps them to its own volume and mute whatever its touch preset,
+  // because that carrier has no speaker. Refused by a sender that predates
+  // them, like LongPress, so neither side needs a version bump. x and y are 0.
+  KnobClockwise = 7,
+  KnobCounterclockwise = 8,
+  KnobPress = 9,
 };
 
 // Bit 0 of the flags byte: the panel was in landscape when the gesture happened.
@@ -331,7 +338,7 @@ struct TouchEvent {
 
 inline bool validTouchGesture(uint8_t raw) {
   return raw >= (uint8_t)TouchGesture::Tap &&
-         raw <= (uint8_t)TouchGesture::LongPress;
+         raw <= (uint8_t)TouchGesture::KnobPress;
 }
 
 // ["ETCH"][version][gesture][sequence u16][x u16][y u16][flags][reserved]

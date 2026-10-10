@@ -125,12 +125,13 @@ static bool takeBootButtonEdge(BootButtonEdge &edge) {
 }
 
 // ---- Rotary encoder (knob carriers) ------------------------------------
-// Each completed detent is one step of the controls the BOOT button already
-// has: it moves the WiFi selector highlight like a short press does there, and
-// otherwise picks the high or low backlight preset the short press toggles
-// between. The knob's push switch is the carrier's BOOT button, so every press
-// tier above applies to it unchanged - except that a press during which the
-// knob turned performs no press action, because press-and-turn is one gesture.
+// The knob carrier has no speaker, so its knob drives the sender's volume:
+// each completed detent is reported as one knob turn, and its push switch -
+// the carrier's BOOT button - reports a short press as one knob press, which
+// the sender maps to mute. In the boot menu and the WiFi selector a detent
+// moves the highlight like a short press does there. Every other press tier
+// applies to the switch unchanged, except that a press during which the knob
+// turned performs no press action, because press-and-turn is one gesture.
 // Steps are decoded in the ISR (a fast turn can cross several detents inside
 // one render pass) and their net is applied from loop().
 static gpio_num_t encoderPinA = GPIO_NUM_NC;
@@ -149,6 +150,10 @@ static void IRAM_ATTR onEncoderEdge() {
   }
   portEXIT_CRITICAL_ISR(&encoderMux);
 }
+
+// Whether the short press is the knob's mute click rather than the backlight
+// toggle: on the knob carrier, whose push switch is its BOOT button.
+static bool knobDrivesVolume() { return bcfg != nullptr && bcfg->hasEncoder(); }
 
 static void initializeEncoderInput() {
   if (bcfg == nullptr || !bcfg->hasEncoder()) return;
@@ -210,6 +215,13 @@ static void applyShortPressDecision(
   for (uint8_t i = 0; i < decision.count; ++i) {
     switch (decision.effects[i]) {
       case buttonpress::ShortPressEffect::Preview:
+        // Mute is a toggle on the sender, so the click is sent at once and a
+        // double click's revert sends it again, leaving mute where it was.
+        if (knobDrivesVolume()) {
+          Serial.println("button: knob click -> mute");
+          sendKnobGesture(KnobGesture::Press);
+          break;
+        }
         shortPressPreviewOriginalBlLevel = userBlLevel;
         userBlLevel = blIsHigh() ? BL_LOW : BL_HIGH;
         applyBacklight();
@@ -217,11 +229,17 @@ static void applyShortPressDecision(
                       blIsHigh() ? "high" : "low");
         break;
       case buttonpress::ShortPressEffect::Commit:
+        if (knobDrivesVolume()) break;  // the sender keeps its own mute
         saveDisplayPrefs();
         Serial.printf("button: short press -> backlight %s (saved)\n",
                       blIsHigh() ? "high" : "low");
         break;
       case buttonpress::ShortPressEffect::Revert:
+        if (knobDrivesVolume()) {
+          Serial.println("button: double click -> mute restored");
+          sendKnobGesture(KnobGesture::Press);
+          break;
+        }
         userBlLevel = shortPressPreviewOriginalBlLevel;
         applyBacklight();
         Serial.printf(
@@ -278,7 +296,8 @@ static void handleShortRelease(uint32_t releasedAt) {
   }
 #endif  // ESPDISP_BOOT_MENU_RUNTIME
 
-  const bool previewEnabled = fixedBlLevel == 0;
+  // A fixed backlight disables only the backlight toggle, not the knob's mute.
+  const bool previewEnabled = fixedBlLevel == 0 || knobDrivesVolume();
   if (!previewEnabled) {
     Serial.printf("button: short press ignored (backlight fixed at %u)\n",
                   fixedBlLevel);
@@ -323,15 +342,16 @@ static void activateSelector(uint32_t pressStartedAt) {
 }
 
 // A turn this large between two loop passes is a stall, not intent; the
-// selector still moves at most this many rows for it.
-static const int16_t MAX_SELECTOR_STEPS_PER_PASS = 4;
+// selector still moves at most this many rows for it, and the sender's volume
+// this many steps.
+static const int16_t MAX_KNOB_STEPS_PER_PASS = 4;
 
 static void applyEncoderTurn(int16_t steps) {
   Serial.printf("knob: turn %+d\n", (int)steps);
   const int8_t direction = steps > 0 ? 1 : -1;
+  int16_t count = steps > 0 ? steps : (int16_t)-steps;
+  if (count > MAX_KNOB_STEPS_PER_PASS) count = MAX_KNOB_STEPS_PER_PASS;
   if (selectorOwnsInput()) {
-    int16_t count = steps > 0 ? steps : (int16_t)-steps;
-    if (count > MAX_SELECTOR_STEPS_PER_PASS) count = MAX_SELECTOR_STEPS_PER_PASS;
 #if defined(ESPDISP_BOOT_MENU_RUNTIME)
     if (bootMenuActive) {
       // A turn is a gesture, however many detents it crossed: the turn that
@@ -347,25 +367,12 @@ static void applyEncoderTurn(int16_t steps) {
     for (int16_t i = 0; i < count; ++i) moveWifiSelector(direction);
     return;
   }
-  if (surveyActive) {
-    Serial.println("knob: turn ignored during signal survey");
-    return;
-  }
-  if (fixedBlLevel != 0) {
-    Serial.printf("knob: turn ignored (backlight fixed at %u)\n",
-                  fixedBlLevel);
-    return;
-  }
-  // A short press still waiting out its double-press window commits first,
-  // so the knob never lands on a level the pending decision then overrides.
+  // A click still waiting out its double-press window is settled first, so a
+  // click, a turn and a click are two mutes rather than a double press.
   applyShortPressDecision(shortPressTracker.flush());
-  const uint8_t want = direction > 0 ? BL_HIGH : BL_LOW;
-  if (userBlLevel == want) return;
-  userBlLevel = want;
-  applyBacklight();
-  saveDisplayPrefs();
-  Serial.printf("knob: turn -> backlight %s (saved)\n",
-                blIsHigh() ? "high" : "low");
+  const KnobGesture gesture =
+      direction > 0 ? KnobGesture::Clockwise : KnobGesture::Counterclockwise;
+  for (int16_t i = 0; i < count; ++i) sendKnobGesture(gesture);
 }
 
 // Applies any detents since the last pass; returns whether there were any.

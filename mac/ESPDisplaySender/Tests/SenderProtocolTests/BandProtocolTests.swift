@@ -605,8 +605,8 @@ final class DeviceProtocolTests: XCTestCase {
         XCTAssertNotNil(DeviceProtocol.parseTouch(packet()))
         XCTAssertNil(DeviceProtocol.parseTouch(packet(magic: "ETCX")))
         XCTAssertNil(DeviceProtocol.parseTouch(packet(version: 99)))
-        // Gesture 0 and 7 sit either side of the defined range, which now runs to
-        // 6 (long press). An unknown gesture is refused rather than ignored:
+        // Gesture 0 and 10 sit either side of the defined range, which now runs
+        // to 9 (the knob's press). An unknown gesture is refused rather than ignored:
         // acting on a byte this parser does not understand is how a future
         // firmware's new gesture would get silently mapped onto the wrong action.
         //
@@ -615,7 +615,11 @@ final class DeviceProtocolTests: XCTestCase {
         // it cannot name, rather than guessing.
         XCTAssertNil(DeviceProtocol.parseTouch(packet(gesture: 0)))
         XCTAssertNotNil(DeviceProtocol.parseTouch(packet(gesture: 6)))
-        XCTAssertNil(DeviceProtocol.parseTouch(packet(gesture: 7)))
+        XCTAssertEqual(DeviceProtocol.parseTouch(packet(gesture: 7))?.gesture, .knobClockwise)
+        XCTAssertEqual(
+            DeviceProtocol.parseTouch(packet(gesture: 8))?.gesture, .knobCounterclockwise)
+        XCTAssertEqual(DeviceProtocol.parseTouch(packet(gesture: 9))?.gesture, .knobPress)
+        XCTAssertNil(DeviceProtocol.parseTouch(packet(gesture: 10)))
         XCTAssertNil(DeviceProtocol.parseTouch(packet(length: 13)))
         XCTAssertNil(DeviceProtocol.parseTouch(packet(length: 15)))
     }

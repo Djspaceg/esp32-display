@@ -85,6 +85,8 @@ enum TouchAction: Equatable, Sendable {
     case cycleSource(forward: Bool)
     case mediaPlayPause
     case volume(up: Bool)
+    /// Toggle this Mac's mute, the way the keyboard's mute key does.
+    case mute
     case track(next: Bool)
     /// Step through the windows currently on screen.
     case cycleWindow(forward: Bool)
@@ -100,6 +102,7 @@ enum TouchAction: Equatable, Sendable {
             return forward ? "Next screen" : "Previous screen"
         case .mediaPlayPause: return "Play or pause"
         case .volume(let up): return up ? "Volume up" : "Volume down"
+        case .mute: return "Mute or unmute"
         case .track(let next): return next ? "Next track" : "Previous track"
         case .cycleWindow(let forward):
             return forward ? "Next window" : "Previous window"
@@ -132,7 +135,7 @@ enum TouchAction: Equatable, Sendable {
         of gesture: DeviceProtocol.TouchGesture, landscape: Bool
     ) -> SwipeVector? {
         switch gesture {
-        case .tap, .longPress:
+        case .tap, .longPress, .knobClockwise, .knobCounterclockwise, .knobPress:
             return nil
         case .swipeUp:
             return SwipeVector(
@@ -157,6 +160,15 @@ enum TouchAction: Equatable, Sendable {
         preset: GesturePreset,
         landscape: Bool
     ) -> TouchAction? {
+        // The knob is a volume knob under every preset: its carrier has no
+        // speaker, and a preset is a choice about what the glass does.
+        switch gesture {
+        case .knobClockwise: return .volume(up: true)
+        case .knobCounterclockwise: return .volume(up: false)
+        case .knobPress: return .mute
+        case .tap, .swipeLeft, .swipeRight, .swipeUp, .swipeDown, .longPress:
+            break
+        }
         switch preset {
         case .sourceCycling:
             // Deliberately axis-blind, preserving the original behaviour: every
@@ -174,7 +186,8 @@ enum TouchAction: Equatable, Sendable {
             // to those visible directions; orientation must not swap their jobs.
             switch gesture {
             case .tap: return .mediaPlayPause
-            case .longPress: return nil
+            case .longPress, .knobClockwise, .knobCounterclockwise, .knobPress:
+                return nil
             case .swipeRight: return .track(next: true)
             case .swipeLeft: return .track(next: false)
             case .swipeUp: return .volume(up: true)
@@ -230,6 +243,9 @@ extension GestureHelpRow {
         case .swipeDown: return "Swipe down"
         case .swipeLeft: return "Swipe left"
         case .swipeRight: return "Swipe right"
+        case .knobClockwise: return "Turn the knob clockwise"
+        case .knobCounterclockwise: return "Turn the knob counterclockwise"
+        case .knobPress: return "Press the knob"
         }
     }
 

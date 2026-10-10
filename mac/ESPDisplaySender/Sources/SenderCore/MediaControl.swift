@@ -22,6 +22,7 @@ enum MediaControl {
         case previousTrack
         case volumeUp
         case volumeDown
+        case mute
     }
 
     /// Why a key could not be sent, or nil on success. A message rather than a
@@ -74,6 +75,7 @@ enum MediaControl {
         switch key {
         case .volumeUp: return 0        // NX_KEYTYPE_SOUND_UP
         case .volumeDown: return 1      // NX_KEYTYPE_SOUND_DOWN
+        case .mute: return 7            // NX_KEYTYPE_MUTE
         case .playPause: return 16      // NX_KEYTYPE_PLAY
         case .nextTrack: return 17      // NX_KEYTYPE_NEXT
         case .previousTrack: return 18  // NX_KEYTYPE_PREVIOUS

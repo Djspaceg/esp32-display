@@ -78,6 +78,33 @@ static void sendTouchEvent(touchgesture::Gesture gesture, int16_t x, int16_t y) 
                 touchgesture::gestureName(gesture), x, y, touchSequence);
 }
 
+void sendKnobGesture(KnobGesture gesture) {
+  deviceproto::TouchGesture wire = deviceproto::TouchGesture::KnobPress;
+  const char *name = "press";
+  switch (gesture) {
+    case KnobGesture::Clockwise:
+      wire = deviceproto::TouchGesture::KnobClockwise;
+      name = "clockwise";
+      break;
+    case KnobGesture::Counterclockwise:
+      wire = deviceproto::TouchGesture::KnobCounterclockwise;
+      name = "counterclockwise";
+      break;
+    case KnobGesture::Press:
+      break;
+  }
+  if (hbPort == 0) {
+    Serial.printf("knob: %s ignored, no sender\n", name);
+    return;
+  }
+  uint8_t packet[deviceproto::TOUCH_PACKET_BYTES];
+  deviceproto::writeTouch(
+      packet, wire, ++touchSequence, 0, 0,
+      panelLandscape ? deviceproto::TOUCH_FLAG_LANDSCAPE : (uint8_t)0);
+  sendToSender(packet, sizeof(packet));
+  Serial.printf("knob: %s seq=%u -> sender\n", name, touchSequence);
+}
+
 // Poll the touch controller and act on whatever the finger turned out to mean.
 //
 // Two behaviours share one finger, and the order between them matters. While the

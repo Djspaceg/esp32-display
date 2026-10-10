@@ -309,6 +309,22 @@ public enum DeviceProtocol {
         /// nothing, and `parseTouch` rejects the value it never sends, so both
         /// directions fail closed with no version bump.
         case longPress = 6
+        /// The knob carrier's encoder, one event per detent, and its push
+        /// switch. Not touch gestures: that carrier has no speaker, so the
+        /// sender maps them to this Mac's volume and mute under every preset.
+        /// Refused by older senders like `longPress`, so no version bump.
+        case knobClockwise = 7
+        case knobCounterclockwise = 8
+        case knobPress = 9
+
+        /// Whether this comes from the knob rather than the touch screen.
+        public var isKnob: Bool {
+            switch self {
+            case .knobClockwise, .knobCounterclockwise, .knobPress: return true
+            case .tap, .swipeLeft, .swipeRight, .swipeUp, .swipeDown, .longPress:
+                return false
+            }
+        }
     }
 
     public struct TouchEvent: Equatable, Sendable {

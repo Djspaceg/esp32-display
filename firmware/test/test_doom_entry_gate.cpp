@@ -29,6 +29,7 @@
 #include "../display_stream/boot_menu.h"
 #include "../display_stream/input_touch.h"
 #include "../display_stream/boot_menu_model.h"
+#include "../display_stream/device_protocol.h"
 #include "../display_stream/input_button.h"
 #include "../display_stream/wifi_selector_model.h"
 
@@ -169,6 +170,21 @@ static const uint32_t TAP_MS = 80;
 static std::vector<ScriptedInput> script;
 static void bootIsrAt(bool down);
 
+// One knob detent through the real encoder interrupt: the decoder counts a
+// detent on each A change, clockwise when A and B then differ, and a B-only
+// change counts nothing. So B is first lined up with A (clockwise) or set
+// apart from it (counterclockwise), and the A change that follows is the
+// detent.
+static void knobDetent(bool clockwise) {
+  const int a = bcfg->pinEncoderA, b = bcfg->pinEncoderB;
+  if ((levelOf(a) == levelOf(b)) != clockwise) {
+    fakePinLevel[b] = levelOf(b) ? 0 : 1;
+    fakePinIsr[b]();
+  }
+  fakePinLevel[a] = levelOf(a) ? 0 : 1;
+  fakePinIsr[a]();
+}
+
 // A menu that is never left would spin forever on the fake clock. The menu loop
 // polls these fakes every pass, so the guard fires there and the test fails
 // with a message instead of hanging the suite.
@@ -181,20 +197,8 @@ static void deliverScript(ScriptedInput::Kind wanted) {
     (void)wanted;
     script.erase(script.begin());
     if (next.kind == ScriptedInput::KnobTurn) {
-      // x detents clockwise, through the real encoder interrupt: the decoder
-      // counts a detent on each A change, clockwise when A and B then differ,
-      // and a B-only change counts nothing.
-      for (int16_t i = 0; i < next.x; ++i) {
-        const int a = bcfg->pinEncoderA, b = bcfg->pinEncoderB;
-        // Line B up with A first (counts nothing), so the A change that
-        // follows leaves them different: one clockwise detent.
-        if (levelOf(a) != levelOf(b)) {
-          fakePinLevel[b] = levelOf(b) ? 0 : 1;
-          fakePinIsr[b]();
-        }
-        fakePinLevel[a] = levelOf(a) ? 0 : 1;
-        fakePinIsr[a]();
-      }
+      // x detents clockwise.
+      for (int16_t i = 0; i < next.x; ++i) knobDetent(true);
     } else {
       bootIsrAt(next.kind == ScriptedInput::BootDown);
     }
@@ -262,7 +266,11 @@ bool touchWakeActive() { return false; }
 bool displaySleeping = false;
 extern const uint32_t TOUCH_WAKE_MS = 8000;
 uint16_t hbPort = 0;
-void sendToSender(const uint8_t *, size_t) {}
+// Every datagram the panel sends, so the knob's reports can be read back.
+static std::vector<std::vector<uint8_t>> sentPackets;
+void sendToSender(const uint8_t *data, size_t length) {
+  sentPackets.emplace_back(data, data + length);
+}
 touchmap::Calibration touchCalibration = touchmap::GT911_ON_JD9365_4C;
 bool panelMirrorX = false;
 uint8_t addressedPanelRotation() { return 0; }
@@ -1318,6 +1326,100 @@ static int nonQuakeBoardNeverReadsThePak() {
   return 0;
 }
 
+// The knob carrier has no speaker, so its knob drives the Mac's volume: each
+// detent reports one knob turn to the sender, a click reports one knob press
+// (the Mac's mute toggle), and neither moves or saves the backlight the knob
+// used to step. On the carrier's real profile, through its encoder and BOOT
+// interrupts and the real input_touch.cpp sender.
+static std::vector<deviceproto::TouchGesture> sentKnobGestures(
+    std::vector<uint16_t> *sequences = nullptr) {
+  std::vector<deviceproto::TouchGesture> gestures;
+  for (const std::vector<uint8_t> &packet : sentPackets) {
+    deviceproto::TouchEvent event;
+    if (!deviceproto::parseTouch(packet.data(), packet.size(), event)) continue;
+    gestures.push_back(event.gesture);
+    if (sequences != nullptr) sequences->push_back(event.sequence);
+  }
+  return gestures;
+}
+
+static int knobTurnIsVolumeAndClickIsMute() {
+  using deviceproto::TouchGesture;
+  const board::Variant savedVariant = boardVariant;
+  const board::Config *savedConfig = bcfg;
+  boardVariant = board::Variant::ElecrowKnob128;
+  bcfg = &board::configFor(boardVariant);
+  fakePinLevel.clear();
+  fakePinIsr.clear();
+  initializeButtonInput();
+  resetObservations();
+  hbPort = 4210;
+  sentPackets.clear();
+  const uint8_t blBefore = userBlLevel;
+
+  // Two detents clockwise, then one back: one report per detent, on the
+  // touch sequence so the sender's duplicate filter covers them.
+  knobDetent(true);
+  knobDetent(true);
+  handleButton();
+  knobDetent(false);
+  handleButton();
+  std::vector<uint16_t> sequences;
+  std::vector<TouchGesture> got = sentKnobGestures(&sequences);
+  CHECK(got.size() == 3);
+  CHECK(got[0] == TouchGesture::KnobClockwise);
+  CHECK(got[1] == TouchGesture::KnobClockwise);
+  CHECK(got[2] == TouchGesture::KnobCounterclockwise);
+  CHECK(sequences[1] == (uint16_t)(sequences[0] + 1));
+  CHECK(sequences[2] == (uint16_t)(sequences[1] + 1));
+
+  // A stall that piles up detents still sends a bounded burst.
+  sentPackets.clear();
+  for (int i = 0; i < 9; ++i) knobDetent(true);
+  handleButton();
+  CHECK(sentKnobGestures().size() == 4);
+
+  // A click is one mute toggle, and its double-press window closing sends
+  // nothing more.
+  sentPackets.clear();
+  shortPress();
+  got = sentKnobGestures();
+  CHECK(got.size() == 1 && got[0] == TouchGesture::KnobPress);
+  fakeNow += 1000;
+  handleButton();
+  CHECK(sentKnobGestures().size() == 1);
+
+  // A double click still opens the signal survey, and toggles mute twice, so
+  // mute ends where it started.
+  sentPackets.clear();
+  shortPress();
+  shortPress();
+  got = sentKnobGestures();
+  CHECK(got.size() == 2);
+  CHECK(got[0] == TouchGesture::KnobPress && got[1] == TouchGesture::KnobPress);
+  CHECK(surveyActive);
+  surveyActive = false;
+
+  // Nothing the knob did touched the backlight.
+  CHECK(userBlLevel == blBefore);
+  CHECK(displayPrefSaves == 0);
+  CHECK(Serial.captured.find("backlight") == std::string::npos);
+
+  // With no sender yet there is nowhere to report to; the log says so.
+  sentPackets.clear();
+  hbPort = 0;
+  knobDetent(true);
+  handleButton();
+  CHECK(sentPackets.empty());
+  CHECK(Serial.captured.find("ignored, no sender") != std::string::npos);
+
+  boardVariant = savedVariant;
+  bcfg = savedConfig;
+  fakePinIsr.clear();
+  initializeButtonInput();
+  return 0;
+}
+
 int main() {
   bcfg = &board::configFor(boardVariant);
   PANEL_GEOMETRY = {bcfg->panel->width, bcfg->panel->height};
@@ -1358,6 +1460,7 @@ int main() {
   if (silentRestingFingerStillStreams() != 0) return 1;
   if (fingerLiftedDuringPrimeThenTapCounts() != 0) return 1;
   if (knobWorksAfterPressAndTurn() != 0) return 1;
+  if (knobTurnIsVolumeAndClickIsMute() != 0) return 1;
   if (bootPressesThenHoldChooseDoom() != 0) return 1;
   if (touchCancelRowThenStartChoosesDoom() != 0) return 1;
   if (touchAloneDrivesTheMenuToStreaming() != 0) return 1;

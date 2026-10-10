@@ -3,7 +3,8 @@
 // that reopens the boot-mode menu where it offers more than streaming. Edges
 // are captured by an ISR so rendering cannot swallow one half of a double
 // press. A carrier rotary encoder, where present, steps the same selector and
-// backlight controls. The WiFi selector and the boot menu share one scheme.
+// otherwise the sender's volume, and its push switch's short press is the
+// sender's mute. The WiFi selector and the boot menu share one scheme.
 #pragma once
 
 #include <stdint.h>

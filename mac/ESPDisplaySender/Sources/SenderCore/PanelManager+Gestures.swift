@@ -56,6 +56,8 @@ extension PanelManager {
             sendMediaKey(.playPause, for: serviceName)
         case .volume(let up):
             sendMediaKey(up ? .volumeUp : .volumeDown, for: serviceName)
+        case .mute:
+            sendMediaKey(.mute, for: serviceName)
         case .track(let next):
             sendMediaKey(next ? .nextTrack : .previousTrack, for: serviceName)
         case .cycleWindow(let forward):
