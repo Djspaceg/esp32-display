@@ -43,6 +43,13 @@ final class PanelManager: ObservableObject {
         MediaControl.requestAuthorizationOnce()
     }
     var mediaKeySender: (MediaControl.Key) -> String? = { MediaControl.send($0) }
+    /// Called when a notice the user must act on first appears. The sender
+    /// usually runs with its window closed, so the window controller uses this
+    /// to bring the window forward without taking focus.
+    var onAttentionNeeded: (() -> Void)?
+    /// The Accessibility notice was dismissed; it stays down for this launch
+    /// rather than coming back on the next detent of the same turn.
+    var accessibilityNoticeDismissed = false
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []
     /// What each source currently reports under an issue kind, in report order.
@@ -589,6 +596,7 @@ final class PanelManager: ObservableObject {
     /// Dismiss a problem the user has read. Identical to `resolve`, but named
     /// for the UI so the intent at each call site is obvious.
     func dismissIssue(_ issue: AppIssue) {
+        if issue == .accessibility { accessibilityNoticeDismissed = true }
         resolve(issue)
     }
 

@@ -93,6 +93,16 @@ enum TouchAction: Equatable, Sendable {
     /// Abandon a window pick and show the whole screen again.
     case showFullDisplay
 
+    /// Whether this goes through a media key, and so needs the Accessibility
+    /// grant.
+    var sendsMediaKey: Bool {
+        switch self {
+        case .mediaPlayPause, .volume, .mute, .track: return true
+        case .togglePause, .cycleSource, .cycleWindow, .showFullDisplay:
+            return false
+        }
+    }
+
     /// How this action reads in the help readout. Phrased as an effect, because
     /// the row already names the gesture.
     var summary: String {

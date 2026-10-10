@@ -1120,8 +1120,15 @@ struct PanelDetailView: View {
                         systemImage: "lock.fill")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Button("Allow…") { MediaControl.requestAuthorization() }
-                        .controlSize(.small)
+                    // The prompt was raised when the preset was chosen, and
+                    // macOS never shows it again once declined, so this opens
+                    // the settings pane instead of asking again.
+                    Button("Open System Settings…") {
+                        if let url = AppIssue.accessibility.settingsURL {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .controlSize(.small)
                 }
             }
         }
@@ -1820,11 +1827,22 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
     private var titleObserver: AnyCancellable?
     private let settingsWindow: SettingsWindowController
     private var settingsObserver: AnyCancellable?
+    private var activationObserver: AnyCancellable?
 
     init(manager: PanelManager) {
         self.manager = manager
         settingsWindow = SettingsWindowController(manager: manager)
         super.init()
+        // A notice the user must act on (the Accessibility grant media keys
+        // need) is no use behind a closed window, so it brings the window
+        // forward - without activating the app or making the window key, so
+        // whatever the user is typing into keeps focus.
+        manager.onAttentionNeeded = { [weak self] in self?.presentWithoutFocus() }
+        // Back from System Settings with the grant: clear the notice.
+        activationObserver = NotificationCenter.default
+            .publisher(for: NSApplication.didBecomeActiveNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.manager.refreshMediaKeyAuthorization() }
         settingsWindow.onClose = { [weak self] in
             self?.enterAccessoryModeWhenNoWindowsAreVisible()
         }
@@ -1851,6 +1869,15 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
         window?.orderOut(nil)
         manager.setPreviewVisible(false)
         enterAccessoryModeWhenNoWindowsAreVisible()
+    }
+
+    /// Put the window on screen for a notice, leaving focus where it is.
+    func presentWithoutFocus() {
+        guard !isVisible else { return }
+        mainMenu.installIfNeeded()
+        let window = makeWindowIfNeeded()
+        manager.setPreviewVisible(true)
+        window.orderFrontRegardless()
     }
 
     func show() {

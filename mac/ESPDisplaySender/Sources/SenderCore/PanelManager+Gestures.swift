@@ -45,20 +45,16 @@ extension PanelManager {
         // the packet is wrong, the only symptom is that nothing happens, which
         // is indistinguishable from the panel never having sent anything.
         print("[\(serviceName)] touch \(touch.gesture) -> \(action)")
-        // The knob is a volume knob under every preset, so the Accessibility
-        // grant it needs is asked for when it is first used rather than only
-        // when the multimedia preset is chosen - once per launch, so a turn
-        // does not stack prompts. macOS never asks again once the prompt is
-        // declined, so a standing notice says what is wrong and opens the
-        // settings pane; it replaces the per-detent failure alert.
-        if touch.gesture.isKnob {
+        // Media keys need the Accessibility grant. It is asked for when a
+        // gesture first needs it - the knob is a volume knob under every
+        // preset - once per launch, so a turn does not stack prompts. macOS
+        // never asks again once the prompt is declined, so a standing notice
+        // says what is wrong and opens the settings pane; it replaces the
+        // failure alert a refused key used to raise on every detent or swipe.
+        if action.sendsMediaKey {
             guard mediaKeysAuthorized() else {
                 requestMediaKeyAuthorization()
-                report(.accessibility, detail:
-                    "The knob on \(panel.displayName) changes this Mac's volume "
-                    + "and mute, which needs Accessibility permission. Turn on "
-                    + "ESPDisplaySender under System Settings > Privacy & "
-                    + "Security > Accessibility, then turn the knob again.")
+                reportMissingMediaKeyGrant()
                 return
             }
             resolve(.accessibility)
@@ -143,6 +139,25 @@ extension PanelManager {
         persistIfNeeded(force: true)
     }
 
+    /// Raise the Accessibility notice, unless the user dismissed it this
+    /// launch, and ask for the window the first time it appears.
+    private func reportMissingMediaKeyGrant() {
+        guard !accessibilityNoticeDismissed else { return }
+        let firstReport = !issues.contains { $0.issue == .accessibility }
+        report(.accessibility, detail:
+            "Volume, mute and playback from a display - its knob, or the "
+            + "multimedia gestures - need Accessibility permission. Turn on "
+            + "ESPDisplaySender under System Settings > Privacy & Security > "
+            + "Accessibility, then try again.")
+        if firstReport { onAttentionNeeded?() }
+    }
+
+    /// Withdraw the Accessibility notice once the grant is there, so coming
+    /// back from System Settings clears it without another gesture.
+    func refreshMediaKeyAuthorization() {
+        if mediaKeysAuthorized() { resolve(.accessibility) }
+    }
+
     /// Choose which gesture bindings a panel uses.
     ///
     /// The Accessibility prompt is raised here rather than at the first gesture,
@@ -153,8 +168,8 @@ extension PanelManager {
         guard panels.contains(where: { $0.serviceName == serviceName }) else { return }
         updatePanel(serviceName) { $0.gesturePreset = preset }
         persistIfNeeded(force: true)
-        if preset == .multimedia, !MediaControl.isAuthorized {
-            MediaControl.requestAuthorization()
+        if preset == .multimedia, !mediaKeysAuthorized() {
+            requestMediaKeyAuthorization()
         }
     }
 
