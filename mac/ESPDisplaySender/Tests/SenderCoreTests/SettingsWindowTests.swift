@@ -173,45 +173,71 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(manager.savedCredential(for: "Studio WiFi")?.password, "rotated")
     }
 
-    /// Every AppKit control in each pane lies inside the window. The Identify
-    /// stepper used to be laid out as a whole form row inside the value
-    /// column, which put its arrows past the window's right edge.
+    /// Every AppKit control in each pane lies within the window's width, at
+    /// the window's default size and at its minimum. The Identify stepper
+    /// used to be laid out as a whole form row inside the value column, which
+    /// put its arrows past the right edge, and at the old 640 pt minimum the
+    /// tile-quality segments ran 12 pt past it. Only the horizontal is
+    /// checked: the form scrolls, so a control below the fold is no defect.
+    ///
+    /// The WiFi pane carries a 32-byte open network. Its row buttons are drawn
+    /// by SwiftUI rather than AppKit, so whether "Edit…" keeps its width is
+    /// not measurable here; that one was checked in the live window.
     func testEveryPaneKeepsItsControlsInsideTheWindow() throws {
+        let longName = "Workshop Upstairs Mesh Extender!"
+        XCTAssertEqual(longName.utf8.count, 32)
         let (manager, _) = makeManager(saved: ["Studio WiFi"])
-        for pane in SettingsPane.allCases {
-            let navigation = SettingsNavigation()
-            navigation.show(pane)
-            let size = NSRect(x: 0, y: 0, width: 720, height: 620)
-            let host = NSHostingView(rootView: SettingsView(
-                manager: manager, navigation: navigation)
-                .frame(width: size.width, height: size.height))
-            host.frame = size
-            let window = NSWindow(
-                contentRect: size, styleMask: [.borderless],
-                backing: .buffered, defer: false)
-            window.isReleasedWhenClosed = false
-            window.contentView = host
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.4))
-            host.layoutSubtreeIfNeeded()
-            var controls: [NSView] = []
-            var queue: [NSView] = [host]
-            while let view = queue.popLast() {
-                if view is NSStepper || view is NSPopUpButton || view is NSSlider {
-                    controls.append(view)
+        let store = InMemoryWifiCredentials([
+            SavedWiFiCredential(ssid: "Studio WiFi", password: "pw"),
+            SavedWiFiCredential(ssid: longName, password: "", isOpenNetwork: true),
+        ])
+        manager.useWifiCredentials(store)
+        manager.applySavedNetworkNames(store.names)
+        XCTAssertTrue(manager.savedNetworkNames.contains(longName))
+
+        let minimum = SettingsWindowController.minimumContentSize
+        for size in [CGSize(width: 720, height: 620), minimum] {
+            for pane in SettingsPane.allCases {
+                let navigation = SettingsNavigation()
+                navigation.show(pane)
+                let rect = NSRect(origin: .zero, size: size)
+                let host = NSHostingView(rootView: SettingsView(
+                    manager: manager, navigation: navigation)
+                    .frame(width: size.width, height: size.height))
+                host.frame = rect
+                let window = NSWindow(
+                    contentRect: rect, styleMask: [.borderless],
+                    backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = host
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.4))
+                host.layoutSubtreeIfNeeded()
+                var controls: [NSView] = []
+                var queue: [NSView] = [host]
+                while let view = queue.popLast() {
+                    // A hidden scroller has a zero-height frame at -9.
+                    if view is NSControl, !(view is NSScroller) { controls.append(view) }
+                    queue.append(contentsOf: view.subviews)
                 }
-                queue.append(contentsOf: view.subviews)
+                let label = "\(pane.title) at \(Int(size.width))x\(Int(size.height))"
+                switch pane {
+                case .general:
+                    XCTAssertTrue(controls.contains { $0 is NSStepper }, "no stepper on \(label)")
+                case .streaming:
+                    XCTAssertEqual(
+                        controls.filter { $0 is NSSlider }.count, 2, "no sliders on \(label)")
+                case .wifiNetworks:
+                    break
+                }
+                for control in controls where control.window != nil {
+                    let frame = control.convert(control.bounds, to: host)
+                    XCTAssertTrue(
+                        frame.minX >= -0.5 && frame.maxX <= host.bounds.maxX + 0.5,
+                        "\(type(of: control)) on \(label) lies at \(frame), "
+                            + "outside the window's width \(host.bounds.width)")
+                }
+                window.close()
             }
-            if pane == .general {
-                XCTAssertTrue(controls.contains { $0 is NSStepper }, "no stepper rendered")
-            }
-            for control in controls {
-                let frame = control.convert(control.bounds, to: host)
-                XCTAssertTrue(
-                    host.bounds.insetBy(dx: -0.5, dy: -0.5).contains(frame),
-                    "\(type(of: control)) on \(pane.title) lies at \(frame), "
-                        + "outside the window \(host.bounds)")
-            }
-            window.close()
         }
     }
 

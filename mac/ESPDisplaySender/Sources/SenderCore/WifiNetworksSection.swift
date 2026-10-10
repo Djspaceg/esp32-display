@@ -121,14 +121,17 @@ struct WifiNetworksSection: View {
     private func networkRow(_ ssid: String, index: Int) -> some View {
         LabeledContent {
             HStack(spacing: 8) {
+                // The name is the one thing in the row that gives way, by
+                // truncating in the middle; everything after it keeps its
+                // size. Otherwise a long name squeezed "Edit…" to "E…".
                 Text(ssid)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .layoutPriority(1)
                 if openNetworks.contains(ssid) {
                     Text("Open")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize()
                 }
                 Spacer(minLength: 8)
                 Button("Move Up", systemImage: "chevron.up") {
@@ -136,6 +139,7 @@ struct WifiNetworksSection: View {
                     manager.moveSavedNetwork(ssid, by: -1)
                 }
                 .labelStyle(.iconOnly)
+                .fixedSize()
                 .disabled(index == 0)
                 .help("Move \"\(ssid)\" one slot earlier")
                 Button("Move Down", systemImage: "chevron.down") {
@@ -143,6 +147,7 @@ struct WifiNetworksSection: View {
                     manager.moveSavedNetwork(ssid, by: 1)
                 }
                 .labelStyle(.iconOnly)
+                .fixedSize()
                 .disabled(index == manager.savedNetworkNames.count - 1)
                 .help("Move \"\(ssid)\" one slot later")
                 Button("Edit…") {
@@ -152,14 +157,13 @@ struct WifiNetworksSection: View {
                         original: ssid, ssid: ssid,
                         isOpenNetwork: saved?.isOpenNetwork ?? false)
                 }
-                // Kept whole: beside a long network name it was the one
-                // squeezed, to "E…", where the name can truncate instead.
                 .fixedSize()
                 .disabled(editor != nil)
                 Button("Remove", systemImage: "minus.circle") {
                     pendingRemoval = ssid
                 }
                 .labelStyle(.iconOnly)
+                .fixedSize()
                 .help("Remove \"\(ssid)\" from this Mac")
             }
         } label: {

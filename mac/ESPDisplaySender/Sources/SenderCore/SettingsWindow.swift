@@ -320,6 +320,8 @@ private struct GeneralSettingsPane: View {
                     HStack(spacing: 8) {
                         Text("\(manager.settings.identifySeconds) seconds")
                             .monospacedDigit()
+                            // Read out as the stepper's value instead.
+                            .accessibilityHidden(true)
                         Stepper(
                             "Identify duration in seconds",
                             value: Binding(
@@ -329,6 +331,8 @@ private struct GeneralSettingsPane: View {
                                 }),
                             in: SenderSettings.identifyRange)
                             .labelsHidden()
+                            .accessibilityValue(
+                                "\(manager.settings.identifySeconds) seconds")
                     }
                 }
             } header: {
@@ -511,6 +515,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     /// accessory when nothing else is on screen.
     var onClose: () -> Void = {}
 
+    /// The narrowest the window goes: the widest card row, the tile-quality
+    /// segments, still fits beside the sidebar. At 640 they ran 12 pt past
+    /// the right edge.
+    static let minimumContentSize = NSSize(width: 680, height: 420)
+
     init(manager: PanelManager) {
         self.manager = manager
     }
@@ -535,7 +544,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.setContentSize(NSSize(width: 720, height: 620))
         // The window owns the minimum, for the reason `ManagerWindowController`
         // gives: a SwiftUI minimum is reported up with the titlebar added.
-        window.contentMinSize = NSSize(width: 640, height: 420)
+        window.contentMinSize = Self.minimumContentSize
         window.styleMask = [
             .titled, .closable, .miniaturizable, .resizable, .fullSizeContentView,
         ]
