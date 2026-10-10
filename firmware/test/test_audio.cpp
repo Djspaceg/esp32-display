@@ -727,10 +727,31 @@ static int testToneMeterLevels() {
   return 0;
 }
 
+// A tone too short for a measured window says so rather than blaming the
+// microphones, and a 100 ms tone still plays and completes.
+static int testShortToneIsNotMeasured() {
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audioengine::stop();
+  audiotransport::stop();
+  CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
+  CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  audiohost::setI2sLoopback(true);
+  CHECK(startToneWithEngineRunning(100) == nullptr);
+  finishTone();
+  CHECK(!audioToneTestRunning());
+  CHECK(!lastAudioToneLoopback().measured);
+  CHECK(!audio::sharedCodecBackend().running());
+  audioengine::stop();
+  audiotransport::stop();
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
 // The speaker test hears itself: with the microphones receiving what the
-// speaker plays, the tone stands far above the silence played before it, and
-// the report reads the amplifier enable back high. With nothing reaching
-// the microphones (no speaker), the tone does not rise at all.
+// speaker plays, the tone stands far above the silence played before it and
+// falls back once the amplifier is off. With nothing reaching the
+// microphones (no speaker), the tone does not rise at all.
 static int testToneMeasuresItsOwnLoopback() {
   const board::AudioConfig *audio =
       board::generatedAudioConfig(board::Variant::LcdSt77916);
@@ -746,6 +767,10 @@ static int testToneMeasuresItsOwnLoopback() {
     audiohost::setI2sLoopback(heard == 1);
     CHECK(startToneWithEngineRunning(1000) == nullptr);
     CHECK(audio::sharedCodecBackend().ampEnableLevel() == HIGH);
+    if (heard == 1) {
+      // The fake microphones hear the speaker only while its amp is on.
+      audiohost::setI2sLoopbackFollowsPin(audio->pinAmpEnable);
+    }
     finishTone();
     CHECK(!audioToneTestRunning());
     const AudioToneLoopback result = lastAudioToneLoopback();
@@ -753,6 +778,8 @@ static int testToneMeasuresItsOwnLoopback() {
     CHECK(result.channels == audio->captureChannels);
     for (uint8_t channel = 0; channel < result.channels; ++channel) {
       CHECK(result.silenceDbfs[channel] ==
+            audiometer::ToneMeter::FLOOR_DBFS);
+      CHECK(result.ampOffDbfs[channel] ==
             audiometer::ToneMeter::FLOOR_DBFS);
       if (heard == 1) {
         CHECK(result.toneDbfs[channel] > -40.0f);
@@ -1299,6 +1326,7 @@ int main() {
       {"tone-failed-resend-releases", testFailedReSentToneGivesUpTheBackend},
       {"tone-meter-levels", testToneMeterLevels},
       {"tone-measures-loopback", testToneMeasuresItsOwnLoopback},
+      {"tone-short-not-measured", testShortToneIsNotMeasured},
       {"playback-only-start", testPlaybackOnlyStart},
   };
   for (const auto &finding : findingTests) {

@@ -11,12 +11,14 @@ void serviceAudioToneTest();
 bool audioToneTestRunning();
 
 // What the board's own microphones heard at the tone's frequency: the window
-// of silence the test plays first, then the tone. `measured` is false until a
-// tone completes with microphone data for both windows.
+// of silence the test plays first, the tone, then the tone with the amplifier
+// off. `measured` is false until a tone completes with microphone data for
+// all three windows.
 struct AudioToneLoopback {
   bool measured;
   uint8_t channels;
   float silenceDbfs[2];
   float toneDbfs[2];
+  float ampOffDbfs[2];
 };
 AudioToneLoopback lastAudioToneLoopback();

@@ -413,6 +413,10 @@ int CodecSerialAudioBackend::ampEnableLevel() const {
   return running_ ? digitalRead(config_.pinAmpEnable) : -1;
 }
 
+void CodecSerialAudioBackend::setAmpEnabled(bool enabled) {
+  if (running_) digitalWrite(config_.pinAmpEnable, enabled ? HIGH : LOW);
+}
+
 size_t CodecSerialAudioBackend::readFrames(int16_t *samples,
                                            size_t frameCount) {
   if (!running_ || !capture_ || samples == nullptr) return 0;
@@ -492,6 +496,8 @@ bool CodecSerialAudioBackend::readCodecRegister(uint8_t, uint8_t &) {
 }
 
 int CodecSerialAudioBackend::ampEnableLevel() const { return -1; }
+
+void CodecSerialAudioBackend::setAmpEnabled(bool) {}
 
 bool CodecSerialAudioBackend::setGain(uint8_t) { return false; }
 

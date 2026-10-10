@@ -77,11 +77,24 @@ before muting the codec and stopping I2S.
    | 0.85, 1.54 | 8 | 9 | 10 | 12 | 7 |
    | P4 4B, 4C, 3.4C | 13 | 12 | 10 | 9 | 53 |
 
-5. Listen for a steady 440 Hz tone lasting one second. At completion, confirm:
+5. The test plays 500 ms of silence first, then a steady 440 Hz tone lasting
+   one second, then 500 ms more of the tone with the amplifier off. Listen
+   for the tone. At completion, confirm:
 
    ```text
+   audio: readback amp enable=1 es8311 0x12=0x00 0x13=0x10 0x31=0x00 0x32=...
+   audio: mic1 at 440 Hz: silence ..., tone ..., tone with amp off ... dBFS; rise ... dB amp on, ... dB amp off (...)
+   audio: mic2 at 440 Hz: ...
    audio: tone complete; amp disabled, codec muted
    ```
+
+   The readback is taken while the amplifier is on: the enable pad must read
+   1, and ES8311 `0x31=0x00` means the DAC is unmuted. The `mic` lines are the
+   board's own microphones (ES7210 MIC1 and MIC2; MIC3, the echo reference,
+   stays off) at 440 Hz. A speaker heard through the air rises well above the
+   silence with the amplifier on and falls back with it off. A rise that stays
+   with the amplifier off is electrical coupling, not sound. Tones under
+   225 ms are not measured.
 
 6. To abort a longer test, send:
 

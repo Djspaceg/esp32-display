@@ -90,6 +90,9 @@ void setTaskDelayHook(void (*hook)());
 // Every I2S read returns the bytes written before it, in order, then zeros:
 // a speaker heard by the microphones. reset() clears it.
 void setI2sLoopback(bool loopback);
+// With the loopback on, only what is written while this pin is high is heard
+// (an amplifier enable); the rest reads back as silence. reset() clears it.
+void setI2sLoopbackFollowsPin(int pin);
 // Mutexes created and not deleted, and whether any take/give was unpaired.
 int liveMutexes();
 bool mutexMisuse();

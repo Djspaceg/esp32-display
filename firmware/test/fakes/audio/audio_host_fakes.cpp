@@ -39,6 +39,7 @@ uint32_t nowMs = 0;
 unsigned taskDelayCalls = 0;
 void (*taskDelayHook)() = nullptr;
 bool i2sLoopback = false;
+int i2sLoopbackPin = -1;
 std::deque<uint8_t> i2sLoopbackBytes;
 bool inTaskDelayHook = false;
 bool taskCreateFailing = false;
@@ -332,7 +333,11 @@ size_t I2SClass::write(const void *data, size_t bytes) {
       {audiohost::HardwareEventKind::I2sWrite, static_cast<int>(bytes)});
   if (i2sLoopback && !i2sFailing) {
     const auto *begin = static_cast<const uint8_t *>(data);
-    i2sLoopbackBytes.insert(i2sLoopbackBytes.end(), begin, begin + bytes);
+    if (i2sLoopbackPin < 0 || digitalRead(i2sLoopbackPin) == 1) {
+      i2sLoopbackBytes.insert(i2sLoopbackBytes.end(), begin, begin + bytes);
+    } else {
+      i2sLoopbackBytes.insert(i2sLoopbackBytes.end(), bytes, 0);
+    }
   }
   return i2sFailing ? 0 : bytes;
 }
@@ -421,6 +426,7 @@ void reset() {
   taskDelayCalls = 0;
   taskDelayHook = nullptr;
   i2sLoopback = false;
+  i2sLoopbackPin = -1;
   i2sLoopbackBytes.clear();
   taskCreateFailing = false;
   createdTaskList.clear();
@@ -498,6 +504,8 @@ void setI2sLoopback(bool loopback) {
   i2sLoopback = loopback;
   i2sLoopbackBytes.clear();
 }
+
+void setI2sLoopbackFollowsPin(int pin) { i2sLoopbackPin = pin; }
 void setTaskCreateFailing(bool failing) { taskCreateFailing = failing; }
 const std::vector<CreatedTask> &createdTasks() { return createdTaskList; }
 int liveMutexes() { return liveMutexCount; }

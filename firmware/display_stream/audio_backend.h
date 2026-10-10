@@ -43,6 +43,9 @@ class CodecSerialAudioBackend final : public AudioBackend {
   // amplifier enable pin's pad level (-1 when not running).
   bool readCodecRegister(uint8_t reg, uint8_t &value);
   int ampEnableLevel() const;
+  // The speaker test's control window: the codec keeps playing with the
+  // amplifier off. No-op when not running.
+  void setAmpEnabled(bool enabled);
 
  private:
   bool writeRegister(uint8_t address, uint8_t reg, uint8_t value);
