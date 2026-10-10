@@ -39,6 +39,8 @@ final class PreviewDriver {
     /// Bumped on every start and stop, so a capture that finishes starting after
     /// it has been superseded throws itself away instead of taking over.
     private var generation = 0
+    /// The window a Window source is previewing, followed for resizes.
+    private var followedWindow: CGWindowID?
 
     var isRunning: Bool { capture != nil }
 
@@ -134,6 +136,7 @@ final class PreviewDriver {
                     return
                 }
                 try await capture.start(window: window, fps: fps)
+                followedWindow = window.windowID
 
             case .automatic:
                 // Resolved exactly as a session would, so the preview shows what
@@ -163,6 +166,25 @@ final class PreviewDriver {
             return
         }
         self.capture = capture
+        if case .window = target.source, let windowID = followedWindow {
+            followWindowSize(windowID, capture: capture, token: token)
+        }
+    }
+
+    /// Keep a previewed window centred as it is resized. A session does this
+    /// from its watchdog; the preview has none, so it looks on the same 2 s
+    /// cadence until this preview is replaced or stopped.
+    private func followWindowSize(_ id: CGWindowID, capture: DisplayCapture, token: Int) {
+        Task { [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, self.generation == token else { return }
+                guard let window = await DisplayCapture.findWindow(id: id),
+                    self.generation == token
+                else { continue }
+                await capture.updateContentSize(window.frame.size)
+            }
+        }
     }
 
     private func unavailable(_ serviceName: String, _ reason: String) {

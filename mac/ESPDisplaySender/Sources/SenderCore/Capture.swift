@@ -796,6 +796,13 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// run without a stream. Called with the frame size and source rectangle.
     var configureForTesting: ((Int, Int, CGRect?) async throws -> Void)?
 
+    /// Where the current content is placed in the frame, as last configured.
+    var destinationForTesting: CGRect? {
+        stateLock.withLock {
+            _contentSize.flatMap { Self.letterbox(content: $0, width: _outW, height: _outH) }
+        }
+    }
+
     /// The frame size samples are currently converted at.
     var frameSizeForTesting: (width: Int, height: Int) {
         stateLock.withLock { (_outW, _outH) }

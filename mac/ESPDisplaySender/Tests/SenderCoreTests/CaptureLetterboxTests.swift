@@ -114,4 +114,41 @@ final class CaptureLetterboxTests: XCTestCase {
         _ = await capture.updateContentSize(CGSize(width: 1600, height: 900))
         XCTAssertEqual(calls.get(), 1, "an unchanged size reconfigured the stream")
     }
+
+    /// A rotation that changes the frame shape keeps the content, and places
+    /// it centred in the new shape.
+    func testAReshapeReCentresTheContentInTheNewFrameShape() async {
+        let capture = DisplayCapture(geometry: rectangular, landscape: false, onFrame: { _, _ in })
+        capture.configureForTesting = { _, _, _ in }
+        let content = CGSize(width: 1600, height: 900)
+        _ = await capture.updateContentSize(content)
+        _ = await capture.reshape(landscape: true)
+        XCTAssertEqual(
+            capture.destinationForTesting,
+            DisplayCapture.letterbox(content: content, width: 320, height: 172))
+    }
+
+    /// A re-centre ScreenCaptureKit refuses keeps the old placement without
+    /// rebuilding the stream, and the next look at the window asks again.
+    func testARefusedReCentreIsAskedForAgain() async {
+        struct Refused: Error {}
+        let capture = DisplayCapture(geometry: square, landscape: false, onFrame: { _, _ in })
+        let calls = LockedBox(0)
+        capture.configureForTesting = { _, _, _ in calls.update { $0 += 1 } }
+        let wide = CGSize(width: 1600, height: 900)
+        _ = await capture.updateContentSize(wide)
+        capture.configureForTesting = { _, _, _ in
+            calls.update { $0 += 1 }
+            throw Refused()
+        }
+        let tall = CGSize(width: 700, height: 1200)
+        let applied = await capture.updateContentSize(tall)
+        XCTAssertFalse(applied)
+        XCTAssertEqual(
+            capture.destinationForTesting,
+            DisplayCapture.letterbox(content: wide, width: 466, height: 466))
+        XCTAssertFalse(capture.stopped, "a content-only refusal rebuilt the stream")
+        _ = await capture.updateContentSize(tall)
+        XCTAssertEqual(calls.get(), 3, "the refused size was not asked for again")
+    }
 }
