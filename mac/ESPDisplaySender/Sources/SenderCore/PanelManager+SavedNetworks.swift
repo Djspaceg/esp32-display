@@ -71,6 +71,11 @@ extension PanelManager {
         // Views that read the credential itself - the Add Display sheet -
         // redraw even when the list of names is the same.
         objectWillChange.send()
+        // Entering it again is what a display page asks for when the last copy
+        // could not use it, so it leaves that row now, not at the next copy.
+        for hardwareID in wifiPresetSyncReports.keys {
+            wifiPresetSyncReports[hardwareID]?.unusable.removeAll { $0 == ssid }
+        }
         setWifiPresetOrder(order, keychainNames: wifiNetworkNamesReader())
         syncWifiPresetsToAttachedDevices()
         return nil

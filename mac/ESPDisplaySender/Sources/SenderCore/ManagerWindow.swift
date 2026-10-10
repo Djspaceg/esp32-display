@@ -908,7 +908,9 @@ struct PanelDetailView: View {
             .accessibilityAddTraits(.isButton)
     }
 
+    @ViewBuilder
     private var connectionSection: some View {
+        let presetReport = manager.wifiPresetSyncReport(for: panel.serviceName)
         Section {
             LabeledContent("Address") {
                 CopyableAddress(address: panel.address)
@@ -919,8 +921,9 @@ struct PanelDetailView: View {
             WifiNetworkRows(
                 connectedDescription: panel.boardNetworkDescription(asOf: Date()),
                 presetDescription: WifiNetworkRows.presetDescription(
-                    manager.wifiPresetSyncReport(for: panel.serviceName),
-                    savedNetworkCount: manager.savedNetworkNames.count),
+                    presetReport, savedNetworkCount: manager.savedNetworkNames.count),
+                skippedDescription: WifiNetworkRows.skippedDescription(
+                    presetReport, savedNetworkNames: manager.savedNetworkNames),
                 onOpenSettings: { SettingsPane.open(.wifiNetworks) })
         } header: {
             Text("Network Connection")

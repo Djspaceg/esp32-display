@@ -1,4 +1,5 @@
 import AppKit
+import SenderProtocol
 import SwiftUI
 import XCTest
 
@@ -91,6 +92,53 @@ final class WifiNetworkRowsRenderTests: XCTestCase {
         if let dir = ProcessInfo.processInfo.environment["ESPDISP_RENDER_DIR"] {
             try png.write(to: URL(fileURLWithPath: dir)
                 .appendingPathComponent("wifi-rows.png"))
+        }
+    }
+
+    /// The rows when the last copy had to skip a saved network, laid out the
+    /// way the display page lays them out, so the extra row can be checked for
+    /// wrapping. Set ESPDISP_RENDER_DIR to keep the PNG.
+    func testTheRowsRenderASkippedNetwork() throws {
+        let report = WifiPresetSyncReport(
+            snapshot: WifiPresetSnapshot(
+                roster: ConfigCommands.WiFiPresetRoster(
+                    capacity: 10, validSlots: [2], activeSlot: 2,
+                    localSelectorAvailable: true),
+                slots: [2: ConfigCommands.WiFiPresetSlot(
+                    slot: 2, ssid: "Studio WiFi", hasPassword: true, active: true)]),
+            omitted: [], unusable: ["Office"], commandCount: 0)
+        let skipped = WifiNetworkRows.skippedDescription(
+            report, savedNetworkNames: ["Office", "Studio WiFi"])
+        XCTAssertNotNil(skipped)
+        func render(_ skipped: String?) throws -> NSBitmapImageRep {
+            let view = Form {
+                Section("Network Connection") {
+                    WifiNetworkRows(
+                        connectedDescription: "Studio WiFi",
+                        presetDescription: WifiNetworkRows.presetDescription(
+                            report, savedNetworkCount: 2),
+                        skippedDescription: skipped)
+                }
+            }
+            .formStyle(.grouped)
+            .labeledContentStyle(.labelColumn)
+            .frame(width: 620, height: 220)
+            let host = NSHostingView(rootView: view)
+            host.frame = NSRect(x: 0, y: 0, width: 620, height: 220)
+            host.appearance = NSAppearance(named: .aqua)
+            host.layoutSubtreeIfNeeded()
+            let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: rep)
+            return rep
+        }
+        let shown = try render(skipped)
+        XCTAssertNotEqual(
+            shown.tiffRepresentation, try render(nil).tiffRepresentation,
+            "the skipped row draws nothing")
+        if let dir = ProcessInfo.processInfo.environment["ESPDISP_RENDER_DIR"] {
+            let png = try XCTUnwrap(shown.representation(using: .png, properties: [:]))
+            try png.write(to: URL(fileURLWithPath: dir)
+                .appendingPathComponent("wifi-preset-row-skipped-network.png"))
         }
     }
 

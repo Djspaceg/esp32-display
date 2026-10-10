@@ -103,6 +103,78 @@ final class SettingsWindowTests: XCTestCase {
             "None saved on this Mac")
     }
 
+    private func skippedReport(
+        unusable: [String], omitted: [String] = [], onBoard: [Int: String] = [1: "Home"]
+    ) -> WifiPresetSyncReport {
+        WifiPresetSyncReport(
+            snapshot: WifiPresetSnapshot(
+                roster: ConfigCommands.WiFiPresetRoster(
+                    capacity: 10, validSlots: Set(onBoard.keys),
+                    activeSlot: onBoard.keys.min(), localSelectorAvailable: true),
+                slots: Dictionary(uniqueKeysWithValues: onBoard.map { slot, ssid in
+                    (slot, ConfigCommands.WiFiPresetSlot(
+                        slot: slot, ssid: ssid, hasPassword: true,
+                        active: slot == onBoard.keys.min()))
+                })),
+            omitted: omitted, unusable: unusable, commandCount: 0)
+    }
+
+    /// A saved network the copy had to skip is named on a row of its own.
+    /// Otherwise Settings lists it, the board's picker does not, and nothing
+    /// says why.
+    func testTheSkippedRowNamesSavedNetworksTheCopyCouldNotUse() {
+        let saved = ["Home", "Office", "Guest", "Lab", "Eleventh"]
+        func row(_ report: WifiPresetSyncReport?) -> String? {
+            WifiNetworkRows.skippedDescription(report, savedNetworkNames: saved)
+        }
+        XCTAssertNil(row(nil))
+        XCTAssertNil(row(skippedReport(unusable: [])))
+        // Past the tenth slot is what the section footer already explains.
+        XCTAssertEqual(
+            row(skippedReport(unusable: ["Office"], omitted: ["Eleventh"])),
+            row(skippedReport(unusable: ["Office"])))
+        XCTAssertEqual(
+            row(skippedReport(unusable: ["Office"])),
+            "Office: no password a display accepts could be read for it at "
+                + "the last USB copy. Enter it again in Settings.")
+        XCTAssertEqual(
+            row(skippedReport(unusable: ["Office", "Guest", "Lab"])),
+            "Office, Guest and Lab: no passwords a display accepts could be "
+                + "read for them at the last USB copy. Enter them again in "
+                + "Settings.")
+    }
+
+    /// The report is only replaced by the next USB copy, and a display is
+    /// usually on WiFi alone, so the row checks it against now: a network no
+    /// longer saved is not named, and neither is one the board still holds
+    /// (the slot it is joined through, which the copy never touches).
+    func testTheSkippedRowLeavesOutWhatNoLongerApplies() {
+        let report = skippedReport(
+            unusable: ["Office", "Guest"], onBoard: [1: "Home", 3: "Guest"])
+        XCTAssertEqual(
+            WifiNetworkRows.skippedDescription(
+                report, savedNetworkNames: ["Home", "Office", "Guest"]),
+            "Office: no password a display accepts could be read for it at "
+                + "the last USB copy. Enter it again in Settings.")
+        XCTAssertNil(WifiNetworkRows.skippedDescription(
+            report, savedNetworkNames: ["Home", "Guest"]))
+        XCTAssertNil(WifiNetworkRows.skippedDescription(
+            report, savedNetworkNames: []))
+    }
+
+    /// Entering the network again is what the row asks for, so saving it
+    /// takes it off the row at once, with no board attached to copy to.
+    func testSavingASkippedNetworkTakesItOffTheRow() {
+        let (manager, panel) = makeManager(saved: ["Home", "Office", "Guest"])
+        manager.wifiPresetSyncReports["020000123456"] =
+            skippedReport(unusable: ["Office", "Guest"])
+        XCTAssertNil(manager.saveNetwork(
+            ssid: "Office", password: "new password", isOpenNetwork: false))
+        XCTAssertEqual(
+            manager.wifiPresetSyncReport(for: panel.serviceName)?.unusable,
+            ["Guest"])
+    }
+
     // MARK: the Settings window
 
     /// The WiFi Networks pane is where a network is added, edited, removed and

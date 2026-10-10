@@ -239,8 +239,9 @@ final class PanelManager: ObservableObject {
     /// sync signature, because a new password under an unchanged list of names
     /// is still a collection every board has to receive.
     var wifiCredentialRevision = 0
-    /// The last completed sync per board, so the UI can say what did not fit
-    /// without re-reading the display.
+    /// The last completed sync per board, less any network saved again since,
+    /// so the UI can say what did not fit or could not be copied without
+    /// re-reading the display.
     var wifiPresetSyncReports: [String: WifiPresetSyncReport] = [:]
     /// How long to wait before each retry of an automatic preset sync the
     /// board went silent on. A board can answer CFGSHOW and then go quiet for
