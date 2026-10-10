@@ -801,6 +801,19 @@ def render_swift_catalog(
         "    public static let quarterTurnProfiles: Set<String> = Set(%s)\n\n"
         % _swift_array(quarter_turns)
     )
+    # Boards with a knob (encoder lines on the carrier). The knob drives the
+    # Mac's volume and mute through media keys whatever the touch preset, so
+    # the app offers the Accessibility grant on these boards' pages.
+    encoders = [
+        descriptor["identity"]["profile"]
+        for family in grouped.values()
+        for descriptor in family
+        if board_descriptor.optional_pin(descriptor, "carrier.pin_encoder_a") >= 0
+        and board_descriptor.optional_pin(descriptor, "carrier.pin_encoder_b") >= 0
+    ]
+    lines.append(
+        "    public static let encoderProfiles: Set<String> = Set(%s)\n\n"
+        % _swift_array(encoders))
     # Families whose USB writes need the operator to name the carrier, the
     # same rule espdisp.py applies through required_profiles.
     lines.append(

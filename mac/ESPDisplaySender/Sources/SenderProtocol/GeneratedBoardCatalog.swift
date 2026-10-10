@@ -72,6 +72,8 @@ public enum GeneratedBoardCatalog {
 
     public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7789", "jd9853", "st7703-4b", "jd9365-4c", "jd9365-34c", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"])
 
+    public static let encoderProfiles: Set<String> = Set(["gc9a01-knob-128"])
+
     public static let carrierEvidenceFamilies: Set<String> = Set(["p4"])
 
     public static let largeTileGeometries: Set<PanelGeometry> = [PanelGeometry(width: 720, height: 720), PanelGeometry(width: 800, height: 800)]
