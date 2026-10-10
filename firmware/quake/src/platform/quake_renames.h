@@ -29,5 +29,6 @@
 #define mainzone quake_mainzone
 #define nomonsters quake_nomonsters
 #define onground quake_onground
+#define precache quake_precache
 #define startepisode quake_startepisode
 #define timelimit quake_timelimit

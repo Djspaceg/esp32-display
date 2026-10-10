@@ -16,6 +16,7 @@
 
 extern "C" const char* quake_display_setup(void);
 extern "C" bool quake_input_setup(void);
+extern "C" void quake_audio_setup(void);
 
 namespace {
 
@@ -29,6 +30,9 @@ const char QUAKE_STARTUP_COMMANDS[] =
     "bind d +moveright\n"
     "bind ] \"impulse 10\"\n"
     "bind [ \"impulse 12\"\n"
+    // Mix 200 ms ahead: an S3 frame can take 120 ms, and anything less than
+    // a frame ahead leaves gaps of silence.
+    "_snd_mixahead 0.2\n"
     "+mlook\n";
 
 void logStage(const char* stage) {
@@ -48,7 +52,7 @@ void quakeTask(void*) {
   static char arg0[] = "quake";
   static char* argv[] = {arg0, nullptr};
   const char* failure = quake_engine_start(1, argv, QUAKE_HUNK_BYTES,
-                                           QUAKE_HUNK_RESERVE_BYTES);
+                                           QUAKE_HUNK_SLACK_BYTES);
   if (failure != nullptr) quake_fail_restart(failure, true);
   quake_engine_command(QUAKE_STARTUP_COMMANDS);
   logStage("engine");
@@ -88,6 +92,7 @@ void quake_enter(void) {
   if (!quake_input_setup()) {
     quake_fail_restart("no PSRAM for Quake's input state", true);
   }
+  quake_audio_setup();
   quake_log("Controls: left half drag moves, right half drag aims, tap fires,");
   quake_log("  double tap jumps, swipe up/down changes weapon, 2nd finger runs;");
   quake_log("  BOOT short = Escape, 0.6-3 s = Enter, 3 s hold = exit;");

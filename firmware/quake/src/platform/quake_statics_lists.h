@@ -138,6 +138,12 @@
 #define QUAKE_STATICS_screen(X) \
   X(scr_centerstring, PSRAM) \
   X(scr_vrect, PSRAM)
+#define QUAKE_STATICS_snd_dma(X) \
+  X(sn, PSRAM) \
+  X(sound_channels, PSRAM)
+#define QUAKE_STATICS_snd_mix(X) \
+  X(paintbuffer, PSRAM) \
+  X(snd_scaletable, PSRAM)
 #define QUAKE_STATICS_sv_main(X) \
   X(fatpvs, PSRAM) \
   X(localmodels, PSRAM) \
@@ -182,6 +188,8 @@
   X(r_surf) \
   X(sbar) \
   X(screen) \
+  X(snd_dma) \
+  X(snd_mix) \
   X(sv_main) \
   X(world) \
   X(zone)
@@ -291,6 +299,10 @@
 #define scoreboardtop (*quake_scoreboardtop)
 #define scr_centerstring (*quake_scr_centerstring)
 #define scr_vrect (*quake_scr_vrect)
+#define sn (*quake_sn)
+#define sound_channels (*quake_sound_channels)
+#define paintbuffer (*quake_paintbuffer)
+#define snd_scaletable (*quake_snd_scaletable)
 #define fatpvs (*quake_fatpvs)
 #define localmodels (*quake_localmodels)
 #define sv (*quake_sv)

@@ -1,6 +1,6 @@
 // Hardware-free half of Quake's input and frame placement: what a touch, a
-// BOOT press or a USB key means to the engine, and where the 320x240 frame
-// sits on the panel.
+// BOOT press or a USB key means to the engine, and how large the frame is and
+// where it sits on the panel.
 //
 // C++ with no Arduino, IDF or engine headers beyond the two key tables, so the
 // host suite (firmware/test/test_quake_input.cpp) runs it directly. The
@@ -17,31 +17,62 @@ namespace quakeinput {
 
 // ---- Frame placement -----------------------------------------------------
 
+// The engine's base frame, and the one every panel that takes it at 2x or more
+// renders (the P4 carriers).
 constexpr int RENDER_WIDTH = 320;
 constexpr int RENDER_HEIGHT = 240;
+// On a panel that takes the base frame only at 1x (the S3 boards) the frame
+// is rendered larger instead, 4k x 3k, up to this k: 368x276, which a frame
+// on the S3 renders at about the base frame's rate once the panel write runs
+// beside the next frame (quake_hw_bridge.cpp).
+constexpr int MAX_ONE_X_K = 92;
 
 struct FrameLayout {
-  int scale;      // whole-pixel scale, 0 when the panel cannot hold one copy
-  int width;      // scaled frame
+  int scale;         // whole-pixel scale, 0 when the panel cannot hold one copy
+  int renderWidth;   // the engine's frame
+  int renderHeight;
+  int width;         // scaled frame
   int height;
-  int x;          // its top-left corner on the panel
+  int x;             // its top-left corner on the panel
   int y;
 };
 
-// The largest whole-pixel scale that fits, centred. Whole pixels keep the
-// software renderer's output sharp and make the scaler a plain copy; 2x fills
-// 640x480 of the 720x720 4B and 4C and of the 800x800 3.4C (whose round glass
-// still shows all of it: the 3.4C's 800-pixel circle has room for 640x480).
-constexpr FrameLayout frameLayout(int panelWidth, int panelHeight) {
+// The largest whole-pixel scale of the base frame that fits, centred. Whole
+// pixels keep the software renderer's output sharp and make the scaler a plain
+// copy; 2x fills 640x480 of the 720x720 4B and 4C and of the 800x800 3.4C
+// (whose round glass still shows all of it: the 3.4C's 800-pixel circle has
+// room for 640x480).
+//
+// At 1x the frame grows to the largest 4:3 that the panel shows whole: on
+// round glass that is the rectangle inside the circle (diagonal 5k at most the
+// diameter), so the 1.75C's 466 pixels give 368x276. Never below the base
+// frame, whose 320x200 menus Quake draws in the middle of whatever it gets:
+// the 1.85C's 360-pixel circle is too small for 4:3 at 320, so it keeps
+// 320x240 and loses the corners.
+constexpr FrameLayout frameLayout(int panelWidth, int panelHeight,
+                                  bool round = false) {
   const int sx = panelWidth / RENDER_WIDTH;
   const int sy = panelHeight / RENDER_HEIGHT;
   const int s = sx < sy ? sx : sy;
+  if (s <= 0) return FrameLayout{0, 0, 0, 0, 0, 0, 0};
+  int rw = RENDER_WIDTH;
+  int rh = RENDER_HEIGHT;
+  if (s == 1) {
+    const int side = panelWidth < panelHeight ? panelWidth : panelHeight;
+    const int kw = round ? side / 5 : panelWidth / 4;
+    const int kh = round ? side / 5 : panelHeight / 3;
+    int k = (kw < kh ? kw : kh) & ~1;
+    if (k > MAX_ONE_X_K) k = MAX_ONE_X_K;
+    if (k > RENDER_WIDTH / 4) {
+      rw = 4 * k;
+      rh = 3 * k;
+    }
+  }
   // The origin is even: the 1.75C's CO5300 takes windows only from even
-  // columns and rows, and 466x466 would otherwise put the frame at (73,113).
-  return s <= 0 ? FrameLayout{0, 0, 0, 0, 0}
-                : FrameLayout{s, RENDER_WIDTH * s, RENDER_HEIGHT * s,
-                              ((panelWidth - RENDER_WIDTH * s) / 2) & ~1,
-                              ((panelHeight - RENDER_HEIGHT * s) / 2) & ~1};
+  // columns and rows.
+  return FrameLayout{s, rw, rh, rw * s, rh * s,
+                     ((panelWidth - rw * s) / 2) & ~1,
+                     ((panelHeight - rh * s) / 2) & ~1};
 }
 
 // ---- Key events ------------------------------------------------------------

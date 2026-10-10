@@ -178,18 +178,30 @@ void Sys_LowFPPrecision(void) {}
 
 viddef_t vid;
 
-#define BASEWIDTH QUAKEGENERIC_RES_X
-#define BASEHEIGHT QUAKEGENERIC_RES_Y
-
-static byte* vid_buffer;
+// The frame's size is the panel's choice (quake_display_render_size): 320x240
+// on the P4, larger on an S3's 1x panel. With two pages the panel write of one
+// frame runs beside the drawing of the next (quake_display_pages).
+static int vid_width;
+static int vid_height;
+static byte* vid_buffers[2];
+static int vid_page;
 static short* zbuffer;
 static byte* surfcache;
 // Read per pixel by the scaler: internal RAM, allocated by VID_Init.
 static uint16_t* palette565;
 
+// What internal RAM keeps back for others when a Quake buffer would like to
+// be there: pak reads into PSRAM bounce through up to 16 KB of it, and USB
+// host and the panel's DMA need their own.
+#define QUAKE_INTERNAL_FLOOR_BYTES (48u * 1024u)
+
 static void* quake_alloc_prefer_internal(size_t bytes) {
-  void* p = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  return p != NULL ? p : heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >=
+      bytes + QUAKE_INTERNAL_FLOOR_BYTES) {
+    void* p = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (p != NULL) return p;
+  }
+  return heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
 static const char* quake_where(const void* p) {
@@ -211,32 +223,43 @@ void VID_SetPalette(unsigned char* palette) {
 void VID_ShiftPalette(unsigned char* palette) { VID_SetPalette(palette); }
 
 void VID_Init(unsigned char* palette) {
-  vid.maxwarpwidth = vid.width = vid.conwidth = BASEWIDTH;
-  vid.maxwarpheight = vid.height = vid.conheight = BASEHEIGHT;
+  quake_display_render_size(&vid_width, &vid_height);
+  const int pages = quake_display_pages();
+  vid.width = vid.conwidth = vid_width;
+  vid.height = vid.conheight = vid_height;
+  // The underwater warp renders into r_main.c's WARP_WIDTH x WARP_HEIGHT
+  // buffer and scales up; a larger frame warps at that size (r_misc.c).
+  vid.maxwarpwidth = vid_width < WARP_WIDTH ? vid_width : WARP_WIDTH;
+  vid.maxwarpheight = vid_height < WARP_HEIGHT ? vid_height : WARP_HEIGHT;
   vid.aspect = 1.0;
-  vid.numpages = 1;
+  vid.numpages = pages;
   vid.colormap = host_colormap;
   vid.fullbright = 256 - LittleLong(*((int*)vid.colormap + 2048));
-  vid.rowbytes = vid.conrowbytes = BASEWIDTH;
+  vid.rowbytes = vid.conrowbytes = vid_width;
 
   // The frame and depth buffer are touched for every pixel drawn; internal
-  // RAM when the Quake boot has room for them, which it should.
-  vid_buffer = (byte*)quake_alloc_prefer_internal(BASEWIDTH * BASEHEIGHT);
-  zbuffer = (short*)quake_alloc_prefer_internal(
-      BASEWIDTH * BASEHEIGHT * sizeof(short));
-  const int surfcache_size = D_SurfaceCacheForRes(BASEWIDTH, BASEHEIGHT);
+  // RAM when the Quake boot has room for them.
+  const int pixels = vid_width * vid_height;
+  for (int page = 0; page < pages; ++page) {
+    vid_buffers[page] = (byte*)quake_alloc_prefer_internal(pixels);
+  }
+  zbuffer = (short*)quake_alloc_prefer_internal(pixels * sizeof(short));
+  const int surfcache_size = D_SurfaceCacheForRes(vid_width, vid_height);
   surfcache = (byte*)heap_caps_malloc(surfcache_size,
                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (vid_buffer == NULL || zbuffer == NULL || surfcache == NULL) {
-    Sys_Error("no memory for the %dx%d frame", BASEWIDTH, BASEHEIGHT);
+  if (vid_buffers[0] == NULL || (pages > 1 && vid_buffers[1] == NULL) ||
+      zbuffer == NULL || surfcache == NULL) {
+    Sys_Error("no memory for the %dx%d frame", vid_width, vid_height);
   }
-  quake_log("frame %s, depth %s, %d KB surface cache %s",
-            quake_where(vid_buffer), quake_where(zbuffer),
+  quake_log("frame %dx%d, %d page%s %s, depth %s, %d KB surface cache %s",
+            vid_width, vid_height, pages, pages > 1 ? "s" : "",
+            quake_where(vid_buffers[0]), quake_where(zbuffer),
             surfcache_size / 1024, quake_where(surfcache));
 
   palette565 = (uint16_t*)quake_alloc_prefer_internal(256 * sizeof(uint16_t));
   if (palette565 == NULL) Sys_Error("no memory for the palette");
-  vid.buffer = vid.conbuffer = vid_buffer;
+  vid_page = 0;
+  vid.buffer = vid.conbuffer = vid_buffers[0];
   d_pzbuffer = zbuffer;
   D_InitCaches(surfcache, surfcache_size);
   VID_SetPalette(palette);
@@ -250,6 +273,13 @@ void VID_Update(vrect_t* rects) {
   (void)rects;
   ++frames_rendered;
   quake_display_present(vid.buffer, palette565);
+  // With two pages the panel is still being given this one: draw the next
+  // frame into the other. vid.numpages tells the engine each page needs its
+  // own copy of whatever it draws only on change (the status bar).
+  if (vid.numpages > 1) {
+    vid_page ^= 1;
+    vid.buffer = vid.conbuffer = vid_buffers[vid_page];
+  }
 }
 
 void D_BeginDirectRect(int x, int y, byte* pbitmap, int width, int height) {
@@ -280,10 +310,19 @@ void QG_SetPalette(unsigned char palette[768]) { (void)palette; }
 static double s_last_time;
 
 const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes,
-                               uint32_t reserve_bytes) {
+                               uint32_t slack_bytes) {
   if (!quake_statics_allocate()) return "no memory for the engine's tables";
-  // As much of hunk_bytes as PSRAM has once reserve_bytes is kept back; the
-  // engine refuses a heap under its floor itself, with the sizes.
+  COM_InitArgv(argc, argv);
+  // As much of hunk_bytes as PSRAM has once what VID_Init allocates after it
+  // (the pages, depth buffer and surface cache, at the panel's frame size)
+  // and slack_bytes are kept back. The engine refuses a heap under its floor
+  // itself, with the sizes.
+  int width = 0, height = 0;
+  quake_display_render_size(&width, &height);
+  const size_t pixels = (size_t)width * (size_t)height;
+  const size_t reserve_bytes =
+      (size_t)quake_display_pages() * pixels + pixels * sizeof(short) +
+      (size_t)D_SurfaceCacheForRes(width, height) + slack_bytes;
   const size_t largest =
       heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (largest <= reserve_bytes) return "no PSRAM for the engine heap";
@@ -299,7 +338,6 @@ const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes,
   parms.basedir = QUAKE_PAK_MOUNT;
   parms.cachedir = NULL;
 
-  COM_InitArgv(argc, argv);
   parms.argc = com_argc;
   parms.argv = com_argv;
 

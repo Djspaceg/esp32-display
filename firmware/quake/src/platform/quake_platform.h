@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -14,11 +15,11 @@ extern "C" {
 // ---- Engine side (quake_sys_esp32.c) ----
 
 /// Allocates the relocated arrays, the frame and depth buffers and the hunk,
-/// then runs Host_Init. The hunk is hunk_bytes, or less where PSRAM would
-/// then keep under reserve_bytes free. Returns NULL on success, else why it
-/// could not start.
+/// then runs Host_Init. The hunk is hunk_bytes, or less where PSRAM would not
+/// then keep the frame buffers plus slack_bytes free. Returns NULL on success,
+/// else why it could not start.
 const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes,
-                               uint32_t reserve_bytes);
+                               uint32_t slack_bytes);
 
 /// One pass of the host loop: Host_Frame with the time since the last pass.
 /// Quake itself skips passes that come sooner than 1/72 s.
@@ -35,6 +36,13 @@ void quake_engine_command(const char* text);
 /// Frames drawn since start, for the frame-rate line.
 uint32_t quake_engine_frames_rendered(void);
 
+/// The codec's output rate, from quake_audio_setup(); 0 leaves Quake silent.
+void quake_audio_set_rate(uint32_t rate);
+
+/// The sound bridge's render callback (doom_audio_bridge.h): the next
+/// `frames` frames of the mixing ring, on the bridge's output task.
+void quake_audio_render(int16_t* out, size_t frames, unsigned channels);
+
 // ---- Hardware side (quake_hw_bridge.cpp) ----
 
 /// Sends engine text (Sys_Printf, so the console too) to Serial.
@@ -43,9 +51,18 @@ void quake_console_write(const char* text);
 /// One line typed on Serial, ending in its newline, or NULL. Sys_ConsoleInput.
 const char* quake_console_read_line(void);
 
-/// Converts one 320x240 8-bit frame through `palette565` (256 big-endian
-/// RGB565 entries) and puts it on the panel. Returns only once DMA is done
-/// with it; a panel that never completes ends the session.
+/// The engine's frame size for this panel (quake_input_model.h frameLayout).
+void quake_display_render_size(int* width, int* height);
+
+/// 2 when frames go to the panel beside the drawing of the next (the S3), so
+/// the engine draws into two pages in turn; else 1.
+int quake_display_pages(void);
+
+/// Converts one 8-bit frame through `palette565` (256 big-endian RGB565
+/// entries) and puts it on the panel. With one page it returns once DMA is
+/// done with it; with two it returns once the previous frame is on the panel,
+/// and `pixels` is the panel's until the next call returns. A panel that never
+/// completes ends the session.
 void quake_display_present(const uint8_t* pixels, const uint16_t* palette565);
 
 /// Samples touch, BOOT, USB and Serial and queues what they mean.

@@ -131,7 +131,9 @@ void SNDDMA_Shutdown(void);
 #define	MAX_DYNAMIC_CHANNELS	8
 
 
-extern	channel_t   channels[MAX_CHANNELS];
+// espdisp: renamed from channels, which is also a member name, so the
+// statics relocation can move it out of internal RAM.
+extern	channel_t   sound_channels[MAX_CHANNELS];
 // 0 to MAX_DYNAMIC_CHANNELS-1	= normal entity sounds
 // MAX_DYNAMIC_CHANNELS to MAX_DYNAMIC_CHANNELS + NUM_AMBIENTS -1 = water, etc
 // MAX_DYNAMIC_CHANNELS + NUM_AMBIENTS to total_channels = static sounds

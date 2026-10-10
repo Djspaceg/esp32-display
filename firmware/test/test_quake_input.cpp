@@ -59,25 +59,39 @@ int main() {
   {
     const FrameLayout l = frameLayout(720, 720);  // 4B and 4C
     CHECK(l.scale == 2 && l.width == 640 && l.height == 480);
+    CHECK(l.renderWidth == 320 && l.renderHeight == 240);
     CHECK(l.x == 40 && l.y == 120);
-    const FrameLayout r = frameLayout(800, 800);  // 3.4C
+    const FrameLayout r = frameLayout(800, 800, true);  // 3.4C, round
     CHECK(r.scale == 2 && r.x == 80 && r.y == 160);
+    CHECK(r.renderWidth == 320 && r.renderHeight == 240);
     // The 3.4C's glass is round: all four corners of the frame are inside
     // its 400-pixel radius.
     const int dx = r.width / 2, dy = r.height / 2;
     CHECK(dx * dx + dy * dy <= 400 * 400);
-    // The 1.75C: 1x, at an even origin for its CO5300, and inside the
-    // 233-pixel radius of its round glass.
-    const FrameLayout a = frameLayout(466, 466);
-    CHECK(a.scale == 1 && a.x == 72 && a.y == 112);
-    CHECK((a.x + a.width - 233) * (a.x + a.width - 233) +
-              (a.y + a.height - 233) * (a.y + a.height - 233) <=
-          233 * 233);
-    CHECK((a.x - 233) * (a.x - 233) + (a.y - 233) * (a.y - 233) <= 233 * 233);
-    const FrameLayout q = frameLayout(360, 360);  // the 1.85C
-    CHECK(q.scale == 1 && q.x == 20 && q.y == 60);
+    // The 1.75C: rendered at 368x276, 1x, at an even origin for its CO5300,
+    // and every corner inside the 233-pixel radius of its round glass.
+    const FrameLayout a = frameLayout(466, 466, true);
+    CHECK(a.scale == 1 && a.renderWidth == 368 && a.renderHeight == 276);
+    CHECK(a.width == 368 && a.height == 276 && a.x == 48 && a.y == 94);
+    for (int cx : {a.x, a.x + a.width}) {
+      for (int cy : {a.y, a.y + a.height}) {
+        CHECK((cx - 233) * (cx - 233) + (cy - 233) * (cy - 233) <= 233 * 233);
+      }
+    }
+    // The 1.85C's 360-pixel circle is too small for a larger 4:3: the base
+    // frame, at an even origin.
+    const FrameLayout q = frameLayout(360, 360, true);
+    CHECK(q.scale == 1 && q.renderWidth == 320 && q.renderHeight == 240);
+    CHECK(q.x == 20 && q.y == 60);
+    // Rectangular glass at 1x: the largest 4:3 that fits, up to 368x276.
+    const FrameLayout w = frameLayout(480, 320);
+    CHECK(w.renderWidth == 368 && w.renderHeight == 276 && w.x == 56 && w.y == 22);
+    const FrameLayout n = frameLayout(340, 300);
+    CHECK(n.renderWidth == 336 && n.renderHeight == 252);
     CHECK(frameLayout(960, 720).scale == 3);
+    CHECK(frameLayout(960, 720).renderWidth == 320);
     CHECK(frameLayout(320, 240).scale == 1);
+    CHECK(frameLayout(320, 240).renderWidth == 320);
     CHECK(frameLayout(320, 239).scale == 0);
     CHECK(frameLayout(0, 0).scale == 0);
   }
