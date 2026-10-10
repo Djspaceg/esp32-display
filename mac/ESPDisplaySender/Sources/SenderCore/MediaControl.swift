@@ -66,6 +66,16 @@ enum MediaControl {
         _ = AXIsProcessTrustedWithOptions([option: true] as CFDictionary)
     }
 
+    /// `requestAuthorization`, at most once per process. A knob asks on every
+    /// refused detent, and nothing guarantees every macOS release coalesces
+    /// repeated prompts into one, so a turn must not stack them.
+    @MainActor private static var askedForAuthorization = false
+    @MainActor static func requestAuthorizationOnce() {
+        guard !askedForAuthorization else { return }
+        askedForAuthorization = true
+        requestAuthorization()
+    }
+
     // MARK: event construction
 
     /// Values from IOKit's `ev_keymap.h` (`NX_KEYTYPE_*`). Spelled out because

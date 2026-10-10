@@ -47,10 +47,10 @@ extension PanelManager {
         print("[\(serviceName)] touch \(touch.gesture) -> \(action)")
         // The knob is a volume knob under every preset, so the Accessibility
         // grant it needs is asked for when it is first used rather than only
-        // when the multimedia preset is chosen. macOS shows the prompt at most
-        // once per grant state, so asking on every refused detent is harmless.
+        // when the multimedia preset is chosen - once per launch, so a turn
+        // does not stack prompts.
         if touch.gesture.isKnob, !MediaControl.isAuthorized {
-            MediaControl.requestAuthorization()
+            MediaControl.requestAuthorizationOnce()
         }
         switch action {
         case .togglePause:
