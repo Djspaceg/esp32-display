@@ -51,6 +51,7 @@ const char *startAudioToneTest(const board::Config &config,
   // A connected sender streams the whole time, silence included, so the tone
   // takes precedence: the engine drops the stream and lets go of the codec
   // for the tone's length, and the stream plays again after it.
+  const bool pausesStream = audioengine::streamActive();
   audioengine::setLocalTestActive(true);
   for (TickType_t waited = 0; !audioengine::localTestHeld() &&
                               waited < pdMS_TO_TICKS(ENGINE_PARK_WAIT_MS);
@@ -69,6 +70,9 @@ const char *startAudioToneTest(const board::Config &config,
     return "codec/I2S initialization failed; amp remains disabled";
   }
   toneOwnsBackend = true;
+  if (pausesStream) {
+    Serial.println("audio: network stream paused for the tone");
+  }
   toneGenerator.reset(format.sampleRateHz, format.channels, TONE_FREQUENCY_HZ);
   framesRemaining =
       (uint32_t)(((uint64_t)format.sampleRateHz * durationMs) / 1000U);
