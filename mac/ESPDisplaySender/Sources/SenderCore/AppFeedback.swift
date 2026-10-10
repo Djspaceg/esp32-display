@@ -36,6 +36,7 @@ enum AppIssue: String, CaseIterable, Sendable {
     case deviceConfig
     case persistence
     case wifiPresetSync
+    case accessibility
 
     var title: String {
         switch self {
@@ -43,6 +44,20 @@ enum AppIssue: String, CaseIterable, Sendable {
         case .deviceConfig: return "Per-display source file ignored"
         case .persistence: return "Display settings could not be saved"
         case .wifiPresetSync: return "WiFi presets could not be copied"
+        case .accessibility: return "Accessibility permission needed"
+        }
+    }
+
+    /// The System Settings pane that fixes this, for issues the user resolves
+    /// there. macOS does not ask again for a permission once it is declined,
+    /// so the notice has to offer the way back itself.
+    var settingsURL: URL? {
+        switch self {
+        case .accessibility:
+            return URL(string: "x-apple.systempreferences:"
+                + "com.apple.preference.security?Privacy_Accessibility")
+        case .screenRecording, .deviceConfig, .persistence, .wifiPresetSync:
+            return nil
         }
     }
 }

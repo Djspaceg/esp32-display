@@ -280,6 +280,15 @@ private struct IssueBanner: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+                // A permission macOS will not prompt for again is fixed in
+                // System Settings, so the notice opens the pane itself.
+                if let settingsURL = issue.issue.settingsURL {
+                    Button("Open System Settings") {
+                        NSWorkspace.shared.open(settingsURL)
+                    }
+                    .controlSize(.small)
+                    .padding(.top, 4)
+                }
             }
             Spacer(minLength: 8)
             Button(action: onDismiss) {

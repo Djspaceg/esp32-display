@@ -34,6 +34,15 @@ final class PanelManager: ObservableObject {
     /// asks CFGSHOW for the current SSID, and a capture must never open a real
     /// serial port another process may be using.
     var serialIODisabled = false
+    /// The media-key path a gesture goes through: whether this process may
+    /// post keys, the one-time Accessibility prompt, and the sender itself.
+    /// Replaced by tests, which must not prompt or change the volume of
+    /// whoever runs them.
+    var mediaKeysAuthorized: () -> Bool = { MediaControl.isAuthorized }
+    var requestMediaKeyAuthorization: () -> Void = {
+        MediaControl.requestAuthorizationOnce()
+    }
+    var mediaKeySender: (MediaControl.Key) -> String? = { MediaControl.send($0) }
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []
     /// What each source currently reports under an issue kind, in report order.

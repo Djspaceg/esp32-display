@@ -48,9 +48,20 @@ extension PanelManager {
         // The knob is a volume knob under every preset, so the Accessibility
         // grant it needs is asked for when it is first used rather than only
         // when the multimedia preset is chosen - once per launch, so a turn
-        // does not stack prompts.
-        if touch.gesture.isKnob, !MediaControl.isAuthorized {
-            MediaControl.requestAuthorizationOnce()
+        // does not stack prompts. macOS never asks again once the prompt is
+        // declined, so a standing notice says what is wrong and opens the
+        // settings pane; it replaces the per-detent failure alert.
+        if touch.gesture.isKnob {
+            guard mediaKeysAuthorized() else {
+                requestMediaKeyAuthorization()
+                report(.accessibility, detail:
+                    "The knob on \(panel.displayName) changes this Mac's volume "
+                    + "and mute, which needs Accessibility permission. Turn on "
+                    + "ESPDisplaySender under System Settings > Privacy & "
+                    + "Security > Accessibility, then turn the knob again.")
+                return
+            }
+            resolve(.accessibility)
         }
         switch action {
         case .togglePause:
@@ -83,7 +94,7 @@ extension PanelManager {
     /// to discard - so the only symptom would be a panel that appears to have
     /// stopped noticing fingers.
     private func sendMediaKey(_ key: MediaControl.Key, for serviceName: String) {
-        guard let failure = MediaControl.send(key) else { return }
+        guard let failure = mediaKeySender(key) else { return }
         let name = panels.first { $0.serviceName == serviceName }?.displayName
             ?? serviceName
         operationOutcome = .failure(
