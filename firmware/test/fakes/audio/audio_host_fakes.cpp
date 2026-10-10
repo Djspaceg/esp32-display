@@ -37,6 +37,8 @@ struct UdpDatagram {
 
 uint32_t nowMs = 0;
 unsigned taskDelayCalls = 0;
+void (*taskDelayHook)() = nullptr;
+bool inTaskDelayHook = false;
 bool taskCreateFailing = false;
 std::vector<audiohost::CreatedTask> createdTaskList;
 int liveMutexCount = 0;
@@ -194,7 +196,13 @@ int64_t esp_timer_get_time() { return (int64_t)nowMs * 1000; }
 
 void vTaskDelete(TaskHandle_t) {}
 
-void vTaskDelay(TickType_t) { taskDelayCalls++; }
+void vTaskDelay(TickType_t) {
+  taskDelayCalls++;
+  if (taskDelayHook == nullptr || inTaskDelayHook) return;
+  inTaskDelayHook = true;
+  taskDelayHook();
+  inTaskDelayHook = false;
+}
 
 void taskYIELD() { taskYieldCalls++; }
 
@@ -389,6 +397,7 @@ namespace audiohost {
 void reset() {
   nowMs = 0;
   taskDelayCalls = 0;
+  taskDelayHook = nullptr;
   taskCreateFailing = false;
   createdTaskList.clear();
   liveMutexCount = 0;
@@ -458,6 +467,8 @@ void enqueueUdp(const std::vector<uint8_t> &data, uint32_t remoteIp,
 
 size_t pendingUdp() { return udpDatagrams.size(); }
 unsigned delayCalls() { return taskDelayCalls; }
+
+void setTaskDelayHook(void (*hook)()) { taskDelayHook = hook; }
 void setTaskCreateFailing(bool failing) { taskCreateFailing = failing; }
 const std::vector<CreatedTask> &createdTasks() { return createdTaskList; }
 int liveMutexes() { return liveMutexCount; }

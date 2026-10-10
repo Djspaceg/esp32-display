@@ -83,6 +83,10 @@ struct CreatedTask {
 };
 // Tasks created since reset().
 const std::vector<CreatedTask> &createdTasks();
+// Called from vTaskDelay(), so a test can run another task while the code
+// under test sleeps waiting on it. Not re-entered from a delay inside the
+// hook itself. reset() clears it.
+void setTaskDelayHook(void (*hook)());
 // Mutexes created and not deleted, and whether any take/give was unpaired.
 int liveMutexes();
 bool mutexMisuse();

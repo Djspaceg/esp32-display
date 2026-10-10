@@ -15,6 +15,9 @@ bool available();
 bool shouldSuppressVideo();
 bool streamActive();
 void setLocalTestActive(bool active);
+// After setLocalTestActive(true): whether the engine task has stopped
+// touching the codec backend (always, when no engine task runs).
+bool localTestHeld();
 
 extern uint32_t tuneLowWatermarkMs;
 extern uint32_t tuneTargetWatermarkMs;

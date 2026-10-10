@@ -38,6 +38,9 @@ volatile bool engineAvailable = false;
 volatile bool suppressVideo = false;
 volatile bool streamSeen = false;
 volatile bool localTestActive = false;
+// Set by the engine task once it has seen localTestActive and let go of the
+// codec backend, so a local tone can take the backend over a live stream.
+volatile bool localTestParked = false;
 // Engine-task state, file scope so a host test's re-entered task keeps it.
 StartBackoff startBackoff;
 
@@ -259,9 +262,15 @@ void engineTask(void *) {
       }
       tracker.reset();
       jitter.clear();
+      cursor.reset();
+      for (uint8_t channel = 0; channel < MAX_CHANNELS; ++channel) {
+        lastOutput[channel] = 0;
+      }
+      underrun.reset();
       playbackMetrics.reset();
       streamSeen = false;
       suppressVideo = false;
+      localTestParked = true;
       vTaskDelay(1);
       continue;
     }
@@ -653,7 +662,13 @@ void stop() {
 bool available() { return engineAvailable; }
 bool shouldSuppressVideo() { return streamSeen && suppressVideo; }
 bool streamActive() { return streamSeen; }
-void setLocalTestActive(bool active) { localTestActive = active; }
+void setLocalTestActive(bool active) {
+  // Cleared first: a park the engine reported for an earlier hold must not
+  // pass for this one before the engine has seen it.
+  if (active) localTestParked = false;
+  localTestActive = active;
+}
+bool localTestHeld() { return !engineAvailable || localTestParked; }
 
 #else
 
@@ -663,6 +678,7 @@ bool available() { return false; }
 bool shouldSuppressVideo() { return false; }
 bool streamActive() { return false; }
 void setLocalTestActive(bool) {}
+bool localTestHeld() { return true; }
 
 #endif
 

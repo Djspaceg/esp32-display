@@ -657,6 +657,12 @@ static void queueSenderStream(uint16_t packets) {
   audiotransport::hostReceiveBurst();
 }
 
+// The engine task runs whenever the loop task sleeps, as it does on the
+// board, where it is the higher-priority task on the same core.
+static void runOneEngineIteration() {
+  audioengine::host::runEngineTaskIterations(1);
+}
+
 // A tone runs to completion, then gives the codec back: ownership and the
 // engine's local-test hold are both released, so a sender's stream plays.
 static int testToneLifecycleReleasesTheBackend() {
@@ -667,6 +673,7 @@ static int testToneLifecycleReleasesTheBackend() {
   audiotransport::hostResetStats();
   CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
   CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  audiohost::setTaskDelayHook(runOneEngineIteration);
   CHECK(startAudioToneTest(board::CONFIG_LCD_ST77916, 100) == nullptr);
   CHECK(audioToneTestRunning());
   for (int pass = 0; pass < 32 && audioToneTestRunning(); ++pass) {
@@ -688,6 +695,55 @@ static int testToneLifecycleReleasesTheBackend() {
   return 0;
 }
 
+// A connected sender streams the whole time, silence included, so a tone that
+// waited for the stream to end never played while the app ran: the 4B
+// answered CFGAUDIOTEST with "network audio is active" and stayed silent. The
+// tone pauses the stream for its length, and the stream plays again after.
+static int testToneTakesPrecedenceOverSenderStream() {
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
+  CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  audiohost::setTaskDelayHook(runOneEngineIteration);
+  audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
+  queueSenderStream(6);
+  audiohost::setMillis(250);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  CHECK(audioengine::streamActive());
+  CHECK(backend.running());
+
+  CHECK(startAudioToneTest(board::CONFIG_LCD_ST77916, 100) == nullptr);
+  CHECK(audioToneTestRunning());
+  CHECK(!audioengine::streamActive());
+
+  // The sender keeps sending through the tone; the engine drops it.
+  queueSenderStream(6);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  CHECK(!audioengine::streamActive());
+  CHECK(audioToneTestRunning());
+  for (int pass = 0; pass < 32 && audioToneTestRunning(); ++pass) {
+    serviceAudioToneTest();
+  }
+  serviceAudioToneTest();
+  CHECK(!audioToneTestRunning());
+  CHECK(!backend.running());
+
+  queueSenderStream(6);
+  audiohost::setMillis(500);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  CHECK(audioengine::streamActive());
+  CHECK(backend.running());
+
+  audioengine::stop();
+  audiotransport::stop();
+  CHECK(!audiohost::i2sChannelMisused());
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
 // A tone whose backend is stopped underneath it (the engine's dead-I2S path)
 // must not keep the engine on hold: the next service releases it.
 static int testStaleToneOwnershipIsReleased() {
@@ -698,6 +754,7 @@ static int testStaleToneOwnershipIsReleased() {
   audiotransport::hostResetStats();
   CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
   CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  audiohost::setTaskDelayHook(runOneEngineIteration);
   CHECK(startAudioToneTest(board::CONFIG_LCD_ST77916, 1000) == nullptr);
   audio::sharedCodecBackend().stop();
   serviceAudioToneTest();
@@ -1055,6 +1112,8 @@ int main() {
       {"failed-start-backs-off", testFailedBackendStartBacksOff},
       {"tone-lifecycle", testToneLifecycleReleasesTheBackend},
       {"tone-stale-ownership", testStaleToneOwnershipIsReleased},
+      {"tone-precedes-sender-stream",
+       testToneTakesPrecedenceOverSenderStream},
       {"playback-only-start", testPlaybackOnlyStart},
   };
   for (const auto &finding : findingTests) {

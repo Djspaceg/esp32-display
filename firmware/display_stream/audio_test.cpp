@@ -12,6 +12,9 @@ constexpr uint32_t TONE_FREQUENCY_HZ = 440;
 constexpr uint32_t SERVICE_INTERVAL_MS = 10;
 constexpr size_t MAX_SERVICE_FRAMES = 640;
 constexpr uint8_t MAX_CHANNELS = 2;
+// The engine task parks within one service block (10 ms) unless an I2S write
+// is stuck; past this the tone gives up rather than share the backend.
+constexpr uint32_t ENGINE_PARK_WAIT_MS = 200;
 
 audiobackend::ToneGenerator toneGenerator;
 uint32_t framesRemaining = 0;
@@ -45,10 +48,19 @@ const char *startAudioToneTest(const board::Config &config,
   }
 
 #if defined(ESPDISP_AUDIO_RUNTIME)
-  if (audioengine::streamActive()) {
-    return "network audio is active; stop the sender first";
-  }
+  // A connected sender streams the whole time, silence included, so the tone
+  // takes precedence: the engine drops the stream and lets go of the codec
+  // for the tone's length, and the stream plays again after it.
   audioengine::setLocalTestActive(true);
+  for (TickType_t waited = 0; !audioengine::localTestHeld() &&
+                              waited < pdMS_TO_TICKS(ENGINE_PARK_WAIT_MS);
+       ++waited) {
+    vTaskDelay(1);
+  }
+  if (!audioengine::localTestHeld()) {
+    audioengine::setLocalTestActive(false);
+    return "network audio did not pause; amp unchanged";
+  }
   audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
   const audiobackend::Format format =
       audiobackend::descriptorFormat(*audioConfig);
