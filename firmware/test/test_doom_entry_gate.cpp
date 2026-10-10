@@ -1312,17 +1312,43 @@ static int quakeSaveFailureKeepsTheMenuUp() {
 }
 
 // Rule: a board Quake does not run on never reads the quake_pak partition,
-// even in an image that carries Quake (an S3 Doom board here).
+// even in an image that carries Quake (the 0.85, whose 128x128 panel cannot
+// hold a 320x240 frame).
 static int nonQuakeBoardNeverReadsThePak() {
   resetObservations();
   const board::Variant saved = boardVariant;
-  boardVariant = board::Variant::AmoledCo5300;
+  boardVariant = board::Variant::LcdGc9107;
   wadProblem = nullptr;
   pakProblem = nullptr;
   CHECK(runMenu(false) == MenuRun::Returned);
   boardVariant = saved;
   CHECK(menuLabels == "STREAMING,DOOM");
   CHECK(pakPreflightCalls == 0);
+  return 0;
+}
+
+// Rule: the S3 boards with a big enough panel ask the pak check, which is
+// where a 16 MiB chip says no; a 32 MiB one with the pak offers Quake.
+static int s3QuakeBoardsAskThePakCheck() {
+  const board::Variant saved = boardVariant;
+  for (board::Variant variant :
+       {board::Variant::AmoledCo5300, board::Variant::LcdSt77916}) {
+    resetObservations();
+    boardVariant = variant;
+    wadProblem = nullptr;
+    pakProblem = "flash too small for Quake's data (needs 32 MiB)";
+    CHECK(runMenu(false) == MenuRun::Returned);
+    CHECK(menuLabels == "STREAMING,DOOM");
+    CHECK(pakPreflightCalls == 1);
+    CHECK(Serial.captured.find("boot menu: Quake not offered (flash too small "
+                               "for Quake's data (needs 32 MiB))") !=
+          std::string::npos);
+    resetObservations();
+    pakProblem = nullptr;
+    CHECK(runMenu(false) == MenuRun::Returned);
+    CHECK(menuLabels == "STREAMING,DOOM,QUAKE");
+  }
+  boardVariant = saved;
   return 0;
 }
 
@@ -1473,6 +1499,7 @@ int main() {
   if (bootPressesThenHoldChooseQuake() != 0) return 1;
   if (quakeSaveFailureKeepsTheMenuUp() != 0) return 1;
   if (nonQuakeBoardNeverReadsThePak() != 0) return 1;
+  if (s3QuakeBoardsAskThePakCheck() != 0) return 1;
   printf("test_doom_entry_gate: %d checks passed\n", checks);
   return 0;
 }

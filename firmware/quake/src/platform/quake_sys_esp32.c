@@ -279,13 +279,23 @@ void QG_SetPalette(unsigned char palette[768]) { (void)palette; }
 
 static double s_last_time;
 
-const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes) {
+const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes,
+                               uint32_t reserve_bytes) {
   if (!quake_statics_allocate()) return "no memory for the engine's tables";
+  // As much of hunk_bytes as PSRAM has once reserve_bytes is kept back; the
+  // engine refuses a heap under its floor itself, with the sizes.
+  const size_t largest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (largest <= reserve_bytes) return "no PSRAM for the engine heap";
+  if (largest - reserve_bytes < hunk_bytes) {
+    hunk_bytes = (uint32_t)((largest - reserve_bytes) & ~(size_t)0xFFFF);
+  }
   static quakeparms_t parms;
   parms.memsize = (int)hunk_bytes;
   parms.membase =
       heap_caps_malloc(hunk_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (parms.membase == NULL) return "no PSRAM for the engine heap";
+  quake_log("engine heap %u KB", (unsigned)(hunk_bytes / 1024));
   parms.basedir = QUAKE_PAK_MOUNT;
   parms.cachedir = NULL;
 

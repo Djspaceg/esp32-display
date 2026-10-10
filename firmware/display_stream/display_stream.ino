@@ -81,7 +81,7 @@
 // Doom remains a developer/profile-gated feature inside supported family images.
 #if defined(ESPDISP_DOOM_RUNTIME)
 #include <doom_mode.h>
-// Quake rides on the Doom runtime on the P4 carriers (quake_build.h decides).
+// Quake rides on the Doom runtime on the P4 and S3 images (quake_build.h decides).
 #include <quake_mode.h>
 #endif
 

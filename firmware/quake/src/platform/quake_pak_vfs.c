@@ -1,6 +1,11 @@
 // The read-only Quake data file: /qdata/id1/pak0.pak, served from the
 // quake_pak partition with esp_partition_read().
 //
+// On the P4 the partition is in the table (partitions_p4_4b.csv). The S3's
+// universal table covers only its common 8 MiB, so there the pak is a raw
+// flash region past it, registered at runtime as an external partition, and
+// only on a chip big enough to hold it: 32 MiB in practice.
+//
 // Quake reads its pack through both of its file paths: Sys_FileOpenRead and
 // friends for the pack directory and every whole-file load, and stdio
 // (fopen/fseek/fread) for demos. One VFS registration serves both unchanged.
@@ -26,6 +31,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include <esp_flash.h>
 #include <esp_heap_caps.h>
 #include <esp_partition.h>
 #include <esp_vfs.h>
@@ -39,6 +45,14 @@
 // the same pair before `write-data quake_pak` writes anything.
 #define QUAKE_PAK_PARTITION_TYPE 0x42
 #define QUAKE_PAK_PARTITION_SUBTYPE 0x07
+
+#if CONFIG_IDF_TARGET_ESP32S3
+// The S3 region: from the end of the universal 8 MiB layout, 18 MiB, so the
+// chip must have 26 MiB. tools/espdisp.py writes the bundle's pak here, and
+// only to a chip that large (QUAKE_PAK_S3_* there).
+#define QUAKE_PAK_S3_OFFSET 0x800000u
+#define QUAKE_PAK_S3_BYTES 0x1200000u
+#endif
 
 // The reader task: enough for esp_partition_read() and the flash driver below
 // it. Above the Quake task's priority, so a read starts as soon as it is asked.
@@ -98,11 +112,53 @@ static bool quake_pak_read(void* context, uint32_t offset, void* out,
   return ok;
 }
 
+#if CONFIG_IDF_TARGET_ESP32S3
+// Registers the S3 region as the quake_pak partition, once per boot. NULL on
+// success, else why the chip cannot hold it.
+static const char* quake_pak_register_s3_region(void) {
+  static const char* s_region_failure = "not registered";
+  static bool s_tried = false;
+  if (s_tried) return s_region_failure;
+  s_tried = true;
+  uint32_t physical = 0;
+  if (esp_flash_get_physical_size(esp_flash_default_chip, &physical) !=
+      ESP_OK) {
+    s_region_failure = "could not read the flash size";
+    return s_region_failure;
+  }
+  if (physical < QUAKE_PAK_S3_OFFSET + QUAKE_PAK_S3_BYTES) {
+    s_region_failure = "flash too small for Quake's data (needs 32 MiB)";
+    return s_region_failure;
+  }
+  // The driver takes its size from the image header, 8 MiB, and refuses to
+  // register a partition past it; the chip is bigger, so tell it. Reads past
+  // 16 MiB need the chip driver's 4-byte addressing (SPI_FLASH_CHIP_CAP_32MB_
+  // SUPPORT); the pak's own check below fails cleanly if they come back wrong.
+  if (esp_flash_default_chip->size < physical) {
+    esp_flash_default_chip->size = physical;
+  }
+  if (esp_partition_register_external(
+          esp_flash_default_chip, QUAKE_PAK_S3_OFFSET, QUAKE_PAK_S3_BYTES,
+          "quake_pak", (esp_partition_type_t)QUAKE_PAK_PARTITION_TYPE,
+          (esp_partition_subtype_t)QUAKE_PAK_PARTITION_SUBTYPE,
+          NULL) != ESP_OK) {
+    s_region_failure = "could not register the Quake data region";
+    return s_region_failure;
+  }
+  s_region_failure = NULL;
+  return NULL;
+}
+#endif
+
 const char* quake_pak_preflight(void) {
+  s_pack_bytes = 0;
+#if CONFIG_IDF_TARGET_ESP32S3
+  s_failure = quake_pak_register_s3_region();
+  if (s_failure != NULL) return s_failure;
+#endif
   s_partition = esp_partition_find_first(
       (esp_partition_type_t)QUAKE_PAK_PARTITION_TYPE,
       (esp_partition_subtype_t)QUAKE_PAK_PARTITION_SUBTYPE, "quake_pak");
-  s_pack_bytes = 0;
   if (s_partition == NULL) {
     s_failure =
         "no quake_pak partition (flash the current P4 bundle over USB)";

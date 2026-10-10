@@ -14,8 +14,11 @@ extern "C" {
 // ---- Engine side (quake_sys_esp32.c) ----
 
 /// Allocates the relocated arrays, the frame and depth buffers and the hunk,
-/// then runs Host_Init. Returns NULL on success, else why it could not start.
-const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes);
+/// then runs Host_Init. The hunk is hunk_bytes, or less where PSRAM would
+/// then keep under reserve_bytes free. Returns NULL on success, else why it
+/// could not start.
+const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes,
+                               uint32_t reserve_bytes);
 
 /// One pass of the host loop: Host_Frame with the time since the last pass.
 /// Quake itself skips passes that come sooner than 1/72 s.

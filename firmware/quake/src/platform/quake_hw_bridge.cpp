@@ -1,4 +1,4 @@
-// Hardware side of Quake on the P4: the panel, touch, BOOT, the USB keyboard
+// Hardware side of Quake on the P4 and S3: the panel, touch, BOOT, the USB keyboard
 // and mouse, and the serial console. What each input MEANS is decided in
 // quake_input_model.h, which is host tested; this file only samples hardware
 // and moves bytes.
@@ -217,6 +217,10 @@ extern "C" bool quake_input_setup(void) {
                       ? touchmap::GT911_ON_JD9365_4C
                   : bcfg->variant == board::Variant::P4_34C
                       ? touchmap::GT911_ON_JD9365_34C
+                  : bcfg->variant == board::Variant::AmoledCo5300
+                      ? touchmap::CST9217_ON_CO5300
+                  : bcfg->variant == board::Variant::LcdSt77916
+                      ? touchmap::CST816_ON_ST77916
                       : touchmap::GT911_ON_ST7703_4B;
   s_touch_ready = boardtouch::init(*bcfg);
   s_tracker.reset();

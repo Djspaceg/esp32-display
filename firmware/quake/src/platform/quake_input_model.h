@@ -36,10 +36,12 @@ constexpr FrameLayout frameLayout(int panelWidth, int panelHeight) {
   const int sx = panelWidth / RENDER_WIDTH;
   const int sy = panelHeight / RENDER_HEIGHT;
   const int s = sx < sy ? sx : sy;
+  // The origin is even: the 1.75C's CO5300 takes windows only from even
+  // columns and rows, and 466x466 would otherwise put the frame at (73,113).
   return s <= 0 ? FrameLayout{0, 0, 0, 0, 0}
                 : FrameLayout{s, RENDER_WIDTH * s, RENDER_HEIGHT * s,
-                              (panelWidth - RENDER_WIDTH * s) / 2,
-                              (panelHeight - RENDER_HEIGHT * s) / 2};
+                              ((panelWidth - RENDER_WIDTH * s) / 2) & ~1,
+                              ((panelHeight - RENDER_HEIGHT * s) / 2) & ~1};
 }
 
 // ---- Key events ------------------------------------------------------------

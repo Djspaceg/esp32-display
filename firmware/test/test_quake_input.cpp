@@ -66,6 +66,16 @@ int main() {
     // its 400-pixel radius.
     const int dx = r.width / 2, dy = r.height / 2;
     CHECK(dx * dx + dy * dy <= 400 * 400);
+    // The 1.75C: 1x, at an even origin for its CO5300, and inside the
+    // 233-pixel radius of its round glass.
+    const FrameLayout a = frameLayout(466, 466);
+    CHECK(a.scale == 1 && a.x == 72 && a.y == 112);
+    CHECK((a.x + a.width - 233) * (a.x + a.width - 233) +
+              (a.y + a.height - 233) * (a.y + a.height - 233) <=
+          233 * 233);
+    CHECK((a.x - 233) * (a.x - 233) + (a.y - 233) * (a.y - 233) <= 233 * 233);
+    const FrameLayout q = frameLayout(360, 360);  // the 1.85C
+    CHECK(q.scale == 1 && q.x == 20 && q.y == 60);
     CHECK(frameLayout(960, 720).scale == 3);
     CHECK(frameLayout(320, 240).scale == 1);
     CHECK(frameLayout(320, 239).scale == 0);

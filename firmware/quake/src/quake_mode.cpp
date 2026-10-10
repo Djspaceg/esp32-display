@@ -47,7 +47,8 @@ void quakeTask(void*) {
   // size passed below.
   static char arg0[] = "quake";
   static char* argv[] = {arg0, nullptr};
-  const char* failure = quake_engine_start(1, argv, QUAKE_HUNK_BYTES);
+  const char* failure = quake_engine_start(1, argv, QUAKE_HUNK_BYTES,
+                                           QUAKE_HUNK_RESERVE_BYTES);
   if (failure != nullptr) quake_fail_restart(failure, true);
   quake_engine_command(QUAKE_STARTUP_COMMANDS);
   logStage("engine");

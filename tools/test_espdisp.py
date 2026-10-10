@@ -4059,7 +4059,7 @@ def test_write_data_quake_pak():
             out.write(sound)
         port = espdisp.PortInfo("/dev/cu.usbmodemP4", [], "unknown")
 
-        def run(before, after=None):
+        def run(before, after=None, chip="esp32p4", flash_bytes=None):
             commands = []
             written = []
 
@@ -4079,6 +4079,11 @@ def test_write_data_quake_pak():
                     espdisp, "esptool_path", return_value="/x/esptool"), \
                  unittest.mock.patch.object(
                     espdisp, "run_streaming", side_effect=write), \
+                 unittest.mock.patch.object(
+                    espdisp, "probe_chip", return_value=chip), \
+                 unittest.mock.patch.object(
+                    espdisp, "detect_flash_bytes",
+                    return_value=flash_bytes), \
                  contextlib.redirect_stdout(io.StringIO()):
                 espdisp.cmd_write_data(args)
             return commands, written
@@ -4094,6 +4099,35 @@ def test_write_data_quake_pak():
         check_fails(lambda: run(current, previous), "changed during the write",
                     "a table that changed during the write (a wrapped "
                     "address) is reported")
+
+        # An S3: the universal table, and the raw region past it on a chip
+        # that reaches 0x1A00000.
+        s3_table = b"".join(head + [
+            entry("app0", 0x00, 0x10, 0x10000, 0x1F0000),
+            entry("app1", 0x00, 0x11, 0x200000, 0x1F0000),
+            entry("doom_wad", 0x42, 0x06, 0x3FF000, 0x401000),
+        ]) + b"\xff" * 32
+        s3 = espdisp.FAMILIES["s3"]
+        check_equal(
+            run(s3_table, chip="esp32s3", flash_bytes=32 * 0x100000),
+            ([["/x/esptool", "--chip", "esp32s3", "--port", port.address,
+               "--baud", s3.upload_speed, "write_flash", "0x800000"]],
+             [sound]),
+            "on a 32 MiB S3 write-data writes the pak at its raw region")
+        check_fails(
+            lambda: run(s3_table, chip="esp32s3", flash_bytes=16 * 0x100000),
+            "has 16 MiB of flash", "a 16 MiB S3 is refused before any write")
+        check_fails(
+            lambda: run(current, chip="esp32s3", flash_bytes=32 * 0x100000),
+            "not this repo's s3 layout",
+            "an S3 whose table is not the universal one is refused")
+        check_equal(
+            espdisp.quake_pak_s3_target(s3_table, 32 * 0x100000, 18689235),
+            0x800000, "the shareware pak fits the S3 region")
+        check_fails(
+            lambda: espdisp.quake_pak_s3_target(
+                s3_table, 32 * 0x100000, 0x1200001),
+            "holds 18874368", "a file larger than the S3 region is refused")
 
         reads = []
 

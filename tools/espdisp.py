@@ -6094,6 +6094,12 @@ def _ensure_doom_wad() -> Optional[str]:
 # so it reaches a board by this separate write. The partition crosses 16 MiB,
 # which is fine because Quake reads its data rather than mapping it.
 # tools/fetch_game_data.sh fetches the shareware pak0.pak to the default path.
+#
+# On the P4 it is a partition in the table. The S3's universal table covers
+# only its common 8 MiB, so there it is a raw region just past that layout,
+# which the firmware registers at runtime (firmware/quake/src/platform/
+# quake_pak_vfs.c, QUAKE_PAK_S3_*), and only a chip of at least 26 MiB (in
+# practice 32 MiB) holds it.
 _QUAKE_PAK_LABEL = "quake_pak"
 _QUAKE_PAK_TYPE = 0x42
 _QUAKE_PAK_SUBTYPE = 0x07
@@ -6106,6 +6112,8 @@ _QUAKE_PAK_SIZE = 18689235
 _QUAKE_PAK_SHA256 = "35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a946af"
 # Each Quake pack directory entry: 56-byte name, u32 offset, u32 length.
 _QUAKE_PACK_ENTRY_BYTES = 64
+_QUAKE_PAK_S3_ADDRESS = 0x800000
+_QUAKE_PAK_S3_REGION_BYTES = 0x1200000
 
 
 class DataPartition(NamedTuple):
@@ -6201,6 +6209,44 @@ def data_partition_target(
     return address
 
 
+def quake_pak_s3_target(table: bytes, flash_bytes: int, payload_bytes: int) -> int:
+    """Where the pak goes on an S3: its raw region, if this board holds it.
+
+    The table must be the universal S3 layout, whose last partition ends where
+    the region starts, and the chip must reach the region's end.
+    """
+    family = FAMILIES["s3"]
+    try:
+        _verify_partition_payload(family, table)
+    except Fail as exc:
+        raise Fail(
+            "the board's partition table is not this repo's s3 layout (%s); "
+            "flash the current bundle over USB first" % exc)
+    end = _QUAKE_PAK_S3_ADDRESS + _QUAKE_PAK_S3_REGION_BYTES
+    if flash_bytes < end:
+        raise Fail(
+            "this board has %d MiB of flash; Quake's data needs the region "
+            "0x%X-0x%X, so a 32 MiB chip" % (flash_bytes // 0x100000,
+                                              _QUAKE_PAK_S3_ADDRESS, end))
+    if payload_bytes > _QUAKE_PAK_S3_REGION_BYTES:
+        raise Fail("the file is %d bytes but the S3 Quake region holds %d"
+                   % (payload_bytes, _QUAKE_PAK_S3_REGION_BYTES))
+    return _QUAKE_PAK_S3_ADDRESS
+
+
+def detect_flash_bytes(family: Family, port_address: str) -> int:
+    """The attached chip's flash size, as esptool's flash-id reports it."""
+    command = esptool_invocation(
+        family, port_address, esptool_subcommand(("flash-id", "flash_id")))
+    proc = run_capture(command, timeout=60.0)
+    blob = (proc.stdout or "") + (proc.stderr or "")
+    found = re.findall(r"Detected flash size:\s*(\d+)\s*MB", blob)
+    if proc.returncode != 0 or not found:
+        raise Fail("could not read the flash size of %s:\n%s"
+                   % (port_address, blob.strip()[-600:]))
+    return int(found[-1]) * 0x100000
+
+
 def cmd_write_data(args) -> int:
     spec = DATA_PARTITIONS[args.partition]
     path = args.file or spec.default_path
@@ -6211,12 +6257,18 @@ def cmd_write_data(args) -> int:
     data = read_binary(path)
     validate_quake_pak(data)
     digest = sha256_hex(data)
-    family = FAMILIES[spec.family]
     port = resolve_port(args.port)
+    # The chip decides the family: a P4 has the partition, an S3 the region.
+    s3 = probe_chip(port.address) == FAMILIES["s3"].chip
+    family = FAMILIES["s3" if s3 else spec.family]
     print("Reading the partition table on %s..." % port.address, flush=True)
     table = read_device_partition_table(family, port.address)
-    address = data_partition_target(
-        args.partition, spec, family, table, len(data))
+    if s3:
+        address = quake_pak_s3_target(
+            table, detect_flash_bytes(family, port.address), len(data))
+    else:
+        address = data_partition_target(
+            args.partition, spec, family, table, len(data))
     shareware = len(data) == _QUAKE_PAK_SIZE and digest == _QUAKE_PAK_SHA256
     print("Writing %s (%d bytes, sha256 %s%s) to %s at 0x%X..."
           % (path, len(data), digest,
@@ -6670,7 +6722,8 @@ def build_parser() -> argparse.ArgumentParser:
         "bundle or the release catalog.",
         epilog="quake_pak: a Quake pack, default firmware/quake/id1/pak0.pak\n"
         "(tools/fetch_game_data.sh --game quake fetches the shareware one),\n"
-        "written to the P4 quake_pak partition at 0xE00000.",
+        "written to the P4 quake_pak partition at 0xE00000, or on an S3 with\n"
+        "32 MiB of flash to its raw region at 0x800000.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_write_data.add_argument("partition", choices=sorted(DATA_PARTITIONS))

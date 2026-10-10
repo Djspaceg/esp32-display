@@ -1,7 +1,8 @@
 # Quake game mode
 
-Quake shareware (id1/pak0.pak) on the three ESP32-P4 carriers: the 4B, the 4C
-and the 3.4C. It sits beside Doom and starts the same way, from the boot-mode
+Quake shareware (id1/pak0.pak) on the three ESP32-P4 carriers (the 4B, the 4C
+and the 3.4C) and on the ESP32-S3 boards with 32 MiB of flash and a panel that
+holds a 320x240 frame (the AMOLED 1.75C and the LCD 1.85C). It sits beside Doom and starts the same way, from the boot-mode
 menu, into an isolated boot with WiFi and streaming off. Any failure, and a
 3 s BOOT hold, restarts into the normal firmware.
 
@@ -15,15 +16,38 @@ upstream's system and video drivers, is GPL-2.0.
 ## Game data
 
 The pak is never committed or bundled. Fetch it and write it to the board's
-`quake_pak` partition (18 MiB at 0xE00000) over USB:
+`quake_pak` partition over USB (18 MiB at 0xE00000 on a P4; on an S3, a raw
+region of 18 MiB at 0x800000, just past the universal 8 MiB layout):
 
 ```sh
 tools/fetch_game_data.sh --game quake
 python3 tools/espdisp.py write-data quake_pak --port /dev/cu.usbmodemXXXX
 ```
 
-A board on an older partition table needs one full USB flash of the current P4
-bundle first; `write-data` refuses until then. Quake reads the partition with
+A board on an older partition table needs one full USB flash of the current
+bundle first; `write-data` refuses until then. On an S3 it also reads the chip's
+flash size and refuses anything under 32 MiB.
+
+### Which S3 boards
+
+The pak is 18,689,235 bytes. Every S3 runs the same image, whose layout (two
+app slots and the Doom WAD) fills the first 8 MiB, so the pak needs a chip of
+at least 26 MiB: a 32 MiB one.
+
+| Board | Flash | Panel | Quake |
+| --- | --- | --- | --- |
+| AMOLED 1.75C | 16 or 32 MiB (one unit here reads 32) | 466x466 | with 32 MiB |
+| LCD 1.85C | 16 MiB | 360x360 | with 32 MiB |
+| LCD 1.3, Touch LCD 1.54, ELECROW knob | 16 MiB | 240x240 | no: flash and panel |
+| LCD 1.9 | 16 MiB | 170x320 | no: flash and panel |
+| LCD 0.85 | 8 MiB | 128x128 | no: flash and panel |
+
+The S3 image carries the engine on every board: 243 KB more app (1,781,298 of
+the slot's 2,031,616 bytes) and 10,248 bytes more internal RAM. A Quake boot
+on an S3 sizes its engine heap to what the 8 MB of PSRAM has left once 1 MiB is
+kept back (id's floor is 5.3 MB) and puts the frame at 1x in the centre of the
+panel, at an even origin for the CO5300. The firmware raises the flash driver's size from
+the image header's 8 MiB to the chip's own before registering the region. Quake reads the partition with
 `esp_partition_read()` through a read-only file system mounted at `/qdata`
 (`platform/quake_pak_vfs.c`), so the pak may cross 16 MiB, past what this
 core's flash cache can map.
