@@ -1437,7 +1437,52 @@ static int knobTurnIsVolumeAndClickIsMute() {
   knobDetent(true);
   handleButton();
   CHECK(sentPackets.empty());
-  CHECK(Serial.captured.find("ignored, no sender") != std::string::npos);
+  CHECK(Serial.captured.find("knob: clockwise ignored, no sender") !=
+        std::string::npos);
+  hbPort = 4210;
+
+  // A fixed backlight disables the backlight toggle, never the mute click.
+  resetObservations();
+  sentPackets.clear();
+  fixedBlLevel = 120;
+  shortPress();
+  got = sentKnobGestures();
+  CHECK(got.size() == 1 && got[0] == TouchGesture::KnobPress);
+  fixedBlLevel = 0;
+
+  // Press-and-turn is one gesture outside the menus too: the turn steps the
+  // volume and the release mutes nothing.
+  resetObservations();
+  sentPackets.clear();
+  bootEdge(true);
+  fakeNow += 100;
+  knobDetent(true);
+  handleButton();
+  fakeNow += 100;
+  bootEdge(false);
+  fakeNow += 1000;
+  handleButton();
+  got = sentKnobGestures();
+  CHECK(got.size() == 1 && got[0] == TouchGesture::KnobClockwise);
+  CHECK(Serial.captured.find("press released after a turn") !=
+        std::string::npos);
+
+  // A refused triple press: presses one and two mute and unmute, the third
+  // sends nothing, and the survey their double opened is closed again.
+  resetObservations();
+  sentPackets.clear();
+  wadProblem = "no doom_wad partition";
+  shortPress();
+  shortPress();
+  shortPress();
+  got = sentKnobGestures();
+  CHECK(got.size() == 2);
+  CHECK(got[0] == TouchGesture::KnobPress && got[1] == TouchGesture::KnobPress);
+  CHECK(!surveyActive);
+  CHECK(ESP.restarts == 0);
+  CHECK(Serial.captured.find("button: Doom unavailable") != std::string::npos);
+  wadProblem = nullptr;
+  hbPort = 0;
 
   boardVariant = savedVariant;
   bcfg = savedConfig;

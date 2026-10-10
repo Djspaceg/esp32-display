@@ -32,8 +32,8 @@ enum MediaControl {
     static func send(_ key: Key) -> String? {
         guard isAuthorized else {
             return "ESPDisplaySender needs Accessibility permission to control "
-                + "playback. Grant it in System Settings > Privacy & Security > "
-                + "Accessibility, then try the gesture again."
+                + "volume and playback. Grant it in System Settings > Privacy & "
+                + "Security > Accessibility, then try the gesture or knob again."
         }
         // Down then up: media apps act on the press, but a key left logically
         // down is a stuck modifier as far as the window server is concerned.

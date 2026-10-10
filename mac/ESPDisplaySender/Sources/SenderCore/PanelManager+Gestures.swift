@@ -45,6 +45,13 @@ extension PanelManager {
         // the packet is wrong, the only symptom is that nothing happens, which
         // is indistinguishable from the panel never having sent anything.
         print("[\(serviceName)] touch \(touch.gesture) -> \(action)")
+        // The knob is a volume knob under every preset, so the Accessibility
+        // grant it needs is asked for when it is first used rather than only
+        // when the multimedia preset is chosen. macOS shows the prompt at most
+        // once per grant state, so asking on every refused detent is harmless.
+        if touch.gesture.isKnob, !MediaControl.isAuthorized {
+            MediaControl.requestAuthorization()
+        }
         switch action {
         case .togglePause:
             setPausedFromDevice(!panel.paused, for: serviceName)
@@ -79,7 +86,8 @@ extension PanelManager {
         guard let failure = MediaControl.send(key) else { return }
         let name = panels.first { $0.serviceName == serviceName }?.displayName
             ?? serviceName
-        operationOutcome = .failure("\(name) could not control playback", failure)
+        operationOutcome = .failure(
+            "\(name) could not control volume or playback", failure)
     }
 
     /// Step this panel through the windows currently on screen.

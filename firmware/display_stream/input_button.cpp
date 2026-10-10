@@ -20,9 +20,10 @@
 
 
 // ---- BOOT button (plain input after boot) -------------------------------
-// Short press: toggle backlight high/low. Long press: turn the display 180
-// (rotation += 2 - a physical button reachable from behind a mounted panel
-// stays a two-position toggle even where quarter turns exist).
+// Short press: toggle backlight high/low, or on the knob carrier toggle the
+// sender's mute (see the rotary encoder section). Long press: turn the
+// display 180 (rotation += 2 - a physical button reachable from behind a
+// mounted panel stays a two-position toggle even where quarter turns exist).
 static const uint32_t LONG_PRESS_MS = 600;
 // A third tier, well past the long press, for the one action that should not
 // be reachable by an accidental long-hold: turning the panel off from a
@@ -37,7 +38,8 @@ static const uint32_t EXTRA_LONG_PRESS_MS = 3000;
 // idle card, and all three single-press tiers are taken. The first release
 // previews its backlight toggle immediately; the second restores the original
 // level, so the double-press costs nothing but a blink - which doubles as
-// feedback. A lone preview is persisted after this window closes.
+// feedback. A lone preview is persisted after this window closes. On the knob
+// carrier the preview is a mute toggle and the restore toggles it back.
 static const uint32_t DOUBLE_PRESS_MS = 800;
 static const uint32_t DEBOUNCE_MS = 30;
 #if defined(ESPDISP_DOOM_RUNTIME)
@@ -347,10 +349,15 @@ static void activateSelector(uint32_t pressStartedAt) {
 static const int16_t MAX_KNOB_STEPS_PER_PASS = 4;
 
 static void applyEncoderTurn(int16_t steps) {
-  Serial.printf("knob: turn %+d\n", (int)steps);
   const int8_t direction = steps > 0 ? 1 : -1;
   int16_t count = steps > 0 ? steps : (int16_t)-steps;
-  if (count > MAX_KNOB_STEPS_PER_PASS) count = MAX_KNOB_STEPS_PER_PASS;
+  if (count > MAX_KNOB_STEPS_PER_PASS) {
+    Serial.printf("knob: turn %+d, %d applied (stall)\n", (int)steps,
+                  (int)MAX_KNOB_STEPS_PER_PASS);
+    count = MAX_KNOB_STEPS_PER_PASS;
+  } else {
+    Serial.printf("knob: turn %+d\n", (int)steps);
+  }
   if (selectorOwnsInput()) {
 #if defined(ESPDISP_BOOT_MENU_RUNTIME)
     if (bootMenuActive) {
@@ -387,10 +394,11 @@ static bool handleEncoder() {
   return true;
 }
 
-// Process queued BOOT edges: short press toggles backlight, a completed long
-// press flips the display 180 degrees, and an extra-long press toggles manual
-// display off/on. Capturing the edges outside the render loop is load-bearing:
-// a full S3 tile pass can otherwise begin and end between two polls.
+// Process queued BOOT edges: short press toggles backlight (the knob
+// carrier's mute), a completed long press flips the display 180 degrees, and
+// an extra-long press toggles manual display off/on. Capturing the edges
+// outside the render loop is load-bearing: a full S3 tile pass can otherwise
+// begin and end between two polls.
 // Normal-mode rotation waits for release, so crossing the three-second power
 // threshold cannot visibly rotate the picture first. Survey-selector holds
 // keep their immediate behavior because they are a separate mode and never
