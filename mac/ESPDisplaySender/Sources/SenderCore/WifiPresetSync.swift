@@ -32,10 +32,10 @@ enum WifiPresetOrder {
     ///
     /// The migration and the steady state are one rule. A nil order (never
     /// migrated) is seeded from the Keychain in the alphabetical order every
-    /// earlier build synced in, and networks saved since - by onboarding or the
-    /// standalone WiFi dialog, which write the Keychain directly - are appended
-    /// alphabetically after whatever order the user chose. Applying it to its
-    /// own output changes nothing.
+    /// earlier build synced in, and networks the Keychain gained since without
+    /// Settings - written by an earlier build's onboarding or WiFi dialog, or
+    /// by hand in Keychain Access - are appended alphabetically after whatever
+    /// order the user chose. Applying it to its own output changes nothing.
     static func reconciled(stored: [String]?, keychainNames: [String]) -> [String] {
         let existing = cleaned(stored ?? [])
         let known = Set(existing)
@@ -351,24 +351,6 @@ extension WifiConfigUI {
         }
     }
 
-    /// `syncSavedWifiPresets` with credentials read through `lookup`, for the
-    /// preset sheet's Copy Now. Read here, off the main actor, exactly as the
-    /// automatic path reads them.
-    static func syncSavedWifiPresets(
-        savedSSIDs: [String],
-        lookup: (String) -> SavedWiFiCredential?,
-        port: String,
-        send: WifiPresetCommandSender
-    ) -> Result<WifiPresetSyncReport, ConfigFailure> {
-        var credentials: [String: SavedWiFiCredential] = [:]
-        for ssid in savedSSIDs {
-            if let credential = lookup(ssid) { credentials[ssid] = credential }
-        }
-        return syncSavedWifiPresets(
-            savedSSIDs: savedSSIDs, credentials: credentials,
-            port: port, send: send)
-    }
-
     static func syncWifiPresets(
         _ desired: [String?],
         credentials: [String: SavedWiFiCredential],
@@ -390,9 +372,9 @@ extension WifiConfigUI {
         ).map(\.snapshot)
     }
 
-    /// Plan, write, and read back. Separated from reading so the automatic path
-    /// and the sheet share one set of write and verification rules and one
-    /// `before` snapshot.
+    /// Plan, write, and read back. Separated from reading so both sync entry
+    /// points share one set of write and verification rules and one `before`
+    /// snapshot.
     private static func apply(
         _ desired: [String?],
         before: WifiPresetSnapshot,

@@ -4,6 +4,8 @@ import SwiftUI
 
 extension Notification.Name {
     static let espDisplayShowManager = Notification.Name("com.espdisplay.sender.showManager")
+    /// Opens the Settings window, at the pane named by the `pane` user-info
+    /// key when there is one; see `SettingsPane.open`.
     static let espDisplayShowSettings = Notification.Name("com.espdisplay.sender.showSettings")
     /// Posted by the File menu, handled by whichever manager window is showing -
     /// the same indirection `espDisplayShowSettings` uses, and for the same reason:
@@ -15,7 +17,6 @@ extension Notification.Name {
 
 struct ManagerView: View {
     @ObservedObject var manager: PanelManager
-    @State private var showingSettings = false
     @State private var showingAddDevice = false
     @State private var pendingDeletion: PanelSnapshot?
 
@@ -70,9 +71,6 @@ struct ManagerView: View {
         // titlebar inset - measured, a 580pt minimum became a 620pt window
         // floor - which then fights the window's own contentMinSize. The window
         // owns the minimum; see ManagerWindowController.
-        .sheet(isPresented: $showingSettings) {
-            SettingsSheet(manager: manager)
-        }
         .sheet(isPresented: $showingAddDevice) {
             AddDeviceSheet(manager: manager)
         }
@@ -95,11 +93,6 @@ struct ManagerView: View {
             Text("This removes the hardware record and its saved display settings "
                 + "from this Mac. It does not change the physical display, its "
                 + "firmware, or its saved WiFi credentials.")
-        }
-        .onReceive(
-            NotificationCenter.default.publisher(for: .espDisplayShowSettings)
-        ) { _ in
-            showingSettings = true
         }
         .onReceive(
             NotificationCenter.default.publisher(for: .espDisplayAddDevice)
@@ -257,7 +250,7 @@ private struct DisplayListFooter: View {
     }
 }
 
-private extension DeviceListSortOrder {
+extension DeviceListSortOrder {
     var sidebarTitle: String {
         switch self {
         case .alphabetical: return "Alphabetical"
@@ -351,12 +344,6 @@ struct PanelDetailView: View {
     @State private var updateTarget: PanelManager.FirmwareUpdateTarget?
     @State private var editedName = ""
     @State private var isEditingName = false
-    /// A picker value is not necessarily user intent: before CFGSHOW returns,
-    /// the UI displays the first saved credential as an automatic fallback.
-    /// Keep only actual picker changes here so a delayed device-reported SSID
-    /// can replace that fallback without overwriting a deliberate user choice.
-    @State private var explicitlySelectedSSID: String?
-    @State private var showingWifiPresets = false
     @State private var editedIdleText = ""
     @State private var isEditingOTAPassword = false
     @State private var otaPassword = ""
@@ -378,19 +365,6 @@ struct PanelDetailView: View {
 
     private var nameHasChanges: Bool {
         !normalizedName.isEmpty && normalizedName != panel.displayName
-    }
-
-    private var selectedSSID: String {
-        PanelManager.preferredSSID(
-            explicitSelection: explicitlySelectedSSID,
-            reportedSSID: panel.currentSSID,
-            savedNames: manager.savedNetworkNames)
-    }
-
-    private var wifiSelection: Binding<String> {
-        Binding(
-            get: { selectedSSID },
-            set: { explicitlySelectedSSID = $0.isEmpty ? nil : $0 })
     }
 
     var body: some View {
@@ -479,9 +453,7 @@ struct PanelDetailView: View {
         .onAppear {
             editedName = panel.displayName
             editedIdleText = panel.screensaverTemplate
-            // CFGSHOW is asynchronous. `selectedSSID` remains derived from the
-            // optional explicit choice, so this reply can fill the empty
-            // default without being mistaken for a user selection.
+            // CFGSHOW is asynchronous; its reply fills in Connected WiFi.
             manager.refreshCurrentSSID(for: panel.serviceName)
         }
         .onChange(of: panel.screensaverTemplate) { _, newValue in
@@ -489,11 +461,6 @@ struct PanelDetailView: View {
         }
         .onChange(of: panel.displayName) { _, newValue in
             if !isEditingName { editedName = newValue }
-        }
-        .onChange(of: manager.savedNetworkNames) { _, names in
-            if let explicit = explicitlySelectedSSID, !names.contains(explicit) {
-                explicitlySelectedSSID = nil
-            }
         }
         .confirmationDialog(
             "Restart \(panel.displayName)?", isPresented: $confirmRestart,
@@ -507,9 +474,6 @@ struct PanelDetailView: View {
         }
         .sheet(item: $updateTarget) { target in
             FirmwareUpdateSheet(manager: manager, target: target)
-        }
-        .sheet(isPresented: $showingWifiPresets) {
-            WifiPresetSheet(manager: manager, panel: panel)
         }
     }
 
@@ -936,45 +900,23 @@ struct PanelDetailView: View {
                 CopyableAddress(address: panel.address)
             }
             LabeledContent("WiFi signal", value: panel.signalDescription)
+            // Read only: the saved networks belong to the whole app, so this
+            // page says where this display stands and links to Settings.
             WifiNetworkRows(
                 connectedDescription: panel.boardNetworkDescription(asOf: Date()),
-                savedNetworkNames: manager.savedNetworkNames,
-                selection: wifiSelection,
-                canApply: manager.canPerform(.savedWiFi, for: panel.serviceName),
-                // Editing the saved list is app-wide, in Settings, and needs no
-                // board, so it is never disabled by this display's state.
-                canEdit: true,
-                applyHelp: operationHelp(.savedWiFi, "Apply this saved network"),
-                editHelp: "Add, edit or reorder the saved networks in Settings, "
-                    + "for every display",
-                onApply: {
-                    manager.applySavedNetwork(selectedSSID, to: panel.serviceName)
-                },
-                onEdit: {
-                    NotificationCenter.default.post(
-                        name: .espDisplayShowSettings, object: nil)
-                })
-            LabeledContent("On-device picker") {
-                Button("Show Presets...") {
-                    showingWifiPresets = true
-                }
-                .disabled(!manager.canPerform(.savedWiFi, for: panel.serviceName))
-                .help(operationHelp(
-                    .savedWiFi,
-                    "See which saved networks this display's signal screen offers"))
-            }
+                presetDescription: WifiNetworkRows.presetDescription(
+                    manager.wifiPresetSyncReport(for: panel.serviceName),
+                    savedNetworkCount: manager.savedNetworkNames.count),
+                onOpenSettings: { SettingsPane.open(.wifiNetworks) })
         } header: {
             Text("Network Connection")
         } footer: {
             Text("Connected WiFi is the network the display itself reports, "
                 + "over WiFi or USB. "
-                + "WiFi credentials are stored in your login Keychain and applied "
-                + "to this physical display over its current USB connection. "
-                + "The saved networks are edited and ordered in Settings, once "
-                + "for every display, and copied to this display automatically "
-                + "whenever it is connected by USB. "
-                + "Only the first 10 access points are selectable from the "
-                + "device.")
+                + "The saved networks are set in Settings, once for every "
+                + "display, and the first 10 are copied to this display's "
+                + "preset slots whenever it is connected by USB. Its own "
+                + "picker chooses between them.")
         }
     }
 
@@ -1867,9 +1809,31 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
     private let mainMenu = MainMenuController()
     private var window: NSWindow?
     private var titleObserver: AnyCancellable?
+    private let settingsWindow: SettingsWindowController
+    private var settingsObserver: AnyCancellable?
 
     init(manager: PanelManager) {
         self.manager = manager
+        settingsWindow = SettingsWindowController(manager: manager)
+        super.init()
+        settingsWindow.onClose = { [weak self] in
+            self?.enterAccessoryModeWhenNoWindowsAreVisible()
+        }
+        // From the app menu's Settings… and from the links on a display's
+        // page and in the Add Display sheet.
+        settingsObserver = NotificationCenter.default
+            .publisher(for: .espDisplayShowSettings)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] notification in
+                let pane = (notification.userInfo?["pane"] as? String)
+                    .flatMap(SettingsPane.init(rawValue:))
+                self?.showSettings(pane)
+            }
+    }
+
+    func showSettings(_ pane: SettingsPane? = nil) {
+        mainMenu.installIfNeeded()
+        settingsWindow.show(pane)
     }
 
     var isVisible: Bool { window?.isVisible == true }

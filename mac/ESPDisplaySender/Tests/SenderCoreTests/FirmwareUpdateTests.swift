@@ -250,7 +250,7 @@ final class FirmwareUpdateTests: XCTestCase {
     }
 
     /// A panel not known to the manager is a no-op rather than a crash - the
-    /// same defensive stance `rename`/`applySavedNetwork` take for an
+    /// same defensive stance `rename`/`clearOTAPassword` take for an
     /// unrecognised service name.
     func testSetAndClearOTAPasswordIgnoreAnUnknownPanel() {
         let manager = Self.manager()

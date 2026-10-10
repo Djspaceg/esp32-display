@@ -116,135 +116,6 @@ extension PanelManager {
         }
     }
 
-    func applySavedNetwork(_ ssid: String, to serviceName: String) {
-        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else { return }
-        guard !ssid.isEmpty else {
-            operationOutcome = .failure(
-                "No network selected", "Select a saved WiFi network first.")
-            return
-        }
-        guard requireOperation(
-            .savedWiFi, for: serviceName, title: "WiFi configuration")
-        else { return }
-        switch WifiConfigUI.applySavedNetwork(
-            ssid,
-            currentName: panel.displayName,
-            preferredPort: panel.usbPort,
-            expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
-        {
-        case .success:
-            markUSBRestarting(serviceName)
-            operationOutcome = .success(
-                "WiFi saved",
-                "The display is restarting and joining \"\(ssid)\". Streaming "
-                    + "reconnects automatically.")
-        case .failure(let failure):
-            operationOutcome = .failure(failure)
-        }
-    }
-
-    func wifiPresets(
-        for serviceName: String
-    ) async -> Result<WifiPresetSnapshot, WifiConfigUI.ConfigFailure> {
-        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
-            return .failure(WifiConfigUI.ConfigFailure(
-                title: "Display not found",
-                message: "The selected display is no longer available."))
-        }
-        let currentName = panel.displayName
-        let preferredPort = panel.usbPort
-        let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
-        let held = beginWifiPresetSheetOperation(for: panel)
-        defer { endWifiPresetSheetOperation(held) }
-        return await Task.detached(priority: .userInitiated) {
-            WifiConfigUI.wifiPresets(
-                currentName: currentName,
-                preferredPort: preferredPort,
-                expectedHardwareID: expectedHardwareID)
-        }.value
-    }
-
-    /// Copy the saved networks to one board now, from its preset sheet.
-    ///
-    /// The same copy the automatic sync makes - the same order, the same
-    /// commands, the same active-slot and empty-password rules - only on
-    /// request and over whichever port the record resolves to, so a board the
-    /// automatic path is still waiting on can be brought up to date by hand.
-    func copySavedWifiPresets(
-        to serviceName: String
-    ) async -> Result<WifiPresetSyncReport, WifiConfigUI.ConfigFailure> {
-        guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
-            return .failure(WifiConfigUI.ConfigFailure(
-                title: "Display not found",
-                message: "The selected display is no longer available."))
-        }
-        let savedSSIDs = savedNetworkNames
-        guard !savedSSIDs.isEmpty else {
-            return .failure(WifiConfigUI.ConfigFailure(
-                title: "No saved networks",
-                message: "Add a network in Settings first. With none saved, "
-                    + "the display's presets are left as they are."))
-        }
-        let hardwareID = stableHardwareID(of: panel)
-        // The sheet's hold only keeps a NEW automatic sync from starting; one
-        // already running would share the serial port with this copy and each
-        // could read the other's replies. It is asked to wait instead.
-        if let hardwareID, wifiPresetSyncTasks[hardwareID] != nil {
-            return .failure(WifiConfigUI.ConfigFailure(
-                title: "Already copying",
-                message: "The saved networks are already being copied to this "
-                    + "display, or a copy is waiting to retry. Try again in a "
-                    + "moment."))
-        }
-        let currentName = panel.displayName
-        let preferredPort = panel.usbPort
-        let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
-        let lookup = wifiCredentialLookup
-        let sender = usbControlSender
-        let resolvePort = wifiPresetPortResolver
-        let signature = hardwareID.map {
-            currentWifiPresetSyncSignature(hardwareID: $0)
-        }
-        let held = beginWifiPresetSheetOperation(for: panel)
-        defer { endWifiPresetSheetOperation(held) }
-        let result = await Task.detached(priority: .userInitiated) {
-            resolvePort(currentName, preferredPort, expectedHardwareID)
-                .flatMap { port in
-                    WifiConfigUI.syncSavedWifiPresets(
-                        savedSSIDs: savedSSIDs, lookup: lookup,
-                        port: port, send: sender)
-                }
-        }.value
-        if let hardwareID {
-            switch result {
-            case .success(let report):
-                // What the automatic path would have recorded, so the next
-                // probe does not copy the same collection again.
-                syncedWifiPresetSignatures[hardwareID] = signature
-                wifiPresetSyncReports[hardwareID] = report
-                resolve(.wifiPresetSync, source: hardwareID)
-            case .failure:
-                syncedWifiPresetSignatures[hardwareID] = nil
-            }
-        }
-        return result
-    }
-
-    /// Hold the automatic preset sync off this board while the sheet talks to
-    /// it. A sync already running is not stopped; one waiting to retry waits
-    /// on until the sheet is done.
-    private func beginWifiPresetSheetOperation(for panel: PanelSnapshot) -> String? {
-        guard let hardwareID = stableHardwareID(of: panel) else { return nil }
-        wifiPresetSheetOperations[hardwareID, default: 0] += 1
-        return hardwareID
-    }
-
-    private func endWifiPresetSheetOperation(_ hardwareID: String?) {
-        guard let hardwareID, let count = wifiPresetSheetOperations[hardwareID]
-        else { return }
-        wifiPresetSheetOperations[hardwareID] = count > 1 ? count - 1 : nil
-    }
-
     // MARK: adding a display over USB
 
     /// Everything one onboarding run needs, gathered by the sheet so this cannot
@@ -448,28 +319,9 @@ extension PanelManager {
             return false
         }
 
-        // Remembered only once the board has taken it, so a credential that was
-        // refused does not end up in the keychain looking like a working one. Same
-        // ordering WifiConfigUI.run uses.
-        var keychainNote = ""
-        switch request.password {
-        case .set(let password):
-            keychainNote = WifiCredentialStore.save(ssid: request.ssid, password: password)
-                ? " The credential is saved in your Keychain."
-                : " The board was configured, but Keychain storage failed."
-        case .openNetwork:
-            keychainNote = WifiCredentialStore.save(
-                ssid: request.ssid, password: "", isOpenNetwork: true)
-                ? " The open network is saved in your Keychain."
-                : " The board was configured, but Keychain storage failed."
-        case .keepCurrent:
-            break
-        }
-        if request.password == .keepCurrent {
-            refreshSavedNetworks()
-        } else {
-            savedCredentialsWereWritten()
-        }
+        // Nothing is written to the Keychain here: the network is one the
+        // Settings window already saved, and only Settings adds, edits or
+        // removes one.
         refreshUSBPorts()
 
         // Recheck after the write/configuration window: another Add sheet or a
@@ -505,7 +357,7 @@ extension PanelManager {
             request.mode == .flashAndConfigure ? "Board set up" : "WiFi saved",
             wrote + "is joining \"\(request.ssid)\". Its record is now in the "
                 + "sidebar and becomes Online when the board announces itself, "
-                + "which takes a few seconds." + named + keychainNote)
+                + "which takes a few seconds." + named)
         return true
     }
 
@@ -515,7 +367,7 @@ extension PanelManager {
     /// every other credential read in this app already lives.
     func savedWifiCredential(for ssid: String) -> SavedWiFiCredential? {
         guard !ssid.isEmpty else { return nil }
-        return WifiCredentialStore.credential(for: ssid)
+        return wifiCredentialLookup(ssid)
     }
 
 }

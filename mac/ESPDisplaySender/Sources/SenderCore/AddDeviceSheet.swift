@@ -54,11 +54,9 @@ struct AddDeviceSheet: View {
     /// default source.
     @AppStorage("AddDevice.devCatalogFolder") private var devCatalogFolder = ""
 
-    /// Empty means the network is being typed in rather than chosen.
+    /// One of the app's saved networks, which are added in Settings and only
+    /// chosen here. Empty until one is.
     @State private var savedSSID = ""
-    @State private var typedSSID = ""
-    @State private var typedPassword = ""
-    @State private var openNetwork = false
     @State private var name = ""
     @State private var eraseAll = false
 
@@ -344,31 +342,54 @@ struct AddDeviceSheet: View {
 
     private var networkSection: some View {
         Section {
-            Picker("Network", selection: $savedSSID) {
-                Text("Type a network…").tag("")
-                ForEach(manager.savedNetworkNames, id: \.self) { ssid in
-                    Text(ssid).tag(ssid)
+            if manager.savedNetworkNames.isEmpty {
+                LabeledContent("Network") {
+                    Text("None saved on this Mac yet")
+                        .foregroundStyle(.secondary)
                 }
+            } else {
+                Picker("Network", selection: $savedSSID) {
+                    Text("Choose a network…").tag("")
+                    ForEach(manager.savedNetworkNames, id: \.self) { ssid in
+                        Text(ssid).tag(ssid)
+                    }
+                }
+                .disabled(running)
             }
-            .disabled(running)
-            if savedSSID.isEmpty {
-                TextField("Network name (SSID)", text: $typedSSID)
-                    .disabled(running)
-                SecureField("Password", text: $typedPassword)
-                    .disabled(running || openNetwork)
-                Toggle("Open network (no password)", isOn: $openNetwork)
-                    .disabled(running)
+            HStack {
+                Spacer()
+                // Settings is its own window, so it opens beside this sheet,
+                // and a network added there appears in the picker at once.
+                Button(manager.savedNetworkNames.isEmpty
+                    ? "Add a Network in Settings…" : "WiFi Settings…"
+                ) {
+                    SettingsPane.open(.wifiNetworks)
+                }
+                .buttonStyle(.link)
+                .textSelection(.disabled)
+                .disabled(running)
             }
             TextField("Name for this display (optional)", text: $name)
                 .disabled(running)
         } header: {
             Text("WiFi")
         } footer: {
-            Text("The credentials are sent over the cable and saved on the board, "
-                + "which is what lets one firmware bundle serve any network. A "
-                + "password you type is kept in your login Keychain. A name is "
-                + "shortened to letters, numbers and dashes; leave it blank to keep "
-                + "the board's own.")
+            Text("The network is one of this Mac's saved networks, which are added "
+                + "and edited in Settings. Its credentials are sent over the cable "
+                + "and saved on the board, which is what lets one firmware bundle "
+                + "serve any network. A name is shortened to letters, numbers and "
+                + "dashes; leave it blank to keep the board's own.")
+        }
+        // A network added or removed in Settings while this sheet is open.
+        // The first one saved is chosen, as when the sheet opens; one that
+        // goes away is not replaced by another nobody chose.
+        .onChange(of: manager.savedNetworkNames) { old, names in
+            guard !running else { return }
+            if old.isEmpty, savedSSID.isEmpty, let first = names.first {
+                savedSSID = first
+            } else if !savedSSID.isEmpty, !names.contains(savedSSID) {
+                savedSSID = ""
+            }
         }
     }
 
@@ -390,9 +411,9 @@ struct AddDeviceSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             VStack(alignment: .leading, spacing: 6) {
-                Text(plan.headline)
+                Text(shownPlan.headline)
                     .fontWeight(.medium)
-                Text(plan.detail)
+                Text(shownPlan.detail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -407,9 +428,9 @@ struct AddDeviceSheet: View {
             // button with its reason out of sight reads as no reason at all.
             if !plan.canStart, !running {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(plan.headline)
+                    Text(shownPlan.headline)
                         .font(.callout.weight(.semibold))
-                    Text(plan.detail)
+                    Text(shownPlan.detail)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -469,21 +490,14 @@ struct AddDeviceSheet: View {
 
     // MARK: - derived
 
-    private var ssid: String {
-        savedSSID.isEmpty
-            ? typedSSID.trimmingCharacters(in: .whitespaces)
-            : savedSSID
-    }
+    private var ssid: String { savedSSID }
 
-    /// What to do about the password, or that there is nothing to send yet.
+    /// What to send for the password, from the saved credential, or that there
+    /// is nothing to send yet.
     private var credential: UsbOnboarding.Credential {
-        if savedSSID.isEmpty {
-            if openNetwork { return .ready(.openNetwork) }
-            return typedPassword.isEmpty ? .incomplete : .ready(.set(typedPassword))
-        }
-        guard let saved = manager.savedWifiCredential(for: savedSSID) else {
-            return .incomplete
-        }
+        guard !savedSSID.isEmpty,
+              let saved = manager.savedWifiCredential(for: savedSSID)
+        else { return .incomplete }
         guard let password = saved.presetPassword else {
             return .incomplete
         }
@@ -638,6 +652,28 @@ struct AddDeviceSheet: View {
     }
 
     private var plan: UsbOnboardingPlan { UsbOnboardingPlan.make(request) }
+
+    /// The plan's words, except where they would send the user to type a
+    /// network or a password here. Those come from Settings now, so these two
+    /// steps say so instead.
+    private var shownPlan: (headline: String, detail: String) {
+        switch plan.action {
+        case .chooseNetwork where manager.savedNetworkNames.isEmpty:
+            return ("Add a WiFi network in Settings",
+                    "The board needs credentials of its own to reach this Mac, and "
+                        + "they come from this Mac's saved networks. Add one in "
+                        + "Settings, under WiFi Networks, and it appears here.")
+        case .chooseNetwork:
+            return (plan.headline,
+                    "Choose one of this Mac's saved networks. " + plan.detail)
+        case .enterPassword:
+            return ("The saved credential for \"\(ssid)\" cannot be sent",
+                    "Edit it in Settings, under WiFi Networks, with its password "
+                        + "or as an open network.")
+        default:
+            return (plan.headline, plan.detail)
+        }
+    }
 
     private var boardDescription: String {
         if let recordName = manager.associatedDisplayName(forUSBPath: port) {

@@ -19,7 +19,6 @@ extension PanelManager {
         case power
         case identify
         case restart
-        case savedWiFi
         case rename
         case otaPassword
         case firmwareUpdate
@@ -240,7 +239,7 @@ extension PanelManager {
             return .networkControl(.identify)
         case .restart:
             return .networkControl(.restart)
-        case .savedWiFi, .rename, .otaPassword:
+        case .rename, .otaPassword:
             return .usbSerial(.verified)
         case .firmwareUpdate:
             return .either([.networkControl(.ota), .usbBootloader])
@@ -523,7 +522,6 @@ extension PanelManager {
         case .power: return "Power control"
         case .identify: return "Identify"
         case .restart: return "Remote restart"
-        case .savedWiFi: return "WiFi configuration"
         case .rename: return "Rename"
         case .otaPassword: return "OTA password"
         case .firmwareUpdate, .wirelessFirmwareUpdate: return "Firmware updates"

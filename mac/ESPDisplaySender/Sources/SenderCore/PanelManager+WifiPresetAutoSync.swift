@@ -38,8 +38,8 @@ extension PanelManager {
     /// again.
     ///
     /// Nor while a USB flash or onboarding run owns the board; the run's end
-    /// re-probes it (`finishUSBFlash`). Nor while the preset sheet or a repair
-    /// has the port (`wifiPresetSyncHeldOff`).
+    /// re-probes it (`finishUSBFlash`). Nor while a repair has the port
+    /// (`wifiPresetSyncHeldOff`).
     func wifiPresetSyncDevice(
         for serviceName: String
     ) -> WifiConfigUI.USBDeviceOption? {
@@ -254,10 +254,10 @@ extension PanelManager {
         wifiPresetSyncTasks[hardwareID] = work
     }
 
-    /// Whether something else has the board's serial port for now: the preset
-    /// sheet reading or writing it, or a repair holding every probe off.
+    /// Whether something else has the board's serial port for now: a repair
+    /// holding every probe off.
     func wifiPresetSyncHeldOff(hardwareID: String) -> Bool {
-        usbProbeHolds > 0 || wifiPresetSheetOperations[hardwareID] != nil
+        usbProbeHolds > 0
     }
 
     /// The record's service name now, which a rename during a wait may have

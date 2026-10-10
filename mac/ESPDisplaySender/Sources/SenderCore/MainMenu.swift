@@ -73,8 +73,7 @@ final class MainMenuController: NSObject {
     private func fileMenu() -> NSMenu {
         // Nothing here opens or saves documents. Adding a display is the closest
         // thing this app has to New, and it gets ⌘N because it is the one action
-        // that has to work when the sidebar is empty - and because the standalone
-        // `--configure` dialog was previously reachable from no menu at all.
+        // that has to work when the sidebar is empty.
         let menu = NSMenu(title: "File")
         let add = menu.addItem(
             withTitle: "Add Display over USB\u{2026}", action: #selector(addDevice(_:)),
@@ -145,10 +144,10 @@ final class MainMenuController: NSObject {
         NSWorkspace.shared.open(Self.helpURL)
     }
 
-    /// Posted rather than calling into the view, so the menu does not need a
-    /// reference to whichever window is showing.
+    /// Posted rather than calling into the window, so the menu does not need a
+    /// reference to it.
     @objc private func openSettings(_ sender: Any?) {
-        NotificationCenter.default.post(name: .espDisplayShowSettings, object: nil)
+        SettingsPane.open()
     }
 
     /// No "show the window first" step, and that is safe for the reason this menu

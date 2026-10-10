@@ -199,14 +199,6 @@ final class PanelManager: ObservableObject {
     var wifiCredentialLookup: @Sendable (String) -> SavedWiFiCredential? = { ssid in
         WifiCredentialStore.credential(for: ssid)
     }
-    /// Which serial port a record's board is on, for the preset sheet's Copy
-    /// Now. Injectable so a test can name a fake port instead of probing /dev.
-    var wifiPresetPortResolver: @Sendable (
-        _ name: String, _ preferredPort: String?, _ expectedHardwareID: String?
-    ) -> Result<String, WifiConfigUI.ConfigFailure> = { name, preferred, hardwareID in
-        WifiConfigUI.matchingPort(
-            for: name, expectedHardwareID: hardwareID, preferredPort: preferred)
-    }
     /// The Keychain's saved network names, and writing and removing one, for
     /// the Settings list. Injectable for the same reason as the lookup.
     var wifiNetworkNamesReader: @Sendable () -> [String] = {
@@ -244,9 +236,6 @@ final class PanelManager: ObservableObject {
     /// stays attached, so the banner clears when it comes good.
     var wifiPresetSyncRecheckInterval: TimeInterval = 60
     var wifiPresetSyncRechecks: [String: Task<Void, Never>] = [:]
-    /// Boards (by hardware ID) the preset sheet is reading or writing. The
-    /// automatic sync would otherwise talk over it on the same port.
-    var wifiPresetSheetOperations: [String: Int] = [:]
     /// Boards (by hardware ID) a USB flash or onboarding run currently owns.
     /// Between esptool's reset and the run's last line the board answers
     /// CFGSHOW before it is safe to hand preset commands, so the automatic
@@ -422,9 +411,9 @@ final class PanelManager: ObservableObject {
     /// restarts its capture to pick it up.
     func updateSettings(_ new: SenderSettings) {
         var validated = new.validated
-        // The preset order is edited live from the WiFi section, not through
-        // the sheet's draft, so a draft taken before an edit - or Restore
-        // Defaults - must not put the old order back.
+        // The preset order is edited from the WiFi Networks pane, not through
+        // here, so a copy of the settings taken before an edit - or the
+        // AppleScript setter's - must not put the old order back.
         validated.wifiPresetOrder = settings.wifiPresetOrder
         guard validated != settings else { return }
         let sortOrderChanged =
@@ -595,42 +584,7 @@ final class PanelManager: ObservableObject {
     }
 
 
-    /// Whether a display has the panel's own 172:320 aspect, in either
-    /// orientation. Same tolerances as `DisplayCapture.resolve`'s fallback.
-    ///
-    /// `nonisolated` because it reads nothing but its arguments; inheriting the
-    /// manager's actor would make a pure arithmetic check await the main queue.
-    ///
-    /// STILL THE COMPILED-IN 172:320, DELIBERATELY, and for the same reason
-    /// `DisplayCapture.resolve(named:)` keeps it: this filters the list of Mac
-    /// displays a panel could be pointed at, with no panel in scope to ask. A
-    /// square panel's ratio is 1:1, so believing an advertised geometry here would
-    /// exclude every square Mac display from the list rather than excluding the
-    /// panel it was meant to catch. The point is to skip a display that IS a
-    /// panel, and the only panels this can see are shaped like the constant.
-    /// Which of this Mac's saved networks the picker should preselect.
-    ///
-    /// `reportedSSID` is what the device actually said over CFGSHOW
-    /// (`PanelSnapshot.currentSSID`). `explicitSelection` is only a value the
-    /// user picked; an automatically displayed default must remain nil so a
-    /// delayed device reply can replace it. An explicit choice wins while it
-    /// remains saved, then the device report - and otherwise nothing. Falling
-    /// back to the first saved credential made the row read as the board's
-    /// network when it was only the top of the app's list; the board's own
-    /// report is `boardNetworkDescription`, shown on its own row.
-    ///
-    /// `nonisolated` because it only examines its arguments.
-    nonisolated static func preferredSSID(
-        explicitSelection: String?, reportedSSID: String?, savedNames: [String]
-    ) -> String {
-        if let explicitSelection, savedNames.contains(explicitSelection) {
-            return explicitSelection
-        }
-        if let reportedSSID, savedNames.contains(reportedSSID) { return reportedSSID }
-        return ""
-    }
-
-    /// The network the board itself reports, for the settings window.
+    /// The network the board itself reports, for its page in the manager window.
     ///
     /// The name comes from the panel's own mDNS `ssid` record (the network it
     /// has joined) or from CFGSHOW's `ssid=` over USB (the network it is set to

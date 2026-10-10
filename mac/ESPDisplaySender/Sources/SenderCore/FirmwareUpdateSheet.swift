@@ -424,7 +424,7 @@ struct FirmwareUpdateSheet: View {
         // the one that forgot.
         .textSelection(.enabled)
         .labeledContentStyle(.labelColumn)
-        // A floating glass action bar, as in SettingsSheet, so the form scrolls
+        // A floating glass action bar, as in the Add Display sheet, so the form scrolls
         // under it rather than being pushed up by a row bolted to the bottom.
         .safeAreaInset(edge: .bottom) {
             actionBar.textSelection(.enabled)
@@ -775,7 +775,7 @@ struct FirmwareUpdateSheet: View {
             fraction: progressFraction, title: progressDescription, detail: detail)
     }
 
-    /// Floats over the form like SettingsSheet's, and carries the run's status
+    /// Floats over the form like the Add Display sheet's, and carries the run's status
     /// under its buttons so progress and failure are never below the fold.
     private var actionBar: some View {
         VStack(alignment: .leading, spacing: 10) {

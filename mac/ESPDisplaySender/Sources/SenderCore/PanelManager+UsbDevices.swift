@@ -661,8 +661,8 @@ extension PanelManager {
     }
 
     /// Unanswered ports whose next ask is due. None while anything in the app
-    /// has a USB port: a CFGSHOW written over esptool, a flash, the preset
-    /// sheet, a preset sync or a control write would talk over it. Ownership
+    /// has a USB port: a CFGSHOW written over esptool, a flash, a preset sync
+    /// or a control write would talk over it. Ownership
     /// is checked app-wide rather than per board because a board that has not
     /// answered may not have a hardware ID to match a run against. Another
     /// program's esptool is kept out by its lock (`WifiConfigUI.probePort`).
@@ -675,7 +675,7 @@ extension PanelManager {
     ) -> [String] {
         guard usbProbeHolds == 0, usbIdentifyRetryHolds == 0,
               usbControlsInFlight == 0,
-              usbFlashesInFlight.isEmpty, wifiPresetSheetOperations.isEmpty,
+              usbFlashesInFlight.isEmpty,
               wifiPresetSyncTasks.isEmpty, usbBrightnessTasks.isEmpty
         else { return [] }
         let restartingIDs = Set(panels.compactMap { panel in
@@ -721,8 +721,8 @@ extension PanelManager {
     }
 
     func refreshSavedNetworks() {
-        // Reconciled with the stored preset order, so a network another path
-        // saved (onboarding, the standalone WiFi dialog) joins the end of it.
+        // Reconciled with the stored preset order, so a network the Keychain
+        // gained outside Settings joins the end of it.
         guard applySavedNetworkNames(wifiNetworkNamesReader()) else { return }
         // The app's own collection changed. Every board still attached gets it.
         syncWifiPresetsToAttachedDevices()

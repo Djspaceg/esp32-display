@@ -3,10 +3,10 @@ import SwiftUI
 import XCTest
 @testable import SenderCore
 
-/// Renders the Settings sheet's WiFi Networks section and a display's Network
-/// Connection rows to PNGs when ESPDISP_UX_CAPTURE_DIR is set; otherwise does
-/// nothing. As in `LayoutCaptureTests`, windows are never ordered on screen,
-/// serial I/O is off, and the networks are in memory, never the Keychain.
+/// Renders the Settings window's panes and a display's Network Connection
+/// rows to PNGs when ESPDISP_UX_CAPTURE_DIR is set; otherwise does nothing.
+/// As in `LayoutCaptureTests`, windows are never ordered on screen, serial
+/// I/O is off, and the networks are in memory, never the Keychain.
 @MainActor
 final class WifiSettingsCaptureTests: XCTestCase {
     func testCaptureWifiSettingsWhenRequested() throws {
@@ -40,23 +40,27 @@ final class WifiSettingsCaptureTests: XCTestCase {
             detail: "Desk Panel: WiFi preset sync stopped. Command 3 of 9 "
                 + "(CFGWIFISET slot 3) failed: no response from the device.")
 
+        for (index, pane) in SettingsPane.allCases.enumerated() {
+            let navigation = SettingsNavigation()
+            navigation.show(pane)
+            try capture(
+                SettingsView(manager: manager, navigation: navigation),
+                size: .init(width: 720, height: pane == .wifiNetworks ? 1000 : 720),
+                to: output, name: "settings-\(index + 1)-\(pane.rawValue)")
+        }
+        // The sidebar on its own as well: inside the split view its material
+        // has nothing behind it to sample offscreen, and draws as a blank.
         try capture(
-            Form {
-                WifiNetworksSection(manager: manager, isEditing: .constant(false))
-            }
-            .formStyle(.grouped)
-            .textSelection(.enabled)
-            .labeledContentStyle(.labelColumn),
-            size: .init(width: 560, height: 820), to: output,
-            name: "wifi-1-settings-networks-section")
+            SettingsSidebar(navigation: SettingsNavigation())
+                .background(Color(nsColor: .windowBackgroundColor)),
+            size: .init(width: 230, height: 360), to: output,
+            name: "settings-0-sidebar")
         try capture(
             Form {
                 Section("Network Connection") {
                     WifiNetworkRows(
                         connectedDescription: "Studio WiFi",
-                        savedNetworkNames: manager.savedNetworkNames,
-                        selection: .constant("Studio WiFi"),
-                        canApply: true, canEdit: true)
+                        presetDescription: "Studio WiFi (slot 1 of 10, at the last USB copy)")
                 }
             }
             .formStyle(.grouped)

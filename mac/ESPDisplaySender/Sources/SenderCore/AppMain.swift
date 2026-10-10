@@ -103,7 +103,6 @@ func parseOptions() -> Options {
                   --window <name>          app or window title substring; captures that
                                            window directly, no virtual display needed
                   --list-windows           show capturable windows and exit
-                  --configure              device WiFi setup dialog (USB serial)
                   --background             run without showing the manager window
                   --host <host>            skip discovery and stream to one host
                   --devices-config <path>  per-device sources as JSON, keyed by device
@@ -162,12 +161,15 @@ public enum ESPDisplaySenderApp {
             || ProcessInfo.processInfo.environment["ESPDISP_AGENT"] != nil
 
         if opts.configure {
-            // Standalone invocation: no manager window exists to show the
-            // result in, so present it modally.
-            MainActor.assumeIsolated {
-                WifiConfigUI.presentOutcome(WifiConfigUI.run())
-            }
-            exit(0)
+            // The standalone dialog that saved a network while sending it to
+            // one board is gone: the saved networks are app-wide and edited
+            // only in Settings, and a board gets one by the Add Display sheet.
+            FileHandle.standardError.write(Data((
+                "--configure is no longer available. Add WiFi networks in the app's "
+                    + "Settings > WiFi Networks; every display connected by USB "
+                    + "receives them as presets. To give a board its network, use "
+                    + "File > Add Display over USB.\n").utf8))
+            exit(64)
         }
 
         // Single-instance guard: two senders interleave frame IDs and the

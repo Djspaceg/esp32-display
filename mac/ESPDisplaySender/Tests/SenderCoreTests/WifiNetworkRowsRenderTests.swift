@@ -4,9 +4,9 @@ import XCTest
 
 @testable import SenderCore
 
-/// Renders the two WiFi rows offscreen, in the states the board can report,
-/// so the wording and the separation of the two rows can be looked at
-/// without a window or a board. Set ESPDISP_RENDER_DIR to keep the PNG.
+/// Renders the two read-only WiFi rows offscreen, in the states the board can
+/// report, so the wording can be looked at without a window or a board. Set
+/// ESPDISP_RENDER_DIR to keep the PNG.
 @MainActor
 final class WifiNetworkRowsRenderTests: XCTestCase {
 
@@ -18,11 +18,10 @@ final class WifiNetworkRowsRenderTests: XCTestCase {
     private struct Case {
         let title: String
         let panel: PanelSnapshot
-        let selection: String
     }
 
     private let now = Date()
-    private let saved = ["Guest", "Studio WiFi"]
+    private let preset = "Studio WiFi (slot 2 of 10, at the last USB copy)"
 
     private func panel(
         ssid: String?, announced: String? = nil, connected: Bool?,
@@ -42,25 +41,19 @@ final class WifiNetworkRowsRenderTests: XCTestCase {
             Case(title: "On WiFi, named by its announcement",
                  panel: panel(
                      ssid: nil, announced: "Studio WiFi", connected: nil,
-                     heartbeatSecondsAgo: 1),
-                 selection: "Studio WiFi"),
+                     heartbeatSecondsAgo: 1)),
             Case(title: "Went quiet over WiFi",
-                 panel: panel(ssid: "Studio WiFi", connected: true, heartbeatSecondsAgo: 120),
-                 selection: "Studio WiFi"),
+                 panel: panel(ssid: "Studio WiFi", connected: true, heartbeatSecondsAgo: 120)),
             Case(title: "On a network this Mac has not saved",
                  panel: panel(
                      ssid: nil, announced: "Neighbours WiFi", connected: nil,
-                     heartbeatSecondsAgo: 1),
-                 selection: ""),
+                     heartbeatSecondsAgo: 1)),
             Case(title: "Older firmware over WiFi only",
-                 panel: panel(ssid: nil, connected: nil, heartbeatSecondsAgo: 1),
-                 selection: ""),
+                 panel: panel(ssid: nil, connected: nil, heartbeatSecondsAgo: 1)),
             Case(title: "Nothing reported yet",
-                 panel: panel(ssid: nil, connected: nil, heartbeatSecondsAgo: nil),
-                 selection: ""),
+                 panel: panel(ssid: nil, connected: nil, heartbeatSecondsAgo: nil)),
             Case(title: "USB says no network is set",
-                 panel: panel(ssid: "", connected: false, heartbeatSecondsAgo: nil),
-                 selection: ""),
+                 panel: panel(ssid: "", connected: false, heartbeatSecondsAgo: nil)),
         ]
     }
 
@@ -70,9 +63,7 @@ final class WifiNetworkRowsRenderTests: XCTestCase {
                 Section(item.title) {
                     WifiNetworkRows(
                         connectedDescription: item.panel.boardNetworkDescription(asOf: self.now),
-                        savedNetworkNames: self.saved,
-                        selection: .constant(item.selection),
-                        canApply: true, canEdit: true)
+                        presetDescription: self.preset)
                 }
             }
         }
@@ -110,8 +101,7 @@ final class WifiNetworkRowsRenderTests: XCTestCase {
         func render(_ words: String) throws -> Data {
             let view = Form {
                 WifiNetworkRows(
-                    connectedDescription: words, savedNetworkNames: saved,
-                    selection: .constant(""), canApply: true, canEdit: true)
+                    connectedDescription: words, presetDescription: preset)
             }
             .formStyle(.grouped)
             .frame(width: 560, height: 160)

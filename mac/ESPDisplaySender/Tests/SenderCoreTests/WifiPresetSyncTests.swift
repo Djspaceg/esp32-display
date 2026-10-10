@@ -568,99 +568,6 @@ final class WifiPresetSyncTests: XCTestCase {
                 + Data("rotated".utf8).base64EncodedString())
     }
 
-    /// Onboarding or the WiFi dialog can re-save a name with a new password.
-    /// The other attached boards are told, as they are for an edit in Settings.
-    func testACredentialWrittenElsewhereRecopiesAnUnchangedList() async throws {
-        let path = "/dev/cu.usbmodem-preset-test"
-        let device = FakePresetDevice(slots: [:])
-        let manager = manager(path: path, saved: ["alpha"], device: device)
-        manager.noteUSBIdentity(
-            path: path, identity: Self.verifiedIdentity,
-            generation: manager.usbPathGeneration(path))
-        try await waitForSyncToSettle(manager)
-        XCTAssertEqual(device.mutations.count, 1)
-
-        manager.savedCredentialsWereWritten()
-        try await waitForSyncToSettle(manager)
-
-        XCTAssertEqual(device.mutations.count, 2, device.mutations.description)
-    }
-
-    // MARK: Copy Now, from the preset sheet
-
-    /// Copy Now is the automatic copy on request: the same commands, and it
-    /// records what it copied so the next probe does not copy it again.
-    func testCopyNowCopiesTheSavedOrderAndIsNotRepeatedByTheNextProbe() async throws {
-        let path = "/dev/cu.usbmodem-preset-test"
-        let device = FakePresetDevice(slots: [1: ("Leftover", true)])
-        let manager = manager(path: path, saved: ["Zeta", "alpha"], device: device)
-        manager.wifiPresetPortResolver = { _, _, _ in .success(path) }
-
-        let report = try resultValue(
-            await manager.copySavedWifiPresets(to: "studio-display"))
-
-        XCTAssertEqual(
-            (1...2).map { report.snapshot.slots[$0]?.ssid }, ["alpha", "Zeta"])
-        XCTAssertTrue(device.mutations.allSatisfy {
-            $0.hasPrefix("CFGWIFISET ") || $0.hasPrefix("CFGWIFICLEAR ")
-        }, device.mutations.description)
-        XCTAssertNotNil(manager.wifiPresetSyncReport(for: "studio-display"))
-        let afterCopy = device.mutations
-
-        manager.noteUSBIdentity(
-            path: path, identity: Self.verifiedIdentity,
-            generation: manager.usbPathGeneration(path))
-        try await waitForSyncToSettle(manager)
-        XCTAssertEqual(device.mutations, afterCopy)
-    }
-
-    /// The empty-password rule holds on this path too: an unmarked empty
-    /// credential is skipped, never written as an open preset.
-    func testCopyNowSkipsAnUnmarkedEmptyPassword() async throws {
-        let path = "/dev/cu.usbmodem-preset-test"
-        let device = FakePresetDevice(slots: [:])
-        let manager = manager(path: path, saved: ["Office"], device: device)
-        manager.wifiPresetPortResolver = { _, _, _ in .success(path) }
-        manager.wifiCredentialLookup = { ssid in
-            SavedWiFiCredential(ssid: ssid, password: "")
-        }
-
-        let report = try resultValue(
-            await manager.copySavedWifiPresets(to: "studio-display"))
-
-        XCTAssertEqual(report.unusable, ["Office"])
-        XCTAssertTrue(device.mutations.isEmpty, device.mutations.description)
-    }
-
-    /// While an automatic copy holds the board, Copy Now waits its turn rather
-    /// than sharing the serial port with it.
-    func testCopyNowIsRefusedWhileAnAutomaticCopyRuns() async throws {
-        let path = "/dev/cu.usbmodem-preset-test"
-        let device = FakePresetDevice(slots: [:])
-        let manager = manager(path: path, saved: ["alpha"], device: device)
-        manager.wifiPresetPortResolver = { _, _, _ in .success(path) }
-        manager.wifiPresetSyncTasks["020000123456"] = Task {}
-
-        let failure = try copyFailure(
-            await manager.copySavedWifiPresets(to: "studio-display"))
-
-        XCTAssertEqual(failure.title, "Already copying")
-        XCTAssertTrue(device.commands.isEmpty, device.commands.description)
-    }
-
-    func testCopyNowWithNothingSavedLeavesTheDisplayAlone() async throws {
-        let path = "/dev/cu.usbmodem-preset-test"
-        let device = FakePresetDevice(slots: [1: ("Studio", true)])
-        let manager = manager(path: path, saved: [], device: device)
-        manager.wifiPresetPortResolver = { _, _, _ in .success(path) }
-
-        let failure = try copyFailure(
-            await manager.copySavedWifiPresets(to: "studio-display"))
-
-        XCTAssertEqual(failure.title, "No saved networks")
-        XCTAssertTrue(device.commands.isEmpty)
-    }
-
     /// An edit that lands while a copy is already running is not lost: the
     /// copy that finishes sees the list moved on and copies again.
     func testAnEditDuringACopyIsCopiedWhenItFinishes() async throws {
@@ -958,9 +865,9 @@ final class WifiPresetSyncTests: XCTestCase {
         XCTAssertTrue(manager.issues.isEmpty, manager.issues.description)
     }
 
-    /// While the preset sheet has the board, a retry waits instead of talking
-    /// over it, and goes ahead once the sheet is done.
-    func testARetryWaitsWhileThePresetSheetHasTheBoard() async throws {
+    /// While a repair holds USB probes off, a retry waits instead of talking
+    /// over it, and goes ahead once the repair is done.
+    func testARetryWaitsWhileARepairHasTheBoard() async throws {
         let path = "/dev/cu.usbmodem-preset-test"
         let device = FakePresetDevice(slots: [:])
         let manager = manager(path: path, saved: ["alpha"], device: device)
@@ -973,26 +880,26 @@ final class WifiPresetSyncTests: XCTestCase {
             }
             return device.send(command)
         }
-        manager.wifiPresetSheetOperations["020000123456"] = 1
+        manager.usbProbeHolds = 1
         manager.noteUSBIdentity(
             path: path, identity: Self.verifiedIdentity,
             generation: manager.usbPathGeneration(path))
         try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(asked.total, 0, "a new sync is held off while the sheet has the board")
+        XCTAssertEqual(asked.total, 0, "a new sync is held off while the repair has the board")
 
         // Released: the next CFGSHOW answer syncs, and the board is silent.
-        // The sheet takes the board again before the retry comes.
-        manager.wifiPresetSheetOperations = [:]
+        // The repair takes the board again before the retry comes.
+        manager.usbProbeHolds = 0
         manager.noteUSBIdentity(
             path: path, identity: Self.verifiedIdentity,
             generation: manager.usbPathGeneration(path))
         try await waitUntil { asked.total == 1 }
-        manager.wifiPresetSheetOperations["020000123456"] = 1
+        manager.usbProbeHolds = 1
         try await Task.sleep(nanoseconds: 500_000_000)
-        XCTAssertEqual(asked.total, 1, "the retry waits while the sheet has the board")
+        XCTAssertEqual(asked.total, 1, "the retry waits while the repair has the board")
         XCTAssertNotNil(manager.wifiPresetSyncTasks["020000123456"])
 
-        manager.wifiPresetSheetOperations = [:]
+        manager.usbProbeHolds = 0
         try await waitUntil { manager.wifiPresetSyncReport(for: "studio-display") != nil }
         XCTAssertEqual(device.mutations.count, 1, device.commands.description)
         XCTAssertTrue(manager.issues.isEmpty, manager.issues.description)
@@ -1271,16 +1178,6 @@ final class WifiPresetSyncTests: XCTestCase {
         case .success(let value): return value
         case .failure(let error): throw error
         }
-    }
-
-    private func copyFailure(
-        _ result: Result<WifiPresetSyncReport, WifiConfigUI.ConfigFailure>
-    ) throws -> WifiConfigUI.ConfigFailure {
-        guard case .failure(let failure) = result else {
-            XCTFail("expected a failure, got \(result)")
-            throw CancellationError()
-        }
-        return failure
     }
 
     private func failureValue<T>(

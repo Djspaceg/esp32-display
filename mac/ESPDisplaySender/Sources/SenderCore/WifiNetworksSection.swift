@@ -2,17 +2,14 @@ import SenderProtocol
 import SwiftUI
 
 /// The app's saved WiFi networks and the order they fill every board's ten
-/// preset slots: the one place either is edited. A board's own page only
-/// applies one of them, or points here.
+/// preset slots: the one place either is edited, in the Settings window's
+/// WiFi Networks pane. A board's own page only says which preset it is on and
+/// links here; onboarding only chooses one of them.
 ///
-/// Changes take effect at once rather than on the sheet's Done, because they
-/// are Keychain writes - there is no draft of a password to cancel back to.
+/// Changes take effect at once, as everything in Settings does, and they are
+/// Keychain writes - there is no draft of a password to cancel back to.
 struct WifiNetworksSection: View {
     @ObservedObject var manager: PanelManager
-    /// Whether the add or edit form is open, so the sheet can hand Return and
-    /// Escape to the form instead of its own Done and Cancel - which would
-    /// close the sheet and drop what was typed.
-    @Binding var isEditing: Bool
 
     /// The network being added (`original` nil) or edited.
     @State private var editor: Editor?
@@ -64,7 +61,7 @@ struct WifiNetworksSection: View {
                     .foregroundStyle(.orange)
             }
         } header: {
-            Text("WiFi Networks")
+            Text("Saved Networks")
         } footer: {
             Text("Every display connected by USB receives the first \(slotCount) "
                 + "networks, in this order, as the presets its on-device picker "
@@ -75,7 +72,6 @@ struct WifiNetworksSection: View {
         // By set, not order: a move changes no credential, so it reads none.
         .task(id: Set(manager.savedNetworkNames)) { reloadOpenNetworks() }
         .onAppear { manager.refreshSavedNetworks() }
-        .onChange(of: editor != nil) { _, open in isEditing = open }
         // A change to the list is the Keychain answering again, so a failure
         // reported before it no longer describes the current state.
         .onChange(of: manager.savedNetworkNames) { _, _ in failure = nil }
@@ -113,9 +109,9 @@ struct WifiNetworksSection: View {
             + "keeps it."
     }
 
-    /// The preset-sync problems behind the window's banner, repeated here
-    /// because this sheet covers the banner. They resolve on their own the
-    /// same way, when a later copy succeeds.
+    /// The preset-sync problems behind the manager window's banner, repeated
+    /// here because that banner is in another window. They resolve on their
+    /// own the same way, when a later copy succeeds.
     private var syncIssues: [String] {
         manager.issues.filter { $0.issue == .wifiPresetSync }
             .flatMap { $0.detail.components(separatedBy: "\n") }

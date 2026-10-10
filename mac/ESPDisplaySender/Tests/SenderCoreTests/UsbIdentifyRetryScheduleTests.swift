@@ -39,13 +39,10 @@ extension UsbIdentifyRetryTests {
         XCTAssertEqual(manager.usbPortsDueForIdentifyRetry(), [])
         manager.releaseUSBIdentifyRetries()
 
-        // A USB control write, the preset sheet, a preset sync, a brightness drag.
+        // A USB control write, a preset sync, a brightness drag.
         manager.usbControlsInFlight = 1
         XCTAssertEqual(manager.usbPortsDueForIdentifyRetry(), [])
         manager.usbControlsInFlight = 0
-        manager.wifiPresetSheetOperations["020000aabbcc"] = 1
-        XCTAssertEqual(manager.usbPortsDueForIdentifyRetry(), [])
-        manager.wifiPresetSheetOperations = [:]
         manager.wifiPresetSyncTasks["020000aabbcc"] = Task {}
         XCTAssertEqual(manager.usbPortsDueForIdentifyRetry(), [])
         manager.wifiPresetSyncTasks = [:]

@@ -176,25 +176,13 @@ final class OperationOutcomeTests: XCTestCase {
         XCTAssertEqual(OperationOutcome.failure("a", "b").kind, .failure)
     }
 
-    /// Empty SSID is caught before any serial I/O is attempted.
-    func testApplyingNoNetworkFails() {
-        let manager = makeManager([
-            PanelSnapshot(serviceName: "studio-display", displayName: "studio-display"),
-        ])
-
-        manager.applySavedNetwork("", to: "studio-display")
-
-        XCTAssertEqual(manager.operationOutcome?.kind, .failure)
-        XCTAssertEqual(manager.operationOutcome?.title, "No network selected")
-    }
-
     /// An action for a panel that is not in the list does nothing at all, rather
     /// than reporting a confusing outcome about a display the user cannot see.
     func testActionForUnknownPanelIsIgnored() {
         let manager = makeManager()
 
         manager.rename("new-name", for: "ghost")
-        manager.applySavedNetwork("Studio WiFi", to: "ghost")
+        manager.setOTAPassword("secret", remember: false, for: "ghost")
 
         XCTAssertNil(manager.operationOutcome)
     }
@@ -203,7 +191,8 @@ final class OperationOutcomeTests: XCTestCase {
         let manager = makeManager([
             PanelSnapshot(serviceName: "studio-display", displayName: "studio-display"),
         ])
-        manager.applySavedNetwork("", to: "studio-display")
+        manager.serialIODisabled = true
+        manager.rename("new-name", for: "studio-display")
         XCTAssertNotNil(manager.operationOutcome)
 
         manager.clearOperationOutcome()

@@ -118,7 +118,7 @@ Coverage went from 20 Swift tests and 140 host checks to 198 and 280.
   once installed. Per-panel fps starts to matter when one panel is on weak
   WiFi. Note `UDP_PORT` is hardcoded in firmware, so port is only meaningful if
   the device side becomes configurable too.
-  - Done for fps, pacing, and adaptive pacing, via a ⌘, Settings sheet backed
+  - Done for fps, pacing, and adaptive pacing, via the ⌘, Settings window backed
     by `settings.json`. Port was deliberately left out: exposing a control that
     cannot work against the current firmware is the same mistake as the OTA
     button above.

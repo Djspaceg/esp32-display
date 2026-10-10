@@ -68,6 +68,9 @@ extension PanelManager {
         // The same name may carry a new password, so the boards are told even
         // when the list of names did not change.
         wifiCredentialRevision += 1
+        // Views that read the credential itself - the Add Display sheet -
+        // redraw even when the list of names is the same.
+        objectWillChange.send()
         setWifiPresetOrder(order, keychainNames: wifiNetworkNamesReader())
         syncWifiPresetsToAttachedDevices()
         return nil
@@ -103,16 +106,6 @@ extension PanelManager {
         // end, so they regain a place if the item comes back.
         let hidden = (settings.wifiPresetOrder ?? []).filter { !order.contains($0) }
         setWifiPresetOrder(order + hidden, keychainNames: wifiNetworkNamesReader())
-    }
-
-    /// Another path - onboarding, the WiFi dialog - wrote a credential to the
-    /// Keychain. Its name may already be saved with an older password, which
-    /// leaves the list of names unchanged, so the attached boards are told
-    /// regardless, the same way an edit in Settings tells them.
-    func savedCredentialsWereWritten() {
-        wifiCredentialRevision += 1
-        refreshSavedNetworks()
-        syncWifiPresetsToAttachedDevices()
     }
 
     /// The saved credential behind a network, for the Settings editor.
