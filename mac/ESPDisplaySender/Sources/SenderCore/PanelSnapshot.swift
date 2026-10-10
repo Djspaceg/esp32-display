@@ -73,7 +73,17 @@ struct PanelSnapshot: Identifiable, Equatable {
     var target: String?
     /// Runtime physical profile and partition evidence used with family/chip to
     /// select embedded firmware. Both are discovery-scoped.
-    var profile: String?
+    var profile: String? {
+        didSet {
+            if let profile, GeneratedBoardCatalog.encoderProfiles.contains(profile) {
+                knobReported = true
+            }
+        }
+    }
+    /// The board has shown it has a knob this launch: by reporting a knob
+    /// profile, or by sending a knob gesture. Kept when `profile` is cleared
+    /// with discovery, because the knob keeps working over the session.
+    var knobReported = false
     var partition: String?
     /// The panel's native screen size, from its `res` TXT record or from a known
     /// USB `board` identity. nil means neither source established a usable size.

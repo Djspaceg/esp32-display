@@ -392,6 +392,11 @@ struct PanelDetailView: View {
             if panel.capabilities.contains(.touch) {
                 gestureSection
             }
+            // Outside the touch gate: a knob board's knob sends media keys
+            // under every preset, touch screen or not.
+            if panel.offersMediaKeyGrant(authorized: manager.mediaKeysAuthorized()) {
+                mediaKeyGrantSection
+            }
             if panel.capabilities.contains(.idleText) {
                 screensaverSection
             }
@@ -1113,16 +1118,21 @@ struct PanelDetailView: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
-            if panel.gesturePreset == .multimedia, !MediaControl.isAuthorized {
-                HStack(spacing: 8) {
-                    Label(
-                        "Playback control needs Accessibility permission.",
-                        systemImage: "lock.fill")
+        }
+    }
+
+    /// The way back to the Accessibility grant media keys need: for a knob
+    /// board under any preset, and for the multimedia preset on glass. macOS
+    /// never shows the prompt again once declined, so this opens the settings
+    /// pane instead of asking again.
+    private var mediaKeyGrantSection: some View {
+        Section {
+            LabeledContent("Accessibility") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(mediaKeyGrantText, systemImage: "lock.fill")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    // The prompt was raised when the preset was chosen, and
-                    // macOS never shows it again once declined, so this opens
-                    // the settings pane instead of asking again.
+                        .textSelection(.enabled)
                     Button("Open System Settings…") {
                         if let url = AppIssue.accessibility.settingsURL {
                             NSWorkspace.shared.open(url)
@@ -1131,6 +1141,20 @@ struct PanelDetailView: View {
                     .controlSize(.small)
                 }
             }
+        }
+    }
+
+    private var mediaKeyGrantText: String {
+        let glass = panel.gesturePreset == .multimedia
+            && panel.capabilities.contains(.touch)
+        switch (panel.hasKnob, glass) {
+        case (true, true):
+            return "The knob's volume and mute, and playback control, need "
+                + "Accessibility permission."
+        case (true, false):
+            return "The knob's volume and mute need Accessibility permission."
+        case (false, _):
+            return "Playback control needs Accessibility permission."
         }
     }
 

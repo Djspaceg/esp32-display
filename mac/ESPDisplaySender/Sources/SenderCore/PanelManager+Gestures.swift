@@ -26,6 +26,11 @@ extension PanelManager {
 
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return }
+        // A knob gesture is the board saying it has a knob, whatever discovery
+        // has reported, so its page offers the knob's Accessibility way back.
+        if touch.gesture.isKnob, !panel.knobReported {
+            updatePanel(serviceName) { $0.knobReported = true }
+        }
 
         // The orientation comes from the gesture itself rather than from this
         // panel's last known state, so a swipe is read against the frame that was
