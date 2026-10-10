@@ -173,6 +173,48 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(manager.savedCredential(for: "Studio WiFi")?.password, "rotated")
     }
 
+    /// Every AppKit control in each pane lies inside the window. The Identify
+    /// stepper used to be laid out as a whole form row inside the value
+    /// column, which put its arrows past the window's right edge.
+    func testEveryPaneKeepsItsControlsInsideTheWindow() throws {
+        let (manager, _) = makeManager(saved: ["Studio WiFi"])
+        for pane in SettingsPane.allCases {
+            let navigation = SettingsNavigation()
+            navigation.show(pane)
+            let size = NSRect(x: 0, y: 0, width: 720, height: 620)
+            let host = NSHostingView(rootView: SettingsView(
+                manager: manager, navigation: navigation)
+                .frame(width: size.width, height: size.height))
+            host.frame = size
+            let window = NSWindow(
+                contentRect: size, styleMask: [.borderless],
+                backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.4))
+            host.layoutSubtreeIfNeeded()
+            var controls: [NSView] = []
+            var queue: [NSView] = [host]
+            while let view = queue.popLast() {
+                if view is NSStepper || view is NSPopUpButton || view is NSSlider {
+                    controls.append(view)
+                }
+                queue.append(contentsOf: view.subviews)
+            }
+            if pane == .general {
+                XCTAssertTrue(controls.contains { $0 is NSStepper }, "no stepper rendered")
+            }
+            for control in controls {
+                let frame = control.convert(control.bounds, to: host)
+                XCTAssertTrue(
+                    host.bounds.insetBy(dx: -0.5, dy: -0.5).contains(frame),
+                    "\(type(of: control)) on \(pane.title) lies at \(frame), "
+                        + "outside the window \(host.bounds)")
+            }
+            window.close()
+        }
+    }
+
     func testTheSidebarSearchFindsAPaneByTheSettingsOnIt() {
         let navigation = SettingsNavigation()
         XCTAssertEqual(navigation.visiblePanes, SettingsPane.allCases)

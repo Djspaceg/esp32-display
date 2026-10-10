@@ -313,19 +313,23 @@ private struct GeneralSettingsPane: View {
 
             Section {
                 LabeledContent("Identify for") {
-                    Stepper(
-                        value: Binding(
-                            get: { manager.settings.identifySeconds },
-                            set: { seconds in
-                                change(manager) { $0.identifySeconds = seconds }
-                            }),
-                        in: SenderSettings.identifyRange
-                    ) {
+                    // The number beside a label-less stepper, as the display
+                    // page's brightness presets do. A stepper carrying its own
+                    // label is laid out as a whole form row inside the value
+                    // column, which put its arrows past the window's edge.
+                    HStack(spacing: 8) {
                         Text("\(manager.settings.identifySeconds) seconds")
                             .monospacedDigit()
+                        Stepper(
+                            "Identify duration in seconds",
+                            value: Binding(
+                                get: { manager.settings.identifySeconds },
+                                set: { seconds in
+                                    change(manager) { $0.identifySeconds = seconds }
+                                }),
+                            in: SenderSettings.identifyRange)
+                            .labelsHidden()
                     }
-                    .fixedSize()
-                    .accessibilityLabel("Identify duration in seconds")
                 }
             } header: {
                 Text("Identify")

@@ -152,6 +152,9 @@ struct WifiNetworksSection: View {
                         original: ssid, ssid: ssid,
                         isOpenNetwork: saved?.isOpenNetwork ?? false)
                 }
+                // Kept whole: beside a long network name it was the one
+                // squeezed, to "E…", where the name can truncate instead.
+                .fixedSize()
                 .disabled(editor != nil)
                 Button("Remove", systemImage: "minus.circle") {
                     pendingRemoval = ssid
