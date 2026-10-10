@@ -91,10 +91,14 @@ before muting the codec and stopping I2S.
    The readback is taken while the amplifier is on: the enable pad must read
    1, and ES8311 `0x31=0x00` means the DAC is unmuted. The `mic` lines are the
    board's own microphones (ES7210 MIC1 and MIC2; MIC3, the echo reference,
-   stays off) at 440 Hz. A speaker heard through the air rises well above the
-   silence with the amplifier on and falls back with it off. A rise that stays
-   with the amplifier off is electrical coupling, not sound. Tones under
-   225 ms are not measured.
+   stays off) at 440 Hz. A rise that stays with the amplifier off is
+   electrical coupling from the codec side, not sound. A rise that falls back
+   with the amplifier off came through the amplifier: either the speaker's
+   sound or coupling from the amplifier's output traces, which a run with the
+   speaker unplugged tells apart. On a 4B (MIC1/MIC2 at 0 dB, DAC 62%) with
+   unknown speaker fitment, both mics rose +36 to +42 dB with the amp on and
+   about 0 dB with it off (2026-10-10); a no-speaker baseline is not yet
+   recorded. Tones under 225 ms are not measured.
 
 6. To abort a longer test, send:
 

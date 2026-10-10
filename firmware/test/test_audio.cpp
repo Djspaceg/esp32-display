@@ -750,21 +750,24 @@ static int testShortToneIsNotMeasured() {
 
 // The speaker test hears itself: with the microphones receiving what the
 // speaker plays, the tone stands far above the silence played before it and
-// falls back once the amplifier is off. With nothing reaching the
-// microphones (no speaker), the tone does not rise at all.
+// falls back once the amplifier is off. With the tone coupled into the
+// microphones whatever the amplifier does, it stays up with the amp off.
+// With nothing reaching the microphones, the tone does not rise at all.
 static int testToneMeasuresItsOwnLoopback() {
   const board::AudioConfig *audio =
       board::generatedAudioConfig(board::Variant::LcdSt77916);
   CHECK(audio != nullptr);
   CHECK(audio->captureChannels == audio->playbackChannels);
-  for (int heard = 1; heard >= 0; --heard) {
+  // 2: coupled regardless of the amp; 1: heard only while the amp is on;
+  // 0: nothing reaches the microphones.
+  for (int heard = 2; heard >= 0; --heard) {
     audiohost::reset();
     audio::resetBoardAudioStatusForTest();
     audioengine::stop();
     audiotransport::stop();
     CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
     CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
-    audiohost::setI2sLoopback(heard == 1);
+    audiohost::setI2sLoopback(heard > 0);
     CHECK(startToneWithEngineRunning(1000) == nullptr);
     CHECK(audio::sharedCodecBackend().ampEnableLevel() == HIGH);
     if (heard == 1) {
@@ -779,11 +782,17 @@ static int testToneMeasuresItsOwnLoopback() {
     for (uint8_t channel = 0; channel < result.channels; ++channel) {
       CHECK(result.silenceDbfs[channel] ==
             audiometer::ToneMeter::FLOOR_DBFS);
-      CHECK(result.ampOffDbfs[channel] ==
-            audiometer::ToneMeter::FLOOR_DBFS);
-      if (heard == 1) {
+      if (heard == 2) {
         CHECK(result.toneDbfs[channel] > -40.0f);
+        CHECK(std::fabs(result.ampOffDbfs[channel] -
+                        result.toneDbfs[channel]) < 1.0f);
+      } else if (heard == 1) {
+        CHECK(result.toneDbfs[channel] > -40.0f);
+        CHECK(result.ampOffDbfs[channel] ==
+              audiometer::ToneMeter::FLOOR_DBFS);
       } else {
+        CHECK(result.ampOffDbfs[channel] ==
+              audiometer::ToneMeter::FLOOR_DBFS);
         CHECK(result.toneDbfs[channel] ==
               audiometer::ToneMeter::FLOOR_DBFS);
       }

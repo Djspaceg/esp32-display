@@ -24,10 +24,10 @@ constexpr uint32_t ENGINE_PARK_WAIT_MS = 200;
 // first reads of a window still hold the one before.
 constexpr uint32_t LEAD_SILENCE_MS = 500;
 constexpr uint32_t WINDOW_SETTLE_MS = 200;
-// Then the tone plays on this long with the amplifier off. Sound from the
-// speaker stops with the amplifier; 440 Hz coupled into the microphones
-// electrically from the codec side does not, so the two rises tell them
-// apart where one rise alone cannot.
+// Then the tone plays on this long with the amplifier off. 440 Hz coupled
+// into the microphones from the codec side stays; what the amplifier makes
+// stops with it. That is the speaker's sound or coupling from the amplifier's
+// output traces, which only a run with the speaker unplugged tells apart.
 constexpr uint32_t AMP_OFF_CONTROL_MS = 500;
 // 25 ms blocks put 440 Hz on a whole bin (11 cycles).
 constexpr uint32_t METER_BLOCK_MS = 25;
@@ -177,9 +177,9 @@ void reportReadback(audio::CodecSerialAudioBackend &backend) {
                 backend.ampEnableLevel(), registers);
 }
 
-// What the microphones heard at 440 Hz, not a verdict on its own: a speaker
-// heard through the air rises with the amplifier on and falls back with it
-// off, while electrical coupling rises either way.
+// What the microphones heard at 440 Hz, not a verdict: codec-side coupling
+// rises with the amplifier on and off alike; a rise only with it on came
+// through the amplifier (see AMP_OFF_CONTROL_MS).
 void reportLoopback() {
   if (captureChannels == 0) {
     Serial.println(
