@@ -152,3 +152,98 @@ final class CaptureLetterboxTests: XCTestCase {
         XCTAssertEqual(calls.get(), 3, "the refused size was not asked for again")
     }
 }
+
+/// Live re-centring for a picker selection, which the session must not
+/// restart: a stream started from a picked filter cannot reliably be recreated.
+final class PickedDisplayFollowTests: XCTestCase {
+
+    private let square = PanelGeometry(width: 466, height: 466)
+
+    /// A picked display (or an application share, which is shown on its
+    /// display) whose resolution changes shape is re-centred in place.
+    func testAPickedDisplayThatChangesResolutionIsReCentred() async {
+        let capture = DisplayCapture(geometry: square, landscape: false, onFrame: { _, _ in })
+        capture.configureForTesting = { _, _, _ in }
+        _ = await capture.updateContentSize(CGSize(width: 1512, height: 982))
+        let looked = LockedBox<[CGDirectDisplayID]>([])
+        await DeviceSession.followPickedDisplay(capture, displayID: 7) { id in
+            looked.update { $0.append(id) }
+            return CGSize(width: 1024, height: 768)
+        }
+        XCTAssertEqual(looked.get(), [7])
+        XCTAssertEqual(
+            capture.destinationForTesting,
+            DisplayCapture.letterbox(
+                content: CGSize(width: 1024, height: 768), width: 466, height: 466))
+    }
+
+    /// Which picks the watchdog follows by display: a picked display or
+    /// application share, never a picked window (that follows the window), and
+    /// nothing without a selection or a display to look up.
+    func testOnlyAPickedDisplayOrApplicationShareIsFollowedByItsDisplay() {
+        XCTAssertEqual(
+            DeviceSession.pickedDisplayToFollow(
+                pickerSelected: true, windowTracked: false, displayID: 7), 7)
+        XCTAssertNil(
+            DeviceSession.pickedDisplayToFollow(
+                pickerSelected: true, windowTracked: true, displayID: 7))
+        XCTAssertNil(
+            DeviceSession.pickedDisplayToFollow(
+                pickerSelected: false, windowTracked: false, displayID: 7))
+        XCTAssertNil(
+            DeviceSession.pickedDisplayToFollow(
+                pickerSelected: true, windowTracked: false, displayID: nil))
+    }
+
+    /// The live display lookup answers a real display's size in points and
+    /// nil for an ID that is not attached.
+    func testTheDisplaySizeLookupAnswersOnlyForAnAttachedDisplay() {
+        XCTAssertNil(DeviceSession.displayPointSize(0xDEAD_BEEF))
+        let main = CGMainDisplayID()
+        if let size = DeviceSession.displayPointSize(main) {
+            XCTAssertEqual(size, CGDisplayBounds(main).size)
+        }
+    }
+
+    /// A display that keeps its shape, or a lookup that fails, sends nothing.
+    func testAnUnchangedOrUnknownDisplayLeavesTheStreamAlone() async {
+        let capture = DisplayCapture(geometry: square, landscape: false, onFrame: { _, _ in })
+        let calls = LockedBox(0)
+        capture.configureForTesting = { _, _, _ in calls.update { $0 += 1 } }
+        _ = await capture.updateContentSize(CGSize(width: 1512, height: 982))
+        await DeviceSession.followPickedDisplay(capture, displayID: 7) { _ in
+            CGSize(width: 1512, height: 982)
+        }
+        await DeviceSession.followPickedDisplay(capture, displayID: 7) { _ in nil }
+        XCTAssertEqual(calls.get(), 1)
+    }
+}
+
+/// The stream reference is touched by the supervisor, the preview's window
+/// poll and region drags from different tasks at once. Run under
+/// ThreadSanitizer (`swift test --sanitize=thread`) to check it; without it
+/// this only exercises the same paths.
+final class CaptureStreamRaceTests: XCTestCase {
+
+    func testStoppingWhileReconfiguringIsNotADataRace() async {
+        let capture = DisplayCapture(
+            geometry: PanelGeometry(width: 466, height: 466), landscape: false,
+            onFrame: { _, _ in })
+        await withTaskGroup(of: Void.self) { group in
+            for i in 0..<200 {
+                group.addTask {
+                    if i % 2 == 0 {
+                        await capture.stop()
+                    } else {
+                        _ = await capture.updateContentSize(
+                            CGSize(width: 1000 + i, height: 700))
+                        _ = await capture.retarget(
+                            to: SCContentFilter())
+                    }
+                }
+            }
+        }
+        // The assertion here is ThreadSanitizer's: there is no stream, so the
+        // calls themselves have nothing to apply.
+    }
+}

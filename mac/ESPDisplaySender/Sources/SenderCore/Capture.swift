@@ -8,7 +8,11 @@ import SenderProtocol
 /// ScreenCaptureKit capture of one display, scaled by SCK to the panel's own
 /// pixel size in BGRA, converted to RGB565BE and handed to a callback.
 final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
-    private var stream: SCStream?
+    /// The running stream. Read through `stream` and written only under
+    /// `stateLock`: the supervisor, the preview's window poll and region drags
+    /// reach it from different tasks while a start or stop is changing it.
+    private var _stream: SCStream?
+    private var stream: SCStream? { stateLock.withLock { _stream } }
     private let outputQueue = DispatchQueue(label: "espdisp.capture")
     /// The panel this capture is feeding. Every output size below comes from it.
     ///
@@ -707,7 +711,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             throw error
         }
-        self.stream = stream
+        stateLock.withLock { _stream = stream }
     }
 
     static func configuration(
@@ -946,13 +950,18 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Samples are refused first, so a stream that will not stop cannot feed
     /// the session after it has moved on.
     func stop() async {
-        stateLock.withLock { _acceptedStream = nil }
+        // Let go of the stream before stopping it, so a reconfigure arriving
+        // meanwhile finds nothing to change rather than a stream going away.
+        let stream = stateLock.withLock { () -> SCStream? in
+            _acceptedStream = nil
+            defer { _stream = nil }
+            return _stream
+        }
         if let stream {
             _ = try? await withCaptureDeadline(Self.callDeadline, "Stopping capture") {
                 try await stream.stopCapture()
             }
         }
-        stream = nil
     }
 
     // MARK: SCStreamOutput

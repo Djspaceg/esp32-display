@@ -1135,6 +1135,13 @@ final class DeviceSession {
                         &window, capture: capture, isPicked: pickerSelection != nil)
                     tracked = window
                     if !healthy { break }
+                } else if let displayID = Self.pickedDisplayToFollow(
+                    pickerSelected: pickerSelection != nil, windowTracked: tracked != nil,
+                    displayID: pickedDisplayID)
+                {
+                    await Self.followPickedDisplay(capture, displayID: displayID) {
+                        Self.displayPointSize($0)
+                    }
                 }
                 // Reconnecting (`superviseLink`) has not helped for long enough
                 // that the device is gone rather than flapping. Stop capturing.
@@ -1222,6 +1229,40 @@ final class DeviceSession {
         await capture.updateContentSize(window.frame.size)
         markStreaming()
         return true
+    }
+
+    /// The display a picker selection is followed by: a picked display or
+    /// application share, both shown at their display's size. A picked window
+    /// is followed by the window itself (`followWindow`), and without a
+    /// selection the display source restarts on a change instead.
+    static func pickedDisplayToFollow(
+        pickerSelected: Bool, windowTracked: Bool, displayID: CGDirectDisplayID?
+    ) -> CGDirectDisplayID? {
+        guard pickerSelected, !windowTracked else { return nil }
+        return displayID
+    }
+
+    /// A display's current size in points, or nil when it is not attached.
+    /// Asked of Core Graphics rather than ScreenCaptureKit: it answers at once,
+    /// so a watchdog tick never waits on a shareable-content fetch for it.
+    static func displayPointSize(_ id: CGDirectDisplayID) -> CGSize? {
+        let bounds = CGDisplayBounds(id)
+        return bounds.isEmpty ? nil : bounds.size
+    }
+
+    /// Re-centre a picked display or application share after its display
+    /// changes resolution, in place.
+    ///
+    /// Both are shown at their display's size, and a picked stream is never
+    /// restarted for a display change the way a Screen source is, because a
+    /// stream started from a picker selection cannot reliably be recreated
+    /// from it. A lookup that fails leaves the stream as it is.
+    static func followPickedDisplay(
+        _ capture: DisplayCapture, displayID: CGDirectDisplayID,
+        displaySize: (CGDirectDisplayID) async -> CGSize?
+    ) async {
+        guard let size = await displaySize(displayID) else { return }
+        await capture.updateContentSize(size)
     }
 
     /// Hold capture and sending down until the device answers again.
