@@ -115,7 +115,7 @@ static constexpr Config CONFIG_P4_4B = {
 };
 static constexpr Config CONFIG_AMOLED_CO5300 = {
     Variant::AmoledCo5300, "ESP32-S3-Touch-AMOLED-1.75C (CO5300)", &PLATFORM_ESP32_S3, &PANEL_CO5300_466X466, 38, 4,
-    5, 6, 7, 12, -1, 2,
+    5, 6, 7, 12, -1, 1,
     -1, 0, -1, TouchController::Cst9217, 15, 14,
     2, 11, PowerController::Axp2101, -1, 0, -1,
     -1, MotionController::Qmi8658, 1, 1, 0, 1,

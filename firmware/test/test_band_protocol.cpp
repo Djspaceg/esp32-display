@@ -3190,12 +3190,15 @@ int main() {
     CHECK(am.isQspi());
 
     // Waveshare's pin_config.h for the 1.75C, asserted pin by pin so a
-    // copy-paste between rows cannot pass silently.
+    // copy-paste between rows cannot pass silently. LCD_RESET is GPIO1 in the
+    // board's schematic netlist and in the vendor BSP (BSP_LCD_RST); GPIO2 is
+    // only TP_RESET. With the panel reset on GPIO2, GPIO1 was never driven,
+    // the suspected cause of a unit whose glass stayed dark.
     CHECK(am.pinSclk == 38);
     CHECK(am.pinMosi == 4);  // SDIO0
     CHECK(am.pinData1 == 5 && am.pinData2 == 6 && am.pinData3 == 7);
     CHECK(am.pinCs == 12);
-    CHECK(am.pinRst == 2);
+    CHECK(am.pinRst == 1);
 
     // QSPI has no D/C line and an AMOLED has no backlight: both absences are
     // what panel_init keys its bring-up and brightness paths on.
@@ -3214,13 +3217,14 @@ int main() {
     CHECK(!board::configFor(Variant::LcdSt7789).panel->roundDisplay);
     CHECK(!board::configFor(Variant::TouchJd9853).panel->roundDisplay);
 
-    // CST9217 on its own I2C bus; reset shared with the panel, so touch
-    // bring-up must never pulse it independently.
+    // CST9217 on its own I2C bus with its own reset line (TP_RESET, GPIO2),
+    // which touch bring-up pulses itself before its first command.
     CHECK(am.touch == board::TouchController::Cst9217);
     CHECK(am.hasTouch());
     CHECK(am.pinTouchSda == 15 && am.pinTouchScl == 14);
     CHECK(am.pinTouchInt == 11);
-    CHECK(am.pinTouchRst == am.pinRst);
+    CHECK(am.pinTouchRst == 2);
+    CHECK(am.pinTouchRst != am.pinRst);
 
     const auto &generatedS3Plan =
         board::detectionPlanForPlatform(board::Platform::Esp32S3);

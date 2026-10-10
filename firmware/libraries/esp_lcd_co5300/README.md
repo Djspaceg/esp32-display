@@ -66,7 +66,7 @@ board table carries `colOffset = 6`.
 - Like the vendored JD9853, it does **not** read
   `esp_lcd_panel_dev_config_t::data_endian`: the panel expects big-endian
   RGB565, which is the byte order this project's framebuffers already use.
-- `reset()` drives the reset GPIO when one is configured. On the 1.75C the
-  panel and touch controller share that line (GPIO2), so a panel reset also
-  resets touch - bring up touch after the panel, and never pulse the line
-  from the touch side.
+- `reset()` drives the reset GPIO when one is configured. On the 1.75C that
+  is GPIO1 (LCD_RESET in the schematic and the vendor BSP); the touch
+  controller has its own reset on GPIO2 (TP_RESET), which touch bring-up
+  pulses itself.

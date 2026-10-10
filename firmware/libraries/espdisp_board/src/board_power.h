@@ -170,11 +170,11 @@ inline bool setRegisterBits(uint8_t reg, uint8_t bits) {
 /// profile-dependent initialization, and boardtouch::init() may run before or
 /// after this on the same selected bus.
 ///
-/// NEVER drives cfg.pinTouchRst, and there is no pinMode or digitalWrite
-/// anywhere in this file for that reason. On the 1.75C that line IS the panel
-/// reset (GPIO2, one shared line), so pulsing it would hard-reset a CO5300 that
-/// initDisplay() has already brought up and leave the panel dark. board_touch.h
-/// documents the same hazard. The PMU needs no reset line in any case.
+/// NEVER drives cfg.pinTouchRst or cfg.pinRst, and there is no pinMode or
+/// digitalWrite anywhere in this file for that reason: touch bring-up owns the
+/// touch reset (GPIO2 on the 1.75C) and panel bring-up owns the panel reset
+/// (GPIO1), and pulsing either here would reset a controller that is already
+/// up. The PMU needs no reset line in any case.
 inline bool init(const board::Config &cfg, bool verbose = true) {
   enabled = false;
   activeController = board::PowerController::None;
