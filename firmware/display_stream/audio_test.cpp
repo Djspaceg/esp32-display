@@ -52,15 +52,19 @@ const char *startAudioToneTest(const board::Config &config,
   // takes precedence: the engine drops the stream and lets go of the codec
   // for the tone's length, and the stream plays again after it.
   const bool pausesStream = audioengine::streamActive();
-  audioengine::setLocalTestActive(true);
-  for (TickType_t waited = 0; !audioengine::localTestHeld() &&
-                              waited < pdMS_TO_TICKS(ENGINE_PARK_WAIT_MS);
-       ++waited) {
-    vTaskDelay(1);
-  }
-  if (!audioengine::localTestHeld()) {
-    audioengine::setLocalTestActive(false);
-    return "network audio did not pause; amp unchanged";
+  // A tone already playing holds the engine; re-arming the hold here could
+  // only time out into releasing it under that tone's running backend.
+  if (!toneOwnsBackend) {
+    audioengine::setLocalTestActive(true);
+    for (TickType_t waited = 0; !audioengine::localTestHeld() &&
+                                waited < pdMS_TO_TICKS(ENGINE_PARK_WAIT_MS);
+         ++waited) {
+      vTaskDelay(1);
+    }
+    if (!audioengine::localTestHeld()) {
+      audioengine::setLocalTestActive(false);
+      return "network audio did not pause; amp unchanged";
+    }
   }
   audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
   const audiobackend::Format format =

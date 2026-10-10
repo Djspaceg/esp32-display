@@ -647,9 +647,10 @@ static int testFailedBackendStartBacksOff() {
   return 0;
 }
 
-static void queueSenderStream(uint16_t packets) {
+static void queueSenderStream(uint16_t packets, uint16_t firstSequence = 0) {
   constexpr uint16_t framesPerPacket = 320;
-  for (uint16_t sequence = 0; sequence < packets; ++sequence) {
+  for (uint16_t sequence = firstSequence;
+       sequence < firstSequence + packets; ++sequence) {
     audiohost::enqueueUdp(
         documentedPcm(sequence, sequence * framesPerPacket, framesPerPacket),
         0x01020304, 6000);
@@ -658,9 +659,25 @@ static void queueSenderStream(uint16_t packets) {
 }
 
 // The engine task runs whenever the loop task sleeps, as it does on the
-// board, where it is the higher-priority task on the same core.
+// board, where it is the higher-priority task on the same core. Armed only
+// around the loop task's wait, so the engine's own delays never re-enter it.
 static void runOneEngineIteration() {
   audioengine::host::runEngineTaskIterations(1);
+}
+
+static const char *startToneWithEngineRunning(uint32_t durationMs) {
+  audiohost::setTaskDelayHook(runOneEngineIteration);
+  const char *error =
+      startAudioToneTest(board::CONFIG_LCD_ST77916, durationMs);
+  audiohost::setTaskDelayHook(nullptr);
+  return error;
+}
+
+static void finishTone() {
+  for (int pass = 0; pass < 32 && audioToneTestRunning(); ++pass) {
+    serviceAudioToneTest();
+  }
+  serviceAudioToneTest();
 }
 
 // A tone runs to completion, then gives the codec back: ownership and the
@@ -673,13 +690,9 @@ static int testToneLifecycleReleasesTheBackend() {
   audiotransport::hostResetStats();
   CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
   CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
-  audiohost::setTaskDelayHook(runOneEngineIteration);
-  CHECK(startAudioToneTest(board::CONFIG_LCD_ST77916, 100) == nullptr);
+  CHECK(startToneWithEngineRunning(100) == nullptr);
   CHECK(audioToneTestRunning());
-  for (int pass = 0; pass < 32 && audioToneTestRunning(); ++pass) {
-    serviceAudioToneTest();
-  }
-  serviceAudioToneTest();
+  finishTone();
   CHECK(!audioToneTestRunning());
   CHECK(!audio::sharedCodecBackend().running());
 
@@ -707,7 +720,6 @@ static int testToneTakesPrecedenceOverSenderStream() {
   audiotransport::hostResetStats();
   CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
   CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
-  audiohost::setTaskDelayHook(runOneEngineIteration);
   audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
   queueSenderStream(6);
   audiohost::setMillis(250);
@@ -715,31 +727,71 @@ static int testToneTakesPrecedenceOverSenderStream() {
   CHECK(audioengine::streamActive());
   CHECK(backend.running());
 
-  CHECK(startAudioToneTest(board::CONFIG_LCD_ST77916, 100) == nullptr);
-  CHECK(audioToneTestRunning());
-  CHECK(!audioengine::streamActive());
+  for (uint16_t tone = 0; tone < 2; ++tone) {
+    // The second tone follows a stream that resumed after the first: a park
+    // left over from the first must not let it take the backend before the
+    // engine has let go again.
+    const uint16_t base = (uint16_t)(6 + tone * 12);
+    CHECK(startToneWithEngineRunning(100) == nullptr);
+    CHECK(audioToneTestRunning());
+    CHECK(!audioengine::streamActive());
 
-  // The sender keeps sending through the tone; the engine drops it.
-  queueSenderStream(6);
-  CHECK(audioengine::host::runEngineTaskIterations(2));
-  CHECK(!audioengine::streamActive());
-  CHECK(audioToneTestRunning());
-  for (int pass = 0; pass < 32 && audioToneTestRunning(); ++pass) {
-    serviceAudioToneTest();
+    // The sender keeps sending through the tone, its sequence carrying on;
+    // the engine drops it.
+    queueSenderStream(6, base);
+    CHECK(audioengine::host::runEngineTaskIterations(2));
+    CHECK(!audioengine::streamActive());
+    CHECK(audioToneTestRunning());
+    finishTone();
+    CHECK(!audioToneTestRunning());
+    CHECK(!backend.running());
+
+    queueSenderStream(6, (uint16_t)(base + 6));
+    audiohost::setMillis(500 + tone * 250);
+    CHECK(audioengine::host::runEngineTaskIterations(2));
+    CHECK(audioengine::streamActive());
+    CHECK(backend.running());
   }
-  serviceAudioToneTest();
-  CHECK(!audioToneTestRunning());
-  CHECK(!backend.running());
 
+  audioengine::stop();
+  audiotransport::stop();
+  CHECK(!audiohost::i2sChannelMisused());
+  audio::resetBoardAudioStatusForTest();
+  return 0;
+}
+
+// An engine that never lets go of the codec (stuck in an I2S call) refuses the
+// tone rather than share the backend with it, and keeps its stream.
+static int testToneRefusedWhenEngineDoesNotPark() {
+  audiohost::reset();
+  audio::resetBoardAudioStatusForTest();
+  audioengine::stop();
+  audiotransport::stop();
+  audiotransport::hostResetStats();
+  CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
+  CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
+  audio::CodecSerialAudioBackend &backend = audio::sharedCodecBackend();
   queueSenderStream(6);
-  audiohost::setMillis(500);
+  audiohost::setMillis(250);
+  CHECK(audioengine::host::runEngineTaskIterations(2));
+  CHECK(backend.running());
+  const unsigned beginsBefore = audiohost::i2sBeginCalls();
+
+  const char *error = startAudioToneTest(board::CONFIG_LCD_ST77916, 100);
+  CHECK(error != nullptr);
+  CHECK(std::strcmp(error, "network audio did not pause; amp unchanged") ==
+        0);
+  CHECK(!audioToneTestRunning());
+  CHECK(backend.running());
+  CHECK(audiohost::i2sBeginCalls() == beginsBefore);
+
+  queueSenderStream(6, 6);
   CHECK(audioengine::host::runEngineTaskIterations(2));
   CHECK(audioengine::streamActive());
   CHECK(backend.running());
 
   audioengine::stop();
   audiotransport::stop();
-  CHECK(!audiohost::i2sChannelMisused());
   audio::resetBoardAudioStatusForTest();
   return 0;
 }
@@ -754,8 +806,7 @@ static int testStaleToneOwnershipIsReleased() {
   audiotransport::hostResetStats();
   CHECK(audiotransport::start(board::CONFIG_LCD_ST77916));
   CHECK(audioengine::start(board::CONFIG_LCD_ST77916));
-  audiohost::setTaskDelayHook(runOneEngineIteration);
-  CHECK(startAudioToneTest(board::CONFIG_LCD_ST77916, 1000) == nullptr);
+  CHECK(startToneWithEngineRunning(1000) == nullptr);
   audio::sharedCodecBackend().stop();
   serviceAudioToneTest();
   CHECK(!audioToneTestRunning());
@@ -1114,6 +1165,7 @@ int main() {
       {"tone-stale-ownership", testStaleToneOwnershipIsReleased},
       {"tone-precedes-sender-stream",
        testToneTakesPrecedenceOverSenderStream},
+      {"tone-refused-without-park", testToneRefusedWhenEngineDoesNotPark},
       {"playback-only-start", testPlaybackOnlyStart},
   };
   for (const auto &finding : findingTests) {

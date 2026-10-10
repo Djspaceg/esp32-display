@@ -40,6 +40,8 @@ volatile bool streamSeen = false;
 volatile bool localTestActive = false;
 // Set by the engine task once it has seen localTestActive and let go of the
 // codec backend, so a local tone can take the backend over a live stream.
+// Plain volatile flags suffice because the engine task and the loop task that
+// runs the tone are both pinned to core 1 (CONFIG_ARDUINO_RUNNING_CORE).
 volatile bool localTestParked = false;
 // Engine-task state, file scope so a host test's re-entered task keeps it.
 StartBackoff startBackoff;
@@ -642,6 +644,7 @@ void stop() {
   streamSeen = false;
   suppressVideo = false;
   localTestActive = false;
+  localTestParked = false;
   if (engineTaskHandle != nullptr) {
     vTaskDelete(engineTaskHandle);
     engineTaskHandle = nullptr;

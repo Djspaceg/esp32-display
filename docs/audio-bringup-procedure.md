@@ -110,6 +110,14 @@ before muting the codec and stopping I2S.
    First confirm the command was sent after the readiness marker, then capture
    MCLK, BCLK, LRCK, DOUT, GPIO46 polarity, and the speaker output before
    changing gain or the power sequence.
-6. A click/pop without the tone is likewise insufficient to distinguish an
+6. `CFGERR network audio did not pause; amp unchanged` means the audio
+   engine task did not let go of the codec within 200 ms. A connected Mac
+   sender no longer blocks the tone: its stream, silence included, is paused
+   for the tone (`audio: network stream paused for the tone`) and resumes on
+   its next packets.
+7. The ESP32-P4-WIFI6-Touch-LCD-4B ships with no speaker, only an empty
+   1.25 mm 2-pin AUDIO connector (8 ohm 2 W). Check one is plugged in before
+   reading silence as a fault.
+8. A click/pop without the tone is likewise insufficient to distinguish an
    I2S, codec-routing, amplifier, speaker, or revision problem. Preserve the
    serial log and clock/GPIO captures for diagnosis.
