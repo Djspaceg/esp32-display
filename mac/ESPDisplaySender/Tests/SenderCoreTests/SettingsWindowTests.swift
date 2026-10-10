@@ -113,7 +113,7 @@ final class SettingsWindowTests: XCTestCase {
         navigation.show(.wifiNetworks)
         let pane = ViewReading(SettingsView(manager: manager, navigation: navigation))
 
-        for control in ["Add Network…", "Edit…", "Move Up", "Move Down", "Remove"] {
+        for control in ["Add Network…", "Edit…", "Remove"] {
             XCTAssertNotNil(pane.button(control), "Settings has no \"\(control)\"")
         }
         // "Slot \(n)", as the localized key the row's label carries.
@@ -123,13 +123,138 @@ final class SettingsWindowTests: XCTestCase {
                 pane.strings.contains(section.title),
                 "the sidebar does not list \(section.title)")
         }
+        XCTAssertEqual(pane.moveActions.count, 1, "the rows are not draggable")
+    }
 
-        // The buttons are the ones that change the shared list: moving the
-        // last network up moves it between every board's slots.
-        let moves = pane.buttons.filter { $0.title == "Move Up" }
-        XCTAssertEqual(moves.count, 3)
-        moves[2].press()
-        XCTAssertEqual(manager.savedNetworkNames, ["Studio WiFi", "Home", "Guest"])
+    // MARK: the saved-network list
+
+    /// One edit button per row, a plus and a minus under the list, and no
+    /// per-row arrows or remove buttons any more.
+    func testEachRowHasOnlyAnEditButtonAndTheFooterAddsAndRemoves() {
+        let (manager, _) = makeManager(saved: ["Studio WiFi", "Guest", "Home"])
+        let section = ViewReading(WifiNetworksSection(manager: manager))
+        XCTAssertEqual(section.buttons.filter { $0.title == "Edit…" }.count, 3)
+        XCTAssertEqual(section.buttons.filter { $0.title == "Remove" }.count, 1)
+        XCTAssertEqual(section.buttons.filter { $0.title == "Add Network…" }.count, 1)
+        XCTAssertNil(section.button("Move Up"))
+        XCTAssertNil(section.button("Move Down"))
+    }
+
+    /// Dragging a row is a move of the shared order: what the list's drop
+    /// handler is given goes straight into every board's slot order.
+    func testDraggingARowReordersTheSavedNetworks() throws {
+        let (manager, _) = makeManager(saved: ["Studio WiFi", "Guest", "Home"])
+        let section = ViewReading(WifiNetworksSection(manager: manager))
+        let drop = try XCTUnwrap(section.moveActions.first, "the rows are not draggable")
+
+        // "Home" dragged to the top, then "Studio WiFi" dragged past the end.
+        drop([2], 0)
+        XCTAssertEqual(manager.savedNetworkNames, ["Home", "Studio WiFi", "Guest"])
+        drop([1], 3)
+        XCTAssertEqual(manager.savedNetworkNames, ["Home", "Guest", "Studio WiFi"])
+        XCTAssertEqual(manager.settings.wifiPresetOrder, ["Home", "Guest", "Studio WiFi"])
+        // A drop where the row already is changes nothing.
+        drop([0], 0)
+        drop([0], 1)
+        XCTAssertEqual(manager.savedNetworkNames, ["Home", "Guest", "Studio WiFi"])
+    }
+
+    /// The manager's move means what SwiftUI's `onMove` means, for every
+    /// selection of rows and every drop position in a five-row list.
+    func testTheMoveMatchesSwiftUIsOnMoveEverywhere() {
+        let names = ["a", "b", "c", "d", "e"]
+        for mask in 1..<(1 << names.count) {
+            let source = IndexSet((0..<names.count).filter { mask & (1 << $0) != 0 })
+            for destination in 0...names.count {
+                var expected = names
+                expected.move(fromOffsets: source, toOffset: destination)
+                XCTAssertEqual(
+                    PanelManager.moving(names, fromOffsets: source, toOffset: destination),
+                    expected, "moving \(Array(source)) to \(destination)")
+            }
+        }
+    }
+
+    /// The footer's minus removes the selected row, after asking. With no
+    /// row selected it does nothing.
+    func testMinusRemovesTheSelectedRowAfterAsking() throws {
+        let (manager, _) = makeManager(saved: ["Studio WiFi", "Guest", "Home"])
+        let list = WifiNetworkList(manager: manager)
+        let minus = try XCTUnwrap(
+            ViewReading(WifiNetworksSection(manager: manager, list: list)).button("Remove"))
+
+        XCTAssertFalse(list.canRemove)
+        minus.press()
+        XCTAssertNil(list.pendingRemoval, "nothing selected, nothing to ask about")
+
+        list.selection = "Guest"
+        XCTAssertTrue(list.canRemove)
+        minus.press()
+        XCTAssertEqual(list.pendingRemoval, "Guest")
+        XCTAssertEqual(manager.savedNetworkNames.count, 3, "removed before confirming")
+
+        list.cancelRemoval()
+        XCTAssertNil(list.pendingRemoval)
+        XCTAssertEqual(manager.savedNetworkNames.count, 3)
+
+        minus.press()
+        list.confirmRemoval()
+        XCTAssertEqual(manager.savedNetworkNames, ["Studio WiFi", "Home"])
+        XCTAssertNil(list.selection, "the removed row stays selected")
+        XCTAssertNil(manager.savedCredential(for: "Guest"))
+        XCTAssertNil(list.failure)
+    }
+
+    /// Nothing is removed while the add or edit form is open - the minus is
+    /// greyed out and the Delete key asks nothing - since saving the form
+    /// afterwards would put the removed network back at the end.
+    func testNothingIsRemovedWhileTheEditorIsOpen() {
+        let (manager, _) = makeManager(saved: ["Studio WiFi", "Guest"])
+        let list = WifiNetworkList(manager: manager)
+        list.selection = "Guest"
+        list.isEditing = true
+        XCTAssertFalse(list.canRemove)
+        list.requestRemoval()
+        XCTAssertNil(list.pendingRemoval)
+        list.isEditing = false
+        list.requestRemoval()
+        XCTAssertEqual(list.pendingRemoval, "Guest")
+        // Confirmed for the network the dialog showed, even if the dialog
+        // has already let go of it.
+        list.cancelRemoval()
+        list.confirmRemoval("Guest")
+        XCTAssertEqual(manager.savedNetworkNames, ["Studio WiFi"])
+    }
+
+    /// A removal the Keychain refuses keeps the network and its selection, and
+    /// says why.
+    func testARefusedRemovalKeepsTheRowAndSaysWhy() {
+        let (manager, _) = makeManager(saved: ["Studio WiFi", "Guest"])
+        let store = InMemoryWifiCredentials([
+            SavedWiFiCredential(ssid: "Studio WiFi", password: "pw"),
+            SavedWiFiCredential(ssid: "Guest", password: "pw"),
+        ])
+        manager.useWifiCredentials(store)
+        store.writesFail = true
+        let list = WifiNetworkList(manager: manager)
+        list.selection = "Guest"
+        list.requestRemoval()
+        list.confirmRemoval()
+        XCTAssertEqual(list.failure?.title, "Keychain removal failed")
+        XCTAssertEqual(list.selection, "Guest")
+        XCTAssertEqual(manager.savedNetworkNames, ["Studio WiFi", "Guest"])
+    }
+
+    /// A selected network that goes away some other way is no longer what
+    /// the minus would remove.
+    func testASelectionThatDisappearsIsDropped() {
+        let (manager, _) = makeManager(saved: ["Studio WiFi", "Guest"])
+        let list = WifiNetworkList(manager: manager)
+        list.selection = "Guest"
+        XCTAssertNil(manager.removeSavedNetwork("Guest"))
+        list.namesChanged(manager.savedNetworkNames)
+        XCTAssertNil(list.selection)
+        XCTAssertFalse(list.canRemove)
     }
 
     /// Settings apply as they are made. Restore Defaults puts back only what
@@ -350,6 +475,8 @@ struct ViewReading {
 
     private(set) var strings: [String] = []
     private(set) var buttons: [PressableButton] = []
+    /// Every `onMove` handler: what a list calls when a row is dropped.
+    private(set) var moveActions: [(IndexSet, Int) -> Void] = []
     private(set) var typeNames: [String] = []
 
     init(_ root: Any) {
@@ -378,6 +505,10 @@ struct ViewReading {
         typeNames.append(typeName)
         if typeName.hasPrefix("SwiftUI.Button<"), let pressable = Self.pressable(mirror) {
             buttons.append(pressable)
+        }
+        if let move = value as? (IndexSet, Int) -> Void {
+            moveActions.append(move)
+            return
         }
         if let each = value as? ReadableForEach {
             for element in each.readContents { visit(element, depth: depth + 1) }

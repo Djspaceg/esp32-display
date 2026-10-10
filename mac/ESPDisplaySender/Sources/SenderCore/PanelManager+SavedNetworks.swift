@@ -94,18 +94,41 @@ extension PanelManager {
     }
 
     /// Move one network up (negative) or down (positive) in the order, which
-    /// moves it between the slots every board receives.
+    /// moves it between the slots every board receives. The Settings list
+    /// drags instead (`moveSavedNetworks`); this stays as the step form the
+    /// order's tests are written in.
     func moveSavedNetwork(_ ssid: String, by offset: Int) {
-        var order = savedNetworkNames
-        guard let from = order.firstIndex(of: ssid) else { return }
-        let to = min(max(from + offset, 0), order.count - 1)
+        guard let from = savedNetworkNames.firstIndex(of: ssid) else { return }
+        let to = min(max(from + offset, 0), savedNetworkNames.count - 1)
         guard to != from else { return }
-        order.remove(at: from)
-        order.insert(ssid, at: to)
+        // `toOffset` counts positions before the move, as a drag does.
+        moveSavedNetworks(fromOffsets: [from], toOffset: to > from ? to + 1 : to)
+    }
+
+    /// Move the networks at `source` to before position `destination` - the
+    /// list's drag-and-drop reorder, with SwiftUI's `onMove` meaning of both
+    /// offsets: positions in the order as it stands before the move, where
+    /// `destination` may be one past the end.
+    func moveSavedNetworks(fromOffsets source: IndexSet, toOffset destination: Int) {
+        let order = Self.moving(savedNetworkNames, fromOffsets: source, toOffset: destination)
+        guard order != savedNetworkNames else { return }
         // Names the stored order keeps for a missing Keychain item stay at the
         // end, so they regain a place if the item comes back.
         let hidden = (settings.wifiPresetOrder ?? []).filter { !order.contains($0) }
         setWifiPresetOrder(order + hidden, keychainNames: wifiNetworkNamesReader())
+    }
+
+    /// `Array.move(fromOffsets:toOffset:)`, without needing SwiftUI here.
+    nonisolated static func moving(
+        _ names: [String], fromOffsets source: IndexSet, toOffset destination: Int
+    ) -> [String] {
+        let valid = source.filter { names.indices.contains($0) }
+        guard !valid.isEmpty else { return names }
+        let moved = valid.map { names[$0] }
+        var rest = names.enumerated().filter { !valid.contains($0.offset) }.map(\.element)
+        let insertAt = destination - valid.filter { $0 < destination }.count
+        rest.insert(contentsOf: moved, at: min(max(insertAt, 0), rest.count))
+        return rest
     }
 
     /// The saved credential behind a network, for the Settings editor.

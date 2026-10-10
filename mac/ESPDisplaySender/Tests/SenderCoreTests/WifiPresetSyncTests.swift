@@ -542,6 +542,31 @@ final class WifiPresetSyncTests: XCTestCase {
         XCTAssertFalse(device.commands.contains { $0.hasPrefix("CFGWIFIUSE") })
     }
 
+    /// A drag in the Settings list is the same move: the attached board gets
+    /// the new order through the same set-before-clear copy, and nothing
+    /// activates a preset.
+    func testDraggingInSettingsRecopiesInTheNewOrder() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(
+            path: path, saved: ["alpha", "Bravo", "Charlie"], device: device)
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+
+        manager.moveSavedNetworks(fromOffsets: [2], toOffset: 0)
+        try await waitForSyncToSettle(manager)
+
+        let report = try XCTUnwrap(manager.wifiPresetSyncReport(for: "studio-display"))
+        XCTAssertEqual(
+            (1...3).map { report.snapshot.slots[$0]?.ssid }, ["Charlie", "alpha", "Bravo"])
+        XCTAssertTrue(device.mutations.allSatisfy {
+            $0.hasPrefix("CFGWIFISET ") || $0.hasPrefix("CFGWIFICLEAR ")
+        }, device.mutations.description)
+        XCTAssertFalse(device.commands.contains { $0.hasPrefix("CFGWIFIUSE") })
+    }
+
     /// A new password under the same name is still a change the boards need,
     /// and it is the new password that arrives.
     func testAPasswordChangeInSettingsRecopiesAnUnchangedList() async throws {
