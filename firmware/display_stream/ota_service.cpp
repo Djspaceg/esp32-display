@@ -11,6 +11,7 @@
 #include "app_state.h"
 #include "display_power.h"
 #include "ota_policy.h"
+#include "stream_update_service.h"
 #include "ui_screens.h"
 
 
@@ -83,6 +84,9 @@ bool startOtaIfConfigured() {
 
   ArduinoOTA.setHostname(cfgName.c_str());  // <name>.local, not esp32-<mac>
   ArduinoOTA.setPassword(otaPassword.c_str());
+  // The stream-channel update answers the same challenge with the same
+  // secret, and like ArduinoOTA keeps only its SHA-256 hex.
+  streamupdatesvc::arm(otaPassword.c_str());
   ArduinoOTA.setPort(OTA_PORT);
   ArduinoOTA.setMdnsEnabled(false);  // addMdnsService() owns every registration
 

@@ -14,6 +14,10 @@ extern volatile uint16_t hbPort;
 
 bool startInboundTransport();
 void sendToSender(const uint8_t *data, size_t len);
+// Reply to one endpoint whatever the last packet's source was: an update
+// session answers its own sender even if another Mac pings in between.
+void sendToEndpoint(uint32_t ip, uint16_t port, const uint8_t *data,
+                    size_t len);
 
 // CFGTUNE knobs (serial_config.cpp): meaningful only when the selected
 // PlatformConfig uses the raw lwIP receive task.

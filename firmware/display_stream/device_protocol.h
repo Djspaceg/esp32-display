@@ -142,6 +142,12 @@ enum Capability : uint32_t {
   CAP_AUDIO_DOWNLINK = 1u << 20,
   // Emits version-1 captured PCM on the same dedicated audio socket.
   CAP_AUDIO_UPLINK = 1u << 21,
+  // Accepts a firmware update over the stream channel itself (EUP* packets
+  // on UDP_PORT, stream_update.h): the same password and PBKDF2 challenge as
+  // CAP_OTA, but the Mac starts every flow, so a Mac whose firewall drops
+  // connections from the LAN can still update it. Advertised exactly when
+  // CAP_OTA is; a sender without this bit keeps using ArduinoOTA.
+  CAP_STREAM_UPDATE = 1u << 22,
 };
 
 enum class ControlOpcode : uint8_t {

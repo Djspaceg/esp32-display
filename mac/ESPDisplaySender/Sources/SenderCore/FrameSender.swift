@@ -257,6 +257,10 @@ final class FrameSender {
     let radioBudget = PanelRadioBudget()
     private var _paused = false
     private var _parked = false
+    /// Set while a firmware update owns this link: frames are dropped as if
+    /// paused, without touching the user's own pause.
+    private var _updateHold = false
+    private var _updatePacketHandler: ((Data) -> Void)?
     /// Set by `stop()`, after which no connection is opened again.
     private var _stopped = false
     /// Between ESLP and EWAK: the Mac's displays are asleep. The periodic
@@ -540,6 +544,18 @@ final class FrameSender {
         lock.unlock()
         if !paused { forceKeyframe() }
     }
+
+    /// Stop or resume frames for a firmware update, leaving the user's pause
+    /// and the keepalive ping alone.
+    func setUpdateHold(_ held: Bool) {
+        lock.withLock {
+            _updateHold = held
+            if held { pendingFrame = nil }
+        }
+        if !held { forceKeyframe() }
+    }
+
+    var updateHold: Bool { lock.withLock { _updateHold } }
 
     func stop() {
         lock.withLock {
@@ -897,6 +913,20 @@ final class FrameSender {
     }
 
     private func handleInbound(_ data: Data) {
+        if StreamUpdateProtocol.isUpdatePacket(data) {
+            // Proof the panel is answering, and a heartbeat for the link
+            // supervisor's purposes: the panel keeps EHB1 going during an
+            // update too, but a reconnect now would open a new socket the
+            // update session is not bound to.
+            let handler = lock.withLock { () -> ((Data) -> Void)? in
+                _deviceReplies &+= 1
+                _lastReplyAt = Date()
+                _lastHeartbeatAt = _lastReplyAt
+                return _updatePacketHandler
+            }
+            handler?(data)
+            return
+        }
         if let info = DeviceProtocol.parseInfo(data) {
             lock.lock()
             var previousCapabilities: DeviceProtocol.Capabilities = []
@@ -1134,7 +1164,7 @@ final class FrameSender {
     /// displays sleep: the repaint would relight a panel that ESLP had just
     /// darkened and hold the pre-sleep picture on it until the Mac woke.
     var refreshAllowed: Bool {
-        lock.withLock { !_parked && !_paused && !_displaysAsleep }
+        lock.withLock { !_parked && !_paused && !_updateHold && !_displaysAsleep }
     }
 
     func setBrightness(high: Bool) {
@@ -1311,7 +1341,7 @@ final class FrameSender {
     /// the sender frees up is the one that goes out.
     func submit(frame: [UInt8], landscape: Bool) {
         lock.lock()
-        guard !_paused, !_parked else {
+        guard !_paused, !_parked, !_updateHold else {
             lock.unlock()
             return
         }
@@ -1723,5 +1753,24 @@ final class FrameSender {
         }
         timer.resume()
         refreshTimer = timer
+    }
+}
+
+/// The link a stream-channel update rides: the session's own UDP connection
+/// to the panel, so the update reuses the flow the Mac already opened.
+protocol StreamUpdateLink: AnyObject {
+    func sendUpdatePacket(_ data: Data)
+    func setUpdatePacketHandler(_ handler: ((Data) -> Void)?)
+}
+
+extension FrameSender: StreamUpdateLink {
+    func sendUpdatePacket(_ data: Data) {
+        queue.async { [weak self] in
+            self?.connection?.send(content: data, completion: .contentProcessed { _ in })
+        }
+    }
+
+    func setUpdatePacketHandler(_ handler: ((Data) -> Void)?) {
+        lock.withLock { _updatePacketHandler = handler }
     }
 }

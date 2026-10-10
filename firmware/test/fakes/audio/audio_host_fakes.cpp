@@ -19,6 +19,7 @@
 #include "../../../display_stream/frame_pipeline.h"
 #include "../../../display_stream/orientation.h"
 #include "../../../display_stream/ota_service.h"
+#include "../../../display_stream/stream_update_service.h"
 
 namespace {
 
@@ -538,3 +539,13 @@ volatile bool otaInProgress = false;
 otapolicy::Status currentOtaStatus() {
   return otapolicy::status(otaActive, otaConfigured);
 }
+
+// The stream-channel update is not linked into these hosts; nothing in them
+// arms it, and every datagram they feed is a frame, audio or control packet.
+namespace streamupdatesvc {
+void arm(const char *) {}
+bool armed() { return false; }
+bool handleInbound(const uint8_t *, size_t, uint32_t, uint16_t) { return false; }
+bool ownsPanel() { return false; }
+bool service() { return false; }
+}  // namespace streamupdatesvc

@@ -108,6 +108,7 @@ using namespace bandproto;
 #include "net_link.h"
 #include "orientation.h"
 #include "ota_service.h"
+#include "stream_update_service.h"
 #include "prefs_store.h"
 #include "serial_config.h"
 #include "serial_out.h"
@@ -690,8 +691,21 @@ void setup() {
   esp_task_wdt_add(NULL);
 }
 
+// 1Hz heartbeat and 2s EINF back to the sender. Its own function because a
+// stream-channel update keeps them going: the sender's link supervisor
+// reconnects after 10s without a heartbeat, and a reconnect opens a new
+// socket the update session is not bound to.
+static void serviceSenderTelemetry();
+
 void loop() {
   esp_task_wdt_reset();
+
+  // A stream-channel update owns the loop the way ArduinoOTA's handle() does,
+  // except that it returns between chunks so the telemetry above still flows.
+  if (streamupdatesvc::service()) {
+    serviceSenderTelemetry();
+    return;
+  }
 
   if (otaActive) {
     // An entire update happens inside this one call: handle() runs the transfer
@@ -972,31 +986,7 @@ void loop() {
     }
   }
 
-  // 1Hz heartbeat back to the sender: "EHB1" + 5 x u32 LE stats. Lets the
-  // Mac detect blackholing and auto-tune its send pacing from real drops.
-  static uint32_t lastHeartbeat = 0;
-  if (hbPort != 0 && millis() - lastHeartbeat >= 1000) {
-    lastHeartbeat = millis();
-    uint8_t pkt[24];
-    memcpy(pkt, "EHB1", 4);
-    uint32_t vals[5] = {statFramesShown, statFramesDropped, statFramesPartial,
-                        statPackets, (uint32_t)ESP.getFreeHeap()};
-    for (int i = 0; i < 5; i++) {
-      pkt[4 + i * 4] = vals[i] & 0xFF;
-      pkt[5 + i * 4] = (vals[i] >> 8) & 0xFF;
-      pkt[6 + i * 4] = (vals[i] >> 16) & 0xFF;
-      pkt[7 + i * 4] = (vals[i] >> 24) & 0xFF;
-    }
-    sendToSender(pkt, sizeof(pkt));
-  }
-
-  // Versioned capabilities and live state for the manager window. EHB1
-  // remains unchanged for compatibility with older senders.
-  static uint32_t lastInfo = 0;
-  if (hbPort != 0 && millis() - lastInfo >= 2000) {
-    lastInfo = millis();
-    sendDeviceInfo();
-  }
+  serviceSenderTelemetry();
 
   // Battery, well slower than EINF's 2s. A cell does not move perceptibly in
   // ten seconds, and each sample is either a small PMU read or eight local ADC
@@ -1042,5 +1032,33 @@ void loop() {
 #endif
     reportMotionDiagnostics();
     reportBatteryLine();
+  }
+}
+
+static void serviceSenderTelemetry() {
+  // 1Hz heartbeat back to the sender: "EHB1" + 5 x u32 LE stats. Lets the
+  // Mac detect blackholing and auto-tune its send pacing from real drops.
+  static uint32_t lastHeartbeat = 0;
+  if (hbPort != 0 && millis() - lastHeartbeat >= 1000) {
+    lastHeartbeat = millis();
+    uint8_t pkt[24];
+    memcpy(pkt, "EHB1", 4);
+    uint32_t vals[5] = {statFramesShown, statFramesDropped, statFramesPartial,
+                        statPackets, (uint32_t)ESP.getFreeHeap()};
+    for (int i = 0; i < 5; i++) {
+      pkt[4 + i * 4] = vals[i] & 0xFF;
+      pkt[5 + i * 4] = (vals[i] >> 8) & 0xFF;
+      pkt[6 + i * 4] = (vals[i] >> 16) & 0xFF;
+      pkt[7 + i * 4] = (vals[i] >> 24) & 0xFF;
+    }
+    sendToSender(pkt, sizeof(pkt));
+  }
+
+  // Versioned capabilities and live state for the manager window. EHB1
+  // remains unchanged for compatibility with older senders.
+  static uint32_t lastInfo = 0;
+  if (hbPort != 0 && millis() - lastInfo >= 2000) {
+    lastInfo = millis();
+    sendDeviceInfo();
   }
 }

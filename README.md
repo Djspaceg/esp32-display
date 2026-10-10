@@ -317,6 +317,14 @@ python3 tools/espdisp.py ota panel.local --family s3
 OTA writes the inactive application slot. It does not replace bootloader or
 partition metadata. USB remains the recovery path.
 
+The app updates a board that advertises `CAP_STREAM_UPDATE` over its existing
+stream connection instead (`stream_update.h`, `StreamUpdateProtocol.swift`):
+the same password and PBKDF2 challenge, a window of CRC-checked chunks with
+selective acks, and the image's SHA-256 checked before `Update.end()` switches
+the boot slot. The board never connects back to the Mac, so a Mac firewall that
+drops connections from the LAN does not block it. Streaming to that board
+pauses for the transfer. Boards without the bit, and the CLI, keep ArduinoOTA.
+
 ## macOS app
 
 Build and install to `~/Applications/ESPDisplaySender.app`:

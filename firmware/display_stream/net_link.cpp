@@ -12,6 +12,7 @@
 #include "device_protocol.h"
 #include "display_power.h"
 #include "frame_pipeline.h"
+#include "stream_update_service.h"
 
 using namespace bandproto;
 
@@ -46,6 +47,12 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
   lastSenderPacketAt = millis();
   if (len == 4 && memcmp(data, "EPNG", 4) == 0) {
     return;  // keepalive ping: endpoint refresh only
+  }
+  // Firmware update packets ride this socket (stream_update.h). Never
+  // counted as frame packets, so the link-heal starvation check below in
+  // loop() cannot mistake an update for a stream that stopped drawing.
+  if (streamupdatesvc::handleInbound(data, len, remoteIp, remotePort)) {
+    return;
   }
   if (len == 4 && memcmp(data, "ESLP", 4) == 0) {
     sleepRequested = true;  // Mac's displays slept: loop turns backlight off
@@ -94,6 +101,11 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
   // fill trend says continuity is at risk, discard video before any frame
   // parsing or PSRAM copy so the panel's CPU and memory bandwidth go to audio.
   if (audioengine::shouldSuppressVideo()) {
+    return;
+  }
+  // An authenticated update owns the screen and the flash: no frame may be
+  // drawn over its progress or queue DMA under its writes.
+  if (streamupdatesvc::ownsPanel()) {
     return;
   }
   if (len >= 4 && memcmp(data, "ETL1", 4) == 0) {
@@ -309,6 +321,16 @@ static void sendRawToSender(const uint8_t *data, size_t len) {
   lwip_sendto(rxSock, data, len, 0, (struct sockaddr *)&to, sizeof(to));
 }
 
+static void sendRawToEndpoint(uint32_t ip, uint16_t port, const uint8_t *data,
+                              size_t len) {
+  if (rxSock < 0 || port == 0) return;
+  struct sockaddr_in to = {};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(port);
+  to.sin_addr.s_addr = ip;
+  lwip_sendto(rxSock, data, len, 0, (struct sockaddr *)&to, sizeof(to));
+}
+
 static void onPacket(AsyncUDPPacket packet) {
   handleInbound(packet.data(), packet.length(), (uint32_t)packet.remoteIP(),
                 packet.remotePort());
@@ -329,6 +351,15 @@ bool startInboundTransport() {
   return board::COMPILED_PLATFORM.useRawLwipReceiveTask
              ? startRawInboundTransport()
              : startAsyncInboundTransport();
+}
+
+void sendToEndpoint(uint32_t ip, uint16_t port, const uint8_t *data,
+                    size_t len) {
+  if (board::COMPILED_PLATFORM.useRawLwipReceiveTask) {
+    sendRawToEndpoint(ip, port, data, len);
+  } else if (port != 0) {
+    udp.writeTo(data, len, IPAddress(ip), port);
+  }
 }
 
 void sendToSender(const uint8_t *data, size_t len) {

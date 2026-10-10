@@ -14,6 +14,7 @@
 #include "wifi_worker.h"
 #include "ota_policy.h"
 #include "ota_service.h"
+#include "stream_update_service.h"
 #include "panel_state.h"
 
 // Capabilities every board has, whatever panel or peripherals it carries.
@@ -104,6 +105,12 @@ uint32_t deviceCapabilities() {
          // update path that would time out. advertisesCapability owns that rule.
          | (otapolicy::advertisesCapability(currentOtaStatus())
                 ? deviceproto::CAP_OTA
+                : 0u)
+         // Armed from the same stored password in the same call, so the two
+         // update paths are offered together or not at all.
+         | (otapolicy::advertisesCapability(currentOtaStatus()) &&
+                    streamupdatesvc::armed()
+                ? deviceproto::CAP_STREAM_UPDATE
                 : 0u);
 }
 

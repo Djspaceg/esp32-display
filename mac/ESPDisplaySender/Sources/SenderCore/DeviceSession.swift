@@ -386,8 +386,22 @@ final class DeviceSession {
     func setPaused(_ paused: Bool) {
         sender.setPaused(paused)
         setAudioEnabled(AudioSessionActivationPolicy.isEnabled(
-            paused: paused, parked: sender.parked))
+            paused: paused || sender.updateHold, parked: sender.parked))
     }
+
+    /// The link a stream-channel firmware update rides: this session's own
+    /// connection to the panel.
+    var firmwareUpdateLink: StreamUpdateLink { sender }
+
+    /// Frames and audio stop for an update and come back after it, whatever
+    /// the user's own pause says; their pause is left as it was.
+    func setFirmwareUpdateHold(_ held: Bool) {
+        sender.setUpdateHold(held)
+        setAudioEnabled(AudioSessionActivationPolicy.isEnabled(
+            paused: held || sender.paused, parked: sender.parked))
+    }
+
+    var firmwareUpdateHoldForTesting: Bool { sender.updateHold }
     func applyAudio(tuning: AudioRuntimeTuning) {
         let session = stateLock.withLock {
             audioTuning = tuning.validated
@@ -1236,7 +1250,7 @@ final class DeviceSession {
 
         sender.setParked(false)
         setAudioEnabled(AudioSessionActivationPolicy.isEnabled(
-            paused: sender.paused, parked: false))
+            paused: sender.paused || sender.updateHold, parked: false))
         guard !isStopped else { return }
         setCaptureStatus(.waiting("The panel answered again. Restarting mirroring…"))
         print("[\(name)] display answered again - resuming capture")

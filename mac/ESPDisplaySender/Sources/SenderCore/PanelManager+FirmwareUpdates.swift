@@ -231,6 +231,13 @@ extension PanelManager {
                 "This panel no longer has a live resolved address. Choose USB, "
                     + "or wait for it to reconnect and try again.")
         }
+        if let panel = panels.first(where: { $0.serviceName == target.serviceName }),
+           panel.capabilities.contains(.streamUpdate),
+           let session = sessions[target.serviceName] {
+            return await pushFirmwareOverStream(
+                image: image, filename: filename, to: target, address: address,
+                password: password, session: session, progress: progress)
+        }
         let pusher = FirmwarePusher()
         do {
             try await pusher.push(
@@ -241,6 +248,33 @@ extension PanelManager {
                 "\(target.displayName) has the new firmware and is restarting "
                     + "onto it. Streaming reconnects by itself; the version in "
                     + "the Firmware section updates when it reports in.")
+        } catch {
+            return .failure("Update failed", error.localizedDescription)
+        }
+    }
+
+    /// The stream-channel push, for a panel advertising `streamUpdate`: the
+    /// image goes over this session's own link, so nothing has to connect back
+    /// to this Mac. Frames to this panel stop for the transfer and resume after
+    /// it; every other panel keeps streaming.
+    private func pushFirmwareOverStream(
+        image: Data, filename: String, to target: FirmwareUpdateTarget,
+        address: String, password: String, session: DeviceSession,
+        progress: @escaping @Sendable (FirmwarePusher.Progress) -> Void
+    ) async -> OperationOutcome {
+        session.setFirmwareUpdateHold(true)
+        defer { session.setFirmwareUpdateHold(false) }
+        let pusher = StreamFirmwarePusher(link: session.firmwareUpdateLink)
+        do {
+            let measured = try await pusher.push(
+                image: image, filename: filename, to: address,
+                password: password, progress: progress)
+            return .success(
+                "Update sent",
+                "\(target.displayName) checked the image's SHA-256, activated it and "
+                    + "is restarting onto it. Sent \(measured.summary). Streaming "
+                    + "reconnects by itself; the version in the Firmware section "
+                    + "updates when it reports in.")
         } catch {
             return .failure("Update failed", error.localizedDescription)
         }

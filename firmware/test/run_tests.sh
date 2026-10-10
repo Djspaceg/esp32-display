@@ -23,6 +23,7 @@ QUAKE_INPUT_OUT="$TMP/test_quake_input"
 BOOT_SCREEN_OUT="$TMP/test_boot_screen"
 DSI_BACKLIGHT_OUT="$TMP/test_dsi_backlight"
 COPROCESSOR_OUT="$TMP/test_coprocessor_update"
+STREAM_UPDATE_OUT="$TMP/test_stream_update"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -243,6 +244,13 @@ clang++ "${CXXFLAGS[@]}" \
 clang++ "${CXXFLAGS[@]}" \
   -o "$COPROCESSOR_OUT" "$HERE/test_coprocessor_update.cpp"
 "$COPROCESSOR_OUT"
+
+# Firmware update over the stream channel: nothing is buffered before the
+# PBKDF2 challenge is answered, loss/duplication/reordering still write the
+# exact image once, and only a matching SHA-256 ever reaches Update.end().
+clang++ "${CXXFLAGS[@]}" \
+  -o "$STREAM_UPDATE_OUT" "$HERE/test_stream_update.cpp"
+"$STREAM_UPDATE_OUT"
 
 # The 5 s status line is unchanged and the mem line after it parses.
 clang++ "${CXXFLAGS[@]}" \

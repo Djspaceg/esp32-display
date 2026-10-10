@@ -118,6 +118,10 @@ public enum DeviceProtocol {
         public static let audioDownlink = Capabilities(rawValue: 1 << 20)
         /// Emits EAUD v1 microphone PCM and status to the accepted downlink peer.
         public static let audioUplink = Capabilities(rawValue: 1 << 21)
+        /// Accepts a firmware update over this stream link (EUP* packets,
+        /// `StreamUpdateProtocol`). Advertised exactly when `ota` is; without
+        /// it the app keeps using ArduinoOTA.
+        public static let streamUpdate = Capabilities(rawValue: 1 << 22)
     }
 
     public struct DeviceInfo: Equatable, Sendable {
