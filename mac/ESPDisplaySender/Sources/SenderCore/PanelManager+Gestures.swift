@@ -57,7 +57,7 @@ extension PanelManager {
                 reportMissingMediaKeyGrant()
                 return
             }
-            resolve(.accessibility)
+            mediaKeyGrantSeen()
         }
         switch action {
         case .togglePause:
@@ -155,7 +155,15 @@ extension PanelManager {
     /// Withdraw the Accessibility notice once the grant is there, so coming
     /// back from System Settings clears it without another gesture.
     func refreshMediaKeyAuthorization() {
-        if mediaKeysAuthorized() { resolve(.accessibility) }
+        if mediaKeysAuthorized() { mediaKeyGrantSeen() }
+    }
+
+    /// The grant is there: withdraw the notice, and end any dismissal, so a
+    /// grant taken away later in this launch is reported again rather than
+    /// leaving every media key silently refused.
+    private func mediaKeyGrantSeen() {
+        accessibilityNoticeDismissed = false
+        resolve(.accessibility)
     }
 
     /// Choose which gesture bindings a panel uses.

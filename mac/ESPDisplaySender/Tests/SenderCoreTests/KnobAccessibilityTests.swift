@@ -105,6 +105,23 @@ final class KnobAccessibilityTests: XCTestCase {
         XCTAssertTrue(sentKeys.isEmpty)
     }
 
+    /// A dismissal lasts until the grant is seen. If the grant is later
+    /// taken away, the knob must not go silently dead for the rest of the
+    /// launch: the notice comes back.
+    func testANoticeDismissedBeforeAGrantReturnsIfTheGrantGoes() {
+        let subject = manager(authorized: false)
+        subject.update(knob(.knobClockwise, 1), for: "knob")
+        subject.dismissIssue(.accessibility)
+
+        subject.mediaKeysAuthorized = { true }
+        subject.update(knob(.knobClockwise, 2), for: "knob")
+        subject.mediaKeysAuthorized = { false }
+        subject.update(knob(.knobClockwise, 3), for: "knob")
+
+        XCTAssertTrue(subject.issues.contains { $0.issue == .accessibility })
+        XCTAssertEqual(attentionRequests, 2)
+    }
+
     /// Granted in System Settings and back: the notice goes without having to
     /// turn the knob first.
     func testGrantingInSettingsClearsTheNoticeOnReturn() {

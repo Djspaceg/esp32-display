@@ -47,8 +47,8 @@ final class PanelManager: ObservableObject {
     /// usually runs with its window closed, so the window controller uses this
     /// to bring the window forward without taking focus.
     var onAttentionNeeded: (() -> Void)?
-    /// The Accessibility notice was dismissed; it stays down for this launch
-    /// rather than coming back on the next detent of the same turn.
+    /// The Accessibility notice was dismissed; it stays down until the grant
+    /// is next seen rather than coming back on the next detent of the turn.
     var accessibilityNoticeDismissed = false
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []

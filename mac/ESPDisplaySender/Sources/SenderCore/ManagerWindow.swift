@@ -1871,9 +1871,12 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
         enterAccessoryModeWhenNoWindowsAreVisible()
     }
 
-    /// Put the window on screen for a notice, leaving focus where it is.
+    /// Put the window on screen for a notice, leaving focus where it is. The
+    /// regular policy gives it a Dock icon and a Cmd-Tab entry, so it can be
+    /// found again behind System Settings; neither activates the app.
     func presentWithoutFocus() {
         guard !isVisible else { return }
+        NSApp.setActivationPolicy(.regular)
         mainMenu.installIfNeeded()
         let window = makeWindowIfNeeded()
         manager.setPreviewVisible(true)
