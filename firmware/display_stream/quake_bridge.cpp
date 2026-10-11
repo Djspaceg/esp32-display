@@ -34,21 +34,19 @@ static bool waitForQuakeDma(uint32_t maxMs, bool sampleInput) {
 
 // esp_lcd queues the source pointer rather than copying it, so the caller's
 // buffer is DMA's until completion: this returns only once it is done, or
-// false on a timeout, after which the caller restarts. With sampleInput (the
-// Quake task's own writes) touch and USB are serviced while waiting, so input
-// that lands mid-transfer is kept; the S3's panel task passes false.
+// false on a timeout, after which the caller restarts. Touch and USB are
+// serviced while waiting, so input that lands mid-transfer is kept.
 extern "C" bool quake_display_blit_blocking(int x0, int y0, int x1, int y1,
-                                            const uint16_t *pixels,
-                                            bool sampleInput) {
+                                            const uint16_t *pixels) {
   if (panel == nullptr || bcfg == nullptr || pixels == nullptr || x1 <= x0 ||
       y1 <= y0) {
     return false;
   }
-  if (!waitForQuakeDma(1000, sampleInput)) return false;
+  if (!waitForQuakeDma(1000, true)) return false;
   if (queuePanelBitmap(panel, *bcfg, x0, y0, x1, y1, pixels) != ESP_OK) {
     return false;
   }
-  return waitForQuakeDma(1000, sampleInput);
+  return waitForQuakeDma(1000, true);
 }
 
 // How long a Quake boot that cannot start keeps its reason on the panel.
@@ -90,7 +88,6 @@ static void printQuakeFatal(const char *reason) {
 extern "C" void quake_fail_restart(const char *reason, bool showOnPanel) {
   printQuakeFatal(reason);
   if (showOnPanel) {
-    quake_display_quiesce();
     if (showQuakeFailure(reason)) delay(QUAKE_FAILURE_SHOW_MS);
     printQuakeFatal(reason);
   }

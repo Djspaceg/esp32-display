@@ -49,12 +49,15 @@ constexpr bool quakeSupportsBoard(board::Variant variant) {
 // The engine heap ("-mem"): id's own default is 8 MB and its floor 5.3 MB;
 // 16 MB leaves room for the larger shareware levels with PSRAM to spare. The
 // S3's 8 MB of PSRAM cannot give 16, so the heap is this or what PSRAM has
-// left once the frame buffers allocated after it and QUAKE_HUNK_SLACK_BYTES
-// (the sound ring, the input state, IDF's own) are kept back, whichever is
-// smaller.
+// left once the frame buffers (allocated first) and QUAKE_HUNK_SLACK_BYTES are
+// taken, whichever is smaller. The slack is for what is allocated in PSRAM
+// after the hunk: the sound ring, Quake's video palette, and the larger
+// mallocs IDF and Arduino make.
 #define QUAKE_HUNK_BYTES (16u * 1024u * 1024u)
-#define QUAKE_HUNK_SLACK_BYTES (192u * 1024u)
+#define QUAKE_HUNK_SLACK_BYTES (64u * 1024u)
 // The Quake task's stack, in PSRAM: several renderer functions keep 40-130 KB
 // working arrays on the stack (R_EdgeDrawing alone 128 KB), more than the
-// internal RAM could spare as one block.
-#define QUAKE_TASK_STACK_BYTES (320u * 1024u)
+// internal RAM could spare as one block. Play at 368x276 used 131 KB of it;
+// 256 KB keeps 125 KB spare and gives the S3's hunk the 64 KB it needs to
+// reach id's 5.3 MB floor at 466x466.
+#define QUAKE_TASK_STACK_BYTES (256u * 1024u)

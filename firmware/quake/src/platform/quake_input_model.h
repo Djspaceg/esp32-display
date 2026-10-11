@@ -22,11 +22,9 @@ namespace quakeinput {
 constexpr int RENDER_WIDTH = 320;
 constexpr int RENDER_HEIGHT = 240;
 // On a panel that takes the base frame only at 1x (the S3 boards) the frame
-// is rendered larger instead, 4k x 3k, up to this k: 368x276, which a frame
-// on the S3 renders at about the base frame's rate once the panel write runs
-// beside the next frame (quake_hw_bridge.cpp).
-constexpr int MAX_ONE_X_K = 92;
-
+// is rendered at the panel's own size instead, square on a square panel, so
+// the view fills the glass and its horizontal and vertical fields of view
+// are equal. Quake keeps its 320-wide status bar and menus centred in it.
 struct FrameLayout {
   int scale;         // whole-pixel scale, 0 when the panel cannot hold one copy
   int renderWidth;   // the engine's frame
@@ -43,14 +41,11 @@ struct FrameLayout {
 // (whose round glass still shows all of it: the 3.4C's 800-pixel circle has
 // room for 640x480).
 //
-// At 1x the frame grows to the largest 4:3 that the panel shows whole: on
-// round glass that is the rectangle inside the circle (diagonal 5k at most the
-// diameter), so the 1.75C's 466 pixels give 368x276. Never below the base
-// frame, whose 320x200 menus Quake draws in the middle of whatever it gets:
-// the 1.85C's 360-pixel circle is too small for 4:3 at 320, so it keeps
-// 320x240 and loses the corners.
-constexpr FrameLayout frameLayout(int panelWidth, int panelHeight,
-                                  bool round = false) {
+// At 1x the frame is the whole panel, even in both directions (the 1.75C's
+// CO5300 takes windows only from even columns and rows): 466x466 on the
+// 1.75C, 360x360 on the 1.85C. The round glass hides the corners, which the
+// view's own corners can afford to lose.
+constexpr FrameLayout frameLayout(int panelWidth, int panelHeight) {
   const int sx = panelWidth / RENDER_WIDTH;
   const int sy = panelHeight / RENDER_HEIGHT;
   const int s = sx < sy ? sx : sy;
@@ -58,15 +53,8 @@ constexpr FrameLayout frameLayout(int panelWidth, int panelHeight,
   int rw = RENDER_WIDTH;
   int rh = RENDER_HEIGHT;
   if (s == 1) {
-    const int side = panelWidth < panelHeight ? panelWidth : panelHeight;
-    const int kw = round ? side / 5 : panelWidth / 4;
-    const int kh = round ? side / 5 : panelHeight / 3;
-    int k = (kw < kh ? kw : kh) & ~1;
-    if (k > MAX_ONE_X_K) k = MAX_ONE_X_K;
-    if (k > RENDER_WIDTH / 4) {
-      rw = 4 * k;
-      rh = 3 * k;
-    }
+    rw = panelWidth & ~1;
+    rh = panelHeight & ~1;
   }
   // The origin is even: the 1.75C's CO5300 takes windows only from even
   // columns and rows.

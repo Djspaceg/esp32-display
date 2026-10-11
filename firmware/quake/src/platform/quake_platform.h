@@ -14,10 +14,10 @@ extern "C" {
 
 // ---- Engine side (quake_sys_esp32.c) ----
 
-/// Allocates the relocated arrays, the frame and depth buffers and the hunk,
-/// then runs Host_Init. The hunk is hunk_bytes, or less where PSRAM would not
-/// then keep the frame buffers plus slack_bytes free. Returns NULL on success,
-/// else why it could not start.
+/// Allocates the relocated arrays, the frame, depth buffer and surface cache,
+/// then the hunk, then runs Host_Init. The hunk is hunk_bytes, or less where
+/// PSRAM would not then keep slack_bytes free. Returns NULL on success, else
+/// why it could not start.
 const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes,
                                uint32_t slack_bytes);
 
@@ -54,18 +54,10 @@ const char* quake_console_read_line(void);
 /// The engine's frame size for this panel (quake_input_model.h frameLayout).
 void quake_display_render_size(int* width, int* height);
 
-/// 2 when frames go to the panel beside the drawing of the next (the S3), so
-/// the engine draws into two pages in turn; else 1.
-int quake_display_pages(void);
-
-/// Stops frames going to the panel (the failure card's writes come next).
-void quake_display_quiesce(void);
 
 /// Converts one 8-bit frame through `palette565` (256 big-endian RGB565
-/// entries) and puts it on the panel. With one page it returns once DMA is
-/// done with it; with two it returns once the previous frame is on the panel,
-/// and `pixels` is the panel's until the next call returns. A panel that never
-/// completes ends the session.
+/// entries) and puts it on the panel. Returns only once DMA is done with it;
+/// a panel that never completes ends the session.
 void quake_display_present(const uint8_t* pixels, const uint16_t* palette565);
 
 /// Samples touch, BOOT, USB and Serial and queues what they mean.
