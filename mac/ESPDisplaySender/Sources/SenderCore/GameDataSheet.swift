@@ -357,7 +357,7 @@ struct GameDataSheet: View {
             + "more). Firmware, settings and the bundled doom1.wad are not touched. The "
             + "board's boot menu lists each added WAD, and QUAKE, on firmware that reads "
             + "the game store; update the firmware first if it does not. Older firmware "
-            + "still finds pak0.pak, which always goes first."
+            + "still finds pak0.pak, which goes first whenever it can."
     }
 
     // MARK: action bar
@@ -410,7 +410,9 @@ struct GameDataSheet: View {
     // MARK: actions
 
     /// The cache's size, the Mac's free space, and the cached shareware pak
-    /// (hashed off the main thread, then listed unchecked).
+    /// (hashed off the main thread, then listed: checked, unless the board
+    /// already lists a pak0.pak of its own, which it would replace). The Quake
+    /// checkbox itself is left as it was.
     private func refreshCacheFacts() {
         guard let cache else { return }
         let offerPak = quakeOffered
@@ -426,7 +428,12 @@ struct GameDataSheet: View {
                     $0.identified.storedName == pak.storedName
                 }) {
                     let wasChecked = selection.isGameChecked(.quakePak)
-                    selection.add(pak, source: .cache(cache.url(for: GameData.quakeShareware)))
+                    let boardHasOne = selection.items(of: .quakePak).contains {
+                        $0.source == .board && $0.identified.storedName == pak.storedName
+                    }
+                    selection.add(
+                        pak, source: .cache(cache.url(for: GameData.quakeShareware)),
+                        checked: !boardHasOne)
                     selection.setGameChecked(.quakePak, wasChecked)
                     if let board { selection.noteBoard(board.contents) }
                 }
@@ -532,7 +539,13 @@ struct GameDataSheet: View {
             let outcome = await manager.writeGameDataOverUSB(chosen, to: target) { update in
                 monitor.record(update)
             }
-            if outcome.kind == .failure { monitor.fail(outcome) }
+            if outcome.kind == .failure {
+                monitor.fail(outcome)
+                // The write may have changed the board before it stopped, so
+                // what it was read to hold no longer stands.
+                board = nil
+                selection.noteBoard(.legacy(legacyPak0Bytes: nil))
+            }
             isWriting = false
             isBusy = false
             if outcome.kind == .success {

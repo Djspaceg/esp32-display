@@ -8,9 +8,9 @@ import Foundation
 /// game-store-v1.hex. The area is the flash Quake's data has always used (the
 /// P4's quake_pak partition, the S3's raw region past its 8 MiB table), so the
 /// partition table is unchanged. An area with no directory is the legacy
-/// layout: Quake's pak0.pak, raw, at offset 0. The app keeps pak0.pak at
-/// offset 0 whenever the store holds one, so firmware from before the store
-/// still finds it.
+/// layout: Quake's pak0.pak, raw, at offset 0. The app puts pak0.pak at
+/// offset 0 whenever it can, moving files it holds a copy of out of the way,
+/// so firmware from before the store still finds it.
 ///
 /// The bundled doom1.wad is not here: every firmware flash writes it to the
 /// doom_wad partition, and it stays required by every S3 and P4 bundle.
@@ -173,7 +173,12 @@ public enum GameStore {
             guard let kind = Kind(rawValue: bytes[at]) else {
                 throw DecodeError.damaged("a file this app does not know")
             }
-            let nameBytes = bytes[(at + 12)..<(at + 32)].prefix { $0 != 0 }
+            let nameField = bytes[(at + 12)..<(at + 32)]
+            let nameBytes = nameField.prefix { $0 != 0 }
+            // As the firmware: no flags, and nothing after the name's NUL.
+            guard u16(at + 2) == 0,
+                  nameField.dropFirst(nameBytes.count).allSatisfy({ $0 == 0 })
+            else { throw DecodeError.damaged("a damaged entry") }
             let sha = bytes[(at + 32)..<(at + 64)]
             entries.append(Entry(
                 kind: kind, slot: Int(bytes[at + 1]), offset: u32(at + 4),
@@ -371,19 +376,39 @@ public enum GameStore {
         }
     }
 
-    /// The legacy pak0.pak's length from the area's first bytes: where its
-    /// directory ends, which is where id's own tools end the file. Nil when
-    /// offset 0 is not a pack.
-    public static func legacyPakBytes(firstBytes: Data, areaBytes: Int) -> Int? {
+    /// Where a legacy pak0.pak's directory is, from the area's first bytes,
+    /// or nil when offset 0 is not a pack whose directory fits the area.
+    public static func legacyPakDirectory(firstBytes: Data, areaBytes: Int) -> Range<Int>? {
         let bytes = [UInt8](firstBytes.prefix(12))
         guard bytes.count == 12, Array(bytes[0..<4]) == Array("PACK".utf8) else { return nil }
-        func u32(_ at: Int) -> Int {
-            Int(bytes[at]) | (Int(bytes[at + 1]) << 8) | (Int(bytes[at + 2]) << 16)
-                | (Int(bytes[at + 3]) << 24)
+        let offset = le32(bytes, 4)
+        let length = le32(bytes, 8)
+        guard length > 0, length % 64 == 0, length / 64 <= QuakePak.maxEntries,
+              offset >= 12, offset <= areaBytes, length <= areaBytes - offset
+        else { return nil }
+        return offset..<(offset + length)
+    }
+
+    /// The legacy pak0.pak's length as the firmware's quake_pak_check measures
+    /// it: where its directory or its furthest file ends. Nil when an entry
+    /// runs past the area. A length past `areaBytes - sectorBytes` reaches the
+    /// directory sector, so the pak cannot stay beside a store.
+    public static func legacyPakBytes(directory: Range<Int>, entries: Data, areaBytes: Int) -> Int? {
+        let bytes = [UInt8](entries)
+        guard bytes.count == directory.count else { return nil }
+        var end = directory.upperBound
+        for at in stride(from: 0, to: bytes.count, by: 64) {
+            let offset = le32(bytes, at + 56)
+            let size = le32(bytes, at + 60)
+            guard offset <= areaBytes, size <= areaBytes - offset else { return nil }
+            end = max(end, offset + size)
         }
-        let end = u32(4) + u32(8)
-        guard end > 12, end <= areaBytes - sectorBytes else { return nil }
         return end
+    }
+
+    private static func le32(_ bytes: [UInt8], _ at: Int) -> Int {
+        Int(bytes[at]) | (Int(bytes[at + 1]) << 8) | (Int(bytes[at + 2]) << 16)
+            | (Int(bytes[at + 3]) << 24)
     }
 
     // MARK: - planning a write
@@ -478,12 +503,19 @@ public enum GameStore {
         var inPlace: [Int: Entry] = [:]
         for (index, file) in desired.enumerated() {
             if let entry = onBoard.first(where: { file.matches($0) }) {
-                inPlace[index] = renamed(entry, as: file)
+                inPlace[index] = entry
             } else if file.boardOnly {
                 return .failure(.invalid("\(file.name) is not on the board to keep."))
             }
         }
-        stayingSets.append(inPlace)
+        // Unless pak0.pak is to be written and a file the app could move holds
+        // offset 0: then the first try would put pak0.pak elsewhere, where
+        // firmware from before the store cannot find it.
+        let pak0Moving = desired.indices.contains {
+            desired[$0].kind == .quakePak && desired[$0].slot == 0 && inPlace[$0] == nil
+        }
+        let zeroMovable = inPlace.contains { $0.value.offset == 0 && !desired[$0.key].boardOnly }
+        if !(pak0Moving && zeroMovable) { stayingSets.append(inPlace) }
         // Second: only what the app cannot rewrite stays put.
         stayingSets.append(inPlace.filter { desired[$0.key].boardOnly })
 
@@ -548,14 +580,6 @@ public enum GameStore {
             return "The board's game store holds at most \(maxEntries) files."
         }
         return nil
-    }
-
-    private static func renamed(_ entry: Entry, as file: File) -> Entry {
-        var entry = entry
-        // A legacy pak0.pak has no digest on the board; keep the one the app
-        // knows when it matched by bytes it already had.
-        if entry.sha256.isEmpty { entry.sha256 = file.sha256 }
-        return entry
     }
 
     private static func place(

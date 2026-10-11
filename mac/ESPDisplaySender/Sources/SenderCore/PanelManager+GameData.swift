@@ -216,8 +216,25 @@ extension PanelManager {
                     expectedID: expectedID, tool: tool, address: area.address,
                     byteCount: GameStore.sectorBytes, progress: progress) {
                 case .done(let first):
-                    contents = .legacy(legacyPak0Bytes: GameStore.legacyPakBytes(
-                        firstBytes: first, areaBytes: area.byteCount))
+                    if let directory = GameStore.legacyPakDirectory(
+                        firstBytes: first, areaBytes: area.byteCount) {
+                        // Measured as the firmware measures it: to the end of
+                        // its directory or its furthest file, whichever is last.
+                        switch await Self.readGameFlash(
+                            "the old pak0.pak's directory", port: path, chip: detectedChip,
+                            expectedID: expectedID, tool: tool,
+                            address: area.address + directory.lowerBound,
+                            byteCount: directory.count, progress: progress) {
+                        case .done(let entries):
+                            contents = .legacy(legacyPak0Bytes: GameStore.legacyPakBytes(
+                                directory: directory, entries: entries,
+                                areaBytes: area.byteCount))
+                        case .stop(let outcome):
+                            return .stop(outcome)
+                        }
+                    } else {
+                        contents = .legacy(legacyPak0Bytes: nil)
+                    }
                 case .stop(let outcome):
                     return .stop(outcome)
                 }
@@ -400,6 +417,36 @@ extension PanelManager {
                 return .failure(failure)
             } catch {
                 return .failure("Writing failed", error.localizedDescription)
+            }
+            // That run reset the board, and a reset can renumber its port: it
+            // must still be the same device, answering with the same MAC,
+            // before the files go out.
+            guard usbPathGeneration(board.path) == expectedGeneration,
+                  usbDevices.contains(where: { $0.path == board.path && $0.isConnected })
+            else {
+                return .failure(
+                    "USB device changed",
+                    "The serial device changed after the game store directory was "
+                        + "cleared, so no game files were written. Write again to finish.")
+            }
+            switch await UsbOnboarder.detectChip(
+                port: board.path, tool: board.tool, onProgress: progress) {
+            case .detected(let chip, let mac)
+                where chip == board.chip
+                    && ConfigCommands.canonicalHardwareID(mac) == board.expectedID:
+                break
+            case .detected(_, let mac):
+                return .failure(
+                    "USB device mismatch",
+                    "esptool read \(mac ?? "no MAC address") from \(board.path) after the "
+                        + "directory was cleared, not this display's board, so no game "
+                        + "files were written.")
+            case .failed(let reason):
+                return .failure("Could not read the USB board", reason)
+            case .notAttempted:
+                return .failure(
+                    "Could not read the USB board",
+                    "esptool did not attempt chip detection, so no game files were written.")
             }
         }
 

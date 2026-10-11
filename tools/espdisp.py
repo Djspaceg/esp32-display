@@ -6117,7 +6117,7 @@ _QUAKE_PAK_S3_REGION_BYTES = 0x1200000
 # The area's last 4 KiB sector is the Mac app's game store directory
 # (firmware/doom/src/platform/game_store_model.h), which names the WADs and
 # paks it put there. A raw pak written here makes the area the legacy layout
-# again, so the directory is erased in the same write; left, it would name
+# again, so the directory is erased first, in its own run; left, it would name
 # files the pak just overwrote. Both areas are 0x1200000 bytes here: the P4
 # partition, and the S3 region on the 32 MiB chip Quake needs.
 _GAME_STORE_DIRECTORY_BYTES = 0x1000
@@ -6302,9 +6302,13 @@ def cmd_write_data(args) -> int:
         cleared = os.path.join(directory, "game_store_directory.bin")
         with open(cleared, "wb") as out:
             out.write(b"\xff" * _GAME_STORE_DIRECTORY_BYTES)
+        # The directory goes first, in its own run, so a write cut short never
+        # leaves it naming files the pak has begun to overwrite.
         command = esptool_invocation(family, port.address, "write_flash")
-        command.extend(["0x%X" % address, staged,
-                        "0x%X" % directory_address, cleared])
+        command.extend(["0x%X" % directory_address, cleared])
+        run_streaming(command)
+        command = esptool_invocation(family, port.address, "write_flash")
+        command.extend(["0x%X" % address, staged])
         run_streaming(command)
     finally:
         shutil.rmtree(directory, ignore_errors=True)

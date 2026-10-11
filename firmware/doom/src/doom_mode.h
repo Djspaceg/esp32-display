@@ -81,9 +81,10 @@ void doom_request_exit(void);
 #define DOOM_RENDER_HEIGHT         200
 #define DOOM_TARGET_FPS            35    // Target frame rate
 
-// WAD storage geometry retained by the universal S3 image. The canonical
-// partition table occupies only the first 8 MiB, so uploads preserve this raw
-// 16 MiB-carrier region even though it is no longer listed as a partition.
+// WAD storage geometry of the legacy S3 developer images, whose 16 MiB table
+// omitted the doom_wad entry. The universal table's doom_wad partition replaces
+// it; on a universal 16 MiB S3 this raw region now lies inside the game data
+// area (game_store.h), which the Mac app may write.
 #define DOOM_WAD_PARTITION_TYPE    0x42
 #define DOOM_WAD_PARTITION_SUBTYPE 0x06
 #define DOOM_WAD_PARTITION_OFFSET  0xBFF000U

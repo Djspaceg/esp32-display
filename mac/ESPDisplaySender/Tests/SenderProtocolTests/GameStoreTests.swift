@@ -121,13 +121,57 @@ final class GameStoreTests: XCTestCase {
         }
     }
 
-    func testALegacyPakIsMeasuredByItsDirectoryEnd() {
+    func testALegacyPakIsMeasuredAsTheFirmwareMeasuresIt() {
         var head = [UInt8]("PACK".utf8)
-        head += [0x00, 0x10, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00]  // 0x1000 + 0x40
-        XCTAssertEqual(GameStore.legacyPakBytes(firstBytes: Data(head), areaBytes: 0x1200000),
-                       0x1040)
-        XCTAssertNil(GameStore.legacyPakBytes(
+        head += [0x00, 0x10, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00]  // 0x1000 + 0x80
+        let directory = try! XCTUnwrap(
+            GameStore.legacyPakDirectory(firstBytes: Data(head), areaBytes: 0x1200000))
+        XCTAssertEqual(directory, 0x1000..<0x1080)
+        XCTAssertNil(GameStore.legacyPakDirectory(
             firstBytes: Data(repeating: 0xFF, count: 12), areaBytes: 0x1200000))
+        func entry(_ offset: Int, _ size: Int) -> [UInt8] {
+            [UInt8](repeating: 0, count: 56)
+                + (0..<4).map { UInt8((offset >> ($0 * 8)) & 0xFF) }
+                + (0..<4).map { UInt8((size >> ($0 * 8)) & 0xFF) }
+        }
+        // A file after the directory: the pak ends there, not at the directory.
+        XCTAssertEqual(GameStore.legacyPakBytes(
+            directory: directory, entries: Data(entry(12, 4) + entry(0x2000, 0x500)),
+            areaBytes: 0x1200000), 0x2500)
+        XCTAssertEqual(GameStore.legacyPakBytes(
+            directory: directory, entries: Data(entry(12, 4) + entry(16, 4)),
+            areaBytes: 0x1200000), 0x1080)
+        XCTAssertNil(GameStore.legacyPakBytes(
+            directory: directory, entries: Data(entry(12, 4) + entry(0x11FFFFF, 2)),
+            areaBytes: 0x1200000))
+    }
+
+    func testPak0TakesOffsetZeroFromAFileTheAppCanMove() throws {
+        let wad = file(.doomWad, "small.wad", 9000)
+        let current = GameStore.Contents.directory(GameStore.Directory(
+            areaBytes: 0x1200000, generation: 1,
+            entries: [GameStore.Entry(kind: .doomWad, offset: 0, length: 9000,
+                                      name: "small.wad", sha256: wad.sha256)]))
+        let plan = try GameStore.plan(
+            current: current, desired: [wad, file(.quakePak, "pak0.pak", 100_000)],
+            area: Self.area).get()
+        XCTAssertEqual(plan.final.entries.first?.name, "pak0.pak")
+        XCTAssertEqual(plan.final.entries.first?.offset, 0)
+        XCTAssertNotNil(plan.interim)
+    }
+
+    func testDecodeRefusesFlagsAndBytesAfterTheName() {
+        var flagged = [UInt8](GameStore.encode(Self.fixtureDirectory))
+        flagged[32 + 2] = 1
+        var trailing = [UInt8](GameStore.encode(Self.fixtureDirectory))
+        trailing[32 + 12 + 15] = 0x61
+        for bytes in [flagged, trailing] {
+            var sealed = bytes
+            sealed.replaceSubrange(24..<28, with: [0, 0, 0, 0])
+            let crc = GameStore.crc32(sealed[0..<(32 + 2 * 64)])
+            sealed.replaceSubrange(24..<28, with: (0..<4).map { UInt8((crc >> ($0 * 8)) & 0xFF) })
+            XCTAssertThrowsError(try GameStore.decode(sector: Data(sealed), areaBytes: 0x1200000))
+        }
     }
 
     // MARK: - planning

@@ -280,6 +280,8 @@ void testLabels() {
   CHECK(std::strcmp(label, "FREEDOOM1") == 0);
   game_store_doom_label("my-doom_2.wad", label);
   CHECK(std::strcmp(label, "MY-DOOM_2") == 0);
+  game_store_doom_label("doom.wad", label);
+  CHECK(std::strcmp(label, "DOOM.WAD") == 0);
 }
 
 // Rule: Quake opens id1/pak0.pak, pak1.pak, ... in turn; each maps to its slot

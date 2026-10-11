@@ -4097,14 +4097,14 @@ def test_write_data_quake_pak():
         # area the legacy layout again, so the directory is erased with it:
         # left, it would name files the pak just overwrote.
         cleared = b"\xff" * 0x1000
+        p4_write = ["/x/esptool", "--chip", "esp32p4", "--port", port.address,
+                    "--baud", p4.upload_speed, "write_flash"]
         check_equal(
             run(current),
-            ([["/x/esptool", "--chip", "esp32p4", "--port", port.address,
-               "--baud", p4.upload_speed, "write_flash", "0xE00000",
-               "0x1FFF000"]],
-             [sound, cleared]),
-            "write-data writes the validated bytes once, at the device's "
-            "quake_pak, and erases the game store directory")
+            ([p4_write + ["0x1FFF000"], p4_write + ["0xE00000"]],
+             [cleared, sound]),
+            "write-data erases the game store directory first, then writes "
+            "the validated bytes once, at the device's quake_pak")
         check_fails(lambda: run(previous), "flash the current bundle",
                     "write-data on the previous layout writes nothing")
         with open(path, "wb") as out:
@@ -4128,9 +4128,10 @@ def test_write_data_quake_pak():
         check_equal(
             run(s3_table, chip="esp32s3", flash_bytes=32 * 0x100000),
             ([["/x/esptool", "--chip", "esp32s3", "--port", port.address,
-               "--baud", s3.upload_speed, "write_flash", "0x800000",
-               "0x19FF000"]],
-             [sound, cleared]),
+               "--baud", s3.upload_speed, "write_flash", "0x19FF000"],
+              ["/x/esptool", "--chip", "esp32s3", "--port", port.address,
+               "--baud", s3.upload_speed, "write_flash", "0x800000"]],
+             [cleared, sound]),
             "on a 32 MiB S3 write-data writes the pak at its raw region and "
             "erases the directory at its end")
         check_fails(

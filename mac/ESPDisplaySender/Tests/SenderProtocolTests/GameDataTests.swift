@@ -128,7 +128,7 @@ final class GameDataTests: XCTestCase {
         XCTAssertEqual(files.map(\.name), ["doom2.wad", "old.wad", "pak0.pak"])
         XCTAssertEqual(files.last?.boardOnly, true)
         // Unchecking a board file of a checked game removes it.
-        selection.setChecked("1/old.wad", false)
+        selection.setChecked("board/1/old.wad", false)
         files = selection.desiredFiles(board: board)
         XCTAssertEqual(files.map(\.name), ["doom2.wad", "pak0.pak"])
         // A board without Quake ignores Quake files entirely.
@@ -153,13 +153,34 @@ final class GameDataTests: XCTestCase {
             entries: [GameStore.Entry(kind: .quakePak, offset: 0, length: first.byteCount,
                                       name: "pak0.pak", sha256: first.sha256)]))
         selection.noteBoard(board)
-        let item = selection.items(of: .quakePak)[0]
-        XCTAssertFalse(GameDataSelection.isOnBoard(item, contents: board),
+        let rows = selection.items(of: .quakePak)
+        XCTAssertEqual(rows.map(\.source), [.chosen(URL(fileURLWithPath: "/u/PAK0.PAK")), .board],
+                       "the board's other pak0 is listed beside the chosen one")
+        XCTAssertFalse(GameDataSelection.isOnBoard(rows[0], contents: board),
                        "different bytes under the same name are not on the board")
-        XCTAssertEqual(selection.items(of: .quakePak).count, 1,
-                       "the board's other pak0 is replaced, not listed")
-        selection.remove(item.id)
-        XCTAssertTrue(selection.items(of: .quakePak).isEmpty)
+        XCTAssertFalse(rows[1].isChecked, "the chosen pak0 is to replace it")
+        XCTAssertEqual(selection.desiredFiles(board: board).map(\.sha256), [second.sha256])
+        selection.remove(rows[0].id)
+        XCTAssertEqual(selection.items(of: .quakePak).map(\.source), [.board])
+        XCTAssertTrue(selection.items(of: .quakePak)[0].isChecked,
+                      "removing the chosen file keeps the board's")
+        XCTAssertEqual(selection.desiredFiles(board: board).first?.boardOnly, true)
+    }
+
+    func testABoardFileUncheckedStaysUncheckedWhenTheBoardIsNotedAgain() {
+        var selection = GameDataSelection(quakeOffered: false, doomChecked: true)
+        let board = GameStore.Contents.directory(GameStore.Directory(
+            areaBytes: 0x1200000, generation: 1,
+            entries: [GameStore.Entry(kind: .doomWad, offset: 0, length: 600, name: "old.wad",
+                                      sha256: String(repeating: "b", count: 64))]))
+        selection.noteBoard(board)
+        selection.setChecked("board/1/old.wad", false)
+        selection.add(identified(Self.wad(), "doom2.wad", .doomWad),
+                      source: .chosen(URL(fileURLWithPath: "/tmp/doom2.wad")))
+        selection.noteBoard(board)
+        XCTAssertEqual(selection.items(of: .doomWad).first { $0.source == .board }?.isChecked,
+                       false)
+        XCTAssertEqual(selection.desiredFiles(board: board).map(\.name), ["doom2.wad"])
     }
 }
 

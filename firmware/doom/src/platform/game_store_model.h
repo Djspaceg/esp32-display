@@ -11,8 +11,9 @@
 // - An area with no directory is the legacy layout: Quake's pak0.pak, raw, at
 //   offset 0, as tools/espdisp.py write-data quake_pak and the app before the
 //   store wrote it.
-// - The app places pak0.pak at offset 0 whenever the store holds one, so
-//   firmware from before the store still finds it there and boots Quake.
+// - The app places pak0.pak at offset 0 whenever it can (it moves any file it
+//   holds a copy of out of the way), so firmware from before the store still
+//   finds it there and boots Quake.
 //
 // Versioned: a directory whose version is newer than this firmware's is
 // refused with a reason that says to update, never misread.
@@ -293,11 +294,16 @@ static inline const game_store_entry_t* game_store_find_quake(
 }
 
 // The boot menu's label for a stored WAD: its name without ".wad", upper case,
-// so "freedoom1.wad" reads FREEDOOM1. `out` holds GAME_STORE_NAME_BYTES + 1.
+// so "freedoom1.wad" reads FREEDOOM1. A stored doom.wad keeps its extension,
+// DOOM.WAD, so it is not a second row reading DOOM, the bundled doom1.wad's.
+// `out` holds GAME_STORE_NAME_BYTES + 1.
 static inline void game_store_doom_label(const char* name, char* out) {
   size_t length = strlen(name);
   if (length > GAME_STORE_NAME_BYTES) length = GAME_STORE_NAME_BYTES;
-  if (game_store_ends_with(name, length, ".wad")) length -= 4;
+  if (game_store_ends_with(name, length, ".wad") &&
+      !(length == 8 && game_store_names_equal(name, "doom.wad"))) {
+    length -= 4;
+  }
   for (size_t i = 0; i < length; ++i) {
     const char c = name[i];
     out[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;

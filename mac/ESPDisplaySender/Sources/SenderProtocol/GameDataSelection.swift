@@ -22,7 +22,12 @@ public struct GameDataSelection: Equatable, Sendable {
         public var source: Source
         public var isChecked: Bool
 
-        public var id: String { "\(identified.kind.rawValue)/\(identified.storedName)" }
+        /// A board row has its own id, so a local file of the same name sits
+        /// beside it rather than replacing it.
+        public var id: String {
+            (source == .board ? "board/" : "")
+                + "\(identified.kind.rawValue)/\(identified.storedName)"
+        }
         public var kind: GameStore.Kind { identified.kind }
 
         public var url: URL? {
@@ -30,6 +35,10 @@ public struct GameDataSelection: Equatable, Sendable {
             case .cache(let url), .chosen(let url): return url
             case .board: return nil
             }
+        }
+
+        func sameStoredFile(as other: Item) -> Bool {
+            kind == other.kind && identified.storedName == other.identified.storedName
         }
     }
 
@@ -47,9 +56,10 @@ public struct GameDataSelection: Equatable, Sendable {
     }
 
     public func items(of kind: GameStore.Kind) -> [Item] {
+        // A board row after the local file of its name.
         items.filter { $0.kind == kind }.sorted {
-            ($0.identified.slot, $0.identified.storedName)
-                < ($1.identified.slot, $1.identified.storedName)
+            ($0.identified.slot, $0.identified.storedName, $0.source == .board ? 1 : 0)
+                < ($1.identified.slot, $1.identified.storedName, $1.source == .board ? 1 : 0)
         }
     }
 
@@ -67,14 +77,24 @@ public struct GameDataSelection: Equatable, Sendable {
         }
     }
 
-    /// Adds a file, checked, and checks its game. It replaces the file the
-    /// board would store under the same name (for Quake, the same pak), so
-    /// choosing another pak0.pak swaps it in.
-    public mutating func add(_ identified: GameData.Identified, source: Source) {
+    /// Adds a file and, when it is checked, its game. It replaces a local file
+    /// stored under the same name (for Quake, the same pak), so choosing another
+    /// pak0.pak swaps it in; a board file of that name stays listed, unchecked,
+    /// since the new one would replace it.
+    public mutating func add(
+        _ identified: GameData.Identified, source: Source, checked: Bool = true
+    ) {
         if identified.kind == .quakePak && !quakeOffered { return }
-        items.removeAll { $0.id == "\(identified.kind.rawValue)/\(identified.storedName)" }
-        items.append(Item(identified: identified, source: source, isChecked: true))
-        setGameChecked(identified.kind, true)
+        let item = Item(identified: identified, source: source, isChecked: checked)
+        items.removeAll { $0.id == item.id }
+        if checked {
+            for index in items.indices where items[index].source == .board
+                && items[index].sameStoredFile(as: item) {
+                items[index].isChecked = false
+            }
+            setGameChecked(identified.kind, true)
+        }
+        items.append(item)
     }
 
     public mutating func setChecked(_ id: Item.ID, _ checked: Bool) {
@@ -82,36 +102,46 @@ public struct GameDataSelection: Equatable, Sendable {
         items[index].isChecked = checked
     }
 
-    /// Takes away a chosen file; the cache and the board keep theirs.
+    /// Takes away a chosen file; the cache and the board keep theirs, and a
+    /// board file it had displaced is checked again.
     public mutating func remove(_ id: Item.ID) {
-        items.removeAll { $0.id == id && $0.source != .board }
+        guard let removed = items.first(where: { $0.id == id && $0.source != .board })
+        else { return }
+        items.removeAll { $0.id == id }
+        if removed.isChecked {
+            for index in items.indices where items[index].source == .board
+                && items[index].sameStoredFile(as: removed) {
+                items[index].isChecked = true
+            }
+        }
     }
 
-    /// Lists what the board holds: a file this Mac has the same bytes of is
-    /// marked on the board through `isOnBoard`; anything else becomes a
-    /// board-only row, checked, so it stays unless someone unchecks it.
+    /// Lists what the board holds. A file this Mac has the same bytes of is
+    /// marked on the board through `isOnBoard`; anything else is a board row
+    /// of its own: checked (it stays) unless someone unchecked it before or a
+    /// checked local file of the same name is to replace it.
     public mutating func noteBoard(_ contents: GameStore.Contents) {
+        let previous = Dictionary(
+            items.filter { $0.source == .board }.map { ($0.id, $0.isChecked) },
+            uniquingKeysWith: { first, _ in first })
         items.removeAll { $0.source == .board }
         for entry in contents.entries {
             if entry.kind == .quakePak && !quakeOffered { continue }
-            let held = items.contains {
-                $0.kind == entry.kind && $0.identified.storedName == entry.name
-                    && $0.identified.sha256 == entry.sha256 && !entry.sha256.isEmpty
-            }
-            if held { continue }
-            // The same name with different bytes: the local file replaces it
-            // when written; the board's copy is not listed as well.
-            if items.contains(where: {
-                $0.kind == entry.kind && $0.identified.storedName == entry.name
-            }) { continue }
-            items.append(Item(
+            let row = Item(
                 identified: GameData.Identified(
                     kind: entry.kind, slot: entry.slot, storedName: entry.name,
                     byteCount: entry.length, sha256: entry.sha256,
                     summary: entry.sha256.isEmpty
                         ? "Written before the game store; contents not identified"
                         : "On the board; no copy on this Mac"),
-                source: .board, isChecked: true))
+                source: .board, isChecked: true)
+            let local = items.filter { $0.sameStoredFile(as: row) }
+            if local.contains(where: {
+                !entry.sha256.isEmpty && $0.identified.sha256 == entry.sha256
+            }) { continue }
+            var kept = row
+            kept.isChecked = previous[row.id] ?? !local.contains(where: \.isChecked)
+            items.append(kept)
         }
     }
 

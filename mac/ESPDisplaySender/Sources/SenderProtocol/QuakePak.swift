@@ -20,6 +20,9 @@ public enum QuakePak {
     /// Each pack directory entry: 56-byte name, u32 offset, u32 length.
     static let directoryEntryBytes = 64
     static let headerBytes = 12
+    /// The engine's MAX_FILES_IN_PACK, which the firmware's quake_pak_check
+    /// also holds a pack to.
+    public static let maxEntries = 2048
     /// Where a board keeps its partition table, and how much of it is read.
     public static let partitionTableAddress = 0x8000
     public static let partitionTableBytes = 0xC00
@@ -103,6 +106,7 @@ public enum QuakePak {
             let directory = u32(4)
             let length = u32(8)
             guard length != 0, length % directoryEntryBytes == 0,
+                  length / directoryEntryBytes <= maxEntries,
                   directory >= headerBytes, directory <= count,
                   length <= count - directory
             else {

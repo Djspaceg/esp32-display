@@ -705,9 +705,11 @@ char *D_FindIWAD(int mask, GameMission_t *mission)
     // On ESP32, the WAD is memory-mapped from a flash partition.
     // Skip all filesystem searching -- just return the -iwad argument directly.
     // W_OpenFile() handles the actual data access via the partition map.
+    // The name says which game it is (doom2.wad, freedoom2.wad); a name no
+    // IWAD has is left `none`, so D_IdentifyVersion tells by its lumps.
     int iwadparm = M_CheckParmWithArgs("-iwad", 1);
     if (iwadparm) {
-        *mission = doom;
+        *mission = IdentifyIWADByName(myargv[iwadparm + 1], mask);
         return myargv[iwadparm + 1];
     }
     I_Error("ESP32 Doom: -iwad argument required");

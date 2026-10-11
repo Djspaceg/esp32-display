@@ -22,10 +22,10 @@ extern "C" {
 /// Serial and the panel (quake_fail_restart) and restarts.
 void quake_enter(void);
 
-/// From the normal firmware: whether the quake_pak partition holds a pack the
-/// Quake boot will accept. NULL when it does, else a short reason. Reads the
-/// partition; never maps it. On the S3 it first registers the partition, which
-/// fails on a chip too small for it.
+/// From the normal firmware: whether the game data area (doom/src/
+/// game_store.h) holds a pak0.pak the Quake boot will accept. NULL when it
+/// does, else a short reason. Reads the area; never maps it. On the S3 the area
+/// is registered first; a 16 MiB chip's 8 MiB area cannot hold pak0.pak.
 const char* quake_pak_preflight(void);
 
 #ifdef __cplusplus

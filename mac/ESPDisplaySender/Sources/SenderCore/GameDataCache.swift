@@ -92,8 +92,10 @@ struct GameDataCache: Sendable {
         if let available = availableBytes(), available < needed {
             throw FetchError.noSpace(needed: needed, available: available)
         }
+        sweepStaleWork(in: target.deletingLastPathComponent())
         var reasons: [String] = []
         for mirror in download.mirrors {
+            try Task.checkCancellation()
             let work = target.deletingLastPathComponent()
                 .appendingPathComponent(".fetch-" + UUID().uuidString, isDirectory: true)
             defer { try? FileManager.default.removeItem(at: work) }
@@ -124,11 +126,21 @@ struct GameDataCache: Sendable {
                 return identified
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let error as URLError where error.code == .cancelled {
+                throw CancellationError()
             } catch {
                 reasons.append("\(mirror.name): \(error.localizedDescription)")
             }
         }
         throw FetchError.allMirrorsFailed(reasons)
+    }
+
+    /// Work directories a fetch left when the app was quit mid-download.
+    private func sweepStaleWork(in directory: URL) {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        for name in names where name.hasPrefix(".fetch-") {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
     }
 
     // MARK: download and unpack

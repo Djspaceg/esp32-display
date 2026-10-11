@@ -154,6 +154,15 @@ for target in P4 S3; do
   done
 done
 
+# Which game the Doom boot takes a stored WAD for: by its IWAD name, else by
+# its lumps (d_iwad.c.inc, unmodified; upstream engine code, so its own
+# warnings are not this suite's to fail on).
+clang -std=c11 -w -I"$HERE/../doom/src" \
+  -c -o "$TMP/doom_iwad_unit.o" "$HERE/doom_iwad_unit.c"
+clang++ "${CXXFLAGS[@]}" -I"$HERE/../doom/src" \
+  -o "$TMP/test_doom_iwad" "$HERE/test_doom_iwad.cpp" "$TMP/doom_iwad_unit.o"
+"$TMP/test_doom_iwad"
+
 # The game store's directory: the format the Mac app writes (the shared
 # fixture), every refusal, and the legacy layout.
 clang++ "${CXXFLAGS[@]}" \
