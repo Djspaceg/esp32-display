@@ -518,6 +518,9 @@ public enum GameStore {
         if !(pak0Moving && zeroMovable) { stayingSets.append(inPlace) }
         // Second: only what the app cannot rewrite stays put.
         stayingSets.append(inPlace.filter { desired[$0.key].boardOnly })
+        // Last, when moving everything does not fit around what cannot move:
+        // everything stays, pak0.pak wherever there is room.
+        if pak0Moving && zeroMovable { stayingSets.append(inPlace) }
 
         var lastFailure: PlanError = .doesNotFit(needed: needed, usable: area.usableBytes)
         for staying in stayingSets {
@@ -562,12 +565,14 @@ public enum GameStore {
             return "The board's menu lists at most \(maxDoomWads) extra WADs; \(doom.count) "
                 + "are checked."
         }
-        if Set(doom.map(\.name)).count != doom.count {
-            return "Two checked WADs share a name; the board tells them apart by name."
+        let names = doom.map(\.name)
+        if let twice = names.first(where: { name in names.filter { $0 == name }.count > 1 }) {
+            return "Two checked WADs are both named \(twice), and the board tells them apart "
+                + "by name. Uncheck one of them."
         }
         let slots = files.filter { $0.kind == .quakePak }.map(\.slot)
-        if Set(slots).count != slots.count {
-            return "Two checked Quake paks are the same pak; keep one of each."
+        if let twice = slots.first(where: { slot in slots.filter { $0 == slot }.count > 1 }) {
+            return "Two checked files are both pak\(twice).pak. Uncheck one of them."
         }
         if !slots.isEmpty {
             let missing = (0...(slots.max() ?? 0)).first { !slots.contains($0) }

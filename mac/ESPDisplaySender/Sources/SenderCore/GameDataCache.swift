@@ -135,11 +135,17 @@ struct GameDataCache: Sendable {
         throw FetchError.allMirrorsFailed(reasons)
     }
 
-    /// Work directories a fetch left when the app was quit mid-download.
+    /// Work directories a fetch left when the app was quit mid-download: an
+    /// hour old, so another sheet's download in progress is never one.
     private func sweepStaleWork(in directory: URL) {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         for name in names where name.hasPrefix(".fetch-") {
-            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+            let url = directory.appendingPathComponent(name)
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantFuture
+            if modified < Date(timeIntervalSinceNow: -3600) {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
     }
 

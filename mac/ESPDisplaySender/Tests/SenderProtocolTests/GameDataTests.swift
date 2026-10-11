@@ -185,6 +185,31 @@ final class GameDataTests: XCTestCase {
 }
 
 extension GameDataTests {
+    func testAFileOnTheBoardIsOnlyRemovedWhenSomeoneUnchecksIt() {
+        let a = GameStore.Entry(kind: .doomWad, offset: 0, length: 600, name: "a.wad",
+                                sha256: String(repeating: "a", count: 64))
+        let board = GameStore.Contents.directory(GameStore.Directory(
+            areaBytes: 0x1200000, generation: 1, entries: [a]))
+        // Never listed (no Check Board, or the rows were from another read).
+        var selection = GameDataSelection(quakeOffered: false)
+        selection.add(identified(Self.wad(), "b.wad", .doomWad),
+                      source: .chosen(URL(fileURLWithPath: "/tmp/b.wad")))
+        XCTAssertEqual(selection.desiredFiles(board: board).map(\.name), ["b.wad", "a.wad"])
+        XCTAssertEqual(selection.desiredFiles(board: board).last?.boardOnly, true)
+        // A local copy with the same bytes stands for it; removing that copy
+        // keeps the board's, unchecking it removes it.
+        let copy = GameData.Identified(
+            kind: .doomWad, slot: 0, storedName: "a.wad", byteCount: 600, sha256: a.sha256,
+            summary: "")
+        selection.add(copy, source: .chosen(URL(fileURLWithPath: "/tmp/a.wad")))
+        selection.noteBoard(board)
+        XCTAssertFalse(selection.items.contains { $0.source == .board })
+        selection.setChecked("1/a.wad", false)
+        XCTAssertEqual(selection.desiredFiles(board: board).map(\.name), ["b.wad"])
+        selection.remove("1/a.wad")
+        XCTAssertEqual(selection.desiredFiles(board: board).map(\.name), ["b.wad", "a.wad"])
+    }
+
     func testSpaceCountsSectorsAndBlocksWhatDoesNotFit() {
         var selection = GameDataSelection(quakeOffered: true)
         let wad = try! GameData.identify(Self.wad(), filename: "doom2.wad", kind: .doomWad)

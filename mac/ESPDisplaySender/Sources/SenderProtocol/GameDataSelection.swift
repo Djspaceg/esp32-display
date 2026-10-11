@@ -155,22 +155,42 @@ public struct GameDataSelection: Equatable, Sendable {
 
     /// The files the store should hold after a write to a board holding
     /// `contents`.
+    ///
+    /// Removal is only ever explicit. A file the board holds stays unless its
+    /// row is unchecked, a checked local file of its name replaces it, or the
+    /// local file that stands for it (same bytes) is unchecked. So a file with
+    /// no row at all - the board changed since it was listed, or it was never
+    /// listed - is kept, never dropped unseen.
     public func desiredFiles(board contents: GameStore.Contents) -> [GameStore.File] {
         var files: [GameStore.File] = []
         for kind in GameStore.Kind.allCases {
-            if isGameChecked(kind) {
-                files += items(of: kind).filter(\.isChecked).map {
-                    $0.identified.file(boardOnly: $0.source == .board)
+            let onBoard = contents.entries.filter { $0.kind == kind }
+            guard isGameChecked(kind) else {
+                files += onBoard.map(Self.kept)
+                continue
+            }
+            let local = items(of: kind).filter { $0.source != .board }
+            files += local.filter(\.isChecked).map { $0.identified.file() }
+            for entry in onBoard {
+                let named = local.filter { $0.identified.storedName == entry.name }
+                if named.contains(where: \.isChecked) { continue }  // replaced
+                if named.contains(where: {
+                    !entry.sha256.isEmpty && $0.identified.sha256 == entry.sha256
+                }) { continue }  // its stand-in is unchecked
+                let row = items.first {
+                    $0.source == .board && $0.kind == kind && $0.identified.storedName == entry.name
                 }
-            } else {
-                files += contents.entries.filter { $0.kind == kind }.map {
-                    GameStore.File(
-                        kind: $0.kind, slot: $0.slot, name: $0.name, sha256: $0.sha256,
-                        byteCount: $0.length, boardOnly: true)
-                }
+                if row?.isChecked == false { continue }
+                files.append(Self.kept(entry))
             }
         }
         return files
+    }
+
+    private static func kept(_ entry: GameStore.Entry) -> GameStore.File {
+        GameStore.File(
+            kind: entry.kind, slot: entry.slot, name: entry.name, sha256: entry.sha256,
+            byteCount: entry.length, boardOnly: true)
     }
 
     /// What the checked selection alone needs, before the board is read: the

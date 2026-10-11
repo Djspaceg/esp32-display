@@ -153,8 +153,9 @@ struct GameDataSheet: View {
         ) {
             Button("Write") { startWrite() }
         } message: {
-            Text("The checked games' files are written over USB; files already on the "
-                + "board stay where they are. The board restarts a few times; its firmware, "
+            Text("The checked games' files are written over USB. Files already on the "
+                + "board stay where they are unless their row is unchecked or a file of the "
+                + "same name replaces them. The board restarts a few times; its firmware, "
                 + "settings and bundled doom1.wad are not touched.")
         }
     }
@@ -542,9 +543,10 @@ struct GameDataSheet: View {
             if outcome.kind == .failure {
                 monitor.fail(outcome)
                 // The write may have changed the board before it stopped, so
-                // what it was read to hold no longer stands.
+                // what it was read to hold no longer stands. The rows and their
+                // checkboxes stay; a write reads the board again and keeps any
+                // file nobody unchecked.
                 board = nil
-                selection.noteBoard(.legacy(legacyPak0Bytes: nil))
             }
             isWriting = false
             isBusy = false

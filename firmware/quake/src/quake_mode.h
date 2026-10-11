@@ -36,8 +36,9 @@ const char* quake_pak_preflight(void);
 /// The carriers Quake runs on: the three P4 boards, whose 32 MB of PSRAM
 /// holds its 16 MB heap and whose flash layout has the quake_pak partition,
 /// and the S3 boards whose panel holds a 320x240 frame (the 1.75C's 466x466,
-/// the 1.85C's 360x360). An S3 also needs a 32 MiB chip for the pak, which
-/// quake_pak_preflight() checks; with 16 MiB its menu leaves Quake out.
+/// the 1.85C's 360x360). An S3 also needs a pak0.pak that fits its game data
+/// area, which quake_pak_preflight() checks: the shareware one needs a 32 MiB
+/// chip, and a 16 MiB chip's 8 MiB area holds only a small one.
 constexpr bool quakeSupportsBoard(board::Variant variant) {
   return variant == board::Variant::P4_4B || variant == board::Variant::P4_4C ||
          variant == board::Variant::P4_34C ||

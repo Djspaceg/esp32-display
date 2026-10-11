@@ -52,6 +52,7 @@ public enum GameData {
         case wadHasNoMaps
         case bundledWad
         case wadName(String)
+        case notDoom(String)
         case notAPak(String)
         case pakName(String)
 
@@ -80,6 +81,9 @@ public enum GameData {
                 return "\(name) cannot be stored under its own name: the board needs a name "
                     + "ending in .wad, up to 20 letters, digits, dots, dashes or underscores. "
                     + "Rename the file and choose it again."
+            case .notDoom(let name):
+                return "\(name) is not a Doom WAD: the board runs Doom and Doom II WADs, not "
+                    + "Heretic, Hexen or Strife."
             case .notAPak(let why):
                 return why
             case .pakName(let name):
@@ -136,6 +140,12 @@ public enum GameData {
             if name == "E1M1" || name == "MAP01" { maps.insert(name) }
         }
         guard !maps.isEmpty else { throw IdentifyError.wadHasNoMaps }
+        // Heretic, Hexen and Strife IWADs have E1M1 or MAP01 too, but this
+        // engine is Doom's and would run them as Doom.
+        if ["heretic.wad", "heretic1.wad", "hexen.wad", "strife1.wad", "strife0.wad"]
+            .contains(filename.lowercased()) {
+            throw IdentifyError.notDoom(filename)
+        }
         let sha = FirmwareBundle.sha256Hex(data)
         if bytes.count == bundledDoomBytes && sha == bundledDoomSHA256 {
             throw IdentifyError.bundledWad
