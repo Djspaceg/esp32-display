@@ -124,7 +124,8 @@ static esp_reset_reason_t fakeResetReason = ESP_RST_POWERON;
 esp_reset_reason_t esp_reset_reason(void) { return fakeResetReason; }
 
 bool blIsHigh() { return userBlLevel == BL_HIGH; }
-void applyBacklight() {}
+static int backlightApplies = 0;
+void applyBacklight() { backlightApplies++; }
 static int displayPrefSaves = 0;
 void saveDisplayPrefs() { displayPrefSaves++; }
 void drawSurveyScreen() {}
@@ -275,7 +276,7 @@ void sendToSender(const uint8_t *data, size_t length) {
 touchmap::Calibration touchCalibration = touchmap::GT911_ON_JD9365_4C;
 bool panelMirrorX = false;
 uint8_t appliedPanelRotation = 0;
-uint8_t addressedPanelRotation() { return 0; }
+uint8_t addressedPanelRotation() { return appliedPanelRotation; }
 static std::vector<std::pair<int16_t, int16_t>> touchMarkers;
 void drawTouchMarker(int16_t x, int16_t y) { touchMarkers.push_back({x, y}); }
 void closeWifiSelector() {}
@@ -1489,47 +1490,92 @@ static int knobTurnIsVolumeAndClickIsMute() {
   hbPort = 0;
 
   boardVariant = savedVariant;
-  bcfg = savedConfig;
-  fakePinIsr.clear();
-  initializeButtonInput();
-  return 0;
-}
-
-// CFGTOUCHLOG: a press is logged once, raw and mapped, and marked where it
+  bcfg = save// CFGTOUCHLOG: a press is logged once, raw and mapped, and marked where it
 // mapped, and nothing else acts on it - a corner tap on the survey card would
 // otherwise land on its preset button and open the WiFi selector.
+static void serviceTouchFor(uint32_t ms) {
+  for (const uint32_t until = fakeNow + ms; fakeNow < until; fakeNow += 10) {
+    serviceTouch();
+  }
+}
+
 static int touchLogOnlyLogsAndMarks() {
   resetObservations();
   touchAvailable = true;
   hbPort = 4210;
   sentPackets.clear();
   touchMarkers.clear();
+  // A quarter turn, so the raw and mapped points differ and logging or
+  // marking the wrong one shows: (700,15) is raw (704,700) at rotation 1.
+  appliedPanelRotation = 1;
 
-  // Off: the same tap reaches the sender and leaves no marker.
+  // Off: the tap reaches the sender and leaves no marker.
   touchPress(fakeNow + 100, 50, 10, 20);
-  for (const uint32_t until = fakeNow + 400; fakeNow < until; fakeNow += 10) {
-    serviceTouch();
-  }
+  serviceTouchFor(400);
   CHECK(sentPackets.size() == 1);
   CHECK(touchMarkers.empty());
   CHECK(Serial.captured.find("touchlog:") == std::string::npos);
 
   touchLogEnabled = true;
   sentPackets.clear();
-  touchPress(fakeNow + 100, 50, 700, 16);
-  for (const uint32_t until = fakeNow + 400; fakeNow < until; fakeNow += 10) {
-    serviceTouch();
-  }
+  touchPress(fakeNow + 100, 50, 700, 15);
+  serviceTouchFor(400);
   CHECK(sentPackets.empty());
   CHECK(touchMarkers.size() == 1);
-  CHECK(touchMarkers[0].first == 700 && touchMarkers[0].second == 16);
-  const size_t at = Serial.captured.find("touchlog: raw=(");
+  CHECK(touchMarkers[0].first == 700 && touchMarkers[0].second == 15);
+  const size_t at = Serial.captured.find(
+      "touchlog: raw=(704,700) mapped=(700,15) frame=720x720 rot=1 "
+      "addressed=1");
   CHECK(at != std::string::npos);
-  CHECK(Serial.captured.find("mapped=(700,16) frame=720x720 rot=0", at) !=
-        std::string::npos);
   CHECK(Serial.captured.find("touchlog:", at + 1) == std::string::npos);
 
+  // A hold long enough for a long press is still only logged once.
+  touchHeld(fakeNow + 100, fakeNow + 2100, 360, 360);
+  serviceTouchFor(2400);
+  CHECK(sentPackets.empty());
+  CHECK(!wifiSelectorActive);
+  CHECK(touchMarkers.size() == 2);
+
+  // A dimmed status card is lit, without the press being spent as a wake.
+  idleActive = true;
+  backlightApplies = 0;
+  touchPress(fakeNow + 100, 50, 10, 20);
+  serviceTouchFor(400);
+  CHECK(backlightApplies > 0);
+  CHECK(Serial.captured.find("touch: wake") == std::string::npos);
+  CHECK(touchMarkers.size() == 3);
+  idleActive = false;
+
+  // A press that began logged stays logged after the toggle goes off.
+  touchPress(fakeNow + 100, 300, 10, 20);
+  serviceTouchFor(150);
   touchLogEnabled = false;
+  serviceTouchFor(400);
+  CHECK(sentPackets.empty());
+  CHECK(touchMarkers.size() == 4);
+
+  // A wake press that began unlogged is still a wake once the toggle comes
+  // on, and its release leaves nothing to eat the next tap.
+  idleActive = true;
+  touchPress(fakeNow + 100, 300, 10, 20);
+  serviceTouchFor(150);
+  CHECK(Serial.captured.find("touch: wake") != std::string::npos);
+  touchLogEnabled = true;
+  serviceTouchFor(400);
+  touchLogEnabled = false;
+  idleActive = false;
+  touchPress(fakeNow + 100, 50, 10, 20);
+  serviceTouchFor(400);
+  CHECK(sentPackets.size() == 1);
+  CHECK(touchMarkers.size() == 4);
+
+  appliedPanelRotation = 0;
+  hbPort = 0;
+  touchAvailable = false;
+  return 0;
+}
+
+gEnabled = false;
   hbPort = 0;
   touchAvailable = false;
   return 0;

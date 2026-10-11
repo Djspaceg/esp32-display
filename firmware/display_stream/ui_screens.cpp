@@ -800,15 +800,16 @@ void redrawInfoBarOverRun() {
   }
 }
 
-// Show OTA progress on the glass.
-//
 // ---- Touch marker (CFGTOUCHLOG only) -------------------------------------
 // Drawn through the same panel path as every frame, so it lands under the
 // finger exactly when touch and pixels agree about which way is up. Its own
 // buffer, filled once and never rewritten, so no screen's staging is disturbed
 // and the source outlives any transfer still reading it.
 static const int TOUCH_MARKER_PX = 12;
-static uint8_t touchMarkerPixels[TOUCH_MARKER_PX * TOUCH_MARKER_PX * 2];
+// Aligned like the frame buffers, so a direct SPI draw (C3/C6) need not bounce
+// it through a temporary copy.
+static uint8_t touchMarkerPixels[TOUCH_MARKER_PX * TOUCH_MARKER_PX * 2]
+    __attribute__((aligned(4)));
 static bool touchMarkerFilled = false;
 
 void drawTouchMarker(int16_t x, int16_t y) {
@@ -836,6 +837,8 @@ void drawTouchMarker(int16_t x, int16_t y) {
   }
 }
 
+// Show OTA progress on the glass.
+//
 // An update takes tens of seconds during which nothing else is drawn, and a panel
 // that simply freezes mid-picture looks broken rather than busy - so it says what
 // is happening on the device, not only in the terminal doing the pushing.

@@ -49,7 +49,8 @@ void clearInfoBarIfExpired();
 void redrawInfoBarOverRun();
 
 // A small square at a mapped touch point, for CFGTOUCHLOG. Left for the next
-// redraw to erase.
+// redraw to erase: a streamed frame that changes there, or within 500 ms on the
+// survey card, which refreshes itself.
 void drawTouchMarker(int16_t x, int16_t y);
 
 // OTA progress screen (percent < 0 draws no bar).

@@ -26,6 +26,10 @@ static uint32_t touchPressStartedAt = 0;
 // panel at power-on is not taken for a press on the menu.
 static bool touchHeldThroughMenuOpen = false;
 bool touchLogEnabled = false;
+// Whether the current press began with the log on. Latched per press, so a
+// toggle mid-press neither hands a logged press to the handlers nor strands a
+// normal one (a wake press would leave touchConsumed set to eat the next tap).
+static bool touchPressLogged = false;
 // Report a completed gesture to whoever is driving this panel.
 //
 // The internal gesture enum and the wire one are separate types: touch_gesture.h
@@ -159,7 +163,7 @@ void serviceTouch() {
   touchgesture::Event held = touchTracker.tick(millis());
   // A hold means nothing on the boot menu, and there is no sender yet.
   if (held.gesture != touchgesture::Gesture::None && !touchConsumed &&
-      !bootMenuActive && !touchLogEnabled) {
+      !bootMenuActive && !touchPressLogged) {
     if (held.gesture == touchgesture::Gesture::LongPress &&
         wifiSelectorActive) {
       closeWifiSelector();
@@ -204,8 +208,12 @@ void serviceTouch() {
   // its preset button, and a tap in the selector can change networks. So
   // while logging, a press is logged, marked and may light a dimmed panel,
   // and nothing else acts on it.
-  if (touchLogEnabled) {
-    if (!event.pressStarted) return;
+  if (event.pressStarted) touchPressLogged = touchLogEnabled;
+  if (touchPressLogged) {
+    if (!event.pressStarted) {
+      if (!touchTracker.pressActive()) touchPressLogged = false;
+      return;
+    }
     // The frame size is the mapped space's, so the expected corner for each
     // tap is readable straight off the line.
     const bool swapped =
@@ -217,7 +225,8 @@ void serviceTouch() {
                   touchmap::frameHeight(swapped, touchCalibration),
                   appliedPanelRotation, addressedPanelRotation(),
                   panelLandscape ? 1 : 0, panelMirrorX ? 1 : 0);
-    if (displaySleeping || (idleActive && !touchWakeActive())) {
+    if (!surveyActive &&
+        (displaySleeping || (idleActive && !touchWakeActive()))) {
       touchWakeUntil = millis() + TOUCH_WAKE_MS;
       applyBacklight();
     }
