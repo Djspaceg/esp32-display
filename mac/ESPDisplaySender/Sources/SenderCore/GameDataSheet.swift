@@ -239,6 +239,8 @@ struct GameDataSheet: View {
             if case .chosen = item.source {
                 Button {
                     selection.remove(item.id)
+                    // A board file the removed one stood for is listed again.
+                    if let board { selection.noteBoard(board.contents) }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                 }

@@ -128,6 +128,7 @@ public enum GameData {
         guard count > 0, directory <= bytes.count, count <= (bytes.count - directory) / 16
         else { throw IdentifyError.wadDirectory }
         var maps: Set<String> = []
+        var otherGame = false
         for index in 0..<count {
             let at = directory + index * 16
             let offset = s32(at)
@@ -138,12 +139,16 @@ public enum GameData {
                 decoding: bytes[(at + 8)..<(at + 16)].prefix { $0 != 0 }, as: UTF8.self
             ).uppercased()
             if name == "E1M1" || name == "MAP01" { maps.insert(name) }
+            // The lumps the engine's W_CheckCorrectIWAD refuses a Doom boot on:
+            // Heretic's, Hexen's and Strife's.
+            if ["IMPXA1", "ETTNA1", "AGRDA1"].contains(name) { otherGame = true }
         }
         guard !maps.isEmpty else { throw IdentifyError.wadHasNoMaps }
         // Heretic, Hexen and Strife IWADs have E1M1 or MAP01 too, but this
-        // engine is Doom's and would run them as Doom.
-        if ["heretic.wad", "heretic1.wad", "hexen.wad", "strife1.wad", "strife0.wad"]
-            .contains(filename.lowercased()) {
+        // engine is Doom's and refuses them at boot: by their lumps, whatever
+        // the file is called, and by their names.
+        if otherGame || ["heretic.wad", "heretic1.wad", "hexen.wad", "strife1.wad",
+                         "strife0.wad"].contains(filename.lowercased()) {
             throw IdentifyError.notDoom(filename)
         }
         let sha = FirmwareBundle.sha256Hex(data)

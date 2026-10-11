@@ -210,6 +210,35 @@ extension GameDataTests {
         XCTAssertEqual(selection.desiredFiles(board: board).map(\.name), ["b.wad", "a.wad"])
     }
 
+    func testOnlyOneRowOfANameIsCheckedAndAStaleUncheckRemovesNothing() {
+        var selection = GameDataSelection(quakeOffered: false, doomChecked: true)
+        let listed = GameStore.Contents.directory(GameStore.Directory(
+            areaBytes: 0x1200000, generation: 1,
+            entries: [GameStore.Entry(kind: .doomWad, offset: 0, length: 600, name: "a.wad",
+                                      sha256: String(repeating: "a", count: 64))]))
+        selection.add(identified(Self.wad(), "a.wad", .doomWad),
+                      source: .chosen(URL(fileURLWithPath: "/tmp/a.wad")))
+        selection.noteBoard(listed)
+        selection.setChecked("board/1/a.wad", true)
+        XCTAssertEqual(selection.items(of: .doomWad).map(\.isChecked), [false, true])
+        selection.setChecked("1/a.wad", true)
+        XCTAssertEqual(selection.items(of: .doomWad).map(\.isChecked), [true, false])
+        // The row was unchecked against other bytes than the board now holds.
+        selection.remove("1/a.wad")
+        selection.setChecked("board/1/a.wad", false)
+        let replaced = GameStore.Contents.directory(GameStore.Directory(
+            areaBytes: 0x1200000, generation: 2,
+            entries: [GameStore.Entry(kind: .doomWad, offset: 0, length: 700, name: "a.wad",
+                                      sha256: String(repeating: "c", count: 64))]))
+        XCTAssertEqual(selection.desiredFiles(board: replaced).map(\.name), ["a.wad"])
+        XCTAssertEqual(selection.desiredFiles(board: listed).map(\.name), [])
+    }
+
+    func testHereticByItsLumpsIsNotADoomWad() {
+        XCTAssertEqual(refusal(Self.wad(lumps: ["E1M1", "IMPXA1"]), "renamed.wad", .doomWad),
+                       .notDoom("renamed.wad"))
+    }
+
     func testSpaceCountsSectorsAndBlocksWhatDoesNotFit() {
         var selection = GameDataSelection(quakeOffered: true)
         let wad = try! GameData.identify(Self.wad(), filename: "doom2.wad", kind: .doomWad)

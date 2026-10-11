@@ -97,9 +97,17 @@ public struct GameDataSelection: Equatable, Sendable {
         items.append(item)
     }
 
+    /// Checking a row unchecks any other row of the same stored name: the
+    /// board holds one file by each name, so only one can be kept.
     public mutating func setChecked(_ id: Item.ID, _ checked: Bool) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         items[index].isChecked = checked
+        guard checked else { return }
+        let chosen = items[index]
+        for other in items.indices where other != index
+            && items[other].sameStoredFile(as: chosen) {
+            items[other].isChecked = false
+        }
     }
 
     /// Takes away a chosen file; the cache and the board keep theirs, and a
@@ -177,8 +185,12 @@ public struct GameDataSelection: Equatable, Sendable {
                 if named.contains(where: {
                     !entry.sha256.isEmpty && $0.identified.sha256 == entry.sha256
                 }) { continue }  // its stand-in is unchecked
+                // The row must be for these bytes: an uncheck made against a file
+                // the board has since replaced removes nothing unseen.
                 let row = items.first {
                     $0.source == .board && $0.kind == kind && $0.identified.storedName == entry.name
+                        && $0.identified.sha256 == entry.sha256
+                        && $0.identified.byteCount == entry.length
                 }
                 if row?.isChecked == false { continue }
                 files.append(Self.kept(entry))
