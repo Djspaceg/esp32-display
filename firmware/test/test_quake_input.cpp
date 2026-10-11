@@ -79,6 +79,20 @@ int main() {
     // Odd sizes round down to even.
     const FrameLayout o = frameLayout(481, 323);
     CHECK(o.renderWidth == 480 && o.renderHeight == 322 && o.x == 0 && o.y == 0);
+    // Asked-for 4:3 windows on the 1.75C, unscaled and centred. 372x280 is
+    // the human's choice (its 465.6 px diagonal just fits the 466 px circle);
+    // the even origin puts it at (46,92), a pixel up and left of centre.
+    const FrameLayout b = frameLayout(466, 466, 372, 280);
+    CHECK(b.scale == 1 && b.renderWidth == 372 && b.renderHeight == 280);
+    CHECK(b.width == 372 && b.height == 280 && b.x == 46 && b.y == 92);
+    const FrameLayout c = frameLayout(466, 466, 320, 240);
+    CHECK(c.renderWidth == 320 && c.renderHeight == 240 && c.x == 72 && c.y == 112);
+    // 0x0, an oversized or an undersized request: the whole panel.
+    CHECK(frameLayout(466, 466, 0, 0).renderWidth == 466);
+    CHECK(frameLayout(466, 466, 500, 280).renderWidth == 466);
+    CHECK(frameLayout(466, 466, 300, 200).renderWidth == 466);
+    // A request does not change a panel that scales (the P4's 2x).
+    CHECK(frameLayout(720, 720, 372, 280).renderWidth == 320);
     CHECK(frameLayout(960, 720).scale == 3);
     CHECK(frameLayout(960, 720).renderWidth == 320);
     CHECK(frameLayout(320, 240).scale == 1);

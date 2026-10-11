@@ -52,6 +52,13 @@ void quake_profile_frame(float render, float world, float bmodels, float scan,
 /// Seconds spent building one cache surface (d_surf.c D_CacheSurface).
 void quake_profile_surface_cache(double seconds);
 
+// The S3 gives the second page to the hunk's floor: id's 5.3 MB guard
+// (MINIMUM_MEMORY) is lowered to 5 MB there, which the shareware demos use
+// under half of (2,465 KB at most, serial_s3_diagE.log). host.c reads it.
+#if defined(ARDUINO_ESP32S3_DEV)
+#define QUAKE_PLATFORM_MINIMUM_MEMORY 0x500000
+#endif
+
 // ---- Hardware side (quake_hw_bridge.cpp) ----
 
 /// Sends engine text (Sys_Printf, so the console too) to Serial.
@@ -64,9 +71,18 @@ const char* quake_console_read_line(void);
 void quake_display_render_size(int* width, int* height);
 
 
+/// 2 when frames go to the panel from another core while the next one is drawn
+/// (the S3's 1x panel), so the engine draws into two pages in turn; else 1.
+int quake_display_pages(void);
+
+/// Stops frames going to the panel (the failure card's writes come next).
+void quake_display_quiesce(void);
+
 /// Converts one 8-bit frame through `palette565` (256 big-endian RGB565
-/// entries) and puts it on the panel. Returns only once DMA is done with it;
-/// a panel that never completes ends the session.
+/// entries) and puts it on the panel. With one page it returns once DMA is
+/// done with it; with two it returns once the previous frame is on the panel,
+/// and `pixels` is the panel's until the next call returns. A panel that never
+/// completes ends the session.
 void quake_display_present(const uint8_t* pixels, const uint16_t* palette565);
 
 /// Samples touch, BOOT, USB and Serial and queues what they mean.

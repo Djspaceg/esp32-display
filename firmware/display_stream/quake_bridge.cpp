@@ -55,10 +55,13 @@ extern "C" bool quake_display_blit_blocking(int x0, int y0, int x1, int y1,
 // nothing goes through PSRAM on the way. That was a 62 ms write at 466x466
 // (convert into a PSRAM band, copy it into staging, wait, repeat); the wire
 // alone is about 22 ms at 40 MHz QSPI. Returns once every row is on the panel,
-// or false on a timeout, after which the caller restarts.
+// or false on a timeout, after which the caller restarts. Touch and USB are
+// sampled while waiting only on the Quake task (sampleInput): the S3's panel
+// task on core 0 passes false.
 extern "C" bool quake_display_present_1x(int x0, int y0, int width, int height,
                                          const uint8_t *pixels,
-                                         const uint16_t *palette565) {
+                                         const uint16_t *palette565,
+                                         bool sampleInput) {
   if (panel == nullptr || bcfg == nullptr || pixels == nullptr || width <= 0 ||
       height <= 0 ||
       (size_t)width * sizeof(uint16_t) > PANEL_TRANSFER_STAGE_BYTES) {
@@ -72,7 +75,7 @@ extern "C" bool quake_display_present_1x(int x0, int y0, int width, int height,
     const uint32_t startedAt = millis();
     while (!acquirePanelTransferStaging(0, staging)) {
       if (millis() - startedAt > 1000) return false;
-      quake_input_sample_while_waiting();
+      if (sampleInput) quake_input_sample_while_waiting();
     }
     uint16_t *out = (uint16_t *)staging.pixels;
     const uint8_t *src = pixels + (size_t)row * width;
@@ -83,7 +86,7 @@ extern "C" bool quake_display_present_1x(int x0, int y0, int width, int height,
       return false;
     }
   }
-  return waitForQuakeDma(1000, true);
+  return waitForQuakeDma(1000, sampleInput);
 }
 #endif
 
@@ -126,6 +129,7 @@ static void printQuakeFatal(const char *reason) {
 extern "C" void quake_fail_restart(const char *reason, bool showOnPanel) {
   printQuakeFatal(reason);
   if (showOnPanel) {
+    quake_display_quiesce();
     if (showQuakeFailure(reason)) delay(QUAKE_FAILURE_SHOW_MS);
     printQuakeFatal(reason);
   }

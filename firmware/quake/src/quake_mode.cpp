@@ -14,7 +14,10 @@
 #include "platform/quake_pak_vfs.h"
 #include "platform/quake_platform.h"
 
-extern "C" const char* quake_display_setup(void);
+extern "C" const char* quake_display_setup(int want_width, int want_height);
+
+int quake_render_width = QUAKE_RENDER_WIDTH;
+int quake_render_height = QUAKE_RENDER_HEIGHT;
 extern "C" bool quake_input_setup(void);
 extern "C" void quake_audio_setup(void);
 
@@ -84,7 +87,8 @@ void quake_enter(void) {
   quake_log("pak0.pak: %u bytes on the quake_pak partition",
             (unsigned)quake_pak_bytes());
 
-  const char* displayProblem = quake_display_setup();
+  const char* displayProblem =
+      quake_display_setup(quake_render_width, quake_render_height);
   if (displayProblem != nullptr) {
     // The panel may be what failed, so the reason goes to Serial only.
     quake_fail_restart(displayProblem, false);

@@ -45,7 +45,14 @@ struct FrameLayout {
 // CO5300 takes windows only from even columns and rows): 466x466 on the
 // 1.75C, 360x360 on the 1.85C. The round glass hides the corners, which the
 // view's own corners can afford to lose.
-constexpr FrameLayout frameLayout(int panelWidth, int panelHeight) {
+//
+// Or, when asked (wantWidth and wantHeight, both nonzero and no larger than
+// the panel, and no smaller than the base frame), that size unscaled and
+// centred: 372x280 or 320x240 inside the 1.75C's circle. Only that window is
+// written to the panel. Sizes round down to even, and the origin to even, so a
+// window that cannot sit exactly central sits a pixel up and left of centre.
+constexpr FrameLayout frameLayout(int panelWidth, int panelHeight,
+                                  int wantWidth = 0, int wantHeight = 0) {
   const int sx = panelWidth / RENDER_WIDTH;
   const int sy = panelHeight / RENDER_HEIGHT;
   const int s = sx < sy ? sx : sy;
@@ -53,8 +60,10 @@ constexpr FrameLayout frameLayout(int panelWidth, int panelHeight) {
   int rw = RENDER_WIDTH;
   int rh = RENDER_HEIGHT;
   if (s == 1) {
-    rw = panelWidth & ~1;
-    rh = panelHeight & ~1;
+    const bool asked = wantWidth >= RENDER_WIDTH && wantHeight >= RENDER_HEIGHT &&
+                       wantWidth <= panelWidth && wantHeight <= panelHeight;
+    rw = (asked ? wantWidth : panelWidth) & ~1;
+    rh = (asked ? wantHeight : panelHeight) & ~1;
   }
   // The origin is even: the 1.75C's CO5300 takes windows only from even
   // columns and rows.

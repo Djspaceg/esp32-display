@@ -11,6 +11,9 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -46,12 +49,16 @@ extern int16_t PANEL_H;
 // display_stream/quake_bridge.cpp: the 1x frame straight into DMA staging.
 extern "C" bool quake_display_present_1x(int x0, int y0, int width, int height,
                                          const uint8_t* pixels,
-                                         const uint16_t* palette565);
+                                         const uint16_t* palette565,
+                                         bool sample_input);
 #endif
 
 // display_stream/quake_bridge.cpp: queue a panel region and wait for its DMA.
 extern "C" bool quake_display_blit_blocking(int x0, int y0, int x1, int y1,
                                             const uint16_t* pixels);
+
+void presentTask(void*);  // below, the S3's core-0 panel task
+extern "C" void quake_input_sample_while_waiting(void);  // below
 
 namespace {
 
@@ -78,6 +85,30 @@ constexpr int64_t FPS_WINDOW_US = 5000000;
 int64_t s_window_started = 0;
 uint32_t s_window_frames = 0;
 int64_t s_window_present_us = 0;
+int64_t s_window_wait_us = 0;
+
+// On the S3's 1x panel the frame goes to the panel from a task on core 0
+// (which a Quake boot leaves to the sound output) while the engine draws the
+// next into its other page. Measured at 466x466 (serial_s3_diagE.log): the
+// write is 30.6 ms of a 115-140 ms frame, on top of the render. The P4 keeps
+// its one page and blocking write.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+constexpr bool OVERLAP_1X = true;
+#else
+constexpr bool OVERLAP_1X = false;
+#endif
+constexpr uint32_t PRESENT_TASK_STACK = 4096;
+constexpr UBaseType_t PRESENT_TASK_PRIORITY = 5;  // below the sound output's 10
+constexpr BaseType_t PRESENT_TASK_CORE = 0;
+bool s_overlap = false;  // set once the panel task is running
+TaskHandle_t s_present_task = nullptr;
+SemaphoreHandle_t s_present_go = nullptr;
+SemaphoreHandle_t s_present_done = nullptr;
+const uint8_t* s_present_pixels = nullptr;
+// The palette as it was when the frame was handed over: the engine may change
+// its own (a flash of damage) while the frame is still going out.
+uint16_t* s_present_palette = nullptr;
+volatile int64_t s_present_last_us = 0;
 // r_dspeeds' stage times summed over the window (quake_profile_frame), when
 // the cvar is on: render, world, brush models, edge scan and spans, alias
 // models, view model, particles; and the cache-surface builds inside the scan.
@@ -208,8 +239,9 @@ void serviceUsb() {
 // ---- Setup, from quake_mode.cpp ------------------------------------------
 
 // NULL when the panel is ready for frames, else why not.
-extern "C" const char* quake_display_setup(void) {
-  s_layout = quakeinput::frameLayout(PANEL_W, PANEL_H);
+extern "C" const char* quake_display_setup(int want_width, int want_height) {
+  s_layout =
+      quakeinput::frameLayout(PANEL_W, PANEL_H, want_width, want_height);
   if (s_layout.scale == 0) return "panel too small for a 320x240 frame";
   s_frame = (uint16_t*)heap_caps_malloc(
       (size_t)s_layout.width * QUAKE_BAND_ROWS * s_layout.scale *
@@ -225,12 +257,43 @@ extern "C" const char* quake_display_setup(void) {
       quake_display_blit_blocking(0, 0, PANEL_W, PANEL_H, black);
   if (!ok) return "panel DMA did not complete";  // still DMA's: leak it
   heap_caps_free(black);
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  if (OVERLAP_1X && s_layout.scale == 1) {
+    s_present_palette = (uint16_t*)heap_caps_malloc(
+        256 * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_present_go = xSemaphoreCreateBinary();
+    s_present_done = xSemaphoreCreateBinary();
+    // xTaskCreate puts the stack in internal RAM.
+    if (s_present_palette == nullptr || s_present_go == nullptr ||
+        s_present_done == nullptr ||
+        xTaskCreatePinnedToCore(presentTask, "quake_present",
+                                PRESENT_TASK_STACK, nullptr,
+                                PRESENT_TASK_PRIORITY, &s_present_task,
+                                PRESENT_TASK_CORE) != pdPASS) {
+      return "no internal RAM for the panel task";
+    }
+    xSemaphoreGive(s_present_done);  // nothing in flight yet
+    s_overlap = true;
+  }
+#endif
   quake_log("frame %dx%d rendered, %dx%d at %dx scale, at (%d,%d) on the "
             "%dx%d panel",
             s_layout.renderWidth, s_layout.renderHeight, s_layout.width,
             s_layout.height, s_layout.scale, s_layout.x, s_layout.y, PANEL_W,
             PANEL_H);
   return nullptr;
+}
+
+extern "C" int quake_display_pages(void) {
+  return OVERLAP_1X && s_layout.scale == 1 ? 2 : 1;
+}
+
+// For the failure card (display_stream/quake_bridge.cpp): waits up to a
+// second for the panel task's frame and keeps it from starting another, so
+// the card's writes are the panel's only ones. A no-op on the panel task.
+extern "C" void quake_display_quiesce(void) {
+  if (!s_overlap || xTaskGetCurrentTaskHandle() == s_present_task) return;
+  (void)xSemaphoreTake(s_present_done, pdMS_TO_TICKS(1000));
 }
 
 extern "C" void quake_display_render_size(int* width, int* height) {
@@ -321,9 +384,21 @@ extern "C" void quake_display_present(const uint8_t* pixels,
   // One page, written in bands on this task: at 466x466 a second page and a
   // whole-panel RGB565 copy would cost the engine heap 650 KB it cannot spare.
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-  if (scale == 1) {
+  if (s_overlap) {
+    // The previous frame must be on the panel: its page is the one the
+    // engine draws into next.
+    while (xSemaphoreTake(s_present_done, pdMS_TO_TICKS(1)) != pdTRUE) {
+      quake_input_sample_while_waiting();
+    }
+    s_window_wait_us += esp_timer_get_time() - started;
+    s_window_present_us += s_present_last_us;
+    memcpy(s_present_palette, palette565, 256 * sizeof(uint16_t));
+    s_present_pixels = pixels;
+    xSemaphoreGive(s_present_go);
+  } else if (scale == 1) {
     if (!quake_display_present_1x(s_layout.x, s_layout.y, renderWidth,
-                                  s_layout.renderHeight, pixels, palette565)) {
+                                  s_layout.renderHeight, pixels, palette565,
+                                  true)) {
       quake_fail_restart("panel DMA did not complete", false);
     }
   } else
@@ -362,17 +437,20 @@ extern "C" void quake_display_present(const uint8_t* pixels,
   }
 
   const int64_t now = esp_timer_get_time();
-  s_window_present_us += now - started;
+  if (!s_overlap) s_window_present_us += now - started;
   ++s_window_frames;
   if (s_window_started == 0) s_window_started = now;
   const int64_t elapsed = now - s_window_started;
   if (elapsed >= FPS_WINDOW_US) {
     const float seconds = (float)elapsed / 1e6f;
+    // With the write overlapped, "present" is the panel task's time per
+    // frame and "wait" what the engine spent waiting for it.
     quake_log("fps %.1f (%lu frames in %.1f s), present %.1f ms/frame, "
-              "psram free %u largest %u, internal free %u",
+              "wait %.1f ms/frame, psram free %u largest %u, internal free %u",
               (float)s_window_frames / seconds, (unsigned long)s_window_frames,
               seconds,
               (float)s_window_present_us / 1000.0f / (float)s_window_frames,
+              (float)s_window_wait_us / 1000.0f / (float)s_window_frames,
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -392,7 +470,24 @@ extern "C" void quake_display_present(const uint8_t* pixels,
     s_window_started = now;
     s_window_frames = 0;
     s_window_present_us = 0;
+    s_window_wait_us = 0;
   }
+}
+
+void presentTask(void*) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  while (true) {
+    xSemaphoreTake(s_present_go, portMAX_DELAY);
+    const int64_t started = esp_timer_get_time();
+    if (!quake_display_present_1x(s_layout.x, s_layout.y,
+                                  s_layout.renderWidth, s_layout.renderHeight,
+                                  s_present_pixels, s_present_palette, false)) {
+      quake_fail_restart("panel DMA did not complete", false);
+    }
+    s_present_last_us = esp_timer_get_time() - started;
+    xSemaphoreGive(s_present_done);
+  }
+#endif
 }
 
 extern "C" void quake_profile_frame(float render, float world, float bmodels,

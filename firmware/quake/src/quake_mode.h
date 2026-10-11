@@ -47,6 +47,25 @@ constexpr bool quakeSupportsBoard(board::Variant variant) {
 }
 #endif
 
+// The render size on a 1x panel (the S3 boards), a build switch: 0x0 renders
+// the whole panel (466x466 on the 1.75C); 372x280 or 320x240 render that 4:3
+// window unscaled and centred inside the round glass. A test image may set
+// quake_render_width/height before quake_enter() to try another.
+#ifndef QUAKE_RENDER_WIDTH
+#define QUAKE_RENDER_WIDTH 0
+#endif
+#ifndef QUAKE_RENDER_HEIGHT
+#define QUAKE_RENDER_HEIGHT 0
+#endif
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern int quake_render_width;
+extern int quake_render_height;
+#ifdef __cplusplus
+}
+#endif
+
 // The engine heap ("-mem"): id's own default is 8 MB and its floor 5.3 MB;
 // 16 MB leaves room for the larger shareware levels with PSRAM to spare. The
 // S3's 8 MB of PSRAM cannot give 16, so the heap is this or what PSRAM has

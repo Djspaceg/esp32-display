@@ -183,6 +183,8 @@ viddef_t vid;
 static int vid_width;
 static int vid_height;
 static byte* vid_buffer;
+static byte* vid_buffer2;  // the second page, with two
+static int vid_page;
 static short* zbuffer;
 static byte* surfcache;
 // Read per pixel by the scaler: internal RAM, allocated by VID_Init.
@@ -229,7 +231,7 @@ void VID_Init(unsigned char* palette) {
   vid.maxwarpwidth = vid_width < WARP_WIDTH ? vid_width : WARP_WIDTH;
   vid.maxwarpheight = vid_height < WARP_HEIGHT ? vid_height : WARP_HEIGHT;
   vid.aspect = 1.0;
-  vid.numpages = 1;
+  vid.numpages = vid_buffer2 != NULL ? 2 : 1;
   vid.colormap = host_colormap;
   vid.fullbright = 256 - LittleLong(*((int*)vid.colormap + 2048));
   vid.rowbytes = vid.conrowbytes = vid_width;
@@ -239,6 +241,7 @@ void VID_Init(unsigned char* palette) {
 
   palette565 = (uint16_t*)quake_alloc_prefer_internal(256 * sizeof(uint16_t));
   if (palette565 == NULL) Sys_Error("no memory for the palette");
+  vid_page = 0;
   vid.buffer = vid.conbuffer = vid_buffer;
   d_pzbuffer = zbuffer;
   D_InitCaches(surfcache, surfcache_size);
@@ -253,6 +256,13 @@ void VID_Update(vrect_t* rects) {
   (void)rects;
   ++frames_rendered;
   quake_display_present(vid.buffer, palette565);
+  // With two pages the panel is still being given this one: draw the next
+  // frame into the other. vid.numpages tells the engine each page needs its
+  // own copy of what it redraws only on change (the status bar).
+  if (vid.numpages > 1) {
+    vid_page ^= 1;
+    vid.buffer = vid.conbuffer = vid_page ? vid_buffer2 : vid_buffer;
+  }
 }
 
 void D_BeginDirectRect(int x, int y, byte* pbitmap, int width, int height) {
@@ -300,8 +310,12 @@ static const char* quake_vid_allocate(void) {
       {"surface cache", (void**)&surfcache, (size_t)surfcache_size, false},
       {"depth buffer", (void**)&zbuffer, (size_t)pixels * sizeof(short), true},
       {"frame", (void**)&vid_buffer, (size_t)pixels, true},
+      {"second page", (void**)&vid_buffer2, (size_t)pixels, true},
   };
-  for (size_t i = 0; i < sizeof(buffers) / sizeof(buffers[0]); ++i) {
+  const size_t count = quake_display_pages() > 1
+                           ? sizeof(buffers) / sizeof(buffers[0])
+                           : sizeof(buffers) / sizeof(buffers[0]) - 1;
+  for (size_t i = 0; i < count; ++i) {
     const size_t largest =
         heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     *buffers[i].where =

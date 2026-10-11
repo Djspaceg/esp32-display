@@ -784,6 +784,9 @@ void Host_Init (quakeparms_t *parms)
 		minimum_memory = MINIMUM_MEMORY;
 	else
 		minimum_memory = MINIMUM_MEMORY_LEVELPAK;
+#ifdef QUAKE_PLATFORM_MINIMUM_MEMORY
+	minimum_memory = QUAKE_PLATFORM_MINIMUM_MEMORY;	// espdisp: S3 floor
+#endif
 
 	if (COM_CheckParm ("-minmemory"))
 		parms->memsize = minimum_memory;
