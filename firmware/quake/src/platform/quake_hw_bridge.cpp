@@ -78,6 +78,12 @@ constexpr int64_t FPS_WINDOW_US = 5000000;
 int64_t s_window_started = 0;
 uint32_t s_window_frames = 0;
 int64_t s_window_present_us = 0;
+// r_dspeeds' stage times summed over the window (quake_profile_frame), when
+// the cvar is on: render, world, brush models, edge scan and spans, alias
+// models, view model, particles; and the cache-surface builds inside the scan.
+float s_profile_ms[7] = {};
+uint32_t s_profile_frames = 0;
+double s_profile_surface_s = 0;
 
 // ---- Input -----------------------------------------------------------------
 
@@ -370,10 +376,36 @@ extern "C" void quake_display_present(const uint8_t* pixels,
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    if (s_profile_frames > 0) {
+      const float n = (float)s_profile_frames;
+      quake_log("profile ms/frame: render %.1f = world %.1f + bmodels %.1f + "
+                "scan %.1f (of which surface cache %.1f) + alias %.1f + "
+                "viewmodel %.1f + particles %.1f; present %.1f",
+                s_profile_ms[0] / n, s_profile_ms[1] / n, s_profile_ms[2] / n,
+                s_profile_ms[3] / n, (float)(s_profile_surface_s * 1000.0) / n,
+                s_profile_ms[4] / n, s_profile_ms[5] / n, s_profile_ms[6] / n,
+                (float)s_window_present_us / 1000.0f / (float)s_window_frames);
+      for (float& v : s_profile_ms) v = 0;
+      s_profile_frames = 0;
+      s_profile_surface_s = 0;
+    }
     s_window_started = now;
     s_window_frames = 0;
     s_window_present_us = 0;
   }
+}
+
+extern "C" void quake_profile_frame(float render, float world, float bmodels,
+                                    float scan, float entities,
+                                    float viewmodel, float particles) {
+  const float v[7] = {render, world, bmodels, scan, entities, viewmodel,
+                      particles};
+  for (int i = 0; i < 7; ++i) s_profile_ms[i] += v[i];
+  ++s_profile_frames;
+}
+
+extern "C" void quake_profile_surface_cache(double seconds) {
+  s_profile_surface_s += seconds;
 }
 
 extern "C" void quake_input_service(void) {

@@ -6,3 +6,4 @@
 
 #include "quake_renames.h"
 #include "quake_statics.h"
+#include "quake_platform.h"

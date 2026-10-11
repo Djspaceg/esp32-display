@@ -225,9 +225,10 @@ void R_PrintDSpeeds (void)
 	dv_time = (dv_time2 - dv_time1) * 1000;
 	ms = (r_time2 - r_time1) * 1000;
 
-	Con_Printf ("%3i %4.1fp %3iw %4.1fb %3is %4.1fe %4.1fv\n",
-				(int)ms, dp_time, (int)rw_time, db_time, (int)se_time, de_time,
-				dv_time);
+	// espdisp: summed and printed every 5 s with the frame rate instead of a
+	// console line per frame (quake_platform.h).
+	quake_profile_frame (ms, rw_time, db_time, se_time, de_time, dv_time,
+						 dp_time);
 }
 
 

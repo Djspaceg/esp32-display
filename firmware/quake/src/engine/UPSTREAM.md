@@ -38,8 +38,8 @@ from outside, in the prelude every engine unit includes first
   the replaced `vid_null.c` are allocated by the platform layer instead).
 - `quake_renames.h` renames the globals Doom's engine also defines.
 
-The engine sources carry five kinds of small edit, each marked `espdisp:`,
-all but the sound guard for the same reason (internal RAM in the streaming
+The engine sources carry six kinds of small edit, each marked `espdisp:`,
+all but the sound guard and the profile hooks for the same reason (internal RAM in the streaming
 firmware):
 
 - Nine function-local static buffers moved to file scope under their own
@@ -50,6 +50,10 @@ firmware):
 - `S_Init`'s "Sound sampling rate" line guarded by `if (shm)`: upstream reads
   through a NULL `shm` when the sound device fails to start, so a board without
   audio would crash instead of playing silent.
+- With `r_dspeeds 1`, `R_PrintDSpeeds` (`r_misc.c`) hands its per-stage times
+  to the platform, which prints them summed every 5 s, instead of a console
+  line every frame, and `D_CacheSurface` (`d_surf.c`) times each cache-surface
+  build: the S3's frame-time profile.
 - The global `channels` array of `snd_dma.c` renamed `sound_channels`, in
   `sound.h`, `snd_dma.c` and `snd_mix.c`: `channels` is also a member of two
   sound structs, which the relocation would rename too.

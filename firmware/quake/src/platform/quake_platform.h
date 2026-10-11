@@ -43,6 +43,15 @@ void quake_audio_set_rate(uint32_t rate);
 /// `frames` frames of the mixing ring, on the bridge's output task.
 void quake_audio_render(int16_t* out, size_t frames, unsigned channels);
 
+/// r_dspeeds' per-stage times for one frame, in ms (r_misc.c R_PrintDSpeeds):
+/// render total, world edges, brush models, edge scan with span drawing and
+/// surface caching, alias models, view model, particles.
+void quake_profile_frame(float render, float world, float bmodels, float scan,
+                         float entities, float viewmodel, float particles);
+
+/// Seconds spent building one cache surface (d_surf.c D_CacheSurface).
+void quake_profile_surface_cache(double seconds);
+
 // ---- Hardware side (quake_hw_bridge.cpp) ----
 
 /// Sends engine text (Sys_Printf, so the console too) to Serial.

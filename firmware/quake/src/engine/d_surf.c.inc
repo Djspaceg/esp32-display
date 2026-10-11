@@ -327,7 +327,11 @@ surfcache_t *D_CacheSurface (msurface_t *surface, int miplevel)
 	r_drawsurf.surf = surface;
 
 	c_surf++;
-	R_DrawSurface ();
+	{	// espdisp: time spent building cache surfaces, for the S3 profile
+		const double espdisp_t0 = Sys_FloatTime ();
+		R_DrawSurface ();
+		quake_profile_surface_cache (Sys_FloatTime () - espdisp_t0);
+	}
 
 	return surface->cachespots[miplevel];
 }
