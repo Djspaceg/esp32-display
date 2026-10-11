@@ -245,6 +245,24 @@ struct PanelSnapshot: Identifiable, Equatable {
             reportedSSID: currentSSID, connected: networkConnected)
     }
 
+    /// The network name behind `boardNetworkDescription`, by the same
+    /// evidence and precedence, for the WiFi pop-up's selection. nil when the
+    /// board has named none.
+    func boardSSID(asOf now: Date) -> String? {
+        let usbName = currentSSID.flatMap { $0.isEmpty ? nil : $0 }
+        if let lastReplyAt, now.timeIntervalSince(lastReplyAt) < 10 {
+            let usbIsNewer = networkReportedAt.map { reported in
+                announcedAt.map { reported > $0 } ?? true
+            } ?? false
+            if let usbName, usbIsNewer || announcedSSID == nil { return usbName }
+            return announcedSSID
+        }
+        if let lastReplyAt, networkReportedAt.map({ lastReplyAt > $0 }) ?? true {
+            return usbName ?? announcedSSID
+        }
+        return usbName
+    }
+
     func isOnline(asOf now: Date) -> Bool {
         guard let lastHeartbeatAt else { return false }
         return now.timeIntervalSince(lastHeartbeatAt) < 10

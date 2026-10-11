@@ -937,30 +937,29 @@ struct PanelDetailView: View {
 
     @ViewBuilder
     private var connectionSection: some View {
-        let presetReport = manager.wifiPresetSyncReport(for: panel.serviceName)
+        let now = Date()
         Section {
+            WifiNetworkRows(
+                model: WifiNetworkRows.model(
+                    current: panel.boardSSID(asOf: now),
+                    currentDescription: panel.boardNetworkDescription(asOf: now),
+                    savedNetworks: manager.savedNetworkNames,
+                    report: manager.wifiPresetSyncReport(for: panel.serviceName),
+                    switchState: manager.wifiSwitchState(
+                        for: panel.serviceName, asOf: now),
+                    unavailableReason: manager.wifiSwitchUnavailableReason(
+                        for: panel.serviceName)),
+                onChoose: { manager.switchWifi(to: $0, for: panel.serviceName) },
+                onOpenSettings: { SettingsPane.open(.wifiNetworks) })
             LabeledContent("Address") {
                 CopyableAddress(address: panel.address)
             }
-            LabeledContent("WiFi signal", value: panel.signalDescription)
-            // Read only: the saved networks belong to the whole app, so this
-            // page says where this display stands and links to Settings.
-            WifiNetworkRows(
-                connectedDescription: panel.boardNetworkDescription(asOf: Date()),
-                presetDescription: WifiNetworkRows.presetDescription(
-                    presetReport, savedNetworkCount: manager.savedNetworkNames.count),
-                skippedDescription: WifiNetworkRows.skippedDescription(
-                    presetReport, savedNetworkNames: manager.savedNetworkNames),
-                onOpenSettings: { SettingsPane.open(.wifiNetworks) })
+            LabeledContent("Signal strength", value: panel.signalDescription)
         } header: {
             Text("Network Connection")
         } footer: {
-            Text("Connected WiFi is the network the display itself reports, "
-                + "over WiFi or USB. "
-                + "The saved networks are set in Settings, once for every "
-                + "display, and the first 10 are copied to this display's "
-                + "preset slots whenever it is connected by USB. Its own "
-                + "picker chooses between them.")
+            Text("Switching networks restarts the display, and needs it "
+                + "connected to this Mac by USB.")
         }
     }
 

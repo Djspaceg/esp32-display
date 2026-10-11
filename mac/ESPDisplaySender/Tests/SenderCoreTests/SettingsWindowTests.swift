@@ -22,30 +22,34 @@ final class SettingsWindowTests: XCTestCase {
 
     // MARK: the display page
 
-    /// Every control the display page used to offer for the saved networks -
-    /// the picker, Apply, Manage, the preset sheet and its Copy Now - is gone.
-    /// What is left reads, and links to Settings.
-    func testADisplayPageHasNoWifiEditorOnlyALinkToSettings() {
+    /// The section reads, top down: the WiFi pop-up with its link to
+    /// Settings, the address, the signal. The rows that explained presets and
+    /// copies are gone, and the pop-up offers the saved networks by name.
+    func testTheDisplayPageOffersTheSavedNetworksAboveAddressAndSignal() throws {
         let (manager, panel) = makeManager(saved: ["Studio WiFi", "Guest"])
         let page = ViewReading(PanelDetailView(panel: panel, manager: manager))
 
-        // The reading reached the section the controls used to be in.
-        XCTAssertTrue(page.strings.contains("Network Connection"))
-        XCTAssertTrue(page.strings.contains("WiFi preset"))
-        XCTAssertNotNil(page.button("WiFi Settings…"), "the line keeps its link to Settings")
-        for gone in ["Apply", "Manage…", "Add…", "Show Presets...", "Copy Now",
-                     "Edit Saved Networks…", "Add Network…", "Edit…", "Remove",
-                     "Move Up", "Move Down"] {
+        let strings = page.strings
+        let section = try XCTUnwrap(strings.firstIndex(of: "Network Connection"))
+        let wifi = try XCTUnwrap(strings.firstIndex(of: "WiFi"))
+        let address = try XCTUnwrap(strings.firstIndex(of: "Address"))
+        let signal = try XCTUnwrap(strings.firstIndex(of: "Signal strength"))
+        XCTAssertTrue(section < wifi && wifi < address && address < signal,
+            "the rows are not WiFi, Address, Signal strength in that order")
+        XCTAssertTrue(strings.contains("Studio WiFi") && strings.contains("Guest"),
+            "the pop-up does not offer the saved networks")
+        XCTAssertTrue(page.contains("SwiftUI.Picker"))
+        XCTAssertNotNil(page.button("WiFi Settings…"), "the row keeps its link to Settings")
+        for gone in ["WiFi preset", "Could not copy", "Connected WiFi", "WiFi signal"] {
+            XCTAssertFalse(strings.contains(gone), "\"\(gone)\" is still on the display page")
+        }
+        for gone in ["Apply", "Manage…", "Copy Now", "Add Network…", "Edit…", "Remove"] {
             XCTAssertNil(page.button(gone), "\"\(gone)\" is still on the display page")
         }
-        XCTAssertFalse(page.strings.contains("Saved on this Mac"))
-        XCTAssertFalse(
-            page.strings.contains("Studio WiFi") || page.strings.contains("Guest"),
-            "a saved network is still offered on the display page")
         XCTAssertFalse(page.contains("SwiftUI.SecureField"))
     }
 
-    /// Pressing the page's link asks for the Settings window at WiFi Networks.
+    /// Pressing the row's link asks for the Settings window at WiFi Networks.
     func testTheDisplayPageLinkOpensSettingsAtWifiNetworks() throws {
         let (manager, panel) = makeManager(saved: ["Studio WiFi"])
         let link = try XCTUnwrap(
@@ -71,39 +75,63 @@ final class SettingsWindowTests: XCTestCase {
         }
     }
 
-    /// The line says which preset the board is on, from the last copy's read.
-    func testThePresetLineSaysWhichSlotTheBoardIsOn() {
-        func report(active: Int?, slots: [Int: String]) -> WifiPresetSyncReport {
-            WifiPresetSyncReport(
-                snapshot: WifiPresetSnapshot(
-                    roster: ConfigCommands.WiFiPresetRoster(
-                        capacity: 10, validSlots: Set(slots.keys),
-                        activeSlot: active, localSelectorAvailable: true),
-                    slots: Dictionary(uniqueKeysWithValues: slots.map { slot, ssid in
-                        (slot, ConfigCommands.WiFiPresetSlot(
-                            slot: slot, ssid: ssid, hasPassword: true,
-                            active: slot == active))
-                    })),
-                omitted: [], unusable: [], commandCount: 0)
+    /// The pop-up selects the board's own network. A network this Mac has not
+    /// saved, or none reported, is shown as an item of its own so the pop-up
+    /// still says where the board is.
+    func testThePopUpSelectsTheBoardsNetwork() {
+        func model(_ current: String?, _ description: String) -> WifiNetworkRows.Model {
+            WifiNetworkRows.model(
+                current: current, currentDescription: description,
+                savedNetworks: ["Home", "Guest"], report: nil, switchState: nil,
+                unavailableReason: nil)
         }
+        XCTAssertEqual(model("Guest", "Guest").selection, "Guest")
+        XCTAssertNil(model("Guest", "Guest").unsavedItem)
         XCTAssertEqual(
-            WifiNetworkRows.presetDescription(
-                report(active: 3, slots: [1: "Home", 3: "Studio WiFi"]),
-                savedNetworkCount: 2),
-            "Studio WiFi (slot 3 of 10, at the last USB copy)")
+            model("Neighbours", "Neighbours").unsavedItem,
+            "Neighbours (not saved on this Mac)")
         XCTAssertEqual(
-            WifiNetworkRows.presetDescription(
-                report(active: nil, slots: [1: "Home"]), savedNetworkCount: 1),
-            "None at the last USB copy (joined through its own WiFi setting)")
+            model("Home", "Not answering (set to \"Home\")").selection, "Home")
         XCTAssertEqual(
-            WifiNetworkRows.presetDescription(nil, savedNetworkCount: 4),
-            "Not read yet (copied when connected by USB)")
+            model("Home", "Not answering (set to \"Home\")").statusNote,
+            "Not answering (set to \"Home\")",
+            "the pop-up shows only the name, so the rest is said under it")
+        XCTAssertNil(model("Guest", "Guest").statusNote)
+        XCTAssertNil(model(nil, "Unknown (not reported yet)").selection)
         XCTAssertEqual(
-            WifiNetworkRows.presetDescription(nil, savedNetworkCount: 0),
-            "None saved on this Mac")
+            model(nil, "Unknown (not reported yet)").unsavedItem,
+            "Unknown (not reported yet)")
     }
 
-    private func skippedReport(
+    /// A switch in flight selects the network it is going to; a failed one is
+    /// the row's error; with neither, the error is a network the last copy
+    /// could not read, and an empty password is never one.
+    func testTheRowShowsASwitchAndItsError() {
+        let report = unreadableReport(unusable: ["Office"])
+        func model(_ state: WifiSwitchState?) -> WifiNetworkRows.Model {
+            WifiNetworkRows.model(
+                current: "Home", currentDescription: "Home",
+                savedNetworks: ["Home", "Office", "Guest"], report: report,
+                switchState: state, unavailableReason: nil)
+        }
+        let switching = model(.switching("Guest", since: Date()))
+        XCTAssertEqual(switching.selection, "Guest")
+        XCTAssertNil(switching.problem)
+        XCTAssertEqual(model(.failed("The display refused it.")).problem,
+            "The display refused it.")
+        XCTAssertEqual(
+            model(nil).problem,
+            "The password for \"Office\" could not be read from the Keychain, "
+                + "so it is not on this display. Enter it again in Settings.")
+        XCTAssertNil(WifiNetworkRows.model(
+            current: "Home", currentDescription: "Home",
+            savedNetworks: ["Home", "Guest"],
+            report: unreadableReport(unusable: []), switchState: nil,
+            unavailableReason: nil).problem,
+            "an open network is not a copy problem")
+    }
+
+    private func unreadableReport(
         unusable: [String], omitted: [String] = [], onBoard: [Int: String] = [1: "Home"]
     ) -> WifiPresetSyncReport {
         WifiPresetSyncReport(
@@ -119,55 +147,44 @@ final class SettingsWindowTests: XCTestCase {
             omitted: omitted, unusable: unusable, commandCount: 0)
     }
 
-    /// A saved network the copy had to skip is named on a row of its own.
-    /// Otherwise Settings lists it, the board's picker does not, and nothing
-    /// says why.
-    func testTheSkippedRowNamesSavedNetworksTheCopyCouldNotUse() {
+    /// The error names the networks whose password could not be read. One
+    /// merely past the tenth slot is not an error.
+    func testTheErrorNamesNetworksWhosePasswordCouldNotBeRead() {
         let saved = ["Home", "Office", "Guest", "Lab", "Eleventh"]
         func row(_ report: WifiPresetSyncReport?) -> String? {
-            WifiNetworkRows.skippedDescription(report, savedNetworkNames: saved)
+            WifiNetworkRows.unreadableDescription(report, savedNetworkNames: saved)
         }
         XCTAssertNil(row(nil))
-        XCTAssertNil(row(skippedReport(unusable: [])))
-        // Past the tenth slot is what the section footer already explains.
+        XCTAssertNil(row(unreadableReport(unusable: [])))
+        XCTAssertNil(row(unreadableReport(unusable: [], omitted: ["Eleventh"])))
         XCTAssertEqual(
-            row(skippedReport(unusable: ["Office"], omitted: ["Eleventh"])),
-            row(skippedReport(unusable: ["Office"])))
-        XCTAssertEqual(
-            row(skippedReport(unusable: ["Office"])),
-            "Office: no password a display accepts could be read for it at "
-                + "the last USB copy. Enter it again in Settings.")
-        XCTAssertEqual(
-            row(skippedReport(unusable: ["Office", "Guest", "Lab"])),
-            "Office, Guest and Lab: no passwords a display accepts could be "
-                + "read for them at the last USB copy. Enter them again in "
-                + "Settings.")
+            row(unreadableReport(unusable: ["Office", "Guest", "Lab"])),
+            "The passwords for \"Office\", \"Guest\" and \"Lab\" could not be "
+                + "read from the Keychain, so they are not on this display. Enter "
+                + "them again in Settings.")
     }
 
-    /// The report is only replaced by the next USB copy, and a display is
-    /// usually on WiFi alone, so the row checks it against now: a network no
-    /// longer saved is not named, and neither is one the board still holds
-    /// (the slot it is joined through, which the copy never touches).
-    func testTheSkippedRowLeavesOutWhatNoLongerApplies() {
-        let report = skippedReport(
+    /// The report is only replaced by the next USB copy, so the error checks
+    /// it against now: a network no longer saved is not named, and neither is
+    /// one the board still holds.
+    func testTheErrorLeavesOutWhatNoLongerApplies() {
+        let report = unreadableReport(
             unusable: ["Office", "Guest"], onBoard: [1: "Home", 3: "Guest"])
         XCTAssertEqual(
-            WifiNetworkRows.skippedDescription(
+            WifiNetworkRows.unreadableDescription(
                 report, savedNetworkNames: ["Home", "Office", "Guest"]),
-            "Office: no password a display accepts could be read for it at "
-                + "the last USB copy. Enter it again in Settings.")
-        XCTAssertNil(WifiNetworkRows.skippedDescription(
+            "The password for \"Office\" could not be read from the Keychain, "
+                + "so it is not on this display. Enter it again in Settings.")
+        XCTAssertNil(WifiNetworkRows.unreadableDescription(
             report, savedNetworkNames: ["Home", "Guest"]))
-        XCTAssertNil(WifiNetworkRows.skippedDescription(
-            report, savedNetworkNames: []))
     }
 
-    /// Entering the network again is what the row asks for, so saving it
-    /// takes it off the row at once, with no board attached to copy to.
+    /// Entering the network again is what the error asks for, so saving it
+    /// clears the error at once, with no board attached to copy to.
     func testSavingASkippedNetworkTakesItOffTheRow() {
         let (manager, panel) = makeManager(saved: ["Home", "Office", "Guest"])
         manager.wifiPresetSyncReports["020000123456"] =
-            skippedReport(unusable: ["Office", "Guest"])
+            unreadableReport(unusable: ["Office", "Guest"])
         XCTAssertNil(manager.saveNetwork(
             ssid: "Office", password: "new password"))
         XCTAssertEqual(

@@ -1,4 +1,5 @@
 import AppKit
+import SenderProtocol
 import SwiftUI
 import XCTest
 @testable import SenderCore
@@ -57,15 +58,38 @@ final class WifiSettingsCaptureTests: XCTestCase {
             name: "settings-0-sidebar")
         try capture(
             Form {
-                Section("Network Connection") {
-                    WifiNetworkRows(
-                        connectedDescription: "Studio WiFi",
-                        presetDescription: "Studio WiFi (slot 1 of 10, at the last USB copy)")
+                Section {
+                    WifiNetworkRows(model: WifiNetworkRows.Model(
+                        savedNetworks: ["Stephens Manor", "Alkai-A2", "Guest"],
+                        current: "Stephens Manor",
+                        currentDescription: "Stephens Manor"))
+                    LabeledContent("Address", value: "192.168.1.159")
+                    LabeledContent("Signal strength", value: "Excellent (-43 dBm)")
+                } header: {
+                    Text("Network Connection")
+                } footer: {
+                    Text("Switching networks restarts the display, and needs it "
+                        + "connected to this Mac by USB.")
+                }
+                Section("With a copy problem") {
+                    WifiNetworkRows(model: WifiNetworkRows.Model(
+                        savedNetworks: ["Stephens Manor", "Alkai-A2", "Guest"],
+                        current: "Stephens Manor",
+                        currentDescription: "Stephens Manor",
+                        problem: WifiNetworkRows.unreadableDescription(
+                            WifiPresetSyncReport(
+                                snapshot: WifiPresetSnapshot(
+                                    roster: ConfigCommands.WiFiPresetRoster(
+                                        capacity: 10, validSlots: [], activeSlot: nil,
+                                        localSelectorAvailable: true),
+                                    slots: [:]),
+                                omitted: [], unusable: ["Alkai-A2"], commandCount: 0),
+                            savedNetworkNames: ["Alkai-A2"])))
                 }
             }
             .formStyle(.grouped)
             .labeledContentStyle(.labelColumn),
-            size: .init(width: 620, height: 200), to: output,
+            size: .init(width: 620, height: 380), to: output,
             name: "wifi-2-board-network-rows")
     }
 

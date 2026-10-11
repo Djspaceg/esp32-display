@@ -349,6 +349,65 @@ extension WifiConfigUI {
         }
     }
 
+    /// What switching a board to a saved network did.
+    struct WifiPresetSwitch: Equatable, Sendable {
+        /// The copy that ran first, so the board holds the current collection.
+        var report: WifiPresetSyncReport
+        /// Whether `CFGWIFIUSE` was sent, which restarts the board. False when
+        /// it was already joined through the chosen network's slot.
+        var restarted: Bool
+    }
+
+    /// Switch a board to one of the saved networks, the choice made on its
+    /// page. The saved collection is copied first, so the chosen network is in
+    /// one of the board's slots, then that slot is chosen with `CFGWIFIUSE`,
+    /// which restarts the board onto it.
+    static func switchSavedWifiPreset(
+        to ssid: String,
+        savedSSIDs: [String],
+        credentials: [String: SavedWiFiCredential],
+        port: String,
+        send: WifiPresetCommandSender = {
+            command, port, timeout in
+            sendCommand(command, port: port, timeout: timeout)
+        }
+    ) -> Result<WifiPresetSwitch, ConfigFailure> {
+        let report: WifiPresetSyncReport
+        switch syncSavedWifiPresets(
+            savedSSIDs: savedSSIDs, credentials: credentials, port: port, send: send)
+        {
+        case .success(let copied): report = copied
+        case .failure(let failure): return .failure(failure)
+        }
+        if report.snapshot.activeSSID == ssid {
+            return .success(WifiPresetSwitch(report: report, restarted: false))
+        }
+        guard let slot = report.snapshot.slots.values
+            .first(where: { $0.ssid == ssid })?.slot,
+            let command = ConfigCommands.useWifiPreset(slot: slot)
+        else {
+            let reason: String
+            if report.unusable.contains(ssid) {
+                reason = "The password for \"\(ssid)\" could not be read from "
+                    + "the Keychain. Enter it again in Settings."
+            } else if report.omitted.contains(ssid) {
+                reason = "\"\(ssid)\" did not fit in this display's slots. "
+                    + "Drag it higher in Settings."
+            } else {
+                reason = "\"\(ssid)\" is not on this display."
+            }
+            return .failure(ConfigFailure(title: "Could not switch WiFi", message: reason))
+        }
+        switch send(command, port, 6) {
+        case .success:
+            return .success(WifiPresetSwitch(report: report, restarted: true))
+        case .failure(let reason):
+            return .failure(ConfigFailure(
+                title: "Could not switch WiFi",
+                message: "The display refused \"\(ssid)\": \(reason)"))
+        }
+    }
+
     static func syncWifiPresets(
         _ desired: [String?],
         credentials: [String: SavedWiFiCredential],

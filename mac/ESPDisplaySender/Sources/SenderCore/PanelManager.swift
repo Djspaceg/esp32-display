@@ -248,6 +248,9 @@ final class PanelManager: ObservableObject {
     /// so the UI can say what did not fit or could not be copied without
     /// re-reading the display.
     var wifiPresetSyncReports: [String: WifiPresetSyncReport] = [:]
+    /// A switch to a saved network from a board's page, in flight or failed,
+    /// by service name (`PanelManager+WifiSwitch`).
+    var wifiSwitchStates: [String: WifiSwitchState] = [:]
     /// How long to wait before each retry of an automatic preset sync the
     /// board went silent on. A board can answer CFGSHOW and then go quiet for
     /// several seconds - still booting after the port opened, or restarted once

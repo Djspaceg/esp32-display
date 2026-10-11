@@ -11,9 +11,10 @@ import SenderProtocol
 ///
 /// Three things this deliberately does not do:
 ///
-/// - It never sends `CFGWIFIUSE`. Activating a preset restarts the board, and
-///   choosing a network is the on-device picker's job, not a side effect of
-///   plugging in a cable.
+/// - It never sends `CFGWIFIUSE`. Activating a preset restarts the board, so
+///   it is only ever sent for a choice the user made: the on-device picker, or
+///   the WiFi pop-up on the board's page (`switchWifi`), never as a side effect
+///   of plugging in a cable.
 /// - It never touches the slot the board reports as active. See
 ///   `WifiPresetSlotPlan`.
 /// - It does nothing at all when the app has no saved networks. An empty
@@ -218,6 +219,7 @@ extension PanelManager {
                 self.wifiPresetSyncReports[hardwareID] = report
                 self.wifiPresetSyncRechecks.removeValue(forKey: hardwareID)?.cancel()
                 self.resolve(.wifiPresetSync, source: hardwareID)
+                self.clearWifiSwitchFailures(hardwareID: hardwareID)
                 self.objectWillChange.send()
                 // The collection changed while this ran - the sync an edit in
                 // Settings asks for is turned away while this one holds the
@@ -330,6 +332,7 @@ extension PanelManager {
         syncedWifiPresetSignatures[canonical] = nil
         wifiPresetSyncTasks.removeValue(forKey: canonical)?.cancel()
         wifiPresetSyncRechecks.removeValue(forKey: canonical)?.cancel()
+        clearWifiSwitchFailures(hardwareID: canonical)
     }
 }
 

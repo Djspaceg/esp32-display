@@ -516,6 +516,241 @@ final class WifiPresetSyncTests: XCTestCase {
             .unreadable)
     }
 
+    // MARK: switching from the display page
+
+    /// Choosing a network copies the saved collection first, so it is in a
+    /// slot, and only then chooses that slot - the one CFGWIFIUSE, last.
+    func testSwitchingCopiesFirstThenChoosesTheNetworksSlot() throws {
+        let device = FakePresetDevice(slots: [1: ("Home", true)], activeSlot: 1)
+
+        let outcome = try resultValue(WifiConfigUI.switchSavedWifiPreset(
+            to: "Guest",
+            savedSSIDs: ["Home", "Office", "Guest"],
+            credentials: [
+                "Home": SavedWiFiCredential(ssid: "Home", password: "h"),
+                "Office": SavedWiFiCredential(ssid: "Office", password: "o"),
+                "Guest": SavedWiFiCredential(ssid: "Guest", password: ""),
+            ],
+            port: "/dev/fake",
+            send: { command, _, _ in device.send(command) }))
+
+        XCTAssertTrue(outcome.restarted)
+        XCTAssertEqual(outcome.report.snapshot.slots[3]?.ssid, "Guest")
+        let uses = device.commands.filter { $0.hasPrefix("CFGWIFIUSE") }
+        XCTAssertEqual(uses, ["CFGWIFIUSE 3"])
+        XCTAssertEqual(device.commands.last, "CFGWIFIUSE 3")
+        XCTAssertTrue(device.mutations.contains("CFGWIFISET 3 R3Vlc3Q= -"),
+            "the open network went in as open: \(device.mutations)")
+    }
+
+    /// A board already joined through the chosen network's slot is not
+    /// restarted for nothing.
+    func testSwitchingToTheActiveNetworkSendsNoChoice() throws {
+        let device = FakePresetDevice(slots: [1: ("Home", true)], activeSlot: 1)
+
+        let outcome = try resultValue(WifiConfigUI.switchSavedWifiPreset(
+            to: "Home", savedSSIDs: ["Home"],
+            credentials: ["Home": SavedWiFiCredential(ssid: "Home", password: "h")],
+            port: "/dev/fake",
+            send: { command, _, _ in device.send(command) }))
+
+        XCTAssertFalse(outcome.restarted)
+        XCTAssertFalse(device.commands.contains { $0.hasPrefix("CFGWIFIUSE") })
+    }
+
+    /// A network that could not be copied is not chosen, and the row says why
+    /// in words: an unreadable password, or one past the ten slots.
+    func testANetworkTheCopyCouldNotPlaceIsNotChosen() throws {
+        let device = FakePresetDevice(slots: [:])
+        let unreadable = WifiConfigUI.switchSavedWifiPreset(
+            to: "Office", savedSSIDs: ["Home", "Office"],
+            credentials: ["Home": SavedWiFiCredential(ssid: "Home", password: "h")],
+            port: "/dev/fake",
+            send: { command, _, _ in device.send(command) })
+        guard case .failure(let failure) = unreadable else {
+            return XCTFail("an unreadable network was switched to")
+        }
+        XCTAssertEqual(
+            failure.message,
+            "The password for \"Office\" could not be read from the Keychain. "
+                + "Enter it again in Settings.")
+
+        let eleven = (1...11).map { "net\($0)" }
+        let pastTheSlots = WifiConfigUI.switchSavedWifiPreset(
+            to: "net11", savedSSIDs: eleven,
+            credentials: Dictionary(uniqueKeysWithValues: eleven.map {
+                ($0, SavedWiFiCredential(ssid: $0, password: "pw"))
+            }),
+            port: "/dev/fake",
+            send: { command, _, _ in device.send(command) })
+        guard case .failure(let failure) = pastTheSlots else {
+            return XCTFail("a network past the slots was switched to")
+        }
+        XCTAssertEqual(
+            failure.message,
+            "\"net11\" did not fit in this display's slots. "
+                + "Drag it higher in Settings.")
+        XCTAssertFalse(device.commands.contains { $0.hasPrefix("CFGWIFIUSE") })
+    }
+
+    /// The manager's switch: over USB it copies and chooses, and the board is
+    /// marked as restarting; the row shows the switch until the board
+    /// reports the network.
+    func testTheManagerSwitchesAVerifiedBoardAndShowsItRestarting() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["Home", "Guest"], device: device)
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+        XCTAssertNil(manager.wifiSwitchUnavailableReason(for: "studio-display"))
+
+        manager.switchWifi(to: "Guest", for: "studio-display")
+        guard case .switching("Guest", _)? =
+            manager.wifiSwitchState(for: "studio-display", asOf: Date())
+        else { return XCTFail("the switch did not show as in progress") }
+        try await waitForSyncToSettle(manager)
+
+        let slot = try XCTUnwrap(manager.wifiPresetSyncReport(for: "studio-display")?
+            .snapshot.slots.values.first { $0.ssid == "Guest" }?.slot)
+        XCTAssertEqual(
+            device.commands.filter { $0.hasPrefix("CFGWIFIUSE") }, ["CFGWIFIUSE \(slot)"])
+        XCTAssertTrue(manager.usbRestartingServices.contains("studio-display"))
+        guard case .switching("Guest", _)? =
+            manager.wifiSwitchState(for: "studio-display", asOf: Date())
+        else { return XCTFail("the switch stopped showing before the board reported") }
+        XCTAssertEqual(
+            manager.wifiSwitchUnavailableReason(for: "studio-display"),
+            "This display is restarting.")
+        // A board that never reports the network stops showing as switching
+        // once the wait is over.
+        XCTAssertNil(manager.wifiSwitchState(
+            for: "studio-display",
+            asOf: Date().addingTimeInterval(PanelManager.wifiSwitchPatience + 1)))
+
+        manager.updatePanel("studio-display") { $0.currentSSID = "Guest" }
+        XCTAssertNil(manager.wifiSwitchState(for: "studio-display", asOf: Date()))
+    }
+
+    /// While a copy holds the board the pop-up is disabled, rather than
+    /// taking a choice and leaving an error behind.
+    func testThePopUpIsDisabledWhileACopyHoldsTheBoard() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["Home"], device: device)
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+
+        let held = Task<Void, Never> { try? await Task.sleep(nanoseconds: 5_000_000_000) }
+        manager.wifiPresetSyncTasks["020000123456"] = held
+        XCTAssertEqual(
+            manager.wifiSwitchUnavailableReason(for: "studio-display"),
+            "Copying the saved networks to this display.")
+        held.cancel()
+        manager.wifiPresetSyncTasks["020000123456"] = nil
+        XCTAssertNil(manager.wifiSwitchUnavailableReason(for: "studio-display"))
+    }
+
+    /// A refresh that lets go of the board mid-switch does not hide a choice
+    /// that already went out: the board is still shown restarting onto it.
+    func testACancelledSwitchWhoseChoiceWentOutStillShowsTheRestart() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(path: path, saved: ["Home", "Guest"], device: device)
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+
+        manager.switchWifi(to: "Guest", for: "studio-display")
+        manager.forgetWifiPresetSync(hardwareID: "020000123456")
+        try await waitUntil {
+            device.commands.contains { $0.hasPrefix("CFGWIFIUSE") }
+                && manager.usbRestartingServices.contains("studio-display")
+        }
+        guard case .switching("Guest", _)? =
+            manager.wifiSwitchState(for: "studio-display", asOf: Date())
+        else { return XCTFail("the restart the choice caused is not shown") }
+    }
+
+    /// Without USB there is no command to send: the network protocol has
+    /// none for WiFi. The pop-up says so, and a choice sends nothing.
+    func testWithoutUSBTheSwitchIsUnavailableAndSendsNothing() async throws {
+        let device = FakePresetDevice(slots: [:])
+        let manager = manager(
+            path: "/dev/cu.usbmodem-preset-test", saved: ["Home"], device: device)
+
+        XCTAssertEqual(
+            manager.wifiSwitchUnavailableReason(for: "studio-display"),
+            "Connect this display to the Mac by USB to switch its network. "
+                + "Over WiFi the display has no command for it.")
+        manager.switchWifi(to: "Home", for: "studio-display")
+        try await waitForSyncToSettle(manager)
+
+        XCTAssertTrue(device.commands.isEmpty, device.commands.description)
+        XCTAssertEqual(
+            manager.wifiSwitchState(for: "studio-display", asOf: Date()),
+            .failed(manager.wifiSwitchUnavailableReason(for: "studio-display")!))
+    }
+
+    /// A refused choice is shown on the row, and the next choice clears it.
+    func testARefusedSwitchIsShownUntilTheNextChoice() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        device.sabotage = .refuseSets
+        let manager = manager(path: path, saved: ["Home"], device: device)
+        manager.wifiPresetSyncRetryDelays = []
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+
+        manager.switchWifi(to: "Home", for: "studio-display")
+        try await waitForSyncToSettle(manager)
+        guard case .failed(let reason)? =
+            manager.wifiSwitchState(for: "studio-display", asOf: Date())
+        else { return XCTFail("a refused switch was not shown") }
+        XCTAssertFalse(reason.isEmpty)
+        XCTAssertFalse(device.commands.contains { $0.hasPrefix("CFGWIFIUSE") })
+
+        device.sabotage = nil
+        manager.switchWifi(to: "Home", for: "studio-display")
+        if case .failed? = manager.wifiSwitchState(for: "studio-display", asOf: Date()) {
+            XCTFail("the next choice left the old error up")
+        }
+        try await waitForSyncToSettle(manager)
+    }
+
+    /// A failed switch's error clears itself once a later copy to the board
+    /// goes through - the user does not have to choose again to clear it.
+    func testASwitchErrorClearsWhenACopyLaterSucceeds() async throws {
+        let path = "/dev/cu.usbmodem-preset-test"
+        let device = FakePresetDevice(slots: [:])
+        device.sabotage = .refuseSets
+        let manager = manager(path: path, saved: ["Home"], device: device)
+        manager.wifiPresetSyncRetryDelays = []
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+        manager.switchWifi(to: "Home", for: "studio-display")
+        try await waitForSyncToSettle(manager)
+        guard case .failed? = manager.wifiSwitchState(for: "studio-display", asOf: Date())
+        else { return XCTFail("the refused switch was not shown") }
+
+        device.sabotage = nil
+        manager.noteUSBIdentity(
+            path: path, identity: Self.verifiedIdentity,
+            generation: manager.usbPathGeneration(path))
+        try await waitForSyncToSettle(manager)
+
+        XCTAssertNil(manager.wifiSwitchState(for: "studio-display", asOf: Date()))
+        XCTAssertFalse(device.commands.contains { $0.hasPrefix("CFGWIFIUSE") })
+    }
+
     // MARK: the manager's automatic trigger
 
     /// A board that answers CFGSHOW on a serial port is a board that gets the
@@ -1345,6 +1580,14 @@ private final class FakePresetDevice: @unchecked Sendable {
             storage[slot] = nil
             if active == slot { active = nil }
             return .success("CFGOK wifi slot=\(slot) cleared")
+        }
+        if command.hasPrefix("CFGWIFIUSE "),
+           let slot = Int(command.dropFirst("CFGWIFIUSE ".count)) {
+            guard storage[slot] != nil else {
+                return .failure("CFGERR wifi slot=\(slot) unavailable")
+            }
+            active = slot
+            return .success("CFGOK wifi slot=\(slot) selected")
         }
         return .failure("unexpected command")
     }
