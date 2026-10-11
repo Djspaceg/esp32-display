@@ -69,7 +69,9 @@ final class WifiNetworkList: ObservableObject {
 /// links here; onboarding only chooses one of them.
 ///
 /// A macOS list: rows are selected, dragged to reorder, and each has one edit
-/// button; the footer's plus adds and its minus removes the selected row.
+/// button; the footer's plus adds and its minus removes the selected row. The
+/// add and edit form is a section of its own below the list, so the list's
+/// card keeps its shape while it is open.
 ///
 /// Changes take effect at once, as everything in Settings does, and they are
 /// Keychain writes - there is no draft of a password to cancel back to.
@@ -83,48 +85,41 @@ struct WifiNetworksSection: View {
     /// changes rather than on every redraw.
     @State private var openNetworks: Set<String> = []
 
+    /// No "open network" switch: an empty password is an open network
+    /// (`SavedWiFiCredential.isOpenNetwork`).
     struct Editor: Equatable {
         var original: String?
         var ssid = ""
         var password = ""
-        var isOpenNetwork = false
+        /// Editing a network whose saved password could not be read. Saving
+        /// with the field still empty would make it open, so the form says so.
+        var passwordUnreadable = false
     }
 
-    /// `list` is for tests, to watch what the footer's buttons do.
-    init(manager: PanelManager, list: WifiNetworkList? = nil) {
+    /// `list` and `editing` are for tests: to watch what the footer's buttons
+    /// do, and to read the form as it is drawn while open.
+    init(manager: PanelManager, list: WifiNetworkList? = nil, editing: Editor? = nil) {
         self.manager = manager
         _list = StateObject(wrappedValue: list ?? WifiNetworkList(manager: manager))
+        _editor = State(initialValue: editing)
     }
 
     private var slotCount: Int { WifiPresetSlotPlan.capacity }
-    private static let rowHeight: CGFloat = 28
     private static let footerHeight: CGFloat = 28
-    /// The rows' height as the list itself measured it, so every row is
-    /// shown whatever height macOS gives one: the list never scrolls inside
-    /// the page, a network beyond the ten slots is in view to be dragged up,
-    /// and the footer never covers a row. Estimated until the first layout.
-    @State private var measuredRowsHeight: CGFloat?
 
+    /// The rows' height: a fixed height per row, so the card is the same shape
+    /// whatever is selected or being dragged, and every row shows - the list
+    /// never scrolls inside the page, and a network past the ten slots is in
+    /// view to be dragged up.
     private var rowsHeight: CGFloat {
-        measuredRowsHeight
-            ?? CGFloat(max(manager.savedNetworkNames.count, 1)) * Self.rowHeight
+        CGFloat(max(manager.savedNetworkNames.count, 1)) * WifiNetworkTable.rowHeight
     }
 
     var body: some View {
-        Section {
+        attachBehaviour(Section {
             networkList
                 .frame(height: rowsHeight + Self.footerHeight)
                 .listRowInsets(EdgeInsets())
-            if editor != nil {
-                editorRows
-            }
-            if let failure = list.failure {
-                problemRows(failure)
-            }
-            ForEach(syncIssues, id: \.self) { detail in
-                Label(detail, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-            }
         } header: {
             Text("Saved Networks")
         } footer: {
@@ -134,7 +129,31 @@ struct WifiNetworksSection: View {
                 + "network stays in its slot, so a copy never restarts it. "
                 + "Passwords are kept in your login Keychain, and changes here "
                 + "take effect immediately.")
+        })
+        if let current = editor {
+            Section {
+                editorRows(current)
+                if let failure = list.failure { problemRows(failure) }
+            } header: {
+                Text(current.original == nil ? "New Network" : "Network Details")
+            }
+        } else if let failure = list.failure {
+            Section { problemRows(failure) }
         }
+        if !syncIssues.isEmpty {
+            Section {
+                ForEach(syncIssues, id: \.self) { detail in
+                    Label(detail, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+    }
+
+    /// The list's own behaviour, on the list's section only, so it is attached
+    /// once rather than to every section this view returns.
+    private func attachBehaviour<Content: View>(_ content: Content) -> some View {
+        content
         // By set, not order: a move changes no credential, so it reads none.
         .task(id: Set(manager.savedNetworkNames)) { reloadOpenNetworks() }
         .onAppear { manager.refreshSavedNetworks() }
@@ -166,29 +185,19 @@ struct WifiNetworksSection: View {
     /// The rows, and the plus and minus under them. The footer is an overlay
     /// on the space the frame leaves below the rows - the placement the
     /// display list's own footer needed to render at all (see
-    /// `DisplayListFooter`). A row of the form would do too, but takes a full
-    /// row's height.
+    /// `DisplayListFooter`).
     private var networkList: some View {
-        List(selection: $list.selection) {
-            ForEach(Array(manager.savedNetworkNames.enumerated()), id: \.element) {
-                index, ssid in
-                networkRow(ssid, index: index)
-                    .tag(ssid)
-            }
-            .onMove { list.move(fromOffsets: $0, toOffset: $1) }
-        }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .environment(\.defaultMinListRowHeight, Self.rowHeight)
-        // A selectable row takes the click as the start of a text selection,
-        // and the row would stop selecting and dragging.
-        .textSelection(.disabled)
-        .scrollDisabled(true)
-        .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: {
-            _, height in
-            if height > 0 { measuredRowsHeight = height }
-        }
-        .onDeleteCommand { list.requestRemoval() }
+        WifiNetworkTable(
+            rows: manager.savedNetworkNames.map {
+                WifiNetworkTable.Row(ssid: $0, isOpen: openNetworks.contains($0))
+            },
+            selection: $list.selection,
+            editingDisabled: editor != nil,
+            onMove: { list.move(fromOffsets: $0, toOffset: $1) },
+            onEdit: { beginEdit($0) },
+            onDelete: { list.requestRemoval() })
+        .frame(height: rowsHeight)
+        .frame(maxHeight: .infinity, alignment: .top)
         .overlay {
             if manager.savedNetworkNames.isEmpty {
                 Text("No networks are saved on this Mac yet.")
@@ -246,43 +255,6 @@ struct WifiNetworksSection: View {
             .filter { !$0.isEmpty }
     }
 
-    private func networkRow(_ ssid: String, index: Int) -> some View {
-        HStack(spacing: 10) {
-            // Words rather than a dash past the tenth row, which beside the
-            // footer's minus would read as a control.
-            Text(index < slotCount ? "Slot \(index + 1)" : "Not copied")
-                .font(index < slotCount ? .body : .caption)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 64, alignment: .leading)
-                .help(index < slotCount
-                    ? "The preset slot this network fills on every display"
-                    : "Displays have \(slotCount) preset slots; drag this network "
-                        + "up to copy it")
-            // The name is the one thing in the row that gives way, by
-            // truncating in the middle; everything after it keeps its size.
-            Text(ssid)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(index < slotCount ? .primary : .secondary)
-            if openNetworks.contains(ssid) {
-                Text("Open")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-            }
-            Spacer(minLength: 8)
-            Button("Edit…", systemImage: "pencil") { beginEdit(ssid) }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderless)
-                .fixedSize()
-                .disabled(editor != nil)
-                .help("Edit \"\(ssid)\"")
-                .accessibilityLabel("Edit \(ssid)")
-        }
-        .contentShape(Rectangle())
-    }
-
     private func beginAdd() {
         list.failure = nil
         editor = Editor()
@@ -291,47 +263,62 @@ struct WifiNetworksSection: View {
     private func beginEdit(_ ssid: String) {
         list.failure = nil
         list.selection = ssid
-        let saved = manager.savedCredential(for: ssid)
-        editor = Editor(
-            original: ssid, ssid: ssid,
-            isOpenNetwork: saved?.isOpenNetwork ?? false)
+        // The saved password fills the field, so Save without a change keeps
+        // it. One that cannot be read leaves the field empty, and the form
+        // says that saving it empty would make the network open.
+        editor = Self.editor(for: ssid, saved: manager.savedCredential(for: ssid))
+    }
+
+    /// The form for editing `ssid`, whose saved credential reads as `saved`:
+    /// nil when its password could not be read.
+    static func editor(for ssid: String, saved: SavedWiFiCredential?) -> Editor {
+        Editor(
+            original: ssid, ssid: ssid, password: saved?.password ?? "",
+            passwordUnreadable: saved == nil)
     }
 
     @ViewBuilder
-    private var editorRows: some View {
-        if let current = editor {
-            let isNew = current.original == nil
-            Text(isNew ? "New Network" : "Edit \"\(current.original ?? "")\"")
-                .fontWeight(.semibold)
+    private func editorRows(_ current: Editor) -> some View {
+        let isNew = current.original == nil
+        if isNew {
             TextField("Network name (SSID)", text: editorBinding(\.ssid))
-                .disabled(!isNew)
                 .onSubmit { if canCommit(current) { commit(current) } }
-            Toggle("Open network (no password)", isOn: editorBinding(\.isOpenNetwork))
-            if !current.isOpenNetwork {
-                SecureField(
-                    isNew ? "Password" : "New password",
-                    text: editorBinding(\.password))
-                    .onSubmit { if canCommit(current) { commit(current) } }
+        } else {
+            LabeledContent("Network", value: current.original ?? "")
+        }
+        SecureField("Password", text: editorBinding(\.password),
+                    prompt: Text("None for an open network"))
+            .onSubmit { if canCommit(current) { commit(current) } }
+        // Derived from the fields on every change, so it disappears the
+        // moment what was typed becomes valid.
+        if let problem = typingProblem(current) {
+            Text(problem)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        } else if current.passwordUnreadable, current.password.isEmpty {
+            Text("The saved password could not be read from your login Keychain, "
+                + "so it is not shown here. Enter it again to save. To make this "
+                + "an open network, remove it and add it with no password.")
+                .font(.callout)
+                .foregroundStyle(.orange)
+        } else {
+            Text(current.password.isEmpty
+                ? "With no password, this is saved as an open network."
+                : "Kept in your login Keychain.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        HStack {
+            Spacer()
+            Button("Cancel") {
+                editor = nil
+                list.failure = nil
             }
-            // Derived from the fields on every change, so it disappears the
-            // moment what was typed becomes valid.
-            if let problem = typingProblem(current) {
-                Text(problem)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    editor = nil
-                    list.failure = nil
-                }
-                .keyboardShortcut(.cancelAction)
-                Button(isNew ? "Add" : "Save") { commit(current) }
-                    .buttonStyle(.glassProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canCommit(current))
-            }
+            .keyboardShortcut(.cancelAction)
+            Button(isNew ? "Add" : "Save") { commit(current) }
+                .buttonStyle(.glassProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canCommit(current))
         }
     }
 
@@ -340,19 +327,21 @@ struct WifiNetworksSection: View {
     /// as an error.
     private func typingProblem(_ editor: Editor) -> String? {
         let ssid = editor.ssid.trimmingCharacters(in: .whitespaces)
-        if ssid.isEmpty || (!editor.isOpenNetwork && editor.password.isEmpty) {
-            return nil
-        }
+        if ssid.isEmpty { return nil }
         return PanelManager.savedNetworkProblem(
-            ssid: ssid, password: editor.password,
-            isOpenNetwork: editor.isOpenNetwork)?.message
+            ssid: ssid, password: editor.password)?.message
     }
 
-    private func canCommit(_ editor: Editor) -> Bool {
-        PanelManager.savedNetworkProblem(
+    private func canCommit(_ editor: Editor) -> Bool { Self.canCommit(editor) }
+
+    /// Whether the form can be saved as filled in. A password that could not
+    /// be read is never saved as an open network by an empty field: that is
+    /// one press of Return away, and the real password would be lost.
+    static func canCommit(_ editor: Editor) -> Bool {
+        if editor.passwordUnreadable && editor.password.isEmpty { return false }
+        return PanelManager.savedNetworkProblem(
             ssid: editor.ssid.trimmingCharacters(in: .whitespaces),
-            password: editor.password,
-            isOpenNetwork: editor.isOpenNetwork) == nil
+            password: editor.password) == nil
     }
 
     private func problemRows(_ failure: WifiConfigUI.ConfigFailure) -> some View {
@@ -384,8 +373,7 @@ struct WifiNetworksSection: View {
 
     private func commit(_ editor: Editor) {
         if let problem = manager.saveNetwork(
-            ssid: editor.ssid, password: editor.password,
-            isOpenNetwork: editor.isOpenNetwork) {
+            ssid: editor.ssid, password: editor.password) {
             list.failure = problem
             return
         }

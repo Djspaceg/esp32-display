@@ -12,25 +12,20 @@ import SenderProtocol
 extension PanelManager {
     /// Why a network cannot be saved as typed, or nil when it can. Checked
     /// against the same device limits the sync applies, so a network the
-    /// Settings list accepts is one every board accepts too.
+    /// Settings list accepts is one every board accepts too. An empty
+    /// password is an open network (`SavedWiFiCredential.isOpenNetwork`), not
+    /// a missing one.
     nonisolated static func savedNetworkProblem(
-        ssid: String, password: String, isOpenNetwork: Bool
+        ssid: String, password: String
     ) -> WifiConfigUI.ConfigFailure? {
         guard !ssid.isEmpty, ssid.utf8.count <= 32 else {
             return WifiConfigUI.ConfigFailure(
                 title: "Invalid network name",
                 message: "The network name (SSID) must be 1 to 32 bytes.")
         }
-        if !isOpenNetwork && password.isEmpty {
-            return WifiConfigUI.ConfigFailure(
-                title: "Password needed",
-                message: "Enter the password for \"\(ssid)\", or mark it as an "
-                    + "open network.")
-        }
-        let stored = isOpenNetwork ? "" : password
         guard ConfigCommands.setWifiPreset(
             slot: ConfigCommands.wifiPresetSlotRange.lowerBound,
-            ssid: ssid, password: stored) != nil
+            ssid: ssid, password: password) != nil
         else {
             return WifiConfigUI.ConfigFailure(
                 title: "Invalid WiFi credential",
@@ -45,15 +40,13 @@ extension PanelManager {
     ///
     /// Returns nil on success. An empty password saves an open network.
     func saveNetwork(
-        ssid rawSSID: String, password: String, isOpenNetwork: Bool
+        ssid rawSSID: String, password: String
     ) -> WifiConfigUI.ConfigFailure? {
         let ssid = rawSSID.trimmingCharacters(in: .whitespaces)
-        if let problem = Self.savedNetworkProblem(
-            ssid: ssid, password: password, isOpenNetwork: isOpenNetwork) {
+        if let problem = Self.savedNetworkProblem(ssid: ssid, password: password) {
             return problem
         }
-        let credential = SavedWiFiCredential(
-            ssid: ssid, password: isOpenNetwork ? "" : password)
+        let credential = SavedWiFiCredential(ssid: ssid, password: password)
         guard wifiCredentialWriter(credential) else {
             return WifiConfigUI.ConfigFailure(
                 title: "Keychain storage failed",

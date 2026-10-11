@@ -627,7 +627,7 @@ final class WifiPresetSyncTests: XCTestCase {
         XCTAssertEqual(device.mutations.count, 1)
 
         XCTAssertNil(manager.saveNetwork(
-            ssid: "alpha", password: "rotated", isOpenNetwork: false))
+            ssid: "alpha", password: "rotated"))
         try await waitForSyncToSettle(manager)
 
         XCTAssertEqual(device.mutations.count, 2, device.mutations.description)

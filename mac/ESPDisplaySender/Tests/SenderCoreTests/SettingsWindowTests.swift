@@ -169,7 +169,7 @@ final class SettingsWindowTests: XCTestCase {
         manager.wifiPresetSyncReports["020000123456"] =
             skippedReport(unusable: ["Office", "Guest"])
         XCTAssertNil(manager.saveNetwork(
-            ssid: "Office", password: "new password", isOpenNetwork: false))
+            ssid: "Office", password: "new password"))
         XCTAssertEqual(
             manager.wifiPresetSyncReport(for: panel.serviceName)?.unusable,
             ["Guest"])
@@ -185,39 +185,286 @@ final class SettingsWindowTests: XCTestCase {
         navigation.show(.wifiNetworks)
         let pane = ViewReading(SettingsView(manager: manager, navigation: navigation))
 
-        for control in ["Add Network…", "Edit…", "Remove"] {
+        for control in ["Add Network…", "Remove"] {
             XCTAssertNotNil(pane.button(control), "Settings has no \"\(control)\"")
         }
-        // "Slot \(n)", as the localized key the row's label carries.
-        XCTAssertTrue(pane.strings.contains("Slot %lld"))
+        // The rows, their slots and their pencils are the table's; see
+        // testEachRowHasOnlyAnEditButtonAndTheFooterAddsAndRemoves.
+        XCTAssertTrue(pane.contains("SenderCore.WifiNetworkTable"))
         for section in SettingsPane.allCases {
             XCTAssertTrue(
                 pane.strings.contains(section.title),
                 "the sidebar does not list \(section.title)")
         }
-        XCTAssertEqual(pane.moveActions.count, 1, "the rows are not draggable")
+        XCTAssertEqual(pane.networkTables.count, 1, "the rows are not draggable")
     }
 
     // MARK: the saved-network list
 
-    /// One edit button per row, a plus and a minus under the list, and no
-    /// per-row arrows or remove buttons any more.
+    /// A plus and a minus under the list, and no per-row arrows or remove
+    /// buttons. Each row's only button is its pencil, drawn by the table.
     func testEachRowHasOnlyAnEditButtonAndTheFooterAddsAndRemoves() {
         let (manager, _) = makeManager(saved: ["Studio WiFi", "Guest", "Home"])
         let section = ViewReading(WifiNetworksSection(manager: manager))
-        XCTAssertEqual(section.buttons.filter { $0.title == "Edit…" }.count, 3)
         XCTAssertEqual(section.buttons.filter { $0.title == "Remove" }.count, 1)
         XCTAssertEqual(section.buttons.filter { $0.title == "Add Network…" }.count, 1)
         XCTAssertNil(section.button("Move Up"))
         XCTAssertNil(section.button("Move Down"))
+        XCTAssertNil(section.button("Edit…"))
+        XCTAssertTrue(section.contains("SenderCore.WifiNetworkTable"))
+
+        let (table, coordinator) = makeTable(["Studio WiFi", "Guest", "Home"])
+        XCTAssertEqual(table.numberOfRows, 3)
+        var edited: [String] = []
+        coordinator.onEdit = { edited.append($0) }
+        for row in 0..<3 {
+            let cell = try? XCTUnwrap(coordinator.tableView(
+                table, viewFor: table.tableColumns.first, row: row) as? NetworkCell)
+            let buttons = cell.map(Self.buttons(in:)) ?? []
+            XCTAssertEqual(buttons.count, 1, "row \(row) has other buttons")
+            XCTAssertEqual(cell?.slotLabel.stringValue, "Slot \(row + 1)")
+            buttons.first?.performClick(nil)
+        }
+        XCTAssertEqual(edited, ["Studio WiFi", "Guest", "Home"])
+    }
+
+    // MARK: drag-and-drop reorder
+
+    /// Every direction: down, up, the first row to the end, the last row to
+    /// the top, and a drop where the row already is.
+    func testTheReorderModelMovesUpDownFirstAndLast() {
+        let names = ["a", "b", "c", "d"]
+        func drop(_ row: Int, into gap: Int) -> [String] {
+            WifiNetworkReorder.reordered(names, dragging: [row], to: gap)
+        }
+        XCTAssertEqual(drop(1, into: 3), ["a", "c", "b", "d"], "down one")
+        XCTAssertEqual(drop(2, into: 1), ["a", "c", "b", "d"], "up one")
+        XCTAssertEqual(drop(0, into: 4), ["b", "c", "d", "a"], "first to the end")
+        XCTAssertEqual(drop(0, into: 2), ["b", "a", "c", "d"], "first down")
+        XCTAssertEqual(drop(3, into: 0), ["d", "a", "b", "c"], "last to the top")
+        XCTAssertEqual(drop(3, into: 2), ["a", "b", "d", "c"], "last up one")
+        XCTAssertEqual(drop(1, into: 0), ["b", "a", "c", "d"], "to the top")
+        for row in 0..<4 {
+            XCTAssertEqual(drop(row, into: row), names, "onto its own gap above")
+            XCTAssertEqual(drop(row, into: row + 1), names, "onto its own gap below")
+        }
+    }
+
+    /// A drop "on" a row is turned into the gap above or below it, so the
+    /// indicator shows a line at every pointer position rather than vanishing
+    /// over each row's middle - the flicker - and every gap stays reachable.
+    func testADropOnARowBecomesTheGapNearestThePointer() {
+        func gap(_ row: Int, _ op: NSTableView.DropOperation, lower: Bool = false) -> Int {
+            WifiNetworkReorder.retargeted(
+                row: row, dropOperation: op, lowerHalf: lower, rowCount: 4)
+        }
+        XCTAssertEqual(gap(0, .on), 0, "upper half of the first row: the top")
+        XCTAssertEqual(gap(0, .on, lower: true), 1)
+        XCTAssertEqual(gap(3, .on), 3)
+        XCTAssertEqual(gap(3, .on, lower: true), 4, "lower half of the last row: the end")
+        XCTAssertEqual(gap(2, .above), 2)
+        XCTAssertEqual(gap(4, .above), 4)
+        XCTAssertEqual(gap(9, .above), 4, "clamped to the end")
+        XCTAssertEqual(gap(-1, .above), 0, "clamped to the top")
+    }
+
+    /// What the table does on a drop, through to the shared order, in both
+    /// directions and at both ends.
+    func testADropReordersTheSavedNetworksUpAndDown() {
+        let (manager, _) = makeManager(saved: ["a", "b", "c", "d"])
+        let list = WifiNetworkList(manager: manager)
+        let (_, coordinator) = makeTable(manager.savedNetworkNames)
+        coordinator.onMove = { list.move(fromOffsets: $0, toOffset: $1) }
+
+        coordinator.performDrop(rows: [3], to: 0)
+        XCTAssertEqual(manager.savedNetworkNames, ["d", "a", "b", "c"], "last to the top")
+        coordinator.performDrop(rows: [0], to: 4)
+        XCTAssertEqual(manager.savedNetworkNames, ["a", "b", "c", "d"], "first to the end")
+        coordinator.performDrop(rows: [2], to: 1)
+        XCTAssertEqual(manager.savedNetworkNames, ["a", "c", "b", "d"], "up")
+        coordinator.performDrop(rows: [1], to: 3)
+        XCTAssertEqual(manager.savedNetworkNames, ["a", "b", "c", "d"], "down")
+        XCTAssertEqual(manager.settings.wifiPresetOrder, ["a", "b", "c", "d"])
+    }
+
+    /// While a drag is under way the rows are not rebuilt, even when the list
+    /// changes; the change is shown once the drag ends. Rebuilding the rows
+    /// under the pointer is what made the drop indicator flicker.
+    func testTheRowsAreNotRebuiltWhileADragIsUnderWay() {
+        let (table, coordinator) = makeTable(["a", "b", "c"])
+        let before = coordinator.reloadCount
+        coordinator.beginDrag()
+        coordinator.apply(.init(
+            rows: ["c", "a", "b"].map { .init(ssid: $0, isOpen: false) },
+            selection: nil, editingDisabled: false))
+        XCTAssertEqual(coordinator.reloadCount, before)
+        XCTAssertEqual(coordinator.state.rows.map(\.ssid), ["a", "b", "c"])
+        coordinator.endDrag()
+        XCTAssertEqual(coordinator.reloadCount, before + 1)
+        XCTAssertEqual(coordinator.state.rows.map(\.ssid), ["c", "a", "b"])
+        XCTAssertEqual(table.numberOfRows, 3)
+        // An unchanged list does not rebuild either.
+        coordinator.apply(coordinator.state)
+        XCTAssertEqual(coordinator.reloadCount, before + 1)
+    }
+
+    /// Selecting a row reports it, and the Delete key asks to remove it.
+    func testSelectingARowAndTheDeleteKey() throws {
+        let (table, coordinator) = makeTable(["a", "b", "c"])
+        var selected: [String?] = []
+        var deletes = 0
+        coordinator.onSelect = { selected.append($0) }
+        coordinator.onDelete = { deletes += 1 }
+        table.selectRowIndexes([1], byExtendingSelection: false)
+        XCTAssertEqual(selected, ["b"])
+        // Matching the table to a selection made elsewhere is not reported.
+        coordinator.apply(.init(
+            rows: coordinator.state.rows, selection: "c", editingDisabled: false))
+        XCTAssertEqual(table.selectedRow, 2)
+        XCTAssertEqual(selected, ["b"])
+
+        let delete = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "\u{7f}",
+            charactersIgnoringModifiers: "\u{7f}", isARepeat: false, keyCode: 51))
+        table.keyDown(with: delete)
+        XCTAssertEqual(deletes, 1)
+    }
+
+    // MARK: the network form
+
+    /// The form is a section of its own below the list, with no "open
+    /// network" switch: an empty password is an open network.
+    func testTheFormIsItsOwnSectionWithNoOpenNetworkSwitch() {
+        let (manager, _) = makeManager(saved: ["Studio WiFi", "Office"])
+        let closed = ViewReading(WifiNetworksSection(manager: manager))
+        XCTAssertFalse(closed.strings.contains("Network Details"))
+
+        let editing = ViewReading(WifiNetworksSection(
+            manager: manager,
+            editing: .init(original: "Office", ssid: "Office", password: "pw")))
+        XCTAssertTrue(editing.strings.contains("Network Details"))
+        XCTAssertTrue(editing.strings.contains("Saved Networks"))
+        XCTAssertGreaterThanOrEqual(
+            editing.typeNames.filter { $0.hasPrefix("SwiftUI.Section<") }.count, 2,
+            "the form is not a section of its own")
+        XCTAssertFalse(editing.strings.contains("Open network (no password)"))
+        XCTAssertFalse(editing.contains("SwiftUI.Toggle"))
+        XCTAssertNotNil(editing.button("Save"))
+
+        let adding = ViewReading(WifiNetworksSection(
+            manager: manager, editing: .init(original: nil)))
+        XCTAssertTrue(adding.strings.contains("New Network"))
+        XCTAssertTrue(adding.strings.contains(
+            "With no password, this is saved as an open network."))
+        XCTAssertNotNil(adding.button("Add"))
+    }
+
+    /// A network whose saved password cannot be read is not shown as open:
+    /// the form says it could not be read.
+    func testEditingAnUnreadablePasswordSaysSo() {
+        let (manager, _) = makeManager(saved: ["Office"])
+        let reading = ViewReading(WifiNetworksSection(
+            manager: manager,
+            editing: .init(original: "Office", ssid: "Office", passwordUnreadable: true)))
+        XCTAssertTrue(reading.strings.contains { $0.contains("could not be read") })
+        XCTAssertFalse(reading.strings.contains(
+            "With no password, this is saved as an open network."))
+    }
+
+    /// The edit form fills in a readable password, shows an open network's
+    /// empty one, and marks one that could not be read - which an empty field
+    /// can then never save as open.
+    func testTheEditFormFromEachKindOfSavedCredential() {
+        let secured = WifiNetworksSection.editor(
+            for: "Home", saved: SavedWiFiCredential(ssid: "Home", password: "pw"))
+        XCTAssertEqual(secured.password, "pw")
+        XCTAssertFalse(secured.passwordUnreadable)
+        XCTAssertTrue(WifiNetworksSection.canCommit(secured))
+
+        let open = WifiNetworksSection.editor(
+            for: "Guest", saved: SavedWiFiCredential(ssid: "Guest", password: ""))
+        XCTAssertEqual(open.password, "")
+        XCTAssertFalse(open.passwordUnreadable)
+        XCTAssertTrue(WifiNetworksSection.canCommit(open), "an open network saves as open")
+
+        var unreadable = WifiNetworksSection.editor(for: "Office", saved: nil)
+        XCTAssertTrue(unreadable.passwordUnreadable)
+        XCTAssertEqual(unreadable.password, "")
+        XCTAssertFalse(
+            WifiNetworksSection.canCommit(unreadable),
+            "an unreadable password must not save as an open network")
+        unreadable.password = "typed again"
+        XCTAssertTrue(WifiNetworksSection.canCommit(unreadable))
+    }
+
+    /// The drop handler as the table calls it: the pasteboard names the
+    /// dragged network, and the drop is refused when the list changed under
+    /// the drag, so a stale row never moves a different network.
+    func testTheTablesDropHandlerReadsNamesAndRefusesAStaleList() throws {
+        let (table, coordinator) = makeTable(["a", "b", "c", "d"])
+        var moves: [(IndexSet, Int)] = []
+        coordinator.onMove = { moves.append(($0, $1)) }
+
+        let item = try XCTUnwrap(coordinator.tableView(table, pasteboardWriterForRow: 3)
+            as? NSPasteboardItem)
+        XCTAssertEqual(item.string(forType: WifiNetworkTable.Coordinator.rowType), "d")
+        let pasteboard = NSPasteboard(name: .init("wifi-table-test-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.writeObjects([item])
+        let info = FakeDraggingInfo(source: table, pasteboard: pasteboard)
+
+        XCTAssertTrue(coordinator.tableView(
+            table, acceptDrop: info, row: 0, dropOperation: .above))
+        XCTAssertEqual(moves.map { Array($0.0) }, [[3]])
+        XCTAssertEqual(moves.map(\.1), [0])
+
+        // The list changes while a second drag is under way: refused.
+        coordinator.beginDrag()
+        coordinator.apply(.init(
+            rows: ["d", "a", "b"].map { .init(ssid: $0, isOpen: false) },
+            selection: nil, editingDisabled: false))
+        XCTAssertFalse(coordinator.acceptDrop(of: ["a"], to: 0))
+        XCTAssertEqual(moves.count, 1)
+        coordinator.endDrag()
+        XCTAssertTrue(coordinator.acceptDrop(of: ["b"], to: 0))
+        XCTAssertEqual(moves.last.map { Array($0.0) }, [2])
+
+        // Another table's drag is not this list's reorder.
+        let stranger = FakeDraggingInfo(source: NSTableView(), pasteboard: pasteboard)
+        XCTAssertEqual(coordinator.tableView(
+            table, validateDrop: stranger, proposedRow: 0, proposedDropOperation: .above), [])
+        XCTAssertEqual(coordinator.tableView(
+            table, validateDrop: info, proposedRow: 1, proposedDropOperation: .above), .move)
+    }
+
+    private func makeTable(
+        _ names: [String]
+    ) -> (NSTableView, WifiNetworkTable.Coordinator) {
+        let coordinator = WifiNetworkTable.Coordinator()
+        let table = WifiNetworkTable.Coordinator.makeTable(coordinator)
+        table.frame = NSRect(x: 0, y: 0, width: 400, height: 200)
+        coordinator.apply(.init(
+            rows: names.map { .init(ssid: $0, isOpen: false) },
+            selection: nil, editingDisabled: false))
+        return (table, coordinator)
+    }
+
+    private static func buttons(in view: NSView) -> [NSButton] {
+        view.subviews.flatMap { sub -> [NSButton] in
+            (sub as? NSButton).map { [$0] } ?? buttons(in: sub)
+        }
     }
 
     /// Dragging a row is a move of the shared order: what the list's drop
     /// handler is given goes straight into every board's slot order.
     func testDraggingARowReordersTheSavedNetworks() throws {
         let (manager, _) = makeManager(saved: ["Studio WiFi", "Guest", "Home"])
-        let section = ViewReading(WifiNetworksSection(manager: manager))
-        let drop = try XCTUnwrap(section.moveActions.first, "the rows are not draggable")
+        let section = ViewReading(WifiNetworksSection(
+            manager: manager, list: WifiNetworkList(manager: manager)))
+        let drop = try XCTUnwrap(
+            section.networkTables.first?.onMove, "the rows are not draggable")
 
         // "Home" dragged to the top, then "Studio WiFi" dragged past the end.
         drop([2], 0)
@@ -365,7 +612,7 @@ final class SettingsWindowTests: XCTestCase {
         let watch = manager.objectWillChange.sink { redraws += 1 }
         defer { watch.cancel() }
         XCTAssertNil(manager.saveNetwork(
-            ssid: "Studio WiFi", password: "rotated", isOpenNetwork: false))
+            ssid: "Studio WiFi", password: "rotated"))
         XCTAssertGreaterThan(redraws, 0)
         XCTAssertEqual(manager.savedCredential(for: "Studio WiFi")?.password, "rotated")
     }
@@ -547,8 +794,11 @@ struct ViewReading {
 
     private(set) var strings: [String] = []
     private(set) var buttons: [PressableButton] = []
-    /// Every `onMove` handler: what a list calls when a row is dropped.
-    private(set) var moveActions: [(IndexSet, Int) -> Void] = []
+    /// Every saved-network table, with the drop handler it was given. Read
+    /// as the typed value rather than cast out of a `Mirror` as a closure:
+    /// the handler is main-actor isolated, and a closure cast loses that and
+    /// calls it with the wrong arguments.
+    private(set) var networkTables: [WifiNetworkTable] = []
     private(set) var typeNames: [String] = []
 
     init(_ root: Any) {
@@ -578,8 +828,8 @@ struct ViewReading {
         if typeName.hasPrefix("SwiftUI.Button<"), let pressable = Self.pressable(mirror) {
             buttons.append(pressable)
         }
-        if let move = value as? (IndexSet, Int) -> Void {
-            moveActions.append(move)
+        if let table = value as? WifiNetworkTable {
+            networkTables.append(table)
             return
         }
         if let each = value as? ReadableForEach {
@@ -616,4 +866,44 @@ private protocol ReadableForEach {
 
 extension ForEach: ReadableForEach {
     fileprivate var readContents: [Any] { data.map { content($0) } }
+}
+
+/// Just enough of a drag for the table's drop handlers.
+private final class FakeDraggingInfo: NSObject, NSDraggingInfo {
+    let source: AnyObject
+    let pasteboard: NSPasteboard
+
+    init(source: AnyObject, pasteboard: NSPasteboard) {
+        self.source = source
+        self.pasteboard = pasteboard
+    }
+
+    var draggingDestinationWindow: NSWindow? { nil }
+    var draggingSourceOperationMask: NSDragOperation { .move }
+    var draggingLocation: NSPoint { .zero }
+    var draggedImageLocation: NSPoint { .zero }
+    var draggedImage: NSImage? { nil }
+    var draggingPasteboard: NSPasteboard { pasteboard }
+    var draggingSource: Any? { source }
+    var draggingSequenceNumber: Int { 1 }
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    var draggingFormation: NSDraggingFormation {
+        get { .default }
+        set {}
+    }
+    var animatesToDestination: Bool {
+        get { false }
+        set {}
+    }
+    var numberOfValidItemsForDrop: Int {
+        get { 1 }
+        set {}
+    }
+    func enumerateDraggingItems(
+        options enumOpts: NSDraggingItemEnumerationOptions = [], for view: NSView?,
+        classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any] = [:],
+        using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void
+    ) {}
+    var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+    func resetSpringLoading() {}
 }

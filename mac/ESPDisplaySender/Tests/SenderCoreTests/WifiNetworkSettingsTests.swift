@@ -221,51 +221,49 @@ final class WifiNetworkSettingsTests: XCTestCase {
         XCTAssertEqual(manager.savedNetworkNames, ["Home", "Office"])
 
         XCTAssertNil(manager.saveNetwork(
-            ssid: "  Cafe ", password: "latte", isOpenNetwork: false))
+            ssid: "  Cafe ", password: "latte"))
         XCTAssertEqual(manager.savedNetworkNames, ["Home", "Office", "Cafe"])
         XCTAssertEqual(
             store.credential(for: "Cafe"),
             SavedWiFiCredential(ssid: "Cafe", password: "latte"))
 
         XCTAssertNil(manager.saveNetwork(
-            ssid: "Home", password: "new-password", isOpenNetwork: false))
+            ssid: "Home", password: "new-password"))
         XCTAssertEqual(manager.savedNetworkNames, ["Home", "Office", "Cafe"])
         XCTAssertEqual(store.credential(for: "Home")?.password, "new-password")
     }
 
-    /// 7663fc3's rule, at the Settings entry point: an empty password is saved
-    /// only as an explicit open network, marked as one. A typed password is
-    /// ignored when the network is marked open.
-    func testAnEmptyPasswordIsSavedOnlyAsAnExplicitOpenNetwork() {
+    /// An empty password is an open network: Settings saves it as one, with
+    /// nothing to tick, and a typed password is a secured network.
+    func testAnEmptyPasswordSavesAnOpenNetwork() {
         let (manager, store) = managerWithStore([])
 
-        let refused = manager.saveNetwork(
-            ssid: "Office", password: "", isOpenNetwork: false)
-        XCTAssertEqual(refused?.title, "Password needed")
-        XCTAssertNil(store.credential(for: "Office"))
-        XCTAssertTrue(manager.savedNetworkNames.isEmpty)
-
-        XCTAssertNil(manager.saveNetwork(
-            ssid: "Guest", password: "typed by mistake", isOpenNetwork: true))
+        XCTAssertNil(manager.saveNetwork(ssid: "Guest", password: ""))
         let guest = store.credential(for: "Guest")
         XCTAssertEqual(guest?.isOpenNetwork, true)
         XCTAssertEqual(guest?.password, "")
+        XCTAssertEqual(manager.savedNetworkNames, ["Guest"])
+
+        // Editing it with a password secures it; clearing the password opens
+        // it again.
+        XCTAssertNil(manager.saveNetwork(ssid: "Guest", password: "lobby"))
+        XCTAssertEqual(store.credential(for: "Guest")?.isOpenNetwork, false)
+        XCTAssertNil(manager.saveNetwork(ssid: "Guest", password: ""))
+        XCTAssertEqual(store.credential(for: "Guest")?.isOpenNetwork, true)
     }
 
     func testInvalidNetworksAreRefusedBeforeTheKeychain() {
         let (manager, store) = managerWithStore([])
         XCTAssertEqual(
-            manager.saveNetwork(ssid: "   ", password: "x", isOpenNetwork: false)?.title,
+            manager.saveNetwork(ssid: "   ", password: "x")?.title,
             "Invalid network name")
         XCTAssertEqual(
             manager.saveNetwork(
-                ssid: String(repeating: "s", count: 33), password: "x",
-                isOpenNetwork: false)?.title,
+                ssid: String(repeating: "s", count: 33), password: "x")?.title,
             "Invalid network name")
         XCTAssertEqual(
             manager.saveNetwork(
-                ssid: "Long", password: String(repeating: "p", count: 65),
-                isOpenNetwork: false)?.title,
+                ssid: "Long", password: String(repeating: "p", count: 65))?.title,
             "Invalid WiFi credential")
         XCTAssertTrue(store.names.isEmpty)
     }
@@ -275,7 +273,7 @@ final class WifiNetworkSettingsTests: XCTestCase {
         store.writesFail = true
 
         let failure = manager.saveNetwork(
-            ssid: "Cafe", password: "latte", isOpenNetwork: false)
+            ssid: "Cafe", password: "latte")
         XCTAssertEqual(failure?.title, "Keychain storage failed")
         XCTAssertEqual(manager.savedNetworkNames, ["Home"])
 
@@ -286,7 +284,7 @@ final class WifiNetworkSettingsTests: XCTestCase {
         // Resolved: the retry goes through and reports nothing.
         store.writesFail = false
         XCTAssertNil(manager.saveNetwork(
-            ssid: "Cafe", password: "latte", isOpenNetwork: false))
+            ssid: "Cafe", password: "latte"))
         XCTAssertEqual(manager.savedNetworkNames, ["Home", "Cafe"])
     }
 
