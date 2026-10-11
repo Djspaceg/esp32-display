@@ -1446,6 +1446,51 @@ static int choosingAStoredWadNamesIt() {
   return 0;
 }
 
+// Rule: CFGGAME picks a boot-menu row by its label, over serial, exactly as
+// choosing it on the menu does; a label the menu does not offer starts nothing.
+static int serialChoosesAMenuRowByLabel() {
+  resetObservations();
+  wadProblem = nullptr;
+  pakProblem = nullptr;
+  storedWads = {"freedoom1.wad", "miniwad.wad"};
+  ESP.throwOnRestart = true;
+  bool restarted = false;
+  try {
+    chooseBootMenuEntry("miniwad");
+  } catch (const FakeRestart &) {
+    restarted = true;
+  }
+  ESP.throwOnRestart = false;
+  bootMenuActive = false;
+  CHECK(restarted);
+  CHECK(fakeNvsStrings["doomwad"] == "miniwad.wad");
+  CHECK(fakeNvsBools.count("doomonce") == 1);
+
+  resetObservations();
+  wadProblem = nullptr;
+  pakProblem = nullptr;
+  ESP.throwOnRestart = true;
+  restarted = false;
+  try {
+    chooseBootMenuEntry("QUAKE");
+  } catch (const FakeRestart &) {
+    restarted = true;
+  }
+  ESP.throwOnRestart = false;
+  bootMenuActive = false;
+  CHECK(restarted);
+  CHECK(fakeNvsBools.count("quakeonce") == 1);
+  CHECK(fakeNvsStrings.count("doomwad") == 0);
+
+  resetObservations();
+  wadProblem = nullptr;
+  CHECK(!chooseBootMenuEntry("FREEDOOM2"));
+  CHECK(ESP.restarts == 0);
+  CHECK(fakeNvsBools.empty());
+  CHECK(Serial.captured.find("boot menu: no FREEDOOM2 row") != std::string::npos);
+  return 0;
+}
+
 // Rule: a stored WAD whose name cannot be saved starts nothing: no Doom
 // request is left to boot the wrong WAD.
 static int storedWadSaveFailureStartsNothing() {
@@ -1764,6 +1809,7 @@ int main() {
   if (storedWadsWithoutTheBundledOne() != 0) return 1;
   if (choosingAStoredWadNamesIt() != 0) return 1;
   if (storedWadSaveFailureStartsNothing() != 0) return 1;
+  if (serialChoosesAMenuRowByLabel() != 0) return 1;
   printf("test_doom_entry_gate: %d checks passed\n", checks);
   return 0;
 }

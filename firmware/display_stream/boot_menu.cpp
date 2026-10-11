@@ -6,6 +6,7 @@
 #include <Preferences.h>
 #include <esp_system.h>
 #include <string.h>
+#include <strings.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -360,6 +361,21 @@ static void chooseHighlighted() {
       ESP.restart();
       return;
   }
+}
+
+bool chooseBootMenuEntry(const char *label) {
+  bootMenuChoices = bootmenu::offeredModes(bootMenuCapabilities(nullptr));
+  for (size_t i = 0; i < bootMenuChoices.count; ++i) {
+    if (strcasecmp(choiceLabel(i), label) != 0) continue;
+    bootMenuIndex = i;
+    Serial.printf("boot menu: %s chosen over serial\n", choiceLabel(i));
+    // A game restarts from here; only a request that could not be saved, or
+    // STREAMING, comes back.
+    chooseHighlighted();
+    return bootMenuChoices.modes[i] == bootmenu::Mode::Streaming;
+  }
+  Serial.printf("boot menu: no %s row to choose\n", label);
+  return false;
 }
 
 void activateBootMenu(uint32_t pressStartedAt) {

@@ -11,6 +11,7 @@
 #include "audio_engine.h"
 #include "audio_test.h"
 #include "audio_transport.h"
+#include "boot_menu.h"
 #include "coprocessor_service.h"
 #include "display_power.h"
 #include "fault_inject.h"
@@ -456,6 +457,17 @@ static void processConfigLine(char *line) {
     touchLogEnabled = want != 0;
     configSerial().printf("CFGOK touchlog=%d (not persisted)\n",
                           touchLogEnabled);
+  } else if (strncmp(line, "CFGGAME ", 8) == 0) {
+    // Bench and test use: start a boot-menu row by its label (DOOM, QUAKE, a
+    // stored WAD's name), exactly as choosing it on the menu does.
+    const char *label = line + 8;
+    if (*label == '\0' || strlen(label) > 32) {
+      configSerial().println("CFGERR expected: CFGGAME <boot menu label>");
+      return;
+    }
+    if (!chooseBootMenuEntry(label)) {
+      configSerial().printf("CFGERR the boot menu offers no %s\n", label);
+    }
   } else if (strncmp(line, "CFGFIXEDBL ", 11) == 0) {
     int want;
     char extra;

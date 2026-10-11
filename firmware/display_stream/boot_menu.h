@@ -44,6 +44,12 @@ bool bootMenuOffered(const char **refusal);
 // request could not be saved.
 void requestBootMenuAndRestart();
 
+// CFGGAME: chooses the boot-menu row whose label is `label` (any case) as a
+// press on the menu would - a game's request saved, then a restart into it -
+// whether or not the menu is open. Returns false, starting nothing, when the
+// menu would not offer that row or its request could not be saved.
+bool chooseBootMenuEntry(const char *label);
+
 // Shows the menu if this boot should, and returns once streaming is chosen or
 // the countdown runs out. Returns whether the menu was opened, so the caller
 // knows to repaint what it drew over. A game choice restarts and never returns.
@@ -77,6 +83,7 @@ inline bool bootMenuOffered(const char **refusal) {
   return false;
 }
 inline void requestBootMenuAndRestart() {}
+inline bool chooseBootMenuEntry(const char *) { return false; }
 inline bool runBootMenuIfDue(bool) { return false; }
 inline constexpr bool bootMenuActive = false;
 inline uint32_t bootMenuClockMs() { return 0; }
