@@ -241,6 +241,12 @@ static size_t wifiSelectorCount = 0;
 static size_t wifiSelectorIndex = 0;
 static uint8_t wifiSelectorActiveSlot = 0;
 static const char *wifiSelectorMessage = nullptr;
+// On glass with no touch the selector has no BACK control, and BOOT only moves
+// and chooses there, so a double press could otherwise only be left by
+// choosing a network, which restarts the board. Left alone this long, it
+// closes back to whatever it covered.
+static const uint32_t WIFI_SELECTOR_IDLE_MS = 30000;
+static uint32_t wifiSelectorInputAt = 0;
 
 static void fillRect565(uint8_t *buffer, int bufferWidth, int bufferHeight,
                         int x, int y, int width, int height, uint16_t color) {
@@ -508,6 +514,7 @@ void openWifiSelector() {
       wifiSelectorSlots, wifiSelectorCount, wifiSelectorActiveSlot);
   wifiSelectorMessage = nullptr;
   wifiSelectorActive = true;
+  wifiSelectorInputAt = millis();
   surveyActive = true;
   infoBarUntil = 0;
   Serial.printf("wifi selector: opened with %u saved presets\n",
@@ -521,7 +528,23 @@ void closeWifiSelector() {
   wifiSelectorMessage = nullptr;
   Serial.println("wifi selector: closed");
   if (!waitForDmaIdle(200)) return;
-  drawSurveyScreen();
+  // The status screen it was opened over, unless that is closing as well.
+  if (surveyActive) drawSurveyScreen();
+}
+
+void serviceWifiSelectorTimeout() {
+  if (!wifiSelectorActive || touchAvailable || restartAt != 0) return;
+  if ((uint32_t)(millis() - wifiSelectorInputAt) < WIFI_SELECTOR_IDLE_MS) {
+    return;
+  }
+  Serial.println("wifi selector: idle, closing");
+  // Back to the stream or the idle card, not the status screen: on the knob
+  // carrier, where BOOT is mute, that would be one more screen BOOT cannot
+  // leave.
+  surveyActive = false;
+  closeWifiSelector();
+  applyBacklight();
+  if (idleActive) drawIdleScreen();
 }
 
 void moveWifiSelector(int direction) {
@@ -529,6 +552,7 @@ void moveWifiSelector(int direction) {
   wifiSelectorIndex = wifiselector::movedIndex(
       wifiSelectorIndex, wifiSelectorCount, direction);
   wifiSelectorMessage = nullptr;
+  wifiSelectorInputAt = millis();
   Serial.printf("wifi selector: slot %u highlighted\n",
                 (unsigned)wifiSelectorSlots[wifiSelectorIndex]);
   drawWifiSelectorScreen();
@@ -576,6 +600,7 @@ void handleWifiSelectorTap(int16_t x, int16_t y) {
 
 void activateWifiSelector() {
   if (!wifiSelectorActive) return;
+  wifiSelectorInputAt = millis();
   if (wifiSelectorCount == 0) {
     closeWifiSelector();
     return;
@@ -677,8 +702,10 @@ void drawSurveyScreen() {
   text[ROW_NAME] = cfgName.c_str();
   text[ROW_FIRMWARE] = firmware;
   text[ROW_BATTERY] = showBattery ? battery : "";
-  text[ROW_HINT] = touchAvailable ? "TAP OUTSIDE TO CLOSE"
-                                  : "PRESS BOOT TO CLOSE";
+  // The knob carrier's BOOT is its mute, so it closes nothing there.
+  text[ROW_HINT] = touchAvailable      ? "TAP OUTSIDE TO CLOSE"
+                   : bcfg->hasEncoder() ? ""
+                                        : "PRESS BOOT TO CLOSE";
   size_t lengths[ROW_COUNT];
   for (int row = 0; row < ROW_COUNT; ++row) lengths[row] = strlen(text[row]);
   const bool roundGlass = bcfg->panel->roundDisplay;

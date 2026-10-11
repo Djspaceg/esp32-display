@@ -153,8 +153,8 @@ static void IRAM_ATTR onEncoderEdge() {
   portEXIT_CRITICAL_ISR(&encoderMux);
 }
 
-// Whether the short press is the knob's mute click rather than the backlight
-// toggle: on the knob carrier, whose push switch is its BOOT button.
+// Whether the short press is the knob's mute click rather than the status
+// screen: on the knob carrier, whose push switch is its BOOT button.
 static bool knobDrivesVolume() { return bcfg != nullptr && bcfg->hasEncoder(); }
 
 static void initializeEncoderInput() {
@@ -257,11 +257,18 @@ static void handleTriplePress() {
     return;
   }
   // Staying normal must undo the single and the double that the triple's
-  // first two presses also were. A reboot used to hide them.
-  if (selectorOpenedByDouble && wifiSelectorActive) closeWifiSelector();
+  // first two presses also were. A reboot used to hide them. Closing the
+  // selector repaints the status screen under it, so when that is closing too
+  // it is marked closed first rather than drawn once and then taken down.
+  if (selectorOpenedByDouble && wifiSelectorActive) {
+    if (!statusBeforeSingle) surveyActive = false;
+    closeWifiSelector();
+  }
   selectorOpenedByDouble = false;
-  if (surveyActive != statusBeforeSingle) {
-    setStatusScreen(statusBeforeSingle, "triple press refused, undo");
+  if (!statusBeforeSingle) {
+    setStatusScreen(false, "triple press refused, undo");
+  } else if (!surveyActive) {
+    setStatusScreen(true, "triple press refused, undo");
   }
 #if defined(ESPDISP_DOOM_RUNTIME)
   // Doom is the only game, so a menu with nothing but streaming means its

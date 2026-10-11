@@ -28,6 +28,9 @@ void moveWifiSelector(int direction);
 void activateWifiSelector();
 void drawWifiSelectorScreen();
 void handleWifiSelectorTap(int16_t x, int16_t y);
+// Called every loop pass: on glass with no touch, closes a selector left idle
+// (it has no BACK control there).
+void serviceWifiSelectorTimeout();
 
 // Boot-mode menu screen (state and input live in boot_menu.cpp, which also
 // decides whether this image has a menu at all). labels has count entries;

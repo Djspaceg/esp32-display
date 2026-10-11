@@ -291,7 +291,13 @@ uint8_t appliedPanelRotation = 0;
 uint8_t addressedPanelRotation() { return appliedPanelRotation; }
 static std::vector<std::pair<int16_t, int16_t>> touchMarkers;
 void drawTouchMarker(int16_t x, int16_t y) { touchMarkers.push_back({x, y}); }
-void closeWifiSelector() { wifiSelectorActive = false; }
+// Whether the status screen was still up under the selector as it closed,
+// which is what the real one repaints.
+static bool surveyUpAtSelectorClose = false;
+void closeWifiSelector() {
+  surveyUpAtSelectorClose = surveyActive;
+  wifiSelectorActive = false;
+}
 void handleWifiSelectorTap(int16_t, int16_t) {}
 bool handleSurveyTap(int16_t, int16_t) { return false; }
 const char *defaultInfoBarText() { return ""; }
@@ -497,6 +503,9 @@ static int tripleWithInvalidWadStaysNormal() {
   CHECK(selectorMoves == 0);
   CHECK(userBlLevel == BL_HIGH);
   CHECK(displayPrefSaves == 0);
+  // The status screen was marked closed before the selector over it closed,
+  // so it was not drawn once just to be taken down.
+  CHECK(!surveyUpAtSelectorClose);
   // The Doom reason is the last line, after the undo.
   CHECK(Serial.captured.rfind("button: Doom unavailable") >
         Serial.captured.rfind("wifi status off"));
@@ -528,6 +537,7 @@ static int refusalKeepsASurveyThatWasOn() {
   CHECK(ESP.restarts == 0);
   CHECK(surveyActive);
   CHECK(!wifiSelectorActive);
+  CHECK(surveyUpAtSelectorClose);
   CHECK(selectorMoves == 0);
   surveyActive = false;
   return 0;
@@ -661,6 +671,43 @@ static int doublePressOpensTheWifiSelector() {
   CHECK(displayPrefSaves == 0);
   wifiSelectorActive = false;
   surveyActive = false;
+  return 0;
+}
+
+// Review probes: each of these once survived a mutation of the press logic.
+static int quickSelectorPressesAfterTheWindowAreMoves() {
+  // Past the triple-press window, presses in a selector a double opened are
+  // the selector's, however quickly they come: three of them must not count
+  // as a triple and restart into the boot menu.
+  resetObservations();
+  wadProblem = nullptr;
+  shortPress();
+  shortPress();
+  CHECK(wifiSelectorActive);
+  fakeNow += 1000;
+  shortPress();
+  shortPress();
+  shortPress();
+  CHECK(selectorMoves == 3);
+  CHECK(ESP.restarts == 0);
+  CHECK(fakeNvsBools.count("bootmenu") == 0);
+  wifiSelectorActive = false;
+  surveyActive = false;
+  return 0;
+}
+
+static int closingTheStatusScreenRestoresTheBacklight() {
+  // The status screen lights the panel at the survey level; closing it hands
+  // the backlight back to the saved, state-driven level.
+  resetObservations();
+  shortPress();
+  backlightApplies = 0;
+  fakeNow += 1000;
+  handleButton();
+  shortPress();
+  CHECK(!surveyActive);
+  CHECK(backlightApplies >= 1);
+  CHECK(userBlLevel == BL_HIGH);
   return 0;
 }
 
@@ -1760,6 +1807,24 @@ static int knobTurnIsVolumeAndClickIsMute() {
   CHECK(displayPrefSaves == 0);
   CHECK(Serial.captured.find("backlight") == std::string::npos);
 
+  // A click, a turn and a click are two mutes, not a double click: the turn
+  // settles the first click's window.
+  sentPackets.clear();
+  fakeNow += 1000;
+  handleButton();
+  shortPress();
+  knobDetent(true);
+  handleButton();
+  shortPress();
+  got = sentKnobGestures();
+  CHECK(got.size() == 3);
+  CHECK(got[0] == TouchGesture::KnobPress &&
+        got[1] == TouchGesture::KnobClockwise &&
+        got[2] == TouchGesture::KnobPress);
+  CHECK(!wifiSelectorActive);
+  fakeNow += 1000;
+  handleButton();
+
   // With no sender yet there is nowhere to report to; the log says so.
   sentPackets.clear();
   hbPort = 0;
@@ -1940,6 +2005,8 @@ int main() {
   if (singlePressKeepsAnyBacklightLevel() != 0) return 1;
   if (doublePressOpensTheWifiSelector() != 0) return 1;
   if (holdsKeepTheirJobs() != 0) return 1;
+  if (quickSelectorPressesAfterTheWindowAreMoves() != 0) return 1;
+  if (closingTheStatusScreenRestoresTheBacklight() != 0) return 1;
   if (ineligibleProfileNeverChecksWad() != 0) return 1;
   if (requestIsConsumedOnce() != 0) return 1;
   if (automaticRestartSkipsMenu() != 0) return 1;

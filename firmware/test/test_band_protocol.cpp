@@ -1132,6 +1132,19 @@ int main() {
           CHECK(x0 >= l.spanX[row]);
           CHECK(x1 <= l.spanX[row] + l.spanWidth[row]);
           CHECK(x0 >= 0 && x1 <= panel.width);
+          // And the span maxChars is measured against stays on the glass too,
+          // whatever text fills it.
+          if (panel.round) {
+            const int r = panel.width / 2;
+            for (const int cx :
+                 {(int)l.spanX[row], l.spanX[row] + l.spanWidth[row]}) {
+              for (const int cy : {y0, y1}) {
+                const int dx = cx - panel.width / 2;
+                const int dy = cy - panel.height / 2;
+                CHECK(dx * dx + dy * dy < r * r);
+              }
+            }
+          }
           if (panel.round) {
             const int r = panel.width / 2;
             for (const int cx : {x0, x1}) {

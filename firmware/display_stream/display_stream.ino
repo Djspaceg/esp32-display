@@ -755,6 +755,8 @@ void loop() {
 
   serviceStreamDraw();
 
+  serviceWifiSelectorTimeout();
+
   // Signal-survey refresh: a live meter that only updates on entry is a
   // photograph. Half a second tracks a walk around a room; skipped while
   // DMA is busy rather than gated, because a beat late is fine.
