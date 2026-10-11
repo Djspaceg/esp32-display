@@ -465,8 +465,16 @@ static void processConfigLine(char *line) {
       configSerial().println("CFGERR expected: CFGGAME <boot menu label>");
       return;
     }
-    if (!chooseBootMenuEntry(label)) {
-      configSerial().printf("CFGERR the boot menu offers no %s\n", label);
+    switch (chooseBootMenuEntry(label)) {
+      case BootMenuSerialChoice::Streaming:
+        configSerial().println("CFGOK game=STREAMING");
+        break;
+      case BootMenuSerialChoice::NotOffered:
+        configSerial().printf("CFGERR the boot menu offers no %s\n", label);
+        break;
+      case BootMenuSerialChoice::SaveFailed:
+        configSerial().printf("CFGERR could not save the %s request\n", label);
+        break;
     }
   } else if (strncmp(line, "CFGFIXEDBL ", 11) == 0) {
     int want;

@@ -294,14 +294,17 @@ static inline const game_store_entry_t* game_store_find_quake(
 }
 
 // The boot menu's label for a stored WAD: its name without ".wad", upper case,
-// so "freedoom1.wad" reads FREEDOOM1. A stored doom.wad keeps its extension,
-// DOOM.WAD, so it is not a second row reading DOOM, the bundled doom1.wad's.
-// `out` holds GAME_STORE_NAME_BYTES + 1.
+// so "freedoom1.wad" reads FREEDOOM1. One whose stem is another row's label
+// (doom.wad, quake.wad, streaming.wad) keeps its extension, DOOM.WAD, so the
+// menu never shows two rows reading the same. `out` holds
+// GAME_STORE_NAME_BYTES + 1.
 static inline void game_store_doom_label(const char* name, char* out) {
   size_t length = strlen(name);
   if (length > GAME_STORE_NAME_BYTES) length = GAME_STORE_NAME_BYTES;
   if (game_store_ends_with(name, length, ".wad") &&
-      !(length == 8 && game_store_names_equal(name, "doom.wad"))) {
+      !game_store_names_equal(name, "doom.wad") &&
+      !game_store_names_equal(name, "quake.wad") &&
+      !game_store_names_equal(name, "streaming.wad")) {
     length -= 4;
   }
   for (size_t i = 0; i < length; ++i) {

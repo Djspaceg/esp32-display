@@ -1456,7 +1456,7 @@ static int serialChoosesAMenuRowByLabel() {
   ESP.throwOnRestart = true;
   bool restarted = false;
   try {
-    chooseBootMenuEntry("miniwad");
+    (void)chooseBootMenuEntry("miniwad");
   } catch (const FakeRestart &) {
     restarted = true;
   }
@@ -1472,7 +1472,7 @@ static int serialChoosesAMenuRowByLabel() {
   ESP.throwOnRestart = true;
   restarted = false;
   try {
-    chooseBootMenuEntry("QUAKE");
+    (void)chooseBootMenuEntry("QUAKE");
   } catch (const FakeRestart &) {
     restarted = true;
   }
@@ -1484,10 +1484,21 @@ static int serialChoosesAMenuRowByLabel() {
 
   resetObservations();
   wadProblem = nullptr;
-  CHECK(!chooseBootMenuEntry("FREEDOOM2"));
+  CHECK(chooseBootMenuEntry("FREEDOOM2") == BootMenuSerialChoice::NotOffered);
   CHECK(ESP.restarts == 0);
   CHECK(fakeNvsBools.empty());
   CHECK(Serial.captured.find("boot menu: no FREEDOOM2 row") != std::string::npos);
+
+  // A request that cannot be saved starts nothing, says so, and draws no
+  // menu over the streaming panel.
+  resetObservations();
+  wadProblem = nullptr;
+  fakeNvsWritesFail = true;
+  CHECK(chooseBootMenuEntry("DOOM") == BootMenuSerialChoice::SaveFailed);
+  CHECK(ESP.restarts == 0);
+  CHECK(menuDraws == 0);
+  CHECK(chooseBootMenuEntry("streaming") == BootMenuSerialChoice::Streaming);
+  CHECK(menuDraws == 0);
   return 0;
 }
 

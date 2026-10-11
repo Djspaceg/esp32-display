@@ -196,6 +196,8 @@ static const char *choiceLabel(size_t index) {
 }
 
 static void drawBootMenu() {
+  // CFGGAME chooses without the menu open; nothing is drawn over streaming.
+  if (!bootMenuActive) return;
   const char *labels[bootmenu::MODE_MAX];
   for (size_t i = 0; i < bootMenuChoices.count; ++i) {
     labels[i] = choiceLabel(i);
@@ -363,19 +365,21 @@ static void chooseHighlighted() {
   }
 }
 
-bool chooseBootMenuEntry(const char *label) {
+BootMenuSerialChoice chooseBootMenuEntry(const char *label) {
   bootMenuChoices = bootmenu::offeredModes(bootMenuCapabilities(nullptr));
   for (size_t i = 0; i < bootMenuChoices.count; ++i) {
     if (strcasecmp(choiceLabel(i), label) != 0) continue;
     bootMenuIndex = i;
     Serial.printf("boot menu: %s chosen over serial\n", choiceLabel(i));
-    // A game restarts from here; only a request that could not be saved, or
-    // STREAMING, comes back.
+    // A game restarts from here; only STREAMING, or a request that could
+    // not be saved, comes back.
     chooseHighlighted();
-    return bootMenuChoices.modes[i] == bootmenu::Mode::Streaming;
+    return bootMenuChoices.modes[i] == bootmenu::Mode::Streaming
+               ? BootMenuSerialChoice::Streaming
+               : BootMenuSerialChoice::SaveFailed;
   }
   Serial.printf("boot menu: no %s row to choose\n", label);
-  return false;
+  return BootMenuSerialChoice::NotOffered;
 }
 
 void activateBootMenu(uint32_t pressStartedAt) {
