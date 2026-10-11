@@ -19,6 +19,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+// The game store's directory (firmware/doom/src/platform), which says where
+// each pak is.
+#include "platform/game_store_model.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -103,6 +108,53 @@ static inline bool quake_pak_path_matches(const char* path) {
     ++path;
   }
   return *want == '\0' && *path == '\0';
+}
+
+// Which pak `path` (below the mount point) names: N for "/id1/pakN.pak", N
+// from 0 to 9, else -1. Quake opens pak0.pak, pak1.pak, ... in turn until one
+// is missing; the game store holds each in its own slot.
+static inline int quake_pak_path_slot(const char* path) {
+  static const char prefix[] = "/id1/pak";
+  if (path == NULL || strncmp(path, prefix, sizeof(prefix) - 1) != 0) {
+    return -1;
+  }
+  const char* rest = path + sizeof(prefix) - 1;
+  if (rest[0] < '0' || rest[0] > '9' || strcmp(rest + 1, ".pak") != 0) {
+    return -1;
+  }
+  return rest[0] - '0';
+}
+
+// Where one pak Quake is given lies in the game data area.
+typedef struct {
+  uint32_t base;
+  uint32_t bytes;
+} quake_pak_span_t;
+
+// The paks Quake is given from a parsed area: a legacy area is pak0.pak alone,
+// from offset 0 across the whole area (quake_pak_check finds its end); a store
+// gives pak0.pak and each slot after it up to the first gap, since Quake stops
+// at the first missing pakN.pak. Returns how many, filling spans[0..n); 0 with
+// *problem when there is no pak0.pak.
+static inline int quake_pak_spans(const game_store_t* store,
+                                  quake_pak_span_t* spans,
+                                  const char** problem) {
+  *problem = NULL;
+  if (store->legacy) {
+    spans[0].base = 0;
+    spans[0].bytes = store->area_bytes;
+    return 1;
+  }
+  int count = 0;
+  for (uint8_t slot = 0; slot <= GAME_STORE_MAX_QUAKE_SLOT; ++slot) {
+    const game_store_entry_t* entry = game_store_find_quake(store, slot);
+    if (entry == NULL) break;
+    spans[count].base = entry->offset;
+    spans[count].bytes = entry->length;
+    ++count;
+  }
+  if (count == 0) *problem = "no pak0.pak in the game store";
+  return count;
 }
 
 // Where a seek lands, or -1 when it would leave the file. whence is 0, 1 or 2

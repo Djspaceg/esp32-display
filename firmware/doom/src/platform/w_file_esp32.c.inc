@@ -9,6 +9,11 @@
 // remains only for legacy developer images whose 16 MiB table omitted the
 // partition entry but wrote the WAD at DOOM_WAD_PARTITION_OFFSET.
 //
+// A WAD the Mac app put in the game store (game_store.h) is not mapped: the
+// store's area crosses 16 MiB, past what the cache maps, so its lumps are read
+// through the flash API into the engine's zone as Doom asks for them, the way
+// the engine reads a WAD from a disk. The boot menu chooses one by name.
+//
 // GPL-2.0 (part of the Doom engine integration)
 #include <string.h>
 #include <esp_partition.h>
@@ -19,6 +24,7 @@
 #include "doom_mode.h"
 #include "doom_log.h"
 #include "doom_wad_check.h"
+#include "../game_store.h"
 
 static const void* wad_mapped_ptr = NULL;
 static uint32_t wad_size = 0;
@@ -28,6 +34,10 @@ static spi_flash_mmap_handle_t wad_map_handle;
 static bool wad_mapped_via_partition = false;
 // Why the last ensure_wad_mapped() refused, for the Doom boot's FATAL line.
 static const char* wad_failure = "WAD not checked";
+// The stored WAD this boot plays, by name; empty for the bundled doom1.wad.
+static char store_wad_name[GAME_STORE_NAME_BYTES + 1] = "";
+// Its directory entry, once ensure_wad_mapped() has accepted it.
+static const game_store_entry_t* store_wad = NULL;
 
 // The flash cache maps only 24-bit (16 MiB) flash addresses unless the
 // bootloader enables 32-bit cache addressing, which the prebuilt Arduino
@@ -116,8 +126,69 @@ static bool read_mapped_wad(void* ctx, uint32_t offset, void* dst,
     return true;
 }
 
+static bool read_store_wad(void* ctx, uint32_t offset, void* dst,
+                           uint32_t len) {
+    const game_store_entry_t* entry = (const game_store_entry_t*)ctx;
+    return offset <= entry->length && len <= entry->length - offset &&
+           game_store_read(entry->offset + offset, dst, len);
+}
+
+void doom_select_store_wad(const char* name) {
+    store_wad_name[0] = '\0';
+    if (name == NULL) return;
+    strncpy(store_wad_name, name, GAME_STORE_NAME_BYTES);
+    store_wad_name[GAME_STORE_NAME_BYTES] = '\0';
+}
+
+const char* doom_selected_wad_name(void) {
+    return store_wad_name[0] != '\0' ? store_wad_name : "doom1.wad";
+}
+
+// The chosen stored WAD: found in the directory and structurally checked over
+// its own length. Nothing is mapped.
+static bool ensure_store_wad(void) {
+    if (store_wad != NULL) return true;
+    const char* problem = game_store_open();
+    if (problem != NULL) {
+        doom_log("Game store unusable for %s: %s", store_wad_name, problem);
+        wad_failure = problem;
+        return false;
+    }
+    const game_store_entry_t* entry =
+        game_store_find_doom(game_store_directory(), store_wad_name);
+    if (entry == NULL) {
+        doom_log("WAD %s is not in the game store", store_wad_name);
+        wad_failure = "chosen WAD is not in the game store";
+        return false;
+    }
+    doom_wad_header_t header;
+    const doom_wad_status_t status =
+        doom_wad_check_file(read_store_wad, (void*)entry, entry->length,
+                            entry->length, &header);
+    if (status != DOOM_WAD_OK) {
+        doom_log("Invalid WAD structure in %s (%s; magic=%02x%02x%02x%02x "
+                 "lumps=%lu dir=%lu bytes=%lu)",
+                 store_wad_name, doom_wad_status_text(status),
+                 header.magic[0], header.magic[1], header.magic[2],
+                 header.magic[3], (unsigned long)header.lump_count,
+                 (unsigned long)header.directory_offset,
+                 (unsigned long)entry->length);
+        wad_failure = doom_wad_status_text(status);
+        return false;
+    }
+    store_wad = entry;
+    wad_size = entry->length;
+    doom_log("WAD %s: %lu bytes from the game store at 0x%lx, read on demand "
+             "(%.4s, %lu lumps)",
+             store_wad_name, (unsigned long)wad_size,
+             (unsigned long)entry->offset, (const char*)header.magic,
+             (unsigned long)header.lump_count);
+    return true;
+}
+
 // Called once at Doom init to map and structurally validate the WAD partition.
 static bool ensure_wad_mapped(void) {
+    if (store_wad_name[0] != '\0') return ensure_store_wad();
     if (wad_mapped_ptr != NULL) return true;
 
     const esp_partition_t* part = find_wad_partition();
@@ -203,6 +274,10 @@ bool doom_wad_available(void) {
     return ensure_wad_mapped();
 }
 
+bool doom_wad_is_mapped(void) {
+    return wad_mapped_ptr != NULL;
+}
+
 const char* doom_wad_failure(void) {
     return wad_failure;
 }
@@ -252,6 +327,35 @@ const char* doom_wad_preflight(void) {
     return status == DOOM_WAD_OK ? NULL : doom_wad_status_text(status);
 }
 
+// The boot menu's list of stored WADs: each one the Doom boot would accept,
+// checked the same way through the flash API. Fills names[0..max) in
+// directory order and returns how many; *problem is the first reason one was
+// left out, or the area's own problem, else NULL.
+size_t doom_store_wad_preflight(char names[][GAME_STORE_NAME_BYTES + 1],
+                                size_t max, const char** problem) {
+    *problem = game_store_open();
+    if (*problem != NULL) return 0;
+    const game_store_t* store = game_store_directory();
+    size_t count = 0;
+    for (size_t i = 0; i < store->count && count < max; ++i) {
+        const game_store_entry_t* entry = &store->entries[i];
+        if (entry->kind != GAME_STORE_KIND_DOOM_WAD) continue;
+        doom_wad_header_t header;
+        const doom_wad_status_t status =
+            doom_wad_check_file(read_store_wad, (void*)entry, entry->length,
+                                entry->length, &header);
+        if (status != DOOM_WAD_OK) {
+            doom_log("Stored WAD %s refused: %s", entry->name,
+                     doom_wad_status_text(status));
+            if (*problem == NULL) *problem = doom_wad_status_text(status);
+            continue;
+        }
+        memcpy(names[count], entry->name, sizeof(names[count]));
+        ++count;
+    }
+    return count;
+}
+
 // --- doomgeneric WAD file interface ---
 // These replace the standard w_file_stdc.c functions
 
@@ -265,6 +369,7 @@ wad_file_t* W_OpenFile(char* path) {
 
     doom_wad_file.file_class = NULL;
     doom_wad_file.length = wad_size;
+    // NULL for a stored WAD: the engine then reads each lump into its zone.
     doom_wad_file.mapped = (byte*)wad_mapped_ptr;
 
     return &doom_wad_file;
@@ -279,11 +384,21 @@ size_t W_Read(wad_file_t* wad, unsigned int offset,
               void* buffer, size_t buffer_len) {
     (void)wad;
 
-    if (!wad_mapped_ptr || offset >= wad_size) return 0;
+    if (offset >= wad_size) return 0;
     if (buffer_len > wad_size - offset) {
         buffer_len = wad_size - offset;
     }
 
+    if (store_wad != NULL) {
+        if (!read_store_wad((void*)store_wad, offset, buffer,
+                            (uint32_t)buffer_len)) {
+            doom_log("WAD read failed at %u+%u", offset,
+                     (unsigned)buffer_len);
+            return 0;
+        }
+        return buffer_len;
+    }
+    if (!wad_mapped_ptr) return 0;
     memcpy(buffer, (const uint8_t*)wad_mapped_ptr + offset, buffer_len);
     return buffer_len;
 }

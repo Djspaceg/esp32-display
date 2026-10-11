@@ -19,6 +19,8 @@ MEM_REPORT_OUT="$TMP/test_mem_report"
 USB_INPUT_OUT="$TMP/test_usb_input"
 USB_HOST_INIT_OUT="$TMP/test_usb_host_init"
 QUAKE_PAK_OUT="$TMP/test_quake_pak"
+GAME_STORE_OUT="$TMP/test_game_store"
+DOOM_STORE_WAD_OUT="$TMP/test_doom_store_wad"
 QUAKE_INPUT_OUT="$TMP/test_quake_input"
 BOOT_SCREEN_OUT="$TMP/test_boot_screen"
 DSI_BACKLIGHT_OUT="$TMP/test_dsi_backlight"
@@ -140,7 +142,25 @@ for target in P4 S3; do
     -o "$DOOM_WAD_OUT-$target" \
     "$HERE/test_doom_wad.cpp" "$TMP/doom_wad_unit_$target.o"
   "$DOOM_WAD_OUT-$target"
+  # Doom WADs in the game store: listed, chosen and read unmapped. Each case is
+  # its own process, as each is its own boot on the board.
+  clang++ "${CXXFLAGS[@]}" \
+    -DCONFIG_IDF_TARGET_ESP32$target \
+    -I"$HERE/fakes/doom_wad" -I"$HERE/../doom/src" \
+    -o "$DOOM_STORE_WAD_OUT-$target" \
+    "$HERE/test_doom_store_wad.cpp" "$TMP/doom_wad_unit_$target.o"
+  for case in preflight legacy chosen missing small-s3; do
+    "$DOOM_STORE_WAD_OUT-$target" "$case"
+  done
 done
+
+# The game store's directory: the format the Mac app writes (the shared
+# fixture), every refusal, and the legacy layout.
+clang++ "${CXXFLAGS[@]}" \
+  -DGAME_STORE_FIXTURE="\"$HERE/../../mac/ESPDisplaySender/Tests/SenderProtocolTests/Fixtures/game-store-v1.hex\"" \
+  -I"$HERE/../doom/src" \
+  -o "$GAME_STORE_OUT" "$HERE/test_game_store.cpp"
+"$GAME_STORE_OUT"
 
 # Doom's sound effects: what the engine starts is what the codec is sent
 # (the sound module and i_sound.c.inc, unmodified, against fakes/doom_sound).
@@ -207,6 +227,7 @@ clang++ "${CXXFLAGS[@]}" \
 # too where tools/fetch_game_data.sh has put it.
 clang++ "${CXXFLAGS[@]}" \
   -DQUAKE_TEST_PAK_PATH="\"$HERE/../quake/id1/pak0.pak\"" \
+  -I"$HERE/../doom/src" \
   -o "$QUAKE_PAK_OUT" "$HERE/test_quake_pak.cpp"
 "$QUAKE_PAK_OUT"
 

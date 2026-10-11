@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <esp_system.h>
+#include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -32,6 +33,15 @@ static size_t bootMenuIndex = 0;
 static bootmenu::Countdown bootMenuCountdown;
 static uint32_t bootMenuShownSeconds = 0;
 static const char *bootMenuMessage = nullptr;
+// "STARTING <WAD>" for a stored WAD's row.
+static char bootMenuStartingMessage[16 + GAME_STORE_NAME_BYTES];
+
+// The game store's WADs the Doom boot would accept, as the preflight listed
+// them, and their menu labels.
+static_assert(bootmenu::STORED_WAD_MAX == GAME_STORE_MAX_DOOM_WADS,
+              "one menu row per WAD the game store can hold");
+static char storedWadNames[bootmenu::STORED_WAD_MAX][GAME_STORE_NAME_BYTES + 1];
+static char storedWadLabels[bootmenu::STORED_WAD_MAX][GAME_STORE_NAME_BYTES + 1];
 
 // Every menu time is on the FreeRTOS tick clock, because that is what the BOOT
 // interrupt stamps edges with. millis() runs ahead of it by however long the
@@ -44,6 +54,8 @@ static uint32_t menuClockMs() {
 static const char *BOOT_MENU_REQUEST_KEY = "bootmenu";
 // Read by setup() before the normal boot; see the Doom branch there.
 static const char *DOOM_REQUEST_KEY = "doomonce";
+// Read with it: which stored WAD to play. Absent for the bundled doom1.wad.
+static const char *DOOM_WAD_KEY = "doomwad";
 // Read by setup() likewise; see the Quake branch there.
 static const char *QUAKE_REQUEST_KEY = "quakeonce";
 
@@ -73,6 +85,18 @@ static bootmenu::Capabilities bootMenuCapabilities(const char **refusal) {
     if (wadProblem != nullptr) {
       if (refusal != nullptr) *refusal = wadProblem;
       Serial.printf("boot menu: Doom not offered (%s)\n", wadProblem);
+    }
+    // The WADs the Mac app put in the game store, each checked as the Doom
+    // boot would check it.
+    const char *storedProblem = nullptr;
+    caps.storedWads = doom_store_wad_preflight(
+        storedWadNames, bootmenu::STORED_WAD_MAX, &storedProblem);
+    for (size_t i = 0; i < caps.storedWads; ++i) {
+      game_store_doom_label(storedWadNames[i], storedWadLabels[i]);
+    }
+    if (storedProblem != nullptr) {
+      Serial.printf("boot menu: a stored WAD not offered (%s)\n",
+                    storedProblem);
     }
   }
 #endif
@@ -133,6 +157,24 @@ static bool saveOneShotFlag(const char *key) {
   return saved;
 }
 
+// Doom's request with the WAD it is for: the stored WAD's name first, then
+// the flag, so a saved flag always has its name; a name with no flag is
+// removed, and choosing the bundled WAD removes any name left from before.
+static bool saveDoomRequest(const char *storedWad) {
+  Preferences prefs;
+  if (!prefs.begin("espdisp", false)) return false;
+  bool saved;
+  if (storedWad != nullptr) {
+    saved = prefs.putString(DOOM_WAD_KEY, storedWad) == strlen(storedWad);
+  } else {
+    saved = !prefs.isKey(DOOM_WAD_KEY) || prefs.remove(DOOM_WAD_KEY);
+  }
+  saved = saved && prefs.putBool(DOOM_REQUEST_KEY, true) == sizeof(uint8_t);
+  if (!saved && storedWad != nullptr) prefs.remove(DOOM_WAD_KEY);
+  prefs.end();
+  return saved;
+}
+
 void requestBootMenuAndRestart() {
   if (!saveOneShotFlag(BOOT_MENU_REQUEST_KEY)) {
     Serial.println("button: boot menu request could not be saved; staying");
@@ -144,10 +186,18 @@ void requestBootMenuAndRestart() {
   ESP.restart();
 }
 
+// A row's label: the mode's, or a stored WAD's own.
+static const char *choiceLabel(size_t index) {
+  if (bootMenuChoices.modes[index] == bootmenu::Mode::StoredDoom) {
+    return storedWadLabels[bootMenuChoices.storedWad[index]];
+  }
+  return bootmenu::modeLabel(bootMenuChoices.modes[index]);
+}
+
 static void drawBootMenu() {
   const char *labels[bootmenu::MODE_MAX];
   for (size_t i = 0; i < bootMenuChoices.count; ++i) {
-    labels[i] = bootmenu::modeLabel(bootMenuChoices.modes[i]);
+    labels[i] = choiceLabel(i);
   }
   bootMenuShownSeconds = bootMenuCountdown.secondsLeft(menuClockMs());
   char title[24];
@@ -197,8 +247,7 @@ static void moveHighlight(int direction) {
   bootMenuIndex = wifiselector::movedIndex(bootMenuIndex,
                                            bootMenuChoices.count, direction);
   bootMenuMessage = nullptr;
-  Serial.printf("boot menu: %s highlighted\n",
-                bootmenu::modeLabel(bootMenuChoices.modes[bootMenuIndex]));
+  Serial.printf("boot menu: %s highlighted\n", choiceLabel(bootMenuIndex));
   drawBootMenu();
 }
 
@@ -255,11 +304,33 @@ static void chooseHighlighted() {
     case bootmenu::Mode::Streaming:
       leaveMenuForStreaming("chosen");
       return;
+    case bootmenu::Mode::StoredDoom: {
+      // Doom's handoff, naming the WAD; setup() hands the name to the Doom
+      // boot (doom_select_store_wad).
+      const uint8_t wad = bootMenuChoices.storedWad[bootMenuIndex];
+      if (!saveDoomRequest(storedWadNames[wad])) {
+        bootMenuMessage = "SAVE FAILED";
+        Serial.printf("boot menu: %s request could not be saved\n",
+                      storedWadNames[wad]);
+        drawBootMenu();
+        return;
+      }
+      snprintf(bootMenuStartingMessage, sizeof(bootMenuStartingMessage),
+               "STARTING %s", storedWadLabels[wad]);
+      bootMenuMessage = bootMenuStartingMessage;
+      Serial.printf("boot menu: %s chosen; restarting into isolated mode\n",
+                    storedWadNames[wad]);
+      drawBootMenu();
+      Serial.flush();
+      delay(50);
+      ESP.restart();
+      return;
+    }
     case bootmenu::Mode::Doom:
       // The same one-shot handoff the triple press used to write directly:
       // the next boot consumes it before anything fallible, so a missing WAD
       // or a Doom crash comes back up streaming instead of looping.
-      if (!saveOneShotFlag(DOOM_REQUEST_KEY)) {
+      if (!saveDoomRequest(nullptr)) {
         bootMenuMessage = "SAVE FAILED";
         Serial.println("boot menu: Doom request could not be saved");
         drawBootMenu();
@@ -324,7 +395,7 @@ void handleBootMenuTap(int16_t x, int16_t y, uint32_t pressStartedAt) {
       bootMenuIndex = hit.rowIndex;
       bootMenuMessage = nullptr;
       Serial.printf("boot menu: touch highlighted %s at (%d,%d)\n",
-                    bootmenu::modeLabel(bootMenuChoices.modes[bootMenuIndex]),
+                    choiceLabel(bootMenuIndex),
                     x, y);
       drawBootMenu();
       break;

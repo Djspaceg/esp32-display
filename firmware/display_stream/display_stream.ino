@@ -204,6 +204,17 @@ void setup() {
         Serial.println("doom: could not consume one-shot request; staying normal");
       }
     }
+    // Which stored WAD the boot menu chose (boot_menu.cpp), consumed with the
+    // request; none means the bundled doom1.wad. Removed even without a
+    // request, so a stale one can never pick a later boot's WAD.
+    if (doomPrefs.isKey("doomwad")) {
+      if (doomRequested) {
+        const String wad = doomPrefs.getString("doomwad", "");
+        doom_select_store_wad(wad.c_str());
+        Serial.printf("doom: playing %s from the game store\n", wad.c_str());
+      }
+      doomPrefs.remove("doomwad");
+    }
     doomPrefs.end();
   }
 #endif

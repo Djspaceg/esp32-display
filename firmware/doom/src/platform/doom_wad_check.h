@@ -36,12 +36,13 @@ static inline uint32_t doom_wad_u32_le(const uint8_t* p) {
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-// region_bytes is the size of the storage the WAD sits in. The directory and
-// every lump must lie within DOOM_WAD_EXPECTED_BYTES, the shareware file.
-static inline doom_wad_status_t doom_wad_check(doom_wad_read_fn read,
-                                               void* ctx,
-                                               uint32_t region_bytes,
-                                               doom_wad_header_t* header) {
+// region_bytes is the size of the storage the WAD sits in, and file_bytes the
+// WAD's own length: the directory and every lump must lie within it.
+static inline doom_wad_status_t doom_wad_check_file(doom_wad_read_fn read,
+                                                    void* ctx,
+                                                    uint32_t region_bytes,
+                                                    uint32_t file_bytes,
+                                                    doom_wad_header_t* header) {
     memset(header, 0, sizeof(*header));
     if (region_bytes < 12) return DOOM_WAD_TOO_SMALL;
 
@@ -56,9 +57,9 @@ static inline doom_wad_status_t doom_wad_check(doom_wad_read_fn read,
     }
     const uint32_t lump_count = header->lump_count;
     const uint32_t directory_offset = header->directory_offset;
-    if (region_bytes < DOOM_WAD_EXPECTED_BYTES || lump_count == 0 ||
-        directory_offset > DOOM_WAD_EXPECTED_BYTES ||
-        lump_count > (DOOM_WAD_EXPECTED_BYTES - directory_offset) / 16) {
+    if (region_bytes < file_bytes || lump_count == 0 ||
+        directory_offset > file_bytes ||
+        lump_count > (file_bytes - directory_offset) / 16) {
         return DOOM_WAD_BAD_DIRECTORY;
     }
 
@@ -77,14 +78,25 @@ static inline doom_wad_status_t doom_wad_check(doom_wad_read_fn read,
             const int32_t file_size =
                 (int32_t)doom_wad_u32_le(entries + i * 16 + 4);
             if (file_offset < 0 || file_size < 0 ||
-                (uint32_t)file_offset > DOOM_WAD_EXPECTED_BYTES ||
+                (uint32_t)file_offset > file_bytes ||
                 (uint32_t)file_size >
-                    DOOM_WAD_EXPECTED_BYTES - (uint32_t)file_offset) {
+                    file_bytes - (uint32_t)file_offset) {
                 return DOOM_WAD_BAD_LUMP;
             }
         }
     }
     return DOOM_WAD_OK;
+}
+
+// The bundled doom1.wad in the doom_wad partition, which has no file length:
+// the directory and every lump must lie within DOOM_WAD_EXPECTED_BYTES, the
+// shareware file.
+static inline doom_wad_status_t doom_wad_check(doom_wad_read_fn read,
+                                               void* ctx,
+                                               uint32_t region_bytes,
+                                               doom_wad_header_t* header) {
+    return doom_wad_check_file(read, ctx, region_bytes,
+                               DOOM_WAD_EXPECTED_BYTES, header);
 }
 
 static inline const char* doom_wad_status_text(doom_wad_status_t status) {

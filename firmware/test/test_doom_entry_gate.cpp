@@ -25,6 +25,7 @@
 
 #include <board_touch.h>
 #include <touch_map.h>
+#include <doom_mode.h>
 
 #include "../display_stream/app_state.h"
 #include "../display_stream/boot_menu.h"
@@ -71,6 +72,7 @@ static int checks = 0;
 FakeSerial Serial;
 FakeEsp ESP;
 std::map<std::string, bool> fakeNvsBools;
+std::map<std::string, std::string> fakeNvsStrings;
 bool fakeNvsWritesFail = false;
 static uint32_t fakeNow = 1000;
 static int fakeBootLevel = 1;
@@ -291,6 +293,21 @@ extern "C" const char *doom_wad_preflight(void) {
   preflightCalls++;
   return wadProblem;
 }
+// The game store's WADs the Doom boot would accept; none unless a test says.
+static std::vector<std::string> storedWads;
+static const char *storedWadProblem = nullptr;
+static int storedWadPreflightCalls = 0;
+extern "C" size_t doom_store_wad_preflight(
+    char names[][GAME_STORE_NAME_BYTES + 1], size_t max, const char **problem) {
+  storedWadPreflightCalls++;
+  *problem = storedWadProblem;
+  size_t count = 0;
+  for (const std::string &name : storedWads) {
+    if (count == max) break;
+    snprintf(names[count++], GAME_STORE_NAME_BYTES + 1, "%s", name.c_str());
+  }
+  return count;
+}
 
 // ---- Fakes for the Quake library ------------------------------------------
 // The test profile is a P4 carrier, so this image carries Quake. Its pak is
@@ -336,6 +353,10 @@ static void resetObservations() {
   Serial.captured.clear();
   ESP.restarts = 0;
   fakeNvsBools.clear();
+  fakeNvsStrings.clear();
+  storedWads.clear();
+  storedWadProblem = nullptr;
+  storedWadPreflightCalls = 0;
   infoBarShown.clear();
   preflightCalls = 0;
   pakProblem = NO_PAK;
@@ -1357,6 +1378,97 @@ static int s3QuakeBoardsAskThePakCheck() {
   return 0;
 }
 
+// Rule: each WAD in the game store is its own row, after the bundled DOOM and
+// before QUAKE, labelled by its name.
+static int storedWadsAreRowsOfTheirOwn() {
+  resetObservations();
+  wadProblem = nullptr;
+  pakProblem = nullptr;
+  storedWads = {"freedoom1.wad", "miniwad.wad"};
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(menuLabels == "STREAMING,DOOM,FREEDOOM1,MINIWAD,QUAKE");
+  CHECK(storedWadPreflightCalls == 1);
+  CHECK(fakeNvsStrings.empty());
+  return 0;
+}
+
+// Rule: stored WADs are offered even when the bundled one is not, and a
+// stored WAD the Doom boot would refuse is reported.
+static int storedWadsWithoutTheBundledOne() {
+  resetObservations();
+  wadProblem = "WAD header missing";
+  pakProblem = NO_PAK;
+  storedWads = {"miniwad.wad"};
+  storedWadProblem = "WAD lump outside the file";
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(menuLabels == "STREAMING,MINIWAD");
+  CHECK(Serial.captured.find(
+            "boot menu: a stored WAD not offered (WAD lump outside the file)") !=
+        std::string::npos);
+  return 0;
+}
+
+// Rule: choosing a stored WAD saves its name with Doom's one-shot request, so
+// the Doom boot plays that file; choosing DOOM saves no name.
+static int choosingAStoredWadNamesIt() {
+  resetObservations();
+  wadProblem = nullptr;
+  pakProblem = NO_PAK;
+  storedWads = {"freedoom1.wad", "miniwad.wad"};
+  touchAvailable = true;
+  const wifiselector::SelectorLayout layout = menuLayout(4);
+  const uint32_t t = fakeNow;
+  touchTap(t + 300, layout.rowRect(3));  // cancels
+  touchTap(t + 500, layout.rowRect(3));  // highlights MINIWAD
+  touchTap(t + 900, layout.connect);     // chooses it
+  CHECK(runMenu(false) == MenuRun::Restarted);
+  CHECK(menuMessage == "STARTING MINIWAD");
+  CHECK(fakeNvsBools.count("doomonce") == 1);
+  CHECK(fakeNvsStrings.count("doomwad") == 1);
+  CHECK(fakeNvsStrings["doomwad"] == "miniwad.wad");
+  CHECK(Serial.captured.find("boot menu: miniwad.wad chosen") !=
+        std::string::npos);
+
+  resetObservations();
+  wadProblem = nullptr;
+  storedWads = {"miniwad.wad"};
+  fakeNvsStrings["doomwad"] = "stale.wad";
+  touchAvailable = true;
+  const wifiselector::SelectorLayout three = menuLayout(3);
+  const uint32_t u = fakeNow;
+  touchTap(u + 300, three.rowRect(1));  // cancels
+  touchTap(u + 500, three.rowRect(1));  // highlights DOOM
+  touchTap(u + 900, three.connect);     // chooses it
+  CHECK(runMenu(false) == MenuRun::Restarted);
+  CHECK(menuMessage == "STARTING DOOM");
+  CHECK(fakeNvsBools.count("doomonce") == 1);
+  CHECK(fakeNvsStrings.count("doomwad") == 0);
+  return 0;
+}
+
+// Rule: a stored WAD whose name cannot be saved starts nothing: no Doom
+// request is left to boot the wrong WAD.
+static int storedWadSaveFailureStartsNothing() {
+  resetObservations();
+  wadProblem = nullptr;
+  pakProblem = NO_PAK;
+  storedWads = {"miniwad.wad"};
+  touchAvailable = true;
+  const wifiselector::SelectorLayout layout = menuLayout(3);
+  const uint32_t t = fakeNow;
+  touchTap(t + 300, layout.rowRect(2));   // cancels
+  touchTap(t + 500, layout.rowRect(2));   // highlights MINIWAD
+  touchTap(t + 900, layout.connect);      // fails to save
+  touchTap(t + 1300, layout.rowRect(0));  // highlights STREAMING
+  touchTap(t + 1700, layout.connect);     // streams
+  fakeNvsWritesFail = true;
+  CHECK(runMenu(false) == MenuRun::Returned);
+  CHECK(ESP.restarts == 0);
+  CHECK(fakeNvsBools.count("doomonce") == 0);
+  CHECK(fakeNvsStrings.count("doomwad") == 0);
+  return 0;
+}
+
 // The knob carrier has no speaker, so its knob drives the Mac's volume: each
 // detent reports one knob turn to the sender, a click reports one knob press
 // (the Mac's mute toggle), and neither moves or saves the backlight the knob
@@ -1490,7 +1602,13 @@ static int knobTurnIsVolumeAndClickIsMute() {
   hbPort = 0;
 
   boardVariant = savedVariant;
-  bcfg = save// CFGTOUCHLOG: a press is logged once, raw and mapped, and marked where it
+  bcfg = savedConfig;
+  fakePinIsr.clear();
+  initializeButtonInput();
+  return 0;
+}
+
+// CFGTOUCHLOG: a press is logged once, raw and mapped, and marked where it
 // mapped, and nothing else acts on it - a corner tap on the survey card would
 // otherwise land on its preset button and open the WiFi selector.
 static void serviceTouchFor(uint32_t ms) {
@@ -1575,12 +1693,6 @@ static int touchLogOnlyLogsAndMarks() {
   return 0;
 }
 
-gEnabled = false;
-  hbPort = 0;
-  touchAvailable = false;
-  return 0;
-}
-
 int main() {
   bcfg = &board::configFor(boardVariant);
   PANEL_GEOMETRY = {bcfg->panel->width, bcfg->panel->height};
@@ -1636,6 +1748,10 @@ int main() {
   if (quakeSaveFailureKeepsTheMenuUp() != 0) return 1;
   if (nonQuakeBoardNeverReadsThePak() != 0) return 1;
   if (s3QuakeBoardsAskThePakCheck() != 0) return 1;
+  if (storedWadsAreRowsOfTheirOwn() != 0) return 1;
+  if (storedWadsWithoutTheBundledOne() != 0) return 1;
+  if (choosingAStoredWadNamesIt() != 0) return 1;
+  if (storedWadSaveFailureStartsNothing() != 0) return 1;
   printf("test_doom_entry_gate: %d checks passed\n", checks);
   return 0;
 }

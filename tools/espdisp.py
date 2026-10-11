@@ -6114,6 +6114,13 @@ _QUAKE_PAK_SHA256 = "35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a
 _QUAKE_PACK_ENTRY_BYTES = 64
 _QUAKE_PAK_S3_ADDRESS = 0x800000
 _QUAKE_PAK_S3_REGION_BYTES = 0x1200000
+# The area's last 4 KiB sector is the Mac app's game store directory
+# (firmware/doom/src/platform/game_store_model.h), which names the WADs and
+# paks it put there. A raw pak written here makes the area the legacy layout
+# again, so the directory is erased in the same write; left, it would name
+# files the pak just overwrote. Both areas are 0x1200000 bytes here: the P4
+# partition, and the S3 region on the 32 MiB chip Quake needs.
+_GAME_STORE_DIRECTORY_BYTES = 0x1000
 
 
 class DataPartition(NamedTuple):
@@ -6273,6 +6280,13 @@ def cmd_write_data(args) -> int:
     else:
         address = data_partition_target(
             args.partition, spec, family, table, len(data))
+    directory_address = address + _QUAKE_PAK_PARTITION_SIZE - \
+        _GAME_STORE_DIRECTORY_BYTES
+    if address + len(data) > directory_address:
+        raise Fail(
+            "the file is %d bytes but the area's last 4 KiB hold the game "
+            "store directory, leaving %d" % (
+                len(data), directory_address - address))
     shareware = len(data) == _QUAKE_PAK_SIZE and digest == _QUAKE_PAK_SHA256
     print("Writing %s (%d bytes, sha256 %s%s) to %s at 0x%X..."
           % (path, len(data), digest,
@@ -6285,8 +6299,12 @@ def cmd_write_data(args) -> int:
         staged = os.path.join(directory, "%s.bin" % args.partition)
         with open(staged, "wb") as out:
             out.write(data)
+        cleared = os.path.join(directory, "game_store_directory.bin")
+        with open(cleared, "wb") as out:
+            out.write(b"\xff" * _GAME_STORE_DIRECTORY_BYTES)
         command = esptool_invocation(family, port.address, "write_flash")
-        command.extend(["0x%X" % address, staged])
+        command.extend(["0x%X" % address, staged,
+                        "0x%X" % directory_address, cleared])
         run_streaming(command)
     finally:
         shutil.rmtree(directory, ignore_errors=True)
@@ -6727,7 +6745,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="quake_pak: a Quake pack, default firmware/quake/id1/pak0.pak\n"
         "(tools/fetch_game_data.sh --game quake fetches the shareware one),\n"
         "written to the P4 quake_pak partition at 0xE00000, or on an S3 with\n"
-        "32 MiB of flash to its raw region at 0x800000.",
+        "32 MiB of flash to its raw region at 0x800000. The Mac app's game\n"
+        "store directory in the area's last 4 KiB is erased with it, so any\n"
+        "WADs or paks the app put there are no longer offered.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_write_data.add_argument("partition", choices=sorted(DATA_PARTITIONS))

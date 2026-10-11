@@ -100,6 +100,14 @@ esp_err_t esp_partition_mmap(const esp_partition_t *partition, size_t offset,
 
 void esp_partition_munmap(esp_partition_mmap_handle_t) { liveMappings--; }
 
+// No game data area here: test_doom_store_wad.cpp covers it.
+esp_err_t esp_partition_register_external(esp_flash_t *, size_t, size_t,
+                                          const char *, esp_partition_type_t,
+                                          esp_partition_subtype_t,
+                                          const esp_partition_t **) {
+  return ESP_FAIL;
+}
+
 esp_err_t esp_partition_read(const esp_partition_t *partition,
                              size_t src_offset, void *dst, size_t size) {
   partitionReads++;

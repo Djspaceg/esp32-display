@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "esp_flash.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +33,10 @@ esp_err_t esp_partition_mmap(const esp_partition_t *partition, size_t offset,
                              const void **out_ptr,
                              esp_partition_mmap_handle_t *out_handle);
 void esp_partition_munmap(esp_partition_mmap_handle_t handle);
+esp_err_t esp_partition_register_external(
+    esp_flash_t *flash_chip, size_t offset, size_t size, const char *label,
+    esp_partition_type_t type, esp_partition_subtype_t subtype,
+    const esp_partition_t **registered_partition);
 esp_err_t esp_partition_read(const esp_partition_t *partition,
                              size_t src_offset, void *dst, size_t size);
 

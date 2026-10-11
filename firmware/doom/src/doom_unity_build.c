@@ -16,6 +16,7 @@
 // Platform stubs and bridge (order matters: stubs before engine)
 #include "platform/doom_esp32_stubs.c.inc"
 #include "platform/doomgeneric_esp32.c.inc"
+#include "platform/game_store.c.inc"
 #include "platform/w_file_esp32.c.inc"
 
 // Network stub

@@ -7,8 +7,11 @@
 // Compiled into family builds that define ESPDISP_DOOM_RUNTIME.
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+
+#include "platform/game_store_model.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +42,26 @@ const char* doom_wad_preflight(void);
 
 /// Why the Doom boot's own WAD check last refused, for its FATAL line.
 const char* doom_wad_failure(void);
+
+/// Plays the game store's WAD `name` (game_store.h) this boot instead of the
+/// bundled doom1.wad. Call before doom_enter(); NULL or "" keeps doom1.wad.
+void doom_select_store_wad(const char* name);
+
+/// The WAD this boot plays, as the engine is told it: "doom1.wad" or the
+/// stored file's name.
+const char* doom_selected_wad_name(void);
+
+/// Whether the WAD is memory-mapped (the bundled one) rather than read into
+/// the engine's zone as it is used (a stored one). Meaningful once
+/// doom_enter() has checked it.
+bool doom_wad_is_mapped(void);
+
+/// The boot menu's list of stored WADs the Doom boot would accept, checked
+/// the same way through the flash API: up to `max` names, in directory order,
+/// and how many. *problem is the first reason one was left out, or why the
+/// store could not be read; NULL when nothing was refused.
+size_t doom_store_wad_preflight(char names[][GAME_STORE_NAME_BYTES + 1],
+                                size_t max, const char** problem);
 
 /// Check if Doom mode is currently active (for use by other subsystems
 /// that need to know whether to yield resources).

@@ -38,7 +38,6 @@ extern "C" {
     void doomgeneric_Tick(void);
     bool doom_prepare_static_buffers(void);
     bool doom_wad_available(void);
-    const char* doom_wad_failure(void);
 }
 
 static const char* TAG = "doom_mode";
@@ -124,8 +123,20 @@ void doom_enter(void) {
     // -mb 4 = 4MB memory zone (from PSRAM via malloc). PSRAM budget:
     //   4MB zone + 256KB render buf + 434KB scaled buf = ~4.7MB of 8MB
     // Remaining ~3.3MB is free for texture cache etc.
-    char* argv[] = {"doom", "-mb", "4", "-iwad", "doom1.wad", NULL};
+    // A stored WAD is not mapped, so its lumps live in the zone too; where the
+    // PSRAM has room (a P4's 32 MB) the zone doubles for them. The name is how
+    // the engine tells Doom from Doom II (d_iwad.c.inc), so it is the file's.
+    char zone_mb[] = "4";
+    if (!doom_wad_is_mapped() &&
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) >= 12u << 20) {
+        zone_mb[0] = '8';
+    }
+    static char iwad[GAME_STORE_NAME_BYTES + 1];
+    strncpy(iwad, doom_selected_wad_name(), GAME_STORE_NAME_BYTES);
+    iwad[GAME_STORE_NAME_BYTES] = '\0';
+    char* argv[] = {"doom", "-mb", zone_mb, "-iwad", iwad, NULL};
     int argc = 5;
+    doom_log("Doom WAD %s, %s MB zone", iwad, zone_mb);
 
     doomgeneric_Create(argc, argv);
 

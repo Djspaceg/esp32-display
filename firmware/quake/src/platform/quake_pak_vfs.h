@@ -8,16 +8,17 @@
 extern "C" {
 #endif
 
-// Checks that the quake_pak partition holds a usable pack, reading it with
-// esp_partition_read() and never mapping it. NULL when it does, otherwise a
-// short reason for the serial log. Call from a task with an internal stack.
+// Checks that the game data area holds a usable pak0.pak, and any pak1.pak and
+// on after it, reading them with esp_partition_read() and never mapping them.
+// NULL when it does, otherwise a short reason for the serial log. Call from a
+// task with an internal stack.
 const char* quake_pak_preflight(void);
 
-// The pack's length after a successful check, else 0.
+// pak0.pak's length after a successful check, else 0.
 uint32_t quake_pak_bytes(void);
 
-// The Quake boot: checks the pack and registers /qdata, whose one file
-// id1/pak0.pak reads the partition. NULL on success, else the reason.
+// The Quake boot: checks the paks and registers /qdata, whose id1/pakN.pak
+// files read the area. NULL on success, else the reason.
 const char* quake_pak_mount(void);
 
 // The reason the last check or mount refused.

@@ -13,28 +13,37 @@ namespace bootmenu {
 // expired countdown starts it whatever is highlighted.
 enum class Mode : uint8_t {
   Streaming = 0,
-  Doom,
+  Doom,        // the bundled doom1.wad, in the doom_wad partition
+  StoredDoom,  // a WAD the Mac app put in the game store, one row each
   Quake,
 };
 
-static const size_t MODE_MAX = 3;
+// The game store lists at most this many WADs (GAME_STORE_MAX_DOOM_WADS).
+static const size_t STORED_WAD_MAX = 8;
+static const size_t MODE_MAX = 3 + STORED_WAD_MAX;
 
 // What this image, this resolved board, and this flash can run. A game is
 // offered only when all of them hold. Doom also needs a WAD that passes the
-// Doom boot's own check, which only a full USB flash writes. Quake likewise
-// needs a pack in its quake_pak partition that passes the Quake boot's own
-// check, which only `tools/espdisp.py write-data quake_pak` writes.
+// Doom boot's own check, which only a full USB flash writes. Each WAD the Mac
+// app put in the game store that passes the same check is a Doom row of its
+// own. Quake likewise needs a pak0.pak in the game data area that passes the
+// Quake boot's own check, which the Mac app or `tools/espdisp.py write-data
+// quake_pak` writes.
 struct Capabilities {
   bool doomBuild = false;
   bool doomBoard = false;
   bool doomWadReady = false;
+  size_t storedWads = 0;
   bool quakeBuild = false;
   bool quakeBoard = false;
   bool quakePakReady = false;
 };
 
 struct Choices {
-  Mode modes[MODE_MAX] = {Mode::Streaming, Mode::Streaming, Mode::Streaming};
+  Mode modes[MODE_MAX] = {};
+  // For a StoredDoom row, which stored WAD (its index in the preflight's
+  // list); 0 otherwise.
+  uint8_t storedWad[MODE_MAX] = {};
   size_t count = 0;
 };
 
@@ -52,6 +61,14 @@ inline Choices offeredModes(const Capabilities &caps) {
   if (caps.doomBuild && caps.doomBoard && caps.doomWadReady) {
     choices.modes[choices.count++] = Mode::Doom;
   }
+  if (caps.doomBuild && caps.doomBoard) {
+    const size_t stored =
+        caps.storedWads < STORED_WAD_MAX ? caps.storedWads : STORED_WAD_MAX;
+    for (size_t i = 0; i < stored; ++i) {
+      choices.storedWad[choices.count] = (uint8_t)i;
+      choices.modes[choices.count++] = Mode::StoredDoom;
+    }
+  }
   if (caps.quakeBuild && caps.quakeBoard && caps.quakePakReady) {
     choices.modes[choices.count++] = Mode::Quake;
   }
@@ -64,6 +81,8 @@ inline const char *modeLabel(Mode mode) {
       return "STREAMING";
     case Mode::Doom:
       return "DOOM";
+    case Mode::StoredDoom:
+      return "DOOM";  // the menu shows the WAD's own label instead
     case Mode::Quake:
       return "QUAKE";
   }

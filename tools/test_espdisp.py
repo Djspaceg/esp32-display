@@ -4064,9 +4064,13 @@ def test_write_data_quake_pak():
             written = []
 
             def write(command):
-                commands.append(command[:-1])
-                with open(command[-1], "rb") as staged:
-                    written.append(staged.read())
+                # Everything up to the first address, then each address with
+                # the bytes of the file written there.
+                start = command.index("write_flash") + 1
+                commands.append(command[:start] + command[start::2])
+                for staged_path in command[start + 1::2]:
+                    with open(staged_path, "rb") as staged:
+                        written.append(staged.read())
 
             args = argparse.Namespace(
                 partition="quake_pak", file=path, port=None)
@@ -4088,14 +4092,27 @@ def test_write_data_quake_pak():
                 espdisp.cmd_write_data(args)
             return commands, written
 
+        # The last 4 KiB of the area hold the app's game store directory
+        # (firmware/doom/src/platform/game_store_model.h). A raw pak makes the
+        # area the legacy layout again, so the directory is erased with it:
+        # left, it would name files the pak just overwrote.
+        cleared = b"\xff" * 0x1000
         check_equal(
             run(current),
             ([["/x/esptool", "--chip", "esp32p4", "--port", port.address,
-               "--baud", p4.upload_speed, "write_flash", "0xE00000"]],
-             [sound]),
-            "write-data writes the validated bytes once, at the device's quake_pak")
+               "--baud", p4.upload_speed, "write_flash", "0xE00000",
+               "0x1FFF000"]],
+             [sound, cleared]),
+            "write-data writes the validated bytes once, at the device's "
+            "quake_pak, and erases the game store directory")
         check_fails(lambda: run(previous), "flash the current bundle",
                     "write-data on the previous layout writes nothing")
+        with open(path, "wb") as out:
+            out.write(pack([(b"x", 12, 4)], b"abcd" + b"\0" * 0x11FF000))
+        check_fails(lambda: run(current), "game store directory",
+                    "a pak reaching the area's last 4 KiB is refused")
+        with open(path, "wb") as out:
+            out.write(sound)
         check_fails(lambda: run(current, previous), "changed during the write",
                     "a table that changed during the write (a wrapped "
                     "address) is reported")
@@ -4111,9 +4128,11 @@ def test_write_data_quake_pak():
         check_equal(
             run(s3_table, chip="esp32s3", flash_bytes=32 * 0x100000),
             ([["/x/esptool", "--chip", "esp32s3", "--port", port.address,
-               "--baud", s3.upload_speed, "write_flash", "0x800000"]],
-             [sound]),
-            "on a 32 MiB S3 write-data writes the pak at its raw region")
+               "--baud", s3.upload_speed, "write_flash", "0x800000",
+               "0x19FF000"]],
+             [sound, cleared]),
+            "on a 32 MiB S3 write-data writes the pak at its raw region and "
+            "erases the directory at its end")
         check_fails(
             lambda: run(s3_table, chip="esp32s3", flash_bytes=16 * 0x100000),
             "has 16 MiB of flash", "a 16 MiB S3 is refused before any write")

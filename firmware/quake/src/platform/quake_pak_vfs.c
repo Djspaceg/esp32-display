@@ -1,10 +1,12 @@
-// The read-only Quake data file: /qdata/id1/pak0.pak, served from the
-// quake_pak partition with esp_partition_read().
+// The read-only Quake data files: /qdata/id1/pak0.pak, and pak1.pak and on
+// where the Mac app stored them, served from the game data area with
+// esp_partition_read().
 //
-// On the P4 the partition is in the table (partitions_p4_4b.csv). The S3's
-// universal table covers only its common 8 MiB, so there the pak is a raw
-// flash region past it, registered at runtime as an external partition, and
-// only on a chip big enough to hold it: 32 MiB in practice.
+// The area (doom/src/game_store.h) is the P4's quake_pak partition, and on an
+// S3 the raw flash past its 8 MiB table. A legacy area holds pak0.pak alone,
+// raw at offset 0; one with a game store directory names each pak's offset and
+// length. Quake opens pak0.pak, pak1.pak, ... until one is missing, so the
+// paks it is given run from slot 0 without a gap.
 //
 // Quake reads its pack through both of its file paths: Sys_FileOpenRead and
 // friends for the pack directory and every whole-file load, and stdio
@@ -39,20 +41,10 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include <game_store.h>
+
 #include "quake_pak_model.h"
-
-// The partition's identity in partitions_p4_4b.csv; tools/espdisp.py checks
-// the same pair before `write-data quake_pak` writes anything.
-#define QUAKE_PAK_PARTITION_TYPE 0x42
-#define QUAKE_PAK_PARTITION_SUBTYPE 0x07
-
-#if CONFIG_IDF_TARGET_ESP32S3
-// The S3 region: from the end of the universal 8 MiB layout, 18 MiB, so the
-// chip must have 26 MiB. tools/espdisp.py writes the bundle's pak here, and
-// only to a chip that large (QUAKE_PAK_S3_* there).
-#define QUAKE_PAK_S3_OFFSET 0x800000u
-#define QUAKE_PAK_S3_BYTES 0x1200000u
-#endif
+#include "quake_platform.h"
 
 // The reader task: enough for esp_partition_read() and the flash driver below
 // it. Above the Quake task's priority, so a read starts as soon as it is asked.
@@ -64,11 +56,16 @@
 #define QUAKE_PAK_MAX_OPEN 4
 
 static const esp_partition_t* s_partition = NULL;
-static uint32_t s_pack_bytes = 0;
 static const char* s_failure = "not checked";
+
+// Each pak Quake is given: where it starts in the area and, once checked, its
+// length.
+static quake_pak_span_t s_paks[GAME_STORE_MAX_QUAKE_SLOT + 1];
+static int s_pak_count = 0;
 
 static struct {
   bool open;
+  int slot;
   uint32_t position;
 } s_files[QUAKE_PAK_MAX_OPEN];
 
@@ -92,9 +89,12 @@ static void quake_pak_reader_task(void* arg) {
   }
 }
 
+// `context` is the pak; `offset` is within it.
 static bool quake_pak_read(void* context, uint32_t offset, void* out,
                            uint32_t length) {
-  (void)context;
+  const quake_pak_span_t* pak = (const quake_pak_span_t*)context;
+  if (offset > pak->bytes || length > pak->bytes - offset) return false;
+  offset += pak->base;
   if (s_args_lock == NULL) {
     // Not mounted yet: the normal firmware's preflight, on loopTask, whose
     // stack is internal.
@@ -112,68 +112,48 @@ static bool quake_pak_read(void* context, uint32_t offset, void* out,
   return ok;
 }
 
-#if CONFIG_IDF_TARGET_ESP32S3
-// Registers the S3 region as the quake_pak partition, once per boot. NULL on
-// success, else why the chip cannot hold it.
-static const char* quake_pak_register_s3_region(void) {
-  static const char* s_region_failure = "not registered";
-  static bool s_tried = false;
-  if (s_tried) return s_region_failure;
-  s_tried = true;
-  uint32_t physical = 0;
-  if (esp_flash_get_physical_size(esp_flash_default_chip, &physical) !=
-      ESP_OK) {
-    s_region_failure = "could not read the flash size";
-    return s_region_failure;
-  }
-  if (physical < QUAKE_PAK_S3_OFFSET + QUAKE_PAK_S3_BYTES) {
-    s_region_failure = "flash too small for Quake's data (needs 32 MiB)";
-    return s_region_failure;
-  }
-  // The driver takes its size from the image header, 8 MiB, and refuses to
-  // register a partition past it; the chip is bigger, so tell it. Reads past
-  // 16 MiB need the chip driver's 4-byte addressing (SPI_FLASH_CHIP_CAP_32MB_
-  // SUPPORT); the pak's own check below fails cleanly if they come back wrong.
-  if (esp_flash_default_chip->size < physical) {
-    esp_flash_default_chip->size = physical;
-  }
-  if (esp_partition_register_external(
-          esp_flash_default_chip, QUAKE_PAK_S3_OFFSET, QUAKE_PAK_S3_BYTES,
-          "quake_pak", (esp_partition_type_t)QUAKE_PAK_PARTITION_TYPE,
-          (esp_partition_subtype_t)QUAKE_PAK_PARTITION_SUBTYPE,
-          NULL) != ESP_OK) {
-    s_region_failure = "could not register the Quake data region";
-    return s_region_failure;
-  }
-  s_region_failure = NULL;
-  return NULL;
-}
-#endif
 
 const char* quake_pak_preflight(void) {
-  s_pack_bytes = 0;
-#if CONFIG_IDF_TARGET_ESP32S3
-  s_failure = quake_pak_register_s3_region();
+  s_pak_count = 0;
+  s_failure = game_store_open();
   if (s_failure != NULL) return s_failure;
-#endif
-  s_partition = esp_partition_find_first(
-      (esp_partition_type_t)QUAKE_PAK_PARTITION_TYPE,
-      (esp_partition_subtype_t)QUAKE_PAK_PARTITION_SUBTYPE, "quake_pak");
-  if (s_partition == NULL) {
-    s_failure =
-        "no quake_pak partition (flash the current P4 bundle over USB)";
-    return s_failure;
+  s_partition = game_store_partition();
+  const game_store_t* store = game_store_directory();
+  quake_pak_span_t spans[GAME_STORE_MAX_QUAKE_SLOT + 1];
+  const int count = quake_pak_spans(store, spans, &s_failure);
+  if (count == 0) return s_failure;
+  static const char* const kSlotFailures[] = {
+      "pak0.pak is unusable", "pak1.pak is unusable", "pak2.pak is unusable",
+      "pak3.pak is unusable", "pak4.pak is unusable", "pak5.pak is unusable",
+      "pak6.pak is unusable", "pak7.pak is unusable", "pak8.pak is unusable",
+      "pak9.pak is unusable"};
+  for (int slot = 0; slot < count; ++slot) {
+    quake_pak_span_t pak = spans[slot];
+    uint32_t pack_bytes = 0;
+    const char* problem =
+        quake_pak_check(quake_pak_read, &pak, pak.bytes, &pack_bytes);
+    if (problem != NULL) {
+      // A legacy area keeps the check's own words, which the app and the CLI
+      // name; a stored pak says which one it was.
+      s_failure = store->legacy ? problem : kSlotFailures[slot];
+      quake_log("pak%d.pak refused: %s", slot, problem);
+      return s_failure;
+    }
+    pak.bytes = pack_bytes;
+    s_paks[slot] = pak;
   }
-  s_failure = quake_pak_check(quake_pak_read, NULL, s_partition->size,
-                              &s_pack_bytes);
-  return s_failure;
+  s_pak_count = count;
+  return NULL;
 }
 
-uint32_t quake_pak_bytes(void) { return s_pack_bytes; }
+uint32_t quake_pak_bytes(void) {
+  return s_pak_count > 0 ? s_paks[0].bytes : 0;
+}
 
 static int quake_pak_vfs_open(const char* path, int flags, int mode) {
   (void)mode;
-  if (!quake_pak_path_matches(path)) {
+  const int slot = quake_pak_path_slot(path);
+  if (slot < 0 || slot >= s_pak_count) {
     errno = ENOENT;
     return -1;
   }
@@ -185,6 +165,7 @@ static int quake_pak_vfs_open(const char* path, int flags, int mode) {
   for (int fd = 0; fd < QUAKE_PAK_MAX_OPEN; ++fd) {
     if (!s_files[fd].open) {
       s_files[fd].open = true;
+      s_files[fd].slot = slot;
       s_files[fd].position = 0;
       return fd;
     }
@@ -202,10 +183,11 @@ static ssize_t quake_pak_vfs_read(int fd, void* dst, size_t size) {
     errno = EBADF;
     return -1;
   }
+  quake_pak_span_t* pak = &s_paks[s_files[fd].slot];
   const uint32_t length =
-      quake_pak_read_length(s_files[fd].position, s_pack_bytes, size);
+      quake_pak_read_length(s_files[fd].position, pak->bytes, size);
   if (length == 0) return 0;
-  if (!quake_pak_read(NULL, s_files[fd].position, dst, length)) {
+  if (!quake_pak_read(pak, s_files[fd].position, dst, length)) {
     errno = EIO;
     return -1;
   }
@@ -219,7 +201,8 @@ static off_t quake_pak_vfs_lseek(int fd, off_t offset, int whence) {
     return -1;
   }
   const int64_t target =
-      quake_pak_seek(s_files[fd].position, s_pack_bytes, offset, whence);
+      quake_pak_seek(s_files[fd].position, s_paks[s_files[fd].slot].bytes,
+                     offset, whence);
   if (target < 0) {
     errno = EINVAL;
     return -1;
@@ -244,18 +227,19 @@ static int quake_pak_vfs_fstat(int fd, struct stat* st) {
   }
   memset(st, 0, sizeof(*st));
   st->st_mode = S_IFREG | 0444;
-  st->st_size = s_pack_bytes;
+  st->st_size = s_paks[s_files[fd].slot].bytes;
   return 0;
 }
 
 static int quake_pak_vfs_stat(const char* path, struct stat* st) {
-  if (!quake_pak_path_matches(path)) {
+  const int slot = quake_pak_path_slot(path);
+  if (slot < 0 || slot >= s_pak_count) {
     errno = ENOENT;
     return -1;
   }
   memset(st, 0, sizeof(*st));
   st->st_mode = S_IFREG | 0444;
-  st->st_size = s_pack_bytes;
+  st->st_size = s_paks[slot].bytes;
   return 0;
 }
 
