@@ -49,6 +49,44 @@ extern "C" bool quake_display_blit_blocking(int x0, int y0, int x1, int y1,
   return waitForQuakeDma(1000, true);
 }
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+// The S3's 1x frame, palette-converted straight into the panel's two internal
+// DMA staging slots: one slot is converted while the other is on the wire, and
+// nothing goes through PSRAM on the way. That was a 62 ms write at 466x466
+// (convert into a PSRAM band, copy it into staging, wait, repeat); the wire
+// alone is about 22 ms at 40 MHz QSPI. Returns once every row is on the panel,
+// or false on a timeout, after which the caller restarts.
+extern "C" bool quake_display_present_1x(int x0, int y0, int width, int height,
+                                         const uint8_t *pixels,
+                                         const uint16_t *palette565) {
+  if (panel == nullptr || bcfg == nullptr || pixels == nullptr || width <= 0 ||
+      height <= 0 ||
+      (size_t)width * sizeof(uint16_t) > PANEL_TRANSFER_STAGE_BYTES) {
+    return false;
+  }
+  const int rowsPerSlot =
+      (int)(PANEL_TRANSFER_STAGE_BYTES / ((size_t)width * sizeof(uint16_t)));
+  for (int row = 0; row < height; row += rowsPerSlot) {
+    const int rows = height - row < rowsPerSlot ? height - row : rowsPerSlot;
+    PanelTransferStaging staging;
+    const uint32_t startedAt = millis();
+    while (!acquirePanelTransferStaging(0, staging)) {
+      if (millis() - startedAt > 1000) return false;
+      quake_input_sample_while_waiting();
+    }
+    uint16_t *out = (uint16_t *)staging.pixels;
+    const uint8_t *src = pixels + (size_t)row * width;
+    const size_t count = (size_t)rows * width;
+    for (size_t i = 0; i < count; ++i) out[i] = palette565[src[i]];
+    if (queuePanelTransferStaging(panel, *bcfg, x0, y0 + row, x0 + width,
+                                  y0 + row + rows, staging) != ESP_OK) {
+      return false;
+    }
+  }
+  return waitForQuakeDma(1000, true);
+}
+#endif
+
 // How long a Quake boot that cannot start keeps its reason on the panel.
 static const uint32_t QUAKE_FAILURE_SHOW_MS = 4000;
 static const char QUAKE_FAILURE_HEADLINE[] = "Quake could not start";

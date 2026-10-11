@@ -42,6 +42,13 @@ extern const board::Config* bcfg;
 extern int16_t PANEL_W;
 extern int16_t PANEL_H;
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+// display_stream/quake_bridge.cpp: the 1x frame straight into DMA staging.
+extern "C" bool quake_display_present_1x(int x0, int y0, int width, int height,
+                                         const uint8_t* pixels,
+                                         const uint16_t* palette565);
+#endif
+
 // display_stream/quake_bridge.cpp: queue a panel region and wait for its DMA.
 extern "C" bool quake_display_blit_blocking(int x0, int y0, int x1, int y1,
                                             const uint16_t* pixels);
@@ -307,6 +314,14 @@ extern "C" void quake_display_present(const uint8_t* pixels,
   //
   // One page, written in bands on this task: at 466x466 a second page and a
   // whole-panel RGB565 copy would cost the engine heap 650 KB it cannot spare.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  if (scale == 1) {
+    if (!quake_display_present_1x(s_layout.x, s_layout.y, renderWidth,
+                                  s_layout.renderHeight, pixels, palette565)) {
+      quake_fail_restart("panel DMA did not complete", false);
+    }
+  } else
+#endif
   for (int band = 0; band < s_layout.renderHeight; band += QUAKE_BAND_ROWS) {
     const int rows = s_layout.renderHeight - band < QUAKE_BAND_ROWS
                          ? s_layout.renderHeight - band
