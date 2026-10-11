@@ -1662,30 +1662,42 @@ static int touchLogOnlyLogsAndMarks() {
   CHECK(backlightApplies > 0);
   CHECK(Serial.captured.find("touch: wake") == std::string::npos);
   CHECK(touchMarkers.size() == 3);
-  idleActive = false;
 
-  // A press that began logged stays logged after the toggle goes off.
-  touchPress(fakeNow + 100, 300, 10, 20);
-  serviceTouchFor(150);
-  touchLogEnabled = false;
+  // The survey card keeps its own brightness, as the real wake leaves it.
+  surveyActive = true;
+  touchWakeUntil = 0;
+  backlightApplies = 0;
+  touchPress(fakeNow + 100, 50, 10, 20);
   serviceTouchFor(400);
-  CHECK(sentPackets.empty());
+  CHECK(backlightApplies == 0);
   CHECK(touchMarkers.size() == 4);
+  surveyActive = false;
+  idleActive = false;
+  touchWakeUntil = 0;
+
+  // A press that began logged stays logged after the toggle goes off: its
+  // hold, still down, sends no long press.
+  touchHeld(fakeNow + 10, fakeNow + 1500, 10, 20);
+  serviceTouchFor(100);
+  touchLogEnabled = false;
+  serviceTouchFor(1800);
+  CHECK(sentPackets.empty());
+  CHECK(touchMarkers.size() == 5);
 
   // A wake press that began unlogged is still a wake once the toggle comes
   // on, and its release leaves nothing to eat the next tap.
   idleActive = true;
-  touchPress(fakeNow + 100, 300, 10, 20);
-  serviceTouchFor(150);
+  touchHeld(fakeNow + 10, fakeNow + 1500, 10, 20);
+  serviceTouchFor(100);
   CHECK(Serial.captured.find("touch: wake") != std::string::npos);
   touchLogEnabled = true;
-  serviceTouchFor(400);
+  serviceTouchFor(1800);
   touchLogEnabled = false;
   idleActive = false;
   touchPress(fakeNow + 100, 50, 10, 20);
   serviceTouchFor(400);
   CHECK(sentPackets.size() == 1);
-  CHECK(touchMarkers.size() == 4);
+  CHECK(touchMarkers.size() == 5);
 
   appliedPanelRotation = 0;
   hbPort = 0;

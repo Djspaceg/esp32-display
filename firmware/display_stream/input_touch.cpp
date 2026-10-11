@@ -29,6 +29,8 @@ bool touchLogEnabled = false;
 // Whether the current press began with the log on. Latched per press, so a
 // toggle mid-press neither hands a logged press to the handlers nor strands a
 // normal one (a wake press would leave touchConsumed set to eat the next tap).
+// A finger held past the tracker's 10 s ceiling starts a new press, which is
+// latched afresh; a bench toggle under a resting finger is not worth more.
 static bool touchPressLogged = false;
 // Report a completed gesture to whoever is driving this panel.
 //
