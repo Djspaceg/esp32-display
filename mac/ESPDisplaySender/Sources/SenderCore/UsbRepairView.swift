@@ -15,6 +15,7 @@ final class UsbRepairModel: ObservableObject {
         /// The board is kept when the rescue image got on, so the install can
         /// be tried again without catching it twice.
         case failed(UsbRescuer.RescuedBoard?)
+        case resumable(UsbRecoveryRecord)
     }
 
     @Published var family: UsbRescue.Family? {
@@ -49,6 +50,7 @@ final class UsbRepairModel: ObservableObject {
 
     var canStart: Bool {
         guard family != nil, !isRunning else { return false }
+        if case .resumable = stage { return false }
         guard needsCarrier else { return true }
         return carrierChoices.contains { $0.profile == carrier }
     }
@@ -64,6 +66,53 @@ final class UsbRepairModel: ObservableObject {
     /// until Start Over or close: between the stages too, so no CFGSHOW of the
     /// app's own lands on the board while the next stage opens it.
     private weak var holding: PanelManager?
+
+    /// Where this recovery is kept between launches; nil keeps nothing.
+    var store: UsbRecoveryStore?
+    /// This recovery as last kept: what Resume takes up after a failure, a
+    /// Stop, or a relaunch.
+    @Published private(set) var record: UsbRecoveryRecord?
+    /// The USB device behind a port, from the IORegistry (a test gives its own).
+    var deviceForPort: (String) -> UsbRescue.USBIdentity? = { UsbRescuer.usbDevice(forPort: $0) }
+    /// The serial ports on USB now, listed from /dev without opening any.
+    var listPorts: () -> [String] = { WifiConfigUI.candidatePorts() }
+    @Published private(set) var attachedPorts: [String] = []
+    /// Ports that appeared since a kept recovery began, marked in the list.
+    @Published private(set) var newSinceRecoveryBegan: Set<String> = []
+    private var portWatch: Timer?
+    /// The board's own port when it is on USB already, so it is taken with
+    /// nothing pressed; nil to catch it as it appears. Read by the running loop
+    /// too, so a port chosen part-way through a run is taken then.
+    @Published var chosenPort: String? {
+        didSet { choice.port = chosenPort }
+    }
+    private let choice = UsbRescuer.PortChoice()
+
+    /// Which kept recovery a sheet opens on: one that reached a board always,
+    /// since there is one record and a new run would replace it; one that
+    /// never did only from Recover Board.
+    nonisolated static func offered(
+        _ record: UsbRecoveryRecord?, fromRecoverBoard: Bool
+    ) -> UsbRecoveryRecord? {
+        // A family this copy of the app has no rescue image for cannot be
+        // resumed; a new Start replaces such a record.
+        guard let record, UsbRescue.Family.named(record.family) != nil else { return nil }
+        return record.stage != .waiting || fromRecoverBoard ? record : nil
+    }
+
+    /// A sheet opened while a recovery is kept offers it as Resume. A record
+    /// is only left behind by a run the app was quit or crashed in: Stop and
+    /// Close remove one that never reached the board.
+    convenience init(
+        family: UsbRescue.Family?, pending: UsbRecoveryRecord?, store: UsbRecoveryStore? = nil
+    ) {
+        self.init(family: pending.flatMap { UsbRescue.Family.named($0.family) } ?? family)
+        self.store = store
+        guard let pending else { return }
+        carrier = pending.carrier
+        record = pending
+        stage = .resumable(pending)
+    }
 
     init(family: UsbRescue.Family?) {
         self.family = family
@@ -89,6 +138,9 @@ final class UsbRepairModel: ObservableObject {
         }
     }
 
+    /// A kept recovery, which Resume takes up.
+    var canResume: Bool { record != nil && !isRunning }
+
     /// Stop is withheld only while the real firmware is being written, for the
     /// reason the Add Display sheet gives. Catching can always be stopped: the
     /// board was not booting its firmware anyway.
@@ -104,23 +156,77 @@ final class UsbRepairModel: ObservableObject {
         }
     }
 
+    /// A chosen port stays chosen while it is off USB: these boards come and
+    /// go, and it is listed as not on USB now rather than dropped.
+    func refreshPorts() {
+        var ports = listPorts()
+        presentPorts = Set(ports)
+        if let chosenPort, !ports.contains(chosenPort) { ports.append(chosenPort) }
+        attachedPorts = ports
+    }
+
+    /// The ports /dev listed at the last refresh.
+    private var presentPorts: Set<String> = []
+
+    /// /dev is listed again every second while the sheet is up, without
+    /// opening anything, so the list follows a board that comes and goes.
+    func watchPorts() {
+        refreshPorts()
+        guard portWatch == nil else { return }
+        portWatch = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.stage == .choosing || self.isLookingForTheBoard else { return }
+                self.refreshPorts()
+            }
+        }
+    }
+
+    func isOnUSB(_ port: String) -> Bool { presentPorts.contains(port) }
+
     func start(manager: PanelManager) {
+        begin(manager: manager, resuming: false)
+    }
+
+    private func begin(manager: PanelManager, resuming: Bool) {
         guard let family, canStart else { return }
+        // One record is kept: a reached one this sheet did not open on (kept
+        // since by another sheet) is offered rather than written over.
+        if record == nil,
+           let kept = Self.offered((manager.recoveryStore ?? store)?.load(), fromRecoverBoard: false) {
+            record = kept
+            stage = .resumable(kept)
+            return
+        }
         let carrier = needsCarrier ? self.carrier : nil
+        store = manager.recoveryStore ?? store
         hold(manager)
         monitor.reset(flow: .repair)
         installOffer = nil
         installProblem = nil
+        let baseline = listPorts()
+        refreshPorts()
+        keep(UsbRecovery.atStart(
+            existing: record, resuming: resuming,
+            family: family.key, carrier: carrier, baseline: baseline))
+        choice.port = chosenPort
         stage = .catching
         let monitor = monitor
+        let choice = choice
         work = Task {
             let result = await manager.rescueUSBBoard(
-                family: family, carrier: carrier) { monitor.record($0) }
+                family: family, carrier: carrier, choice: choice
+            ) { [weak self] event in
+                monitor.record(event)
+                if case .phase(.rescue(.caught)) = event {
+                    Task { @MainActor in self?.noteProgress(event) }
+                }
+            }
             switch result {
             case .success(let board): rescued(board)
             case .failure(let failure):
                 monitor.fail(.failure(failure))
                 stage = .failed(nil)
+                if Task.isCancelled { noteStopped() }
             }
         }
     }
@@ -130,10 +236,99 @@ final class UsbRepairModel: ObservableObject {
     }
 
     /// Stop whatever runs and let the app probe USB again. For the view going
-    /// away; exactly one release per hold.
+    /// away; exactly one release per hold. A recovery that reached the board is
+    /// kept for Resume.
     func close() {
         work?.cancel()
+        portWatch?.invalidate()
+        portWatch = nil
+        if !isRunning { noteStopped() }
         release()
+    }
+
+    /// Take a kept recovery up where it stopped, finding the board on USB by
+    /// its serial number. Nothing is asked of the person unless the board is
+    /// not on USB at all.
+    func resume(manager: PanelManager) {
+        guard let record, !isRunning else { return }
+        store = manager.recoveryStore ?? store
+        family = UsbRescue.Family.named(record.family)
+        carrier = record.carrier
+        attachedPorts = listPorts()
+        let located = UsbRecovery.locate(record, ports: attachedPorts, device: deviceForPort)
+        monitor.reset(flow: .repair)
+        switch UsbRecovery.plan(record, located: located, present: attachedPorts) {
+        case .choose(let newPorts):
+            newSinceRecoveryBegan = Set(newPorts)
+            chosenPort = nil
+            stage = .choosing
+        case .adopt(let port):
+            stage = .choosing
+            chosenPort = port
+            begin(manager: manager, resuming: true)
+        case .waitForBoard:
+            stage = .choosing
+            chosenPort = nil
+            begin(manager: manager, resuming: true)
+        case .read(let port):
+            readAgain(port: port, manager: manager)
+        case .install(let board):
+            rescued(board)
+            install(manager: manager)
+        }
+    }
+
+    /// Forget the kept recovery. The board is left as it is.
+    func discard() {
+        guard !isRunning else { return }
+        record = nil
+        store?.clear()
+        stage = .choosing
+        monitor.reset(flow: .repair)
+    }
+
+    /// The rescue image was on: ask it again, and write it again on that same
+    /// port when it does not answer as the rescue image.
+    private func readAgain(port: String, manager: PanelManager) {
+        guard let family else { return }
+        store = manager.recoveryStore ?? store
+        hold(manager)
+        stage = .catching
+        let monitor = monitor
+        let carrier = needsCarrier ? self.carrier : nil
+        let hardwareID = record?.board?.hardwareID
+        work = Task {
+            let answer = await manager.rereadRecoveredBoard(
+                port: port, family: family, carrier: carrier, hardwareID: hardwareID,
+                progress: { monitor.record($0) })
+            switch answer {
+            case .rescue(let board):
+                rescued(board)
+            case .realFirmware(let port, let version):
+                // Flashed since by another way: there is nothing left to do.
+                monitor.record(.log(.app, "The board answered on \(port) running \(version)."))
+                stage = .installed(port: port)
+                noteInstalled()
+                release()
+            case .otherBoard(let port, let other):
+                // The recorded board is not the one there now; nothing is
+                // written to the one that is. The record is kept.
+                monitor.fail(.failure(WifiConfigUI.ConfigFailure(
+                    title: "Another board is on that port",
+                    message: "\(port) now answers as board \(other), not the board this "
+                        + "recovery was for, so nothing was written. Put the recovered "
+                        + "board back on USB and press Resume, or Discard the recovery.")))
+                stage = .failed(nil)
+            case .silent where !Task.isCancelled:
+                monitor.record(.log(.app, "\(port) did not answer as the rescue image; "
+                    + "writing it again there."))
+                stage = .choosing
+                chosenPort = port
+                begin(manager: manager, resuming: true)
+            case .silent:
+                stage = .failed(nil)
+            }
+        }
     }
 
     private func hold(_ manager: PanelManager) {
@@ -170,8 +365,10 @@ final class UsbRepairModel: ObservableObject {
 
     func install(manager: PanelManager) {
         guard let board, !isRunning, board.storedOverride == nil else { return }
+        store = manager.recoveryStore ?? store
         hold(manager)
         stage = .installing(board)
+        noteInstallStarted(board)
         let monitor = monitor
         work = Task {
             switch await manager.installFirmwareAfterRepair(
@@ -179,6 +376,7 @@ final class UsbRepairModel: ObservableObject {
             {
             case .success(let port):
                 stage = .installed(port: port)
+                noteInstalled()
                 release()
             case .failure(let failure):
                 monitor.fail(.failure(failure))
@@ -190,8 +388,12 @@ final class UsbRepairModel: ObservableObject {
     func startOver() {
         guard !isRunning else { return }
         release()
-        stage = .choosing
         monitor.reset(flow: .repair)
+        if let record, record.stage != .waiting {
+            stage = .resumable(record)
+        } else {
+            stage = .choosing
+        }
     }
 
     func rescued(
@@ -199,6 +401,10 @@ final class UsbRepairModel: ObservableObject {
         firmware: BundledFirmware.Availability = BundledFirmware.load()
     ) {
         stage = .rescued(board)
+        keep(UsbRecovery.rescued(
+            record ?? UsbRecovery.started(family: board.family.key, carrier: board.carrier,
+                                          baseline: []),
+            board: board, device: deviceForPort(board.port)))
         switch firmware {
         case .ready(let releases):
             do {
@@ -221,41 +427,139 @@ final class UsbRepairModel: ObservableObject {
         }
     }
 
+    // MARK: - keeping the record
+
+    func noteStarted(baseline: [String]) {
+        guard let family else { return }
+        keep(UsbRecovery.started(
+            family: family.key, carrier: needsCarrier ? carrier : nil, baseline: baseline))
+    }
+
+    func noteProgress(_ event: UsbFlashEvent) {
+        guard case .phase(.rescue(.caught(let port))) = event, let record else { return }
+        keep(UsbRecovery.caught(record, port: port, device: deviceForPort(port)))
+    }
+
+    func noteInstallStarted(_ board: UsbRescuer.RescuedBoard) {
+        let rescuedRecord = UsbRecovery.rescued(
+            record ?? UsbRecovery.started(family: board.family.key, carrier: board.carrier,
+                                          baseline: []),
+            board: board, device: deviceForPort(board.port))
+        keep(UsbRecovery.installing(rescuedRecord))
+    }
+
+    func noteInstalled() {
+        record = nil
+        store?.clear()
+    }
+
+    /// Stopped by the person: a run that never reached the board leaves
+    /// nothing behind it, and one that did stays resumable.
+    func noteStopped() {
+        guard record?.stage == .waiting else { return }
+        record = nil
+        store?.clear()
+    }
+
+    private func keep(_ next: UsbRecoveryRecord) {
+        record = next
+        try? store?.save(next)
+    }
+
+    /// When the one physical action is what the person should be doing: the
+    /// run is looking for the board and no port is chosen.
+    var waitsForTheBoard: Bool { isLookingForTheBoard && chosenPort == nil }
+
+    /// A run catching the board before esptool has reached it, while a port
+    /// may still be chosen or changed.
+    var isLookingForTheBoard: Bool {
+        guard stage == .catching else { return false }
+        switch monitor.session.phase {
+        case nil, .rescue(.startingEsptool), .rescue(.plugIn), .rescue(.missed),
+             .rescue(.seenWhileStarting), .rescue(.tooManyPorts), .rescue(.couldNotConnect):
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// What the sheet says before Start.
+    nonisolated static func introduction(for family: UsbRescue.Family?) -> String {
+        let action = family.map { "Then put it in download mode, once. " + $0.downloadModeAction }
+            ?? "Choose the chip family, and this says how to put the board in download mode."
+        return "For a board missing from the list, shown as not connected, or on USB "
+            + "only for a moment. If its port is listed above, choose it: esptool resets "
+            + "the board over USB and nothing on it needs pressing. If it is not on USB, "
+            + "leave the port on \"Not on USB\" and press Start. " + action
+            + " Everything after that is done over USB. Saved WiFi and name are not "
+            + "erased, and other USB devices are left alone."
+    }
+
+    /// Where a kept recovery stopped, in words.
+    nonisolated static func resumeSummary(for record: UsbRecoveryRecord) -> String {
+        let family = UsbRescue.Family.named(record.family)?.displayName ?? record.family
+        let port = record.port.map { " on \($0)" } ?? ""
+        switch record.stage {
+        case .waiting:
+            return "A recovery of an \(family) board was started, and nothing had reached "
+                + "the board yet. Resume marks the ports that have appeared since, so a "
+                + "board already in download mode can be chosen as it is."
+        case .caught:
+            return "esptool had reached the \(family) board\(port) and was writing the "
+                + "rescue firmware. Resume writes it again."
+        case .rescued:
+            return "The rescue firmware is on the \(family) board\(port); the real "
+                + "firmware is not installed yet."
+        case .installing:
+            return "The real firmware was being installed on the \(family) board\(port). "
+                + "Resume installs it again."
+        }
+    }
+
     /// The instruction at the top of the progress section.
     nonisolated static func headline(for stage: Stage, phase: UsbFlashPhase?) -> String {
         switch stage {
         case .choosing:
-            return "Unplug the board, choose its chip family, then press Start"
+            return "Choose the board's chip family, then press Start"
         case .catching:
             switch phase {
             case .rescue(let step): return step.title
             case nil: return UsbRescueStep.startingEsptool.title
-            default: return "Got it - keep the board plugged in"
+            default: return "Got it - leave the board as it is"
             }
         case .rescued: return "Rescue firmware is on"
         case .clearing: return "Rescue firmware is on - clearing the stored override"
         case .installing: return "Rescue firmware is on - installing the real firmware"
         case .installed: return "Done - the real firmware is installed"
         case .failed: return "The repair stopped"
+        case .resumable: return "Resume the recovery"
         }
     }
 }
 
-/// Repair a board that shows up on USB for a moment after it is plugged in and
-/// then vanishes. Shown in place of the Add Display and Firmware Update forms,
-/// in the same sheet, and hands back the port the repaired board answered on.
+/// Recover a board the app cannot reach: one missing from the list, shown as
+/// not connected, or on USB for a moment at a time. Shown on its own from
+/// File > Recover Board, and in place of the Add Display and Firmware Update
+/// forms in their sheets; hands back the port the recovered board answered on.
 struct UsbRepairView: View {
     @ObservedObject var manager: PanelManager
     @StateObject private var model: UsbRepairModel
     let closeTitle: String
     let onClose: (String?) -> Void
-
+    /// A kept recovery that reached a board opens whichever way in, so no
+    /// other run can write over it; `offersKeptRecovery` (File > Recover Board
+    /// and the launch offer) also opens one that never reached a board.
     init(
-        manager: PanelManager, family: UsbRescue.Family?,
+        manager: PanelManager, family: UsbRescue.Family?, offersKeptRecovery: Bool = false,
         closeTitle: String = "Back", onClose: @escaping (String?) -> Void
     ) {
         self.init(
-            manager: manager, model: UsbRepairModel(family: family),
+            manager: manager,
+            model: UsbRepairModel(
+                family: family,
+                pending: UsbRepairModel.offered(
+                    manager.recoveryStore?.load(), fromRecoverBoard: offersKeptRecovery),
+                store: manager.recoveryStore),
             closeTitle: closeTitle, onClose: onClose)
     }
 
@@ -272,8 +576,21 @@ struct UsbRepairView: View {
     var body: some View {
         Form {
             introSection
-            if model.stage != .choosing {
+            if case .resumable(let record) = model.stage {
+                resumeSection(record)
+            } else if model.stage != .choosing {
                 UsbRepairProgressSection(model: model, monitor: model.monitor)
+            }
+            if model.waitsForTheBoard, let family = model.family {
+                Section("Put the board in download mode, once") {
+                    Text(family.downloadModeAction)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Everything after this is done over USB: nothing to unplug, "
+                        + "and nothing to press again.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if let board = model.board {
                 boardSection(board)
@@ -286,6 +603,7 @@ struct UsbRepairView: View {
         .textSelection(.enabled)
         .labeledContentStyle(.labelColumn)
         .safeAreaInset(edge: .bottom) { actionBar.textSelection(.enabled) }
+        .onAppear { model.watchPorts() }
         .onDisappear { model.close() }
     }
 
@@ -307,19 +625,50 @@ struct UsbRepairView: View {
                 }
                 .disabled(model.stage != .choosing)
             }
+            // Open while catching too: a board attached at Start that is
+            // chosen here is taken at once, with nothing pressed.
+            if model.stage == .choosing || model.isLookingForTheBoard {
+                Picker("Its USB port", selection: $model.chosenPort) {
+                    Text("Not on USB - catch it when it appears").tag(String?.none)
+                    ForEach(model.attachedPorts, id: \.self) { port in
+                        Text(portLabel(port)).tag(Optional(port))
+                    }
+                }
+            }
         } header: {
-            Text("Repair a board that drops off USB")
+            Text("Recover a board")
         } footer: {
             // Only before the run: once it starts, the progress and the board
             // it found need the room.
             if model.stage == .choosing {
-                Text("For a board that appears for a moment after it is plugged in, "
-                    + "then disappears. esptool is started first and waits; the board "
-                    + "is caught the moment it appears and given a small rescue "
-                    + "firmware that keeps USB on. Saved WiFi and name are not erased. "
-                    + "Other USB devices can stay plugged in: only a port that appears "
-                    + "after \"Plug the board in now\" is touched.")
+                Text(UsbRepairModel.introduction(for: model.family))
             }
+        }
+    }
+
+    /// The port, and what the app already knows is on it.
+    private func portLabel(_ port: String) -> String {
+        let name = (port as NSString).lastPathComponent
+        var notes: [String] = []
+        if let device = manager.usbDevices.first(where: { $0.path == port }),
+           let known = [device.name, device.board].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
+            notes.append(known + (device.isConnected ? ", connected" : ""))
+        }
+        if model.newSinceRecoveryBegan.contains(port) { notes.append("new since the recovery began") }
+        if !model.isOnUSB(port) { notes.append("not on USB now") }
+        return notes.isEmpty ? name : "\(name) (" + notes.joined(separator: "; ") + ")"
+    }
+
+    private func resumeSection(_ record: UsbRecoveryRecord) -> some View {
+        Section("An earlier recovery stopped") {
+            Text(UsbRepairModel.resumeSummary(for: record))
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Resume finds the board on USB by its serial number and goes on from "
+                + "there; nothing on the board needs touching while it is on USB. "
+                + "Discard forgets it and leaves the board as it is.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -358,6 +707,10 @@ struct UsbRepairView: View {
                 if case .installed(let port) = model.stage { onClose(port) } else { onClose(nil) }
             }
             .disabled(model.isRunning)
+            if case .resumable = model.stage {
+                Button("Discard") { model.discard() }
+                    .help("Forget the stopped recovery; the board is left as it is")
+            }
             Spacer()
             if model.isRunning {
                 Button("Stop", role: .cancel) { model.stop() }
@@ -396,9 +749,13 @@ struct UsbRepairView: View {
                 Button("Clear Override") { model.clearOverride(manager: manager) }
             } else if let board, board.storedOverride == nil, model.installOffer != nil {
                 Button("Install Again") { model.install(manager: manager) }
+            } else if model.canResume {
+                Button("Resume") { model.resume(manager: manager) }
             } else {
                 Button("Start Over") { model.startOver() }
             }
+        case .resumable:
+            Button("Resume") { model.resume(manager: manager) }
         }
     }
 }

@@ -11,6 +11,8 @@ extension Notification.Name {
     /// the same indirection `espDisplayShowSettings` uses, and for the same reason:
     /// the menu holds no reference to a view.
     static let espDisplayAddDevice = Notification.Name("com.espdisplay.sender.addDevice")
+    /// Posted by File > Recover Board, handled the same way.
+    static let espDisplayRecoverBoard = Notification.Name("com.espdisplay.sender.recoverBoard")
 }
 
 // MARK: - Window
@@ -18,6 +20,7 @@ extension Notification.Name {
 struct ManagerView: View {
     @ObservedObject var manager: PanelManager
     @State private var showingAddDevice = false
+    @State private var showingRecovery = false
     @State private var pendingDeletion: PanelSnapshot?
 
     var body: some View {
@@ -73,6 +76,30 @@ struct ManagerView: View {
         // owns the minimum; see ManagerWindowController.
         .sheet(isPresented: $showingAddDevice) {
             AddDeviceSheet(manager: manager)
+        }
+        .sheet(isPresented: $showingRecovery) {
+            UsbRepairView(
+                manager: manager, family: nil, offersKeptRecovery: true, closeTitle: "Close"
+            ) { _ in
+                showingRecovery = false
+                manager.refreshUSBDevices()
+            }
+            .frame(width: 560, height: 620)
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .espDisplayRecoverBoard)
+        ) { _ in
+            showingRecovery = true
+        }
+        // A recovery the app was quit in the middle of is offered once per
+        // launch, as soon as the window is up.
+        .onAppear {
+            guard !manager.recoveryOffered else { return }
+            manager.recoveryOffered = true
+            if UsbRepairModel.offered(
+                manager.recoveryStore?.load(), fromRecoverBoard: true) != nil {
+                showingRecovery = true
+            }
         }
         .confirmationDialog(
             pendingDeletion.map { "Remove \($0.displayName)?" } ?? "Remove display?",
@@ -1997,12 +2024,15 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
     private let managerWindow: ManagerWindowController
     private let manager: PanelManager
     private let showAtLaunch: Bool
+    /// False for the listing modes, which print and leave.
+    private let offersResumeAtLaunch: Bool
 
     init(managerWindow: ManagerWindowController, manager: PanelManager,
-         showAtLaunch: Bool) {
+         showAtLaunch: Bool, offersResumeAtLaunch: Bool = true) {
         self.managerWindow = managerWindow
         self.manager = manager
         self.showAtLaunch = showAtLaunch
+        self.offersResumeAtLaunch = offersResumeAtLaunch
         super.init()
     }
 
@@ -2010,7 +2040,12 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(showManagerFromNotification),
             name: .espDisplayShowManager, object: nil)
-        if showAtLaunch { managerWindow.show() }
+        if Self.showsManager(
+            requested: showAtLaunch,
+            pendingRecovery: offersResumeAtLaunch && UsbRepairModel.offered(
+                manager.recoveryStore?.load(), fromRecoverBoard: true) != nil) {
+            managerWindow.show()
+        }
     }
 
     func applicationShouldHandleReopen(
@@ -2026,6 +2061,12 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         manager.flushPersistence()
+    }
+
+    /// The window is shown at launch when asked for, and also on a background
+    /// (login) launch when a recovery was interrupted, so Resume is offered.
+    static func showsManager(requested: Bool, pendingRecovery: Bool) -> Bool {
+        requested || pendingRecovery
     }
 
     @objc private func showManagerFromNotification(_ notification: Notification) {

@@ -223,7 +223,8 @@ public enum ESPDisplaySenderApp {
                 managerWindow: window,
                 manager: manager,
                 showAtLaunch: !launchedInBackground && !opts.listDisplays
-                    && !opts.listWindows)
+                    && !opts.listWindows,
+                offersResumeAtLaunch: !opts.listDisplays && !opts.listWindows)
             NSApplication.shared.delegate = delegate
             RetainedComponents.managerWindow = window
             RetainedComponents.applicationDelegate = delegate

@@ -128,6 +128,12 @@ final class PanelManager: ObservableObject {
     /// background. A repair holds this: the board it is catching must be
     /// opened by esptool alone, in the moment it is on USB.
     var usbProbeHolds = 0
+    /// Where a USB recovery is kept between launches; nil keeps none (previews
+    /// and tests that do not give one).
+    let recoveryStore: UsbRecoveryStore?
+    /// Whether an interrupted recovery has been offered since launch, so it is
+    /// offered once rather than each time the window is shown.
+    var recoveryOffered = false
     /// Ports whose last CFGSHOW at this path generation went unanswered, and
     /// when to ask again. A board still booting misses its first probe; without
     /// this it stayed unverified until a manual refresh or a replug.
@@ -275,6 +281,7 @@ final class PanelManager: ObservableObject {
         let url = PanelStore.defaultURL
         persistenceURL = url
         settingsURL = SettingsStore.defaultURL
+        recoveryStore = UsbRecoveryStore.defaultURL.map(UsbRecoveryStore.init(url:))
         let loaded = PanelStore.load(from: url)
         let loadedSettings = SettingsStore.load(from: SettingsStore.defaultURL)
         // An explicit value from the command line wins for this run without
@@ -384,9 +391,11 @@ final class PanelManager: ObservableObject {
         usbSerialPorts: [String],
         otaPasswords: OTAPasswordStoring = InMemoryOTAPasswordStore(),
         settings: SenderSettings = SenderSettings(),
-        settingsPersistenceURL: URL? = nil
+        settingsPersistenceURL: URL? = nil,
+        recoveryStore: UsbRecoveryStore? = nil
     ) {
         defaultDisplayName = ""
+        self.recoveryStore = recoveryStore
         // In memory by default, never the keychain: this initialiser is what the
         // SwiftUI previews and the tests use, and both run unsigned.
         self.otaPasswords = otaPasswords

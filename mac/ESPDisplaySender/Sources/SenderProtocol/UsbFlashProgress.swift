@@ -408,6 +408,7 @@ public struct UsbFlashSession: Equatable, Sendable {
     }
 
     private var defaultNextAction: String {
+        if flow == .repair { return repairNextAction }
         switch phase {
         case .findingBoard, nil:
             return "Nothing was written. Fix what the message says and try again; "
@@ -442,6 +443,26 @@ public struct UsbFlashSession: Equatable, Sendable {
         case .configuring:
             return "Unplug the board, plug it back in, then run this again with "
                 + "Set Up WiFi only to resend the settings."
+        }
+    }
+
+    /// A repair never asks for a replug after its one physical action: once
+    /// the board has been reached, Resume finds it on USB again and esptool
+    /// resets it there, whatever stage the run stopped in.
+    private var repairNextAction: String {
+        switch phase {
+        case .rescue(.rescued), .rescue(.readingBoard):
+            return "The rescue firmware is on the board and keeps its USB up. Press "
+                + "Resume: the app finds the board again by itself."
+        case .rescue, nil:
+            return "Check the chip family and the cable, then press Resume, or Start "
+                + "Over when Resume is not offered. "
+                + "Anything already written is the rescue image, which is safe to "
+                + "write again."
+        case .findingBoard, .enteringDownloadMode, .erasing, .writing, .verifying,
+             .restarting, .waitingForBoard, .configuring:
+            return "Press Resume: the app finds the board on USB and esptool resets "
+                + "it there; nothing on the board needs touching. Rewriting is safe."
         }
     }
 }

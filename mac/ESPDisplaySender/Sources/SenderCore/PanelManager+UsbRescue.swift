@@ -32,6 +32,7 @@ extension PanelManager {
     func rescueUSBBoard(
         family: UsbRescue.Family,
         carrier: String? = nil,
+        choice: UsbRescuer.PortChoice = .init(),
         progress: @escaping @Sendable (UsbFlashEvent) -> Void
     ) async -> Result<UsbRescuer.RescuedBoard, WifiConfigUI.ConfigFailure> {
         // The CLI's carrier guard: a family whose image drives carrier pins
@@ -82,6 +83,8 @@ extension PanelManager {
                     ports: { WifiConfigUI.candidatePorts() },
                     identify: { UsbRescuer.usbDevices() },
                     identifyPort: { UsbRescuer.usbDevice(forPort: $0) },
+                    adopted: { choice.port },
+                    adoptedGeneration: { choice.generation },
                     spawn: spawn,
                     now: { ProcessInfo.processInfo.systemUptime },
                     sleep: { try? await Task.sleep(for: .seconds($0)) },
@@ -105,6 +108,77 @@ extension PanelManager {
             } catch {
                 return .failure(WifiConfigUI.ConfigFailure(
                     title: "Repair failed", message: error.localizedDescription))
+            }
+        }
+        return await withTaskCancellationHandler {
+            await run.value
+        } onCancel: {
+            run.cancel()
+        }
+    }
+
+    /// A kept recovery is over once its board answers with real firmware,
+    /// whichever flow put it there: a recovery is never resumed onto a board
+    /// that already works.
+    func clearRecovery(ofBoardAnswering hardwareID: String) {
+        guard let store = recoveryStore, let record = store.load(),
+              UsbRecovery.isRecordedBoard(record, hardwareID: hardwareID)
+        else { return }
+        store.clear()
+    }
+
+    /// What answered on a recovered board's port when it was asked again.
+    enum RecoveredBoardAnswer: Equatable, Sendable {
+        /// The rescue image, as recorded.
+        case rescue(UsbRescuer.RescuedBoard)
+        /// Real firmware, from the recorded board: the recovery is done.
+        case realFirmware(port: String, version: String)
+        /// Another board answers there now: it is not touched.
+        case otherBoard(port: String, hardwareID: String)
+        /// Nothing that is this board.
+        case silent
+
+        enum Kind: Equatable {
+            case rescue, realFirmware(String), otherBoard(String), silent
+        }
+
+        /// What a CFGSHOW answer on the recorded port is, for the board with
+        /// this hardware ID (nil when the record never learned it).
+        nonisolated static func kind(
+            of identity: WifiConfigUI.USBIdentity?, expected: String?
+        ) -> Kind {
+            guard let identity, let answered = identity.hardwareID else { return .silent }
+            if let expected, answered != ConfigCommands.canonicalHardwareID(expected) {
+                return .otherBoard(answered)
+            }
+            if let version = identity.status?.firmwareVersion { return .realFirmware(version) }
+            return .rescue
+        }
+    }
+
+    /// Ask the board on `port` again what it is, for a recovery resumed after
+    /// the rescue image was written. Only that port is opened.
+    func rereadRecoveredBoard(
+        port: String, family: UsbRescue.Family, carrier: String?, hardwareID: String?,
+        progress: @escaping @Sendable (UsbFlashEvent) -> Void
+    ) async -> RecoveredBoardAnswer {
+        holdUSBProbes()
+        defer { releaseUSBProbes() }
+        let run = Task.detached { () -> RecoveredBoardAnswer in
+            let read = await UsbRescuer.readRescuedBoard(
+                port: port, family: family, attempts: 3, onProgress: progress)
+            switch RecoveredBoardAnswer.kind(of: read?.identity, expected: hardwareID) {
+            case .silent:
+                return .silent
+            case .otherBoard(let other):
+                return .otherBoard(port: port, hardwareID: other)
+            case .realFirmware(let version):
+                return .realFirmware(port: port, version: version)
+            case .rescue:
+                guard var board = read else { return .silent }
+                board.carrier = carrier
+                progress(.phase(.rescue(.rescued(port: board.port))))
+                return .rescue(board)
             }
         }
         return await withTaskCancellationHandler {
@@ -310,7 +384,14 @@ extension PanelManager {
                 + "\(settled.firmwareVersion ?? bundle.firmwareVersion)."))
             return .success(settled.port)
         case .failure(let failure):
-            return .failure(failure)
+            // Settle's own advice is to replug; a recovery's is Install Again,
+            // which finds the board on USB and resets it there.
+            progress(.log(.app, failure.message))
+            return fail(failure.title,
+                        "The real firmware was written, but the board did not answer as it "
+                            + "in time. Press Install Again: the app finds the board on USB "
+                            + "and esptool resets it there; nothing on the board needs "
+                            + "touching.")
         }
     }
 }

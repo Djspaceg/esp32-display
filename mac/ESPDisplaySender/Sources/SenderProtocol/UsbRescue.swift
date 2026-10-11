@@ -16,6 +16,13 @@ import Foundation
 /// The same design as `tools/espdisp.py rescue` (`run_rescue`), which was
 /// proven on hardware first; the names here follow it so the two can be read
 /// side by side. `UsbRescuer` in SenderCore owns the processes and the loop.
+///
+/// The app asks for at most one physical action, the family's
+/// `downloadModeAction`, and departs from the CLI to keep it to one: what is
+/// attached at Start is fixed then, so a board put in download mode while
+/// esptool starts is still new, and a port the user names (a board already on
+/// USB, or one found again by Resume) is taken whatever the baseline says.
+/// Every later reset is esptool's, over USB.
 public enum UsbRescue {
 
     // MARK: - constants shared with tools/espdisp.py
@@ -77,6 +84,33 @@ public enum UsbRescue {
         public static func named(_ key: String?) -> Family? {
             guard let key else { return nil }
             return all.first { $0.key == key }
+        }
+
+        /// The one thing the person does to put a board of this family into
+        /// ROM download mode, whose USB stays up until esptool resets it. Never
+        /// a replug: a board with a battery does not restart when unplugged.
+        ///
+        /// From the vendors' pages (Waveshare, Elecrow): the S3 displays come
+        /// with either a RESET button or, on the battery boards with a power
+        /// chip (1.75-inch AMOLED, 0.85, 1.54), a PWR button and no RESET. The
+        /// C6 boards have BOOT and RESET. The P4 boards reach the chip through a
+        /// CH343 USB-UART bridge, whose DTR and RTS lines let esptool reset the
+        /// chip into download mode with nothing pressed.
+        public var downloadModeAction: String {
+            switch key {
+            case "s3":
+                return "With a RESET (RST) button: hold BOOT, press and release RESET, "
+                    + "then release BOOT. With a PWR button and no RESET (the 1.75-inch "
+                    + "AMOLED, 0.85-inch and 1.54-inch boards, which keep running on "
+                    + "their battery): hold PWR until the screen goes dark, then hold "
+                    + "BOOT, press PWR, and release BOOT once the board is on."
+            case "p4":
+                return "Nothing to press: the board's USB-UART bridge lets esptool reset "
+                    + "it into download mode by itself. Connect its UART USB port; if "
+                    + "it is connected already, choose that port."
+            default:
+                return "Hold BOOT, press and release RESET (RST), then release BOOT."
+            }
         }
 
         /// The family a chip token names, when exactly one does.
@@ -247,6 +281,15 @@ public enum UsbRescue {
         }
     }
 
+    /// Whether two readings are one USB device: by serial when both have
+    /// one, else by socket. Stricter than `isKnown`, for which the same socket
+    /// is enough: a board chosen by port must not turn out to be another board
+    /// plugged into that socket.
+    public static func isSameDevice(_ a: USBIdentity, _ b: USBIdentity) -> Bool {
+        if !a.serial.isEmpty, !b.serial.isEmpty { return a.serial == b.serial }
+        return a.location == b.location
+    }
+
     /// The --port one spawned esptool is given, spelled under /dev/.
     ///
     /// esptool picks its USB Serial/JTAG reset only after matching the port to a
@@ -340,19 +383,19 @@ public enum UsbRescueStep: Equatable, Sendable {
     public var title: String {
         switch self {
         case .startingEsptool:
-            return "Keep the board unplugged"
+            return "Starting esptool"
         case .plugIn:
-            return "Plug the board in now"
+            return "Waiting for the board"
         case .missed:
-            return "Missed it - unplug and plug in again"
+            return "The board dropped off before esptool reached it"
         case .seenWhileStarting:
-            return "Board seen - keep it plugged in"
+            return "Board seen - esptool is almost ready"
         case .caught:
-            return "Got it - keep the board plugged in"
+            return "Got it - leave the board as it is"
         case .couldNotConnect:
-            return "Could not reach the board - unplug it"
+            return "Could not reach the board"
         case .tooManyPorts:
-            return "Leave only the board to repair plugged in"
+            return "More than one new USB device appeared"
         case .rescued, .readingBoard:
             return "Rescue firmware is on"
         }
@@ -363,7 +406,7 @@ public enum UsbRescueStep: Equatable, Sendable {
         switch self {
         case .startingEsptool: return "Starting esptool"
         case .plugIn, .missed, .seenWhileStarting, .tooManyPorts:
-            return "Waiting for the board to be plugged in"
+            return "Waiting for the board"
         case .caught: return "Resetting the board into download mode"
         case .couldNotConnect: return "Connecting to the board"
         case .rescued, .readingBoard: return "Reading the repaired board"
@@ -373,16 +416,17 @@ public enum UsbRescueStep: Equatable, Sendable {
     public var detail: String? {
         switch self {
         case .startingEsptool:
-            return "Starting esptool; this takes a few seconds. A board plugged in "
-                + "now is left alone for this repair."
+            return "This takes a few seconds. The board can be put in download mode "
+                + "now; esptool reaches it as soon as it is ready."
         case .plugIn:
-            return "esptool is waiting and will catch the board as soon as it appears."
+            return "esptool is ready and reaches the board the moment it is in "
+                + "download mode."
         case .missed(let ready):
             return ready
-                ? "esptool is waiting again."
-                : "esptool is starting again; plug the board in when this says so."
+                ? "esptool is waiting again, and takes the board as soon as it is back."
+                : "esptool is starting again."
         case .seenWhileStarting(let port):
-            return "Board seen on \(port), but esptool is still starting."
+            return "Board seen on \(port); esptool reaches it in a moment."
         case .caught(let port):
             return "Board seen on \(port); resetting it into download mode."
         case .couldNotConnect(let port, let family):
@@ -391,7 +435,8 @@ public enum UsbRescueStep: Equatable, Sendable {
                 + "an ESP32-\(family.uppercased()) board?"
         case .tooManyPorts(let ports):
             return "\(ports.count) new USB serial devices appeared "
-                + "(\(ports.joined(separator: ", "))); none of them is touched."
+                + "(\(ports.joined(separator: ", "))); none of them is touched. Choose "
+                + "the board's port to go on."
         case .rescued(let port):
             return "The board is running the rescue image on \(port); its USB now "
                 + "stays on. Install the real firmware to finish."

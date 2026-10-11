@@ -38,10 +38,33 @@ enum UsbRescuer {
         /// The device that publishes a port, from the IORegistry; nil when it
         /// cannot be found there, and the name is parsed instead.
         var identifyPort: (String) -> UsbRescue.USBIdentity? = { _ in nil }
+        /// A port the user named as the board, attached or not: it is taken
+        /// whatever the baseline says. nil while they have named none.
+        var adopted: () -> String? = { nil }
+        /// Counts the user's choices, the same port chosen again included.
+        var adoptedGeneration: () -> Int = { 0 }
         var spawn: () throws -> RescueWorker
         var now: () -> Double
         var sleep: (Double) async -> Void
         var isCancelled: () -> Bool
+    }
+
+    /// The port the user has named as the board, set from the sheet while the
+    /// loop reads it from its own task.
+    final class PortChoice: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: String?
+        private var count = 0
+
+        init(_ port: String? = nil) { value = port }
+
+        var port: String? {
+            get { lock.withLock { value } }
+            set { lock.withLock { value = newValue; count += 1 } }
+        }
+
+        /// How many times a port has been chosen, the same one again included.
+        var generation: Int { lock.withLock { count } }
     }
 
     // MARK: - the loop
@@ -67,24 +90,24 @@ enum UsbRescuer {
             onProgress(.phase(.rescue(step)))
         }
 
+        // Everything attached at Start is left alone for the whole run, however
+        // it comes and goes, unless the user names it as the board: the same
+        // socket gives the same name, and another socket the same USB device.
+        // Fixed here, not grown while esptool starts, so the board may be put in
+        // download mode the moment Start is pressed: its one physical action.
         var baseline = Set(io.ports())
-        var knownDevices = Set(io.identify())
+        let knownDevices = Set(io.identify())
         report(.startingEsptool)
-        // Everything attached now is left alone for the whole run, however it
-        // is replugged: the same socket gives the same name, and another
-        // socket the same USB device. So the board must be unplugged BEFORE
-        // Start, and the words say so rather than "unplug it now".
-        say("Starting esptool; this takes a few seconds. Keep the board to repair "
-            + "unplugged until this says \"Plug the board in now\".")
+        say("Starting esptool; this takes a few seconds. The board can be put in "
+            + "download mode now.")
         if !baseline.isEmpty {
-            say("Attached now, so left alone for this whole repair: "
-                + baseline.sorted().joined(separator: ", ") + ". If one of them is "
-                + "the board to repair, stop, unplug it, and start again.")
+            say("Attached now, so left alone unless one is chosen as the board: "
+                + baseline.sorted().joined(separator: ", ") + ".")
         }
         var worker = try io.spawn()
         defer { worker.kill() }
 
-        var started = false      // "plug in now" has been said once
+        var started = false      // esptool has been ready once
         var announced = false    // ...and holds for the current esptool
         var missed = false       // the last attempt ended in a miss
         var linked: (port: String, since: Double, connectedAt: Double?)?
@@ -95,6 +118,17 @@ enum UsbRescuer {
         var toldIgnored = Set<String>()
         var toldCrowd = false
         var toldWait: String?
+        /// The USB device the chosen port was when it was first seen after the
+        /// person chose it: a native USB port is named for its socket, so
+        /// another board plugged in there comes back under the same name. Kept
+        /// until the next choice, so a refused board stays refused however
+        /// often it drops off and returns. When the device cannot be read at
+        /// either end, the port is taken by name, as an unchosen one is.
+        var chosenDevice: UsbRescue.USBIdentity?
+        var recordedChoice: (port: String, generation: Int)?
+        func device(of port: String) -> UsbRescue.USBIdentity? {
+            io.identifyPort(port) ?? UsbRescue.identity(forPort: port, devices: io.identify())
+        }
         var echo = Echo(regions: regions)
 
         func relaunch() throws {
@@ -110,16 +144,14 @@ enum UsbRescuer {
             }
             let now = io.now()
             let present = Set(io.ports())
-            if !started {
-                let early = present.subtracting(baseline)
-                if !early.isEmpty {
-                    knownDevices.formUnion(io.identify())
-                    say("Ignoring " + early.sorted().joined(separator: ", ")
-                        + ": it appeared before esptool was ready, so it is left alone "
-                        + "for this repair. If that is the board, stop, unplug it, "
-                        + "and start again.")
+            let chosen = io.adopted()
+            if let chosen, present.contains(chosen) {
+                let generation = io.adoptedGeneration()
+                if recordedChoice?.port != chosen || recordedChoice?.generation != generation {
+                    recordedChoice = (chosen, generation)
+                    chosenDevice = device(of: chosen)
+                    refused.remove(chosen)
                 }
-                baseline.formUnion(present)
             }
             let code = worker.poll()
             if linked != nil {
@@ -150,13 +182,14 @@ enum UsbRescuer {
                         say("esptool could not write \(port) ("
                             + (wrongChip ? "it is another chip"
                                 : "\(failures[port, default: 0]) failed attempts")
-                            + "); is it an \(family.displayName) board? Unplug it.")
+                            + "); is it an \(family.displayName) board? It is left alone.")
                         report(.couldNotConnect(port: port, family: family.key))
                     } else {
                         say("esptool could not finish on \(port); trying again.")
                     }
                 } else {
-                    say("Missed it. Unplug the board, then plug it in again.")
+                    say("The board dropped off before esptool reached it; esptool is "
+                        + "waiting for it again.")
                     missed = true
                     report(.missed(esptoolReady: false))
                 }
@@ -164,7 +197,7 @@ enum UsbRescuer {
                 continue
             }
             if worker.isReady, !announced {
-                say(started ? "esptool is waiting again." : "Plug the board in now.")
+                say(started ? "esptool is waiting again." : "esptool is ready; waiting for the board.")
                 started = true
                 announced = true
                 if refused.isEmpty {
@@ -186,7 +219,7 @@ enum UsbRescuer {
                     if failures[current.port, default: 0] >= UsbRescue.failuresBeforeRefusal {
                         refused.insert(current.port)
                         say("esptool stopped writing to \(current.port) \(failures[current.port, default: 0]) "
-                            + "times; is it an \(family.displayName) board? Unplug it.")
+                            + "times; is it an \(family.displayName) board? It is left alone.")
                         report(.couldNotConnect(port: current.port, family: family.key))
                     } else {
                         say("esptool stopped writing to \(current.port) for "
@@ -196,7 +229,8 @@ enum UsbRescuer {
                     worker.unlink()
                     linked = nil
                     missed = true
-                    say("Missed it. Unplug the board, then plug it in again.")
+                    say("The board dropped off before esptool reached it; esptool is "
+                        + "waiting for it again.")
                     report(.missed(esptoolReady: true))
                 } else if present.contains(current.port), !worker.isConnected,
                           now - current.since > UsbRescue.connectTimeout {
@@ -208,10 +242,12 @@ enum UsbRescuer {
                     refused.insert(current.port)
                     say("esptool could not connect to \(current.port) in "
                         + "\(Int(UsbRescue.connectTimeout)) s; is it an "
-                        + "\(family.displayName) board? Unplug it.")
+                        + "\(family.displayName) board? It is left alone.")
                     report(.couldNotConnect(port: current.port, family: family.key))
                 }
-            } else if started {
+            } else {
+                // Before esptool is ready too: a port that appears then is new,
+                // and is reached as soon as esptool is.
                 let hadRefused = !refused.isEmpty
                 refused.formIntersection(present)
                 failures = failures.filter { present.contains($0.key) }
@@ -224,13 +260,24 @@ enum UsbRescuer {
                     } else if gone.contains(port), !toldIgnored.contains(port) {
                         toldIgnored.insert(port)
                         say("Ignoring \(port): it was attached before the repair started. "
-                            + "If that is the board to repair, stop, unplug it, and "
-                            + "start again.")
+                            + "If it is the board, choose it as the board's port.")
                     }
                 }
                 var fresh = UsbRescue.newPorts(baseline: baseline, present: present)
                     .filter { !refused.contains($0) }
-                if fresh.count == 1,
+                // A port the user named is the only one taken, attached at Start
+                // or not, and no other port is while one is named.
+                if let chosen {
+                    fresh = present.contains(chosen) && !refused.contains(chosen) ? [chosen] : []
+                    if !fresh.isEmpty, worker.isReady, linked == nil,
+                       let was = chosenDevice, let now = device(of: chosen),
+                       !UsbRescue.isSameDevice(now, was) {
+                        refused.insert(chosen)
+                        fresh = []
+                        say("\(chosen) is now another USB device than the one chosen, so it is "
+                            + "left alone. If that is the board, choose its port again.")
+                    }
+                } else if fresh.count == 1,
                    UsbRescue.isKnown(
                        io.identifyPort(fresh[0])
                            ?? UsbRescue.identity(forPort: fresh[0], devices: io.identify()),
@@ -243,8 +290,7 @@ enum UsbRescuer {
                 if fresh.count > 1 {
                     if !toldCrowd {
                         say("\(fresh.count) new ports appeared (\(fresh.joined(separator: ", "))); "
-                            + "touching none of them. Leave only the board to repair "
-                            + "plugged in.")
+                            + "touching none of them. Choose the board's port to go on.")
                         toldCrowd = true
                         report(.tooManyPorts(fresh))
                     }
@@ -252,8 +298,7 @@ enum UsbRescuer {
                     toldCrowd = false
                     if !worker.isReady {
                         if toldWait != port {
-                            say("Board seen on \(port), but esptool is still starting; "
-                                + "keep it plugged in.")
+                            say("Board seen on \(port); esptool reaches it in a moment.")
                             toldWait = port
                             report(.seenWhileStarting(port: port))
                         }
@@ -263,7 +308,9 @@ enum UsbRescuer {
                         toldWait = nil
                         missed = false
                         echo = Echo(regions: regions)
-                        say("Board seen on \(port); resetting it into download mode.")
+                        say(port == chosen
+                            ? "Using \(port), chosen as the board; resetting it into download mode."
+                            : "Board seen on \(port); resetting it into download mode.")
                         report(.caught(port: port))
                     }
                 } else {

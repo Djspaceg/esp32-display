@@ -332,6 +332,9 @@ extension PanelManager {
         if let verifiedGeneration {
             usbDevices[index].verifiedGeneration = verifiedGeneration
         }
+        if let canonicalID, serialStatus?.firmwareVersion != nil {
+            clearRecovery(ofBoardAnswering: canonicalID)
+        }
 
         guard let canonicalID else {
             sortPanels()

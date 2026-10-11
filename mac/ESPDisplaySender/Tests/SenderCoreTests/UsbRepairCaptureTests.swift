@@ -25,6 +25,8 @@ final class UsbRepairCaptureTests: XCTestCase {
         // when they appear, so they are never rendered here.
         func repair(_ name: String, _ configure: (UsbRepairModel) -> Void) throws {
             let model = UsbRepairModel(family: .named("s3"))
+            // /dev is not listed either: each screen names its own ports.
+            model.listPorts = { [] }
             configure(model)
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
             try capture(
@@ -64,6 +66,26 @@ final class UsbRepairCaptureTests: XCTestCase {
         try repair("8-repair-could-not-connect") { model in
             model.stage = .catching
             model.monitor.record(.phase(.rescue(.couldNotConnect(port: port, family: "s3"))))
+        }
+        try repair("9-recover-choose-its-port") { model in
+            model.listPorts = { ["/dev/cu.usbmodem5B901700691", port] }
+            model.refreshPorts()
+            model.chosenPort = port
+        }
+        try repair("10-recover-the-one-action") { model in
+            model.listPorts = { ["/dev/cu.usbmodem5B901700691"] }
+            model.refreshPorts()
+            model.stage = .catching
+            model.monitor.record(.phase(.rescue(.startingEsptool)))
+            model.monitor.record(.phase(.rescue(.plugIn)))
+        }
+        try repair("11-recover-resume-after-quit") { model in
+            let record = UsbRecovery.installing(UsbRecovery.rescued(
+                UsbRecovery.caught(
+                    UsbRecovery.started(family: "s3", carrier: nil, baseline: []),
+                    port: port, device: nil),
+                board: board, device: nil))
+            model.stage = .resumable(record)
         }
     }
 

@@ -41,6 +41,8 @@ final class UsbRescueTests: XCTestCase {
         var identities: [String: UsbRescue.USBIdentity] = [:]
         /// What the IORegistry says publishes a port, whatever its name.
         var registry: [String: UsbRescue.USBIdentity] = [:]
+        /// The port the user has named as the board by time `t`, if any.
+        var adopted: (Double) -> String? = { _ in nil }
         var workers: [FakeWorker] = []
         var events: [UsbFlashEvent] = []
         var written: [String] = []
@@ -65,6 +67,7 @@ final class UsbRescueTests: XCTestCase {
                 ports: { self.ports() },
                 identify: { self.identify() },
                 identifyPort: { self.registry[$0] },
+                adopted: { self.adopted(self.t) },
                 spawn: {
                     let worker = FakeWorker(world: self)
                     self.workers.append(worker)
@@ -282,8 +285,8 @@ final class UsbRescueTests: XCTestCase {
         let result = await world.run()
         XCTAssertEqual(result, board)
         XCTAssertEqual(Set(world.links), [board], "only the new port is ever linked")
-        XCTAssertTrue(world.said("Plug the board in now"))
-        XCTAssertTrue(world.said("Missed it"))
+        XCTAssertTrue(world.said("esptool is ready; waiting for the board"))
+        XCTAssertTrue(world.said("dropped off before esptool reached it"))
         XCTAssertTrue(world.said("Ignoring /dev/cu.usbmodemFLICK"))
         XCTAssertEqual(world.workers.count, 1, "a miss before connecting costs no relaunch")
         XCTAssertTrue(world.workers[0].killed, "esptool is stopped at the end")
@@ -296,7 +299,7 @@ final class UsbRescueTests: XCTestCase {
         XCTAssertEqual(result, board)
         XCTAssertEqual(world.workers.count, 2, "a failed esptool is relaunched")
         XCTAssertTrue(world.workers[0].killed, "the failed esptool is reaped")
-        XCTAssertTrue(world.said("Missed it"))
+        XCTAssertTrue(world.said("dropped off before esptool reached it"))
         XCTAssertTrue(world.said("esptool: could not open port"))
         XCTAssertTrue(world.said("esptool is waiting again"))
     }
@@ -307,8 +310,8 @@ final class UsbRescueTests: XCTestCase {
         let result = await world.run()
         XCTAssertEqual(result, board)
         XCTAssertTrue(world.said("could not finish on \(board); trying again"))
-        XCTAssertTrue(world.said("esptool is still starting"))
-        XCTAssertFalse(world.said("Missed it"))
+        XCTAssertTrue(world.said("esptool reaches it in a moment"))
+        XCTAssertFalse(world.said("dropped off"))
         XCTAssertTrue(world.steps.contains(.seenWhileStarting(port: board)))
     }
 
@@ -324,12 +327,162 @@ final class UsbRescueTests: XCTestCase {
         XCTAssertEqual(world.steps.last, .tooManyPorts([board, "/dev/cu.usbmodemC"]))
     }
 
-    func testAPortThatAppearsWhileEsptoolStartsCountsAsAttached() async {
+    /// The human may do their one action the moment they press Start: a board
+    /// that comes up while esptool is still starting is new, and is caught.
+    func testAPortThatAppearsWhileEsptoolStartsIsCaughtOnceItIsReady() async {
         let world = World(baseline: [other], windows: [(board, 1.5, 1e9)])
-        world.limit = 15
+        let result = await world.run()
+        XCTAssertEqual(result, board)
+        XCTAssertEqual(world.links, [board])
+        XCTAssertTrue(world.steps.contains(.seenWhileStarting(port: board)))
+    }
+
+    // MARK: - a board that is already attached
+
+    func testAChosenAttachedPortIsRecoveredWithoutAReplug() async {
+        let world = World(baseline: [other, (board, 0, 1e9)], windows: [])
+        world.adopted = { _ in self.board }
+        let result = await world.run()
+        XCTAssertEqual(result, board)
+        XCTAssertEqual(world.links, [board], "only the chosen port is linked")
+        XCTAssertTrue(world.said("chosen"))
+    }
+
+    func testAPortChosenPartWayThroughTheRunIsTakenThen() async {
+        let world = World(baseline: [other, (board, 0, 1e9)], windows: [])
+        world.adopted = { t in t >= 10 ? self.board : nil }
+        let result = await world.run()
+        XCTAssertEqual(result, board)
+        XCTAssertEqual(world.links, [board])
+        XCTAssertGreaterThanOrEqual(world.workers[0].linkedAt, 10)
+    }
+
+    /// A native-USB port is named for its socket: a different board plugged
+    /// into the same socket comes back under the chosen name and is not taken.
+    func testAChosenPortThatComesBackAsAnotherDeviceIsLeftAlone() async {
+        let world = World(baseline: [other, (board, 0, 2)], windows: [(board, 3, 1e9)])
+        world.adopted = { _ in self.board }
+        var swapped = false
+        world.registry = [board: .init(location: 0x131010, serial: "7C:0C:5F:42:39:A4")]
+        let io = world.io
+        var probed = io
+        probed.identifyPort = { port in
+            if world.t >= 3 { swapped = true }
+            return world.t >= 3
+                ? .init(location: 0x131010, serial: "68:EE:8F:5D:AC:8C") : world.registry[port]
+        }
+        world.limit = 20
+        let result: String
+        do {
+            result = try await UsbRescuer.run(
+                family: .named("s3")!, regions: UsbRescueTests.regions, io: probed
+            ) { world.events.append($0) }
+        } catch {
+            result = "STOPPED"
+        }
+        XCTAssertTrue(swapped)
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertTrue(world.links.isEmpty, "the other board is never reset or written")
+        XCTAssertTrue(world.said("another USB device"))
+    }
+
+    /// Review round 2: once refused, the other board stays refused however
+    /// often it drops off and comes back; only a new choice records anew.
+    func testARefusedOtherBoardOnTheChosenPortStaysRefusedThroughAFlicker() async {
+        let world = World(
+            baseline: [other, (board, 0, 2)],
+            windows: [(board, 3, 8), (board, 8.5, 1e9)])
+        world.adopted = { _ in self.board }
+        var probed = world.io
+        probed.identifyPort = { _ in
+            world.t >= 3
+                ? .init(location: 0x131010, serial: "68:EE:8F:5D:AC:8C")
+                : .init(location: 0x131010, serial: "7C:0C:5F:42:39:A4")
+        }
+        world.limit = 30
+        do {
+            _ = try await UsbRescuer.run(
+                family: .named("s3")!, regions: UsbRescueTests.regions, io: probed
+            ) { world.events.append($0) }
+        } catch {}
+        XCTAssertTrue(world.links.isEmpty, "the other board is never reset or written")
+    }
+
+    func testChoosingThePortAgainRecordsTheBoardNowOnIt() async {
+        let world = World(baseline: [other, (board, 0, 2)], windows: [(board, 3, 1e9)])
+        var probed = world.io
+        probed.adopted = { self.board }
+        // The person sees the refusal and chooses the port again at t = 10.
+        probed.adoptedGeneration = { world.t >= 10 ? 1 : 0 }
+        probed.identifyPort = { _ in
+            world.t >= 3
+                ? .init(location: 0x131010, serial: "68:EE:8F:5D:AC:8C")
+                : .init(location: 0x131010, serial: "7C:0C:5F:42:39:A4")
+        }
+        let result = (try? await UsbRescuer.run(
+            family: .named("s3")!, regions: UsbRescueTests.regions, io: probed
+        ) { world.events.append($0) }) ?? "STOPPED"
+        XCTAssertEqual(result, board)
+        XCTAssertEqual(world.links, [board])
+        XCTAssertGreaterThanOrEqual(world.workers.last?.linkedAt ?? 0, 10)
+        let choice = UsbRescuer.PortChoice()
+        choice.port = board
+        choice.port = board
+        XCTAssertEqual(choice.generation, 2, "each choice counts, the same port too")
+    }
+
+    func testAnAttachedPortThatDropsAndReturnsIsStillLeftAloneUnlessChosen() async {
+        let world = World(
+            baseline: [other, (board, 0, 5), (board, 6, 1e9)], windows: [])
+        world.limit = 20
         let result = await world.run()
         XCTAssertEqual(result, "STOPPED")
         XCTAssertTrue(world.links.isEmpty)
+        XCTAssertTrue(world.said("choose it"),
+                      "the way to take it is to choose it, not to replug it")
+    }
+
+    // MARK: - one physical action
+
+    /// Nothing the run says asks for the board to be unplugged or plugged in
+    /// again: a battery board does not restart that way, and every reset after
+    /// the one action is esptool's, over USB.
+    func testNoInstructionAsksForTheBoardToBeReplugged() async {
+        let runs: [World] = [
+            World(baseline: [other], windows: [(board, 6.0, 6.2), (board, 9.0, 1e9)]),
+            World(baseline: [other], windows: [(board, 6.0, 7.0), (board, 14.0, 1e9)]),
+            World(baseline: [other, (board, 0, 5), (board, 6, 1e9)], windows: []),
+        ]
+        let foreign = World(baseline: [other], windows: [(board, 6.0, 1e9)])
+        foreign.foreign = [board]
+        let wrong = World(baseline: [other], windows: [(board, 6.0, 1e9)])
+        wrong.wrongChip = [board]
+        for world in runs + [foreign, wrong] {
+            world.limit = 30
+            _ = await world.run()
+            let texts = world.messages + world.steps.flatMap { [$0.title, $0.detail ?? ""] }
+            for text in texts {
+                XCTAssertNil(text.range(of: "unplug|plug (it|the board) in|plugged in again|once more|keep it plugged",
+                                        options: [.regularExpression, .caseInsensitive]),
+                             "asks for a replug: \(text)")
+            }
+        }
+    }
+
+    func testEachFamilySaysItsOneDownloadModeAction() {
+        let s3 = UsbRescue.Family.named("s3")!.downloadModeAction
+        XCTAssertTrue(s3.contains("BOOT") && s3.contains("RESET") && s3.contains("PWR"),
+                      "S3 boards come with RESET or with PWR; both are named: \(s3)")
+        let c6 = UsbRescue.Family.named("c6")!.downloadModeAction
+        XCTAssertTrue(c6.contains("BOOT") && c6.contains("RESET"))
+        let p4 = UsbRescue.Family.named("p4")!.downloadModeAction
+        XCTAssertTrue(p4.localizedCaseInsensitiveContains("nothing to press"),
+                      "P4 boards are reset by esptool through their USB-UART bridge")
+        for family in UsbRescue.Family.all {
+            XCTAssertNil(family.downloadModeAction.range(
+                of: "unplug|replug", options: [.regularExpression, .caseInsensitive]),
+                "\(family.key): \(family.downloadModeAction)")
+        }
     }
 
     func testABoardEsptoolCannotReachIsGivenUpAndTheNextOneIsRescued() async {
@@ -477,40 +630,51 @@ final class UsbRescueTests: XCTestCase {
     }
 
     func testRescueStepsReadAsPlainInstructions() {
-        XCTAssertEqual(UsbFlashPhase.rescue(.plugIn).title, "Plug the board in now")
+        XCTAssertEqual(UsbFlashPhase.rescue(.plugIn).title, "Waiting for the board")
         XCTAssertEqual(UsbFlashPhase.rescue(.missed(esptoolReady: true)).title,
-                       "Missed it - unplug and plug in again")
+                       "The board dropped off before esptool reached it")
         XCTAssertEqual(UsbFlashPhase.rescue(.missed(esptoolReady: false)).detail,
-                       "esptool is starting again; plug the board in when this says so.")
+                       "esptool is starting again.")
         XCTAssertEqual(
             UsbRepairModel.headline(for: .installing(Self.rescuedBoard()), phase: .writing(
                 FlashPartProgress(index: 1, count: 4, role: "bootloader", address: 0,
                                   percent: 5, bytesBefore: 0, bytes: 1, totalBytes: 4))),
             "Rescue firmware is on - installing the real firmware")
         XCTAssertEqual(UsbRepairModel.headline(for: .catching, phase: .rescue(.plugIn)),
-                       "Plug the board in now")
+                       "Waiting for the board")
         XCTAssertEqual(UsbRepairModel.headline(for: .catching, phase: .enteringDownloadMode),
-                       "Got it - keep the board plugged in")
+                       "Got it - leave the board as it is")
     }
 
     func testARepairFailureNamesTheStepAndWhatToDo() {
         var session = UsbFlashSession(flow: .repair)
         session.apply(.phase(.rescue(.startingEsptool)), at: 0)
         session.apply(.phase(.rescue(.plugIn)), at: 4)
-        XCTAssertEqual(session.phase?.title, "Plug the board in now")
-        XCTAssertTrue(session.transcript.text.contains("Plug the board in now - esptool is waiting"))
+        XCTAssertEqual(session.phase?.title, "Waiting for the board")
+        XCTAssertTrue(session.transcript.text.contains("Waiting for the board - esptool is ready"))
         session.apply(.log(.esptool, "A fatal error occurred: could not open port"), at: 5)
         session.fail(title: "esptool stopped while waiting for the board",
                      message: "could not open port", at: 5)
-        XCTAssertEqual(session.failure?.step, "Waiting for the board to be plugged in")
+        XCTAssertEqual(session.failure?.step, "Waiting for the board")
         XCTAssertEqual(session.failure?.lastSeen, ["A fatal error occurred: could not open port"])
-        XCTAssertTrue(session.failure?.nextAction.contains("start the repair again") == true)
+        XCTAssertTrue(session.failure?.nextAction.contains("press Resume, or Start Over") == true)
 
         var installing = UsbFlashSession(flow: .repair)
         installing.apply(.phase(.waitingForBoard(SettleWait(
             target: .reappear(flashedPort: board), attempt: 1, elapsed: 1, budget: 60))), at: 0)
         installing.fail(title: "The board did not come back", message: "", at: 1)
-        XCTAssertTrue(installing.failure?.nextAction.hasPrefix("The firmware is written") == true)
+        XCTAssertTrue(installing.failure?.nextAction.hasPrefix("Press Resume") == true)
+        for phase: UsbFlashPhase in [
+            .findingBoard, .enteringDownloadMode, .restarting, .rescue(.rescued(port: board)),
+            .rescue(.plugIn),
+        ] {
+            var repair = UsbFlashSession(flow: .repair)
+            repair.apply(.phase(phase), at: 0)
+            repair.fail(title: "x", message: "", at: 1)
+            XCTAssertNil(repair.failure?.nextAction.range(
+                of: "unplug|plug it|replug", options: [.regularExpression, .caseInsensitive]),
+                "\(phase): \(repair.failure?.nextAction ?? "")")
+        }
     }
 
     // MARK: - the process-tree kill

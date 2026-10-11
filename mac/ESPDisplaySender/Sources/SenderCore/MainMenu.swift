@@ -79,11 +79,19 @@ final class MainMenuController: NSObject {
             withTitle: "Add Display over USB\u{2026}", action: #selector(addDevice(_:)),
             keyEquivalent: "n")
         add.target = self
+        // For a board the list does not show, or shows as not connected: the
+        // repair flow with no board chosen.
+        let recover = menu.addItem(
+            withTitle: "Recover Board\u{2026}", action: #selector(recoverBoard(_:)),
+            keyEquivalent: "")
+        recover.target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Close",
                      action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         return menu
     }
+
+    func fileMenuForTesting() -> NSMenu { fileMenu() }
 
     private func editMenu() -> NSMenu {
         let menu = NSMenu(title: "Edit")
@@ -157,5 +165,10 @@ final class MainMenuController: NSObject {
     /// present the sheet.
     @objc private func addDevice(_ sender: Any?) {
         NotificationCenter.default.post(name: .espDisplayAddDevice, object: nil)
+    }
+
+    /// Posted for the manager window, as Add Display is, and for the same reason.
+    @objc private func recoverBoard(_ sender: Any?) {
+        NotificationCenter.default.post(name: .espDisplayRecoverBoard, object: nil)
     }
 }
