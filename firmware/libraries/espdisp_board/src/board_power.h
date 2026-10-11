@@ -69,6 +69,11 @@ static const uint8_t REG_ADC_CHANNEL_CTRL = 0x30;
 // Battery voltage, 13 bits across two registers (high 5 bits, then low 8).
 static const uint8_t REG_BAT_VOLTAGE_HIGH = 0x34;
 static const uint8_t REG_BAT_VOLTAGE_LOW = 0x35;
+// PWRON_STATUS / PWROFF_STATUS: what last switched the part on and off.
+static const uint8_t REG_PWRON_STATUS = 0x20;
+static const uint8_t REG_PWROFF_STATUS = 0x21;
+// INPUT_CURRENT_LIMIT: bits 2:0 the VBUS input current limit code.
+static const uint8_t REG_INPUT_CURRENT_LIMIT = 0x16;
 // BAT_DET_CTRL: bit0 enables battery detection.
 static const uint8_t REG_BAT_DET_CTRL = 0x68;
 // Fuel-gauge percentage. Only meaningful while STATUS1 says a battery is
@@ -253,6 +258,17 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
                   status1,
                   axp2101::batteryPresent(status1) ? "present" : "absent",
                   cfg.pinTouchSda, cfg.pinTouchScl);
+    // Read only: what the part last switched on and off for, and the VBUS
+    // input current it allows. A board that powers itself off under load
+    // shows the cause here on its next boot.
+    uint8_t pwron = 0, pwroff = 0, inputLimit = 0;
+    if (readRegister(REG_PWRON_STATUS, pwron) &&
+        readRegister(REG_PWROFF_STATUS, pwroff) &&
+        readRegister(REG_INPUT_CURRENT_LIMIT, inputLimit)) {
+      Serial.printf("power: AXP2101 last power-on 0x%02X, last power-off 0x%02X, "
+                    "VBUS input limit code %u\n",
+                    pwron, pwroff, (unsigned)(inputLimit & 0x07));
+    }
   }
   return true;
 }
