@@ -28,6 +28,7 @@
 #include "../display_stream/tile_protocol.h"
 #include "../display_stream/wifi_presets.h"
 #include "../display_stream/wifi_selector_model.h"
+#include "../display_stream/wifi_status_model.h"
 #include "../display_stream/wifi_supervisor.h"
 #include "../doom/src/platform/doom_runtime_policy.h"
 #include "../board_bootstrap/bootstrap_protocol.h"
@@ -1046,6 +1047,118 @@ int main() {
     CHECK(decoder.update(0xFE) == 0 && decoder.state == 2);
   }
 
+  // --- WiFi status screen layout, on every panel shape --------------------
+  {
+    using namespace wifistatus;
+    struct Panel {
+      int width, height;
+      bool round;
+    };
+    // Every board's glass in both orientations: the 128 px square, the C6 and
+    // S3 strips, the 240 px squares and rounds, the 360 and 466 px rounds and
+    // the P4's 720 and 800 px.
+    const Panel panels[] = {
+        {128, 128, false}, {172, 320, false}, {320, 172, false},
+        {170, 320, false}, {320, 170, false}, {240, 240, false},
+        {240, 240, true},  {360, 360, true},  {466, 466, true},
+        {720, 720, false}, {720, 720, true},  {800, 800, true},
+    };
+    // The longest text each row carries: a 32-byte SSID, "-100", "dBm,
+    // unusable", "IP 255.255.255.255", a long name, a version with a suffix,
+    // the longest battery line and the touch hint.
+    size_t worst[ROW_COUNT] = {};
+    worst[ROW_NETWORK] = 32;
+    worst[ROW_SIGNAL] = 4;
+    worst[ROW_QUALITY] = strlen("dBm, no reading");
+    worst[ROW_ADDRESS] = strlen("IP 255.255.255.255");
+    worst[ROW_NAME] = 24;
+    worst[ROW_FIRMWARE] = strlen("FW 12.34.56-dev");
+    worst[ROW_BATTERY] = strlen("batt 100% discharging");
+    worst[ROW_HINT] = strlen("TAP OUTSIDE TO CLOSE");
+    size_t noBattery[ROW_COUNT];
+    memcpy(noBattery, worst, sizeof(worst));
+    noBattery[ROW_BATTERY] = 0;
+    for (const Panel &panel : panels) {
+      for (const size_t *lengths : {worst, noBattery}) {
+        const Layout l = layout(panel.width, panel.height, panel.round, lengths);
+        CHECK(l.fits);
+        const wifiselector::Rect button = wifiselector::surveyPresetButton(
+            panel.width, panel.height, panel.round);
+        // Everything but the hint is always shown, and the meter is the
+        // largest thing on the screen.
+        for (int row = 0; row < ROW_HINT; ++row) {
+          CHECK((l.scale[row] > 0) == (lengths[row] > 0));
+        }
+        CHECK(l.scale[ROW_SIGNAL] >= 2);
+        for (int row = 0; row < ROW_COUNT; ++row) {
+          if (row != ROW_SIGNAL) CHECK(l.scale[row] <= l.scale[ROW_SIGNAL]);
+        }
+        // Nothing the panel cannot shorten is shortened. The longest battery
+        // line is a character too wide for the 128 px square, which has no
+        // battery.
+        for (const int row : {ROW_SIGNAL, ROW_QUALITY, ROW_ADDRESS,
+                              ROW_FIRMWARE, ROW_BATTERY, ROW_HINT}) {
+          if (row == ROW_BATTERY && panel.width < 170) continue;
+          if (l.scale[row] > 0) CHECK(l.maxChars((Row)row) >= lengths[row]);
+        }
+        // A network or name is shown to at least 16 characters, ellipsis
+        // included.
+        CHECK(l.maxChars(ROW_NETWORK) >= 16);
+        CHECK(l.maxChars(ROW_NAME) >= 16);
+        // Rows run top to bottom without overlapping, above the control.
+        int previousBottom = l.top;
+        for (int row = 0; row < ROW_COUNT; ++row) {
+          if (l.scale[row] == 0) continue;
+          CHECK(l.y[row] >= previousBottom);
+          previousBottom = l.y[row] + 7 * l.scale[row];
+        }
+        CHECK(previousBottom <= l.bottom);
+        CHECK(l.bottom < button.y);
+        // The rule sits between the quality word and the address.
+        CHECK(l.dividerWidth > 0);
+        CHECK(l.dividerY >= l.y[ROW_QUALITY] + 7 * l.scale[ROW_QUALITY]);
+        CHECK(l.dividerY < l.y[ROW_ADDRESS]);
+        // Each row's widest text, centred, stays on the glass: inside the
+        // margin on a rectangle, inside the circle on a round panel.
+        for (int row = 0; row < ROW_COUNT; ++row) {
+          if (l.scale[row] == 0) continue;
+          size_t chars = lengths[row];
+          if (chars > l.maxChars((Row)row)) chars = l.maxChars((Row)row);
+          const int textWidth = (int)chars * 6 * l.scale[row];
+          const int x0 = l.centreX - textWidth / 2;
+          const int x1 = x0 + textWidth;
+          const int y0 = l.y[row];
+          const int y1 = y0 + 7 * l.scale[row];
+          CHECK(x0 >= l.spanX[row]);
+          CHECK(x1 <= l.spanX[row] + l.spanWidth[row]);
+          CHECK(x0 >= 0 && x1 <= panel.width);
+          if (panel.round) {
+            const int r = panel.width / 2;
+            for (const int cx : {x0, x1}) {
+              for (const int cy : {y0, y1}) {
+                const int dx = cx - panel.width / 2;
+                const int dy = cy - panel.height / 2;
+                CHECK(dx * dx + dy * dy < r * r);
+              }
+            }
+          }
+        }
+      }
+    }
+    // Larger glass gets larger text: the 4B's 720 px square reads at 4x, the
+    // 466 px round at 3x, the 240 px panels at 2x, the 128 px square at 1x.
+    CHECK(layout(720, 720, false, worst).scale[ROW_ADDRESS] == 4);
+    CHECK(layout(466, 466, true, worst).scale[ROW_ADDRESS] == 3);
+    CHECK(layout(240, 240, false, worst).scale[ROW_ADDRESS] == 2);
+    CHECK(layout(128, 128, false, worst).scale[ROW_ADDRESS] == 1);
+    CHECK(layout(720, 720, false, worst).scale[ROW_HINT] > 0);
+    // With no reading the meter still has its row ("--").
+    size_t down[ROW_COUNT];
+    memcpy(down, noBattery, sizeof(down));
+    down[ROW_SIGNAL] = 2;
+    CHECK(layout(128, 128, false, down).scale[ROW_SIGNAL] >= 2);
+  }
+
   // --- BOOT short/double-press effects -----------------------------------
   {
     using namespace buttonpress;
@@ -1059,78 +1172,44 @@ int main() {
     CHECK(normalAction(3000, false, 20, 600, 3000) == Action::Power);
     CHECK(normalAction(3000, true, 20, 600, 3000) == Action::Power);
 
+    // A single acts at once and owes nothing when the window closes (there is
+    // no deferred save); a second release inside the window undoes it and
+    // acts as the double.
     DoublePressTracker tracker;
-    bool high = true;
-    bool originalHigh = high;
-    int commits = 0;
-    int doubles = 0;
-    auto apply = [&](const ShortPressDecision &decision) {
-      for (uint8_t i = 0; i < decision.count; ++i) {
-        switch (decision.effects[i]) {
-          case ShortPressEffect::Preview:
-            originalHigh = high;
-            high = !high;
-            break;
-          case ShortPressEffect::Commit:
-            commits++;
-            break;
-          case ShortPressEffect::Revert:
-            high = originalHigh;
-            break;
-          case ShortPressEffect::Double:
-            doubles++;
-            break;
-        }
-      }
+    auto only = [](const ShortPressDecision &decision, ShortPressEffect a) {
+      return decision.count == 1 && decision.effects[0] == a;
     };
+    auto undoThenDouble = [](const ShortPressDecision &decision) {
+      return decision.count == 2 &&
+             decision.effects[0] == ShortPressEffect::Undo &&
+             decision.effects[1] == ShortPressEffect::Double;
+    };
+    CHECK(only(tracker.record(100, 800), ShortPressEffect::Single));
+    CHECK(undoThenDouble(tracker.record(900, 800)));
+    // A third release starts over rather than pairing with the double.
+    CHECK(only(tracker.record(1000, 800), ShortPressEffect::Single));
+    tracker.resolve(1800, 800);
+    CHECK(undoThenDouble(tracker.record(1800, 800)));
 
-    apply(tracker.record(100, 800, true));
-    apply(tracker.record(900, 800, true));
-    CHECK(commits == 0);
-    CHECK(high);
-    CHECK(doubles == 1);
+    // Past the window, each release is a single of its own.
+    CHECK(only(tracker.record(3000, 800), ShortPressEffect::Single));
+    CHECK(only(tracker.record(3801, 800), ShortPressEffect::Single));
+    // resolve() disarms once the window has closed, and only then.
+    tracker.resolve(4601, 800);
+    CHECK(undoThenDouble(tracker.record(4601, 800)));
+    CHECK(only(tracker.record(5000, 800), ShortPressEffect::Single));
+    tracker.resolve(5801, 800);
+    CHECK(only(tracker.record(5802, 800), ShortPressEffect::Single));
 
-    apply(tracker.record(1000, 800, true));
-    apply(tracker.resolve(1800, 800));
-    CHECK(commits == 0);
-    apply(tracker.resolve(1801, 800));
-    CHECK(commits == 1);
-    CHECK(!high);
-
+    // The window holds across clock wrap.
     tracker.flush();
-    high = true;
-    originalHigh = high;
-    commits = 0;
-    doubles = 0;
-    apply(tracker.record(UINT32_MAX - 100, 800, true));
-    apply(tracker.record(50, 800, true));
-    CHECK(commits == 0);
-    CHECK(high);
-    CHECK(doubles == 1);
+    CHECK(only(tracker.record(UINT32_MAX - 100, 800), ShortPressEffect::Single));
+    CHECK(undoThenDouble(tracker.record(50, 800)));
 
+    // flush() disarms: the next release is a single however soon it comes.
+    CHECK(only(tracker.record(6000, 800), ShortPressEffect::Single));
     tracker.flush();
-    high = true;
-    originalHigh = high;
-    commits = 0;
-    doubles = 0;
-    apply(tracker.record(2000, 800, false));
-    apply(tracker.record(2100, 800, false));
-    CHECK(commits == 0);
-    CHECK(high);
-    CHECK(doubles == 1);
-
-    tracker.flush();
-    high = true;
-    originalHigh = high;
-    commits = 0;
-    doubles = 0;
-    apply(tracker.record(3000, 800, true));
-    apply(tracker.record(3801, 800, true));
-    CHECK(commits == 1);
-    CHECK(high);
-    CHECK(doubles == 0);
-    apply(tracker.flush());
-    CHECK(commits == 2);
+    CHECK(only(tracker.record(6100, 800), ShortPressEffect::Single));
   }
 
   // --- WiFi preset records are whole, versioned, and corruption-checked ----

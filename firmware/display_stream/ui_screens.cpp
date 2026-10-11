@@ -22,6 +22,7 @@
 #include "prefs_store.h"
 #include "telemetry.h"
 #include "wifi_selector_model.h"
+#include "wifi_status_model.h"
 #include "wifi_worker.h"
 
 
@@ -202,6 +203,34 @@ static const char *surveyQualityWord(bool connected, int rssi) {
   if (rssi >= -75) return "fair";
   if (rssi >= -80) return "poor";
   return "unusable";
+}
+
+// The same thresholds as a colour for the meter: green where the stream
+// works, amber where it is marginal, red where it will not, grey with no
+// reading at all.
+static uint16_t surveyQualityColor(bool connected, int rssi) {
+  if (!connected || rssi == 0) return 0x8410;
+  if (rssi >= -70) return 0x07E0;
+  if (rssi >= -75) return 0xFFE0;
+  if (rssi >= -80) return 0xFD20;
+  return 0xF800;
+}
+
+// text, cut to maxChars with "..." marking the cut, and with anything the
+// 5x7 font cannot show (an SSID is bytes, not ASCII) as '?'.
+static void fitStatusText(char *out, size_t capacity, const char *text,
+                          size_t maxChars) {
+  if (capacity == 0) return;
+  size_t length = strlen(text);
+  size_t copied = length;
+  if (copied > maxChars) copied = maxChars;
+  if (copied > capacity - 1) copied = capacity - 1;
+  for (size_t i = 0; i < copied; ++i) {
+    const uint8_t byte = (uint8_t)text[i];
+    out[i] = byte >= 0x20 && byte <= 0x7E ? (char)byte : '?';
+  }
+  if (length > copied && copied >= 3) memcpy(out + copied - 3, "...", 3);
+  out[copied] = 0;
 }
 
 bool wifiSelectorActive = false;
@@ -585,9 +614,11 @@ bool handleSurveyTap(int16_t x, int16_t y) {
   return true;
 }
 
-// Compose and push the signal-survey card: the live RSSI, huge, centred,
-// at full brightness, so the panel itself is the meter while it is carried
-// around the room. Redrawn every 500 ms by loop() while surveyActive.
+// Compose and push the WiFi status screen (the signal survey): the live RSSI,
+// huge, centred, at full brightness, so the panel itself is the meter while it
+// is carried around the room, with the network over it and the panel's own
+// facts under it. Laid out by wifistatus::layout() for this glass. Redrawn
+// every 500 ms by loop() while surveyActive.
 void drawSurveyScreen() {
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   return;
@@ -603,42 +634,76 @@ void drawSurveyScreen() {
   const bool connected = WiFi.status() == WL_CONNECTED;
   const int rssi = connected ? wifiworker::rssi() : 0;
 
-  char lineRssi[16];
+  // From the WiFi worker's cache, never the radio: on P4 WiFi.SSID() is a
+  // hosted RPC that can hold this loop for seconds.
+  char ssid[33] = {0};
+  const bool haveSsid = connected && wifiworker::ssid(ssid, sizeof(ssid)) &&
+                        ssid[0] != 0;
+  char signal[8], quality[24], address[24], firmware[24], battery[24];
   if (connected && rssi != 0) {
-    snprintf(lineRssi, sizeof(lineRssi), "%d", rssi);
+    snprintf(signal, sizeof(signal), "%d", rssi);
+    snprintf(quality, sizeof(quality), "dBm, %s",
+             surveyQualityWord(connected, rssi));
   } else {
-    snprintf(lineRssi, sizeof(lineRssi), "--");
+    snprintf(signal, sizeof(signal), "--");
+    snprintf(quality, sizeof(quality), "%s",
+             surveyQualityWord(connected, rssi));
   }
-  const char *lines[4] = {"SIGNAL", lineRssi,
-                          surveyQualityWord(connected, rssi),
-                          "TAP OUTSIDE TO EXIT"};
-  const int lineCount = hgt < 200 ? 3 : 4;
-  const wifiselector::Rect presetsButton = wifiselector::surveyPresetButton(
-      w, hgt, bcfg->panel->roundDisplay);
-  const int margin = wifiScreenMargin(w, hgt);
-  // Per-line scales: the number dominates, everything else is legible-small.
-  // Width-capped like infoBarGlyphScale, so the C6's 172 px and the S3's 466
-  // both centre without clipping.
-  int scales[4];
-  for (int i = 0; i < lineCount; i++) {
-    const int wanted =
-        i == 1 ? (hgt < 200 ? 4 : 8) : (i == 3 || hgt < 200 ? 1 : 2);
-    int fit = (w - 8) / ((int)strlen(lines[i]) * 6);
-    scales[i] = fit < wanted ? fit : wanted;
-    if (scales[i] < 1) scales[i] = 1;
+  if (connected) {
+    snprintf(address, sizeof(address), "IP %s",
+             WiFi.localIP().toString().c_str());
+  } else {
+    snprintf(address, sizeof(address), "IP --");
   }
-  int blockH = 0;
-  for (int i = 0; i < lineCount; i++) blockH += 9 * scales[i] + 4;
-  const int contentBottom = presetsButton.y - 8;
-  int y = margin + (contentBottom - margin - blockH) / 2;
-  if (y < margin) y = margin;
+  snprintf(firmware, sizeof(firmware), "FW %s", FW_VERSION);
+  // Only for a board with a battery and a reading that has not aged out, as
+  // on the idle card.
+  const bool showBattery = panelstate::shouldShowBatteryLine(
+      bcfg->hasBattery(), batteryReadingCurrent());
+  if (showBattery) {
+    panelstate::formatBatteryLine(
+        battery, sizeof(battery), externalPowerForDisplay(),
+        lastBattery.present, lastBattery.percentKnown, lastBattery.percent,
+        toChargeWord(lastBattery.charge));
+  }
+
+  using namespace wifistatus;
+  const char *text[ROW_COUNT] = {};
+  text[ROW_NETWORK] =
+      haveSsid ? ssid : (connected ? "connected" : "not connected");
+  text[ROW_SIGNAL] = signal;
+  text[ROW_QUALITY] = quality;
+  text[ROW_ADDRESS] = address;
+  text[ROW_NAME] = cfgName.c_str();
+  text[ROW_FIRMWARE] = firmware;
+  text[ROW_BATTERY] = showBattery ? battery : "";
+  text[ROW_HINT] = touchAvailable ? "TAP OUTSIDE TO CLOSE"
+                                  : "PRESS BOOT TO CLOSE";
+  size_t lengths[ROW_COUNT];
+  for (int row = 0; row < ROW_COUNT; ++row) lengths[row] = strlen(text[row]);
+  const bool roundGlass = bcfg->panel->roundDisplay;
+  const Layout layout = wifistatus::layout(w, hgt, roundGlass, lengths);
 
   memset(bufB, 0, FRAME_BYTES);  // black field: maximum contrast, no burn-in
-  for (int i = 0; i < lineCount; i++) {
-    const int lineW = (int)strlen(lines[i]) * 6 * scales[i];
-    drawOutlinedText(bufB, w, hgt, (w - lineW) / 2, y, lines[i], scales[i]);
-    y += 9 * scales[i] + 4;
+  const uint16_t meterColor = surveyQualityColor(connected, rssi);
+  for (int row = 0; row < ROW_COUNT; ++row) {
+    if (layout.scale[row] == 0) continue;
+    char line[48];
+    fitStatusText(line, sizeof(line), text[row], layout.maxChars((Row)row));
+    const int scale = layout.scale[row];
+    const int lineW = (int)strlen(line) * 6 * scale;
+    uint16_t color = 0xFFFF;
+    if (row == ROW_SIGNAL || row == ROW_QUALITY) color = meterColor;
+    if (row == ROW_HINT) color = 0x8410;
+    drawText(bufB, w, hgt, layout.centreX - lineW / 2, layout.y[row], line,
+             color, scale);
   }
+  if (layout.dividerWidth > 0) {
+    fillRect565(bufB, w, hgt, layout.dividerX, layout.dividerY,
+                layout.dividerWidth, 1, 0x4208);
+  }
+  const wifiselector::Rect presetsButton =
+      wifiselector::surveyPresetButton(w, hgt, roundGlass);
   drawWifiControl(w, hgt, presetsButton,
                   touchAvailable ? "WIFI PRESETS" : "HOLD BOOT: PRESETS",
                   touchAvailable);

@@ -20,10 +20,12 @@
 
 
 // ---- BOOT button (plain input after boot) -------------------------------
-// Short press: toggle backlight high/low, or on the knob carrier toggle the
-// sender's mute (see the rotary encoder section). Long press: turn the
-// display 180 (rotation += 2 - a physical button reachable from behind a
-// mounted panel stays a two-position toggle even where quarter turns exist).
+// Short press: open or close the WiFi status screen (the signal survey), or on
+// the knob carrier toggle the sender's mute (see the rotary encoder section).
+// No press changes or saves the backlight; brightness is the app's to set.
+// Long press: turn the display 180 (rotation += 2 - a physical button
+// reachable from behind a mounted panel stays a two-position toggle even
+// where quarter turns exist), or on the status screen open the WiFi selector.
 static const uint32_t LONG_PRESS_MS = 600;
 // A third tier, well past the long press, for the one action that should not
 // be reachable by an accidental long-hold: turning the panel off from a
@@ -32,14 +34,13 @@ static const uint32_t LONG_PRESS_MS = 600;
 // meaning to - the long-press flip already fired and released the button in
 // any ordinary press.
 static const uint32_t EXTRA_LONG_PRESS_MS = 3000;
-// Two short presses within this window toggle the signal survey - the one
-// panel-side action that must be reachable MID-STREAM (its whole job is
-// walking an actively-failing panel to better air), so it cannot live on the
-// idle card, and all three single-press tiers are taken. The first release
-// previews its backlight toggle immediately; the second restores the original
-// level, so the double-press costs nothing but a blink - which doubles as
-// feedback. A lone preview is persisted after this window closes. On the knob
-// carrier the preview is a mute toggle and the restore toggles it back.
+// Two short presses within this window open the WiFi selector. The first
+// release opens the status screen at once, so a single press waits for
+// nothing; the second replaces it with the selector. Both must be reachable
+// MID-STREAM (the status screen's meter walks an actively-failing panel to
+// better air, and the selector moves it to a network that works), so neither
+// can live on the idle card alone. On the knob carrier the first click is a
+// mute toggle and the second toggles it back.
 static const uint32_t DOUBLE_PRESS_MS = 800;
 static const uint32_t DEBOUNCE_MS = 30;
 #if defined(ESPDISP_DOOM_RUNTIME)
@@ -76,14 +77,13 @@ void swallowBootPressAcrossMenuEnd(uint32_t endedAt) {
   menuEndedAt = endedAt;
 }
 #endif
-static uint8_t shortPressPreviewOriginalBlLevel = 0;
-#if defined(ESPDISP_DOOM_RUNTIME)
-// The release time of the press whose double toggled the signal survey, so a
-// refused Doom triple press (whose second press is that double) can undo it.
-static uint32_t surveyToggledByDoubleAt = 0;
-static bool surveyToggledByDouble = false;
-static bool surveyBeforeDouble = false;
-#endif
+// The status screen as it was before the latest single press, and whether
+// the double that followed opened the WiFi selector. Presses one and two of a
+// triple press are a single and a double, so a triple press that stays normal
+// puts both back, and the third press, which lands in that selector, is still
+// counted towards the triple rather than moving its highlight.
+static bool statusBeforeSingle = false;
+static bool selectorOpenedByDouble = false;
 
 static uint32_t buttonClockMs() {
   return (uint32_t)xTaskGetTickCount() * (uint32_t)portTICK_PERIOD_MS;
@@ -192,15 +192,15 @@ void initializeButtonInput() {
                   onBootButtonEdge, CHANGE);
 }
 
-static void setSignalSurvey(bool active, const char *cause = "double press") {
+static void setStatusScreen(bool active, const char *cause) {
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   (void)active;
   (void)cause;
-  Serial.println("button: signal survey unavailable on compact C3 framebuffer");
+  Serial.println("button: wifi status unavailable on compact C3 framebuffer");
   return;
 #endif
   surveyActive = active;
-  Serial.printf("button: %s -> signal survey %s\n", cause,
+  Serial.printf("button: %s -> wifi status %s\n", cause,
                 surveyActive ? "on" : "off");
   if (surveyActive) {
     drawSurveyScreen();
@@ -216,106 +216,105 @@ static void applyShortPressDecision(
     const buttonpress::ShortPressDecision &decision) {
   for (uint8_t i = 0; i < decision.count; ++i) {
     switch (decision.effects[i]) {
-      case buttonpress::ShortPressEffect::Preview:
+      case buttonpress::ShortPressEffect::Single:
+        statusBeforeSingle = surveyActive;
+        selectorOpenedByDouble = false;
         // Mute is a toggle on the sender, so the click is sent at once and a
-        // double click's revert sends it again, leaving mute where it was.
+        // double click's undo sends it again, leaving mute where it was.
         if (knobDrivesVolume()) {
           Serial.println("button: knob click -> mute");
           sendKnobGesture(KnobGesture::Press);
           break;
         }
-        shortPressPreviewOriginalBlLevel = userBlLevel;
-        userBlLevel = blIsHigh() ? BL_LOW : BL_HIGH;
-        applyBacklight();
-        Serial.printf("button: short press -> backlight %s (save pending)\n",
-                      blIsHigh() ? "high" : "low");
+        setStatusScreen(!surveyActive, "short press");
         break;
-      case buttonpress::ShortPressEffect::Commit:
-        if (knobDrivesVolume()) break;  // the sender keeps its own mute
-        saveDisplayPrefs();
-        Serial.printf("button: short press -> backlight %s (saved)\n",
-                      blIsHigh() ? "high" : "low");
-        break;
-      case buttonpress::ShortPressEffect::Revert:
+      case buttonpress::ShortPressEffect::Undo:
         if (knobDrivesVolume()) {
           Serial.println("button: double click -> mute restored");
           sendKnobGesture(KnobGesture::Press);
-          break;
         }
-        userBlLevel = shortPressPreviewOriginalBlLevel;
-        applyBacklight();
-        Serial.printf(
-            "button: double press -> backlight %s restored (not saved)\n",
-            blIsHigh() ? "high" : "low");
+        // The status screen is not put back: the selector the double opens
+        // next replaces whatever is up, and closing it returns to the status
+        // screen either way.
         break;
       case buttonpress::ShortPressEffect::Double:
-        setSignalSurvey(!surveyActive);
+        if (wifiSelectorActive) break;
+        Serial.println("button: double press -> wifi selector");
+        openWifiSelector();
+        selectorOpenedByDouble = wifiSelectorActive;
         break;
     }
   }
+}
+
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+// The third short press of a triple: reopen the boot-mode menu through a
+// one-shot restart, or say why not and put back what presses one and two did.
+static void handleTriplePress() {
+  const char *refusal = nullptr;
+  if (bootMenuOffered(&refusal)) {
+    requestBootMenuAndRestart();
+    return;
+  }
+  // Staying normal must undo the single and the double that the triple's
+  // first two presses also were. A reboot used to hide them.
+  if (selectorOpenedByDouble && wifiSelectorActive) closeWifiSelector();
+  selectorOpenedByDouble = false;
+  if (surveyActive != statusBeforeSingle) {
+    setStatusScreen(statusBeforeSingle, "triple press refused, undo");
+  }
+#if defined(ESPDISP_DOOM_RUNTIME)
+  // Doom is the only game, so a menu with nothing but streaming means its
+  // WAD is unusable. Only a full USB flash of the bundle writes the WAD; a
+  // WiFi update or a rescue image writes the app alone. Refuse here, where
+  // the reason can be shown.
+  Serial.printf(
+      "button: Doom unavailable (%s); staying normal. Only a full USB "
+      "flash of the firmware bundle writes the Doom WAD.\n",
+      refusal != nullptr ? refusal : "not offered");
+  showInfoBar(DOOM_NEEDS_USB_FLASH_TEXT);
+#else
+  // A game other than Doom refused. Say so rather than swallowing the press.
+  Serial.printf("button: no game available (%s); staying normal\n",
+                refusal != nullptr ? refusal : "no runtime");
+#endif
+}
+#endif  // ESPDISP_BOOT_MENU_RUNTIME
+
+// A short press in the WiFi selector that a double press just opened may be
+// the third press of a triple. Returns whether it was, and so was spent on the
+// triple rather than on moving the highlight.
+static bool selectorPressCompletesTriple(uint32_t releasedAt) {
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+  if (!wifiSelectorActive || !selectorOpenedByDouble) return false;
+  if (!bootMenuMayOfferGames() || !triplePressTracker.record(releasedAt)) {
+    // Too late for a triple: from here on the selector's presses are its own.
+    selectorOpenedByDouble = false;
+    return false;
+  }
+  handleTriplePress();
+  return true;
+#else
+  (void)releasedAt;
+  return false;
+#endif
 }
 
 static void handleShortRelease(uint32_t releasedAt) {
   // A triple press reopens the boot-mode menu through a one-shot restart
   // rather than tearing down a live stream; a game chosen there gets its own
   // isolated boot. Boards whose image or profile runs no game keep all three
-  // presses as ordinary short presses.
+  // presses as ordinary short presses. Its third press normally lands in the
+  // WiFi selector the double opened (selectorPressCompletesTriple()); this
+  // catches one that did not open.
 #if defined(ESPDISP_BOOT_MENU_RUNTIME)
   if (bootMenuMayOfferGames() && triplePressTracker.record(releasedAt)) {
-    const char *refusal = nullptr;
-    if (bootMenuOffered(&refusal)) {
-      requestBootMenuAndRestart();
-      return;
-    }
-#if defined(ESPDISP_DOOM_RUNTIME)
-    // Doom is the only game, so a menu with nothing but streaming means its
-    // WAD is unusable. Only a full USB flash of the bundle writes the WAD; a
-    // WiFi update or a rescue image writes the app alone. Refuse here, where
-    // the reason can be shown.
-    //
-    // Presses one and two of the triple were also a double press, which
-    // toggled the signal survey. A reboot used to hide that; staying normal
-    // must undo it. Press times, not processing times, so a loop stall
-    // between presses cannot skip the undo.
-    if (surveyToggledByDouble &&
-        releasedAt - surveyToggledByDoubleAt <=
-            bootmenu::TRIPLE_PRESS_WINDOW_MS &&
-        surveyActive != surveyBeforeDouble) {
-      setSignalSurvey(surveyBeforeDouble, "Doom refused, undo double press");
-    }
-    surveyToggledByDouble = false;
-    Serial.printf(
-        "button: Doom unavailable (%s); staying normal. Only a full USB "
-        "flash of the firmware bundle writes the Doom WAD.\n",
-        refusal != nullptr ? refusal : "not offered");
-    showInfoBar(DOOM_NEEDS_USB_FLASH_TEXT);
-#else
-    // A game other than Doom refused. Say so rather than swallowing the press.
-    Serial.printf("button: no game available (%s); staying normal\n",
-                  refusal != nullptr ? refusal : "no runtime");
-#endif
+    handleTriplePress();
     return;
   }
 #endif  // ESPDISP_BOOT_MENU_RUNTIME
-
-  // A fixed backlight disables only the backlight toggle, not the knob's mute.
-  const bool previewEnabled = fixedBlLevel == 0 || knobDrivesVolume();
-  if (!previewEnabled) {
-    Serial.printf("button: short press ignored (backlight fixed at %u)\n",
-                  fixedBlLevel);
-  }
-  const buttonpress::ShortPressDecision decision =
-      shortPressTracker.record(releasedAt, DOUBLE_PRESS_MS, previewEnabled);
-#if defined(ESPDISP_DOOM_RUNTIME)
-  for (uint8_t i = 0; i < decision.count; ++i) {
-    if (decision.effects[i] == buttonpress::ShortPressEffect::Double) {
-      surveyToggledByDouble = true;
-      surveyToggledByDoubleAt = releasedAt;
-      surveyBeforeDouble = surveyActive;
-    }
-  }
-#endif
-  applyShortPressDecision(decision);
+  applyShortPressDecision(
+      shortPressTracker.record(releasedAt, DOUBLE_PRESS_MS));
 }
 
 // The boot-mode menu and the WiFi selector share one control scheme: a short
@@ -374,9 +373,9 @@ static void applyEncoderTurn(int16_t steps) {
     for (int16_t i = 0; i < count; ++i) moveWifiSelector(direction);
     return;
   }
-  // A click still waiting out its double-press window is settled first, so a
+  // A click still inside its double-press window is settled first, so a
   // click, a turn and a click are two mutes rather than a double press.
-  applyShortPressDecision(shortPressTracker.flush());
+  shortPressTracker.flush();
   const KnobGesture gesture =
       direction > 0 ? KnobGesture::Clockwise : KnobGesture::Counterclockwise;
   for (int16_t i = 0; i < count; ++i) sendKnobGesture(gesture);
@@ -394,9 +393,10 @@ static bool handleEncoder() {
   return true;
 }
 
-// Process queued BOOT edges: short press toggles backlight (the knob
-// carrier's mute), a completed long press flips the display 180 degrees, and
-// an extra-long press toggles manual display off/on. Capturing the edges
+// Process queued BOOT edges: a short press opens or closes the WiFi status
+// screen (the knob carrier's mute), a double press opens the WiFi selector, a
+// completed long press flips the display 180 degrees, and an extra-long press
+// toggles manual display off/on. Capturing the edges
 // outside the render loop is load-bearing: a full S3 tile pass can otherwise
 // begin and end between two polls.
 // Normal-mode rotation waits for release, so crossing the three-second power
@@ -418,7 +418,8 @@ void handleButton() {
     longFired = true;
     if (surveyActive) {
       selectorEntryHold = true;
-      applyShortPressDecision(shortPressTracker.flush());
+      shortPressTracker.flush();
+      selectorOpenedByDouble = false;
       openWifiSelector();
       return;
     }
@@ -495,7 +496,8 @@ void handleButton() {
         activateSelector(downAt);
       }
       wasDown = false;
-      if (!longFired && heldMs >= DEBOUNCE_MS) {
+      if (!longFired && heldMs >= DEBOUNCE_MS &&
+          !(wifiSelectorActive && selectorPressCompletesTriple(edge.atMs))) {
         moveSelector(1, downAt);
       }
       continue;
@@ -549,6 +551,5 @@ void handleButton() {
       }
     }
   }
-  applyShortPressDecision(
-      shortPressTracker.resolve(buttonClockMs(), DOUBLE_PRESS_MS));
+  shortPressTracker.resolve(buttonClockMs(), DOUBLE_PRESS_MS);
 }

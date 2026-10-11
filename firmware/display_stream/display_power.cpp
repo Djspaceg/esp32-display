@@ -58,11 +58,12 @@ uint32_t lastIdleDrawAt = 0;
 volatile bool sleepRequested = false;  // set by UDP task on ESLP
 volatile bool wakeRequested = false;   // set by UDP task on EWAK
 bool displaySleeping = false;
-// Signal-survey mode: a bright, half-second-refresh RSSI meter on the glass,
-// so a marginal panel can be walked around the room to find placement that
+// Signal-survey mode, the WiFi status screen: a bright, half-second-refresh
+// RSSI meter on the glass with the network, address and firmware under it, so
+// a marginal panel can be walked around the room to find placement that
 // actually carries the stream - sections 17.17 and 18.5-18.6 are all stories
 // about radio placement, and until now the only live readout was a laptop
-// pinging it. Entered and left by a BOOT double-press at ANY time (streaming
+// pinging it. Entered and left by a single BOOT press at ANY time (streaming
 // included - the stream's draw pass is suppressed while the meter is up and
 // its dirty state keeps accumulating for the exit repaint), or by a tap on
 // touch boards; a tap on the lit status card also enters it.

@@ -130,11 +130,21 @@ static int backlightApplies = 0;
 void applyBacklight() { backlightApplies++; }
 static int displayPrefSaves = 0;
 void saveDisplayPrefs() { displayPrefSaves++; }
-void drawSurveyScreen() {}
+static int surveyDraws = 0;
+void drawSurveyScreen() { surveyDraws++; }
 void drawIdleScreen() {}
-void openWifiSelector() {}
-void moveWifiSelector(int) {}
-void activateWifiSelector() {}
+// The WiFi selector's state as ui_screens.cpp keeps it: opening it puts the
+// survey (the status screen) under it, which closing it returns to.
+static int selectorOpens = 0;
+static int selectorMoves = 0;
+static int selectorActivations = 0;
+void openWifiSelector() {
+  selectorOpens++;
+  wifiSelectorActive = true;
+  surveyActive = true;
+}
+void moveWifiSelector(int) { selectorMoves++; }
+void activateWifiSelector() { selectorActivations++; }
 
 static std::string infoBarShown;
 void showInfoBar(const char *text) { infoBarShown = text; }
@@ -281,7 +291,7 @@ uint8_t appliedPanelRotation = 0;
 uint8_t addressedPanelRotation() { return appliedPanelRotation; }
 static std::vector<std::pair<int16_t, int16_t>> touchMarkers;
 void drawTouchMarker(int16_t x, int16_t y) { touchMarkers.push_back({x, y}); }
-void closeWifiSelector() {}
+void closeWifiSelector() { wifiSelectorActive = false; }
 void handleWifiSelectorTap(int16_t, int16_t) {}
 bool handleSurveyTap(int16_t, int16_t) { return false; }
 const char *defaultInfoBarText() { return ""; }
@@ -362,6 +372,10 @@ static void resetObservations() {
   pakProblem = NO_PAK;
   pakPreflightCalls = 0;
   displayPrefSaves = 0;
+  surveyDraws = 0;
+  selectorOpens = 0;
+  selectorMoves = 0;
+  selectorActivations = 0;
   fakeNvsWritesFail = false;
   menuDraws = 0;
   menuLabels.clear();
@@ -473,14 +487,19 @@ static int tripleWithInvalidWadStaysNormal() {
   CHECK(Serial.captured.find("rebooting into isolated mode") ==
         std::string::npos);
   CHECK(infoBarShown == "Doom: full USB flash");
-  // Presses one and two were also a double press, which toggled the signal
-  // survey; staying normal must leave it, and the backlight, as they were.
+  // Press one opened the status screen and presses one and two were a double
+  // press, which opened the WiFi selector; staying normal must close both,
+  // leave the backlight as it was, and not spend the third press moving the
+  // selector.
   CHECK(!surveyActive);
+  CHECK(!wifiSelectorActive);
+  CHECK(selectorOpens == 1);
+  CHECK(selectorMoves == 0);
   CHECK(userBlLevel == BL_HIGH);
   CHECK(displayPrefSaves == 0);
-  // The Doom reason is the last line, after the survey undo.
+  // The Doom reason is the last line, after the undo.
   CHECK(Serial.captured.rfind("button: Doom unavailable") >
-        Serial.captured.rfind("signal survey off"));
+        Serial.captured.rfind("wifi status off"));
   return 0;
 }
 
@@ -508,6 +527,8 @@ static int refusalKeepsASurveyThatWasOn() {
   shortPress();
   CHECK(ESP.restarts == 0);
   CHECK(surveyActive);
+  CHECK(!wifiSelectorActive);
+  CHECK(selectorMoves == 0);
   surveyActive = false;
   return 0;
 }
@@ -527,6 +548,10 @@ static int tripleWithValidWadReopensBootMenu() {
   CHECK(Serial.captured.find("button: boot menu requested; restarting") !=
         std::string::npos);
   CHECK(infoBarShown.empty());
+  // The third press reached the triple press, not the selector the double
+  // opened.
+  CHECK(selectorMoves == 0);
+  wifiSelectorActive = false;
   return 0;
 }
 
@@ -540,6 +565,135 @@ static int twoPressesAreNotATriple() {
   CHECK(preflightCalls == 0);
   CHECK(ESP.restarts == 0);
   CHECK(fakeNvsBools.count("bootmenu") == 0);
+  // The late third press is an ordinary press in the selector.
+  CHECK(wifiSelectorActive);
+  CHECK(selectorMoves == 1);
+  wifiSelectorActive = false;
+  return 0;
+}
+
+// ---- BOOT presses outside the menus ----------------------------------------
+// A single press opens the WiFi status screen (the signal survey) and the next
+// one closes it; a double press opens the WiFi selector. No press touches the
+// backlight or saves it: brightness is the app's to set.
+
+static int singlePressTogglesTheStatusScreenOnly() {
+  resetObservations();
+  const uint8_t level = userBlLevel;
+  shortPress();
+  CHECK(surveyActive);
+  CHECK(!wifiSelectorActive);
+  CHECK(surveyDraws == 1);
+  // The double-press window closing leaves the screen up and saves nothing.
+  fakeNow += 1000;
+  handleButton();
+  CHECK(surveyActive);
+  shortPress();
+  CHECK(!surveyActive);
+  fakeNow += 1000;
+  handleButton();
+  CHECK(!surveyActive);
+  CHECK(userBlLevel == level);
+  CHECK(displayPrefSaves == 0);
+  CHECK(selectorOpens == 0);
+  CHECK(Serial.captured.find("backlight") == std::string::npos);
+  CHECK(Serial.captured.find("button: short press -> wifi status on") !=
+        std::string::npos);
+  CHECK(Serial.captured.find("button: short press -> wifi status off") !=
+        std::string::npos);
+  return 0;
+}
+
+static int singlePressKeepsAnyBacklightLevel() {
+  resetObservations();
+  userBlLevel = BL_LOW;
+  shortPress();
+  fakeNow += 1000;
+  handleButton();
+  CHECK(userBlLevel == BL_LOW);
+  CHECK(displayPrefSaves == 0);
+  // A fixed level once disabled the press, which toggled the backlight. The
+  // status screen is not a backlight toggle, so it opens all the same.
+  resetObservations();
+  fixedBlLevel = 120;
+  shortPress();
+  CHECK(surveyActive);
+  CHECK(Serial.captured.find("ignored") == std::string::npos);
+  fixedBlLevel = 0;
+  surveyActive = false;
+  return 0;
+}
+
+static int doublePressOpensTheWifiSelector() {
+  resetObservations();
+  wadProblem = nullptr;
+  shortPress();
+  shortPress();
+  CHECK(wifiSelectorActive);
+  CHECK(selectorOpens == 1);
+  CHECK(userBlLevel == BL_HIGH);
+  CHECK(displayPrefSaves == 0);
+  CHECK(Serial.captured.find("button: double press -> wifi selector") !=
+        std::string::npos);
+  // Inside the selector nothing changed: past the triple-press window a press
+  // moves the highlight and a hold chooses it.
+  fakeNow += 1000;
+  shortPress();
+  CHECK(selectorMoves == 1);
+  CHECK(ESP.restarts == 0);
+  bootEdge(true);
+  fakeNow += 700;
+  handleButton();
+  CHECK(selectorActivations == 1);
+  fakeNow += 100;
+  bootEdge(false);
+  CHECK(selectorMoves == 1);
+  CHECK(selectorOpens == 1);
+
+  // From the status screen as well: the first press closes it and the second
+  // opens the selector over it.
+  resetObservations();
+  surveyActive = true;
+  shortPress();
+  shortPress();
+  CHECK(wifiSelectorActive);
+  CHECK(selectorOpens == 1);
+  CHECK(displayPrefSaves == 0);
+  wifiSelectorActive = false;
+  surveyActive = false;
+  return 0;
+}
+
+static int holdsKeepTheirJobs() {
+  // A hold on the status screen still opens the selector, and the release that
+  // ends it does nothing more.
+  resetObservations();
+  shortPress();
+  fakeNow += 1000;
+  handleButton();
+  bootEdge(true);
+  fakeNow += 700;
+  handleButton();
+  CHECK(wifiSelectorActive);
+  CHECK(selectorOpens == 1);
+  fakeNow += 100;
+  bootEdge(false);
+  CHECK(panelRotation == 0);
+  CHECK(selectorMoves == 0);
+  CHECK(selectorActivations == 0);
+  wifiSelectorActive = false;
+  surveyActive = false;
+
+  // With no screen up a hold turns the panel 180 and saves that, as before.
+  resetObservations();
+  bootEdge(true);
+  fakeNow += 700;
+  bootEdge(false);
+  CHECK(panelRotation == 2);
+  CHECK(displayPrefSaves == 1);
+  CHECK(!surveyActive);
+  CHECK(userBlLevel == BL_HIGH);
+  panelRotation = 0;
   return 0;
 }
 
@@ -1579,24 +1733,26 @@ static int knobTurnIsVolumeAndClickIsMute() {
   CHECK(sentKnobGestures().size() == 4);
 
   // A click is one mute toggle, and its double-press window closing sends
-  // nothing more.
+  // nothing more. The click is the knob's mute, not the status screen.
   sentPackets.clear();
   shortPress();
   got = sentKnobGestures();
   CHECK(got.size() == 1 && got[0] == TouchGesture::KnobPress);
+  CHECK(!surveyActive);
   fakeNow += 1000;
   handleButton();
   CHECK(sentKnobGestures().size() == 1);
 
-  // A double click still opens the signal survey, and toggles mute twice, so
-  // mute ends where it started.
+  // A double click opens the WiFi selector, and toggles mute twice, so mute
+  // ends where it started.
   sentPackets.clear();
   shortPress();
   shortPress();
   got = sentKnobGestures();
   CHECK(got.size() == 2);
   CHECK(got[0] == TouchGesture::KnobPress && got[1] == TouchGesture::KnobPress);
-  CHECK(surveyActive);
+  CHECK(wifiSelectorActive);
+  wifiSelectorActive = false;
   surveyActive = false;
 
   // Nothing the knob did touched the backlight.
@@ -1641,7 +1797,7 @@ static int knobTurnIsVolumeAndClickIsMute() {
         std::string::npos);
 
   // A refused triple press: presses one and two mute and unmute, the third
-  // sends nothing, and the survey their double opened is closed again.
+  // sends nothing, and the selector their double opened is closed again.
   resetObservations();
   sentPackets.clear();
   wadProblem = "no doom_wad partition";
@@ -1652,6 +1808,7 @@ static int knobTurnIsVolumeAndClickIsMute() {
   CHECK(got.size() == 2);
   CHECK(got[0] == TouchGesture::KnobPress && got[1] == TouchGesture::KnobPress);
   CHECK(!surveyActive);
+  CHECK(!wifiSelectorActive);
   CHECK(ESP.restarts == 0);
   CHECK(Serial.captured.find("button: Doom unavailable") != std::string::npos);
   wadProblem = nullptr;
@@ -1779,6 +1936,10 @@ int main() {
   if (refusalWithFixedBacklight() != 0) return 1;
   if (tripleWithValidWadReopensBootMenu() != 0) return 1;
   if (twoPressesAreNotATriple() != 0) return 1;
+  if (singlePressTogglesTheStatusScreenOnly() != 0) return 1;
+  if (singlePressKeepsAnyBacklightLevel() != 0) return 1;
+  if (doublePressOpensTheWifiSelector() != 0) return 1;
+  if (holdsKeepTheirJobs() != 0) return 1;
   if (ineligibleProfileNeverChecksWad() != 0) return 1;
   if (requestIsConsumedOnce() != 0) return 1;
   if (automaticRestartSkipsMenu() != 0) return 1;

@@ -189,7 +189,8 @@ struct Config {
   /// sketch picks its brightness sink from hasBacklightPin().
   int8_t pinBl;
 
-  // BOOT button: short press toggles backlight, long press flips 180.
+  // BOOT button: short press opens the WiFi status screen, double press the
+  // WiFi selector, long press flips 180.
   //
   // GPIO9 on both C6 boards. Waveshare's pinout table for the Touch board says
   // GPIO8 and omits GPIO9 entirely; that is wrong. Measured on a real board by

@@ -12,13 +12,14 @@
 // burn-in).
 void drawIdleScreen();
 
-// Signal survey: a live full-brightness RSSI meter (BOOT double-press or a
-// tap on the idle card).
+// WiFi status screen (the signal survey): a live full-brightness RSSI meter
+// with the network, address, name, firmware and battery under it (a BOOT
+// press or a tap on the idle card).
 void drawSurveyScreen();
 bool handleSurveyTap(int16_t x, int16_t y);
 
-// Saved WiFi preset selector. Entered through the visible survey button or by
-// holding BOOT/touch. While active it owns the panel; streaming continues to
+// Saved WiFi preset selector. Entered by a BOOT double press, through the
+// visible survey button, or by holding BOOT/touch on the survey. While active it owns the panel; streaming continues to
 // fill bufA but cannot overwrite the selector.
 extern bool wifiSelectorActive;
 void openWifiSelector();
