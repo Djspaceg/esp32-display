@@ -243,6 +243,16 @@ public enum GameStore {
         }
     }
 
+    /// One write for `UsbOnboarder.flash`: a stored file, or the directory
+    /// sector, at its absolute flash address.
+    public static func flashWrite(
+        role: String, address: Int, payload: Data, sha256: String? = nil
+    ) -> FirmwareBundle.FlashWrite {
+        FirmwareBundle.FlashWrite(
+            role: role, address: address, filename: role,
+            sha256: sha256 ?? FirmwareBundle.sha256Hex(payload), payload: payload)
+    }
+
     // MARK: - the area
 
     /// Where a board's game data area is, from the partition table it boots

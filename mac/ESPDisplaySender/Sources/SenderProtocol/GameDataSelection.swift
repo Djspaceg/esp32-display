@@ -158,3 +158,41 @@ public struct GameDataSelection: Equatable, Sendable {
         GameStore.Kind.allCases.contains(where: isGameChecked)
     }
 }
+
+extension GameDataSelection {
+    /// The space the selection needs against what the board's game data area
+    /// can hold, and why a write would be refused, if it would.
+    public struct Space: Equatable, Sendable {
+        public let neededBytes: Int
+        /// Nil until the board is read on an S3, whose area depends on its
+        /// flash size.
+        public let usableBytes: Int?
+        public let problem: String?
+
+        public var fits: Bool { problem == nil }
+    }
+
+    /// The area a family's current layout gives before the board is read: the
+    /// P4's quake_pak partition, less the directory sector. An S3's depends on
+    /// its flash, so it is nil until read.
+    public static func expectedUsableBytes(chip: String?) -> Int? {
+        chip == QuakePak.p4Chip ? 0x1200000 - GameStore.sectorBytes : nil
+    }
+
+    /// Before the board is read, what the checked files need; after, what the
+    /// whole store would hold (unchecked games stay as they are).
+    public func space(usableBytes: Int?, contents: GameStore.Contents?) -> Space {
+        let files = contents.map { desiredFiles(board: $0) } ?? checkedFiles
+        let needed = GameStore.neededBytes(files)
+        if let problem = GameStore.selectionProblem(files) {
+            return Space(neededBytes: needed, usableBytes: usableBytes, problem: problem)
+        }
+        if let usableBytes, needed > usableBytes {
+            return Space(
+                neededBytes: needed, usableBytes: usableBytes,
+                problem: GameStore.PlanError.doesNotFit(needed: needed, usable: usableBytes)
+                    .localizedDescription)
+        }
+        return Space(neededBytes: needed, usableBytes: usableBytes, problem: nil)
+    }
+}

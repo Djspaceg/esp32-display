@@ -1292,8 +1292,8 @@ struct PanelDetailView: View {
                     }
                 }
             }
-            if QuakeDataRow.isOffered(for: panel, manager: manager) {
-                QuakeDataRow(panel: panel, manager: manager)
+            if GamesDataRow.isOffered(for: panel, manager: manager) {
+                GamesDataRow(panel: panel, manager: manager)
             }
             LabeledContent("Wireless updates") {
                 Text(manager.canPerform(

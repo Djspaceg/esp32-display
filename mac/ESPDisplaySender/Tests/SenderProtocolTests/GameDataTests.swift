@@ -162,3 +162,32 @@ final class GameDataTests: XCTestCase {
         XCTAssertTrue(selection.items(of: .quakePak).isEmpty)
     }
 }
+
+extension GameDataTests {
+    func testSpaceCountsSectorsAndBlocksWhatDoesNotFit() {
+        var selection = GameDataSelection(quakeOffered: true)
+        let wad = try! GameData.identify(Self.wad(), filename: "doom2.wad", kind: .doomWad)
+        selection.add(wad, source: .chosen(URL(fileURLWithPath: "/tmp/doom2.wad")))
+        let usable = GameDataSelection.expectedUsableBytes(chip: "esp32p4")
+        XCTAssertEqual(usable, 18_870_272)
+        XCTAssertNil(GameDataSelection.expectedUsableBytes(chip: "esp32s3"))
+        var space = selection.space(usableBytes: usable, contents: nil)
+        XCTAssertEqual(space.neededBytes, 4096, "a file takes whole 4 KiB sectors")
+        XCTAssertTrue(space.fits)
+        // The board's own files count once it is read: a pak0 that stays.
+        let board = GameStore.Contents.legacy(legacyPak0Bytes: 18_869_000)
+        selection.noteBoard(board)
+        space = selection.space(usableBytes: usable, contents: board)
+        XCTAssertEqual(space.neededBytes, 4096 + GameStore.aligned(18_869_000))
+        XCTAssertFalse(space.fits)
+        XCTAssertTrue(space.problem?.contains("Uncheck") ?? false)
+        // Unknown usable bytes (an S3 before it is read) never blocks on space.
+        XCTAssertTrue(selection.space(usableBytes: nil, contents: nil).fits)
+        // A pak1 with no pak0 is refused whatever the space.
+        var paks = GameDataSelection(quakeOffered: true)
+        paks.add(try! GameData.identify(Self.pak(), filename: "pak1.pak", kind: .quakePak),
+                 source: .chosen(URL(fileURLWithPath: "/tmp/pak1.pak")))
+        XCTAssertTrue(paks.space(usableBytes: usable, contents: nil).problem?
+            .contains("pak0.pak") ?? false)
+    }
+}

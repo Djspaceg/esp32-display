@@ -25,6 +25,18 @@ public enum GameData {
         /// "Quake shareware pak0.pak", "IWAD, 2,919 lumps, Doom II maps".
         public let summary: String
 
+        public init(
+            kind: GameStore.Kind, slot: Int, storedName: String, byteCount: Int,
+            sha256: String, summary: String
+        ) {
+            self.kind = kind
+            self.slot = slot
+            self.storedName = storedName
+            self.byteCount = byteCount
+            self.sha256 = sha256
+            self.summary = summary
+        }
+
         public func file(boardOnly: Bool = false) -> GameStore.File {
             GameStore.File(
                 kind: kind, slot: slot, name: storedName, sha256: sha256,

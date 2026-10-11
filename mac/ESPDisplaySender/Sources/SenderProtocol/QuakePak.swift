@@ -1,19 +1,14 @@
 import Foundation
 
-/// Quake's data file, id1/pak0.pak, and where it may be written on a board.
+/// Quake's data files, id1/pak0.pak and on: the user's own, or the shareware
+/// pak0.pak the app fetches, never part of a bundle or the catalog.
 ///
-/// The pak is the user's own file, never part of a bundle or the catalog, so it
-/// reaches a board by a separate USB write. These are the rules
-/// `tools/espdisp.py write-data quake_pak` applies (`validate_quake_pak`,
-/// `data_partition_target`, `quake_pak_s3_target`), kept here as pure functions
-/// so the app and the CLI refuse the same boards for the same reasons.
-///
-/// On the P4 it is a partition in the table. The S3's universal table covers
-/// only its common 8 MiB, so there it is a raw region just past that layout,
-/// which the firmware registers at runtime (firmware/quake/src/platform/
-/// quake_pak_vfs.c, QUAKE_PAK_S3_*), and only a 32 MiB chip holds it.
+/// `validate` is the structural rule `tools/espdisp.py write-data quake_pak`
+/// applies (`validate_quake_pak`) and the firmware's quake_pak_check. Where a
+/// pak goes on a board is `GameStore`'s: the game data area this partition
+/// (the P4's) or the S3's raw region past its table provides.
 public enum QuakePak {
-    /// The `FirmwareBundle.FlashWrite` role, and the P4 table's label.
+    /// The P4 table's label for the game data area.
     public static let flashRole = "quake_pak"
     public static let partitionType: UInt8 = 0x42
     public static let partitionSubtype: UInt8 = 0x07
@@ -25,12 +20,6 @@ public enum QuakePak {
     /// Each pack directory entry: 56-byte name, u32 offset, u32 length.
     static let directoryEntryBytes = 64
     static let headerBytes = 12
-    /// The S3's raw region, which starts where the universal table's last
-    /// partition ends.
-    public static let s3Address = 0x800000
-    public static let s3RegionBytes = 0x1200000
-    /// 26 MiB is the region's end; in practice that means a 32 MiB chip.
-    public static var s3RequiredFlashBytes: Int { s3Address + s3RegionBytes }
     /// Where a board keeps its partition table, and how much of it is read.
     public static let partitionTableAddress = 0x8000
     public static let partitionTableBytes = 0xC00
@@ -133,112 +122,5 @@ public enum QuakePak {
         }
         return Validated(
             byteCount: count, sha256: FirmwareBundle.sha256Hex(data), entryCount: checked)
-    }
-
-    // MARK: - where it goes
-
-    /// Where the pak may be written, or why it may not.
-    public enum Plan: Equatable, Sendable {
-        case write(address: Int)
-        case refuse(title: String, message: String)
-    }
-
-    /// Decide where `payloadBytes` of pak go on this board.
-    ///
-    /// `partitionTable` is what the board itself boots with, read from 0x8000:
-    /// the board's table, not this repo's, decides where bytes land, so a board
-    /// on an older layout (where that address belongs to an app slot or the
-    /// Doom WAD) is refused rather than overwritten. `flashBytes` is the chip's
-    /// detected flash size and is only consulted on an S3.
-    public static func plan(
-        chip: String,
-        partitionTable: Data,
-        flashBytes: Int?,
-        payloadBytes: Int
-    ) -> Plan {
-        let entries = FirmwareBundle.partitionEntries(partitionTable)
-        switch chip {
-        case p4Chip:
-            guard let entries,
-                  FirmwareBundle.matchesDoomPartitionLayout(entries, targets: ["p4"])
-            else { return staleLayout(family: "P4") }
-            guard let entry = entries[flashRole] else {
-                return .refuse(
-                    title: "No Quake partition",
-                    message: "The board's partition table has no \(flashRole) partition.")
-            }
-            guard entry.type == partitionType, entry.subtype == partitionSubtype else {
-                return .refuse(
-                    title: "No Quake partition",
-                    message: "The board's \(flashRole) partition has type/subtype "
-                        + "\(hexByte(entry.type))/\(hexByte(entry.subtype)), expected "
-                        + "\(hexByte(partitionType))/\(hexByte(partitionSubtype)).")
-            }
-            guard payloadBytes <= entry.byteCount else {
-                return tooLarge(payloadBytes: payloadBytes, holds: entry.byteCount)
-            }
-            return .write(address: entry.address)
-        case s3Chip:
-            guard let entries,
-                  FirmwareBundle.matchesDoomPartitionLayout(entries, targets: ["s3"])
-            else { return staleLayout(family: "S3") }
-            guard let flashBytes else {
-                return .refuse(
-                    title: "Flash size unknown",
-                    message: "esptool did not report this board's flash size, so the "
-                        + "app cannot tell whether Quake's data fits. Nothing was written.")
-            }
-            guard flashBytes >= s3RequiredFlashBytes else {
-                return .refuse(
-                    title: "Not enough flash for Quake",
-                    message: "This board has \(flashBytes / 0x100000) MiB of flash; "
-                        + "Quake's data needs 32 MiB. Nothing was written.")
-            }
-            guard payloadBytes <= s3RegionBytes else {
-                return tooLarge(payloadBytes: payloadBytes, holds: s3RegionBytes)
-            }
-            return .write(address: s3Address)
-        default:
-            return chipRefusal(chip)
-                ?? .refuse(title: "Quake is not available on this board", message: chip)
-        }
-    }
-
-    /// The refusal for a chip Quake does not run on, or nil when it does - so
-    /// a caller can stop before reading anything off such a board.
-    public static func chipRefusal(_ chip: String) -> Plan? {
-        guard !supports(chip: chip) else { return nil }
-        return .refuse(
-            title: "Quake is not available on this board",
-            message: "Quake runs only on ESP32-P4 and ESP32-S3 boards; this one is "
-                + "\(chip.isEmpty ? "an unknown chip" : chip). Nothing was written.")
-    }
-
-    /// The single write the planner allowed, for `UsbOnboarder.flash`.
-    public static func flashWrite(
-        payload: Data, address: Int, filename: String, sha256: String
-    ) -> FirmwareBundle.FlashWrite {
-        FirmwareBundle.FlashWrite(
-            role: flashRole, address: address, filename: filename,
-            sha256: sha256, payload: payload)
-    }
-
-    private static func staleLayout(family: String) -> Plan {
-        .refuse(
-            title: "Partition layout not current",
-            message: "The board's partition table is not this app's \(family) layout. "
-                + "Update its firmware over USB first, then write Quake's data. "
-                + "Nothing was written.")
-    }
-
-    private static func tooLarge(payloadBytes: Int, holds: Int) -> Plan {
-        .refuse(
-            title: "The file is too large",
-            message: "The file is \(payloadBytes) bytes, but the board's Quake area "
-                + "holds \(holds). Nothing was written.")
-    }
-
-    private static func hexByte(_ value: UInt8) -> String {
-        String(format: "0x%02X", value)
     }
 }
