@@ -3691,6 +3691,22 @@ int main() {
     CHECK_EQ(axp2101::chargeDirection(0xA0), axp2101::DIRECTION_CHARGING);
     CHECK_EQ(axp2101::chargeDirection(0xFF), 3);
 
+    // REG 16 bits 2:0, the VBUS input current limit. A 1.75C ran its battery
+    // from 60% to 0% while "charging" on USB, then lost power under load; the
+    // limit is raised to 1500 mA (code 4), never lowered, and the other five
+    // bits of the register are kept.
+    CHECK_EQ(axp2101::inputLimitMilliamps(0x00), 100);
+    CHECK_EQ(axp2101::inputLimitMilliamps(0x01), 500);
+    CHECK_EQ(axp2101::inputLimitMilliamps(0x04), 1500);
+    CHECK_EQ(axp2101::inputLimitMilliamps(0x05), 2000);
+    CHECK_EQ(axp2101::inputLimitMilliamps(0xF9), 500);
+    CHECK_EQ(axp2101::inputLimitMilliamps(0x07), 0);  // reserved code
+    CHECK_EQ((int)axp2101::raisedInputLimit(0x01), 0x04);
+    CHECK_EQ((int)axp2101::raisedInputLimit(0xA9), 0xAC);
+    CHECK_EQ((int)axp2101::raisedInputLimit(0x04), 0x04);
+    CHECK_EQ((int)axp2101::raisedInputLimit(0x05), 0x05);  // 2000 mA kept
+    CHECK_EQ((int)axp2101::raisedInputLimit(0x07), 0x04);  // reserved -> 1500
+
     // Unknown is a distinct value from Absent, and neither is zero-or-nonzero
     // interchangeable with the other. This is the whole reason External is not
     // a bool: a board that cannot answer must not answer "no".

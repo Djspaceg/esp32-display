@@ -76,4 +76,23 @@ inline uint8_t chargeDirection(uint8_t status2) {
                    STATUS2_CHARGE_DIRECTION_MASK);
 }
 
+// REG 16 bits 2:0: the VBUS input current limit (XPowersLib's
+// xpowers_axp2101_vbus_cur_limit_t: 100, 500, 900, 1000, 1500, 2000 mA).
+static const uint8_t INPUT_LIMIT_MASK = 0x07;
+static const uint8_t INPUT_LIMIT_1500MA = 0x04;
+
+/// The limit a REG 16 value sets, in mA; 0 for the reserved codes 6 and 7.
+inline int inputLimitMilliamps(uint8_t reg16) {
+  static const int MILLIAMPS[] = {100, 500, 900, 1000, 1500, 2000};
+  const uint8_t code = reg16 & INPUT_LIMIT_MASK;
+  return code < 6 ? MILLIAMPS[code] : 0;
+}
+
+/// REG 16 with the limit raised to 1500 mA when it is lower (or reserved),
+/// and the other bits kept. A 2000 mA setting is left alone.
+inline uint8_t raisedInputLimit(uint8_t reg16) {
+  if (inputLimitMilliamps(reg16) >= 1500) return reg16;
+  return (uint8_t)((reg16 & (uint8_t)~INPUT_LIMIT_MASK) | INPUT_LIMIT_1500MA);
+}
+
 }  // namespace axp2101

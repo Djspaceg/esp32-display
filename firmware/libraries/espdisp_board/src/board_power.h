@@ -72,7 +72,8 @@ static const uint8_t REG_BAT_VOLTAGE_LOW = 0x35;
 // PWRON_STATUS / PWROFF_STATUS: what last switched the part on and off.
 static const uint8_t REG_PWRON_STATUS = 0x20;
 static const uint8_t REG_PWROFF_STATUS = 0x21;
-// INPUT_CURRENT_LIMIT: bits 2:0 the VBUS input current limit code.
+// INPUT_CURRENT_LIMIT: bits 2:0 the VBUS input current limit code
+// (axp2101_status.h).
 static const uint8_t REG_INPUT_CURRENT_LIMIT = 0x16;
 // BAT_DET_CTRL: bit0 enables battery detection.
 static const uint8_t REG_BAT_DET_CTRL = 0x68;
@@ -258,16 +259,30 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
                   status1,
                   axp2101::batteryPresent(status1) ? "present" : "absent",
                   cfg.pinTouchSda, cfg.pinTouchScl);
-    // Read only: what the part last switched on and off for, and the VBUS
-    // input current it allows. A board that powers itself off under load
-    // shows the cause here on its next boot.
-    uint8_t pwron = 0, pwroff = 0, inputLimit = 0;
+    // What the part last switched on and off for: a board that powers itself
+    // off under load shows the cause here on its next boot.
+    uint8_t pwron = 0, pwroff = 0;
     if (readRegister(REG_PWRON_STATUS, pwron) &&
-        readRegister(REG_PWROFF_STATUS, pwroff) &&
-        readRegister(REG_INPUT_CURRENT_LIMIT, inputLimit)) {
-      Serial.printf("power: AXP2101 last power-on 0x%02X, last power-off 0x%02X, "
-                    "VBUS input limit code %u\n",
-                    pwron, pwroff, (unsigned)(inputLimit & 0x07));
+        readRegister(REG_PWROFF_STATUS, pwroff)) {
+      Serial.printf("power: AXP2101 last power-on 0x%02X, last power-off 0x%02X\n",
+                    pwron, pwroff);
+    }
+  }
+  // The VBUS input current limit, raised to 1500 mA when lower. A 1.75C on
+  // USB ran its battery from 60% to 0% while reporting "charging" and then
+  // lost power under load: the board drew more than the PMU let in.
+  uint8_t inputLimit = 0;
+  if (readRegister(REG_INPUT_CURRENT_LIMIT, inputLimit)) {
+    const uint8_t raised = axp2101::raisedInputLimit(inputLimit);
+    const bool wrote =
+        raised != inputLimit && writeRegister(REG_INPUT_CURRENT_LIMIT, raised);
+    uint8_t now = inputLimit;
+    if (wrote) readRegister(REG_INPUT_CURRENT_LIMIT, now);
+    if (verbose) {
+      Serial.printf("power: AXP2101 VBUS input limit %d mA%s%d mA\n",
+                    axp2101::inputLimitMilliamps(inputLimit),
+                    wrote ? ", raised to " : ", kept at ",
+                    axp2101::inputLimitMilliamps(now));
     }
   }
   return true;
