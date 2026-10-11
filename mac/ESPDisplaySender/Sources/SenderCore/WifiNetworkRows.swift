@@ -49,7 +49,7 @@ struct WifiNetworkRows: View {
             if savedNetworks.contains(selection) { return nil }
             return selection == current && currentDescription != selection
                 ? currentDescription
-                : "\(selection) (not saved on this Mac)"
+                : "\(selection) (not saved)"
         }
     }
 
@@ -84,7 +84,6 @@ struct WifiNetworkRows: View {
                     Spacer(minLength: 8)
                     Button("WiFi Settings…", action: onOpenSettings)
                         .buttonStyle(.link)
-                        .fixedSize()
                         // A selectable row takes the click as the start of a
                         // selection, and the link would stop opening.
                         .textSelection(.disabled)

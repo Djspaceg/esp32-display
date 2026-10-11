@@ -89,7 +89,7 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertNil(model("Guest", "Guest").unsavedItem)
         XCTAssertEqual(
             model("Neighbours", "Neighbours").unsavedItem,
-            "Neighbours (not saved on this Mac)")
+            "Neighbours (not saved)")
         XCTAssertEqual(
             model("Home", "Not answering (set to \"Home\")").selection, "Home")
         XCTAssertEqual(
