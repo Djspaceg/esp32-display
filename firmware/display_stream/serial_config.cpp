@@ -15,6 +15,7 @@
 #include "display_power.h"
 #include "fault_inject.h"
 #include "frame_pipeline.h"
+#include "input_touch.h"
 #include "net_link.h"
 #include "orientation.h"
 #include "ota_policy.h"
@@ -439,6 +440,22 @@ static void processConfigLine(char *line) {
     saveDisplayPrefs();
     configSerial().printf(
         "CFGOK mirrorx=%d (saved; applies with next frame)\n", panelMirrorX);
+  } else if (strncmp(line, "CFGTOUCHLOG ", 12) == 0) {
+    // Debug only: log each press's raw and mapped point and the rotation that
+    // mapped it, and mark the point on the panel - how a corner test shows
+    // whether a touch lands where the finger is. Presses do nothing else while
+    // it is on (see serviceTouch). Not persisted, like CFGTUNE, so a bench
+    // session never leaves a panel logging and inert after a reboot.
+    int want;
+    char extra;
+    if (sscanf(line + 12, "%d %c", &want, &extra) != 1 ||
+        (want != 0 && want != 1)) {
+      configSerial().println("CFGERR expected: CFGTOUCHLOG 0|1");
+      return;
+    }
+    touchLogEnabled = want != 0;
+    configSerial().printf("CFGOK touchlog=%d (not persisted)\n",
+                          touchLogEnabled);
   } else if (strncmp(line, "CFGFIXEDBL ", 11) == 0) {
     int want;
     char extra;

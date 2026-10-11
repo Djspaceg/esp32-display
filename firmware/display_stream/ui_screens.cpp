@@ -802,6 +802,40 @@ void redrawInfoBarOverRun() {
 
 // Show OTA progress on the glass.
 //
+// ---- Touch marker (CFGTOUCHLOG only) -------------------------------------
+// Drawn through the same panel path as every frame, so it lands under the
+// finger exactly when touch and pixels agree about which way is up. Its own
+// buffer, filled once and never rewritten, so no screen's staging is disturbed
+// and the source outlives any transfer still reading it.
+static const int TOUCH_MARKER_PX = 12;
+static uint8_t touchMarkerPixels[TOUCH_MARKER_PX * TOUCH_MARKER_PX * 2];
+static bool touchMarkerFilled = false;
+
+void drawTouchMarker(int16_t x, int16_t y) {
+  if (panel == nullptr) return;
+  if (!touchMarkerFilled) {
+    for (size_t i = 0; i < sizeof(touchMarkerPixels); i += 2) {
+      touchMarkerPixels[i] = 0xF8;  // magenta, big-endian RGB565 like bufB
+      touchMarkerPixels[i + 1] = 0x1F;
+    }
+    touchMarkerFilled = true;
+  }
+  const int w = PANEL_GEOMETRY.frameWidth(panelLandscape);
+  const int hgt = PANEL_GEOMETRY.frameHeight(panelLandscape);
+  if (w < TOUCH_MARKER_PX || hgt < TOUCH_MARKER_PX) return;
+  int x0 = x - TOUCH_MARKER_PX / 2;
+  int y0 = y - TOUCH_MARKER_PX / 2;
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x0 > w - TOUCH_MARKER_PX) x0 = w - TOUCH_MARKER_PX;
+  if (y0 > hgt - TOUCH_MARKER_PX) y0 = hgt - TOUCH_MARKER_PX;
+  if (!waitForDmaIdle(200)) return;
+  if (queuePanelBitmap(panel, *bcfg, x0, y0, x0 + TOUCH_MARKER_PX,
+                       y0 + TOUCH_MARKER_PX, touchMarkerPixels) != ESP_OK) {
+    statDrawErrors = statDrawErrors + 1;
+  }
+}
+
 // An update takes tens of seconds during which nothing else is drawn, and a panel
 // that simply freezes mid-picture looks broken rather than busy - so it says what
 // is happening on the device, not only in the terminal doing the pushing.

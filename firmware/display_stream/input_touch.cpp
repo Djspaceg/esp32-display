@@ -25,6 +25,7 @@ static uint32_t touchPressStartedAt = 0;
 // report is ignored until it lifts, so a resting hand or a case pressing the
 // panel at power-on is not taken for a press on the menu.
 static bool touchHeldThroughMenuOpen = false;
+bool touchLogEnabled = false;
 // Report a completed gesture to whoever is driving this panel.
 //
 // The internal gesture enum and the wire one are separate types: touch_gesture.h
@@ -158,7 +159,7 @@ void serviceTouch() {
   touchgesture::Event held = touchTracker.tick(millis());
   // A hold means nothing on the boot menu, and there is no sender yet.
   if (held.gesture != touchgesture::Gesture::None && !touchConsumed &&
-      !bootMenuActive) {
+      !bootMenuActive && !touchLogEnabled) {
     if (held.gesture == touchgesture::Gesture::LongPress &&
         wifiSelectorActive) {
       closeWifiSelector();
@@ -198,6 +199,31 @@ void serviceTouch() {
   }
   touchgesture::Event event =
       touchTracker.onReport(sample.pressed, p.x, p.y, millis());
+
+  // A corner test taps wherever the glass ends, which on the survey card is
+  // its preset button, and a tap in the selector can change networks. So
+  // while logging, a press is logged, marked and may light a dimmed panel,
+  // and nothing else acts on it.
+  if (touchLogEnabled) {
+    if (!event.pressStarted) return;
+    // The frame size is the mapped space's, so the expected corner for each
+    // tap is readable straight off the line.
+    const bool swapped =
+        touchmap::swapsAxes(panelLandscape, addressedPanelRotation());
+    Serial.printf("touchlog: raw=(%u,%u) mapped=(%d,%d) frame=%dx%d rot=%u "
+                  "addressed=%u landscape=%d mirrorx=%d\n",
+                  (unsigned)sample.rawX, (unsigned)sample.rawY, p.x, p.y,
+                  touchmap::frameWidth(swapped, touchCalibration),
+                  touchmap::frameHeight(swapped, touchCalibration),
+                  appliedPanelRotation, addressedPanelRotation(),
+                  panelLandscape ? 1 : 0, panelMirrorX ? 1 : 0);
+    if (displaySleeping || (idleActive && !touchWakeActive())) {
+      touchWakeUntil = millis() + TOUCH_WAKE_MS;
+      applyBacklight();
+    }
+    drawTouchMarker(p.x, p.y);
+    return;
+  }
 
   if (event.pressStarted) {
     // On the boot menu's clock, the one BOOT edges use. A press stops a

@@ -12,6 +12,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Arduino.h>
@@ -273,7 +274,10 @@ void sendToSender(const uint8_t *data, size_t length) {
 }
 touchmap::Calibration touchCalibration = touchmap::GT911_ON_JD9365_4C;
 bool panelMirrorX = false;
+uint8_t appliedPanelRotation = 0;
 uint8_t addressedPanelRotation() { return 0; }
+static std::vector<std::pair<int16_t, int16_t>> touchMarkers;
+void drawTouchMarker(int16_t x, int16_t y) { touchMarkers.push_back({x, y}); }
 void closeWifiSelector() {}
 void handleWifiSelectorTap(int16_t, int16_t) {}
 bool handleSurveyTap(int16_t, int16_t) { return false; }
@@ -1491,6 +1495,46 @@ static int knobTurnIsVolumeAndClickIsMute() {
   return 0;
 }
 
+// CFGTOUCHLOG: a press is logged once, raw and mapped, and marked where it
+// mapped, and nothing else acts on it - a corner tap on the survey card would
+// otherwise land on its preset button and open the WiFi selector.
+static int touchLogOnlyLogsAndMarks() {
+  resetObservations();
+  touchAvailable = true;
+  hbPort = 4210;
+  sentPackets.clear();
+  touchMarkers.clear();
+
+  // Off: the same tap reaches the sender and leaves no marker.
+  touchPress(fakeNow + 100, 50, 10, 20);
+  for (const uint32_t until = fakeNow + 400; fakeNow < until; fakeNow += 10) {
+    serviceTouch();
+  }
+  CHECK(sentPackets.size() == 1);
+  CHECK(touchMarkers.empty());
+  CHECK(Serial.captured.find("touchlog:") == std::string::npos);
+
+  touchLogEnabled = true;
+  sentPackets.clear();
+  touchPress(fakeNow + 100, 50, 700, 16);
+  for (const uint32_t until = fakeNow + 400; fakeNow < until; fakeNow += 10) {
+    serviceTouch();
+  }
+  CHECK(sentPackets.empty());
+  CHECK(touchMarkers.size() == 1);
+  CHECK(touchMarkers[0].first == 700 && touchMarkers[0].second == 16);
+  const size_t at = Serial.captured.find("touchlog: raw=(");
+  CHECK(at != std::string::npos);
+  CHECK(Serial.captured.find("mapped=(700,16) frame=720x720 rot=0", at) !=
+        std::string::npos);
+  CHECK(Serial.captured.find("touchlog:", at + 1) == std::string::npos);
+
+  touchLogEnabled = false;
+  hbPort = 0;
+  touchAvailable = false;
+  return 0;
+}
+
 int main() {
   bcfg = &board::configFor(boardVariant);
   PANEL_GEOMETRY = {bcfg->panel->width, bcfg->panel->height};
@@ -1504,6 +1548,7 @@ int main() {
     return 1;
   }
   if (tripleWithInvalidWadStaysNormal() != 0) return 1;
+  if (touchLogOnlyLogsAndMarks() != 0) return 1;
   if (refusalKeepsASurveyThatWasOn() != 0) return 1;
   if (refusalWithFixedBacklight() != 0) return 1;
   if (tripleWithValidWadReopensBootMenu() != 0) return 1;

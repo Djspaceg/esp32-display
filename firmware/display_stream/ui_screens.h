@@ -48,5 +48,9 @@ void showInfoBar(const char *text);
 void clearInfoBarIfExpired();
 void redrawInfoBarOverRun();
 
+// A small square at a mapped touch point, for CFGTOUCHLOG. Left for the next
+// redraw to erase.
+void drawTouchMarker(int16_t x, int16_t y);
+
 // OTA progress screen (percent < 0 draws no bar).
 void drawOtaScreen(const char *headline, int percent);

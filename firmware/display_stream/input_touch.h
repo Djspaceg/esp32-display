@@ -7,6 +7,12 @@
 
 void serviceTouch();
 
+// Bench aid for checking the touch transform on the glass (CFGTOUCHLOG 0|1).
+// While set, each press logs its raw and mapped point once, with the rotation
+// that mapped it, and marks the mapped point on the panel; presses do nothing
+// else but light a dimmed panel. RAM-only, off at boot.
+extern bool touchLogEnabled;
+
 // The knob carrier's encoder detents and push-switch click, which the sender
 // maps to its own volume and mute. Sent on the touch gesture sequence, so the
 // sender's duplicate filter covers both.
