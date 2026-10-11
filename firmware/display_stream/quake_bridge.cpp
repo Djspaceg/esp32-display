@@ -67,8 +67,11 @@ extern "C" bool quake_display_present_1x(int x0, int y0, int width, int height,
       (size_t)width * sizeof(uint16_t) > PANEL_TRANSFER_STAGE_BYTES) {
     return false;
   }
+  // Even, for the CO5300's even windows: 400 or 440 wide would otherwise give
+  // 19 or 17 rows.
   const int rowsPerSlot =
-      (int)(PANEL_TRANSFER_STAGE_BYTES / ((size_t)width * sizeof(uint16_t)));
+      (int)(PANEL_TRANSFER_STAGE_BYTES / ((size_t)width * sizeof(uint16_t))) &
+      ~1;
   for (int row = 0; row < height; row += rowsPerSlot) {
     const int rows = height - row < rowsPerSlot ? height - row : rowsPerSlot;
     PanelTransferStaging staging;

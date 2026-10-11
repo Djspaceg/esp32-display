@@ -52,9 +52,9 @@ void quake_profile_frame(float render, float world, float bmodels, float scan,
 /// Seconds spent building one cache surface (d_surf.c D_CacheSurface).
 void quake_profile_surface_cache(double seconds);
 
-// The S3 gives the second page to the hunk's floor: id's 5.3 MB guard
-// (MINIMUM_MEMORY) is lowered to 5 MB there, which the shareware demos use
-// under half of (2,465 KB at most, serial_s3_diagE.log). host.c reads it.
+// The S3's frame buffers (two pages, 424 KB at 466x466) come out of the hunk,
+// so id's 5.3 MB guard (MINIMUM_MEMORY) is lowered to 5 MB there; the
+// shareware demos use under half of it (2,465 KB at most). host.c reads it.
 #if defined(ARDUINO_ESP32S3_DEV)
 #define QUAKE_PLATFORM_MINIMUM_MEMORY 0x500000
 #endif

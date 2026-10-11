@@ -87,10 +87,14 @@ int main() {
     CHECK(b.width == 372 && b.height == 280 && b.x == 46 && b.y == 92);
     const FrameLayout c = frameLayout(466, 466, 320, 240);
     CHECK(c.renderWidth == 320 && c.renderHeight == 240 && c.x == 72 && c.y == 112);
-    // 0x0, an oversized or an undersized request: the whole panel.
+    // 0x0: the whole panel; an oversized or undersized request: the base frame.
     CHECK(frameLayout(466, 466, 0, 0).renderWidth == 466);
-    CHECK(frameLayout(466, 466, 500, 280).renderWidth == 466);
-    CHECK(frameLayout(466, 466, 300, 200).renderWidth == 466);
+    CHECK(frameLayout(466, 466, 500, 280).renderWidth == 320);
+    CHECK(frameLayout(466, 466, 300, 200).renderWidth == 320);
+    // The 1.85C cannot take the 372x280 default: the base frame, not its
+    // whole 360x360 panel, so the status bar stays on the round glass.
+    const FrameLayout d = frameLayout(360, 360, 372, 280);
+    CHECK(d.renderWidth == 320 && d.renderHeight == 240 && d.x == 20 && d.y == 60);
     // A request does not change a panel that scales (the P4's 2x).
     CHECK(frameLayout(720, 720, 372, 280).renderWidth == 320);
     CHECK(frameLayout(960, 720).scale == 3);

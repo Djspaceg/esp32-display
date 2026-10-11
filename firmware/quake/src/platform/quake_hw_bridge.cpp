@@ -243,11 +243,20 @@ extern "C" const char* quake_display_setup(int want_width, int want_height) {
   s_layout =
       quakeinput::frameLayout(PANEL_W, PANEL_H, want_width, want_height);
   if (s_layout.scale == 0) return "panel too small for a 320x240 frame";
-  s_frame = (uint16_t*)heap_caps_malloc(
-      (size_t)s_layout.width * QUAKE_BAND_ROWS * s_layout.scale *
-          sizeof(uint16_t),
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (s_frame == nullptr) return "no PSRAM for the Quake frame";
+  // The band buffer, for scaled frames only: the S3's 1x frame converts
+  // straight into DMA staging.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  const bool needBand = s_layout.scale != 1;
+#else
+  const bool needBand = true;
+#endif
+  if (needBand) {
+    s_frame = (uint16_t*)heap_caps_malloc(
+        (size_t)s_layout.width * QUAKE_BAND_ROWS * s_layout.scale *
+            sizeof(uint16_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_frame == nullptr) return "no PSRAM for the Quake frame";
+  }
   // Black the whole panel once; each frame then writes only its own region.
   const size_t panelBytes = (size_t)PANEL_W * PANEL_H * sizeof(uint16_t);
   uint16_t* black =
@@ -381,14 +390,19 @@ extern "C" void quake_display_present(const uint8_t* pixels,
   // Whole-pixel scale: each source pixel becomes a scale x scale block. 2x,
   // the case every P4 panel takes, writes pixel pairs as one 32-bit store.
   //
-  // One page, written in bands on this task: at 466x466 a second page and a
-  // whole-panel RGB565 copy would cost the engine heap 650 KB it cannot spare.
+  // The S3's 1x frame goes to its core-0 panel task (two pages) or straight
+  // into DMA staging; scaled frames (the P4's 2x) go in bands on this task.
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   if (s_overlap) {
     // The previous frame must be on the panel: its page is the one the
     // engine draws into next.
+    // A panel that never completes ends the session (quake_platform.h).
+    const int64_t waitStarted = esp_timer_get_time();
     while (xSemaphoreTake(s_present_done, pdMS_TO_TICKS(1)) != pdTRUE) {
       quake_input_sample_while_waiting();
+      if (esp_timer_get_time() - waitStarted > 2000000) {
+        quake_fail_restart("panel task did not finish a frame", false);
+      }
     }
     s_window_wait_us += esp_timer_get_time() - started;
     s_window_present_us += s_present_last_us;
@@ -454,6 +468,7 @@ extern "C" void quake_display_present(const uint8_t* pixels,
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    if (s_profile_frames == 0) s_profile_surface_s = 0;  // r_dspeeds is off
     if (s_profile_frames > 0) {
       const float n = (float)s_profile_frames;
       quake_log("profile ms/frame: render %.1f = world %.1f + bmodels %.1f + "

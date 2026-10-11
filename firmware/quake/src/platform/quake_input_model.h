@@ -46,9 +46,9 @@ struct FrameLayout {
 // 1.75C, 360x360 on the 1.85C. The round glass hides the corners, which the
 // view's own corners can afford to lose.
 //
-// Or, when asked (wantWidth and wantHeight, both nonzero and no larger than
-// the panel, and no smaller than the base frame), that size unscaled and
-// centred: 372x280 or 320x240 inside the 1.75C's circle. Only that window is
+// Or, when asked (wantWidth and wantHeight both nonzero), that size unscaled
+// and centred, if the panel holds it and it is no smaller than the base frame,
+// else the base frame: 372x280 or 320x240 inside the 1.75C's circle. Only that window is
 // written to the panel. Sizes round down to even, and the origin to even, so a
 // window that cannot sit exactly central sits a pixel up and left of centre.
 constexpr FrameLayout frameLayout(int panelWidth, int panelHeight,
@@ -60,10 +60,14 @@ constexpr FrameLayout frameLayout(int panelWidth, int panelHeight,
   int rw = RENDER_WIDTH;
   int rh = RENDER_HEIGHT;
   if (s == 1) {
-    const bool asked = wantWidth >= RENDER_WIDTH && wantHeight >= RENDER_HEIGHT &&
-                       wantWidth <= panelWidth && wantHeight <= panelHeight;
-    rw = (asked ? wantWidth : panelWidth) & ~1;
-    rh = (asked ? wantHeight : panelHeight) & ~1;
+    const bool asked = wantWidth > 0 && wantHeight > 0;
+    const bool fits = wantWidth >= RENDER_WIDTH && wantHeight >= RENDER_HEIGHT &&
+                      wantWidth <= panelWidth && wantHeight <= panelHeight;
+    // A request the panel cannot take (372x280 on the 1.85C's 360x360) falls
+    // back to the base frame, whose status bar stays on round glass; no
+    // request at all means the whole panel.
+    rw = (!asked ? panelWidth : fits ? wantWidth : RENDER_WIDTH) & ~1;
+    rh = (!asked ? panelHeight : fits ? wantHeight : RENDER_HEIGHT) & ~1;
   }
   // The origin is even: the 1.75C's CO5300 takes windows only from even
   // columns and rows.
