@@ -386,7 +386,7 @@ final class SettingsWindowTests: XCTestCase {
         let (manager, _) = makeManager(saved: ["Studio WiFi"])
         let store = InMemoryWifiCredentials([
             SavedWiFiCredential(ssid: "Studio WiFi", password: "pw"),
-            SavedWiFiCredential(ssid: longName, password: "", isOpenNetwork: true),
+            SavedWiFiCredential(ssid: longName, password: ""),
         ])
         manager.useWifiCredentials(store)
         manager.applySavedNetworkNames(store.names)

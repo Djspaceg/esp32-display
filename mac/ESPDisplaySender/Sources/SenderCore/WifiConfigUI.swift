@@ -6,33 +6,20 @@ import SenderProtocol
 struct SavedWiFiCredential: Equatable, Sendable {
     let ssid: String
     let password: String
-    /// An empty password is valid only when the user explicitly saved this as
-    /// an open network. An unmarked empty Keychain item cannot prove that.
-    let isOpenNetwork: Bool
 
-    init(ssid: String, password: String, isOpenNetwork: Bool = false) {
-        self.ssid = ssid
-        self.password = password
-        self.isOpenNetwork = isOpenNetwork
-    }
-
-    /// The password form accepted by a device-side preset, or nil when the
-    /// saved item cannot safely describe a credential.
-    var presetPassword: String? {
-        if isOpenNetwork {
-            return password.isEmpty ? "" : nil
-        }
-        return password.isEmpty ? nil : password
-    }
+    /// No password is an open network: there is nothing else to say about
+    /// one. A password that could not be READ is a different thing and never
+    /// gets this far - `WifiCredentialStore.read` reports it as unreadable,
+    /// and nothing is built from it.
+    var isOpenNetwork: Bool { password.isEmpty }
 }
 
 /// App-managed WiFi credentials. Passwords never enter panel persistence or
 /// UserDefaults; each SSID is a generic-password item in the login Keychain.
 enum WifiCredentialStore {
     private static let service = "com.espdisplay.sender.wifi"
-    /// Generic-password data alone cannot distinguish an intentionally open
-    /// network from a zero-byte credential. Keep the intent in a separate
-    /// Keychain attribute so empty data is never silently treated as open.
+    /// Still written beside an open network, so a build from before empty
+    /// meant open, which required it, copies the network too. Never read.
     private static let openNetworkMarker = Data("open-network-v1".utf8)
 
     static func savedNetworkNames() -> [String] {
@@ -58,7 +45,33 @@ enum WifiCredentialStore {
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
+    /// What one Keychain lookup found. An empty password and an unreadable
+    /// one are told apart here and nowhere else: the first is an open
+    /// network, the second is an error, and an error never becomes an open
+    /// network (7663fc3).
+    enum Read: Equatable, Sendable {
+        /// The item was read; an empty password is an open network.
+        case saved(SavedWiFiCredential)
+        /// No item for this network.
+        case notSaved
+        /// An item exists or may exist, but its password could not be read:
+        /// the Keychain is locked, access was denied, or the data is missing
+        /// or not UTF-8.
+        case unreadable
+
+        /// The credential to copy, or nil for anything not read: no network
+        /// is ever made up from a lookup that failed.
+        var credential: SavedWiFiCredential? {
+            guard case .saved(let credential) = self else { return nil }
+            return credential
+        }
+    }
+
     static func credential(for ssid: String) -> SavedWiFiCredential? {
+        read(ssid).credential
+    }
+
+    static func read(_ ssid: String) -> Read {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -68,24 +81,28 @@ enum WifiCredentialStore {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return decode(ssid: ssid, status: status, result: result)
+    }
+
+    /// `read`'s verdict on what `SecItemCopyMatching` returned, apart from
+    /// the Keychain so both cases can be tested. Only a successful lookup
+    /// that returned password data counts as read; zero bytes of it is an
+    /// open network.
+    static func decode(ssid: String, status: OSStatus, result: CFTypeRef?) -> Read {
+        if status == errSecItemNotFound { return .notSaved }
+        guard status == errSecSuccess,
               let item = result as? [String: Any],
               let data = item[kSecValueData as String] as? Data,
               let password = String(data: data, encoding: .utf8)
-        else { return nil }
-        let isOpenNetwork = password.isEmpty
-            && item[kSecAttrGeneric as String] as? Data == openNetworkMarker
-        return SavedWiFiCredential(
-            ssid: ssid, password: password, isOpenNetwork: isOpenNetwork)
+        else { return .unreadable }
+        return .saved(SavedWiFiCredential(ssid: ssid, password: password))
     }
 
+    /// Save a network; an empty password saves it as open.
     @discardableResult
-    static func save(
-        ssid: String, password: String, isOpenNetwork: Bool = false
-    ) -> Bool {
-        guard isOpenNetwork ? password.isEmpty : !password.isEmpty else {
-            return false
-        }
+    static func save(ssid: String, password: String) -> Bool {
+        let isOpenNetwork = password.isEmpty
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

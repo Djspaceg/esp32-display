@@ -228,8 +228,7 @@ final class PanelManager: ObservableObject {
     }
     var wifiCredentialWriter: @Sendable (SavedWiFiCredential) -> Bool = { credential in
         WifiCredentialStore.save(
-            ssid: credential.ssid, password: credential.password,
-            isOpenNetwork: credential.isOpenNetwork)
+            ssid: credential.ssid, password: credential.password)
     }
     var wifiCredentialRemover: @Sendable (String) -> Bool = { ssid in
         WifiCredentialStore.remove(ssid: ssid)

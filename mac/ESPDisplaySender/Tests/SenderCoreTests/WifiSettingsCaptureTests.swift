@@ -21,7 +21,7 @@ final class WifiSettingsCaptureTests: XCTestCase {
         ]
         let store = InMemoryWifiCredentials(names.map {
             $0 == "Guest" || $0 == "Airport Free"
-                ? SavedWiFiCredential(ssid: $0, password: "", isOpenNetwork: true)
+                ? SavedWiFiCredential(ssid: $0, password: "")
                 : SavedWiFiCredential(ssid: $0, password: "pw")
         })
         var panel = PanelSnapshot(serviceName: "desk-panel", displayName: "Desk Panel")

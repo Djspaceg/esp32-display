@@ -278,7 +278,7 @@ final class WifiPresetSyncTests: XCTestCase {
         let credentials = [
             "New": SavedWiFiCredential(ssid: "New", password: "synthetic"),
             "Cafe": SavedWiFiCredential(
-                ssid: "Cafe", password: "", isOpenNetwork: true),
+                ssid: "Cafe", password: ""),
         ]
 
         let result = WifiConfigUI.syncWifiPresets(
@@ -438,38 +438,82 @@ final class WifiPresetSyncTests: XCTestCase {
         XCTAssertEqual(report.unusable.sorted(), ["No Credential", tooLong].sorted())
     }
 
-    func testAutomaticSyncDoesNotWriteAnEmptyPasswordAsAnOpenPreset() throws {
-        let device = FakePresetDevice(slots: [:])
-
-        let report = try resultValue(WifiConfigUI.syncSavedWifiPresets(
-            savedSSIDs: ["Office"],
-            credentials: [
-                "Office": SavedWiFiCredential(ssid: "Office", password: "")
-            ],
-            port: "/dev/fake",
-            send: { command, _, _ in device.send(command) }))
-
-        XCTAssertEqual(report.unusable, ["Office"])
-        XCTAssertFalse(
-            device.mutations.contains("CFGWIFISET 1 T2ZmaWNl -"),
-            "an empty password must not become an open-network command: "
-                + "\(device.mutations)")
-    }
-
-    func testAutomaticSyncWritesAnExplicitOpenNetwork() throws {
+    /// No password is an open network: it is copied as one and never named
+    /// as a network the copy left out.
+    func testAnEmptyPasswordIsCopiedAsAnOpenNetwork() throws {
         let device = FakePresetDevice(slots: [:])
 
         let report = try resultValue(WifiConfigUI.syncSavedWifiPresets(
             savedSSIDs: ["Guest"],
             credentials: [
-                "Guest": SavedWiFiCredential(
-                    ssid: "Guest", password: "", isOpenNetwork: true)
+                "Guest": SavedWiFiCredential(ssid: "Guest", password: "")
             ],
             port: "/dev/fake",
             send: { command, _, _ in device.send(command) }))
 
         XCTAssertTrue(report.unusable.isEmpty)
         XCTAssertEqual(device.mutations, ["CFGWIFISET 1 R3Vlc3Q= -"])
+    }
+
+    /// The 7663fc3 safety, kept: a password the Keychain could not read is
+    /// an error, never an open network. `WifiCredentialStore.credential(for:)`
+    /// is `read(_:).credential`, which is nil for an unreadable item, so the
+    /// sync gets no credential for it, names it as unusable and writes nothing
+    /// for it.
+    func testAnUnreadablePasswordIsNeverCopiedAsAnOpenNetwork() throws {
+        let device = FakePresetDevice(slots: [:])
+        let lookups: [String: WifiCredentialStore.Read] = [
+            "Office": WifiCredentialStore.decode(
+                ssid: "Office", status: errSecInteractionNotAllowed, result: nil),
+            "Guest": .saved(SavedWiFiCredential(ssid: "Guest", password: "")),
+        ]
+        XCTAssertEqual(lookups["Office"], .unreadable)
+
+        let report = try resultValue(WifiConfigUI.syncSavedWifiPresets(
+            savedSSIDs: ["Office", "Guest"],
+            credentials: lookups.compactMapValues(\.credential),
+            port: "/dev/fake",
+            send: { command, _, _ in device.send(command) }))
+
+        XCTAssertEqual(report.unusable, ["Office"])
+        XCTAssertEqual(device.mutations, ["CFGWIFISET 1 R3Vlc3Q= -"],
+            "only the readable open network is written")
+    }
+
+    /// How a Keychain answer is read: zero bytes of password data is an open
+    /// network; any lookup that did not return data is unreadable.
+    func testKeychainAnswersAreReadAsOpenOrUnreadableNeverBoth() {
+        func item(_ data: Data?) -> CFTypeRef {
+            var item: [String: Any] = [kSecAttrAccount as String: "Guest"]
+            item[kSecValueData as String] = data
+            return item as CFDictionary
+        }
+        XCTAssertEqual(
+            WifiCredentialStore.decode(
+                ssid: "Guest", status: errSecSuccess, result: item(Data())),
+            .saved(SavedWiFiCredential(ssid: "Guest", password: "")))
+        XCTAssertEqual(
+            WifiCredentialStore.decode(
+                ssid: "Home", status: errSecSuccess, result: item(Data("pw".utf8))),
+            .saved(SavedWiFiCredential(ssid: "Home", password: "pw")))
+        XCTAssertEqual(
+            WifiCredentialStore.decode(ssid: "Gone", status: errSecItemNotFound, result: nil),
+            .notSaved)
+        for status in [errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled] {
+            XCTAssertEqual(
+                WifiCredentialStore.decode(ssid: "Guest", status: status, result: item(Data())),
+                .unreadable, "status \(status)")
+        }
+        XCTAssertEqual(
+            WifiCredentialStore.decode(ssid: "Guest", status: errSecSuccess, result: item(nil)),
+            .unreadable, "attributes without password data")
+        XCTAssertEqual(
+            WifiCredentialStore.decode(
+                ssid: "Guest", status: errSecSuccess, result: item(Data([0xFF, 0xFE]))),
+            .unreadable, "data that is not UTF-8")
+        XCTAssertEqual(
+            WifiCredentialStore.decode(ssid: "Guest", status: errSecSuccess, result: nil),
+            .unreadable)
     }
 
     // MARK: the manager's automatic trigger

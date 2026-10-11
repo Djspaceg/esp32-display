@@ -43,9 +43,7 @@ extension PanelManager {
     /// Add a network, or replace the credential of one already saved. A new
     /// network goes to the end of the order; an existing one keeps its place.
     ///
-    /// Returns nil on success. The empty-password rule from the Keychain store
-    /// applies unchanged: an empty password is saved only as an explicit open
-    /// network, carrying the open-network marker.
+    /// Returns nil on success. An empty password saves an open network.
     func saveNetwork(
         ssid rawSSID: String, password: String, isOpenNetwork: Bool
     ) -> WifiConfigUI.ConfigFailure? {
@@ -55,8 +53,7 @@ extension PanelManager {
             return problem
         }
         let credential = SavedWiFiCredential(
-            ssid: ssid, password: isOpenNetwork ? "" : password,
-            isOpenNetwork: isOpenNetwork)
+            ssid: ssid, password: isOpenNetwork ? "" : password)
         guard wifiCredentialWriter(credential) else {
             return WifiConfigUI.ConfigFailure(
                 title: "Keychain storage failed",
@@ -143,9 +140,8 @@ extension PanelManager {
 }
 
 /// Saved networks held in memory, for previews and tests, which run unsigned
-/// and must never write the login Keychain. Keeps the open-network marker the
-/// way the Keychain store does: an empty password is open only when saved as
-/// open.
+/// and must never write the login Keychain. An empty password is an open
+/// network here too.
 final class InMemoryWifiCredentials: @unchecked Sendable {
     private let lock = NSLock()
     private var credentials: [String: SavedWiFiCredential]
@@ -168,10 +164,7 @@ final class InMemoryWifiCredentials: @unchecked Sendable {
 
     func save(_ credential: SavedWiFiCredential) -> Bool {
         lock.withLock {
-            // The Keychain store's own rule, mirrored.
-            guard !writesFail,
-                  credential.isOpenNetwork == credential.password.isEmpty
-            else { return false }
+            guard !writesFail else { return false }
             credentials[credential.ssid] = credential
             return true
         }

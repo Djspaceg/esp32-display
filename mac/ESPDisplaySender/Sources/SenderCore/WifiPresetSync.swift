@@ -205,10 +205,9 @@ enum WifiPresetSyncPlanner {
                 return .failure(.missingCredential(slot: slot, ssid: selected))
             }
             guard credential.ssid == selected,
-                  let password = credential.presetPassword,
                   let command = ConfigCommands.setWifiPreset(
                     slot: slot, ssid: credential.ssid,
-                    password: password)
+                    password: credential.password)
             else {
                 return .failure(.invalidCredential(slot: slot, ssid: selected))
             }
@@ -319,11 +318,10 @@ extension WifiConfigUI {
         for ssid in WifiPresetOrder.cleaned(savedSSIDs) {
             if let credential = credentials[ssid],
                credential.ssid == ssid,
-               let password = credential.presetPassword,
                ConfigCommands.setWifiPreset(
                 slot: ConfigCommands.wifiPresetSlotRange.lowerBound,
                 ssid: credential.ssid,
-                password: password) != nil {
+                password: credential.password) != nil {
                 usable.append(ssid)
             } else {
                 unusable.append(ssid)

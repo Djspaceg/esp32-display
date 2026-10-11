@@ -158,9 +158,7 @@ final class WifiNetworkSettingsTests: XCTestCase {
     func testMigrationLeavesEveryCredentialAsItWas() {
         let store = InMemoryWifiCredentials([
             SavedWiFiCredential(ssid: "Office", password: "secret"),
-            SavedWiFiCredential(ssid: "Guest", password: "", isOpenNetwork: true),
-            // An unmarked empty item, which 7663fc3 made unusable on purpose.
-            SavedWiFiCredential(ssid: "Broken", password: ""),
+            SavedWiFiCredential(ssid: "Guest", password: ""),
         ])
         let before = store.names.map { store.credential(for: $0) }
         let manager = PanelManager(
@@ -175,10 +173,9 @@ final class WifiNetworkSettingsTests: XCTestCase {
 
         manager.applySavedNetworkNames(store.names)
 
-        XCTAssertEqual(manager.savedNetworkNames, ["Broken", "Guest", "Office"])
+        XCTAssertEqual(manager.savedNetworkNames, ["Guest", "Office"])
         XCTAssertEqual(store.names.map { store.credential(for: $0) }, before)
-        XCTAssertEqual(store.credential(for: "Guest")?.presetPassword, "")
-        XCTAssertNil(store.credential(for: "Broken")?.presetPassword)
+        XCTAssertEqual(store.credential(for: "Guest")?.isOpenNetwork, true)
     }
 
     // MARK: the setting itself
@@ -252,7 +249,7 @@ final class WifiNetworkSettingsTests: XCTestCase {
             ssid: "Guest", password: "typed by mistake", isOpenNetwork: true))
         let guest = store.credential(for: "Guest")
         XCTAssertEqual(guest?.isOpenNetwork, true)
-        XCTAssertEqual(guest?.presetPassword, "")
+        XCTAssertEqual(guest?.password, "")
     }
 
     func testInvalidNetworksAreRefusedBeforeTheKeychain() {
