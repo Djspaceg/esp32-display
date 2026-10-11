@@ -49,9 +49,22 @@ at least 26 MiB: a 32 MiB one.
 
 The S3 image carries the engine on every board: 243 KB more app (1,781,298 of
 the slot's 2,031,616 bytes) and 10,248 bytes more internal RAM. A Quake boot
-on an S3 sizes its engine heap to what the 8 MB of PSRAM has left once 1 MiB is
-kept back (id's floor is 5.3 MB) and puts the frame at 1x in the centre of the
-panel, at an even origin for the CO5300. The firmware raises the flash driver's size from
+on an S3 renders 372x280 at 1x, centred at (46,92) on the 1.75C's round glass
+(the CO5300 takes only even origins); `QUAKE_RENDER_WIDTH`/`HEIGHT` in
+`src/quake_mode.h` choose another size, 0x0 for the whole panel. Only that
+window is written to the panel, from a task on core 0 while the engine draws
+the next frame into a second page.
+
+Measured on the 1.75C (2026-10-11, `timedemo` demo1/demo2/demo3 back to back):
+
+| Render size | demo1 | demo2 | demo3 | render, ms/frame |
+| --- | --- | --- | --- | --- |
+| 466x466 | 9.0 | 10.6 | 8.6 | 91 |
+| 372x280 | 15.3 | 16.8 | 14.5 | 63 |
+| 320x240 | 18.5 | 19.8 | 17.5 | 60 |
+
+The panel write (31, 16 and 12 ms) runs beside the render and costs nothing.
+With `r_dspeeds 1` the 5 s line breaks the render down by stage. The firmware raises the flash driver's size from
 the image header's 8 MiB to the chip's own before registering the region. Quake reads the partition with
 `esp_partition_read()` through a read-only file system mounted at `/qdata`
 (`platform/quake_pak_vfs.c`), so the pak may cross 16 MiB, past what this
@@ -112,8 +125,10 @@ P4 link map): small globals and the 153 initialised cvars.
 
 A Quake boot allocates a 16 MB engine heap, the 320x240 frame and depth
 buffers, a ~600 KB surface cache, a 640x480 scaled frame and a 320 KB task
-stack, the last three in PSRAM. On an S3 the heap is what the 8 MB of PSRAM
-has left after the frame buffers and 192 KB of slack, about 6 MB.
+stack, the last three in PSRAM. On an S3 the frame buffers come first, and the heap
+is what the 8 MB of PSRAM has left less 64 KB: 6,144 KB at 372x280, 5,376 KB at
+466x466. The S3's floor is 5 MB instead of id's 5.3 MB; the shareware demos use
+at most 2.5 MB of the heap.
 
 ## Sound
 

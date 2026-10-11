@@ -50,12 +50,19 @@ constexpr bool quakeSupportsBoard(board::Variant variant) {
 // The render size on a 1x panel (the S3 boards), a build switch: 0x0 renders
 // the whole panel (466x466 on the 1.75C); 372x280 or 320x240 render that 4:3
 // window unscaled and centred inside the round glass. A test image may set
-// quake_render_width/height before quake_enter() to try another.
+// quake_render_width/height before quake_enter() to try another. A size
+// larger than the panel (372x280 on the 1.85C's 360x360) renders the whole
+// panel.
+//
+// 372x280 by default. Measured on the 1.75C, timedemo demo1/demo2/demo3:
+// 466x466 9.0/10.6/8.6 fps, 372x280 15.3/16.8/14.5, 320x240 18.5/19.8/17.5
+// (render 91, 63 and 60 ms a frame). 372x280 is the largest 4:3 whose
+// corners stay on the round glass, at about 1.7 times the full panel's rate.
 #ifndef QUAKE_RENDER_WIDTH
-#define QUAKE_RENDER_WIDTH 0
+#define QUAKE_RENDER_WIDTH 372
 #endif
 #ifndef QUAKE_RENDER_HEIGHT
-#define QUAKE_RENDER_HEIGHT 0
+#define QUAKE_RENDER_HEIGHT 280
 #endif
 #ifdef __cplusplus
 extern "C" {
