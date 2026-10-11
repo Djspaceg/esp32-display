@@ -97,6 +97,7 @@ final class SettingsWindowTests: XCTestCase {
             "Not answering (set to \"Home\")",
             "the pop-up shows only the name, so the rest is said under it")
         XCTAssertNil(model("Guest", "Guest").statusNote)
+        XCTAssertNil(model("Guest", "Guest").disabledNote, "an enabled pop-up says nothing")
         XCTAssertNil(model(nil, "Unknown (not reported yet)").selection)
         XCTAssertEqual(
             model(nil, "Unknown (not reported yet)").unsavedItem,
@@ -114,6 +115,19 @@ final class SettingsWindowTests: XCTestCase {
                 savedNetworks: ["Home", "Office", "Guest"], report: report,
                 switchState: state, unavailableReason: nil)
         }
+        let unavailable = WifiNetworkRows.model(
+            current: "Home", currentDescription: "Home",
+            savedNetworks: ["Home"], report: nil, switchState: nil,
+            unavailableReason: "Connect this display to the Mac by USB.")
+        XCTAssertEqual(
+            unavailable.disabledNote, "Connect this display to the Mac by USB.",
+            "a disabled pop-up says why on the row, not only in a tooltip")
+        XCTAssertEqual(
+            WifiNetworkRows.model(
+                current: nil, currentDescription: "Unknown", savedNetworks: [],
+                report: nil, switchState: nil, unavailableReason: nil).disabledNote,
+            "No networks are saved on this Mac yet.")
+        XCTAssertNil(model(.switching("Guest", since: Date())).disabledNote)
         let switching = model(.switching("Guest", since: Date()))
         XCTAssertEqual(switching.selection, "Guest")
         XCTAssertNil(switching.problem)

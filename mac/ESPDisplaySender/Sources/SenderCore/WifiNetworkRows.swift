@@ -38,6 +38,17 @@ struct WifiNetworkRows: View {
             return currentDescription
         }
 
+        /// Why the pop-up is disabled, shown under it rather than only as a
+        /// tooltip: a disabled control that does not say why reads as broken.
+        /// nil while it is enabled, and while a switch in progress disables it,
+        /// which the spinner already says.
+        var disabledNote: String? {
+            guard switchingTo == nil else { return nil }
+            if let unavailableReason { return unavailableReason }
+            if savedNetworks.isEmpty { return "No networks are saved on this Mac yet." }
+            return nil
+        }
+
         /// What the pop-up shows as chosen.
         var selection: String? { switchingTo ?? current }
 
@@ -93,6 +104,13 @@ struct WifiNetworkRows: View {
                     Text(note)
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                }
+                if let disabled = model.disabledNote {
+                    Text(disabled)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let problem = model.problem {
                     Text(problem)

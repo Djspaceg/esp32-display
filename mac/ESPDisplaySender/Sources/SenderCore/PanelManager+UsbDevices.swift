@@ -547,6 +547,17 @@ extension PanelManager {
             noteUnansweredUSBProbe(path, generation: generation)
             return result
         }
+        // A reply with no id= from a port whose board has reported one, or
+        // whose record expects one, is the start of an answer another reader
+        // of the same port took the rest of (a serial capture, a monitor) - or
+        // one cut short some other way. Taken as the answer it would wipe the
+        // port's hardware ID and count as answered, so the board would never
+        // be asked again and never verify. It is asked again instead. Firmware
+        // from before id= has neither, so it is still taken as it is.
+        if identity.hardwareID == nil, usbPortExpectsHardwareID(path) {
+            noteUnansweredUSBProbe(path, generation: generation)
+            return .unavailable("CFGSHOW reply on \(path) was cut short")
+        }
         usbIdentifyRetries[path] = nil
         if let index = usbDevices.firstIndex(where: { $0.path == path }) {
             // A completed CFGSHOW probe is authoritative for discovery-scoped
@@ -654,6 +665,14 @@ extension PanelManager {
             usbDevices.first(where: { $0.path == path })?.hardwareID)
         else { return false }
         return panelAssociated(withHardwareID: hardwareID) != nil
+    }
+
+    /// Whether a CFGSHOW answer at this port should carry id=: the board here
+    /// has reported a hardware ID before, or a display record with one is
+    /// assigned this path.
+    func usbPortExpectsHardwareID(_ path: String) -> Bool {
+        if usbDevices.first(where: { $0.path == path })?.hardwareID != nil { return true }
+        return panels.contains { $0.usbPort == path && stableHardwareID(of: $0) != nil }
     }
 
     func usbIdentifyRetryDelay(afterAttempt attempts: Int) -> TimeInterval {
