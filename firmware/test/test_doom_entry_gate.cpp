@@ -820,6 +820,58 @@ static int misreadEdgesStillMakeOnePress() {
   return 0;
 }
 
+// A release takes effect once its bounce has settled, DEBOUNCE_MS after it.
+// The hold path must time the press to the release, not to that settling:
+// a press let go just short of 3 s once turned the panel off and then also
+// rotated it, and one let go just short of 600 ms on the status screen opened
+// the WiFi selector.
+static int releaseJustBeforeAThresholdIsNotAHold() {
+  resetObservations();
+  bootIsrAt(true);
+  serviceButtonFor(2985);
+  bootIsrAt(false);
+  serviceButtonFor(1000);
+  CHECK(!panelManuallyOff);
+  CHECK(panelRotation == 2);
+  CHECK(Serial.captured.find("extra-long press") == std::string::npos);
+  panelRotation = 0;
+
+  resetObservations();
+  shortPress();
+  serviceButtonFor(1000);
+  CHECK(surveyActive);
+  bootIsrAt(true);
+  serviceButtonFor(590);
+  bootIsrAt(false);
+  serviceButtonFor(1000);
+  CHECK(!wifiSelectorActive);
+  CHECK(!surveyActive);
+  return 0;
+}
+
+// A hold on the status screen that a slow loop pass only sees at its release
+// opens the selector there; the press after it is the selector's, not
+// swallowed as the rest of that hold.
+static int holdSeenOnlyAtReleaseLeavesTheNextPress() {
+  resetObservations();
+  shortPress();
+  serviceButtonFor(1000);
+  bootIsrAt(true);
+  fakeNow += 700;
+  bootIsrAt(false);
+  fakeNow += 40;
+  handleButton();
+  fakeNow += 40;
+  handleButton();
+  CHECK(wifiSelectorActive);
+  fakeNow += 1000;
+  shortPress();
+  CHECK(selectorMoves == 1);
+  wifiSelectorActive = false;
+  surveyActive = false;
+  return 0;
+}
+
 // Review probes: each of these once survived a mutation of the press logic.
 static int quickSelectorPressesAfterTheWindowAreMoves() {
   // Past the triple-press window, presses in a selector a double opened are
@@ -2154,6 +2206,8 @@ int main() {
   if (quickSelectorPressesAfterTheWindowAreMoves() != 0) return 1;
   if (droppedReleaseStillEndsThePress() != 0) return 1;
   if (misreadEdgesStillMakeOnePress() != 0) return 1;
+  if (releaseJustBeforeAThresholdIsNotAHold() != 0) return 1;
+  if (holdSeenOnlyAtReleaseLeavesTheNextPress() != 0) return 1;
   if (closingTheStatusScreenRestoresTheBacklight() != 0) return 1;
   if (ineligibleProfileNeverChecksWad() != 0) return 1;
   if (requestIsConsumedOnce() != 0) return 1;

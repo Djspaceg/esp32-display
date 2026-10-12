@@ -154,9 +154,17 @@ static bool takeDebouncedBootEdge(BootButtonEdge &settled) {
     if (hadRun) return true;
   }
   if (bootRunOpen && buttonClockMs() - bootRunLastAt >= DEBOUNCE_MS) {
+    // Read under the queue's lock, and only if no edge has landed since the
+    // queue was drained: such an edge belongs to the next run, and the level
+    // read after it would merge two presses into one.
+    portENTER_CRITICAL(&bootButtonMux);
+    const bool quiet = bootEdgeRead == bootEdgeWrite;
+    const bool down = gpio_get_level(bootButtonPin) == 0;
+    portEXIT_CRITICAL(&bootButtonMux);
+    if (!quiet) return takeDebouncedBootEdge(settled);
     bootRunOpen = false;
     settled.atMs = bootRunStartAt;
-    settled.down = gpio_get_level(bootButtonPin) == 0;
+    settled.down = down;
     return true;
   }
   return false;
@@ -560,6 +568,9 @@ void handleButton() {
       case buttonpress::Action::None:
         break;
     }
+    // A status-screen hold seen only now, at its release, opened the selector
+    // just above; the press it marked to swallow has already ended.
+    selectorEntryHold = false;
     wasDown = false;
   }
 
@@ -569,7 +580,11 @@ void handleButton() {
 #endif
   if (wasDown && knobTurned) turnedWhileDown = true;
   if (wasDown && !turnedWhileDown) {
-    const uint32_t heldMs = buttonClockMs() - downAt;
+    // Timed to the edge that may be this press's release, still settling,
+    // rather than to now: a press let go just short of a threshold is not a
+    // hold for the DEBOUNCE_MS its release takes to settle.
+    const uint32_t heldMs = (bootRunOpen ? bootRunStartAt : buttonClockMs()) -
+                            downAt;
     if (!selectorEntryHold) {
       if (selectorOwnsInput()) {
         if (!longFired && heldMs >= LONG_PRESS_MS) {
@@ -594,5 +609,9 @@ void handleButton() {
       }
     }
   }
-  shortPressTracker.resolve(buttonClockMs(), DOUBLE_PRESS_MS);
+  // Not while a press is still settling: its time is its first edge, so the
+  // window must not close on it in the meantime.
+  if (!bootRunOpen) {
+    shortPressTracker.resolve(buttonClockMs(), DOUBLE_PRESS_MS);
+  }
 }
