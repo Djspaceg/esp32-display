@@ -342,16 +342,23 @@ static void bootIsrAt(bool down) {
   bootIsr();
 }
 
+// An edge, then the loop passes that see it settle once the debounce window
+// has run out.
 static void bootEdge(bool down) {
   bootIsrAt(down);
   handleButton();
+  fakeNow += 30;
+  handleButton();
 }
 
+// A press and release, then a loop pass once its debounce window has run
+// out, as the firmware's loop gives it.
 static void shortPress() {
   bootEdge(true);
   fakeNow += 100;
   bootEdge(false);
   fakeNow += 100;
+  handleButton();
 }
 
 static void resetObservations() {
@@ -690,13 +697,16 @@ static int droppedReleaseStillEndsThePress() {
   // A release that bounces: up, down again 35 ms later (kept: past the
   // window), and up 5 ms after that (dropped: inside it).
   resetObservations();
-  bootEdge(true);
+  bootIsrAt(true);
+  handleButton();
   fakeNow += 120;
-  bootEdge(false);
+  bootIsrAt(false);
+  handleButton();
   fakeNow += 35;
-  bootEdge(true);
+  bootIsrAt(true);
+  handleButton();
   fakeNow += 5;
-  bootEdge(false);
+  bootIsrAt(false);
   serviceButtonFor(4000);
   CHECK(surveyActive);
   // Held, as the button wrongly read, 600 ms on the status screen opened the
@@ -717,9 +727,10 @@ static int droppedReleaseStillEndsThePress() {
   // as it always was, but it must not leave the button reading as held: the
   // next real press is a single that opens the status screen.
   resetObservations();
-  bootEdge(true);
+  bootIsrAt(true);
+  handleButton();
   fakeNow += 12;
-  bootEdge(false);
+  bootIsrAt(false);
   serviceButtonFor(4000);
   CHECK(!surveyActive);
   CHECK(!panelManuallyOff);
@@ -727,6 +738,84 @@ static int droppedReleaseStillEndsThePress() {
   shortPress();
   CHECK(surveyActive);
   CHECK(!wifiSelectorActive);
+  surveyActive = false;
+  return 0;
+}
+
+// The ISR reads the pin when it runs, so on a bouncing contact it can record
+// an edge with the wrong direction, and the real edge a few ms later is then
+// dropped as bounce. Seen on the 1.75" round (BOOT is the small button by the
+// USB port): a press that logged nothing at all, and a press on the status
+// screen that opened the WiFi selector instead of closing it.
+static void misreadEdge(bool levelSeenDown, bool settledDown) {
+  fakeBootLevel = levelSeenDown ? 0 : 1;
+  bootIsr();
+  fakeNow += 5;
+  fakeBootLevel = settledDown ? 0 : 1;
+  bootIsr();  // inside DEBOUNCE_MS: dropped
+  handleButton();
+}
+
+static int misreadEdgesStillMakeOnePress() {
+  // (a) A press whose down edge reads as up is still a press, and so is the
+  // first press on a panel that has gone idle and dimmed or asleep.
+  for (int asleep = 0; asleep < 2; ++asleep) {
+    resetObservations();
+    idleActive = true;
+    displaySleeping = asleep == 1;
+    misreadEdge(false, true);
+    fakeNow += 120;
+    bootEdge(false);
+    serviceButtonFor(1000);
+    CHECK(surveyActive);
+    CHECK(!wifiSelectorActive);
+    CHECK(Serial.captured.find("button: short press -> wifi status on") !=
+          std::string::npos);
+    displaySleeping = false;
+    idleActive = false;
+    surveyActive = false;
+  }
+
+  // (b) On the status screen, a press whose release reads as down closes the
+  // screen; it does not sit "held" until the hold opens the selector.
+  resetObservations();
+  shortPress();
+  serviceButtonFor(1000);
+  CHECK(surveyActive);
+  bootEdge(true);
+  fakeNow += 120;
+  misreadEdge(true, false);
+  serviceButtonFor(2000);
+  CHECK(!surveyActive);
+  CHECK(!wifiSelectorActive);
+  CHECK(selectorOpens == 0);
+  CHECK(Serial.captured.find("button: short press -> wifi status off") !=
+        std::string::npos);
+
+  // (c) Single presses, however they bounce, never open the selector; two
+  // inside the window do.
+  resetObservations();
+  misreadEdge(false, true);
+  fakeNow += 120;
+  bootEdge(false);
+  serviceButtonFor(1000);
+  bootEdge(true);
+  fakeNow += 120;
+  misreadEdge(true, false);
+  serviceButtonFor(1000);
+  CHECK(selectorOpens == 0);
+  CHECK(!surveyActive);
+  bootEdge(true);
+  fakeNow += 100;
+  misreadEdge(true, false);
+  fakeNow += 100;
+  misreadEdge(false, true);
+  fakeNow += 100;
+  bootEdge(false);
+  serviceButtonFor(1000);
+  CHECK(selectorOpens == 1);
+  CHECK(wifiSelectorActive);
+  wifiSelectorActive = false;
   surveyActive = false;
   return 0;
 }
@@ -2064,6 +2153,7 @@ int main() {
   if (holdsKeepTheirJobs() != 0) return 1;
   if (quickSelectorPressesAfterTheWindowAreMoves() != 0) return 1;
   if (droppedReleaseStillEndsThePress() != 0) return 1;
+  if (misreadEdgesStillMakeOnePress() != 0) return 1;
   if (closingTheStatusScreenRestoresTheBacklight() != 0) return 1;
   if (ineligibleProfileNeverChecksWad() != 0) return 1;
   if (requestIsConsumedOnce() != 0) return 1;
