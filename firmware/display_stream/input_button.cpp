@@ -52,6 +52,8 @@ static const char DOOM_NEEDS_USB_FLASH_TEXT[] = "Doom: full USB flash";
 struct BootButtonEdge {
   uint32_t atMs;
   bool down;
+  // Not from the queue: the pin's settled level, for an edge the ISR dropped.
+  bool settled = false;
 };
 
 static const uint8_t BOOT_EDGE_QUEUE_CAPACITY = 16;
@@ -62,6 +64,9 @@ static volatile uint8_t bootEdgeRead = 0;
 static volatile uint8_t bootEdgeWrite = 0;
 static volatile uint32_t lastBootEdgeAt = 0;
 static volatile bool haveBootEdge = false;
+// Every edge the ISR saw, including the ones it dropped as bounce.
+static volatile uint32_t lastRawBootEdgeAt = 0;
+static volatile bool haveRawBootEdge = false;
 static gpio_num_t bootButtonPin = GPIO_NUM_NC;
 static portMUX_TYPE bootButtonMux = portMUX_INITIALIZER_UNLOCKED;
 static buttonpress::DoublePressTracker shortPressTracker;
@@ -95,6 +100,8 @@ static void IRAM_ATTR onBootButtonEdge() {
   const bool down = gpio_get_level(bootButtonPin) == 0;
 
   portENTER_CRITICAL_ISR(&bootButtonMux);
+  haveRawBootEdge = true;
+  lastRawBootEdgeAt = now;
   if (haveBootEdge && now - lastBootEdgeAt < DEBOUNCE_MS) {
     portEXIT_CRITICAL_ISR(&bootButtonMux);
     return;
@@ -122,7 +129,35 @@ static bool takeBootButtonEdge(BootButtonEdge &edge) {
   edge.atMs = bootEdges[bootEdgeRead].atMs;
   edge.down = bootEdges[bootEdgeRead].down;
   bootEdgeRead = (bootEdgeRead + 1) & BOOT_EDGE_QUEUE_MASK;
+  edge.settled = false;
   portEXIT_CRITICAL(&bootButtonMux);
+  return true;
+}
+
+// The ISR drops an edge inside DEBOUNCE_MS of the last one it kept, as
+// bounce. When the dropped edge was the press's real last one - a release that
+// bounced down and up again, or a press shorter than the window - the queue
+// ends disagreeing with the pin, and a button that is up reads as held: the
+// press did nothing, then 600 ms later opened the WiFi selector over the
+// status screen, or 3 s later turned the panel off, and the next press's
+// release counted as a long one. So once the queue is empty and the pin has
+// been quiet for DEBOUNCE_MS, a level that disagrees with wasDown is taken as
+// the edge that was dropped, at the time it was seen.
+static bool takeSettledBootEdge(bool wasDown, BootButtonEdge &edge) {
+  if (bootButtonPin == GPIO_NUM_NC) return false;
+  const bool down = gpio_get_level(bootButtonPin) == 0;
+  if (down == wasDown) return false;
+  portENTER_CRITICAL(&bootButtonMux);
+  const bool quiet = haveRawBootEdge && bootEdgeRead == bootEdgeWrite &&
+                     buttonClockMs() - lastRawBootEdgeAt >= DEBOUNCE_MS;
+  const uint32_t at = lastRawBootEdgeAt;
+  portEXIT_CRITICAL(&bootButtonMux);
+  if (!quiet) return false;
+  edge.atMs = at;
+  edge.down = down;
+  edge.settled = true;
+  Serial.printf("button: %s edge dropped as bounce; taking the pin's level\n",
+                down ? "press" : "release");
   return true;
 }
 
@@ -187,6 +222,7 @@ void initializeButtonInput() {
   bootEdgeRead = 0;
   bootEdgeWrite = 0;
   haveBootEdge = false;
+  haveRawBootEdge = false;
   portEXIT_CRITICAL(&bootButtonMux);
   attachInterrupt(digitalPinToInterrupt(bcfg->pinBootButton),
                   onBootButtonEdge, CHANGE);
@@ -452,7 +488,7 @@ void handleButton() {
   if (swallowPressFromMenu && wasDown) selectorEntryHold = true;
 #endif
   BootButtonEdge edge;
-  while (takeBootButtonEdge(edge)) {
+  while (takeBootButtonEdge(edge) || takeSettledBootEdge(wasDown, edge)) {
     if (edge.down) {
       if (!wasDown) {
         wasDown = true;
@@ -488,6 +524,8 @@ void handleButton() {
       continue;
     }
 
+    // A settled release shorter than DEBOUNCE_MS was bounce, as any such
+    // release always was: Action::None below, but the button is up again.
     const uint32_t heldMs = edge.atMs - downAt;
     if (selectorEntryHold) {
       wasDown = false;

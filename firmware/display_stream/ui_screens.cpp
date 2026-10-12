@@ -709,14 +709,39 @@ void drawSurveyScreen() {
   text[ROW_NAME] = cfgName.c_str();
   text[ROW_FIRMWARE] = firmware;
   text[ROW_BATTERY] = showBattery ? battery : "";
-  // The knob carrier's BOOT is its mute, so it closes nothing there.
-  text[ROW_HINT] = touchAvailable      ? "TAP OUTSIDE TO CLOSE"
-                   : bcfg->hasEncoder() ? ""
-                                        : "PRESS BOOT TO CLOSE";
+  // How to close it, longest wording first; the longest that fits its row is
+  // drawn, and the layout is sized for the shortest. The knob carrier's BOOT
+  // is its mute, so it closes nothing there.
+  static const char *const BOOT_AND_TAP[] = {
+      "PRESS BOOT OR TAP TO CLOSE", "BOOT OR TAP TO CLOSE", "BOOT/TAP: CLOSE"};
+  static const char *const BOOT_ONLY[] = {"PRESS BOOT TO CLOSE",
+                                          "BOOT: CLOSE"};
+  static const char *const TAP_ONLY[] = {"TAP OUTSIDE TO CLOSE",
+                                         "TAP TO CLOSE"};
+  const bool bootCloses = bcfg->hasBootButton() && !bcfg->hasEncoder();
+  const char *const *hints = nullptr;
+  size_t hintCount = 0;
+  if (bootCloses && touchAvailable) {
+    hints = BOOT_AND_TAP;
+    hintCount = sizeof(BOOT_AND_TAP) / sizeof(BOOT_AND_TAP[0]);
+  } else if (bootCloses) {
+    hints = BOOT_ONLY;
+    hintCount = sizeof(BOOT_ONLY) / sizeof(BOOT_ONLY[0]);
+  } else if (touchAvailable) {
+    hints = TAP_ONLY;
+    hintCount = sizeof(TAP_ONLY) / sizeof(TAP_ONLY[0]);
+  }
+  text[ROW_HINT] = hintCount > 0 ? hints[hintCount - 1] : "";
   size_t lengths[ROW_COUNT];
   for (int row = 0; row < ROW_COUNT; ++row) lengths[row] = strlen(text[row]);
   const bool roundGlass = bcfg->panel->roundDisplay;
   const Layout layout = wifistatus::layout(w, hgt, roundGlass, lengths);
+  for (size_t i = 0; i < hintCount; ++i) {
+    if (strlen(hints[i]) <= layout.maxChars(ROW_HINT)) {
+      text[ROW_HINT] = hints[i];
+      break;
+    }
+  }
 
   memset(bufB, 0, FRAME_BYTES);  // black field: maximum contrast, no burn-in
   const uint16_t meterColor = surveyQualityColor(connected, rssi);

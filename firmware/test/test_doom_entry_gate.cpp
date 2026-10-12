@@ -674,6 +674,63 @@ static int doublePressOpensTheWifiSelector() {
   return 0;
 }
 
+// A release the BOOT interrupt drops as bounce (inside DEBOUNCE_MS of the
+// edge before it) once left the button reading as held while it was up: the
+// press did nothing, three seconds later the "extra-long press" turned the
+// panel off, and the next press's release counted as a long press. Seen on
+// the 1.75" round as "one press sometimes does nothing, sometimes turns the
+// display off". The pin's settled level must win.
+static void serviceButtonFor(uint32_t ms) {
+  for (const uint32_t until = fakeNow + ms; fakeNow < until; fakeNow += 10) {
+    handleButton();
+  }
+}
+
+static int droppedReleaseStillEndsThePress() {
+  // A release that bounces: up, down again 35 ms later (kept: past the
+  // window), and up 5 ms after that (dropped: inside it).
+  resetObservations();
+  bootEdge(true);
+  fakeNow += 120;
+  bootEdge(false);
+  fakeNow += 35;
+  bootEdge(true);
+  fakeNow += 5;
+  bootEdge(false);
+  serviceButtonFor(4000);
+  CHECK(surveyActive);
+  // Held, as the button wrongly read, 600 ms on the status screen opened the
+  // WiFi selector over it.
+  CHECK(!wifiSelectorActive);
+  CHECK(!panelManuallyOff);
+  CHECK(panelRotation == 0);
+  CHECK(Serial.captured.find("extra-long press") == std::string::npos);
+  CHECK(Serial.captured.find("long press") == std::string::npos);
+  // And the next press is an ordinary single again: it closes the screen.
+  shortPress();
+  serviceButtonFor(1000);
+  CHECK(!surveyActive);
+  CHECK(panelRotation == 0);
+  CHECK(!panelManuallyOff);
+
+  // A blip shorter than the window (its release dropped outright) is bounce,
+  // as it always was, but it must not leave the button reading as held: the
+  // next real press is a single that opens the status screen.
+  resetObservations();
+  bootEdge(true);
+  fakeNow += 12;
+  bootEdge(false);
+  serviceButtonFor(4000);
+  CHECK(!surveyActive);
+  CHECK(!panelManuallyOff);
+  CHECK(Serial.captured.find("long press") == std::string::npos);
+  shortPress();
+  CHECK(surveyActive);
+  CHECK(!wifiSelectorActive);
+  surveyActive = false;
+  return 0;
+}
+
 // Review probes: each of these once survived a mutation of the press logic.
 static int quickSelectorPressesAfterTheWindowAreMoves() {
   // Past the triple-press window, presses in a selector a double opened are
@@ -2006,6 +2063,7 @@ int main() {
   if (doublePressOpensTheWifiSelector() != 0) return 1;
   if (holdsKeepTheirJobs() != 0) return 1;
   if (quickSelectorPressesAfterTheWindowAreMoves() != 0) return 1;
+  if (droppedReleaseStillEndsThePress() != 0) return 1;
   if (closingTheStatusScreenRestoresTheBacklight() != 0) return 1;
   if (ineligibleProfileNeverChecksWad() != 0) return 1;
   if (requestIsConsumedOnce() != 0) return 1;

@@ -61,28 +61,32 @@ inline int isqrt(int value) {
 }
 
 // The horizontal span a text row [y0, y1) may use. Rectangular glass keeps
-// the plain margin. On round glass a row keeps off the bezel's curve at its
-// end farther from the centre, and is never held narrower than the inscribed
-// square every other on-device screen keeps to.
+// the plain margin. On round glass a row keeps to the chord, at its end
+// farther from the centre, of a circle 88% of the glass's: the bezel hides the
+// outermost pixels, and text that only just fits the full circle read as
+// running off it on the 1.75" round.
 inline void rowSpan(int width, int height, bool roundDisplay, int y0, int y1,
                     int &x, int &spanWidth) {
   const int margin = wifiselector::safeMargin(width, height, roundDisplay);
   x = margin;
   spanWidth = width - 2 * margin;
   if (!roundDisplay) return;
-  const int radius = (width < height ? width : height) / 2;
+  const int radius = (width < height ? width : height) / 2 * 88 / 100;
   const int centreX = width / 2;
   const int centreY = height / 2;
   const int above = centreY - y0;
   const int below = y1 - centreY;
   const int farthest = above > below ? above : below;
-  if (farthest >= radius) return;
-  const int pad = 4 + radius / 20;
-  const int half = isqrt(radius * radius - farthest * farthest) - pad;
-  if (2 * half > spanWidth) {
-    x = centreX - half;
-    spanWidth = 2 * half;
+  if (farthest >= radius) {
+    x = centreX;
+    spanWidth = 0;
+    return;
   }
+  const int pad = 4 + radius / 20;
+  int half = isqrt(radius * radius - farthest * farthest) - pad;
+  if (half < 0) half = 0;
+  x = centreX - half;
+  spanWidth = 2 * half;
 }
 
 // lengths[row] is the length of the row's text, 0 for a row with none (no
@@ -123,7 +127,10 @@ inline Layout layout(int width, int height, bool roundDisplay,
     // A row too wide for its span drops a scale and the column is placed
     // again; rows only ever shrink, so this settles.
     for (int pass = 0; pass < 64; ++pass) {
-      const int gap = detail + 1;
+      // A third of a detail glyph's height between rows, and never under
+      // 4 px: at 1 px per glyph scale the 1.75" round's lines ran together.
+      int gap = (7 * detail + 2) / 3;
+      if (gap < 4) gap = 4;
       const bool divider = want[ROW_ADDRESS] > 0 &&
                            (want[ROW_SIGNAL] > 0 || want[ROW_QUALITY] > 0);
       int total = 0;
@@ -169,14 +176,16 @@ inline Layout layout(int width, int height, bool roundDisplay,
       if (!shrank) break;
     }
     if (result.fits) return result;
-    if (hint) {
-      hint = false;
-    } else if (signal > 2 * detail && signal > 3) {
+    // The meter gives way first, then the detail rows, and how to close the
+    // screen goes only when nothing else can.
+    if (signal > 2 * detail && signal > 3) {
       --signal;
     } else if (detail > 1) {
       --detail;
     } else if (signal > 2) {
       --signal;
+    } else if (hint) {
+      hint = false;
     } else if (quality) {
       quality = false;
     } else {

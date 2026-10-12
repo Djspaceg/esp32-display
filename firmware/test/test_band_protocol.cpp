@@ -1108,19 +1108,36 @@ int main() {
         // included.
         CHECK(l.maxChars(ROW_NETWORK) >= 16);
         CHECK(l.maxChars(ROW_NAME) >= 16);
-        // Rows run top to bottom without overlapping, above the control.
+        // Rows run top to bottom with clear space between them (at least a
+        // third of the smaller glyph's height, and 4 px), above the control.
+        // On the 1.75" round they once sat 4 px apart at 21 px glyphs, and
+        // the battery line touched the hint.
         int previousBottom = l.top;
+        int previousScale = 0;
         for (int row = 0; row < ROW_COUNT; ++row) {
           if (l.scale[row] == 0) continue;
-          CHECK(l.y[row] >= previousBottom);
+          if (previousScale > 0) {
+            const int smaller =
+                l.scale[row] < previousScale ? l.scale[row] : previousScale;
+            int wanted = 7 * smaller / 3;
+            if (wanted < 4) wanted = 4;
+            CHECK(l.y[row] - previousBottom >= wanted);
+          }
           previousBottom = l.y[row] + 7 * l.scale[row];
+          previousScale = l.scale[row];
+        }
+        // The hint (how to close the screen) is always shown; the 128 px
+        // square, which has no battery, has no room for it beside one.
+        if (panel.width >= 170 || lengths[ROW_BATTERY] == 0) {
+          CHECK(l.scale[ROW_HINT] > 0);
         }
         CHECK(previousBottom <= l.bottom);
         CHECK(l.bottom < button.y);
-        // The rule sits between the quality word and the address.
+        // The rule sits between the quality word and the address, clear of
+        // both (it once ran into the address line).
         CHECK(l.dividerWidth > 0);
-        CHECK(l.dividerY >= l.y[ROW_QUALITY] + 7 * l.scale[ROW_QUALITY]);
-        CHECK(l.dividerY < l.y[ROW_ADDRESS]);
+        CHECK(l.dividerY >= l.y[ROW_QUALITY] + 7 * l.scale[ROW_QUALITY] + 3);
+        CHECK(l.dividerY + 3 < l.y[ROW_ADDRESS]);
         // Each row's widest text, centred, stays on the glass: inside the
         // margin on a rectangle, inside the circle on a round panel.
         for (int row = 0; row < ROW_COUNT; ++row) {
@@ -1144,7 +1161,9 @@ int main() {
               for (const int cy : {y0, y1}) {
                 const int dx = cx - panel.width / 2;
                 const int dy = cy - panel.height / 2;
-                CHECK(dx * dx + dy * dy < r * r);
+                // Well inside the glass, not grazing it: the bezel hides
+                // its outer edge (the address line once reached it).
+                CHECK(100 * (dx * dx + dy * dy) < 81 * r * r);
               }
             }
           }
@@ -1154,7 +1173,9 @@ int main() {
               for (const int cy : {y0, y1}) {
                 const int dx = cx - panel.width / 2;
                 const int dy = cy - panel.height / 2;
-                CHECK(dx * dx + dy * dy < r * r);
+                // Well inside the glass, not grazing it: the bezel hides
+                // its outer edge (the address line once reached it).
+                CHECK(100 * (dx * dx + dy * dy) < 81 * r * r);
               }
             }
           }
