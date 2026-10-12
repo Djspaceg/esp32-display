@@ -533,8 +533,15 @@ void closeWifiSelector() {
 }
 
 void serviceWifiSelectorTimeout() {
-  if (!wifiSelectorActive || touchAvailable || restartAt != 0) return;
-  if ((uint32_t)(millis() - wifiSelectorInputAt) < WIFI_SELECTOR_IDLE_MS) {
+  if (!wifiSelectorActive) return;
+  const uint32_t now = millis();
+  // BOOT is active low. A press held now is input: it restarts the wait.
+  const bool pressHeld =
+      bcfg->hasBootButton() && digitalRead(bcfg->pinBootButton) == LOW;
+  if (pressHeld) wifiSelectorInputAt = now;
+  if (!wifiselector::idleTimedOut(now, wifiSelectorInputAt,
+                                  WIFI_SELECTOR_IDLE_MS, touchAvailable,
+                                  restartAt != 0, pressHeld)) {
     return;
   }
   Serial.println("wifi selector: idle, closing");

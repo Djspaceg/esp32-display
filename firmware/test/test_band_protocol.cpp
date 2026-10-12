@@ -1062,6 +1062,9 @@ int main() {
         {170, 320, false}, {320, 170, false}, {240, 240, false},
         {240, 240, true},  {360, 360, true},  {466, 466, true},
         {720, 720, false}, {720, 720, true},  {800, 800, true},
+        // Two round sizes no board has, where a chord measured too generously
+        // runs text off the glass.
+        {213, 213, true},  {340, 340, true},
     };
     // The longest text each row carries: a 32-byte SSID, "-100", "dBm,
     // unusable", "IP 255.255.255.255", a long name, a version with a suffix,
@@ -1170,6 +1173,21 @@ int main() {
     memcpy(down, noBattery, sizeof(down));
     down[ROW_SIGNAL] = 2;
     CHECK(layout(128, 128, false, down).scale[ROW_SIGNAL] >= 2);
+  }
+
+  // --- The WiFi selector's idle close, on glass with no touch ---------------
+  {
+    using wifiselector::idleTimedOut;
+    CHECK(!idleTimedOut(1000 + 29999, 1000, 30000, false, false, false));
+    CHECK(idleTimedOut(1000 + 30000, 1000, 30000, false, false, false));
+    // Across clock wrap.
+    CHECK(!idleTimedOut(100, UINT32_MAX - 100, 30000, false, false, false));
+    CHECK(idleTimedOut(29900, UINT32_MAX - 100, 30000, false, false, false));
+    // Touch has a BACK control; a pending restart is a choice already made;
+    // a held press may be choosing right now.
+    CHECK(!idleTimedOut(1000 + 60000, 1000, 30000, true, false, false));
+    CHECK(!idleTimedOut(1000 + 60000, 1000, 30000, false, true, false));
+    CHECK(!idleTimedOut(1000 + 60000, 1000, 30000, false, false, true));
   }
 
   // --- BOOT short/double-press effects -----------------------------------

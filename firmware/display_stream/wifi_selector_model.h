@@ -75,6 +75,17 @@ inline Rect surveyPresetButton(int width, int height, bool roundDisplay) {
           (int16_t)(width - 2 * margin), (int16_t)buttonHeight};
 }
 
+// Whether a selector with no BACK control (no touch) has been left alone long
+// enough to close. Never while a chosen network's restart is pending, and
+// never under a held press: closing mid-hold would turn the hold that was
+// choosing a network into a normal BOOT long press. Unsigned subtraction keeps
+// it right across clock wrap.
+inline bool idleTimedOut(uint32_t now, uint32_t lastInputAt, uint32_t idleMs,
+                         bool touch, bool restartPending, bool pressHeld) {
+  if (touch || restartPending || pressHeld) return false;
+  return now - lastInputAt >= idleMs;
+}
+
 inline size_t initialIndex(const uint8_t *slots, size_t count,
                            uint8_t activeSlot) {
   if (slots == nullptr || count == 0) return 0;
