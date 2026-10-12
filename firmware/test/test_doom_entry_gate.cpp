@@ -20,6 +20,7 @@
 #include <driver/gpio.h>
 #include <esp_system.h>
 #include <freertos/task.h>
+#include <esp_timer.h>
 
 #include <board_config.h>
 
@@ -70,6 +71,8 @@ static int checks = 0;
 
 // ---- Fakes for the Arduino and FreeRTOS surface --------------------------
 FakeSerial Serial;
+void (*fakeEspTimerCallback)(void *arg) = nullptr;
+void *fakeEspTimerArg = nullptr;
 FakeEsp ESP;
 std::map<std::string, bool> fakeNvsBools;
 std::map<std::string, std::string> fakeNvsStrings;
@@ -872,6 +875,54 @@ static int holdSeenOnlyAtReleaseLeavesTheNextPress() {
   return 0;
 }
 
+// A release burst whose very last level read is wrong, seen by one slow loop
+// pass together with the next press, used to settle at that wrong level: the
+// release was lost, the button read as held, and the next press's release
+// was a rotate. The 10 ms pin sampler corrects the queue in between.
+static void fireBootSampler() {
+  if (fakeEspTimerCallback != nullptr) fakeEspTimerCallback(fakeEspTimerArg);
+}
+
+static int samplerCorrectsAWrongLastRead() {
+  resetObservations();
+  CHECK(fakeEspTimerCallback != nullptr);
+  bootEdge(true);
+  fakeNow += 120;
+  // The release: two edges, both read as down; the pin is up.
+  fakeBootLevel = 0;
+  bootIsr();
+  fakeNow += 3;
+  bootIsr();
+  fakeBootLevel = 1;
+  for (int i = 0; i < 5; ++i) {
+    fakeNow += 10;
+    fireBootSampler();
+  }
+  // The next press, a second later, before any loop pass.
+  fakeNow += 1000;
+  bootIsrAt(true);
+  fakeNow += 120;
+  bootIsrAt(false);
+  serviceButtonFor(1000);
+  CHECK(!surveyActive);
+  CHECK(!wifiSelectorActive);
+  CHECK(panelRotation == 0);
+  CHECK(Serial.captured.find("long press") == std::string::npos);
+  CHECK(Serial.captured.find("button: short press -> wifi status on") !=
+        std::string::npos);
+  CHECK(Serial.captured.find("button: short press -> wifi status off") !=
+        std::string::npos);
+  // With nothing to correct, the sampler queues nothing.
+  resetObservations();
+  for (int i = 0; i < 20; ++i) {
+    fakeNow += 10;
+    fireBootSampler();
+  }
+  handleButton();
+  CHECK(Serial.captured.empty());
+  return 0;
+}
+
 // Review probes: each of these once survived a mutation of the press logic.
 static int quickSelectorPressesAfterTheWindowAreMoves() {
   // Past the triple-press window, presses in a selector a double opened are
@@ -1144,7 +1195,10 @@ static int pressDownLateInTheCountdownStaysInTheMenu() {
   };
   // A short release over the deadline (backlight), a long one (rotate), and an
   // extra-long one (power).
-  const Case cases[] = {{4900, 5100}, {4700, 5500}, {4700, 8000}};
+  // And a press in the countdown's last DEBOUNCE_MS, which stops it although it
+  // only settles after the deadline.
+  const Case cases[] = {
+      {4900, 5100}, {4985, 5100}, {4700, 5500}, {4700, 8000}};
   for (const Case &c : cases) {
     resetObservations();
     wadProblem = nullptr;
@@ -2005,6 +2059,30 @@ static int knobTurnIsVolumeAndClickIsMute() {
   CHECK(displayPrefSaves == 0);
   CHECK(Serial.captured.find("backlight") == std::string::npos);
 
+  // A turn just after the click was let go, while its release still settles,
+  // is not a turn made during the press: the click still mutes.
+  sentPackets.clear();
+  fakeNow += 1000;
+  handleButton();
+  bootIsrAt(true);
+  handleButton();
+  fakeNow += 100;
+  bootIsrAt(false);
+  handleButton();
+  fakeNow += 10;
+  knobDetent(true);
+  handleButton();
+  fakeNow += 40;
+  handleButton();
+  got = sentKnobGestures();
+  CHECK(got.size() == 2);
+  CHECK(got.size() == 2 && got[0] == TouchGesture::KnobClockwise &&
+        got[1] == TouchGesture::KnobPress);
+  CHECK(Serial.captured.find("press released after a turn") ==
+        std::string::npos);
+  fakeNow += 1000;
+  handleButton();
+
   // A click, a turn and a click are two mutes, not a double click: the turn
   // settles the first click's window.
   sentPackets.clear();
@@ -2208,6 +2286,7 @@ int main() {
   if (misreadEdgesStillMakeOnePress() != 0) return 1;
   if (releaseJustBeforeAThresholdIsNotAHold() != 0) return 1;
   if (holdSeenOnlyAtReleaseLeavesTheNextPress() != 0) return 1;
+  if (samplerCorrectsAWrongLastRead() != 0) return 1;
   if (closingTheStatusScreenRestoresTheBacklight() != 0) return 1;
   if (ineligibleProfileNeverChecksWad() != 0) return 1;
   if (requestIsConsumedOnce() != 0) return 1;

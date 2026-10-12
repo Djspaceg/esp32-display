@@ -668,9 +668,17 @@ void drawSurveyScreen() {
 
   // From the WiFi worker's cache, never the radio: on P4 WiFi.SSID() is a
   // hosted RPC that can hold this loop for seconds.
-  char ssid[33] = {0};
-  const bool haveSsid = connected && wifiworker::ssid(ssid, sizeof(ssid)) &&
-                        ssid[0] != 0;
+  char ssidBytes[33] = {0};
+  const bool haveSsid = connected &&
+                        wifiworker::ssid(ssidBytes, sizeof(ssidBytes)) &&
+                        ssidBytes[0] != 0;
+  // Both are bytes, usually UTF-8; shown in the font's closest form.
+  char ssid[33];
+  wifiselector::panelText((const uint8_t *)ssidBytes, strlen(ssidBytes), ssid,
+                          sizeof(ssid));
+  char name[33];
+  wifiselector::panelText((const uint8_t *)cfgName.c_str(), cfgName.length(),
+                          name, sizeof(name));
   char signal[8], quality[24], address[24], firmware[24], battery[24];
   if (connected && rssi != 0) {
     snprintf(signal, sizeof(signal), "%d", rssi);
@@ -706,7 +714,7 @@ void drawSurveyScreen() {
   text[ROW_SIGNAL] = signal;
   text[ROW_QUALITY] = quality;
   text[ROW_ADDRESS] = address;
-  text[ROW_NAME] = cfgName.c_str();
+  text[ROW_NAME] = name;
   text[ROW_FIRMWARE] = firmware;
   text[ROW_BATTERY] = showBattery ? battery : "";
   // How to close it, longest wording first; the longest that fits its row is

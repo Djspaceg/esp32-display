@@ -12,6 +12,11 @@
 void initializeButtonInput();
 void handleButton();
 
+// Whether a BOOT edge is still settling (inside the debounce window). The
+// boot menu's countdown does not run out under one: a press made in its last
+// moments stops it once it settles.
+bool bootPressSettling();
+
 // Called as the boot menu ends: the rest of a BOOT press that went down while
 // it was up is swallowed, so it cannot reach the normal press tiers. Defined
 // only in images that have a boot menu.

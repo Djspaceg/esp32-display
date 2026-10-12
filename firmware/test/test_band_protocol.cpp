@@ -1000,9 +1000,31 @@ int main() {
                             'F', 'i'};
     memcpy(credentials.ssid, ssid, sizeof(ssid));
     credentials.ssidLength = sizeof(ssid);
+    // UTF-8 is shown in the font's closest form: a Latin letter as its ASCII
+    // base, anything else as one '?' per character, never one per byte.
     char label[16];
-    CHECK(displaySsid(credentials, label, sizeof(label)) == sizeof(ssid));
-    CHECK(strcmp(label, "Lab?? WiFi") == 0);
+    CHECK(displaySsid(credentials, label, sizeof(label)) == 9);
+    CHECK(strcmp(label, "Labe WiFi") == 0);
+    {
+      char text[32];
+      const char cafe[] = "Caf\xC3\xA9 \xC5\xBB\xC3\xB3\xC5\x82w";
+      CHECK(panelText((const uint8_t *)cafe, strlen(cafe), text,
+                      sizeof(text)) == 9);
+      CHECK(strcmp(text, "Cafe Zolw") == 0);
+      const char other[] = "\xE2\x98\x95 \xE6\x97\xA5\xE6\x9C\xAC "
+                           "\xF0\x9F\x93\xB6";
+      CHECK(panelText((const uint8_t *)other, strlen(other), text,
+                      sizeof(text)) == 6);
+      CHECK(strcmp(text, "? ?? ?") == 0);
+      // Bytes that are not UTF-8 are '?' each; a cut-off sequence is one.
+      const char broken[] = "a\xFF\x80" "b\xC3";
+      CHECK(panelText((const uint8_t *)broken, strlen(broken), text,
+                      sizeof(text)) == 5);
+      CHECK(strcmp(text, "a??b?") == 0);
+      // A short buffer gets what fits; the return is still the full length.
+      CHECK(panelText((const uint8_t *)cafe, strlen(cafe), text, 4) == 9);
+      CHECK(strcmp(text, "Caf") == 0);
+    }
     char clipped[7];
     CHECK(displaySsid(credentials, clipped, sizeof(clipped)) == 6);
     CHECK(strcmp(clipped, "Lab...") == 0);

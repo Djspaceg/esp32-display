@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <driver/gpio.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -88,6 +89,22 @@ static uint32_t buttonClockMs() {
   return (uint32_t)xTaskGetTickCount() * (uint32_t)portTICK_PERIOD_MS;
 }
 
+// The level the newest queued entry read, for the sampler below.
+static volatile bool lastQueuedDown = false;
+
+// Called with bootButtonMux held.
+static void IRAM_ATTR queueBootLevel(uint32_t now, bool down) {
+  const uint8_t next = (bootEdgeWrite + 1) & BOOT_EDGE_QUEUE_MASK;
+  if (next == bootEdgeRead) {
+    // Prefer the newest physical state if an extreme stall fills the queue.
+    bootEdgeRead = (bootEdgeRead + 1) & BOOT_EDGE_QUEUE_MASK;
+  }
+  bootEdges[bootEdgeWrite].atMs = now;
+  bootEdges[bootEdgeWrite].down = down;
+  bootEdgeWrite = next;
+  lastQueuedDown = down;
+}
+
 static void IRAM_ATTR onBootButtonEdge() {
   const uint32_t now =
       (uint32_t)xTaskGetTickCountFromISR() * (uint32_t)portTICK_PERIOD_MS;
@@ -97,15 +114,26 @@ static void IRAM_ATTR onBootButtonEdge() {
   // here, after the edge, and on a bouncing contact can already be the
   // opposite one, so no single edge's level is trusted on its own.
   portENTER_CRITICAL_ISR(&bootButtonMux);
-  const uint8_t next = (bootEdgeWrite + 1) & BOOT_EDGE_QUEUE_MASK;
-  if (next == bootEdgeRead) {
-    // Prefer the newest physical state if an extreme stall fills the queue.
-    bootEdgeRead = (bootEdgeRead + 1) & BOOT_EDGE_QUEUE_MASK;
-  }
-  bootEdges[bootEdgeWrite].atMs = now;
-  bootEdges[bootEdgeWrite].down = down;
-  bootEdgeWrite = next;
+  queueBootLevel(now, down);
   portEXIT_CRITICAL_ISR(&bootButtonMux);
+}
+
+// Every BOOT_SAMPLE_MS the pin is read and, if it disagrees with the level the
+// newest queue entry read, queued as one more entry. A burst whose very last
+// read was wrong is then corrected even when one slow loop pass sees it and
+// the next press together, which the quiet-pin read in handleButton() cannot
+// do. It never queues while the queue already agrees with the pin, so a
+// button left alone costs nothing but the read.
+static const uint32_t BOOT_SAMPLE_MS = 10;
+static esp_timer_handle_t bootSampler = nullptr;
+
+static void sampleBootButton(void *) {
+  const uint32_t now =
+      (uint32_t)xTaskGetTickCount() * (uint32_t)portTICK_PERIOD_MS;
+  portENTER_CRITICAL(&bootButtonMux);
+  const bool down = gpio_get_level(bootButtonPin) == 0;
+  if (down != lastQueuedDown) queueBootLevel(now, down);
+  portEXIT_CRITICAL(&bootButtonMux);
 }
 
 static bool takeBootButtonEdge(BootButtonEdge &edge) {
@@ -186,12 +214,19 @@ static rotaryencoder::Decoder encoderDecoder;
 static volatile int16_t encoderPendingSteps = 0;
 static portMUX_TYPE encoderMux = portMUX_INITIALIZER_UNLOCKED;
 
+// When the first detent not yet applied was turned, on the BOOT edges' clock:
+// a turn is part of a press only if it came before the press's release.
+static volatile uint32_t encoderFirstStepAt = 0;
+
 static void IRAM_ATTR onEncoderEdge() {
+  const uint32_t now =
+      (uint32_t)xTaskGetTickCountFromISR() * (uint32_t)portTICK_PERIOD_MS;
   const uint8_t state = rotaryencoder::pinState(
       gpio_get_level(encoderPinA) != 0, gpio_get_level(encoderPinB) != 0);
   portENTER_CRITICAL_ISR(&encoderMux);
   const int8_t step = encoderDecoder.update(state);
   if (step != 0 && encoderPendingSteps > -1000 && encoderPendingSteps < 1000) {
+    if (encoderPendingSteps == 0) encoderFirstStepAt = now;
     encoderPendingSteps = (int16_t)(encoderPendingSteps + step);
   }
   portEXIT_CRITICAL_ISR(&encoderMux);
@@ -231,10 +266,23 @@ void initializeButtonInput() {
   bootEdgeRead = 0;
   bootEdgeWrite = 0;
   bootRunOpen = false;
+  lastQueuedDown = gpio_get_level(bootButtonPin) == 0;
   portEXIT_CRITICAL(&bootButtonMux);
   attachInterrupt(digitalPinToInterrupt(bcfg->pinBootButton),
                   onBootButtonEdge, CHANGE);
+  if (bootSampler == nullptr) {
+    esp_timer_create_args_t args = {};
+    args.callback = sampleBootButton;
+    args.name = "bootsample";
+    if (esp_timer_create(&args, &bootSampler) != ESP_OK ||
+        esp_timer_start_periodic(bootSampler, BOOT_SAMPLE_MS * 1000) !=
+            ESP_OK) {
+      Serial.println("button: BOOT sampler unavailable; edges only");
+    }
+  }
 }
+
+bool bootPressSettling() { return bootRunOpen; }
 
 static void setStatusScreen(bool active, const char *cause) {
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
@@ -433,11 +481,14 @@ static void applyEncoderTurn(int16_t steps) {
 }
 
 // Applies any detents since the last pass; returns whether there were any.
+static uint32_t knobTurnedAt = 0;
+
 static bool handleEncoder() {
   if (bcfg == nullptr || !bcfg->hasEncoder()) return false;
   portENTER_CRITICAL(&encoderMux);
   const int16_t steps = encoderPendingSteps;
   encoderPendingSteps = 0;
+  knobTurnedAt = encoderFirstStepAt;
   portEXIT_CRITICAL(&encoderMux);
   if (steps == 0) return false;
   applyEncoderTurn(steps);
@@ -521,7 +572,11 @@ void handleButton() {
       continue;
     }
     if (!wasDown) continue;
-    if (knobTurned) turnedWhileDown = true;
+    // Only a turn made before this release: one just after it, while the
+    // release still settles, is a turn after the press.
+    if (knobTurned && (int32_t)(edge.atMs - knobTurnedAt) > 0) {
+      turnedWhileDown = true;
+    }
     if (turnedWhileDown) {
       Serial.println("knob: press released after a turn; no press action");
       wasDown = false;
@@ -576,9 +631,16 @@ void handleButton() {
 
 #if defined(ESPDISP_BOOT_MENU_RUNTIME)
   // Every edge from before the menu ended has now been seen.
-  swallowPressFromMenu = false;
+  // Unless a press is still settling: if it went down before the menu ended,
+  // it is still the menu's when it settles.
+  if (!bootRunOpen) swallowPressFromMenu = false;
 #endif
-  if (wasDown && knobTurned) turnedWhileDown = true;
+  // Not if the press's release is already in, still settling, from before
+  // the turn.
+  if (wasDown && knobTurned &&
+      !(bootRunOpen && (int32_t)(knobTurnedAt - bootRunStartAt) >= 0)) {
+    turnedWhileDown = true;
+  }
   if (wasDown && !turnedWhileDown) {
     // Timed to the edge that may be this press's release, still settling,
     // rather than to now: a press let go just short of a threshold is not a

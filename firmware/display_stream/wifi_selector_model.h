@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "wifi_presets.h"
 
@@ -175,17 +176,101 @@ inline Hit selectorHitTest(const SelectorLayout &layout, size_t count,
   return {};
 }
 
+// The panel font is ASCII. An SSID or a name is bytes, usually UTF-8, so
+// each character is shown in its closest ASCII form: a Latin letter with an
+// accent as its base letter, typographic quotes and dashes as plain ones, and
+// anything else (CJK, emoji, a byte that is not UTF-8) as one '?' per
+// character, not one per byte. Writes at most capacity - 1 characters and a
+// NUL; returns how many characters the whole text needs.
+inline char panelCharFor(uint32_t codePoint) {
+  // U+00C0..U+00FF and U+0100..U+017F, folded to their base letters.
+  static const char LATIN1[] =
+      "AAAAAAACEEEEIIIIDNOOOOOxOUUUUYTsaaaaaaaceeeeiiiidnooooo/ouuuuyty";
+  static const char EXTENDED_A[] =
+      "AaAaAaCcCcCcCcDdDdEeEeEeEeEeGgGgGgGgHhHhIiIiIiIiIiIiJjKkkLlLlLlLlLl"
+      "NnNnNnnNnOoOoOoOoRrRrRrSsSsSsSsTtTtTtUuUuUuUuUuUuWwYyYZzZzZzs";
+  if (codePoint >= 0x20 && codePoint <= 0x7E) return (char)codePoint;
+  if (codePoint == 0xA0) return ' ';
+  if (codePoint >= 0xC0 && codePoint <= 0xFF) return LATIN1[codePoint - 0xC0];
+  if (codePoint >= 0x100 && codePoint <= 0x17F) {
+    return EXTENDED_A[codePoint - 0x100];
+  }
+  switch (codePoint) {
+    case 0x2018:
+    case 0x2019:
+      return '\'';
+    case 0x201C:
+    case 0x201D:
+      return '"';
+    case 0x2010:
+    case 0x2011:
+    case 0x2013:
+    case 0x2014:
+      return '-';
+    default:
+      return '?';
+  }
+}
+
+inline size_t panelText(const uint8_t *input, size_t length, char *output,
+                        size_t capacity) {
+  size_t produced = 0;
+  size_t i = 0;
+  while (i < length) {
+    const uint8_t lead = input[i];
+    size_t extra = 0;
+    uint32_t codePoint = lead;
+    if (lead >= 0xC2 && lead <= 0xDF) {
+      extra = 1;
+      codePoint = lead & 0x1F;
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+      extra = 2;
+      codePoint = lead & 0x0F;
+    } else if (lead >= 0xF0 && lead <= 0xF4) {
+      extra = 3;
+      codePoint = lead & 0x07;
+    } else if (lead >= 0x80) {
+      codePoint = 0xFFFD;  // a continuation or invalid lead byte on its own
+    }
+    size_t used = 1;
+    for (size_t k = 1; k <= extra; ++k) {
+      if (i + k >= length || (input[i + k] & 0xC0) != 0x80) {
+        codePoint = 0xFFFD;  // cut off, or not followed by continuations
+        break;
+      }
+      codePoint = (codePoint << 6) | (input[i + k] & 0x3F);
+      used = k + 1;
+    }
+    if (codePoint == 0xFFFD && extra > 0) {
+      // A broken sequence is one character; skip its continuations.
+      while (used < extra + 1 && i + used < length &&
+             (input[i + used] & 0xC0) == 0x80) {
+        ++used;
+      }
+    }
+    i += used;
+    if (output != nullptr && produced + 1 < capacity) {
+      output[produced] = panelCharFor(codePoint);
+      output[produced + 1] = 0;
+    }
+    ++produced;
+  }
+  if (output != nullptr && capacity > 0 && produced == 0) output[0] = 0;
+  return produced;
+}
+
 inline size_t displaySsid(const wifipresets::Credentials &credentials,
                           char *output, size_t capacity) {
   if (output == nullptr || capacity == 0) return 0;
   const size_t available = capacity - 1;
-  size_t copied = credentials.ssidLength;
+  char text[33];
+  size_t length = panelText(credentials.ssid, credentials.ssidLength, text,
+                            sizeof(text));
+  if (length > sizeof(text) - 1) length = sizeof(text) - 1;
+  size_t copied = length;
   if (copied > available) copied = available;
-  for (size_t i = 0; i < copied; ++i) {
-    const uint8_t byte = credentials.ssid[i];
-    output[i] = byte >= 0x20 && byte <= 0x7E ? (char)byte : '?';
-  }
-  if (credentials.ssidLength > copied && copied >= 3) {
+  memcpy(output, text, copied);
+  if (length > copied && copied >= 3) {
     output[copied - 3] = '.';
     output[copied - 2] = '.';
     output[copied - 1] = '.';

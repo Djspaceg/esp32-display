@@ -475,7 +475,7 @@ bool runBootMenuIfDue(bool requested) {
     if (!bootMenuActive) break;
     const uint32_t now = menuClockMs();
     bootMenuCountdown.tick(now);
-    if (bootMenuCountdown.expired(now)) {
+    if (!bootPressSettling() && bootMenuCountdown.expired(now)) {
       // Only an untouched menu expires, so its highlight is still STREAMING.
       leaveMenuForStreaming("countdown ended");
       break;
