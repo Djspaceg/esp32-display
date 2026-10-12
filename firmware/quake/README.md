@@ -17,27 +17,24 @@ quakegeneric leaves out.
 
 ## Game data
 
-The pak is never committed or bundled. Fetch it and write it to the board's
-`quake_pak` partition over USB (18 MiB at 0xE00000 on a P4; on an S3, a raw
-region of 18 MiB at 0x800000, just past the universal 8 MiB layout):
+The paks are never committed or bundled. They live in the board's game store
+(`docs/game-store.md`): the 18 MiB `quake_pak` partition at 0xE00000 on a P4,
+and on an S3 the flash past its 8 MiB table. Put them there from the Mac app: a
+P4 or S3 display's Firmware section has a **Games data** row whose **Install
+Game Data…** sheet downloads the shareware `pak0.pak`, takes your own
+`pak0.pak` or `pak1.pak` with **Choose…**, shows whether the board already holds
+each one and how much room is left, and writes the checked ones over USB.
 
-```sh
-tools/fetch_game_data.sh --game quake
-python3 tools/espdisp.py write-data quake_pak --port /dev/cu.usbmodemXXXX
-```
-
-The Mac app does the same over USB: a P4 or S3 display's Firmware section has
-**Install Quake Data…**, which takes your pak0.pak and applies the same checks.
-
-A board on an older partition table needs one full USB flash of the current
-bundle first; `write-data` refuses until then. On an S3 it also reads the chip's
-flash size and refuses anything under 32 MiB.
+Quake loads `id1/pak0.pak`, then `pak1.pak` and on, each from its slot in the
+store, so a set runs from `pak0.pak` without a gap. A registered `pak1.pak`
+(about 34 MB) fits no board.
 
 ### Which S3 boards
 
-The pak is 18,689,235 bytes. Every S3 runs the same image, whose layout (two
-app slots and the Doom WAD) fills the first 8 MiB, so the pak needs a chip of
-at least 26 MiB: a 32 MiB one.
+The shareware `pak0.pak` is 18,689,235 bytes. Every S3 runs the same image,
+whose layout (two app slots and the Doom WAD) fills the first 8 MiB, and its
+game store is what the chip has past that, up to 18 MiB: the pak needs a
+32 MiB chip. A 16 MiB chip's 8 MiB store holds WADs, or only a small pak.
 
 | Board | Flash | Panel | Quake |
 | --- | --- | --- | --- |
@@ -65,16 +62,17 @@ Measured on the 1.75C (2026-10-11, `timedemo` demo1/demo2/demo3 back to back):
 
 The panel write (31, 16 and 12 ms) runs beside the render and costs nothing.
 With `r_dspeeds 1` the 5 s line breaks the render down by stage. The firmware raises the flash driver's size from
-the image header's 8 MiB to the chip's own before registering the region. Quake reads the partition with
-`esp_partition_read()` through a read-only file system mounted at `/qdata`
-(`platform/quake_pak_vfs.c`), so the pak may cross 16 MiB, past what this
-core's flash cache can map.
+the image header's 8 MiB to the chip's own before registering the store. Quake
+reads its paks with `esp_partition_read()` through a read-only file system
+mounted at `/qdata` (`platform/quake_pak_vfs.c`), so a pak may cross 16 MiB,
+past what this core's flash cache can map.
 
 ## Play Quake
 
 1. Open the boot-mode menu (power-on or reset, or a triple press of BOOT) and
    choose **QUAKE**. The menu offers it only when this image carries the Quake
-   runtime and the partition holds a pack that passes the Quake boot's check.
+   runtime and the game store holds a `pak0.pak` that passes the Quake boot's
+   check. `CFGGAME QUAKE` over serial chooses it the same way.
 2. Left alone, Quake plays its attract demos. A short BOOT press opens the
    menu (a tap during a demo fires, as in play).
 

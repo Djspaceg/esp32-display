@@ -285,6 +285,7 @@ python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGMIRRORX 1
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 \
   CFGBRIGHTLEVELS 24 128 10 255
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGFIXEDBL 255
+python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGGAME QUAKE
 ```
 
 `CFGAUTOROT 0|1` persists motion-based orientation; `CFGSHOW` reports both
@@ -296,6 +297,12 @@ persists the four runtime brightness presets, each from 1 through 255, with
 `CFGMIRRORX` persists a left/right reflection for prism installations.
 `CFGFIXEDBL 1..255` locks every lit state at that level and stops advertising
 brightness controls; `CFGFIXEDBL 0` restores normal brightness behavior.
+
+`CFGGAME <label>` starts a boot-menu row by its label (`DOOM`, `QUAKE`, a stored
+WAD's name such as `FREEDOOM1`, or `STREAMING`), as choosing it on the menu
+does. A game restarts the board into it, so it sends no reply; otherwise it
+answers `CFGOK game=STREAMING`, `CFGERR the boot menu offers no <label>`, or
+`CFGERR could not save the <label> request`. See `docs/game-store.md`.
 
 WiFi and names use base64-safe helper flows in the app. OTA stays disabled until
 a password is stored:
@@ -348,6 +355,12 @@ identity. For a blank/recovery board, the Add Display sheet requires an explicit
 hardware-profile choice, then rechecks chip and MAC with esptool before writing.
 Wrong family/chip/profile/partition, absent identity, ambiguous resources, and
 catalog size/hash drift are refused.
+
+A P4 or S3 display's Firmware section also has a **Games data** row. Its
+**Install Game Data…** sheet adds Doom WADs and Quake paks to the board's game
+store over USB: choose your own files or download Quake's shareware `pak0.pak`,
+see which are already on the board and how much room is left, and write the
+checked ones. See `docs/game-store.md`.
 
 Release notes are rendered as literal text. Legacy bundles receive accessible
 fallback text, and note metadata never affects transfer or update-safety logic.

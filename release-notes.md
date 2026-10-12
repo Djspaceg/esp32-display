@@ -5,6 +5,8 @@
 - Added an early boot menu that chooses Streaming, Doom, or Quake when a runtime exists, by touch or by the BOOT button.
 - Changed the triple press of BOOT to open that menu instead of starting Doom directly.
 - Changed a board left alone at boot to start streaming, which stays the default.
+- Added a game store: a board keeps up to eight extra Doom WADs and Quake's paks in its game data area, and the boot menu lists each stored WAD as its own row.
+- Added CFGGAME, a serial command that starts a boot-menu row by its label.
 
 ## 1.5.0
 

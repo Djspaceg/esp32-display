@@ -15,6 +15,8 @@ allocate from PSRAM only when Doom starts.
    it (tap **START**, or hold BOOT for 0.6 seconds). The panel restarts, shows
    the Doom splash, and enters the title/demo loop. Left alone, the menu starts
    streaming. It offers Doom only when the WAD passes the Doom boot's check.
+   Each WAD you have added from the Mac app is a row of its own below **DOOM**,
+   named for its file (see "Your own WADs").
 2. Short-press BOOT or tap the screen to open the main menu.
 3. Swipe up or down to move the menu cursor. Swipe left or right to change a
    highlighted slider, such as screen size, mouse sensitivity, or sound volume.
@@ -30,6 +32,26 @@ allocate from PSRAM only when Doom starts.
    finger enables run.
 7. Hold BOOT for 3 seconds to exit Doom. The panel restarts into the normal
    streaming firmware; release is not required once the threshold is reached.
+
+## Your own WADs
+
+Beside the bundled shareware WAD, a board keeps up to eight more in its game
+store (`docs/game-store.md`), each a boot-menu row named for its file:
+`freedoom1.wad` is **FREEDOOM1**. Add them from the Mac app: a P4 or S3
+display's Firmware section has a **Games data** row whose **Install Game
+Data…** sheet takes your WADs with **Choose…**, shows whether the board already
+holds each one and how much room is left, and writes the checked ones over USB.
+
+A WAD must be a complete IWAD with E1M1 or MAP01, named up to 20 of
+`a-z 0-9 . _ -` ending `.wad`; the engine tells Doom from Doom II by that name
+(`doom2.wad`, `freedoom2.wad`) or by its maps. PWADs, Heretic, Hexen and Strife
+WADs, and another copy of the bundled `doom1.wad`, are refused. A stored WAD is
+read from flash into the engine's zone as each lump is needed, so it may be any
+size the store holds: 18 MiB on a P4 or a 32 MiB S3, 8 MiB on a 16 MiB S3,
+less whatever Quake's paks take.
+
+`CFGGAME <label>` over serial starts any row by its label, as choosing it on the
+menu does: `CFGGAME FREEDOOM1`.
 
 ## Sound
 
@@ -160,12 +182,9 @@ The bundle writer and both catalog readers require all of the following:
 The partition address is read from the bundled partition table rather than
 hardcoded: S3 writes it at `0x3FF000`, while P4 writes it at `0x9F0000`.
 `tools/fetch_game_data.sh --game doom` fetches the WAD to `firmware/doom/doom1.wad`
-and checks it. The P4 table also reserves `quake_pak` (`0xE00000`, 18 MiB) for
-the Quake shareware `pak0.pak`, which no bundle carries:
-`tools/fetch_game_data.sh --game quake` fetches it and
-`tools/espdisp.py write-data quake_pak` writes it to an attached P4 over USB.
-A P4 still on an older table (a WiFi update keeps the board's table) needs one
-full USB flash of the current bundle first; `write-data` refuses until then.
+and checks it. The P4 table also reserves `quake_pak` (`0xE00000`, 18 MiB), the
+board's game store for the WADs and Quake paks the Mac app adds
+(`docs/game-store.md`); no bundle writes it.
 `firmware/partitions_s3_doom.csv` remains available as a manual 16 MiB developer
 layout with larger `0x5F0000` application slots; it is not the canonical build.
 
