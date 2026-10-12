@@ -1014,6 +1014,14 @@ void loop() {
     sendBatteryStatus();
   }
 
+  // The PWR key (AXP2101 boards only). Its press bits latch in the PMU, so a
+  // slow poll misses nothing; 50 ms keeps the log close to the press.
+  static uint32_t lastPowerKeyPoll = 0;
+  if (millis() - lastPowerKeyPoll >= 50) {
+    lastPowerKeyPoll = millis();
+    servicePowerKey();
+  }
+
   static uint32_t lastLedUpdate = 0;
   if (millis() - lastLedUpdate >= 2000) {
     lastLedUpdate = millis();

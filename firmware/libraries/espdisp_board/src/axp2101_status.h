@@ -95,4 +95,37 @@ inline uint8_t raisedInputLimit(uint8_t reg16) {
   return (uint8_t)((reg16 & (uint8_t)~INPUT_LIMIT_MASK) | INPUT_LIMIT_1500MA);
 }
 
+// REG 41H (INTEN2) and REG 49H (INTSTS2): the PWR key's interrupts. Bit 2 is
+// a long press (held past the PMU's IRQ level time), bit 3 a short press, and
+// bits 0/1 the key's edges (XPowersLib XPowersParams.hpp, "IRQ2 REG 41H":
+// PKEY_LONG_IRQ = _BV(10), PKEY_SHORT_IRQ = _BV(11), byte 1 of the mask). A
+// status bit is cleared by writing 1 to it. Enabling these changes nothing
+// about how a long hold powers the board off: that is REG 27H's off time.
+static const uint8_t IRQ2_PKEY_LONG = 1u << 2;
+static const uint8_t IRQ2_PKEY_SHORT = 1u << 3;
+static const uint8_t IRQ2_PKEY_PRESSES = IRQ2_PKEY_LONG | IRQ2_PKEY_SHORT;
+
+struct PowerKeyEvents {
+  bool shortPress = false;
+  bool longPress = false;
+};
+
+/// REG 41H with the two press interrupts enabled and every other bit kept.
+inline uint8_t powerKeyIrqEnable(uint8_t inten2) {
+  return (uint8_t)(inten2 | IRQ2_PKEY_PRESSES);
+}
+
+inline PowerKeyEvents powerKeyEvents(uint8_t intsts2) {
+  PowerKeyEvents events;
+  events.shortPress = (intsts2 & IRQ2_PKEY_SHORT) != 0;
+  events.longPress = (intsts2 & IRQ2_PKEY_LONG) != 0;
+  return events;
+}
+
+/// What to write to REG 49H to clear the press bits it reported, and only
+/// those: the other interrupts' status is not this reader's to clear.
+inline uint8_t powerKeyClear(uint8_t intsts2) {
+  return (uint8_t)(intsts2 & IRQ2_PKEY_PRESSES);
+}
+
 }  // namespace axp2101

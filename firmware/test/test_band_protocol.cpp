@@ -3860,6 +3860,24 @@ int main() {
     CHECK_EQ((int)axp2101::raisedInputLimit(0x05), 0x05);  // 2000 mA kept
     CHECK_EQ((int)axp2101::raisedInputLimit(0x07), 0x04);  // reserved -> 1500
 
+    // REG 41H/49H, the PWR key's interrupts (XPowersLib XPowersParams.hpp,
+    // "IRQ2 REG 41H": bit 2 long press, bit 3 short press; bits 0/1 are the
+    // key's edges). Only the two press bits are enabled, read and cleared;
+    // every other enable and status bit is left as it was.
+    CHECK_EQ((int)axp2101::powerKeyIrqEnable(0x00), 0x0C);
+    CHECK_EQ((int)axp2101::powerKeyIrqEnable(0xF3), 0xFF);
+    {
+      const axp2101::PowerKeyEvents none = axp2101::powerKeyEvents(0xF3);
+      CHECK(!none.shortPress && !none.longPress);
+      const axp2101::PowerKeyEvents shortOnly = axp2101::powerKeyEvents(0x08);
+      CHECK(shortOnly.shortPress && !shortOnly.longPress);
+      const axp2101::PowerKeyEvents both = axp2101::powerKeyEvents(0x0F);
+      CHECK(both.shortPress && both.longPress);
+      CHECK_EQ((int)axp2101::powerKeyClear(0xFF), 0x0C);
+      CHECK_EQ((int)axp2101::powerKeyClear(0x04), 0x04);
+      CHECK_EQ((int)axp2101::powerKeyClear(0xF3), 0x00);
+    }
+
     // Unknown is a distinct value from Absent, and neither is zero-or-nonzero
     // interchangeable with the other. This is the whole reason External is not
     // a bool: a board that cannot answer must not answer "no".

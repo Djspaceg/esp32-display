@@ -275,6 +275,14 @@ void sendControlAck(const deviceproto::ControlCommand &command,
   sendToSender(packet, sizeof(packet));
 }
 // The battery half of loop()'s 5-second serial report.
+void servicePowerKey() {
+  if (!batteryAvailable) return;
+  axp2101::PowerKeyEvents events;
+  if (!boardpower::powerKeyEvents(events)) return;
+  if (events.shortPress) Serial.println("pwr key: short press");
+  if (events.longPress) Serial.println("pwr key: long press");
+}
+
 void reportBatteryLine() {
     // Its own line, and only where a battery telemetry source exists.
     if (batteryReadingCurrent()) {

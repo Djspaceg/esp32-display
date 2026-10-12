@@ -77,6 +77,9 @@ static const uint8_t REG_PWROFF_STATUS = 0x21;
 static const uint8_t REG_INPUT_CURRENT_LIMIT = 0x16;
 // BAT_DET_CTRL: bit0 enables battery detection.
 static const uint8_t REG_BAT_DET_CTRL = 0x68;
+// INTEN2 / INTSTS2: the PWR key's press interrupts (axp2101_status.h).
+static const uint8_t REG_IRQ_ENABLE2 = 0x41;
+static const uint8_t REG_IRQ_STATUS2 = 0x49;
 // Fuel-gauge percentage. Only meaningful while STATUS1 says a battery is
 // present - the vendor library returns -1 otherwise, which is what maps onto
 // deviceproto::BATTERY_PERCENT_UNKNOWN on the wire.
@@ -252,6 +255,16 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     return false;
   }
 
+  // The PWR key's short- and long-press interrupts, so their status bits
+  // latch for powerKeyEvents() to poll; nothing is done with them here, and
+  // the PMU's own long-hold power off is untouched. Any press left latched
+  // from before boot is cleared.
+  uint8_t inten2 = 0;
+  if (readRegister(REG_IRQ_ENABLE2, inten2)) {
+    writeRegister(REG_IRQ_ENABLE2, axp2101::powerKeyIrqEnable(inten2));
+    writeRegister(REG_IRQ_STATUS2, axp2101::IRQ2_PKEY_PRESSES);
+  }
+
   activeController = cfg.power;
   enabled = true;
   if (verbose) {
@@ -289,6 +302,21 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
 }
 
 inline bool available() { return enabled; }
+
+/// Poll the PWR key: reads REG 49H and clears the press bits it found, so each
+/// press is reported once. Returns false on any board without an AXP2101 or
+/// when the read failed.
+inline bool powerKeyEvents(axp2101::PowerKeyEvents &events) {
+  if (!enabled || activeController != board::PowerController::Axp2101) {
+    return false;
+  }
+  uint8_t status = 0;
+  if (!readRegister(REG_IRQ_STATUS2, status)) return false;
+  events = axp2101::powerKeyEvents(status);
+  const uint8_t clear = axp2101::powerKeyClear(status);
+  if (clear != 0) writeRegister(REG_IRQ_STATUS2, clear);
+  return true;
+}
 
 /// Read STATUS1 and STATUS2 raw, without interpreting them.
 ///
