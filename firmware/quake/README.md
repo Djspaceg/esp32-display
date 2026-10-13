@@ -115,8 +115,9 @@ Quake writes under `/qdata` that is not a pak (`id1/config.cfg`, the menu's
 `config.cfg` is read at start as always, and written within 10 s of a change,
 on a BOOT hold to leave, on a render size change and on `quit`. Files are
 deflated; a save the store cannot hold prints `ERROR: not saved, no room in
-the save area.` and the slot keeps what it had (see the Doom README for how a
-full store saves over a slot).
+the save area.` and the slot keeps what it had. `ERROR: not saved, the save
+area could not be written.` is a flash error, which on a full store saving
+over a slot in place can have cost that slot (see the Doom README).
 
 ## Memory
 

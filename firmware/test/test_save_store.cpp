@@ -322,10 +322,15 @@ void testFullStoreStillSavesOver() {
         nullptr);  // four
   CHECK(save_store_free_sectors(&store) == 1);
   CHECK(put(&store, "quake/id1/config.cfg", text("cfg")) != nullptr);
+  // Each saved over at its own size, again and again.
   for (int i = 0; i < 6; ++i) {
     CHECK(put(&store, i % 2 ? "quake/id1/s0.sav" : "quake/id1/s2.sav",
-              pattern(4 * SAVE_STORE_SECTOR_BYTES, 9 + i)) == nullptr);
+              pattern((i % 2 ? 4 : 3) * SAVE_STORE_SECTOR_BYTES, 9 + i)) ==
+          nullptr);
   }
+  // Growing s2 into the last free sector is refused.
+  CHECK(put(&store, "quake/id1/s2.sav",
+            pattern(4 * SAVE_STORE_SECTOR_BYTES, 40)) == SAVE_STORE_FULL);
   // Bigger than its old place and the free room together: refused, kept.
   CHECK(put(&store, "quake/id1/s1.sav",
             pattern(6 * SAVE_STORE_SECTOR_BYTES, 20)) != nullptr);
@@ -352,11 +357,33 @@ void testGrowingSave() {
   CHECK(save_store_free_sectors(&store) == 4);
   const auto again1 = pattern(9 * SAVE_STORE_SECTOR_BYTES, 3);
   CHECK(put(&store, "quake/id1/s0.sav", again1) == nullptr);
+  // Growing into the very last sector is refused while the config is there,
+  // so the config is still replaced whole.
+  CHECK(put(&store, "quake/id1/s0.sav", pattern(13 * SAVE_STORE_SECTOR_BYTES, 4)) ==
+        SAVE_STORE_FULL);  // fourteen sectors
+  CHECK(save_store_free_sectors(&store) == 4);
+  CHECK(put(&store, "quake/id1/s0.sav",
+            pattern(12 * SAVE_STORE_SECTOR_BYTES, 5)) == nullptr);  // thirteen
+  CHECK(save_store_free_sectors(&store) == 1);
+  for (long budget = 0; budget < 8; ++budget) {
+    f.budget = budget;
+    put(&store, "quake/id1/config.cfg", text("cfg2"));
+    save_store_t check;
+    CHECK(mount(&check, f) == nullptr);
+    bool ok = false;
+    const auto got = get(&check, "quake/id1/config.cfg", &ok);
+    CHECK(ok && (got == text("cfg") || got == text("cfg2")));
+    CHECK(mount(&store, f) == nullptr);
+  }
+  CHECK(put(&store, "quake/id1/s0.sav", again1) == nullptr);
   save_store_t again;
   CHECK(mount(&again, f) == nullptr);
   bool ok = false;
   CHECK(get(&again, "quake/id1/s0.sav", &ok) == again1 && ok);
-  CHECK(get(&again, "quake/id1/config.cfg", &ok) == text("cfg") && ok);
+  {
+    const auto cfg = get(&again, "quake/id1/config.cfg", &ok);
+    CHECK(ok && (cfg == text("cfg") || cfg == text("cfg2")));
+  }
 }
 
 // Saving over a slot in place: the power going at any point leaves the old

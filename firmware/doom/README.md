@@ -70,8 +70,9 @@ writes or erases. Quake keeps its `config.cfg` and saves there too.
 - Files are deflated. A new save that does not fit says GAME NOT SAVED: NO
   ROOM. Saving over a slot always fits at its size or smaller: the old copy is
   kept until the new one is whole, or, when the store is too full for both,
-  erased first (only then could a power cut mid-save lose that slot). Nothing
-  on the board deletes a save yet.
+  erased first (only then could a power cut or flash error mid-save lose that
+  slot). A config is always replaced whole. Nothing on the board deletes a save
+  yet.
 
 The boot log names what the store holds (`[save] store at 0x3f0000: ...`) and
 each write (`[save] wrote doom/doom1.wad/doomsav0.dsg: ...`).
@@ -84,8 +85,8 @@ Lines typed on the serial port during Doom are commands:
 | `map <episode> <map>` | Starts a new game there |
 | `save <0-5> [name]` | Saves to that slot, as the menu does |
 | `load <0-5>` | Loads that slot |
-| `get <variable>` | Prints a `default.cfg` variable |
-| `set <variable> <value>` | Sets one and writes `default.cfg` |
+| `get <variable>` | Prints a configuration variable (`default.cfg` or Doom's extra config) |
+| `set <variable> <value>` | Sets one and writes both config files |
 
 ## Sound
 

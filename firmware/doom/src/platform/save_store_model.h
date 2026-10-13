@@ -23,8 +23,9 @@
 // Room: a file is replaced as above whenever both copies fit. When they do
 // not, but the new one fits in the old one's place, the old copy is erased
 // first: a slot can always be saved over at its size or smaller, but a power
-// cut or flash error during that write loses it. A new file must leave one
-// sector free, so a one-sector file (every config) is always replaced whole.
+// cut or flash error during that write loses it. A new file, and an in-place
+// save while other files remain, must leave one sector free, so a one-sector
+// file (every config) is always replaced whole.
 //
 // Pure C over a flash interface, so firmware/test/test_save_store.cpp runs it
 // on the host against a NOR flash fake. Compression is the caller's: the
@@ -421,8 +422,12 @@ static inline const char* save_store_write(save_store_t* store,
   uint32_t room = store->sectors - save_store_popcount(used);
   int old = found_old;
   if (needed > room) {
-    if (old < 0 ||
-        needed > room + save_store_popcount(store->files[old].mask)) {
+    const uint32_t place = room + (old < 0 ? 0 : save_store_popcount(
+                                                      store->files[old].mask));
+    // In place it still leaves a sector free while other files remain, for
+    // their configs to be replaced whole.
+    if (old < 0 || needed > place ||
+        (needed == place && store->count > 1)) {
       return SAVE_STORE_FULL;
     }
     // No room for both copies: the old one goes first.
