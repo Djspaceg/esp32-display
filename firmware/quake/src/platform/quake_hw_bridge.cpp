@@ -241,13 +241,7 @@ void serviceUsb() {
 // ---- Setup, from quake_mode.cpp ------------------------------------------
 
 // NULL when the panel is ready for frames, else why not.
-// The size asked for this boot, for Video Options.
-int s_want_width = 0;
-int s_want_height = 0;
-
 extern "C" const char* quake_display_setup(int want_width, int want_height) {
-  s_want_width = want_width;
-  s_want_height = want_height;
   s_layout =
       quakeinput::frameLayout(PANEL_W, PANEL_H, want_width, want_height);
   if (s_layout.scale == 0) return "panel too small for a 320x240 frame";
@@ -318,34 +312,66 @@ extern "C" int quake_display_render_choices(const char** labels, int max,
   quakeinput::RenderChoice choices[quakeinput::MAX_RENDER_CHOICES];
   const int n = quakeinput::renderChoices(PANEL_W, PANEL_H, choices);
   for (int i = 0; i < n && i < max; ++i) labels[i] = choices[i].label;
-  *current =
-      quakeinput::renderChoiceIndex(PANEL_W, PANEL_H, s_want_width, s_want_height);
+  *current = quakeinput::runningChoiceIndex(PANEL_W, PANEL_H, s_layout.renderWidth,
+                                            s_layout.renderHeight);
   return n < max ? n : max;
 }
+
+namespace {
+
+struct RenderSave {
+  quakeinput::RenderChoice choice;
+  SemaphoreHandle_t failed;
+};
+
+// NVS writes disable the flash cache, which IDF asserts no task does from a
+// PSRAM stack, and the Quake task's stack is in PSRAM (quake_mode.cpp): the
+// save runs on this one-shot task, whose stack is internal. It restarts on
+// success; on failure it signals and ends.
+void renderSaveTask(void* arg) {
+  RenderSave* save = static_cast<RenderSave*>(arg);
+  // The same NVS namespace and one-shot flag the boot menu uses
+  // (display_stream/boot_menu.cpp), so the restart comes straight back to
+  // Quake at the new size.
+  Preferences prefs;
+  const bool saved =
+      prefs.begin("espdisp", false) &&
+      prefs.putShort(QUAKE_RENDER_WIDTH_KEY, (int16_t)save->choice.width) &&
+      prefs.putShort(QUAKE_RENDER_HEIGHT_KEY, (int16_t)save->choice.height) &&
+      prefs.putBool("quakeonce", true);
+  prefs.end();
+  if (saved) {
+    quake_log("render size %s chosen; restarting Quake", save->choice.label);
+    doom_audio_end();
+    delay(20);
+    ESP.restart();
+  }
+  quake_log("render size %s could not be saved", save->choice.label);
+  xSemaphoreGive(save->failed);
+  vTaskDelete(nullptr);
+}
+
+}  // namespace
 
 extern "C" void quake_display_choose_render(int index) {
   quakeinput::RenderChoice choices[quakeinput::MAX_RENDER_CHOICES];
   const int n = quakeinput::renderChoices(PANEL_W, PANEL_H, choices);
   if (index < 0 || index >= n) return;
-  // The same NVS namespace and one-shot flag the boot menu uses
-  // (display_stream/boot_menu.cpp), so the restart comes straight back to
-  // Quake at the new size.
-  Preferences prefs;
-  if (!prefs.begin("espdisp", false)) return;
-  const bool saved =
-      prefs.putShort(QUAKE_RENDER_WIDTH_KEY, (int16_t)choices[index].width) &&
-      prefs.putShort(QUAKE_RENDER_HEIGHT_KEY, (int16_t)choices[index].height) &&
-      prefs.putBool("quakeonce", true);
-  prefs.end();
-  if (!saved) {
-    quake_log("render size %s could not be saved", choices[index].label);
+  // Quake's own settings first, on this task, which owns the engine
+  // (quake_quit does the same).
+  quake_engine_save_config();
+  static RenderSave save;
+  save.choice = choices[index];
+  if (save.failed == nullptr) save.failed = xSemaphoreCreateBinary();
+  // xTaskCreate puts the stack in internal RAM.
+  if (save.failed == nullptr ||
+      xTaskCreatePinnedToCore(renderSaveTask, "quake_rsave", 4096, &save, 5,
+                              nullptr, tskNO_AFFINITY) != pdPASS) {
+    quake_log("render size %s could not be saved", save.choice.label);
     return;
   }
-  quake_log("render size %s chosen; restarting Quake", choices[index].label);
-  quake_engine_save_config();
-  doom_audio_end();
-  delay(20);
-  ESP.restart();
+  // The Quake task waits here; on success the board restarts meanwhile.
+  (void)xSemaphoreTake(save.failed, pdMS_TO_TICKS(3000));
 }
 
 extern "C" void quake_display_render_size(int* width, int* height) {

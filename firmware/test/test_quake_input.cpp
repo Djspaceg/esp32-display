@@ -116,6 +116,13 @@ int main() {
     CHECK(renderChoiceIndex(466, 466, 0, 0) == 1);
     CHECK(renderChoiceIndex(466, 466, 320, 240) == 2);
     CHECK(renderChoiceIndex(466, 466, 400, 300) == -1);
+    // Which choice the running frame is: on the 1.85C the 372x280 default
+    // runs as 320x240, so Video Options marks 320x240, not nothing.
+    CHECK(runningChoiceIndex(360, 360, 320, 240) == 1);
+    CHECK(runningChoiceIndex(360, 360, 360, 360) == 0);
+    CHECK(runningChoiceIndex(466, 466, 372, 280) == 0);
+    CHECK(runningChoiceIndex(466, 466, 466, 466) == 1);
+    CHECK(runningChoiceIndex(466, 466, 400, 300) == -1);
     CHECK(frameLayout(960, 720).scale == 3);
     CHECK(frameLayout(960, 720).renderWidth == 320);
     CHECK(frameLayout(320, 240).scale == 1);

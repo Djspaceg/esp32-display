@@ -111,6 +111,20 @@ inline int renderChoiceIndex(int panelWidth, int panelHeight, int width,
   return -1;
 }
 
+/// Which of renderChoices() gives the running frame (renderWidth x
+/// renderHeight), or -1: a request the panel could not take runs as another.
+inline int runningChoiceIndex(int panelWidth, int panelHeight, int renderWidth,
+                              int renderHeight) {
+  RenderChoice choices[MAX_RENDER_CHOICES];
+  const int n = renderChoices(panelWidth, panelHeight, choices);
+  for (int i = 0; i < n; ++i) {
+    const FrameLayout l =
+        frameLayout(panelWidth, panelHeight, choices[i].width, choices[i].height);
+    if (l.renderWidth == renderWidth && l.renderHeight == renderHeight) return i;
+  }
+  return -1;
+}
+
 // ---- Key events ------------------------------------------------------------
 
 struct KeyEvent {
