@@ -6,8 +6,10 @@
 #   0x000000 - 0x008FFF  Bootloader (36KB, managed by esptool)
 #   0x009000 - 0x00DFFF  NVS (20KB) - WiFi creds, device name, orientation, brightness
 #   0x00E000 - 0x00FFFF  OTA data (8KB)
-#   0x010000 - 0x5FFFFF  app0 (6,225,920 bytes)
-#   0x600000 - 0xBEFFFF  app1 (6,225,920 bytes)
+#   0x010000 - 0x5BFFFF  app0 (5,963,776 bytes)
+#   0x5C0000 - 0xB6FFFF  app1 (5,963,776 bytes)
+#   0xB70000 - 0xBEFFFF  game_saves (512KB, 128 sectors) - Quake's and Doom's
+#                        configs and saves (doom/src/platform/save_store_model.h)
 #   0xBF0000 - 0xBFEFFF  reserved alignment gap
 #   0xBFF000 - 0xFFFFFF  doom_wad (4,198,400 bytes)
 #
@@ -22,6 +24,7 @@
 # Name,    Type, SubType, Offset,   Size,     Flags
 nvs,       data, nvs,     0x9000,   0x5000,
 otadata,   data, ota,     0xE000,   0x2000,
-app0,      app,  ota_0,   0x10000,  0x5F0000,
-app1,      app,  ota_1,   0x600000, 0x5F0000,
-doom_wad,  0x42, 0x06,    0xBFF000, 0x401000,
+app0,       app,  ota_0,   0x10000,  0x5B0000,
+app1,       app,  ota_1,   0x5C0000, 0x5B0000,
+game_saves, 0x42, 0x08,    0xB70000, 0x80000,
+doom_wad,   0x42, 0x06,    0xBFF000, 0x401000,
