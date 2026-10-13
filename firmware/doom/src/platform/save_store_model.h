@@ -20,9 +20,10 @@
 // round the area from where the last write stopped, so repeated config saves
 // wear every free sector alike.
 //
-// Room: a new file is refused when it would leave too few free sectors to
-// rewrite the largest file, so a slot can always be saved over; replacing a
-// file needs only room for the new copy.
+// Room: a file is replaced as above whenever both copies fit. When they do
+// not, but the new one fits in the old one's place, the old copy is erased
+// first: a slot can always be saved over at its size or smaller, and only
+// then could a power cut mid-write lose it. A new file needs room of its own.
 //
 // Pure C over a flash interface, so firmware/test/test_save_store.cpp runs it
 // on the host against a NOR flash fake. Compression is the caller's: the
@@ -88,8 +89,12 @@ typedef struct {
   uint32_t sectors;
   uint32_t next_sequence;
   uint32_t cursor;  // where the next allocation starts looking
+  // Heads of replaced copies whose erase failed; retried before a remove,
+  // which would otherwise bring the old copy back at the next mount.
+  uint32_t stale;
   int count;
   save_store_file_t files[SAVE_STORE_MAX_FILES];
+  save_store_file_t scan[SAVE_STORE_MAX_SECTORS];  // mount's working set
 } save_store_t;
 
 // zlib's CRC-32, continuing from `crc` (0 to start).
@@ -212,13 +217,15 @@ static inline bool save_store_name_from_path(const char* prefix,
     memcpy(out, prefix, used);
   }
   const char* p = path;
+  bool last_dot = false;
   while (*p != '\0') {
     while (*p == '/') ++p;
     const char* end = p;
     while (*end != '\0' && *end != '/') ++end;
     const size_t part = (size_t)(end - p);
     if (part == 0) break;
-    if (!(part == 1 && p[0] == '.')) {
+    last_dot = part == 1 && p[0] == '.';
+    if (!last_dot) {
       const size_t sep = used > 0 ? 1 : 0;
       if (used + sep + part >= SAVE_STORE_NAME_BYTES) return false;
       if (sep) out[used++] = '/';
@@ -228,7 +235,8 @@ static inline bool save_store_name_from_path(const char* prefix,
     p = end;
   }
   out[used] = '\0';
-  // A path naming only a directory ("/id1/") is not a file.
+  // A path naming only a directory ("/id1/", "/id1/.") is not a file.
+  if (last_dot) return false;
   if (path[0] != '\0' && path[strlen(path) - 1] == '/') return false;
   if (prefix != NULL && prefix[0] != '\0' &&
       used == strnlen(prefix, SAVE_STORE_NAME_BYTES)) {
@@ -309,20 +317,22 @@ static inline bool save_store_parse_head(const uint8_t* h, uint32_t sector,
          save_store_name_valid(out->name);
 }
 
-static inline bool save_store_payload_ok(const save_store_flash_t* flash,
-                                         const save_store_file_t* file) {
+// 1 when a record's payload passes its CRC, 0 when it does not, -1 when the
+// flash could not be read (then nothing may be concluded about it).
+static inline int save_store_payload_ok(const save_store_flash_t* flash,
+                                        const save_store_file_t* file) {
   uint8_t chunk[256];
   uint32_t crc = 0;
   for (uint32_t at = 0; at < file->stored_bytes;) {
     uint32_t n = file->stored_bytes - at;
     if (n > sizeof(chunk)) n = sizeof(chunk);
     if (!save_store_read_payload(flash, file->head, file->mask, at, chunk, n)) {
-      return false;
+      return -1;
     }
     crc = save_store_crc32(crc, chunk, n);
     at += n;
   }
-  return crc == file->stored_crc;
+  return crc == file->stored_crc ? 1 : 0;
 }
 
 // Reads the area: every record whose header and payload pass, the newest of
@@ -336,7 +346,9 @@ static inline const char* save_store_mount(save_store_t* store,
   if (sectors == 0 || sectors > SAVE_STORE_MAX_SECTORS) {
     return "save area has an unusable size";
   }
-  save_store_file_t found[SAVE_STORE_MAX_SECTORS];
+  // A read failure fails the mount rather than dropping the record, whose
+  // sectors would then be reused.
+  save_store_file_t* found = store->scan;
   uint32_t count = 0;
   for (uint32_t sector = 0; sector < sectors; ++sector) {
     uint8_t head[SAVE_STORE_HEAD_BYTES];
@@ -344,10 +356,10 @@ static inline const char* save_store_mount(save_store_t* store,
                     sizeof(head))) {
       return "save area read failed";
     }
-    if (save_store_parse_head(head, sector, sectors, &found[count]) &&
-        save_store_payload_ok(&flash, &found[count])) {
-      ++count;
-    }
+    if (!save_store_parse_head(head, sector, sectors, &found[count])) continue;
+    const int payload = save_store_payload_ok(&flash, &found[count]);
+    if (payload < 0) return "save area read failed";
+    if (payload > 0) ++count;
   }
   // Newest first; a record overlapping a newer one or repeating its name
   // loses.
@@ -394,21 +406,27 @@ static inline const char* save_store_write(save_store_t* store,
   if (!save_store_name_valid(name)) return "unusable file name";
   const uint32_t needed = save_store_sectors_for(stored);
   if (needed > store->sectors) return "too big for the save area";
-  const int old = save_store_find(store, name);
-  if (old < 0 && store->count >= SAVE_STORE_MAX_FILES) {
+  const int found_old = save_store_find(store, name);
+  if (found_old < 0 && store->count >= SAVE_STORE_MAX_FILES) {
     return "save area holds its most files";
   }
-  const uint32_t used = save_store_used_mask(store);
-  const uint32_t free = store->sectors - save_store_popcount(used);
-  if (needed > free) return "save area full";
-  if (old < 0) {
-    // Keep room to rewrite the largest file, this one included.
-    uint32_t largest = needed;
-    for (int i = 0; i < store->count; ++i) {
-      const uint32_t n = save_store_popcount(store->files[i].mask);
-      if (n > largest) largest = n;
+  uint32_t used = save_store_used_mask(store);
+  uint32_t room = store->sectors - save_store_popcount(used);
+  int old = found_old;
+  if (needed > room) {
+    if (old < 0 ||
+        needed > room + save_store_popcount(store->files[old].mask)) {
+      return "save area full";
     }
-    if (free - needed < largest) return "save area full";
+    // No room for both copies: the old one goes first.
+    if (!store->flash.erase_sector(store->flash.context,
+                                   store->files[old].head)) {
+      return "save area erase failed";
+    }
+    save_store_drop(store, old);
+    old = -1;
+    used = save_store_used_mask(store);
+    room = store->sectors - save_store_popcount(used);
   }
   // Free sectors round from the cursor; the first is the head.
   uint32_t mask = 0;
@@ -429,6 +447,7 @@ static inline const char* save_store_write(save_store_t* store,
       return "save area erase failed";
     }
   }
+  store->stale &= ~mask;
   // Payload, the head sector's share last, then the header.
   const uint8_t* bytes = (const uint8_t*)payload;
   const uint32_t first = SAVE_STORE_SECTOR_BYTES - SAVE_STORE_HEAD_BYTES;
@@ -476,8 +495,12 @@ static inline const char* save_store_write(save_store_t* store,
   }
   store->next_sequence++;
   if (old >= 0) {
-    // The new copy is whole; a failed erase here is resolved at next mount.
-    store->flash.erase_sector(store->flash.context, store->files[old].head);
+    // The new copy is whole; a failed erase here is resolved at next mount,
+    // or retried by a remove.
+    if (!store->flash.erase_sector(store->flash.context,
+                                   store->files[old].head)) {
+      store->stale |= 1u << store->files[old].head;
+    }
     store->files[old] = file;
   } else {
     store->files[store->count++] = file;
@@ -489,6 +512,14 @@ static inline const char* save_store_write(save_store_t* store,
 static inline bool save_store_remove(save_store_t* store, const char* name) {
   const int i = save_store_find(store, name);
   if (i < 0) return false;
+  const uint32_t used = save_store_used_mask(store);
+  for (uint32_t sector = 0; sector < store->sectors; ++sector) {
+    const uint32_t bit = 1u << sector;
+    if ((store->stale & bit) && !(used & bit) &&
+        store->flash.erase_sector(store->flash.context, sector)) {
+      store->stale &= ~bit;
+    }
+  }
   if (!store->flash.erase_sector(store->flash.context, store->files[i].head)) {
     return false;
   }

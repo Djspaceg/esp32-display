@@ -64,8 +64,13 @@ static void save_log(const char* format, ...) {
 static bool save_tried = false;
 static const char* save_failure = "save store not opened";
 static const esp_partition_t* save_area = NULL;
-static save_store_t save_state;
+// In PSRAM, allocated at open: nothing of the store is paid for in a
+// streaming boot's internal RAM.
+static save_store_t* save_state = NULL;
 static SemaphoreHandle_t save_lock = NULL;
+// Heads of files that could not be read this boot: never written over, so a
+// game that fell back to its defaults does not replace the file it lost.
+static uint32_t save_unreadable = 0;
 
 // ---- Flash, from any stack --------------------------------------------------
 
@@ -73,6 +78,7 @@ enum { SAVE_OP_READ, SAVE_OP_WRITE, SAVE_OP_ERASE };
 
 static SemaphoreHandle_t save_request = NULL;
 static SemaphoreHandle_t save_done = NULL;
+static bool save_worker_started = false;
 static struct {
   int op;
   uint32_t offset;
@@ -103,10 +109,25 @@ static void save_worker_task(void* arg) {
   }
 }
 
-// Callers hold save_lock, which also owns save_job.
+// Callers hold save_lock, which also owns save_job. The worker is started on
+// the first call from a PSRAM stack (Quake's); Doom's loop never needs it.
 static bool save_flash(int op, uint32_t offset, void* data, uint32_t length) {
   if (!esp_ptr_external_ram(__builtin_frame_address(0))) {
     return save_flash_now(op, offset, data, length) == ESP_OK;
+  }
+  if (!save_worker_started) {
+    // xTaskCreate puts the stack in internal RAM.
+    if (save_request == NULL) save_request = xSemaphoreCreateBinary();
+    if (save_done == NULL) save_done = xSemaphoreCreateBinary();
+    if (save_request == NULL || save_done == NULL ||
+        xTaskCreatePinnedToCore(save_worker_task, "game_saves",
+                                SAVE_WORKER_STACK_BYTES, NULL,
+                                SAVE_WORKER_PRIORITY, NULL,
+                                tskNO_AFFINITY) != pdPASS) {
+      save_log("no internal RAM for the save worker");
+      return false;
+    }
+    save_worker_started = true;
   }
   save_job.op = op;
   save_job.offset = offset;
@@ -164,9 +185,10 @@ static const char* save_register_area(void) {
 
 // ---- Compression ------------------------------------------------------------
 
+// PSRAM only: a game boot has megabytes of it, and internal RAM is the
+// panel's and the flash driver's.
 static void* save_alloc(size_t bytes) {
-  void* p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  return p != NULL ? p : malloc(bytes);
+  return heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
 // Deflates `length` bytes into a new buffer; NULL when it does not shrink.
@@ -217,6 +239,7 @@ static struct {
   bool writable;
   bool append;
   bool dirty;
+  bool failed;  // a write failed: the file is not stored on close
   char name[SAVE_STORE_NAME_BYTES];
   uint8_t* data;
   uint32_t length;
@@ -230,10 +253,10 @@ static bool save_fd_valid(int fd) {
 
 // File `index`'s raw bytes into a new buffer of at least one byte.
 static uint8_t* save_load(int index, uint32_t* length) {
-  const save_store_file_t* file = &save_state.files[index];
+  const save_store_file_t* file = &save_state->files[index];
   uint8_t* stored = (uint8_t*)save_alloc(file->stored_bytes + 1);
   if (stored == NULL) return NULL;
-  if (!save_store_read(&save_state, index, 0, stored, file->stored_bytes)) {
+  if (!save_store_read(save_state, index, 0, stored, file->stored_bytes)) {
     free(stored);
     return NULL;
   }
@@ -256,8 +279,10 @@ static uint8_t* save_load(int index, uint32_t* length) {
   return raw;
 }
 
+bool save_store_ready(void) { return save_tried && save_failure == NULL; }
+
 int save_file_open(const char* name, int flags) {
-  if (save_area == NULL || save_failure != NULL) {
+  if (!save_store_ready()) {
     errno = ENODEV;
     return -1;
   }
@@ -274,7 +299,7 @@ int save_file_open(const char* name, int flags) {
     return -1;
   }
   const int access = flags & O_ACCMODE;
-  const int index = save_store_find(&save_state, name);
+  const int index = save_store_find(save_state, name);
   if (index < 0 && (access == O_RDONLY || !(flags & O_CREAT))) {
     xSemaphoreGive(save_lock);
     errno = ENOENT;
@@ -285,8 +310,10 @@ int save_file_open(const char* name, int flags) {
   if (index >= 0 && !(access != O_RDONLY && (flags & O_TRUNC))) {
     data = save_load(index, &length);
     if (data == NULL) {
+      save_unreadable |= 1u << save_state->files[index].head;
       xSemaphoreGive(save_lock);
-      save_log("could not read %s", name);
+      save_log("could not read %s; it will not be written over this boot",
+               name);
       errno = EIO;
       return -1;
     }
@@ -328,6 +355,7 @@ ssize_t save_file_write(int fd, const void* src, size_t size) {
   if (save_files[fd].append) save_files[fd].position = save_files[fd].length;
   const uint32_t position = save_files[fd].position;
   if (size > SAVE_FILE_MAX_BYTES || position > SAVE_FILE_MAX_BYTES - size) {
+    save_files[fd].failed = true;
     errno = EFBIG;
     return -1;
   }
@@ -340,9 +368,7 @@ ssize_t save_file_write(int fd, const void* src, size_t size) {
     uint8_t* grown = (uint8_t*)heap_caps_realloc(
         save_files[fd].data, capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (grown == NULL) {
-      grown = (uint8_t*)realloc(save_files[fd].data, capacity);
-    }
-    if (grown == NULL) {
+      save_files[fd].failed = true;
       errno = ENOMEM;
       return -1;
     }
@@ -382,18 +408,23 @@ off_t save_file_lseek(int fd, off_t offset, int whence) {
 static const char* save_commit(const char* name, const uint8_t* data,
                                uint32_t length) {
   const uint32_t crc = save_store_crc32(0, data, length);
-  if (save_store_unchanged(&save_state, name, length, crc)) return NULL;
+  if (save_store_unchanged(save_state, name, length, crc)) return NULL;
+  const int old = save_store_find(save_state, name);
+  if (old >= 0 && (save_unreadable & (1u << save_state->files[old].head))) {
+    save_log("not writing %s: its stored copy could not be read", name);
+    return "stored copy unreadable";
+  }
   uint32_t stored = length;
   uint8_t* packed = save_deflate(data, length, &stored);
   const char* failure = save_store_write(
-      &save_state, name, packed != NULL ? packed : data, stored, length, crc,
+      save_state, name, packed != NULL ? packed : data, stored, length, crc,
       packed != NULL ? SAVE_STORE_ENCODING_DEFLATE : SAVE_STORE_ENCODING_RAW);
   free(packed);
   if (failure == NULL) {
     save_log("wrote %s: %u bytes (%u stored), %u of %u sectors free", name,
              (unsigned)length, (unsigned)stored,
-             (unsigned)save_store_free_sectors(&save_state),
-             (unsigned)save_state.sectors);
+             (unsigned)save_store_free_sectors(save_state),
+             (unsigned)save_state->sectors);
   } else {
     save_log("could not write %s (%u bytes, %u stored): %s", name,
              (unsigned)length, (unsigned)stored, failure);
@@ -408,7 +439,12 @@ int save_file_close(int fd) {
   }
   xSemaphoreTake(save_lock, portMAX_DELAY);
   const char* failure = NULL;
-  if (save_files[fd].dirty) {
+  if (save_files[fd].failed) {
+    // Part of the file never arrived; storing the rest would replace a good
+    // copy with a damaged one.
+    save_log("not writing %s: a write to it failed", save_files[fd].name);
+    failure = "write failed";
+  } else if (save_files[fd].dirty) {
     static const uint8_t empty = 0;
     failure = save_commit(save_files[fd].name,
                           save_files[fd].data != NULL ? save_files[fd].data
@@ -437,13 +473,13 @@ int save_file_fstat(int fd, struct stat* st) {
 }
 
 int save_file_stat(const char* name, struct stat* st) {
-  if (save_area == NULL || save_failure != NULL) {
+  if (!save_store_ready()) {
     errno = ENODEV;
     return -1;
   }
   xSemaphoreTake(save_lock, portMAX_DELAY);
-  const int index = save_store_find(&save_state, name);
-  const uint32_t bytes = index >= 0 ? save_state.files[index].raw_bytes : 0;
+  const int index = save_store_find(save_state, name);
+  const uint32_t bytes = index >= 0 ? save_state->files[index].raw_bytes : 0;
   xSemaphoreGive(save_lock);
   if (index < 0) {
     errno = ENOENT;
@@ -456,13 +492,15 @@ int save_file_stat(const char* name, struct stat* st) {
 }
 
 int save_file_unlink(const char* name) {
-  if (save_area == NULL || save_failure != NULL) {
+  if (!save_store_ready()) {
     errno = ENODEV;
     return -1;
   }
   xSemaphoreTake(save_lock, portMAX_DELAY);
-  const bool exists = save_store_find(&save_state, name) >= 0;
-  const bool removed = exists && save_store_remove(&save_state, name);
+  const int index = save_store_find(save_state, name);
+  const bool exists = index >= 0;
+  if (exists) save_unreadable &= ~(1u << save_state->files[index].head);
+  const bool removed = exists && save_store_remove(save_state, name);
   xSemaphoreGive(save_lock);
   if (!removed) {
     errno = exists ? EIO : ENOENT;
@@ -520,20 +558,14 @@ const char* save_store_open(void) {
   save_failure = save_register_area();
   if (save_failure != NULL) return save_failure;
   save_lock = xSemaphoreCreateMutex();
-  save_request = xSemaphoreCreateBinary();
-  save_done = xSemaphoreCreateBinary();
-  // xTaskCreate puts the stack in internal RAM.
-  if (save_lock == NULL || save_request == NULL || save_done == NULL ||
-      xTaskCreatePinnedToCore(save_worker_task, "game_saves",
-                              SAVE_WORKER_STACK_BYTES, NULL,
-                              SAVE_WORKER_PRIORITY, NULL,
-                              tskNO_AFFINITY) != pdPASS) {
-    save_failure = "no internal RAM for the save store";
+  save_state = (save_store_t*)save_alloc(sizeof(*save_state));
+  if (save_lock == NULL || save_state == NULL) {
+    save_failure = "no memory for the save store";
     return save_failure;
   }
   const save_store_flash_t flash = {NULL, save_area_read, save_area_write,
                                     save_area_erase};
-  save_failure = save_store_mount(&save_state, flash,
+  save_failure = save_store_mount(save_state, flash,
                                   SAVE_AREA_BYTES / SAVE_STORE_SECTOR_BYTES);
   if (save_failure != NULL) return save_failure;
   if (esp_vfs_register(SAVE_STORE_MOUNT, &save_vfs, NULL) != ESP_OK) {
@@ -541,13 +573,13 @@ const char* save_store_open(void) {
     return save_failure;
   }
   save_log("store at 0x%06x: %d file(s), %u of %u sectors free",
-           (unsigned)save_area->address, save_state.count,
-           (unsigned)save_store_free_sectors(&save_state),
-           (unsigned)save_state.sectors);
-  for (int i = 0; i < save_state.count; ++i) {
-    save_log("  %s: %u bytes (%u stored)", save_state.files[i].name,
-             (unsigned)save_state.files[i].raw_bytes,
-             (unsigned)save_state.files[i].stored_bytes);
+           (unsigned)save_area->address, save_state->count,
+           (unsigned)save_store_free_sectors(save_state),
+           (unsigned)save_state->sectors);
+  for (int i = 0; i < save_state->count; ++i) {
+    save_log("  %s: %u bytes (%u stored)", save_state->files[i].name,
+             (unsigned)save_state->files[i].raw_bytes,
+             (unsigned)save_state->files[i].stored_bytes);
   }
   return NULL;
 }

@@ -22,6 +22,8 @@
 #include <esp_timer.h>
 
 #include "quake_platform.h"
+
+#include <save_store.h>
 #include "quake_pak_model.h"
 
 qboolean isDedicated;
@@ -483,7 +485,9 @@ static void quake_log_map_change(void) {
 // host.c defines it; no header declares it.
 void Host_WriteConfiguration(void);
 
-void quake_engine_save_config(void) { Host_WriteConfiguration(); }
+void quake_engine_save_config(void) {
+  if (save_store_ready()) Host_WriteConfiguration();
+}
 
 void quake_engine_frame(void) {
   const double now = Sys_FloatTime();
@@ -496,7 +500,7 @@ void quake_engine_frame(void) {
   // skips an unchanged file, so this costs no flash.
   static double config_due = 0;
   if (now >= config_due) {
-    if (config_due != 0) Host_WriteConfiguration();
+    if (config_due != 0 && save_store_ready()) Host_WriteConfiguration();
     config_due = now + 10.0;
   }
 }

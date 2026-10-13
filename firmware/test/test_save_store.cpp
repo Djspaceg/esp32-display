@@ -33,6 +33,9 @@ struct Flash {
   // Operations allowed before the power goes; -1 is never.
   long budget = -1;
   bool dead = false;
+  // A sector whose erase fails, and a byte range whose reads fail; -1 none.
+  long badEraseSector = -1;
+  long badReadFrom = -1, badReadTo = -1;
 
   explicit Flash(uint32_t sectors)
       : bytes(sectors * SAVE_STORE_SECTOR_BYTES, 0xFF), erases(sectors, 0) {}
@@ -51,6 +54,10 @@ struct Flash {
 bool fakeRead(void* context, uint32_t offset, void* out, uint32_t length) {
   Flash* f = static_cast<Flash*>(context);
   if (f->dead || offset + length > f->bytes.size()) return false;
+  if (f->badReadFrom >= 0 && (long)(offset + length) > f->badReadFrom &&
+      (long)offset < f->badReadTo) {
+    return false;
+  }
   std::memcpy(out, f->bytes.data() + offset, length);
   return true;
 }
@@ -74,6 +81,7 @@ bool fakeWrite(void* context, uint32_t offset, const void* data,
 
 bool fakeErase(void* context, uint32_t sector) {
   Flash* f = static_cast<Flash*>(context);
+  if ((long)sector == f->badEraseSector) return false;
   if (sector >= f->erases.size() || !f->spend()) return false;
   std::memset(f->bytes.data() + sector * SAVE_STORE_SECTOR_BYTES, 0xFF,
               SAVE_STORE_SECTOR_BYTES);
@@ -299,29 +307,116 @@ void testDuplicateResolvedToNewest() {
   CHECK(save_store_free_sectors(&third) == SECTORS - 1);
 }
 
-// New files never take the last room an overwrite of the largest file needs,
-// so a slot can always be saved over.
-void testRoomKeptForOverwrite() {
+// A full store still takes a save over a slot at its size or smaller, and a
+// save that grew, by erasing the old copy first when both do not fit.
+void testFullStoreStillSavesOver() {
   Flash f(SECTORS);
   save_store_t store;
   CHECK(mount(&store, f) == nullptr);
   const auto big = pattern(4 * SAVE_STORE_SECTOR_BYTES, 8);  // five sectors
-  CHECK(put(&store, "quake/id1/s0.sav", big) == nullptr);       // 10 free
-  CHECK(put(&store, "quake/id1/s1.sav", big) == nullptr);       // 5 free
-  // A third would leave nothing to rewrite either with.
-  CHECK(put(&store, "quake/id1/s2.sav", big) != nullptr);
+  CHECK(put(&store, "quake/id1/s0.sav", big) == nullptr);
+  CHECK(put(&store, "quake/id1/s1.sav", big) == nullptr);
+  CHECK(put(&store, "quake/id1/s2.sav", big) == nullptr);
+  CHECK(save_store_free_sectors(&store) == 0);
   CHECK(put(&store, "quake/id1/config.cfg", text("cfg")) != nullptr);
-  CHECK(save_store_free_sectors(&store) == 5);
-  // Both slots can still be saved over, again and again.
   for (int i = 0; i < 6; ++i) {
-    CHECK(put(&store, i % 2 ? "quake/id1/s0.sav" : "quake/id1/s1.sav",
+    CHECK(put(&store, i % 2 ? "quake/id1/s0.sav" : "quake/id1/s2.sav",
               pattern(4 * SAVE_STORE_SECTOR_BYTES, 9 + i)) == nullptr);
   }
-  CHECK(save_store_remove(&store, "quake/id1/s1.sav"));
-  CHECK(put(&store, "quake/id1/config.cfg", text("cfg")) == nullptr);
+  // Bigger than its old place and the free room together: refused, kept.
+  CHECK(put(&store, "quake/id1/s1.sav",
+            pattern(6 * SAVE_STORE_SECTOR_BYTES, 20)) != nullptr);
+  save_store_t again;
+  CHECK(mount(&again, f) == nullptr);
+  bool ok = false;
+  CHECK(get(&again, "quake/id1/s1.sav", &ok) == big && ok);
+  CHECK(get(&again, "quake/id1/s0.sav", &ok) ==
+            pattern(4 * SAVE_STORE_SECTOR_BYTES, 14) && ok);
+  CHECK(again.count == 3);
   // Too big for the area at all.
-  CHECK(put(&store, "x", pattern(SECTORS * SAVE_STORE_SECTOR_BYTES, 1)) !=
+  CHECK(put(&again, "x", pattern(SECTORS * SAVE_STORE_SECTOR_BYTES, 1)) !=
         nullptr);
+}
+
+void testGrowingSave() {
+  Flash f(SECTORS);
+  save_store_t store;
+  CHECK(mount(&store, f) == nullptr);
+  CHECK(put(&store, "quake/id1/config.cfg", text("cfg")) == nullptr);
+  CHECK(put(&store, "quake/id1/s0.sav", pattern(9000, 1)) == nullptr);
+  const auto grown = pattern(9 * SAVE_STORE_SECTOR_BYTES, 2);  // ten sectors
+  CHECK(put(&store, "quake/id1/s0.sav", grown) == nullptr);
+  CHECK(save_store_free_sectors(&store) == 4);
+  const auto again1 = pattern(9 * SAVE_STORE_SECTOR_BYTES, 3);
+  CHECK(put(&store, "quake/id1/s0.sav", again1) == nullptr);
+  save_store_t again;
+  CHECK(mount(&again, f) == nullptr);
+  bool ok = false;
+  CHECK(get(&again, "quake/id1/s0.sav", &ok) == again1 && ok);
+  CHECK(get(&again, "quake/id1/config.cfg", &ok) == text("cfg") && ok);
+}
+
+// Saving over a slot in place: the power going at any point leaves the old
+// copy, the new one, or (only in this case) none, never a damaged file, and
+// the other files are untouched.
+void testPowerLossDuringInPlaceOverwrite() {
+  const auto big = pattern(4 * SAVE_STORE_SECTOR_BYTES, 8);
+  const auto after = pattern(4 * SAVE_STORE_SECTOR_BYTES, 30);
+  int sawNone = 0, sawNew = 0;
+  for (long budget = 0; budget < 32; ++budget) {
+    Flash f(SECTORS);
+    save_store_t store;
+    CHECK(mount(&store, f) == nullptr);
+    CHECK(put(&store, "a/s0", big) == nullptr);
+    CHECK(put(&store, "a/s1", big) == nullptr);
+    CHECK(put(&store, "a/s2", big) == nullptr);
+    f.budget = budget;
+    put(&store, "a/s1", after);
+    save_store_t again;
+    CHECK(mount(&again, f) == nullptr);
+    bool ok = false;
+    const auto got = get(&again, "a/s1", &ok);
+    CHECK(!ok || got == big || got == after);
+    if (!ok) ++sawNone;
+    if (ok && got == after) ++sawNew;
+    CHECK(get(&again, "a/s0", &ok) == big && ok);
+    CHECK(get(&again, "a/s2", &ok) == big && ok);
+  }
+  CHECK(sawNone > 0);
+  CHECK(sawNew > 0);
+}
+
+// An old copy whose erase failed does not come back after a remove.
+void testRemoveAfterFailedErase() {
+  Flash f(SECTORS);
+  save_store_t store;
+  CHECK(mount(&store, f) == nullptr);
+  CHECK(put(&store, "doom/default.cfg", text("old")) == nullptr);
+  f.badEraseSector = store.files[save_store_find(&store, "doom/default.cfg")].head;
+  CHECK(put(&store, "doom/default.cfg", text("new")) == nullptr);
+  f.badEraseSector = -1;
+  CHECK(save_store_remove(&store, "doom/default.cfg"));
+  save_store_t again;
+  CHECK(mount(&again, f) == nullptr);
+  CHECK(again.count == 0);
+}
+
+// A sector that cannot be read fails the mount instead of being taken as
+// free and written over.
+void testReadErrorFailsMount() {
+  Flash f(SECTORS);
+  save_store_t store;
+  CHECK(mount(&store, f) == nullptr);
+  CHECK(put(&store, "quake/id1/s0.sav", pattern(9000, 1)) == nullptr);
+  const uint32_t head =
+      store.files[save_store_find(&store, "quake/id1/s0.sav")].head;
+  f.badReadFrom = head * SAVE_STORE_SECTOR_BYTES + SAVE_STORE_HEAD_BYTES + 300;
+  f.badReadTo = f.badReadFrom + 1;
+  save_store_t again;
+  CHECK(save_store_mount(&again, flashOf(f), SECTORS) != nullptr);
+  f.badReadFrom = f.badReadTo = -1;
+  CHECK(mount(&again, f) == nullptr);
+  CHECK(again.count == 1);
 }
 
 // A config saved over and over wears the area evenly, not one sector.
@@ -360,6 +455,7 @@ void testNames() {
   CHECK(!save_store_name_from_path("quake", "/id1/../x", out));
   CHECK(!save_store_name_from_path("quake", "/", out));
   CHECK(!save_store_name_from_path("quake", "/id1/", out));
+  CHECK(!save_store_name_from_path("quake", "/id1/config.cfg/.", out));
   CHECK(!save_store_name_from_path(nullptr, "", out));
   std::string longPath = "/" + std::string(SAVE_STORE_NAME_BYTES, 'a');
   CHECK(!save_store_name_from_path(nullptr, longPath.c_str(), out));
@@ -388,7 +484,11 @@ int main() {
   testGarbageArea();
   testCorruptPayloadIgnored();
   testDuplicateResolvedToNewest();
-  testRoomKeptForOverwrite();
+  testFullStoreStillSavesOver();
+  testGrowingSave();
+  testPowerLossDuringInPlaceOverwrite();
+  testRemoveAfterFailedErase();
+  testReadErrorFailsMount();
   testWearSpreads();
   testNames();
   testCrcIsZlibs();

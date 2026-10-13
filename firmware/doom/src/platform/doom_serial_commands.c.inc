@@ -7,7 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-void doom_save_config(void) { M_SaveDefaults(); }
+void doom_save_config(void) {
+  if (save_store_ready()) M_SaveDefaults();
+}
 
 static void doom_serial_help(void) {
   doom_log("serial commands: where | map <episode> <map> | save <0-5> [name] |"
@@ -33,8 +35,22 @@ void doom_serial_command(char* line) {
              playeringame[consoleplayer] ? players[consoleplayer].health : 0,
              demoplayback ? 1 : 0, menuactive ? 1 : 0);
   } else if (strcmp(cmd, "map") == 0 && argc >= 3) {
-    G_DeferedInitNew(sk_medium, atoi(argv[1]), atoi(argv[2]));
-    doom_log("map: starting E%sM%s", argv[1], argv[2]);
+    // Only a map the WAD has: the engine itself does not check.
+    const int episode = atoi(argv[1]);
+    const int map = atoi(argv[2]);
+    char lump[9];
+    if (gamemode == commercial) {
+      snprintf(lump, sizeof(lump), "MAP%02d", map);
+    } else {
+      snprintf(lump, sizeof(lump), "E%dM%d", episode, map);
+    }
+    if (episode < 0 || episode > 9 || map < 1 || map > 99 ||
+        W_CheckNumForName(lump) < 0) {
+      doom_log("map: this WAD has no %s", lump);
+      return;
+    }
+    G_DeferedInitNew(sk_medium, episode, map);
+    doom_log("map: starting %s", lump);
   } else if (strcmp(cmd, "save") == 0 && argc >= 2) {
     const int slot = atoi(argv[1]);
     if (slot < 0 || slot > 5 || gamestate != GS_LEVEL || !usergame ||
