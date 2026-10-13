@@ -104,17 +104,21 @@ static bool showQuakeFailure(const char *reason) {
   }
   const size_t bytes = (size_t)PANEL_W * (size_t)PANEL_H * 2;
   uint8_t *card = (uint8_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+  // Once the engine heap exists PSRAM has no 434 KB left; the engine is dead
+  // by now (every caller restarts), so its heap holds the card instead.
+  const bool scratch = card == nullptr;
+  if (scratch) card = (uint8_t *)quake_engine_scratch(bytes);
   if (card == nullptr) return false;
   doomfail::compose(card, PANEL_W, PANEL_H, bcfg->panel->roundDisplay, reason,
                     QUAKE_FAILURE_HEADLINE);
   if (queuePanelBitmap(panel, *bcfg, 0, 0, PANEL_W, PANEL_H, card) != ESP_OK) {
-    heap_caps_free(card);
+    if (!scratch) heap_caps_free(card);
     return false;
   }
   // DMA owns the card until completion; leak it on a timeout, the restart
   // reclaims it.
   if (!waitForQuakeDma(1000, false)) return false;
-  heap_caps_free(card);
+  if (!scratch) heap_caps_free(card);
   return true;
 }
 

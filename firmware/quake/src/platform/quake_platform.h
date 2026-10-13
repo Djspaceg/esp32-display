@@ -33,6 +33,10 @@ bool quake_engine_in_menu(void);
 /// Queues a line of console text, as if typed at the console.
 void quake_engine_command(const char* text);
 
+/// Memory for a failure card once the engine has stopped for good: the hunk,
+/// when it is at least `bytes`, else NULL. Only the restart path may use it.
+void* quake_engine_scratch(size_t bytes);
+
 /// Frames drawn since start, for the frame-rate line.
 uint32_t quake_engine_frames_rendered(void);
 

@@ -415,6 +415,16 @@ static const char* quake_vid_allocate(void) {
   return NULL;
 }
 
+static quakeparms_t parms;
+
+// The hunk, for a failure card once the engine is dead: Sys_Error never
+// returns, so nothing reads the hunk again before the restart.
+void* quake_engine_scratch(size_t bytes) {
+  return parms.membase != NULL && bytes <= (size_t)parms.memsize
+             ? parms.membase
+             : NULL;
+}
+
 const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes,
                                uint32_t slack_bytes) {
   if (!quake_statics_allocate()) return "no memory for the engine's tables";
@@ -429,7 +439,6 @@ const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes,
   if (largest - slack_bytes < hunk_bytes) {
     hunk_bytes = (uint32_t)((largest - slack_bytes) & ~(size_t)0xFFFF);
   }
-  static quakeparms_t parms;
   parms.memsize = (int)hunk_bytes;
   parms.membase =
       heap_caps_malloc(hunk_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
