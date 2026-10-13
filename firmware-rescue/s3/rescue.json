@@ -1,5 +1,5 @@
 {
-  "built_at": "2026-10-10T19:09:55Z",
+  "built_at": "2026-10-13T20:38:05Z",
   "chip": "esp32s3",
   "family": "s3",
   "format": 1,
@@ -16,7 +16,7 @@
       "bytes": 3072,
       "file": "partitions.bin",
       "role": "partitions",
-      "sha256": "44114f7a5e42bf59146493f8fb55fa5d8022713039d95fcb8a10464225c014a9"
+      "sha256": "873aa9790a8d20b442f8fcfa2a592ed55f7c7da7c42f3b1010c8dd38bbfe7ed6"
     },
     {
       "address": 57344,
@@ -27,12 +27,12 @@
     },
     {
       "address": 65536,
-      "bytes": 420032,
+      "bytes": 420048,
       "file": "app.bin",
       "role": "app",
-      "sha256": "55eb426eae983f3b128fe79698e27b4a9740f92b01650415e7532cd899f23176"
+      "sha256": "377746a35cbe717a3115779649bb3de3d97174c97c42e616f7b05b11b6512e28"
     }
   ],
-  "source_commit": "6484c944e0743467212739ea0bb6a35b8bb500df",
+  "source_commit": "729e99e92b65d5e2439ff5b3a98052f6afe2152d",
   "source_dirty": false
 }

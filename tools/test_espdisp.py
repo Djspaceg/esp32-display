@@ -4214,7 +4214,7 @@ def test_doom_partition_contracts():
     check_fails(
         lambda: espdisp._verify_partition_payload(
             espdisp.FAMILIES["p4"], no_quake),
-        "expected app0, app1, doom_wad, nvs, otadata, quake_pak",
+        "expected app0, app1, doom_wad, game_saves, nvs, otadata, quake_pak",
         "the P4 table before quake_pak is no longer the canonical layout")
     # The layout the 4B proved unmappable: 8 MiB slots, WAD at 0x1010000.
     past_map = b"".join([
@@ -4232,7 +4232,7 @@ def test_doom_partition_contracts():
     check_fails(
         lambda: espdisp._verify_partition_payload(
             espdisp.FAMILIES["p4"], missing_app1),
-        "expected app0, app1, doom_wad, nvs, otadata, quake_pak",
+        "expected app0, app1, doom_wad, game_saves, nvs, otadata, quake_pak",
         "P4 table without its recovery OTA slot")
 
     s3 = b"".join([
@@ -5648,9 +5648,14 @@ def test_s3_doom_build_contract():
                 espdisp.read_binary(artifact_path))
             image = manifest["images"][0]
             wad = flash_payloads[key].get("doom_wad")
+            # The latest revision is on the current layout; an older one may
+            # keep the layout it shipped with, which only a USB flash installs.
+            layouts = {family.partition_scheme}
+            if revision["version"] != catalog["families"][key]["latest_version"]:
+                layouts |= espdisp.LEGACY_PARTITION_SCHEMES.get(key, set())
             satisfies_doom_contract = (
                 espdisp.app_carries_doom_runtime(payloads[key])
-                and image.get("partition") == family.partition_scheme
+                and image.get("partition") in layouts
                 and wad is not None
                 and len(wad) == espdisp._DOOM_WAD_SIZE
             )
