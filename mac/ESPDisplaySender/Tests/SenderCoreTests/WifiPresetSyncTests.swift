@@ -1386,7 +1386,6 @@ final class WifiPresetSyncTests: XCTestCase {
             serviceName: "studio-display",
             displayName: "studio-display",
             hardwareID: "020000123456")
-        panel.usbPort = path
         panel.usbHardwareID = "020000123456"
         let manager = PanelManager(
             previewPanels: [panel],

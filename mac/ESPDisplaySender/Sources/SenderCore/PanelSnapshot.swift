@@ -17,9 +17,9 @@ struct PanelSnapshot: Identifiable, Equatable {
         timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
     var hardwareID: String?
     var address: String?
-    var usbPort: String?
-    /// Stable identity of the manually selected USB device. Unlike `usbPort`,
-    /// this survives the board resetting under a different macOS device node.
+    /// The hardware ID this record's board reported over USB. A record is
+    /// paired with a port only by the ID a board there reports, never by the
+    /// port's path: the path is where the board happens to be plugged in.
     var usbHardwareID: String?
     var discovered = false
     var lastSeen: Date?

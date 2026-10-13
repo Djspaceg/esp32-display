@@ -11,11 +11,12 @@ final class UsbIdentifyRetryTests: XCTestCase {
 
     private static let hardwareID = "1cdbd47b5b94"
 
-    func manager(port: String) -> PanelManager {
+    /// The record carries no port: which port its board is on is learned from
+    /// what the board there reports.
+    func manager(port _: String) -> PanelManager {
         var panel = PanelSnapshot(serviceName: "espdisplay-5b94", displayName: "Desk")
         panel.hardwareID = Self.hardwareID
         panel.usbHardwareID = Self.hardwareID
-        panel.usbPort = port
         return PanelManager(
             previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
     }
@@ -90,7 +91,6 @@ final class UsbIdentifyRetryTests: XCTestCase {
         var panel = PanelSnapshot(serviceName: "big-round", displayName: "big-round")
         panel.hardwareID = "e8f60ae0a0e4"
         panel.usbHardwareID = "e8f60ae0a0e4"
-        panel.usbPort = board.path
         let manager = PanelManager(
             previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
         manager.usbIdentifyRetryDelays = [0.3]

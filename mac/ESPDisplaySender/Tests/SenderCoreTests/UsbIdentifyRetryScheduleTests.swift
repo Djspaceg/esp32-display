@@ -150,17 +150,22 @@ extension UsbIdentifyRetryTests {
         }
     }
 
-    /// A serial device no display record points at is let go after the cap;
-    /// a display's own port is asked until it answers or is unplugged.
+    /// A serial device no display's board has answered on is let go after the
+    /// cap; a port whose board reported a display's hardware ID at this
+    /// connection is asked until it answers again or is unplugged. Which port
+    /// that is comes from what the board said, never from a saved path.
     func testOnlyADisplaysOwnPortIsAskedForever() async throws {
         let board = try FakeSerialBoard(onCommand: { _ in nil })
         defer { board.stop() }
-        // The record knows the board's hardware ID and its saved path; a
-        // silent board has reported no ID, so the path is what links them.
-        for (savedPort, expectRetry) in [("/dev/cu.usbmodem-other", false), (board.path, true)] {
-            let manager = manager(port: savedPort)
+        for answeredBefore in [false, true] {
+            let manager = manager(port: board.path)
             manager.usbUnknownPortRetryAttempts = 2
             manager.updateUSBPorts([board.path])
+            if answeredBefore {
+                // It answered once with the record's ID, then went quiet.
+                manager.noteUSBIdentity(
+                    path: board.path, name: "Desk", hardwareID: "1cdbd47b5b94")
+            }
             for _ in 0..<3 {
                 if let pending = manager.usbIdentifyRetries[board.path] {
                     manager.usbIdentifyRetries[board.path]?.nextAt = pending.nextAt - 100
@@ -168,8 +173,8 @@ extension UsbIdentifyRetryTests {
                 _ = await manager.probeUSBDevice(board.path, timeout: 0.1)
             }
             XCTAssertEqual(
-                manager.usbIdentifyRetries[board.path] != nil, expectRetry,
-                "saved port \(savedPort)")
+                manager.usbIdentifyRetries[board.path] != nil, answeredBefore,
+                "answered before: \(answeredBefore)")
         }
     }
 

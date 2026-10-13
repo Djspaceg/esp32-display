@@ -22,12 +22,10 @@ struct PersistedPanel: Codable, Equatable {
     var dateAdded: Date?
     /// Stable across renames and re-flashes; the real identity of the panel.
     var hardwareID: String?
-    /// Stable identity of the USB device the user assigned. The serial path is
-    /// only a reconnect hint because macOS can rename it across a board reset.
+    /// The hardware ID the board reported over USB. No serial path is stored:
+    /// ports are paired with records by the ID a board reports, each time it
+    /// is plugged in. Files that still carry a `usbPort` decode with it ignored.
     var usbHardwareID: String?
-    /// Last serial path used for USB configuration, retained for older firmware
-    /// that cannot report a hardware ID and as a diagnostic hint.
-    var usbPort: String?
     /// Last known address, kept as a hint for the UI while offline.
     var address: String?
     /// When the panel was last heard from, so "last seen" survives a restart.
@@ -54,7 +52,6 @@ struct PersistedPanel: Codable, Equatable {
                 snapshot.dateAdded.timeIntervalSince1970.rounded(.down))
         hardwareID = snapshot.hardwareID
         usbHardwareID = snapshot.usbHardwareID
-        usbPort = snapshot.usbPort
         address = snapshot.address
         lastSeen = snapshot.lastSeen
         source = snapshot.source.spec
@@ -75,7 +72,6 @@ struct PersistedPanel: Codable, Equatable {
             dateAdded: dateAdded ?? lastSeen ?? .distantPast,
             hardwareID: hardwareID,
             address: address,
-            usbPort: usbPort,
             usbHardwareID: usbHardwareID,
             lastSeen: lastSeen)
         panel.source = PanelSource(source)

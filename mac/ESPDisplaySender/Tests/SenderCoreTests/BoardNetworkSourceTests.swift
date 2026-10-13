@@ -15,7 +15,6 @@ final class BoardNetworkSourceTests: XCTestCase {
     private func manager() -> PanelManager {
         var panel = PanelSnapshot(
             serviceName: panelName, displayName: panelName, hardwareID: "020000123456")
-        panel.usbPort = path
         panel.usbHardwareID = panel.hardwareID
         return PanelManager(
             previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [path])

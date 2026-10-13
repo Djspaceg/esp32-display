@@ -153,14 +153,6 @@ final class PanelManager: ObservableObject {
     /// USB control writes (flip, rotate, power, brightness) being sent now,
     /// with the reprobe that follows each.
     var usbControlsInFlight = 0
-    /// A path-only USB choice made during this app run. Legacy firmware cannot
-    /// report CFGSHOW id=, so this is the narrow bridge that lets the user choose
-    /// among several name-only devices. It is never persisted and expires when
-    /// the macOS path generation changes; esptool still has to read the panel's
-    /// exact EINF MAC before any write.
-    var explicitLegacyUSBSelections: [
-        String: (path: String, generation: Int)
-    ] = [:]
     private var lastPersistedAt = Date.distantPast
     /// Where per-panel OTA passwords are kept. Injected rather than reached for
     /// directly so that previews and tests, which run unsigned, cannot touch the
@@ -738,7 +730,6 @@ extension PanelManager {
                     displayName: "studio-display",
                     hardwareID: "esp32c6-a1b2c3d4",
                     address: "192.168.1.42",
-                    usbPort: "/dev/cu.usbserial-A1B2C3D4",
                     discovered: true,
                     lastSeen: now,
                     lastHeartbeatAt: now,

@@ -148,7 +148,6 @@ final class DeviceListSortApplicationTests: XCTestCase {
         var usbPanel = panel("USB Panel", added: 0)
         usbPanel.hardwareID = hardwareID
         usbPanel.usbHardwareID = hardwareID
-        usbPanel.usbPort = path
         let manager = PanelManager(
             previewPanels: [usbPanel],
             savedNetworkNames: [],
@@ -184,7 +183,6 @@ final class DeviceListSortApplicationTests: XCTestCase {
             captureStatus: .streaming)
         snapshot.hardwareID = hardwareID
         snapshot.usbHardwareID = hardwareID
-        snapshot.usbPort = path
         let manager = PanelManager(
             previewPanels: [snapshot],
             savedNetworkNames: [],
@@ -213,7 +211,6 @@ final class DeviceListSortApplicationTests: XCTestCase {
         var usbPanel = panel("USB Panel", added: 0)
         usbPanel.hardwareID = "020000123456"
         usbPanel.usbHardwareID = usbPanel.hardwareID
-        usbPanel.usbPort = path
         let manager = PanelManager(
             previewPanels: [usbPanel],
             savedNetworkNames: [],
@@ -235,7 +232,6 @@ final class DeviceListSortApplicationTests: XCTestCase {
         var usbPanel = panel("Zulu USB", added: 0)
         usbPanel.hardwareID = hardwareID
         usbPanel.usbHardwareID = hardwareID
-        usbPanel.usbPort = path
         var settings = SenderSettings()
         settings.deviceListSortOrder = .status
         let manager = PanelManager(

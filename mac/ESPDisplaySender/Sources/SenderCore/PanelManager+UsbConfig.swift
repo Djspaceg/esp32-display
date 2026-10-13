@@ -14,7 +14,7 @@ extension PanelManager {
         switch WifiConfigUI.renameDevice(
             currentName: panel.displayName,
             newName: newName,
-            preferredPort: panel.usbPort,
+            preferredPort: pairedUSBPath(for: panel.serviceName),
             expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
         {
         case .success(let appliedName):
@@ -67,7 +67,7 @@ extension PanelManager {
         switch WifiConfigUI.setOTAPassword(
             password,
             currentName: panel.displayName,
-            preferredPort: panel.usbPort,
+            preferredPort: pairedUSBPath(for: panel.serviceName),
             expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
         {
         case .success:
@@ -100,7 +100,7 @@ extension PanelManager {
         else { return }
         switch WifiConfigUI.clearOTAPassword(
             currentName: panel.displayName,
-            preferredPort: panel.usbPort,
+            preferredPort: pairedUSBPath(for: panel.serviceName),
             expectedHardwareID: panel.usbHardwareID ?? panel.hardwareID)
         {
         case .success:
@@ -305,15 +305,14 @@ extension PanelManager {
             }
         }
 
-        let finalPort: String
         switch await UsbOnboarder.sendConfiguration(
             steps: steps, flashedPort: request.port,
             expectedHardwareID: stableID,
             wroteFirmware: request.mode == .flashAndConfigure,
             onProgress: progress)
         {
-        case .success(let port):
-            finalPort = port
+        case .success:
+            break
         case .failure(let failure):
             operationOutcome = .failure(failure)
             return false
@@ -339,7 +338,6 @@ extension PanelManager {
             serviceName: serviceName,
             displayName: recordName,
             hardwareID: stableID,
-            usbPort: finalPort,
             usbHardwareID: stableID)
         supersededServiceNames.remove(serviceName)
         panels.append(record)

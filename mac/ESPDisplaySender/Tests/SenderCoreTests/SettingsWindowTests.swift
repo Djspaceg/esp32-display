@@ -775,7 +775,6 @@ final class SettingsWindowTests: XCTestCase {
         panel.rssi = -52
         panel.firmwareVersion = "2.0.0"
         panel.controlProtocolVersion = Int(DeviceProtocol.controlProtocolVersion)
-        panel.usbPort = "/dev/cu.usbmodem101"
         panel.usbHardwareID = "020000123456"
         let store = InMemoryWifiCredentials(saved.map {
             SavedWiFiCredential(ssid: $0, password: "pw")

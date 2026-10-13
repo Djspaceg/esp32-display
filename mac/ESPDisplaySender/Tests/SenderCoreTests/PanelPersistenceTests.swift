@@ -20,7 +20,6 @@ final class PanelPersistenceTests: XCTestCase {
             dateAdded: Date(timeIntervalSince1970: 1_690_000_000),
             hardwareID: "esp32c6-a1b2c3d4",
             address: "192.168.1.42",
-            usbPort: "/dev/cu.usbserial-A1B2C3D4",
             usbHardwareID: "288485a1b2c3",
             discovered: true,
             lastSeen: Date(timeIntervalSince1970: 1_700_000_000),
@@ -95,7 +94,6 @@ final class PanelPersistenceTests: XCTestCase {
         XCTAssertEqual(record.dateAdded, Date(timeIntervalSince1970: 1_690_000_000))
         XCTAssertEqual(record.hardwareID, "esp32c6-a1b2c3d4")
         XCTAssertEqual(record.usbHardwareID, "288485a1b2c3")
-        XCTAssertEqual(record.usbPort, "/dev/cu.usbserial-A1B2C3D4")
         XCTAssertEqual(record.address, "192.168.1.42")
         XCTAssertEqual(record.lastSeen, Date(timeIntervalSince1970: 1_700_000_000))
     }
@@ -108,7 +106,6 @@ final class PanelPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.dateAdded, Date(timeIntervalSince1970: 1_690_000_000))
         XCTAssertEqual(restored.hardwareID, "esp32c6-a1b2c3d4")
         XCTAssertEqual(restored.usbHardwareID, "288485a1b2c3")
-        XCTAssertEqual(restored.usbPort, "/dev/cu.usbserial-A1B2C3D4")
         XCTAssertEqual(restored.address, "192.168.1.42")
         XCTAssertEqual(restored.lastSeen, Date(timeIntervalSince1970: 1_700_000_000))
         assertNoTelemetry(restored)
@@ -151,11 +148,13 @@ final class PanelPersistenceTests: XCTestCase {
                     "diffPercent", "brightness", "brightnessHigh", "flipped", "sleeping",
                     "idle", "paused", "discovered", "lastHeartbeatAt", "firmwareVersion",
                     "chip", "target", "currentSSID", "networkConnected", "networkReportedAt", "announcedSSID", "announcedAt", "lastReplyAt", "capabilitiesRaw", "frameProtocolVersion",
-                    "controlProtocolVersion", "sourceDescription", "lastError"] {
+                    "controlProtocolVersion", "sourceDescription", "lastError",
+                    // A port is where a board is plugged in, never part of it.
+                    "usbPort"] {
             XCTAssertFalse(json.contains("\"\(key)\""), "\(key) reached disk")
         }
         for key in ["serviceName", "displayName", "dateAdded", "hardwareID", "usbHardwareID",
-                    "usbPort", "address", "lastSeen"] {
+                    "address", "lastSeen"] {
             XCTAssertTrue(json.contains("\"\(key)\""), "\(key) missing from disk")
         }
     }
@@ -211,7 +210,10 @@ final class PanelPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.dateAdded, restored.lastSeen)
         XCTAssertEqual(restored.hardwareID, "esp32c6-a1b2c3d4")
         XCTAssertNil(restored.usbHardwareID)
-        XCTAssertEqual(restored.usbPort, "/dev/cu.usbserial-A1B2C3D4")
+        // The old file's port path is read past, not kept: re-saving drops it.
+        let resaved = try XCTUnwrap(String(
+            data: JSONEncoder.espDisplay.encode(records), encoding: .utf8))
+        XCTAssertFalse(resaved.contains("usbPort"), resaved)
         XCTAssertEqual(restored.address, "192.168.1.42")
         XCTAssertEqual(restored.lastSeen, Date(timeIntervalSince1970: 1_700_000_000))
         assertNoTelemetry(restored)
@@ -232,7 +234,6 @@ final class PanelPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.dateAdded, .distantPast)
         XCTAssertNil(restored.hardwareID)
         XCTAssertNil(restored.usbHardwareID)
-        XCTAssertNil(restored.usbPort)
         XCTAssertNil(restored.address)
         XCTAssertNil(restored.lastSeen)
         assertNoTelemetry(restored)

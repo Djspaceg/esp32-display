@@ -29,14 +29,9 @@ extension PanelManager {
     }
 
     func associatedDisplayName(forUSBPath path: String) -> String? {
-        guard let device = usbDevices.first(where: { $0.path == path }) else { return nil }
-        if let hardwareID = device.hardwareID,
-           let panel = panelAssociated(withHardwareID: hardwareID) {
-            return panel.displayName
-        }
-        return panels.first(where: {
-            $0.usbPort == path && $0.hardwareID == nil && $0.usbHardwareID == nil
-        })?.displayName
+        guard let hardwareID = usbDevices.first(where: { $0.path == path })?.hardwareID
+        else { return nil }
+        return panelAssociated(withHardwareID: hardwareID)?.displayName
     }
 
     func isUSBDeviceAssociated(_ path: String) -> Bool {
@@ -58,23 +53,23 @@ extension PanelManager {
             profile: device.board, partition: device.partition)
     }
 
+    /// The port this record's board is on right now: the one connected port
+    /// whose board reported the record's hardware ID. Worked out afresh from
+    /// the ports present and what the boards on them said, never remembered.
     func currentUSBPort(for serviceName: String) -> String? {
-        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }),
+              let hardwareID = stableHardwareID(of: panel)
         else { return nil }
-        if let explicit = explicitLegacyUSBSelections[serviceName],
-           explicit.generation == usbPathGeneration(explicit.path),
-           usbDevices.contains(where: { $0.path == explicit.path && $0.isConnected }) {
-            return explicit.path
-        }
-        let hardwareID = stableHardwareID(of: panel)
-        if let hardwareID {
-            let matches = usbDevices.filter { $0.hardwareID == hardwareID }
-            if matches.count == 1 { return matches[0].path }
-            if matches.count > 1 { return "Ambiguous" }
-            return nil
-        }
-        guard let saved = panel.usbPort, usbSerialPorts.contains(saved) else { return nil }
-        return saved
+        let matches = usbDevices.filter { $0.hardwareID == hardwareID }
+        if matches.count == 1 { return matches[0].path }
+        if matches.count > 1 { return "Ambiguous" }
+        return nil
+    }
+
+    /// `currentUSBPort` as a hint for a command that finds its port by asking,
+    /// nil when there is no single port.
+    func pairedUSBPath(for serviceName: String) -> String? {
+        currentUSBPort(for: serviceName).flatMap { $0 == "Ambiguous" ? nil : $0 }
     }
 
     /// Current-generation, identity-bound serial state for one durable record.
@@ -119,25 +114,20 @@ extension PanelManager {
     /// does not need the live CFGSHOW status a runtime control needs, because
     /// the board's identity is read again over serial and then independently
     /// out of esptool before anything is written. What it does need is a device
-    /// that is unambiguously this record's - either it reports this record's
-    /// hardware ID, or the record has no identity of its own and this is the
-    /// device its explicit assignment points at.
+    /// that is unambiguously this record's: it reports this record's hardware
+    /// ID. A record with no hardware ID has no USB device.
     func usbUpdateDevice(
         for serviceName: String
     ) -> WifiConfigUI.USBDeviceOption? {
-        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }),
+              let expectedID = stableHardwareID(of: panel)
         else { return nil }
-        let connected = usbDevices.filter { $0.isConnected && !$0.path.isEmpty }
-        if let expectedID = stableHardwareID(of: panel) {
-            let matches = connected.filter {
-                ConfigCommands.canonicalHardwareID($0.hardwareID) == expectedID
-            }
-            // Two boards claiming one identity is not a write target.
-            return matches.count == 1 ? matches.first : nil
+        let matches = usbDevices.filter {
+            $0.isConnected && !$0.path.isEmpty
+                && ConfigCommands.canonicalHardwareID($0.hardwareID) == expectedID
         }
-        guard let path = currentUSBPort(for: serviceName), path != "Ambiguous"
-        else { return nil }
-        return connected.first { $0.path == path }
+        // Two boards claiming one identity is not a write target.
+        return matches.count == 1 ? matches.first : nil
     }
 
     /// A USB device that is flashable on its own terms: it named its firmware
@@ -162,91 +152,6 @@ extension PanelManager {
             && device.board?.isEmpty == false
             && device.chip?.isEmpty == false
             && device.partition?.isEmpty == false
-    }
-
-    func usbPortOptions(for serviceName: String) -> [WifiConfigUI.USBDeviceOption] {
-        guard let panel = panels.first(where: { $0.serviceName == serviceName })
-        else { return usbDevices }
-        if let hardwareID = panel.usbHardwareID {
-            guard !usbDevices.contains(where: { $0.hardwareID == hardwareID }) else {
-                return usbDevices
-            }
-            let disconnected = WifiConfigUI.USBDeviceOption(
-                path: panel.usbPort ?? "",
-                name: panel.displayName,
-                hardwareID: hardwareID,
-                isConnected: false)
-            return [disconnected] + usbDevices
-        }
-        guard let assigned = panel.usbPort,
-              !assigned.isEmpty,
-              !usbDevices.contains(where: { $0.path == assigned })
-        else { return usbDevices }
-        let disconnected = WifiConfigUI.USBDeviceOption(
-            path: assigned,
-            name: panel.displayName,
-            isConnected: false)
-        return [disconnected] + usbDevices
-    }
-
-    func usbDeviceSelection(for serviceName: String) -> String {
-        guard let panel = panels.first(where: { $0.serviceName == serviceName })
-        else { return "" }
-        if let hardwareID = panel.usbHardwareID { return "hardware:\(hardwareID)" }
-        if let path = panel.usbPort { return "path:\(path)" }
-        return ""
-    }
-
-    func setUSBDeviceSelection(_ selection: String, for serviceName: String) {
-        let normalized = selection.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else {
-            explicitLegacyUSBSelections[serviceName] = nil
-            updatePanel(serviceName) { panel in
-                panel.usbPort = nil
-                panel.usbHardwareID = nil
-            }
-            persistIfNeeded(force: true)
-            return
-        }
-
-        let options = usbPortOptions(for: serviceName)
-        if normalized.hasPrefix("hardware:"),
-           let hardwareID = ConfigCommands.canonicalHardwareID(
-               String(normalized.dropFirst("hardware:".count))) {
-            explicitLegacyUSBSelections[serviceName] = nil
-            let device = options.first { $0.hardwareID == hardwareID }
-            updatePanel(serviceName) { panel in
-                panel.usbHardwareID = hardwareID
-                panel.usbPort = device?.path.isEmpty == false ? device?.path : nil
-            }
-        } else if normalized.hasPrefix("path:") {
-            let path = String(normalized.dropFirst("path:".count))
-            let device = options.first { $0.path == path }
-            if let device, device.isConnected, device.hardwareID == nil,
-               !path.isEmpty {
-                explicitLegacyUSBSelections[serviceName] = (
-                    path: path, generation: usbPathGeneration(path))
-            } else {
-                explicitLegacyUSBSelections[serviceName] = nil
-            }
-            updatePanel(serviceName) { panel in
-                panel.usbPort = path.isEmpty ? nil : path
-                panel.usbHardwareID = device?.hardwareID
-            }
-        }
-        persistIfNeeded(force: true)
-    }
-
-    /// Compatibility entry point for path-oriented callers and tests.
-    func setUSBPort(_ port: String?, for serviceName: String) {
-        let normalized = port?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let path = normalized, !path.isEmpty else {
-            setUSBDeviceSelection("", for: serviceName)
-            return
-        }
-        let selection = usbPortOptions(for: serviceName)
-            .first(where: { $0.path == path })?.selectionID ?? "path:\(path)"
-        setUSBDeviceSelection(selection, for: serviceName)
     }
 
     /// Refresh transport paths without blocking the main actor. Newly seen paths
@@ -300,10 +205,6 @@ extension PanelManager {
             usbDevices[index].serialStatus = nil
             usbDevices[index].verifiedGeneration = nil
         }
-        let expired = explicitLegacyUSBSelections.compactMap { service, selection in
-            selection.path == path ? service : nil
-        }
-        for service in expired { explicitLegacyUSBSelections[service] = nil }
     }
 
     /// Record identity learned either by a background CFGSHOW probe or by the
@@ -339,44 +240,6 @@ extension PanelManager {
         guard let canonicalID else {
             sortPanels()
             return
-        }
-        var associationChanged = false
-        for panelIndex in panels.indices {
-            if panels[panelIndex].usbPort == path {
-                if let savedID = panels[panelIndex].usbHardwareID {
-                    if savedID != canonicalID {
-                        // macOS reused this path for another board. Preserve the
-                        // stable assignment and discard only the stale path hint.
-                        panels[panelIndex].usbPort = nil
-                        associationChanged = true
-                    }
-                } else if let panelID = ConfigCommands.canonicalHardwareID(
-                    panels[panelIndex].hardwareID), panelID != canonicalID {
-                    // A legacy record already knows this panel's MAC from EINF.
-                    // Promote it before discarding the reused path so a later
-                    // probe can still find the assigned board at its new path.
-                    panels[panelIndex].usbHardwareID = panelID
-                    panels[panelIndex].usbPort = nil
-                    associationChanged = true
-                } else {
-                    // Legacy path-only assignment: migrate it once, never replace
-                    // a non-nil identity merely because a path was reused.
-                    panels[panelIndex].usbHardwareID = canonicalID
-                    associationChanged = true
-                }
-            } else {
-                let panelID = ConfigCommands.canonicalHardwareID(
-                    panels[panelIndex].hardwareID)
-                let hasLegacyPath = panels[panelIndex].usbPort?.isEmpty == false
-                if panels[panelIndex].usbHardwareID == canonicalID
-                    || (panels[panelIndex].usbHardwareID == nil
-                        && hasLegacyPath && panelID == canonicalID)
-                {
-                    panels[panelIndex].usbHardwareID = canonicalID
-                    panels[panelIndex].usbPort = path
-                    associationChanged = true
-                }
-            }
         }
         var rotationBefore: (serviceName: String, rotation: Int)?
         if let status = serialStatus,
@@ -448,7 +311,6 @@ extension PanelManager {
             refreshPreviewDriver()
         }
         sortPanels()
-        if associationChanged { persistIfNeeded(force: true) }
     }
 
     func noteUSBIdentity(
@@ -547,16 +409,17 @@ extension PanelManager {
             noteUnansweredUSBProbe(path, generation: generation)
             return result
         }
-        // A reply with no id= from a port whose board has reported one, or
-        // whose record expects one, is the start of an answer another reader
-        // of the same port took the rest of (a serial capture, a monitor) - or
-        // one cut short some other way. Taken as the answer it would wipe the
-        // port's hardware ID and count as answered, so the board would never
-        // be asked again and never verify. It is asked again instead. Firmware
-        // from before id= has neither, so it is still taken as it is.
-        if identity.hardwareID == nil, usbPortExpectsHardwareID(path) {
+        // A reply with no id= names nothing to pair the port with. Usually it
+        // is the start of an answer another reader of the same port took the
+        // rest of (a serial capture, a monitor). Taken as the answer it would
+        // wipe the port's hardware ID and count as answered, so the board
+        // would never be asked again and never verify. The port is asked again
+        // instead, and what is known about it is left alone. The caller still
+        // gets the reply: firmware from before id= answers this way, and the
+        // Add Display sheet can still flash it.
+        if identity.hardwareID == nil {
             noteUnansweredUSBProbe(path, generation: generation)
-            return .unavailable("CFGSHOW reply on \(path) was cut short")
+            return result
         }
         usbIdentifyRetries[path] = nil
         if let index = usbDevices.firstIndex(where: { $0.path == path }) {
@@ -649,14 +512,11 @@ extension PanelManager {
             now + usbIdentifyRetryDelay(afterAttempt: attempts))
     }
 
-    /// Whether a display record points at this port: by the hardware ID the
-    /// board reported, by a record's saved path, or as a restarting record's
-    /// device. The saved path counts even for a record with a hardware ID,
-    /// because a board that has not answered has reported no ID: it is the
-    /// only link from a silent board to its display. A path macOS reused for
-    /// something else is asked on too, at most every 30 s.
+    /// Whether a display record's board is on this port: by the hardware ID
+    /// the board here reported, or as a restarting record's device. A board
+    /// that has never answered at this port has reported nothing to pair it
+    /// by, so it is asked like any other device until it answers.
     func usbPortBelongsToADisplay(_ path: String) -> Bool {
-        if panels.contains(where: { $0.usbPort == path }) { return true }
         if panels.contains(where: {
             usbRestartingServices.contains($0.serviceName)
                 && usbUpdateDevice(for: $0.serviceName)?.path == path
@@ -665,14 +525,6 @@ extension PanelManager {
             usbDevices.first(where: { $0.path == path })?.hardwareID)
         else { return false }
         return panelAssociated(withHardwareID: hardwareID) != nil
-    }
-
-    /// Whether a CFGSHOW answer at this port should carry id=: the board here
-    /// has reported a hardware ID before, or a display record with one is
-    /// assigned this path.
-    func usbPortExpectsHardwareID(_ path: String) -> Bool {
-        if usbDevices.first(where: { $0.path == path })?.hardwareID != nil { return true }
-        return panels.contains { $0.usbPort == path && stableHardwareID(of: $0) != nil }
     }
 
     func usbIdentifyRetryDelay(afterAttempt attempts: Int) -> TimeInterval {
@@ -765,7 +617,7 @@ extension PanelManager {
         else { return }
         let currentName = panel.displayName
         let expectedHardwareID = panel.usbHardwareID ?? panel.hardwareID
-        let preferredPort = panel.usbPort
+        let preferredPort = pairedUSBPath(for: serviceName)
         Task { @MainActor [weak self] in
             let network = await Task.detached {
                 WifiConfigUI.currentNetwork(

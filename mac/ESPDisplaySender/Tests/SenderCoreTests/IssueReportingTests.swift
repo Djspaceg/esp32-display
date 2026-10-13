@@ -22,9 +22,9 @@ final class PanelStoreTests: XCTestCase {
         directory.appendingPathComponent("panels.json")
     }
 
-    private func record(_ name: String, usbPort: String? = nil) -> PersistedPanel {
+    private func record(_ name: String, usbHardwareID: String? = nil) -> PersistedPanel {
         var snapshot = PanelSnapshot(serviceName: name, displayName: name)
-        snapshot.usbPort = usbPort
+        snapshot.usbHardwareID = usbHardwareID
         return PersistedPanel(snapshot: snapshot)
     }
 
@@ -38,7 +38,7 @@ final class PanelStoreTests: XCTestCase {
 
     func testRoundTripThroughDisk() throws {
         let records = [
-            record("studio-display", usbPort: "/dev/cu.usbmodem-1"),
+            record("studio-display", usbHardwareID: "020000123456"),
             record("travel-display"),
         ]
         try PanelStore.save(records, to: storeURL)

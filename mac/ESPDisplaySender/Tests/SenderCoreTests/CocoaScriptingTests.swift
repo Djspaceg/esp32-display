@@ -104,7 +104,6 @@ final class CocoaScriptingHandlerTests: XCTestCase {
         var snapshot = panel(online: false)
         snapshot.hardwareID = hardwareID
         snapshot.usbHardwareID = hardwareID
-        snapshot.usbPort = path
         let (handler, manager, _) = subject(panels: [snapshot])
         manager.updateUSBPorts([path])
         let identity = WifiConfigUI.usbIdentity(from:

@@ -603,7 +603,6 @@ final class FirmwareUpdateTests: XCTestCase {
             hardwareID: "a4cb8fdb3c24",
             capabilities: .restart)
         panel.firmwareVersion = nil
-        panel.usbPort = "/dev/cu.usbmodem-1"
         let manager = PanelManager(
             previewPanels: [panel],
             savedNetworkNames: [],

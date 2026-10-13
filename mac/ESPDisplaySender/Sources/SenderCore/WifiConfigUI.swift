@@ -220,12 +220,6 @@ enum WifiConfigUI {
     struct USBDeviceOption: Identifiable, Equatable, Sendable {
         var id: String { path }
 
-        /// Stable picker value for post-setup assignment. A configured board is
-        /// selected by hardware ID; path-only devices retain a transport key.
-        var selectionID: String {
-            hardwareID.map { "hardware:\($0)" } ?? "path:\(path)"
-        }
-
         var path: String
         var name: String?
         var hardwareID: String?

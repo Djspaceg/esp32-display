@@ -64,7 +64,6 @@ final class BoardNetworkIngestTests: XCTestCase {
         var panel = PanelSnapshot(
             serviceName: "studio-display", displayName: "studio-display",
             hardwareID: "020000123456")
-        panel.usbPort = path
         panel.usbHardwareID = panel.hardwareID
         let manager = PanelManager(
             previewPanels: [panel], savedNetworkNames: ["Guest"],
@@ -91,7 +90,6 @@ final class BoardNetworkIngestTests: XCTestCase {
         var panel = PanelSnapshot(
             serviceName: "studio-display", displayName: "studio-display",
             hardwareID: "020000123456")
-        panel.usbPort = path
         panel.usbHardwareID = panel.hardwareID
         panel.currentSSID = "Old Network"
         let manager = PanelManager(
@@ -114,7 +112,6 @@ final class BoardNetworkIngestTests: XCTestCase {
         var panel = PanelSnapshot(
             serviceName: "studio-display", displayName: "studio-display",
             hardwareID: "020000123456")
-        panel.usbPort = path
         panel.usbHardwareID = panel.hardwareID
         let manager = PanelManager(
             previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [path])
