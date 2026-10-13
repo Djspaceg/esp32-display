@@ -419,6 +419,9 @@ static const char* quake_vid_allocate(void) {
 
 static quakeparms_t parms;
 
+static void* quake_save_take(size_t bytes);
+static void quake_save_give(void);
+
 // The hunk, for a failure card once the engine is dead: Sys_Error never
 // returns, so nothing reads the hunk again before the restart.
 void* quake_engine_scratch(size_t bytes) {
@@ -456,6 +459,7 @@ const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes,
 
   // A failure inside ends in Sys_Error, which restarts with the reason.
   Host_Init(&parms);
+  save_store_set_arena(quake_save_take, quake_save_give);
   s_last_time = Sys_FloatTime();
   return NULL;
 }
@@ -484,6 +488,35 @@ static void quake_log_map_change(void) {
 
 // host.c defines it; no header declares it.
 void Host_WriteConfiguration(void);
+
+// zone.c's temp-buffer state (globals there, declared in no header).
+extern qboolean hunk_tempactive;
+extern int hunk_tempmark;
+
+// The saved-games store's deflate state, lent from the top of the engine
+// heap: on an S3 the heap leaves only about 120 KB of PSRAM. A write runs from
+// fopen to fclose on this task with no hunk use in between (a save, or
+// config.cfg), so the loan is given back before anything else allocates high.
+static int s_save_mark = -1;
+
+static void* quake_save_take(size_t bytes) {
+  if (s_save_mark >= 0 || bytes > (size_t)INT32_MAX) return NULL;
+  // As Hunk_HighAllocName would, so the mark below is where it starts.
+  if (hunk_tempactive) {
+    Hunk_FreeToHighMark(hunk_tempmark);
+    hunk_tempactive = false;
+  }
+  const int mark = Hunk_HighMark();
+  void* p = Hunk_HighAllocName((int)bytes, "saves");
+  if (p != NULL) s_save_mark = mark;
+  return p;
+}
+
+static void quake_save_give(void) {
+  if (s_save_mark < 0) return;
+  Hunk_FreeToHighMark(s_save_mark);
+  s_save_mark = -1;
+}
 
 void quake_engine_save_config(void) {
   if (save_store_ready()) Host_WriteConfiguration();

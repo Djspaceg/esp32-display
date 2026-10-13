@@ -26,9 +26,16 @@ const char* save_store_open(void);
 // Whether save_store_open() succeeded.
 bool save_store_ready(void);
 
+// Memory a write may borrow when the heap cannot give its deflate state
+// (about 220 KB): `take` lends that many bytes or NULL, `give` takes them
+// back. At most one loan at a time, from the opening write to its close, on
+// the task that writes. The Quake boot lends the top of its engine heap.
+void save_store_set_arena(void* (*take)(size_t bytes), void (*give)(void));
+
 // Files by store name ("quake/id1/config.cfg"), for a VFS that forwards to
-// the store. As POSIX: -1 with errno on failure. A file opened for writing is
-// kept in RAM and goes to flash, compressed, when it is closed; close fails
+// the store. As POSIX: -1 with errno on failure. A file is written whole from
+// the start ("w"; never "a" or "r+"), deflated as it is written, and goes to
+// flash when it is closed; close fails
 // with ENOSPC when there was no room (the old copy, if any, stays) and EIO
 // when a write to it or the flash failed. Any task, PSRAM stacks included.
 int save_file_open(const char* name, int flags);

@@ -9,8 +9,10 @@
 // as an external partition, which the driver refuses if it would overlap any
 // other, so a table without the gap simply has no store.
 //
-// Files are compressed with the ROM's deflate (miniz): Quake's text saves
-// shrink several times over, which is what makes room for them.
+// Files are compressed with the ROM's deflate (miniz) as they are written,
+// and inflated as they are read: Quake's text saves shrink several times
+// over, which is what makes room for them, and no whole raw file is ever
+// held in memory.
 //
 // Flash access runs with the cache disabled, so not on a PSRAM stack, which
 // the Quake task's is. Any flash operation asked for from one is handed to a
@@ -183,114 +185,198 @@ static const char* save_register_area(void) {
   return "no free 60 KB beside doom_wad for saves";
 }
 
-// ---- Compression ------------------------------------------------------------
+// ---- Memory -----------------------------------------------------------------
 
-// PSRAM only: a game boot has megabytes of it, and internal RAM is the
-// panel's and the flash driver's.
+// A file in the store is at most the area less one header. Deflate's state
+// (about 160 KB) and that much output are what a write needs at most; a
+// read needs inflate's state and its 32 KB window. Neither ever holds a
+// whole raw file, which on an S3 running Quake would not fit: its engine
+// heap leaves about 120 KB of PSRAM.
+#define SAVE_OUT_BYTES (SAVE_AREA_BYTES - SAVE_STORE_HEAD_BYTES)
+// A file this small is kept whole until it is closed, so an unchanged
+// config is recognised by its CRC without deflating anything.
+#define SAVE_SMALL_BYTES 8192u
+#define SAVE_IN_CHUNK 1024u
+
+typedef struct {
+  tdefl_compressor deflate;
+  uint8_t out[SAVE_OUT_BYTES];
+} save_packer_t;
+
+typedef struct {
+  tinfl_decompressor inflate;
+  uint8_t window[TINFL_LZ_DICT_SIZE];
+  uint8_t in[SAVE_IN_CHUNK];
+} save_unpacker_t;
+
+// PSRAM only: a game boot has it, and internal RAM is the panel's and the
+// flash driver's.
 static void* save_alloc(size_t bytes) {
   return heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
-// Deflates `length` bytes into a new buffer; NULL when it does not shrink.
-static uint8_t* save_deflate(const uint8_t* in, uint32_t length,
-                             uint32_t* out_length) {
-  if (length < 64) return NULL;
-  tdefl_compressor* c = (tdefl_compressor*)save_alloc(sizeof(*c));
-  uint8_t* out = (uint8_t*)save_alloc(length);
-  if (c == NULL || out == NULL) {
-    free(c);
-    free(out);
-    return NULL;
-  }
-  size_t in_size = length;
-  size_t out_size = length;
-  tdefl_status status = TDEFL_STATUS_BAD_PARAM;
-  if (tdefl_init(c, NULL, NULL, TDEFL_DEFAULT_MAX_PROBES) ==
-      TDEFL_STATUS_OKAY) {
-    status = tdefl_compress(c, in, &in_size, out, &out_size, TDEFL_FINISH);
-  }
-  free(c);
-  if (status != TDEFL_STATUS_DONE || in_size != length) {
-    free(out);
-    return NULL;
-  }
-  *out_length = (uint32_t)out_size;
-  return out;
-}
+// Where a write's deflate state comes from when the heap has too little: the
+// Quake boot lends the top of its engine heap (save_store_set_arena).
+static void* (*save_arena_take)(size_t bytes) = NULL;
+static void (*save_arena_give)(void) = NULL;
 
-// 1 inflated, 0 the data is bad, -1 no memory for the inflate state.
-static int save_inflate(const uint8_t* in, uint32_t length, uint8_t* out,
-                        uint32_t out_length) {
-  tinfl_decompressor* d = (tinfl_decompressor*)save_alloc(sizeof(*d));
-  if (d == NULL) return -1;
-  tinfl_init(d);
-  size_t in_size = length;
-  size_t out_size = out_length;
-  const tinfl_status status =
-      tinfl_decompress(d, in, &in_size, out, out, &out_size,
-                       TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
-  free(d);
-  return status == TINFL_STATUS_DONE && out_size == out_length ? 1 : 0;
+void save_store_set_arena(void* (*take)(size_t bytes), void (*give)(void)) {
+  save_arena_take = take;
+  save_arena_give = give;
 }
 
 // ---- Files ------------------------------------------------------------------
 
-static struct {
+typedef struct {
   bool open;
   bool writable;
-  bool append;
-  bool dirty;
-  bool failed;  // a write failed: the file is not stored on close
+  bool failed;   // a write failed or did not fit: nothing is stored on close
+  bool too_big;  // ...because the file does not fit the area
   char name[SAVE_STORE_NAME_BYTES];
-  uint8_t* data;
-  uint32_t length;
-  uint32_t capacity;
-  uint32_t position;
-} save_files[SAVE_FILE_MAX_OPEN];
+  uint32_t crc;  // of the raw bytes written, or read so far
+  // Reading: the record as opened, and where the stream is.
+  uint32_t sequence;
+  uint8_t encoding;
+  uint32_t raw_bytes;
+  uint32_t raw_crc_expected;
+  uint32_t stored_bytes;
+  uint32_t position;  // where the next read() starts
+  uint32_t produced;  // raw bytes the stream has given out
+  uint32_t consumed;  // stored bytes fed to inflate
+  save_unpacker_t* unpacker;
+  uint32_t window_at;  // where inflate writes next in the window
+  uint32_t pending_at, pending;  // output not yet given out
+  uint32_t in_at, in_left;
+  bool done;
+  // Writing.
+  uint32_t length;  // raw bytes written
+  uint8_t* small;   // the first SAVE_SMALL_BYTES, while that is all there is
+  save_packer_t* packer;
+  bool packer_borrowed;
+  uint32_t out_length;
+} save_file_t;
+
+static save_file_t save_files[SAVE_FILE_MAX_OPEN];
 
 static bool save_fd_valid(int fd) {
   return fd >= 0 && fd < SAVE_FILE_MAX_OPEN && save_files[fd].open;
 }
 
-// File `index`'s raw bytes into a new buffer of at least one byte. On NULL,
-// *transient says whether it could work another time (memory, a flash read)
-// rather than the file being damaged.
-static uint8_t* save_load(int index, uint32_t* length, bool* transient) {
-  const save_store_file_t* file = &save_state->files[index];
-  *transient = true;
-  uint8_t* stored = (uint8_t*)save_alloc(file->stored_bytes + 1);
-  if (stored == NULL) return NULL;
-  if (!save_store_read(save_state, index, 0, stored, file->stored_bytes)) {
-    free(stored);
-    return NULL;
-  }
-  uint8_t* raw = stored;
-  if (file->encoding == SAVE_STORE_ENCODING_DEFLATE) {
-    raw = (uint8_t*)save_alloc(file->raw_bytes + 1);
-    if (raw == NULL) {
-      free(stored);
-      return NULL;
-    }
-    const int inflated =
-        save_inflate(stored, file->stored_bytes, raw, file->raw_bytes);
-    if (inflated <= 0) {
-      *transient = inflated < 0;
-      free(raw);
-      free(stored);
-      return NULL;
-    }
-    free(stored);
-  }
-  if (save_store_crc32(0, raw, file->raw_bytes) != file->raw_crc) {
-    *transient = false;
-    free(raw);
-    return NULL;
-  }
-  *length = file->raw_bytes;
-  return raw;
+bool save_store_ready(void) { return save_tried && save_failure == NULL; }
+
+// Stored bytes of the record the file was opened on; false when the flash
+// read failed or the record has since been replaced. save_lock held.
+static bool save_read_stored(const save_file_t* f, uint32_t at, void* out,
+                             uint32_t length) {
+  const int index = save_store_find(save_state, f->name);
+  return index >= 0 && save_state->files[index].sequence == f->sequence &&
+         save_store_read(save_state, index, at, out, length);
 }
 
-bool save_store_ready(void) { return save_tried && save_failure == NULL; }
+static void save_stream_reset(save_file_t* f) {
+  if (f->unpacker != NULL) tinfl_init(&f->unpacker->inflate);
+  f->produced = f->consumed = 0;
+  f->window_at = f->pending_at = f->pending = 0;
+  f->in_at = f->in_left = 0;
+  f->done = false;
+  f->crc = 0;
+}
+
+// Gives out up to `want` raw bytes from the stream into `dst` (or drops them
+// when dst is NULL). 1 with *got set, 0 when the stored bytes are damaged,
+// -1 when the flash could not be read. save_lock held.
+static int save_stream_next(save_file_t* f, uint8_t* dst, uint32_t want,
+                            uint32_t* got) {
+  *got = 0;
+  if (f->encoding == SAVE_STORE_ENCODING_RAW) {
+    uint32_t n = f->raw_bytes - f->produced;
+    if (n > want) n = want;
+    while (*got < n) {
+      uint8_t chunk[256];
+      uint32_t step = n - *got;
+      if (step > sizeof(chunk)) step = sizeof(chunk);
+      uint8_t* to = dst != NULL ? dst + *got : chunk;
+      if (!save_read_stored(f, f->produced, to, step)) return -1;
+      f->crc = save_store_crc32(f->crc, to, step);
+      f->produced += step;
+      *got += step;
+    }
+    return 1;
+  }
+  save_unpacker_t* u = f->unpacker;
+  while (*got < want) {
+    if (f->pending > 0) {
+      uint32_t n = want - *got;
+      if (n > f->pending) n = f->pending;
+      const uint8_t* from = u->window + f->pending_at;
+      if (dst != NULL) memcpy(dst + *got, from, n);
+      f->crc = save_store_crc32(f->crc, from, n);
+      f->pending_at += n;
+      f->pending -= n;
+      f->produced += n;
+      *got += n;
+      if (f->produced > f->raw_bytes) return 0;
+      continue;
+    }
+    if (f->done) break;
+    if (f->in_left == 0 && f->consumed < f->stored_bytes) {
+      uint32_t n = f->stored_bytes - f->consumed;
+      if (n > SAVE_IN_CHUNK) n = SAVE_IN_CHUNK;
+      if (!save_read_stored(f, f->consumed, u->in, n)) return -1;
+      f->in_at = 0;
+      f->in_left = n;
+      f->consumed += n;
+    }
+    size_t in_size = f->in_left;
+    size_t out_size = TINFL_LZ_DICT_SIZE - f->window_at;
+    const int flags = f->consumed < f->stored_bytes ? TINFL_FLAG_HAS_MORE_INPUT : 0;
+    const tinfl_status status =
+        tinfl_decompress(&u->inflate, u->in + f->in_at, &in_size, u->window,
+                         u->window + f->window_at, &out_size, flags);
+    f->in_at += (uint32_t)in_size;
+    f->in_left -= (uint32_t)in_size;
+    f->pending_at = f->window_at;
+    f->pending = (uint32_t)out_size;
+    f->window_at = (f->window_at + (uint32_t)out_size) & (TINFL_LZ_DICT_SIZE - 1);
+    if (status == TINFL_STATUS_DONE) {
+      f->done = true;
+    } else if (status < 0) {
+      return 0;
+    } else if (status == TINFL_STATUS_NEEDS_MORE_INPUT && f->in_left == 0 &&
+               f->consumed >= f->stored_bytes && out_size == 0) {
+      return 0;  // the stream stops short
+    }
+  }
+  return 1;
+}
+
+// Reads the whole file once, checking its length and CRC, then rewinds.
+// 1 whole, 0 damaged, -1 the flash could not be read. save_lock held.
+static int save_stream_verify(save_file_t* f) {
+  save_stream_reset(f);
+  for (;;) {
+    uint32_t got = 0;
+    const int r = save_stream_next(f, NULL, 4096, &got);
+    if (r <= 0) return r;
+    if (got == 0) break;
+  }
+  const bool whole = f->produced == f->raw_bytes && f->crc == f->raw_crc_expected;
+  save_stream_reset(f);
+  return whole ? 1 : 0;
+}
+
+static void save_release(save_file_t* f) {
+  free(f->unpacker);
+  free(f->small);
+  if (f->packer != NULL) {
+    if (f->packer_borrowed) {
+      if (save_arena_give != NULL) save_arena_give();
+    } else {
+      free(f->packer);
+    }
+  }
+  memset(f, 0, sizeof(*f));
+}
 
 int save_file_open(const char* name, int flags) {
   if (!save_store_ready()) {
@@ -301,6 +387,13 @@ int save_file_open(const char* name, int flags) {
     errno = ENAMETOOLONG;
     return -1;
   }
+  const int access = flags & O_ACCMODE;
+  // Writes stream to flash through deflate, so a file is only ever written
+  // whole, from the start: "w", never "a" or "r+".
+  if (access != O_RDONLY && !(flags & O_TRUNC)) {
+    errno = EINVAL;
+    return -1;
+  }
   xSemaphoreTake(save_lock, portMAX_DELAY);
   int fd = 0;
   while (fd < SAVE_FILE_MAX_OPEN && save_files[fd].open) ++fd;
@@ -309,57 +402,122 @@ int save_file_open(const char* name, int flags) {
     errno = ENFILE;
     return -1;
   }
-  const int access = flags & O_ACCMODE;
+  save_file_t* f = &save_files[fd];
+  memset(f, 0, sizeof(*f));
+  strncpy(f->name, name, SAVE_STORE_NAME_BYTES - 1);
+  if (access != O_RDONLY) {
+    if (!(flags & O_CREAT) && save_store_find(save_state, name) < 0) {
+      xSemaphoreGive(save_lock);
+      errno = ENOENT;
+      return -1;
+    }
+    f->open = true;
+    f->writable = true;
+    xSemaphoreGive(save_lock);
+    return fd;
+  }
   const int index = save_store_find(save_state, name);
-  if (index < 0 && (access == O_RDONLY || !(flags & O_CREAT))) {
+  if (index < 0) {
     xSemaphoreGive(save_lock);
     errno = ENOENT;
     return -1;
   }
-  uint8_t* data = NULL;
-  uint32_t length = 0;
-  if (index >= 0 && !(access != O_RDONLY && (flags & O_TRUNC))) {
-    bool transient = false;
-    data = save_load(index, &length, &transient);
-    if (data == NULL) {
-      // A damaged copy may be written over; one that only could not be read
-      // just now is kept, since the game will fall back to its defaults.
-      if (transient) save_unreadable |= 1u << save_state->files[index].head;
-      xSemaphoreGive(save_lock);
-      save_log(transient ? "could not read %s; not writing over it this boot"
-                         : "%s is damaged; it will be replaced when written",
-               name);
-      errno = EIO;
-      return -1;
-    }
+  const save_store_file_t* record = &save_state->files[index];
+  f->sequence = record->sequence;
+  f->encoding = record->encoding;
+  f->raw_bytes = record->raw_bytes;
+  f->raw_crc_expected = record->raw_crc;
+  f->stored_bytes = record->stored_bytes;
+  int whole = -1;  // no memory counts as a passing failure
+  if (f->encoding == SAVE_STORE_ENCODING_RAW ||
+      (f->unpacker = (save_unpacker_t*)save_alloc(sizeof(save_unpacker_t))) !=
+          NULL) {
+    whole = save_stream_verify(f);
   }
-  memset(&save_files[fd], 0, sizeof(save_files[fd]));
-  save_files[fd].open = true;
-  save_files[fd].writable = access != O_RDONLY;
-  save_files[fd].append = (flags & O_APPEND) != 0;
-  // A truncated file is new content even when empty.
-  save_files[fd].dirty = save_files[fd].writable && data == NULL;
-  strncpy(save_files[fd].name, name, SAVE_STORE_NAME_BYTES - 1);
-  save_files[fd].data = data;
-  save_files[fd].length = length;
-  save_files[fd].capacity = length;
+  if (whole <= 0) {
+    // A damaged copy may be written over; one that only could not be read
+    // just now is kept, since the game will fall back to its defaults.
+    if (whole < 0) save_unreadable |= 1u << record->head;
+    save_release(f);
+    xSemaphoreGive(save_lock);
+    save_log(whole < 0 ? "could not read %s; not writing over it this boot"
+                       : "%s is damaged; it will be replaced when written",
+             name);
+    errno = EIO;
+    return -1;
+  }
+  f->open = true;
   xSemaphoreGive(save_lock);
   return fd;
 }
 
 ssize_t save_file_read(int fd, void* dst, size_t size) {
-  if (!save_fd_valid(fd)) {
+  if (!save_fd_valid(fd) || save_files[fd].writable) {
     errno = EBADF;
     return -1;
   }
-  const uint32_t position = save_files[fd].position;
-  const uint32_t length = save_files[fd].length;
-  const size_t n = position >= length ? 0
-                   : size < length - position ? size
-                                              : length - position;
-  if (n > 0) memcpy(dst, save_files[fd].data + position, n);
-  save_files[fd].position += (uint32_t)n;
-  return (ssize_t)n;
+  save_file_t* f = &save_files[fd];
+  xSemaphoreTake(save_lock, portMAX_DELAY);
+  // A seek back starts the stream again; a seek on skips forward.
+  if (f->position < f->produced) save_stream_reset(f);
+  int result = 1;
+  while (result > 0 && f->produced < f->position) {
+    uint32_t skip = f->position - f->produced, got = 0;
+    if (skip > 4096) skip = 4096;
+    result = save_stream_next(f, NULL, skip, &got);
+    if (result > 0 && got == 0) break;
+  }
+  uint32_t got = 0;
+  if (result > 0 && f->position < f->raw_bytes) {
+    uint32_t want = f->raw_bytes - f->position;
+    if (want > size) want = (uint32_t)size;
+    result = save_stream_next(f, (uint8_t*)dst, want, &got);
+    f->position += got;
+  }
+  xSemaphoreGive(save_lock);
+  if (result <= 0) {
+    errno = EIO;
+    return -1;
+  }
+  return (ssize_t)got;
+}
+
+// Feeds deflate; FINISH as `flush` ends the stream. False when it fails or
+// the output outgrows the area.
+static bool save_pack(save_file_t* f, const uint8_t* in, uint32_t length,
+                      tdefl_flush flush) {
+  save_packer_t* p = f->packer;
+  for (;;) {
+    size_t in_size = length;
+    size_t out_size = SAVE_OUT_BYTES - f->out_length;
+    const tdefl_status status = tdefl_compress(
+        &p->deflate, in, &in_size, p->out + f->out_length, &out_size, flush);
+    f->out_length += (uint32_t)out_size;
+    in += in_size;
+    length -= (uint32_t)in_size;
+    if (status < 0) return false;
+    if (flush == TDEFL_FINISH ? status == TDEFL_STATUS_DONE : length == 0) {
+      return true;
+    }
+    if (f->out_length >= SAVE_OUT_BYTES || (in_size == 0 && out_size == 0)) {
+      f->too_big = f->out_length >= SAVE_OUT_BYTES;
+      return false;
+    }
+  }
+}
+
+// Starts deflate, from the heap or else the borrowed arena.
+static bool save_packer_start(save_file_t* f) {
+  f->packer = (save_packer_t*)save_alloc(sizeof(save_packer_t));
+  f->packer_borrowed = false;
+  if (f->packer == NULL && save_arena_take != NULL) {
+    f->packer = (save_packer_t*)save_arena_take(sizeof(save_packer_t));
+    f->packer_borrowed = f->packer != NULL;
+  }
+  if (f->packer == NULL) return false;
+  f->out_length = 0;
+  return tdefl_init(&f->packer->deflate, NULL, NULL,
+                    TDEFL_DEFAULT_MAX_PROBES) == TDEFL_STATUS_OKAY;
 }
 
 ssize_t save_file_write(int fd, const void* src, size_t size) {
@@ -367,37 +525,38 @@ ssize_t save_file_write(int fd, const void* src, size_t size) {
     errno = EBADF;
     return -1;
   }
-  if (save_files[fd].append) save_files[fd].position = save_files[fd].length;
-  const uint32_t position = save_files[fd].position;
-  if (size > SAVE_FILE_MAX_BYTES || position > SAVE_FILE_MAX_BYTES - size) {
-    save_files[fd].failed = true;
-    errno = EFBIG;
-    return -1;
+  save_file_t* f = &save_files[fd];
+  // After a failure the rest is taken and dropped: close says what happened.
+  if (f->failed || size == 0) return (ssize_t)size;
+  if (size > SAVE_FILE_MAX_BYTES || f->length > SAVE_FILE_MAX_BYTES - size) {
+    f->failed = f->too_big = true;
+    return (ssize_t)size;
   }
-  const uint32_t end = position + (uint32_t)size;
-  if (end > save_files[fd].capacity) {
-    uint32_t capacity = save_files[fd].capacity < 4096
-                            ? 4096
-                            : save_files[fd].capacity;
-    while (capacity < end) capacity *= 2;
-    uint8_t* grown = (uint8_t*)heap_caps_realloc(
-        save_files[fd].data, capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (grown == NULL) {
-      save_files[fd].failed = true;
-      errno = ENOMEM;
-      return -1;
+  f->crc = save_store_crc32(f->crc, (const uint8_t*)src, size);
+  if (f->packer == NULL && f->length + size <= SAVE_SMALL_BYTES) {
+    if (f->small == NULL) f->small = (uint8_t*)save_alloc(SAVE_SMALL_BYTES);
+    if (f->small == NULL) {
+      f->failed = true;
+      return (ssize_t)size;
     }
-    save_files[fd].data = grown;
-    save_files[fd].capacity = capacity;
+    memcpy(f->small + f->length, src, size);
+    f->length += (uint32_t)size;
+    return (ssize_t)size;
   }
-  if (position > save_files[fd].length) {
-    memset(save_files[fd].data + save_files[fd].length, 0,
-           position - save_files[fd].length);
+  if (f->packer == NULL) {
+    if (!save_packer_start(f) ||
+        (f->length > 0 &&
+         !save_pack(f, f->small, f->length, TDEFL_NO_FLUSH))) {
+      f->failed = true;
+      return (ssize_t)size;
+    }
+    free(f->small);
+    f->small = NULL;
   }
-  memcpy(save_files[fd].data + position, src, size);
-  save_files[fd].position = end;
-  if (end > save_files[fd].length) save_files[fd].length = end;
-  save_files[fd].dirty = true;
+  if (!save_pack(f, (const uint8_t*)src, (uint32_t)size, TDEFL_NO_FLUSH)) {
+    f->failed = true;
+  }
+  f->length += (uint32_t)size;
   return (ssize_t)size;
 }
 
@@ -406,46 +565,20 @@ off_t save_file_lseek(int fd, off_t offset, int whence) {
     errno = EBADF;
     return -1;
   }
-  int64_t base = 0;
-  if (whence == SEEK_CUR) base = save_files[fd].position;
-  else if (whence == SEEK_END) base = save_files[fd].length;
-  else if (whence != SEEK_SET) base = -1;
+  save_file_t* f = &save_files[fd];
+  const int64_t end = f->writable ? f->length : f->raw_bytes;
+  int64_t base = -1;
+  if (whence == SEEK_SET) base = 0;
+  else if (whence == SEEK_CUR) base = f->writable ? f->length : f->position;
+  else if (whence == SEEK_END) base = end;
   const int64_t target = base < 0 ? -1 : base + (int64_t)offset;
-  if (target < 0 || target > SAVE_FILE_MAX_BYTES) {
+  // A write stream only goes forward from where it is (ftell works).
+  if (target < 0 || target > end || (f->writable && target != end)) {
     errno = EINVAL;
     return -1;
   }
-  save_files[fd].position = (uint32_t)target;
+  if (!f->writable) f->position = (uint32_t)target;
   return (off_t)target;
-}
-
-// Stores a closed file's bytes; NULL, or why it was not stored
-// (SAVE_STORE_FULL when there was no room).
-static const char* save_commit(const char* name, const uint8_t* data,
-                               uint32_t length) {
-  const uint32_t crc = save_store_crc32(0, data, length);
-  if (save_store_unchanged(save_state, name, length, crc)) return NULL;
-  const int old = save_store_find(save_state, name);
-  if (old >= 0 && (save_unreadable & (1u << save_state->files[old].head))) {
-    save_log("not writing %s: its stored copy could not be read", name);
-    return "stored copy unreadable";
-  }
-  uint32_t stored = length;
-  uint8_t* packed = save_deflate(data, length, &stored);
-  const char* failure = save_store_write(
-      save_state, name, packed != NULL ? packed : data, stored, length, crc,
-      packed != NULL ? SAVE_STORE_ENCODING_DEFLATE : SAVE_STORE_ENCODING_RAW);
-  free(packed);
-  if (failure == NULL) {
-    save_log("wrote %s: %u bytes (%u stored), %u of %u sectors free", name,
-             (unsigned)length, (unsigned)stored,
-             (unsigned)save_store_free_sectors(save_state),
-             (unsigned)save_state->sectors);
-  } else {
-    save_log("could not write %s (%u bytes, %u stored): %s", name,
-             (unsigned)length, (unsigned)stored, failure);
-  }
-  return failure;
 }
 
 int save_file_close(int fd) {
@@ -453,22 +586,58 @@ int save_file_close(int fd) {
     errno = EBADF;
     return -1;
   }
+  save_file_t* f = &save_files[fd];
   xSemaphoreTake(save_lock, portMAX_DELAY);
   const char* failure = NULL;
-  if (save_files[fd].failed) {
-    // Part of the file never arrived; storing the rest would replace a good
-    // copy with a damaged one.
-    save_log("not writing %s: a write to it failed", save_files[fd].name);
-    failure = "write failed";
-  } else if (save_files[fd].dirty) {
+  if (f->writable) {
     static const uint8_t empty = 0;
-    failure = save_commit(save_files[fd].name,
-                          save_files[fd].data != NULL ? save_files[fd].data
-                                                      : &empty,
-                          save_files[fd].length);
+    const uint8_t* payload = NULL;
+    uint32_t stored = 0;
+    int encoding = SAVE_STORE_ENCODING_DEFLATE;
+    if (f->failed) {
+      failure = f->too_big ? SAVE_STORE_FULL : "a write to it failed";
+    } else if (save_store_unchanged(save_state, f->name, f->length, f->crc)) {
+      // Nothing to do; the flash keeps what it has.
+    } else if (f->packer == NULL) {
+      // Small: deflate it now, or keep it raw when that is no smaller.
+      if (f->length >= 64 && save_packer_start(f) &&
+          save_pack(f, f->small, f->length, TDEFL_FINISH) &&
+          f->out_length < f->length) {
+        payload = f->packer->out;
+        stored = f->out_length;
+      } else {
+        payload = f->small != NULL ? f->small : &empty;
+        stored = f->length;
+        encoding = SAVE_STORE_ENCODING_RAW;
+      }
+    } else if (save_pack(f, NULL, 0, TDEFL_FINISH)) {
+      payload = f->packer->out;
+      stored = f->out_length;
+    } else {
+      failure = f->too_big ? SAVE_STORE_FULL : "deflate failed";
+    }
+    if (failure == NULL && payload != NULL) {
+      const int old = save_store_find(save_state, f->name);
+      if (old >= 0 &&
+          (save_unreadable & (1u << save_state->files[old].head))) {
+        failure = "its stored copy could not be read";
+      } else {
+        failure = save_store_write(save_state, f->name, payload, stored,
+                                   f->length, f->crc, encoding);
+      }
+      if (failure == NULL) {
+        save_log("wrote %s: %u bytes (%u stored), %u of %u sectors free",
+                 f->name, (unsigned)f->length, (unsigned)stored,
+                 (unsigned)save_store_free_sectors(save_state),
+                 (unsigned)save_state->sectors);
+      }
+    }
+    if (failure != NULL) {
+      save_log("could not write %s (%u bytes): %s", f->name,
+               (unsigned)f->length, failure);
+    }
   }
-  free(save_files[fd].data);
-  memset(&save_files[fd], 0, sizeof(save_files[fd]));
+  save_release(f);
   xSemaphoreGive(save_lock);
   if (failure != NULL) {
     errno = failure == SAVE_STORE_FULL ? ENOSPC : EIO;
@@ -484,7 +653,8 @@ int save_file_fstat(int fd, struct stat* st) {
   }
   memset(st, 0, sizeof(*st));
   st->st_mode = S_IFREG | 0666;
-  st->st_size = save_files[fd].length;
+  st->st_size =
+      save_files[fd].writable ? save_files[fd].length : save_files[fd].raw_bytes;
   return 0;
 }
 
