@@ -222,6 +222,18 @@ void VID_SetPalette(unsigned char* palette) {
 
 void VID_ShiftPalette(unsigned char* palette) { VID_SetPalette(palette); }
 
+// menu.c's Video Options hooks, and the menu below.
+extern void (*vid_menudrawfn)(void);
+extern void (*vid_menukeyfn)(int key);
+static void quake_video_menu_draw(void);
+static void quake_video_menu_key(int key);
+#define VIDEO_MENU_MAX 3
+static const char* s_video_labels[VIDEO_MENU_MAX];
+static int s_video_count;
+static int s_video_current;
+static int s_video_cursor;
+
+
 void VID_Init(unsigned char* palette) {
   quake_display_render_size(&vid_width, &vid_height);
   vid.width = vid.conwidth = vid_width;
@@ -241,11 +253,77 @@ void VID_Init(unsigned char* palette) {
 
   palette565 = (uint16_t*)quake_alloc_prefer_internal(256 * sizeof(uint16_t));
   if (palette565 == NULL) Sys_Error("no memory for the palette");
+  // Video Options, where this panel has sizes to choose from.
+  s_video_count = quake_display_render_choices(s_video_labels, VIDEO_MENU_MAX,
+                                               &s_video_current);
+  if (s_video_count > 0) {
+    s_video_cursor = s_video_current >= 0 ? s_video_current : 0;
+    vid_menudrawfn = quake_video_menu_draw;
+    vid_menukeyfn = quake_video_menu_key;
+  }
+
   vid_page = 0;
   vid.buffer = vid.conbuffer = vid_buffer;
   d_pzbuffer = zbuffer;
   D_InitCaches(surfcache, surfcache_size);
   VID_SetPalette(palette);
+}
+
+// ---- Video Options: the render size ---------------------------------------
+//
+// Quake's own Options menu shows "Video Options" when vid_menudrawfn is set.
+// On the S3 it lists the sizes this panel offers; Enter saves one and
+// restarts into Quake at it (quake_display_choose_render), since the frame
+// buffers are sized once, before the hunk.
+
+extern double realtime;
+void M_Print(int cx, int cy, char* str);
+void M_PrintWhite(int cx, int cy, char* str);
+void M_DrawCharacter(int cx, int line, int num);
+void M_DrawPic(int x, int y, qpic_t* pic);
+void M_Menu_Options_f(void);
+
+static void quake_video_menu_draw(void) {
+  qpic_t* title = Draw_CachePic("gfx/vidmodes.lmp");
+  M_DrawPic((320 - title->width) / 2, 4, title);
+  M_Print(16, 32, "      Render size");
+  for (int i = 0; i < s_video_count; ++i) {
+    char line[40];
+    snprintf(line, sizeof(line), "%s%s", s_video_labels[i],
+             i == s_video_current ? " (now)" : "");
+    if (i == s_video_current) {
+      M_PrintWhite(80, 48 + i * 8, line);
+    } else {
+      M_Print(80, 48 + i * 8, line);
+    }
+  }
+  M_Print(16, 48 + VIDEO_MENU_MAX * 8 + 16, "  Enter switches, restarting");
+  M_DrawCharacter(64, 48 + s_video_cursor * 8, 12 + ((int)(realtime * 4) & 1));
+}
+
+static void quake_video_menu_key(int key) {
+  switch (key) {
+    case K_ESCAPE:
+      S_LocalSound("misc/menu1.wav");
+      M_Menu_Options_f();
+      break;
+    case K_UPARROW:
+      S_LocalSound("misc/menu1.wav");
+      s_video_cursor = (s_video_cursor + s_video_count - 1) % s_video_count;
+      break;
+    case K_DOWNARROW:
+      S_LocalSound("misc/menu1.wav");
+      s_video_cursor = (s_video_cursor + 1) % s_video_count;
+      break;
+    case K_ENTER:
+      S_LocalSound("misc/menu2.wav");
+      if (s_video_cursor != s_video_current) {
+        quake_display_choose_render(s_video_cursor);
+      }
+      break;
+    default:
+      break;
+  }
 }
 
 void VID_Shutdown(void) {}

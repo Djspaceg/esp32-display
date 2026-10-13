@@ -97,6 +97,25 @@ int main() {
     CHECK(d.renderWidth == 320 && d.renderHeight == 240 && d.x == 20 && d.y == 60);
     // A request does not change a panel that scales (the P4's 2x).
     CHECK(frameLayout(720, 720, 372, 280).renderWidth == 320);
+    // The render sizes offered in Quake's Video Options: on the 1.75C the
+    // 372x280 default, the whole panel and 320x240; a request is each one's
+    // frameLayout size.
+    RenderChoice choices[MAX_RENDER_CHOICES];
+    CHECK(renderChoices(466, 466, choices) == 3);
+    CHECK(choices[0].width == 372 && choices[0].height == 280);
+    CHECK(choices[1].width == 0 && choices[1].height == 0);
+    CHECK(choices[2].width == 320 && choices[2].height == 240);
+    CHECK(frameLayout(466, 466, choices[1].width, choices[1].height).renderWidth == 466);
+    // The 1.85C's 360x360 cannot take 372x280: the whole panel and 320x240.
+    CHECK(renderChoices(360, 360, choices) == 2);
+    CHECK(choices[0].width == 0 && choices[1].width == 320);
+    // A scaled panel (the P4) offers nothing: its size is fixed.
+    CHECK(renderChoices(720, 720, choices) == 0);
+    // Which choice a saved size is; anything else is -1.
+    CHECK(renderChoiceIndex(466, 466, 372, 280) == 0);
+    CHECK(renderChoiceIndex(466, 466, 0, 0) == 1);
+    CHECK(renderChoiceIndex(466, 466, 320, 240) == 2);
+    CHECK(renderChoiceIndex(466, 466, 400, 300) == -1);
     CHECK(frameLayout(960, 720).scale == 3);
     CHECK(frameLayout(960, 720).renderWidth == 320);
     CHECK(frameLayout(320, 240).scale == 1);

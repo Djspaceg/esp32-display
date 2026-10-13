@@ -14,6 +14,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <Preferences.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -26,6 +27,7 @@
 
 #include "quake_input_model.h"
 #include "quake_platform.h"
+#include "../quake_mode.h"  // the render size's NVS keys
 
 // Doom's USB host glue (firmware/doom/src/platform/doom_usb_input.h). Polled in
 // its menu context it hands every key over as Doom key codes through Doom's
@@ -239,7 +241,13 @@ void serviceUsb() {
 // ---- Setup, from quake_mode.cpp ------------------------------------------
 
 // NULL when the panel is ready for frames, else why not.
+// The size asked for this boot, for Video Options.
+int s_want_width = 0;
+int s_want_height = 0;
+
 extern "C" const char* quake_display_setup(int want_width, int want_height) {
+  s_want_width = want_width;
+  s_want_height = want_height;
   s_layout =
       quakeinput::frameLayout(PANEL_W, PANEL_H, want_width, want_height);
   if (s_layout.scale == 0) return "panel too small for a 320x240 frame";
@@ -303,6 +311,40 @@ extern "C" int quake_display_pages(void) {
 extern "C" void quake_display_quiesce(void) {
   if (!s_overlap || xTaskGetCurrentTaskHandle() == s_present_task) return;
   (void)xSemaphoreTake(s_present_done, pdMS_TO_TICKS(1000));
+}
+
+extern "C" int quake_display_render_choices(const char** labels, int max,
+                                            int* current) {
+  quakeinput::RenderChoice choices[quakeinput::MAX_RENDER_CHOICES];
+  const int n = quakeinput::renderChoices(PANEL_W, PANEL_H, choices);
+  for (int i = 0; i < n && i < max; ++i) labels[i] = choices[i].label;
+  *current =
+      quakeinput::renderChoiceIndex(PANEL_W, PANEL_H, s_want_width, s_want_height);
+  return n < max ? n : max;
+}
+
+extern "C" void quake_display_choose_render(int index) {
+  quakeinput::RenderChoice choices[quakeinput::MAX_RENDER_CHOICES];
+  const int n = quakeinput::renderChoices(PANEL_W, PANEL_H, choices);
+  if (index < 0 || index >= n) return;
+  // The same NVS namespace and one-shot flag the boot menu uses
+  // (display_stream/boot_menu.cpp), so the restart comes straight back to
+  // Quake at the new size.
+  Preferences prefs;
+  if (!prefs.begin("espdisp", false)) return;
+  const bool saved =
+      prefs.putShort(QUAKE_RENDER_WIDTH_KEY, (int16_t)choices[index].width) &&
+      prefs.putShort(QUAKE_RENDER_HEIGHT_KEY, (int16_t)choices[index].height) &&
+      prefs.putBool("quakeonce", true);
+  prefs.end();
+  if (!saved) {
+    quake_log("render size %s could not be saved", choices[index].label);
+    return;
+  }
+  quake_log("render size %s chosen; restarting Quake", choices[index].label);
+  doom_audio_end();
+  delay(20);
+  ESP.restart();
 }
 
 extern "C" void quake_display_render_size(int* width, int* height) {

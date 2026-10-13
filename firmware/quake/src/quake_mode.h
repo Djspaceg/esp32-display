@@ -64,6 +64,10 @@ constexpr bool quakeSupportsBoard(board::Variant variant) {
 #ifndef QUAKE_RENDER_HEIGHT
 #define QUAKE_RENDER_HEIGHT 280
 #endif
+// Where Video Options keeps a chosen size (the "espdisp" NVS namespace); a
+// saved size overrides the build switch when it is one this panel offers.
+#define QUAKE_RENDER_WIDTH_KEY "quakerw"
+#define QUAKE_RENDER_HEIGHT_KEY "quakerh"
 #ifdef __cplusplus
 extern "C" {
 #endif

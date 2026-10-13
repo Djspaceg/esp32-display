@@ -6,13 +6,19 @@
 #include "quake_mode.h"
 
 #include <Arduino.h>
+#include <Preferences.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
 #include <freertos/task.h>
 
 #include "platform/quake_pak_vfs.h"
+#include "platform/quake_input_model.h"
 #include "platform/quake_platform.h"
+
+// Settled by display_stream before Quake is entered.
+extern int16_t PANEL_W;
+extern int16_t PANEL_H;
 
 extern "C" const char* quake_display_setup(int want_width, int want_height);
 
@@ -87,6 +93,22 @@ void quake_enter(void) {
   quake_log("pak0.pak: %u bytes on the quake_pak partition",
             (unsigned)quake_pak_bytes());
 
+  {
+    // A size chosen in Video Options, if it is one this panel offers.
+    Preferences prefs;
+    if (prefs.begin("espdisp", true)) {
+      if (prefs.isKey(QUAKE_RENDER_WIDTH_KEY) &&
+          prefs.isKey(QUAKE_RENDER_HEIGHT_KEY)) {
+        const int w = prefs.getShort(QUAKE_RENDER_WIDTH_KEY, 0);
+        const int h = prefs.getShort(QUAKE_RENDER_HEIGHT_KEY, 0);
+        if (quakeinput::renderChoiceIndex(PANEL_W, PANEL_H, w, h) >= 0) {
+          quake_render_width = w;
+          quake_render_height = h;
+        }
+      }
+      prefs.end();
+    }
+  }
   const char* displayProblem =
       quake_display_setup(quake_render_width, quake_render_height);
   if (displayProblem != nullptr) {

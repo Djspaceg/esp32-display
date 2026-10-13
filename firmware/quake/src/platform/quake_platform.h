@@ -78,6 +78,15 @@ int quake_display_pages(void);
 /// Stops frames going to the panel (the failure card's writes come next).
 void quake_display_quiesce(void);
 
+/// The render sizes Video Options offers on this panel (quake_input_model.h
+/// renderChoices), up to `max` labels; *current is the running one's index,
+/// or -1. 0 when the panel has no choice (the P4).
+int quake_display_render_choices(const char** labels, int max, int* current);
+
+/// Saves choice `index` for the next Quake boot and restarts into Quake.
+/// Returns only if it could not be saved.
+void quake_display_choose_render(int index);
+
 /// Converts one 8-bit frame through `palette565` (256 big-endian RGB565
 /// entries) and puts it on the panel. With one page it returns once DMA is
 /// done with it; with two it returns once the previous frame is on the panel,

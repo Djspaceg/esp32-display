@@ -76,6 +76,41 @@ constexpr FrameLayout frameLayout(int panelWidth, int panelHeight,
                      ((panelHeight - rh * s) / 2) & ~1};
 }
 
+// ---- Render size choices --------------------------------------------------
+
+// What Quake's Video Options offers on a 1x panel (the S3 boards): requests
+// for frameLayout, the first the default. 0x0 is the whole panel. A panel
+// that scales (the P4's 2x) has nothing to choose.
+struct RenderChoice {
+  int width;
+  int height;
+  const char* label;
+};
+constexpr int MAX_RENDER_CHOICES = 3;
+
+inline int renderChoices(int panelWidth, int panelHeight,
+                         RenderChoice out[MAX_RENDER_CHOICES]) {
+  if (frameLayout(panelWidth, panelHeight).scale != 1) return 0;
+  int n = 0;
+  if (panelWidth >= 372 && panelHeight >= 280) {
+    out[n++] = RenderChoice{372, 280, "372x280"};
+  }
+  out[n++] = RenderChoice{0, 0, "full panel"};
+  out[n++] = RenderChoice{RENDER_WIDTH, RENDER_HEIGHT, "320x240"};
+  return n;
+}
+
+/// Which of renderChoices() a request is, or -1.
+inline int renderChoiceIndex(int panelWidth, int panelHeight, int width,
+                             int height) {
+  RenderChoice choices[MAX_RENDER_CHOICES];
+  const int n = renderChoices(panelWidth, panelHeight, choices);
+  for (int i = 0; i < n; ++i) {
+    if (choices[i].width == width && choices[i].height == height) return i;
+  }
+  return -1;
+}
+
 // ---- Key events ------------------------------------------------------------
 
 struct KeyEvent {
