@@ -19,6 +19,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 */
 
 #include "quakedef.h"
+#include <errno.h>  // espdisp: Host_Savegame_f tells no room from a flash error
 
 extern cvar_t	pausable;
 
@@ -511,7 +512,9 @@ void Host_Savegame_f (void)
 	// store refuses it when it has no room (the slot keeps what it had).
 	if (fclose (f) != 0)
 	{
-		Con_Printf ("ERROR: not saved, no room in the save area.\n");
+		Con_Printf (errno == ENOSPC
+			? "ERROR: not saved, no room in the save area.\n"
+			: "ERROR: not saved, the save area could not be written.\n");
 		return;
 	}
 	Con_Printf ("done.\n");

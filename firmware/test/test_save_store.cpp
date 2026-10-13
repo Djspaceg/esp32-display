@@ -316,8 +316,11 @@ void testFullStoreStillSavesOver() {
   const auto big = pattern(4 * SAVE_STORE_SECTOR_BYTES, 8);  // five sectors
   CHECK(put(&store, "quake/id1/s0.sav", big) == nullptr);
   CHECK(put(&store, "quake/id1/s1.sav", big) == nullptr);
-  CHECK(put(&store, "quake/id1/s2.sav", big) == nullptr);
-  CHECK(save_store_free_sectors(&store) == 0);
+  // A new file must leave a sector free: five would leave none.
+  CHECK(put(&store, "quake/id1/s2.sav", big) != nullptr);
+  CHECK(put(&store, "quake/id1/s2.sav", pattern(3 * SAVE_STORE_SECTOR_BYTES, 7)) ==
+        nullptr);  // four
+  CHECK(save_store_free_sectors(&store) == 1);
   CHECK(put(&store, "quake/id1/config.cfg", text("cfg")) != nullptr);
   for (int i = 0; i < 6; ++i) {
     CHECK(put(&store, i % 2 ? "quake/id1/s0.sav" : "quake/id1/s2.sav",
@@ -367,9 +370,10 @@ void testPowerLossDuringInPlaceOverwrite() {
     Flash f(SECTORS);
     save_store_t store;
     CHECK(mount(&store, f) == nullptr);
+    const auto four = pattern(3 * SAVE_STORE_SECTOR_BYTES, 31);
     CHECK(put(&store, "a/s0", big) == nullptr);
     CHECK(put(&store, "a/s1", big) == nullptr);
-    CHECK(put(&store, "a/s2", big) == nullptr);
+    CHECK(put(&store, "a/s2", four) == nullptr);
     f.budget = budget;
     put(&store, "a/s1", after);
     save_store_t again;
@@ -380,7 +384,7 @@ void testPowerLossDuringInPlaceOverwrite() {
     if (!ok) ++sawNone;
     if (ok && got == after) ++sawNew;
     CHECK(get(&again, "a/s0", &ok) == big && ok);
-    CHECK(get(&again, "a/s2", &ok) == big && ok);
+    CHECK(get(&again, "a/s2", &ok) == four && ok);
   }
   CHECK(sawNone > 0);
   CHECK(sawNew > 0);
@@ -399,6 +403,26 @@ void testRemoveAfterFailedErase() {
   save_store_t again;
   CHECK(mount(&again, f) == nullptr);
   CHECK(again.count == 0);
+}
+
+// The same when the failed erase is mount's, of an older duplicate.
+void testRemoveAfterFailedMountErase() {
+  Flash f(SECTORS);
+  save_store_t store;
+  CHECK(mount(&store, f) == nullptr);
+  CHECK(put(&store, "doom/default.cfg", text("old")) == nullptr);
+  const uint32_t oldHead =
+      store.files[save_store_find(&store, "doom/default.cfg")].head;
+  f.badEraseSector = oldHead;
+  CHECK(put(&store, "doom/default.cfg", text("new")) == nullptr);
+  save_store_t again;
+  CHECK(save_store_mount(&again, flashOf(f), SECTORS) == nullptr);
+  CHECK(again.count == 1);
+  f.badEraseSector = -1;
+  CHECK(save_store_remove(&again, "doom/default.cfg"));
+  save_store_t third;
+  CHECK(mount(&third, f) == nullptr);
+  CHECK(third.count == 0);
 }
 
 // A sector that cannot be read fails the mount instead of being taken as
@@ -488,6 +512,7 @@ int main() {
   testGrowingSave();
   testPowerLossDuringInPlaceOverwrite();
   testRemoveAfterFailedErase();
+  testRemoveAfterFailedMountErase();
   testReadErrorFailsMount();
   testWearSpreads();
   testNames();

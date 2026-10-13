@@ -218,10 +218,11 @@ static uint8_t* save_deflate(const uint8_t* in, uint32_t length,
   return out;
 }
 
-static bool save_inflate(const uint8_t* in, uint32_t length, uint8_t* out,
-                         uint32_t out_length) {
+// 1 inflated, 0 the data is bad, -1 no memory for the inflate state.
+static int save_inflate(const uint8_t* in, uint32_t length, uint8_t* out,
+                        uint32_t out_length) {
   tinfl_decompressor* d = (tinfl_decompressor*)save_alloc(sizeof(*d));
-  if (d == NULL) return false;
+  if (d == NULL) return -1;
   tinfl_init(d);
   size_t in_size = length;
   size_t out_size = out_length;
@@ -229,7 +230,7 @@ static bool save_inflate(const uint8_t* in, uint32_t length, uint8_t* out,
       tinfl_decompress(d, in, &in_size, out, out, &out_size,
                        TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
   free(d);
-  return status == TINFL_STATUS_DONE && out_size == out_length;
+  return status == TINFL_STATUS_DONE && out_size == out_length ? 1 : 0;
 }
 
 // ---- Files ------------------------------------------------------------------
@@ -251,9 +252,12 @@ static bool save_fd_valid(int fd) {
   return fd >= 0 && fd < SAVE_FILE_MAX_OPEN && save_files[fd].open;
 }
 
-// File `index`'s raw bytes into a new buffer of at least one byte.
-static uint8_t* save_load(int index, uint32_t* length) {
+// File `index`'s raw bytes into a new buffer of at least one byte. On NULL,
+// *transient says whether it could work another time (memory, a flash read)
+// rather than the file being damaged.
+static uint8_t* save_load(int index, uint32_t* length, bool* transient) {
   const save_store_file_t* file = &save_state->files[index];
+  *transient = true;
   uint8_t* stored = (uint8_t*)save_alloc(file->stored_bytes + 1);
   if (stored == NULL) return NULL;
   if (!save_store_read(save_state, index, 0, stored, file->stored_bytes)) {
@@ -263,8 +267,14 @@ static uint8_t* save_load(int index, uint32_t* length) {
   uint8_t* raw = stored;
   if (file->encoding == SAVE_STORE_ENCODING_DEFLATE) {
     raw = (uint8_t*)save_alloc(file->raw_bytes + 1);
-    if (raw == NULL ||
-        !save_inflate(stored, file->stored_bytes, raw, file->raw_bytes)) {
+    if (raw == NULL) {
+      free(stored);
+      return NULL;
+    }
+    const int inflated =
+        save_inflate(stored, file->stored_bytes, raw, file->raw_bytes);
+    if (inflated <= 0) {
+      *transient = inflated < 0;
       free(raw);
       free(stored);
       return NULL;
@@ -272,6 +282,7 @@ static uint8_t* save_load(int index, uint32_t* length) {
     free(stored);
   }
   if (save_store_crc32(0, raw, file->raw_bytes) != file->raw_crc) {
+    *transient = false;
     free(raw);
     return NULL;
   }
@@ -308,11 +319,15 @@ int save_file_open(const char* name, int flags) {
   uint8_t* data = NULL;
   uint32_t length = 0;
   if (index >= 0 && !(access != O_RDONLY && (flags & O_TRUNC))) {
-    data = save_load(index, &length);
+    bool transient = false;
+    data = save_load(index, &length, &transient);
     if (data == NULL) {
-      save_unreadable |= 1u << save_state->files[index].head;
+      // A damaged copy may be written over; one that only could not be read
+      // just now is kept, since the game will fall back to its defaults.
+      if (transient) save_unreadable |= 1u << save_state->files[index].head;
       xSemaphoreGive(save_lock);
-      save_log("could not read %s; it will not be written over this boot",
+      save_log(transient ? "could not read %s; not writing over it this boot"
+                         : "%s is damaged; it will be replaced when written",
                name);
       errno = EIO;
       return -1;
@@ -404,7 +419,8 @@ off_t save_file_lseek(int fd, off_t offset, int whence) {
   return (off_t)target;
 }
 
-// Stores a closed file's bytes; NULL, or why it was not stored.
+// Stores a closed file's bytes; NULL, or why it was not stored
+// (SAVE_STORE_FULL when there was no room).
 static const char* save_commit(const char* name, const uint8_t* data,
                                uint32_t length) {
   const uint32_t crc = save_store_crc32(0, data, length);
@@ -455,7 +471,7 @@ int save_file_close(int fd) {
   memset(&save_files[fd], 0, sizeof(save_files[fd]));
   xSemaphoreGive(save_lock);
   if (failure != NULL) {
-    errno = ENOSPC;
+    errno = failure == SAVE_STORE_FULL ? ENOSPC : EIO;
     return -1;
   }
   return 0;

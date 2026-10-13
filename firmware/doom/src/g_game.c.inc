@@ -17,6 +17,7 @@
 
 
 
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -1621,9 +1622,10 @@ void G_DoSaveGame (void)
     temp_savegame_file = P_TempSaveGameFile();
     savegame_file = P_SaveGameFile(savegameslot);
 #ifdef ESP_PLATFORM
-    // The saved-games store replaces a file only once the new copy is whole,
-    // which is what the temporary file and rename are for, so the save goes
-    // straight to its slot. The store has no rename.
+    // The saved-games store writes a file only when it is closed and keeps
+    // the old copy until the new one is whole wherever both fit, which is
+    // what the temporary file and rename are for; so the save goes straight
+    // to its slot. The store has no rename.
     temp_savegame_file = savegame_file;
 #endif
 
@@ -1669,14 +1671,17 @@ void G_DoSaveGame (void)
 
 #ifdef ESP_PLATFORM
     // The store writes the file to flash on close, and refuses it when the
-    // save area has no room; the slot then keeps what it had.
+    // save area has no room (the slot then keeps what it had) or on a flash
+    // error.
     if (fclose(save_stream) != 0)
     {
-        doom_log("save to slot %d failed (no room in the save area)",
-                 savegameslot);
+        const boolean full = errno == ENOSPC;
+        doom_log("save to slot %d failed (%s)", savegameslot,
+                 full ? "no room in the save area" : "flash error");
         gameaction = ga_nothing;
         M_StringCopy(savedescription, "", sizeof(savedescription));
-        players[consoleplayer].message = "GAME NOT SAVED: NO ROOM";
+        players[consoleplayer].message =
+            full ? "GAME NOT SAVED: NO ROOM" : "GAME NOT SAVED";
         return;
     }
     doom_log("saved slot %d: E%dM%d, leveltime %d", savegameslot,

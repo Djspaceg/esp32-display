@@ -22,8 +22,9 @@
 //
 // Room: a file is replaced as above whenever both copies fit. When they do
 // not, but the new one fits in the old one's place, the old copy is erased
-// first: a slot can always be saved over at its size or smaller, and only
-// then could a power cut mid-write lose it. A new file needs room of its own.
+// first: a slot can always be saved over at its size or smaller, but a power
+// cut or flash error during that write loses it. A new file must leave one
+// sector free, so a one-sector file (every config) is always replaced whole.
 //
 // Pure C over a flash interface, so firmware/test/test_save_store.cpp runs it
 // on the host against a NOR flash fake. Compression is the caller's: the
@@ -62,6 +63,10 @@ extern "C" {
 #define SAVE_STORE_ENCODING_DEFLATE 1
 
 static const char SAVE_STORE_MAGIC[8] = {'E', 'S', 'P', 'S', 'A', 'V', 'E', '1'};
+
+// save_store_write's answer when there is no room, as opposed to a flash
+// error: compare the pointer.
+static const char SAVE_STORE_FULL[] = "save area full";
 
 typedef struct {
   void* context;
@@ -389,15 +394,17 @@ static inline const char* save_store_mount(save_store_t* store,
     if (store->count == 1) store->cursor = (file->head + 1) % sectors;
   }
   for (uint32_t sector = 0; sector < sectors; ++sector) {
-    if ((stale & (1u << sector)) && !(claimed & (1u << sector))) {
-      flash.erase_sector(flash.context, sector);
+    if ((stale & (1u << sector)) && !(claimed & (1u << sector)) &&
+        !flash.erase_sector(flash.context, sector)) {
+      store->stale |= 1u << sector;  // retried before a remove
     }
   }
   return NULL;
 }
 
 // Stores `stored` bytes as `name`, replacing any file of that name. NULL, or
-// why it was not stored (the old file, if any, is then untouched).
+// why it was not stored: SAVE_STORE_FULL leaves the old file untouched; a
+// flash error on the in-place path above may have erased it.
 static inline const char* save_store_write(save_store_t* store,
                                            const char* name,
                                            const void* payload,
@@ -416,7 +423,7 @@ static inline const char* save_store_write(save_store_t* store,
   if (needed > room) {
     if (old < 0 ||
         needed > room + save_store_popcount(store->files[old].mask)) {
-      return "save area full";
+      return SAVE_STORE_FULL;
     }
     // No room for both copies: the old one goes first.
     if (!store->flash.erase_sector(store->flash.context,
@@ -427,6 +434,8 @@ static inline const char* save_store_write(save_store_t* store,
     old = -1;
     used = save_store_used_mask(store);
     room = store->sectors - save_store_popcount(used);
+  } else if (old < 0 && needed == room) {
+    return SAVE_STORE_FULL;  // a new file leaves one sector free
   }
   // Free sectors round from the cursor; the first is the head.
   uint32_t mask = 0;

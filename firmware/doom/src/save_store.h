@@ -29,8 +29,8 @@ bool save_store_ready(void);
 // Files by store name ("quake/id1/config.cfg"), for a VFS that forwards to
 // the store. As POSIX: -1 with errno on failure. A file opened for writing is
 // kept in RAM and goes to flash, compressed, when it is closed; close fails
-// with ENOSPC when it was not stored (no room, or a write to it failed), and
-// the old copy, if any, stays. Any task, PSRAM stacks included.
+// with ENOSPC when there was no room (the old copy, if any, stays) and EIO
+// when a write to it or the flash failed. Any task, PSRAM stacks included.
 int save_file_open(const char* name, int flags);
 ssize_t save_file_read(int fd, void* dst, size_t size);
 ssize_t save_file_write(int fd, const void* src, size_t size);
