@@ -13,6 +13,7 @@
 
 #include "audio_backend.h"
 #include "doom_audio_pace.h"
+#include "game_quiet.h"
 
 // Settled by display_stream before Doom is entered.
 extern const board::Config *bcfg;
@@ -97,6 +98,11 @@ extern "C" uint32_t doom_audio_begin(doom_audio_render_fn render) {
   if (audioConfig == nullptr ||
       audiobackend::classify(*audioConfig) ==
           audiobackend::DescriptorStatus::NoAudio) {
+    return 0;
+  }
+  // Before the probe, so a quiet boot touches no audio part at all.
+  if (gameQuietEnabled()) {
+    doom_log("sound: off, quiet mode (CFGQUIET 0 turns it back on)");
     return 0;
   }
   // Probes the codec and ADC chip IDs once, read-only, for a supported

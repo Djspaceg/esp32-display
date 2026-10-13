@@ -286,6 +286,7 @@ python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 \
   CFGBRIGHTLEVELS 24 128 10 255
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGFIXEDBL 255
 python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGGAME QUAKE
+python3 tools/espdisp.py config --port /dev/cu.usbmodem1101 CFGQUIET 1
 ```
 
 `CFGAUTOROT 0|1` persists motion-based orientation; `CFGSHOW` reports both
@@ -303,6 +304,14 @@ WAD's name such as `FREEDOOM1`, or `STREAMING`), as choosing it on the menu
 does. A game restarts the board into it, so it sends no reply; otherwise it
 answers `CFGOK game=STREAMING`, `CFGERR the boot menu offers no <label>`, or
 `CFGERR could not save the <label> request`. See `docs/game-store.md`.
+
+`CFGQUIET 1` is quiet mode for benchmark and demo runs (`timedemo demo1`):
+Doom and Quake start with no sound at all, effects or music, on every family
+that runs them. It is persisted, so it lasts across restarts until
+`CFGQUIET 0`, applies from the next game boot, and replies
+`CFGOK quiet=1 (saved; Doom and Quake start with no sound)`. `CFGSHOW` reports
+it as `quiet=`. A quiet game logs `sound: off, quiet mode` on serial and never
+powers the codec or amplifier. Audio streamed from the Mac is not affected.
 
 WiFi and names use base64-safe helper flows in the app. OTA stays disabled until
 a password is stored:

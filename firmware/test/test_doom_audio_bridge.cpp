@@ -10,6 +10,8 @@
 // - Each failure after the probe leaves the amplifier off and frees what it
 //   took, so sound stays off and Doom carries on.
 // - doom_audio_end lets the queue drain, then turns the amplifier off once.
+// - Quiet mode (the NVS "quiet" key CFGQUIET sets) declines before any I2C
+//   read or GPIO write, so neither game mixes or plays a sample.
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +19,7 @@
 #include <vector>
 
 #include <Arduino.h>
+#include <Preferences.h>
 #include <board_config.h>
 
 #include "../display_stream/audio_backend.h"
@@ -200,6 +203,29 @@ int main() {
   // A later attempt in the same boot may still succeed.
   audiohost::setTaskCreateFailing(false);
   CHECK(doom_audio_begin(renderSilence) == 16000);
+
+  // ---- Quiet mode (CFGQUIET 1): a board with audio stays silent. ----
+  // Doom and Quake both start their sound here, so declining leaves each
+  // engine with sound off: nothing is mixed, the codec and amplifier are never
+  // touched, and the reason is logged once.
+  fresh(board::CONFIG_AMOLED_CO5300);
+  Preferences::bools()["quiet"] = true;
+  renderedFrames = 0;
+  CHECK(doom_audio_begin(renderSilence) == 0);
+  CHECK(logged.find("sound: off, quiet mode") != std::string::npos);
+  CHECK(audiohost::hardwareEvents().empty());
+  CHECK(audiohost::createdTasks().empty());
+  CHECK(audiohost::liveMutexes() == 0);
+  CHECK(renderedFrames == 0);
+  const uint32_t quietEnd = millis();
+  doom_audio_end();
+  CHECK(millis() == quietEnd);
+  CHECK(audiohost::hardwareEvents().empty());
+  // Turned off again, the same board has its sound back.
+  fresh(board::CONFIG_AMOLED_CO5300);
+  Preferences::bools()["quiet"] = false;
+  CHECK(doom_audio_begin(renderSilence) == 16000);
+  Preferences::bools().clear();
 
   audio::sharedCodecBackend().stop();
   printf("test_doom_audio_bridge: %d checks passed\n", checks);

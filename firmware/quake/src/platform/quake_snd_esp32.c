@@ -66,7 +66,9 @@ void quake_audio_render(int16_t* out, size_t frames, unsigned channels) {
 
 qboolean SNDDMA_Init(void) {
   if (s_rate == 0) {
-    Con_Printf("sound: this board has no usable audio\n");
+    // The bridge has logged why: no audio parts, a failed start, or quiet
+    // mode (CFGQUIET).
+    Con_Printf("sound: off\n");
     return false;
   }
   int16_t* ring = (int16_t*)heap_caps_calloc(

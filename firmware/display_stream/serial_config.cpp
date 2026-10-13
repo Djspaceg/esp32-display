@@ -16,6 +16,7 @@
 #include "display_power.h"
 #include "fault_inject.h"
 #include "frame_pipeline.h"
+#include "game_quiet.h"
 #include "input_touch.h"
 #include "net_link.h"
 #include "orientation.h"
@@ -476,6 +477,28 @@ static void processConfigLine(char *line) {
         configSerial().printf("CFGERR could not save the %s request\n", label);
         break;
     }
+  } else if (strncmp(line, "CFGQUIET ", 9) == 0) {
+    // Quiet mode for Doom and Quake (game_quiet.h): CFGQUIET 0|1. Persisted,
+    // and read when a game starts its sound, so it applies from the next game
+    // boot; streaming audio is not affected.
+    int want;
+    char extra;
+    if (sscanf(line + 9, "%d %c", &want, &extra) != 1 ||
+        (want != 0 && want != 1)) {
+      configSerial().println("CFGERR expected: CFGQUIET 0|1");
+      return;
+    }
+    Preferences prefs;
+    const bool saved = prefs.begin("espdisp", false) &&
+                       prefs.putBool(GAME_QUIET_KEY, want != 0) == 1;
+    prefs.end();
+    if (!saved) {
+      configSerial().println("CFGERR could not save quiet");
+      return;
+    }
+    configSerial().printf(
+        "CFGOK quiet=%d (saved; Doom and Quake start %s)\n", want,
+        want != 0 ? "with no sound" : "with sound");
   } else if (strncmp(line, "CFGFIXEDBL ", 11) == 0) {
     int want;
     char extra;
@@ -867,7 +890,7 @@ static void processConfigLine(char *line) {
         // would make the field ambiguous to every parser reading it.
         "connected=%d ip=%s rssi=%d flip=%d rot=%u mirrorx=%d autorot=%d "
         "auto=%u effective=%u motion=%d bl=%s blfixed=%u "
-        "bllow=%u blhigh=%u blidle=%u blsurvey=%u pwr=%s "
+        "bllow=%u blhigh=%u blidle=%u blsurvey=%u pwr=%s quiet=%d "
         "board=%s profile=%s target=%s chip=%s partition=%s bat=%d "
         "ota=%s ssid=%s%s\n",
         (const char *)b64, (const char *)name64,
@@ -879,7 +902,7 @@ static void processConfigLine(char *line) {
         automaticRotationEnabled, automaticRotation, appliedPanelRotation,
         motionAvailable, blIsHigh() ? "high" : "low", fixedBlLevel,
         BL_LOW, BL_HIGH, BL_IDLE, BL_SURVEY,
-        panelManuallyOff ? "off" : "on",
+        panelManuallyOff ? "off" : "on", gameQuietEnabled() ? 1 : 0,
         board::variantToken(boardVariant), board::variantToken(boardVariant),
         board::targetToken(boardVariant), bcfg->platform->chipToken,
         bcfg->platform->partitionToken,
