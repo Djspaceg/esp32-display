@@ -751,8 +751,16 @@ const char* save_store_open(void) {
   }
   const save_store_flash_t flash = {NULL, save_area_read, save_area_write,
                                     save_area_erase};
-  save_failure = save_store_mount(save_state, flash,
-                                  save_area->size / SAVE_STORE_SECTOR_BYTES);
+  // The mount's working space is only needed meanwhile: about 11 KB of PSRAM
+  // that a Quake boot on an S3 cannot spare for the whole session.
+  save_store_file_t* scan = (save_store_file_t*)save_alloc(
+      SAVE_STORE_MAX_SECTORS * sizeof(save_store_file_t));
+  save_failure = scan == NULL ? "no memory to read the save store"
+                              : save_store_mount(save_state, flash,
+                                                 save_area->size /
+                                                     SAVE_STORE_SECTOR_BYTES,
+                                                 scan);
+  free(scan);
   if (save_failure != NULL) return save_failure;
   if (esp_vfs_register(SAVE_STORE_MOUNT, &save_vfs, NULL) != ESP_OK) {
     save_failure = "could not register the /save file system";

@@ -106,7 +106,6 @@ typedef struct {
   save_store_mask_t stale;
   int count;
   save_store_file_t files[SAVE_STORE_MAX_FILES];
-  save_store_file_t scan[SAVE_STORE_MAX_SECTORS];  // mount's working set
 } save_store_t;
 
 // zlib's CRC-32, continuing from `crc` (0 to start).
@@ -391,9 +390,11 @@ static inline int save_store_payload_ok(const save_store_flash_t* flash,
 
 // Reads the area: every record whose header and payload pass, the newest of
 // each name. Older copies are erased. NULL, or why the area is unusable.
+// `scan` is working space for one entry per sector, needed only meanwhile.
 static inline const char* save_store_mount(save_store_t* store,
                                            save_store_flash_t flash,
-                                           uint32_t sectors) {
+                                           uint32_t sectors,
+                                           save_store_file_t* scan) {
   memset(store, 0, sizeof(*store));
   store->flash = flash;
   store->sectors = sectors;
@@ -402,7 +403,7 @@ static inline const char* save_store_mount(save_store_t* store,
   }
   // A read failure fails the mount rather than dropping the record, whose
   // sectors would then be reused.
-  save_store_file_t* found = store->scan;
+  save_store_file_t* found = scan;
   uint32_t count = 0;
   for (uint32_t sector = 0; sector < sectors; ++sector) {
     uint8_t head[SAVE_STORE_HEAD_BYTES];

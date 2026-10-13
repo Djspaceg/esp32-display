@@ -226,7 +226,9 @@ and checks it. The P4 table also reserves `quake_pak` (`0xE00000`, 18 MiB), the
 board's game store for the WADs and Quake paks the Mac app adds
 (`docs/game-store.md`); no bundle writes it.
 `firmware/partitions_s3_doom.csv` remains available as a manual 16 MiB developer
-layout with larger `0x5F0000` application slots; it is not the canonical build.
+layout with larger `0x5F0000` application slots; it is not the canonical build,
+and it has no `game_saves` partition, so a board flashed with it keeps no
+settings or saves (the boot log says so).
 
 Changing from an earlier S3 table (`universal-8m-ota`, or
 `universal-8m-doom-ota` before `game_saves`) to `universal-8m-doom-saves-ota`,

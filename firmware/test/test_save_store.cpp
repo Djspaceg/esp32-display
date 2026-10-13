@@ -1,6 +1,6 @@
 // Host tests for the saved-games store (firmware/doom/src/platform/
 // save_store_model.h): what Quake's config.cfg and saves and Doom's
-// default.cfg and saves are kept in, in the 60 KB of flash beside doom_wad.
+// default.cfg and saves are kept in, the S3 and P4 game_saves partitions.
 //
 // The flash is faked with NOR rules (a write only clears bits, an erase sets
 // a whole sector to 0xFF), and every "restart" mounts a fresh store over the
@@ -24,6 +24,8 @@ static int failures = 0;
   } while (0)
 
 namespace {
+
+save_store_file_t scratch[SAVE_STORE_MAX_SECTORS];  // mount's working space
 
 // Most tests use a small area, where room runs out quickly; the capacity
 // tests use the two real game_saves partitions.
@@ -106,7 +108,8 @@ save_store_flash_t flashOf(Flash& f) {
 const char* mount(save_store_t* store, Flash& f) {
   f.dead = false;
   f.budget = -1;
-  return save_store_mount(store, flashOf(f), (uint32_t)(f.erases.size()));
+  return save_store_mount(store, flashOf(f), (uint32_t)(f.erases.size()),
+                          scratch);
 }
 
 std::vector<uint8_t> text(const std::string& s) {
@@ -447,7 +450,7 @@ void testRemoveAfterFailedMountErase() {
   f.badEraseSector = oldHead;
   CHECK(put(&store, "doom/default.cfg", text("new")) == nullptr);
   save_store_t again;
-  CHECK(save_store_mount(&again, flashOf(f), SECTORS) == nullptr);
+  CHECK(save_store_mount(&again, flashOf(f), SECTORS, scratch) == nullptr);
   CHECK(again.count == 1);
   f.badEraseSector = -1;
   CHECK(save_store_remove(&again, "doom/default.cfg"));
@@ -468,7 +471,7 @@ void testReadErrorFailsMount() {
   f.badReadFrom = head * SAVE_STORE_SECTOR_BYTES + SAVE_STORE_HEAD_BYTES + 300;
   f.badReadTo = f.badReadFrom + 1;
   save_store_t again;
-  CHECK(save_store_mount(&again, flashOf(f), SECTORS) != nullptr);
+  CHECK(save_store_mount(&again, flashOf(f), SECTORS, scratch) != nullptr);
   f.badReadFrom = f.badReadTo = -1;
   CHECK(mount(&again, f) == nullptr);
   CHECK(again.count == 1);
