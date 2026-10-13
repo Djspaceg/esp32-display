@@ -137,6 +137,37 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
             partition: "p4-32m-saves-ota")))
     }
 
+    /// A catalog from before game_saves (the local dev catalog of an older
+    /// checkout, say) still reads, naming its own layout; a scheme the family
+    /// never had does not.
+    func testACatalogFromBeforeGameSavesStillReads() throws {
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Self.catalogData()) as? [String: Any])
+        var families = object["families"] as! [String: Any]
+        for (family, scheme) in [("s3", "universal-8m-doom-ota"), ("p4", "p4-32m-ota")] {
+            var entry = families[family] as! [String: Any]
+            var compatibility = entry["compatibility"] as! [String: Any]
+            compatibility["partition_scheme"] = scheme
+            entry["compatibility"] = compatibility
+            families[family] = entry
+        }
+        object["families"] = families
+        let catalog = try FirmwareReleaseCatalog.read(
+            JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(
+            catalog.families["s3"]?.compatibility.partitionScheme, "universal-8m-doom-ota")
+        XCTAssertEqual(catalog.families["p4"]?.compatibility.partitionScheme, "p4-32m-ota")
+
+        var p4 = families["p4"] as! [String: Any]
+        var compatibility = p4["compatibility"] as! [String: Any]
+        compatibility["partition_scheme"] = "p4-64m-ota"
+        p4["compatibility"] = compatibility
+        families["p4"] = p4
+        object["families"] = families
+        XCTAssertThrowsError(try FirmwareReleaseCatalog.read(
+            JSONSerialization.data(withJSONObject: object)))
+    }
+
     func testThePreGameSavesSchemesAreNoLongerCurrent() throws {
         let catalog = try FirmwareReleaseCatalog.read(Self.catalogData())
         for (identity, expected) in [

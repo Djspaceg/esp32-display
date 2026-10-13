@@ -178,10 +178,15 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
                     rawHardware[profile], at: "\(family).hardware.\(profile)")
             }
             let compatibility = try parseCompatibility(raw["compatibility"], family: family)
+            // A catalog written before the family's current layout (one of its
+            // previous schemes) still reads: its images install over USB only,
+            // as for an older revision.
             guard let required = expected[family], chip == required.chip,
                   profiles == required.profiles,
                   compatibility.flashBytes == required.flashBytes,
-                  compatibility.partitionScheme == required.partition,
+                  compatibility.partitionScheme == required.partition
+                    || (Self.previousPartitionSchemes[family] ?? [])
+                        .contains(compatibility.partitionScheme),
                   compatibility.bootloaderAddress == required.bootloaderAddress,
                   compatibility.partitionsAddress == 0x8000,
                   compatibility.bootApp0Address == 0xE000,
