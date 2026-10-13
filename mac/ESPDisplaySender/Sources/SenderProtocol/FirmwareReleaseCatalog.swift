@@ -241,6 +241,13 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
         return try bundle(for: revision, in: entry, data: data)
     }
 
+    /// The layouts each family shipped before its current one: an older
+    /// revision built for one of them is still offered, over USB only.
+    public static let previousPartitionSchemes: [String: Set<String>] = [
+        "s3": ["universal-8m-doom-ota"],
+        "p4": ["p4-32m-ota"],
+    ]
+
     /// Verify one independently selectable revision against its family contract.
     public func bundle(
         for revision: Revision, in entry: Entry, data: Data
@@ -275,7 +282,11 @@ public struct FirmwareReleaseCatalog: Equatable, Sendable {
             throw FirmwareReleaseCatalogError.revisionMissingPayload(
                 family: entry.family, role: "doom_wad")
         }
-        guard partition == entry.compatibility.partitionScheme else {
+        // An older revision may keep the layout it shipped with; installing it
+        // rewrites the board's table, which only a USB flash can do.
+        let olderLayout = revision.version != entry.latestVersion
+            && (Self.previousPartitionSchemes[entry.family] ?? []).contains(partition)
+        guard partition == entry.compatibility.partitionScheme || olderLayout else {
             throw FirmwareReleaseCatalogError.revisionPartitionMismatch(
                 family: entry.family,
                 expected: entry.compatibility.partitionScheme,
@@ -537,7 +548,10 @@ public enum FirmwareReleaseCatalogError: Error, LocalizedError, Equatable {
         case .unknownFamily(let family): return "No release exists for family \(family)."
         case .chipMismatch(let expected, let found): return "Chip \(found) does not match \(expected)."
         case .profileMismatch(let family, let found): return "Profile \(found) is not valid for \(family)."
-        case .partitionMismatch(let expected, let found): return "Partition \(found) does not match \(expected)."
+        case .partitionMismatch(let expected, let found):
+            return "This board uses partition layout \(found), but this firmware needs "
+                + "\(expected). The partition layout changes, so update this board over "
+                + "USB; a WiFi update cannot rewrite the partition table."
         case .artifactSizeMismatch(let family): return "\(family) artifact byte count does not match the catalog."
         case .artifactHashMismatch(let family): return "\(family) artifact hash does not match the catalog."
         case .bundleMetadataMismatch(let family): return "\(family) bundle metadata does not match the catalog."

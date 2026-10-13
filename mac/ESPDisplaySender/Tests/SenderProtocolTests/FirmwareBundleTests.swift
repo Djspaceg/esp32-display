@@ -544,7 +544,7 @@ final class FirmwareBundleTests: XCTestCase {
             filename: "display_stream.ino.partitions.bin",
             payload: Self.p4PartitionTable(
                 wadAddress: wadAddress, slotBytes: 0x800000,
-                quakeAddress: nil))
+                savesAddress: nil, quakeAddress: nil))
         p4.flashParts[3] = FlashPartSpec(
             role: "doom_wad", address: wadAddress,
             filename: "doom1.wad", payload: Self.canonicalDoomWad)
@@ -566,7 +566,7 @@ final class FirmwareBundleTests: XCTestCase {
             filename: "display_stream.ino.partitions.bin",
             payload: Self.p4PartitionTable(
                 wadAddress: wadAddress, slotBytes: 0x5F0000,
-                quakeAddress: nil))
+                savesAddress: nil, quakeAddress: nil))
         p4.flashParts[3] = FlashPartSpec(
             role: "doom_wad", address: wadAddress,
             filename: "doom1.wad", payload: Self.canonicalDoomWad)
@@ -576,6 +576,46 @@ final class FirmwareBundleTests: XCTestCase {
         XCTAssertNil(
             bundle.flashPlan(forTarget: "p4"),
             "the P4 table without quake_pak is never flashed")
+    }
+
+    // p4-32m-ota: 0x4F0000 slots and no game_saves. The 1.5.0 and earlier
+    // 2.0.0 bundles carry it, so it still reads and flashes (a USB install of
+    // an older revision writes its own table back); anything else between
+    // the two layouts is refused.
+    func testP4ReadsThePreGameSavesLayoutAndPinsGameSaves() throws {
+        var p4 = Self.currentP4Spec
+        p4.flashParts[1] = FlashPartSpec(
+            role: "partitions", address: 0x8000,
+            filename: "display_stream.ino.partitions.bin",
+            payload: Self.p4PartitionTable(slotBytes: 0x4F0000, savesAddress: nil))
+        let bundle = try Self.readBundle(
+            version: "1.5.0", images: [p4], generation: FirmwareBundle.format)
+        XCTAssertNotNil(
+            bundle.flashPlan(forTarget: "p4"),
+            "an older revision's P4 table without game_saves is still flashed")
+
+        var moved = Self.currentP4Spec
+        moved.flashParts[1] = FlashPartSpec(
+            role: "partitions", address: 0x8000,
+            filename: "display_stream.ino.partitions.bin",
+            payload: Self.p4PartitionTable(savesAddress: 0x971000))
+        let movedBundle = try Self.readBundle(
+            version: "1.5.0", images: [moved], generation: FirmwareBundle.format)
+        XCTAssertNil(movedBundle.flashPlan(forTarget: "p4"), "game_saves is pinned")
+    }
+
+    // universal-8m-doom-ota: 0x1F0000 slots and no game_saves.
+    func testS3ReadsThePreGameSavesLayout() throws {
+        var s3 = Self.currentS3Spec
+        s3.flashParts[1] = FlashPartSpec(
+            role: "partitions", address: 0x8000,
+            filename: "display_stream.ino.partitions.bin",
+            payload: Self.s3PartitionTable(previous: true))
+        let bundle = try Self.readBundle(
+            version: "1.5.0", images: [s3], generation: FirmwareBundle.format)
+        XCTAssertNotNil(
+            bundle.flashPlan(forTarget: "s3"),
+            "an older revision's S3 table without game_saves is still flashed")
     }
 
     func testP4RefusesAMisplacedQuakePak() throws {
@@ -1972,8 +2012,8 @@ final class FirmwareBundleTests: XCTestCase {
 
     private static func p4PartitionTable(
         wadAddress: Int = 0x9F0000, includeApp1: Bool = true,
-        includeDoom: Bool = true, slotBytes: Int = 0x4F0000,
-        quakeAddress: Int? = 0xE00000
+        includeDoom: Bool = true, slotBytes: Int = 0x4B0000,
+        savesAddress: Int? = 0x970000, quakeAddress: Int? = 0xE00000
     ) -> Data {
         var bytes = [UInt8](repeating: 0xFF, count: 3072)
         func writeU32(_ value: Int, _ offset: Int) {
@@ -2004,6 +2044,10 @@ final class FirmwareBundleTests: XCTestCase {
         var next = 3
         if includeApp1 {
             entry(next, "app1", 0x00, 0x11, 0x10000 + slotBytes, slotBytes)
+            next += 1
+        }
+        if let savesAddress {
+            entry(next, "game_saves", 0x42, 0x08, savesAddress, 0x80000)
             next += 1
         }
         if includeDoom {
@@ -2062,7 +2106,9 @@ final class FirmwareBundleTests: XCTestCase {
         ]
     }
 
-    private static func s3PartitionTable() -> Data {
+    /// The current S3 table, or with `previous` universal-8m-doom-ota's, the
+    /// table before game_saves took the top of the app slots.
+    private static func s3PartitionTable(previous: Bool = false) -> Data {
         var bytes = [UInt8](repeating: 0xFF, count: 3072)
         func writeU32(_ value: Int, _ offset: Int) {
             for shift in stride(from: 0, through: 24, by: 8) {
@@ -2087,9 +2133,16 @@ final class FirmwareBundleTests: XCTestCase {
         }
         entry(0, "nvs", 0x01, 0x02, 0x9000, 0x5000)
         entry(1, "otadata", 0x01, 0x00, 0xE000, 0x2000)
-        entry(2, "app0", 0x00, 0x10, 0x10000, 0x1F0000)
-        entry(3, "app1", 0x00, 0x11, 0x200000, 0x1F0000)
-        entry(4, "doom_wad", 0x42, 0x06, 0x3FF000, 0x401000)
+        if previous {
+            entry(2, "app0", 0x00, 0x10, 0x10000, 0x1F0000)
+            entry(3, "app1", 0x00, 0x11, 0x200000, 0x1F0000)
+            entry(4, "doom_wad", 0x42, 0x06, 0x3FF000, 0x401000)
+        } else {
+            entry(2, "app0", 0x00, 0x10, 0x10000, 0x1E0000)
+            entry(3, "app1", 0x00, 0x11, 0x1F0000, 0x1E0000)
+            entry(4, "game_saves", 0x42, 0x08, 0x3D0000, 0x2F000)
+            entry(5, "doom_wad", 0x42, 0x06, 0x3FF000, 0x401000)
+        }
         return Data(bytes)
     }
 

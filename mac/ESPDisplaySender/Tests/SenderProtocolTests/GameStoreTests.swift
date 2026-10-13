@@ -87,15 +87,79 @@ final class GameStoreTests: XCTestCase {
 
     static let p4Table = table([
         ("nvs", 0x01, 0x02, 0x9000, 0x5000), ("otadata", 0x01, 0x00, 0xE000, 0x2000),
-        ("app0", 0x00, 0x10, 0x10000, 0x4F0000), ("app1", 0x00, 0x11, 0x500000, 0x4F0000),
+        ("app0", 0x00, 0x10, 0x10000, 0x4B0000), ("app1", 0x00, 0x11, 0x4C0000, 0x4B0000),
+        ("game_saves", 0x42, 0x08, 0x970000, 0x80000),
         ("doom_wad", 0x42, 0x06, 0x9F0000, 0x401000),
         ("quake_pak", 0x42, 0x07, 0xE00000, 0x1200000),
     ])
     static let s3Table = table([
         ("nvs", 0x01, 0x02, 0x9000, 0x5000), ("otadata", 0x01, 0x00, 0xE000, 0x2000),
+        ("app0", 0x00, 0x10, 0x10000, 0x1E0000), ("app1", 0x00, 0x11, 0x1F0000, 0x1E0000),
+        ("game_saves", 0x42, 0x08, 0x3D0000, 0x2F000),
+        ("doom_wad", 0x42, 0x06, 0x3FF000, 0x401000),
+    ])
+    /// p4-32m-ota, the P4 table before game_saves took the top of its slots.
+    static let previousP4Table = table([
+        ("nvs", 0x01, 0x02, 0x9000, 0x5000), ("otadata", 0x01, 0x00, 0xE000, 0x2000),
+        ("app0", 0x00, 0x10, 0x10000, 0x4F0000), ("app1", 0x00, 0x11, 0x500000, 0x4F0000),
+        ("doom_wad", 0x42, 0x06, 0x9F0000, 0x401000),
+        ("quake_pak", 0x42, 0x07, 0xE00000, 0x1200000),
+    ])
+    /// universal-8m-doom-ota, the S3 table before game_saves.
+    static let previousS3Table = table([
+        ("nvs", 0x01, 0x02, 0x9000, 0x5000), ("otadata", 0x01, 0x00, 0xE000, 0x2000),
         ("app0", 0x00, 0x10, 0x10000, 0x1F0000), ("app1", 0x00, 0x11, 0x200000, 0x1F0000),
         ("doom_wad", 0x42, 0x06, 0x3FF000, 0x401000),
     ])
+
+    func testThePreGameSavesTablesAreStaleLayouts() throws {
+        let stale = GameStore.AreaResult.refuse(
+            title: "Partition layout not current",
+            message: "The board's partition table is not this app's P4 layout. "
+                + "Update its firmware over USB first, then write its game data. "
+                + "Nothing was written.")
+        XCTAssertEqual(
+            GameStore.area(chip: "esp32p4", partitionTable: Self.previousP4Table, flashBytes: nil),
+            stale)
+        guard case .refuse(let title, let message) = GameStore.area(
+            chip: "esp32s3", partitionTable: Self.previousS3Table, flashBytes: 32 << 20)
+        else { return XCTFail("the pre-game_saves S3 table is stale") }
+        XCTAssertEqual(title, "Partition layout not current")
+        XCTAssertTrue(message.contains("S3 layout"), message)
+        XCTAssertTrue(message.contains("over USB"), message)
+
+        func entries(_ table: Data) throws -> [String: FirmwareBundle.PartitionEntry] {
+            try XCTUnwrap(FirmwareBundle.partitionEntries(table))
+        }
+        XCTAssertTrue(FirmwareBundle.matchesDoomPartitionLayout(
+            try entries(Self.s3Table), targets: ["s3"]))
+        XCTAssertTrue(FirmwareBundle.matchesDoomPartitionLayout(
+            try entries(Self.p4Table), targets: ["p4"]))
+        XCTAssertFalse(FirmwareBundle.matchesDoomPartitionLayout(
+            try entries(Self.previousS3Table), targets: ["s3"]))
+        XCTAssertFalse(FirmwareBundle.matchesDoomPartitionLayout(
+            try entries(Self.previousP4Table), targets: ["p4"]))
+        XCTAssertFalse(FirmwareBundle.matchesDoomPartitionLayout(
+            try entries(Self.p4Table), targets: ["s3"]))
+
+        // game_saves is checked exactly: moved, resized or retyped is stale.
+        for saves in [
+            ("game_saves", UInt8(0x42), UInt8(0x08), 0x3D1000, 0x2E000),
+            ("game_saves", UInt8(0x42), UInt8(0x08), 0x3D0000, 0x2E000),
+            ("game_saves", UInt8(0x42), UInt8(0x06), 0x3D0000, 0x2F000),
+            ("saves", UInt8(0x42), UInt8(0x08), 0x3D0000, 0x2F000),
+        ] {
+            let table = Self.table([
+                ("nvs", 0x01, 0x02, 0x9000, 0x5000), ("otadata", 0x01, 0x00, 0xE000, 0x2000),
+                ("app0", 0x00, 0x10, 0x10000, 0x1E0000),
+                ("app1", 0x00, 0x11, 0x1F0000, 0x1E0000),
+                saves, ("doom_wad", 0x42, 0x06, 0x3FF000, 0x401000),
+            ])
+            XCTAssertFalse(
+                FirmwareBundle.matchesDoomPartitionLayout(try entries(table), targets: ["s3"]),
+                "\(saves)")
+        }
+    }
 
     func testTheAreaIsThePartitionOnAP4AndTheFlashPast8MiBOnAnS3() {
         XCTAssertEqual(

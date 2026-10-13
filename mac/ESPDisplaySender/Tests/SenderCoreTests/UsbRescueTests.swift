@@ -909,7 +909,7 @@ final class UsbRescueTests: XCTestCase {
                 tries.count += 1
                 return tries.count < 3 ? .failure("no response")
                     : .success("CFGINFO id=aabbccddeeff board=st7789-190 profile=st7789-190 "
-                        + "target=s3 chip=esp32s3 partition=universal-8m-doom-ota "
+                        + "target=s3 chip=esp32s3 partition=universal-8m-doom-saves-ota "
                         + "cfgboard=st7789-190")
             },
             sleep: { _ in }, onProgress: { events.append($0) })
@@ -934,7 +934,7 @@ final class UsbRescueTests: XCTestCase {
             port: "/dev/cu.usbmodemB", family: .named("p4")!,
             identity: WifiConfigUI.usbIdentity(from:
                 "CFGINFO id=e8f60ae0a0e4 board=\(reported) profile=\(reported) target=p4 "
-                    + "chip=esp32p4 partition=p4-32m-ota cfgboard=auto"),
+                    + "chip=esp32p4 partition=p4-32m-saves-ota cfgboard=auto"),
             storedOverride: nil, carrier: carrier)
     }
 
@@ -988,7 +988,7 @@ final class UsbRescueTests: XCTestCase {
         var unidentified = Self.rescuedBoard()
         unidentified.identity = WifiConfigUI.usbIdentity(from:
             "CFGINFO id=aabbccddeeff board=auto profile=auto target=unknown "
-                + "chip=esp32s3 partition=universal-8m-doom-ota cfgboard=auto")
+                + "chip=esp32s3 partition=universal-8m-doom-saves-ota cfgboard=auto")
         XCTAssertThrowsError(
             try PanelManager.repairInstallSelection(for: unidentified, releases: releases)
         ) { error in
@@ -1026,7 +1026,7 @@ final class UsbRescueTests: XCTestCase {
             port: "/dev/cu.usbmodemB", family: .named("s3")!,
             identity: WifiConfigUI.usbIdentity(from:
                 "CFGINFO id=aabbccddeeff board=st7789-190 profile=st7789-190 target=s3 "
-                    + "chip=esp32s3 partition=universal-8m-doom-ota cfgboard=auto"),
+                    + "chip=esp32s3 partition=universal-8m-doom-saves-ota cfgboard=auto"),
             storedOverride: nil)
     }
 

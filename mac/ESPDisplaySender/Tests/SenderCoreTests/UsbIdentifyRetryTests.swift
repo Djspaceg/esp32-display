@@ -66,7 +66,7 @@ final class UsbIdentifyRetryTests: XCTestCase {
         + "rssi=-49 flip=0 rot=0 mirrorx=0 autorot=1 auto=0 effective=0 motion=0 "
         + "bl=high blfixed=0 bllow=24 blhigh=128 blidle=10 blsurvey=255 pwr=on "
         + "board=jd9365-4c profile=jd9365-4c target=p4 chip=esp32p4 "
-        + "partition=p4-32m-ota bat=-1 ota=on ssid=Stephens Manor caps=007967ff "
+        + "partition=p4-32m-saves-ota bat=-1 ota=on ssid=Stephens Manor caps=007967ff "
         + "bllevel=83 fw=2.0.0 src=094824ca50bdf5dedc93672254ef80fa2f365f84 "
         + "c6fw=2.12.13 c6=current"
 

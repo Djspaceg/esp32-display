@@ -21,7 +21,7 @@ final class SerialReplyFramingTests: XCTestCase {
         + "connected=0 ip=0.0.0.0 rssi=0 flip=0 rot=0 mirrorx=0 autorot=1 auto=0 "
         + "effective=0 motion=1 bl=high blfixed=0 bllow=24 blhigh=128 blidle=10 "
         + "blsurvey=255 pwr=on board=st7789-190 profile=st7789-190 target=s3 "
-        + "chip=esp32s3 partition=universal-8m-doom-ota bat=-1 ota=off ssid= "
+        + "chip=esp32s3 partition=universal-8m-doom-saves-ota bat=-1 ota=off ssid= "
         + "caps=000051ef bllevel=128 fw=1.5.0"
 
     /// The tail of the measured backlog, verbatim, ending where the board's

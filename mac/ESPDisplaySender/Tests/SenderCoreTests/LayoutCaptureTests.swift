@@ -43,7 +43,7 @@ final class LayoutCaptureTests: XCTestCase {
         panel.chip = "esp32s3"
         panel.target = "s3"
         panel.profile = "co5300"
-        panel.partition = "universal-8m-doom-ota"
+        panel.partition = "universal-8m-doom-saves-ota"
         panel.geometry = PanelGeometry(width: 466, height: 466)
         panel.frameProtocolVersion = 2
         panel.controlProtocolVersion = Int(DeviceProtocol.controlProtocolVersion)
@@ -71,7 +71,7 @@ final class LayoutCaptureTests: XCTestCase {
                     "CFGINFO ssid64=U3R1ZGlvIFdpRmk= name64=RGVzayBQYW5lbA== "
                         + "id=020000123456 connected=1 ip=192.168.1.42 rssi=-52 flip=0 "
                         + "rot=0 pwr=on board=co5300 profile=co5300 target=s3 "
-                        + "chip=esp32s3 partition=universal-8m-doom-ota bat=87 ota=on "
+                        + "chip=esp32s3 partition=universal-8m-doom-saves-ota bat=87 ota=on "
                         + "ssid=Studio WiFi caps=\(caps) bllevel=180 fw=1.5.0 "
                         + "src=\(Self.commit)"),
                 generation: manager.usbPathGeneration("/dev/cu.usbmodem1101"))

@@ -165,10 +165,10 @@ final class BundledFirmwareSelectionTests: XCTestCase {
             .partitionMigration(
                 selected.selection,
                 from: "universal-8m-ota",
-                to: "universal-8m-doom-ota"))
+                to: "universal-8m-doom-saves-ota"))
         XCTAssertEqual(
             selected.selection.catalogEntry.compatibility.partitionScheme,
-            "universal-8m-doom-ota")
+            "universal-8m-doom-saves-ota")
         XCTAssertEqual(selected.identity, identity)
     }
 
@@ -188,8 +188,55 @@ final class BundledFirmwareSelectionTests: XCTestCase {
             XCTAssertEqual(
                 $0 as? FirmwareReleaseCatalogError,
                 .partitionMismatch(
-                    expected: "universal-8m-doom-ota",
+                    expected: "universal-8m-doom-saves-ota",
                     found: "universal-8m-ota"))
+        }
+    }
+
+    /// universal-8m-doom-ota and p4-32m-ota, the layouts before game_saves,
+    /// are stale: USB migrates them by rewriting the table and app together,
+    /// and WiFi, which cannot rewrite the table, is refused toward USB.
+    func testPreGameSavesLayoutsMigrateOnlyOverUSB() throws {
+        let releases = try Self.releaseSetForResolution()
+        let cases: [(FirmwareReleaseCatalog.Identity, String)] = [
+            (.init(family: "s3", chip: "esp32s3", profile: "co5300",
+                   partition: "universal-8m-doom-ota"), "universal-8m-doom-saves-ota"),
+            (.init(family: "p4", chip: "esp32p4", profile: "st7703-4b",
+                   partition: "p4-32m-ota"), "p4-32m-saves-ota"),
+        ]
+        for (identity, current) in cases {
+            let old = try XCTUnwrap(identity.partition)
+            let family = try XCTUnwrap(identity.family)
+            let selected = try releases.selectForUpdate(
+                live: identity, usb: nil, transport: .usb)
+            XCTAssertEqual(
+                selected.resolution,
+                .partitionMigration(selected.selection, from: old, to: current),
+                family)
+            XCTAssertEqual(selected.resolution.canonicalTarget, family)
+            XCTAssertEqual(
+                try releases.resolveFamilyForUpdate(
+                    live: identity, usb: nil, transport: .usb).canonicalTarget,
+                family)
+
+            for attempt in [
+                { _ = try releases.selectForUpdate(
+                    live: identity, usb: nil, transport: .ota) },
+                { _ = try releases.resolveFamilyForUpdate(
+                    live: identity, usb: nil, transport: .ota) },
+            ] {
+                XCTAssertThrowsError(try attempt(), family) {
+                    XCTAssertEqual(
+                        $0 as? FirmwareReleaseCatalogError,
+                        .partitionMismatch(expected: current, found: old))
+                    XCTAssertEqual(
+                        $0.localizedDescription,
+                        "This board uses partition layout \(old), but this firmware "
+                            + "needs \(current). The partition layout changes, so "
+                            + "update this board over USB; a WiFi update cannot "
+                            + "rewrite the partition table.")
+                }
+            }
         }
     }
 
@@ -250,7 +297,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "p4",
                 chip: "esp32p4",
                 profile: "st7703-4b",
-                partition: "p4-32m-ota"),
+                partition: "p4-32m-saves-ota"),
             usb: nil,
             transport: .usb)
 
@@ -258,7 +305,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
             selected.resolution,
             .partitionMigration(
                 selected.selection,
-                from: "p4-32m-ota",
+                from: "p4-32m-saves-ota",
                 to: "future-p4-layout"))
     }
 
@@ -282,7 +329,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 profile: "jd9853", partition: complete.partition)),
             ("partition", .init(
                 family: complete.family, chip: complete.chip,
-                profile: complete.profile, partition: "universal-8m-doom-ota")),
+                profile: complete.profile, partition: "universal-8m-doom-saves-ota")),
         ]
 
         for (field, usb) in conflicts {
@@ -407,7 +454,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3-175",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-doom-ota"),
+                partition: "universal-8m-doom-saves-ota"),
             usb: nil,
             transport: .ota)
 
@@ -418,7 +465,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-doom-ota"))
+                partition: "universal-8m-doom-saves-ota"))
     }
 
     func testUpdatePreselectionAcceptsLegacyLiveS3AliasMatchedToCanonicalUSBFamily() throws {
@@ -429,12 +476,12 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3-175",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-doom-ota"),
+                partition: "universal-8m-doom-saves-ota"),
             usb: .init(
                 family: "s3",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-doom-ota"),
+                partition: "universal-8m-doom-saves-ota"),
             transport: .usb)
 
         XCTAssertEqual(selected.selection.catalogEntry.family, "s3")
@@ -444,7 +491,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-doom-ota"))
+                partition: "universal-8m-doom-saves-ota"))
     }
 
     func testUpdatePreselectionStillRejectsGenuineCrossTransportFamilyConflicts() throws {
@@ -455,12 +502,12 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 family: "s3-175",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-doom-ota"),
+                partition: "universal-8m-doom-saves-ota"),
             usb: .init(
                 family: "p4",
                 chip: "esp32s3",
                 profile: "co5300",
-                partition: "universal-8m-doom-ota"),
+                partition: "universal-8m-doom-saves-ota"),
             transport: .usb)) {
                     guard case let BundledFirmware.UpdateIdentityError
                         .conflictingEvidence(field, live, usb) = $0

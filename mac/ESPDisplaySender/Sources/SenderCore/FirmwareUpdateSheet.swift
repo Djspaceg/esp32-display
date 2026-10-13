@@ -157,6 +157,26 @@ struct FirmwareUpdatePlan: Equatable {
         }
     }
 
+    /// A WiFi update writes only the inactive app slot, never the partition
+    /// table, so a bundle built for a different layout than the board reports
+    /// is refused over WiFi and sent to USB, which rewrites the table and app
+    /// together. Nil when either side does not name its layout or they agree.
+    static func wifiPartitionChange(
+        reported: String?, required: String?
+    ) -> FirmwareUpdatePlan? {
+        guard let reported, let required, !reported.isEmpty, !required.isEmpty,
+              reported != required
+        else { return nil }
+        return FirmwareUpdatePlan(
+            headline: "Update over USB: the partition layout changes",
+            detail: "This board uses partition layout \(reported), and this "
+                + "firmware needs \(required). A WiFi update cannot rewrite the "
+                + "partition table, so connect the board over USB and update it "
+                + "there; that writes the new table and firmware together "
+                + "without erasing saved settings.",
+            action: .blocked)
+    }
+
     /// Firmware predating CFGSHOW's `fw=` field cannot be version-compared, but
     /// a compatible image may still be installed over fully verified USB.
     static func makeForUnknownPanelVersion(
@@ -847,6 +867,12 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func plan(_ bundle: FirmwareBundle) -> FirmwareUpdatePlan {
+        if selectedTransport == .wifi,
+           let blocked = FirmwareUpdatePlan.wifiPartitionChange(
+               reported: target.partition ?? target.usbDevice?.partition,
+               required: effectiveTarget.flatMap { bundle.image(forTarget: $0)?.partition }) {
+            return blocked
+        }
         if let panelVersion = target.firmwareVersion {
             return FirmwareUpdatePlan.make(
                 bundle.availability(
@@ -1053,9 +1079,16 @@ struct FirmwareUpdateSheet: View {
                         live: live,
                         usb: usb,
                         transport: selectedTransport == .usb ? .usb : .ota)
-                } catch {
-                    resolved = try releases.resolveUnavailableFamilyForUpdate(
-                        live: live, usb: usb)
+                } catch let strictError {
+                    // A family with no bundled image may still be named; when
+                    // there is none, the strict reason (a partition layout that
+                    // needs USB, say) is the one worth showing.
+                    do {
+                        resolved = try releases.resolveUnavailableFamilyForUpdate(
+                            live: live, usb: usb)
+                    } catch {
+                        throw strictError
+                    }
                 }
                 let options = releases.revisions(
                     for: resolved.canonicalTarget)

@@ -436,7 +436,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             family: "s3-175",
             chip: "esp32s3",
             profile: "co5300",
-            partition: "universal-8m-doom-ota",
+            partition: "universal-8m-doom-saves-ota",
             transport: .usb)
 
         guard case .familyFallback(let selection) = resolution else {
@@ -454,7 +454,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             family: "p4",
             chip: "esp32s3",
             profile: "co5300",
-            partition: "universal-8m-doom-ota",
+            partition: "universal-8m-doom-saves-ota",
             transport: .usb)) {
                 XCTAssertEqual(
                     $0 as? FirmwareReleaseCatalogError,

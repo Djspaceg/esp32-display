@@ -470,16 +470,18 @@ final class EsptoolCommandTests: XCTestCase {
         writeEntry(0, "nvs", 0x01, 0x02, 0x9000, 0x5000)
         writeEntry(1, "otadata", 0x01, 0x00, 0xE000, 0x2000)
         if p4 {
-            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x4F0000)
-            writeEntry(3, "app1", 0x00, 0x11, 0x500000, 0x4F0000)
+            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x4B0000)
+            writeEntry(3, "app1", 0x00, 0x11, 0x4C0000, 0x4B0000)
             if doom {
-                writeEntry(4, "doom_wad", 0x42, 0x06, 0x9F0000, 0x401000)
-                writeEntry(5, "quake_pak", 0x42, 0x07, 0xE00000, 0x1200000)
+                writeEntry(4, "game_saves", 0x42, 0x08, 0x970000, 0x80000)
+                writeEntry(5, "doom_wad", 0x42, 0x06, 0x9F0000, 0x401000)
+                writeEntry(6, "quake_pak", 0x42, 0x07, 0xE00000, 0x1200000)
             }
         } else if canonicalS3 {
-            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x1F0000)
-            writeEntry(3, "app1", 0x00, 0x11, 0x200000, 0x1F0000)
-            writeEntry(4, "doom_wad", 0x42, 0x06, 0x3FF000, 0x401000)
+            writeEntry(2, "app0", 0x00, 0x10, 0x10000, 0x1E0000)
+            writeEntry(3, "app1", 0x00, 0x11, 0x1F0000, 0x1E0000)
+            writeEntry(4, "game_saves", 0x42, 0x08, 0x3D0000, 0x2F000)
+            writeEntry(5, "doom_wad", 0x42, 0x06, 0x3FF000, 0x401000)
         } else {
             writeEntry(2, "app0", 0x00, 0x10, appAddress, 0x200000)
         }

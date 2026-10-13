@@ -772,7 +772,8 @@ public struct FirmwareBundle: Equatable, Sendable {
             guard let doomPart = image.flashPart(role: Self.doomWadFlashRole),
                   let partitionEntries,
                   Self.matchesDoomPartitionLayout(
-                    partitionEntries, targets: image.targets),
+                    partitionEntries, targets: image.targets,
+                    orPrevious: true),
                   let doomEntry = partitionEntries[Self.doomWadFlashRole],
                   doomEntry.type == 0x42,
                   doomEntry.subtype == 0x06,
@@ -972,8 +973,13 @@ public struct FirmwareBundle: Equatable, Sendable {
         return true
     }
 
+    /// Whether `entries` is the current Doom-carrying table of `targets`' one
+    /// family. With `orPrevious`, the table from before `game_saves` passes
+    /// too: an older release bundle carries that one, and a USB flash of it
+    /// writes it back.
     static func matchesDoomPartitionLayout(
-        _ entries: [String: PartitionEntry], targets: [String]
+        _ entries: [String: PartitionEntry], targets: [String],
+        orPrevious: Bool = false
     ) -> Bool {
         let layouts = Set(targets.compactMap { doomPartitionLayoutByTarget[$0] })
         guard layouts.count == 1, let layout = layouts.first else { return false }
@@ -988,19 +994,24 @@ public struct FirmwareBundle: Equatable, Sendable {
         guard matches("nvs", 0x01, 0x02, 0x009000, 0x005000),
               matches("otadata", 0x01, 0x00, 0x00E000, 0x002000)
         else { return false }
+        if orPrevious && matchesPreviousDoomPartitionLayout(entries, layout) {
+            return true
+        }
         switch layout {
         case .universalS3:
-            return entries.count == 5
-                && matches("app0", 0x00, 0x10, 0x010000, 0x1F0000)
-                && matches("app1", 0x00, 0x11, 0x200000, 0x1F0000)
+            return entries.count == 6
+                && matches("app0", 0x00, 0x10, 0x010000, 0x1E0000)
+                && matches("app1", 0x00, 0x11, 0x1F0000, 0x1E0000)
+                && matches("game_saves", 0x42, 0x08, 0x3D0000, 0x02F000)
                 && matches(
                     doomWadFlashRole, 0x42, 0x06, 0x3FF000,
                     doomWadPartitionBytes)
         case .p4:
             // quake_pak is never in a bundle; the table only reserves it.
-            guard entries.count == 6,
-                  matches("app0", 0x00, 0x10, 0x010000, 0x4F0000),
-                  matches("app1", 0x00, 0x11, 0x500000, 0x4F0000),
+            guard entries.count == 7,
+                  matches("app0", 0x00, 0x10, 0x010000, 0x4B0000),
+                  matches("app1", 0x00, 0x11, 0x4C0000, 0x4B0000),
+                  matches("game_saves", 0x42, 0x08, 0x970000, 0x080000),
                   matches("quake_pak", 0x42, 0x07, 0xE00000, 0x1200000),
                   let wad = entries[doomWadFlashRole]
             else { return false }
@@ -1008,6 +1019,34 @@ public struct FirmwareBundle: Equatable, Sendable {
                 && wad.byteCount == doomWadPartitionBytes
                 && wad.address % 0x1000 == 0
                 && wad.address == 0x9F0000
+        }
+    }
+
+    /// The S3 and P4 tables of 2.0.0 and earlier, before `game_saves`
+    /// (schemes universal-8m-doom-ota and p4-32m-ota).
+    private static func matchesPreviousDoomPartitionLayout(
+        _ entries: [String: PartitionEntry], _ layout: DoomPartitionLayout
+    ) -> Bool {
+        func matches(
+            _ label: String, _ type: UInt8, _ subtype: UInt8,
+            _ address: Int, _ byteCount: Int
+        ) -> Bool {
+            guard let entry = entries[label] else { return false }
+            return entry.type == type && entry.subtype == subtype
+                && entry.address == address && entry.byteCount == byteCount
+        }
+        switch layout {
+        case .universalS3:
+            return entries.count == 5
+                && matches("app0", 0x00, 0x10, 0x010000, 0x1F0000)
+                && matches("app1", 0x00, 0x11, 0x200000, 0x1F0000)
+                && matches(doomWadFlashRole, 0x42, 0x06, 0x3FF000, doomWadPartitionBytes)
+        case .p4:
+            return entries.count == 6
+                && matches("app0", 0x00, 0x10, 0x010000, 0x4F0000)
+                && matches("app1", 0x00, 0x11, 0x500000, 0x4F0000)
+                && matches("quake_pak", 0x42, 0x07, 0xE00000, 0x1200000)
+                && matches(doomWadFlashRole, 0x42, 0x06, 0x9F0000, doomWadPartitionBytes)
         }
     }
 

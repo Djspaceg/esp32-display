@@ -277,7 +277,7 @@ final class PanelManagerTests: XCTestCase {
         let identity = WifiConfigUI.usbIdentity(from:
             "CFGINFO ssid64= name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
                 + "connected=0 rot=0 pwr=on board=st7703-4b profile=st7703-4b "
-                + "target=p4 chip=esp32p4 partition=p4-32m-ota ota=off ssid= "
+                + "target=p4 chip=esp32p4 partition=p4-32m-saves-ota ota=off ssid= "
                 + "bllevel=128 fw=1.5.0")
         manager.noteUSBIdentity(
             path: path,
@@ -303,7 +303,7 @@ final class PanelManagerTests: XCTestCase {
             "CFGINFO ssid64= name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
                 + "connected=0 rot=0 pwr=on board=st7703-4b "
                 + "profile=st7703-4b target=p4 chip=esp32p4 "
-                + "partition=p4-32m-ota ota=off ssid= caps=00002000 "
+                + "partition=p4-32m-saves-ota ota=off ssid= caps=00002000 "
                 + "bllevel=128 fw=1.5.0")
         manager.noteUSBIdentity(
             path: path,
@@ -328,7 +328,7 @@ final class PanelManagerTests: XCTestCase {
         let identity = WifiConfigUI.usbIdentity(from:
             "CFGINFO ssid64= name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
                 + "connected=0 rot=0 pwr=on target=p4 chip=esp32p4 "
-                + "partition=p4-32m-ota ota=off ssid= caps=00002000 "
+                + "partition=p4-32m-saves-ota ota=off ssid= caps=00002000 "
                 + "bllevel=128 fw=1.5.0")
         manager.noteUSBIdentity(
             path: path,
@@ -378,7 +378,7 @@ final class PanelManagerTests: XCTestCase {
             "CFGINFO ssid64= name64=c3R1ZGlvLWRpc3BsYXk= id=020000123456 "
                 + "connected=0 rot=1 pwr=on board=st7789-190 "
                 + "profile=st7789-190 target=s3 chip=esp32s3 "
-                + "partition=universal-8m-doom-ota ota=off ssid= "
+                + "partition=universal-8m-doom-saves-ota ota=off ssid= "
                 + "caps=00002000 bllevel=128 fw=1.5.0")
         manager.noteUSBIdentity(
             path: path,

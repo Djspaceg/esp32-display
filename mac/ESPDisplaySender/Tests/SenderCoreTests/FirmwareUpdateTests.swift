@@ -499,7 +499,7 @@ final class FirmwareUpdateTests: XCTestCase {
             target: "s3",
             board: "st77916",
             chip: "esp32s3",
-            partition: "universal-8m-doom-ota")
+            partition: "universal-8m-doom-saves-ota")
         XCTAssertNil(
             manager.verifiedUSBDevice(for: "espdisplay"),
             "the old rule's precondition must still be absent, or this proves nothing")
@@ -537,7 +537,7 @@ final class FirmwareUpdateTests: XCTestCase {
         let identity = WifiConfigUI.usbIdentity(from:
             "CFGINFO name64=ZXNwZGlzcGxheQ== id=a4cb8fdb3c24 rot=0 pwr=on "
                 + "board=st77916 profile=st77916 target=s3 chip=esp32s3 "
-                + "partition=universal-8m-doom-ota fw=1.5.0")
+                + "partition=universal-8m-doom-saves-ota fw=1.5.0")
         manager.noteUSBIdentity(
             path: path, identity: identity,
             generation: manager.usbPathGeneration(path))
@@ -615,7 +615,7 @@ final class FirmwareUpdateTests: XCTestCase {
             target: "s3",
             board: "st77916",
             chip: "esp32s3",
-            partition: "universal-8m-doom-ota")
+            partition: "universal-8m-doom-saves-ota")
 
         // Not even a candidate: it cannot be tied to this record, and it could
         // not be offered on its own terms either.
@@ -645,7 +645,7 @@ final class FirmwareUpdateTests: XCTestCase {
                 target: "s3",
                 board: "st77916",
                 chip: "esp32s3",
-                partition: "universal-8m-doom-ota")
+                partition: "universal-8m-doom-saves-ota")
         }
 
         XCTAssertNil(manager.usbUpdateDevice(for: "espdisplay"))
@@ -686,43 +686,77 @@ final class FirmwareUpdateTests: XCTestCase {
     func testUSBPartitionCompatibilityTreatsAnyMismatchAsAFullFlashMigration() {
         XCTAssertEqual(
             PanelManager.usbPartitionCompatibility(
-                reported: "universal-8m-doom-ota",
-                required: "universal-8m-doom-ota"),
+                reported: "universal-8m-doom-saves-ota",
+                required: "universal-8m-doom-saves-ota"),
             .exact)
         XCTAssertEqual(
             PanelManager.usbPartitionCompatibility(
                 reported: "universal-8m-ota",
-                required: "universal-8m-doom-ota"),
+                required: "universal-8m-doom-saves-ota"),
             .fullFlashMigration(
-                from: "universal-8m-ota", to: "universal-8m-doom-ota"))
+                from: "universal-8m-ota", to: "universal-8m-doom-saves-ota"))
+        XCTAssertEqual(
+            PanelManager.usbPartitionCompatibility(
+                reported: "universal-8m-doom-saves-ota",
+                required: "universal-8m-ota"),
+            .fullFlashMigration(
+                from: "universal-8m-doom-saves-ota", to: "universal-8m-ota"))
+        // The layouts before game_saves are migrated the same way.
         XCTAssertEqual(
             PanelManager.usbPartitionCompatibility(
                 reported: "universal-8m-doom-ota",
-                required: "universal-8m-ota"),
+                required: "universal-8m-doom-saves-ota"),
             .fullFlashMigration(
-                from: "universal-8m-doom-ota", to: "universal-8m-ota"))
+                from: "universal-8m-doom-ota", to: "universal-8m-doom-saves-ota"))
         XCTAssertEqual(
             PanelManager.usbPartitionCompatibility(
-                reported: "p4-32m-ota", required: "p4-32m-doom-ota"),
+                reported: "p4-32m-ota", required: "p4-32m-saves-ota"),
             .fullFlashMigration(
-                from: "p4-32m-ota", to: "p4-32m-doom-ota"))
+                from: "p4-32m-ota", to: "p4-32m-saves-ota"))
+    }
+
+    /// A WiFi update writes only an app slot, so a bundle for another layout is
+    /// refused over WiFi with a sentence that sends the user to USB.
+    func testWiFiUpdateAcrossAPartitionLayoutChangeIsRefusedTowardUSB() throws {
+        let plan = try XCTUnwrap(FirmwareUpdatePlan.wifiPartitionChange(
+            reported: "universal-8m-doom-ota", required: "universal-8m-doom-saves-ota"))
+        XCTAssertFalse(plan.canPush)
+        XCTAssertEqual(plan.action, .blocked)
+        XCTAssertEqual(plan.headline, "Update over USB: the partition layout changes")
+        XCTAssertEqual(
+            plan.detail,
+            "This board uses partition layout universal-8m-doom-ota, and this "
+                + "firmware needs universal-8m-doom-saves-ota. A WiFi update cannot "
+                + "rewrite the partition table, so connect the board over USB and "
+                + "update it there; that writes the new table and firmware together "
+                + "without erasing saved settings.")
+        XCTAssertEqual(
+            FirmwareUpdatePlan.wifiPartitionChange(
+                reported: "p4-32m-ota", required: "p4-32m-saves-ota")?.canPush,
+            false)
+        XCTAssertNil(FirmwareUpdatePlan.wifiPartitionChange(
+            reported: "p4-32m-saves-ota", required: "p4-32m-saves-ota"))
+        XCTAssertNil(FirmwareUpdatePlan.wifiPartitionChange(
+            reported: nil, required: "p4-32m-saves-ota"))
+        XCTAssertNil(FirmwareUpdatePlan.wifiPartitionChange(
+            reported: "p4-32m-ota", required: nil))
     }
 
     func testUSBPartitionMigrationWarningNamesBothSchemesAndTheTableRewrite() {
         let notice = USBPartitionMigrationNotice(
             from: "universal-8m-ota",
-            to: "universal-8m-doom-ota")
+            to: "universal-8m-doom-saves-ota")
 
         XCTAssertEqual(
             notice.planDetail,
             "This USB flash will rewrite the partition table from "
-                + "universal-8m-ota to universal-8m-doom-ota. It writes the "
+                + "universal-8m-ota to universal-8m-doom-saves-ota. It writes the "
                 + "bootloader, partition table, boot_app0 and app together "
                 + "without erasing saved settings.")
         XCTAssertEqual(
             notice.confirmationMessage,
             "This USB flash rewrites the partition table from universal-8m-ota "
-                + "to universal-8m-doom-ota. The bootloader, partition table, "
+                + "to universal-8m-doom-saves-ota. The bootloader, partition table, "
                 + "boot_app0 and app will be written together after the board's "
                 + "hardware ID, chip and MAC are re-verified. No whole-chip erase "
                 + "is performed, so saved WiFi, name, settings and OTA password "
@@ -731,11 +765,11 @@ final class FirmwareUpdateTests: XCTestCase {
 
     func testUSBCompatibilityIdentityNamesTheExactFailedField() {
         let profiles = ["co5300", "st77916"]
-        let requiredPartition = "universal-8m-doom-ota"
+        let requiredPartition = "universal-8m-doom-saves-ota"
         func issue(
             chip: String? = "esp32s3",
             profile: String? = "st77916",
-            partition: String? = "universal-8m-doom-ota",
+            partition: String? = "universal-8m-doom-saves-ota",
             required: String? = requiredPartition
         ) -> PanelManager.USBCompatibilityIdentityIssue? {
             PanelManager.usbCompatibilityIdentityIssue(
