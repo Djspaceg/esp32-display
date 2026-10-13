@@ -554,6 +554,7 @@ ssize_t save_file_write(int fd, const void* src, size_t size) {
         (f->length > 0 &&
          !save_pack(f, f->small, f->length, TDEFL_NO_FLUSH))) {
       f->failed = true;
+      save_packer_release(f);
       return (ssize_t)size;
     }
     free(f->small);

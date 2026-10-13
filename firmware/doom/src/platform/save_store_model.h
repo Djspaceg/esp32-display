@@ -25,7 +25,8 @@
 // first: a slot can always be saved over at its size or smaller, but a power
 // cut or flash error during that write loses it. A new file, and an in-place
 // save while other files remain, must leave one sector free, so a one-sector
-// file (every config) is always replaced whole.
+// file is always replaced whole. Every config is one: Quake's config.cfg is
+// about 1.8 KB and Doom's two about 1.1 and 0.6 KB, raw.
 //
 // Pure C over a flash interface, so firmware/test/test_save_store.cpp runs it
 // on the host against a NOR flash fake. Compression is the caller's: the
