@@ -53,6 +53,40 @@ less whatever Quake's paks take.
 `CFGGAME <label>` over serial starts any row by its label, as choosing it on the
 menu does: `CFGGAME FREEDOOM1`.
 
+## Settings and saves
+
+The menu's settings (sound volume, mouse sensitivity, screen size, messages,
+detail, gamma) and the six save slots are kept across restarts and firmware
+updates, on every S3 and P4 board. They live in the saved-games store: the
+60 KB every S3 and P4 partition table leaves unused beside `doom_wad`
+(0x3F0000 on an S3, 0xDF1000 on a P4), which nothing that flashes a board
+writes or erases. Quake keeps its `config.cfg` and saves there too.
+
+- `default.cfg` is read when Doom starts and written within 10 s of a change
+  and when you leave. Key bindings are not kept: they stay the built-in ones
+  the touch, BOOT and USB controls are made for.
+- Each WAD file has its own slots (`doom1.wad`, `freedoom1.wad`, ...), so a
+  save loads only into the WAD it was made in.
+- Files are deflated. A new save that does not fit says GAME NOT SAVED: NO
+  ROOM. Saving over a slot always fits at its size or smaller: the old copy is
+  kept until the new one is whole, or, when the store is too full for both,
+  erased first (only then could a power cut mid-save lose that slot). Nothing
+  on the board deletes a save yet.
+
+The boot log names what the store holds (`[save] store at 0x3f0000: ...`) and
+each write (`[save] wrote doom/doom1.wad/doomsav0.dsg: ...`).
+
+Lines typed on the serial port during Doom are commands:
+
+| Command | Does |
+| --- | --- |
+| `where` | Prints the game state, map, level time and health |
+| `map <episode> <map>` | Starts a new game there |
+| `save <0-5> [name]` | Saves to that slot, as the menu does |
+| `load <0-5>` | Loads that slot |
+| `get <variable>` | Prints a `default.cfg` variable |
+| `set <variable> <value>` | Sets one and writes `default.cfg` |
+
 ## Sound
 
 Sound effects play on boards with a speaker codec (the ES8311/ES7210

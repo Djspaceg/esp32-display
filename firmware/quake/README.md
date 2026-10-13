@@ -108,8 +108,15 @@ palette conversion and the blocking 640x480 write) takes a steady 33 ms of
 that; the engine renders a frame in about 27 ms. Overlapping that write with
 the next frame is the obvious next speedup.
 
-Saving is off: `/qdata` is read-only, so `save` and `config.cfg` report that
-they cannot write and the game carries on.
+Settings and saves are kept across restarts and firmware updates. Every file
+Quake writes under `/qdata` that is not a pak (`id1/config.cfg`, the menu's
+`id1/s0.sav` to `s11.sav`) goes to the saved-games store, the 60 KB beside
+`doom_wad` that Doom's settings and saves share (`firmware/doom/README.md`).
+`config.cfg` is read at start as always, and written within 10 s of a change,
+on a BOOT hold to leave, on a render size change and on `quit`. Files are
+deflated; a save the store cannot hold prints `ERROR: not saved, no room in
+the save area.` and the slot keeps what it had (see the Doom README for how a
+full store saves over a slot).
 
 ## Memory
 
