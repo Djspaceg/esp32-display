@@ -763,6 +763,23 @@ final class FirmwareUpdateTests: XCTestCase {
                 + "remain.")
     }
 
+    /// A USB downgrade to a table from before game_saves says the saves go.
+    func testUSBMigrationBackToAPreGameSavesLayoutWarnsSavedGamesAreLost() {
+        for (from, to) in [
+            ("universal-8m-doom-saves-ota", "universal-8m-doom-ota"),
+            ("p4-32m-saves-ota", "p4-32m-ota"),
+        ] {
+            let notice = USBPartitionMigrationNotice(from: from, to: to)
+            XCTAssertTrue(notice.losesSavedGames, to)
+            let note = "Saved games are lost: \(to) has no game_saves partition."
+            XCTAssertTrue(notice.planDetail.hasSuffix(note), notice.planDetail)
+            XCTAssertTrue(notice.confirmationMessage.hasSuffix(note))
+        }
+        XCTAssertFalse(USBPartitionMigrationNotice(
+            from: "universal-8m-doom-ota", to: "universal-8m-doom-saves-ota"
+        ).losesSavedGames)
+    }
+
     func testUSBCompatibilityIdentityNamesTheExactFailedField() {
         let profiles = ["co5300", "st77916"]
         let requiredPartition = "universal-8m-doom-saves-ota"

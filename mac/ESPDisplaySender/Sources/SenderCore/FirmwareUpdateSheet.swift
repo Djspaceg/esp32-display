@@ -314,10 +314,21 @@ struct USBPartitionMigrationNotice: Equatable {
     let from: String
     let to: String
 
+    /// Going back to a layout from before game_saves gives that flash to the
+    /// second app slot, which the next update overwrites.
+    var losesSavedGames: Bool {
+        FirmwareReleaseCatalog.previousPartitionSchemes.values.contains { $0.contains(to) }
+    }
+
+    private var savedGamesNote: String {
+        losesSavedGames
+            ? " Saved games are lost: \(to) has no game_saves partition." : ""
+    }
+
     var planDetail: String {
         "This USB flash will rewrite the partition table from \(from) to \(to). "
             + "It writes the bootloader, partition table, boot_app0 and app "
-            + "together without erasing saved settings."
+            + "together without erasing saved settings." + savedGamesNote
     }
 
     var confirmationMessage: String {
@@ -325,7 +336,7 @@ struct USBPartitionMigrationNotice: Equatable {
             + "The bootloader, partition table, boot_app0 and app will be written "
             + "together after the board's hardware ID, chip and MAC are re-verified. "
             + "No whole-chip erase is performed, so saved WiFi, name, settings "
-            + "and OTA password remain."
+            + "and OTA password remain." + savedGamesNote
     }
 }
 
@@ -1242,10 +1253,13 @@ struct FirmwareUpdateSheet: View {
 
         switch selectedTransport {
         case .wifi:
+            // The same plan the Install button is gated on, again here: a
+            // WiFi push must never cross a partition layout change.
             guard let exactTarget = effectiveTarget,
                   let image = bundle.payload(forTarget: exactTarget),
                   let entry = bundle.image(forTarget: exactTarget),
-                  entry.chip == effectiveChip
+                  entry.chip == effectiveChip,
+                  plan(bundle).canPush
             else {
                 isPushing = false
                 return
