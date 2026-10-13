@@ -82,8 +82,8 @@ int Sys_FileOpenRead(char* path, int* hndl) {
 }
 
 int Sys_FileOpenWrite(char* path) {
-  // Upstream treats this as fatal; here it is expected (nothing is writable),
-  // and COM_WriteFile reports a -1 and carries on.
+  // Upstream treats this as fatal; here a board without the saved-games
+  // store has nowhere to write, and COM_WriteFile reports a -1 and carries on.
   const int i = findhandle();
   FILE* f = fopen(path, "wb");
   if (!f) {
@@ -480,12 +480,25 @@ static void quake_log_map_change(void) {
             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
+// host.c defines it; no header declares it.
+void Host_WriteConfiguration(void);
+
+void quake_engine_save_config(void) { Host_WriteConfiguration(); }
+
 void quake_engine_frame(void) {
   const double now = Sys_FloatTime();
   const double elapsed = now - s_last_time;
   s_last_time = now;
   Host_Frame((float)elapsed);
   quake_log_map_change();
+  // Quake writes config.cfg only when it quits, and a Quake boot ends in a
+  // restart; so a changed setting is written within 10 s instead. The store
+  // skips an unchanged file, so this costs no flash.
+  static double config_due = 0;
+  if (now >= config_due) {
+    if (config_due != 0) Host_WriteConfiguration();
+    config_due = now + 10.0;
+  }
 }
 
 bool quake_engine_in_menu(void) {

@@ -13,6 +13,7 @@
 #include <freertos/task.h>
 
 #include "platform/quake_pak_vfs.h"
+#include <save_store.h>
 #include "platform/quake_input_model.h"
 #include "platform/quake_platform.h"
 
@@ -92,6 +93,12 @@ void quake_enter(void) {
   }
   quake_log("pak0.pak: %u bytes on the quake_pak partition",
             (unsigned)quake_pak_bytes());
+  {
+    // config.cfg and the saves; without the store Quake runs as before,
+    // keeping nothing. Here, on loopTask's internal stack, as it reads flash.
+    const char* saves = save_store_open();
+    if (saves != nullptr) quake_log("saves off: %s", saves);
+  }
 
   {
     // A size chosen in Video Options, if it is one this panel offers.

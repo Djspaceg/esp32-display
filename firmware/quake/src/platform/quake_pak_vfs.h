@@ -18,7 +18,8 @@ const char* quake_pak_preflight(void);
 uint32_t quake_pak_bytes(void);
 
 // The Quake boot: checks the paks and registers /qdata, whose id1/pakN.pak
-// files read the area. NULL on success, else the reason.
+// files read the area and whose every other file (config.cfg, the saves) is
+// in the saved-games store. NULL on success, else the reason.
 const char* quake_pak_mount(void);
 
 // The reason the last check or mount refused.

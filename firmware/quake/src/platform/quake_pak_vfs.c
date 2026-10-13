@@ -14,6 +14,11 @@
 // Nothing maps the partition, which matters: it crosses 16 MiB, past what this
 // core's flash cache can map.
 //
+// Every other path under /qdata (id1/config.cfg, id1/s0.sav, a recorded demo)
+// is a file in the saved-games store (doom/src/save_store.h), as
+// "quake/id1/...", so Quake keeps its settings and saves with no change to
+// where it looks for them. Those descriptors start at QUAKE_SAVE_FD_BASE.
+//
 // Flash reads run with the cache disabled, so they must not run on a stack in
 // PSRAM, which the Quake task's is (quake_mode.cpp). Every partition read in a
 // Quake boot is therefore handed to a small reader task whose stack is in
@@ -42,6 +47,7 @@
 #include <freertos/task.h>
 
 #include <game_store.h>
+#include <save_store.h>
 
 #include "quake_pak_model.h"
 #include "quake_platform.h"
@@ -54,6 +60,7 @@
 // Open handles at once. Quake holds the pack open for the whole session and
 // opens it once more per demo it plays.
 #define QUAKE_PAK_MAX_OPEN 4
+#define QUAKE_SAVE_FD_BASE 16
 
 static const esp_partition_t* s_partition = NULL;
 static const char* s_failure = "not checked";
@@ -150,15 +157,26 @@ uint32_t quake_pak_bytes(void) {
   return s_pak_count > 0 ? s_paks[0].bytes : 0;
 }
 
+static bool quake_save_name(const char* path, char* name) {
+  return quake_pak_path_slot(path) < 0 &&
+         save_store_name_from_path("quake", path, name);
+}
+
+static bool quake_save_fd(int fd) { return fd >= QUAKE_SAVE_FD_BASE; }
+
 static int quake_pak_vfs_open(const char* path, int flags, int mode) {
   (void)mode;
+  char name[SAVE_STORE_NAME_BYTES];
+  if (quake_save_name(path, name)) {
+    const int fd = save_file_open(name, flags);
+    return fd < 0 ? -1 : fd + QUAKE_SAVE_FD_BASE;
+  }
   const int slot = quake_pak_path_slot(path);
   if (slot < 0 || slot >= s_pak_count) {
     errno = ENOENT;
     return -1;
   }
   if ((flags & O_ACCMODE) != O_RDONLY) {
-    // Saves and config.cfg: Quake reports the failure and carries on.
     errno = EROFS;
     return -1;
   }
@@ -179,6 +197,9 @@ static bool quake_pak_fd_valid(int fd) {
 }
 
 static ssize_t quake_pak_vfs_read(int fd, void* dst, size_t size) {
+  if (quake_save_fd(fd)) {
+    return save_file_read(fd - QUAKE_SAVE_FD_BASE, dst, size);
+  }
   if (!quake_pak_fd_valid(fd)) {
     errno = EBADF;
     return -1;
@@ -195,7 +216,18 @@ static ssize_t quake_pak_vfs_read(int fd, void* dst, size_t size) {
   return (ssize_t)length;
 }
 
+static ssize_t quake_pak_vfs_write(int fd, const void* src, size_t size) {
+  if (quake_save_fd(fd)) {
+    return save_file_write(fd - QUAKE_SAVE_FD_BASE, src, size);
+  }
+  errno = EBADF;
+  return -1;
+}
+
 static off_t quake_pak_vfs_lseek(int fd, off_t offset, int whence) {
+  if (quake_save_fd(fd)) {
+    return save_file_lseek(fd - QUAKE_SAVE_FD_BASE, offset, whence);
+  }
   if (!quake_pak_fd_valid(fd)) {
     errno = EBADF;
     return -1;
@@ -212,6 +244,7 @@ static off_t quake_pak_vfs_lseek(int fd, off_t offset, int whence) {
 }
 
 static int quake_pak_vfs_close(int fd) {
+  if (quake_save_fd(fd)) return save_file_close(fd - QUAKE_SAVE_FD_BASE);
   if (!quake_pak_fd_valid(fd)) {
     errno = EBADF;
     return -1;
@@ -221,6 +254,7 @@ static int quake_pak_vfs_close(int fd) {
 }
 
 static int quake_pak_vfs_fstat(int fd, struct stat* st) {
+  if (quake_save_fd(fd)) return save_file_fstat(fd - QUAKE_SAVE_FD_BASE, st);
   if (!quake_pak_fd_valid(fd)) {
     errno = EBADF;
     return -1;
@@ -232,6 +266,8 @@ static int quake_pak_vfs_fstat(int fd, struct stat* st) {
 }
 
 static int quake_pak_vfs_stat(const char* path, struct stat* st) {
+  char name[SAVE_STORE_NAME_BYTES];
+  if (quake_save_name(path, name)) return save_file_stat(name, st);
   const int slot = quake_pak_path_slot(path);
   if (slot < 0 || slot >= s_pak_count) {
     errno = ENOENT;
@@ -241,6 +277,13 @@ static int quake_pak_vfs_stat(const char* path, struct stat* st) {
   st->st_mode = S_IFREG | 0444;
   st->st_size = s_paks[slot].bytes;
   return 0;
+}
+
+static int quake_pak_vfs_unlink(const char* path) {
+  char name[SAVE_STORE_NAME_BYTES];
+  if (quake_save_name(path, name)) return save_file_unlink(name);
+  errno = EROFS;
+  return -1;
 }
 
 const char* quake_pak_mount(void) {
@@ -261,13 +304,15 @@ const char* quake_pak_mount(void) {
   s_args_lock = args_lock;
   memset(s_files, 0, sizeof(s_files));
   static const esp_vfs_t vfs = {
-      .flags = ESP_VFS_FLAG_DEFAULT | ESP_VFS_FLAG_READONLY_FS,
+      .flags = ESP_VFS_FLAG_DEFAULT,
+      .write = &quake_pak_vfs_write,
       .read = &quake_pak_vfs_read,
       .lseek = &quake_pak_vfs_lseek,
       .open = &quake_pak_vfs_open,
       .close = &quake_pak_vfs_close,
       .fstat = &quake_pak_vfs_fstat,
       .stat = &quake_pak_vfs_stat,
+      .unlink = &quake_pak_vfs_unlink,
   };
   if (esp_vfs_register(QUAKE_PAK_MOUNT, &vfs, NULL) != ESP_OK) {
     s_failure = "could not register the /qdata file system";

@@ -17,6 +17,7 @@
 #include "platform/doom_esp32_stubs.c.inc"
 #include "platform/doomgeneric_esp32.c.inc"
 #include "platform/game_store.c.inc"
+#include "platform/save_store.c.inc"
 #include "platform/w_file_esp32.c.inc"
 
 // Network stub
@@ -103,6 +104,9 @@
 #include "w_wad.c.inc"
 #include "wi_stuff.c.inc"
 #include "z_zone.c.inc"
+
+// Serial commands, which use the engine above.
+#include "platform/doom_serial_commands.c.inc"
 
 // Arduino's precompiled IDF permits PSRAM heap allocation but not external
 // BSS placement. Allocate only the largest Doom renderer work arrays here;

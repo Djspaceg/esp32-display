@@ -62,6 +62,8 @@ firmware):
   sound structs, which the relocation would rename too.
 - `Host_Please_f`'s local `cl` renamed `client` (it is compiled only with
   IDGODS, but the relocation renames every `cl`).
+- `Host_Savegame_f` (`host_cmd.c`) checks `fclose`: the saved-games store
+  writes the file then and refuses it when full, so "done." would be untrue.
 - Read-only tables made `const`, so they stay in flash: `r_avertexnormals`,
   `keynames`, `svc_strings`, `pop`, `pr_opnames`, `bindnames`, `quitMessage`,
   `levels`, `hipnoticlevels`, `roguelevels`, `episodes`, `hipnoticepisodes`,

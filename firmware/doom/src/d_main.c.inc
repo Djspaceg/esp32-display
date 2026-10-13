@@ -1562,7 +1562,15 @@ void D_DoomMain (void)
     else
 #endif
     {
+#ifdef ESP_PLATFORM
+        // The file's own name (doom1.wad, freedoom1.wad), not its mission's:
+        // two WADs of one mission have different maps.
+        char *iwadbase = strrchr(iwadfile, '/');
+        savegamedir = M_GetSaveGameDir(iwadbase != NULL ? iwadbase + 1
+                                                        : iwadfile);
+#else
         savegamedir = M_GetSaveGameDir(D_SaveGameIWADName(gamemission));
+#endif
     }
 
     // Check for -file in shareware

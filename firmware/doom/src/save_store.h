@@ -1,0 +1,42 @@
+// The saved-games store (platform/save_store_model.h has the format): game
+// configs and saves kept across restarts in the 60 KB beside doom_wad.
+// C linkage: the Doom boot mounts it at /save, and the Quake boot serves
+// everything in /qdata that is not a pak from it.
+#pragma once
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#include "platform/save_store_model.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define SAVE_STORE_MOUNT "/save"
+
+// Finds the area, reads it and registers /save, once a boot. NULL when the
+// store is usable, else a short reason for the serial log (games then run
+// with nothing kept, as before). Call from a task with an internal stack.
+const char* save_store_open(void);
+
+// Files by store name ("quake/id1/config.cfg"), for a VFS that forwards to
+// the store. As POSIX: -1 with errno on failure. A file opened for writing is
+// kept in RAM and goes to flash, compressed, when it is closed; close fails
+// with ENOSPC when it did not fit, and the old copy, if any, stays. Any task,
+// PSRAM stacks included.
+int save_file_open(const char* name, int flags);
+ssize_t save_file_read(int fd, void* dst, size_t size);
+ssize_t save_file_write(int fd, const void* src, size_t size);
+off_t save_file_lseek(int fd, off_t offset, int whence);
+int save_file_close(int fd);
+int save_file_fstat(int fd, struct stat* st);
+int save_file_stat(const char* name, struct stat* st);
+int save_file_unlink(const char* name);
+
+#ifdef __cplusplus
+}
+#endif

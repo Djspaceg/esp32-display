@@ -1608,7 +1608,7 @@ static const int scantokey[128] =
 
 static void SaveDefaultCollection(default_collection_t *collection)
 {
-#if ORIGCODE
+#if ORIGCODE || defined(ESP_PLATFORM)
     default_t *defaults;
     int i, v;
     FILE *f;
@@ -1629,6 +1629,16 @@ static void SaveDefaultCollection(default_collection_t *collection)
         {
             continue;
         }
+
+#ifdef ESP_PLATFORM
+        // Key bindings stay the built-in ones the touch, BOOT and USB
+        // controls are made for: no menu on the board changes them, and a
+        // key with no scan code would come back unbound.
+        if (defaults[i].type == DEFAULT_KEY)
+        {
+            continue;
+        }
+#endif
 
         // Print the name and line up all values at 30 characters
 
@@ -1770,7 +1780,7 @@ static void SetVariable(default_t *def, char *value)
 
 static void LoadDefaultCollection(default_collection_t *collection)
 {
-#if ORIGCODE
+#if ORIGCODE || defined(ESP_PLATFORM)
     FILE *f;
     default_t *def;
     char defname[80];
@@ -2042,11 +2052,17 @@ float M_GetFloatVariable(char *name)
 
 static char *GetDefaultConfigDir(void)
 {
+#ifdef ESP_PLATFORM
+    // The saved-games store (save_store.h), or nowhere when the board has
+    // none: then nothing is kept, as before it existed.
+    return strdup(save_store_open() == NULL ? SAVE_STORE_MOUNT "/doom/" : "");
+#else
     char *result = (char *)malloc(2);
     result[0] = '.';
     result[1] = '\0';
 
     return result;
+#endif
 }
 
 // 
@@ -2115,7 +2131,13 @@ char *M_GetSaveGameDir(char *iwadname)
 
         free(topdir);
 #else
+#ifdef ESP_PLATFORM
+        // One directory per IWAD file: a save only loads into the WAD it
+        // was made in.
+        savegamedir = M_StringJoin(configdir, iwadname, DIR_SEPARATOR_S, NULL);
+#else
         savegamedir = M_StringJoin(configdir, DIR_SEPARATOR_S, ".savegame/", NULL);
+#endif
 
         M_MakeDirectory(savegamedir);
 

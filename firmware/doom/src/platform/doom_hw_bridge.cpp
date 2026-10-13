@@ -45,6 +45,14 @@ extern "C" void doom_log(const char* format, ...) {
     Serial.flush();
 }
 
+// The saved-games store's lines (save_store.c.inc), from the Doom loop or the
+// Quake task; one at a time, as only one game runs a boot.
+extern "C" void save_store_log_line(const char* line) {
+    Serial.print("[save] ");
+    Serial.println(line);
+    Serial.flush();
+}
+
 extern "C" void doom_log_stage(const char* stage) {
     // ESP-IDF reports the high-water mark in bytes.
     doom_log("stage %s: %s stack min free %u bytes", stage,

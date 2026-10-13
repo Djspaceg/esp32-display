@@ -342,6 +342,7 @@ extern "C" void quake_display_choose_render(int index) {
     return;
   }
   quake_log("render size %s chosen; restarting Quake", choices[index].label);
+  quake_engine_save_config();
   doom_audio_end();
   delay(20);
   ESP.restart();
@@ -588,6 +589,7 @@ extern "C" void quake_input_get_mouse(int* x, int* y) {
 }
 
 extern "C" void quake_quit(void) {
+  quake_engine_save_config();
   quake_log("Quake stopped. Restarting to normal firmware...");
   doom_audio_end();
   delay(20);

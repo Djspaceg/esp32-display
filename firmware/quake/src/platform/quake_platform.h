@@ -25,6 +25,11 @@ const char* quake_engine_start(int argc, char** argv, uint32_t hunk_bytes,
 /// Quake itself skips passes that come sooner than 1/72 s.
 void quake_engine_frame(void);
 
+/// Writes config.cfg (key bindings and archived settings) to the saved-games
+/// store, as Quake does when it quits; an unchanged file is not rewritten.
+/// From the Quake task, between frames.
+void quake_engine_save_config(void);
+
 /// Whether a menu, the console or a chat line has the keyboard, or the console
 /// is forced up (no game and no demo), which is what decides what a touch
 /// means.

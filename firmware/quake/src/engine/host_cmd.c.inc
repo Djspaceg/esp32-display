@@ -507,7 +507,13 @@ void Host_Savegame_f (void)
 		ED_Write (f, EDICT_NUM(i));
 		fflush (f);
 	}
-	fclose (f);
+	// espdisp: the file reaches flash when it is closed, and the saved-games
+	// store refuses it when it has no room (the slot keeps what it had).
+	if (fclose (f) != 0)
+	{
+		Con_Printf ("ERROR: not saved, no room in the save area.\n");
+		return;
+	}
 	Con_Printf ("done.\n");
 }
 

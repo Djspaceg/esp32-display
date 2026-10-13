@@ -16,6 +16,7 @@
 #include "platform/doom_audio_bridge.h"
 #include "platform/doom_log.h"
 #include "platform/doom_splash.h"
+#include "save_store.h"
 
 // From the doomgeneric platform and the C engine unity build.
 extern "C" void push_key(unsigned char key, int pressed);
@@ -36,6 +37,8 @@ extern "C" int doom_boot_pin(void);
 extern "C" {
     void doomgeneric_Create(int argc, char** argv);
     void doomgeneric_Tick(void);
+    void doom_serial_command(char* line);
+    void doom_save_config(void);
     bool doom_prepare_static_buffers(void);
     bool doom_wad_available(void);
 }
@@ -75,6 +78,12 @@ void doom_enter(void) {
         doom_fail_restart(reason, true);
     }
     doom_log_stage("wad");
+    {
+        // Settings and saves (default.cfg, the save slots); without the
+        // store Doom runs as before, keeping nothing.
+        const char* problem = save_store_open();
+        if (problem != nullptr) doom_log("saves off: %s", problem);
+    }
 
     doom_log("=== DOOM EASTER EGG ACTIVATED ===");
     ESP_LOGI(TAG, "Panel rotation locked for Doom");
@@ -142,11 +151,37 @@ void doom_enter(void) {
 
     // Game loop -- runs until exit requested
     bool first_tick = true;
+    uint32_t config_saved_at = millis();
     while (!should_exit()) {
         doomgeneric_Tick();
         if (first_tick) {
             first_tick = false;
             doom_log_stage("first tick");
+        }
+
+        // A changed setting reaches flash within 10 s, as Doom itself only
+        // writes default.cfg when it quits; an unchanged one is not written.
+        if (millis() - config_saved_at >= 10000) {
+            config_saved_at = millis();
+            doom_save_config();
+        }
+
+        // Serial lines are commands (platform/doom_serial_commands.c.inc).
+        {
+            static char line[96];
+            static size_t used = 0;
+            while (Serial.available() > 0) {
+                const int c = Serial.read();
+                if (c == '\n' || c == '\r') {
+                    if (used > 0) {
+                        line[used] = '\0';
+                        used = 0;
+                        doom_serial_command(line);
+                    }
+                } else if (used + 1 < sizeof(line)) {
+                    line[used++] = (char)c;
+                }
+            }
         }
 
         // Poll BOOT during Doom. Every short release is a normal Escape press:
@@ -196,6 +231,7 @@ void doom_enter(void) {
     // partial in-process teardown would add use-after-free paths without ever
     // returning to normal operation. The amplifier goes off first so the
     // restart does not pop the speaker.
+    doom_save_config();
     doom_audio_end();
     doom_log("Doom stopped. Restarting to normal firmware...");
 }

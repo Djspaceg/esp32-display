@@ -1583,6 +1583,10 @@ void G_DoLoadGame (void)
 	I_Error ("Bad savegame");
 
     fclose(save_stream);
+#ifdef ESP_PLATFORM
+    doom_log("loaded %s: E%dM%d, leveltime %d", savename, gameepisode,
+             gamemap, leveltime);
+#endif
     
     if (setsizeneeded)
     	R_ExecuteSetViewSize ();
@@ -1616,6 +1620,12 @@ void G_DoSaveGame (void)
     recovery_savegame_file = NULL;
     temp_savegame_file = P_TempSaveGameFile();
     savegame_file = P_SaveGameFile(savegameslot);
+#ifdef ESP_PLATFORM
+    // The saved-games store replaces a file only once the new copy is whole,
+    // which is what the temporary file and rename are for, so the save goes
+    // straight to its slot. The store has no rename.
+    temp_savegame_file = savegame_file;
+#endif
 
     // Open the savegame file for writing.  We write to a temporary file
     // and then rename it at the end if it was successfully written.
@@ -1657,7 +1667,23 @@ void G_DoSaveGame (void)
     
     // Finish up, close the savegame file.
 
+#ifdef ESP_PLATFORM
+    // The store writes the file to flash on close, and refuses it when the
+    // save area has no room; the slot then keeps what it had.
+    if (fclose(save_stream) != 0)
+    {
+        doom_log("save to slot %d failed (no room in the save area)",
+                 savegameslot);
+        gameaction = ga_nothing;
+        M_StringCopy(savedescription, "", sizeof(savedescription));
+        players[consoleplayer].message = "GAME NOT SAVED: NO ROOM";
+        return;
+    }
+    doom_log("saved slot %d: E%dM%d, leveltime %d", savegameslot,
+             gameepisode, gamemap, leveltime);
+#else
     fclose(save_stream);
+#endif
 
     if (recovery_savegame_file != NULL)
     {
@@ -1672,8 +1698,10 @@ void G_DoSaveGame (void)
     // Now rename the temporary savegame file to the actual savegame
     // file, overwriting the old savegame if there was one there.
 
+#ifndef ESP_PLATFORM
     remove(savegame_file);
     rename(temp_savegame_file, savegame_file);
+#endif
     
     gameaction = ga_nothing;
     M_StringCopy(savedescription, "", sizeof(savedescription));
