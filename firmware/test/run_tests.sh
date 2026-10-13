@@ -171,6 +171,12 @@ clang++ "${CXXFLAGS[@]}" \
   -o "$GAME_STORE_OUT" "$HERE/test_game_store.cpp"
 "$GAME_STORE_OUT"
 
+# The saved-games store beside doom_wad: configs and saves survive a restart,
+# and the power going mid-write leaves the old file or the new one, whole.
+clang++ "${CXXFLAGS[@]}" \
+  -o "$TMP/test_save_store" "$HERE/test_save_store.cpp"
+"$TMP/test_save_store"
+
 # Doom's sound effects: what the engine starts is what the codec is sent
 # (the sound module and i_sound.c.inc, unmodified, against fakes/doom_sound).
 # The upstream music-module table leaves its optional Poll hook implicit.
