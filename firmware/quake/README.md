@@ -32,7 +32,7 @@ store, so a set runs from `pak0.pak` without a gap. A registered `pak1.pak`
 ### Which S3 boards
 
 The shareware `pak0.pak` is 18,689,235 bytes. Every S3 runs the same image,
-whose layout (two app slots and the Doom WAD) fills the first 8 MiB, and its
+whose layout (two app slots, the saves and the Doom WAD) fills the first 8 MiB, and its
 game store is what the chip has past that, up to 18 MiB: the pak needs a
 32 MiB chip. A 16 MiB chip's 8 MiB store holds WADs, or only a small pak.
 
@@ -45,7 +45,7 @@ game store is what the chip has past that, up to 18 MiB: the pak needs a
 | LCD 0.85 | 8 MiB | 128x128 | no: flash and panel |
 
 The S3 image carries the engine on every board: 243 KB more app (1,781,298 of
-the slot's 2,031,616 bytes) and 10,248 bytes more internal RAM. A Quake boot
+the slot's 2,031,616 bytes then; the slot is 1,966,080 since `game_saves`) and 10,248 bytes more internal RAM. A Quake boot
 on an S3 renders 372x280 at 1x, centred at (46,92) on the 1.75C's round glass
 (the CO5300 takes only even origins); `QUAKE_RENDER_WIDTH`/`HEIGHT` in
 `src/quake_mode.h` choose another size, 0x0 for the whole panel. Only that
@@ -110,8 +110,8 @@ the next frame is the obvious next speedup.
 
 Settings and saves are kept across restarts and firmware updates. Every file
 Quake writes under `/qdata` that is not a pak (`id1/config.cfg`, the menu's
-`id1/s0.sav` to `s11.sav`) goes to the saved-games store, the 60 KB beside
-`doom_wad` that Doom's settings and saves share (`firmware/doom/README.md`).
+`id1/s0.sav` to `s11.sav`) goes to the saved-games store, the `game_saves`
+partition that Doom's settings and saves share (`firmware/doom/README.md`).
 `config.cfg` is read at start as always, and written within 10 s of a change,
 on a BOOT hold to leave, on a render size change and on `quit`. Files are
 deflated; a save the store cannot hold prints `ERROR: not saved, no room in

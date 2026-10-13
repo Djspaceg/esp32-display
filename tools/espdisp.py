@@ -632,7 +632,10 @@ TARGET_UNKNOWN = "unknown"  # nothing to compare, or a board this tool cannot pl
 TARGET_OLD_LAYOUT = "old-layout"  # same family, but OTA cannot replace its table
 
 LEGACY_PARTITION_SCHEMES = {
-    "s3": {"universal-8m-ota"},
+    # Layouts an application-only OTA cannot move a board off: each needs one
+    # USB flash, which rewrites the partition table.
+    "s3": {"universal-8m-ota", "universal-8m-doom-ota"},
+    "p4": {"p4-32m-ota"},
 }
 
 
@@ -5899,8 +5902,10 @@ def _verify_partition_payload(family: Family, blob: bytes) -> None:
         expected = {
             "nvs": (0x01, 0x02, 0x009000, 0x005000),
             "otadata": (0x01, 0x00, 0x00E000, 0x002000),
-            "app0": (0x00, 0x10, 0x010000, 0x4F0000),
-            "app1": (0x00, 0x11, 0x500000, 0x4F0000),
+            "app0": (0x00, 0x10, 0x010000, 0x4B0000),
+            "app1": (0x00, 0x11, 0x4C0000, 0x4B0000),
+            # Quake's and Doom's saves; no bundle writes it.
+            "game_saves": (0x42, 0x08, 0x970000, 0x080000),
             "doom_wad": (0x42, 0x06, 0x9F0000, 0x401000),
             # No bundle writes it; `write-data quake_pak` does.
             _QUAKE_PAK_LABEL: (_QUAKE_PAK_TYPE, _QUAKE_PAK_SUBTYPE,
@@ -5910,8 +5915,10 @@ def _verify_partition_payload(family: Family, blob: bytes) -> None:
         expected = {
             "nvs": (0x01, 0x02, 0x009000, 0x005000),
             "otadata": (0x01, 0x00, 0x00E000, 0x002000),
-            "app0": (0x00, 0x10, 0x010000, 0x1F0000),
-            "app1": (0x00, 0x11, 0x200000, 0x1F0000),
+            "app0": (0x00, 0x10, 0x010000, 0x1E0000),
+            "app1": (0x00, 0x11, 0x1F0000, 0x1E0000),
+            # Quake's and Doom's saves; no bundle writes it.
+            "game_saves": (0x42, 0x08, 0x3D0000, 0x02F000),
             "doom_wad": (0x42, 0x06, 0x3FF000, 0x401000),
         }
     elif family.key in ("c3", "c6"):

@@ -1,13 +1,12 @@
 // The saved-games store on the board: where its area is, flash access from
 // any task, compression, and the /save file system Doom writes through.
 //
-// The area is the 60 KB (0xF000) every S3 and P4 partition table leaves
-// unused beside doom_wad: on an S3 the gap before it (0x3F0000, after app1),
-// on a P4 the gap after it (0xDF1000, before quake_pak). Nothing writes or
-// erases it: OTA updates write their app slot, USB flashes write the parts a
-// bundle names, and the Mac app writes the game store. It is registered here
-// as an external partition, which the driver refuses if it would overlap any
-// other, so a table without the gap simply has no store.
+// The area is the game_saves partition (type 0x42, subtype 0x08) of the S3
+// and P4 tables: 0x3D0000, 188 KB on an S3; 0x970000, 512 KB on a P4. Nothing
+// writes or erases it: OTA updates write their app slot, USB flashes write
+// the parts a bundle names, and the Mac app writes the game store. A board
+// still on an older table has none, and its games keep nothing until it is
+// flashed over USB.
 //
 // Files are compressed with the ROM's deflate (miniz) as they are written,
 // and inflated as they are read: Quake's text saves shrink several times
@@ -38,11 +37,9 @@
 
 #include "../save_store.h"
 
-#define SAVE_AREA_BYTES 0xF000u
 #define SAVE_AREA_TYPE 0x42
 #define SAVE_AREA_SUBTYPE 0x08
 #define SAVE_AREA_LABEL "game_saves"
-#define SAVE_WAD_SUBTYPE 0x06
 #define SAVE_FILE_MAX_OPEN 4
 // Bigger than any save either game writes (Doom's vanilla limit is 180 KB).
 #define SAVE_FILE_MAX_BYTES (1u << 20)
@@ -72,7 +69,7 @@ static save_store_t* save_state = NULL;
 static SemaphoreHandle_t save_lock = NULL;
 // Heads of files that could not be read this boot: never written over, so a
 // game that fell back to its defaults does not replace the file it lost.
-static uint32_t save_unreadable = 0;
+static save_store_mask_t save_unreadable;
 
 // ---- Flash, from any stack --------------------------------------------------
 
@@ -161,38 +158,30 @@ static bool save_area_erase(void* context, uint32_t sector) {
 
 // ---- Opening ----------------------------------------------------------------
 
-static const char* save_register_area(void) {
-  const esp_partition_t* wad = esp_partition_find_first(
+static const char* save_find_area(void) {
+  save_area = esp_partition_find_first(
       (esp_partition_type_t)SAVE_AREA_TYPE,
-      (esp_partition_subtype_t)SAVE_WAD_SUBTYPE, NULL);
-  if (wad == NULL) return "no doom_wad partition to find the save area by";
-  // Before doom_wad (the S3 tables), else after it (the P4's).
-  const uint32_t candidates[2] = {
-      wad->address >= SAVE_AREA_BYTES ? wad->address - SAVE_AREA_BYTES : 0,
-      wad->address + wad->size};
-  for (int i = 0; i < 2; ++i) {
-    if (candidates[i] == 0 || candidates[i] % SAVE_STORE_SECTOR_BYTES != 0) {
-      continue;
-    }
-    if (esp_partition_register_external(
-            esp_flash_default_chip, candidates[i], SAVE_AREA_BYTES,
-            SAVE_AREA_LABEL, (esp_partition_type_t)SAVE_AREA_TYPE,
-            (esp_partition_subtype_t)SAVE_AREA_SUBTYPE,
-            &save_area) == ESP_OK) {
-      return NULL;
-    }
+      (esp_partition_subtype_t)SAVE_AREA_SUBTYPE, SAVE_AREA_LABEL);
+  if (save_area == NULL) {
+    return "no game_saves partition (flash the current bundle over USB)";
   }
-  return "no free 60 KB beside doom_wad for saves";
+  if (save_area->size < 4 * SAVE_STORE_SECTOR_BYTES ||
+      save_area->size % SAVE_STORE_SECTOR_BYTES != 0 ||
+      save_area->size / SAVE_STORE_SECTOR_BYTES > SAVE_STORE_MAX_SECTORS) {
+    save_area = NULL;
+    return "game_saves partition has an unusable size";
+  }
+  return NULL;
 }
 
 // ---- Memory -----------------------------------------------------------------
 
-// A file in the store is at most the area less one header. Deflate's state
-// (about 160 KB) and that much output are what a write needs at most; a
-// read needs inflate's state and its 32 KB window. Neither ever holds a
-// whole raw file, which on an S3 running Quake would not fit: its engine
-// heap leaves about 120 KB of PSRAM.
-#define SAVE_OUT_BYTES (SAVE_AREA_BYTES - SAVE_STORE_HEAD_BYTES)
+// A file is at most 16 sectors stored (a Quake save is about 17 KB, a Doom
+// save about 13 KB). Deflate's state (about 160 KB) and that much output are
+// what a write needs at most; a read needs inflate's state and its 32 KB
+// window. Neither ever holds a whole raw file, which on an S3 running Quake
+// would not fit: its engine heap leaves about 120 KB of PSRAM.
+#define SAVE_OUT_BYTES (16u * SAVE_STORE_SECTOR_BYTES - SAVE_STORE_HEAD_BYTES)
 // A file this small is kept whole until it is closed, so an unchanged
 // config is recognised by its CRC without deflating anything.
 #define SAVE_SMALL_BYTES 8192u
@@ -443,7 +432,7 @@ int save_file_open(const char* name, int flags) {
   if (whole <= 0) {
     // A damaged copy may be written over; one that only could not be read
     // just now is kept, since the game will fall back to its defaults.
-    if (whole < 0) save_unreadable |= 1u << record->head;
+    if (whole < 0) save_store_add(&save_unreadable, record->head);
     save_release(f);
     xSemaphoreGive(save_lock);
     save_log(whole < 0 ? "could not read %s; not writing over it this boot"
@@ -630,7 +619,7 @@ int save_file_close(int fd) {
     if (failure == NULL && payload != NULL) {
       const int old = save_store_find(save_state, f->name);
       if (old >= 0 &&
-          (save_unreadable & (1u << save_state->files[old].head))) {
+          save_store_has(&save_unreadable, save_state->files[old].head)) {
         failure = "its stored copy could not be read";
       } else {
         failure = save_store_write(save_state, f->name, payload, stored,
@@ -696,7 +685,7 @@ int save_file_unlink(const char* name) {
   xSemaphoreTake(save_lock, portMAX_DELAY);
   const int index = save_store_find(save_state, name);
   const bool exists = index >= 0;
-  if (exists) save_unreadable &= ~(1u << save_state->files[index].head);
+  if (exists) save_store_take(&save_unreadable, save_state->files[index].head);
   const bool removed = exists && save_store_remove(save_state, name);
   xSemaphoreGive(save_lock);
   if (!removed) {
@@ -752,7 +741,7 @@ static const esp_vfs_t save_vfs = {
 const char* save_store_open(void) {
   if (save_tried) return save_failure;
   save_tried = true;
-  save_failure = save_register_area();
+  save_failure = save_find_area();
   if (save_failure != NULL) return save_failure;
   save_lock = xSemaphoreCreateMutex();
   save_state = (save_store_t*)save_alloc(sizeof(*save_state));
@@ -763,7 +752,7 @@ const char* save_store_open(void) {
   const save_store_flash_t flash = {NULL, save_area_read, save_area_write,
                                     save_area_erase};
   save_failure = save_store_mount(save_state, flash,
-                                  SAVE_AREA_BYTES / SAVE_STORE_SECTOR_BYTES);
+                                  save_area->size / SAVE_STORE_SECTOR_BYTES);
   if (save_failure != NULL) return save_failure;
   if (esp_vfs_register(SAVE_STORE_MOUNT, &save_vfs, NULL) != ESP_OK) {
     save_failure = "could not register the /save file system";

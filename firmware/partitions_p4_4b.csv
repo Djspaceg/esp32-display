@@ -1,4 +1,9 @@
-# ESP32-P4 4B: dual 4.9 MiB OTA slots, the Doom WAD and the Quake pak in 32 MiB flash.
+# ESP32-P4 4B: dual 4.7 MiB OTA slots, saved games, the Doom WAD and the Quake
+# pak in 32 MiB flash (scheme p4-32m-saves-ota).
+# Each application slot is 0x4B0000 (4,915,200 bytes; the 2.0.0 app is about
+# 2.15 MB). game_saves (0x80000, 128 sectors) holds Quake's and Doom's
+# configs and saves (firmware/doom/src/platform/save_store_model.h); no
+# bundle writes it.
 # doom_wad must end within the first 16 MiB: the prebuilt bootloader's flash
 # cache maps only 24-bit addresses, so esp_partition_mmap() refuses anything
 # past 0x1000000 (it sat at 0x1010000 until the 4B showed that).
@@ -6,10 +11,11 @@
 # 16 MiB, which is fine: Quake reads its data with esp_partition_read() and
 # never maps it. No bundle carries it; `tools/espdisp.py write-data quake_pak`
 # writes the user's own copy over USB.
-# Name,    Type, SubType, Offset,   Size,      Flags
-nvs,       data, nvs,     0x9000,   0x5000,
-otadata,   data, ota,     0xE000,   0x2000,
-app0,      app,  ota_0,   0x10000,  0x4F0000,
-app1,      app,  ota_1,   0x500000, 0x4F0000,
-doom_wad,  0x42, 0x06,    0x9F0000, 0x401000,
-quake_pak, 0x42, 0x07,    0xE00000, 0x1200000,
+# Name,      Type, SubType, Offset,   Size,      Flags
+nvs,         data, nvs,     0x9000,   0x5000,
+otadata,     data, ota,     0xE000,   0x2000,
+app0,        app,  ota_0,   0x10000,  0x4B0000,
+app1,        app,  ota_1,   0x4C0000, 0x4B0000,
+game_saves,  0x42, 0x08,    0x970000, 0x80000,
+doom_wad,    0x42, 0x06,    0x9F0000, 0x401000,
+quake_pak,   0x42, 0x07,    0xE00000, 0x1200000,

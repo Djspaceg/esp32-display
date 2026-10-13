@@ -25,7 +25,11 @@ static int failures = 0;
 
 namespace {
 
-const uint32_t SECTORS = 15;  // 0xF000, the gap beside doom_wad
+// Most tests use a small area, where room runs out quickly; the capacity
+// tests use the two real game_saves partitions.
+const uint32_t SECTORS = 15;
+const uint32_t S3_SECTORS = 0x2F000 / SAVE_STORE_SECTOR_BYTES;  // 47
+const uint32_t P4_SECTORS = 0x80000 / SAVE_STORE_SECTOR_BYTES;  // 128
 
 struct Flash {
   std::vector<uint8_t> bytes;
@@ -495,6 +499,46 @@ void testWearSpreads() {
   CHECK(again.count == 2);
 }
 
+// The real partitions hold several slots per game beside the configs, and a
+// restart finds every file, in sectors past the first 32 too.
+void testCapacity(uint32_t sectors, int quakeSlots, int doomSlots) {
+  Flash f(sectors);
+  save_store_t store;
+  CHECK(mount(&store, f) == nullptr);
+  CHECK(put(&store, "quake/id1/config.cfg", pattern(1824, 1)) == nullptr);
+  CHECK(put(&store, "doom/default.cfg", pattern(1097, 2)) == nullptr);
+  CHECK(put(&store, "doom/doomgenericdoom.cfg", pattern(632, 3)) == nullptr);
+  // Stored sizes measured on the round S3: a Quake save 17,056 bytes (five
+  // sectors), a Doom save 12,663 (four).
+  char name[SAVE_STORE_NAME_BYTES];
+  for (int i = 0; i < quakeSlots; ++i) {
+    std::snprintf(name, sizeof(name), "quake/id1/s%d.sav", i);
+    CHECK(put(&store, name, pattern(17056, 10 + i)) == nullptr);
+  }
+  for (int i = 0; i < doomSlots; ++i) {
+    std::snprintf(name, sizeof(name), "doom/doom1.wad/doomsav%d.dsg", i);
+    CHECK(put(&store, name, pattern(12663, 40 + i)) == nullptr);
+  }
+  // Every slot can be saved over again.
+  CHECK(put(&store, "quake/id1/s0.sav", pattern(17056, 99)) == nullptr);
+  save_store_t again;
+  CHECK(mount(&again, f) == nullptr);
+  CHECK(again.count == 3 + quakeSlots + doomSlots);
+  bool ok = false;
+  CHECK(get(&again, "quake/id1/s0.sav", &ok) == pattern(17056, 99) && ok);
+  for (int i = 0; i < doomSlots; ++i) {
+    std::snprintf(name, sizeof(name), "doom/doom1.wad/doomsav%d.dsg", i);
+    CHECK(get(&again, name, &ok) == pattern(12663, 40 + i) && ok);
+  }
+  bool high = false;
+  for (int i = 0; i < again.count; ++i) {
+    for (uint32_t s = 32; s < sectors; ++s) {
+      if (save_store_has(&again.files[i].mask, s)) high = true;
+    }
+  }
+  CHECK(high || sectors <= 32);
+}
+
 void testNames() {
   char out[SAVE_STORE_NAME_BYTES];
   CHECK(save_store_name_from_path("doom", "/doom1.wad//./doomsav0.dsg", out));
@@ -542,6 +586,8 @@ int main() {
   testRemoveAfterFailedMountErase();
   testReadErrorFailsMount();
   testWearSpreads();
+  testCapacity(S3_SECTORS, 4, 4);  // 3 + 20 + 16 of 47 sectors
+  testCapacity(P4_SECTORS, 12, 6);  // every menu slot: 3 + 60 + 24 of 128
   testNames();
   testCrcIsZlibs();
   if (failures != 0) {

@@ -33,8 +33,8 @@ ST7703 or JD9365 timing, GT911 behavior, or carrier GPIOs.
 | Family | Chip | Runtime profiles | Partition compatibility |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-ota` |
-| `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c`, `jd9365-34c` | `p4-32m-ota` |
+| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-saves-ota` |
+| `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c`, `jd9365-34c` | `p4-32m-saves-ota` |
 
 C6 probes its shared I2C bus before panel GPIO initialization. S3 uses 8 MiB
 flash identity for the GC9107 carrier and distinct I2C buses on larger-flash

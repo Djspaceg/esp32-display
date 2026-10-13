@@ -4002,8 +4002,9 @@ def test_write_data_quake_pak():
         entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
     ]
     current = b"".join(head + [
-        entry("app0", 0x00, 0x10, 0x10000, 0x4F0000),
-        entry("app1", 0x00, 0x11, 0x500000, 0x4F0000),
+        entry("app0", 0x00, 0x10, 0x10000, 0x4B0000),
+        entry("app1", 0x00, 0x11, 0x4C0000, 0x4B0000),
+        entry("game_saves", 0x42, 0x08, 0x970000, 0x80000),
         entry("doom_wad", 0x42, 0x06, 0x9F0000, 0x401000),
         entry("quake_pak", 0x42, 0x07, 0xE00000, 0x1200000),
     ]) + b"\xff" * 32
@@ -4120,8 +4121,9 @@ def test_write_data_quake_pak():
         # An S3: the universal table, and the raw region past it on a chip
         # that reaches 0x1A00000.
         s3_table = b"".join(head + [
-            entry("app0", 0x00, 0x10, 0x10000, 0x1F0000),
-            entry("app1", 0x00, 0x11, 0x200000, 0x1F0000),
+            entry("app0", 0x00, 0x10, 0x10000, 0x1E0000),
+            entry("app1", 0x00, 0x11, 0x1F0000, 0x1E0000),
+            entry("game_saves", 0x42, 0x08, 0x3D0000, 0x2F000),
             entry("doom_wad", 0x42, 0x06, 0x3FF000, 0x401000),
         ]) + b"\xff" * 32
         s3 = espdisp.FAMILIES["s3"]
@@ -4184,8 +4186,9 @@ def test_doom_partition_contracts():
     good = b"".join([
         entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
         entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
-        entry("app0", 0x00, 0x10, 0x10000, 0x4F0000),
-        entry("app1", 0x00, 0x11, 0x500000, 0x4F0000),
+        entry("app0", 0x00, 0x10, 0x10000, 0x4B0000),
+        entry("app1", 0x00, 0x11, 0x4C0000, 0x4B0000),
+        entry("game_saves", 0x42, 0x08, 0x970000, 0x80000),
         # The P4 WAD follows app1 and ends inside the first 16 MiB, the most
         # the firmware's flash cache can map.
         entry("doom_wad", 0x42, 0x06, 0x9F0000, 0x401000),
@@ -4235,8 +4238,9 @@ def test_doom_partition_contracts():
     s3 = b"".join([
         entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
         entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
-        entry("app0", 0x00, 0x10, 0x10000, 0x1F0000),
-        entry("app1", 0x00, 0x11, 0x200000, 0x1F0000),
+        entry("app0", 0x00, 0x10, 0x10000, 0x1E0000),
+        entry("app1", 0x00, 0x11, 0x1F0000, 0x1E0000),
+        entry("game_saves", 0x42, 0x08, 0x3D0000, 0x2F000),
         entry("doom_wad", 0x42, 0x06, 0x3FF000, 0x401000),
     ]) + b"\xff" * 32
     check_accepts(
@@ -5833,30 +5837,30 @@ def test_family_resolution_and_discovery():
         "address": "192.0.2.3", "protocol": "network",
         "properties": {
             "hostname": "panel.local.", "board": "esp32s3", "target": "s3",
-            "profile": "co5300", "partition": "universal-8m-doom-ota",
+            "profile": "co5300", "partition": "universal-8m-doom-saves-ota",
         }}}]}
     ports = espdisp.parse_network_ports(payload)
     check_equal(len(ports), 1, "one network panel parsed")
     check_equal(ports[0].profile, "co5300", "profile metadata parsed")
-    check_equal(ports[0].partition, "universal-8m-doom-ota",
+    check_equal(ports[0].partition, "universal-8m-doom-saves-ota",
                 "partition metadata parsed")
     family = espdisp.FAMILIES["s3"]
     check_equal(espdisp.classify_ota_target(
-        family, "s3", "esp32s3", "co5300", "universal-8m-doom-ota"),
+        family, "s3", "esp32s3", "co5300", "universal-8m-doom-saves-ota"),
         espdisp.TARGET_OK, "all independent S3 evidence agrees")
     for values, label in (
-            (("p4", "esp32s3", "co5300", "universal-8m-doom-ota"), "wrong family"),
-            (("s3", "esp32p4", "co5300", "universal-8m-doom-ota"), "wrong chip"),
-            (("s3", "esp32s3", "st7703-4b", "universal-8m-doom-ota"), "wrong profile"),
-            (("s3", "esp32s3", "co5300", "p4-32m-ota"), "wrong partition")):
+            (("p4", "esp32s3", "co5300", "universal-8m-doom-saves-ota"), "wrong family"),
+            (("s3", "esp32p4", "co5300", "universal-8m-doom-saves-ota"), "wrong chip"),
+            (("s3", "esp32s3", "st7703-4b", "universal-8m-doom-saves-ota"), "wrong profile"),
+            (("s3", "esp32s3", "co5300", "p4-32m-saves-ota"), "wrong partition")):
         check_equal(espdisp.classify_ota_target(family, *values),
                     espdisp.TARGET_WRONG, label)
     for values, label in (
-            (("", "esp32s3", "co5300", "universal-8m-doom-ota"), "missing family"),
-            (("s3", "", "co5300", "universal-8m-doom-ota"), "missing chip"),
-            (("s3", "esp32s3", "", "universal-8m-doom-ota"), "missing profile"),
+            (("", "esp32s3", "co5300", "universal-8m-doom-saves-ota"), "missing family"),
+            (("s3", "", "co5300", "universal-8m-doom-saves-ota"), "missing chip"),
+            (("s3", "esp32s3", "", "universal-8m-doom-saves-ota"), "missing profile"),
             (("s3", "esp32s3", "co5300", ""), "missing partition"),
-            (("s3", "esp32s3", "future", "universal-8m-doom-ota"), "unknown profile")):
+            (("s3", "esp32s3", "future", "universal-8m-doom-saves-ota"), "unknown profile")):
         check_equal(espdisp.classify_ota_target(family, *values),
                     espdisp.TARGET_UNKNOWN, label)
     check_equal(
@@ -5864,6 +5868,18 @@ def test_family_resolution_and_discovery():
             family, "s3", "esp32s3", "co5300", "universal-8m-ota"),
         espdisp.TARGET_OLD_LAYOUT,
         "the previous S3 partition token is identified as an old layout")
+    # The layouts from before game_saves: an application-only OTA cannot add
+    # the partition, so each is an old layout needing one USB flash.
+    check_equal(
+        espdisp.classify_ota_target(
+            family, "s3", "esp32s3", "co5300", "universal-8m-doom-ota"),
+        espdisp.TARGET_OLD_LAYOUT,
+        "the S3 table before game_saves is identified as an old layout")
+    check_equal(
+        espdisp.classify_ota_target(
+            espdisp.FAMILIES["p4"], "p4", "esp32p4", "st7703-4b", "p4-32m-ota"),
+        espdisp.TARGET_OLD_LAYOUT,
+        "the P4 table before game_saves is identified as an old layout")
     with unittest.mock.patch.object(
         espdisp, "discovered_network_ports", return_value=ports), \
          unittest.mock.patch("sys.stdout", io.StringIO()):
@@ -8991,7 +9007,7 @@ def test_rescue_override_warning():
     try:
         warning = espdisp.rescue_override_warning(
             "CFGINFO id=1cdbd47b5b94 board=st7789-190 profile=st7789-190 "
-            "target=s3 chip=esp32s3 partition=universal-8m-doom-ota "
+            "target=s3 chip=esp32s3 partition=universal-8m-doom-saves-ota "
             "cfgboard=st7789-130", "/dev/cu.usbmodemB")
     except AttributeError as exc:
         check(False, "rescue reports a stored CFGBOARD override (%s)" % exc)

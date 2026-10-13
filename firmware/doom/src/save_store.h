@@ -1,5 +1,5 @@
 // The saved-games store (platform/save_store_model.h has the format): game
-// configs and saves kept across restarts in the 60 KB beside doom_wad.
+// configs and saves kept across restarts in the game_saves partition.
 // C linkage: the Doom boot mounts it at /save, and the Quake boot serves
 // everything in /qdata that is not a pak from it.
 #pragma once

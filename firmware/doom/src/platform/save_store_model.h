@@ -1,13 +1,12 @@
 // The saved-games store: Quake's config.cfg and saves, Doom's default.cfg and
-// saves, kept in a small flash area across restarts and firmware updates.
+// saves, kept in a flash area across restarts and firmware updates.
 //
-// The area is 60 KB (15 sectors) the partition tables already leave unused
-// beside the doom_wad partition (save_store.c.inc finds it); nothing in the
-// table, a bundle or the game store changes.
+// The area is the game_saves partition of the S3 and P4 tables (47 sectors on
+// an S3, 128 on a P4); save_store.c.inc finds it. No bundle writes it.
 //
 // Each file is one record of whole 4 KiB sectors, anywhere in the area. Its
 // first sector, the head, starts with a header naming the file and every
-// sector it holds (a bitmask, so a record need not be contiguous); its stored
+// sector it holds (a bitmap, so a record need not be contiguous); its stored
 // bytes follow the header and run on through the other sectors in ascending
 // order. Nothing else is kept: mounting reads every sector's first bytes and
 // keeps each record whose header and payload both pass their CRCs.
@@ -33,18 +32,19 @@
 // header records how the payload is encoded and the raw length and CRC.
 //
 // Head sector, little-endian:
-//   0  char[8]  "ESPSAVE1"
+//   0  char[8]  "ESPSAVE2"
 //   8  u32      sequence, one more than any other record's
-//   12 u32      sector mask, bit N for sector N; includes the head
-//   16 u32      stored (payload) bytes
-//   20 u32      raw bytes, after decoding
-//   24 u32      CRC-32 (zlib) of the raw bytes
-//   28 u32      CRC-32 of the stored bytes
-//   32 u8       encoding: 0 raw, 1 raw deflate
-//   33 u8[3]    0
-//   36 char[48] name, NUL padded: "quake/id1/s0.sav", "doom/default.cfg"
-//   84 u32      CRC-32 of bytes 0 to 84
-//   88          stored bytes
+//   12 u32      stored (payload) bytes
+//   16 u32      raw bytes, after decoding
+//   20 u32      CRC-32 (zlib) of the raw bytes
+//   24 u32      CRC-32 of the stored bytes
+//   28 u8       encoding: 0 raw, 1 raw deflate
+//   29 u8[3]    0
+//   32 char[48] name, NUL padded: "quake/id1/s0.sav", "doom/default.cfg"
+//   80 u8[16]   sector map, bit N (byte N/8, bit N%8) for sector N; includes
+//               the head
+//   96 u32      CRC-32 of bytes 0 to 96
+//   100         stored bytes
 #pragma once
 
 #include <stdbool.h>
@@ -57,14 +57,14 @@ extern "C" {
 #endif
 
 #define SAVE_STORE_SECTOR_BYTES 4096u
-#define SAVE_STORE_MAX_SECTORS 32u
-#define SAVE_STORE_HEAD_BYTES 88u
+#define SAVE_STORE_MAX_SECTORS 128u
+#define SAVE_STORE_HEAD_BYTES 100u
 #define SAVE_STORE_NAME_BYTES 48
-#define SAVE_STORE_MAX_FILES 32
+#define SAVE_STORE_MAX_FILES 64
 #define SAVE_STORE_ENCODING_RAW 0
 #define SAVE_STORE_ENCODING_DEFLATE 1
 
-static const char SAVE_STORE_MAGIC[8] = {'E', 'S', 'P', 'S', 'A', 'V', 'E', '1'};
+static const char SAVE_STORE_MAGIC[8] = {'E', 'S', 'P', 'S', 'A', 'V', 'E', '2'};
 
 // save_store_write's answer when there is no room, as opposed to a flash
 // error: compare the pointer.
@@ -79,10 +79,15 @@ typedef struct {
   bool (*erase_sector)(void* context, uint32_t sector);
 } save_store_flash_t;
 
+// A set of sectors.
+typedef struct {
+  uint32_t words[SAVE_STORE_MAX_SECTORS / 32];
+} save_store_mask_t;
+
 typedef struct {
   char name[SAVE_STORE_NAME_BYTES];
   uint32_t sequence;
-  uint32_t mask;
+  save_store_mask_t mask;
   uint32_t stored_bytes;
   uint32_t raw_bytes;
   uint32_t raw_crc;
@@ -98,7 +103,7 @@ typedef struct {
   uint32_t cursor;  // where the next allocation starts looking
   // Heads of replaced copies whose erase failed; retried before a remove,
   // which would otherwise bring the old copy back at the next mount.
-  uint32_t stale;
+  save_store_mask_t stale;
   int count;
   save_store_file_t files[SAVE_STORE_MAX_FILES];
   save_store_file_t scan[SAVE_STORE_MAX_SECTORS];  // mount's working set
@@ -133,9 +138,38 @@ static inline void save_store_put32(uint8_t* p, uint32_t v) {
   p[3] = (uint8_t)(v >> 24);
 }
 
-static inline uint32_t save_store_popcount(uint32_t v) {
+static inline bool save_store_has(const save_store_mask_t* m, uint32_t s) {
+  return (m->words[s / 32] >> (s % 32)) & 1u;
+}
+
+static inline void save_store_add(save_store_mask_t* m, uint32_t s) {
+  m->words[s / 32] |= 1u << (s % 32);
+}
+
+static inline void save_store_take(save_store_mask_t* m, uint32_t s) {
+  m->words[s / 32] &= ~(1u << (s % 32));
+}
+
+static inline void save_store_union(save_store_mask_t* m,
+                                    const save_store_mask_t* other) {
+  for (uint32_t i = 0; i < SAVE_STORE_MAX_SECTORS / 32; ++i) {
+    m->words[i] |= other->words[i];
+  }
+}
+
+static inline bool save_store_overlap(const save_store_mask_t* a,
+                                      const save_store_mask_t* b) {
+  for (uint32_t i = 0; i < SAVE_STORE_MAX_SECTORS / 32; ++i) {
+    if (a->words[i] & b->words[i]) return true;
+  }
+  return false;
+}
+
+static inline uint32_t save_store_popcount(const save_store_mask_t* m) {
   uint32_t n = 0;
-  for (; v != 0; v &= v - 1) ++n;
+  for (uint32_t i = 0; i < SAVE_STORE_MAX_SECTORS / 32; ++i) {
+    for (uint32_t v = m->words[i]; v != 0; v &= v - 1) ++n;
+  }
   return n;
 }
 
@@ -149,7 +183,8 @@ static inline uint32_t save_store_sectors_for(uint32_t stored) {
 
 // Where payload byte `at` of a record lies in the area, and how many bytes
 // from there stay in the same sector.
-static inline uint32_t save_store_payload_address(uint32_t head, uint32_t mask,
+static inline uint32_t save_store_payload_address(uint32_t head,
+                                                  const save_store_mask_t* mask,
                                                   uint32_t at,
                                                   uint32_t* run) {
   const uint32_t first = SAVE_STORE_SECTOR_BYTES - SAVE_STORE_HEAD_BYTES;
@@ -161,7 +196,7 @@ static inline uint32_t save_store_payload_address(uint32_t head, uint32_t mask,
   uint32_t index = at / SAVE_STORE_SECTOR_BYTES;
   const uint32_t within = at % SAVE_STORE_SECTOR_BYTES;
   for (uint32_t sector = 0; sector < SAVE_STORE_MAX_SECTORS; ++sector) {
-    if (sector == head || !(mask & (1u << sector))) continue;
+    if (sector == head || !save_store_has(mask, sector)) continue;
     if (index-- == 0) {
       *run = SAVE_STORE_SECTOR_BYTES - within;
       return sector * SAVE_STORE_SECTOR_BYTES + within;
@@ -172,7 +207,8 @@ static inline uint32_t save_store_payload_address(uint32_t head, uint32_t mask,
 }
 
 static inline bool save_store_read_payload(const save_store_flash_t* flash,
-                                           uint32_t head, uint32_t mask,
+                                           uint32_t head,
+                                           const save_store_mask_t* mask,
                                            uint32_t at, void* out,
                                            uint32_t length) {
   uint8_t* dst = (uint8_t*)out;
@@ -262,14 +298,18 @@ static inline int save_store_find(const save_store_t* store,
   return -1;
 }
 
-static inline uint32_t save_store_used_mask(const save_store_t* store) {
-  uint32_t used = 0;
-  for (int i = 0; i < store->count; ++i) used |= store->files[i].mask;
+static inline save_store_mask_t save_store_used_mask(const save_store_t* store) {
+  save_store_mask_t used;
+  memset(&used, 0, sizeof(used));
+  for (int i = 0; i < store->count; ++i) {
+    save_store_union(&used, &store->files[i].mask);
+  }
   return used;
 }
 
 static inline uint32_t save_store_free_sectors(const save_store_t* store) {
-  return store->sectors - save_store_popcount(save_store_used_mask(store));
+  const save_store_mask_t used = save_store_used_mask(store);
+  return store->sectors - save_store_popcount(&used);
 }
 
 // Whether `name` already holds exactly these raw bytes, so a write of them
@@ -290,7 +330,7 @@ static inline bool save_store_read(const save_store_t* store, int index,
   if (at > file->stored_bytes || length > file->stored_bytes - at) {
     return false;
   }
-  return save_store_read_payload(&store->flash, file->head, file->mask, at,
+  return save_store_read_payload(&store->flash, file->head, &file->mask, at,
                                  out, length);
 }
 
@@ -304,21 +344,27 @@ static inline bool save_store_parse_head(const uint8_t* h, uint32_t sector,
                                          uint32_t sectors,
                                          save_store_file_t* out) {
   if (memcmp(h, SAVE_STORE_MAGIC, sizeof(SAVE_STORE_MAGIC)) != 0) return false;
-  if (save_store_crc32(0, h, 84) != save_store_get32(h + 84)) return false;
+  if (save_store_crc32(0, h, 96) != save_store_get32(h + 96)) return false;
   out->sequence = save_store_get32(h + 8);
-  out->mask = save_store_get32(h + 12);
-  out->stored_bytes = save_store_get32(h + 16);
-  out->raw_bytes = save_store_get32(h + 20);
-  out->raw_crc = save_store_get32(h + 24);
-  out->stored_crc = save_store_get32(h + 28);
-  out->encoding = h[32];
+  out->stored_bytes = save_store_get32(h + 12);
+  out->raw_bytes = save_store_get32(h + 16);
+  out->raw_crc = save_store_get32(h + 20);
+  out->stored_crc = save_store_get32(h + 24);
+  out->encoding = h[28];
   out->head = (uint8_t)sector;
-  memcpy(out->name, h + 36, SAVE_STORE_NAME_BYTES);
-  const uint32_t all = sectors >= 32 ? 0xFFFFFFFFu : (1u << sectors) - 1u;
-  return h[33] == 0 && h[34] == 0 && h[35] == 0 &&
+  memcpy(out->name, h + 32, SAVE_STORE_NAME_BYTES);
+  memset(&out->mask, 0, sizeof(out->mask));
+  bool outside = false;  // a sector past the area
+  for (uint32_t s = 0; s < SAVE_STORE_MAX_SECTORS; ++s) {
+    if ((h[80 + s / 8] >> (s % 8)) & 1u) {
+      if (s >= sectors) outside = true;
+      save_store_add(&out->mask, s);
+    }
+  }
+  return h[29] == 0 && h[30] == 0 && h[31] == 0 && !outside &&
          out->encoding <= SAVE_STORE_ENCODING_DEFLATE &&
-         (out->mask & (1u << sector)) != 0 && (out->mask & ~all) == 0 &&
-         save_store_popcount(out->mask) ==
+         save_store_has(&out->mask, sector) &&
+         save_store_popcount(&out->mask) ==
              save_store_sectors_for(out->stored_bytes) &&
          out->name[SAVE_STORE_NAME_BYTES - 1] == '\0' &&
          save_store_name_valid(out->name);
@@ -333,7 +379,8 @@ static inline int save_store_payload_ok(const save_store_flash_t* flash,
   for (uint32_t at = 0; at < file->stored_bytes;) {
     uint32_t n = file->stored_bytes - at;
     if (n > sizeof(chunk)) n = sizeof(chunk);
-    if (!save_store_read_payload(flash, file->head, file->mask, at, chunk, n)) {
+    if (!save_store_read_payload(flash, file->head, &file->mask, at, chunk,
+                                 n)) {
       return -1;
     }
     crc = save_store_crc32(crc, chunk, n);
@@ -378,27 +425,29 @@ static inline const char* save_store_mount(save_store_t* store,
       found[j - 1] = t;
     }
   }
-  uint32_t claimed = 0;
-  uint32_t stale = 0;  // heads to erase
+  save_store_mask_t claimed, stale;  // stale: heads to erase
+  memset(&claimed, 0, sizeof(claimed));
+  memset(&stale, 0, sizeof(stale));
   for (uint32_t i = 0; i < count; ++i) {
     const save_store_file_t* file = &found[i];
     if (store->next_sequence <= file->sequence) {
       store->next_sequence = file->sequence + 1;
     }
-    if ((file->mask & claimed) != 0 || save_store_find(store, file->name) >= 0 ||
+    if (save_store_overlap(&file->mask, &claimed) ||
+        save_store_find(store, file->name) >= 0 ||
         store->count >= SAVE_STORE_MAX_FILES) {
-      stale |= 1u << file->head;
+      save_store_add(&stale, file->head);
       continue;
     }
-    claimed |= file->mask;
+    save_store_union(&claimed, &file->mask);
     store->files[store->count++] = *file;
     // Allocation carries on after the newest record.
     if (store->count == 1) store->cursor = (file->head + 1) % sectors;
   }
   for (uint32_t sector = 0; sector < sectors; ++sector) {
-    if ((stale & (1u << sector)) && !(claimed & (1u << sector)) &&
+    if (save_store_has(&stale, sector) && !save_store_has(&claimed, sector) &&
         !flash.erase_sector(flash.context, sector)) {
-      store->stale |= 1u << sector;  // retried before a remove
+      save_store_add(&store->stale, sector);  // retried before a remove
     }
   }
   return NULL;
@@ -419,12 +468,12 @@ static inline const char* save_store_write(save_store_t* store,
   if (found_old < 0 && store->count >= SAVE_STORE_MAX_FILES) {
     return "save area holds its most files";
   }
-  uint32_t used = save_store_used_mask(store);
-  uint32_t room = store->sectors - save_store_popcount(used);
+  save_store_mask_t used = save_store_used_mask(store);
+  uint32_t room = store->sectors - save_store_popcount(&used);
   int old = found_old;
   if (needed > room) {
-    const uint32_t place = room + (old < 0 ? 0 : save_store_popcount(
-                                                      store->files[old].mask));
+    const uint32_t place =
+        room + (old < 0 ? 0 : save_store_popcount(&store->files[old].mask));
     // In place it still leaves a sector free while other files remain, for
     // their configs to be replaced whole.
     if (old < 0 || needed > place ||
@@ -439,36 +488,38 @@ static inline const char* save_store_write(save_store_t* store,
     save_store_drop(store, old);
     old = -1;
     used = save_store_used_mask(store);
-    room = store->sectors - save_store_popcount(used);
+    room = store->sectors - save_store_popcount(&used);
   } else if (old < 0 && needed == room) {
     return SAVE_STORE_FULL;  // a new file leaves one sector free
   }
   // Free sectors round from the cursor; the first is the head.
-  uint32_t mask = 0;
+  save_store_mask_t mask;
+  memset(&mask, 0, sizeof(mask));
   uint32_t head = 0;
   uint32_t last = store->cursor;
   for (uint32_t step = 0, taken = 0; step < store->sectors && taken < needed;
        ++step) {
     const uint32_t sector = (store->cursor + step) % store->sectors;
-    if (used & (1u << sector)) continue;
+    if (save_store_has(&used, sector)) continue;
     if (taken++ == 0) head = sector;
-    mask |= 1u << sector;
+    save_store_add(&mask, sector);
     last = sector;
   }
   store->cursor = (last + 1) % store->sectors;
   for (uint32_t sector = 0; sector < store->sectors; ++sector) {
-    if ((mask & (1u << sector)) &&
-        !store->flash.erase_sector(store->flash.context, sector)) {
-      return "save area erase failed";
+    if (save_store_has(&mask, sector)) {
+      if (!store->flash.erase_sector(store->flash.context, sector)) {
+        return "save area erase failed";
+      }
+      save_store_take(&store->stale, sector);
     }
   }
-  store->stale &= ~mask;
   // Payload, the head sector's share last, then the header.
   const uint8_t* bytes = (const uint8_t*)payload;
   const uint32_t first = SAVE_STORE_SECTOR_BYTES - SAVE_STORE_HEAD_BYTES;
   for (uint32_t at = stored > first ? first : stored; at < stored;) {
     uint32_t run = 0;
-    const uint32_t address = save_store_payload_address(head, mask, at, &run);
+    const uint32_t address = save_store_payload_address(head, &mask, at, &run);
     if (run > stored - at) run = stored - at;
     if (!store->flash.write(store->flash.context, address, bytes + at, run)) {
       return "save area write failed";
@@ -496,14 +547,16 @@ static inline const char* save_store_write(save_store_t* store,
   memset(h, 0, sizeof(h));
   memcpy(h, SAVE_STORE_MAGIC, sizeof(SAVE_STORE_MAGIC));
   save_store_put32(h + 8, file.sequence);
-  save_store_put32(h + 12, file.mask);
-  save_store_put32(h + 16, file.stored_bytes);
-  save_store_put32(h + 20, file.raw_bytes);
-  save_store_put32(h + 24, file.raw_crc);
-  save_store_put32(h + 28, file.stored_crc);
-  h[32] = file.encoding;
-  memcpy(h + 36, file.name, SAVE_STORE_NAME_BYTES);
-  save_store_put32(h + 84, save_store_crc32(0, h, 84));
+  save_store_put32(h + 12, file.stored_bytes);
+  save_store_put32(h + 16, file.raw_bytes);
+  save_store_put32(h + 20, file.raw_crc);
+  save_store_put32(h + 24, file.stored_crc);
+  h[28] = file.encoding;
+  memcpy(h + 32, file.name, SAVE_STORE_NAME_BYTES);
+  for (uint32_t s = 0; s < SAVE_STORE_MAX_SECTORS; ++s) {
+    if (save_store_has(&mask, s)) h[80 + s / 8] |= (uint8_t)(1u << (s % 8));
+  }
+  save_store_put32(h + 96, save_store_crc32(0, h, 96));
   if (!store->flash.write(store->flash.context,
                           head * SAVE_STORE_SECTOR_BYTES, h, sizeof(h))) {
     return "save area write failed";
@@ -514,7 +567,7 @@ static inline const char* save_store_write(save_store_t* store,
     // or retried by a remove.
     if (!store->flash.erase_sector(store->flash.context,
                                    store->files[old].head)) {
-      store->stale |= 1u << store->files[old].head;
+      save_store_add(&store->stale, store->files[old].head);
     }
     store->files[old] = file;
   } else {
@@ -527,12 +580,12 @@ static inline const char* save_store_write(save_store_t* store,
 static inline bool save_store_remove(save_store_t* store, const char* name) {
   const int i = save_store_find(store, name);
   if (i < 0) return false;
-  const uint32_t used = save_store_used_mask(store);
+  const save_store_mask_t used = save_store_used_mask(store);
   for (uint32_t sector = 0; sector < store->sectors; ++sector) {
-    const uint32_t bit = 1u << sector;
-    if ((store->stale & bit) && !(used & bit) &&
+    if (save_store_has(&store->stale, sector) &&
+        !save_store_has(&used, sector) &&
         store->flash.erase_sector(store->flash.context, sector)) {
-      store->stale &= ~bit;
+      save_store_take(&store->stale, sector);
     }
   }
   if (!store->flash.erase_sector(store->flash.context, store->files[i].head)) {

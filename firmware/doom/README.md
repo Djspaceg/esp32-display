@@ -57,10 +57,12 @@ menu does: `CFGGAME FREEDOOM1`.
 
 The menu's settings (sound volume, mouse sensitivity, screen size, messages,
 detail, gamma) and the six save slots are kept across restarts and firmware
-updates, on every S3 and P4 board. They live in the saved-games store: the
-60 KB every S3 and P4 partition table leaves unused beside `doom_wad`
-(0x3F0000 on an S3, 0xDF1000 on a P4), which nothing that flashes a board
-writes or erases. Quake keeps its `config.cfg` and saves there too.
+updates, on every S3 and P4 board. They live in the saved-games store, the
+`game_saves` partition: 188 KB (47 sectors) at 0x3D0000 on an S3, 512 KB
+(128 sectors) at 0x970000 on a P4, which no bundle, OTA update or game-data
+write touches. Quake keeps its `config.cfg` and saves there too. A Quake save
+takes about 5 sectors and a Doom save about 4, so an S3 holds the three
+configs and four or more slots of each game, and a P4 every menu slot.
 
 - `default.cfg` is read when Doom starts and written within 10 s of a change
   and when you leave. Key bindings are not kept: they stay the built-in ones
@@ -204,8 +206,9 @@ serial log when Doom starts.
 ## Firmware and WAD delivery
 
 The canonical universal S3 image uses `firmware/partitions_s3.csv`, which keeps
-dual OTA in exactly 8 MiB with two `0x1F0000` application slots and a `0x401000`
-WAD partition at `0x3FF000`. The WAD partition ends at the 8 MiB boundary. The
+dual OTA in exactly 8 MiB with two `0x1E0000` application slots, the
+`0x2F000` `game_saves` partition at `0x3D0000` and a `0x401000` WAD partition
+at `0x3FF000`. The WAD partition ends at the 8 MiB boundary. The
 canonical 4,196,020-byte shareware v1.9 IWAD fits with 2,380 bytes to spare.
 
 Every canonical S3 and P4 bundle includes the WAD as a blank-device flash part.
@@ -225,11 +228,12 @@ board's game store for the WADs and Quake paks the Mac app adds
 `firmware/partitions_s3_doom.csv` remains available as a manual 16 MiB developer
 layout with larger `0x5F0000` application slots; it is not the canonical build.
 
-Changing from the former `universal-8m-ota` table to
-`universal-8m-doom-ota` requires one USB flash. OTA target validation refuses
-the old partition identity because an application-only OTA cannot install a
-partition table or WAD payload. Later application OTAs preserve the WAD
-partition.
+Changing from an earlier S3 table (`universal-8m-ota`, or
+`universal-8m-doom-ota` before `game_saves`) to `universal-8m-doom-saves-ota`,
+or from the P4's `p4-32m-ota` to `p4-32m-saves-ota`, requires one USB flash.
+OTA target validation refuses the old partition identity because an
+application-only OTA cannot install a partition table or WAD payload. Later
+application OTAs preserve the WAD and saves partitions.
 
 The canonical family commands build and flash the universal S3 release only:
 

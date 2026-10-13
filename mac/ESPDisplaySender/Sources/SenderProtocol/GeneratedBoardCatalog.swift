@@ -10,13 +10,13 @@ public enum GeneratedBoardCatalog {
         public let bootloaderAddress: Int
     }
 
-    public static let sourceSHA256 = "6d8c083ee1c088369ba2c128b8a74f2d621e82468ded2665bb53f39372d26452"
+    public static let sourceSHA256 = "f961c212702e356d7edd4901bb1b0e7361ca7e3aae68e3e2017d0ad22056daf8"
     public static let requiredFamilies: Set<String> = ["c3", "c6", "s3", "p4"]
     public static let expected: [String: Expected] = [
         "c3": Expected(chip: "esp32c3", profiles: ["gc9a01a-240"], flashBytes: [4194304], partition: "c3-4m-ota", bootloaderAddress: 0),
         "c6": Expected(chip: "esp32c6", profiles: ["st7789", "jd9853"], flashBytes: [8388608], partition: "default-8m", bootloaderAddress: 0),
-        "s3": Expected(chip: "esp32s3", profiles: ["gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-ota", bootloaderAddress: 0),
-        "p4": Expected(chip: "esp32p4", profiles: ["st7703-4b", "jd9365-4c", "jd9365-34c"], flashBytes: [33554432], partition: "p4-32m-ota", bootloaderAddress: 8192),
+        "s3": Expected(chip: "esp32s3", profiles: ["gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-saves-ota", bootloaderAddress: 0),
+        "p4": Expected(chip: "esp32p4", profiles: ["st7703-4b", "jd9365-4c", "jd9365-34c"], flashBytes: [33554432], partition: "p4-32m-saves-ota", bootloaderAddress: 8192),
     ]
 
     public static let profilesByTarget: [String: Set<String>] = [

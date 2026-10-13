@@ -24,8 +24,8 @@ and internal build-target keys are not release names.
 | Family | Chip | Runtime profiles | Canonical partition |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-ota` |
-| `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c`, `jd9365-34c` | `p4-32m-ota` |
+| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-saves-ota` |
+| `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c`, `jd9365-34c` | `p4-32m-saves-ota` |
 
 The S3 image uses an 8 MiB common-denominator dual-OTA layout and contains all
 supported S3 panel, touch, power, and peripheral paths, including the
