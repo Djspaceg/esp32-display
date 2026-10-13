@@ -39,7 +39,7 @@ void I_Error(char *error, ...) {
 // --- Sound/Music module definitions ---
 // doomgeneric expects DG_sound_module and DG_music_module to be defined.
 // Sound effects play on the board's codec when it has one; music is not
-// implemented, so its module stays a no-op that i_sound.c never selects.
+// implemented, so the module i_sound.c selects is a no-op.
 
 #include "i_sound.h"
 #include "doom_sound_esp32.c.inc"

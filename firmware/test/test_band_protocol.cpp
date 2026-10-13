@@ -393,6 +393,9 @@ int main() {
     CHECK(source.find("blhigh=") != std::string::npos);
     CHECK(source.find("blidle=") != std::string::npos);
     CHECK(source.find("blsurvey=") != std::string::npos);
+    CHECK(source.find("\"CFGQUIET \"") != std::string::npos);
+    CHECK(source.find("quiet=%d") != std::string::npos);
+    CHECK(source.find("GAME_QUIET_KEY") != std::string::npos);
     CHECK(source.find(
               "automaticRotationEnabled, automaticRotation, "
               "appliedPanelRotation") != std::string::npos);

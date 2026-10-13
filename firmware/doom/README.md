@@ -58,7 +58,9 @@ menu does: `CFGGAME FREEDOOM1`.
 Sound effects play on boards with a speaker codec (the ES8311/ES7210
 descriptors that pass the codec chip-ID probe); every other board stays
 silent exactly as before. The menu's sound volume controls them. Music is not
-implemented: Doom stores it as MUS, which needs a synthesizer.
+implemented: Doom stores it as MUS, which needs a synthesizer. `CFGQUIET 1`
+over serial (stored until `CFGQUIET 0`) boots Doom and Quake with no sound at
+all; the log then says `sound: off, quiet mode`.
 
 `platform/doom_sound_esp32.c.inc` mixes the engine's channels from the
 memory-mapped WAD, resamples each 11025 Hz lump to the codec's rate and sends

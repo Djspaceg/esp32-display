@@ -36,6 +36,9 @@
 static Stream *selectedConfigPort = &Serial;
 static Stream *replyConfigPort = &Serial;
 static Stream *recoveryConfigPort = nullptr;
+// CFGQUIET's stored value, read from NVS on the first CFGSHOW and kept current
+// by CFGQUIET, so CFGSHOW stays a report of RAM state like its other fields.
+static int8_t cachedGameQuiet = -1;
 
 // Returns a whole-line writer rather than the raw Stream. Every reply below is
 // a complete line, and the identity reply was being truncated at the transport's
@@ -493,9 +496,11 @@ static void processConfigLine(char *line) {
                        prefs.putBool(GAME_QUIET_KEY, want != 0) == 1;
     prefs.end();
     if (!saved) {
+      cachedGameQuiet = -1;  // unknown now; CFGSHOW reads NVS again
       configSerial().println("CFGERR could not save quiet");
       return;
     }
+    cachedGameQuiet = want != 0 ? 1 : 0;
     configSerial().printf(
         "CFGOK quiet=%d (saved; Doom and Quake start %s)\n", want,
         want != 0 ? "with no sound" : "with sound");
@@ -859,6 +864,7 @@ static void processConfigLine(char *line) {
     mbedtls_base64_encode(name64, sizeof(name64) - 1, &name64Len,
                           (const unsigned char *)cfgName.c_str(), cfgName.length());
     name64[name64Len] = 0;
+    if (cachedGameQuiet < 0) cachedGameQuiet = gameQuietEnabled() ? 1 : 0;
     char extension[160];
     const int extensionLength = serialcfg::formatShowExtension(
         extension, sizeof(extension), deviceCapabilities(), userBlLevel,
@@ -902,7 +908,7 @@ static void processConfigLine(char *line) {
         automaticRotationEnabled, automaticRotation, appliedPanelRotation,
         motionAvailable, blIsHigh() ? "high" : "low", fixedBlLevel,
         BL_LOW, BL_HIGH, BL_IDLE, BL_SURVEY,
-        panelManuallyOff ? "off" : "on", gameQuietEnabled() ? 1 : 0,
+        panelManuallyOff ? "off" : "on", (int)cachedGameQuiet,
         board::variantToken(boardVariant), board::variantToken(boardVariant),
         board::targetToken(boardVariant), bcfg->platform->chipToken,
         bcfg->platform->partitionToken,

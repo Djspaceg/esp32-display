@@ -134,7 +134,8 @@ Quake's own mixer (`snd_dma.c`, `snd_mix.c`, `snd_mem.c`) mixes into a
 4096-frame ring in PSRAM, 200 ms ahead of where Doom's sound bridge
 (`display_stream/doom_audio.cpp`) is reading it out to the codec from core 0.
 Sounds play at the codec's rate, resampled from Quake's 11 kHz when a level
-loads. A board without usable audio plays silent.
+loads. A board without usable audio plays silent, and so does every board
+while `CFGQUIET 1` is stored (the log says `sound: off, quiet mode`).
 
 ## Layout
 
