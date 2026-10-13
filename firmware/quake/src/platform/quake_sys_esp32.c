@@ -16,6 +16,7 @@
 #include "../engine/quakegeneric.h"
 
 #include <errno.h>
+#include <sys/stat.h>
 
 #include <esp_heap_caps.h>
 #include <esp_memory_utils.h>
@@ -116,12 +117,9 @@ int Sys_FileWrite(int handle, void* data, int count) {
 }
 
 int Sys_FileTime(char* path) {
-  FILE* f = fopen(path, "rb");
-  if (f) {
-    fclose(f);
-    return 1;
-  }
-  return -1;
+  // stat, not fopen: opening a saved file inflates all of it to check it.
+  struct stat st;
+  return stat(path, &st) == 0 ? 1 : -1;
 }
 
 void Sys_mkdir(char* path) { (void)path; }
@@ -497,24 +495,33 @@ extern int hunk_tempmark;
 // heap: on an S3 the heap leaves only about 120 KB of PSRAM. A write runs from
 // fopen to fclose on this task with no hunk use in between (a save, or
 // config.cfg), so the loan is given back before anything else allocates high.
+// A live temp buffer (a screenshot being written, say) is kept: the loan goes
+// above it, and the temp state is put back when the loan is.
 static int s_save_mark = -1;
+static qboolean s_save_temp_active;
+static int s_save_temp_mark;
 
 static void* quake_save_take(size_t bytes) {
   if (s_save_mark >= 0 || bytes > (size_t)INT32_MAX) return NULL;
-  // As Hunk_HighAllocName would, so the mark below is where it starts.
-  if (hunk_tempactive) {
-    Hunk_FreeToHighMark(hunk_tempmark);
-    hunk_tempactive = false;
-  }
+  s_save_temp_active = hunk_tempactive;
+  s_save_temp_mark = hunk_tempmark;
+  hunk_tempactive = false;  // so the allocation below does not free it
   const int mark = Hunk_HighMark();
   void* p = Hunk_HighAllocName((int)bytes, "saves");
-  if (p != NULL) s_save_mark = mark;
+  if (p == NULL) {
+    hunk_tempactive = s_save_temp_active;
+    return NULL;
+  }
+  s_save_mark = mark;
   return p;
 }
 
 static void quake_save_give(void) {
   if (s_save_mark < 0) return;
+  // Frees any temp buffer taken during the loan, then the loan itself.
   Hunk_FreeToHighMark(s_save_mark);
+  hunk_tempactive = s_save_temp_active;
+  hunk_tempmark = s_save_temp_mark;
   s_save_mark = -1;
 }
 

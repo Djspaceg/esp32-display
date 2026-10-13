@@ -28,8 +28,10 @@ bool save_store_ready(void);
 
 // Memory a write may borrow when the heap cannot give its deflate state
 // (about 220 KB): `take` lends that many bytes or NULL, `give` takes them
-// back. At most one loan at a time, from the opening write to its close, on
-// the task that writes. The Quake boot lends the top of its engine heap.
+// back. At most one loan at a time (a second large write meanwhile fails),
+// from a write past 8 KB to its close or failure, on the task that writes,
+// and never for a file of 8 KB or less. The Quake boot lends the top of its
+// engine heap.
 void save_store_set_arena(void* (*take)(size_t bytes), void (*give)(void));
 
 // Files by store name ("quake/id1/config.cfg"), for a VFS that forwards to

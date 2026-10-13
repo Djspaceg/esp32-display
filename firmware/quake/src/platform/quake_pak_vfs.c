@@ -14,10 +14,11 @@
 // Nothing maps the partition, which matters: it crosses 16 MiB, past what this
 // core's flash cache can map.
 //
-// Every other path under /qdata (id1/config.cfg, id1/s0.sav, a recorded demo)
-// is a file in the saved-games store (doom/src/save_store.h), as
-// "quake/id1/...", so Quake keeps its settings and saves with no change to
-// where it looks for them. Those descriptors start at QUAKE_SAVE_FD_BASE.
+// Every .cfg and .sav path under /qdata (id1/config.cfg, id1/s0.sav) is a file
+// in the saved-games store (doom/src/save_store.h), as "quake/id1/...", so
+// Quake keeps its settings and saves with no change to where it looks for
+// them; anything else it writes (a demo, a screenshot) is refused as before.
+// Those descriptors start at QUAKE_SAVE_FD_BASE.
 //
 // Flash reads run with the cache disabled, so they must not run on a stack in
 // PSRAM, which the Quake task's is (quake_mode.cpp). Every partition read in a
@@ -157,8 +158,14 @@ uint32_t quake_pak_bytes(void) {
   return s_pak_count > 0 ? s_paks[0].bytes : 0;
 }
 
+// Only settings and saves go to the store: a recorded demo or a screenshot
+// would hold its deflate state across frames or outgrow the area.
 static bool quake_save_name(const char* path, char* name) {
-  return quake_pak_path_slot(path) < 0 &&
+  const size_t length = path != NULL ? strlen(path) : 0;
+  const bool kept =
+      length > 4 && (strcmp(path + length - 4, ".cfg") == 0 ||
+                     strcmp(path + length - 4, ".sav") == 0);
+  return kept && quake_pak_path_slot(path) < 0 &&
          save_store_name_from_path("quake", path, name);
 }
 

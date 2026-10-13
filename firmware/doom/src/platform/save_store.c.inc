@@ -365,9 +365,7 @@ static int save_stream_verify(save_file_t* f) {
   return whole ? 1 : 0;
 }
 
-static void save_release(save_file_t* f) {
-  free(f->unpacker);
-  free(f->small);
+static void save_packer_release(save_file_t* f) {
   if (f->packer != NULL) {
     if (f->packer_borrowed) {
       if (save_arena_give != NULL) save_arena_give();
@@ -375,6 +373,14 @@ static void save_release(save_file_t* f) {
       free(f->packer);
     }
   }
+  f->packer = NULL;
+  f->packer_borrowed = false;
+}
+
+static void save_release(save_file_t* f) {
+  free(f->unpacker);
+  free(f->small);
+  save_packer_release(f);
   memset(f, 0, sizeof(*f));
 }
 
@@ -506,11 +512,11 @@ static bool save_pack(save_file_t* f, const uint8_t* in, uint32_t length,
   }
 }
 
-// Starts deflate, from the heap or else the borrowed arena.
-static bool save_packer_start(save_file_t* f) {
+// Starts deflate, from the heap or else (when `borrow`) the arena.
+static bool save_packer_start(save_file_t* f, bool borrow) {
   f->packer = (save_packer_t*)save_alloc(sizeof(save_packer_t));
   f->packer_borrowed = false;
-  if (f->packer == NULL && save_arena_take != NULL) {
+  if (f->packer == NULL && borrow && save_arena_take != NULL) {
     f->packer = (save_packer_t*)save_arena_take(sizeof(save_packer_t));
     f->packer_borrowed = f->packer != NULL;
   }
@@ -544,7 +550,7 @@ ssize_t save_file_write(int fd, const void* src, size_t size) {
     return (ssize_t)size;
   }
   if (f->packer == NULL) {
-    if (!save_packer_start(f) ||
+    if (!save_packer_start(f, true) ||
         (f->length > 0 &&
          !save_pack(f, f->small, f->length, TDEFL_NO_FLUSH))) {
       f->failed = true;
@@ -554,7 +560,9 @@ ssize_t save_file_write(int fd, const void* src, size_t size) {
     f->small = NULL;
   }
   if (!save_pack(f, (const uint8_t*)src, (uint32_t)size, TDEFL_NO_FLUSH)) {
+    // Give the deflate state (perhaps borrowed) back now, not at close.
     f->failed = true;
+    save_packer_release(f);
   }
   f->length += (uint32_t)size;
   return (ssize_t)size;
@@ -599,8 +607,10 @@ int save_file_close(int fd) {
     } else if (save_store_unchanged(save_state, f->name, f->length, f->crc)) {
       // Nothing to do; the flash keeps what it has.
     } else if (f->packer == NULL) {
-      // Small: deflate it now, or keep it raw when that is no smaller.
-      if (f->length >= 64 && save_packer_start(f) &&
+      // Small: deflate it now, or keep it raw when that is no smaller. Never
+      // with borrowed memory: a config fits raw, and a loan would make Quake
+      // evict and reload cached data.
+      if (f->length >= 64 && save_packer_start(f, false) &&
           save_pack(f, f->small, f->length, TDEFL_FINISH) &&
           f->out_length < f->length) {
         payload = f->packer->out;
