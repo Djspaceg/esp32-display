@@ -63,6 +63,8 @@ fi
 # any process running as the user could swap between a check and the copy.
 mkdir -p "$HAL"
 rm -rf -- "$STAGING"
+# Whatever happens next, the staging folder goes with the script.
+trap 'rm -rf -- "$STAGING"' EXIT
 mkdir -m 700 "$STAGING"
 chown root:wheel "$STAGING"
 ditto "$SOURCE" "$STAGED"
@@ -70,7 +72,6 @@ chown -R root:wheel "$STAGED"
 chmod -R go-w "$STAGED"
 identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$STAGED/Contents/Info.plist")"
 if [[ "$identifier" != "$BUNDLE_ID" ]]; then
-  rm -rf -- "$STAGING"
   echo "error: $SOURCE is $identifier, not $BUNDLE_ID" >&2
   exit 1
 fi
@@ -78,12 +79,10 @@ fi
 # signed: an ad-hoc signature would pass a plain --verify.
 requirement="=anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$TEAM\""
 if ! codesign --verify --strict -R "$requirement" "$STAGED"; then
-  rm -rf -- "$STAGING"
   echo "error: $SOURCE is not signed by team $TEAM; rebuild it with $HERE/build-driver.sh" >&2
   exit 1
 fi
 rm -rf -- "$TARGET"
 mv -- "$STAGED" "$TARGET"
-rmdir "$STAGING"
 restart_coreaudiod
 echo "installed $TARGET and restarted coreaudiod"

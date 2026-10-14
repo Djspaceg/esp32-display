@@ -25,7 +25,8 @@
 // device's own UID, as macOS lists it, is "<uid>.<suffix>": the suffix is the
 // first ESPDISP_AUDIO_UID_SUFFIX_BYTES bytes of SHA-256(token) in lowercase
 // hex, so a device that changes owner is a different device to macOS.
-// Reading it returns { "devices": [ "<uid>", ... ] } for the devices that exist.
+// Reading it returns { "devices": [ "<device uid>", ... ] }: the UIDs, suffix
+// and all, of the devices that exist.
 #define ESPDISP_AUDIO_SELECTOR_REGISTER 'ESrg'
 // Plug-in object, read-only CFNumber: ESPDISP_AUDIO_PROTOCOL_VERSION.
 #define ESPDISP_AUDIO_SELECTOR_VERSION 'ESvr'
@@ -49,6 +50,8 @@
 #define ESPDISP_AUDIO_SAMPLE_RATE 48000
 #define ESPDISP_AUDIO_MAX_READ_FRAMES 4800
 #define ESPDISP_AUDIO_MAX_DEVICES 8
+// Clients registered at once; one more is refused.
+#define ESPDISP_AUDIO_MAX_CLIENTS 8
 #define ESPDISP_AUDIO_CLIENT_TIMEOUT_SECONDS 10
 #define ESPDISP_AUDIO_MIN_TOKEN_BYTES 32
 #define ESPDISP_AUDIO_UID_SUFFIX_BYTES 8

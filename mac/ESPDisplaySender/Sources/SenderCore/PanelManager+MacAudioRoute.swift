@@ -77,6 +77,7 @@ final class MacAudioRouting {
     var runner = PrivilegedRunner.appleScript
     private var timer: Timer?
     private var keepAlive: DispatchSourceTimer?
+    private let keepAliveQueue = DispatchQueue(label: "espdisp.audio.driver-keepalive")
 
     /// Seconds between passes. Each pass is the driver's heartbeat, well
     /// inside its ten-second timeout.
@@ -111,7 +112,7 @@ final class MacAudioRouting {
         endKeepAlive()
         guard let displays = router?.heartbeat, !displays.isEmpty else { return }
         let bridge = bridge
-        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        let timer = DispatchSource.makeTimerSource(queue: keepAliveQueue)
         timer.schedule(
             deadline: .now() + Self.interval, repeating: Self.interval)
         timer.setEventHandler { bridge.register(displays) }
@@ -119,9 +120,13 @@ final class MacAudioRouting {
         keepAlive = timer
     }
 
+    /// Returns once no heartbeat is in flight, so none can land after the
+    /// next pass has said goodbye.
     func endKeepAlive() {
-        keepAlive?.cancel()
-        keepAlive = nil
+        guard let keepAlive else { return }
+        keepAlive.cancel()
+        self.keepAlive = nil
+        keepAliveQueue.sync {}
     }
 
     func stop() {

@@ -148,19 +148,20 @@ struct DisplayAudioDriverSetup: Equatable, Sendable {
                 busy: false, message: message)
         case .incompatible(let version)?:
             let found = version.map { "version \($0)" } ?? "an unreadable version"
+            let button = installButton("Reinstall Audio Driver…")
             return Presentation(
                 status: "Installed, \(found) (this app needs version "
                     + "\(DisplayAudioDriverProtocol.version))",
-                button: installButton("Reinstall Audio Driver…"),
-                busy: false, message: message)
+                button: button, busy: false,
+                message: message ?? (button.enabled ? nil : Self.developerHint(button)))
         }
     }
 
     /// A build that cannot install still says how to get the driver.
     private static func developerHint(_ button: Button) -> String {
-        (button.help ?? "") + " From the esp32-display source folder, "
+        (button.help ?? "") + " To install it by hand, run "
             + "mac/AudioDriver/build-driver.sh and then sudo "
-            + "mac/AudioDriver/install-driver.sh install it by hand."
+            + "mac/AudioDriver/install-driver.sh from the esp32-display source folder."
     }
 
     private func installButton(_ title: String) -> Button {
@@ -235,17 +236,17 @@ enum DisplayAudioDriverInstaller {
             "set -e",
             "/bin/mkdir -p \(shellQuoted(halFolder))",
             "/bin/rm -rf \(stagingPath)",
+            // Whatever happens next, the staging folder goes with the shell.
+            "trap \(shellQuoted("/bin/rm -rf " + shellQuoted(staging))) EXIT",
             "/bin/mkdir -m 700 \(stagingPath)",
             "/usr/sbin/chown root:wheel \(stagingPath)",
             "/usr/bin/ditto \(shellQuoted(source.path)) \(stagedPath)",
             "/usr/sbin/chown -R root:wheel \(stagedPath)",
             "/bin/chmod -R go-w \(stagedPath)",
             "/usr/bin/codesign --verify --strict -R \(shellQuoted(requirement)) \(stagedPath)"
-                + " || { /bin/rm -rf \(stagingPath); echo 'the driver is not signed by "
-                + "this app'\\''s team' >&2; exit 3; }",
+                + " || { echo 'the driver is not signed by this app'\\''s team' >&2; exit 3; }",
             "/bin/rm -rf \(shellQuoted(target))",
             "/bin/mv \(stagedPath) \(shellQuoted(target))",
-            "/bin/rmdir \(stagingPath)",
             "/usr/bin/killall coreaudiod || true",
         ].joined(separator: "; ")
     }

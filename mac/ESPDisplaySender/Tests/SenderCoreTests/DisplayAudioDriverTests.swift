@@ -40,9 +40,21 @@ final class FakeDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Sendabl
 
     func addDevice(uid: String, id: AudioObjectID) { lock.withLock { ids[uid] = id } }
 
-    func deviceID(uid: String) -> AudioObjectID? { lock.withLock { ids[uid] } }
+    /// As the real driver's: another owner's device for a display carries
+    /// that owner's UID suffix, so it is not found by this app's UID.
+    func deviceID(uid: String) -> AudioObjectID? {
+        lock.withLock { claimedElsewhere.contains(uid) ? nil : ids[uid] }
+    }
 
-    func deviceUID(for uid: String) -> String { uid }
+    /// The suffix this app's devices carry in macOS; empty for tests that
+    /// compare UIDs as registered.
+    var suffix = ""
+
+    func deviceUID(for uid: String) -> String { uid + suffix }
+
+    func isClaimedElsewhere(uid: String) -> Bool {
+        lock.withLock { claimedElsewhere.contains(uid) && ids[uid] != nil }
+    }
 
     /// UIDs whose device another client claimed first.
     var claimedElsewhere: Set<String> = []
@@ -101,6 +113,7 @@ final class DisplayAudioDriverTests: XCTestCase {
         XCTAssertEqual(define("ESPDISP_AUDIO_SAMPLE_RATE"), "\(Int(P.sampleRate))")
         XCTAssertEqual(define("ESPDISP_AUDIO_MAX_READ_FRAMES"), "\(P.maxReadFrames)")
         XCTAssertEqual(define("ESPDISP_AUDIO_MAX_DEVICES"), "\(P.maxDevices)")
+        XCTAssertEqual(define("ESPDISP_AUDIO_MAX_CLIENTS"), "\(P.maxClients)")
         XCTAssertEqual(
             define("ESPDISP_AUDIO_CLIENT_TIMEOUT_SECONDS"), "\(Int(P.clientTimeoutSeconds))")
         XCTAssertEqual(define("ESPDISP_AUDIO_UID_SUFFIX_BYTES"), "\(P.uidSuffixBytes)")
@@ -131,6 +144,19 @@ final class DisplayAudioDriverTests: XCTestCase {
         // marshals it.
         XCTAssertNoThrow(try PropertyListSerialization.data(
             fromPropertyList: payload, format: .binary, options: 0))
+    }
+
+    func testADeviceUIDIsTheRegisteredUIDAndAnOwnersSuffix() {
+        let uid = "com.espdisplay.display.AAAA"
+        XCTAssertTrue(DisplayAudioDriverProtocol.isDeviceUID(uid + ".0123456789abcdef", of: uid))
+        XCTAssertFalse(DisplayAudioDriverProtocol.isDeviceUID(uid, of: uid))
+        XCTAssertFalse(DisplayAudioDriverProtocol.isDeviceUID(uid + ".0123", of: uid))
+        XCTAssertFalse(DisplayAudioDriverProtocol.isDeviceUID(uid + ".0123456789ABCDEF", of: uid))
+        XCTAssertFalse(
+            DisplayAudioDriverProtocol.isDeviceUID(uid + "B.0123456789abcdef", of: uid),
+            "another display whose UID only starts the same")
+        XCTAssertTrue(DisplayAudioDriverProtocol.isDeviceUID(
+            DisplayAudioDriverProtocol.deviceUID(for: uid, token: "t"), of: uid))
     }
 
     func testDeviceUIDIsTheBoardIdentityWhenKnown() {

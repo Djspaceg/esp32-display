@@ -341,6 +341,22 @@ final class MacAudioRouteTests: XCTestCase {
         XCTAssertTrue(plan.note?.contains("\"Desk\"") == true, plan.note ?? "")
     }
 
+    /// The default output and Multi-Output members are named by the UIDs
+    /// macOS lists, which carry this app's suffix, not as registered.
+    func testRoutesByTheDevicesMacOSUIDs() {
+        let driver = FakeDisplayAudioDriver()
+        driver.suffix = ".0123456789abcdef"
+        let listed = DisplayAudioDeviceSpec(
+            uid: desk.uid + driver.suffix, name: desk.name, latencyFrames: desk.latencyFrames)
+        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        system.show([listed])
+        let router = MacAudioRouter(bridge: driver, system: system)
+        let plan = router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertEqual(plan.target, .device(uid: listed.uid))
+        XCTAssertEqual(system.defaultUID, listed.uid)
+        XCTAssertEqual(driver.lastRegistration, [desk], "registered as the display's own UID")
+    }
+
     /// A driver with no room left for this app says so rather than leaving
     /// the route waiting for devices that will never come.
     func testARefusedRegistrationIsNoted() {

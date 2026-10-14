@@ -42,7 +42,7 @@
 
 enum {
     kMaxDevices = ESPDISP_AUDIO_MAX_DEVICES,
-    kMaxClients = 8,
+    kMaxClients = ESPDISP_AUDIO_MAX_CLIENTS,
     kChannels = 2,
     kBytesPerFrame = kChannels * (UInt32)sizeof(Float32),
     // One second of audio. The app polls every 10 ms and never reads more

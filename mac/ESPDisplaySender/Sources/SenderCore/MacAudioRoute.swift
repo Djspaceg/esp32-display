@@ -209,7 +209,12 @@ final class MacAudioRouter {
         var claimed: [DisplayAudioDeviceSpec] = []
         if driving {
             for display in displays {
-                guard let id = bridge.deviceID(uid: display.uid) else { continue }
+                // Another owner's device for this display carries that
+                // owner's UID suffix, so it is not found by ours.
+                guard let id = bridge.deviceID(uid: display.uid) else {
+                    if bridge.isClaimedElsewhere(uid: display.uid) { claimed.append(display) }
+                    continue
+                }
                 if bridge.owns(device: id) {
                     present[display.uid] = id
                 } else {
@@ -253,7 +258,7 @@ final class MacAudioRouter {
             return MacAudioRoutePlan(
                 chosen: plan.chosen, effective: plan.effective, target: plan.target,
                 note: "The display audio driver refused this app's displays. It "
-                    + "takes up to \(DisplayAudioDriverProtocol.maxDevices) apps at "
+                    + "takes up to \(DisplayAudioDriverProtocol.maxClients) apps at "
                     + "once, so other apps on this Mac may be using every place; "
                     + "quit them, or restart the Mac.")
         }

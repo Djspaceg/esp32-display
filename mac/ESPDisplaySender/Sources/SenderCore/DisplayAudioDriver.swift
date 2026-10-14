@@ -18,9 +18,19 @@ enum DisplayAudioDriverProtocol {
     static let sampleRate = 48_000.0
     static let maxReadFrames = 4_800
     static let maxDevices = 8
+    static let maxClients = 8
     static let clientTimeoutSeconds = 10.0
     static let minTokenBytes = 32
     static let uidSuffixBytes = 8
+
+    /// Whether `deviceUID` is the driver's device for `uid` under some owner:
+    /// `uid`, a dot, and the 16 hex digits of an owner's suffix.
+    static func isDeviceUID(_ deviceUID: String, of uid: String) -> Bool {
+        guard deviceUID.hasPrefix(uid + ".") else { return false }
+        let suffix = deviceUID.dropFirst(uid.count + 1)
+        return suffix.count == 2 * uidSuffixBytes
+            && suffix.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
 
     /// The UID macOS lists for a display registered as `uid` by the owner of
     /// `token` (see the protocol header).
@@ -110,6 +120,9 @@ protocol DisplayAudioDriverBridge: AnyObject, Sendable {
     /// The UID macOS lists for this app's device for `uid`, as the default
     /// output and Multi-Output devices name it.
     func deviceUID(for uid: String) -> String
+    /// Whether a device for `uid` exists under another owner's suffix: one
+    /// this app cannot find by its own UID, so it must look for it.
+    func isClaimedElsewhere(uid: String) -> Bool
     /// Whether this app owns the device, so the Mac's sound routed to it
     /// reaches this app and no one else. Takes no frames.
     func owns(device: AudioObjectID) -> Bool
@@ -170,6 +183,14 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
 
     func deviceUID(for uid: String) -> String {
         DisplayAudioDriverProtocol.deviceUID(for: uid, token: token)
+    }
+
+    func isClaimedElsewhere(uid: String) -> Bool {
+        let mine = deviceUID(for: uid)
+        return CoreAudioDeviceCatalog.devices(includingOwnDevices: true).contains {
+            $0.option.uid != mine
+                && DisplayAudioDriverProtocol.isDeviceUID($0.option.uid, of: uid)
+        }
     }
 
     func deviceID(uid: String) -> AudioObjectID? {
@@ -333,21 +354,22 @@ final class DisplayAudioDeviceTap: SystemAudioTap, @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     static let pollMilliseconds = 10
 
+    private static let claimed = NSError(
+        domain: "ESPDisplaySender.Audio",
+        code: 6,
+        userInfo: [NSLocalizedDescriptionKey:
+            "the display's output device belongs to another app on this Mac."])
+
     init(bridge: DisplayAudioDriverBridge, uid: String) throws {
         guard let device = bridge.deviceID(uid: uid) else {
+            if bridge.isClaimedElsewhere(uid: uid) { throw Self.claimed }
             throw NSError(
                 domain: "ESPDisplaySender.Audio",
                 code: 5,
                 userInfo: [NSLocalizedDescriptionKey:
                     "the display's output device has not appeared in macOS yet."])
         }
-        guard bridge.owns(device: device) else {
-            throw NSError(
-                domain: "ESPDisplaySender.Audio",
-                code: 6,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "the display's output device belongs to another app on this Mac."])
-        }
+        guard bridge.owns(device: device) else { throw Self.claimed }
         self.bridge = bridge
         self.device = device
     }
