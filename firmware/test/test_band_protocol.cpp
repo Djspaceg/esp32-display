@@ -4826,15 +4826,32 @@ int main() {
     uint8_t einp[deviceproto::INPUT_REPORT_HEADER_BYTES +
                  2 * deviceproto::INPUT_COUNT];
     CHECK(deviceproto::writeInputReport(einp, sizeof(einp), inputs, functions,
-                                        sent, plain) == 48);
+                                        sent, plain, 0) == 48);
     CHECK(deviceproto::writeInputReport(einp, sizeof(einp) - 1, inputs,
-                                        functions, sent, plain) == 0);
+                                        functions, sent, plain, 0) == 0);
     const uint8_t expectedHead[16] = {0x45, 0x49, 0x4e, 0x50, 0x01, 0x10,
                                       0x00, 0x00, 0x7e, 0xfc, 0x01, 0x00,
                                       0x7f, 0x00, 0x00, 0x00};
     CHECK(memcmp(einp, expectedHead, sizeof(expectedHead)) == 0);
     CHECK(memcmp(einp + 16, sent.functions + 1, 16) == 0);
     CHECK(memcmp(einp + 32, plain.functions + 1, 16) == 0);
+
+    // The map's flags ride byte 6 both ways, and EINP byte 7 says whether the
+    // stored map is in force for the sender now driving the board.
+    deviceproto::InputMap counted = knob;
+    counted.flags = deviceproto::INPUT_MAP_FLAG_COUNT_PRESSES;
+    CHECK(!deviceproto::shortPressesAsDefault(counted, knob, true));
+    CHECK(deviceproto::writeInputMap(emap, sizeof(emap), counted) == 24);
+    CHECK(emap[6] == 0x01);
+    CHECK(deviceproto::parseInputMap(emap, sizeof(emap), knob, got));
+    CHECK(got.flags == deviceproto::INPUT_MAP_FLAG_COUNT_PRESSES);
+    emap[6] = 0xFF;  // unknown flag bits from a newer sender are dropped
+    CHECK(deviceproto::parseInputMap(emap, sizeof(emap), knob, got));
+    CHECK(got.flags == deviceproto::INPUT_MAP_FLAG_COUNT_PRESSES);
+    CHECK(deviceproto::writeInputReport(
+              einp, sizeof(einp), inputs, functions, counted, knob,
+              deviceproto::INPUT_REPORT_STATUS_MAP_IN_FORCE) == 48);
+    CHECK(einp[6] == 0x01 && einp[7] == 0x01);
   }
 
   // --- Counted BOOT presses (a map that changed the short tiers) ----------

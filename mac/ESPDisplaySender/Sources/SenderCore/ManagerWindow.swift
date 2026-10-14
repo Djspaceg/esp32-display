@@ -1120,8 +1120,10 @@ struct PanelDetailView: View {
                 }
                 .labelsHidden()
                 .fixedSize()
-                .help("Sets every button and gesture below at once: "
-                    + panel.gesturePreset.summary)
+                .help(panel.hasCustomAssignments
+                    ? "Choose a preset to set every button and gesture below at once."
+                    : "Sets every button and gesture below at once: "
+                        + panel.gesturePreset.summary)
             }
             ForEach(InputGroup.allCases, id: \.self) { group in
                 let inputs = panel.availableInputs.filter { InputGroup.of($0) == group }

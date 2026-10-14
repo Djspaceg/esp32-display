@@ -141,7 +141,59 @@ final class InputMappingTests: XCTestCase {
         let applied = DeviceProtocol.inputMapPacket(panel.boardCodes).dropFirst(8)
         panel.inputReport = DeviceProtocol.InputReport(
             inputs: panel.inputReport!.inputs, functions: panel.inputReport!.functions,
-            current: Array(applied), defaults: [1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 0, 0])
+            current: Array(applied), defaults: [1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 0, 0],
+            flags: panel.boardFlags)
+        XCTAssertTrue(panel.boardMapIsCurrent)
+    }
+
+    /// A report this app cannot fully name - a newer board's function - is
+    /// left alone rather than overwritten; a short one never reads as stale.
+    func testUnnameableOrShortReportsAreNotFoughtOver() {
+        var newer = reportingPanel(current: [1, 1, 1, 1, 1, 1, 1, 1, 1, 9, 3, 4, 5, 6, 0, 0])
+        XCTAssertFalse(newer.boardMapIsNameable)
+        newer.inputReport = nil
+        XCTAssertFalse(newer.boardMapIsNameable)
+        var short = reportingPanel()
+        short.inputReport = DeviceProtocol.InputReport(
+            inputs: [.tap], functions: [.nothing, .sender], current: [1], defaults: [1])
+        XCTAssertTrue(short.boardMapIsNameable)
+        XCTAssertTrue(short.boardMapIsCurrent)
+    }
+
+    /// A board another app configured runs its defaults for this one until
+    /// this app sends its own map, so the map is sent even when it matches.
+    func testAMapNotInForceForThisAppIsSent() {
+        var panel = reportingPanel()
+        let report = panel.inputReport!
+        panel.inputReport = DeviceProtocol.InputReport(
+            inputs: report.inputs, functions: report.functions,
+            current: [1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 0, 0],
+            defaults: [1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 0, 0],
+            mapInForce: false)
+        XCTAssertFalse(panel.boardMapIsCurrent)
+    }
+
+    /// The knob's click given to a Mac function a second click does not undo
+    /// asks the board to count clicks; mute (its default) does not.
+    func testARemappedKnobClickIsCountedOnTheBoard() {
+        var panel = reportingPanel(inputs: [.knobClockwise, .knobCounterclockwise, .knobPress,
+                                            .bootDoublePress])
+        panel.profile = "gc9a01-knob-128"
+        XCTAssertEqual(panel.boardFlags, 0)
+        XCTAssertTrue(panel.boardMapIsCurrent)
+        panel.inputAssignments[.knobPress] = .mac(.cycleSource(forward: true))
+        XCTAssertEqual(panel.boardFlags, DeviceProtocol.inputMapFlagCountPresses)
+        XCTAssertEqual(panel.boardCodes[.knobPress], .sender)
+        XCTAssertFalse(panel.boardMapIsCurrent)
+    }
+
+    /// An input missing from this boot's report (touch that did not start)
+    /// is sent as the board has it, not reset to its default.
+    func testAnInputMissingThisBootKeepsWhatTheBoardHas() {
+        let panel = reportingPanel(
+            inputs: [.bootSinglePress],
+            current: [5, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 0, 0])
+        XCTAssertEqual(panel.boardCodes[.tap], .rotate180)
         XCTAssertTrue(panel.boardMapIsCurrent)
     }
 
@@ -167,6 +219,12 @@ final class InputMappingTests: XCTestCase {
         XCTAssertEqual(
             try XCTUnwrap(subject.panels.first).inputAssignments,
             [.bootLongPress: .mac(.togglePause)])
+        // Nothing on a gesture the preset leaves unbound is kept: the board
+        // drops it instead of reporting it.
+        subject.setGesturePreset(.windowCycling, for: "panel")
+        subject.setInputFunction(.nothing, for: .tap, on: "panel")
+        XCTAssertEqual(try XCTUnwrap(subject.panels.first).inputAssignments[.tap], .nothing)
+        XCTAssertEqual(try XCTUnwrap(subject.panels.first).boardCodes[.tap], .nothing)
         // A preset replaces every assignment.
         subject.setGesturePreset(.windowCycling, for: "panel")
         let panel = try XCTUnwrap(subject.panels.first)

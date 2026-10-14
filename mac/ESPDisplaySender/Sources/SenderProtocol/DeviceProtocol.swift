@@ -352,6 +352,13 @@ public enum DeviceProtocol {
     public static let inputCount = 16
     static let inputMapMaxCount = 32
     static let inputReportHeaderBytes = 16
+    /// EMAP/EINP byte 6: the single press (on the knob carrier, the knob's
+    /// click) runs one of this app's functions that a second press does not
+    /// undo, so the board counts presses out.
+    public static let inputMapFlagCountPresses: UInt8 = 0x01
+    /// EINP byte 7: the stored map is in force for this app, because this
+    /// app sent it. Until then the board runs its defaults for it.
+    static let inputReportStatusMapInForce: UInt8 = 0x01
 
     /// What the board does with an input. The board only knows its own
     /// functions; anything this app does is `sender`, and which of the app's
@@ -374,15 +381,22 @@ public enum DeviceProtocol {
         public let functions: Set<BoardFunctionCode>
         let currentCodes: [UInt8]
         let defaultCodes: [UInt8]
+        /// The stored map's flags (`inputMapFlagCountPresses`).
+        public let flags: UInt8
+        /// Whether the stored map is what the board runs for this app.
+        public let mapInForce: Bool
 
         public init(
             inputs: Set<TouchGesture>, functions: Set<BoardFunctionCode>,
-            current: [UInt8], defaults: [UInt8]
+            current: [UInt8], defaults: [UInt8], flags: UInt8 = 0,
+            mapInForce: Bool = true
         ) {
             self.inputs = inputs
             self.functions = functions
             self.currentCodes = current
             self.defaultCodes = defaults
+            self.flags = flags
+            self.mapInForce = mapInForce
         }
 
         /// The code the board runs for `input` now, or nil if it sent none.
@@ -398,8 +412,8 @@ public enum DeviceProtocol {
         }
     }
 
-    /// ["EINP"][version][count][reserved x2][inputs u32][functions u32] then
-    /// `count` current codes and `count` defaults. Inputs and functions past
+    /// ["EINP"][version][count][map flags][status][inputs u32][functions u32]
+    /// then `count` current codes and `count` defaults. Inputs and functions past
     /// what this app names are a newer board's and are read past.
     public static func parseInputReport(_ data: Data) -> InputReport? {
         let bytes = [UInt8](data)
@@ -427,14 +441,18 @@ public enum DeviceProtocol {
         return InputReport(
             inputs: inputs, functions: functions,
             current: Array(bytes[start..<start + count]),
-            defaults: Array(bytes[start + count..<start + 2 * count]))
+            defaults: Array(bytes[start + count..<start + 2 * count]),
+            flags: bytes[6],
+            mapInForce: bytes[7] & inputReportStatusMapInForce != 0)
     }
 
-    /// ["EMAP"][version][count][reserved x2] then one code per input from 1.
-    /// An input missing from `codes` is sent as `nothing`.
-    public static func inputMapPacket(_ codes: [TouchGesture: BoardFunctionCode]) -> Data {
+    /// ["EMAP"][version][count][flags][reserved] then one code per input
+    /// from 1. An input missing from `codes` is sent as `nothing`.
+    public static func inputMapPacket(
+        _ codes: [TouchGesture: BoardFunctionCode], flags: UInt8 = 0
+    ) -> Data {
         var data = Data("EMAP".utf8)
-        data.append(contentsOf: [inputMapVersion, UInt8(inputCount), 0, 0])
+        data.append(contentsOf: [inputMapVersion, UInt8(inputCount), flags, 0])
         for raw in 1...inputCount {
             let gesture = TouchGesture(rawValue: UInt8(raw))
             data.append((gesture.flatMap { codes[$0] } ?? .nothing).rawValue)

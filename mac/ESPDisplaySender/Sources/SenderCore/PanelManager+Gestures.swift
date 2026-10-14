@@ -206,17 +206,23 @@ extension PanelManager {
     }
 
     /// Give one input its own function. Choosing what the preset already
-    /// gives it, in both orientations, removes the assignment instead, so a
-    /// board set back by hand reads as its preset again.
+    /// gives it, in both orientations and on the board, removes the
+    /// assignment instead, so a board set back by hand reads as its preset
+    /// again. (Nothing on a gesture the preset leaves unbound is kept: the
+    /// preset still has the board report it, Nothing has the board drop it.)
     func setInputFunction(
         _ function: InputFunction, for input: DeviceProtocol.TouchGesture,
         on serviceName: String
     ) {
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return }
+        var assigned = panel
+        assigned.inputAssignments[input] = function
+        var unassigned = panel
+        unassigned.inputAssignments[input] = nil
         let matchesPreset = [false, true].allSatisfy {
             panel.presetFunction(for: input, landscape: $0) == function
-        }
+        } && assigned.boardCodes[input] == unassigned.boardCodes[input]
         updatePanel(serviceName) { panel in
             panel.inputAssignments[input] = matchesPreset ? nil : function
         }
@@ -233,16 +239,19 @@ extension PanelManager {
     }
 
     /// Send the board the map this app wants, if what it last reported is
-    /// different. Called on every EINP (every two seconds) and on each change,
-    /// so a map lost to a dropped datagram or a board that restarted is put
-    /// back within one report, and nothing is sent while the two agree.
+    /// different or not yet in force for this app (a board another app set
+    /// up runs its defaults for anyone else until they send their own).
+    /// Called on every EINP (every two seconds) and on each change, so a map
+    /// lost to a dropped datagram is put back within one report, and nothing
+    /// is sent while the two agree.
     func syncInputMap(for serviceName: String) {
         guard let session = sessions[serviceName],
               let panel = panels.first(where: { $0.serviceName == serviceName }),
-              panel.capabilities.contains(.inputMap), panel.inputReport != nil,
+              panel.capabilities.contains(.inputMap), panel.boardMapIsNameable,
               !panel.boardMapIsCurrent
         else { return }
-        session.sendInputMap(DeviceProtocol.inputMapPacket(panel.boardCodes))
+        session.sendInputMap(DeviceProtocol.inputMapPacket(
+            panel.boardCodes, flags: panel.boardFlags))
     }
 
     /// Advance this panel to the next display in the source ring.

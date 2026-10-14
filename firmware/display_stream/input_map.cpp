@@ -13,9 +13,16 @@ static deviceproto::InputMap activeMap;
 static deviceproto::InputMap defaultMap;
 static deviceproto::InputMap pendingMap;
 static bool pendingMapReady = false;
+// The sender endpoint the last EMAP came from. The stored map is in force
+// only with no sender at all or for that one: a sender that never sends EMAP
+// (one that predates maps) gets the defaults, today's behaviour.
+static uint32_t mapSenderIp = 0;
+static uint16_t mapSenderPort = 0;
 static portMUX_TYPE inputMapMux = portMUX_INITIALIZER_UNLOCKED;
 
 static const char INPUT_MAP_KEY[] = "inmap";
+// Inputs 1..INPUT_COUNT, then the map's flags.
+static const size_t INPUT_MAP_RECORD_BYTES = deviceproto::INPUT_COUNT + 1;
 
 static bool boardHasKnob() { return bcfg != nullptr && bcfg->hasEncoder(); }
 
@@ -34,14 +41,18 @@ void loadInputMap() {
   activeMap = defaultMap;
   Preferences prefs;
   if (prefs.begin("espdisp", true /* read-only */)) {
-    uint8_t stored[deviceproto::INPUT_COUNT];
+    uint8_t stored[INPUT_MAP_RECORD_BYTES];
     if (prefs.getBytesLength(INPUT_MAP_KEY) == sizeof(stored) &&
         prefs.getBytes(INPUT_MAP_KEY, stored, sizeof(stored)) == sizeof(stored)) {
       bool valid = true;
-      for (uint8_t function : stored) {
-        valid = valid && deviceproto::validInputFunction(function);
+      for (size_t i = 0; i < deviceproto::INPUT_COUNT; ++i) {
+        valid = valid && deviceproto::validInputFunction(stored[i]);
       }
-      if (valid) memcpy(activeMap.functions + 1, stored, sizeof(stored));
+      if (valid) {
+        memcpy(activeMap.functions + 1, stored, deviceproto::INPUT_COUNT);
+        activeMap.flags =
+            stored[deviceproto::INPUT_COUNT] & deviceproto::INPUT_MAP_FLAGS_KNOWN;
+      }
     }
     prefs.end();
   }
@@ -52,25 +63,40 @@ void loadInputMap() {
                     ? " (defaults)" : " (saved)");
 }
 
+static bool storedMapInForce() {
+  const uint16_t port = hbPort;
+  if (port == 0) return true;
+  const uint32_t ip = hbIp;
+  portENTER_CRITICAL(&inputMapMux);
+  const bool sentByThisSender = mapSenderPort == port && mapSenderIp == ip;
+  portEXIT_CRITICAL(&inputMapMux);
+  return sentByThisSender;
+}
+
+static const deviceproto::InputMap &mapInForce() {
+  return storedMapInForce() ? activeMap : defaultMap;
+}
+
 uint8_t inputFunctionFor(uint8_t input) {
   if (input == 0 || input > deviceproto::INPUT_COUNT) {
     return (uint8_t)deviceproto::InputFunction::Nothing;
   }
-  return activeMap.functions[input];
+  return mapInForce().functions[input];
 }
 
 bool bootShortPressesAsDefault() {
-  return deviceproto::shortPressesAsDefault(activeMap, defaultMap,
+  return deviceproto::shortPressesAsDefault(mapInForce(), defaultMap,
                                             boardHasKnob());
 }
 
 uint8_t highestBoundBootTier() {
   using deviceproto::TouchGesture;
   const uint8_t nothing = (uint8_t)deviceproto::InputFunction::Nothing;
-  if (activeMap.functions[(uint8_t)TouchGesture::BootTriplePress] != nothing) {
+  const deviceproto::InputMap &map = mapInForce();
+  if (map.functions[(uint8_t)TouchGesture::BootTriplePress] != nothing) {
     return 3;
   }
-  if (activeMap.functions[(uint8_t)TouchGesture::BootDoublePress] != nothing) {
+  if (map.functions[(uint8_t)TouchGesture::BootDoublePress] != nothing) {
     return 2;
   }
   return 1;
@@ -79,23 +105,27 @@ uint8_t highestBoundBootTier() {
 bool offerInputMap(const uint8_t *data, size_t len) {
   deviceproto::InputMap parsed;
   if (!deviceproto::parseInputMap(data, len, defaultMap, parsed)) return false;
+  // Called after handleInbound() took this packet's sender as the reply
+  // endpoint, so hbIp/hbPort are the sender that sent it.
   portENTER_CRITICAL(&inputMapMux);
   pendingMap = parsed;
   pendingMapReady = true;
+  mapSenderIp = hbIp;
+  mapSenderPort = hbPort;
   portEXIT_CRITICAL(&inputMapMux);
   return true;
 }
 
 // The sender repeats EMAP until EINP shows it applied, and only while the two
 // differ, so a write here happens once per real change.
-void applyPendingInputMap() {
+bool applyPendingInputMap() {
   deviceproto::InputMap next;
   portENTER_CRITICAL(&inputMapMux);
   const bool ready = pendingMapReady;
   pendingMapReady = false;
   if (ready) next = pendingMap;
   portEXIT_CRITICAL(&inputMapMux);
-  if (!ready || memcmp(&next, &activeMap, sizeof(next)) == 0) return;
+  if (!ready || memcmp(&next, &activeMap, sizeof(next)) == 0) return true;
   activeMap = next;
   Preferences prefs;
   bool saved = false;
@@ -106,16 +136,19 @@ void applyPendingInputMap() {
       prefs.remove(INPUT_MAP_KEY);
       saved = true;
     } else {
-      saved = prefs.putBytes(INPUT_MAP_KEY, activeMap.functions + 1,
-                             deviceproto::INPUT_COUNT) ==
-              deviceproto::INPUT_COUNT;
+      uint8_t record[INPUT_MAP_RECORD_BYTES];
+      memcpy(record, activeMap.functions + 1, deviceproto::INPUT_COUNT);
+      record[deviceproto::INPUT_COUNT] = activeMap.flags;
+      saved = prefs.putBytes(INPUT_MAP_KEY, record, sizeof(record)) ==
+              sizeof(record);
     }
     prefs.end();
   }
   char line[64];
   formatInputMap(line, sizeof(line));
-  Serial.printf("input map: %s from sender (%s)\n", line,
-                saved ? "saved" : "NOT saved");
+  Serial.printf("input map: %s flags=%u from sender (%s)\n", line,
+                (unsigned)activeMap.flags, saved ? "saved" : "NOT saved");
+  return saved;
 }
 
 void sendInputReport(bool powerKey) {
@@ -128,7 +161,8 @@ void sendInputReport(bool powerKey) {
   uint8_t packet[deviceproto::INPUT_REPORT_HEADER_BYTES +
                  2 * deviceproto::INPUT_COUNT];
   const size_t len = deviceproto::writeInputReport(
-      packet, sizeof(packet), inputs, functions, activeMap, defaultMap);
+      packet, sizeof(packet), inputs, functions, activeMap, defaultMap,
+      storedMapInForce() ? deviceproto::INPUT_REPORT_STATUS_MAP_IN_FORCE : 0);
   if (len > 0) sendToSender(packet, len);
 }
 

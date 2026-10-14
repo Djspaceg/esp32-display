@@ -40,9 +40,9 @@ final class InputMapProtocolTests: XCTestCase {
     private func report(
         count: UInt8 = 16, inputs: UInt32 = 0x0001_FC7E, functions: UInt32 = 0x7F,
         current: [UInt8]? = nil, defaults: [UInt8]? = nil, magic: String = "EINP",
-        version: UInt8 = 1
+        version: UInt8 = 1, flags: UInt8 = 0, status: UInt8 = 1
     ) -> Data {
-        var bytes = Array(magic.utf8) + [version, count, 0, 0]
+        var bytes = Array(magic.utf8) + [version, count, flags, status]
         for value in [inputs, functions] {
             bytes += [UInt8(value & 0xFF), UInt8((value >> 8) & 0xFF),
                       UInt8((value >> 16) & 0xFF), UInt8(value >> 24)]
@@ -67,6 +67,18 @@ final class InputMapProtocolTests: XCTestCase {
         XCTAssertEqual(parsed.defaultCode(.tap), 1)
         XCTAssertEqual(parsed.defaultCode(.bootDoublePress), 3)
         XCTAssertEqual(parsed.defaultCode(.powerKeyLongPress), 0)
+    }
+
+    /// Byte 6 is the stored map's flags, byte 7 whether it is in force for
+    /// this app; EMAP carries the flags in its byte 6 too.
+    func testFlagsAndInForceStatus() throws {
+        let inForce = try XCTUnwrap(DeviceProtocol.parseInputReport(report(flags: 1, status: 1)))
+        XCTAssertEqual(inForce.flags, DeviceProtocol.inputMapFlagCountPresses)
+        XCTAssertTrue(inForce.mapInForce)
+        let notYet = try XCTUnwrap(DeviceProtocol.parseInputReport(report(status: 0)))
+        XCTAssertFalse(notYet.mapInForce)
+        XCTAssertEqual(
+            [UInt8](DeviceProtocol.inputMapPacket([:], flags: 1))[6], 0x01)
     }
 
     func testKnobBoardReportsTheKnobAndNoSinglePress() throws {

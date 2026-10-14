@@ -263,7 +263,11 @@ extension PanelSnapshot {
             let boardDefault = inputReport?.defaultCode(input)
                 .flatMap(DeviceProtocol.BoardFunctionCode.init(rawValue:)) ?? .nothing
             guard inputReport?.inputs.contains(input) == true else {
-                codes[input] = boardDefault
+                // Not on this board now - perhaps only this boot (touch that
+                // did not start): left as the board has it, so an assignment
+                // made on a good boot is not overwritten.
+                codes[input] = inputReport?.current(input)
+                    .flatMap(DeviceProtocol.BoardFunctionCode.init(rawValue:)) ?? boardDefault
                 continue
             }
             let both = [false, true].map { landscape -> DeviceProtocol.BoardFunctionCode in
@@ -280,10 +284,40 @@ extension PanelSnapshot {
         return codes
     }
 
-    /// Whether the board is running the map this app wants it to.
+    /// EMAP's flags: the single press (the knob's click on the knob
+    /// carrier) given to one of this Mac's functions is counted out on the
+    /// board, because a second press would not undo it the way it undoes
+    /// mute or the status screen.
+    var boardFlags: UInt8 {
+        let single: DeviceProtocol.TouchGesture = hasKnob ? .knobPress : .bootSinglePress
+        if case .mac = inputAssignments[single] {
+            return DeviceProtocol.inputMapFlagCountPresses
+        }
+        return 0
+    }
+
+    /// Whether the board is running the map this app wants it to, for this
+    /// app. Only the inputs the board reported are compared, so a shorter
+    /// report cannot read as a mismatch forever.
     var boardMapIsCurrent: Bool {
         guard let report = inputReport else { return true }
-        return boardCodes.allSatisfy { report.current($0.key) == $0.value.rawValue }
+        return report.mapInForce && report.flags == boardFlags
+            && boardCodes.allSatisfy { input, code in
+                report.current(input).map { $0 == code.rawValue } ?? true
+            }
+    }
+
+    /// Whether this app can name every code the board reported. A newer
+    /// board may run, or default to, a function this build does not know;
+    /// sending it a map would overwrite that with something else, so the map
+    /// is left alone until the app is updated.
+    var boardMapIsNameable: Bool {
+        guard let report = inputReport else { return false }
+        return DeviceProtocol.TouchGesture.allCases.allSatisfy { input in
+            [report.current(input), report.defaultCode(input)].allSatisfy { code in
+                code.map { DeviceProtocol.BoardFunctionCode(rawValue: $0) != nil } ?? true
+            }
+        }
     }
 
     /// Whether some input's function posts a synthetic event, which needs

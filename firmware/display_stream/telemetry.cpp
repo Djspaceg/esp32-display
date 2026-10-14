@@ -155,7 +155,9 @@ void sendDeviceInfo() {
                     (unsigned)((ip >> 16) & 0xFF), (unsigned)(ip >> 24),
                     (unsigned)port);
     }
-    sendInputReport(boardpower::hasPowerKey());
+    // The PWR key is read only on the AXP2101 (servicePowerKey()).
+    sendInputReport(batteryAvailable &&
+                    bcfg->power == board::PowerController::Axp2101);
   }
 }
 

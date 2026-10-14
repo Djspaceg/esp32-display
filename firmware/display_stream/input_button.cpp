@@ -551,6 +551,9 @@ static void activateSelector(uint32_t pressStartedAt) {
 // this many steps.
 static const int16_t MAX_KNOB_STEPS_PER_PASS = 4;
 
+static const uint32_t KNOB_TURN_GAP_MS = 300;
+static uint32_t lastBoardKnobDetentAt = 0;
+
 static void applyEncoderTurn(int16_t steps) {
   const int8_t direction = steps > 0 ? 1 : -1;
   int16_t count = steps > 0 ? steps : (int16_t)-steps;
@@ -586,9 +589,13 @@ static void applyEncoderTurn(int16_t steps) {
                               : deviceproto::TouchGesture::KnobCounterclockwise);
   const uint8_t function = inputFunctionFor(input);
   if (function != (uint8_t)deviceproto::InputFunction::Sender) {
-    // A board function runs once per turn, however many detents it crossed:
-    // a rotation or the backlight stepped per detent would undo itself.
-    runInputFunction(input, function);
+    // A board function runs once per turn, however many detents and loop
+    // passes it spans: a rotation or the backlight stepped per detent would
+    // undo itself. A turn ends once the knob rests KNOB_TURN_GAP_MS.
+    const uint32_t now = buttonClockMs();
+    const bool newTurn = now - lastBoardKnobDetentAt >= KNOB_TURN_GAP_MS;
+    lastBoardKnobDetentAt = now;
+    if (newTurn) runInputFunction(input, function);
     return;
   }
   for (int16_t i = 0; i < count; ++i) sendInputGesture(input);
@@ -656,6 +663,11 @@ void handleButton() {
     if (function == (uint8_t)deviceproto::InputFunction::DisplayPower) {
       toggleDisplayPower("extra-long press");
     } else {
+      // Fired while BOOT is still down: the rest of this hold is spent, so a
+      // screen it opened (the selector, the status screen) does not take the
+      // same hold as its own choose or open-selector hold.
+      longFired = true;
+      selectorEntryHold = true;
       runInputFunction(input, function);
     }
   };

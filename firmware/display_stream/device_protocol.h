@@ -425,9 +425,21 @@ inline bool validInputFunction(uint8_t raw) {
   return raw <= INPUT_FUNCTION_LAST;
 }
 
+// EMAP byte 6. The sender gave the single press (on the knob carrier, the
+// knob's click) to one of its own functions that a second press does not
+// undo, so presses must be counted out even though the code is still Sender.
+static const uint8_t INPUT_MAP_FLAG_COUNT_PRESSES = 0x01;
+static const uint8_t INPUT_MAP_FLAGS_KNOWN = INPUT_MAP_FLAG_COUNT_PRESSES;
+// EINP byte 7: the stored map is in force for the sender now driving this
+// board, because that sender sent it (EMAP). Until then a board with a
+// sender runs its defaults, so a sender that predates maps gets today's
+// behaviour even from a board a newer one configured.
+static const uint8_t INPUT_REPORT_STATUS_MAP_IN_FORCE = 0x01;
+
 // functions[id] for id 1..INPUT_COUNT; index 0 is unused.
 struct InputMap {
   uint8_t functions[INPUT_COUNT + 1];
+  uint8_t flags;
 };
 
 // What this board does today with nothing assigned. Every gesture and knob
@@ -469,7 +481,7 @@ inline bool shortPressesAsDefault(const InputMap &map,
   for (uint8_t id : tiers) {
     if (map.functions[id] != defaults.functions[id]) return false;
   }
-  return true;
+  return (map.flags & INPUT_MAP_FLAG_COUNT_PRESSES) == 0;
 }
 
 // Bit n set: input n exists on this board. On the knob carrier BOOT is the
@@ -504,22 +516,24 @@ inline uint32_t functionMask(bool screens, bool bootMenu) {
   return mask;
 }
 
-// ["EMAP"][version][count][reserved x2] then one function per input, 1..count.
+// ["EMAP"][version][count][flags][reserved] then one function per input,
+// 1..count.
 inline size_t writeInputMap(uint8_t *out, size_t capacity, const InputMap &map) {
   const size_t len = INPUT_MAP_HEADER_BYTES + INPUT_COUNT;
   if (capacity < len) return 0;
   memcpy(out, "EMAP", 4);
   out[4] = INPUT_MAP_VERSION;
   out[5] = INPUT_COUNT;
-  out[6] = 0;
+  out[6] = map.flags;
   out[7] = 0;
   memcpy(out + INPUT_MAP_HEADER_BYTES, map.functions + 1, INPUT_COUNT);
   return len;
 }
 
 // Inputs past `count` keep `defaults` (count 0 restores every default), and
-// inputs past INPUT_COUNT are a newer sender's and are ignored. Any function
-// this board cannot name, for an input it knows, refuses the whole map.
+// inputs past INPUT_COUNT are a newer sender's and are ignored, as are flag
+// bits this board does not know. Any function this board cannot name, for an
+// input it knows, refuses the whole map.
 inline bool parseInputMap(const uint8_t *data, size_t len,
                           const InputMap &defaults, InputMap &out) {
   if (len < INPUT_MAP_HEADER_BYTES || memcmp(data, "EMAP", 4) != 0 ||
@@ -532,6 +546,7 @@ inline bool parseInputMap(const uint8_t *data, size_t len,
   }
   InputMap parsed = defaults;
   parsed.functions[0] = 0;
+  parsed.flags = data[6] & INPUT_MAP_FLAGS_KNOWN;
   for (uint8_t id = 1; id <= count && id <= INPUT_COUNT; ++id) {
     const uint8_t function = data[INPUT_MAP_HEADER_BYTES + id - 1];
     if (!validInputFunction(function)) return false;
@@ -541,20 +556,21 @@ inline bool parseInputMap(const uint8_t *data, size_t len,
   return true;
 }
 
-// ["EINP"][version][count][reserved x2][inputs u32][functions u32] then the
-// current map and the board's defaults, count bytes each. Sent after every
-// EINF by firmware advertising CAP_INPUT_MAP: the sender compares the
-// current map with the one it wants and sends EMAP only when they differ.
+// ["EINP"][version][count][map flags][status][inputs u32][functions u32]
+// then the stored map and the board's defaults, count bytes each. Sent after
+// every EINF by firmware advertising CAP_INPUT_MAP: the sender compares the
+// stored map with the one it wants, and sends EMAP when they differ or when
+// status says the map is not yet in force for it.
 inline size_t writeInputReport(uint8_t *out, size_t capacity, uint32_t inputs,
                                uint32_t functions, const InputMap &current,
-                               const InputMap &defaults) {
+                               const InputMap &defaults, uint8_t status) {
   const size_t len = INPUT_REPORT_HEADER_BYTES + 2 * INPUT_COUNT;
   if (capacity < len) return 0;
   memcpy(out, "EINP", 4);
   out[4] = INPUT_MAP_VERSION;
   out[5] = INPUT_COUNT;
-  out[6] = 0;
-  out[7] = 0;
+  out[6] = current.flags;
+  out[7] = status;
   writeU32LE(out + 8, inputs);
   writeU32LE(out + 12, functions);
   memcpy(out + INPUT_REPORT_HEADER_BYTES, current.functions + 1, INPUT_COUNT);

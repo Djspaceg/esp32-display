@@ -285,6 +285,7 @@ bool touchWakeActive() { return false; }
 bool displaySleeping = false;
 extern const uint32_t TOUCH_WAKE_MS = 8000;
 uint16_t hbPort = 0;
+uint32_t hbIp = 0;
 // Every datagram the panel sends, so the knob's reports can be read back.
 static std::vector<std::vector<uint8_t>> sentPackets;
 void sendToSender(const uint8_t *data, size_t length) {
@@ -1988,6 +1989,37 @@ static int storedWadSaveFailureStartsNothing() {
 // (the Mac's mute toggle), and neither moves or saves the backlight the knob
 // used to step. On the carrier's real profile, through its encoder and BOOT
 // interrupts and the real input_touch.cpp sender.
+// Sets the map the way an EMAP from the sender does: one function per input,
+// from input 1, the rest left at the board's defaults.
+static bool setInputMap(const std::vector<uint8_t> &functions) {
+  std::vector<uint8_t> packet = {'E', 'M', 'A', 'P',
+                                 deviceproto::INPUT_MAP_VERSION,
+                                 (uint8_t)functions.size(), 0, 0};
+  packet.insert(packet.end(), functions.begin(), functions.end());
+  if (!offerInputMap(packet.data(), packet.size())) return false;
+  applyPendingInputMap();
+  return true;
+}
+
+// Inputs 1-9 (gestures and knob) left with the sender, then BOOT's single,
+// double, triple, long and extra-long, then the power key's press and hold.
+static std::vector<uint8_t> mapWithBoot(uint8_t single, uint8_t twice,
+                                        uint8_t thrice, uint8_t hold,
+                                        uint8_t extraHold) {
+  return {1, 1, 1, 1, 1, 1, 1, 1, 1, single, twice, thrice, hold, extraHold};
+}
+
+static std::vector<uint8_t> sentInputs() {
+  std::vector<uint8_t> inputs;
+  for (const std::vector<uint8_t> &packet : sentPackets) {
+    deviceproto::TouchEvent event;
+    if (deviceproto::parseTouch(packet.data(), packet.size(), event)) {
+      inputs.push_back((uint8_t)event.gesture);
+    }
+  }
+  return inputs;
+}
+
 static std::vector<deviceproto::TouchGesture> sentKnobGestures(
     std::vector<uint16_t> *sequences = nullptr) {
   std::vector<deviceproto::TouchGesture> gestures;
@@ -2058,6 +2090,50 @@ static int knobTurnIsVolumeAndClickIsMute() {
   CHECK(wifiSelectorActive);
   wifiSelectorActive = false;
   surveyActive = false;
+
+  // A click the sender gave a function a second click does not undo is
+  // counted out: a double click is the double alone, never two of the
+  // single. And a turn given to a board function runs it once per turn.
+  resetObservations();
+  hbPort = 4210;
+  {
+    std::vector<uint8_t> functions = mapWithBoot(0, 3, 0, 5, 6);
+    std::vector<uint8_t> packet = {'E', 'M', 'A', 'P', 1,
+                                   (uint8_t)functions.size(),
+                                   deviceproto::INPUT_MAP_FLAG_COUNT_PRESSES, 0};
+    packet.insert(packet.end(), functions.begin(), functions.end());
+    CHECK(offerInputMap(packet.data(), packet.size()));
+    applyPendingInputMap();
+  }
+  CHECK(!bootShortPressesAsDefault());
+  sentPackets.clear();
+  shortPress();
+  shortPress();
+  CHECK(sentKnobGestures().empty());
+  CHECK(wifiSelectorActive);
+  // Closing the selector leaves the status screen it opened over.
+  wifiSelectorActive = false;
+  surveyActive = false;
+  shortPress();
+  CHECK(sentKnobGestures().empty());
+  fakeNow += 900;
+  handleButton();
+  got = sentKnobGestures();
+  CHECK(got.size() == 1 && got[0] == TouchGesture::KnobPress);
+  CHECK(setInputMap({1, 1, 1, 1, 1, 1, 5}));
+  for (int i = 0; i < 3; ++i) {
+    knobDetent(true);
+    handleButton();
+    fakeNow += 40;
+  }
+  CHECK(panelRotation == 2);
+  fakeNow += 400;
+  knobDetent(true);
+  handleButton();
+  CHECK(panelRotation == 0);
+  surveyActive = false;
+  displayPrefSaves = 0;  // the turns' rotations; the checks below are the knob's own
+  CHECK(setInputMap({}));  // back to the defaults for the checks below
 
   // Nothing the knob did touched the backlight.
   CHECK(userBlLevel == blBefore);
@@ -2265,37 +2341,6 @@ static int touchLogOnlyLogsAndMarks() {
 }
 
 // ---- The input map outside the menus ------------------------------------
-// Sets the map the way an EMAP from the sender does: one function per input,
-// from input 1, the rest left at the board's defaults.
-static bool setInputMap(const std::vector<uint8_t> &functions) {
-  std::vector<uint8_t> packet = {'E', 'M', 'A', 'P',
-                                 deviceproto::INPUT_MAP_VERSION,
-                                 (uint8_t)functions.size(), 0, 0};
-  packet.insert(packet.end(), functions.begin(), functions.end());
-  if (!offerInputMap(packet.data(), packet.size())) return false;
-  applyPendingInputMap();
-  return true;
-}
-
-// Inputs 1-9 (gestures and knob) left with the sender, then BOOT's single,
-// double, triple, long and extra-long, then the power key's press and hold.
-static std::vector<uint8_t> mapWithBoot(uint8_t single, uint8_t twice,
-                                        uint8_t thrice, uint8_t hold,
-                                        uint8_t extraHold) {
-  return {1, 1, 1, 1, 1, 1, 1, 1, 1, single, twice, thrice, hold, extraHold};
-}
-
-static std::vector<uint8_t> sentInputs() {
-  std::vector<uint8_t> inputs;
-  for (const std::vector<uint8_t> &packet : sentPackets) {
-    deviceproto::TouchEvent event;
-    if (deviceproto::parseTouch(packet.data(), packet.size(), event)) {
-      inputs.push_back((uint8_t)event.gesture);
-    }
-  }
-  return inputs;
-}
-
 static int defaultMapIsTodaysBehaviour() {
   resetObservations();
   loadInputMap();
@@ -2419,6 +2464,55 @@ static int touchGivenToTheBoardRunsThere() {
   return 0;
 }
 
+// A 3-second hold given to a screen opens it and ends there: the rest of the
+// hold does not choose a network in the selector it opened (which would
+// switch WiFi and restart) or open the selector from the status screen.
+static int extraLongHoldToAScreenSpendsTheHold() {
+  resetObservations();
+  CHECK(setInputMap(mapWithBoot(2, 3, 4, 5, 3)));
+  bootEdge(true);
+  serviceButtonFor(4000);
+  bootEdge(false);
+  CHECK(wifiSelectorActive);
+  CHECK(selectorOpens == 1);
+  CHECK(selectorActivations == 0);
+  CHECK(ESP.restarts == 0);
+  wifiSelectorActive = false;
+
+  resetObservations();
+  CHECK(setInputMap(mapWithBoot(2, 3, 4, 5, 2)));
+  bootEdge(true);
+  serviceButtonFor(4000);
+  bootEdge(false);
+  CHECK(surveyActive);
+  CHECK(selectorOpens == 0);
+  surveyActive = false;
+  return 0;
+}
+
+// A map another sender stored is not in force for a sender that never sent
+// one (an app that predates maps): it gets today's behaviour. With no sender
+// at all, or once this sender sends its map, the stored one applies.
+static int storedMapAppliesOnlyForItsSender() {
+  resetObservations();
+  hbIp = 0x0108A8C0;
+  hbPort = 50000;
+  CHECK(setInputMap(mapWithBoot(2, 3, 4, 6, 6)));
+  CHECK(inputFunctionFor(13) == 6);
+  hbIp = 0x0208A8C0;  // a different Mac, which never sent EMAP
+  CHECK(inputFunctionFor(13) == 5);
+  bootEdge(true);
+  fakeNow += 700;
+  bootEdge(false);
+  CHECK(panelRotation == 2);
+  CHECK(!panelManuallyOff);
+  hbPort = 0;  // no sender: the board's own stored map
+  CHECK(inputFunctionFor(13) == 6);
+  panelRotation = 0;
+  hbIp = 0;
+  return 0;
+}
+
 static int mapSurvivesARestartAndCanBeReset() {
   resetObservations();
   CHECK(setInputMap({0, 5}));
@@ -2460,6 +2554,8 @@ int main() {
   if (bootInputsGivenToTheSenderAreReported() != 0) return 1;
   if (touchGivenToTheBoardRunsThere() != 0) return 1;
   if (mapSurvivesARestartAndCanBeReset() != 0) return 1;
+  if (extraLongHoldToAScreenSpendsTheHold() != 0) return 1;
+  if (storedMapAppliesOnlyForItsSender() != 0) return 1;
   if (tripleWithInvalidWadStaysNormal() != 0) return 1;
   if (touchLogOnlyLogsAndMarks() != 0) return 1;
   if (refusalKeepsASurveyThatWasOn() != 0) return 1;

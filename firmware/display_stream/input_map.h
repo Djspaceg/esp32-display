@@ -11,8 +11,9 @@
 // serviced.
 void loadInputMap();
 
-// The function (a deviceproto::InputFunction value) the map gives `input`
-// (its ETCH gesture value).
+// The function (a deviceproto::InputFunction value) the map in force gives
+// `input` (its ETCH gesture value). The stored map is in force with no sender,
+// or for the sender that sent it; any other sender gets this board's defaults.
 uint8_t inputFunctionFor(uint8_t input);
 
 // Whether BOOT's single (on the knob carrier, the knob's click), double and
@@ -28,10 +29,11 @@ uint8_t highestBoundBootTier();
 bool offerInputMap(const uint8_t *data, size_t len);
 
 // loop(): applies a map the network task took, saving it if it changed.
-void applyPendingInputMap();
+// Returns false only when a changed map could not be saved.
+bool applyPendingInputMap();
 
 // EINP to the sender: sent after each EINF. `powerKey`: this board's PWR key
-// can be read (boardpower::hasPowerKey()).
+// can be read (an AXP2101 that answered at boot).
 void sendInputReport(bool powerKey);
 
 // One line for CFGSHOW and the boot log: the active map, inputs 1..16.

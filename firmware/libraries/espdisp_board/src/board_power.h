@@ -316,11 +316,6 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
 
 inline bool available() { return enabled; }
 
-/// Whether this board has a PWR key whose presses can be read (the AXP2101).
-inline bool hasPowerKey() {
-  return enabled && activeController == board::PowerController::Axp2101;
-}
-
 /// Poll the PWR key: reads REG 49H and clears the key bits it found, so each
 /// press and edge is reported once. Returns false on any board without an AXP2101 or
 /// when the read failed.

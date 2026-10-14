@@ -885,10 +885,14 @@ static void processConfigLine(char *line) {
           (unsigned)deviceproto::INPUT_COUNT,
           (unsigned)deviceproto::INPUT_FUNCTION_LAST);
     } else {
-      applyPendingInputMap();
+      const bool saved = applyPendingInputMap();
       char text[deviceproto::INPUT_COUNT + 1];
       formatInputMap(text, sizeof(text));
-      configSerial().printf("CFGOK inmap=%s (saved)\n", text);
+      if (saved) {
+        configSerial().printf("CFGOK inmap=%s\n", text);
+      } else {
+        configSerial().printf("CFGERR inmap=%s could not be saved\n", text);
+      }
     }
   } else if (strcmp(line, "CFGSHOW") == 0) {
     // ssid64 first: base64 keeps SSIDs with spaces parseable in a
