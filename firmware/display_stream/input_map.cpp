@@ -64,18 +64,13 @@ static bool boardHasScreens() {
 #endif
 }
 
-static bool saveInputMap();
+static bool saveInputMap(bool onlyIfNeeded = false);
 
 // esp_restart() runs shutdown handlers first, so every deliberate restart -
 // the boot menu, a WiFi switch, an update, a restart command - saves a
 // held-back map before the chip resets. A crash or a power cut does not; a
 // connected sender then re-sends its map, which differs from the board's.
-static void flushInputMapOnRestart() {
-  portENTER_CRITICAL(&inputMapMux);
-  const bool needsSave = mapNeedsSave;
-  portEXIT_CRITICAL(&inputMapMux);
-  if (needsSave) saveInputMap();
-}
+static void flushInputMapOnRestart() { saveInputMap(true); }
 
 static void registerInputMapShutdownFlush() {
   static bool registered = false;
@@ -176,13 +171,19 @@ bool offerInputMap(const uint8_t *data, size_t len) {
 // Saves the active map. Also run from the shutdown handler, which on the P4
 // can be the coprocessor-update task rather than loop(), so the map is copied
 // under the lock that loop() changes it under.
-static bool saveInputMap() {
+// `onlyIfNeeded`: return without writing when, once this save has its turn,
+// there is nothing left to save (another save just wrote it).
+static bool saveInputMap(bool onlyIfNeeded) {
   deviceproto::InputMap snapshot;
   for (;;) {
     portENTER_CRITICAL(&inputMapMux);
     if (!saveInProgress) break;  // leaves the lock held
     portEXIT_CRITICAL(&inputMapMux);
     delay(1);
+  }
+  if (onlyIfNeeded && !mapNeedsSave) {
+    portEXIT_CRITICAL(&inputMapMux);
+    return true;
   }
   saveInProgress = true;
   snapshot = activeMap;

@@ -2568,6 +2568,10 @@ static int mapSurvivesARestartAndCanBeReset() {
   CHECK(fakeNvsBytes["inmap"][1] == 6);  // alternating: held back
   runShutdownHandlers();
   CHECK(fakeNvsBytes["inmap"][1] == 4);
+  // With nothing held back, a restart writes nothing more.
+  Serial.captured.clear();
+  runShutdownHandlers();
+  CHECK(Serial.captured.find("input map: saved") == std::string::npos);
   loadInputMap();
   hbPort = 0;
   CHECK(inputFunctionFor(2) == 4);
