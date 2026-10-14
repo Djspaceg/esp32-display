@@ -30,6 +30,8 @@ static int gFailures = 0;
     } while (0)
 
 static AudioServerPlugInDriverRef gDriver;
+// The process the calls below come from, as the HAL reports it.
+static pid_t gPid = 501;
 
 #pragma mark - Fake host
 
@@ -113,7 +115,7 @@ static OSStatus Get(AudioObjectID object, AudioObjectPropertySelector selector,
     AudioObjectPropertyAddress address = Address(selector, scope);
     UInt32 written = 0;
     OSStatus status = (*gDriver)->GetPropertyData(
-        gDriver, object, 0, &address, qualifierSize, qualifier, size, &written, data);
+        gDriver, object, gPid, &address, qualifierSize, qualifier, size, &written, data);
     if (outSize) *outSize = written;
     return status;
 }
@@ -200,8 +202,8 @@ static OSStatus RegisterDevices(const char* client, int count, const char* const
     AudioObjectPropertyAddress address =
         Address(ESPDISP_AUDIO_SELECTOR_REGISTER, kAudioObjectPropertyScopeGlobal);
     CFPropertyListRef plist = registration;
-    OSStatus status = (*gDriver)->SetPropertyData(gDriver, kAudioObjectPlugInObject, 0, &address,
-                                                  0, NULL, sizeof plist, &plist);
+    OSStatus status = (*gDriver)->SetPropertyData(gDriver, kAudioObjectPlugInObject, gPid,
+                                                  &address, 0, NULL, sizeof plist, &plist);
     CFRelease(registration);
     CFRelease(versionNumber);
     CFRelease(clientString);
@@ -543,12 +545,36 @@ static void TestConcurrentWriteAndRead(void) {
     CHECK((*gDriver)->StopIO(gDriver, shelf, 1) == 0);
 }
 
+// Only a process that registered a display may read what the Mac plays to
+// it, and no other process can replace or withdraw that registration.
+static void TestOtherProcessesCannotReadOrWithdraw(void) {
+    AudioObjectID desk = Translate("com.espdisplay.display.aabbcc");
+    CHECK(desk != kAudioObjectUnknown);
+    gPid = 999;
+    CFPropertyListRef data = NULL;
+    CHECK(Get(desk, ESPDISP_AUDIO_SELECTOR_PCM, kAudioObjectPropertyScopeGlobal, 0, NULL,
+              sizeof data, &data, NULL) == kAudioHardwareIllegalOperationError);
+    CHECK(data == NULL);
+    CHECK(RegisterDevices("app", 0, NULL, NULL, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    gPid = 501;
+    CHECK(Translate("com.espdisplay.display.aabbcc") == desk);
+    Float32* samples = NULL;
+    (void)ReadFrames(desk, &samples);
+    free(samples);
+}
+
 static void TestClientsUnionAndExpire(void) {
     AudioObjectID desk = Translate("com.espdisplay.display.aabbcc");
     const char* other[] = {"com.espdisplay.display.aabbcc", "com.espdisplay.test.tone"};
     const char* otherNames[] = {"Desk again", "Test Tone"};
+    gPid = 777;
     CHECK(RegisterDevices("check-tool", 2, other, otherNames, ESPDISP_AUDIO_PROTOCOL_VERSION)
           == 0);
+    // The check tool may read the device it shares with the app, and its own.
+    Float32* samples = NULL;
+    (void)ReadFrames(Translate(other[1]), &samples);
+    free(samples);
+    gPid = 501;
     AudioObjectID devices[8];
     CHECK(DeviceList(devices, 8) == 3);
     CHECK(Translate(other[0]) == desk);
@@ -570,13 +596,16 @@ static void TestClientsUnionAndExpire(void) {
     UInt32 value = 0;
     CHECK(Get(desk, kAudioObjectPropertyClass, kAudioObjectPropertyScopeGlobal, 0, NULL,
               sizeof value, &value, NULL) == kAudioHardwareBadObjectError);
-    // The HAL may still stop IO on a device it was just told is gone.
-    CHECK((*gDriver)->StopIO(gDriver, desk, 1) == 0);
+    // The HAL may still stop IO on a device it was just told is gone. The
+    // desk is left running here, as if it never did.
+    CHECK((*gDriver)->StartIO(gDriver, desk, 1) == 0);
 
     // Coming back gives a new device ID and keeps the display's volume.
     CHECK(RegisterDevices("app", 2, uids, names, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
     AudioObjectID again = Translate(uids[0]);
     CHECK(again != kAudioObjectUnknown && again != desk);
+    CHECK(GetU32(again, kAudioDevicePropertyDeviceIsRunning, kAudioObjectPropertyScopeGlobal)
+          == 0);
     Float32 scalar = 0;
     CHECK(Get(Owned(again, 1), kAudioLevelControlPropertyScalarValue,
               kAudioObjectPropertyScopeGlobal, 0, NULL, sizeof scalar, &scalar, NULL) == 0);
@@ -594,6 +623,7 @@ int main(void) {
     TestMixedAudioIsReadBackOnce();
     TestVolumeAndMuteScaleWhatIsRead();
     TestConcurrentWriteAndRead();
+    TestOtherProcessesCannotReadOrWithdraw();
     TestClientsUnionAndExpire();
     if (gFailures) {
         fprintf(stderr, "ESPDisplayAudio driver: %d check(s) failed\n", gFailures);

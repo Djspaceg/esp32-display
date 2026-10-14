@@ -93,8 +93,9 @@ struct MacAudioRoutePlan: Equatable, Sendable {
                 chosen: chosen, effective: .copy, target: .restore,
                 note: "The display audio driver is not installed, so the displays "
                     + "copy this Mac's sound instead. To install it, run "
-                    + "\(installCommand) from the esp32-display source folder in "
-                    + "Terminal, then choose this again.")
+                    + "mac/AudioDriver/build-driver.sh and then \(installCommand) "
+                    + "from the esp32-display source folder in Terminal; the "
+                    + "displays switch over once it is loaded.")
         case .incompatible(let version):
             let found = version.map { "version \($0)" } ?? "an unreadable version"
             return MacAudioRoutePlan(
@@ -151,17 +152,31 @@ struct MacAudioRoutePlan: Equatable, Sendable {
 /// Keeps the displays' devices registered with the driver and the Mac's
 /// default output where the chosen route says.
 ///
-/// The default output is changed only when the route or the set of display
-/// devices changes, never on every tick: a user who picks another output in
-/// Sound settings afterwards is not overruled until something changes.
+/// The default output is changed only when the route or the display devices
+/// themselves change (one appears, goes, or comes back as a new device), never
+/// on every tick, and never because the user picked another output: a pick
+/// made in Sound settings afterwards stands until something changes.
 @MainActor
 final class MacAudioRouter {
     private let bridge: DisplayAudioDriverBridge
     private let system: MacOutputSystem
     private var registered = false
-    private var appliedTarget: MacAudioRouteTarget?
+    /// What the default output was last set for. Nil until set, or after a
+    /// change that did not take, so the next pass tries again.
+    private var applied: Trigger?
+    /// The members each Multi-Output device of ours was built with, so one
+    /// that already matches is reused rather than rebuilt.
+    private var built: [String: [String]] = [:]
     /// The output the Mac played through before one of ours took over.
     private(set) var macOutputUID: String?
+
+    private struct Trigger: Equatable {
+        let chosen: MacAudioRoute
+        let effective: MacAudioRoute
+        /// Each present display device by UID, with the object ID it has now:
+        /// a device the driver dropped and made again is a change.
+        let devices: [String: AudioObjectID]
+    }
 
     init(bridge: DisplayAudioDriverBridge, system: MacOutputSystem) {
         self.bridge = bridge
@@ -180,18 +195,20 @@ final class MacAudioRouter {
         }
         let outputs = system.outputDevices()
         rememberMacOutput(outputs: outputs)
-        let present = driving
-            ? displays.map(\.uid).filter { bridge.deviceID(uid: $0) != nil }
-            : []
+        var present: [String: AudioObjectID] = [:]
+        if driving {
+            for display in displays {
+                if let id = bridge.deviceID(uid: display.uid) { present[display.uid] = id }
+            }
+        }
         let plan = MacAudioRoutePlan.make(
             chosen: route,
             driver: route.usesDriver ? availability : .ready,
-            presentDisplayUIDs: present,
+            presentDisplayUIDs: displays.map(\.uid).filter { present[$0] != nil },
             macOutputUID: macOutputUID)
-        // A target that did not take, such as a device CoreAudio does not
-        // list yet, is tried again on the next pass.
-        if plan.target != appliedTarget {
-            appliedTarget = apply(plan.target, outputs: outputs) ? plan.target : nil
+        let trigger = Trigger(chosen: route, effective: plan.effective, devices: present)
+        if trigger != applied {
+            applied = apply(plan.target, outputs: outputs) ? trigger : nil
         }
         return plan
     }
@@ -200,7 +217,7 @@ final class MacAudioRouter {
     /// when the app quits, so a quit never leaves the Mac playing to nothing.
     func shutdown() {
         _ = apply(.restore, outputs: system.outputDevices())
-        appliedTarget = .restore
+        applied = nil
         if registered {
             bridge.register([])
             registered = false
@@ -222,42 +239,61 @@ final class MacAudioRouter {
 
     /// Whether the default output is now where `target` says.
     private func apply(_ target: MacAudioRouteTarget, outputs: [MacOutputDevice]) -> Bool {
+        let aggregates = [MacAudioRoutePlan.mirrorUID, MacAudioRoutePlan.displaysUID]
+            .filter { uid in outputs.contains { $0.uid == uid } }
         switch target {
         case .restore:
-            if let current = system.defaultOutputUID(), MacAudioRoutePlan.isOurs(uid: current),
-               let macOutputUID {
-                system.setDefaultOutput(uid: macOutputUID)
+            if let current = system.defaultOutputUID(), MacAudioRoutePlan.isOurs(uid: current) {
+                guard let macOutputUID, system.setDefaultOutput(uid: macOutputUID) else {
+                    return false
+                }
             }
-            removeAggregates(except: nil, outputs: outputs)
-            return true
+            return removeAggregates(aggregates, keeping: nil)
         case .device(let uid):
             guard system.setDefaultOutput(uid: uid) else { return false }
-            removeAggregates(except: nil, outputs: outputs)
-            return true
+            return removeAggregates(aggregates, keeping: nil)
         case .multiOutput(let uid, let name, let mainUID, let members):
-            // Off the old one first, so destroying it never strands the Mac
-            // on nothing.
-            if system.defaultOutputUID() == uid, let macOutputUID {
-                system.setDefaultOutput(uid: macOutputUID)
+            let signature = [mainUID] + members
+            if aggregates.contains(uid), built[uid] == signature {
+                return system.setDefaultOutput(uid: uid)
+                    && removeAggregates(aggregates, keeping: uid)
             }
-            removeAggregates(except: nil, outputs: outputs)
-            return system.createMultiOutput(
-                uid: uid, name: name, mainUID: mainUID, members: members)
-                && system.setDefaultOutput(uid: uid)
+            // Destroying the default would hand the choice of output to the
+            // HAL, so the Mac is parked on the new device's clock first: its
+            // own output for mirror, the first display for displays only.
+            if let current = system.defaultOutputUID(), aggregates.contains(current) {
+                guard system.setDefaultOutput(uid: mainUID) else { return false }
+            }
+            guard removeAggregates(aggregates, keeping: nil),
+                  system.createMultiOutput(
+                      uid: uid, name: name, mainUID: mainUID, members: members)
+            else { return false }
+            built[uid] = signature
+            return system.setDefaultOutput(uid: uid)
         }
     }
 
-    private func removeAggregates(except keep: String?, outputs: [MacOutputDevice]) {
-        for uid in [MacAudioRoutePlan.mirrorUID, MacAudioRoutePlan.displaysUID]
-        where uid != keep && outputs.contains(where: { $0.uid == uid }) {
+    /// Never the current default: that would hand the choice to the HAL.
+    private func removeAggregates(_ aggregates: [String], keeping keep: String?) -> Bool {
+        let current = system.defaultOutputUID()
+        var removedAll = true
+        for uid in aggregates where uid != keep {
+            if uid == current {
+                removedAll = false
+                continue
+            }
             system.destroyAggregate(uid: uid)
+            built[uid] = nil
         }
+        return removedAll
     }
 }
 
 /// The real system: the HAL's default output and aggregate devices.
 @MainActor
 final class CoreAudioMacOutputSystem: MacOutputSystem {
+    private var created: [String: AudioObjectID] = [:]
+
     func outputDevices() -> [MacOutputDevice] {
         CoreAudioDeviceCatalog.devices(includingOwnDevices: true)
             .filter(\.option.supportsOutput)
@@ -303,12 +339,19 @@ final class CoreAudioMacOutputSystem: MacOutputSystem {
             },
         ]
         var device = AudioObjectID(kAudioObjectUnknown)
-        return AudioHardwareCreateAggregateDevice(description as CFDictionary, &device) == noErr
+        guard AudioHardwareCreateAggregateDevice(description as CFDictionary, &device) == noErr,
+              device != AudioObjectID(kAudioObjectUnknown)
+        else { return false }
+        // The HAL can take a moment to list a new aggregate by UID; until it
+        // does, its ID is known from here.
+        created[uid] = device
+        return true
     }
 
     func destroyAggregate(uid: String) {
         guard let device = deviceID(uid: uid) else { return }
         AudioHardwareDestroyAggregateDevice(device)
+        created[uid] = nil
     }
 
     private func deviceID(uid: String) -> AudioDeviceID? {
@@ -321,7 +364,9 @@ final class CoreAudioMacOutputSystem: MacOutputSystem {
                 AudioObjectID(kAudioObjectSystemObject), &address,
                 UInt32(MemoryLayout<CFString>.size), $0, &size, &device)
         }
-        guard status == noErr, device != AudioDeviceID(kAudioObjectUnknown) else { return nil }
+        guard status == noErr, device != AudioDeviceID(kAudioObjectUnknown) else {
+            return created[uid]
+        }
         return device
     }
 

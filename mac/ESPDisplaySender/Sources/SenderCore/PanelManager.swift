@@ -322,7 +322,6 @@ final class PanelManager: ObservableObject {
             Task { @MainActor in
                 self?.refreshUSBPorts()
                 self?.refreshAudioDevices()
-                self?.applyMacAudioRoute()
                 self?.sortPanels()
                 self?.objectWillChange.send()
             }

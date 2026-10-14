@@ -62,10 +62,15 @@ typedef struct {
     char uid[kMaxStringBytes];
     char name[kMaxStringBytes];
     UInt32 latencyFrames;
+    // The processes whose registrations list this device: the only ones
+    // allowed to read its audio.
+    pid_t readers[kMaxClients];
+    UInt32 readerCount;
 } DeviceSpec;
 
 typedef struct {
     bool used;
+    pid_t pid;
     char id[kMaxStringBytes];
     UInt64 lastSeenHostTime;
     UInt32 deviceCount;
@@ -85,6 +90,8 @@ typedef struct {
     CFStringRef uidRef;
     CFStringRef nameRef;
     UInt32 latencyFrames;
+    pid_t readers[kMaxClients];
+    UInt32 readerCount;
 
     // Guarded by ioMutex.
     pthread_mutex_t ioMutex;
@@ -232,6 +239,8 @@ static bool ApplyDesiredDevices(const DeviceSpec* desired, UInt32 count,
             changed = true;
             continue;
         }
+        memcpy(slot->readers, match->readers, sizeof slot->readers);
+        slot->readerCount = match->readerCount;
         CFStringRef name = CFStringCreateWithCString(
             NULL, match->name, kCFStringEncodingUTF8);
         if (name != NULL && CFStringCompare(name, slot->nameRef, 0) != kCFCompareEqualTo) {
@@ -286,6 +295,15 @@ static bool ApplyDesiredDevices(const DeviceSpec* desired, UInt32 count,
         slot->nameRef = nameRef;
         CopyCString(slot->uid, desired[spec].uid);
         slot->latencyFrames = desired[spec].latencyFrames;
+        memcpy(slot->readers, desired[spec].readers, sizeof slot->readers);
+        slot->readerCount = desired[spec].readerCount;
+        // A display that comes back is a new device to the HAL: nothing of
+        // the old one's IO carries over, even if the HAL never stopped it.
+        pthread_mutex_lock(&slot->ioMutex);
+        slot->ioRunCount = 0;
+        atomic_store_explicit(&slot->writeHead, 0, memory_order_relaxed);
+        atomic_fetch_add_explicit(&slot->generation, 1, memory_order_release);
+        pthread_mutex_unlock(&slot->ioMutex);
         slot->deviceID = gNextObjectID++;
         slot->streamID = gNextObjectID++;
         slot->volumeID = gNextObjectID++;
@@ -333,11 +351,18 @@ static void Reconcile(void) {
         if (!gClients[client].used) continue;
         for (UInt32 index = 0; index < gClients[client].deviceCount; ++index) {
             const DeviceSpec* spec = &gClients[client].devices[index];
-            bool duplicate = false;
+            DeviceSpec* existing = NULL;
             for (UInt32 seen = 0; seen < count; ++seen) {
-                if (strcmp(desired[seen].uid, spec->uid) == 0) duplicate = true;
+                if (strcmp(desired[seen].uid, spec->uid) == 0) existing = &desired[seen];
             }
-            if (!duplicate && count < kMaxDevices) desired[count++] = *spec;
+            if (existing == NULL && count < kMaxDevices) {
+                existing = &desired[count++];
+                *existing = *spec;
+                existing->readerCount = 0;
+            }
+            if (existing != NULL && existing->readerCount < kMaxClients) {
+                existing->readers[existing->readerCount++] = gClients[client].pid;
+            }
         }
     }
     changed = ApplyDesiredDevices(desired, count, renamed, &renamedCount);
@@ -353,7 +378,7 @@ static void Reconcile(void) {
 }
 
 // Parses one registration. The caller holds gStateMutex.
-static OSStatus Register(CFPropertyListRef plist) {
+static OSStatus Register(CFPropertyListRef plist, pid_t pid) {
     if (plist == NULL || CFGetTypeID(plist) != CFDictionaryGetTypeID()) {
         return kAudioHardwareIllegalOperationError;
     }
@@ -378,6 +403,7 @@ static OSStatus Register(CFPropertyListRef plist) {
     Client parsed;
     memset(&parsed, 0, sizeof parsed);
     CopyCString(parsed.id, clientID);
+    parsed.pid = pid;
     CFIndex total = CFArrayGetCount((CFArrayRef)list);
     for (CFIndex index = 0; index < total && parsed.deviceCount < kMaxDevices; ++index) {
         CFTypeRef entry = CFArrayGetValueAtIndex((CFArrayRef)list, index);
@@ -403,7 +429,12 @@ static OSStatus Register(CFPropertyListRef plist) {
 
     int slot = -1;
     for (int index = 0; index < kMaxClients; ++index) {
-        if (gClients[index].used && strcmp(gClients[index].id, clientID) == 0) slot = index;
+        // A client is its ID and its process, so no other process can replace
+        // or withdraw another's devices.
+        if (gClients[index].used && gClients[index].pid == pid
+            && strcmp(gClients[index].id, clientID) == 0) {
+            slot = index;
+        }
     }
     if (parsed.deviceCount == 0) {
         // An empty list is how a client says goodbye.
@@ -1067,7 +1098,15 @@ static OSStatus GetPlugInProperty(const AudioObjectPropertyAddress* address,
     return status;
 }
 
-static OSStatus GetDeviceProperty(DeviceSlot* slot, const AudioObjectPropertyAddress* address,
+static bool MayRead(const DeviceSlot* slot, pid_t pid) {
+    for (UInt32 index = 0; index < slot->readerCount; ++index) {
+        if (slot->readers[index] == pid) return true;
+    }
+    return false;
+}
+
+static OSStatus GetDeviceProperty(DeviceSlot* slot, pid_t clientPID,
+                                  const AudioObjectPropertyAddress* address,
                                   UInt32 dataSize, UInt32* outDataSize, void* outData) {
     OSStatus status = kAudioHardwareNoError;
     bool input = IsInputScope(address);
@@ -1203,6 +1242,13 @@ static OSStatus GetDeviceProperty(DeviceSlot* slot, const AudioObjectPropertyAdd
             status = kAudioHardwareBadPropertySizeError;
             break;
         }
+        // What the Mac plays is private: only a process that registered this
+        // display may read it, or any app could record the Mac's sound
+        // without the recording permission, and take frames from the app.
+        if (!MayRead(slot, clientPID)) {
+            status = kAudioHardwareIllegalOperationError;
+            break;
+        }
         *(CFPropertyListRef*)outData = CopyPendingFrames(slot);
         *outDataSize = sizeof(CFPropertyListRef);
         break;
@@ -1330,7 +1376,6 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef driver, AudioObjectID
                                 pid_t clientPID, const AudioObjectPropertyAddress* address,
                                 UInt32 qualifierSize, const void* qualifier, UInt32 dataSize,
                                 UInt32* outDataSize, void* outData) {
-    (void)clientPID;
     if (!IsDriver(driver)) return kAudioHardwareBadObjectError;
     if (address == NULL || outDataSize == NULL || (outData == NULL && dataSize > 0)) {
         return kAudioHardwareIllegalOperationError;
@@ -1352,7 +1397,8 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef driver, AudioObjectID
                                        outDataSize, outData);
             break;
         case kObjectDevice:
-            status = GetDeviceProperty(slot, address, dataSize, outDataSize, outData);
+            status = GetDeviceProperty(slot, clientPID, address, dataSize, outDataSize,
+                                       outData);
             break;
         case kObjectStream:
             status = GetStreamProperty(slot, address, dataSize, outDataSize, outData);
@@ -1370,7 +1416,7 @@ static OSStatus SetPropertyData(AudioServerPlugInDriverRef driver, AudioObjectID
                                 pid_t clientPID, const AudioObjectPropertyAddress* address,
                                 UInt32 qualifierSize, const void* qualifier, UInt32 dataSize,
                                 const void* data) {
-    (void)clientPID; (void)qualifierSize; (void)qualifier;
+    (void)qualifierSize; (void)qualifier;
     if (!IsDriver(driver)) return kAudioHardwareBadObjectError;
     if (address == NULL || data == NULL) return kAudioHardwareIllegalOperationError;
     AudioObjectPropertyAddress changed[2];
@@ -1391,7 +1437,7 @@ static OSStatus SetPropertyData(AudioServerPlugInDriverRef driver, AudioObjectID
         if (dataSize < sizeof(CFPropertyListRef)) {
             status = kAudioHardwareBadPropertySizeError;
         } else {
-            status = Register(*(const CFPropertyListRef*)data);
+            status = Register(*(const CFPropertyListRef*)data, clientPID);
             reconcile = status == kAudioHardwareNoError;
         }
     } else if (kind == kObjectVolume && (selector == kAudioLevelControlPropertyScalarValue

@@ -14,6 +14,7 @@ HAL="/Library/Audio/Plug-Ins/HAL"
 TARGET="$HAL/ESPDisplayAudio.driver"
 STAGED="$HAL/.ESPDisplayAudio.driver.installing"
 BUNDLE_ID="com.espdisplay.audio-driver"
+PROJECT_FILE="$HERE/../ESPDisplaySender/ESPDisplaySender.xcodeproj/project.pbxproj"
 
 if [[ "$(id -u)" != 0 ]]; then
   echo "error: installing a CoreAudio driver needs admin rights; run:" >&2
@@ -49,18 +50,33 @@ if [[ ! -d "$SOURCE" || -L "$SOURCE" ]]; then
   echo "error: $SOURCE is missing; build it first with $HERE/build-driver.sh" >&2
   exit 1
 fi
-identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SOURCE/Contents/Info.plist")"
-if [[ "$identifier" != "$BUNDLE_ID" ]]; then
-  echo "error: $SOURCE is $identifier, not $BUNDLE_ID" >&2
+TEAM="$(sed -n 's/.*DEVELOPMENT_TEAM = \([A-Z0-9]*\);.*/\1/p' "$PROJECT_FILE" | sort -u)"
+if [[ -z "$TEAM" || "$TEAM" == *$'\n'* ]]; then
+  echo "error: expected one DEVELOPMENT_TEAM in $PROJECT_FILE, found: ${TEAM:-none}" >&2
   exit 1
 fi
-codesign --verify --strict "$SOURCE"
 
+# Everything is checked on the root-owned staged copy, not on build/, which
+# any process running as the user could swap between a check and the copy.
 mkdir -p "$HAL"
 rm -rf -- "$STAGED"
 ditto "$SOURCE" "$STAGED"
 chown -R root:wheel "$STAGED"
 chmod -R go-w "$STAGED"
+identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$STAGED/Contents/Info.plist")"
+if [[ "$identifier" != "$BUNDLE_ID" ]]; then
+  rm -rf -- "$STAGED"
+  echo "error: $SOURCE is $identifier, not $BUNDLE_ID" >&2
+  exit 1
+fi
+# Signed by an Apple-issued certificate of the app's own team, not merely
+# signed: an ad-hoc signature would pass a plain --verify.
+requirement="=anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$TEAM\""
+if ! codesign --verify --strict -R "$requirement" "$STAGED"; then
+  rm -rf -- "$STAGED"
+  echo "error: $SOURCE is not signed by team $TEAM; rebuild it with $HERE/build-driver.sh" >&2
+  exit 1
+fi
 rm -rf -- "$TARGET"
 mv -- "$STAGED" "$TARGET"
 restart_coreaudiod

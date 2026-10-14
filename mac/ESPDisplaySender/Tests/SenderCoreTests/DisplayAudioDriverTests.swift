@@ -15,6 +15,9 @@ final class FakeDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Sendabl
     private(set) var registrations: [[DisplayAudioDeviceSpec]] = []
     /// Devices appear only once registered, as the driver's do.
     var devicesAppearOnRegister = true
+    /// Added to every device ID, so a test can make the driver's devices come
+    /// back as new ones.
+    var idBase: AudioObjectID = 100
 
     func availability() -> DisplayAudioDriverAvailability { lock.withLock { state } }
 
@@ -25,7 +28,7 @@ final class FakeDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Sendabl
             if devicesAppearOnRegister {
                 ids = [:]
                 for (index, device) in devices.enumerated() {
-                    ids[device.uid] = AudioObjectID(100 + index)
+                    ids[device.uid] = idBase + AudioObjectID(index)
                 }
             }
             return true
@@ -188,6 +191,37 @@ final class DisplayAudioDriverTests: XCTestCase {
             "the display device's sound reaches the panel")
     }
 
+    /// A display's own device does not depend on the default output, so a
+    /// route change that leaves it the same device leaves the session be; a
+    /// device made again is reopened.
+    func testARouteChangeRestartsADeviceSourceOnlyWhenItsDeviceChanged() throws {
+        let (session, snapshots, panel) = try startSession()
+        defer {
+            session.stop()
+            panel.close()
+        }
+        let device = DeviceIdentity("7")
+        let tap = ConstantSystemAudioTap(levels: [0.2, 0.2], sampleRate: 48_000, interleaved: true)
+        session.setDownlinkSource(PanelDownlinkSource.displayDevice(
+            name: "Desk Panel", route: .displaysOnly,
+            capture: SystemAudioCaptureSource(open: { tap }),
+            deviceProbe: { device.value }))
+        XCTAssertNotNil(snapshots.waitFor(timeoutSeconds: 4) {
+            $0.state == .streaming && $0.sourceName.contains("Desk Panel")
+        })
+        let settled = snapshots.all.count
+        session.devicesChanged()
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertFalse(
+            snapshots.all.dropFirst(settled).contains { $0.state == .recovering },
+            "the same device is not reopened")
+        device.value = "8"
+        session.devicesChanged()
+        XCTAssertNotNil(snapshots.waitFor(timeoutSeconds: 2) {
+            $0.state == .recovering && $0.message == "The CoreAudio route changed."
+        }, "a new device is reopened")
+    }
+
     func testTheSameSourceTwiceDoesNotRestart() throws {
         let (session, snapshots, panel) = try startSession()
         defer {
@@ -195,16 +229,18 @@ final class DisplayAudioDriverTests: XCTestCase {
             panel.close()
         }
         XCTAssertNotNil(snapshots.waitFor(timeoutSeconds: 4) { $0.state == .streaming })
-        session.setDownlinkSource(.systemTap(note: nil))
+        session.setDownlinkSource(.systemTap())
         Thread.sleep(forTimeInterval: 0.3)
         XCTAssertFalse(snapshots.all.contains { $0.state == .recovering })
     }
 
-    func testAFallbackNoteRidesOnTheTapMessage() throws {
+    /// Back from the display device to the tap, as when the copy is chosen
+    /// again or the driver goes away.
+    func testSwitchingBackToTheTapRestartsIntoIt() throws {
         let tap = ConstantSystemAudioTap(levels: [0.1, 0.1], sampleRate: 48_000, interleaved: true)
+        let authorized = SystemAudioAccess(status: { .authorized }, request: nil)
         let (session, snapshots, panel) = try startSession(
-            access: SystemAudioAccess(status: { .authorized }, request: nil),
-            source: SystemAudioCaptureSource(open: { tap }))
+            access: authorized, source: SystemAudioCaptureSource(open: { tap }))
         defer {
             session.stop()
             panel.close()
@@ -212,13 +248,27 @@ final class DisplayAudioDriverTests: XCTestCase {
         XCTAssertNotNil(snapshots.waitFor(timeoutSeconds: 4) {
             $0.sourceName == PanelAudioSession.tappedSourceName
         })
-        session.setDownlinkSource(PanelDownlinkSource.systemTap(
-            note: "The display audio driver is not installed.",
-            access: SystemAudioAccess(status: { .authorized }, request: nil),
-            capture: SystemAudioCaptureSource(open: { tap })))
+        let device = ConstantSystemAudioTap(
+            levels: [0.2, 0.2], sampleRate: 48_000, interleaved: true)
+        session.setDownlinkSource(PanelDownlinkSource.displayDevice(
+            name: "Desk Panel", route: .mirror,
+            capture: SystemAudioCaptureSource(open: { device })))
         XCTAssertNotNil(snapshots.waitFor(timeoutSeconds: 4) {
-            $0.state == .streaming && $0.message.hasSuffix("The display audio driver is not installed.")
-        }, "last: \(snapshots.last?.message ?? "none")")
+            $0.state == .streaming && $0.sourceName.contains("Desk Panel")
+        })
+        let before = snapshots.all.count
+        session.setDownlinkSource(PanelDownlinkSource.systemTap(
+            access: authorized, capture: SystemAudioCaptureSource(open: { tap })))
+        let deadline = Date().addingTimeInterval(4)
+        var back = false
+        while !back, Date() < deadline {
+            back = snapshots.all.dropFirst(before).contains {
+                $0.state == .streaming && $0.sourceName == PanelAudioSession.tappedSourceName
+                    && $0.message == PanelDownlinkSource.tapStreamingMessage
+            }
+            if !back { Thread.sleep(forTimeInterval: 0.02) }
+        }
+        XCTAssertTrue(back, "last: \(snapshots.last?.message ?? "none")")
     }
 
     func testADeviceThatIsNotThereYetStreamsSilenceAndSaysWhy() throws {
@@ -262,6 +312,16 @@ final class DisplayAudioDriverTests: XCTestCase {
         session.setEnabled(true)
         session.start()
         return (session, snapshots, panel)
+    }
+}
+
+final class DeviceIdentity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: String?
+    init(_ value: String?) { current = value }
+    var value: String? {
+        get { lock.withLock { current } }
+        set { lock.withLock { current = newValue } }
     }
 }
 

@@ -9,30 +9,44 @@ final class PanelAudioDownlinks: @unchecked Sendable {
     private let lock = NSLock()
     private let bridge: DisplayAudioDriverBridge
     private var effective = MacAudioRoute.copy
-    private var note: String?
-    private var devices: [String: DisplayAudioDeviceSpec] = [:]
+    /// Every display record, not only the ones with a device yet, so a
+    /// session built before the next pass still gets its own device.
+    private var identities: [String: DisplayAudioDeviceSpec] = [:]
 
     init(bridge: DisplayAudioDriverBridge) {
         self.bridge = bridge
     }
 
-    func update(plan: MacAudioRoutePlan, devices: [String: DisplayAudioDeviceSpec]) {
+    func update(effective: MacAudioRoute, identities: [String: DisplayAudioDeviceSpec]) {
         lock.withLock {
-            effective = plan.effective
-            note = plan.note
-            self.devices = devices
+            self.effective = effective
+            self.identities = identities
         }
     }
 
     func source(for serviceName: String) -> PanelDownlinkSource {
         lock.withLock {
-            guard effective.usesDriver, let device = devices[serviceName] else {
-                return .systemTap(note: note)
+            guard effective.usesDriver else { return .systemTap() }
+            guard let device = identities[serviceName] else {
+                // Not a display this app knows yet (a probe of a new board):
+                // silence until it is, never the tap and its prompt.
+                return .displayDevice(
+                    name: serviceName, route: effective,
+                    capture: SystemAudioCaptureSource(open: {
+                        throw NSError(
+                            domain: "ESPDisplaySender.Audio", code: 5,
+                            userInfo: [NSLocalizedDescriptionKey:
+                                "the display is not known to this Mac yet."])
+                    }),
+                    identity: "pending")
             }
+            let bridge = bridge
+            let uid = device.uid
             return .displayDevice(
                 name: device.name, route: effective,
-                capture: .displayDevice(uid: device.uid, bridge: bridge),
-                identity: device.uid)
+                capture: .displayDevice(uid: uid, bridge: bridge),
+                identity: uid,
+                deviceProbe: { bridge.deviceID(uid: uid).map(String.init) })
         }
     }
 }
@@ -46,36 +60,60 @@ final class MacAudioRouting {
     let downlinks: PanelAudioDownlinks
     private(set) var router: MacAudioRouter?
     private(set) var plan: MacAudioRoutePlan?
+    private var timer: Timer?
+
+    /// Seconds between passes. Each pass is the driver's heartbeat, well
+    /// inside its ten-second timeout.
+    static let interval: TimeInterval = 2
 
     init(bridge: DisplayAudioDriverBridge = CoreAudioDisplayAudioDriver.shared) {
         self.bridge = bridge
         downlinks = PanelAudioDownlinks(bridge: bridge)
     }
 
-    func start(system: MacOutputSystem) {
+    /// `tick` runs every `interval`, in the run loop's common modes: a modal
+    /// panel or an open menu must not stop the heartbeat, or the driver drops
+    /// the displays' devices and the Mac's output moves.
+    func start(system: MacOutputSystem, tick: @escaping @MainActor () -> Void) {
         guard router == nil else { return }
         router = MacAudioRouter(bridge: bridge, system: system)
+        let timer = Timer(timeInterval: Self.interval, repeats: true) { _ in
+            MainActor.assumeIsolated { tick() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     func stop() {
+        timer?.invalidate()
+        timer = nil
         router?.shutdown()
         router = nil
     }
 
-    func update(route: MacAudioRoute, devices: [String: DisplayAudioDeviceSpec]) {
+    /// Lets an offscreen render show a route's note without CoreAudio.
+    func showForTesting(_ plan: MacAudioRoutePlan) { self.plan = plan }
+
+    func update(
+        route: MacAudioRoute,
+        devices: [String: DisplayAudioDeviceSpec],
+        identities: [String: DisplayAudioDeviceSpec]
+    ) {
         guard let router else { return }
         let plan = router.update(
             route: route,
             displays: devices.keys.sorted().compactMap { devices[$0] })
         self.plan = plan
-        downlinks.update(plan: plan, devices: devices)
+        downlinks.update(effective: plan.effective, identities: identities)
     }
 }
 
 extension PanelManager {
     /// Begin routing; called once by the app, never by tests.
     func startMacAudioRouting(system: MacOutputSystem? = nil) {
-        macAudio.start(system: system ?? CoreAudioMacOutputSystem())
+        macAudio.start(system: system ?? CoreAudioMacOutputSystem()) { [weak self] in
+            self?.applyMacAudioRoute()
+        }
         applyMacAudioRoute()
     }
 
@@ -92,27 +130,42 @@ extension PanelManager {
         applyMacAudioRoute()
     }
 
-    /// The display devices wanted now: every display with a running session
-    /// that has, or advertises, audio.
-    func displayAudioDevices() -> [String: DisplayAudioDeviceSpec] {
+    /// Each display record's device, by service name.
+    func displayAudioIdentities() -> [String: DisplayAudioDeviceSpec] {
         let latency = DisplayAudioDeviceSpec.latencyFrames(tuning: settings.audioTuning)
-        var devices: [String: DisplayAudioDeviceSpec] = [:]
-        for panel in panels where sessions[panel.serviceName] != nil
-            && (panel.audioStatus != nil || panel.capabilities.contains(.audioDownlink)) {
-            devices[panel.serviceName] = DisplayAudioDeviceSpec(
+        var identities: [String: DisplayAudioDeviceSpec] = [:]
+        for panel in panels {
+            identities[panel.serviceName] = DisplayAudioDeviceSpec(
                 uid: DisplayAudioDeviceSpec.uid(
                     hardwareID: panel.hardwareID, serviceName: panel.serviceName),
                 name: panel.displayName,
                 latencyFrames: latency)
         }
-        return devices
+        return identities
     }
 
-    /// Re-plan the route and hand every session its source. Runs on the
-    /// two-second refresh, which is also the driver's heartbeat.
+    /// The display devices wanted now: every display with a running session
+    /// that has, or advertises, audio.
+    func displayAudioDevices(
+        identities: [String: DisplayAudioDeviceSpec]
+    ) -> [String: DisplayAudioDeviceSpec] {
+        identities.filter { name, _ in
+            guard sessions[name] != nil,
+                  let panel = panels.first(where: { $0.serviceName == name })
+            else { return false }
+            return panel.audioStatus != nil || panel.capabilities.contains(.audioDownlink)
+        }
+    }
+
+    /// Re-plan the route and hand every session its source. Runs every two
+    /// seconds, which is also the driver's heartbeat.
     func applyMacAudioRoute() {
         guard macAudio.router != nil else { return }
-        macAudio.update(route: settings.macAudioRoute, devices: displayAudioDevices())
+        let identities = displayAudioIdentities()
+        macAudio.update(
+            route: settings.macAudioRoute,
+            devices: displayAudioDevices(identities: identities),
+            identities: identities)
         for (name, session) in sessions {
             session.setAudioDownlink(macAudio.downlinks.source(for: name))
         }

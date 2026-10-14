@@ -1003,8 +1003,7 @@ struct PanelDetailView: View {
             Text("Audio")
         } footer: {
             if let audio = panel.audioStatus {
-                Text(Self.macAudioRouteFooter(
-                    manager.macAudioRoutePlan?.effective ?? .copy)
+                Text(Self.macAudioRouteFooter(manager.macAudioRoutePlan)
                     + " Volume scales what is sent; 100% is the loudest the "
                     + "display plays. "
                     + audioFooterText(audio.tuning))
@@ -1041,17 +1040,26 @@ struct PanelDetailView: View {
         }
     }
 
-    static func macAudioRouteFooter(_ route: MacAudioRoute) -> String {
-        switch route {
+    static func macAudioRouteFooter(_ plan: MacAudioRoutePlan?) -> String {
+        // macOS gives a Multi-Output device no volume control of its own.
+        var multiOutput = false
+        if case .multiOutput? = plan?.target { multiOutput = true }
+        switch plan?.effective ?? .copy {
         case .copy:
             return "The display speaker plays this Mac's sound while the Mac's "
                 + "own speakers keep playing."
         case .mirror:
             return "Each display is an output device of its own, played together "
-                + "with the Mac's own output. Mac sound applies to every display."
+                + "with the Mac's own output through a Multi-Output device, which "
+                + "the volume keys do not control. Mac sound applies to every "
+                + "display."
         case .displaysOnly:
-            return "The displays are this Mac's only output, so the volume keys "
-                + "set their level. Mac sound applies to every display."
+            return (multiOutput
+                ? "The displays are this Mac's only output, through a "
+                    + "Multi-Output device, which the volume keys do not control."
+                : "The display is this Mac's only output, so the volume keys set "
+                    + "its level.")
+                + " Mac sound applies to every display."
         }
     }
 
