@@ -164,6 +164,9 @@ final class MacAudioRouter {
     private var appliedDefaultUID: String?
     /// The display devices present at the last pass, by UID.
     private(set) var presentDevices: [String: AudioObjectID] = [:]
+    /// What the last pass registered, for a heartbeat sent while the main
+    /// thread waits on the macOS password prompt.
+    private(set) var heartbeat: [DisplayAudioDeviceSpec] = []
     /// The members each Multi-Output device of ours was built with, so one
     /// that already matches is reused rather than rebuilt.
     private var built: [String: [String]] = [:]
@@ -192,7 +195,9 @@ final class MacAudioRouter {
             let accepted = bridge.register(displays)
             refused = !accepted
             registered = accepted || registered
+            heartbeat = accepted ? displays : []
         } else if registered {
+            heartbeat = []
             bridge.register([])
             registered = false
         }
@@ -215,7 +220,8 @@ final class MacAudioRouter {
         let plan = MacAudioRoutePlan.make(
             chosen: route,
             driver: route.usesDriver ? availability : .ready,
-            presentDisplayUIDs: displays.map(\.uid).filter { present[$0] != nil },
+            presentDisplayUIDs: displays.map(\.uid).filter { present[$0] != nil }
+                .map { bridge.deviceUID(for: $0) },
             macOutputUID: macOutputUID)
         presentDevices = present
         // A Multi-Output device whose clock output went away (headphones
@@ -246,9 +252,10 @@ final class MacAudioRouter {
         if refused {
             return MacAudioRoutePlan(
                 chosen: plan.chosen, effective: plan.effective, target: plan.target,
-                note: "The display audio driver refused this app's displays: every "
-                    + "one of its places is taken by other apps on this Mac. Quit "
-                    + "them, or restart coreaudiod by reinstalling the driver.")
+                note: "The display audio driver refused this app's displays. It "
+                    + "takes up to \(DisplayAudioDriverProtocol.maxDevices) apps at "
+                    + "once, so other apps on this Mac may be using every place; "
+                    + "quit them, or restart the Mac.")
         }
         if !claimed.isEmpty {
             let names = claimed.map { "\"\($0.name)\"" }.joined(separator: ", ")

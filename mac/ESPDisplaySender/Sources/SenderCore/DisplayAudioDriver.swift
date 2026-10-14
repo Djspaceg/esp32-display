@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreAudio
+import CryptoKit
 import Foundation
 import Security
 import SenderProtocol
@@ -8,7 +9,7 @@ import SenderProtocol
 /// mac/AudioDriver/ESPDisplayAudioProtocol.h. A test reads that header and
 /// fails if the two disagree.
 enum DisplayAudioDriverProtocol {
-    static let version = 2
+    static let version = 3
     static let bundleID = "com.espdisplay.audio-driver"
     static let registerSelector = fourCharCode("ESrg")
     static let versionSelector = fourCharCode("ESvr")
@@ -19,6 +20,15 @@ enum DisplayAudioDriverProtocol {
     static let maxDevices = 8
     static let clientTimeoutSeconds = 10.0
     static let minTokenBytes = 32
+    static let uidSuffixBytes = 8
+
+    /// The UID macOS lists for a display registered as `uid` by the owner of
+    /// `token` (see the protocol header).
+    static func deviceUID(for uid: String, token: String) -> String {
+        let digest = SHA256.hash(data: Data(token.utf8))
+        return uid + "." + digest.prefix(uidSuffixBytes)
+            .map { String(format: "%02x", $0) }.joined()
+    }
 
     enum Key {
         static let version = "version"
@@ -94,7 +104,12 @@ protocol DisplayAudioDriverBridge: AnyObject, Sendable {
     /// Replaces this process's devices, and is its heartbeat.
     @discardableResult
     func register(_ devices: [DisplayAudioDeviceSpec]) -> Bool
+    /// `uid` is the display's registered UID; the bridge finds the device
+    /// macOS lists for it under this app's ownership.
     func deviceID(uid: String) -> AudioObjectID?
+    /// The UID macOS lists for this app's device for `uid`, as the default
+    /// output and Multi-Output devices name it.
+    func deviceUID(for uid: String) -> String
     /// Whether this app owns the device, so the Mac's sound routed to it
     /// reaches this app and no one else. Takes no frames.
     func owns(device: AudioObjectID) -> Bool
@@ -121,7 +136,7 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
     private var token: String {
         tokenLock.withLock {
             if let cachedToken { return cachedToken }
-            let token = DisplayAudioDriverToken.load() ?? DisplayAudioDriverToken.create()
+            let token = DisplayAudioDriverToken.current()
             cachedToken = token
             return token
         }
@@ -153,9 +168,13 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
         }
     }
 
+    func deviceUID(for uid: String) -> String {
+        DisplayAudioDriverProtocol.deviceUID(for: uid, token: token)
+    }
+
     func deviceID(uid: String) -> AudioObjectID? {
         var address = Self.address(kAudioHardwarePropertyTranslateUIDToDevice)
-        var qualifier = uid as CFString
+        var qualifier = deviceUID(for: uid) as CFString
         var device = AudioObjectID(kAudioObjectUnknown)
         var size = UInt32(MemoryLayout<AudioObjectID>.size)
         let status = withUnsafeMutablePointer(to: &qualifier) {
@@ -226,35 +245,72 @@ enum DisplayAudioDriverToken {
         kSecAttrAccount as String: "owner-token",
     ]
 
-    static func load() -> String? {
-        var lookup = query
-        lookup[kSecReturnData as String] = true
-        lookup[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(lookup as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let token = String(data: data, encoding: .utf8),
-              token.utf8.count >= DisplayAudioDriverProtocol.minTokenBytes
-        else { return nil }
-        return token
+    enum Lookup: Equatable {
+        case found(String)
+        /// Nothing saved, or something that is not a token: make one.
+        case notFound
+        /// Locked, refused or failing: use a token for this launch only and
+        /// leave whatever is saved alone.
+        case unavailable
     }
 
-    /// A fresh secret, saved if the Keychain allows; if not, it still works
-    /// for this launch.
-    static func create() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        let token: String
-        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess {
-            token = bytes.map { String(format: "%02x", $0) }.joined()
-        } else {
-            token = UUID().uuidString + UUID().uuidString
+    static func lookup() -> Lookup {
+        var request = query
+        request[kSecReturnData as String] = true
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        switch SecItemCopyMatching(request as CFDictionary, &item) {
+        case errSecSuccess:
+            guard let data = item as? Data,
+                  let token = String(data: data, encoding: .utf8),
+                  token.utf8.count >= DisplayAudioDriverProtocol.minTokenBytes
+            else { return .notFound }
+            return .found(token)
+        case errSecItemNotFound:
+            return .notFound
+        default:
+            return .unavailable
         }
-        SecItemDelete(query as CFDictionary)
+    }
+
+    /// Only a token that is truly missing is replaced; a Keychain that will
+    /// not answer never costs the saved one.
+    static func resolve(
+        _ lookup: Lookup, fresh: () -> String, save: (String) -> Void
+    ) -> String {
+        switch lookup {
+        case .found(let token):
+            return token
+        case .notFound:
+            let token = fresh()
+            save(token)
+            return token
+        case .unavailable:
+            return fresh()
+        }
+    }
+
+    static func current() -> String {
+        resolve(lookup(), fresh: fresh, save: save)
+    }
+
+    static func fresh() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            return UUID().uuidString + UUID().uuidString
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func save(_ token: String) {
+        let data = Data(token.utf8)
+        let updated = SecItemUpdate(
+            query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        guard updated == errSecItemNotFound else { return }
         var insert = query
-        insert[kSecValueData as String] = Data(token.utf8)
+        insert[kSecValueData as String] = data
         insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         SecItemAdd(insert as CFDictionary, nil)
-        return token
     }
 }
 

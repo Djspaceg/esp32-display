@@ -76,6 +76,7 @@ final class MacAudioRouting {
     var setup = DisplayAudioDriverSetup(bundledDriver: false, signingTeam: nil)
     var runner = PrivilegedRunner.appleScript
     private var timer: Timer?
+    private var keepAlive: DispatchSourceTimer?
 
     /// Seconds between passes. Each pass is the driver's heartbeat, well
     /// inside its ten-second timeout.
@@ -102,7 +103,29 @@ final class MacAudioRouting {
         self.timer = timer
     }
 
+    /// The password prompt holds the main thread, and with it the pass that
+    /// is the driver's heartbeat; past ten seconds the driver would drop the
+    /// displays' devices and move the Mac's output. Until `endKeepAlive`, the
+    /// last registration is repeated from a background queue instead.
+    func beginKeepAlive() {
+        endKeepAlive()
+        guard let displays = router?.heartbeat, !displays.isEmpty else { return }
+        let bridge = bridge
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(
+            deadline: .now() + Self.interval, repeating: Self.interval)
+        timer.setEventHandler { bridge.register(displays) }
+        timer.resume()
+        keepAlive = timer
+    }
+
+    func endKeepAlive() {
+        keepAlive?.cancel()
+        keepAlive = nil
+    }
+
     func stop() {
+        endKeepAlive()
         timer?.invalidate()
         timer = nil
         router?.shutdown()
@@ -236,8 +259,10 @@ extension PanelManager {
             command = DisplayAudioDriverInstaller.removeCommand()
         }
         let runner = macAudio.runner
+        macAudio.beginKeepAlive()
         Task { @MainActor [weak self] in
             let result = await runner.run(command)
+            self?.macAudio.endKeepAlive()
             guard let self else { return }
             self.macAudio.setup.finished(action, result, now: Date())
             self.objectWillChange.send()

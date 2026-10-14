@@ -21,6 +21,7 @@
 // written from scratch against <CoreAudio/AudioServerPlugIn.h>. The device
 // runs on the host clock.
 
+#include <CommonCrypto/CommonDigest.h>
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
@@ -160,6 +161,22 @@ static void CopyCString(char* destination, const char* source) {
     strlcpy(destination, source, kMaxStringBytes);
 }
 
+// The UID macOS sees: the registered UID plus a suffix from the owner's
+// token (the first ESPDISP_AUDIO_UID_SUFFIX_BYTES bytes of its SHA-256, in
+// hex). It is stable for an owner, whose token is kept across launches, and
+// different for any other owner, so when a device changes hands the HAL
+// cannot carry the Mac's output over to it by UID as it would for a device
+// that came back.
+static CFStringRef CreateDeviceUID(const char* uid, const char* owner) {
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(owner, (CC_LONG)strlen(owner), digest);
+    char suffix[2 * ESPDISP_AUDIO_UID_SUFFIX_BYTES + 1];
+    for (int index = 0; index < ESPDISP_AUDIO_UID_SUFFIX_BYTES; ++index) {
+        snprintf(suffix + 2 * index, 3, "%02x", digest[index]);
+    }
+    return CFStringCreateWithFormat(NULL, NULL, CFSTR("%s.%s"), uid, suffix);
+}
+
 static bool CStringFromCF(CFTypeRef value, char* destination) {
     if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return false;
     if (!CFStringGetCString((CFStringRef)value, destination, kMaxStringBytes,
@@ -282,8 +299,7 @@ static bool ApplyDesiredDevices(const DeviceSpec* desired, UInt32 count,
             slot->ring = calloc((size_t)kRingFrames * kChannels, sizeof(Float32));
             if (slot->ring == NULL) break;
         }
-        CFStringRef uidRef = CFStringCreateWithCString(
-            NULL, desired[spec].uid, kCFStringEncodingUTF8);
+        CFStringRef uidRef = CreateDeviceUID(desired[spec].uid, desired[spec].owner);
         CFStringRef nameRef = CFStringCreateWithCString(
             NULL, desired[spec].name, kCFStringEncodingUTF8);
         if (uidRef == NULL || nameRef == NULL) {
@@ -291,7 +307,8 @@ static bool ApplyDesiredDevices(const DeviceSpec* desired, UInt32 count,
             if (nameRef) CFRelease(nameRef);
             break;
         }
-        bool sameDisplay = slot->everUsed && strcmp(slot->uid, desired[spec].uid) == 0;
+        bool sameDisplay = slot->everUsed && strcmp(slot->uid, desired[spec].uid) == 0
+            && strcmp(slot->owner, desired[spec].owner) == 0;
         if (slot->uidRef) CFRelease(slot->uidRef);
         if (slot->nameRef) CFRelease(slot->nameRef);
         slot->uidRef = uidRef;

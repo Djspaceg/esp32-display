@@ -3,6 +3,7 @@
 // properties, the volume and the PCM bridge can be checked without installing
 // anything. Built with ESPDISP_AUDIO_DRIVER_TESTING for the clock hook.
 
+#include <CommonCrypto/CommonDigest.h>
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <mach/mach_time.h>
 #include <math.h>
@@ -141,8 +142,21 @@ static UInt32 DeviceList(AudioObjectID* devices, UInt32 capacity) {
     return written / sizeof(AudioObjectID);
 }
 
-static AudioObjectID Translate(const char* uid) {
-    CFStringRef string = CFStringCreateWithCString(NULL, uid, kCFStringEncodingUTF8);
+// The UID macOS lists for `uid` owned by `token`, worked out independently of
+// the driver from the protocol header's description.
+static void DeviceUIDFor(const char* uid, const char* token, char* out, size_t size) {
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(token, (CC_LONG)strlen(token), digest);
+    int used = snprintf(out, size, "%s.", uid);
+    for (int index = 0; index < ESPDISP_AUDIO_UID_SUFFIX_BYTES; ++index) {
+        used += snprintf(out + used, size - (size_t)used, "%02x", digest[index]);
+    }
+}
+
+static AudioObjectID TranslateAs(const char* uid, const char* token) {
+    char full[512];
+    DeviceUIDFor(uid, token, full, sizeof full);
+    CFStringRef string = CFStringCreateWithCString(NULL, full, kCFStringEncodingUTF8);
     AudioObjectID device = 0xFFFF;
     CHECK(Get(kAudioObjectPlugInObject, kAudioPlugInPropertyTranslateUIDToDevice,
               kAudioObjectPropertyScopeGlobal, sizeof string, &string, sizeof device, &device,
@@ -150,6 +164,8 @@ static AudioObjectID Translate(const char* uid) {
     CFRelease(string);
     return device;
 }
+
+static AudioObjectID Translate(const char* uid) { return TranslateAs(uid, gToken); }
 
 static bool CFStringEquals(CFStringRef string, const char* expected) {
     if (string == NULL) return false;
@@ -346,7 +362,10 @@ static void TestDevicesAppearWithTheirProperties(void) {
     CHECK(desk != kAudioObjectUnknown);
     CHECK(Translate("nobody") == kAudioObjectUnknown);
     CHECK(StringProperty(desk, kAudioObjectPropertyName, "Desk Panel"));
-    CHECK(StringProperty(desk, kAudioDevicePropertyDeviceUID, uids[0]));
+    char deskUID[512];
+    DeviceUIDFor(uids[0], gToken, deskUID, sizeof deskUID);
+    CHECK(strlen(deskUID) == strlen(uids[0]) + 1 + 2 * ESPDISP_AUDIO_UID_SUFFIX_BYTES);
+    CHECK(StringProperty(desk, kAudioDevicePropertyDeviceUID, deskUID));
     CHECK(StringProperty(desk, kAudioDevicePropertyModelUID, ESPDISP_AUDIO_MODEL_UID));
     CHECK(GetU32(desk, kAudioObjectPropertyClass, kAudioObjectPropertyScopeGlobal)
           == kAudioDeviceClassID);
@@ -652,14 +671,16 @@ static void TestANewOwnerGetsANewDevice(void) {
     CHECK(shelf != kAudioObjectUnknown);
     gToken = other;
     CHECK(RegisterDevices("other", 1, uids, names, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
-    CHECK(Translate(uids[0]) == shelf);
+    CHECK(TranslateAs(uids[0], app) == shelf);
     gToken = app;
     const char* keep[] = {"com.espdisplay.display.aabbcc"};
     const char* keepNames[] = {"Desk"};
     int listChanges = Counter(&gDeviceListChanges);
     CHECK(RegisterDevices("app", 1, keep, keepNames, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
-    AudioObjectID handed = Translate(uids[0]);
+    AudioObjectID handed = TranslateAs(uids[0], other);
     CHECK(handed != kAudioObjectUnknown && handed != shelf);
+    // A different UID too, so the HAL cannot carry the Mac's output across.
+    CHECK(TranslateAs(uids[0], app) == kAudioObjectUnknown);
     CHECK(Counter(&gDeviceListChanges) > listChanges);
     CHECK(Owns(handed, other));
     UInt32 value = 0;
@@ -700,7 +721,8 @@ static void TestClientsUnionAndExpire(void) {
     AdvanceSeconds(6);
     ESPDisplayAudio_TestReconcileNow();
     CHECK(DeviceList(devices, 8) == 2);
-    CHECK(Translate("com.espdisplay.test.tone") == kAudioObjectUnknown);
+    CHECK(TranslateAs("com.espdisplay.test.tone", "check-tool-token-0123456789abcdef0123")
+          == kAudioObjectUnknown);
 
     // Then the app goes quiet too: every device goes.
     AdvanceSeconds(11);

@@ -135,9 +135,10 @@ struct DisplayAudioDriverSetup: Equatable, Sendable {
         case nil:
             return Presentation(status: "Checking…", button: nil, busy: false, message: message)
         case .absent?:
+            let button = installButton("Install Audio Driver…")
             return Presentation(
-                status: "Not installed", button: installButton("Install Audio Driver…"),
-                busy: false, message: message)
+                status: "Not installed", button: button, busy: false,
+                message: message ?? (button.enabled ? nil : Self.developerHint(button)))
         case .ready?:
             return Presentation(
                 status: "Installed",
@@ -153,6 +154,13 @@ struct DisplayAudioDriverSetup: Equatable, Sendable {
                 button: installButton("Reinstall Audio Driver…"),
                 busy: false, message: message)
         }
+    }
+
+    /// A build that cannot install still says how to get the driver.
+    private static func developerHint(_ button: Button) -> String {
+        (button.help ?? "") + " From the esp32-display source folder, "
+            + "mac/AudioDriver/build-driver.sh and then sudo "
+            + "mac/AudioDriver/install-driver.sh install it by hand."
     }
 
     private func installButton(_ title: String) -> Button {
@@ -178,7 +186,10 @@ struct DisplayAudioDriverSetup: Equatable, Sendable {
 enum DisplayAudioDriverInstaller {
     static let halFolder = "/Library/Audio/Plug-Ins/HAL"
     static let target = halFolder + "/ESPDisplayAudio.driver"
-    static let staged = halFolder + "/.ESPDisplayAudio.driver.installing"
+    /// Root-only (mode 700), and not a .driver name, so the HAL never loads
+    /// anything from it.
+    static let staging = halFolder + "/.ESPDisplayAudio.installing"
+    static let staged = staging + "/ESPDisplayAudio.driver"
 
     /// Where the app's build puts its driver (mac/AudioDriver/embed-driver.sh).
     static func bundledDriver(in bundle: Bundle = .main) -> URL? {
@@ -208,27 +219,33 @@ enum DisplayAudioDriverInstaller {
         "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// Copies the driver into a root-owned staging folder, checks that copy
-    /// (not the user-writable original) is Apple-signed by `team`, moves it
-    /// into place and restarts coreaudiod. Absolute tool paths throughout:
-    /// it runs as root.
+    /// Copies the driver into a staging folder only root can enter, checks
+    /// that copy (not the user-writable original) is Apple-signed by `team`,
+    /// moves it into place and restarts coreaudiod. The folder is made
+    /// root-only before anything is copied, so nothing running as the user
+    /// can reach the copy between the check and the move. Absolute tool paths
+    /// throughout: it runs as root.
     static func installCommand(source: URL, team: String) -> String {
         let requirement = "=anchor apple generic and identifier \""
             + DisplayAudioDriverProtocol.bundleID
             + "\" and certificate leaf[subject.OU] = \"\(team)\""
+        let stagingPath = shellQuoted(staging)
         let stagedPath = shellQuoted(staged)
         return [
             "set -e",
             "/bin/mkdir -p \(shellQuoted(halFolder))",
-            "/bin/rm -rf \(stagedPath)",
+            "/bin/rm -rf \(stagingPath)",
+            "/bin/mkdir -m 700 \(stagingPath)",
+            "/usr/sbin/chown root:wheel \(stagingPath)",
             "/usr/bin/ditto \(shellQuoted(source.path)) \(stagedPath)",
             "/usr/sbin/chown -R root:wheel \(stagedPath)",
             "/bin/chmod -R go-w \(stagedPath)",
             "/usr/bin/codesign --verify --strict -R \(shellQuoted(requirement)) \(stagedPath)"
-                + " || { /bin/rm -rf \(stagedPath); echo 'the driver is not signed by "
+                + " || { /bin/rm -rf \(stagingPath); echo 'the driver is not signed by "
                 + "this app'\\''s team' >&2; exit 3; }",
             "/bin/rm -rf \(shellQuoted(target))",
             "/bin/mv \(stagedPath) \(shellQuoted(target))",
+            "/bin/rmdir \(stagingPath)",
             "/usr/bin/killall coreaudiod || true",
         ].joined(separator: "; ")
     }

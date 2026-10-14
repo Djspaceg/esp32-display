@@ -5,6 +5,7 @@
 // exit. Run with: swift mac/AudioDriver/check-driver.swift
 import AudioToolbox
 import CoreAudio
+import CryptoKit
 import Foundation
 
 let bundleID = "com.espdisplay.audio-driver"
@@ -49,10 +50,15 @@ print("protocol version \(number)")
 
 // This run's secret: it owns the test device, and only it reads the device.
 let token = UUID().uuidString + UUID().uuidString
+// The UID macOS lists for a display an owner registered (protocol header).
+func deviceUID(_ uid: String, _ owner: String) -> String {
+    uid + "." + SHA256.hash(data: Data(owner.utf8)).prefix(8)
+        .map { String(format: "%02x", $0) }.joined()
+}
 func send(_ devices: [[String: Any]]) -> OSStatus {
     var registerAddress = address(register)
     let plist = [
-        "version": 2, "client": "check-driver.\(getpid())", "token": token,
+        "version": 3, "client": "check-driver.\(getpid())", "token": token,
         "devices": devices,
     ] as CFDictionary
     var reference = Unmanaged.passUnretained(plist).toOpaque()
@@ -69,7 +75,7 @@ defer { _ = send([]) }
 var device = AudioObjectID(kAudioObjectUnknown)
 for _ in 0..<50 where device == kAudioObjectUnknown {
     var uidAddress = address(kAudioHardwarePropertyTranslateUIDToDevice)
-    var uid = testUID as CFString
+    var uid = deviceUID(testUID, token) as CFString
     size = UInt32(MemoryLayout<AudioObjectID>.size)
     _ = withUnsafeMutablePointer(to: &uid) { qualifier in
         AudioObjectGetPropertyData(
@@ -166,7 +172,7 @@ guard anonymous != noErr, wrong != noErr else {
 let otherToken = UUID().uuidString + UUID().uuidString
 var otherAddress = address(register)
 let other = [
-    "version": 2, "client": "check-driver.other.\(getpid())", "token": otherToken,
+    "version": 3, "client": "check-driver.other.\(getpid())", "token": otherToken,
     "devices": [["uid": testUID, "name": "Taken over", "latency": 0]],
 ] as CFDictionary
 var otherReference = Unmanaged.passUnretained(other).toOpaque()
@@ -207,7 +213,7 @@ let mine = owns(token), theirs = owns(otherToken)
 print("second client: read status \(stolen), name \"\(name)\", "
     + "ESow mine \(String(describing: mine)) theirs \(String(describing: theirs))")
 let goodbye = [
-    "version": 2, "client": "check-driver.other.\(getpid())", "token": otherToken,
+    "version": 3, "client": "check-driver.other.\(getpid())", "token": otherToken,
     "devices": [[String: Any]](),
 ] as CFDictionary
 var goodbyeReference = Unmanaged.passUnretained(goodbye).toOpaque()

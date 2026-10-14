@@ -42,6 +42,8 @@ final class FakeDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Sendabl
 
     func deviceID(uid: String) -> AudioObjectID? { lock.withLock { ids[uid] } }
 
+    func deviceUID(for uid: String) -> String { uid }
+
     /// UIDs whose device another client claimed first.
     var claimedElsewhere: Set<String> = []
 
@@ -101,6 +103,7 @@ final class DisplayAudioDriverTests: XCTestCase {
         XCTAssertEqual(define("ESPDISP_AUDIO_MAX_DEVICES"), "\(P.maxDevices)")
         XCTAssertEqual(
             define("ESPDISP_AUDIO_CLIENT_TIMEOUT_SECONDS"), "\(Int(P.clientTimeoutSeconds))")
+        XCTAssertEqual(define("ESPDISP_AUDIO_UID_SUFFIX_BYTES"), "\(P.uidSuffixBytes)")
         XCTAssertEqual(define("ESPDISP_AUDIO_MIN_TOKEN_BYTES"), "\(P.minTokenBytes)")
         for (name, key) in [
             ("VERSION", P.Key.version), ("CLIENT", P.Key.client), ("TOKEN", P.Key.token),
@@ -116,7 +119,7 @@ final class DisplayAudioDriverTests: XCTestCase {
         let payload = DisplayAudioDriverRegistration.payload(
             client: "app.1", token: token,
             devices: [DisplayAudioDeviceSpec(uid: "u", name: "Desk", latencyFrames: 7_200)])
-        XCTAssertEqual(payload["version"] as? Int, 2)
+        XCTAssertEqual(payload["version"] as? Int, 3)
         XCTAssertEqual(payload["client"] as? String, "app.1")
         XCTAssertEqual(payload["token"] as? String, token)
         let devices = try XCTUnwrap(payload["devices"] as? [[String: Any]])

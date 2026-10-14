@@ -6,6 +6,59 @@ import XCTest
 /// state, and how a click, the macOS password prompt's answer and the driver
 /// appearing move it along. No test runs the privileged command.
 final class DisplayAudioDriverSetupTests: XCTestCase {
+    func testTheTokenIsReplacedOnlyWhenMissing() {
+        var saved: [String] = []
+        let found = DisplayAudioDriverToken.resolve(
+            .found("kept"), fresh: { "new" }, save: { saved.append($0) })
+        XCTAssertEqual(found, "kept")
+        XCTAssertEqual(saved, [])
+        let missing = DisplayAudioDriverToken.resolve(
+            .notFound, fresh: { "new" }, save: { saved.append($0) })
+        XCTAssertEqual(missing, "new")
+        XCTAssertEqual(saved, ["new"])
+        let locked = DisplayAudioDriverToken.resolve(
+            .unavailable, fresh: { "launch-only" }, save: { saved.append($0) })
+        XCTAssertEqual(locked, "launch-only")
+        XCTAssertEqual(saved, ["new"], "a Keychain that will not answer keeps what it has")
+    }
+
+    func testTheDeviceUIDCarriesTheOwnersSuffix() {
+        // SHA-256("abc") begins ba7816bf8f01cfea.
+        XCTAssertEqual(
+            DisplayAudioDriverProtocol.deviceUID(for: "u", token: "abc"),
+            "u.ba7816bf8f01cfea")
+    }
+
+    /// A click, its command, the prompt's answer and the driver going, with a
+    /// runner standing in for the prompt.
+    @MainActor
+    func testAClickRunsTheCommandAndFollowsTheDriver() async throws {
+        let manager = PanelManager(previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+        manager.macAudio.showForTesting(
+            driver: .ready,
+            setup: DisplayAudioDriverSetup(bundledDriver: true, signingTeam: "T"))
+        let ran = expectation(description: "the command ran")
+        var commands: [String] = []
+        manager.macAudio.runner = PrivilegedRunner(run: { command in
+            commands.append(command)
+            ran.fulfill()
+            return .succeeded
+        })
+        manager.runDisplayAudioDriverAction(.remove)
+        XCTAssertEqual(manager.displayAudioDriverRow?.status, "Removing…")
+        await fulfillment(of: [ran], timeout: 2)
+        for _ in 0..<20 where manager.displayAudioDriverRow?.status == "Removing…" {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(commands, [DisplayAudioDriverInstaller.removeCommand()])
+        XCTAssertTrue(
+            manager.displayAudioDriverRow?.status.contains("waiting for macOS") == true,
+            manager.displayAudioDriverRow?.status ?? "")
+        manager.macAudio.showForTesting(driver: .absent, setup: manager.macAudio.setup)
+        manager.macAudio.setup.observe(.absent, now: Date())
+        XCTAssertEqual(manager.displayAudioDriverRow?.button?.action, .install)
+    }
+
     private let start = Date(timeIntervalSince1970: 1_000)
     private func ready() -> DisplayAudioDriverSetup {
         DisplayAudioDriverSetup(bundledDriver: true, signingTeam: "YSHQQLS73U")
@@ -40,6 +93,9 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
             .presentation(availability: .absent)
         XCTAssertEqual(noDriver.button?.enabled, false)
         XCTAssertTrue(noDriver.button?.help?.contains("carries no audio driver") == true)
+        XCTAssertTrue(
+            noDriver.message?.contains("sudo mac/AudioDriver/install-driver.sh") == true,
+            "a build that cannot install still says how")
         let noTeam = DisplayAudioDriverSetup(bundledDriver: true, signingTeam: nil)
             .presentation(availability: .absent)
         XCTAssertEqual(noTeam.button?.enabled, false)
@@ -133,9 +189,13 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
             team: "YSHQQLS73U")
         XCTAssertTrue(command.contains(
             "/usr/bin/ditto '/Users/x/Applications/My App.app/Contents/Library/Audio/ESPDisplayAudio.driver' "
-                + "'/Library/Audio/Plug-Ins/HAL/.ESPDisplayAudio.driver.installing'"),
+                + "'/Library/Audio/Plug-Ins/HAL/.ESPDisplayAudio.installing/ESPDisplayAudio.driver'"),
             command)
         let ditto = command.range(of: "/usr/bin/ditto")!.lowerBound
+        let lockedDown = command.range(
+            of: "/bin/mkdir -m 700 '/Library/Audio/Plug-Ins/HAL/.ESPDisplayAudio.installing'")!
+            .lowerBound
+        XCTAssertLessThan(lockedDown, ditto, "the staging folder is root-only before the copy")
         let verify = command.range(of: "/usr/bin/codesign --verify")!.lowerBound
         let move = command.range(of: "/bin/mv")!.lowerBound
         XCTAssertLessThan(ditto, verify)
@@ -177,6 +237,17 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
 
     func testShellQuotingSurvivesQuotes() {
         XCTAssertEqual(DisplayAudioDriverInstaller.shellQuoted("a'b c"), "'a'\\''b c'")
+    }
+
+    /// The real AppleScript compiles, quotes and all. Compiling runs nothing.
+    func testTheAppleScriptCompiles() throws {
+        let command = DisplayAudioDriverInstaller.installCommand(
+            source: URL(fileURLWithPath: #"/Users/a"b\c/X.app/Contents/Library/Audio/ESPDisplayAudio.driver"#),
+            team: "YSHQQLS73U")
+        let script = try XCTUnwrap(
+            NSAppleScript(source: DisplayAudioDriverInstaller.appleScript(for: command)))
+        var error: NSDictionary?
+        XCTAssertTrue(script.compileAndReturnError(&error), "\(String(describing: error))")
     }
 
     func testTheAppleScriptEscapesTheCommand() {

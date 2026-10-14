@@ -12,7 +12,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SOURCE="$HERE/build/ESPDisplayAudio.driver"
 HAL="/Library/Audio/Plug-Ins/HAL"
 TARGET="$HAL/ESPDisplayAudio.driver"
-STAGED="$HAL/.ESPDisplayAudio.driver.installing"
+# Root-only (mode 700) before anything is copied in, so nothing running as
+# the user can touch the copy between its check and the move.
+STAGING="$HAL/.ESPDisplayAudio.installing"
+STAGED="$STAGING/ESPDisplayAudio.driver"
 BUNDLE_ID="com.espdisplay.audio-driver"
 PROJECT_FILE="$HERE/../ESPDisplaySender/ESPDisplaySender.xcodeproj/project.pbxproj"
 
@@ -59,13 +62,15 @@ fi
 # Everything is checked on the root-owned staged copy, not on build/, which
 # any process running as the user could swap between a check and the copy.
 mkdir -p "$HAL"
-rm -rf -- "$STAGED"
+rm -rf -- "$STAGING"
+mkdir -m 700 "$STAGING"
+chown root:wheel "$STAGING"
 ditto "$SOURCE" "$STAGED"
 chown -R root:wheel "$STAGED"
 chmod -R go-w "$STAGED"
 identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$STAGED/Contents/Info.plist")"
 if [[ "$identifier" != "$BUNDLE_ID" ]]; then
-  rm -rf -- "$STAGED"
+  rm -rf -- "$STAGING"
   echo "error: $SOURCE is $identifier, not $BUNDLE_ID" >&2
   exit 1
 fi
@@ -73,11 +78,12 @@ fi
 # signed: an ad-hoc signature would pass a plain --verify.
 requirement="=anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$TEAM\""
 if ! codesign --verify --strict -R "$requirement" "$STAGED"; then
-  rm -rf -- "$STAGED"
+  rm -rf -- "$STAGING"
   echo "error: $SOURCE is not signed by team $TEAM; rebuild it with $HERE/build-driver.sh" >&2
   exit 1
 fi
 rm -rf -- "$TARGET"
 mv -- "$STAGED" "$TARGET"
+rmdir "$STAGING"
 restart_coreaudiod
 echo "installed $TARGET and restarted coreaudiod"
