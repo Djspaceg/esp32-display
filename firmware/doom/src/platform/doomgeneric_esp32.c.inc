@@ -134,9 +134,14 @@ static uint32_t dg_fire_due_at = 0;
 // The PWR key holds Fire down for as long as it is held during play, so a
 // touch Fire pulse ending under it must not let go of Fire.
 static bool dg_power_key_available = false;
-static doom_power_key_t dg_power_key = {false};
+static doom_power_key_t dg_power_key = {false, false};
 static bool dg_power_fire_held = false;
 static bool dg_power_shot_pending = false;
+// Consecutive PMU reads that failed. Past the limit the key is taken to be up:
+// a bus that keeps refusing would otherwise leave Fire held with no release
+// ever to read.
+static int dg_power_read_failures = 0;
+#define POWER_KEY_READ_FAILURE_LIMIT 10
 
 // --- Touch -> aim/shoot/weapon mapping ---
 // Touch-down is the centre of a virtual joystick. Horizontal displacement past
@@ -440,7 +445,15 @@ static void process_power_key_input(void) {
     if (!gameplay) dg_power_shot_pending = false;
 
     doom_power_key_bits_t bits = {false, false, false, false};
-    if (doom_power_key_read(&bits)) {
+    if (!doom_power_key_read(&bits)) {
+        if (dg_power_read_failures < POWER_KEY_READ_FAILURE_LIMIT &&
+            ++dg_power_read_failures == POWER_KEY_READ_FAILURE_LIMIT &&
+            dg_power_key.held) {
+            doom_log("pwr key: PMU not answering; taking the key as up");
+            dg_power_key.held = false;
+        }
+    } else {
+        dg_power_read_failures = 0;
         const bool missed_press = doom_power_key_step(&dg_power_key, bits);
         if (bits.down || bits.up || bits.short_press || bits.long_press) {
             // The raw bits as well as the outcome: the edge polarity is read
