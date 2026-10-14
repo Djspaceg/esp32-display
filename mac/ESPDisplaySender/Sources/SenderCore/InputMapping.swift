@@ -288,12 +288,20 @@ extension PanelSnapshot {
     /// carrier) given to one of this Mac's functions is counted out on the
     /// board, because a second press would not undo it the way it undoes
     /// mute or the status screen.
+    ///
+    /// Which input is the single comes from the report (a knob carrier has
+    /// the knob's click and no BOOT single), and flag bits a newer board
+    /// sent are kept as it has them.
     var boardFlags: UInt8 {
-        let single: DeviceProtocol.TouchGesture = hasKnob ? .knobPress : .bootSinglePress
+        let unknownBits = (inputReport?.flags ?? 0) & ~DeviceProtocol.inputMapFlagCountPresses
+        let knobCarrier = inputReport.map {
+            $0.inputs.contains(.knobPress) && !$0.inputs.contains(.bootSinglePress)
+        } ?? hasKnob
+        let single: DeviceProtocol.TouchGesture = knobCarrier ? .knobPress : .bootSinglePress
         if case .mac = inputAssignments[single] {
-            return DeviceProtocol.inputMapFlagCountPresses
+            return unknownBits | DeviceProtocol.inputMapFlagCountPresses
         }
-        return 0
+        return unknownBits
     }
 
     /// Whether the board is running the map this app wants it to, for this

@@ -28,9 +28,10 @@ uint8_t highestBoundBootTier();
 // packet that is not a valid map, which is then ignored.
 bool offerInputMap(const uint8_t *data, size_t len);
 
-// loop(): applies a map the network task took, saving it if it changed.
-// Returns false only when a changed map could not be saved.
-bool applyPendingInputMap();
+// loop(): applies a map the network task took at once, and saves a changed
+// map at most every 30 s (or now with `saveNow`). Returns false only when a
+// save it attempted failed.
+bool applyPendingInputMap(bool saveNow = false);
 
 // EINP to the sender: sent after each EINF. `powerKey`: this board's PWR key
 // can be read (an AXP2101 that answered at boot).

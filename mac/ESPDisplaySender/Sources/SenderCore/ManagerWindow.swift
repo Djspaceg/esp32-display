@@ -1232,6 +1232,11 @@ struct PanelDetailView: View {
                     + "keep their own jobs and only gestures can be assigned, to "
                     + "this Mac's functions. Update the firmware to assign the rest."
         }
+        if panel.inputReport != nil, !panel.boardMapIsNameable {
+            return "This panel's firmware is newer than this app and uses "
+                + "assignments it cannot name, so changes here are not sent. "
+                + "Update the app to change this panel's assignments."
+        }
         if panel.inputReport != nil, !panel.boardMapIsCurrent {
             return panel.isOnline
                 ? "Sending these assignments to the panel\u{2026}"

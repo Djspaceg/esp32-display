@@ -20,6 +20,14 @@ static uint32_t mapSenderIp = 0;
 static uint16_t mapSenderPort = 0;
 static portMUX_TYPE inputMapMux = portMUX_INITIALIZER_UNLOCKED;
 
+// A changed map is used at once but saved at most this often: two senders
+// each driving the board with their own map would otherwise write NVS on
+// every switch between them. The first change after boot saves at once.
+static const uint32_t INPUT_MAP_SAVE_INTERVAL_MS = 30000;
+static bool mapNeedsSave = false;
+static bool mapSavedSinceBoot = false;
+static uint32_t lastMapSaveAt = 0;
+
 static const char INPUT_MAP_KEY[] = "inmap";
 // Inputs 1..INPUT_COUNT, then the map's flags.
 static const size_t INPUT_MAP_RECORD_BYTES = deviceproto::INPUT_COUNT + 1;
@@ -39,6 +47,8 @@ void loadInputMap() {
   defaultMap = deviceproto::defaultInputMap(
       boardHasKnob(), bootMenuMayOfferGames(), boardHasScreens());
   activeMap = defaultMap;
+  mapNeedsSave = false;
+  mapSavedSinceBoot = false;
   Preferences prefs;
   if (prefs.begin("espdisp", true /* read-only */)) {
     uint8_t stored[INPUT_MAP_RECORD_BYTES];
@@ -64,6 +74,8 @@ void loadInputMap() {
 }
 
 static bool storedMapInForce() {
+  // A board on its defaults runs them for everyone; nothing to confirm.
+  if (memcmp(&activeMap, &defaultMap, sizeof(activeMap)) == 0) return true;
   const uint16_t port = hbPort;
   if (port == 0) return true;
   const uint32_t ip = hbIp;
@@ -118,15 +130,10 @@ bool offerInputMap(const uint8_t *data, size_t len) {
 
 // The sender repeats EMAP until EINP shows it applied, and only while the two
 // differ, so a write here happens once per real change.
-bool applyPendingInputMap() {
-  deviceproto::InputMap next;
-  portENTER_CRITICAL(&inputMapMux);
-  const bool ready = pendingMapReady;
-  pendingMapReady = false;
-  if (ready) next = pendingMap;
-  portEXIT_CRITICAL(&inputMapMux);
-  if (!ready || memcmp(&next, &activeMap, sizeof(next)) == 0) return true;
-  activeMap = next;
+static bool saveInputMap() {
+  mapNeedsSave = false;
+  mapSavedSinceBoot = true;
+  lastMapSaveAt = millis();
   Preferences prefs;
   bool saved = false;
   if (prefs.begin("espdisp", false)) {
@@ -144,11 +151,34 @@ bool applyPendingInputMap() {
     }
     prefs.end();
   }
-  char line[64];
-  formatInputMap(line, sizeof(line));
-  Serial.printf("input map: %s flags=%u from sender (%s)\n", line,
-                (unsigned)activeMap.flags, saved ? "saved" : "NOT saved");
+  if (!saved) mapNeedsSave = true;  // tried again after the interval
+  Serial.printf("input map: %s\n", saved ? "saved" : "NOT saved");
   return saved;
+}
+
+// The sender repeats EMAP until EINP shows it applied, and only while the two
+// differ or the map is not yet in force for it, so a change is rare.
+bool applyPendingInputMap(bool saveNow) {
+  deviceproto::InputMap next;
+  portENTER_CRITICAL(&inputMapMux);
+  const bool ready = pendingMapReady;
+  pendingMapReady = false;
+  if (ready) next = pendingMap;
+  portEXIT_CRITICAL(&inputMapMux);
+  if (ready && memcmp(&next, &activeMap, sizeof(next)) != 0) {
+    activeMap = next;
+    mapNeedsSave = true;
+    char line[64];
+    formatInputMap(line, sizeof(line));
+    Serial.printf("input map: %s flags=%u from sender\n", line,
+                  (unsigned)activeMap.flags);
+  }
+  if (!mapNeedsSave) return true;
+  if (saveNow || !mapSavedSinceBoot ||
+      millis() - lastMapSaveAt >= INPUT_MAP_SAVE_INTERVAL_MS) {
+    return saveInputMap();
+  }
+  return true;
 }
 
 void sendInputReport(bool powerKey) {

@@ -885,7 +885,7 @@ static void processConfigLine(char *line) {
           (unsigned)deviceproto::INPUT_COUNT,
           (unsigned)deviceproto::INPUT_FUNCTION_LAST);
     } else {
-      const bool saved = applyPendingInputMap();
+      const bool saved = applyPendingInputMap(true);
       char text[deviceproto::INPUT_COUNT + 1];
       formatInputMap(text, sizeof(text));
       if (saved) {

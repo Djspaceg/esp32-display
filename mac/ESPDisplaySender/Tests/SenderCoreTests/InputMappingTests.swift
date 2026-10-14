@@ -185,6 +185,17 @@ final class InputMappingTests: XCTestCase {
         XCTAssertEqual(panel.boardFlags, DeviceProtocol.inputMapFlagCountPresses)
         XCTAssertEqual(panel.boardCodes[.knobPress], .sender)
         XCTAssertFalse(panel.boardMapIsCurrent)
+        // Known from the report even before the profile names a knob.
+        panel.profile = nil
+        XCTAssertEqual(panel.boardFlags, DeviceProtocol.inputMapFlagCountPresses)
+        // A newer board's flag bits are sent back as it has them.
+        let report = panel.inputReport!
+        panel.inputReport = DeviceProtocol.InputReport(
+            inputs: report.inputs, functions: report.functions,
+            current: [1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 0, 0],
+            defaults: [1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 0, 0], flags: 0x81)
+        XCTAssertEqual(panel.boardFlags, 0x81)
+        XCTAssertTrue(panel.boardMapIsCurrent)
     }
 
     /// An input missing from this boot's report (touch that did not start)

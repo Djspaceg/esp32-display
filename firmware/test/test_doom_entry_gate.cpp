@@ -2530,6 +2530,15 @@ static int mapSurvivesARestartAndCanBeReset() {
   CHECK(setInputMap({}));
   CHECK(inputFunctionFor(2) == 1);
   CHECK(fakeNvsBytes.count("inmap") == 0);
+  // A second change soon after is used at once but saved only once the
+  // save interval has passed, so two senders trading maps cannot wear NVS.
+  CHECK(setInputMap({0, 6}));
+  CHECK(inputFunctionFor(2) == 6);
+  CHECK(fakeNvsBytes.count("inmap") == 0);
+  fakeNow += 31000;
+  CHECK(applyPendingInputMap());
+  CHECK(fakeNvsBytes.count("inmap") == 1);
+  CHECK(fakeNvsBytes["inmap"].size() == 17);
   return 0;
 }
 
