@@ -129,6 +129,18 @@ bool panelLandscape = false;
 bandproto::Geometry PANEL_GEOMETRY = {0, 0};
 static esp_reset_reason_t fakeResetReason = ESP_RST_POWERON;
 esp_reset_reason_t esp_reset_reason(void) { return fakeResetReason; }
+static std::vector<shutdown_handler_t> shutdownHandlers;
+esp_err_t esp_register_shutdown_handler(shutdown_handler_t handler) {
+  for (shutdown_handler_t known : shutdownHandlers) {
+    if (known == handler) return 1;  // ESP_ERR_INVALID_STATE, as the SDK
+  }
+  shutdownHandlers.push_back(handler);
+  return 0;
+}
+// What esp_restart() does before the chip resets.
+static void runShutdownHandlers() {
+  for (shutdown_handler_t handler : shutdownHandlers) handler();
+}
 
 bool blIsHigh() { return userBlLevel == BL_HIGH; }
 static int backlightApplies = 0;
@@ -2530,15 +2542,48 @@ static int mapSurvivesARestartAndCanBeReset() {
   CHECK(setInputMap({}));
   CHECK(inputFunctionFor(2) == 1);
   CHECK(fakeNvsBytes.count("inmap") == 0);
-  // A second change soon after is used at once but saved only once the
-  // save interval has passed, so two senders trading maps cannot wear NVS.
+  // The newest map from the same sender is saved at once, however soon it
+  // follows the last one, so a restart never brings back an older map.
   CHECK(setInputMap({0, 6}));
   CHECK(inputFunctionFor(2) == 6);
-  CHECK(fakeNvsBytes.count("inmap") == 0);
-  fakeNow += 31000;
-  CHECK(applyPendingInputMap());
   CHECK(fakeNvsBytes.count("inmap") == 1);
   CHECK(fakeNvsBytes["inmap"].size() == 17);
+  CHECK(fakeNvsBytes["inmap"][1] == 6);
+  CHECK(setInputMap({0, 5}));
+  CHECK(fakeNvsBytes["inmap"][1] == 5);
+  loadInputMap();
+  CHECK(inputFunctionFor(2) == 5);
+
+  // Two senders trading maps: used at once, but saved at most every 30 s so
+  // they cannot wear NVS. A deliberate restart in that window still saves
+  // the newest one first (esp_restart() runs the shutdown handler).
+  fakeNow += 31000;
+  hbPort = 50000;
+  hbIp = 0x0108A8C0;
+  CHECK(setInputMap({0, 6}));
+  CHECK(fakeNvsBytes["inmap"][1] == 6);  // past the interval: at once
+  hbIp = 0x0208A8C0;
+  CHECK(setInputMap({0, 4}));
+  CHECK(inputFunctionFor(2) == 4);
+  CHECK(fakeNvsBytes["inmap"][1] == 6);  // alternating: held back
+  runShutdownHandlers();
+  CHECK(fakeNvsBytes["inmap"][1] == 4);
+  loadInputMap();
+  hbPort = 0;
+  CHECK(inputFunctionFor(2) == 4);
+  // ...and without a restart it lands once the interval has passed.
+  fakeNow += 31000;
+  hbPort = 50000;
+  hbIp = 0x0108A8C0;
+  CHECK(setInputMap({0, 6}));
+  hbIp = 0x0208A8C0;
+  CHECK(setInputMap({0, 3}));
+  CHECK(fakeNvsBytes["inmap"][1] == 6);
+  fakeNow += 31000;
+  CHECK(applyPendingInputMap());
+  CHECK(fakeNvsBytes["inmap"][1] == 3);
+  hbPort = 0;
+  hbIp = 0;
   return 0;
 }
 

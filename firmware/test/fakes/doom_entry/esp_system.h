@@ -17,3 +17,9 @@ typedef enum {
 } esp_reset_reason_t;
 
 esp_reset_reason_t esp_reset_reason(void);
+
+// esp_restart() runs these first. The fake keeps them so a test can play a
+// deliberate restart.
+typedef int esp_err_t;
+typedef void (*shutdown_handler_t)(void);
+esp_err_t esp_register_shutdown_handler(shutdown_handler_t handler);
