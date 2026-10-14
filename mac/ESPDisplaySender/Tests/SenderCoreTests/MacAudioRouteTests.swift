@@ -274,6 +274,56 @@ final class MacAudioRouteTests: XCTestCase {
         XCTAssertEqual(system.defaultUID, MacAudioRoutePlan.displaysUID)
     }
 
+    /// Headphones unplugged while mirroring through them: the Multi-Output
+    /// device is rebuilt on the Mac's own output rather than left clocked by
+    /// a device that is gone.
+    func testMirrorIsRebuiltWhenItsMacOutputGoesAway() {
+        let driver = FakeDisplayAudioDriver()
+        let system = FakeMacOutputSystem(
+            devices: [speakers, headphones], defaultUID: headphones.uid)
+        system.show([desk])
+        let router = MacAudioRouter(bridge: driver, system: system)
+        router.update(route: .mirror, displays: [desk])
+        XCTAssertEqual(system.created.last?.main, headphones.uid)
+        system.devices.removeAll { $0.uid == headphones.uid }
+        router.update(route: .mirror, displays: [desk])
+        XCTAssertEqual(system.created.count, 2)
+        XCTAssertEqual(system.created.last?.main, speakers.uid)
+        XCTAssertEqual(system.created.last?.members, [speakers.uid, desk.uid])
+        XCTAssertEqual(system.defaultUID, MacAudioRoutePlan.mirrorUID)
+    }
+
+    /// An output picked outside the app is left alone, and the route says
+    /// where the sound went and how to send it back.
+    func testAnOutputPickedElsewhereIsNotedNotOverruled() {
+        let driver = FakeDisplayAudioDriver()
+        let system = FakeMacOutputSystem(
+            devices: [speakers, headphones], defaultUID: speakers.uid)
+        system.show([desk])
+        let router = MacAudioRouter(bridge: driver, system: system)
+        XCTAssertNil(router.update(route: .displaysOnly, displays: [desk]).note)
+        system.defaultUID = headphones.uid
+        let plan = router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertEqual(system.defaultUID, headphones.uid)
+        XCTAssertTrue(plan.note?.contains("\"Headphones\"") == true, plan.note ?? "")
+        XCTAssertTrue(plan.note?.contains("\"Desk\"") == true, plan.note ?? "")
+        system.defaultUID = desk.uid
+        XCTAssertNil(router.update(route: .displaysOnly, displays: [desk]).note)
+    }
+
+    /// A Mac with no output of its own while one of ours is the default: the
+    /// copy settles there instead of failing every pass.
+    func testRestoreWithNoMacOutputSettles() {
+        let driver = FakeDisplayAudioDriver()
+        let system = FakeMacOutputSystem(devices: [], defaultUID: desk.uid)
+        system.show([desk])
+        let router = MacAudioRouter(bridge: driver, system: system)
+        router.update(route: .copy, displays: [])
+        router.update(route: .copy, displays: [])
+        XCTAssertNil(router.macOutputUID)
+        XCTAssertEqual(system.defaultChanges, [])
+    }
+
     func testGoingBackToTheCopyRestoresTheMacsOutputAndRemovesOurDevices() {
         let driver = FakeDisplayAudioDriver()
         let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
@@ -334,8 +384,15 @@ final class MacAudioRouteTests: XCTestCase {
         let devices = ["espdisp-desk": desk]
         downlinks.update(effective: .displaysOnly, identities: devices)
         let device = downlinks.source(for: "espdisp-desk")
-        XCTAssertTrue(device.key.hasPrefix("device|\(desk.uid)|"))
+        XCTAssertTrue(device.key.hasPrefix("device|\(desk.uid)#absent|"), device.key)
         XCTAssertEqual(device.sourceName, "Mac output \"Desk\"")
+        // A device the driver made again is a new source, so the session
+        // reopens it rather than reading a dead object.
+        downlinks.update(
+            effective: .displaysOnly, identities: devices, deviceIDs: [desk.uid: 300])
+        let remade = downlinks.source(for: "espdisp-desk")
+        XCTAssertNotEqual(remade.key, device.key)
+        XCTAssertEqual(remade.key, downlinks.source(for: "espdisp-desk").key)
         // A display not known yet gets silence, never the tap and its prompt.
         let pending = downlinks.source(for: "unknown")
         XCTAssertTrue(pending.key.hasPrefix("device|pending|"), pending.key)

@@ -1,3 +1,4 @@
+import CoreAudio
 import Foundation
 import SenderProtocol
 
@@ -12,15 +13,23 @@ final class PanelAudioDownlinks: @unchecked Sendable {
     /// Every display record, not only the ones with a device yet, so a
     /// session built before the next pass still gets its own device.
     private var identities: [String: DisplayAudioDeviceSpec] = [:]
+    /// Each display device's current object ID. Part of a source's key, so a
+    /// device the driver made again reopens the session on the new one.
+    private var deviceIDs: [String: AudioObjectID] = [:]
 
     init(bridge: DisplayAudioDriverBridge) {
         self.bridge = bridge
     }
 
-    func update(effective: MacAudioRoute, identities: [String: DisplayAudioDeviceSpec]) {
+    func update(
+        effective: MacAudioRoute,
+        identities: [String: DisplayAudioDeviceSpec],
+        deviceIDs: [String: AudioObjectID] = [:]
+    ) {
         lock.withLock {
             self.effective = effective
             self.identities = identities
+            self.deviceIDs = deviceIDs
         }
     }
 
@@ -42,10 +51,11 @@ final class PanelAudioDownlinks: @unchecked Sendable {
             }
             let bridge = bridge
             let uid = device.uid
+            let id = deviceIDs[uid].map(String.init) ?? "absent"
             return .displayDevice(
                 name: device.name, route: effective,
                 capture: .displayDevice(uid: uid, bridge: bridge),
-                identity: uid,
+                identity: uid + "#" + id,
                 deviceProbe: { bridge.deviceID(uid: uid).map(String.init) })
         }
     }
@@ -104,7 +114,9 @@ final class MacAudioRouting {
             route: route,
             displays: devices.keys.sorted().compactMap { devices[$0] })
         self.plan = plan
-        downlinks.update(effective: plan.effective, identities: identities)
+        downlinks.update(
+            effective: plan.effective, identities: identities,
+            deviceIDs: router.presentDevices)
     }
 }
 

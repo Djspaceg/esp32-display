@@ -164,6 +164,12 @@ final class MacAudioRouter {
     /// What the default output was last set for. Nil until set, or after a
     /// change that did not take, so the next pass tries again.
     private var applied: Trigger?
+    /// What the last change that took was for, and the device it made the
+    /// default (nil when it gave the Mac its own output back).
+    private var appliedTarget: MacAudioRouteTarget?
+    private var appliedDefaultUID: String?
+    /// The display devices present at the last pass, by UID.
+    private(set) var presentDevices: [String: AudioObjectID] = [:]
     /// The members each Multi-Output device of ours was built with, so one
     /// that already matches is reused rather than rebuilt.
     private var built: [String: [String]] = [:]
@@ -206,11 +212,52 @@ final class MacAudioRouter {
             driver: route.usesDriver ? availability : .ready,
             presentDisplayUIDs: displays.map(\.uid).filter { present[$0] != nil },
             macOutputUID: macOutputUID)
+        presentDevices = present
+        // A Multi-Output device whose clock output went away (headphones
+        // unplugged while mirroring) is rebuilt on the Mac's output now.
+        if case .multiOutput(_, _, let mainUID, _)? = appliedTarget,
+           !outputs.contains(where: { $0.uid == mainUID }) {
+            applied = nil
+        }
         let trigger = Trigger(chosen: route, effective: plan.effective, devices: present)
         if trigger != applied {
-            applied = apply(plan.target, outputs: outputs) ? trigger : nil
+            if apply(plan.target, outputs: outputs) {
+                applied = trigger
+                appliedTarget = plan.target
+                appliedDefaultUID = Self.defaultUID(of: plan.target)
+            } else {
+                applied = nil
+            }
         }
-        return plan
+        return noteAnOutputPickedElsewhere(plan, outputs: outputs)
+    }
+
+    private static func defaultUID(of target: MacAudioRouteTarget) -> String? {
+        switch target {
+        case .restore: return nil
+        case .device(let uid): return uid
+        case .multiOutput(let uid, _, _, _): return uid
+        }
+    }
+
+    /// The route's own change stands until something changes, so an output
+    /// picked in Sound settings, or one macOS switched to by itself (AirPods
+    /// connecting), is left alone; the note says so and how to go back.
+    private func noteAnOutputPickedElsewhere(
+        _ plan: MacAudioRoutePlan, outputs: [MacOutputDevice]
+    ) -> MacAudioRoutePlan {
+        guard plan.note == nil, plan.effective.usesDriver,
+              let wanted = appliedDefaultUID, wanted == Self.defaultUID(of: plan.target),
+              let current = system.defaultOutputUID(), current != wanted
+        else { return plan }
+        func name(_ uid: String) -> String {
+            outputs.first(where: { $0.uid == uid })?.name ?? uid
+        }
+        return MacAudioRoutePlan(
+            chosen: plan.chosen, effective: plan.effective, target: plan.target,
+            note: "This Mac now plays through \"\(name(current))\", picked outside "
+                + "this app. To send its sound to the displays again, choose "
+                + "\"\(name(wanted))\" in Sound settings.")
     }
 
     /// Put the Mac's own output back and remove every device of ours. Called
@@ -243,12 +290,14 @@ final class MacAudioRouter {
             .filter { uid in outputs.contains { $0.uid == uid } }
         switch target {
         case .restore:
-            if let current = system.defaultOutputUID(), MacAudioRoutePlan.isOurs(uid: current) {
-                guard let macOutputUID, system.setDefaultOutput(uid: macOutputUID) else {
-                    return false
-                }
+            // With no output of the Mac's own to go back to there is nothing
+            // better than staying put, so that settles rather than retrying.
+            if let current = system.defaultOutputUID(), MacAudioRoutePlan.isOurs(uid: current),
+               let macOutputUID {
+                guard system.setDefaultOutput(uid: macOutputUID) else { return false }
             }
-            return removeAggregates(aggregates, keeping: nil)
+            _ = removeAggregates(aggregates, keeping: nil)
+            return true
         case .device(let uid):
             guard system.setDefaultOutput(uid: uid) else { return false }
             return removeAggregates(aggregates, keeping: nil)

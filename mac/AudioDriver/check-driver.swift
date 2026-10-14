@@ -47,10 +47,13 @@ guard AudioObjectGetPropertyData(plugIn, &versionAddress, 0, nil, &size, &versio
 else { fail("the protocol version did not read") }
 print("protocol version \(number)")
 
+// This run's secret: it owns the test device, and only it reads the device.
+let token = UUID().uuidString + UUID().uuidString
 func send(_ devices: [[String: Any]]) -> OSStatus {
     var registerAddress = address(register)
     let plist = [
-        "version": 1, "client": "check-driver.\(getpid())", "devices": devices,
+        "version": 2, "client": "check-driver.\(getpid())", "token": token,
+        "devices": devices,
     ] as CFDictionary
     var reference = Unmanaged.passUnretained(plist).toOpaque()
     return withExtendedLifetime(plist) {
@@ -78,14 +81,24 @@ for _ in 0..<50 where device == kAudioObjectUnknown {
 guard device != kAudioObjectUnknown else { fail("the test device never appeared") }
 print("test device \(device) appeared")
 
-func readPCM() -> [Float] {
+func readPCM(as reader: String? = token) -> (OSStatus, [Float]) {
     var pcmAddress = address(pcm)
     var value: Unmanaged<CFPropertyList>?
     var size = UInt32(MemoryLayout<CFPropertyList>.size)
-    guard AudioObjectGetPropertyData(device, &pcmAddress, 0, nil, &size, &value) == noErr,
-          let data = value?.takeRetainedValue() as? Data
-    else { return [] }
-    return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    var status: OSStatus
+    if let reader {
+        var qualifier = reader as CFString
+        status = withUnsafeMutablePointer(to: &qualifier) {
+            AudioObjectGetPropertyData(
+                device, &pcmAddress, UInt32(MemoryLayout<CFString>.size), $0, &size, &value)
+        }
+    } else {
+        status = AudioObjectGetPropertyData(device, &pcmAddress, 0, nil, &size, &value)
+    }
+    guard status == noErr, let data = value?.takeRetainedValue() as? Data else {
+        return (status, [])
+    }
+    return (status, data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) })
 }
 
 // A tone at -20 dBFS, played through an output unit pinned to the test device.
@@ -137,8 +150,15 @@ _ = readPCM()
 var samples = [Float]()
 let deadline = Date().addingTimeInterval(1)
 while Date() < deadline {
-    samples += readPCM()
+    samples += readPCM().1
     Thread.sleep(forTimeInterval: 0.01)
+}
+// The read is private to the token that registered the device.
+let (anonymous, _) = readPCM(as: nil)
+let (wrong, _) = readPCM(as: UUID().uuidString + UUID().uuidString)
+print("read without a token: status \(anonymous); with another token: status \(wrong)")
+guard anonymous != noErr, wrong != noErr else {
+    fail("the device's audio could be read without its owner's token")
 }
 AudioOutputUnitStop(unit)
 AudioComponentInstanceDispose(unit)

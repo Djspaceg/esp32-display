@@ -86,8 +86,9 @@ final class DisplayAudioDriverTests: XCTestCase {
         XCTAssertEqual(define("ESPDISP_AUDIO_MAX_DEVICES"), "\(P.maxDevices)")
         XCTAssertEqual(
             define("ESPDISP_AUDIO_CLIENT_TIMEOUT_SECONDS"), "\(Int(P.clientTimeoutSeconds))")
+        XCTAssertEqual(define("ESPDISP_AUDIO_MIN_TOKEN_BYTES"), "\(P.minTokenBytes)")
         for (name, key) in [
-            ("VERSION", P.Key.version), ("CLIENT", P.Key.client),
+            ("VERSION", P.Key.version), ("CLIENT", P.Key.client), ("TOKEN", P.Key.token),
             ("DEVICES", P.Key.devices), ("UID", P.Key.uid), ("NAME", P.Key.name),
             ("LATENCY", P.Key.latency),
         ] {
@@ -96,11 +97,13 @@ final class DisplayAudioDriverTests: XCTestCase {
     }
 
     func testRegistrationPayloadIsWhatTheDriverParses() throws {
+        let token = String(repeating: "t", count: 32)
         let payload = DisplayAudioDriverRegistration.payload(
-            client: "app.1",
+            client: "app.1", token: token,
             devices: [DisplayAudioDeviceSpec(uid: "u", name: "Desk", latencyFrames: 7_200)])
-        XCTAssertEqual(payload["version"] as? Int, 1)
+        XCTAssertEqual(payload["version"] as? Int, 2)
         XCTAssertEqual(payload["client"] as? String, "app.1")
+        XCTAssertEqual(payload["token"] as? String, token)
         let devices = try XCTUnwrap(payload["devices"] as? [[String: Any]])
         XCTAssertEqual(devices.count, 1)
         XCTAssertEqual(devices[0]["uid"] as? String, "u")

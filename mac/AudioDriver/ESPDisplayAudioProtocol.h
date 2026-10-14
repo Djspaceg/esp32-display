@@ -8,7 +8,7 @@
 #ifndef ESPDISPLAY_AUDIO_PROTOCOL_H
 #define ESPDISPLAY_AUDIO_PROTOCOL_H
 
-#define ESPDISP_AUDIO_PROTOCOL_VERSION 1
+#define ESPDISP_AUDIO_PROTOCOL_VERSION 2
 
 // The bundle identifier the app looks the plug-in up by.
 #define ESPDISP_AUDIO_BUNDLE_ID "com.espdisplay.audio-driver"
@@ -17,19 +17,24 @@
 // Plug-in object, settable CFDictionary: which displays this client wants a
 // device for. Sent again at least every few seconds as a heartbeat; an empty
 // device list removes the client at once.
-//   { "version": 1, "client": "<id>",
+//   { "version": 2, "client": "<name>", "token": "<secret>",
 //     "devices": [ { "uid": "...", "name": "...", "latency": <frames> } ] }
+// The token is a per-launch secret of at least ESPDISP_AUDIO_MIN_TOKEN_BYTES
+// characters. It is the client's identity: the first live client to list a
+// UID owns that device, and only its token reads the device's audio.
 // Reading it returns { "devices": [ "<uid>", ... ] } for the devices that exist.
 #define ESPDISP_AUDIO_SELECTOR_REGISTER 'ESrg'
 // Plug-in object, read-only CFNumber: ESPDISP_AUDIO_PROTOCOL_VERSION.
 #define ESPDISP_AUDIO_SELECTOR_VERSION 'ESvr'
-// Device object, read-only CFData: every frame mixed for the device since the
+// Device object, read-only CFData, qualified by the owner's token as a
+// CFString (refused otherwise): every frame mixed for the device since the
 // previous read, at most ESPDISP_AUDIO_MAX_READ_FRAMES of the newest, as
 // interleaved stereo native-endian Float32 at ESPDISP_AUDIO_SAMPLE_RATE.
 #define ESPDISP_AUDIO_SELECTOR_PCM 'ESpc'
 
 #define ESPDISP_AUDIO_KEY_VERSION "version"
 #define ESPDISP_AUDIO_KEY_CLIENT "client"
+#define ESPDISP_AUDIO_KEY_TOKEN "token"
 #define ESPDISP_AUDIO_KEY_DEVICES "devices"
 #define ESPDISP_AUDIO_KEY_UID "uid"
 #define ESPDISP_AUDIO_KEY_NAME "name"
@@ -39,5 +44,6 @@
 #define ESPDISP_AUDIO_MAX_READ_FRAMES 4800
 #define ESPDISP_AUDIO_MAX_DEVICES 8
 #define ESPDISP_AUDIO_CLIENT_TIMEOUT_SECONDS 10
+#define ESPDISP_AUDIO_MIN_TOKEN_BYTES 32
 
 #endif

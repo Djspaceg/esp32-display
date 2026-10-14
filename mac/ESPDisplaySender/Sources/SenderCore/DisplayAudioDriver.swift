@@ -7,7 +7,7 @@ import SenderProtocol
 /// mac/AudioDriver/ESPDisplayAudioProtocol.h. A test reads that header and
 /// fails if the two disagree.
 enum DisplayAudioDriverProtocol {
-    static let version = 1
+    static let version = 2
     static let bundleID = "com.espdisplay.audio-driver"
     static let registerSelector = fourCharCode("ESrg")
     static let versionSelector = fourCharCode("ESvr")
@@ -16,10 +16,12 @@ enum DisplayAudioDriverProtocol {
     static let maxReadFrames = 4_800
     static let maxDevices = 8
     static let clientTimeoutSeconds = 10.0
+    static let minTokenBytes = 32
 
     enum Key {
         static let version = "version"
         static let client = "client"
+        static let token = "token"
         static let devices = "devices"
         static let uid = "uid"
         static let name = "name"
@@ -58,11 +60,15 @@ struct DisplayAudioDeviceSpec: Equatable, Sendable {
 
 enum DisplayAudioDriverRegistration {
     /// The 'ESrg' dictionary. An empty list removes this client's devices.
-    static func payload(client: String, devices: [DisplayAudioDeviceSpec]) -> [String: Any] {
+    /// `token` is this launch's secret: it owns the devices and reads them.
+    static func payload(
+        client: String, token: String, devices: [DisplayAudioDeviceSpec]
+    ) -> [String: Any] {
         typealias Key = DisplayAudioDriverProtocol.Key
         return [
             Key.version: DisplayAudioDriverProtocol.version,
             Key.client: client,
+            Key.token: token,
             Key.devices: devices.prefix(DisplayAudioDriverProtocol.maxDevices).map {
                 [Key.uid: $0.uid, Key.name: $0.name, Key.latency: $0.latencyFrames]
             },
@@ -98,6 +104,9 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
     /// The process ID alone would be reused by a later launch; the start time
     /// makes a restarted app a new client, so the old one simply expires.
     private let clientID = "ESPDisplaySender.\(getpid()).\(UInt64(Date().timeIntervalSince1970))"
+    /// Never leaves this process except to the driver: it is what lets only
+    /// this app read the audio the Mac sends to its displays' devices.
+    private let token = UUID().uuidString + UUID().uuidString
 
     func availability() -> DisplayAudioDriverAvailability {
         guard let plugIn = plugInID() else { return .absent }
@@ -115,7 +124,7 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
         guard let plugIn = plugInID() else { return false }
         var address = Self.address(DisplayAudioDriverProtocol.registerSelector)
         let plist = DisplayAudioDriverRegistration.payload(
-            client: clientID, devices: devices) as CFDictionary
+            client: clientID, token: token, devices: devices) as CFDictionary
         // The property's data is the CFPropertyListRef itself: one pointer.
         var reference = Unmanaged.passUnretained(plist).toOpaque()
         return withExtendedLifetime(plist) {
@@ -143,8 +152,12 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
         var address = Self.address(DisplayAudioDriverProtocol.pcmSelector)
         var value: Unmanaged<CFPropertyList>?
         var size = UInt32(MemoryLayout<CFPropertyList>.size)
-        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr
-        else { return nil }
+        var qualifier = token as CFString
+        let status = withUnsafeMutablePointer(to: &qualifier) {
+            AudioObjectGetPropertyData(
+                device, &address, UInt32(MemoryLayout<CFString>.size), $0, &size, &value)
+        }
+        guard status == noErr else { return nil }
         return value?.takeRetainedValue() as? Data
     }
 

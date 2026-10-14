@@ -30,8 +30,8 @@ static int gFailures = 0;
     } while (0)
 
 static AudioServerPlugInDriverRef gDriver;
-// The process the calls below come from, as the HAL reports it.
-static pid_t gPid = 501;
+// The secret the calls below are made with, as each client's own.
+static const char* gToken = "app-token-0123456789abcdef0123456789";
 
 #pragma mark - Fake host
 
@@ -115,7 +115,7 @@ static OSStatus Get(AudioObjectID object, AudioObjectPropertySelector selector,
     AudioObjectPropertyAddress address = Address(selector, scope);
     UInt32 written = 0;
     OSStatus status = (*gDriver)->GetPropertyData(
-        gDriver, object, gPid, &address, qualifierSize, qualifier, size, &written, data);
+        gDriver, object, 0, &address, qualifierSize, qualifier, size, &written, data);
     if (outSize) *outSize = written;
     return status;
 }
@@ -194,15 +194,17 @@ static OSStatus RegisterDevices(const char* client, int count, const char* const
     }
     CFNumberRef versionNumber = CFNumberCreate(NULL, kCFNumberSInt32Type, &version);
     CFStringRef clientString = CFStringCreateWithCString(NULL, client, kCFStringEncodingUTF8);
+    CFStringRef token = CFStringCreateWithCString(NULL, gToken, kCFStringEncodingUTF8);
     const void* keys[] = {CFSTR(ESPDISP_AUDIO_KEY_VERSION), CFSTR(ESPDISP_AUDIO_KEY_CLIENT),
-                          CFSTR(ESPDISP_AUDIO_KEY_DEVICES)};
-    const void* values[] = {versionNumber, clientString, devices};
+                          CFSTR(ESPDISP_AUDIO_KEY_TOKEN), CFSTR(ESPDISP_AUDIO_KEY_DEVICES)};
+    const void* values[] = {versionNumber, clientString, token, devices};
     CFDictionaryRef registration = CFDictionaryCreate(
-        NULL, keys, values, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        NULL, keys, values, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFRelease(token);
     AudioObjectPropertyAddress address =
         Address(ESPDISP_AUDIO_SELECTOR_REGISTER, kAudioObjectPropertyScopeGlobal);
     CFPropertyListRef plist = registration;
-    OSStatus status = (*gDriver)->SetPropertyData(gDriver, kAudioObjectPlugInObject, gPid,
+    OSStatus status = (*gDriver)->SetPropertyData(gDriver, kAudioObjectPlugInObject, 0,
                                                   &address, 0, NULL, sizeof plist, &plist);
     CFRelease(registration);
     CFRelease(versionNumber);
@@ -229,11 +231,20 @@ static void WriteFrames(AudioObjectID device, AudioObjectID stream, Float64 samp
     free(buffer);
 }
 
-// Reads 'ESpc'; returns the frame count and hands back the samples.
+static OSStatus ReadAs(AudioObjectID device, const char* token, CFPropertyListRef* data) {
+    CFStringRef qualifier = token
+        ? CFStringCreateWithCString(NULL, token, kCFStringEncodingUTF8) : NULL;
+    OSStatus status = Get(device, ESPDISP_AUDIO_SELECTOR_PCM, kAudioObjectPropertyScopeGlobal,
+                          qualifier ? sizeof qualifier : 0, qualifier ? &qualifier : NULL,
+                          sizeof *data, data, NULL);
+    if (qualifier) CFRelease(qualifier);
+    return status;
+}
+
+// Reads 'ESpc' with gToken; returns the frame count and hands back the samples.
 static UInt32 ReadFrames(AudioObjectID device, Float32** outSamples) {
     CFPropertyListRef data = NULL;
-    OSStatus status = Get(device, ESPDISP_AUDIO_SELECTOR_PCM, kAudioObjectPropertyScopeGlobal,
-                          0, NULL, sizeof data, &data, NULL);
+    OSStatus status = ReadAs(device, gToken, &data);
     CHECK(status == 0);
     *outSamples = NULL;
     if (status != 0 || data == NULL) return 0;
@@ -545,18 +556,31 @@ static void TestConcurrentWriteAndRead(void) {
     CHECK((*gDriver)->StopIO(gDriver, shelf, 1) == 0);
 }
 
-// Only a process that registered a display may read what the Mac plays to
-// it, and no other process can replace or withdraw that registration.
-static void TestOtherProcessesCannotReadOrWithdraw(void) {
+// Only the client that owns a display may read what the Mac plays to it:
+// not a caller without the token, not one with a wrong one, and not another
+// client that lists the same UID. Nor can anyone else withdraw it.
+static void TestOtherClientsCannotReadOrWithdraw(void) {
     AudioObjectID desk = Translate("com.espdisplay.display.aabbcc");
     CHECK(desk != kAudioObjectUnknown);
-    gPid = 999;
     CFPropertyListRef data = NULL;
-    CHECK(Get(desk, ESPDISP_AUDIO_SELECTOR_PCM, kAudioObjectPropertyScopeGlobal, 0, NULL,
-              sizeof data, &data, NULL) == kAudioHardwareIllegalOperationError);
+    CHECK(ReadAs(desk, NULL, &data) == kAudioHardwareIllegalOperationError);
+    CHECK(ReadAs(desk, "intruder-token-0123456789abcdef01234", &data)
+          == kAudioHardwareIllegalOperationError);
     CHECK(data == NULL);
+
+    const char* app = gToken;
+    gToken = "intruder-token-0123456789abcdef01234";
+    const char* uids[] = {"com.espdisplay.display.aabbcc"};
+    const char* names[] = {"Mine now"};
+    CHECK(RegisterDevices("app", 1, uids, names, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    CHECK(ReadAs(desk, gToken, &data) == kAudioHardwareIllegalOperationError);
+    CHECK(StringProperty(desk, kAudioObjectPropertyName, "Desk"));
     CHECK(RegisterDevices("app", 0, NULL, NULL, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
-    gPid = 501;
+    // A token too short to be a secret is refused outright.
+    gToken = "short";
+    CHECK(RegisterDevices("app", 1, uids, names, ESPDISP_AUDIO_PROTOCOL_VERSION)
+          == kAudioHardwareIllegalOperationError);
+    gToken = app;
     CHECK(Translate("com.espdisplay.display.aabbcc") == desk);
     Float32* samples = NULL;
     (void)ReadFrames(desk, &samples);
@@ -567,14 +591,17 @@ static void TestClientsUnionAndExpire(void) {
     AudioObjectID desk = Translate("com.espdisplay.display.aabbcc");
     const char* other[] = {"com.espdisplay.display.aabbcc", "com.espdisplay.test.tone"};
     const char* otherNames[] = {"Desk again", "Test Tone"};
-    gPid = 777;
+    const char* app = gToken;
+    gToken = "check-tool-token-0123456789abcdef0123";
     CHECK(RegisterDevices("check-tool", 2, other, otherNames, ESPDISP_AUDIO_PROTOCOL_VERSION)
           == 0);
-    // The check tool may read the device it shares with the app, and its own.
-    Float32* samples = NULL;
-    (void)ReadFrames(Translate(other[1]), &samples);
-    free(samples);
-    gPid = 501;
+    // The check tool reads its own device, not the one the app owns.
+    CFPropertyListRef data = NULL;
+    CHECK(ReadAs(Translate(other[1]), gToken, &data) == 0);
+    if (data) CFRelease(data);
+    data = NULL;
+    CHECK(ReadAs(desk, gToken, &data) == kAudioHardwareIllegalOperationError);
+    gToken = app;
     AudioObjectID devices[8];
     CHECK(DeviceList(devices, 8) == 3);
     CHECK(Translate(other[0]) == desk);
@@ -623,7 +650,7 @@ int main(void) {
     TestMixedAudioIsReadBackOnce();
     TestVolumeAndMuteScaleWhatIsRead();
     TestConcurrentWriteAndRead();
-    TestOtherProcessesCannotReadOrWithdraw();
+    TestOtherClientsCannotReadOrWithdraw();
     TestClientsUnionAndExpire();
     if (gFailures) {
         fprintf(stderr, "ESPDisplayAudio driver: %d check(s) failed\n", gFailures);

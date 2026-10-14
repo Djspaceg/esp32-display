@@ -1044,6 +1044,11 @@ struct PanelDetailView: View {
         // macOS gives a Multi-Output device no volume control of its own.
         var multiOutput = false
         if case .multiOutput? = plan?.target { multiOutput = true }
+        if let plan, plan.effective.usesDriver, plan.target == .restore {
+            return "Each display gets an output device of its own once it "
+                + "appears in macOS; until then this Mac plays as before. Mac "
+                + "sound applies to every display."
+        }
         switch plan?.effective ?? .copy {
         case .copy:
             return "The display speaker plays this Mac's sound while the Mac's "

@@ -42,6 +42,13 @@ tap. Two custom CoreAudio properties carry everything, defined in
 - `'ESpc'` on each device: the app reads the frames mixed for that device since
   its last read, every 10 ms.
 
+Each registration carries a per-launch secret token. The first live client to
+list a display owns its device, and `'ESpc'` answers only a read qualified with
+the owner's token, so no other app can record the Mac's sound through the
+driver or take frames from the app. A process that registers a display's UID
+before the app does would own that device instead (and the app gets silence);
+that is the one gap left, and it needs a process already running as the user.
+
 Custom properties are used rather than a mach service because coreaudiod runs
 the plug-in in the system launchd domain, where a service an app vends in the
 user's session cannot be looked up; that would need a second privileged install.
