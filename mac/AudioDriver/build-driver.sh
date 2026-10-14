@@ -2,7 +2,9 @@
 # Build ESPDisplayAudio.driver into mac/AudioDriver/build and sign it with the
 # same Apple Development identity the app is signed with (the project's
 # DEVELOPMENT_TEAM; see make-app.sh). Needs no admin rights: installing is a
-# separate step, install-driver.sh, run with sudo.
+# separate step, install-driver.sh, run with sudo. For developers: the app
+# carries its own copy (embed-driver.sh) and installs it from its Audio
+# section.
 #
 # ESPDISP_SIGN_IDENTITY names a different identity, by name or SHA-1, when the
 # keychain holds more than one for the team.
@@ -12,7 +14,6 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_FILE="$HERE/../ESPDisplaySender/ESPDisplaySender.xcodeproj/project.pbxproj"
 OUT="$HERE/build"
 BUNDLE="$OUT/ESPDisplayAudio.driver"
-SCRATCH="$OUT/.ESPDisplayAudio.driver.partial"
 
 TEAM="$(sed -n 's/.*DEVELOPMENT_TEAM = \([A-Z0-9]*\);.*/\1/p' "$PROJECT_FILE" | sort -u)"
 if [[ -z "$TEAM" || "$TEAM" == *$'\n'* ]]; then
@@ -21,17 +22,13 @@ if [[ -z "$TEAM" || "$TEAM" == *$'\n'* ]]; then
 fi
 
 mkdir -p "$OUT"
-rm -rf -- "$SCRATCH"
-mkdir -p "$SCRATCH/Contents/MacOS"
-cp "$HERE/Info.plist" "$SCRATCH/Contents/Info.plist"
-plutil -lint "$SCRATCH/Contents/Info.plist" >/dev/null
-
-clang -std=c11 -O2 -Wall -Wextra -Werror \
-  -arch arm64 -arch x86_64 -mmacosx-version-min=13.0 \
-  -bundle -fvisibility=hidden \
-  -framework CoreAudio -framework CoreFoundation \
-  -o "$SCRATCH/Contents/MacOS/ESPDisplayAudio" \
-  "$HERE/ESPDisplayAudio.c"
+# Compiled under its final name inside a scratch folder, then moved into
+# place once signed, so build/ never holds a half-built driver.
+SCRATCH_DIR="$OUT/.partial"
+SCRATCH="$SCRATCH_DIR/ESPDisplayAudio.driver"
+rm -rf -- "$SCRATCH_DIR"
+mkdir -p "$SCRATCH_DIR"
+"$HERE/compile-driver.sh" "$SCRATCH"
 
 # Sign with each Apple Development identity until one carries the app's team.
 team_of() {
@@ -60,6 +57,7 @@ codesign --verify --strict --verbose=1 "$SCRATCH"
 
 rm -rf -- "$BUNDLE"
 mv -- "$SCRATCH" "$BUNDLE"
+rmdir "$SCRATCH_DIR"
 codesign -dv --verbose=2 "$BUNDLE" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier)='
 echo "built $BUNDLE"
 echo "install (needs admin): sudo $HERE/install-driver.sh"

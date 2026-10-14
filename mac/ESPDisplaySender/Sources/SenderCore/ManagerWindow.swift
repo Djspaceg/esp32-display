@@ -983,6 +983,7 @@ struct PanelDetailView: View {
     private var audioSection: some View {
         Section {
             macAudioRouteRow
+            displayAudioDriverRow
             speakerVolumeRow
             if let audio = panel.audioStatus {
                 LabeledContent("State", value: audio.state.label)
@@ -1036,6 +1037,35 @@ struct PanelDetailView: View {
            let note = manager.macAudioRoutePlan?.note {
             LabeledContent("Route") {
                 Text(note).textSelection(.enabled)
+            }
+        }
+    }
+
+    /// Install Audio Driver while it is missing, Remove once it is there. The
+    /// click raises the macOS administrator prompt; the row follows on its own.
+    @ViewBuilder
+    private var displayAudioDriverRow: some View {
+        if let row = manager.displayAudioDriverRow {
+            LabeledContent("Audio driver") {
+                HStack(spacing: 8) {
+                    if row.busy {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(row.status)
+                    if let button = row.button {
+                        Spacer(minLength: 8)
+                        Button(button.title) {
+                            manager.runDisplayAudioDriverAction(button.action)
+                        }
+                        .disabled(!button.enabled)
+                        .help(button.help ?? "")
+                    }
+                }
+            }
+            if let message = row.message {
+                LabeledContent("") {
+                    Text(message).textSelection(.enabled)
+                }
             }
         }
     }

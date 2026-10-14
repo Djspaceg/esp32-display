@@ -95,8 +95,7 @@ final class MacAudioRouteTests: XCTestCase {
             XCTAssertEqual(plan.target, .restore)
             XCTAssertTrue(plan.note?.contains("not installed") == true, plan.note ?? "")
             XCTAssertTrue(
-                plan.note?.contains("sudo mac/AudioDriver/install-driver.sh") == true,
-                plan.note ?? "")
+                plan.note?.contains("Install Audio Driver") == true, plan.note ?? "")
         }
     }
 

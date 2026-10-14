@@ -15,7 +15,21 @@ display):
 
 Without the driver the two driver routes fall back to the copy and say so.
 
-## Build, install, remove
+## Installing from the app
+
+The app carries a signed copy of the driver (built and signed into
+`Contents/Library/Audio` by `embed-driver.sh`, an Xcode build phase). While the
+driver is missing, each display's Audio section shows **Install Audio Driver…**;
+once it is there, **Remove Audio Driver…**. The click runs one root command
+through AppleScript's `do shell script ... with administrator privileges`, so
+macOS shows its own administrator prompt naming the app and no privileged helper
+is left behind. The command copies the driver into a root-owned staging folder,
+checks that copy is Apple-signed by the app's own team, moves it into
+`/Library/Audio/Plug-Ins/HAL` and restarts coreaudiod. The row follows the
+driver appearing on its own, and a cancelled prompt or a failure is shown as
+selectable text.
+
+## Build, install, remove (developers)
 
 ```sh
 mac/AudioDriver/build-driver.sh                    # build and sign; no admin rights

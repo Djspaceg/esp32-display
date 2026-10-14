@@ -69,6 +69,12 @@ final class MacAudioRouting {
     let downlinks: PanelAudioDownlinks
     private(set) var router: MacAudioRouter?
     private(set) var plan: MacAudioRoutePlan?
+    /// Whether the driver is installed, looked for on every pass whatever the
+    /// route, so the Install button shows only while it is missing.
+    private(set) var driverAvailability: DisplayAudioDriverAvailability?
+    /// The Install / Remove Audio Driver row.
+    var setup = DisplayAudioDriverSetup(bundledDriver: false, signingTeam: nil)
+    var runner = PrivilegedRunner.appleScript
     private var timer: Timer?
 
     /// Seconds between passes. Each pass is the driver's heartbeat, well
@@ -86,6 +92,9 @@ final class MacAudioRouting {
     func start(system: MacOutputSystem, tick: @escaping @MainActor () -> Void) {
         guard router == nil else { return }
         router = MacAudioRouter(bridge: bridge, system: system)
+        setup = DisplayAudioDriverSetup(
+            bundledDriver: DisplayAudioDriverInstaller.bundledDriver() != nil,
+            signingTeam: DisplayAudioDriverInstaller.signingTeam())
         let timer = Timer(timeInterval: Self.interval, repeats: true) { _ in
             MainActor.assumeIsolated { tick() }
         }
@@ -103,12 +112,22 @@ final class MacAudioRouting {
     /// Lets an offscreen render show a route's note without CoreAudio.
     func showForTesting(_ plan: MacAudioRoutePlan) { self.plan = plan }
 
+    /// Lets an offscreen render show the driver row without CoreAudio.
+    func showForTesting(
+        driver availability: DisplayAudioDriverAvailability?, setup: DisplayAudioDriverSetup
+    ) {
+        driverAvailability = availability
+        self.setup = setup
+    }
+
     func update(
         route: MacAudioRoute,
         devices: [String: DisplayAudioDeviceSpec],
         identities: [String: DisplayAudioDeviceSpec]
     ) {
         guard let router else { return }
+        driverAvailability = bridge.availability()
+        setup.observe(driverAvailability, now: Date())
         let plan = router.update(
             route: route,
             displays: devices.keys.sorted().compactMap { devices[$0] })
@@ -172,6 +191,10 @@ extension PanelManager {
     /// seconds, which is also the driver's heartbeat.
     func applyMacAudioRoute() {
         guard macAudio.router != nil else { return }
+        let rowBefore = displayAudioDriverRow
+        defer {
+            if displayAudioDriverRow != rowBefore { objectWillChange.send() }
+        }
         let identities = displayAudioIdentities()
         macAudio.update(
             route: settings.macAudioRoute,
@@ -183,4 +206,42 @@ extension PanelManager {
     }
 
     var macAudioRoutePlan: MacAudioRoutePlan? { macAudio.plan }
+
+    /// The Audio section's driver row; nil until the driver has been looked
+    /// for.
+    var displayAudioDriverRow: DisplayAudioDriverSetup.Presentation? {
+        guard macAudio.driverAvailability != nil || macAudio.setup.phase != .idle else {
+            return nil
+        }
+        return macAudio.setup.presentation(availability: macAudio.driverAvailability)
+    }
+
+    /// The Install or Remove Audio Driver button. macOS asks for the password;
+    /// the row follows the driver appearing or going on the two-second pass.
+    func runDisplayAudioDriverAction(_ action: DisplayAudioDriverAction) {
+        guard macAudio.setup.begin(action, now: Date()) else { return }
+        objectWillChange.send()
+        let command: String
+        switch action {
+        case .install:
+            guard let source = DisplayAudioDriverInstaller.bundledDriver(),
+                  let team = macAudio.setup.signingTeam
+            else {
+                macAudio.setup.finished(
+                    action, .failed("this build carries no signed driver."), now: Date())
+                return
+            }
+            command = DisplayAudioDriverInstaller.installCommand(source: source, team: team)
+        case .remove:
+            command = DisplayAudioDriverInstaller.removeCommand()
+        }
+        let runner = macAudio.runner
+        Task { @MainActor [weak self] in
+            let result = await runner.run(command)
+            guard let self else { return }
+            self.macAudio.setup.finished(action, result, now: Date())
+            self.objectWillChange.send()
+            self.applyMacAudioRoute()
+        }
+    }
 }

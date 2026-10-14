@@ -33,12 +33,9 @@ TSAN_OPTIONS=halt_on_error=1 \
   run_lane tsan -O1 -g -fsanitize=thread -fno-omit-frame-pointer
 
 echo "ESPDisplayAudio bundle-load: build"
+# The same compile the app's embed phase and build-driver.sh use.
 BUNDLE="$TMP/ESPDisplayAudio.driver"
-mkdir -p "$BUNDLE/Contents/MacOS"
-cp "$DRIVER/Info.plist" "$BUNDLE/Contents/Info.plist"
-clang -std=c11 -O2 -Wall -Wextra -Werror -bundle -fvisibility=hidden \
-  -framework CoreAudio -framework CoreFoundation \
-  -o "$BUNDLE/Contents/MacOS/ESPDisplayAudio" "$DRIVER/ESPDisplayAudio.c"
+"$DRIVER/compile-driver.sh" "$BUNDLE"
 clang -std=c11 -Wall -Wextra -Werror -framework CoreAudio -framework CoreFoundation \
   -o "$TMP/bundle-load" "$HERE/test_bundle_load.c"
 echo "ESPDisplayAudio bundle-load: run"

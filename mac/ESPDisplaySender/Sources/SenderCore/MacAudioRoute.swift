@@ -73,9 +73,6 @@ struct MacAudioRoutePlan: Equatable, Sendable {
     static let mirrorUID = "com.espdisplay.sender.mirror"
     static let displaysUID = "com.espdisplay.sender.displays"
 
-    static let installCommand =
-        "sudo mac/AudioDriver/install-driver.sh"
-
     static func make(
         chosen: MacAudioRoute,
         driver: DisplayAudioDriverAvailability,
@@ -92,19 +89,16 @@ struct MacAudioRoutePlan: Equatable, Sendable {
             return MacAudioRoutePlan(
                 chosen: chosen, effective: .copy, target: .restore,
                 note: "The display audio driver is not installed, so the displays "
-                    + "copy this Mac's sound instead. To install it, run "
-                    + "mac/AudioDriver/build-driver.sh and then \(installCommand) "
-                    + "from the esp32-display source folder in Terminal; the "
-                    + "displays switch over once it is loaded.")
+                    + "copy this Mac's sound instead. Click Install Audio Driver "
+                    + "below; the displays switch over once macOS has loaded it.")
         case .incompatible(let version):
             let found = version.map { "version \($0)" } ?? "an unreadable version"
             return MacAudioRoutePlan(
                 chosen: chosen, effective: .copy, target: .restore,
                 note: "The installed display audio driver is \(found), and this app "
                     + "needs version \(DisplayAudioDriverProtocol.version), so the "
-                    + "displays copy this Mac's sound instead. Rebuild and reinstall "
-                    + "it with mac/AudioDriver/build-driver.sh, then "
-                    + "\(installCommand).")
+                    + "displays copy this Mac's sound instead. Click Reinstall Audio "
+                    + "Driver below.")
         }
         guard !present.isEmpty else {
             return MacAudioRoutePlan(

@@ -79,6 +79,7 @@
 				A00000000000000000000011 /* Frameworks */,
 				A00000000000000000000012 /* Resources */,
 				A00000000000000000000013 /* Embed canonical firmware releases */,
+				A00000000000000000000014 /* Embed audio driver */,
 			);
 			buildRules = (
 			);
@@ -154,6 +155,21 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
 			shellScript = "\"$SRCROOT/../embed-firmware-bundle.sh\"\n";
+		};
+		A00000000000000000000014 /* Embed audio driver */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Embed audio driver";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "\"$SRCROOT/../AudioDriver/embed-driver.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

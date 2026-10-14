@@ -16,7 +16,10 @@ final class MacAudioRouteRenderTests: XCTestCase {
     }
 
     private func render(
-        route: MacAudioRoute, plan: MacAudioRoutePlan?, source: String, message: String
+        route: MacAudioRoute, plan: MacAudioRoutePlan?, source: String, message: String,
+        driver: DisplayAudioDriverAvailability? = nil,
+        setup: DisplayAudioDriverSetup = DisplayAudioDriverSetup(
+            bundledDriver: true, signingTeam: "YSHQQLS73U")
     ) throws -> Data {
         var panel = PanelSnapshot(serviceName: "desk", displayName: "Desk Display")
         panel.audioStatus = PanelAudioSnapshot(
@@ -33,6 +36,7 @@ final class MacAudioRouteRenderTests: XCTestCase {
             previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
         manager.setMacAudioRoute(route)
         if let plan { manager.macAudio.showForTesting(plan) }
+        manager.macAudio.showForTesting(driver: driver, setup: setup)
         // The bottom of the page, where Audio sits.
         let size = NSSize(width: 640, height: 3_200)
         let host = NSHostingView(
@@ -55,7 +59,16 @@ final class MacAudioRouteRenderTests: XCTestCase {
             macOutputUID: "spk")
         let fallback = try render(
             route: .displaysOnly, plan: absent, source: PanelAudioSession.tappedSourceName,
-            message: PanelDownlinkSource.tapStreamingMessage)
+            message: PanelDownlinkSource.tapStreamingMessage, driver: .absent)
+        var refused = DisplayAudioDriverSetup(bundledDriver: true, signingTeam: "YSHQQLS73U")
+        refused.begin(.install, now: Date())
+        refused.finished(
+            .install, .failed("The administrator user name or password was incorrect."),
+            now: Date())
+        let failed = try render(
+            route: .copy, plan: nil, source: PanelAudioSession.tappedSourceName,
+            message: PanelDownlinkSource.tapStreamingMessage, driver: .absent,
+            setup: refused)
         let only = try render(
             route: .displaysOnly,
             plan: MacAudioRoutePlan.make(
@@ -63,16 +76,19 @@ final class MacAudioRouteRenderTests: XCTestCase {
                 presentDisplayUIDs: ["com.espdisplay.display.AAAA"], macOutputUID: "spk"),
             source: "Mac output \"Desk Display\"",
             message: "Playing what this Mac sends to the \"Desk Display\" output, "
-                + "which is the Mac's only output.")
+                + "which is the Mac's only output.",
+            driver: .ready)
         XCTAssertGreaterThan(copy.count, 10_000, "the render came out empty")
         XCTAssertNotEqual(copy, fallback, "the fallback note is drawn")
         XCTAssertNotEqual(fallback, only)
+        XCTAssertNotEqual(copy, failed, "the install error is drawn")
 
         if let dir = ProcessInfo.processInfo.environment["ESPDISP_RENDER_DIR"] {
             let url = URL(fileURLWithPath: dir)
             try copy.write(to: url.appendingPathComponent("mac-sound-copy.png"))
             try fallback.write(to: url.appendingPathComponent("mac-sound-driver-missing.png"))
             try only.write(to: url.appendingPathComponent("mac-sound-displays-only.png"))
+            try failed.write(to: url.appendingPathComponent("mac-sound-install-failed.png"))
         }
     }
 }
