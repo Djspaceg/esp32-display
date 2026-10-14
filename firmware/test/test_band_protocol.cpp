@@ -6491,6 +6491,23 @@ int main() {
     CHECK(doom_touch_axis_delta(70, 100, 24, 1) == -1);
     CHECK(doom_touch_axis_delta(130, 100, 24, 1) == 1);
 
+    // Tilt walking: a positive pitch walks forward and a negative one walks
+    // backward, the reverse of the sign the 1.75-inch round's player found
+    // backwards. Inside the dead band nothing moves; sideways tilt strafes as
+    // it always has.
+    {
+      const doom_tilt_move_t ahead = doom_tilt_movement(20.0f, 0.0f);
+      CHECK(ahead.forward && !ahead.back && !ahead.left && !ahead.right);
+      const doom_tilt_move_t behind = doom_tilt_movement(-20.0f, 0.0f);
+      CHECK(behind.back && !behind.forward);
+      const doom_tilt_move_t level = doom_tilt_movement(11.0f, -14.0f);
+      CHECK(!level.forward && !level.back && !level.left && !level.right);
+      const doom_tilt_move_t edge = doom_tilt_movement(-12.0f, 15.0f);
+      CHECK(!edge.forward && !edge.back && !edge.left && !edge.right);
+      CHECK(doom_tilt_movement(0.0f, -20.0f).left);
+      CHECK(doom_tilt_movement(0.0f, 20.0f).right);
+    }
+
     // Swipe down is Use (the Space key: doors and switches); swipe up still
     // cycles to the next weapon. A press held past the quick-swipe window is
     // a joystick hold, and its release does nothing.

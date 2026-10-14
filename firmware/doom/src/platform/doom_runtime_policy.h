@@ -66,6 +66,31 @@ static inline int doom_touch_axis_delta(
     return displacement < 0 ? -magnitude : magnitude;
 }
 
+// Tilt walking on IMU boards, from doom_imu_read()'s pitch and roll in
+// degrees. Each axis has a dead band either side of level; past it the board
+// walks or strafes for as long as it stays tilted. A positive pitch walks
+// forward: the opposite sign walked forward until the 1.75-inch round's player
+// reported walking as backwards. Sideways tilt was not reported and keeps its
+// sign.
+#define DOOM_TILT_WALK_DEG    12.0f
+#define DOOM_TILT_STRAFE_DEG  15.0f
+
+typedef struct {
+    bool forward;
+    bool back;
+    bool left;
+    bool right;
+} doom_tilt_move_t;
+
+static inline doom_tilt_move_t doom_tilt_movement(float pitch, float roll) {
+    doom_tilt_move_t move;
+    move.forward = pitch > DOOM_TILT_WALK_DEG;
+    move.back = pitch < -DOOM_TILT_WALK_DEG;
+    move.left = roll < -DOOM_TILT_STRAFE_DEG;
+    move.right = roll > DOOM_TILT_STRAFE_DEG;
+    return move;
+}
+
 // What a completed swipe in the aim zone does during play: up is the next
 // weapon, down is Use (the Space key: open a door, press a switch). Only a
 // quick swipe counts: a press held longer than max_ms is a deliberate joystick

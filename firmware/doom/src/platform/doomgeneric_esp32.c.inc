@@ -107,11 +107,7 @@ void push_key(unsigned char key, int pressed) {
     }
 }
 
-// --- IMU -> movement mapping ---
-#define IMU_DEAD_ZONE     8.0f
-#define IMU_FORWARD_TILT  -12.0f
-#define IMU_BACK_TILT     12.0f
-#define IMU_STRAFE_TILT   15.0f
+// --- IMU -> movement mapping: doom_tilt_movement() (doom_runtime_policy.h) ---
 
 static bool key_forward_held = false;
 static bool key_back_held = false;
@@ -266,12 +262,8 @@ static void process_imu_input(void) {
     float pitch, roll;
     doom_imu_read(&pitch, &roll);
 
-    bool want_forward = (pitch < IMU_FORWARD_TILT);
-    bool want_back = (pitch > IMU_BACK_TILT);
-    bool want_left = (roll < -IMU_STRAFE_TILT);
-    bool want_right = (roll > IMU_STRAFE_TILT);
-
-    dg_set_movement_keys(want_forward, want_back, want_left, want_right);
+    const doom_tilt_move_t move = doom_tilt_movement(pitch, roll);
+    dg_set_movement_keys(move.forward, move.back, move.left, move.right);
 }
 
 static void process_touch_input(void) {
