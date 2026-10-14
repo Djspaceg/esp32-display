@@ -18,9 +18,11 @@
 //     - Tap: shoot
 //     - Double-tap: use/open
 //     - Vertical swipe UP: next weapon
-//     - Vertical swipe DOWN: previous weapon
+//     - Vertical swipe DOWN: use/open (the Space key)
 //   FULL SCREEN:
 //     - Second finger: run modifier
+//
+// The 1.75C's large side button (the AXP2101 PWR key): fire while held.
 //
 // USB keyboard and mouse (carriers whose USB port can host a device):
 //   W/A/S/D or arrows move and turn, Ctrl fires, Space uses, Shift runs,
@@ -62,6 +64,8 @@ extern bool doom_display_round(void);
 extern bool doom_motion_available(void);
 extern void doom_imu_init(void);
 extern void doom_imu_read(float* pitch, float* roll);
+extern bool doom_power_key_init(void);
+extern bool doom_power_key_read(bool* down_edge, bool* up_edge);
 
 // Touch state layout and doom_touch_init/sample/poll declarations. Shared with
 // doom_hw_bridge.cpp so the two halves cannot disagree about the struct.
@@ -127,15 +131,22 @@ static uint32_t dg_pulse_release_generation = 0;
 static bool dg_fire_pending = false;
 static uint32_t dg_fire_due_at = 0;
 
+// The PWR key holds Fire down for as long as it is held during play, so a
+// touch Fire pulse ending under it must not let go of Fire.
+static bool dg_power_key_available = false;
+static doom_power_key_t dg_power_key = {false};
+static bool dg_power_fire_held = false;
+
 // --- Touch -> aim/shoot/weapon mapping ---
 // Touch-down is the centre of a virtual joystick. Horizontal displacement past
 // tap slop becomes per-tic mouse movement, so turn rate grows continuously with
 // distance and persists while the finger holds position. A vertical release is
-// a weapon switch only inside the same 400ms window used for quick taps.
+// a weapon switch (up) or Use (down) only inside the same 400ms window used for
+// quick taps.
 #define TOUCH_TURN_DEADZONE_PX       12
 #define TOUCH_TURN_MAX_MOUSE_DELTA  160
 #define TOUCH_MOVE_DEADZONE_PX       24
-#define TOUCH_WEAPON_SWIPE_MAX_MS   400
+#define TOUCH_QUICK_SWIPE_MAX_MS    400
 
 typedef enum {
     DG_INPUT_TITLE_OR_DEMO,
@@ -166,6 +177,14 @@ static dg_input_context_t dg_current_input_context(void) {
 // KEY_UPARROW whichever of them pressed it.
 static bool dg_shared_keys_released = false;
 
+// Let go of the current gameplay pulse, except Fire while the PWR key holds it.
+static void dg_release_pulse_key(void) {
+    if (!(dg_pulse_key == KEY_FIRE && dg_power_fire_held)) {
+        push_key(dg_pulse_key, 0);
+    }
+    dg_pulse_key_held = false;
+}
+
 static void dg_release_gameplay_keys(void) {
     if (key_forward_held) { push_key(KEY_UPARROW, 0); key_forward_held = false; }
     if (key_back_held) { push_key(KEY_DOWNARROW, 0); key_back_held = false; }
@@ -175,9 +194,10 @@ static void dg_release_gameplay_keys(void) {
     dg_shared_keys_released = true;
     dg_mouse_dx = 0;
     dg_mouse_dy = 0;
-    if (dg_pulse_key_held) {
-        push_key(dg_pulse_key, 0);
-        dg_pulse_key_held = false;
+    if (dg_pulse_key_held) dg_release_pulse_key();
+    if (dg_power_fire_held) {
+        push_key(KEY_FIRE, 0);
+        dg_power_fire_held = false;
     }
     dg_fire_pending = false;
 }
@@ -203,9 +223,7 @@ static void dg_set_movement_keys(bool want_forward, bool want_back,
 }
 
 static void dg_begin_gameplay_pulse(unsigned char key) {
-    if (dg_pulse_key_held) {
-        push_key(dg_pulse_key, 0);
-    }
+    if (dg_pulse_key_held) dg_release_pulse_key();
     push_key(key, 1);
     dg_pulse_key = key;
     dg_pulse_key_held = true;
@@ -215,8 +233,7 @@ static void dg_begin_gameplay_pulse(unsigned char key) {
 static void dg_release_gameplay_pulse_for_new_poll(void) {
     if (dg_pulse_key_held &&
         dg_input_generation >= dg_pulse_release_generation) {
-        push_key(dg_pulse_key, 0);
-        dg_pulse_key_held = false;
+        dg_release_pulse_key();
     }
 }
 
@@ -371,19 +388,23 @@ static void process_touch_input(void) {
     }
 
     if (touch_zone == DOOM_TOUCH_ZONE_AIM) {
-        // A quick vertical gesture cycles weapons. Once a press is older than
+        // A quick swipe up cycles to the next weapon and a quick swipe down
+        // is Use (open a door, press a switch). Once a press is older than
         // 400ms, vertical displacement is ignored so a deliberate joystick
-        // hold cannot become a weapon switch when the finger lifts.
-        const bool quick_weapon_gesture =
-            touch.press_duration_ms <= TOUCH_WEAPON_SWIPE_MAX_MS;
-        if (quick_weapon_gesture &&
-            touch.gesture == DOOM_TOUCH_GESTURE_SWIPE_UP) {
-            ESP_LOGI(GFX_TAG, "touch gameplay: swipe-up -> next weapon");
-            dg_begin_gameplay_pulse((unsigned char)key_nextweapon);
-        } else if (quick_weapon_gesture &&
-                   touch.gesture == DOOM_TOUCH_GESTURE_SWIPE_DOWN) {
-            ESP_LOGI(GFX_TAG, "touch gameplay: swipe-down -> previous weapon");
-            dg_begin_gameplay_pulse((unsigned char)key_prevweapon);
+        // hold cannot become either when the finger lifts.
+        switch (doom_gameplay_swipe_action(touch.gesture,
+                                           touch.press_duration_ms,
+                                           TOUCH_QUICK_SWIPE_MAX_MS)) {
+            case DOOM_GAMEPLAY_SWIPE_NEXT_WEAPON:
+                ESP_LOGI(GFX_TAG, "touch gameplay: swipe-up -> next weapon");
+                dg_begin_gameplay_pulse((unsigned char)key_nextweapon);
+                break;
+            case DOOM_GAMEPLAY_SWIPE_USE:
+                ESP_LOGI(GFX_TAG, "touch gameplay: swipe-down -> use");
+                dg_begin_gameplay_pulse(KEY_USE);
+                break;
+            default:
+                break;
         }
 
         // Virtual joystick: the landing point is neutral. Holding farther left
@@ -391,7 +412,8 @@ static void process_touch_input(void) {
         dg_mouse_dx = dg_touch_joystick_mouse_dx(&touch);
 
         // Fire/use from the tap classification. A swipe this poll is a weapon
-        // change, not a fire, so tap handling is skipped when one arrived.
+        // change or Use, not a fire, so tap handling is skipped when one
+        // arrived.
         if (!is_swipe) {
             if (touch.double_tap) {
                 dg_fire_pending = false;
@@ -405,6 +427,38 @@ static void process_touch_input(void) {
     }
 
     if (gesture_ended) dg_reset_touch_gesture();
+}
+
+// The PWR key's latched edges, read once per input phase. They are folded even
+// outside play so the held state stays true to the key; Fire is only held
+// while play is live, and a press that came and went between two polls still
+// fires once.
+static void process_power_key_input(void) {
+    if (!dg_power_key_available) return;
+    bool down_edge = false;
+    bool up_edge = false;
+    if (!doom_power_key_read(&down_edge, &up_edge)) return;
+    const bool missed_press =
+        doom_power_key_step(&dg_power_key, down_edge, up_edge);
+    if (down_edge || up_edge) {
+        const char* now = dg_power_key.held ? "held"
+                          : missed_press    ? "tap"
+                                            : "released";
+        doom_log("pwr key: %s%s-> %s", down_edge ? "down " : "",
+                 up_edge ? "up " : "", now);
+    }
+
+    const bool gameplay = dg_gameplay_input_active();
+    const bool want_fire = gameplay && dg_power_key.held;
+    if (want_fire != dg_power_fire_held) {
+        push_key(KEY_FIRE, want_fire ? 1 : 0);
+        dg_power_fire_held = want_fire;
+        // Fire is also Ctrl and the left mouse button on a USB carrier.
+        if (!want_fire) dg_shared_keys_released = true;
+    }
+    if (missed_press && gameplay) {
+        dg_begin_gameplay_pulse(KEY_FIRE);
+    }
 }
 
 // Fold whatever the USB keyboard and mouse sent into the same engine queue the
@@ -470,6 +524,9 @@ void DG_Init() {
     doom_log_stage("touch");
     doom_imu_init();
     doom_log_stage("motion");
+    // The 1.75C's PWR key, on the same bus; every other board skips it.
+    dg_power_key_available = doom_power_key_init();
+    doom_log_stage("power key");
     // Never fatal: a carrier that cannot host, or a session with nothing
     // plugged in, keeps touch and BOOT exactly as before.
     doom_usb_input_init();
@@ -592,6 +649,7 @@ void DG_PollInput(void) {
     dg_release_gameplay_pulse_for_new_poll();
     process_imu_input();
     process_touch_input();
+    process_power_key_input();
     process_usb_input();
 }
 

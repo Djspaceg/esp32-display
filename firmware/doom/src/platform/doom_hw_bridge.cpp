@@ -16,6 +16,7 @@
 
 #include <board_config.h>
 #include <board_motion.h>
+#include <board_power.h>
 #include <board_touch.h>
 #include <touch_gesture.h>
 #include <touch_map.h>
@@ -148,6 +149,40 @@ extern "C" void doom_imu_read(float* pitch, float* roll) {
     // roll = rotation about Y axis (lean left/right)
     *pitch = atan2f(-fax, sqrtf(fay * fay + faz * faz)) * 57.2958f;
     *roll = atan2f(fay, faz) * 57.2958f;
+}
+
+// --- PWR key bridge (AXP2101) ---
+// The 1.75C's large side button is the PMU's PWR key. Doom boots before the
+// normal firmware brings the PMU up, so it is brought up here, on the bus touch
+// has already started, and polled from Doom's own input phase. Every other
+// board has no AXP2101 and gets nothing from these. The PMU's own long-hold
+// power off is untouched; the boot log line from boardpower::init() says after
+// how long it acts.
+
+static bool s_power_key_available = false;
+
+extern "C" bool doom_power_key_present(void) {
+    return bcfg != nullptr &&
+           bcfg->power == board::PowerController::Axp2101;
+}
+
+extern "C" bool doom_power_key_init(void) {
+    s_power_key_available =
+        doom_power_key_present() && boardpower::init(*bcfg);
+    if (doom_power_key_present() && !s_power_key_available) {
+        // Not fatal: the button is an extra, and touch still fires.
+        Serial.println("[doom] PWR key unavailable; touch fire only");
+    }
+    return s_power_key_available;
+}
+
+extern "C" bool doom_power_key_read(bool* down_edge, bool* up_edge) {
+    if (!s_power_key_available) return false;
+    axp2101::PowerKeyEvents events;
+    if (!boardpower::powerKeyEvents(events)) return false;
+    *down_edge = events.down;
+    *up_edge = events.up;
+    return true;
 }
 
 // --- Touch bridge ---

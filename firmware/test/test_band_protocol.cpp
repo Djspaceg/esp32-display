@@ -3864,22 +3864,42 @@ int main() {
     CHECK_EQ((int)axp2101::raisedInputLimit(0x07), 0x04);  // reserved -> 1500
 
     // REG 41H/49H, the PWR key's interrupts (XPowersLib XPowersParams.hpp,
-    // "IRQ2 REG 41H": bit 2 long press, bit 3 short press; bits 0/1 are the
-    // key's edges). Only the two press bits are enabled, read and cleared;
-    // every other enable and status bit is left as it was.
-    CHECK_EQ((int)axp2101::powerKeyIrqEnable(0x00), 0x0C);
-    CHECK_EQ((int)axp2101::powerKeyIrqEnable(0xF3), 0xFF);
+    // "IRQ2 REG 41H": bit 0 positive edge (up), bit 1 negative edge (down),
+    // bit 2 long press, bit 3 short press). Those four are enabled, read and
+    // cleared; every other enable and status bit is left as it was.
+    CHECK_EQ((int)axp2101::powerKeyIrqEnable(0x00), 0x0F);
+    CHECK_EQ((int)axp2101::powerKeyIrqEnable(0xF0), 0xFF);
     {
-      const axp2101::PowerKeyEvents none = axp2101::powerKeyEvents(0xF3);
-      CHECK(!none.shortPress && !none.longPress);
+      const axp2101::PowerKeyEvents none = axp2101::powerKeyEvents(0xF0);
+      CHECK(!none.shortPress && !none.longPress && !none.down && !none.up);
       const axp2101::PowerKeyEvents shortOnly = axp2101::powerKeyEvents(0x08);
       CHECK(shortOnly.shortPress && !shortOnly.longPress);
-      const axp2101::PowerKeyEvents both = axp2101::powerKeyEvents(0x0F);
-      CHECK(both.shortPress && both.longPress);
-      CHECK_EQ((int)axp2101::powerKeyClear(0xFF), 0x0C);
+      CHECK(!shortOnly.down && !shortOnly.up);
+      const axp2101::PowerKeyEvents down = axp2101::powerKeyEvents(0x02);
+      CHECK(down.down && !down.up && !down.shortPress);
+      const axp2101::PowerKeyEvents up = axp2101::powerKeyEvents(0x09);
+      CHECK(up.up && !up.down && up.shortPress);
+      const axp2101::PowerKeyEvents all = axp2101::powerKeyEvents(0x0F);
+      CHECK(all.shortPress && all.longPress && all.down && all.up);
+      CHECK_EQ((int)axp2101::powerKeyClear(0xFF), 0x0F);
       CHECK_EQ((int)axp2101::powerKeyClear(0x04), 0x04);
-      CHECK_EQ((int)axp2101::powerKeyClear(0xF3), 0x00);
+      CHECK_EQ((int)axp2101::powerKeyClear(0x03), 0x03);
+      CHECK_EQ((int)axp2101::powerKeyClear(0xF0), 0x00);
     }
+    // REG 27H's off time (bits 3:2) and long-press time (bits 5:4), and REG
+    // 22H's say over what a hold past the off time does.
+    CHECK_EQ(axp2101::powerKeyOffSeconds(0x00), 4);
+    CHECK_EQ(axp2101::powerKeyOffSeconds(0x04), 6);
+    CHECK_EQ(axp2101::powerKeyOffSeconds(0x08), 8);
+    CHECK_EQ(axp2101::powerKeyOffSeconds(0xFF), 10);
+    CHECK_EQ(axp2101::powerKeyLongPressMillis(0x00), 1000);
+    CHECK_EQ(axp2101::powerKeyLongPressMillis(0x10), 1500);
+    CHECK_EQ(axp2101::powerKeyLongPressMillis(0xCF), 1000);
+    CHECK_EQ(axp2101::powerKeyLongPressMillis(0x30), 2500);
+    CHECK(strcmp(axp2101::powerKeyHoldAction(0x00), "nothing") == 0);
+    CHECK(strcmp(axp2101::powerKeyHoldAction(0x01), "nothing") == 0);
+    CHECK(strcmp(axp2101::powerKeyHoldAction(0x02), "power off") == 0);
+    CHECK(strcmp(axp2101::powerKeyHoldAction(0x07), "restart") == 0);
 
     // Unknown is a distinct value from Absent, and neither is zero-or-nonzero
     // interchangeable with the other. This is the whole reason External is not
@@ -6470,6 +6490,40 @@ int main() {
     CHECK(doom_touch_axis_delta(100, 100, 24, 1) == 0);
     CHECK(doom_touch_axis_delta(70, 100, 24, 1) == -1);
     CHECK(doom_touch_axis_delta(130, 100, 24, 1) == 1);
+
+    // Swipe down is Use (the Space key: doors and switches); swipe up still
+    // cycles to the next weapon. A press held past the quick-swipe window is
+    // a joystick hold, and its release does nothing.
+    CHECK(doom_gameplay_swipe_action(DOOM_TOUCH_GESTURE_SWIPE_DOWN, 200,
+                                     400) == DOOM_GAMEPLAY_SWIPE_USE);
+    CHECK(doom_gameplay_swipe_action(DOOM_TOUCH_GESTURE_SWIPE_UP, 200,
+                                     400) == DOOM_GAMEPLAY_SWIPE_NEXT_WEAPON);
+    CHECK(doom_gameplay_swipe_action(DOOM_TOUCH_GESTURE_SWIPE_DOWN, 401,
+                                     400) == DOOM_GAMEPLAY_SWIPE_NONE);
+    CHECK(doom_gameplay_swipe_action(DOOM_TOUCH_GESTURE_SWIPE_UP, 401,
+                                     400) == DOOM_GAMEPLAY_SWIPE_NONE);
+    CHECK(doom_gameplay_swipe_action(DOOM_TOUCH_GESTURE_SWIPE_LEFT, 200,
+                                     400) == DOOM_GAMEPLAY_SWIPE_NONE);
+    CHECK(doom_gameplay_swipe_action(DOOM_TOUCH_GESTURE_NONE, 200, 400) ==
+          DOOM_GAMEPLAY_SWIPE_NONE);
+
+    // The PWR key fires while held: its down edge holds Fire, its up edge
+    // lets go. Both edges inside one poll are a whole press the poll missed
+    // the middle of: one shot if the key was up, still held if it was down
+    // (a release and a fresh press).
+    {
+      doom_power_key_t key = {};
+      CHECK(!doom_power_key_step(&key, false, false) && !key.held);
+      CHECK(!doom_power_key_step(&key, true, false) && key.held);
+      CHECK(!doom_power_key_step(&key, false, false) && key.held);
+      CHECK(!doom_power_key_step(&key, false, true) && !key.held);
+      CHECK(doom_power_key_step(&key, true, true) && !key.held);
+      CHECK(!doom_power_key_step(&key, true, false) && key.held);
+      CHECK(!doom_power_key_step(&key, true, true) && key.held);
+      CHECK(!doom_power_key_step(&key, false, true) && !key.held);
+      // A stray up edge with the key already up changes nothing.
+      CHECK(!doom_power_key_step(&key, false, true) && !key.held);
+    }
   }
 
   // --- platform/panel/carrier composition for P4 -------------------------

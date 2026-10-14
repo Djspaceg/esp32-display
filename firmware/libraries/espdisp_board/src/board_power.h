@@ -77,7 +77,11 @@ static const uint8_t REG_PWROFF_STATUS = 0x21;
 static const uint8_t REG_INPUT_CURRENT_LIMIT = 0x16;
 // BAT_DET_CTRL: bit0 enables battery detection.
 static const uint8_t REG_BAT_DET_CTRL = 0x68;
-// INTEN2 / INTSTS2: the PWR key's press interrupts (axp2101_status.h).
+// PWROFF_EN / IRQ_OFF_ON_LEVEL: whether and after how long a PWR key hold
+// powers the part off (axp2101_status.h). Read only, for the boot log.
+static const uint8_t REG_PWROFF_EN = 0x22;
+static const uint8_t REG_IRQ_OFF_ON_LEVEL = 0x27;
+// INTEN2 / INTSTS2: the PWR key's interrupts (axp2101_status.h).
 static const uint8_t REG_IRQ_ENABLE2 = 0x41;
 static const uint8_t REG_IRQ_STATUS2 = 0x49;
 // Fuel-gauge percentage. Only meaningful while STATUS1 says a battery is
@@ -255,14 +259,13 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     return false;
   }
 
-  // The PWR key's short- and long-press interrupts, so their status bits
-  // latch for powerKeyEvents() to poll; nothing is done with them here, and
-  // the PMU's own long-hold power off is untouched. Any press left latched
-  // from before boot is cleared.
+  // The PWR key's press and edge interrupts, so their status bits latch for
+  // powerKeyEvents() to poll; the PMU's own long-hold power off is untouched.
+  // Any press left latched from before boot is cleared.
   uint8_t inten2 = 0;
   if (readRegister(REG_IRQ_ENABLE2, inten2)) {
     writeRegister(REG_IRQ_ENABLE2, axp2101::powerKeyIrqEnable(inten2));
-    writeRegister(REG_IRQ_STATUS2, axp2101::IRQ2_PKEY_PRESSES);
+    writeRegister(REG_IRQ_STATUS2, axp2101::IRQ2_PKEY_ALL);
   }
 
   activeController = cfg.power;
@@ -279,6 +282,16 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
         readRegister(REG_PWROFF_STATUS, pwroff)) {
       Serial.printf("power: AXP2101 last power-on 0x%02X, last power-off 0x%02X\n",
                     pwron, pwroff);
+    }
+    // What holding the PWR key does, so nobody has to find out by holding it.
+    uint8_t pwroffEn = 0, offOnLevel = 0;
+    if (readRegister(REG_PWROFF_EN, pwroffEn) &&
+        readRegister(REG_IRQ_OFF_ON_LEVEL, offOnLevel)) {
+      Serial.printf("power: AXP2101 PWR key long press %d ms, %d s hold: %s "
+                    "(22H=0x%02X 27H=0x%02X)\n",
+                    axp2101::powerKeyLongPressMillis(offOnLevel),
+                    axp2101::powerKeyOffSeconds(offOnLevel),
+                    axp2101::powerKeyHoldAction(pwroffEn), pwroffEn, offOnLevel);
     }
   }
   // The VBUS input current limit, raised to 1500 mA when lower. A 1.75C on
@@ -303,8 +316,8 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
 
 inline bool available() { return enabled; }
 
-/// Poll the PWR key: reads REG 49H and clears the press bits it found, so each
-/// press is reported once. Returns false on any board without an AXP2101 or
+/// Poll the PWR key: reads REG 49H and clears the key bits it found, so each
+/// press and edge is reported once. Returns false on any board without an AXP2101 or
 /// when the read failed.
 inline bool powerKeyEvents(axp2101::PowerKeyEvents &events) {
   if (!enabled || activeController != board::PowerController::Axp2101) {

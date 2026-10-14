@@ -27,9 +27,12 @@ allocate from PSRAM only when Doom starts.
    difficulty. Use up/down swipes to highlight each choice and a short BOOT
    press or tap to select it.
 6. During play on the S3, tilt to move and drag anywhere to turn. On P4, drag
-   on the left half to move and on the right half to turn. Right-side taps,
-   double-taps, and vertical swipes fire, use/open, and cycle weapons. A second
-   finger enables run.
+   on the left half to move and on the right half to turn. Right-side taps
+   fire, double-taps and swipes down use/open (doors and switches), and swipes
+   up cycle to the next weapon. A second finger enables run. On the 1.75-inch
+   round, hold the large side button to fire; do not hold it for the PMU's
+   power-off time (the boot log's `power: AXP2101 PWR key` line gives it, 6 s
+   or more by default), or the board switches off.
 7. Hold BOOT for 3 seconds to exit Doom. The panel restarts into the normal
    streaming firmware; release is not required once the threshold is reached.
 
@@ -167,7 +170,8 @@ staging and UDP codec scratch.
 | Double-tap in the aim zone | Use/open |
 | Second finger during play | Run modifier |
 | Swipe up during play | Next weapon |
-| Swipe down during play | Previous weapon |
+| Swipe down during play | Use/open (as Space) |
+| 1.75-inch round side button, held during play | Fire while held |
 
 ### USB keyboard and mouse
 

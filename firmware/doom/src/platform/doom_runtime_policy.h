@@ -7,6 +7,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "doom_touch_bridge.h"
+
 typedef struct {
     int panel_width;
     int panel_height;
@@ -62,4 +64,47 @@ static inline int doom_touch_axis_delta(
     int magnitude = absolute - deadzone;
     if (magnitude > max_magnitude) magnitude = max_magnitude;
     return displacement < 0 ? -magnitude : magnitude;
+}
+
+// What a completed swipe in the aim zone does during play: up is the next
+// weapon, down is Use (the Space key: open a door, press a switch). Only a
+// quick swipe counts: a press held longer than max_ms is a deliberate joystick
+// hold, and the vertical drift of its release must not become an action.
+typedef enum {
+    DOOM_GAMEPLAY_SWIPE_NONE,
+    DOOM_GAMEPLAY_SWIPE_NEXT_WEAPON,
+    DOOM_GAMEPLAY_SWIPE_USE,
+} doom_gameplay_swipe_t;
+
+static inline doom_gameplay_swipe_t doom_gameplay_swipe_action(
+    doom_touch_gesture_t gesture, uint32_t press_duration_ms,
+    uint32_t max_ms) {
+    if (press_duration_ms > max_ms) return DOOM_GAMEPLAY_SWIPE_NONE;
+    if (gesture == DOOM_TOUCH_GESTURE_SWIPE_UP) {
+        return DOOM_GAMEPLAY_SWIPE_NEXT_WEAPON;
+    }
+    if (gesture == DOOM_TOUCH_GESTURE_SWIPE_DOWN) {
+        return DOOM_GAMEPLAY_SWIPE_USE;
+    }
+    return DOOM_GAMEPLAY_SWIPE_NONE;
+}
+
+// The power key as Doom sees it, folded from one poll of the PMU's latched
+// edge bits. Doom holds Fire for as long as held is true.
+typedef struct {
+    bool held;  // the key is down as of the latest poll
+} doom_power_key_t;
+
+// Fold one poll's edges into *key. The PMU latches each edge, so a press is
+// never lost between polls, but their order inside one poll is not recorded.
+// Both edges at once is a whole press the poll missed the middle of: from up,
+// down then up (returns true so the caller still fires once); from down, up
+// then down again, which leaves the key held. An up edge with the key already
+// up changes nothing.
+static inline bool doom_power_key_step(
+    doom_power_key_t* key, bool down_edge, bool up_edge) {
+    if (down_edge && up_edge) return !key->held;
+    if (down_edge) key->held = true;
+    if (up_edge) key->held = false;
+    return false;
 }

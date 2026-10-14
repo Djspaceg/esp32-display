@@ -96,36 +96,73 @@ inline uint8_t raisedInputLimit(uint8_t reg16) {
 }
 
 // REG 41H (INTEN2) and REG 49H (INTSTS2): the PWR key's interrupts. Bit 2 is
-// a long press (held past the PMU's IRQ level time), bit 3 a short press, and
-// bits 0/1 the key's edges (XPowersLib XPowersParams.hpp, "IRQ2 REG 41H":
-// PKEY_LONG_IRQ = _BV(10), PKEY_SHORT_IRQ = _BV(11), byte 1 of the mask). A
-// status bit is cleared by writing 1 to it. Enabling these changes nothing
-// about how a long hold powers the board off: that is REG 27H's off time.
+// a long press (held past REG 27H's IRQ time), bit 3 a short press, bit 1 the
+// key's negative edge and bit 0 its positive edge (XPowersLib
+// XPowersParams.hpp, "IRQ2 REG 41H": PKEY_POSITIVE_IRQ = _BV(8),
+// PKEY_NEGATIVE_IRQ = _BV(9), PKEY_LONG_IRQ = _BV(10), PKEY_SHORT_IRQ =
+// _BV(11), byte 1 of the mask). PWRON idles high and the key pulls it to
+// ground, so the negative edge is the key going down and the positive edge
+// it coming back up: the edges are what let a holder see the key held, where
+// the short-press bit only says a press has finished. A status bit is cleared
+// by writing 1 to it. Enabling these changes nothing about how a long hold
+// powers the board off: that is REG 22H and REG 27H.
+static const uint8_t IRQ2_PKEY_UP = 1u << 0;
+static const uint8_t IRQ2_PKEY_DOWN = 1u << 1;
 static const uint8_t IRQ2_PKEY_LONG = 1u << 2;
 static const uint8_t IRQ2_PKEY_SHORT = 1u << 3;
-static const uint8_t IRQ2_PKEY_PRESSES = IRQ2_PKEY_LONG | IRQ2_PKEY_SHORT;
+static const uint8_t IRQ2_PKEY_ALL =
+    IRQ2_PKEY_UP | IRQ2_PKEY_DOWN | IRQ2_PKEY_LONG | IRQ2_PKEY_SHORT;
 
 struct PowerKeyEvents {
   bool shortPress = false;
   bool longPress = false;
+  bool down = false;  ///< the key went down since the last read
+  bool up = false;    ///< the key came back up since the last read
 };
 
-/// REG 41H with the two press interrupts enabled and every other bit kept.
+/// REG 41H with the PWR key's four interrupts enabled and every other bit
+/// kept.
 inline uint8_t powerKeyIrqEnable(uint8_t inten2) {
-  return (uint8_t)(inten2 | IRQ2_PKEY_PRESSES);
+  return (uint8_t)(inten2 | IRQ2_PKEY_ALL);
 }
 
 inline PowerKeyEvents powerKeyEvents(uint8_t intsts2) {
   PowerKeyEvents events;
   events.shortPress = (intsts2 & IRQ2_PKEY_SHORT) != 0;
   events.longPress = (intsts2 & IRQ2_PKEY_LONG) != 0;
+  events.down = (intsts2 & IRQ2_PKEY_DOWN) != 0;
+  events.up = (intsts2 & IRQ2_PKEY_UP) != 0;
   return events;
 }
 
-/// What to write to REG 49H to clear the press bits it reported, and only
+/// What to write to REG 49H to clear the PWR key bits it reported, and only
 /// those: the other interrupts' status is not this reader's to clear.
 inline uint8_t powerKeyClear(uint8_t intsts2) {
-  return (uint8_t)(intsts2 & IRQ2_PKEY_PRESSES);
+  return (uint8_t)(intsts2 & IRQ2_PKEY_ALL);
+}
+
+// REG 22H bit 1: holding the key past REG 27H's off time switches the PMU
+// off (XPowersLib enableLongPressShutdown); bit 0 makes that a restart
+// instead (setLongPressRestart). REG 27H bits 3:2 are that off time, 4, 6, 8
+// or 10 s (setPowerKeyPressOffTime), and bits 5:4 the long-press IRQ time,
+// 1, 1.5, 2 or 2.5 s (setIrqLevelTime). This firmware only reads them.
+static const uint8_t PWROFF_EN_LONG_PRESS = 1u << 1;
+static const uint8_t PWROFF_EN_RESTART = 1u << 0;
+
+/// How long a hold switches the board off (or restarts it), in seconds.
+inline int powerKeyOffSeconds(uint8_t reg27) {
+  return 4 + 2 * ((reg27 >> 2) & 0x03);
+}
+
+/// How long a hold takes to raise the long-press interrupt, in ms.
+inline int powerKeyLongPressMillis(uint8_t reg27) {
+  return 1000 + 500 * ((reg27 >> 4) & 0x03);
+}
+
+/// What a hold past the off time does, as a word for the boot log.
+inline const char *powerKeyHoldAction(uint8_t reg22) {
+  if ((reg22 & PWROFF_EN_LONG_PRESS) == 0) return "nothing";
+  return (reg22 & PWROFF_EN_RESTART) != 0 ? "restart" : "power off";
 }
 
 }  // namespace axp2101
