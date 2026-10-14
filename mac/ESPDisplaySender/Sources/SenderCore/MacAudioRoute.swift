@@ -193,8 +193,11 @@ final class MacAudioRouter {
     func update(route: MacAudioRoute, displays: [DisplayAudioDeviceSpec]) -> MacAudioRoutePlan {
         let availability = route.usesDriver ? bridge.availability() : .absent
         let driving = route.usesDriver && availability == .ready && !displays.isEmpty
+        var refused = false
         if driving {
-            registered = bridge.register(displays) || registered
+            let accepted = bridge.register(displays)
+            refused = !accepted
+            registered = accepted || registered
         } else if registered {
             bridge.register([])
             registered = false
@@ -246,13 +249,21 @@ final class MacAudioRouter {
                 appliedDefaultUID = nil
             }
         }
+        if refused {
+            return MacAudioRoutePlan(
+                chosen: plan.chosen, effective: plan.effective, target: plan.target,
+                note: "The display audio driver refused this app's displays: every "
+                    + "one of its places is taken by other apps on this Mac. Quit "
+                    + "them, or restart coreaudiod by reinstalling the driver.")
+        }
         if !claimed.isEmpty {
             let names = claimed.map { "\"\($0.name)\"" }.joined(separator: ", ")
             return MacAudioRoutePlan(
                 chosen: plan.chosen, effective: plan.effective, target: plan.target,
                 note: "Another app on this Mac has claimed the output device for "
                     + "\(names), so this app does not send the Mac's sound to it. "
-                    + "Quit that app, then quit and reopen ESPDisplaySender.")
+                    + "The device comes back to this app once that app lets go "
+                    + "of it.")
         }
         return noteAnOutputPickedElsewhere(plan, outputs: outputs)
     }

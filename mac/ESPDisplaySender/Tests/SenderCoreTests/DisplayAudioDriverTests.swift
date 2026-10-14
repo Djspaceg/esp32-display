@@ -21,10 +21,13 @@ final class FakeDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Sendabl
 
     func availability() -> DisplayAudioDriverAvailability { lock.withLock { state } }
 
+    /// As a driver whose client places are all taken.
+    var refuseRegistrations = false
+
     func register(_ devices: [DisplayAudioDeviceSpec]) -> Bool {
         lock.withLock {
             registrations.append(devices)
-            guard state == .ready else { return false }
+            guard state == .ready, !refuseRegistrations else { return false }
             if devicesAppearOnRegister {
                 ids = [:]
                 for (index, device) in devices.enumerated() {
@@ -164,6 +167,17 @@ final class DisplayAudioDriverTests: XCTestCase {
         driver.queue([1, 1], for: 7)
         Thread.sleep(forTimeInterval: 0.05)
         XCTAssertEqual(received.all.count, 4, "nothing is delivered after stop")
+    }
+
+    /// A device another process owns is never read from: the session says
+    /// so instead of claiming to play it.
+    func testTheDeviceTapRefusesADeviceItDoesNotOwn() {
+        let driver = FakeDisplayAudioDriver()
+        driver.addDevice(uid: "u", id: 7)
+        driver.claimedElsewhere = ["u"]
+        XCTAssertThrowsError(try DisplayAudioDeviceTap(bridge: driver, uid: "u")) {
+            XCTAssertTrue($0.localizedDescription.contains("another app"))
+        }
     }
 
     func testTheDeviceTapSaysWhenTheDeviceIsNotThereYet() {

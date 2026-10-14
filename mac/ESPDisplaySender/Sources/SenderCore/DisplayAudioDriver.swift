@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreAudio
 import Foundation
+import Security
 import SenderProtocol
 
 /// ESPDisplayAudio.driver's side of the contract, mirrored from
@@ -108,9 +109,23 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
     /// The process ID alone would be reused by a later launch; the start time
     /// makes a restarted app a new client, so the old one simply expires.
     private let clientID = "ESPDisplaySender.\(getpid()).\(UInt64(Date().timeIntervalSince1970))"
+    private let tokenLock = NSLock()
+    private var cachedToken: String?
+
     /// Never leaves this process except to the driver: it is what lets only
-    /// this app read the audio the Mac sends to its displays' devices.
-    private let token = UUID().uuidString + UUID().uuidString
+    /// this app read the audio the Mac sends to its displays' devices. Kept
+    /// in the login Keychain, so a relaunch after a crash is the same owner
+    /// at once rather than a stranger for ten seconds, which another process
+    /// listing the same display could use to take it. Read on first use, so
+    /// a test that never routes never touches the Keychain.
+    private var token: String {
+        tokenLock.withLock {
+            if let cachedToken { return cachedToken }
+            let token = DisplayAudioDriverToken.load() ?? DisplayAudioDriverToken.create()
+            cachedToken = token
+            return token
+        }
+    }
 
     func availability() -> DisplayAudioDriverAvailability {
         guard let plugIn = plugInID() else { return .absent }
@@ -203,6 +218,46 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
     }
 }
 
+/// The app's driver token in the login Keychain.
+enum DisplayAudioDriverToken {
+    private static let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: "com.espdisplay.sender.audio-driver",
+        kSecAttrAccount as String: "owner-token",
+    ]
+
+    static func load() -> String? {
+        var lookup = query
+        lookup[kSecReturnData as String] = true
+        lookup[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(lookup as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data,
+              let token = String(data: data, encoding: .utf8),
+              token.utf8.count >= DisplayAudioDriverProtocol.minTokenBytes
+        else { return nil }
+        return token
+    }
+
+    /// A fresh secret, saved if the Keychain allows; if not, it still works
+    /// for this launch.
+    static func create() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let token: String
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess {
+            token = bytes.map { String(format: "%02x", $0) }.joined()
+        } else {
+            token = UUID().uuidString + UUID().uuidString
+        }
+        SecItemDelete(query as CFDictionary)
+        var insert = query
+        insert[kSecValueData as String] = Data(token.utf8)
+        insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        SecItemAdd(insert as CFDictionary, nil)
+        return token
+    }
+}
+
 /// What macOS plays to a display's own output device, read from the driver.
 ///
 /// Stands in for the process tap behind the same `SystemAudioTap` interface,
@@ -229,6 +284,13 @@ final class DisplayAudioDeviceTap: SystemAudioTap, @unchecked Sendable {
                 code: 5,
                 userInfo: [NSLocalizedDescriptionKey:
                     "the display's output device has not appeared in macOS yet."])
+        }
+        guard bridge.owns(device: device) else {
+            throw NSError(
+                domain: "ESPDisplaySender.Audio",
+                code: 6,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "the display's output device belongs to another app on this Mac."])
         }
         self.bridge = bridge
         self.device = device

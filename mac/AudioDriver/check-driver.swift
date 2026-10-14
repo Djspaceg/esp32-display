@@ -170,19 +170,42 @@ let other = [
     "devices": [["uid": testUID, "name": "Taken over", "latency": 0]],
 ] as CFDictionary
 var otherReference = Unmanaged.passUnretained(other).toOpaque()
-let otherStatus = withExtendedLifetime(other) {
+let otherStatus: OSStatus = withExtendedLifetime(other) {
     AudioObjectSetPropertyData(
         plugIn, &otherAddress, 0, nil,
         UInt32(MemoryLayout<UnsafeMutableRawPointer>.size), &otherReference)
+}
+guard otherStatus == noErr else {
+    fail("the second client's registration was refused (status \(otherStatus)), "
+        + "so the check below would prove nothing")
 }
 Thread.sleep(forTimeInterval: 0.3)
 let (stolen, _) = readPCM(as: otherToken)
 var nameAddress = address(kAudioObjectPropertyName)
 var nameValue: Unmanaged<CFString>?
 size = UInt32(MemoryLayout<CFString>.size)
-AudioObjectGetPropertyData(device, &nameAddress, 0, nil, &size, &nameValue)
-let name = nameValue?.takeRetainedValue() as String? ?? ""
-print("second client: registered \(otherStatus), read status \(stolen), name \"\(name)\"")
+let nameStatus = AudioObjectGetPropertyData(device, &nameAddress, 0, nil, &size, &nameValue)
+guard nameStatus == noErr, let name = nameValue?.takeRetainedValue() as String? else {
+    fail("the test device's name did not read (status \(nameStatus))")
+}
+
+func owns(_ reader: String) -> Bool? {
+    var ownedAddress = address(code("ESow"))
+    var value: Unmanaged<CFPropertyList>?
+    var size = UInt32(MemoryLayout<CFPropertyList>.size)
+    var qualifier = reader as CFString
+    let status = withUnsafeMutablePointer(to: &qualifier) {
+        AudioObjectGetPropertyData(
+            device, &ownedAddress, UInt32(MemoryLayout<CFString>.size), $0, &size, &value)
+    }
+    guard status == noErr, let number = value?.takeRetainedValue() as? NSNumber else {
+        return nil
+    }
+    return number.intValue == 1
+}
+let mine = owns(token), theirs = owns(otherToken)
+print("second client: read status \(stolen), name \"\(name)\", "
+    + "ESow mine \(String(describing: mine)) theirs \(String(describing: theirs))")
 let goodbye = [
     "version": 2, "client": "check-driver.other.\(getpid())", "token": otherToken,
     "devices": [[String: Any]](),
@@ -195,6 +218,9 @@ _ = withExtendedLifetime(goodbye) {
 }
 guard stolen != noErr, name == "ESPDisplay driver check" else {
     fail("a second client listing the same display could read or rename it")
+}
+guard mine == true, theirs == false else {
+    fail("'ESow' did not report this run as the owner and the second client as not")
 }
 AudioOutputUnitStop(unit)
 AudioComponentInstanceDispose(unit)

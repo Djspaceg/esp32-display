@@ -235,12 +235,15 @@ static bool ApplyDesiredDevices(const DeviceSpec* desired, UInt32 count,
         for (UInt32 spec = 0; spec < count; ++spec) {
             if (strcmp(desired[spec].uid, slot->uid) == 0) match = &desired[spec];
         }
-        if (match == NULL) {
+        // A device whose owner changed is retired and made again under new
+        // IDs below, never handed over in place: the HAL then sees the old
+        // device go, so the Mac's output cannot stay on a device whose sound
+        // now goes to someone else.
+        if (match == NULL || strcmp(match->owner, slot->owner) != 0) {
             slot->active = false;
             changed = true;
             continue;
         }
-        CopyCString(slot->owner, match->owner);
         CFStringRef name = CFStringCreateWithCString(
             NULL, match->name, kCFStringEncodingUTF8);
         if (name != NULL && CFStringCompare(name, slot->nameRef, 0) != kCFCompareEqualTo) {

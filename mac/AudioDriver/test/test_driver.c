@@ -640,6 +640,39 @@ static void TestCrowdingCannotTakeADevice(void) {
     gToken = app;
 }
 
+// When the owner goes and another client listing the same display takes
+// it, the device is made again under a new ID rather than handed over, so
+// the HAL moves the Mac's output off it.
+static void TestANewOwnerGetsANewDevice(void) {
+    const char* app = gToken;
+    const char* other = "second-lister-token-0123456789abcdef";
+    const char* uids[] = {"com.espdisplay.display.ddeeff"};
+    const char* names[] = {"Second"};
+    AudioObjectID shelf = Translate(uids[0]);
+    CHECK(shelf != kAudioObjectUnknown);
+    gToken = other;
+    CHECK(RegisterDevices("other", 1, uids, names, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    CHECK(Translate(uids[0]) == shelf);
+    gToken = app;
+    const char* keep[] = {"com.espdisplay.display.aabbcc"};
+    const char* keepNames[] = {"Desk"};
+    int listChanges = Counter(&gDeviceListChanges);
+    CHECK(RegisterDevices("app", 1, keep, keepNames, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    AudioObjectID handed = Translate(uids[0]);
+    CHECK(handed != kAudioObjectUnknown && handed != shelf);
+    CHECK(Counter(&gDeviceListChanges) > listChanges);
+    CHECK(Owns(handed, other));
+    UInt32 value = 0;
+    CHECK(Get(shelf, kAudioObjectPropertyClass, kAudioObjectPropertyScopeGlobal, 0, NULL,
+              sizeof value, &value, NULL) == kAudioHardwareBadObjectError);
+    gToken = other;
+    CHECK(RegisterDevices("other", 0, NULL, NULL, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    gToken = app;
+    const char* both[] = {"com.espdisplay.display.aabbcc", "com.espdisplay.display.ddeeff"};
+    const char* bothNames[] = {"Desk", "Shelf Panel"};
+    CHECK(RegisterDevices("app", 2, both, bothNames, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+}
+
 static void TestClientsUnionAndExpire(void) {
     AudioObjectID desk = Translate("com.espdisplay.display.aabbcc");
     const char* other[] = {"com.espdisplay.display.aabbcc", "com.espdisplay.test.tone"};
@@ -705,6 +738,7 @@ int main(void) {
     TestConcurrentWriteAndRead();
     TestOtherClientsCannotReadOrWithdraw();
     TestCrowdingCannotTakeADevice();
+    TestANewOwnerGetsANewDevice();
     TestClientsUnionAndExpire();
     if (gFailures) {
         fprintf(stderr, "ESPDisplayAudio driver: %d check(s) failed\n", gFailures);

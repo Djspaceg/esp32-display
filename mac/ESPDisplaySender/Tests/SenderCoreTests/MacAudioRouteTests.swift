@@ -342,6 +342,18 @@ final class MacAudioRouteTests: XCTestCase {
         XCTAssertTrue(plan.note?.contains("\"Desk\"") == true, plan.note ?? "")
     }
 
+    /// A driver with no room left for this app says so rather than leaving
+    /// the route waiting for devices that will never come.
+    func testARefusedRegistrationIsNoted() {
+        let driver = FakeDisplayAudioDriver()
+        driver.refuseRegistrations = true
+        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        let router = MacAudioRouter(bridge: driver, system: system)
+        let plan = router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertTrue(plan.note?.contains("refused") == true, plan.note ?? "")
+        XCTAssertEqual(system.defaultUID, speakers.uid)
+    }
+
     /// The output changed to AirPods while mirroring and the user then picks
     /// the mirror again, as the note says: it is rebuilt on the AirPods.
     func testPickingTheMirrorAgainRebuildsItOnTheMacsNewOutput() {
