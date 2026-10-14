@@ -121,8 +121,11 @@ protocol DisplayAudioDriverBridge: AnyObject, Sendable {
     /// output and Multi-Output devices name it.
     func deviceUID(for uid: String) -> String
     /// Whether a device for `uid` exists under another owner's suffix: one
-    /// this app cannot find by its own UID, so it must look for it.
+    /// this app cannot find by its own UID, so it must look for it. Reads the
+    /// whole device list; the router checks the list it already has instead.
     func isClaimedElsewhere(uid: String) -> Bool
+    /// How many devices the driver holds, for every owner together.
+    func deviceCount() -> Int?
     /// Whether this app owns the device, so the Mac's sound routed to it
     /// reaches this app and no one else. Takes no frames.
     func owns(device: AudioObjectID) -> Bool
@@ -183,6 +186,18 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
 
     func deviceUID(for uid: String) -> String {
         DisplayAudioDriverProtocol.deviceUID(for: uid, token: token)
+    }
+
+    func deviceCount() -> Int? {
+        guard let plugIn = plugInID() else { return nil }
+        var address = Self.address(DisplayAudioDriverProtocol.registerSelector)
+        var value: Unmanaged<CFPropertyList>?
+        var size = UInt32(MemoryLayout<CFPropertyList>.size)
+        guard AudioObjectGetPropertyData(plugIn, &address, 0, nil, &size, &value) == noErr,
+              let summary = value?.takeRetainedValue() as? [String: Any],
+              let devices = summary[DisplayAudioDriverProtocol.Key.devices] as? [Any]
+        else { return nil }
+        return devices.count
     }
 
     func isClaimedElsewhere(uid: String) -> Bool {

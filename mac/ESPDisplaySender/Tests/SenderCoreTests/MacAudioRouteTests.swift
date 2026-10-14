@@ -332,7 +332,9 @@ final class MacAudioRouteTests: XCTestCase {
         let driver = FakeDisplayAudioDriver()
         driver.claimedElsewhere = [desk.uid]
         let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
-        system.show([desk])
+        // macOS lists the other owner's device under that owner's suffix.
+        system.devices.append(MacOutputDevice(
+            uid: desk.uid + ".0123456789abcdef", name: "Desk", isBuiltIn: false))
         let router = MacAudioRouter(bridge: driver, system: system)
         let plan = router.update(route: .displaysOnly, displays: [desk])
         XCTAssertEqual(system.defaultUID, speakers.uid)
@@ -355,6 +357,207 @@ final class MacAudioRouteTests: XCTestCase {
         XCTAssertEqual(plan.target, .device(uid: listed.uid))
         XCTAssertEqual(system.defaultUID, listed.uid)
         XCTAssertEqual(driver.lastRegistration, [desk], "registered as the display's own UID")
+    }
+
+    /// Claims are found in the device list the pass has already read, not by
+    /// reading it again on the main thread for every missing display.
+    func testAClaimIsFoundWithoutReadingTheDeviceListAgain() {
+        let driver = FakeDisplayAudioDriver()
+        driver.devicesAppearOnRegister = false
+        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        system.devices.append(MacOutputDevice(
+            uid: desk.uid + ".ffffffffffffffff", name: "Desk", isBuiltIn: false))
+        let router = MacAudioRouter(bridge: driver, system: system)
+        var plan = router.update(route: .displaysOnly, displays: [desk, shelf])
+        plan = router.update(route: .displaysOnly, displays: [desk, shelf])
+        XCTAssertEqual(driver.claimScans, 0)
+        XCTAssertTrue(plan.note?.contains("claimed") == true, plan.note ?? "")
+        XCTAssertTrue(plan.note?.contains("\"Desk\"") == true, plan.note ?? "")
+        XCTAssertFalse(plan.note?.contains("Shelf") == true, "only the claimed one")
+        XCTAssertEqual(system.defaultUID, speakers.uid)
+    }
+
+    /// The driver lists a device under this app's UID that this app does not
+    /// own: noted, and never made the Mac's output.
+    func testAListedDeviceThisAppDoesNotOwnIsNotRoutedTo() {
+        let driver = FakeDisplayAudioDriver()
+        driver.listedButNotOwned = [desk.uid]
+        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        system.show([desk])
+        let router = MacAudioRouter(bridge: driver, system: system)
+        let plan = router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertEqual(system.defaultUID, speakers.uid)
+        XCTAssertEqual(plan.target, .restore)
+        XCTAssertTrue(plan.note?.contains("claimed") == true, plan.note ?? "")
+    }
+
+    /// Registered, but every one of the driver's devices is held by other
+    /// apps: the route says so instead of waiting for a device that cannot come.
+    func testAFullDriverSaysSo() {
+        let driver = FakeDisplayAudioDriver()
+        driver.devicesAppearOnRegister = false
+        driver.heldDevices = DisplayAudioDriverProtocol.maxDevices
+        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        let router = MacAudioRouter(bridge: driver, system: system)
+        let first = router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertFalse(
+            first.note?.contains("no room") == true,
+            "one pass is not enough: the driver may not have caught up")
+        let plan = router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertTrue(plan.note?.contains("no room") == true, plan.note ?? "")
+        XCTAssertTrue(plan.note?.contains("\"Desk\"") == true, plan.note ?? "")
+        XCTAssertTrue(plan.note?.contains("8 of its 8 devices are in use by other apps") == true,
+                      plan.note ?? "")
+        driver.heldDevices = 3
+        let waiting = router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertFalse(waiting.note?.contains("no room") == true, waiting.note ?? "")
+    }
+
+    /// A change of displays, or a refused registration, starts the count
+    /// again: the next pass may read the driver before it caught up.
+    func testAFullCountStartsAgainAfterAChange() {
+        let driver = FakeDisplayAudioDriver()
+        driver.devicesAppearOnRegister = false
+        driver.heldDevices = DisplayAudioDriverProtocol.maxDevices
+        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        let router = MacAudioRouter(bridge: driver, system: system)
+        router.update(route: .displaysOnly, displays: [desk, shelf])
+        XCTAssertTrue(router.update(route: .displaysOnly, displays: [desk, shelf])
+            .note?.contains("no room") == true)
+        let changed = router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertFalse(changed.note?.contains("no room") == true, changed.note ?? "")
+        XCTAssertTrue(router.update(route: .displaysOnly, displays: [desk])
+            .note?.contains("no room") == true)
+        driver.refuseRegistrations = true
+        XCTAssertTrue(router.update(route: .displaysOnly, displays: [desk])
+            .note?.contains("refused") == true)
+        driver.refuseRegistrations = false
+        let back = router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertFalse(back.note?.contains("no room") == true, back.note ?? "")
+    }
+
+    /// A full driver and a claimed display are both said.
+    func testAFullDriverAndAClaimedDisplayAreBothNoted() {
+        let driver = FakeDisplayAudioDriver()
+        driver.devicesAppearOnRegister = false
+        driver.heldDevices = DisplayAudioDriverProtocol.maxDevices
+        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        system.devices.append(MacOutputDevice(
+            uid: desk.uid + ".0123456789abcdef", name: "Desk", isBuiltIn: false))
+        let router = MacAudioRouter(bridge: driver, system: system)
+        router.update(route: .displaysOnly, displays: [desk, shelf])
+        let plan = router.update(route: .displaysOnly, displays: [desk, shelf])
+        XCTAssertTrue(plan.note?.contains("no room for \"Shelf\"") == true, plan.note ?? "")
+        XCTAssertTrue(plan.note?.contains("claimed the output device for \"Desk\"") == true,
+                      plan.note ?? "")
+    }
+
+    /// The plan's own note is kept beside a claimed display's: mirroring on
+    /// a Mac with no output of its own says both.
+    func testThePlansOwnNoteIsKeptBesideAClaim() {
+        let driver = FakeDisplayAudioDriver()
+        let system = FakeMacOutputSystem(devices: [], defaultUID: nil)
+        system.show([shelf])
+        system.devices.append(MacOutputDevice(
+            uid: desk.uid + ".0123456789abcdef", name: "Desk", isBuiltIn: false))
+        driver.claimedElsewhere = [desk.uid]
+        let router = MacAudioRouter(bridge: driver, system: system)
+        let plan = router.update(route: .mirror, displays: [desk, shelf])
+        XCTAssertTrue(plan.note?.contains("no output of its own to mirror") == true,
+                      plan.note ?? "")
+        XCTAssertTrue(plan.note?.contains("claimed the output device for \"Desk\"") == true,
+                      plan.note ?? "")
+    }
+
+    /// Every display claimed: no "waiting for the device to appear", since
+    /// it has appeared, only not for this app.
+    func testAClaimIsNotAlsoCalledWaiting() {
+        let driver = FakeDisplayAudioDriver()
+        driver.claimedElsewhere = [desk.uid]
+        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        system.devices.append(MacOutputDevice(
+            uid: desk.uid + ".0123456789abcdef", name: "Desk", isBuiltIn: false))
+        let router = MacAudioRouter(bridge: driver, system: system)
+        let plan = router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertFalse(plan.note?.contains("Waiting") == true, plan.note ?? "")
+        XCTAssertTrue(plan.note?.contains("claimed") == true, plan.note ?? "")
+    }
+
+    /// A refusal is said on its own: with nothing registered no device can
+    /// be present, so the plan's only note is the generic "waiting".
+    func testARefusalIsNotAlsoCalledWaiting() {
+        let driver = FakeDisplayAudioDriver()
+        driver.refuseRegistrations = true
+        let router = MacAudioRouter(
+            bridge: driver, system: FakeMacOutputSystem(devices: [], defaultUID: nil))
+        let plan = router.update(route: .mirror, displays: [desk])
+        XCTAssertTrue(plan.note?.contains("refused") == true, plan.note ?? "")
+        XCTAssertFalse(plan.note?.contains("Waiting") == true, plan.note ?? "")
+    }
+
+    /// While the driver is full, an output picked elsewhere is still said,
+    /// and the generic "waiting" note gives way to the no-room one.
+    func testAPickElsewhereIsStillSaidWhileTheDriverIsFull() {
+        let driver = FakeDisplayAudioDriver()
+        let system = FakeMacOutputSystem(
+            devices: [speakers, headphones], defaultUID: speakers.uid)
+        system.show([desk])
+        let router = MacAudioRouter(bridge: driver, system: system)
+        router.update(route: .displaysOnly, displays: [desk])
+        system.defaultUID = headphones.uid
+        driver.heldDevices = DisplayAudioDriverProtocol.maxDevices
+        driver.devicesAppearOnRegister = false
+        router.update(route: .displaysOnly, displays: [desk, shelf])
+        let plan = router.update(route: .displaysOnly, displays: [desk, shelf])
+        XCTAssertTrue(plan.note?.contains("no room for \"Shelf\"") == true, plan.note ?? "")
+        XCTAssertTrue(plan.note?.contains("picked outside this app") == true, plan.note ?? "")
+
+        let empty = FakeDisplayAudioDriver()
+        empty.devicesAppearOnRegister = false
+        empty.heldDevices = DisplayAudioDriverProtocol.maxDevices
+        let lone = MacAudioRouter(
+            bridge: empty,
+            system: FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid))
+        lone.update(route: .displaysOnly, displays: [desk])
+        let full = lone.update(route: .displaysOnly, displays: [desk])
+        XCTAssertFalse(full.note?.contains("Waiting") == true, full.note ?? "")
+        XCTAssertTrue(full.note?.contains("no room") == true, full.note ?? "")
+    }
+
+    /// Some of the full driver's devices are this app's own: the note counts
+    /// only the others, and says so when this app itself has every one.
+    func testAFullDriverCountsOnlyOtherAppsDevices() {
+        let driver = FakeDisplayAudioDriver()
+        driver.devicesAppearOnRegister = false
+        driver.heldDevices = DisplayAudioDriverProtocol.maxDevices
+        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        system.show([desk])
+        driver.addDevice(uid: desk.uid, id: 300)
+        let router = MacAudioRouter(bridge: driver, system: system)
+        router.update(route: .displaysOnly, displays: [desk, shelf])
+        let some = router.update(route: .displaysOnly, displays: [desk, shelf])
+        XCTAssertTrue(some.note?.contains("7 of its 8 devices are in use by other apps") == true,
+                      some.note ?? "")
+        XCTAssertTrue(some.note?.contains("\"Shelf\"") == true, some.note ?? "")
+
+        // Nine displays: this app holds all eight devices itself.
+        let many = (0..<9).map {
+            DisplayAudioDeviceSpec(
+                uid: "com.espdisplay.display.\($0)", name: "D\($0)", latencyFrames: 0)
+        }
+        let busy = FakeDisplayAudioDriver()
+        busy.devicesAppearOnRegister = false
+        busy.heldDevices = DisplayAudioDriverProtocol.maxDevices
+        for (index, spec) in many.prefix(8).enumerated() {
+            busy.addDevice(uid: spec.uid, id: AudioObjectID(400 + index))
+        }
+        let crowded = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        crowded.show(Array(many.prefix(8)))
+        let own = MacAudioRouter(bridge: busy, system: crowded)
+        own.update(route: .mirror, displays: many)
+        let all = own.update(route: .mirror, displays: many)
+        XCTAssertTrue(all.note?.contains("already uses all 8") == true, all.note ?? "")
+        XCTAssertTrue(all.note?.contains("\"D8\"") == true, all.note ?? "")
     }
 
     /// A driver with no room left for this app says so rather than leaving

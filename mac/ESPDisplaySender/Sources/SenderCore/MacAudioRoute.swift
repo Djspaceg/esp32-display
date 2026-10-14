@@ -70,6 +70,7 @@ struct MacAudioRoutePlan: Equatable, Sendable {
     /// text under the picker and added to each display's audio detail.
     let note: String?
 
+    static let waitingNote = "Waiting for a display's output device to appear in macOS."
     static let mirrorUID = "com.espdisplay.sender.mirror"
     static let displaysUID = "com.espdisplay.sender.displays"
 
@@ -103,7 +104,7 @@ struct MacAudioRoutePlan: Equatable, Sendable {
         guard !present.isEmpty else {
             return MacAudioRoutePlan(
                 chosen: chosen, effective: chosen, target: .restore,
-                note: "Waiting for a display's output device to appear in macOS.")
+                note: waitingNote)
         }
         switch chosen {
         case .displaysOnly:
@@ -167,6 +168,10 @@ final class MacAudioRouter {
     /// What the last pass registered, for a heartbeat sent while the main
     /// thread waits on the macOS password prompt.
     private(set) var heartbeat: [DisplayAudioDeviceSpec] = []
+    /// Passes in a row that found the driver full with a display missing.
+    private var fullPasses = 0
+    /// The displays those passes were for.
+    private var countedDisplays: [String] = []
     /// The members each Multi-Output device of ours was built with, so one
     /// that already matches is reused rather than rebuilt.
     private var built: [String: [String]] = [:]
@@ -207,12 +212,24 @@ final class MacAudioRouter {
         // claimed first would get whatever the Mac is routed to send it.
         var present: [String: AudioObjectID] = [:]
         var claimed: [DisplayAudioDeviceSpec] = []
+        var missing: [DisplayAudioDeviceSpec] = []
         if driving {
             for display in displays {
                 // Another owner's device for this display carries that
                 // owner's UID suffix, so it is not found by ours.
                 guard let id = bridge.deviceID(uid: display.uid) else {
-                    if bridge.isClaimedElsewhere(uid: display.uid) { claimed.append(display) }
+                    // From the device list this pass already read: another
+                    // read per missing display, every two seconds, on the
+                    // main thread, would be all cost and no news.
+                    let mine = bridge.deviceUID(for: display.uid)
+                    if outputs.contains(where: {
+                        $0.uid != mine
+                            && DisplayAudioDriverProtocol.isDeviceUID($0.uid, of: display.uid)
+                    }) {
+                        claimed.append(display)
+                    } else {
+                        missing.append(display)
+                    }
                     continue
                 }
                 if bridge.owns(device: id) {
@@ -254,24 +271,64 @@ final class MacAudioRouter {
                 appliedDefaultUID = nil
             }
         }
+        // The count is trusted only once two passes in a row, with the same
+        // displays and an accepted registration, agree: the driver updates
+        // its list after each registration, so a pass right after one can
+        // read the old count.
+        let displayUIDs = displays.map(\.uid)
+        if refused || displayUIDs != countedDisplays { fullPasses = 0 }
+        countedDisplays = displayUIDs
+        // The plan's own note, unless it is only the generic "waiting",
+        // which any specific note below says better.
+        let own = plan.note == MacAudioRoutePlan.waitingNote ? nil : plan.note
         if refused {
+            let why = "The display audio driver refused this app's displays. It "
+                + "takes up to \(DisplayAudioDriverProtocol.maxClients) apps at "
+                + "once, so other apps on this Mac may be using every place; "
+                + "quit them, or restart the Mac."
             return MacAudioRoutePlan(
                 chosen: plan.chosen, effective: plan.effective, target: plan.target,
-                note: "The display audio driver refused this app's displays. It "
-                    + "takes up to \(DisplayAudioDriverProtocol.maxClients) apps at "
-                    + "once, so other apps on this Mac may be using every place; "
-                    + "quit them, or restart the Mac.")
+                note: [own, why].compactMap { $0 }.joined(separator: " "))
+        }
+        var notes: [String] = []
+        // Registered, yet no device: a driver whose every device is held
+        // makes none.
+        let held = missing.isEmpty ? nil : bridge.deviceCount()
+        let full = held.map { $0 >= DisplayAudioDriverProtocol.maxDevices } ?? false
+        fullPasses = full ? fullPasses + 1 : 0
+        if let held, fullPasses >= 2 {
+            let names = missing.map { "\"\($0.name)\"" }.joined(separator: ", ")
+            let capacity = DisplayAudioDriverProtocol.maxDevices
+            let others = Swift.max(0, held - present.count)
+            let why = others == 0
+                ? "this app already uses all \(capacity) of its devices, the most it "
+                    + "makes. Remove a display from this app to free one."
+                : "\(others) of its \(capacity) devices are in use by other apps on this "
+                    + "Mac. Quit some of them; the display gets its device once one "
+                    + "is free."
+            notes.append("The display audio driver has no room for \(names): " + why)
         }
         if !claimed.isEmpty {
             let names = claimed.map { "\"\($0.name)\"" }.joined(separator: ", ")
-            return MacAudioRoutePlan(
-                chosen: plan.chosen, effective: plan.effective, target: plan.target,
-                note: "Another app on this Mac has claimed the output device for "
-                    + "\(names), so this app does not send the Mac's sound to it. "
-                    + "The device comes back to this app once that app lets go "
-                    + "of it.")
+            notes.append("Another app on this Mac has claimed the output device for "
+                + "\(names), so this app does not send the Mac's sound to it. "
+                + "The device comes back to this app once that app lets go of it.")
         }
-        return noteAnOutputPickedElsewhere(plan, outputs: outputs)
+        // Everything that applies is said together: the plan's own note
+        // (no output of the Mac's own to mirror, say), then these, then an
+        // output picked elsewhere.
+        let picked = noteAnOutputPickedElsewhere(plan, outputs: outputs).note
+        var all: [String] = []
+        if notes.isEmpty, let note = plan.note {
+            all.append(note)
+        } else if let own {
+            all.append(own)
+        }
+        all += notes
+        if plan.note == nil, let picked { all.append(picked) }
+        return MacAudioRoutePlan(
+            chosen: plan.chosen, effective: plan.effective, target: plan.target,
+            note: all.isEmpty ? nil : all.joined(separator: " "))
     }
 
     private static func defaultUID(of target: MacAudioRouteTarget) -> String? {

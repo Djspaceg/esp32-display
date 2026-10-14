@@ -46,6 +46,15 @@ final class FakeDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Sendabl
         lock.withLock { claimedElsewhere.contains(uid) ? nil : ids[uid] }
     }
 
+    /// Devices the driver lists under this app's UID but this app does not
+    /// own, the branch a device found by UID can still take.
+    var listedButNotOwned: Set<String> = []
+    /// What the driver says it holds, all owners together; nil when it does
+    /// not say.
+    var heldDevices: Int?
+    func deviceCount() -> Int? { lock.withLock { heldDevices } }
+    private(set) var claimScans = 0
+
     /// The suffix this app's devices carry in macOS; empty for tests that
     /// compare UIDs as registered.
     var suffix = ""
@@ -53,7 +62,10 @@ final class FakeDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Sendabl
     func deviceUID(for uid: String) -> String { uid + suffix }
 
     func isClaimedElsewhere(uid: String) -> Bool {
-        lock.withLock { claimedElsewhere.contains(uid) && ids[uid] != nil }
+        lock.withLock {
+            claimScans += 1
+            return claimedElsewhere.contains(uid) && ids[uid] != nil
+        }
     }
 
     /// UIDs whose device another client claimed first.
@@ -62,7 +74,7 @@ final class FakeDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Sendabl
     func owns(device: AudioObjectID) -> Bool {
         lock.withLock {
             guard let uid = ids.first(where: { $0.value == device })?.key else { return false }
-            return !claimedElsewhere.contains(uid)
+            return !claimedElsewhere.contains(uid) && !listedButNotOwned.contains(uid)
         }
     }
 
@@ -204,6 +216,16 @@ final class DisplayAudioDriverTests: XCTestCase {
         let driver = FakeDisplayAudioDriver()
         driver.addDevice(uid: "u", id: 7)
         driver.claimedElsewhere = ["u"]
+        XCTAssertThrowsError(try DisplayAudioDeviceTap(bridge: driver, uid: "u")) {
+            XCTAssertTrue($0.localizedDescription.contains("another app"))
+        }
+    }
+
+    /// Found by this app's UID, yet not this app's: the tap still refuses it.
+    func testTheDeviceTapRefusesAListedDeviceItDoesNotOwn() {
+        let driver = FakeDisplayAudioDriver()
+        driver.addDevice(uid: "u", id: 7)
+        driver.listedButNotOwned = ["u"]
         XCTAssertThrowsError(try DisplayAudioDeviceTap(bridge: driver, uid: "u")) {
             XCTAssertTrue($0.localizedDescription.contains("another app"))
         }
