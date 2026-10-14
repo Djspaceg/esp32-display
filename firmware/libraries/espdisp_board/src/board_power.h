@@ -325,9 +325,27 @@ inline bool powerKeyEvents(axp2101::PowerKeyEvents &events) {
   }
   uint8_t status = 0;
   if (!readRegister(REG_IRQ_STATUS2, status)) return false;
-  events = axp2101::powerKeyEvents(status);
+  // A clear that did not land leaves these bits set, and the next read would
+  // report them again as new; reporting nothing now lets the next read carry
+  // them once, beside whatever has latched since.
   const uint8_t clear = axp2101::powerKeyClear(status);
-  if (clear != 0) writeRegister(REG_IRQ_STATUS2, clear);
+  if (clear != 0 && !writeRegister(REG_IRQ_STATUS2, clear)) return false;
+  events = axp2101::powerKeyEvents(status);
+  return true;
+}
+
+/// What holding the PWR key does on this board: after how many seconds, and
+/// what (axp2101::powerKeyHoldAction's word). False off the AXP2101 path or
+/// when either register read failed.
+inline bool powerKeyHold(int &offSeconds, const char *&action) {
+  if (!enabled || activeController != board::PowerController::Axp2101) {
+    return false;
+  }
+  uint8_t pwroffEn = 0, offOnLevel = 0;
+  if (!readRegister(REG_PWROFF_EN, pwroffEn)) return false;
+  if (!readRegister(REG_IRQ_OFF_ON_LEVEL, offOnLevel)) return false;
+  offSeconds = axp2101::powerKeyOffSeconds(offOnLevel);
+  action = axp2101::powerKeyHoldAction(pwroffEn);
   return true;
 }
 

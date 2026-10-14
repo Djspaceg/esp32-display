@@ -65,7 +65,7 @@ extern bool doom_motion_available(void);
 extern void doom_imu_init(void);
 extern void doom_imu_read(float* pitch, float* roll);
 extern bool doom_power_key_init(void);
-extern bool doom_power_key_read(bool* down_edge, bool* up_edge);
+extern bool doom_power_key_read(doom_power_key_bits_t* bits);
 
 // Touch state layout and doom_touch_init/sample/poll declarations. Shared with
 // doom_hw_bridge.cpp so the two halves cannot disagree about the struct.
@@ -136,6 +136,7 @@ static uint32_t dg_fire_due_at = 0;
 static bool dg_power_key_available = false;
 static doom_power_key_t dg_power_key = {false};
 static bool dg_power_fire_held = false;
+static bool dg_power_shot_pending = false;
 
 // --- Touch -> aim/shoot/weapon mapping ---
 // Touch-down is the centre of a virtual joystick. Horizontal displacement past
@@ -435,28 +436,48 @@ static void process_touch_input(void) {
 // fires once.
 static void process_power_key_input(void) {
     if (!dg_power_key_available) return;
-    bool down_edge = false;
-    bool up_edge = false;
-    if (!doom_power_key_read(&down_edge, &up_edge)) return;
-    const bool missed_press =
-        doom_power_key_step(&dg_power_key, down_edge, up_edge);
-    if (down_edge || up_edge) {
-        const char* now = dg_power_key.held ? "held"
-                          : missed_press    ? "tap"
-                                            : "released";
-        doom_log("pwr key: %s%s-> %s", down_edge ? "down " : "",
-                 up_edge ? "up " : "", now);
+    const bool gameplay = dg_gameplay_input_active();
+    if (!gameplay) dg_power_shot_pending = false;
+
+    doom_power_key_bits_t bits = {false, false, false, false};
+    if (doom_power_key_read(&bits)) {
+        const bool missed_press = doom_power_key_step(&dg_power_key, bits);
+        if (bits.down || bits.up || bits.short_press || bits.long_press) {
+            // The raw bits as well as the outcome: the edge polarity is read
+            // off this line on the bench.
+            doom_log("pwr key: %s%s%s%s-> %s", bits.down ? "down " : "",
+                     bits.up ? "up " : "", bits.short_press ? "short " : "",
+                     bits.long_press ? "long " : "",
+                     dg_power_key.held ? "held"
+                     : missed_press    ? "shot"
+                                       : "released");
+        }
+        if (missed_press && gameplay) dg_power_shot_pending = true;
     }
 
-    const bool gameplay = dg_gameplay_input_active();
     const bool want_fire = gameplay && dg_power_key.held;
     if (want_fire != dg_power_fire_held) {
-        push_key(KEY_FIRE, want_fire ? 1 : 0);
+        // A touch tap's Fire pulse still down this poll releases Fire itself
+        // on the next one; letting go here would drain both edges into one
+        // tic and the tap would never shoot.
+        const bool tap_fire_down =
+            dg_pulse_key_held && dg_pulse_key == KEY_FIRE;
+        if (want_fire || !tap_fire_down) {
+            push_key(KEY_FIRE, want_fire ? 1 : 0);
+        }
         dg_power_fire_held = want_fire;
         // Fire is also Ctrl and the left mouse button on a USB carrier.
         if (!want_fire) dg_shared_keys_released = true;
     }
-    if (missed_press && gameplay) {
+
+    // One shot for a press too quick to be held. Not over a pulse a swipe or
+    // tap began this same poll, which it would cut to nothing; it waits a
+    // poll instead.
+    const bool pulse_began_this_poll =
+        dg_pulse_key_held &&
+        dg_pulse_release_generation == dg_input_generation + 1;
+    if (dg_power_shot_pending && !pulse_began_this_poll) {
+        dg_power_shot_pending = false;
         dg_begin_gameplay_pulse(KEY_FIRE);
     }
 }
@@ -651,6 +672,10 @@ void DG_PollInput(void) {
     process_touch_input();
     process_power_key_input();
     process_usb_input();
+    // A USB Fire release (Ctrl, the left button) lets go of Fire while the
+    // PWR key may still be holding it; press it again. A repeated key-down is
+    // a no-op to the engine.
+    if (dg_power_fire_held) push_key(KEY_FIRE, 1);
 }
 
 int DG_GetKey(int* pressed, unsigned char* key) {

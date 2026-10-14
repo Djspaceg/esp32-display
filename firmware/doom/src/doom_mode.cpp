@@ -31,7 +31,6 @@ extern "C" void doom_display_blit(const uint16_t* buf, int w, int h);
 extern "C" int doom_display_width(void);
 extern "C" int doom_display_height(void);
 extern "C" bool doom_motion_available(void);
-extern "C" bool doom_power_key_present(void);
 extern "C" int doom_boot_pin(void);
 
 // doomgeneric entry points (C linkage)
@@ -100,9 +99,6 @@ void doom_enter(void) {
     ESP_LOGI(TAG, "  Double-tap     = Use/Open");
     ESP_LOGI(TAG, "  Swipe up       = Next weapon");
     ESP_LOGI(TAG, "  Swipe down     = Use/Open");
-    if (doom_power_key_present()) {
-        ESP_LOGI(TAG, "  PWR key held   = Shoot (a long hold powers off)");
-    }
     ESP_LOGI(TAG, "  2nd finger     = Run");
     ESP_LOGI(TAG, "  Menu tap/swipe = Select/navigate");
     ESP_LOGI(TAG, "  BOOT short     = Escape (open/close menu)");

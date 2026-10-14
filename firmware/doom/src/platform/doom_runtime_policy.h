@@ -90,21 +90,48 @@ static inline doom_gameplay_swipe_t doom_gameplay_swipe_action(
 }
 
 // The power key as Doom sees it, folded from one poll of the PMU's latched
-// edge bits. Doom holds Fire for as long as held is true.
+// interrupt bits. Doom holds Fire for as long as held is true.
 typedef struct {
     bool held;  // the key is down as of the latest poll
 } doom_power_key_t;
 
-// Fold one poll's edges into *key. The PMU latches each edge, so a press is
-// never lost between polls, but their order inside one poll is not recorded.
-// Both edges at once is a whole press the poll missed the middle of: from up,
-// down then up (returns true so the caller still fires once); from down, up
-// then down again, which leaves the key held. An up edge with the key already
-// up changes nothing.
-static inline bool doom_power_key_step(
-    doom_power_key_t* key, bool down_edge, bool up_edge) {
-    if (down_edge && up_edge) return !key->held;
-    if (down_edge) key->held = true;
-    if (up_edge) key->held = false;
-    return false;
+// One poll's worth of the PMU's latched PWR key bits.
+typedef struct {
+    bool down;         // negative edge: the key went down
+    bool up;           // positive edge: the key came back up
+    bool short_press;  // a press shorter than the long-press time has ended
+    bool long_press;   // the key has been held past the long-press time
+} doom_power_key_bits_t;
+
+// Fold one poll's bits into *key. Returns true when a press began and ended
+// without Fire ever being held for it, so the caller still fires once.
+//
+// The PMU latches each edge, so a press is never lost between polls, but the
+// order of edges inside one poll is not recorded. Both edges at once is a whole
+// press the poll missed the middle of: from up, down then up (fire once); from
+// held, up then down again, which leaves the key held. An up edge with the key
+// already up changes nothing.
+//
+// The two press bits are the cross-check that keeps Fire from sticking down if
+// the edges bounce or their polarity is not what the register names suggest:
+// a completed short press means the key is up now, whatever the edges said; a
+// long press with no release beside it means the key is down now.
+static inline bool doom_power_key_step(doom_power_key_t* key,
+                                       doom_power_key_bits_t bits) {
+    const bool was_held = key->held;
+    bool fire_once = false;
+    if (bits.down && bits.up) {
+        fire_once = !was_held;
+    } else if (bits.down) {
+        key->held = true;
+    } else if (bits.up) {
+        key->held = false;
+    }
+    if (bits.short_press) {
+        if (!was_held) fire_once = true;
+        key->held = false;
+    } else if (bits.long_press && !bits.up) {
+        key->held = true;
+    }
+    return fire_once;
 }

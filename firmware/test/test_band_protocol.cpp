@@ -6510,19 +6510,50 @@ int main() {
     // The PWR key fires while held: its down edge holds Fire, its up edge
     // lets go. Both edges inside one poll are a whole press the poll missed
     // the middle of: one shot if the key was up, still held if it was down
-    // (a release and a fresh press).
+    // (a release and a fresh press). A completed short press always leaves
+    // the key up, and a long press with no release leaves it down, so bounce
+    // or reversed edges cannot leave Fire stuck.
     {
+      typedef doom_power_key_bits_t B;
+      const B none = {false, false, false, false};
+      const B down = {true, false, false, false};
+      const B up = {false, true, false, false};
+      const B both = {true, true, false, false};
       doom_power_key_t key = {};
-      CHECK(!doom_power_key_step(&key, false, false) && !key.held);
-      CHECK(!doom_power_key_step(&key, true, false) && key.held);
-      CHECK(!doom_power_key_step(&key, false, false) && key.held);
-      CHECK(!doom_power_key_step(&key, false, true) && !key.held);
-      CHECK(doom_power_key_step(&key, true, true) && !key.held);
-      CHECK(!doom_power_key_step(&key, true, false) && key.held);
-      CHECK(!doom_power_key_step(&key, true, true) && key.held);
-      CHECK(!doom_power_key_step(&key, false, true) && !key.held);
+      CHECK(!doom_power_key_step(&key, none) && !key.held);
+      CHECK(!doom_power_key_step(&key, down) && key.held);
+      CHECK(!doom_power_key_step(&key, none) && key.held);
+      CHECK(!doom_power_key_step(&key, up) && !key.held);
+      CHECK(doom_power_key_step(&key, both) && !key.held);
+      CHECK(!doom_power_key_step(&key, down) && key.held);
+      CHECK(!doom_power_key_step(&key, both) && key.held);
+      CHECK(!doom_power_key_step(&key, up) && !key.held);
       // A stray up edge with the key already up changes nothing.
-      CHECK(!doom_power_key_step(&key, false, true) && !key.held);
+      CHECK(!doom_power_key_step(&key, up) && !key.held);
+
+      // A short press ending while held: released, Fire already shot.
+      CHECK(!doom_power_key_step(&key, down) && key.held);
+      CHECK(!doom_power_key_step(&key, {false, true, true, false}) &&
+            !key.held);
+      // A bouncy release reported as both edges plus the short press: up.
+      CHECK(!doom_power_key_step(&key, down) && key.held);
+      CHECK(!doom_power_key_step(&key, {true, true, true, false}) &&
+            !key.held);
+      // Reversed polarity: the press reads as an up edge (ignored), the
+      // release as a down edge plus the short press. Up, and one shot.
+      CHECK(!doom_power_key_step(&key, up) && !key.held);
+      CHECK(doom_power_key_step(&key, {true, false, true, false}) &&
+            !key.held);
+      // A short press whose edges were never seen still shoots once.
+      CHECK(doom_power_key_step(&key, {false, false, true, false}) &&
+            !key.held);
+      // A long press with no release says the key is down.
+      CHECK(!doom_power_key_step(&key, {false, false, false, true}) &&
+            key.held);
+      CHECK(!doom_power_key_step(&key, up) && !key.held);
+      // A long press reported with its release: up.
+      CHECK(!doom_power_key_step(&key, {false, true, false, true}) &&
+            !key.held);
     }
   }
 

@@ -23,6 +23,7 @@
 
 #include "doom_mode.h"
 #include "doom_log.h"
+#include "doom_runtime_policy.h"
 
 // Settled by display_stream before Doom is entered.
 extern const board::Config* bcfg;
@@ -173,15 +174,29 @@ extern "C" bool doom_power_key_init(void) {
         // Not fatal: the button is an extra, and touch still fires.
         Serial.println("[doom] PWR key unavailable; touch fire only");
     }
+    if (s_power_key_available) {
+        // Said after bring-up, from the PMU's own registers, so the warning
+        // is this board's real hold time rather than a remembered default.
+        int offSeconds = 0;
+        const char* action = nullptr;
+        if (boardpower::powerKeyHold(offSeconds, action)) {
+            doom_log("  PWR key held   = Shoot (a %d s hold: %s)", offSeconds,
+                     action);
+        } else {
+            doom_log("  PWR key held   = Shoot");
+        }
+    }
     return s_power_key_available;
 }
 
-extern "C" bool doom_power_key_read(bool* down_edge, bool* up_edge) {
+extern "C" bool doom_power_key_read(doom_power_key_bits_t* bits) {
     if (!s_power_key_available) return false;
     axp2101::PowerKeyEvents events;
     if (!boardpower::powerKeyEvents(events)) return false;
-    *down_edge = events.down;
-    *up_edge = events.up;
+    bits->down = events.down;
+    bits->up = events.up;
+    bits->short_press = events.shortPress;
+    bits->long_press = events.longPress;
     return true;
 }
 

@@ -30,9 +30,11 @@ allocate from PSRAM only when Doom starts.
    on the left half to move and on the right half to turn. Right-side taps
    fire, double-taps and swipes down use/open (doors and switches), and swipes
    up cycle to the next weapon. A second finger enables run. On the 1.75-inch
-   round, hold the large side button to fire; do not hold it for the PMU's
-   power-off time (the boot log's `power: AXP2101 PWR key` line gives it, 6 s
-   or more by default), or the board switches off.
+   round, hold the large side button to fire, but in bursts: the power chip
+   switches the board off if the button is held for its power-off time, and
+   it does that by itself, whatever the firmware is doing. Doom's serial log
+   says how long that is on the board in hand (`PWR key held = Shoot (a N s
+   hold: power off)`).
 7. Hold BOOT for 3 seconds to exit Doom. The panel restarts into the normal
    streaming firmware; release is not required once the threshold is reached.
 
