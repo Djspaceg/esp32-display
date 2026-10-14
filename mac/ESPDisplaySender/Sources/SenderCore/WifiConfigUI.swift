@@ -230,6 +230,9 @@ enum WifiConfigUI {
         var serialStatus: USBStatus?
         var verifiedGeneration: Int?
         var isConnected: Bool
+        /// The USB serial number macOS reports for the device behind this
+        /// port, read from the IORegistry without opening it.
+        var usbSerial: String? = nil
 
         init(
             path: String,

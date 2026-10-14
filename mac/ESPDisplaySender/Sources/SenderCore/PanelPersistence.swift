@@ -26,6 +26,8 @@ struct PersistedPanel: Codable, Equatable {
     /// ports are paired with records by the ID a board reports, each time it
     /// is plugged in. Files that still carry a `usbPort` decode with it ignored.
     var usbHardwareID: String?
+    /// `PanelSnapshot.usbSerialNumbers`, absent when none is known.
+    var usbSerialNumbers: [String]?
     /// Last known address, kept as a hint for the UI while offline.
     var address: String?
     /// When the panel was last heard from, so "last seen" survives a restart.
@@ -52,6 +54,8 @@ struct PersistedPanel: Codable, Equatable {
                 snapshot.dateAdded.timeIntervalSince1970.rounded(.down))
         hardwareID = snapshot.hardwareID
         usbHardwareID = snapshot.usbHardwareID
+        usbSerialNumbers = snapshot.usbSerialNumbers.isEmpty
+            ? nil : snapshot.usbSerialNumbers
         address = snapshot.address
         lastSeen = snapshot.lastSeen
         source = snapshot.source.spec
@@ -74,6 +78,7 @@ struct PersistedPanel: Codable, Equatable {
             address: address,
             usbHardwareID: usbHardwareID,
             lastSeen: lastSeen)
+        panel.usbSerialNumbers = usbSerialNumbers ?? []
         panel.source = PanelSource(source)
         panel.idleText = idleText ?? ""
         panel.gesturePreset = gesturePreset ?? .standard

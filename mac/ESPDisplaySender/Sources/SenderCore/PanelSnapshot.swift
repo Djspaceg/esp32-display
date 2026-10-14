@@ -21,6 +21,11 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// paired with a port only by the ID a board there reports, never by the
     /// port's path: the path is where the board happens to be plugged in.
     var usbHardwareID: String?
+    /// The USB serial numbers macOS reports for the devices this board's
+    /// console has answered behind - the board's own USB identity, not a
+    /// port. Learned only where CFGSHOW answered with this record's ID, so a
+    /// silent board can be paired on any path from the IORegistry alone.
+    var usbSerialNumbers: [String] = []
     var discovered = false
     var lastSeen: Date?
     var lastHeartbeatAt: Date?

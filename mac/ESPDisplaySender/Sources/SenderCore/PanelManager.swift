@@ -215,6 +215,11 @@ final class PanelManager: ObservableObject {
     }
     /// The Keychain's saved network names, and writing and removing one, for
     /// the Settings list. Injectable for the same reason as the lookup.
+    /// The USB serial number behind a port, from the IORegistry; injectable so
+    /// tests need no USB devices.
+    var usbSerialReader: @Sendable (String) -> String? = { port in
+        UsbRescuer.usbDevice(forPort: port).flatMap { $0.serial.isEmpty ? nil : $0.serial }
+    }
     var wifiNetworkNamesReader: @Sendable () -> [String] = {
         WifiCredentialStore.savedNetworkNames()
     }

@@ -66,6 +66,17 @@ extension PanelManager {
         return nil
     }
 
+    /// A connected port whose USB serial is one this record's board answered
+    /// behind: the board is plugged in, whether or not it has answered yet.
+    func usbSerialPairedDevice(for serviceName: String) -> WifiConfigUI.USBDeviceOption? {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }),
+              !panel.usbSerialNumbers.isEmpty
+        else { return nil }
+        return usbDevices.first {
+            $0.isConnected && $0.usbSerial.map(panel.usbSerialNumbers.contains) == true
+        }
+    }
+
     /// `currentUSBPort` as a hint for a command that finds its port by asking,
     /// nil when there is no single port.
     func pairedUSBPath(for serviceName: String) -> String? {
@@ -172,7 +183,12 @@ extension PanelManager {
         for path in removed { invalidateUSBPath(path) }
         let added = paths.filter { existing[$0] == nil }
         for path in added { usbPathGenerations[path, default: 0] += 1 }
-        let refreshed = paths.map { existing[$0] ?? WifiConfigUI.USBDeviceOption(path: $0) }
+        let refreshed = paths.map { path -> WifiConfigUI.USBDeviceOption in
+            if let known = existing[path] { return known }
+            var device = WifiConfigUI.USBDeviceOption(path: path)
+            device.usbSerial = usbSerialReader(path)
+            return device
+        }
         if refreshed != usbDevices { usbDevices = refreshed }
         if !removed.isEmpty { sortPanels() }
         return added
@@ -240,6 +256,23 @@ extension PanelManager {
         guard let canonicalID else {
             sortPanels()
             return
+        }
+        // The board's console answered behind this USB serial: that serial is
+        // this record's board from now on, wherever it is plugged in.
+        if let serial = usbDevices[index].usbSerial {
+            var learned = false
+            for panelIndex in panels.indices {
+                let owns = stableHardwareID(of: panels[panelIndex]) == canonicalID
+                let has = panels[panelIndex].usbSerialNumbers.contains(serial)
+                if owns, !has {
+                    panels[panelIndex].usbSerialNumbers.append(serial)
+                    learned = true
+                } else if !owns, has {
+                    panels[panelIndex].usbSerialNumbers.removeAll { $0 == serial }
+                    learned = true
+                }
+            }
+            if learned { persistIfNeeded(force: true) }
         }
         var rotationBefore: (serviceName: String, rotation: Int)?
         if let status = serialStatus,
@@ -512,11 +545,15 @@ extension PanelManager {
             now + usbIdentifyRetryDelay(afterAttempt: attempts))
     }
 
-    /// Whether a display record's board is on this port: by the hardware ID
-    /// the board here reported, or as a restarting record's device. A board
-    /// that has never answered at this port has reported nothing to pair it
-    /// by, so it is asked like any other device until it answers.
+    /// Whether a display record's board is on this port: by the USB serial
+    /// macOS reports for it (learned where the board answered before), by the
+    /// hardware ID the board here reported, or as a restarting record's
+    /// device. Anything else is asked like any other device until it answers.
     func usbPortBelongsToADisplay(_ path: String) -> Bool {
+        if let serial = usbDevices.first(where: { $0.path == path })?.usbSerial,
+           panels.contains(where: { $0.usbSerialNumbers.contains(serial) }) {
+            return true
+        }
         if panels.contains(where: {
             usbRestartingServices.contains($0.serviceName)
                 && usbUpdateDevice(for: $0.serviceName)?.path == path

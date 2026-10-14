@@ -45,6 +45,9 @@ extension PanelManager {
             }
             return "This display is busy over USB. Try again in a moment."
         }
+        if usbSerialPairedDevice(for: serviceName) != nil {
+            return "Connected by USB. Waiting for this display to answer."
+        }
         return "Connect this display to the Mac by USB to switch its network. "
             + "Over WiFi the display has no command for it."
     }
