@@ -1,0 +1,255 @@
+import AVFoundation
+import CoreAudio
+import Foundation
+import SenderProtocol
+
+/// ESPDisplayAudio.driver's side of the contract, mirrored from
+/// mac/AudioDriver/ESPDisplayAudioProtocol.h. A test reads that header and
+/// fails if the two disagree.
+enum DisplayAudioDriverProtocol {
+    static let version = 1
+    static let bundleID = "com.espdisplay.audio-driver"
+    static let registerSelector = fourCharCode("ESrg")
+    static let versionSelector = fourCharCode("ESvr")
+    static let pcmSelector = fourCharCode("ESpc")
+    static let sampleRate = 48_000.0
+    static let maxReadFrames = 4_800
+    static let maxDevices = 8
+    static let clientTimeoutSeconds = 10.0
+
+    enum Key {
+        static let version = "version"
+        static let client = "client"
+        static let devices = "devices"
+        static let uid = "uid"
+        static let name = "name"
+        static let latency = "latency"
+    }
+
+    static func fourCharCode(_ text: String) -> AudioObjectPropertySelector {
+        text.utf8.reduce(0) { $0 << 8 | AudioObjectPropertySelector($1) }
+    }
+}
+
+/// One display's output device as the driver is asked to create it.
+struct DisplayAudioDeviceSpec: Equatable, Sendable {
+    let uid: String
+    let name: String
+    /// What the device reports as its output latency, so a video player
+    /// delays its picture by about as long as the display's buffer holds the
+    /// sound.
+    let latencyFrames: Int
+
+    static let uidPrefix = "com.espdisplay.display."
+
+    /// Stable across launches, so macOS remembers the device as the output
+    /// the user chose: the board's hardware ID once known, its record name
+    /// before that.
+    static func uid(hardwareID: String?, serviceName: String) -> String {
+        if let hardwareID, !hardwareID.isEmpty { return uidPrefix + hardwareID }
+        return uidPrefix + "service." + serviceName
+    }
+
+    static func latencyFrames(tuning: AudioRuntimeTuning) -> Int {
+        Int((Double(tuning.validated.downlinkTargetMilliseconds)
+            * DisplayAudioDriverProtocol.sampleRate / 1_000).rounded())
+    }
+}
+
+enum DisplayAudioDriverRegistration {
+    /// The 'ESrg' dictionary. An empty list removes this client's devices.
+    static func payload(client: String, devices: [DisplayAudioDeviceSpec]) -> [String: Any] {
+        typealias Key = DisplayAudioDriverProtocol.Key
+        return [
+            Key.version: DisplayAudioDriverProtocol.version,
+            Key.client: client,
+            Key.devices: devices.prefix(DisplayAudioDriverProtocol.maxDevices).map {
+                [Key.uid: $0.uid, Key.name: $0.name, Key.latency: $0.latencyFrames]
+            },
+        ]
+    }
+}
+
+enum DisplayAudioDriverAvailability: Equatable, Sendable {
+    case ready
+    /// Not installed, or installed but coreaudiod has not loaded it yet.
+    case absent
+    /// Installed from a different build; the app and the driver would
+    /// misread each other.
+    case incompatible(version: Int?)
+}
+
+/// What the app needs from the driver. Injectable so tests can stand in a
+/// driver without coreaudiod.
+protocol DisplayAudioDriverBridge: AnyObject, Sendable {
+    func availability() -> DisplayAudioDriverAvailability
+    /// Replaces this process's devices, and is its heartbeat.
+    @discardableResult
+    func register(_ devices: [DisplayAudioDeviceSpec]) -> Bool
+    func deviceID(uid: String) -> AudioObjectID?
+    /// Interleaved stereo Float32 mixed for the device since the last read.
+    func readFrames(device: AudioObjectID) -> Data?
+}
+
+/// The real bridge: CoreAudio property calls to the plug-in and its devices.
+final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Sendable {
+    static let shared = CoreAudioDisplayAudioDriver()
+
+    /// The process ID alone would be reused by a later launch; the start time
+    /// makes a restarted app a new client, so the old one simply expires.
+    private let clientID = "ESPDisplaySender.\(getpid()).\(UInt64(Date().timeIntervalSince1970))"
+
+    func availability() -> DisplayAudioDriverAvailability {
+        guard let plugIn = plugInID() else { return .absent }
+        var address = Self.address(DisplayAudioDriverProtocol.versionSelector)
+        var value: Unmanaged<CFPropertyList>?
+        var size = UInt32(MemoryLayout<CFPropertyList>.size)
+        guard AudioObjectGetPropertyData(plugIn, &address, 0, nil, &size, &value) == noErr,
+              let number = value?.takeRetainedValue() as? NSNumber
+        else { return .incompatible(version: nil) }
+        return number.intValue == DisplayAudioDriverProtocol.version
+            ? .ready : .incompatible(version: number.intValue)
+    }
+
+    func register(_ devices: [DisplayAudioDeviceSpec]) -> Bool {
+        guard let plugIn = plugInID() else { return false }
+        var address = Self.address(DisplayAudioDriverProtocol.registerSelector)
+        let plist = DisplayAudioDriverRegistration.payload(
+            client: clientID, devices: devices) as CFDictionary
+        // The property's data is the CFPropertyListRef itself: one pointer.
+        var reference = Unmanaged.passUnretained(plist).toOpaque()
+        return withExtendedLifetime(plist) {
+            AudioObjectSetPropertyData(
+                plugIn, &address, 0, nil,
+                UInt32(MemoryLayout<UnsafeMutableRawPointer>.size), &reference) == noErr
+        }
+    }
+
+    func deviceID(uid: String) -> AudioObjectID? {
+        var address = Self.address(kAudioHardwarePropertyTranslateUIDToDevice)
+        var qualifier = uid as CFString
+        var device = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = withUnsafeMutablePointer(to: &qualifier) {
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &address,
+                UInt32(MemoryLayout<CFString>.size), $0, &size, &device)
+        }
+        guard status == noErr, device != AudioObjectID(kAudioObjectUnknown) else { return nil }
+        return device
+    }
+
+    func readFrames(device: AudioObjectID) -> Data? {
+        var address = Self.address(DisplayAudioDriverProtocol.pcmSelector)
+        var value: Unmanaged<CFPropertyList>?
+        var size = UInt32(MemoryLayout<CFPropertyList>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr
+        else { return nil }
+        return value?.takeRetainedValue() as? Data
+    }
+
+    private func plugInID() -> AudioObjectID? {
+        var address = Self.address(kAudioHardwarePropertyTranslateBundleIDToPlugIn)
+        var qualifier = DisplayAudioDriverProtocol.bundleID as CFString
+        var plugIn = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = withUnsafeMutablePointer(to: &qualifier) {
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &address,
+                UInt32(MemoryLayout<CFString>.size), $0, &size, &plugIn)
+        }
+        guard status == noErr, plugIn != AudioObjectID(kAudioObjectUnknown) else { return nil }
+        return plugIn
+    }
+
+    private static func address(
+        _ selector: AudioObjectPropertySelector
+    ) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+    }
+}
+
+/// What macOS plays to a display's own output device, read from the driver.
+///
+/// Stands in for the process tap behind the same `SystemAudioTap` interface,
+/// so the session's ring, converter, drift correction and silence fill are the
+/// ones the tap already uses. The driver is polled every 10 ms; while nothing
+/// plays to the device there is nothing to read, and the session's own
+/// silence fill keeps the display's audio running.
+final class DisplayAudioDeviceTap: SystemAudioTap, @unchecked Sendable {
+    let format = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: DisplayAudioDriverProtocol.sampleRate,
+        channels: 2, interleaved: true)!
+
+    private let bridge: DisplayAudioDriverBridge
+    private let device: AudioObjectID
+    private let queue = DispatchQueue(label: "espdisp.audio.driver-read")
+    private var timer: DispatchSourceTimer?
+    static let pollMilliseconds = 10
+
+    init(bridge: DisplayAudioDriverBridge, uid: String) throws {
+        guard let device = bridge.deviceID(uid: uid) else {
+            throw NSError(
+                domain: "ESPDisplaySender.Audio",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "the display's output device has not appeared in macOS yet."])
+        }
+        self.bridge = bridge
+        self.device = device
+    }
+
+    deinit { stop() }
+
+    func start(_ deliver: @escaping (UnsafePointer<AudioBufferList>) -> Void) throws {
+        stop()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(
+            deadline: .now(), repeating: .milliseconds(Self.pollMilliseconds),
+            leeway: .milliseconds(2))
+        let bridge = bridge
+        let device = device
+        timer.setEventHandler {
+            guard var data = bridge.readFrames(device: device), !data.isEmpty else { return }
+            let count = data.count - data.count % 8
+            guard count > 0 else { return }
+            data.withUnsafeMutableBytes { bytes in
+                var list = AudioBufferList(
+                    mNumberBuffers: 1,
+                    mBuffers: AudioBuffer(
+                        mNumberChannels: 2,
+                        mDataByteSize: UInt32(count),
+                        mData: bytes.baseAddress))
+                deliver(&list)
+            }
+        }
+        self.timer = timer
+        timer.resume()
+    }
+
+    /// Returns once no read is in flight, so nothing is delivered after it.
+    func stop() {
+        guard let timer else { return }
+        timer.cancel()
+        self.timer = nil
+        queue.sync {}
+    }
+}
+
+extension SystemAudioCaptureSource {
+    static func displayDevice(
+        uid: String, bridge: DisplayAudioDriverBridge = CoreAudioDisplayAudioDriver.shared
+    ) -> SystemAudioCaptureSource {
+        SystemAudioCaptureSource(open: { try DisplayAudioDeviceTap(bridge: bridge, uid: uid) })
+    }
+}
+
+extension SystemAudioAccess {
+    /// A display's own output device needs no recording permission: macOS
+    /// hands its sound to the driver because the user sent it there.
+    static let notRequired = SystemAudioAccess(status: { .authorized }, request: nil)
+}

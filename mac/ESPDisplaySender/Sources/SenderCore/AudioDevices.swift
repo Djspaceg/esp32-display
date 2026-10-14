@@ -36,7 +36,9 @@ enum CoreAudioDeviceCatalog {
         devices().map(\.option)
     }
 
-    static func devices() -> [CoreAudioDevice] {
+    /// `includingOwnDevices` also lists the taps' private aggregates, which
+    /// only the route planner, telling ours from the Mac's, wants to see.
+    static func devices(includingOwnDevices: Bool = false) -> [CoreAudioDevice] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -65,7 +67,7 @@ enum CoreAudioDeviceCatalog {
         return ids.compactMap { id in
             guard let uid = stringProperty(
                 id, selector: kAudioDevicePropertyDeviceUID),
-                !SystemAudioTapIdentity.isOwnAggregate(uid: uid),
+                includingOwnDevices || !SystemAudioTapIdentity.isOwnAggregate(uid: uid),
                 let name = stringProperty(
                     id, selector: kAudioObjectPropertyName)
             else { return nil }
@@ -84,6 +86,10 @@ enum CoreAudioDeviceCatalog {
             $0.option.name.localizedCaseInsensitiveCompare($1.option.name)
                 == .orderedAscending
         }
+    }
+
+    static func uid(of device: AudioDeviceID) -> String? {
+        stringProperty(device, selector: kAudioDevicePropertyDeviceUID)
     }
 
     static func routeSnapshot() -> CoreAudioRouteSnapshot {

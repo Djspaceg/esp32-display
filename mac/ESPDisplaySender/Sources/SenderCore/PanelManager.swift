@@ -13,6 +13,9 @@ final class PanelManager: ObservableObject {
     @Published internal(set) var savedNetworkNames: [String] = []
     @Published internal(set) var usbDevices: [WifiConfigUI.USBDeviceOption] = []
     var audioRouteSnapshot = CoreAudioRouteSnapshot.empty
+    /// The Mac-audio route and the displays' driver devices; see
+    /// PanelManager+MacAudioRoute.swift.
+    let macAudio = MacAudioRouting()
     /// Current transport paths. Kept as a projection for flashing/configuration
     /// code that needs a path rather than a display label.
     var usbSerialPorts: [String] { usbDevices.map(\.path) }
@@ -319,6 +322,7 @@ final class PanelManager: ObservableObject {
             Task { @MainActor in
                 self?.refreshUSBPorts()
                 self?.refreshAudioDevices()
+                self?.applyMacAudioRoute()
                 self?.sortPanels()
                 self?.objectWillChange.send()
             }

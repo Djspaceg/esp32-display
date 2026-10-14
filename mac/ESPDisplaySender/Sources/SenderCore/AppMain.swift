@@ -217,6 +217,9 @@ public enum ESPDisplaySenderApp {
             // Automatic source the same way a session would resolve it.
             let manager = PanelManager(
                 settings: overrides, defaultDisplayName: opts.displayName)
+            if !opts.listDisplays && !opts.listWindows {
+                manager.startMacAudioRouting()
+            }
             let window = ManagerWindowController(manager: manager)
             CocoaScriptingContext.install(manager: manager, window: window)
             let delegate = ESPDisplayApplicationDelegate(
@@ -443,6 +446,7 @@ public enum ESPDisplaySenderApp {
                 print("saved per-display sources: "
                     + namedSources.keys.sorted().joined(separator: ", "))
             }
+            let audioDownlinks = await MainActor.run { panelManager.macAudio.downlinks }
             func sourceFor(_ name: String) -> DeviceSession.Source {
                 // The manager's own record wins. It is what the picker writes,
                 // so a source chosen in the window is still in effect after a
@@ -473,6 +477,9 @@ public enum ESPDisplaySenderApp {
                         tuning: streaming.audioTuning,
                         peerAddress: sender.peerAddressState,
                         radioBudget: sender.radioBudget,
+                        // Built on the route's source, so a display that
+                        // plays through its own device never opens the tap.
+                        downlink: audioDownlinks.source(for: name),
                         onUpdate: { status in
                             Task { @MainActor in
                                 panelManager.updateAudio(

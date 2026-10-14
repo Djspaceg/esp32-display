@@ -982,6 +982,7 @@ struct PanelDetailView: View {
     @ViewBuilder
     private var audioSection: some View {
         Section {
+            macAudioRouteRow
             speakerVolumeRow
             if let audio = panel.audioStatus {
                 LabeledContent("State", value: audio.state.label)
@@ -1002,14 +1003,55 @@ struct PanelDetailView: View {
             Text("Audio")
         } footer: {
             if let audio = panel.audioStatus {
-                Text("The display speaker plays this Mac's sound while the Mac's "
-                    + "own speakers keep playing. Volume scales what is sent; "
-                    + "100% is the loudest the display plays. "
+                Text(Self.macAudioRouteFooter(
+                    manager.macAudioRoutePlan?.effective ?? .copy)
+                    + " Volume scales what is sent; 100% is the loudest the "
+                    + "display plays. "
                     + audioFooterText(audio.tuning))
             } else {
                 Text("Audio starts only after the panel advertises a complete "
                     + "EAUD descriptor and its audio capability bits.")
             }
+        }
+    }
+
+    /// One choice for every display: the Mac has a single default output.
+    /// When the chosen route cannot be used, the note under it says why and
+    /// what the displays get instead.
+    @ViewBuilder
+    private var macAudioRouteRow: some View {
+        LabeledContent("Mac sound") {
+            Picker("Mac sound", selection: Binding(
+                get: { manager.settings.macAudioRoute },
+                set: { manager.setMacAudioRoute($0) })
+            ) {
+                ForEach(MacAudioRoute.allCases) { route in
+                    Text(route.label).tag(route)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+            .help("Where this Mac's sound goes, for every display")
+        }
+        if manager.settings.macAudioRoute.usesDriver,
+           let note = manager.macAudioRoutePlan?.note {
+            LabeledContent("Route") {
+                Text(note).textSelection(.enabled)
+            }
+        }
+    }
+
+    static func macAudioRouteFooter(_ route: MacAudioRoute) -> String {
+        switch route {
+        case .copy:
+            return "The display speaker plays this Mac's sound while the Mac's "
+                + "own speakers keep playing."
+        case .mirror:
+            return "Each display is an output device of its own, played together "
+                + "with the Mac's own output. Mac sound applies to every display."
+        case .displaysOnly:
+            return "The displays are this Mac's only output, so the volume keys "
+                + "set their level. Mac sound applies to every display."
         }
     }
 
@@ -2157,6 +2199,7 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        manager.stopMacAudioRouting()
         manager.flushPersistence()
     }
 

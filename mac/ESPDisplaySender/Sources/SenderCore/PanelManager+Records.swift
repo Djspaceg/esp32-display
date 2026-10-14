@@ -157,6 +157,7 @@ extension PanelManager {
             spacingMicros: settings.spacingMicros, adaptive: settings.adaptivePacing)
         session.applyTileQuality(settings.tileQuality)
         session.applyAudio(tuning: settings.audioTuning)
+        session.setAudioDownlink(macAudio.downlinks.source(for: session.name))
         if let volume = panels.first(where: { $0.serviceName == session.name })?
             .speakerVolume {
             session.setSpeakerVolume(volume)

@@ -107,6 +107,79 @@ struct PanelUplinkSink: Sendable {
     static let discard = PanelUplinkSink(deliver: { _, _ in })
 }
 
+/// Where the display speaker's sound comes from: this Mac's sound through the
+/// process tap, or what macOS plays to the display's own output device
+/// through ESPDisplayAudio.driver. Both arrive through `SystemAudioTap`, so
+/// everything after the capture ring is shared.
+struct PanelDownlinkSource: Sendable {
+    /// Setting a source with the same key again changes nothing.
+    let key: String
+    let access: SystemAudioAccess
+    let capture: SystemAudioCaptureSource
+    let sourceName: String
+    let streamingMessage: String
+    /// Said when the source cannot be opened and silence is sent instead.
+    let unavailableSourceName: String
+    let unavailableLead: String
+    /// Added to every message, such as why the chosen route is not in use.
+    let note: String?
+
+    static let tapStreamingMessage = "Sending this Mac's sound to the display "
+        + "speaker. The Mac's own speakers keep playing."
+
+    /// The process tap. `note` says why it is used when another route was
+    /// chosen.
+    static func systemTap(
+        note: String?,
+        access: SystemAudioAccess = .system,
+        capture: SystemAudioCaptureSource = .system
+    ) -> PanelDownlinkSource {
+        PanelDownlinkSource(
+            key: "tap|" + (note ?? ""),
+            access: access,
+            capture: capture,
+            sourceName: PanelAudioSession.tappedSourceName,
+            streamingMessage: tapStreamingMessage,
+            unavailableSourceName: "Silence (this Mac's sound could not be recorded)",
+            unavailableLead: "because this Mac's sound could not be recorded: ",
+            note: note)
+    }
+
+    /// The display's own output device. No recording permission is involved:
+    /// macOS mixes for the device because it is the Mac's output.
+    static func displayDevice(
+        name: String,
+        route: MacAudioRoute,
+        capture: SystemAudioCaptureSource,
+        identity: String = ""
+    ) -> PanelDownlinkSource {
+        let output = "the \"\(name)\" output"
+        let streaming: String
+        switch route {
+        case .displaysOnly:
+            streaming = "Playing what this Mac sends to \(output), which is "
+                + "the Mac's only output."
+        case .mirror, .copy:
+            streaming = "Playing this Mac's sound, which goes to the Mac's own "
+                + "output and to \(output) together."
+        }
+        return PanelDownlinkSource(
+            key: "device|\(identity)|\(name)|\(route.rawValue)",
+            access: .notRequired,
+            capture: capture,
+            sourceName: "Mac output \"\(name)\"",
+            streamingMessage: streaming,
+            unavailableSourceName: "Silence (\(output) is not ready)",
+            unavailableLead: "because \(output) could not be read: ",
+            note: nil)
+    }
+
+    func withNote(_ message: String) -> String {
+        guard let note, !note.isEmpty else { return message }
+        return message + " " + note
+    }
+}
+
 /// How many silent packets to keep queued when this Mac's sound is not sent.
 /// Two keeps `AudioPacketPacer` from ever running dry, so its drift-corrected
 /// deadlines, not the generator, decide the rate.
@@ -144,8 +217,7 @@ final class PanelAudioSession: @unchecked Sendable {
     private let peerAddress: PanelPeerAddress
     private let radioBudget: PanelRadioBudget
     private let onUpdate: @Sendable (PanelAudioSnapshot) -> Void
-    private let systemAudioAccess: SystemAudioAccess
-    private let systemAudioSource: SystemAudioCaptureSource
+    private var downlink: PanelDownlinkSource
     private let uplinkSink: PanelUplinkSink
     private let queue = DispatchQueue(label: "espdisp.audio")
 
@@ -214,12 +286,14 @@ final class PanelAudioSession: @unchecked Sendable {
         systemAudioAccess: SystemAudioAccess = .system,
         systemAudioSource: SystemAudioCaptureSource = .system,
         uplinkSink: PanelUplinkSink = .discard,
+        downlink: PanelDownlinkSource? = nil,
         onUpdate: @escaping @Sendable (PanelAudioSnapshot) -> Void
     ) {
         let validated = tuning.validated
         self.descriptor = descriptor
-        self.systemAudioAccess = systemAudioAccess
-        self.systemAudioSource = systemAudioSource
+        self.downlink = downlink ?? .systemTap(
+            note: nil, access: systemAudioAccess, capture: systemAudioSource)
+        self.sourceName = self.downlink.sourceName
         self.uplinkSink = uplinkSink
         self.speakerGain = PanelSpeakerVolume.gain(speakerVolume)
         self.tuning = validated
@@ -288,6 +362,21 @@ final class PanelAudioSession: @unchecked Sendable {
         }
     }
 
+    /// Switch where the display speaker's sound comes from. The same source
+    /// again is ignored; a different one restarts the session into it.
+    func setDownlinkSource(_ source: PanelDownlinkSource) {
+        queue.async { [weak self] in
+            guard let self, !self.stopped, self.downlink.key != source.key else { return }
+            self.downlink = source
+            // A prompt asked for the old source no longer matters.
+            self.permissionRequestInFlight = false
+            self.permissionRequestGeneration &+= 1
+            self.refusal = nil
+            self.sourceName = source.sourceName
+            self.restart(reason: "The display speaker's source changed.")
+        }
+    }
+
     /// A route change, such as a new default output, rebuilds the tap on the
     /// device that now plays the Mac's sound.
     func devicesChanged() {
@@ -326,7 +415,7 @@ final class PanelAudioSession: @unchecked Sendable {
 
     private func beginIfNeeded() {
         guard requested, enabled, !stopped, connection == nil else { return }
-        let status = systemAudioAccess.status()
+        let status = downlink.access.status()
         permissionAtStart = status
         // A grant in System Settings can land while the prompt's own answer
         // is still outstanding. The status wins; the late answer is dropped.
@@ -345,7 +434,7 @@ final class PanelAudioSession: @unchecked Sendable {
         case .authorized, .unknown:
             refusal = nil
         case .notDetermined:
-            guard let request = systemAudioAccess.request else {
+            guard let request = downlink.access.request else {
                 // Starting the tap is what raises the prompt.
                 refusal = nil
                 break
@@ -387,13 +476,13 @@ final class PanelAudioSession: @unchecked Sendable {
         // Still undetermined after a refusal means macOS never showed the
         // prompt.
         let refusal: SystemAudioRefusal =
-            systemAudioAccess.status() == .notDetermined ? .promptNotShown : .denied
+            downlink.access.status() == .notDetermined ? .promptNotShown : .denied
         self.refusal = refusal
         if connection == nil {
             connect()
         } else if state == .streaming {
-            sourceName = refusal.sourceName
-            message = refusal.message
+            sourceName = refusal.sourceName(downlink)
+            message = downlink.withNote(refusal.message(downlink))
             publish()
         }
     }
@@ -411,9 +500,9 @@ final class PanelAudioSession: @unchecked Sendable {
             return true
         }
 
-        var sourceName: String {
+        func sourceName(_ downlink: PanelDownlinkSource) -> String {
             if case .captureUnavailable = self {
-                return "Silence (this Mac's sound could not be recorded)"
+                return downlink.unavailableSourceName
             }
             return "Silence (no permission to record this Mac's sound)"
         }
@@ -422,7 +511,7 @@ final class PanelAudioSession: @unchecked Sendable {
             + "Settings > Privacy & Security > Screen & System Audio Recording, "
             + "under System Audio Recording Only."
 
-        var message: String {
+        func message(_ downlink: PanelDownlinkSource) -> String {
             let lead = "The display speaker gets silence "
             switch self {
             case .pending:
@@ -435,8 +524,7 @@ final class PanelAudioSession: @unchecked Sendable {
                 return lead + "because macOS did not ask whether ESPDisplaySender "
                     + "may record this Mac's sound. To send it, " + Self.settingsPath
             case .captureUnavailable(let reason):
-                return lead + "because this Mac's sound could not be recorded: "
-                    + reason
+                return lead + downlink.unavailableLead + reason
             }
         }
     }
@@ -522,10 +610,9 @@ final class PanelAudioSession: @unchecked Sendable {
         }
         do {
             try startTap()
-            sourceName = Self.tappedSourceName
+            sourceName = downlink.sourceName
             state = .streaming
-            message = "Sending this Mac's sound to the display speaker. The "
-                + "Mac's own speakers keep playing."
+            message = downlink.withNote(downlink.streamingMessage)
             publish()
         } catch {
             // A tap that cannot be opened is a steady state, not a fault to
@@ -540,7 +627,7 @@ final class PanelAudioSession: @unchecked Sendable {
     }
 
     private func startTap() throws {
-        let tap = try systemAudioSource.open()
+        let tap = try downlink.capture.open()
         let tapFormat = tap.format
         guard tapFormat.commonFormat == .pcmFormatFloat32,
               tapFormat.sampleRate > 0,
@@ -629,9 +716,9 @@ final class PanelAudioSession: @unchecked Sendable {
     private func startSilence(refusal: SystemAudioRefusal) {
         resetStreamState()
         startSilenceWorker()
-        sourceName = refusal.sourceName
+        sourceName = refusal.sourceName(downlink)
         state = .streaming
-        message = refusal.message
+        message = downlink.withNote(refusal.message(downlink))
         publish()
     }
 
@@ -658,7 +745,7 @@ final class PanelAudioSession: @unchecked Sendable {
         if now - lastPermissionCheckNanos >= 1_000_000_000 {
             lastPermissionCheckNanos = now
             if refusal?.awaitsPermission == true,
-               systemAudioAccess.status() == .authorized {
+               downlink.access.status() == .authorized {
                 restart(reason: "Permission to record this Mac's sound was granted.")
                 return
             }
@@ -709,7 +796,7 @@ final class PanelAudioSession: @unchecked Sendable {
             // Removing the app from the list can read as undetermined rather
             // than denied; either way the tap is recording silence.
             if permissionAtStart == .authorized {
-                switch systemAudioAccess.status() {
+                switch downlink.access.status() {
                 case .denied, .notDetermined:
                     restart(
                         reason: "Permission to record this Mac's sound was turned off.")

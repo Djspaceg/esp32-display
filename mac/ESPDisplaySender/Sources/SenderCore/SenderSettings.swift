@@ -64,6 +64,9 @@ struct SenderSettings: Codable, Equatable {
     /// that finds nil seeds this from exactly that order, so a board receives
     /// the same slots it did before (`WifiPresetOrder.reconciled`).
     var wifiPresetOrder: [String]?
+    /// Where this Mac's sound goes, for every display at once (see
+    /// `MacAudioRoute`). The tap's copy unless the user picks the driver.
+    var macAudioRoute: MacAudioRoute = .copy
 
     /// Default capture rate; see `fps` for why this is a named constant
     /// rather than three repeated literals.
@@ -75,7 +78,8 @@ struct SenderSettings: Codable, Equatable {
          deviceListSortOrder: DeviceListSortOrder = .alphabetical,
          audioDevices: AudioDevicePreferences = AudioDevicePreferences(),
          audioTuning: AudioRuntimeTuning = AudioRuntimeTuning(),
-         wifiPresetOrder: [String]? = nil) {
+         wifiPresetOrder: [String]? = nil,
+         macAudioRoute: MacAudioRoute = .copy) {
         self.fps = fps
         self.spacingMicros = spacingMicros
         self.adaptivePacing = adaptivePacing
@@ -85,6 +89,7 @@ struct SenderSettings: Codable, Equatable {
         self.audioDevices = audioDevices
         self.audioTuning = audioTuning.validated
         self.wifiPresetOrder = wifiPresetOrder.map(WifiPresetOrder.cleaned)
+        self.macAudioRoute = macAudioRoute
     }
 
     /// Every field decodes independently with its default as the fallback,
@@ -113,6 +118,8 @@ struct SenderSettings: Codable, Equatable {
         // Keychain rather than failing the whole file.
         let order = try? c.decodeIfPresent([String].self, forKey: .wifiPresetOrder)
         wifiPresetOrder = order.flatMap { $0 }.map(WifiPresetOrder.cleaned)
+        let route = try? c.decodeIfPresent(MacAudioRoute.self, forKey: .macAudioRoute)
+        macAudioRoute = route.flatMap { $0 } ?? .copy
     }
 
     static let fpsRange = 5...60
@@ -136,7 +143,8 @@ struct SenderSettings: Codable, Equatable {
             deviceListSortOrder: deviceListSortOrder,
             audioDevices: audioDevices,
             audioTuning: audioTuning.validated,
-            wifiPresetOrder: wifiPresetOrder)
+            wifiPresetOrder: wifiPresetOrder,
+            macAudioRoute: macAudioRoute)
     }
 }
 

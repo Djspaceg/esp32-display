@@ -106,3 +106,7 @@ fastlane/test_output
 
 # Bench-only switch for firmware/display_stream/fault_inject.cpp
 firmware/display_stream/fault_inject_local.h
+
+# mac/AudioDriver/build-driver.sh output: the signed driver bundle that
+# install-driver.sh copies into /Library/Audio/Plug-Ins/HAL.
+mac/AudioDriver/build/

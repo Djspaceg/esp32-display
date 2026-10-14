@@ -82,6 +82,7 @@ final class DeviceSession {
     private var audioDescriptor: AudioStreamDescriptor?
     private let audioSessionFactory: ((AudioStreamDescriptor) -> PanelAudioSession)?
     private var speakerVolume = PanelSpeakerVolume.default
+    private var audioDownlink: PanelDownlinkSource?
     private var audioTuning = AudioRuntimeTuning()
     private var audioRunStarted = false
     private var audioEnabled = true
@@ -419,6 +420,15 @@ final class DeviceSession {
         }
         session?.setSpeakerVolume(volume)
     }
+    /// Where the display speaker's sound comes from, kept here as well so a
+    /// session installed later by `reconcileAudio` starts on the same source.
+    func setAudioDownlink(_ source: PanelDownlinkSource) {
+        let session = stateLock.withLock {
+            audioDownlink = source
+            return audioSession
+        }
+        session?.setDownlinkSource(source)
+    }
     func audioDevicesChanged() {
         currentAudioSession?.devicesChanged()
     }
@@ -443,6 +453,7 @@ final class DeviceSession {
         var shouldStart = false
         var shouldEnable = false
         var volume = PanelSpeakerVolume.default
+        var downlink: PanelDownlinkSource?
         var tuning = AudioRuntimeTuning()
 
         stateLock.lock()
@@ -469,6 +480,7 @@ final class DeviceSession {
             shouldStart = audioRunStarted
             shouldEnable = audioEnabled
             volume = speakerVolume
+            downlink = audioDownlink
             tuning = audioTuning
         }
         stateLock.unlock()
@@ -476,6 +488,7 @@ final class DeviceSession {
         oldSession?.stop()
         newSession?.update(tuning: tuning)
         newSession?.setSpeakerVolume(volume)
+        if let downlink { newSession?.setDownlinkSource(downlink) }
         newSession?.setEnabled(shouldEnable)
         if shouldStart {
             newSession?.start()
