@@ -126,8 +126,12 @@ final class GesturePresetTests: XCTestCase {
     /// arbitrary. The invariant that still matters is that no gesture the firmware
     /// can emit is dead everywhere, which would mean the wire format carries
     /// something the app has no use for.
+    ///
+    /// BOOT and the power key are outside this: the board only reports them
+    /// once the user has given one to this Mac, so they are never dead.
     func testEveryGestureIsBoundInSomePreset() {
-        for gesture in DeviceProtocol.TouchGesture.allCases {
+        for gesture in DeviceProtocol.TouchGesture.allCases
+        where gesture.isTouch || gesture.isKnob {
             let bound = GesturePreset.allCases.contains { preset in
                 [true, false].contains { landscape in
                     TouchAction.action(

@@ -103,6 +103,7 @@ using namespace bandproto;
 #include "fault_inject.h"
 #include "frame_pipeline.h"
 #include "input_button.h"
+#include "input_map.h"
 #include "input_touch.h"
 #include "mdns_announce.h"
 #include "net_link.h"
@@ -537,6 +538,7 @@ void setup() {
     updateSignalLed();  // red until WiFi is up
   }
 
+  loadInputMap();
   if (bcfg->hasBootButton() || bcfg->hasEncoder()) {
     initializeButtonInput();
   }
@@ -736,6 +738,7 @@ void loop() {
   handleSerialConfig();
   serviceAudioToneTest();
   applyPendingControl();
+  applyPendingInputMap();
   updateIdentify();
   serviceTouch();
   serviceAutoRotation();

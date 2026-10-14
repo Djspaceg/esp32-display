@@ -34,6 +34,7 @@
 #include "../display_stream/boot_menu_model.h"
 #include "../display_stream/device_protocol.h"
 #include "../display_stream/input_button.h"
+#include "../display_stream/input_map.h"
 #include "../display_stream/wifi_selector_model.h"
 
 // Reads a sketch source file, for the assertions that pin routing the fakes here
@@ -76,6 +77,7 @@ void *fakeEspTimerArg = nullptr;
 FakeEsp ESP;
 std::map<std::string, bool> fakeNvsBools;
 std::map<std::string, std::string> fakeNvsStrings;
+std::map<std::string, std::string> fakeNvsBytes;
 bool fakeNvsWritesFail = false;
 static uint32_t fakeNow = 1000;
 static int fakeBootLevel = 1;
@@ -365,6 +367,9 @@ static void shortPress() {
 }
 
 static void resetObservations() {
+  // Every test starts on this board's defaults, today's behaviour.
+  fakeNvsBytes.clear();
+  loadInputMap();
   // Shared state an earlier test may have left behind. A survey left on once
   // made a later test pass vacuously: its release took the survey branch, so
   // the rotate it was meant to catch could never happen.
@@ -1670,7 +1675,7 @@ static int touchRoutingReachesTheMenuFirst() {
       touchSource.find("handleBootMenuTap(event.startX, event.startY,");
   const size_t wakeSwallow = touchSource.find("touchConsumed = true;");
   const size_t senderReport =
-      touchSource.find("sendTouchEvent(event.gesture, event.startX");
+      touchSource.find("dispatchTouchGesture(event.gesture, event.startX");
   CHECK(routing != std::string::npos);
   CHECK(tap != std::string::npos);
   CHECK(wakeSwallow != std::string::npos);
@@ -2259,6 +2264,181 @@ static int touchLogOnlyLogsAndMarks() {
   return 0;
 }
 
+// ---- The input map outside the menus ------------------------------------
+// Sets the map the way an EMAP from the sender does: one function per input,
+// from input 1, the rest left at the board's defaults.
+static bool setInputMap(const std::vector<uint8_t> &functions) {
+  std::vector<uint8_t> packet = {'E', 'M', 'A', 'P',
+                                 deviceproto::INPUT_MAP_VERSION,
+                                 (uint8_t)functions.size(), 0, 0};
+  packet.insert(packet.end(), functions.begin(), functions.end());
+  if (!offerInputMap(packet.data(), packet.size())) return false;
+  applyPendingInputMap();
+  return true;
+}
+
+// Inputs 1-9 (gestures and knob) left with the sender, then BOOT's single,
+// double, triple, long and extra-long, then the power key's press and hold.
+static std::vector<uint8_t> mapWithBoot(uint8_t single, uint8_t twice,
+                                        uint8_t thrice, uint8_t hold,
+                                        uint8_t extraHold) {
+  return {1, 1, 1, 1, 1, 1, 1, 1, 1, single, twice, thrice, hold, extraHold};
+}
+
+static std::vector<uint8_t> sentInputs() {
+  std::vector<uint8_t> inputs;
+  for (const std::vector<uint8_t> &packet : sentPackets) {
+    deviceproto::TouchEvent event;
+    if (deviceproto::parseTouch(packet.data(), packet.size(), event)) {
+      inputs.push_back((uint8_t)event.gesture);
+    }
+  }
+  return inputs;
+}
+
+static int defaultMapIsTodaysBehaviour() {
+  resetObservations();
+  loadInputMap();
+  CHECK(Serial.captured.find("input map: 1111111112345600 (defaults)") !=
+        std::string::npos);
+  CHECK(bootShortPressesAsDefault());
+  // Choosing today's map from the sender stores no map at all.
+  CHECK(setInputMap(mapWithBoot(2, 3, 4, 5, 6)));
+  CHECK(fakeNvsBytes.count("inmap") == 0);
+  return 0;
+}
+
+static int remappedSingleWaitsOutTheDoubleWindow() {
+  resetObservations();
+  // The single turns the picture; double and triple keep their jobs, so a
+  // single must wait to be sure it is not the start of one.
+  CHECK(setInputMap(mapWithBoot(5, 3, 4, 5, 6)));
+  CHECK(!bootShortPressesAsDefault());
+  CHECK(fakeNvsBytes.count("inmap") == 1);
+  shortPress();
+  CHECK(panelRotation == 0);
+  CHECK(!surveyActive);
+  fakeNow += 900;
+  handleButton();
+  CHECK(panelRotation == 2);
+  CHECK(!surveyActive);
+  // Two presses are the double alone: the selector, and no turn.
+  shortPress();
+  shortPress();
+  fakeNow += 900;
+  handleButton();
+  CHECK(wifiSelectorActive);
+  CHECK(selectorOpens == 1);
+  CHECK(panelRotation == 2);
+  wifiSelectorActive = false;
+  panelRotation = 0;
+  return 0;
+}
+
+static int remappedSingleWithNothingAboveActsAtOnce() {
+  resetObservations();
+  CHECK(setInputMap(mapWithBoot(6, 0, 0, 5, 6)));
+  shortPress();
+  CHECK(panelManuallyOff);
+  shortPress();
+  CHECK(!panelManuallyOff);
+  CHECK(!surveyActive);
+  CHECK(selectorOpens == 0);
+  return 0;
+}
+
+static int theStatusScreenKeepsItsPress() {
+  resetObservations();
+  CHECK(setInputMap(mapWithBoot(5, 0, 0, 5, 6)));
+  surveyActive = true;
+  shortPress();
+  CHECK(!surveyActive);
+  CHECK(panelRotation == 0);
+  return 0;
+}
+
+static int holdsFollowTheMap() {
+  resetObservations();
+  CHECK(setInputMap(mapWithBoot(2, 3, 4, 6, 0)));
+  // The long hold now turns the display off, and nothing turns it.
+  bootEdge(true);
+  fakeNow += 700;
+  bootEdge(false);
+  CHECK(panelManuallyOff);
+  CHECK(panelRotation == 0);
+  // The extra-long hold does nothing.
+  panelManuallyOff = false;
+  bootEdge(true);
+  serviceButtonFor(3500);
+  bootEdge(false);
+  CHECK(!panelManuallyOff);
+  CHECK(panelRotation == 0);
+  return 0;
+}
+
+static int bootInputsGivenToTheSenderAreReported() {
+  resetObservations();
+  hbPort = 4210;
+  sentPackets.clear();
+  CHECK(setInputMap(mapWithBoot(1, 0, 0, 1, 6)));
+  shortPress();
+  bootEdge(true);
+  fakeNow += 700;
+  bootEdge(false);
+  const std::vector<uint8_t> got = sentInputs();
+  CHECK(got.size() == 2);
+  CHECK(got[0] == (uint8_t)deviceproto::TouchGesture::BootSinglePress);
+  CHECK(got[1] == (uint8_t)deviceproto::TouchGesture::BootLongPress);
+  CHECK(!surveyActive);
+  CHECK(panelRotation == 0);
+  hbPort = 0;
+  return 0;
+}
+
+static int touchGivenToTheBoardRunsThere() {
+  resetObservations();
+  touchAvailable = true;
+  hbPort = 4210;
+  sentPackets.clear();
+  // A tap turns the picture here; the swipes stay the sender's.
+  CHECK(setInputMap({5}));
+  touchPress(fakeNow + 100, 50, 360, 360);
+  serviceTouchFor(400);
+  CHECK(panelRotation == 2);
+  CHECK(sentInputs().empty());
+  CHECK(infoBarShown.empty());
+  // Given back to the sender, the tap is reported with the info bar again.
+  CHECK(setInputMap({1}));
+  touchPress(fakeNow + 100, 50, 360, 360);
+  serviceTouchFor(400);
+  const std::vector<uint8_t> got = sentInputs();
+  CHECK(got.size() == 1 && got[0] == (uint8_t)deviceproto::TouchGesture::Tap);
+  panelRotation = 0;
+  touchAvailable = false;
+  hbPort = 0;
+  return 0;
+}
+
+static int mapSurvivesARestartAndCanBeReset() {
+  resetObservations();
+  CHECK(setInputMap({0, 5}));
+  CHECK(inputFunctionFor(1) == 0);
+  CHECK(inputFunctionFor(2) == 5);
+  CHECK(inputFunctionFor(3) == 1);
+  // A restart reads it back.
+  loadInputMap();
+  CHECK(inputFunctionFor(2) == 5);
+  CHECK(Serial.captured.find("(saved)") != std::string::npos);
+  // A malformed map changes nothing; an empty one restores the defaults and
+  // removes the stored copy.
+  const uint8_t bad[9] = {'E', 'M', 'A', 'P', 1, 1, 0, 0, 9};
+  CHECK(!offerInputMap(bad, sizeof(bad)));
+  CHECK(setInputMap({}));
+  CHECK(inputFunctionFor(2) == 1);
+  CHECK(fakeNvsBytes.count("inmap") == 0);
+  return 0;
+}
+
 int main() {
   bcfg = &board::configFor(boardVariant);
   PANEL_GEOMETRY = {bcfg->panel->width, bcfg->panel->height};
@@ -2271,6 +2451,15 @@ int main() {
     printf("FAIL: BOOT interrupt was not attached\n");
     return 1;
   }
+  loadInputMap();
+  if (defaultMapIsTodaysBehaviour() != 0) return 1;
+  if (remappedSingleWaitsOutTheDoubleWindow() != 0) return 1;
+  if (remappedSingleWithNothingAboveActsAtOnce() != 0) return 1;
+  if (theStatusScreenKeepsItsPress() != 0) return 1;
+  if (holdsFollowTheMap() != 0) return 1;
+  if (bootInputsGivenToTheSenderAreReported() != 0) return 1;
+  if (touchGivenToTheBoardRunsThere() != 0) return 1;
+  if (mapSurvivesARestartAndCanBeReset() != 0) return 1;
   if (tripleWithInvalidWadStaysNormal() != 0) return 1;
   if (touchLogOnlyLogsAndMarks() != 0) return 1;
   if (refusalKeepsASurveyThatWasOn() != 0) return 1;

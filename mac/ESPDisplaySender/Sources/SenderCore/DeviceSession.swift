@@ -512,6 +512,7 @@ final class DeviceSession {
     }
     func restartDevice() { sender.restartDevice() }
     func sendIdleText(_ lines: [String]) { sender.sendIdleText(lines) }
+    func sendInputMap(_ packet: Data) { sender.sendInputMap(packet) }
 
     func usePickerFilter(_ filter: SCContentFilter) {
         stateLock.lock()

@@ -43,6 +43,8 @@ final class PanelManager: ObservableObject {
         MediaControl.requestAuthorizationOnce()
     }
     var mediaKeySender: (MediaControl.Key) -> String? = { MediaControl.send($0) }
+    /// Posts a recorded key combination; replaced by tests, like the media key.
+    var keyPressSender: (KeyCombo) -> String? = { MediaControl.press($0) }
     /// Called when a notice the user must act on first appears. The sender
     /// usually runs with its window closed, so the window controller uses this
     /// to bring the window forward without taking focus.

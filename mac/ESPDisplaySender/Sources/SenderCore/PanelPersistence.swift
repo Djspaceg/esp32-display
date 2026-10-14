@@ -42,6 +42,10 @@ struct PersistedPanel: Codable, Equatable {
     /// only says "the default" is noise, and an older file that predates presets
     /// should load as the default rather than fail to decode.
     var gesturePreset: GesturePreset?
+    /// The user's own input assignments, input number to function token,
+    /// absent when there are none. A token this build cannot name (from a
+    /// newer app) is dropped on load rather than failing the record.
+    var inputAssignments: [String: String]?
     /// The display speaker's volume, absent for the default, the same way
     /// `gesturePreset` records its default.
     var speakerVolume: Double?
@@ -62,6 +66,11 @@ struct PersistedPanel: Codable, Equatable {
         idleText = snapshot.idleText.isEmpty ? nil : snapshot.idleText
         gesturePreset = snapshot.gesturePreset == .standard
             ? nil : snapshot.gesturePreset
+        inputAssignments = snapshot.inputAssignments.isEmpty
+            ? nil
+            : Dictionary(uniqueKeysWithValues: snapshot.inputAssignments.map {
+                (String($0.key.rawValue), $0.value.token)
+            })
         let volume = PanelSpeakerVolume.clamped(snapshot.speakerVolume)
         speakerVolume = volume == PanelSpeakerVolume.default ? nil : volume
     }
@@ -82,6 +91,13 @@ struct PersistedPanel: Codable, Equatable {
         panel.source = PanelSource(source)
         panel.idleText = idleText ?? ""
         panel.gesturePreset = gesturePreset ?? .standard
+        for (input, token) in inputAssignments ?? [:] {
+            guard let raw = UInt8(input),
+                  let gesture = DeviceProtocol.TouchGesture(rawValue: raw),
+                  let function = InputFunction(token: token)
+            else { continue }
+            panel.inputAssignments[gesture] = function
+        }
         panel.speakerVolume = PanelSpeakerVolume.clamped(
             speakerVolume ?? PanelSpeakerVolume.default)
         return panel

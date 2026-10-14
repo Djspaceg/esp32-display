@@ -11,10 +11,9 @@ extension PanelSnapshot {
     }
 
     /// Whether this panel's page should offer the way to the Accessibility
-    /// grant media keys need. A knob is a volume knob under every preset; the
-    /// glass sends media keys only under multimedia, and only if it has one.
+    /// grant media keys and recorded key presses need: whenever one of its
+    /// inputs is given one, which a knob is under every preset.
     func offersMediaKeyGrant(authorized: Bool) -> Bool {
-        !authorized && (hasKnob
-            || (gesturePreset == .multimedia && capabilities.contains(.touch)))
+        !authorized && (hasKnob || assignmentsNeedAccessibility)
     }
 }

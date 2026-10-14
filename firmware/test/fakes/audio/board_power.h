@@ -19,5 +19,6 @@ struct Reading {
 
 inline bool read(Reading &) { return false; }
 inline bool powerKeyEvents(axp2101::PowerKeyEvents &) { return false; }
+inline bool hasPowerKey() { return false; }
 
 }  // namespace boardpower

@@ -588,6 +588,13 @@ otapolicy::Status currentOtaStatus() {
   return otapolicy::status(otaActive, otaConfigured);
 }
 
+// The input map is not linked into these hosts: no EMAP is fed to them, and
+// they have no inputs to run.
+bool offerInputMap(const uint8_t *, size_t) { return false; }
+void sendInputReport(bool) {}
+uint8_t inputFunctionFor(uint8_t) { return 0; }
+void runInputFunction(uint8_t, uint8_t) {}
+
 // The stream-channel update is not linked into these hosts; nothing in them
 // arms it, and every datagram they feed is a frame, audio or control packet.
 namespace streamupdatesvc {

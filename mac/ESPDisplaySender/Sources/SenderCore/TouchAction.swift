@@ -77,7 +77,7 @@ struct SwipeVector: Equatable, Sendable {
 /// carries it. `nil` from `action(for:preset:landscape:)` means "not bound in
 /// this preset", which is a normal outcome — the help readout lists exactly what
 /// is bound, so an unbound gesture is visible rather than mysterious.
-enum TouchAction: Equatable, Sendable {
+enum TouchAction: Hashable, Sendable {
     /// Pause a running stream, or resume a paused one. The panel keeps showing
     /// the last frame while paused, so this reads as freeze/unfreeze.
     case togglePause
@@ -92,15 +92,34 @@ enum TouchAction: Equatable, Sendable {
     case cycleWindow(forward: Bool)
     /// Abandon a window pick and show the whole screen again.
     case showFullDisplay
+    /// Press a key combination the user recorded, as if typed on this Mac.
+    case keyPress(KeyCombo)
+
+    /// Every action a control can be given, in the order the assignment menu
+    /// lists them. A recorded key press is offered separately, since it needs
+    /// recording first.
+    static let catalog: [TouchAction] = [
+        .togglePause, .cycleSource(forward: true), .cycleSource(forward: false),
+        .cycleWindow(forward: true), .cycleWindow(forward: false), .showFullDisplay,
+        .mediaPlayPause, .track(next: true), .track(next: false),
+        .volume(up: true), .volume(up: false), .mute,
+    ]
 
     /// Whether this goes through a media key, and so needs the Accessibility
     /// grant.
     var sendsMediaKey: Bool {
         switch self {
         case .mediaPlayPause, .volume, .mute, .track: return true
-        case .togglePause, .cycleSource, .cycleWindow, .showFullDisplay:
+        case .togglePause, .cycleSource, .cycleWindow, .showFullDisplay, .keyPress:
             return false
         }
+    }
+
+    /// Whether this posts a synthetic event - a media key or a recorded key
+    /// press - which macOS only lets through with the Accessibility grant.
+    var needsAccessibility: Bool {
+        if case .keyPress = self { return true }
+        return sendsMediaKey
     }
 
     /// How this action reads in the help readout. Phrased as an effect, because
@@ -117,7 +136,40 @@ enum TouchAction: Equatable, Sendable {
         case .cycleWindow(let forward):
             return forward ? "Next window" : "Previous window"
         case .showFullDisplay: return "Back to the whole screen"
+        case .keyPress(let combo): return "Press \(combo.label)"
         }
+    }
+
+    /// How this is stored in panels.json. A recorded key carries its code,
+    /// modifiers and label; the label goes last so it may contain anything.
+    var token: String {
+        switch self {
+        case .togglePause: return "pause"
+        case .cycleSource(let forward): return forward ? "source.next" : "source.previous"
+        case .mediaPlayPause: return "media.playPause"
+        case .volume(let up): return up ? "volume.up" : "volume.down"
+        case .mute: return "mute"
+        case .track(let next): return next ? "track.next" : "track.previous"
+        case .cycleWindow(let forward): return forward ? "window.next" : "window.previous"
+        case .showFullDisplay: return "window.whole"
+        case .keyPress(let combo):
+            return "key:\(combo.keyCode):\(combo.modifiers):\(combo.label)"
+        }
+    }
+
+    init?(token: String) {
+        if token.hasPrefix("key:") {
+            let parts = token.split(separator: ":", maxSplits: 3,
+                                    omittingEmptySubsequences: false)
+            guard parts.count == 4, let code = UInt16(parts[1]),
+                  let modifiers = UInt(parts[2]), !parts[3].isEmpty
+            else { return nil }
+            self = .keyPress(KeyCombo(
+                keyCode: code, modifiers: modifiers, label: String(parts[3])))
+            return
+        }
+        guard let action = (Self.catalog.first { $0.token == token }) else { return nil }
+        self = action
     }
 
     /// Reduce a swipe to its axis and direction, or nil for gestures that are
@@ -145,8 +197,6 @@ enum TouchAction: Equatable, Sendable {
         of gesture: DeviceProtocol.TouchGesture, landscape: Bool
     ) -> SwipeVector? {
         switch gesture {
-        case .tap, .longPress, .knobClockwise, .knobCounterclockwise, .knobPress:
-            return nil
         case .swipeUp:
             return SwipeVector(
                 axis: landscape ? .short : .long, towardsNext: true)
@@ -159,6 +209,8 @@ enum TouchAction: Equatable, Sendable {
         case .swipeLeft:
             return SwipeVector(
                 axis: landscape ? .long : .short, towardsNext: true)
+        default:
+            return nil
         }
     }
 
@@ -176,8 +228,10 @@ enum TouchAction: Equatable, Sendable {
         case .knobClockwise: return .volume(up: true)
         case .knobCounterclockwise: return .volume(up: false)
         case .knobPress: return .mute
-        case .tap, .swipeLeft, .swipeRight, .swipeUp, .swipeDown, .longPress:
-            break
+        default:
+            // BOOT and the power key are the board's, not a preset's: their
+            // defaults come from the board itself (see InputMapping).
+            guard gesture.isTouch else { return nil }
         }
         switch preset {
         case .sourceCycling:
@@ -196,12 +250,11 @@ enum TouchAction: Equatable, Sendable {
             // to those visible directions; orientation must not swap their jobs.
             switch gesture {
             case .tap: return .mediaPlayPause
-            case .longPress, .knobClockwise, .knobCounterclockwise, .knobPress:
-                return nil
             case .swipeRight: return .track(next: true)
             case .swipeLeft: return .track(next: false)
             case .swipeUp: return .volume(up: true)
             case .swipeDown: return .volume(up: false)
+            default: return nil
             }
 
         case .windowCycling:
@@ -245,7 +298,11 @@ extension GestureHelpRow {
     /// direction before reporting it. What the orientation changes is which
     /// action a swipe lands on, and that is the resolver's job — so the labels
     /// stay fixed while the readout's *pairings* follow the panel.
-    static func label(for gesture: DeviceProtocol.TouchGesture) -> String {
+    static func label(
+        for gesture: DeviceProtocol.TouchGesture, bootIsKnob: Bool = false
+    ) -> String {
+        // On the knob carrier BOOT is the knob's push switch.
+        let button = bootIsKnob ? "the knob" : "BOOT"
         switch gesture {
         case .tap: return "Tap"
         case .longPress: return "Press and hold"
@@ -256,6 +313,13 @@ extension GestureHelpRow {
         case .knobClockwise: return "Turn the knob clockwise"
         case .knobCounterclockwise: return "Turn the knob counterclockwise"
         case .knobPress: return "Press the knob"
+        case .bootSinglePress: return "Press \(button)"
+        case .bootDoublePress: return "Double-press \(button)"
+        case .bootTriplePress: return "Triple-press \(button)"
+        case .bootLongPress: return "Hold \(button)"
+        case .bootExtraLongPress: return "Hold \(button) for 3 seconds"
+        case .powerKeyPress: return "Press the power button"
+        case .powerKeyLongPress: return "Hold the power button"
         }
     }
 

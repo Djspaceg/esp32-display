@@ -148,6 +148,12 @@ enum Capability : uint32_t {
   // connections from the LAN can still update it. Advertised exactly when
   // CAP_OTA is; a sender without this bit keeps using ArduinoOTA.
   CAP_STREAM_UPDATE = 1u << 22,
+  // Accepts EMAP and sends EINP (below): the sender assigns each of this
+  // board's inputs - gestures, knob, BOOT presses, power key - to a function
+  // the board runs itself, to the sender, or to nothing. A board without the
+  // bit behaves as it always has, and a sender without it never sends EMAP,
+  // so the board keeps its defaults, which are that same behaviour.
+  CAP_INPUT_MAP = 1u << 23,
 };
 
 enum class ControlOpcode : uint8_t {
@@ -321,6 +327,17 @@ enum class TouchGesture : uint8_t {
   KnobClockwise = 7,
   KnobCounterclockwise = 8,
   KnobPress = 9,
+  // The BOOT button's press tiers and the AXP2101 power key. Sent only when
+  // the input map (EMAP, below) gives that input to the sender, which only a
+  // sender that knows these values does, so an older sender never sees one.
+  // x and y are 0.
+  BootSinglePress = 10,
+  BootDoublePress = 11,
+  BootTriplePress = 12,
+  BootLongPress = 13,
+  BootExtraLongPress = 14,
+  PowerKeyPress = 15,
+  PowerKeyLongPress = 16,
 };
 
 // Bit 0 of the flags byte: the panel was in landscape when the gesture happened.
@@ -338,7 +355,7 @@ struct TouchEvent {
 
 inline bool validTouchGesture(uint8_t raw) {
   return raw >= (uint8_t)TouchGesture::Tap &&
-         raw <= (uint8_t)TouchGesture::KnobPress;
+         raw <= (uint8_t)TouchGesture::PowerKeyLongPress;
 }
 
 // ["ETCH"][version][gesture][sequence u16][x u16][y u16][flags][reserved]
@@ -372,6 +389,178 @@ inline bool parseTouch(const uint8_t *data, size_t len, TouchEvent &out) {
   out.y = readU16LE(data + 10);
   out.flags = data[12];
   return true;
+}
+
+// ---- Input map ("EMAP" in, "EINP" out) ----------------------------------
+// Which function each of the board's inputs runs in normal streaming mode.
+// Inputs are numbered by their ETCH gesture value. The board only needs to
+// know whether a function is its own (a screen, a rotation, the backlight)
+// or the sender's: anything the sender does is one code, Sender, and the
+// sender keeps which of its own functions that is, custom key presses
+// included. Screens that own input (status screen, WiFi selector, boot
+// menu) and the game images keep their controls whatever the map says.
+//
+// New packet types rather than fields on EINF, for the reason EBAT gives:
+// a sender that predates them drops both silently.
+static const uint8_t INPUT_MAP_VERSION = 1;
+static const uint8_t INPUT_COUNT = 16;
+// The most inputs one EMAP may carry: room for a newer sender's inputs,
+// which this board reads past and ignores.
+static const uint8_t INPUT_MAP_MAX_COUNT = 32;
+static const size_t INPUT_MAP_HEADER_BYTES = 8;
+static const size_t INPUT_REPORT_HEADER_BYTES = 16;
+
+enum class InputFunction : uint8_t {
+  Nothing = 0,
+  Sender = 1,        // report it (ETCH) and let the sender act
+  StatusScreen = 2,  // open or close the WiFi status screen
+  WifiSelector = 3,  // open the WiFi selector
+  BootMenu = 4,      // restart into the boot-mode menu
+  Rotate180 = 5,     // turn the picture 180 degrees (saved)
+  DisplayPower = 6,  // turn the display off or back on (saved)
+};
+static const uint8_t INPUT_FUNCTION_LAST = (uint8_t)InputFunction::DisplayPower;
+
+inline bool validInputFunction(uint8_t raw) {
+  return raw <= INPUT_FUNCTION_LAST;
+}
+
+// functions[id] for id 1..INPUT_COUNT; index 0 is unused.
+struct InputMap {
+  uint8_t functions[INPUT_COUNT + 1];
+};
+
+// What this board does today with nothing assigned. Every gesture and knob
+// event goes to the sender; BOOT keeps its tiers (on the knob carrier its
+// single press is the knob's click, KnobPress); the power key does nothing.
+// `bootMenu`: the image and board can offer a game. `screens`: the status
+// screen and WiFi selector fit this board's framebuffer (not the C3's).
+inline InputMap defaultInputMap(bool knob, bool bootMenu, bool screens) {
+  InputMap map;
+  memset(&map, 0, sizeof(map));
+  for (uint8_t id = (uint8_t)TouchGesture::Tap;
+       id <= (uint8_t)TouchGesture::KnobPress; ++id) {
+    map.functions[id] = (uint8_t)InputFunction::Sender;
+  }
+  map.functions[(uint8_t)TouchGesture::BootSinglePress] =
+      (uint8_t)(screens && !knob ? InputFunction::StatusScreen
+                                 : InputFunction::Nothing);
+  map.functions[(uint8_t)TouchGesture::BootDoublePress] = (uint8_t)(
+      screens ? InputFunction::WifiSelector : InputFunction::Nothing);
+  map.functions[(uint8_t)TouchGesture::BootTriplePress] = (uint8_t)(
+      bootMenu ? InputFunction::BootMenu : InputFunction::Nothing);
+  map.functions[(uint8_t)TouchGesture::BootLongPress] =
+      (uint8_t)InputFunction::Rotate180;
+  map.functions[(uint8_t)TouchGesture::BootExtraLongPress] =
+      (uint8_t)InputFunction::DisplayPower;
+  return map;
+}
+
+// Whether BOOT's short presses (the single - on the knob carrier the knob's
+// click - double and triple) are still the defaults. While they are, the
+// single acts at once and a double undoes it, exactly as before maps existed;
+// once any of them changes, presses are counted out instead.
+inline bool shortPressesAsDefault(const InputMap &map,
+                                  const InputMap &defaults, bool knob) {
+  const uint8_t single = (uint8_t)(knob ? TouchGesture::KnobPress
+                                        : TouchGesture::BootSinglePress);
+  const uint8_t tiers[3] = {single, (uint8_t)TouchGesture::BootDoublePress,
+                            (uint8_t)TouchGesture::BootTriplePress};
+  for (uint8_t id : tiers) {
+    if (map.functions[id] != defaults.functions[id]) return false;
+  }
+  return true;
+}
+
+// Bit n set: input n exists on this board. On the knob carrier BOOT is the
+// knob's push switch, so its single press is reported as KnobPress.
+inline uint32_t inputMask(bool touch, bool knob, bool bootButton,
+                          bool powerKey) {
+  uint32_t mask = 0;
+  auto add = [&mask](TouchGesture from, TouchGesture to) {
+    for (uint8_t id = (uint8_t)from; id <= (uint8_t)to; ++id) mask |= 1u << id;
+  };
+  if (touch) add(TouchGesture::Tap, TouchGesture::LongPress);
+  if (knob) add(TouchGesture::KnobClockwise, TouchGesture::KnobPress);
+  if (bootButton) {
+    add(knob ? TouchGesture::BootDoublePress : TouchGesture::BootSinglePress,
+        TouchGesture::BootExtraLongPress);
+  }
+  if (powerKey) add(TouchGesture::PowerKeyPress, TouchGesture::PowerKeyLongPress);
+  return mask;
+}
+
+// Bit n set: function n can run here.
+inline uint32_t functionMask(bool screens, bool bootMenu) {
+  uint32_t mask = (1u << (uint8_t)InputFunction::Nothing) |
+                  (1u << (uint8_t)InputFunction::Sender) |
+                  (1u << (uint8_t)InputFunction::Rotate180) |
+                  (1u << (uint8_t)InputFunction::DisplayPower);
+  if (screens) {
+    mask |= (1u << (uint8_t)InputFunction::StatusScreen) |
+            (1u << (uint8_t)InputFunction::WifiSelector);
+  }
+  if (bootMenu) mask |= 1u << (uint8_t)InputFunction::BootMenu;
+  return mask;
+}
+
+// ["EMAP"][version][count][reserved x2] then one function per input, 1..count.
+inline size_t writeInputMap(uint8_t *out, size_t capacity, const InputMap &map) {
+  const size_t len = INPUT_MAP_HEADER_BYTES + INPUT_COUNT;
+  if (capacity < len) return 0;
+  memcpy(out, "EMAP", 4);
+  out[4] = INPUT_MAP_VERSION;
+  out[5] = INPUT_COUNT;
+  out[6] = 0;
+  out[7] = 0;
+  memcpy(out + INPUT_MAP_HEADER_BYTES, map.functions + 1, INPUT_COUNT);
+  return len;
+}
+
+// Inputs past `count` keep `defaults` (count 0 restores every default), and
+// inputs past INPUT_COUNT are a newer sender's and are ignored. Any function
+// this board cannot name, for an input it knows, refuses the whole map.
+inline bool parseInputMap(const uint8_t *data, size_t len,
+                          const InputMap &defaults, InputMap &out) {
+  if (len < INPUT_MAP_HEADER_BYTES || memcmp(data, "EMAP", 4) != 0 ||
+      data[4] != INPUT_MAP_VERSION) {
+    return false;
+  }
+  const uint8_t count = data[5];
+  if (count > INPUT_MAP_MAX_COUNT || len != INPUT_MAP_HEADER_BYTES + count) {
+    return false;
+  }
+  InputMap parsed = defaults;
+  parsed.functions[0] = 0;
+  for (uint8_t id = 1; id <= count && id <= INPUT_COUNT; ++id) {
+    const uint8_t function = data[INPUT_MAP_HEADER_BYTES + id - 1];
+    if (!validInputFunction(function)) return false;
+    parsed.functions[id] = function;
+  }
+  out = parsed;
+  return true;
+}
+
+// ["EINP"][version][count][reserved x2][inputs u32][functions u32] then the
+// current map and the board's defaults, count bytes each. Sent after every
+// EINF by firmware advertising CAP_INPUT_MAP: the sender compares the
+// current map with the one it wants and sends EMAP only when they differ.
+inline size_t writeInputReport(uint8_t *out, size_t capacity, uint32_t inputs,
+                               uint32_t functions, const InputMap &current,
+                               const InputMap &defaults) {
+  const size_t len = INPUT_REPORT_HEADER_BYTES + 2 * INPUT_COUNT;
+  if (capacity < len) return 0;
+  memcpy(out, "EINP", 4);
+  out[4] = INPUT_MAP_VERSION;
+  out[5] = INPUT_COUNT;
+  out[6] = 0;
+  out[7] = 0;
+  writeU32LE(out + 8, inputs);
+  writeU32LE(out + 12, functions);
+  memcpy(out + INPUT_REPORT_HEADER_BYTES, current.functions + 1, INPUT_COUNT);
+  memcpy(out + INPUT_REPORT_HEADER_BYTES + INPUT_COUNT, defaults.functions + 1,
+         INPUT_COUNT);
+  return len;
 }
 
 // ---- Battery ("EBAT") ---------------------------------------------------

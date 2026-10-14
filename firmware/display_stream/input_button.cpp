@@ -12,7 +12,9 @@
 #include "boot_menu_model.h"
 #endif
 #include "button_press_model.h"
+#include "device_protocol.h"
 #include "display_power.h"
+#include "input_map.h"
 #include "input_touch.h"
 #include "orientation.h"
 #include "prefs_store.h"
@@ -65,6 +67,10 @@ static volatile uint8_t bootEdgeWrite = 0;
 static gpio_num_t bootButtonPin = GPIO_NUM_NC;
 static portMUX_TYPE bootButtonMux = portMUX_INITIALIZER_UNLOCKED;
 static buttonpress::DoublePressTracker shortPressTracker;
+// Used instead of shortPressTracker once the input map changes a short tier:
+// a single that may be another function cannot be undone by the double after
+// it, so presses are counted out first (bootShortPressesAsDefault()).
+static buttonpress::PressCounter pressCounter;
 #if defined(ESPDISP_BOOT_MENU_RUNTIME)
 static bootmenu::TriplePress triplePressTracker;
 // Set as the boot menu ends: a BOOT press that went down by then belongs to the
@@ -304,6 +310,105 @@ static void setStatusScreen(bool active, const char *cause) {
   }
 }
 
+// The board's own functions, shared by BOOT's tiers and the input map.
+static void rotate180(const char *cause) {
+  // Still a 180 toggle, now expressed as rotation += 2 so it composes with
+  // a quarter turn instead of erasing one.
+  panelRotation = (uint8_t)((panelRotation + 2) & 3);
+  madctlDirty = true;
+  saveDisplayPrefs();
+  Serial.printf("button: %s -> rotation=%u (saved)\n", cause, panelRotation);
+}
+
+static void toggleDisplayPower(const char *cause) {
+  panelManuallyOff = !panelManuallyOff;
+  saveDisplayPrefs();
+  applyBacklight();
+  Serial.printf("button: %s -> pwr=%s (saved)\n", cause,
+                panelManuallyOff ? "off" : "on");
+}
+
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+static void reportBootMenuRefused(const char *refusal) {
+#if defined(ESPDISP_DOOM_RUNTIME)
+  // Doom is the only game, so a menu with nothing but streaming means its
+  // WAD is unusable. Only a full USB flash of the bundle writes the WAD; a
+  // WiFi update or a rescue image writes the app alone. Refuse here, where
+  // the reason can be shown.
+  Serial.printf(
+      "button: Doom unavailable (%s); staying normal. Only a full USB "
+      "flash of the firmware bundle writes the Doom WAD.\n",
+      refusal != nullptr ? refusal : "not offered");
+  showInfoBar(DOOM_NEEDS_USB_FLASH_TEXT);
+#else
+  // A game other than Doom refused. Say so rather than swallowing the press.
+  Serial.printf("button: no game available (%s); staying normal\n",
+                refusal != nullptr ? refusal : "no runtime");
+#endif
+}
+#endif  // ESPDISP_BOOT_MENU_RUNTIME
+
+static void openBootMenuFromInput() {
+#if defined(ESPDISP_BOOT_MENU_RUNTIME)
+  const char *refusal = nullptr;
+  if (bootMenuOffered(&refusal)) {
+    requestBootMenuAndRestart();
+    return;
+  }
+  reportBootMenuRefused(refusal);
+#else
+  Serial.println("input: this image has no boot menu");
+#endif
+}
+
+void runInputFunction(uint8_t input, uint8_t function) {
+  switch ((deviceproto::InputFunction)function) {
+    case deviceproto::InputFunction::Nothing:
+      Serial.printf("input: %u -> nothing\n", (unsigned)input);
+      return;
+    case deviceproto::InputFunction::Sender:
+      sendInputGesture(input);
+      return;
+    case deviceproto::InputFunction::StatusScreen:
+      setStatusScreen(!surveyActive, "input map");
+      return;
+    case deviceproto::InputFunction::WifiSelector:
+      selectorOpenedByDouble = false;
+      if (!wifiSelectorActive) openWifiSelector();
+      return;
+    case deviceproto::InputFunction::BootMenu:
+      openBootMenuFromInput();
+      return;
+    case deviceproto::InputFunction::Rotate180:
+      rotate180("input map");
+      return;
+    case deviceproto::InputFunction::DisplayPower:
+      toggleDisplayPower("input map");
+      return;
+  }
+  Serial.printf("input: %u -> unknown function %u\n", (unsigned)input,
+                (unsigned)function);
+}
+
+// The input for a counted run of short presses: one is the single (on the
+// knob carrier, the knob's click), two the double, three or more the triple.
+static uint8_t bootTierInput(uint8_t presses) {
+  if (presses == 1) {
+    return (uint8_t)(knobDrivesVolume() ? deviceproto::TouchGesture::KnobPress
+                                        : deviceproto::TouchGesture::BootSinglePress);
+  }
+  return (uint8_t)(presses == 2 ? deviceproto::TouchGesture::BootDoublePress
+                                : deviceproto::TouchGesture::BootTriplePress);
+}
+
+static void runCountedPresses(uint8_t presses) {
+  if (presses == 0) return;
+  const uint8_t input = bootTierInput(presses);
+  Serial.printf("button: %u short press%s -> input map\n", (unsigned)presses,
+                presses == 1 ? "" : "es");
+  runInputFunction(input, inputFunctionFor(input));
+}
+
 static void applyShortPressDecision(
     const buttonpress::ShortPressDecision &decision) {
   for (uint8_t i = 0; i < decision.count; ++i) {
@@ -362,21 +467,7 @@ static void handleTriplePress() {
   } else if (!surveyActive) {
     setStatusScreen(true, "triple press refused, undo");
   }
-#if defined(ESPDISP_DOOM_RUNTIME)
-  // Doom is the only game, so a menu with nothing but streaming means its
-  // WAD is unusable. Only a full USB flash of the bundle writes the WAD; a
-  // WiFi update or a rescue image writes the app alone. Refuse here, where
-  // the reason can be shown.
-  Serial.printf(
-      "button: Doom unavailable (%s); staying normal. Only a full USB "
-      "flash of the firmware bundle writes the Doom WAD.\n",
-      refusal != nullptr ? refusal : "not offered");
-  showInfoBar(DOOM_NEEDS_USB_FLASH_TEXT);
-#else
-  // A game other than Doom refused. Say so rather than swallowing the press.
-  Serial.printf("button: no game available (%s); staying normal\n",
-                refusal != nullptr ? refusal : "no runtime");
-#endif
+  reportBootMenuRefused(refusal);
 }
 #endif  // ESPDISP_BOOT_MENU_RUNTIME
 
@@ -400,6 +491,20 @@ static bool selectorPressCompletesTriple(uint32_t releasedAt) {
 }
 
 static void handleShortRelease(uint32_t releasedAt) {
+  // A map that changed a short tier counts presses out instead. The status
+  // screen keeps its own press: a single closes it, whatever the map says.
+  if (!bootShortPressesAsDefault()) {
+    if (surveyActive) {
+      pressCounter.settle();
+      setStatusScreen(false, "short press");
+      return;
+    }
+    const buttonpress::PressCounts counts = pressCounter.record(
+        releasedAt, DOUBLE_PRESS_MS, highestBoundBootTier());
+    runCountedPresses(counts.expired);
+    runCountedPresses(counts.now);
+    return;
+  }
   // A triple press reopens the boot-mode menu through a one-shot restart
   // rather than tearing down a live stream; a game chosen there gets its own
   // isolated boot. Boards whose image or profile runs no game keep all three
@@ -475,9 +580,18 @@ static void applyEncoderTurn(int16_t steps) {
   // A click still inside its double-press window is settled first, so a
   // click, a turn and a click are two mutes rather than a double press.
   shortPressTracker.flush();
-  const KnobGesture gesture =
-      direction > 0 ? KnobGesture::Clockwise : KnobGesture::Counterclockwise;
-  for (int16_t i = 0; i < count; ++i) sendKnobGesture(gesture);
+  runCountedPresses(pressCounter.settle());
+  const uint8_t input =
+      (uint8_t)(direction > 0 ? deviceproto::TouchGesture::KnobClockwise
+                              : deviceproto::TouchGesture::KnobCounterclockwise);
+  const uint8_t function = inputFunctionFor(input);
+  if (function != (uint8_t)deviceproto::InputFunction::Sender) {
+    // A board function runs once per turn, however many detents it crossed:
+    // a rotation or the backlight stepped per detent would undo itself.
+    runInputFunction(input, function);
+    return;
+  }
+  for (int16_t i = 0; i < count; ++i) sendInputGesture(input);
 }
 
 // Applies any detents since the last pass; returns whether there were any.
@@ -525,21 +639,25 @@ void handleButton() {
       openWifiSelector();
       return;
     }
-    // Still a 180 toggle, now expressed as rotation += 2 so it composes with
-    // a quarter turn instead of erasing one.
-    panelRotation = (uint8_t)((panelRotation + 2) & 3);
-    madctlDirty = true;
-    saveDisplayPrefs();
-    Serial.printf("button: long press -> rotation=%u (saved)\n", panelRotation);
+    // Today a 180 turn (rotate180), or whatever the input map gives it.
+    const uint8_t input = (uint8_t)deviceproto::TouchGesture::BootLongPress;
+    const uint8_t function = inputFunctionFor(input);
+    if (function == (uint8_t)deviceproto::InputFunction::Rotate180) {
+      rotate180("long press");
+    } else {
+      runInputFunction(input, function);
+    }
   };
 
   auto fireExtraLongPress = [&]() {
     extraLongFired = true;
-    panelManuallyOff = !panelManuallyOff;
-    saveDisplayPrefs();
-    applyBacklight();
-    Serial.printf("button: extra-long press -> pwr=%s (saved)\n",
-                  panelManuallyOff ? "off" : "on");
+    const uint8_t input = (uint8_t)deviceproto::TouchGesture::BootExtraLongPress;
+    const uint8_t function = inputFunctionFor(input);
+    if (function == (uint8_t)deviceproto::InputFunction::DisplayPower) {
+      toggleDisplayPower("extra-long press");
+    } else {
+      runInputFunction(input, function);
+    }
   };
 
 #if defined(ESPDISP_BOOT_MENU_RUNTIME)
@@ -675,5 +793,6 @@ void handleButton() {
   // window must not close on it in the meantime.
   if (!bootRunOpen) {
     shortPressTracker.resolve(buttonClockMs(), DOUBLE_PRESS_MS);
+    runCountedPresses(pressCounter.resolve(buttonClockMs(), DOUBLE_PRESS_MS));
   }
 }

@@ -136,7 +136,8 @@ final class KnobGrantRowViewTests: XCTestCase {
         let glass = page(
             profile: "co5300", authorized: false, preset: .multimedia, touch: true)
         XCTAssertNotNil(glass.button("Open System Settings…"))
-        XCTAssertTrue(glass.strings.contains("Playback control needs Accessibility permission."))
+        XCTAssertTrue(glass.strings.contains(
+            "Playback and key presses from the panel need Accessibility permission."))
     }
 
     func testAGlassBoardsPageOffersNothingUnderTheDefaultPreset() {

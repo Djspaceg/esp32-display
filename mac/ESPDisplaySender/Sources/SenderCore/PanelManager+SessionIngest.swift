@@ -259,6 +259,13 @@ extension PanelManager {
                 // evidence a reading has gone quiet.
                 panel.batteryAt = now
             }
+        case .inputReport(let report):
+            // Every two seconds beside EINF: only a change is worth a redraw.
+            if panels.first(where: { $0.serviceName == serviceName })?.inputReport
+                != report {
+                updatePanel(serviceName) { $0.inputReport = report }
+            }
+            syncInputMap(for: serviceName)
         }
         persistIfNeeded(force: reconciledIdentity)
     }

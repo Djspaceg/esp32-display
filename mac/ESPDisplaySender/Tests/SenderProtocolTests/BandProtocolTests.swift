@@ -619,7 +619,11 @@ final class DeviceProtocolTests: XCTestCase {
         XCTAssertEqual(
             DeviceProtocol.parseTouch(packet(gesture: 8))?.gesture, .knobCounterclockwise)
         XCTAssertEqual(DeviceProtocol.parseTouch(packet(gesture: 9))?.gesture, .knobPress)
-        XCTAssertNil(DeviceProtocol.parseTouch(packet(gesture: 10)))
+        XCTAssertEqual(
+            DeviceProtocol.parseTouch(packet(gesture: 10))?.gesture, .bootSinglePress)
+        XCTAssertEqual(
+            DeviceProtocol.parseTouch(packet(gesture: 16))?.gesture, .powerKeyLongPress)
+        XCTAssertNil(DeviceProtocol.parseTouch(packet(gesture: 17)))
         XCTAssertNil(DeviceProtocol.parseTouch(packet(length: 13)))
         XCTAssertNil(DeviceProtocol.parseTouch(packet(length: 15)))
     }

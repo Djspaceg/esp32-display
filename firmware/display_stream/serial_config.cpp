@@ -17,6 +17,7 @@
 #include "fault_inject.h"
 #include "frame_pipeline.h"
 #include "game_quiet.h"
+#include "input_map.h"
 #include "input_touch.h"
 #include "net_link.h"
 #include "orientation.h"
@@ -853,6 +854,42 @@ static void processConfigLine(char *line) {
     configSerial().flush();
     delay(200);
     ESP.restart();
+  } else if (strncmp(line, "CFGINMAP ", 9) == 0) {
+    // Bench: set the input map without a sender, exactly as an EMAP would.
+    // CFGINMAP <one digit per input from 1, each a deviceproto::InputFunction>
+    // or CFGINMAP default. Inputs past the digits keep their defaults.
+    const char *arg = line + 9;
+    uint8_t packet[deviceproto::INPUT_MAP_HEADER_BYTES + deviceproto::INPUT_COUNT];
+    memcpy(packet, "EMAP", 4);
+    packet[4] = deviceproto::INPUT_MAP_VERSION;
+    packet[6] = 0;
+    packet[7] = 0;
+    size_t count = 0;
+    bool valid = true;
+    if (strcmp(arg, "default") != 0) {
+      for (; arg[count] != '\0'; ++count) {
+        if (count >= deviceproto::INPUT_COUNT || arg[count] < '0' ||
+            arg[count] > '9') {
+          valid = false;
+          break;
+        }
+        packet[deviceproto::INPUT_MAP_HEADER_BYTES + count] =
+            (uint8_t)(arg[count] - '0');
+      }
+      valid = valid && count > 0;
+    }
+    packet[5] = (uint8_t)count;
+    if (!valid || !offerInputMap(packet, deviceproto::INPUT_MAP_HEADER_BYTES + count)) {
+      configSerial().printf(
+          "CFGERR expected: CFGINMAP default | CFGINMAP <1-%u digits 0-%u>\n",
+          (unsigned)deviceproto::INPUT_COUNT,
+          (unsigned)deviceproto::INPUT_FUNCTION_LAST);
+    } else {
+      applyPendingInputMap();
+      char text[deviceproto::INPUT_COUNT + 1];
+      formatInputMap(text, sizeof(text));
+      configSerial().printf("CFGOK inmap=%s (saved)\n", text);
+    }
   } else if (strcmp(line, "CFGSHOW") == 0) {
     // ssid64 first: base64 keeps SSIDs with spaces parseable in a
     // space-delimited line. Plain ssid goes last, for humans on a monitor.
@@ -865,6 +902,9 @@ static void processConfigLine(char *line) {
                           (const unsigned char *)cfgName.c_str(), cfgName.length());
     name64[name64Len] = 0;
     if (cachedGameQuiet < 0) cachedGameQuiet = gameQuietEnabled() ? 1 : 0;
+    // One digit per input, 1-16: the deviceproto::InputFunction it runs.
+    char inputMapText[deviceproto::INPUT_COUNT + 1];
+    formatInputMap(inputMapText, sizeof(inputMapText));
     char extension[160];
     const int extensionLength = serialcfg::formatShowExtension(
         extension, sizeof(extension), deviceCapabilities(), userBlLevel,
@@ -898,7 +938,7 @@ static void processConfigLine(char *line) {
         "auto=%u effective=%u motion=%d bl=%s blfixed=%u "
         "bllow=%u blhigh=%u blidle=%u blsurvey=%u pwr=%s quiet=%d "
         "board=%s profile=%s target=%s chip=%s partition=%s bat=%d "
-        "ota=%s ssid=%s%s\n",
+        "ota=%s ssid=%s%s inmap=%s\n",
         (const char *)b64, (const char *)name64,
         deviceId[0], deviceId[1], deviceId[2],
         deviceId[3], deviceId[4], deviceId[5],
@@ -913,7 +953,8 @@ static void processConfigLine(char *line) {
         board::targetToken(boardVariant), bcfg->platform->chipToken,
         bcfg->platform->partitionToken,
         batteryPercentOrUnknown(),
-        otapolicy::statusToken(currentOtaStatus()), cfgSsid.c_str(), extension);
+        otapolicy::statusToken(currentOtaStatus()), cfgSsid.c_str(), extension,
+        inputMapText);
   }
   // Anything else on serial is ignored (a monitor typing away is harmless).
 }

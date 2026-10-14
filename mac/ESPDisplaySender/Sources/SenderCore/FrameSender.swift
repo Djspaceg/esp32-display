@@ -35,6 +35,7 @@ final class FrameSender {
         case acknowledgement(DeviceProtocol.ControlAck)
         case touch(DeviceProtocol.TouchEvent)
         case battery(DeviceProtocol.BatteryStatus)
+        case inputReport(DeviceProtocol.InputReport)
     }
 
     private let host: String
@@ -1019,6 +1020,16 @@ final class FrameSender {
             onDeviceEvent?(.battery(battery))
             return
         }
+        if let report = DeviceProtocol.parseInputReport(data) {
+            // A reply, not a heartbeat, for the reasons battery gives: it
+            // rides EINF's timer whether or not frames are landing.
+            lock.withLock {
+                _deviceReplies &+= 1
+                _lastReplyAt = Date()
+            }
+            onDeviceEvent?(.inputReport(report))
+            return
+        }
         guard let stats = BandProtocol.parseHeartbeat(data) else { return }
 
         lock.lock()
@@ -1269,6 +1280,12 @@ final class FrameSender {
     /// packet would be least recoverable.
     func sendIdleText(_ lines: [String]) {
         guard let packet = IdleText.packet(lines: lines) else { return }
+        transmit(packet, repeats: 3)
+    }
+
+    /// EMAP. Idempotent, so repeated like ETXT; the board's next EINP says
+    /// whether it landed, and the manager sends it again until it has.
+    func sendInputMap(_ packet: Data) {
         transmit(packet, repeats: 3)
     }
 

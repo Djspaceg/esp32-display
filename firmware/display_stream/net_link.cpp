@@ -12,6 +12,7 @@
 #include "device_protocol.h"
 #include "display_power.h"
 #include "frame_pipeline.h"
+#include "input_map.h"
 #include "stream_update_service.h"
 
 using namespace bandproto;
@@ -84,6 +85,11 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
     idleText = message;
     idleTextAt = millis();
     portEXIT_CRITICAL(&controlMux);
+    return;
+  }
+  if (len >= 4 && memcmp(data, "EMAP", 4) == 0) {
+    // Applied and saved by loop(); the sender repeats it until EINP agrees.
+    if (!offerInputMap(data, len)) statBadLen = statBadLen + 1;
     return;
   }
   if (len >= 4 && memcmp(data, "ECTL", 4) == 0) {

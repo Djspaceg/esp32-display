@@ -12,6 +12,10 @@
 void initializeButtonInput();
 void handleButton();
 
+// Runs one input map function (a deviceproto::InputFunction value) for
+// `input` (its ETCH gesture value): the board's own, the sender's, or nothing.
+void runInputFunction(uint8_t input, uint8_t function);
+
 // Whether a BOOT edge is still settling (inside the debounce window). The
 // boot menu's countdown does not run out under one: a press made in its last
 // moments stops it once it settles.

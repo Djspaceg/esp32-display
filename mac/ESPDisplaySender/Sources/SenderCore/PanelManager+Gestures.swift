@@ -4,9 +4,11 @@ import Network
 import ScreenCaptureKit
 import SenderProtocol
 
-/// Touch gestures reported by a panel: duplicate suppression, the
-/// per-panel preset, and the actions (pause, media keys, window and
-/// source cycling) a gesture maps to.
+/// Inputs reported by a panel - gestures, knob, and whatever BOOT or power
+/// button presses the input map gave this Mac: duplicate suppression, the
+/// per-panel preset and assignments, keeping the board's copy of the map
+/// current, and the actions (pause, media keys, key presses, window and
+/// source cycling) an input maps to.
 extension PanelManager {
     /// Act on a gesture the panel reported.
     ///
@@ -36,14 +38,21 @@ extension PanelManager {
         // panel's last known state, so a swipe is read against the frame that was
         // actually on screen when the finger moved - not the one that has since
         // replaced it.
-        guard let action = TouchAction.action(
-            for: touch.gesture, preset: panel.gesturePreset,
-            landscape: touch.landscape)
-        else {
+        let action: TouchAction
+        switch panel.function(for: touch.gesture, landscape: touch.landscape) {
+        case .mac(let bound):
+            action = bound
+        case .nothing:
             // Logged, because an unbound gesture and a broken one look identical
             // from the outside: in both cases nothing happens.
             print("[\(serviceName)] touch \(touch.gesture) -> unbound in "
                 + "\(panel.gesturePreset.rawValue)")
+            return
+        case .board(let function):
+            // The board runs these itself; one reaching here means its copy of
+            // the map is behind, which the next EINP corrects.
+            print("[\(serviceName)] touch \(touch.gesture) -> \(function) is the "
+                + "board's; its map is out of date")
             return
         }
         // Logged because a gesture is otherwise untraceable: if the mapping or
@@ -56,7 +65,7 @@ extension PanelManager {
         // never asks again once the prompt is declined, so a standing notice
         // says what is wrong and opens the settings pane; it replaces the
         // failure alert a refused key used to raise on every detent or swipe.
-        if action.sendsMediaKey {
+        if action.needsAccessibility {
             guard mediaKeysAuthorized() else {
                 requestMediaKeyAuthorization()
                 reportMissingMediaKeyGrant()
@@ -85,6 +94,11 @@ extension PanelManager {
             }
         case .showFullDisplay:
             useAutomaticSource(for: serviceName)
+        case .keyPress(let combo):
+            if let failure = keyPressSender(combo) {
+                let name = panel.displayName.isEmpty ? serviceName : panel.displayName
+                operationOutcome = .failure("\(name) could not press \(combo.label)", failure)
+            }
         }
     }
 
@@ -150,9 +164,9 @@ extension PanelManager {
         guard !accessibilityNoticeDismissed else { return }
         let firstReport = !issues.contains { $0.issue == .accessibility }
         report(.accessibility, detail:
-            "Volume, mute and playback from a display - its knob, or the "
-            + "multimedia gestures - need Accessibility permission. Turn on "
-            + "ESPDisplaySender under System Settings > Privacy & Security > "
+            "Volume, mute, playback and key presses from a display - its knob, "
+            + "its gestures or its buttons - need Accessibility permission. Turn "
+            + "on ESPDisplaySender under System Settings > Privacy & Security > "
             + "Accessibility, then try again.")
         if firstReport { onAttentionNeeded?() }
     }
@@ -177,13 +191,58 @@ extension PanelManager {
     /// so the permission is dealt with while the user is looking at the setting
     /// that needs it instead of discovering it later by swiping and getting
     /// nothing.
+    ///
+    /// A preset fills in every assignment at once: the user's own ones are
+    /// cleared, so what the preset says is what every input does.
     func setGesturePreset(_ preset: GesturePreset, for serviceName: String) {
         guard panels.contains(where: { $0.serviceName == serviceName }) else { return }
-        updatePanel(serviceName) { $0.gesturePreset = preset }
-        persistIfNeeded(force: true)
-        if preset == .multimedia, !mediaKeysAuthorized() {
-            requestMediaKeyAuthorization()
+        updatePanel(serviceName) { panel in
+            panel.gesturePreset = preset
+            panel.inputAssignments = [:]
         }
+        persistIfNeeded(force: true)
+        requestAuthorizationIfAssignmentsNeedIt(serviceName)
+        syncInputMap(for: serviceName)
+    }
+
+    /// Give one input its own function. Choosing what the preset already
+    /// gives it, in both orientations, removes the assignment instead, so a
+    /// board set back by hand reads as its preset again.
+    func setInputFunction(
+        _ function: InputFunction, for input: DeviceProtocol.TouchGesture,
+        on serviceName: String
+    ) {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName })
+        else { return }
+        let matchesPreset = [false, true].allSatisfy {
+            panel.presetFunction(for: input, landscape: $0) == function
+        }
+        updatePanel(serviceName) { panel in
+            panel.inputAssignments[input] = matchesPreset ? nil : function
+        }
+        persistIfNeeded(force: true)
+        requestAuthorizationIfAssignmentsNeedIt(serviceName)
+        syncInputMap(for: serviceName)
+    }
+
+    private func requestAuthorizationIfAssignmentsNeedIt(_ serviceName: String) {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }),
+              panel.assignmentsNeedAccessibility, !mediaKeysAuthorized()
+        else { return }
+        requestMediaKeyAuthorization()
+    }
+
+    /// Send the board the map this app wants, if what it last reported is
+    /// different. Called on every EINP (every two seconds) and on each change,
+    /// so a map lost to a dropped datagram or a board that restarted is put
+    /// back within one report, and nothing is sent while the two agree.
+    func syncInputMap(for serviceName: String) {
+        guard let session = sessions[serviceName],
+              let panel = panels.first(where: { $0.serviceName == serviceName }),
+              panel.capabilities.contains(.inputMap), panel.inputReport != nil,
+              !panel.boardMapIsCurrent
+        else { return }
+        session.sendInputMap(DeviceProtocol.inputMapPacket(panel.boardCodes))
     }
 
     /// Advance this panel to the next display in the source ring.

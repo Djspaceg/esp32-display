@@ -393,6 +393,8 @@ struct PanelDetailView: View {
     /// only when something is wrong, so folded away like Diagnostics.
     @State private var showBrightnessPresets = false
     @State private var showAudioDiagnostics = false
+    /// The input whose key combination is being recorded, or nil.
+    @State private var keyCaptureRequest: KeyCaptureRequest?
     @FocusState private var nameIsFocused: Bool
 
     private var normalizedName: String {
@@ -414,9 +416,9 @@ struct PanelDetailView: View {
             displaySection
             firmwareSection
             connectionSection
-            // Gated on the panel actually having a touch screen, so a panel that
-            // cannot produce a gesture does not offer to bind one.
-            if panel.capabilities.contains(.touch) {
+            // Gated on the panel actually having an input this app can
+            // assign, so a panel without one does not offer to bind it.
+            if !panel.availableInputs.isEmpty {
                 gestureSection
             }
             // Outside the touch gate: a knob board's knob sends media keys
@@ -515,6 +517,17 @@ struct PanelDetailView: View {
         }
         .sheet(item: $updateTarget) { target in
             FirmwareUpdateSheet(manager: manager, target: target)
+        }
+        .sheet(item: $keyCaptureRequest) { request in
+            KeyCaptureSheet(
+                request: request,
+                onSave: { combo in
+                    manager.setInputFunction(
+                        .mac(.keyPress(combo)), for: request.input,
+                        on: panel.serviceName)
+                    keyCaptureRequest = nil
+                },
+                onCancel: { keyCaptureRequest = nil })
         }
     }
 
@@ -680,12 +693,15 @@ struct PanelDetailView: View {
         }
     }
 
-    /// The gesture preset, read back from the panel so the dropdown shows what is
-    /// in force rather than the last thing clicked.
-    private var gesturePreset: Binding<GesturePreset> {
+    /// The preset, read back from the panel so the dropdown shows what is in
+    /// force rather than the last thing clicked; nil once any assignment has
+    /// been changed by hand. Choosing a preset fills in every assignment.
+    private var gesturePreset: Binding<GesturePreset?> {
         Binding(
-            get: { panel.gesturePreset },
-            set: { manager.setGesturePreset($0, for: panel.serviceName) })
+            get: { panel.hasCustomAssignments ? nil : panel.gesturePreset },
+            set: { preset in
+                if let preset { manager.setGesturePreset(preset, for: panel.serviceName) }
+            })
     }
 
     /// The dropdown's value: derived from the stored source, so a cancelled
@@ -1085,69 +1101,141 @@ struct PanelDetailView: View {
         return summary
     }
 
-    /// The gesture preset and, below it, what each gesture will actually do.
+    /// The preset and, below it, every input this board has with what it
+    /// does, each one changeable on its own.
     ///
-    /// The readout is not written out here. It is generated from the same
-    /// resolver that dispatches a real gesture, so it describes the behaviour
-    /// rather than restating it — a binding that changed without the help
-    /// following is not expressible.
+    /// The rows are not written out here: each shows what the same resolver
+    /// that dispatches a real input returns, so the list describes the
+    /// behaviour rather than restating it.
     private var gestureSection: some View {
         Section {
             LabeledContent("Preset") {
                 Picker("Preset", selection: gesturePreset) {
                     ForEach(GesturePreset.allCases) { preset in
-                        Text(preset.label).tag(preset)
+                        Text(preset.label).tag(Optional(preset))
+                    }
+                    if panel.hasCustomAssignments {
+                        Text("Custom").tag(GesturePreset?.none)
                     }
                 }
                 .labelsHidden()
                 .fixedSize()
-                .help(panel.gesturePreset.summary)
+                .help("Sets every button and gesture below at once: "
+                    + panel.gesturePreset.summary)
             }
-            LabeledContent("Gestures") {
-                gestureHelp
-            }
-        } header: {
-            Text("Touch")
-        } footer: {
-            Text(panel.gesturePreset.summary
-                + " Directions follow what is on the panel, so they stay correct "
-                + "when it is rotated or flipped — the list above is for how it is "
-                + "facing now. A gesture not listed does nothing under this preset.")
-        }
-    }
-
-    /// One row per bound gesture, plus whatever stands between the preset and
-    /// working: firmware too old to report a long press, or a permission macOS
-    /// has not granted yet.
-    private var gestureHelp: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
-                ForEach(GestureHelpRow.rows(
-                    for: panel.gesturePreset, landscape: panel.landscape)
-                ) { row in
-                    GridRow {
-                        Text(row.gesture).font(.callout.weight(.medium))
-                        Text(row.effect)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+            ForEach(InputGroup.allCases, id: \.self) { group in
+                let inputs = panel.availableInputs.filter { InputGroup.of($0) == group }
+                if !inputs.isEmpty {
+                    LabeledContent(group.title(bootIsKnob: panel.hasKnob)) {
+                        assignmentGrid(inputs)
                     }
                 }
             }
-            // Both of these are the difference between a preset that works and a
-            // gesture that silently does nothing, which is the one outcome a
-            // touch binding cannot afford.
-            if panel.gesturePreset.usesLongPress,
-                !panel.capabilities.contains(.touchLongPress)
-            {
-                Label(
-                    "Press and hold needs newer firmware on this panel. The other "
-                        + "gestures work now.",
-                    systemImage: "exclamationmark.triangle.fill")
+            if let notice = inputMapNotice {
+                Label(notice, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
+        } header: {
+            Text("Buttons and Gestures")
+        } footer: {
+            Text(panel.gesturePreset.summary
+                + " A preset sets every input; change any one of them after. "
+                + "Directions follow what is on the panel, so they stay correct "
+                + "when it is rotated or flipped. Screens the display opens itself "
+                + "- the WiFi status screen, the WiFi selector, the boot menu - "
+                + "and the games keep their own controls.")
         }
+    }
+
+    private func assignmentGrid(_ inputs: [DeviceProtocol.TouchGesture]) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+            ForEach(inputs, id: \.self) { input in
+                GridRow {
+                    Text(GestureHelpRow.label(for: input, bootIsKnob: panel.hasKnob))
+                        .font(.callout.weight(.medium))
+                    assignmentMenu(for: input)
+                }
+            }
+        }
+    }
+
+    /// One input's function: everything this Mac can do, a recorded key
+    /// combination, what the board can do on its own (on firmware that stores
+    /// a map), or nothing. The current choice is checked.
+    private func assignmentMenu(for input: DeviceProtocol.TouchGesture) -> some View {
+        let current = panel.function(for: input, landscape: panel.landscape)
+        let label = GestureHelpRow.label(for: input, bootIsKnob: panel.hasKnob)
+        let choose = { (function: InputFunction) in
+            manager.setInputFunction(function, for: input, on: panel.serviceName)
+        }
+        return Menu {
+            Section("On This Mac") {
+                ForEach(TouchAction.catalog, id: \.self) { action in
+                    menuItem(.mac(action), current: current, choose: choose)
+                }
+                if case .mac(.keyPress) = current {
+                    menuItem(current, current: current, choose: choose)
+                }
+                Button("Record Key Press\u{2026}") {
+                    keyCaptureRequest = KeyCaptureRequest(input: input, inputLabel: label)
+                }
+            }
+            if !panel.availableBoardFunctions.isEmpty {
+                Section("On the Display") {
+                    ForEach(panel.availableBoardFunctions, id: \.self) { function in
+                        menuItem(.board(function), current: current, choose: choose)
+                    }
+                }
+            }
+            Divider()
+            menuItem(.nothing, current: current, choose: choose)
+        } label: {
+            Text(current.summary)
+        }
+        .fixedSize()
+        .accessibilityLabel("\(label): \(current.summary)")
+    }
+
+    private func menuItem(
+        _ function: InputFunction, current: InputFunction,
+        choose: @escaping (InputFunction) -> Void
+    ) -> some View {
+        Button {
+            choose(function)
+        } label: {
+            if function == current {
+                Label(function.summary, systemImage: "checkmark")
+            } else {
+                Text(function.summary)
+            }
+        }
+    }
+
+    /// Whatever stands between the assignments shown and the board doing
+    /// them: firmware too old to report a hold or to store a map, or a map
+    /// still on its way. Selectable, like every message here.
+    private var inputMapNotice: String? {
+        if panel.gesturePreset.usesLongPress, !panel.hasCustomAssignments,
+           panel.capabilities.contains(.touch),
+           !panel.capabilities.contains(.touchLongPress) {
+            return "Press and hold needs newer firmware on this panel. The other "
+                + "gestures work now."
+        }
+        if !panel.capabilities.contains(.inputMap) {
+            return panel.capabilitiesRaw == 0
+                ? nil
+                : "This panel's firmware cannot store assignments, so its buttons "
+                    + "keep their own jobs and only gestures can be assigned, to "
+                    + "this Mac's functions. Update the firmware to assign the rest."
+        }
+        if panel.inputReport != nil, !panel.boardMapIsCurrent {
+            return panel.isOnline
+                ? "Sending these assignments to the panel\u{2026}"
+                : "These assignments are sent when the panel next connects."
+        }
+        return nil
     }
 
     /// The way back to the Accessibility grant media keys need: for a knob
@@ -1174,16 +1262,19 @@ struct PanelDetailView: View {
     }
 
     private var mediaKeyGrantText: String {
-        let glass = panel.gesturePreset == .multimedia
-            && panel.capabilities.contains(.touch)
+        let glass = panel.availableInputs.contains { input in
+            !input.isKnob && panel.function(for: input, landscape: panel.landscape)
+                .needsAccessibility
+        }
         switch (panel.hasKnob, glass) {
         case (true, true):
-            return "The knob's volume and mute, and playback control, need "
-                + "Accessibility permission."
+            return "The knob's volume and mute, and playback and key presses "
+                + "from the panel, need Accessibility permission."
         case (true, false):
             return "The knob's volume and mute need Accessibility permission."
         case (false, _):
-            return "Playback control needs Accessibility permission."
+            return "Playback and key presses from the panel need Accessibility "
+                + "permission."
         }
     }
 

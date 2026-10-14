@@ -122,6 +122,11 @@ public enum DeviceProtocol {
         /// `StreamUpdateProtocol`). Advertised exactly when `ota` is; without
         /// it the app keeps using ArduinoOTA.
         public static let streamUpdate = Capabilities(rawValue: 1 << 22)
+        /// Accepts EMAP and sends EINP: each of the board's inputs can be
+        /// given to a function the board runs itself, to this app, or to
+        /// nothing. Without it the board keeps today's behaviour and the app
+        /// can only choose what the gestures it forwards do here.
+        public static let inputMap = Capabilities(rawValue: 1 << 23)
     }
 
     public struct DeviceInfo: Equatable, Sendable {
@@ -316,15 +321,125 @@ public enum DeviceProtocol {
         case knobClockwise = 7
         case knobCounterclockwise = 8
         case knobPress = 9
+        /// The BOOT button's press tiers and the power key, reported only by
+        /// firmware advertising `Capabilities.inputMap`, and only for an input
+        /// this app gave itself in the map (EMAP) - so an older app never sees
+        /// one. x and y are 0.
+        case bootSinglePress = 10
+        case bootDoublePress = 11
+        case bootTriplePress = 12
+        case bootLongPress = 13
+        case bootExtraLongPress = 14
+        case powerKeyPress = 15
+        case powerKeyLongPress = 16
 
         /// Whether this comes from the knob rather than the touch screen.
         public var isKnob: Bool {
             switch self {
             case .knobClockwise, .knobCounterclockwise, .knobPress: return true
-            case .tap, .swipeLeft, .swipeRight, .swipeUp, .swipeDown, .longPress:
-                return false
+            default: return false
             }
         }
+
+        /// Whether this is a gesture on the glass.
+        public var isTouch: Bool { rawValue <= TouchGesture.longPress.rawValue }
+    }
+
+    // MARK: input map (EMAP out, EINP in)
+
+    public static let inputMapVersion: UInt8 = 1
+    /// Inputs this app names, numbered 1...inputCount by their gesture value.
+    public static let inputCount = 16
+    static let inputMapMaxCount = 32
+    static let inputReportHeaderBytes = 16
+
+    /// What the board does with an input. The board only knows its own
+    /// functions; anything this app does is `sender`, and which of the app's
+    /// functions that is stays here. Mirrors firmware deviceproto::InputFunction.
+    public enum BoardFunctionCode: UInt8, CaseIterable, Sendable {
+        case nothing = 0
+        case sender = 1
+        case statusScreen = 2
+        case wifiSelector = 3
+        case bootMenu = 4
+        case rotate180 = 5
+        case displayPower = 6
+    }
+
+    /// The board's EINP: which inputs and board functions it has, the map it
+    /// is running, and its own defaults (today's behaviour). Codes are kept as
+    /// sent, so a function a newer board names still compares.
+    public struct InputReport: Equatable, Sendable {
+        public let inputs: Set<TouchGesture>
+        public let functions: Set<BoardFunctionCode>
+        let currentCodes: [UInt8]
+        let defaultCodes: [UInt8]
+
+        public init(
+            inputs: Set<TouchGesture>, functions: Set<BoardFunctionCode>,
+            current: [UInt8], defaults: [UInt8]
+        ) {
+            self.inputs = inputs
+            self.functions = functions
+            self.currentCodes = current
+            self.defaultCodes = defaults
+        }
+
+        /// The code the board runs for `input` now, or nil if it sent none.
+        public func current(_ input: TouchGesture) -> UInt8? {
+            let index = Int(input.rawValue) - 1
+            return index < currentCodes.count ? currentCodes[index] : nil
+        }
+
+        /// The board's own default for `input`, or nil if it sent none.
+        public func defaultCode(_ input: TouchGesture) -> UInt8? {
+            let index = Int(input.rawValue) - 1
+            return index < defaultCodes.count ? defaultCodes[index] : nil
+        }
+    }
+
+    /// ["EINP"][version][count][reserved x2][inputs u32][functions u32] then
+    /// `count` current codes and `count` defaults. Inputs and functions past
+    /// what this app names are a newer board's and are read past.
+    public static func parseInputReport(_ data: Data) -> InputReport? {
+        let bytes = [UInt8](data)
+        guard bytes.count >= inputReportHeaderBytes,
+              Array(bytes[0..<4]) == Array("EINP".utf8),
+              bytes[4] == inputMapVersion
+        else { return nil }
+        let count = Int(bytes[5])
+        guard count >= 1, count <= inputMapMaxCount,
+              bytes.count == inputReportHeaderBytes + 2 * count
+        else { return nil }
+        func u32(_ at: Int) -> UInt32 {
+            UInt32(bytes[at]) | UInt32(bytes[at + 1]) << 8
+                | UInt32(bytes[at + 2]) << 16 | UInt32(bytes[at + 3]) << 24
+        }
+        let inputMask = u32(8)
+        let functionMask = u32(12)
+        let inputs = Set(TouchGesture.allCases.filter {
+            inputMask & (1 << UInt32($0.rawValue)) != 0
+        })
+        let functions = Set(BoardFunctionCode.allCases.filter {
+            functionMask & (1 << UInt32($0.rawValue)) != 0
+        })
+        let start = inputReportHeaderBytes
+        return InputReport(
+            inputs: inputs, functions: functions,
+            current: Array(bytes[start..<start + count]),
+            defaults: Array(bytes[start + count..<start + 2 * count]))
+    }
+
+    /// ["EMAP"][version][count][reserved x2] then one code per input from 1.
+    /// An input missing from `codes` is sent as `nothing`.
+    public static func inputMapPacket(_ codes: [TouchGesture: BoardFunctionCode]) -> Data {
+        var data = Data("EMAP".utf8)
+        data.append(contentsOf: [inputMapVersion, UInt8(inputCount), 0, 0])
+        for raw in 1...inputCount {
+            let gesture = TouchGesture(rawValue: UInt8(raw))
+            data.append((gesture.flatMap { codes[$0] } ?? .nothing).rawValue)
+        }
+        return data
     }
 
     public struct TouchEvent: Equatable, Sendable {

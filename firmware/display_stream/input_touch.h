@@ -19,6 +19,10 @@ extern bool touchLogEnabled;
 enum class KnobGesture : uint8_t { Clockwise, Counterclockwise, Press };
 void sendKnobGesture(KnobGesture gesture);
 
+// Any input the map gives the sender, by its ETCH gesture value, with no
+// position: the knob, BOOT's tiers and the power key.
+void sendInputGesture(uint8_t gesture);
+
 // Reads any finger already on the glass just before the boot menu opens, so it
 // is ignored until lifted instead of being taken for a press on the menu.
 // Defined only in images that have a boot menu.

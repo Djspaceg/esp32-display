@@ -50,6 +50,6 @@ const char *batteryChargeWord(boardpower::Charge charge);
 // The battery half of loop()'s 5-second serial report.
 void reportBatteryLine();
 
-// Poll the AXP2101's PWR key and log each press; does nothing else yet, and
+// Poll the AXP2101's PWR key and run what the input map gives each press;
 // nothing on a board without that power chip.
 void servicePowerKey();

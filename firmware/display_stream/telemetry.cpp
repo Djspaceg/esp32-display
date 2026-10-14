@@ -9,6 +9,8 @@
 #include "chip_identity.h"
 #include "device_protocol.h"
 #include "display_power.h"
+#include "input_button.h"
+#include "input_map.h"
 #include "net_link.h"
 #include "orientation.h"
 #include "wifi_worker.h"
@@ -22,7 +24,7 @@ static const uint32_t BASE_CAPABILITIES =
     deviceproto::CAP_FLIP |
     deviceproto::CAP_IDENTIFY | deviceproto::CAP_RESTART |
     deviceproto::CAP_SLEEP_SYNC | deviceproto::CAP_TELEMETRY |
-    deviceproto::CAP_IDLE_TEXT |
+    deviceproto::CAP_IDLE_TEXT | deviceproto::CAP_INPUT_MAP |
     // A manual on/off is not a hardware fact the way battery or rotate are -
     // every board here has a backlight or panel-command brightness sink
     // already, so every board can honour it.
@@ -153,6 +155,7 @@ void sendDeviceInfo() {
                     (unsigned)((ip >> 16) & 0xFF), (unsigned)(ip >> 24),
                     (unsigned)port);
     }
+    sendInputReport(boardpower::hasPowerKey());
   }
 }
 
@@ -279,8 +282,16 @@ void servicePowerKey() {
   if (!batteryAvailable) return;
   axp2101::PowerKeyEvents events;
   if (!boardpower::powerKeyEvents(events)) return;
-  if (events.shortPress) Serial.println("pwr key: short press");
-  if (events.longPress) Serial.println("pwr key: long press");
+  const uint8_t press = (uint8_t)deviceproto::TouchGesture::PowerKeyPress;
+  const uint8_t hold = (uint8_t)deviceproto::TouchGesture::PowerKeyLongPress;
+  if (events.shortPress) {
+    Serial.println("pwr key: short press");
+    runInputFunction(press, inputFunctionFor(press));
+  }
+  if (events.longPress) {
+    Serial.println("pwr key: long press");
+    runInputFunction(hold, inputFunctionFor(hold));
+  }
 }
 
 void reportBatteryLine() {

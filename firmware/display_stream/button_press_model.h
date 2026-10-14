@@ -91,4 +91,53 @@ class DoublePressTracker {
   uint32_t lastReleaseAt_ = 0;
 };
 
+// What a counted press run settled to: `expired` is a run whose window had
+// already closed when this press came (normally resolve() took it first), and
+// `now` a run this press completed by reaching the highest tier bound.
+struct PressCounts {
+  uint8_t expired = 0;
+  uint8_t now = 0;
+};
+
+// Counts short presses into singles, doubles and triples for an input map
+// whose short tiers are no longer today's, where a single cannot be undone
+// by the double after it. A run acts once its window closes, or at once when
+// it reaches `maxCount`, the highest tier with a function, so a single with
+// no double or triple bound still costs no latency. Unsigned subtraction
+// keeps the window valid across clock wrap.
+class PressCounter {
+ public:
+  PressCounts record(uint32_t releasedAt, uint32_t windowMs, uint8_t maxCount) {
+    PressCounts counts;
+    if (count_ != 0 && releasedAt - lastReleaseAt_ > windowMs) {
+      counts.expired = count_;
+      count_ = 0;
+    }
+    count_++;
+    lastReleaseAt_ = releasedAt;
+    if (count_ >= maxCount) {
+      counts.now = count_;
+      count_ = 0;
+    }
+    return counts;
+  }
+
+  // The run whose window has closed by `now`, or 0.
+  uint8_t resolve(uint32_t now, uint32_t windowMs) {
+    if (count_ == 0 || now - lastReleaseAt_ <= windowMs) return 0;
+    return settle();
+  }
+
+  // Ends the run now and returns its count, or 0 if none is open.
+  uint8_t settle() {
+    const uint8_t pending = count_;
+    count_ = 0;
+    return pending;
+  }
+
+ private:
+  uint8_t count_ = 0;
+  uint32_t lastReleaseAt_ = 0;
+};
+
 }  // namespace buttonpress

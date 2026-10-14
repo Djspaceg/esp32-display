@@ -48,6 +48,36 @@ enum MediaControl {
         return nil
     }
 
+    /// Press and release a recorded key combination, as the keyboard would.
+    /// Posted at the HID tap like the media keys, so it reaches whichever app
+    /// is frontmost, and needs the same Accessibility grant.
+    @discardableResult
+    static func press(_ combo: KeyCombo) -> String? {
+        guard isAuthorized else {
+            return "ESPDisplaySender needs Accessibility permission to press "
+                + "\(combo.label). Grant it in System Settings > Privacy & "
+                + "Security > Accessibility, then try again."
+        }
+        var flags: CGEventFlags = []
+        let modifiers = combo.modifierFlags
+        if modifiers.contains(.command) { flags.insert(.maskCommand) }
+        if modifiers.contains(.option) { flags.insert(.maskAlternate) }
+        if modifiers.contains(.control) { flags.insert(.maskControl) }
+        if modifiers.contains(.shift) { flags.insert(.maskShift) }
+        let source = CGEventSource(stateID: .hidSystemState)
+        for pressed in [true, false] {
+            guard let event = CGEvent(
+                keyboardEventSource: source, virtualKey: combo.keyCode,
+                keyDown: pressed)
+            else {
+                return "macOS refused to construct the key event for \(combo.label)."
+            }
+            event.flags = flags
+            event.post(tap: .cghidEventTap)
+        }
+        return nil
+    }
+
     /// Whether this process may post synthetic events.
     ///
     /// Worth knowing about the grant: it is tied to the signed binary, so

@@ -173,6 +173,12 @@ struct PanelSnapshot: Identifiable, Equatable {
     /// Which gesture bindings this panel uses. Persisted, so a preset chosen once
     /// still applies after a restart.
     var gesturePreset: GesturePreset = .standard
+    /// The user's own assignments, each overriding what the preset gives that
+    /// input. Persisted; choosing a preset clears them.
+    var inputAssignments: [DeviceProtocol.TouchGesture: InputFunction] = [:]
+    /// What the board last said about its inputs (EINP), on firmware that
+    /// stores a map. Discovery-scoped: never persisted.
+    var inputReport: DeviceProtocol.InputReport?
     /// The display speaker's volume, 0...1, applied by scaling the samples
     /// this Mac sends. 1 is the loudest the display plays; a display nobody
     /// has set starts at `PanelSpeakerVolume.default`.

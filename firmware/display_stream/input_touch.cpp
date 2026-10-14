@@ -10,6 +10,8 @@
 #include "boot_menu.h"
 #include "device_protocol.h"
 #include "display_power.h"
+#include "input_button.h"
+#include "input_map.h"
 #include "net_link.h"
 #include "orientation.h"
 #include "ui_screens.h"
@@ -41,33 +43,32 @@ static bool touchPressLogged = false;
 // translation is this switch, deliberately explicit so adding a gesture forces a
 // decision about whether it goes on the wire rather than silently renumbering it.
 //
-// The mapping is inline rather than a helper because the Arduino preprocessor
-// hoists function prototypes above the "device_protocol.h" include below, so a
-// function taking a deviceproto type as a parameter does not compile here.
-static void sendTouchEvent(touchgesture::Gesture gesture, int16_t x, int16_t y) {
-  deviceproto::TouchGesture wire;
+// Returned as the wire value rather than the enum because the Arduino
+// preprocessor hoists function prototypes above the "device_protocol.h"
+// include, so a function with a deviceproto type in its signature does not
+// compile here. 0 is not a gesture.
+static uint8_t wireGesture(touchgesture::Gesture gesture) {
   switch (gesture) {
     case touchgesture::Gesture::Tap:
-      wire = deviceproto::TouchGesture::Tap;
-      break;
+      return (uint8_t)deviceproto::TouchGesture::Tap;
     case touchgesture::Gesture::SwipeLeft:
-      wire = deviceproto::TouchGesture::SwipeLeft;
-      break;
+      return (uint8_t)deviceproto::TouchGesture::SwipeLeft;
     case touchgesture::Gesture::SwipeRight:
-      wire = deviceproto::TouchGesture::SwipeRight;
-      break;
+      return (uint8_t)deviceproto::TouchGesture::SwipeRight;
     case touchgesture::Gesture::SwipeUp:
-      wire = deviceproto::TouchGesture::SwipeUp;
-      break;
+      return (uint8_t)deviceproto::TouchGesture::SwipeUp;
     case touchgesture::Gesture::SwipeDown:
-      wire = deviceproto::TouchGesture::SwipeDown;
-      break;
+      return (uint8_t)deviceproto::TouchGesture::SwipeDown;
     case touchgesture::Gesture::LongPress:
-      wire = deviceproto::TouchGesture::LongPress;
-      break;
+      return (uint8_t)deviceproto::TouchGesture::LongPress;
     default:
-      return;  // not a gesture this protocol carries
+      return 0;  // not a gesture this protocol carries
   }
+}
+
+static void sendTouchEvent(touchgesture::Gesture gesture, int16_t x, int16_t y) {
+  const uint8_t wire = wireGesture(gesture);
+  if (wire == 0) return;
   if (hbPort == 0) {
     // No sender has ever spoken to this panel, so there is nowhere to report a
     // gesture to. Log it: a user tapping a panel that no Mac is driving should
@@ -78,11 +79,58 @@ static void sendTouchEvent(touchgesture::Gesture gesture, int16_t x, int16_t y) 
   }
   uint8_t packet[deviceproto::TOUCH_PACKET_BYTES];
   deviceproto::writeTouch(
-      packet, wire, ++touchSequence, (uint16_t)x, (uint16_t)y,
+      packet, (deviceproto::TouchGesture)wire, ++touchSequence, (uint16_t)x,
+      (uint16_t)y,
       panelLandscape ? deviceproto::TOUCH_FLAG_LANDSCAPE : (uint8_t)0);
   sendToSender(packet, sizeof(packet));
   Serial.printf("touch: %s at (%d,%d) seq=%u -> sender\n",
                 touchgesture::gestureName(gesture), x, y, touchSequence);
+}
+
+// A completed gesture in normal mode, run as the input map says: reported to
+// the sender (a tap also showing the quick info bar, as it always has), run
+// on the board, or dropped.
+static void dispatchTouchGesture(touchgesture::Gesture gesture, int16_t x,
+                                 int16_t y) {
+  const uint8_t wire = wireGesture(gesture);
+  if (wire == 0) return;
+  const uint8_t function = inputFunctionFor(wire);
+  if (function == (uint8_t)deviceproto::InputFunction::Sender) {
+    if (gesture == touchgesture::Gesture::Tap) {
+      showInfoBar(defaultInfoBarText());
+    }
+    sendTouchEvent(gesture, x, y);
+    return;
+  }
+  Serial.printf("touch: %s -> input map\n", touchgesture::gestureName(gesture));
+  runInputFunction(wire, function);
+}
+
+void sendInputGesture(uint8_t gesture) {
+  switch ((deviceproto::TouchGesture)gesture) {
+    case deviceproto::TouchGesture::KnobClockwise:
+      sendKnobGesture(KnobGesture::Clockwise);
+      return;
+    case deviceproto::TouchGesture::KnobCounterclockwise:
+      sendKnobGesture(KnobGesture::Counterclockwise);
+      return;
+    case deviceproto::TouchGesture::KnobPress:
+      sendKnobGesture(KnobGesture::Press);
+      return;
+    default:
+      break;
+  }
+  if (hbPort == 0) {
+    Serial.printf("input: %u ignored, no sender\n", (unsigned)gesture);
+    return;
+  }
+  uint8_t packet[deviceproto::TOUCH_PACKET_BYTES];
+  deviceproto::writeTouch(
+      packet, (deviceproto::TouchGesture)gesture, ++touchSequence, 0, 0,
+      panelLandscape ? deviceproto::TOUCH_FLAG_LANDSCAPE : (uint8_t)0);
+  sendToSender(packet, sizeof(packet));
+  Serial.printf("input: %u seq=%u -> sender\n", (unsigned)gesture,
+                touchSequence);
 }
 
 void sendKnobGesture(KnobGesture gesture) {
@@ -175,7 +223,7 @@ void serviceTouch() {
       openWifiSelector();
       return;
     }
-    sendTouchEvent(held.gesture, held.startX, held.startY);
+    dispatchTouchGesture(held.gesture, held.startX, held.startY);
   }
 
   boardtouch::Sample sample;
@@ -343,8 +391,5 @@ void serviceTouch() {
     return;
 #endif
   }
-  if (event.gesture == touchgesture::Gesture::Tap) {
-    showInfoBar(defaultInfoBarText());
-  }
-  sendTouchEvent(event.gesture, event.startX, event.startY);
+  dispatchTouchGesture(event.gesture, event.startX, event.startY);
 }

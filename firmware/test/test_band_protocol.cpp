@@ -4658,7 +4658,7 @@ int main() {
 
     // Round-trip every gesture, so no value is unrepresentable on the wire.
     for (uint8_t raw = (uint8_t)deviceproto::TouchGesture::Tap;
-         raw <= (uint8_t)deviceproto::TouchGesture::KnobPress; raw++) {
+         raw <= (uint8_t)deviceproto::TouchGesture::PowerKeyLongPress; raw++) {
       uint8_t buf[deviceproto::TOUCH_PACKET_BYTES] = {0};
       deviceproto::writeTouch(buf, (deviceproto::TouchGesture)raw, raw, 1, 2, 0);
       deviceproto::TouchEvent got;
@@ -4684,7 +4684,7 @@ int main() {
     memcpy(badGesture, packet, sizeof(badGesture));
     badGesture[5] = 0;
     CHECK(!deviceproto::parseTouch(badGesture, sizeof(badGesture), ignored));
-    badGesture[5] = (uint8_t)deviceproto::TouchGesture::KnobPress + 1;
+    badGesture[5] = (uint8_t)deviceproto::TouchGesture::PowerKeyLongPress + 1;
     CHECK(!deviceproto::parseTouch(badGesture, sizeof(badGesture), ignored));
 
     // The knob carrier's turn and press follow the touch gestures, as the
@@ -4697,6 +4697,186 @@ int main() {
     CHECK(deviceproto::CAP_TOUCH == 1u << 9);
     CHECK((deviceproto::CAP_TOUCH & deviceproto::CAP_IDLE_TEXT) == 0);
     CHECK((deviceproto::CAP_TOUCH & deviceproto::CAP_BRIGHTNESS_LEVEL) == 0);
+  }
+
+  // --- Input map: EMAP from the sender, EINP back --------------------------
+  {
+    using deviceproto::InputFunction;
+    using deviceproto::TouchGesture;
+    // The BOOT tiers and the power key follow the knob, numbered as the
+    // sender numbers them; every input is its ETCH gesture value.
+    CHECK((uint8_t)TouchGesture::BootSinglePress == 10);
+    CHECK((uint8_t)TouchGesture::BootDoublePress == 11);
+    CHECK((uint8_t)TouchGesture::BootTriplePress == 12);
+    CHECK((uint8_t)TouchGesture::BootLongPress == 13);
+    CHECK((uint8_t)TouchGesture::BootExtraLongPress == 14);
+    CHECK((uint8_t)TouchGesture::PowerKeyPress == 15);
+    CHECK((uint8_t)TouchGesture::PowerKeyLongPress == 16);
+    CHECK(deviceproto::INPUT_COUNT == 16);
+    CHECK(deviceproto::CAP_INPUT_MAP == 1u << 23);
+    CHECK((deviceproto::CAP_INPUT_MAP & deviceproto::CAP_STREAM_UPDATE) == 0);
+
+    // Today's behaviour is the default. A plain board: every gesture goes to
+    // the sender, BOOT keeps its tiers, the power key does nothing.
+    const deviceproto::InputMap plain =
+        deviceproto::defaultInputMap(false, false, true);
+    for (uint8_t id = 1; id <= 9; ++id) {
+      CHECK(plain.functions[id] == (uint8_t)InputFunction::Sender);
+    }
+    CHECK(plain.functions[10] == (uint8_t)InputFunction::StatusScreen);
+    CHECK(plain.functions[11] == (uint8_t)InputFunction::WifiSelector);
+    CHECK(plain.functions[12] == (uint8_t)InputFunction::Nothing);
+    CHECK(plain.functions[13] == (uint8_t)InputFunction::Rotate180);
+    CHECK(plain.functions[14] == (uint8_t)InputFunction::DisplayPower);
+    CHECK(plain.functions[15] == (uint8_t)InputFunction::Nothing);
+    CHECK(plain.functions[16] == (uint8_t)InputFunction::Nothing);
+    // A game image's triple press opens the boot menu; the knob carrier's
+    // click is the knob's (the sender's mute), not the status screen; the
+    // compact C3 has neither screen.
+    const deviceproto::InputMap game =
+        deviceproto::defaultInputMap(false, true, true);
+    CHECK(game.functions[12] == (uint8_t)InputFunction::BootMenu);
+    const deviceproto::InputMap knob =
+        deviceproto::defaultInputMap(true, false, true);
+    CHECK(knob.functions[10] == (uint8_t)InputFunction::Nothing);
+    CHECK(knob.functions[9] == (uint8_t)InputFunction::Sender);
+    const deviceproto::InputMap compact =
+        deviceproto::defaultInputMap(false, false, false);
+    CHECK(compact.functions[10] == (uint8_t)InputFunction::Nothing);
+    CHECK(compact.functions[11] == (uint8_t)InputFunction::Nothing);
+
+    // Which short-press tiers are still today's decides whether BOOT keeps
+    // its immediate single press (and the undo a double makes).
+    CHECK(deviceproto::shortPressesAsDefault(plain, plain, false));
+    deviceproto::InputMap edited = plain;
+    edited.functions[13] = (uint8_t)InputFunction::Nothing;
+    CHECK(deviceproto::shortPressesAsDefault(edited, plain, false));
+    edited.functions[12] = (uint8_t)InputFunction::DisplayPower;
+    CHECK(!deviceproto::shortPressesAsDefault(edited, plain, false));
+    deviceproto::InputMap knobEdited = knob;
+    knobEdited.functions[10] = (uint8_t)InputFunction::Rotate180;
+    CHECK(deviceproto::shortPressesAsDefault(knobEdited, knob, true));
+    knobEdited.functions[9] = (uint8_t)InputFunction::Rotate180;
+    CHECK(!deviceproto::shortPressesAsDefault(knobEdited, knob, true));
+
+    // EMAP byte layout: magic, version, count, two reserved, then one
+    // function per input from 1.
+    deviceproto::InputMap sent = plain;
+    sent.functions[1] = (uint8_t)InputFunction::StatusScreen;
+    sent.functions[15] = (uint8_t)InputFunction::DisplayPower;
+    uint8_t emap[deviceproto::INPUT_MAP_HEADER_BYTES + deviceproto::INPUT_COUNT];
+    CHECK(deviceproto::writeInputMap(emap, sizeof(emap), sent) == 24);
+    CHECK(deviceproto::writeInputMap(emap, sizeof(emap) - 1, sent) == 0);
+    const uint8_t expectedMap[24] = {0x45, 0x4d, 0x41, 0x50, 0x01, 0x10,
+                                     0x00, 0x00, 0x02, 0x01, 0x01, 0x01,
+                                     0x01, 0x01, 0x01, 0x01, 0x01, 0x02,
+                                     0x03, 0x00, 0x05, 0x06, 0x06, 0x00};
+    CHECK(memcmp(emap, expectedMap, sizeof(expectedMap)) == 0);
+    deviceproto::InputMap got;
+    CHECK(deviceproto::parseInputMap(emap, sizeof(emap), plain, got));
+    CHECK(memcmp(got.functions, sent.functions, sizeof(got.functions)) == 0);
+
+    // A shorter map covers its own inputs and leaves the rest at the board's
+    // defaults; count 0 puts every input back. A longer one (a newer sender)
+    // is read for the inputs this board knows.
+    uint8_t shortMap[9] = {0x45, 0x4d, 0x41, 0x50, 0x01, 0x01, 0, 0, 0x00};
+    CHECK(deviceproto::parseInputMap(shortMap, sizeof(shortMap), game, got));
+    CHECK(got.functions[1] == (uint8_t)InputFunction::Nothing);
+    CHECK(got.functions[12] == (uint8_t)InputFunction::BootMenu);
+    uint8_t reset[8] = {0x45, 0x4d, 0x41, 0x50, 0x01, 0x00, 0, 0};
+    CHECK(deviceproto::parseInputMap(reset, sizeof(reset), game, got));
+    CHECK(memcmp(got.functions, game.functions, sizeof(got.functions)) == 0);
+    uint8_t longMap[8 + 20];
+    memcpy(longMap, emap, sizeof(emap));
+    longMap[5] = 20;
+    memset(longMap + 24, 0x7f, 4);  // functions this board cannot name
+    CHECK(deviceproto::parseInputMap(longMap, sizeof(longMap), plain, got));
+    CHECK(memcmp(got.functions, sent.functions, sizeof(got.functions)) == 0);
+
+    // Refused whole rather than half-applied: wrong magic, version, length,
+    // or a function this board does not have for an input it knows.
+    deviceproto::InputMap untouched = plain;
+    uint8_t bad[24];
+    memcpy(bad, emap, sizeof(bad));
+    bad[4] = 2;
+    CHECK(!deviceproto::parseInputMap(bad, sizeof(bad), plain, untouched));
+    memcpy(bad, emap, sizeof(bad));
+    bad[0] = 'X';
+    CHECK(!deviceproto::parseInputMap(bad, sizeof(bad), plain, untouched));
+    CHECK(!deviceproto::parseInputMap(emap, sizeof(emap) - 1, plain, untouched));
+    memcpy(bad, emap, sizeof(bad));
+    bad[8 + 3] = deviceproto::INPUT_FUNCTION_LAST + 1;
+    CHECK(!deviceproto::parseInputMap(bad, sizeof(bad), plain, untouched));
+    memcpy(bad, emap, sizeof(bad));
+    bad[5] = deviceproto::INPUT_MAP_MAX_COUNT + 1;
+    CHECK(!deviceproto::parseInputMap(bad, sizeof(bad), plain, untouched));
+    CHECK(memcmp(untouched.functions, plain.functions,
+                 sizeof(plain.functions)) == 0);
+
+    // EINP: which inputs and board functions this board has, then its
+    // current map and its own defaults, so the sender can show today's
+    // behaviour without a second copy of the rule.
+    const uint32_t inputs = deviceproto::inputMask(true, false, true, true);
+    CHECK(inputs == 0x0001FC7Eu);  // touch 1-6, BOOT 10-14, power 15-16
+    CHECK(deviceproto::inputMask(false, true, true, false) == 0x00007B80u);
+    CHECK(deviceproto::inputMask(false, false, false, false) == 0);
+    const uint32_t functions = deviceproto::functionMask(true, true);
+    CHECK(functions == 0x7Fu);
+    CHECK(deviceproto::functionMask(false, false) == 0x63u);
+    uint8_t einp[deviceproto::INPUT_REPORT_HEADER_BYTES +
+                 2 * deviceproto::INPUT_COUNT];
+    CHECK(deviceproto::writeInputReport(einp, sizeof(einp), inputs, functions,
+                                        sent, plain) == 48);
+    CHECK(deviceproto::writeInputReport(einp, sizeof(einp) - 1, inputs,
+                                        functions, sent, plain) == 0);
+    const uint8_t expectedHead[16] = {0x45, 0x49, 0x4e, 0x50, 0x01, 0x10,
+                                      0x00, 0x00, 0x7e, 0xfc, 0x01, 0x00,
+                                      0x7f, 0x00, 0x00, 0x00};
+    CHECK(memcmp(einp, expectedHead, sizeof(expectedHead)) == 0);
+    CHECK(memcmp(einp + 16, sent.functions + 1, 16) == 0);
+    CHECK(memcmp(einp + 32, plain.functions + 1, 16) == 0);
+  }
+
+  // --- Counted BOOT presses (a map that changed the short tiers) ----------
+  {
+    using buttonpress::PressCounter;
+    using buttonpress::PressCounts;
+    PressCounter counter;
+    // Only singles bound: each press acts at once.
+    PressCounts c = counter.record(100, 800, 1);
+    CHECK(c.expired == 0 && c.now == 1);
+    c = counter.record(200, 800, 1);
+    CHECK(c.expired == 0 && c.now == 1);
+    // Doubles bound: a single waits out the window, a second press acts at
+    // once as the double.
+    c = counter.record(1000, 800, 2);
+    CHECK(c.expired == 0 && c.now == 0);
+    CHECK(counter.resolve(1800, 800) == 0);
+    CHECK(counter.resolve(1801, 800) == 1);
+    CHECK(counter.resolve(1900, 800) == 0);
+    c = counter.record(2000, 800, 2);
+    CHECK(c.now == 0);
+    c = counter.record(2500, 800, 2);
+    CHECK(c.expired == 0 && c.now == 2);
+    CHECK(counter.resolve(4000, 800) == 0);
+    // Triples bound: one and two wait, three acts at once.
+    CHECK(counter.record(5000, 800, 3).now == 0);
+    CHECK(counter.record(5500, 800, 3).now == 0);
+    CHECK(counter.resolve(6300, 800) == 0);
+    CHECK(counter.resolve(6301, 800) == 2);
+    CHECK(counter.record(7000, 800, 3).now == 0);
+    CHECK(counter.record(7100, 800, 3).now == 0);
+    CHECK(counter.record(7200, 800, 3).now == 3);
+    // A press after a window nobody resolved settles the old count first.
+    CHECK(counter.record(8000, 800, 3).now == 0);
+    c = counter.record(9000, 800, 3);
+    CHECK(c.expired == 1 && c.now == 0);
+    // settle() hands back whatever is pending (a knob turn ends a click run).
+    CHECK(counter.settle() == 1);
+    CHECK(counter.settle() == 0);
+    // The window holds across clock wrap.
+    CHECK(counter.record(UINT32_MAX - 100, 800, 2).now == 0);
+    CHECK(counter.record(50, 800, 2).now == 2);
   }
 
   // --- EBAT battery reports on the wire ------------------------------------
