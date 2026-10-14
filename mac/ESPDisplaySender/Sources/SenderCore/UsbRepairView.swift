@@ -437,7 +437,7 @@ final class UsbRepairModel: ObservableObject {
 
     func noteProgress(_ event: UsbFlashEvent) {
         guard case .phase(.rescue(.caught(let port))) = event, let record else { return }
-        keep(UsbRecovery.caught(record, port: port, device: deviceForPort(port)))
+        keep(UsbRecovery.caught(record, device: deviceForPort(port)))
     }
 
     func noteInstallStarted(_ board: UsbRescuer.RescuedBoard) {
@@ -498,7 +498,7 @@ final class UsbRepairModel: ObservableObject {
     /// Where a kept recovery stopped, in words.
     nonisolated static func resumeSummary(for record: UsbRecoveryRecord) -> String {
         let family = UsbRescue.Family.named(record.family)?.displayName ?? record.family
-        let port = record.port.map { " on \($0)" } ?? ""
+        let port = record.usbSerial.map { " (USB serial \($0))" } ?? ""
         switch record.stage {
         case .waiting:
             return "A recovery of an \(family) board was started, and nothing had reached "

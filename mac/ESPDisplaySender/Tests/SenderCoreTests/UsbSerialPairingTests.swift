@@ -86,4 +86,45 @@ final class UsbSerialPairingTests: XCTestCase {
         XCTAssertEqual(manager.panels.first { $0.serviceName == "other" }?
             .usbSerialNumbers, [])
     }
+
+    /// A board on the display's USB serial that answers CFGSHOW without id=
+    /// (firmware from before it, or a reply another reader keeps cutting
+    /// short) is asked again a bounded number of times, then left, and the
+    /// WiFi row says why instead of waiting forever.
+    func testABoardThatKeepsAnsweringWithoutAnIDIsLeftAndTheRowSaysWhy() async throws {
+        let asked = LockedLines()
+        let board = try FakeSerialBoard(onCommand: { command in
+            guard command == "CFGSHOW" else { return nil }
+            asked.append(command)
+            return "CFGINFO ssid64=U3RlcGhlbnMgTWFub3I= name64=YmlnLXJvdW5k\n"
+        })
+        defer { board.stop() }
+        let manager = manager(serials: [board.path: Self.consoleSerial])
+        manager.panels[0].usbSerialNumbers = [Self.consoleSerial]
+        manager.updateUSBPorts([board.path])
+        for _ in 0..<(PanelManager.usbIDlessAnswerLimit + 3) {
+            if let pending = manager.usbIdentifyRetries[board.path] {
+                manager.usbIdentifyRetries[board.path]?.nextAt = pending.nextAt - 100
+            }
+            if manager.usbPortsDueForIdentifyRetry().contains(board.path)
+                || asked.lines.isEmpty {
+                _ = await manager.probeUSBDevice(board.path, timeout: 0.5)
+            }
+        }
+        XCTAssertEqual(asked.lines.count, PanelManager.usbIDlessAnswerLimit,
+            "a board answering without an ID was asked without end")
+        XCTAssertNil(manager.usbIdentifyRetries[board.path])
+        XCTAssertEqual(
+            manager.wifiSwitchUnavailableReason(for: "big-round"),
+            "This display answers over USB without reporting its hardware ID, so "
+                + "it cannot be paired. Update its firmware, then unplug it and "
+                + "plug it in again.")
+
+        // Plugged in again, it is asked again from the start.
+        manager.updateUSBPorts([])
+        manager.updateUSBPorts([board.path])
+        XCTAssertEqual(
+            manager.wifiSwitchUnavailableReason(for: "big-round"),
+            "Connected by USB. Waiting for this display to answer.")
+    }
 }

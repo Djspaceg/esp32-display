@@ -45,7 +45,12 @@ extension PanelManager {
             }
             return "This display is busy over USB. Try again in a moment."
         }
-        if usbSerialPairedDevice(for: serviceName) != nil {
+        if let device = usbSerialPairedDevice(for: serviceName) {
+            if usbPortAnswersWithoutID(device.path) {
+                return "This display answers over USB without reporting its hardware "
+                    + "ID, so it cannot be paired. Update its firmware, then unplug it "
+                    + "and plug it in again."
+            }
             return "Connected by USB. Waiting for this display to answer."
         }
         return "Connect this display to the Mac by USB to switch its network. "

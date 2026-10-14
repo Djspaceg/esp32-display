@@ -29,13 +29,13 @@ final class UsbRecoveryTests: XCTestCase {
         let store = try temporaryStore()
         XCTAssertNil(store.load(), "no file is no recovery")
         var record = UsbRecovery.started(family: "s3", carrier: nil, baseline: ["/dev/cu.a"])
-        record = UsbRecovery.caught(record, port: board, device: device)
+        record = UsbRecovery.caught(record, device: device)
         record = UsbRecovery.rescued(record, board: rescued(port: board), device: device)
         try store.save(record)
         let reopened = UsbRecoveryStore(url: store.url)
         XCTAssertEqual(reopened.load(), record)
         XCTAssertEqual(reopened.load()?.stage, .rescued)
-        XCTAssertEqual(reopened.load()?.rescuedBoard?.identity.hardwareID, "aabbccddeeff")
+        XCTAssertEqual(reopened.load()?.rescuedBoard(on: board)?.identity.hardwareID, "aabbccddeeff")
         reopened.clear()
         XCTAssertNil(store.load())
     }
@@ -52,25 +52,23 @@ final class UsbRecoveryTests: XCTestCase {
         let started = UsbRecovery.started(family: "p4", carrier: "st7703-4b", baseline: ["/dev/cu.x"])
         XCTAssertEqual(started.stage, .waiting)
         XCTAssertEqual(started.baseline, ["/dev/cu.x"])
-        let caught = UsbRecovery.caught(started, port: board, device: device)
+        let caught = UsbRecovery.caught(started, device: device)
         XCTAssertEqual(caught.stage, .caught)
-        XCTAssertEqual(caught.port, board)
         XCTAssertEqual(caught.usbSerial, device.serial)
-        XCTAssertEqual(caught.usbLocation, device.location)
         XCTAssertEqual(caught.carrier, "st7703-4b")
         let rescuedRecord = UsbRecovery.rescued(caught, board: rescued(port: board), device: device)
         XCTAssertEqual(rescuedRecord.stage, .rescued)
         let installing = UsbRecovery.installing(rescuedRecord)
         XCTAssertEqual(installing.stage, .installing)
-        XCTAssertEqual(installing.rescuedBoard?.port, board)
-        XCTAssertEqual(installing.rescuedBoard?.carrier, "st7703-4b")
+        XCTAssertEqual(installing.rescuedBoard(on: board)?.port, board)
+        XCTAssertEqual(installing.rescuedBoard(on: board)?.carrier, "st7703-4b")
     }
 
     // MARK: - finding the board again
 
     func testTheBoardIsFoundByItsUSBSerialWhereverItIsNow() {
         var record = UsbRecovery.started(family: "s3", carrier: nil, baseline: [])
-        record = UsbRecovery.caught(record, port: board, device: device)
+        record = UsbRecovery.caught(record, device: device)
         let moved = "/dev/cu.usbmodem14101"
         let other = "/dev/cu.usbmodem5B901700691"
         let registry: [String: UsbRescue.USBIdentity] = [
@@ -80,17 +78,42 @@ final class UsbRecoveryTests: XCTestCase {
         XCTAssertEqual(UsbRecovery.locate(record, ports: [other, moved]) { registry[$0] }, moved)
     }
 
-    func testABoardWithNoSerialIsFoundByItsSocket() {
+    /// The socket a board was in is a port, not the board: one with no USB
+    /// serial is not found again by it, so Resume waits for it to be caught.
+    func testABoardWithNoSerialIsNotFoundByItsSocket() {
         let noSerial = UsbRescue.USBIdentity(location: 0x131010, serial: "")
         var record = UsbRecovery.started(family: "s3", carrier: nil, baseline: [])
-        record = UsbRecovery.caught(record, port: board, device: noSerial)
+        record = UsbRecovery.caught(record, device: noSerial)
         let registry: [String: UsbRescue.USBIdentity] = [board: noSerial]
-        XCTAssertEqual(UsbRecovery.locate(record, ports: [board]) { registry[$0] }, board)
+        XCTAssertNil(UsbRecovery.locate(record, ports: [board]) { registry[$0] })
+        XCTAssertEqual(UsbRecovery.plan(record, located: nil, present: [board]), .waitForBoard)
+    }
+
+    /// The record on disk names the board by its USB serial and what it
+    /// reported, never by the port or the socket it was reached on. A file
+    /// written before still loads, with those read past.
+    func testTheRecordKeepsNoPortOrSocket() throws {
+        var record = UsbRecovery.started(family: "s3", carrier: nil, baseline: [])
+        record = UsbRecovery.rescued(
+            UsbRecovery.caught(record, device: device), board: rescued(port: board),
+            device: device)
+        let json = try XCTUnwrap(String(data: JSONEncoder().encode(record), encoding: .utf8))
+        XCTAssertFalse(json.contains("\"port\""), json)
+        XCTAssertFalse(json.contains("usbLocation"), json)
+        XCTAssertFalse(json.contains("usbmodem1312101"), json)
+
+        let older = """
+            {"stage":"rescued","family":"s3","baseline":[],"port":"/dev/cu.usbmodem1312101",
+             "usbSerial":"7C:0C:5F:42:39:A4","usbLocation":1249296}
+            """
+        let loaded = try JSONDecoder().decode(
+            UsbRecoveryRecord.self, from: Data(older.utf8))
+        XCTAssertEqual(loaded.usbSerial, "7C:0C:5F:42:39:A4")
     }
 
     func testAnotherDeviceOnTheRecordedNameIsNotTheBoard() {
         var record = UsbRecovery.started(family: "s3", carrier: nil, baseline: [])
-        record = UsbRecovery.caught(record, port: board, device: device)
+        record = UsbRecovery.caught(record, device: device)
         let registry: [String: UsbRescue.USBIdentity] = [
             board: .init(location: 0x2000_0000, serial: "68:EE:8F:5D:AC:8C"),
         ]
@@ -101,7 +124,7 @@ final class UsbRecoveryTests: XCTestCase {
 
     func testResumeTakesUpEachStageWithoutAPhysicalAction() {
         let started = UsbRecovery.started(family: "s3", carrier: nil, baseline: ["/dev/cu.old"])
-        let caught = UsbRecovery.caught(started, port: board, device: device)
+        let caught = UsbRecovery.caught(started, device: device)
         let rescuedRecord = UsbRecovery.rescued(caught, board: rescued(port: board), device: device)
         let installing = UsbRecovery.installing(rescuedRecord)
         let moved = "/dev/cu.usbmodem14101"
@@ -133,7 +156,7 @@ final class UsbRecoveryTests: XCTestCase {
     func testAResumedRunKeepsTheRecordOfTheBoardItReached() {
         let caught = UsbRecovery.caught(
             UsbRecovery.started(family: "s3", carrier: nil, baseline: []),
-            port: board, device: device)
+            device: device)
         XCTAssertEqual(UsbRecovery.atStart(existing: caught, resuming: true, family: "s3",
                                            carrier: nil, baseline: ["/dev/cu.x"]), caught)
         XCTAssertEqual(UsbRecovery.atStart(existing: caught, resuming: false, family: "s3",
@@ -148,7 +171,7 @@ final class UsbRecoveryTests: XCTestCase {
         let rescuedRecord = UsbRecovery.rescued(
             UsbRecovery.caught(
                 UsbRecovery.started(family: "s3", carrier: nil, baseline: []),
-                port: board, device: device),
+                device: device),
             board: rescued(port: board), device: device)
         XCTAssertTrue(UsbRecovery.isRecordedBoard(rescuedRecord, hardwareID: "aabbccddeeff"))
         XCTAssertTrue(UsbRecovery.isRecordedBoard(rescuedRecord, hardwareID: "7c0c5f4239a4"),
@@ -186,7 +209,7 @@ final class UsbRecoveryTests: XCTestCase {
 
     func testResumeWaitsForTheBoardOnlyWhenItIsNotOnUSB() {
         let started = UsbRecovery.started(family: "s3", carrier: nil, baseline: [])
-        let caught = UsbRecovery.caught(started, port: board, device: device)
+        let caught = UsbRecovery.caught(started, device: device)
         XCTAssertEqual(UsbRecovery.plan(caught, located: nil, present: []), .waitForBoard)
         let installing = UsbRecovery.installing(
             UsbRecovery.rescued(caught, board: rescued(port: board), device: device))
@@ -237,7 +260,7 @@ final class UsbRecoveryTests: XCTestCase {
         let record = UsbRecovery.installing(UsbRecovery.rescued(
             UsbRecovery.caught(
                 UsbRecovery.started(family: "s3", carrier: nil, baseline: []),
-                port: board, device: device),
+                device: device),
             board: rescued(port: board), device: device))
         let model = UsbRepairModel(family: nil, pending: record)
         XCTAssertEqual(model.stage, .resumable(record))
@@ -269,7 +292,7 @@ final class UsbRecoveryTests: XCTestCase {
         let store = try temporaryStore()
         let record = UsbRecovery.caught(
             UsbRecovery.started(family: "s3", carrier: nil, baseline: []),
-            port: board, device: device)
+            device: device)
         try store.save(record)
         let model = UsbRepairModel(family: nil, pending: store.load(), store: store)
         XCTAssertTrue(model.canResume)
@@ -309,7 +332,7 @@ final class UsbRecoveryTests: XCTestCase {
     /// never reached a board only from Recover Board.
     func testAReachedRecoveryIsOfferedWhicheverWayIn() {
         let waiting = UsbRecovery.started(family: "s3", carrier: nil, baseline: [])
-        let caught = UsbRecovery.caught(waiting, port: board, device: device)
+        let caught = UsbRecovery.caught(waiting, device: device)
         XCTAssertEqual(UsbRepairModel.offered(caught, fromRecoverBoard: false), caught)
         XCTAssertEqual(UsbRepairModel.offered(caught, fromRecoverBoard: true), caught)
         XCTAssertNil(UsbRepairModel.offered(waiting, fromRecoverBoard: false))

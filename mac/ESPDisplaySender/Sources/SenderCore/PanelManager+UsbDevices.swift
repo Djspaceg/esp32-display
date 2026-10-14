@@ -77,6 +77,14 @@ extension PanelManager {
         }
     }
 
+    /// Whether the board at this port has answered CFGSHOW without an ID as
+    /// many times as it is asked at this connection.
+    func usbPortAnswersWithoutID(_ path: String) -> Bool {
+        guard let answers = usbIDlessAnswers[path] else { return false }
+        return answers.generation == usbPathGeneration(path)
+            && answers.count >= Self.usbIDlessAnswerLimit
+    }
+
     /// `currentUSBPort` as a hint for a command that finds its port by asking,
     /// nil when there is no single port.
     func pairedUSBPath(for serviceName: String) -> String? {
@@ -210,6 +218,7 @@ extension PanelManager {
         usbProbeTasks[path]?.task.cancel()
         usbProbeTasks[path] = nil
         usbIdentifyRetries[path] = nil
+        usbIDlessAnswers[path] = nil
         if let index = usbDevices.firstIndex(where: { $0.path == path }) {
             // Unplugged or renumbered: the next time this board is verified it
             // is a fresh USB connection, and the user asked for a copy on every
@@ -451,9 +460,21 @@ extension PanelManager {
         // gets the reply: firmware from before id= answers this way, and the
         // Add Display sheet can still flash it.
         if identity.hardwareID == nil {
-            noteUnansweredUSBProbe(path, generation: generation)
+            let earlier = usbIDlessAnswers[path].flatMap {
+                $0.generation == generation ? $0.count : nil
+            } ?? 0
+            usbIDlessAnswers[path] = (generation, earlier + 1)
+            if earlier + 1 >= Self.usbIDlessAnswerLimit {
+                // It answers, just never with an ID: asking again will not
+                // change that. Left until it is plugged in again.
+                usbIdentifyRetries[path] = nil
+                objectWillChange.send()
+            } else {
+                noteUnansweredUSBProbe(path, generation: generation)
+            }
             return result
         }
+        usbIDlessAnswers[path] = nil
         usbIdentifyRetries[path] = nil
         if let index = usbDevices.firstIndex(where: { $0.path == path }) {
             // A completed CFGSHOW probe is authoritative for discovery-scoped

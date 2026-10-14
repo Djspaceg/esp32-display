@@ -147,6 +147,12 @@ final class PanelManager: ObservableObject {
     /// Unanswered asks after which a port no display record points at is let
     /// go: seven is about two minutes on the delays above.
     var usbUnknownPortRetryAttempts = 7
+    /// CFGSHOW answers without id= at each port, at its current connection.
+    /// Such an answer pairs nothing, so it is asked again, up to
+    /// `usbIDlessAnswerLimit`, and then the port is left until it is plugged
+    /// in again.
+    var usbIDlessAnswers: [String: (generation: Int, count: Int)] = [:]
+    static let usbIDlessAnswerLimit = 5
     /// While above zero, unanswered ports are not asked again: something in the
     /// app (the Add sheet's esptool read) has the port.
     var usbIdentifyRetryHolds = 0

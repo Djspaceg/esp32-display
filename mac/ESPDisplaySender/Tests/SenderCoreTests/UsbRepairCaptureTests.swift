@@ -83,7 +83,7 @@ final class UsbRepairCaptureTests: XCTestCase {
             let record = UsbRecovery.installing(UsbRecovery.rescued(
                 UsbRecovery.caught(
                     UsbRecovery.started(family: "s3", carrier: nil, baseline: []),
-                    port: port, device: nil),
+                    device: nil),
                 board: board, device: nil))
             model.stage = .resumable(record)
         }

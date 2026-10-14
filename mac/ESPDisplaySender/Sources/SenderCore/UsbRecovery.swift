@@ -34,15 +34,17 @@ struct UsbRecoveryRecord: Codable, Equatable, Sendable {
     var carrier: String?
     /// The ports attached when Start was pressed.
     var baseline: [String]
-    /// Where the board was last reached, and the USB device behind it.
-    var port: String?
+    /// The USB serial number of the device the board was reached behind: the
+    /// board's own USB identity, wherever it is plugged in. No port and no
+    /// socket is kept - those are where it was, not what it is. Files that
+    /// still carry `port` or `usbLocation` load with them read past.
     var usbSerial: String?
-    var usbLocation: Int?
     var board: Board?
 
-    /// The rescued board as the install wants it, on the recorded port.
-    var rescuedBoard: UsbRescuer.RescuedBoard? {
-        guard let board, let port, let family = UsbRescue.Family.named(family) else { return nil }
+    /// The rescued board as the install wants it, on the port it is found on
+    /// now (`UsbRecovery.locate`).
+    func rescuedBoard(on port: String) -> UsbRescuer.RescuedBoard? {
+        guard let board, let family = UsbRescue.Family.named(family) else { return nil }
         return UsbRescuer.RescuedBoard(
             port: port, family: family,
             identity: WifiConfigUI.USBIdentity(
@@ -107,13 +109,11 @@ enum UsbRecovery {
     }
 
     static func caught(
-        _ record: UsbRecoveryRecord, port: String, device: UsbRescue.USBIdentity?
+        _ record: UsbRecoveryRecord, device: UsbRescue.USBIdentity?
     ) -> UsbRecoveryRecord {
         var next = record
         next.stage = .caught
-        next.port = port
         next.usbSerial = device.map(\.serial).flatMap { $0.isEmpty ? nil : $0 }
-        next.usbLocation = device?.location
         return next
     }
 
@@ -121,12 +121,9 @@ enum UsbRecovery {
         _ record: UsbRecoveryRecord, board: UsbRescuer.RescuedBoard,
         device: UsbRescue.USBIdentity?
     ) -> UsbRecoveryRecord {
-        var next = caught(record, port: board.port, device: device)
+        var next = caught(record, device: device)
         // A device the registry could not name keeps what was learned before.
-        if device == nil {
-            next.usbSerial = record.usbSerial
-            next.usbLocation = record.usbLocation
-        }
+        if device == nil { next.usbSerial = record.usbSerial }
         next.stage = .rescued
         next.carrier = board.carrier ?? record.carrier
         next.board = .init(
@@ -145,20 +142,15 @@ enum UsbRecovery {
 
     /// The port the recorded board is on now. Its USB serial is the board
     /// wherever it is plugged (a native-USB ESP32 reports its MAC, a bridge its
-    /// own serial); with no serial, the same socket is. A name alone is never
-    /// trusted: macOS reuses names for other devices.
+    /// own serial). Without one there is nothing to find it by: neither a port
+    /// name, which macOS reuses for other devices, nor the socket it was in.
     static func locate(
         _ record: UsbRecoveryRecord, ports: [String],
         device: (String) -> UsbRescue.USBIdentity?
     ) -> String? {
         let devices = ports.map { ($0, device($0)) }
-        if let serial = record.usbSerial {
-            return devices.first { $0.1?.serial == serial }?.0
-        }
-        if let location = record.usbLocation {
-            return devices.first { $0.1?.location == location }?.0
-        }
-        return nil
+        guard let serial = record.usbSerial else { return nil }
+        return devices.first { $0.1?.serial == serial }?.0
     }
 
     /// Whether a board answering with this hardware ID is the recorded one:
@@ -172,7 +164,7 @@ enum UsbRecovery {
     }
 
     /// The record a run starts with. A run Resume begins on a board it had
-    /// already reached keeps that record as it is - its stage, port and serial
+    /// already reached keeps that record as it is - its stage and USB serial
     /// - so a Stop or a quit in the seconds before esptool reaches the board
     /// again loses nothing. Any other run starts a new one.
     static func atStart(
@@ -196,8 +188,8 @@ enum UsbRecovery {
         case .rescued:
             return located.map(Plan.read) ?? .waitForBoard
         case .installing:
-            guard let located, var board = record.rescuedBoard else { return .waitForBoard }
-            board.port = located
+            guard let located, let board = record.rescuedBoard(on: located)
+            else { return .waitForBoard }
             return .install(board)
         }
     }
