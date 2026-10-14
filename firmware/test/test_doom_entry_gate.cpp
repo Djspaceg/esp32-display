@@ -2582,6 +2582,44 @@ static int mapSurvivesARestartAndCanBeReset() {
   fakeNow += 31000;
   CHECK(applyPendingInputMap());
   CHECK(fakeNvsBytes["inmap"][1] == 3);
+  // A, then B, then A again inside 30 s: once B was held back, A's next
+  // change waits for the interval too, so the two cannot write on every
+  // swap. The newest one lands.
+  fakeNow += 31000;
+  hbIp = 0x0108A8C0;
+  CHECK(setInputMap({0, 6}));
+  CHECK(fakeNvsBytes["inmap"][1] == 6);
+  hbIp = 0x0208A8C0;
+  CHECK(setInputMap({0, 3}));
+  hbIp = 0x0108A8C0;
+  CHECK(setInputMap({0, 4}));
+  CHECK(fakeNvsBytes["inmap"][1] == 6);
+  fakeNow += 31000;
+  CHECK(applyPendingInputMap());
+  CHECK(fakeNvsBytes["inmap"][1] == 4);
+  // The same Mac back on a new port is still the same sender.
+  hbPort = 50001;
+  CHECK(setInputMap({0, 2}));
+  CHECK(fakeNvsBytes["inmap"][1] == 2);
+
+  // A save that fails is retried on the interval, not on every loop pass.
+  fakeNvsWritesFail = true;
+  Serial.captured.clear();
+  CHECK(setInputMap({0, 5}));
+  for (int i = 0; i < 10; ++i) {
+    fakeNow += 10;
+    applyPendingInputMap();
+  }
+  size_t attempts = 0;
+  for (size_t at = Serial.captured.find("NOT saved"); at != std::string::npos;
+       at = Serial.captured.find("NOT saved", at + 1)) {
+    ++attempts;
+  }
+  CHECK(attempts == 1);
+  fakeNvsWritesFail = false;
+  fakeNow += 31000;
+  CHECK(applyPendingInputMap());
+  CHECK(fakeNvsBytes["inmap"][1] == 5);
   hbPort = 0;
   hbIp = 0;
   return 0;

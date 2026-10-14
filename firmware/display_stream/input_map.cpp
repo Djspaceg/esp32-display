@@ -15,7 +15,6 @@ static deviceproto::InputMap defaultMap;
 static deviceproto::InputMap pendingMap;
 static bool pendingMapReady = false;
 static uint32_t pendingSenderIp = 0;
-static uint16_t pendingSenderPort = 0;
 // The sender endpoint the last EMAP came from. The stored map is in force
 // only with no sender at all or for that one: a sender that never sends EMAP
 // (one that predates maps) gets the defaults, today's behaviour.
@@ -33,10 +32,13 @@ static const uint32_t INPUT_MAP_SAVE_INTERVAL_MS = 30000;
 static bool mapNeedsSave = false;
 static bool mapSavedSinceBoot = false;
 static uint32_t lastMapSaveAt = 0;
+// Senders by address only: the same Mac's port changes when it reconnects.
 static uint32_t changeSenderIp = 0;
-static uint16_t changeSenderPort = 0;
 static uint32_t savedSenderIp = 0;
-static uint16_t savedSenderPort = 0;
+// A change from another sender was held back since the last save, so the
+// next change saves on the interval too, whoever sends it.
+static bool mapHeldBackSinceSave = false;
+static bool lastSaveFailed = false;
 
 static const char INPUT_MAP_KEY[] = "inmap";
 // Inputs 1..INPUT_COUNT, then the map's flags.
@@ -60,7 +62,10 @@ static bool saveInputMap();
 // held-back map before the chip resets. A crash or a power cut does not; a
 // connected sender then re-sends its map, which differs from the board's.
 static void flushInputMapOnRestart() {
-  if (mapNeedsSave) saveInputMap();
+  portENTER_CRITICAL(&inputMapMux);
+  const bool needsSave = mapNeedsSave;
+  portEXIT_CRITICAL(&inputMapMux);
+  if (needsSave) saveInputMap();
 }
 
 static void registerInputMapShutdownFlush() {
@@ -75,6 +80,8 @@ void loadInputMap() {
   activeMap = defaultMap;
   mapNeedsSave = false;
   mapSavedSinceBoot = false;
+  mapHeldBackSinceSave = false;
+  lastSaveFailed = false;
   registerInputMapShutdownFlush();
   Preferences prefs;
   if (prefs.begin("espdisp", true /* read-only */)) {
@@ -152,37 +159,50 @@ bool offerInputMap(const uint8_t *data, size_t len) {
   mapSenderIp = hbIp;
   mapSenderPort = hbPort;
   pendingSenderIp = hbIp;
-  pendingSenderPort = hbPort;
   portEXIT_CRITICAL(&inputMapMux);
   return true;
 }
 
-// The sender repeats EMAP until EINP shows it applied, and only while the two
-// differ, so a write here happens once per real change.
+// Saves the active map. Also run from the shutdown handler, which on the P4
+// can be the coprocessor-update task rather than loop(), so the map is copied
+// under the lock that loop() changes it under.
 static bool saveInputMap() {
+  deviceproto::InputMap snapshot;
+  portENTER_CRITICAL(&inputMapMux);
+  snapshot = activeMap;
+  const uint32_t sender = changeSenderIp;
   mapNeedsSave = false;
-  mapSavedSinceBoot = true;
+  portEXIT_CRITICAL(&inputMapMux);
   lastMapSaveAt = millis();
-  savedSenderIp = changeSenderIp;
-  savedSenderPort = changeSenderPort;
   Preferences prefs;
   bool saved = false;
   if (prefs.begin("espdisp", false)) {
     // The defaults are stored as no map at all, so a later firmware's
     // defaults reach a board that never chose anything else.
-    if (memcmp(&activeMap, &defaultMap, sizeof(activeMap)) == 0) {
+    if (memcmp(&snapshot, &defaultMap, sizeof(snapshot)) == 0) {
       prefs.remove(INPUT_MAP_KEY);
       saved = true;
     } else {
       uint8_t record[INPUT_MAP_RECORD_BYTES];
-      memcpy(record, activeMap.functions + 1, deviceproto::INPUT_COUNT);
-      record[deviceproto::INPUT_COUNT] = activeMap.flags;
+      memcpy(record, snapshot.functions + 1, deviceproto::INPUT_COUNT);
+      record[deviceproto::INPUT_COUNT] = snapshot.flags;
       saved = prefs.putBytes(INPUT_MAP_KEY, record, sizeof(record)) ==
               sizeof(record);
     }
     prefs.end();
   }
-  if (!saved) mapNeedsSave = true;  // tried again after the interval
+  if (saved) {
+    mapSavedSinceBoot = true;
+    savedSenderIp = sender;
+    mapHeldBackSinceSave = false;
+    lastSaveFailed = false;
+  } else {
+    // Tried again once the interval has passed, not on every loop pass.
+    portENTER_CRITICAL(&inputMapMux);
+    mapNeedsSave = true;
+    portEXIT_CRITICAL(&inputMapMux);
+    lastSaveFailed = true;
+  }
   Serial.printf("input map: %s\n", saved ? "saved" : "NOT saved");
   return saved;
 }
@@ -192,33 +212,38 @@ static bool saveInputMap() {
 bool applyPendingInputMap(bool saveNow) {
   deviceproto::InputMap next;
   uint32_t senderIp = 0;
-  uint16_t senderPort = 0;
+  bool changed = false;
   portENTER_CRITICAL(&inputMapMux);
-  const bool ready = pendingMapReady;
-  pendingMapReady = false;
-  if (ready) {
+  if (pendingMapReady) {
+    pendingMapReady = false;
     next = pendingMap;
     senderIp = pendingSenderIp;
-    senderPort = pendingSenderPort;
+    changed = memcmp(&next, &activeMap, sizeof(next)) != 0;
+    if (changed) {
+      activeMap = next;
+      mapNeedsSave = true;
+      changeSenderIp = senderIp;
+    }
   }
+  const bool needsSave = mapNeedsSave;
   portEXIT_CRITICAL(&inputMapMux);
-  if (ready && memcmp(&next, &activeMap, sizeof(next)) != 0) {
-    activeMap = next;
-    mapNeedsSave = true;
-    changeSenderIp = senderIp;
-    changeSenderPort = senderPort;
+  if (changed) {
     char line[64];
     formatInputMap(line, sizeof(line));
     Serial.printf("input map: %s flags=%u from sender\n", line,
-                  (unsigned)activeMap.flags);
+                  (unsigned)next.flags);
   }
-  if (!mapNeedsSave) return true;
-  const bool sameSender =
-      changeSenderIp == savedSenderIp && changeSenderPort == savedSenderPort;
-  if (saveNow || !mapSavedSinceBoot || sameSender ||
+  if (!needsSave) return true;
+  // The same Mac as the last save (by address: its port changes when it
+  // reconnects) saves at once - unless another Mac's change has been held
+  // back since, which is the two-apps case the interval is for.
+  const bool sameSender = changeSenderIp == savedSenderIp &&
+                          !mapHeldBackSinceSave && !lastSaveFailed;
+  if (saveNow || (!mapSavedSinceBoot && !lastSaveFailed) || sameSender ||
       millis() - lastMapSaveAt >= INPUT_MAP_SAVE_INTERVAL_MS) {
     return saveInputMap();
   }
+  if (changed) mapHeldBackSinceSave = true;
   return true;
 }
 
