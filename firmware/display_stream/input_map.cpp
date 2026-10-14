@@ -15,6 +15,7 @@ static deviceproto::InputMap defaultMap;
 static deviceproto::InputMap pendingMap;
 static bool pendingMapReady = false;
 static uint32_t pendingSenderIp = 0;
+static uint16_t pendingSenderPort = 0;
 // The sender endpoint the last EMAP came from. The stored map is in force
 // only with no sender at all or for that one: a sender that never sends EMAP
 // (one that predates maps) gets the defaults, today's behaviour.
@@ -32,9 +33,17 @@ static const uint32_t INPUT_MAP_SAVE_INTERVAL_MS = 30000;
 static bool mapNeedsSave = false;
 static bool mapSavedSinceBoot = false;
 static uint32_t lastMapSaveAt = 0;
-// Senders by address only: the same Mac's port changes when it reconnects.
+// Senders by address and port, as storedMapInForce() tells them apart: two
+// apps on one Mac are two senders. The same app back on a new port after a
+// reconnect waits out the interval once (it re-sends its map anyway).
 static uint32_t changeSenderIp = 0;
+static uint16_t changeSenderPort = 0;
 static uint32_t savedSenderIp = 0;
+static uint16_t savedSenderPort = 0;
+// One save at a time: the restart flush can run on another task (the P4's
+// coprocessor update), and a save that took its copy first must finish
+// first, or an older map could be written over a newer one.
+static bool saveInProgress = false;
 // A change from another sender was held back since the last save, so the
 // next change saves on the interval too, whoever sends it.
 static bool mapHeldBackSinceSave = false;
@@ -159,6 +168,7 @@ bool offerInputMap(const uint8_t *data, size_t len) {
   mapSenderIp = hbIp;
   mapSenderPort = hbPort;
   pendingSenderIp = hbIp;
+  pendingSenderPort = hbPort;
   portEXIT_CRITICAL(&inputMapMux);
   return true;
 }
@@ -168,9 +178,16 @@ bool offerInputMap(const uint8_t *data, size_t len) {
 // under the lock that loop() changes it under.
 static bool saveInputMap() {
   deviceproto::InputMap snapshot;
-  portENTER_CRITICAL(&inputMapMux);
+  for (;;) {
+    portENTER_CRITICAL(&inputMapMux);
+    if (!saveInProgress) break;  // leaves the lock held
+    portEXIT_CRITICAL(&inputMapMux);
+    delay(1);
+  }
+  saveInProgress = true;
   snapshot = activeMap;
-  const uint32_t sender = changeSenderIp;
+  const uint32_t senderIp = changeSenderIp;
+  const uint16_t senderPort = changeSenderPort;
   mapNeedsSave = false;
   portEXIT_CRITICAL(&inputMapMux);
   lastMapSaveAt = millis();
@@ -193,7 +210,8 @@ static bool saveInputMap() {
   }
   if (saved) {
     mapSavedSinceBoot = true;
-    savedSenderIp = sender;
+    savedSenderIp = senderIp;
+    savedSenderPort = senderPort;
     mapHeldBackSinceSave = false;
     lastSaveFailed = false;
   } else {
@@ -203,6 +221,9 @@ static bool saveInputMap() {
     portEXIT_CRITICAL(&inputMapMux);
     lastSaveFailed = true;
   }
+  portENTER_CRITICAL(&inputMapMux);
+  saveInProgress = false;
+  portEXIT_CRITICAL(&inputMapMux);
   Serial.printf("input map: %s\n", saved ? "saved" : "NOT saved");
   return saved;
 }
@@ -212,17 +233,20 @@ static bool saveInputMap() {
 bool applyPendingInputMap(bool saveNow) {
   deviceproto::InputMap next;
   uint32_t senderIp = 0;
+  uint16_t senderPort = 0;
   bool changed = false;
   portENTER_CRITICAL(&inputMapMux);
   if (pendingMapReady) {
     pendingMapReady = false;
     next = pendingMap;
     senderIp = pendingSenderIp;
+    senderPort = pendingSenderPort;
     changed = memcmp(&next, &activeMap, sizeof(next)) != 0;
     if (changed) {
       activeMap = next;
       mapNeedsSave = true;
       changeSenderIp = senderIp;
+      changeSenderPort = senderPort;
     }
   }
   const bool needsSave = mapNeedsSave;
@@ -234,10 +258,11 @@ bool applyPendingInputMap(bool saveNow) {
                   (unsigned)next.flags);
   }
   if (!needsSave) return true;
-  // The same Mac as the last save (by address: its port changes when it
-  // reconnects) saves at once - unless another Mac's change has been held
-  // back since, which is the two-apps case the interval is for.
+  // The same sender as the last save saves at once - unless another
+  // sender's change has been held back since, which is the two-apps case the
+  // interval is for.
   const bool sameSender = changeSenderIp == savedSenderIp &&
+                          changeSenderPort == savedSenderPort &&
                           !mapHeldBackSinceSave && !lastSaveFailed;
   if (saveNow || (!mapSavedSinceBoot && !lastSaveFailed) || sameSender ||
       millis() - lastMapSaveAt >= INPUT_MAP_SAVE_INTERVAL_MS) {

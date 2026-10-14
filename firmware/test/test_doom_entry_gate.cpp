@@ -2597,9 +2597,19 @@ static int mapSurvivesARestartAndCanBeReset() {
   fakeNow += 31000;
   CHECK(applyPendingInputMap());
   CHECK(fakeNvsBytes["inmap"][1] == 4);
-  // The same Mac back on a new port is still the same sender.
-  hbPort = 50001;
+  // Two apps on one Mac (one address, two ports) are two senders too.
+  fakeNow += 31000;
   CHECK(setInputMap({0, 2}));
+  CHECK(fakeNvsBytes["inmap"][1] == 2);
+  hbPort = 50001;
+  CHECK(setInputMap({0, 6}));
+  hbPort = 50000;
+  CHECK(setInputMap({0, 3}));
+  CHECK(fakeNvsBytes["inmap"][1] == 2);
+  fakeNow += 31000;
+  CHECK(applyPendingInputMap());
+  CHECK(fakeNvsBytes["inmap"][1] == 3);
+  CHECK(setInputMap({0, 2}));  // and that sender alone saves at once again
   CHECK(fakeNvsBytes["inmap"][1] == 2);
 
   // A save that fails is retried on the interval, not on every loop pass.
