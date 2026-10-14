@@ -39,6 +39,16 @@ final class FakeDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Sendabl
 
     func deviceID(uid: String) -> AudioObjectID? { lock.withLock { ids[uid] } }
 
+    /// UIDs whose device another client claimed first.
+    var claimedElsewhere: Set<String> = []
+
+    func owns(device: AudioObjectID) -> Bool {
+        lock.withLock {
+            guard let uid = ids.first(where: { $0.value == device })?.key else { return false }
+            return !claimedElsewhere.contains(uid)
+        }
+    }
+
     func queue(_ samples: [Float], for device: AudioObjectID) {
         lock.withLock { pending[device, default: []] += samples }
     }
@@ -81,6 +91,8 @@ final class DisplayAudioDriverTests: XCTestCase {
         XCTAssertEqual(define("ESPDISP_AUDIO_SELECTOR_PCM"), "'ESpc'")
         XCTAssertEqual(P.registerSelector, 0x4553_7267)
         XCTAssertEqual(P.pcmSelector, 0x4553_7063)
+        XCTAssertEqual(define("ESPDISP_AUDIO_SELECTOR_OWNED"), "'ESow'")
+        XCTAssertEqual(P.ownedSelector, 0x4553_6F77)
         XCTAssertEqual(define("ESPDISP_AUDIO_SAMPLE_RATE"), "\(Int(P.sampleRate))")
         XCTAssertEqual(define("ESPDISP_AUDIO_MAX_READ_FRAMES"), "\(P.maxReadFrames)")
         XCTAssertEqual(define("ESPDISP_AUDIO_MAX_DEVICES"), "\(P.maxDevices)")
@@ -195,20 +207,21 @@ final class DisplayAudioDriverTests: XCTestCase {
     }
 
     /// A display's own device does not depend on the default output, so a
-    /// route change that leaves it the same device leaves the session be; a
-    /// device made again is reopened.
-    func testARouteChangeRestartsADeviceSourceOnlyWhenItsDeviceChanged() throws {
+    /// route change leaves its session be; the device being made again
+    /// changes the source's key instead, and that restarts it once.
+    func testARouteChangeLeavesADeviceSourceBe() throws {
         let (session, snapshots, panel) = try startSession()
         defer {
             session.stop()
             panel.close()
         }
-        let device = DeviceIdentity("7")
         let tap = ConstantSystemAudioTap(levels: [0.2, 0.2], sampleRate: 48_000, interleaved: true)
-        session.setDownlinkSource(PanelDownlinkSource.displayDevice(
-            name: "Desk Panel", route: .displaysOnly,
-            capture: SystemAudioCaptureSource(open: { tap }),
-            deviceProbe: { device.value }))
+        func source(_ id: String) -> PanelDownlinkSource {
+            .displayDevice(
+                name: "Desk Panel", route: .displaysOnly,
+                capture: SystemAudioCaptureSource(open: { tap }), identity: "u#" + id)
+        }
+        session.setDownlinkSource(source("7"))
         XCTAssertNotNil(snapshots.waitFor(timeoutSeconds: 4) {
             $0.state == .streaming && $0.sourceName.contains("Desk Panel")
         })
@@ -217,12 +230,11 @@ final class DisplayAudioDriverTests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.3)
         XCTAssertFalse(
             snapshots.all.dropFirst(settled).contains { $0.state == .recovering },
-            "the same device is not reopened")
-        device.value = "8"
-        session.devicesChanged()
+            "a route change does not reopen the display's device")
+        session.setDownlinkSource(source("8"))
         XCTAssertNotNil(snapshots.waitFor(timeoutSeconds: 2) {
-            $0.state == .recovering && $0.message == "The CoreAudio route changed."
-        }, "a new device is reopened")
+            $0.state == .recovering && $0.message == "The display speaker's source changed."
+        }, "a device made again is reopened")
     }
 
     func testTheSameSourceTwiceDoesNotRestart() throws {
@@ -315,16 +327,6 @@ final class DisplayAudioDriverTests: XCTestCase {
         session.setEnabled(true)
         session.start()
         return (session, snapshots, panel)
-    }
-}
-
-final class DeviceIdentity: @unchecked Sendable {
-    private let lock = NSLock()
-    private var current: String?
-    init(_ value: String?) { current = value }
-    var value: String? {
-        get { lock.withLock { current } }
-        set { lock.withLock { current = newValue } }
     }
 }
 

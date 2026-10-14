@@ -12,6 +12,7 @@ enum DisplayAudioDriverProtocol {
     static let registerSelector = fourCharCode("ESrg")
     static let versionSelector = fourCharCode("ESvr")
     static let pcmSelector = fourCharCode("ESpc")
+    static let ownedSelector = fourCharCode("ESow")
     static let sampleRate = 48_000.0
     static let maxReadFrames = 4_800
     static let maxDevices = 8
@@ -93,6 +94,9 @@ protocol DisplayAudioDriverBridge: AnyObject, Sendable {
     @discardableResult
     func register(_ devices: [DisplayAudioDeviceSpec]) -> Bool
     func deviceID(uid: String) -> AudioObjectID?
+    /// Whether this app owns the device, so the Mac's sound routed to it
+    /// reaches this app and no one else. Takes no frames.
+    func owns(device: AudioObjectID) -> Bool
     /// Interleaved stereo Float32 mixed for the device since the last read.
     func readFrames(device: AudioObjectID) -> Data?
 }
@@ -146,6 +150,20 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
         }
         guard status == noErr, device != AudioObjectID(kAudioObjectUnknown) else { return nil }
         return device
+    }
+
+    func owns(device: AudioObjectID) -> Bool {
+        var address = Self.address(DisplayAudioDriverProtocol.ownedSelector)
+        var value: Unmanaged<CFPropertyList>?
+        var size = UInt32(MemoryLayout<CFPropertyList>.size)
+        var qualifier = token as CFString
+        let status = withUnsafeMutablePointer(to: &qualifier) {
+            AudioObjectGetPropertyData(
+                device, &address, UInt32(MemoryLayout<CFString>.size), $0, &size, &value)
+        }
+        guard status == noErr, let number = value?.takeRetainedValue() as? NSNumber
+        else { return false }
+        return number.intValue == 1
     }
 
     func readFrames(device: AudioObjectID) -> Data? {

@@ -55,8 +55,7 @@ final class PanelAudioDownlinks: @unchecked Sendable {
             return .displayDevice(
                 name: device.name, route: effective,
                 capture: .displayDevice(uid: uid, bridge: bridge),
-                identity: uid + "#" + id,
-                deviceProbe: { bridge.deviceID(uid: uid).map(String.init) })
+                identity: uid + "#" + id)
         }
     }
 }

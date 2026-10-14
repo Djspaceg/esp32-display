@@ -160,6 +160,42 @@ print("read without a token: status \(anonymous); with another token: status \(w
 guard anonymous != noErr, wrong != noErr else {
     fail("the device's audio could be read without its owner's token")
 }
+
+// A second client listing the same display gets no access to it and cannot
+// rename it, inside the real coreaudiod.
+let otherToken = UUID().uuidString + UUID().uuidString
+var otherAddress = address(register)
+let other = [
+    "version": 2, "client": "check-driver.other.\(getpid())", "token": otherToken,
+    "devices": [["uid": testUID, "name": "Taken over", "latency": 0]],
+] as CFDictionary
+var otherReference = Unmanaged.passUnretained(other).toOpaque()
+let otherStatus = withExtendedLifetime(other) {
+    AudioObjectSetPropertyData(
+        plugIn, &otherAddress, 0, nil,
+        UInt32(MemoryLayout<UnsafeMutableRawPointer>.size), &otherReference)
+}
+Thread.sleep(forTimeInterval: 0.3)
+let (stolen, _) = readPCM(as: otherToken)
+var nameAddress = address(kAudioObjectPropertyName)
+var nameValue: Unmanaged<CFString>?
+size = UInt32(MemoryLayout<CFString>.size)
+AudioObjectGetPropertyData(device, &nameAddress, 0, nil, &size, &nameValue)
+let name = nameValue?.takeRetainedValue() as String? ?? ""
+print("second client: registered \(otherStatus), read status \(stolen), name \"\(name)\"")
+let goodbye = [
+    "version": 2, "client": "check-driver.other.\(getpid())", "token": otherToken,
+    "devices": [[String: Any]](),
+] as CFDictionary
+var goodbyeReference = Unmanaged.passUnretained(goodbye).toOpaque()
+_ = withExtendedLifetime(goodbye) {
+    AudioObjectSetPropertyData(
+        plugIn, &otherAddress, 0, nil,
+        UInt32(MemoryLayout<UnsafeMutableRawPointer>.size), &goodbyeReference)
+}
+guard stolen != noErr, name == "ESPDisplay driver check" else {
+    fail("a second client listing the same display could read or rename it")
+}
 AudioOutputUnitStop(unit)
 AudioComponentInstanceDispose(unit)
 

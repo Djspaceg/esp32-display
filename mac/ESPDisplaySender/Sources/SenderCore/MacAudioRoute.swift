@@ -201,10 +201,18 @@ final class MacAudioRouter {
         }
         let outputs = system.outputDevices()
         rememberMacOutput(outputs: outputs)
+        // A device counts only if this app owns it: one another process
+        // claimed first would get whatever the Mac is routed to send it.
         var present: [String: AudioObjectID] = [:]
+        var claimed: [DisplayAudioDeviceSpec] = []
         if driving {
             for display in displays {
-                if let id = bridge.deviceID(uid: display.uid) { present[display.uid] = id }
+                guard let id = bridge.deviceID(uid: display.uid) else { continue }
+                if bridge.owns(device: id) {
+                    present[display.uid] = id
+                } else {
+                    claimed.append(display)
+                }
             }
         }
         let plan = MacAudioRoutePlan.make(
@@ -219,6 +227,13 @@ final class MacAudioRouter {
            !outputs.contains(where: { $0.uid == mainUID }) {
             applied = nil
         }
+        // The user chose our Multi-Output device again (as the note says to)
+        // after the Mac's own output changed: rebuild it on that output, which
+        // changes no one's pick, since ours is the one picked.
+        if case .multiOutput(let uid, _, let mainUID, _) = plan.target,
+           system.defaultOutputUID() == uid, built[uid]?.first != mainUID {
+            applied = nil
+        }
         let trigger = Trigger(chosen: route, effective: plan.effective, devices: present)
         if trigger != applied {
             if apply(plan.target, outputs: outputs) {
@@ -227,7 +242,17 @@ final class MacAudioRouter {
                 appliedDefaultUID = Self.defaultUID(of: plan.target)
             } else {
                 applied = nil
+                appliedTarget = nil
+                appliedDefaultUID = nil
             }
+        }
+        if !claimed.isEmpty {
+            let names = claimed.map { "\"\($0.name)\"" }.joined(separator: ", ")
+            return MacAudioRoutePlan(
+                chosen: plan.chosen, effective: plan.effective, target: plan.target,
+                note: "Another app on this Mac has claimed the output device for "
+                    + "\(names), so this app does not send the Mac's sound to it. "
+                    + "Quit that app, then quit and reopen ESPDisplaySender.")
         }
         return noteAnOutputPickedElsewhere(plan, outputs: outputs)
     }
@@ -290,14 +315,15 @@ final class MacAudioRouter {
             .filter { uid in outputs.contains { $0.uid == uid } }
         switch target {
         case .restore:
-            // With no output of the Mac's own to go back to there is nothing
-            // better than staying put, so that settles rather than retrying.
-            if let current = system.defaultOutputUID(), MacAudioRoutePlan.isOurs(uid: current),
-               let macOutputUID {
-                guard system.setDefaultOutput(uid: macOutputUID) else { return false }
+            // Done only once the Mac is off our devices and they are gone. With
+            // no output of its own to go back to yet, each pass retries, which
+            // costs nothing until one appears.
+            if let current = system.defaultOutputUID(), MacAudioRoutePlan.isOurs(uid: current) {
+                guard let macOutputUID, system.setDefaultOutput(uid: macOutputUID) else {
+                    return false
+                }
             }
-            _ = removeAggregates(aggregates, keeping: nil)
-            return true
+            return removeAggregates(aggregates, keeping: nil)
         case .device(let uid):
             guard system.setDefaultOutput(uid: uid) else { return false }
             return removeAggregates(aggregates, keeping: nil)

@@ -587,6 +587,59 @@ static void TestOtherClientsCannotReadOrWithdraw(void) {
     free(samples);
 }
 
+static bool Owns(AudioObjectID device, const char* token) {
+    CFStringRef qualifier = CFStringCreateWithCString(NULL, token, kCFStringEncodingUTF8);
+    CFPropertyListRef value = NULL;
+    OSStatus status = Get(device, ESPDISP_AUDIO_SELECTOR_OWNED, kAudioObjectPropertyScopeGlobal,
+                          sizeof qualifier, &qualifier, sizeof value, &value, NULL);
+    CFRelease(qualifier);
+    SInt32 owned = 0;
+    CHECK(status == 0 && value != NULL);
+    if (value) {
+        CFNumberGetValue(value, kCFNumberSInt32Type, &owned);
+        CFRelease(value);
+    }
+    return owned == 1;
+}
+
+// A client that fills the device list with made-up UIDs, then lists the
+// app's, must neither crowd the app's device out nor end up owning it, even
+// from a client slot ahead of the app's.
+static void TestCrowdingCannotTakeADevice(void) {
+    const char* app = gToken;
+    const char* crowder = "crowder-token-0123456789abcdef012345";
+    const char* appUIDs[] = {"com.espdisplay.display.aabbcc", "com.espdisplay.display.ddeeff"};
+    const char* appNames[] = {"Desk", "Shelf Panel"};
+    const char* fakes[] = {"f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"};
+    const char* fakeNames[] = {"x", "x", "x", "x", "x", "x", "x", "x"};
+    // The app says goodbye, the crowder takes the first client slot, and the
+    // app comes back behind it.
+    CHECK(RegisterDevices("app", 0, NULL, NULL, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    gToken = crowder;
+    CHECK(RegisterDevices("crowd", 1, fakes, fakeNames, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    gToken = app;
+    CHECK(RegisterDevices("app", 2, appUIDs, appNames, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    AudioObjectID desk = Translate(appUIDs[0]);
+    CHECK(desk != kAudioObjectUnknown);
+    CHECK(Owns(desk, app));
+
+    gToken = crowder;
+    CHECK(RegisterDevices("crowd", 8, fakes, fakeNames, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    const char* steal[] = {"com.espdisplay.display.aabbcc"};
+    const char* spy[] = {"spy"};
+    CHECK(RegisterDevices("crowd", 1, steal, spy, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    gToken = app;
+    CHECK(Translate(appUIDs[0]) == desk);
+    CHECK(Owns(desk, app));
+    CHECK(!Owns(desk, crowder));
+    CHECK(StringProperty(desk, kAudioObjectPropertyName, "Desk"));
+    CFPropertyListRef data = NULL;
+    CHECK(ReadAs(desk, crowder, &data) == kAudioHardwareIllegalOperationError);
+    gToken = crowder;
+    CHECK(RegisterDevices("crowd", 0, NULL, NULL, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
+    gToken = app;
+}
+
 static void TestClientsUnionAndExpire(void) {
     AudioObjectID desk = Translate("com.espdisplay.display.aabbcc");
     const char* other[] = {"com.espdisplay.display.aabbcc", "com.espdisplay.test.tone"};
@@ -651,6 +704,7 @@ int main(void) {
     TestVolumeAndMuteScaleWhatIsRead();
     TestConcurrentWriteAndRead();
     TestOtherClientsCannotReadOrWithdraw();
+    TestCrowdingCannotTakeADevice();
     TestClientsUnionAndExpire();
     if (gFailures) {
         fprintf(stderr, "ESPDisplayAudio driver: %d check(s) failed\n", gFailures);

@@ -1045,9 +1045,8 @@ struct PanelDetailView: View {
         var multiOutput = false
         if case .multiOutput? = plan?.target { multiOutput = true }
         if let plan, plan.effective.usesDriver, plan.target == .restore {
-            return "Each display gets an output device of its own once it "
-                + "appears in macOS; until then this Mac plays as before. Mac "
-                + "sound applies to every display."
+            return "Until this route can be used, this Mac plays as before; the "
+                + "route above says why. Mac sound applies to every display."
         }
         switch plan?.effective ?? .copy {
         case .copy:

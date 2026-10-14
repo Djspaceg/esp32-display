@@ -121,11 +121,11 @@ struct PanelDownlinkSource: Sendable {
     /// Said when the source cannot be opened and silence is sent instead.
     let unavailableSourceName: String
     let unavailableLead: String
-    /// For a display's own device: which device it is now. A route change
-    /// that leaves it the same device does not restart the session, since
-    /// unlike the tap it does not depend on the default output. Nil for the
-    /// tap, which follows every route change.
-    var deviceProbe: (@Sendable () -> String?)? = nil
+    /// The tap is rebuilt on every route change, since it depends on the
+    /// default output. A display's own device does not: when the driver
+    /// makes it again, its source's key (which carries the device's object
+    /// ID) changes instead, so it restarts once rather than twice.
+    var followsRouteChanges = true
 
     static let tapStreamingMessage = "Sending this Mac's sound to the display "
         + "speaker. The Mac's own speakers keep playing."
@@ -152,8 +152,7 @@ struct PanelDownlinkSource: Sendable {
         name: String,
         route: MacAudioRoute,
         capture: SystemAudioCaptureSource,
-        identity: String = "",
-        deviceProbe: (@Sendable () -> String?)? = nil
+        identity: String = ""
     ) -> PanelDownlinkSource {
         let output = "the \"\(name)\" output"
         let streaming: String
@@ -173,7 +172,7 @@ struct PanelDownlinkSource: Sendable {
             streamingMessage: streaming,
             unavailableSourceName: "Silence (\(output) is not ready)",
             unavailableLead: "because \(output) could not be read: ",
-            deviceProbe: deviceProbe)
+            followsRouteChanges: false)
     }
 }
 
@@ -215,8 +214,6 @@ final class PanelAudioSession: @unchecked Sendable {
     private let radioBudget: PanelRadioBudget
     private let onUpdate: @Sendable (PanelAudioSnapshot) -> Void
     private var downlink: PanelDownlinkSource
-    /// The display device the running source opened, by `deviceProbe`.
-    private var openedDevice: String?
     private let uplinkSink: PanelUplinkSink
     private let queue = DispatchQueue(label: "espdisp.audio")
 
@@ -381,11 +378,7 @@ final class PanelAudioSession: @unchecked Sendable {
     func devicesChanged() {
         queue.async { [weak self] in
             guard let self, !self.stopped else { return }
-            if let probe = self.downlink.deviceProbe {
-                var unavailable = false
-                if case .captureUnavailable? = self.refusal { unavailable = true }
-                guard unavailable || probe() != self.openedDevice else { return }
-            }
+            guard self.downlink.followsRouteChanges else { return }
             self.restart(reason: "The CoreAudio route changed.")
         }
     }
@@ -614,7 +607,6 @@ final class PanelAudioSession: @unchecked Sendable {
         }
         do {
             try startTap()
-            openedDevice = downlink.deviceProbe?()
             sourceName = downlink.sourceName
             state = .streaming
             message = downlink.streamingMessage
@@ -624,7 +616,6 @@ final class PanelAudioSession: @unchecked Sendable {
             // retry every second: stream silence so the panel microphone still
             // arrives. A CoreAudio route change restarts and tries again.
             stopEngine()
-            openedDevice = nil
             let refusal = SystemAudioRefusal.captureUnavailable(
                 error.localizedDescription)
             self.refusal = refusal

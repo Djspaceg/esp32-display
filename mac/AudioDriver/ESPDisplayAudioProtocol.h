@@ -31,6 +31,9 @@
 // previous read, at most ESPDISP_AUDIO_MAX_READ_FRAMES of the newest, as
 // interleaved stereo native-endian Float32 at ESPDISP_AUDIO_SAMPLE_RATE.
 #define ESPDISP_AUDIO_SELECTOR_PCM 'ESpc'
+// Device object, read-only CFNumber 1 or 0, qualified the same way: whether
+// the token owns the device. Takes no frames.
+#define ESPDISP_AUDIO_SELECTOR_OWNED 'ESow'
 
 #define ESPDISP_AUDIO_KEY_VERSION "version"
 #define ESPDISP_AUDIO_KEY_CLIENT "client"

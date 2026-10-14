@@ -358,26 +358,25 @@ static void Reconcile(void) {
             gClients[client].used = false;
         }
     }
-    for (int client = 0; client < kMaxClients; ++client) {
-        if (!gClients[client].used) continue;
-        for (UInt32 index = 0; index < gClients[client].deviceCount; ++index) {
-            const DeviceSpec* spec = &gClients[client].devices[index];
-            DeviceSpec* existing = NULL;
-            for (UInt32 seen = 0; seen < count; ++seen) {
-                if (strcmp(desired[seen].uid, spec->uid) == 0) existing = &desired[seen];
-            }
-            if (existing == NULL) {
-                if (count >= kMaxDevices) continue;
-                existing = &desired[count++];
-                *existing = *spec;
-                CopyCString(existing->owner, gClients[client].token);
-            }
-            // The device keeps the owner it has while that client still lists
-            // it; listing a UID someone else owns gives no access to it.
-            const char* current = CurrentOwner(spec->uid);
-            if (current != NULL && strcmp(current, gClients[client].token) == 0) {
-                *existing = *spec;
-                CopyCString(existing->owner, gClients[client].token);
+    // Two passes. First every device whose owner is still alive and still
+    // lists it, from that owner alone, so nothing another client lists can
+    // crowd it out or take it over. Then new devices, first lister owning.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int client = 0; client < kMaxClients; ++client) {
+            if (!gClients[client].used) continue;
+            for (UInt32 index = 0; index < gClients[client].deviceCount; ++index) {
+                const DeviceSpec* spec = &gClients[client].devices[index];
+                const char* current = CurrentOwner(spec->uid);
+                bool owned = current != NULL && strcmp(current, gClients[client].token) == 0;
+                if (pass == 0 && !owned) continue;
+                bool seen = false;
+                for (UInt32 other = 0; other < count; ++other) {
+                    if (strcmp(desired[other].uid, spec->uid) == 0) seen = true;
+                }
+                if (seen || count >= kMaxDevices) continue;
+                desired[count] = *spec;
+                CopyCString(desired[count].owner, gClients[client].token);
+                ++count;
             }
         }
     }
@@ -746,6 +745,8 @@ static const AudioServerPlugInCustomPropertyInfo kPlugInCustomProperties[] = {
 static const AudioServerPlugInCustomPropertyInfo kDeviceCustomProperties[] = {
     {ESPDISP_AUDIO_SELECTOR_PCM, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
      kAudioServerPlugInCustomPropertyDataTypeCFString},
+    {ESPDISP_AUDIO_SELECTOR_OWNED, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
+     kAudioServerPlugInCustomPropertyDataTypeCFString},
 };
 
 static bool IsInputScope(const AudioObjectPropertyAddress* address) {
@@ -801,6 +802,7 @@ static bool DeviceHas(AudioObjectPropertySelector selector) {
     case kAudioDevicePropertyPreferredChannelLayout:
     case kAudioDevicePropertyConfigurationApplication:
     case ESPDISP_AUDIO_SELECTOR_PCM:
+    case ESPDISP_AUDIO_SELECTOR_OWNED:
         return true;
     default:
         return false;
@@ -932,6 +934,7 @@ static UInt32 DataSize(ObjectKind kind, const DeviceSlot* slot,
     case ESPDISP_AUDIO_SELECTOR_REGISTER:
     case ESPDISP_AUDIO_SELECTOR_VERSION:
     case ESPDISP_AUDIO_SELECTOR_PCM:
+    case ESPDISP_AUDIO_SELECTOR_OWNED:
         return sizeof(CFPropertyListRef);
     case kAudioObjectPropertyCustomPropertyInfoList:
         return kind == kObjectPlugIn ? sizeof kPlugInCustomProperties
@@ -1254,6 +1257,13 @@ static OSStatus GetDeviceProperty(DeviceSlot* slot, UInt32 qualifierSize,
         }
         memcpy(outData, kDeviceCustomProperties, size);
         *outDataSize = size;
+        break;
+    }
+    case ESPDISP_AUDIO_SELECTOR_OWNED: {
+        // Lets the app check, without taking any frames, that a device it is
+        // about to route the Mac's sound to really is its own.
+        SInt32 owned = MayRead(slot, qualifierSize, qualifier) ? 1 : 0;
+        WRITE_VALUE(CFPropertyListRef, CFNumberCreate(NULL, kCFNumberSInt32Type, &owned));
         break;
     }
     case ESPDISP_AUDIO_SELECTOR_PCM:
