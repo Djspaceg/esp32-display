@@ -395,6 +395,41 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
         XCTAssertTrue(late.error.contains("quitting"))
     }
 
+    /// The window stays live through the app's real click path while the
+    /// privileged step waits: the real osascript process, running a harmless
+    /// `do shell script "sleep 1"` (waited on as the admin command is, with
+    /// no prompt), through the real runner. A main-queue timer keeps firing
+    /// throughout. The same probe on 3847300's runner, NSAppleScript on the
+    /// main actor, fired 6 times in 1.22 s (red-first-off-main.log).
+    @MainActor
+    func testTheWindowKeepsWorkingThroughAClickWhileThePrivilegedStepWaits() async throws {
+        let manager = PanelManager(previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+        manager.macAudio.showForTesting(
+            driver: .ready,
+            setup: DisplayAudioDriverSetup(bundledDriver: true, signingTeam: "T"))
+        let finished = expectation(description: "runner finished")
+        let real = PrivilegedRunner.osascript(executor: { _ in
+            PrivilegedRunner.runOsascript(["-e", #"do shell script "sleep 1""#])
+        })
+        manager.macAudio.runner = PrivilegedRunner(run: { command, prompt in
+            let result = await real.run(command, prompt)
+            finished.fulfill()
+            return result
+        })
+        var ticks = 0
+        let timer = Timer(timeInterval: 0.02, repeats: true) { _ in ticks += 1 }
+        RunLoop.main.add(timer, forMode: .common)
+        defer { timer.invalidate() }
+        let start = Date()
+        manager.runDisplayAudioDriverAction(.remove)
+        await fulfillment(of: [finished], timeout: 5)
+        let seconds = Date().timeIntervalSince(start)
+        XCTAssertGreaterThan(seconds, 0.9, "the stand-in really waited")
+        XCTAssertGreaterThan(
+            ticks, Int(seconds / 0.02 / 2),
+            "the main thread kept servicing work: \(ticks) ticks in \(seconds) s")
+    }
+
     func testOsascriptOutcomesAreReadFromItsExit() {
         XCTAssertEqual(PrivilegedRunner.outcome(status: 0, error: ""), .succeeded)
         XCTAssertEqual(
