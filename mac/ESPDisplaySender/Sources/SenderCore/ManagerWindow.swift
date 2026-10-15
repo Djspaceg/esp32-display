@@ -1038,6 +1038,9 @@ struct PanelDetailView: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("What this choice does")
+        .accessibilityValue(manager.settings.macAudioRoute.explanation)
         if manager.settings.macAudioRoute.usesDriver,
            let note = manager.macAudioRoutePlan?.note {
             LabeledContent("Status") {

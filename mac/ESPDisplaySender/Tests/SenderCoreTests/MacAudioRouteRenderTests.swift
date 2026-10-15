@@ -74,8 +74,8 @@ final class MacAudioRouteRenderTests: XCTestCase {
                 chosen: .displaysOnly, driver: .ready,
                 presentDisplayUIDs: ["com.espdisplay.display.AAAA"]),
             source: "Mac output \"Desk Display\"",
-            message: "Playing what this Mac sends to the \"Desk Display\" output, "
-                + "which is the Mac's only output.",
+            message: "Playing what this Mac sends to the \"Desk Display\" output; "
+                + "this Mac's own speakers stay quiet.",
             driver: .ready)
         XCTAssertGreaterThan(copy.count, 10_000, "the render came out empty")
         XCTAssertNotEqual(copy, fallback, "the fallback note is drawn")

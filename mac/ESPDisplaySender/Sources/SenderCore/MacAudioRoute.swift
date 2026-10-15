@@ -265,9 +265,10 @@ final class MacAudioRouter {
         let displayUIDs = displays.map(\.uid)
         if refused || displayUIDs != countedDisplays { fullPasses = 0 }
         countedDisplays = displayUIDs
-        // The plan's own note, unless it is only the generic "waiting",
-        // which any specific note below says better.
-        let own = plan.note == MacAudioRoutePlan.waitingNote ? nil : plan.note
+        // Past this point the driver is in use, so the plan's own note can
+        // only be the generic "waiting", which any specific note below says
+        // better: the notes that do not involve the driver (not installed,
+        // another version) come with nothing driving.
         if refused {
             let why = "The display audio driver refused this app's displays. It "
                 + "takes up to \(DisplayAudioDriverProtocol.maxClients) apps at "
@@ -275,7 +276,7 @@ final class MacAudioRouter {
                 + "quit them, or restart the Mac."
             return MacAudioRoutePlan(
                 chosen: plan.chosen, effective: plan.effective, target: plan.target,
-                note: [own, why].compactMap { $0 }.joined(separator: " "))
+                note: why)
         }
         var notes: [String] = []
         // Registered, yet no device: a driver whose every device is held
@@ -301,16 +302,11 @@ final class MacAudioRouter {
                 + "\(names), so this app does not send the Mac's sound to it. "
                 + "The device comes back to this app once that app lets go of it.")
         }
-        // Everything that applies is said together: the plan's own note, then
-        // these, then an output picked elsewhere.
+        // Everything that applies is said together: these, or else the plan's
+        // own note, then an output picked elsewhere.
         let picked = noteAnOutputPickedElsewhere(plan, outputs: outputs).note
-        var all: [String] = []
-        if notes.isEmpty, let note = plan.note {
-            all.append(note)
-        } else if let own {
-            all.append(own)
-        }
-        all += notes
+        var all = notes
+        if notes.isEmpty, let note = plan.note { all.append(note) }
         if plan.note == nil, let picked { all.append(picked) }
         return MacAudioRoutePlan(
             chosen: plan.chosen, effective: plan.effective, target: plan.target,

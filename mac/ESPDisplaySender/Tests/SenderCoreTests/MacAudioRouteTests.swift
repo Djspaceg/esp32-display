@@ -194,6 +194,30 @@ final class MacAudioRouteTests: XCTestCase {
     }
 
 
+    /// Three displays play as one Multi-Output device, the default; the first,
+    /// its clock, goes away. The device is rebuilt on the new first display,
+    /// and the default is never the device being destroyed.
+    func testTheDisplaysDeviceIsRebuiltWhileItIsTheDefault() {
+        let driver = FakeDisplayAudioDriver()
+        let third = DisplayAudioDeviceSpec(
+            uid: "com.espdisplay.display.CCCC", name: "Third", latencyFrames: 7_200)
+        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        system.show([desk, shelf, third])
+        let router = MacAudioRouter(bridge: driver, system: system)
+        router.update(route: .displaysOnly, displays: [desk, shelf, third])
+        XCTAssertEqual(system.defaultUID, MacAudioRoutePlan.displaysUID)
+        XCTAssertEqual(system.created.last?.main, desk.uid)
+        router.update(route: .displaysOnly, displays: [shelf, third])
+        XCTAssertEqual(system.created.count, 2)
+        XCTAssertEqual(system.created.last?.main, shelf.uid)
+        XCTAssertEqual(system.created.last?.members, [shelf.uid, third.uid])
+        XCTAssertEqual(system.defaultUID, MacAudioRoutePlan.displaysUID)
+        XCTAssertEqual(system.destroyedWhileDefault, [])
+        XCTAssertEqual(system.defaultChanges, [
+            MacAudioRoutePlan.displaysUID, shelf.uid, MacAudioRoutePlan.displaysUID,
+        ])
+    }
+
     /// An earlier build's Multi-Output "mirror" device left as the default:
     /// moving to the displays' own device never destroys the default first,
     /// and the old device goes.
@@ -211,9 +235,11 @@ final class MacAudioRouteTests: XCTestCase {
         router.update(route: .copy, displays: [desk, shelf])
         XCTAssertEqual(system.defaultUID, speakers.uid)
         XCTAssertEqual(system.destroyedWhileDefault, [])
-        // Parked on the first display before the old device went, never on
-        // nothing.
-        XCTAssertEqual(system.defaultChanges.first, desk.uid)
+        // Parked on the first display before the old device went, then the
+        // displays' device, then this Mac's own output back.
+        XCTAssertEqual(system.defaultChanges, [
+            desk.uid, MacAudioRoutePlan.displaysUID, speakers.uid,
+        ])
     }
 
 
@@ -617,6 +643,13 @@ final class MacAudioRouteTests: XCTestCase {
     func testTheChoiceIsWhereSoundPlaysAndAnOldMirrorLoadsAsBoth() throws {
         XCTAssertEqual(MacAudioRoute.allCases.map(\.label),
                        ["This Mac and the displays", "The displays only"])
+        // The route itself maps "mirror", not only the settings file's
+        // fallback for a value it cannot read.
+        XCTAssertEqual(
+            try JSONDecoder().decode([MacAudioRoute].self, from: Data(#"["mirror"]"#.utf8)),
+            [.copy])
+        XCTAssertThrowsError(
+            try JSONDecoder().decode([MacAudioRoute].self, from: Data(#"["surround"]"#.utf8)))
         let mirror = try JSONDecoder().decode(
             SenderSettings.self, from: Data(#"{"macAudioRoute": "mirror"}"#.utf8))
         XCTAssertEqual(mirror.macAudioRoute.label, "This Mac and the displays")

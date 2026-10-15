@@ -261,7 +261,7 @@ final class DisplayAudioDriverTests: XCTestCase {
         }
         XCTAssertNotNil(streaming, "last: \(snapshots.last?.message ?? "none")")
         XCTAssertTrue(
-            streaming?.message.contains("only output") == true,
+            streaming?.message.contains("own speakers stay quiet") == true,
             streaming?.message ?? "")
         let packets = panel.receiveDownlink(timeoutSeconds: 3) { packets in
             packets.contains { pcm16Samples($0.samples).contains { $0 != 0 } }
