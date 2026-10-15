@@ -18,8 +18,10 @@
 // WHY THE FIRST BYTES LAST. Update withheld the image's first 16 bytes until
 // end(), so a transfer that stopped anywhere short of activation was never a
 // valid image. This keeps that: they are left erased, not written, until
-// finish(), after the digest matched. Sixteen rather than one so the write
-// stays aligned if flash encryption is ever turned on.
+// finish(), after the digest matched. Sixteen rather than one so that write
+// is 16-byte aligned. Flash encryption (off on every board today) would also
+// need every other write 16-aligned: true for the full batches, and for the
+// tail only because app images are padded to 16 bytes.
 #pragma once
 
 #include <stddef.h>

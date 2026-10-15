@@ -44,7 +44,7 @@ class RefHasher : public Hasher {
   sharef::Sha256 sha;
 };
 
-// Update's part of the bargain: what was begun, written, ended, aborted.
+// The flash side of the bargain: what was begun, written, activated, aborted.
 struct FakeFlash {
   bool begun = false;
   uint32_t size = 0;
@@ -382,9 +382,9 @@ static void testCnonceMustCommitToTheImage() {
   check(!p.flash.begun, "and nothing begins");
 }
 
-static void testAbortDuringBeginReleasesUpdate() {
-  // Review finding: an abort that lands while Update.begin runs used to end
-  // the session without ever calling Update.abort(), leaving Update open.
+static void testAbortDuringBeginReleasesTheImage() {
+  // Review finding: an abort that lands while the begin runs used to end the
+  // session without ever releasing the image, leaving it open.
   Panel p;
   const auto image = makeImage(4096, 19);
   const auto digest = sharef::digest(image.data(), image.size());
@@ -401,7 +401,7 @@ static void testAbortDuringBeginReleasesUpdate() {
   check(begin.kind == Work::Begin, "then begin is offered");
   std::vector<uint8_t> abort(ABORT_BYTES);
   writeAbort(abort.data(), 14);
-  p.deliver(abort);  // arrives while Update.begin is running
+  p.deliver(abort);  // arrives while the begin is running
   // Review finding: the begin (now a multi-pass flash erase) is still running,
   // so the panel and flash are still the update's: no frame may be drawn and
   // ArduinoOTA may not start until the begin has answered and been released.
@@ -410,7 +410,7 @@ static void testAbortDuringBeginReleasesUpdate() {
   p.rx.finishBegin(true, nullptr, p.slotMemory.data(), begin.slots, p.now);
   WorkItem next = p.rx.takeWork(p.now);
   check(next.kind == Work::Abort,
-        "an Update.begin that succeeded after the abort is released");
+        "a begin that succeeded after the abort is released");
   p.rx.finishAbort(p.now);
   check(!p.rx.ownsPanel() && !p.rx.usingSlots(), "and the panel is free again");
 }
@@ -495,7 +495,7 @@ static void testInOrderTransfer() {
   const uint16_t chunk = MAX_CHUNK_BYTES;
   check(authenticate(p, 21, image, chunk), "the right password is accepted");
   check(p.flash.begun && p.flash.size == image.size(),
-        "Update.begin gets the exact image size");
+        "the begin gets the exact image size");
   const uint32_t chunks = (uint32_t)((image.size() + chunk - 1) / chunk);
   uint32_t next = 0;
   for (int round = 0; next < chunks && round < 1000; round++) {
@@ -668,7 +668,7 @@ static void testBadHashNeverActivates() {
   runLossy(p, 60, image, 1024, 9, 0, 0, 0);
   check(p.flash.written == image, "every byte was written");
   check(!p.rx.digestMatched(), "the digest is judged a mismatch");
-  check(p.flash.activations == 0, "Update.end is never called on a mismatch");
+  check(p.flash.activations == 0, "activation never runs on a mismatch");
   check(p.flash.aborts == 1, "the update is aborted instead");
   StatusReply st;
   check(p.lastStatus(st) && st.code == Status::HashMismatch,
@@ -709,7 +709,7 @@ static void testWriteFailure() {
   StatusReply st;
   check(p.lastStatus(st) && st.code == Status::WriteFailed &&
             strcmp(st.detail, "Flash Write Failed") == 0,
-        "a failed flash write is reported with Update's words");
+        "a failed flash write is reported with the flash error");
   check(p.flash.aborts == 1 && p.flash.activations == 0,
         "and aborts without activating");
 }
@@ -724,7 +724,7 @@ static void testImageRefused() {
   StatusReply st;
   check(p.lastStatus(st) && st.code == Status::ImageRefused &&
             strcmp(st.detail, "Could Not Activate The Firmware") == 0,
-        "Update.end refusing the image is reported verbatim");
+        "a refused activation is reported verbatim");
   check(!p.rx.rebootDue(p.now + 60000), "and the panel does not restart");
 }
 
@@ -743,7 +743,7 @@ static void testAbortAndTimeout() {
     StatusReply st;
     check(p.lastStatus(st) && st.code == Status::Aborted, "the sender can abort");
     check(p.flash.aborts == 1 && p.flash.activations == 0,
-          "an abort releases Update and never activates");
+          "an abort releases the image and never activates");
   }
   {
     Panel p;
@@ -1005,7 +1005,7 @@ int main() {
   testOldStampsStillReadAsOld();
   testLostRefusalIsRepeated();
   testCnonceMustCommitToTheImage();
-  testAbortDuringBeginReleasesUpdate();
+  testAbortDuringBeginReleasesTheImage();
   testFullWindowIsAckedAtOnce();
   testInOrderTransfer();
   testLossDuplicationReordering();
