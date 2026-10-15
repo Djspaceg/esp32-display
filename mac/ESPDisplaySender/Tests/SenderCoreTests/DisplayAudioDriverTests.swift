@@ -331,7 +331,7 @@ final class DisplayAudioDriverTests: XCTestCase {
         let device = ConstantSystemAudioTap(
             levels: [0.2, 0.2], sampleRate: 48_000, interleaved: true)
         session.setDownlinkSource(PanelDownlinkSource.displayDevice(
-            name: "Desk Panel", route: .mirror,
+            name: "Desk Panel", route: .displaysOnly,
             capture: SystemAudioCaptureSource(open: { device })))
         XCTAssertNotNil(snapshots.waitFor(timeoutSeconds: 4) {
             $0.state == .streaming && $0.sourceName.contains("Desk Panel")
@@ -358,7 +358,7 @@ final class DisplayAudioDriverTests: XCTestCase {
             panel.close()
         }
         session.setDownlinkSource(PanelDownlinkSource.displayDevice(
-            name: "Desk Panel", route: .mirror,
+            name: "Desk Panel", route: .displaysOnly,
             capture: .displayDevice(uid: "missing", bridge: FakeDisplayAudioDriver())))
         let waiting = snapshots.waitFor(timeoutSeconds: 4) {
             $0.state == .streaming && $0.message.contains("has not appeared")

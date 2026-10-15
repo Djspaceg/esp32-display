@@ -1,31 +1,53 @@
 import CoreAudio
 import Foundation
 
-/// Where this Mac's sound goes, chosen once for every display: the Mac has
-/// one default output, so a choice per display could contradict itself (one
-/// display "only", another "mirrored").
+/// Where this Mac's sound plays, chosen once for every display: the Mac has
+/// one default output, so a choice per display could contradict itself.
 enum MacAudioRoute: String, Codable, CaseIterable, Identifiable, Sendable {
-    /// The route there was before the driver: a process tap copies this Mac's
-    /// sound to every display and the Mac's own output is left alone. Needs
-    /// the System Audio Recording permission and no driver.
+    /// This Mac and the displays: a process tap copies this Mac's sound to
+    /// every display and the Mac's own output, volume keys included, is left
+    /// alone. Needs the System Audio Recording permission and no driver.
     case copy
-    /// ESPDisplayAudio.driver: the Mac's own output and every display play
-    /// together, through a Multi-Output device the app makes.
-    case mirror
-    /// ESPDisplayAudio.driver: the displays are the Mac's only output.
+    /// The displays only, through ESPDisplayAudio.driver: the displays are the
+    /// Mac's output and its own speakers go quiet.
     case displaysOnly
 
     var id: String { rawValue }
 
+    /// The menu asks where sound plays, so each label is a place.
     var label: String {
         switch self {
-        case .copy: return "Copy this Mac's sound"
-        case .mirror: return "Mirror to the displays"
-        case .displaysOnly: return "Displays only"
+        case .copy: return "This Mac and the displays"
+        case .displaysOnly: return "The displays only"
         }
     }
 
-    var usesDriver: Bool { self != .copy }
+    /// One plain line under the menu: what the choice does.
+    var explanation: String {
+        switch self {
+        case .copy:
+            return "The displays get a copy of what this Mac plays."
+        case .displaysOnly:
+            return "Sound goes only to the displays; this Mac's speakers stay quiet."
+        }
+    }
+
+    var usesDriver: Bool { self == .displaysOnly }
+
+    /// "mirror", a third choice in earlier builds, played through the Mac and
+    /// the displays together, which is what the copy does, so it loads as the
+    /// copy. Anything else unknown fails, and the settings file falls back.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        if raw == "mirror" {
+            self = .copy
+        } else if let route = MacAudioRoute(rawValue: raw) {
+            self = route
+        } else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath, debugDescription: "unknown route \(raw)"))
+        }
+    }
 }
 
 /// One output device as macOS lists it.
@@ -71,14 +93,16 @@ struct MacAudioRoutePlan: Equatable, Sendable {
     let note: String?
 
     static let waitingNote = "Waiting for a display's output device to appear in macOS."
-    static let mirrorUID = "com.espdisplay.sender.mirror"
+    /// The Multi-Output device earlier builds made for their "mirror" choice.
+    /// Nothing makes it now; it is still recognised as this app's, so one left
+    /// behind is removed rather than mistaken for the Mac's own output.
+    static let legacyMirrorUID = "com.espdisplay.sender.mirror"
     static let displaysUID = "com.espdisplay.sender.displays"
 
     static func make(
         chosen: MacAudioRoute,
         driver: DisplayAudioDriverAvailability,
-        presentDisplayUIDs present: [String],
-        macOutputUID: String?
+        presentDisplayUIDs present: [String]
     ) -> MacAudioRoutePlan {
         guard chosen.usesDriver else {
             return MacAudioRoutePlan(chosen: chosen, effective: .copy, target: .restore, note: nil)
@@ -89,16 +113,17 @@ struct MacAudioRoutePlan: Equatable, Sendable {
         case .absent:
             return MacAudioRoutePlan(
                 chosen: chosen, effective: .copy, target: .restore,
-                note: "The display audio driver is not installed, so the displays "
-                    + "copy this Mac's sound instead. Click Install Audio Driver "
-                    + "below; the displays switch over once macOS has loaded it.")
+                note: "Playing on the displays only needs the display audio driver, "
+                    + "which is not installed, so this Mac and the displays both "
+                    + "play for now. Click Install Audio Driver below; the displays "
+                    + "switch over once macOS has loaded it.")
         case .incompatible(let version):
             let found = version.map { "version \($0)" } ?? "an unreadable version"
             return MacAudioRoutePlan(
                 chosen: chosen, effective: .copy, target: .restore,
                 note: "The installed display audio driver is \(found), and this app "
-                    + "needs version \(DisplayAudioDriverProtocol.version), so the "
-                    + "displays copy this Mac's sound instead. Click Reinstall Audio "
+                    + "needs version \(DisplayAudioDriverProtocol.version), so this "
+                    + "Mac and the displays both play for now. Click Reinstall Audio "
                     + "Driver below.")
         }
         guard !present.isEmpty else {
@@ -106,40 +131,24 @@ struct MacAudioRoutePlan: Equatable, Sendable {
                 chosen: chosen, effective: chosen, target: .restore,
                 note: waitingNote)
         }
-        switch chosen {
-        case .displaysOnly:
-            if present.count == 1 {
-                return MacAudioRoutePlan(
-                    chosen: chosen, effective: chosen,
-                    target: .device(uid: present[0]), note: nil)
-            }
+        if present.count == 1 {
             return MacAudioRoutePlan(
                 chosen: chosen, effective: chosen,
-                target: .multiOutput(
-                    uid: displaysUID, name: "ESPDisplay Displays",
-                    mainUID: present[0], members: present),
-                note: nil)
-        case .mirror, .copy:
-            guard let macOutputUID else {
-                return MacAudioRoutePlan(
-                    chosen: chosen, effective: chosen, target: .restore,
-                    note: "This Mac has no output of its own to mirror; the "
-                        + "displays play only when an app picks them directly.")
-            }
-            return MacAudioRoutePlan(
-                chosen: chosen, effective: chosen,
-                target: .multiOutput(
-                    uid: mirrorUID, name: "Mac and ESPDisplay Displays",
-                    mainUID: macOutputUID, members: [macOutputUID] + present),
-                note: nil)
+                target: .device(uid: present[0]), note: nil)
         }
+        return MacAudioRoutePlan(
+            chosen: chosen, effective: chosen,
+            target: .multiOutput(
+                uid: displaysUID, name: "ESPDisplay Displays",
+                mainUID: present[0], members: present),
+            note: nil)
     }
 
     /// Devices and aggregates this app makes, which are never "the Mac's own
     /// output".
     static func isOurs(uid: String) -> Bool {
         uid.hasPrefix(DisplayAudioDeviceSpec.uidPrefix)
-            || uid == mirrorUID || uid == displaysUID
+            || uid == legacyMirrorUID || uid == displaysUID
             || SystemAudioTapIdentity.isOwnAggregate(uid: uid)
     }
 }
@@ -159,9 +168,8 @@ final class MacAudioRouter {
     /// What the default output was last set for. Nil until set, or after a
     /// change that did not take, so the next pass tries again.
     private var applied: Trigger?
-    /// What the last change that took was for, and the device it made the
-    /// default (nil when it gave the Mac its own output back).
-    private var appliedTarget: MacAudioRouteTarget?
+    /// The device the last change that took made the default (nil when it
+    /// gave the Mac its own output back).
     private var appliedDefaultUID: String?
     /// The display devices present at the last pass, by UID.
     private(set) var presentDevices: [String: AudioObjectID] = [:]
@@ -238,31 +246,15 @@ final class MacAudioRouter {
             chosen: route,
             driver: route.usesDriver ? availability : .ready,
             presentDisplayUIDs: displays.map(\.uid).filter { present[$0] != nil }
-                .map { bridge.deviceUID(for: $0) },
-            macOutputUID: macOutputUID)
+                .map { bridge.deviceUID(for: $0) })
         presentDevices = present
-        // A Multi-Output device whose clock output went away (headphones
-        // unplugged while mirroring) is rebuilt on the Mac's output now.
-        if case .multiOutput(_, _, let mainUID, _)? = appliedTarget,
-           !outputs.contains(where: { $0.uid == mainUID }) {
-            applied = nil
-        }
-        // The user chose our Multi-Output device again (as the note says to)
-        // after the Mac's own output changed: rebuild it on that output, which
-        // changes no one's pick, since ours is the one picked.
-        if case .multiOutput(let uid, _, let mainUID, _) = plan.target,
-           system.defaultOutputUID() == uid, built[uid]?.first != mainUID {
-            applied = nil
-        }
         let trigger = Trigger(chosen: route, effective: plan.effective, devices: present)
         if trigger != applied {
             if apply(plan.target, outputs: outputs) {
                 applied = trigger
-                appliedTarget = plan.target
                 appliedDefaultUID = Self.defaultUID(of: plan.target)
             } else {
                 applied = nil
-                appliedTarget = nil
                 appliedDefaultUID = nil
             }
         }
@@ -309,9 +301,8 @@ final class MacAudioRouter {
                 + "\(names), so this app does not send the Mac's sound to it. "
                 + "The device comes back to this app once that app lets go of it.")
         }
-        // Everything that applies is said together: the plan's own note
-        // (no output of the Mac's own to mirror, say), then these, then an
-        // output picked elsewhere.
+        // Everything that applies is said together: the plan's own note, then
+        // these, then an output picked elsewhere.
         let picked = noteAnOutputPickedElsewhere(plan, outputs: outputs).note
         var all: [String] = []
         if notes.isEmpty, let note = plan.note {
@@ -380,7 +371,7 @@ final class MacAudioRouter {
 
     /// Whether the default output is now where `target` says.
     private func apply(_ target: MacAudioRouteTarget, outputs: [MacOutputDevice]) -> Bool {
-        let aggregates = [MacAudioRoutePlan.mirrorUID, MacAudioRoutePlan.displaysUID]
+        let aggregates = [MacAudioRoutePlan.legacyMirrorUID, MacAudioRoutePlan.displaysUID]
             .filter { uid in outputs.contains { $0.uid == uid } }
         switch target {
         case .restore:
@@ -403,8 +394,8 @@ final class MacAudioRouter {
                     && removeAggregates(aggregates, keeping: uid)
             }
             // Destroying the default would hand the choice of output to the
-            // HAL, so the Mac is parked on the new device's clock first: its
-            // own output for mirror, the first display for displays only.
+            // HAL, so the Mac is parked on the new device's clock, the first
+            // display, first.
             if let current = system.defaultOutputUID(), aggregates.contains(current) {
                 guard system.setDefaultOutput(uid: mainUID) else { return false }
             }

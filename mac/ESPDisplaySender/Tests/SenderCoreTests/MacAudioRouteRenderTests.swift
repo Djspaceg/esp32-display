@@ -5,7 +5,7 @@ import XCTest
 @testable import SenderCore
 @testable import SenderProtocol
 
-/// Renders a display's Audio section offscreen with the Mac sound choice: the
+/// Renders a display's Audio section offscreen with the Play sound on choice: the
 /// copy (the default), a driver route chosen with no driver installed, and
 /// the displays as the only output. Set ESPDISP_RENDER_DIR to keep the PNGs.
 @MainActor
@@ -55,8 +55,7 @@ final class MacAudioRouteRenderTests: XCTestCase {
             route: .copy, plan: nil, source: PanelAudioSession.tappedSourceName,
             message: PanelDownlinkSource.tapStreamingMessage)
         let absent = MacAudioRoutePlan.make(
-            chosen: .displaysOnly, driver: .absent, presentDisplayUIDs: [],
-            macOutputUID: "spk")
+            chosen: .displaysOnly, driver: .absent, presentDisplayUIDs: [])
         let fallback = try render(
             route: .displaysOnly, plan: absent, source: PanelAudioSession.tappedSourceName,
             message: PanelDownlinkSource.tapStreamingMessage, driver: .absent)
@@ -73,7 +72,7 @@ final class MacAudioRouteRenderTests: XCTestCase {
             route: .displaysOnly,
             plan: MacAudioRoutePlan.make(
                 chosen: .displaysOnly, driver: .ready,
-                presentDisplayUIDs: ["com.espdisplay.display.AAAA"], macOutputUID: "spk"),
+                presentDisplayUIDs: ["com.espdisplay.display.AAAA"]),
             source: "Mac output \"Desk Display\"",
             message: "Playing what this Mac sends to the \"Desk Display\" output, "
                 + "which is the Mac's only output.",

@@ -1,19 +1,19 @@
 # ESPDisplayAudio.driver
 
 A CoreAudio HAL plug-in that gives each ESPDisplay panel an output device of
-its own in Sound settings. ESPDisplaySender uses it for two of its three "Mac
-sound" routes (in each display's Audio section; the choice applies to every
-display):
+its own in Sound settings. ESPDisplaySender's "Play sound on" choice (in each
+display's Audio section; it applies to every display) has two answers:
 
-- **Copy this Mac's sound** (no driver): a process tap copies whatever the Mac
-  plays to every display, and the Mac's own output is left alone. Needs the
-  System Audio Recording permission.
-- **Mirror to the displays**: the app builds a Multi-Output device of the Mac's
-  own output plus every display and makes it the default output.
-- **Displays only**: the display (or a Multi-Output device of all of them) is
-  the Mac's only output, so the volume keys set its level.
+- **This Mac and the displays** (no driver, the default): a process tap copies
+  whatever the Mac plays to every display, and the Mac's own output, volume
+  keys included, is left alone. Needs the System Audio Recording permission.
+- **The displays only** (through this driver): the display, or a Multi-Output
+  device of all of them, is the Mac's only output and the Mac's own speakers go
+  quiet. With one display the volume keys set its level.
 
-Without the driver the two driver routes fall back to the copy and say so.
+Without the driver, "The displays only" falls back to this Mac and the displays
+and says so, pointing at the Install button. A setting saved by an earlier build
+as "Mirror to the displays" loads as "This Mac and the displays".
 
 ## Installing from the app
 

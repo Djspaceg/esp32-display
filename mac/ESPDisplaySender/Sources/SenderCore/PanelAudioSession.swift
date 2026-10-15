@@ -155,15 +155,9 @@ struct PanelDownlinkSource: Sendable {
         identity: String = ""
     ) -> PanelDownlinkSource {
         let output = "the \"\(name)\" output"
-        let streaming: String
-        switch route {
-        case .displaysOnly:
-            streaming = "Playing what this Mac sends to \(output), which is "
-                + "the Mac's only output."
-        case .mirror, .copy:
-            streaming = "Playing this Mac's sound, which goes to the Mac's own "
-                + "output and to \(output) together."
-        }
+        // Only "the displays only" plays through a display's own device.
+        let streaming = "Playing what this Mac sends to \(output), which is "
+            + "the Mac's only output."
         return PanelDownlinkSource(
             key: "device|\(identity)|\(name)|\(route.rawValue)",
             access: .notRequired,

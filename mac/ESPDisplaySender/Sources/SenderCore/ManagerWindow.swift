@@ -1015,13 +1015,13 @@ struct PanelDetailView: View {
         }
     }
 
-    /// One choice for every display: the Mac has a single default output.
-    /// When the chosen route cannot be used, the note under it says why and
-    /// what the displays get instead.
+    /// Where sound plays, one choice for every display: the Mac has a single
+    /// default output. A plain line under it says what the choice does, and a
+    /// status line says why when the choice cannot be used yet.
     @ViewBuilder
     private var macAudioRouteRow: some View {
-        LabeledContent("Mac sound") {
-            Picker("Mac sound", selection: Binding(
+        LabeledContent("Play sound on") {
+            Picker("Play sound on", selection: Binding(
                 get: { manager.settings.macAudioRoute },
                 set: { manager.setMacAudioRoute($0) })
             ) {
@@ -1031,11 +1031,16 @@ struct PanelDetailView: View {
             }
             .labelsHidden()
             .fixedSize()
-            .help("Where this Mac's sound goes, for every display")
+            .help("Where this Mac's sound plays, for every display")
+        }
+        LabeledContent("") {
+            Text(manager.settings.macAudioRoute.explanation)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
         }
         if manager.settings.macAudioRoute.usesDriver,
            let note = manager.macAudioRoutePlan?.note {
-            LabeledContent("Route") {
+            LabeledContent("Status") {
                 Text(note).textSelection(.enabled)
             }
         }
@@ -1075,25 +1080,21 @@ struct PanelDetailView: View {
         var multiOutput = false
         if case .multiOutput? = plan?.target { multiOutput = true }
         if let plan, plan.effective.usesDriver, plan.target == .restore {
-            return "Until this route can be used, this Mac plays as before; the "
-                + "route above says why. Mac sound applies to every display."
+            return "Until the displays can play on their own, this Mac keeps "
+                + "playing as before; the status above says why. Play sound on "
+                + "applies to every display."
         }
         switch plan?.effective ?? .copy {
         case .copy:
-            return "The display speaker plays this Mac's sound while the Mac's "
-                + "own speakers keep playing."
-        case .mirror:
-            return "Each display is an output device of its own, played together "
-                + "with the Mac's own output through a Multi-Output device, which "
-                + "the volume keys do not control. Mac sound applies to every "
-                + "display."
+            return "The display speaker plays this Mac's sound while this Mac's "
+                + "own speakers keep playing, and the volume keys work as usual."
         case .displaysOnly:
             return (multiOutput
-                ? "The displays are this Mac's only output, through a "
-                    + "Multi-Output device, which the volume keys do not control."
+                ? "The displays play together as this Mac's only output, which "
+                    + "the volume keys do not control."
                 : "The display is this Mac's only output, so the volume keys set "
                     + "its level.")
-                + " Mac sound applies to every display."
+                + " Play sound on applies to every display."
         }
     }
 
