@@ -157,8 +157,9 @@ struct PanelDownlinkSource: Sendable {
         let output = "the \"\(name)\" output"
         // Only "the displays only" plays through a display's own device, on
         // its own or with the other displays as one Multi-Output device.
-        let streaming = "Playing what this Mac sends to \(output); this Mac's "
-            + "own speakers stay quiet."
+        // Says only what this session plays: whether the Mac also plays
+        // elsewhere (an output picked in Sound settings) is the route's note.
+        let streaming = "Playing what this Mac sends to \(output)."
         return PanelDownlinkSource(
             key: "device|\(identity)|\(name)|\(route.rawValue)",
             access: .notRequired,

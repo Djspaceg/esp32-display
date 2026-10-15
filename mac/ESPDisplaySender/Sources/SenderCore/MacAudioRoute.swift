@@ -265,10 +265,10 @@ final class MacAudioRouter {
         let displayUIDs = displays.map(\.uid)
         if refused || displayUIDs != countedDisplays { fullPasses = 0 }
         countedDisplays = displayUIDs
-        // Past this point the driver is in use, so the plan's own note can
-        // only be the generic "waiting", which any specific note below says
-        // better: the notes that do not involve the driver (not installed,
-        // another version) come with nothing driving.
+        // The refusal and the notes below come only while the driver is in
+        // use, when the plan's own note can only be the generic "waiting",
+        // which they say better; the plan's other notes (not installed,
+        // another version) come with nothing driving, and stand alone.
         if refused {
             let why = "The display audio driver refused this app's displays. It "
                 + "takes up to \(DisplayAudioDriverProtocol.maxClients) apps at "
