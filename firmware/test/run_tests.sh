@@ -284,7 +284,8 @@ clang++ "${CXXFLAGS[@]}" \
 
 # Firmware update over the stream channel: nothing is buffered before the
 # PBKDF2 challenge is answered, loss/duplication/reordering still write the
-# exact image once, and only a matching SHA-256 ever reaches Update.end().
+# exact image once, only a matching SHA-256 ever reaches activation, and the
+# image area is erased before any write on a DSI panel.
 clang++ "${CXXFLAGS[@]}" \
   -o "$STREAM_UPDATE_OUT" "$HERE/test_stream_update.cpp"
 "$STREAM_UPDATE_OUT"

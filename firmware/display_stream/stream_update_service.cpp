@@ -14,10 +14,12 @@
 #include <freertos/semphr.h>
 #include <mbedtls/sha256.h>
 
+#include "app_state.h"
 #include "display_power.h"
 #include "net_link.h"
 #include "ota_policy.h"
 #include "stream_update.h"
+#include "stream_update_flash.h"
 #include "ui_screens.h"
 
 namespace streamupdatesvc {
@@ -48,7 +50,8 @@ class MbedHasher : public streamupdate::Hasher {
 };
 
 // How many chunks may wait in RAM ahead of flash. 64 x 1440 = 90 KB covers a
-// 64 KB block erase with the link still running; PSRAM where there is any.
+// 64 KB block erase with the link still running (SPI panels still erase as
+// the writes go; stream_update_flash.h); PSRAM where there is any.
 // Without PSRAM (C3, C6) fewer, so streaming's buffers keep their headroom.
 constexpr uint16_t SLOTS_PSRAM = 64;
 constexpr uint16_t SLOTS_INTERNAL = 24;
@@ -61,6 +64,41 @@ MbedHasher hasher;
 SemaphoreHandle_t lock = nullptr;
 uint8_t *slotMemory = nullptr;
 bool configured = false;
+
+// The inactive app partition, written directly rather than through Update so
+// the whole image area can be erased before the progress screen is up. Why,
+// and why the first byte goes last: stream_update_flash.h.
+class PartitionSink : public streamupdate::FlashSink {
+ public:
+  const esp_partition_t *partition = nullptr;
+  bool erase(uint32_t offset, uint32_t length) override {
+    return esp_partition_erase_range(partition, offset, length) == ESP_OK;
+  }
+  bool write(uint32_t offset, const uint8_t *data, size_t length) override {
+    return esp_partition_write(partition, offset, data, length) == ESP_OK;
+  }
+};
+PartitionSink partitionSink;
+streamupdate::FlashImageWriter image;
+// A begun image whose erase is still running, one step per service() pass so
+// loop() keeps feeding the watchdog and the heartbeat between steps. The
+// receiver hears about the begin only once the erase is done.
+struct PendingBegin {
+  bool active = false;
+  uint8_t *memory = nullptr;
+  uint16_t slots = 0;
+  uint32_t startedMs = 0;
+};
+PendingBegin pendingBegin;
+// True from a successful begin until activation or abort: this update owns
+// the inactive partition, as Update.isRunning() says for ArduinoOTA's. The
+// reverse needs no flag: while this receiver owns the panel, loop() returns
+// before ArduinoOTA.handle() can begin anything.
+bool imageOpen = false;
+
+// The P4's DSI refresh stops while flash is erased (stream_update_flash.h),
+// and its panel shows a blank cyan field until it resumes. Dark is better.
+bool panelBlanksDuringFlashErase() { return bcfg->isDsi(); }
 // rx.ownsPanel(), republished on every unlock so the frame path - every
 // inbound frame datagram asks - reads a flag instead of taking the mutex.
 std::atomic<bool> panelOwned{false};
@@ -220,48 +258,71 @@ bool doOneWork() {
       const char *error = nullptr;
       uint8_t *memory = nullptr;
       bool ok = false;
-      if (Update.isRunning()) {
+      const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
+      if (Update.isRunning() || imageOpen) {
         error = "another update is running";
+      } else if (next == nullptr || w.imageBytes > next->size) {
+        error = "no update partition large enough";
       } else if ((memory = allocateSlots(w.slots, w.slotBytes)) == nullptr) {
         error = "not enough memory for the receive window";
-      } else if (!Update.begin(w.imageBytes, U_FLASH)) {
-        error = Update.errorString();
-        heap_caps_free(memory);
-        memory = nullptr;
       } else {
         ok = true;
       }
-      if (ok) {
-        slotMemory = memory;
-        const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
-        Serial.printf("supd: receiving %lu bytes into %s (window %u x %u)\n",
-                      (unsigned long)w.imageBytes, next ? next->label : "?",
-                      (unsigned)w.slots, (unsigned)w.slotBytes);
-      } else {
+      if (!ok) {
         Serial.printf("supd: begin refused: %s\n", error);
+        Lock held;
+        rx.finishBegin(false, error, nullptr, w.slots, millis());
+        break;
       }
-      Lock held;
-      rx.finishBegin(ok, error, memory, w.slots, millis());
+      partitionSink.partition = next;
+      image.start(&partitionSink, w.imageBytes, panelBlanksDuringFlashErase());
+      imageOpen = true;
+      pendingBegin.active = true;
+      pendingBegin.memory = memory;
+      pendingBegin.slots = w.slots;
+      pendingBegin.startedMs = millis();
+      if (panelBlanksDuringFlashErase()) driveBrightness(0);
+      Serial.printf("supd: opening %lu bytes of %s (window %u x %u)\n",
+                    (unsigned long)w.imageBytes, next->label,
+                    (unsigned)w.slots, (unsigned)w.slotBytes);
       break;
     }
     case Work::Write: {
-      const size_t wrote = Update.write(const_cast<uint8_t *>(w.data), w.len);
-      const bool ok = wrote == w.len && !Update.hasError();
+      const bool ok = image.write(w.data, w.len);
       Lock held;
-      rx.finishWrite(w.seq, ok, ok ? nullptr : Update.errorString(), millis());
+      rx.finishWrite(w.seq, ok, ok ? nullptr : "flash write failed", millis());
       break;
     }
     case Work::Activate: {
       Serial.printf("supd: sha256 match %s\n", digestHex);
-      const bool ok = Update.end(false);
-      const char *error = ok ? nullptr : Update.errorString();
-      if (!ok) Serial.printf("supd: Update.end refused: %s\n", error);
+      const char *error = nullptr;
+      bool ok = image.finish();
+      if (!ok) {
+        error = "flash write failed";
+      } else {
+        // Choosing the boot partition erases a sector of otadata, and the
+        // reboot follows: both would show the cyan field, so go dark first.
+        if (panelBlanksDuringFlashErase()) driveBrightness(0);
+        // This also verifies the image (esp_image_verify) before choosing it.
+        const esp_err_t err = esp_ota_set_boot_partition(partitionSink.partition);
+        ok = err == ESP_OK;
+        if (!ok) {
+          error = esp_err_to_name(err);
+          applyBacklight();
+        }
+      }
+      image.close();
+      imageOpen = false;
+      if (!ok) Serial.printf("supd: activation refused: %s\n", error);
       Lock held;
       rx.finishActivate(ok, error, millis());
       break;
     }
     case Work::Abort: {
-      Update.abort();
+      // Nothing to undo: an image whose first byte was never written is not
+      // a valid image, and the boot partition has not changed.
+      image.close();
+      imageOpen = false;
       Lock held;
       rx.finishAbort(millis());
       break;
@@ -419,9 +480,47 @@ bool ownsPanel() {
   return panelOwned.load(std::memory_order_relaxed);
 }
 
+// One erase step of a pending begin, then, once the erase is done, the begin
+// the receiver has been waiting for.
+static void serviceErase() {
+  if (!pendingBegin.active) return;
+  bool stillWanted;
+  {
+    Lock held;
+    stillWanted = rx.phase() == Phase::Beginning;
+  }
+  // A session that ended mid-erase (the sender gave up, an abort) is not
+  // worth the rest of the erase: answer now, and the receiver owes an abort.
+  const bool stepOk = !stillWanted || image.eraseStep();
+  esp_task_wdt_reset();
+  if (stillWanted && stepOk && !image.eraseDone()) return;
+  const bool ok = stepOk && (image.eraseDone() || !stillWanted);
+  pendingBegin.active = false;
+  if (panelBlanksDuringFlashErase()) applyBacklight();
+  const char *error = ok ? nullptr : "flash erase failed";
+  if (ok) {
+    slotMemory = pendingBegin.memory;
+    if (stillWanted) {
+      Serial.printf("supd: opened in %lu ms; receiving into %s\n",
+                    (unsigned long)streamupdate::elapsedMs(millis(), pendingBegin.startedMs),
+                    partitionSink.partition->label);
+    } else {
+      Serial.println("supd: session ended during the erase; releasing");
+    }
+  } else {
+    heap_caps_free(pendingBegin.memory);
+    imageOpen = false;
+    Serial.printf("supd: begin refused: %s\n", error);
+  }
+  Lock held;
+  rx.finishBegin(ok, error, ok ? pendingBegin.memory : nullptr,
+                 pendingBegin.slots, millis());
+}
+
 bool service() {
   if (!configured) return false;
   const uint32_t start = millis();
+  serviceErase();
   // takeWork() also runs the timeouts and keepalive acks, so this runs every
   // pass even with nothing to write.
   while (doOneWork()) {

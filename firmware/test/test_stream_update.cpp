@@ -1,21 +1,24 @@
 // Host tests for the firmware update over the stream channel
 // (display_stream/stream_update.h): the packets, the chunk/ack window, the
-// PBKDF2 challenge, and the SHA-256 gate in front of Update.end().
+// PBKDF2 challenge, and the SHA-256 gate in front of activation.
 //
 // The receiver is driven exactly as stream_update_service.cpp drives it on
 // the panel - onPacket() on the receive path, takeWork()/finish*() on the
 // loop - against a fake flash and a reference SHA-256, through a simulated
 // link that loses, duplicates and reorders datagrams.
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <map>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../display_stream/device_protocol.h"
 #include "../display_stream/stream_update.h"
+#include "../display_stream/stream_update_flash.h"
 #include "support/sha256_ref.h"
 
 using namespace streamupdate;
@@ -391,6 +394,7 @@ static void testAbortDuringBeginReleasesUpdate() {
   p.deliver(authPacket(14, nonce, PASSWORD, boundCnonce(digest, nonce)));
   WorkItem verify = p.rx.takeWork(p.now);
   check(verify.kind == Work::VerifyAuth, "auth is verified first");
+  check(!p.rx.ownsPanel(), "the password check does not take the panel");
   // finish auth the way the pump would
   p.rx.finishAuth(true, p.now);
   WorkItem begin = p.rx.takeWork(p.now);
@@ -398,6 +402,10 @@ static void testAbortDuringBeginReleasesUpdate() {
   std::vector<uint8_t> abort(ABORT_BYTES);
   writeAbort(abort.data(), 14);
   p.deliver(abort);  // arrives while Update.begin is running
+  // Review finding: the begin (now a multi-pass flash erase) is still running,
+  // so the panel and flash are still the update's: no frame may be drawn and
+  // ArduinoOTA may not start until the begin has answered and been released.
+  check(p.rx.ownsPanel(), "the panel stays owned while the begin is still running");
   p.slotMemory.assign((size_t)begin.slots * begin.slotBytes, 0);
   p.rx.finishBegin(true, nullptr, p.slotMemory.data(), begin.slots, p.now);
   WorkItem next = p.rx.takeWork(p.now);
@@ -780,6 +788,213 @@ static void testLostVerdictIsRepeated() {
         "a duplicate after the end gets the verdict again");
 }
 
+// A flash that records every erase and write, and starts out unerased.
+struct RecordingFlash : public FlashSink {
+  explicit RecordingFlash(size_t bytes) : bytes(bytes, 0x00), erased(bytes, false) {}
+  bool erase(uint32_t offset, uint32_t length) override {
+    eraseCalls.push_back({offset, length});
+    if (failErase || offset + length > bytes.size()) return false;
+    for (uint32_t i = 0; i < length; i++) {
+      bytes[offset + i] = 0xFF;
+      erased[offset + i] = true;
+    }
+    return true;
+  }
+  bool write(uint32_t offset, const uint8_t *data, size_t length) override {
+    writeCalls.push_back({offset, (uint32_t)length});
+    if (failWriteAt >= 0 && (int)writeCalls.size() - 1 == failWriteAt) return false;
+    for (size_t i = 0; i < length; i++) {
+      if (!erased[offset + i]) writeToUnerased = true;
+      bytes[offset + i] &= data[i];  // NOR flash only clears bits
+    }
+    return true;
+  }
+  std::vector<uint8_t> bytes;
+  std::vector<bool> erased;
+  std::vector<std::pair<uint32_t, uint32_t>> eraseCalls, writeCalls;
+  bool failErase = false;
+  int failWriteAt = -1;
+  bool writeToUnerased = false;
+};
+
+static std::vector<uint8_t> testImage(size_t n) {
+  std::vector<uint8_t> image(n);
+  for (size_t i = 0; i < n; i++) image[i] = (uint8_t)(i * 37 + 11);
+  image[0] = 0xE9;  // an app image's magic byte
+  return image;
+}
+
+static void eraseAll(FlashImageWriter &w) {
+  int guard = 0;
+  while (!w.eraseDone() && !w.failed() && guard++ < 1000) w.eraseStep();
+}
+
+static void writeInChunks(FlashImageWriter &w, const std::vector<uint8_t> &image,
+                          size_t chunk) {
+  for (size_t off = 0; off < image.size(); off += chunk) {
+    const size_t len = image.size() - off < chunk ? image.size() - off : chunk;
+    check(w.write(image.data() + off, len), "each chunk is accepted");
+  }
+}
+
+static bool firstBytesErased(const RecordingFlash &flash, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    if (flash.bytes[i] != 0xFF) return false;
+  }
+  return true;
+}
+
+// The flicker fix: on a DSI panel every erase happens before the first write,
+// in steps of at most one 64 KiB block, covering the image rounded up to a
+// sector.
+static void testFlashEraseFirstComesFirstInSteps() {
+  const size_t n = 200000;
+  RecordingFlash flash(262144);
+  FlashImageWriter w;
+  w.start(&flash, n, true);
+  const uint8_t one = 1;
+  check(!w.write(&one, 1), "no write is accepted before the erase is done");
+  check(w.failed(), "a write before the erase fails the image");
+
+  w.start(&flash, n, true);
+  int steps = 0;
+  while (!w.eraseDone() && steps < 100) {
+    check(w.eraseStep(), "each erase step succeeds");
+    steps++;
+  }
+  check(steps == 4, "200000 bytes erase in four steps of at most 64 KiB");
+  check(w.erasedBytes() == 49 * 4096, "the erase covers the image rounded up to a sector");
+  for (auto &c : flash.eraseCalls) {
+    check(c.second <= FlashImageWriter::ERASE_STEP_BYTES, "no erase step is larger than a block");
+  }
+  check(flash.writeCalls.empty(), "nothing is written while erasing");
+  check(w.eraseStep(), "a step after the erase finished is a harmless no-op");
+  check(flash.eraseCalls.size() == 4, "and erases nothing more");
+
+  const std::vector<uint8_t> image = testImage(n);
+  writeInChunks(w, image, 1440);
+  check(w.finish(), "the erase-first image finishes");
+  check(flash.eraseCalls.size() == 4, "no erase runs during the writes");
+  check(std::equal(image.begin(), image.end(), flash.bytes.begin()),
+        "the flash holds the exact image");
+  check(!flash.writeToUnerased, "nothing is ever written to unerased flash");
+}
+
+// SPI panels keep the old cadence: a block is erased when the writes reach it.
+static void testFlashEraseAsYouGoOnOtherPanels() {
+  const size_t n = 200000;
+  const std::vector<uint8_t> image = testImage(n);
+  RecordingFlash flash(262144);
+  FlashImageWriter w;
+  w.start(&flash, n, false);
+  check(w.eraseDone(), "an erase-as-you-go image can be written at once");
+  check(flash.eraseCalls.empty(), "and has erased nothing yet");
+  check(w.write(image.data(), 1440), "the first chunk is accepted");
+  check(flash.eraseCalls.empty(), "a chunk short of a batch erases nothing");
+  writeInChunks(w, std::vector<uint8_t>(image.begin() + 1440, image.end()), 1440);
+  check(w.finish(), "the erase-as-you-go image finishes");
+  check(flash.eraseCalls.size() == 4, "four block erases in all");
+  check(std::equal(image.begin(), image.end(), flash.bytes.begin()),
+        "the flash holds the exact image");
+  check(!flash.writeToUnerased, "nothing is ever written to unerased flash");
+}
+
+static void testFlashWritesBatchAndWithholdTheFirstBytes() {
+  const size_t n = 10000;
+  const std::vector<uint8_t> image = testImage(n);
+  RecordingFlash flash(16384);
+  FlashImageWriter w;
+  w.start(&flash, n, true);
+  eraseAll(w);
+  writeInChunks(w, image, 1440);
+  check(flash.writeCalls.size() == 2, "10000 bytes so far are two 4 KiB batches");
+  check(flash.writeCalls[0].first == FlashImageWriter::WITHHELD_BYTES &&
+            flash.writeCalls[0].second ==
+                FlashImageWriter::BATCH_BYTES - FlashImageWriter::WITHHELD_BYTES,
+        "the first batch skips the withheld first 16 bytes");
+  check(flash.writeCalls[1].first == 4096 && flash.writeCalls[1].second == 4096,
+        "later batches are whole sectors");
+  check(firstBytesErased(flash, 16), "the first 16 bytes stay erased until finish()");
+  check(w.finish(), "finish() succeeds for a whole image");
+  check(flash.writeCalls.back().first == 0 && flash.writeCalls.back().second == 16,
+        "the last write is the 16 withheld bytes");
+  check(std::equal(image.begin(), image.end(), flash.bytes.begin()),
+        "after finish() the flash holds the exact image");
+}
+
+static void testFlashImageSizeEdges() {
+  for (size_t n : {(size_t)1, (size_t)15, (size_t)16, (size_t)4096, (size_t)65536,
+                   (size_t)65537}) {
+    for (bool first : {true, false}) {
+      const std::vector<uint8_t> image = testImage(n);
+      RecordingFlash flash(131072);
+      FlashImageWriter w;
+      w.start(&flash, (uint32_t)n, first);
+      eraseAll(w);
+      writeInChunks(w, image, 1440);
+      check(w.finish(), "an image of any size finishes");
+      check(std::equal(image.begin(), image.end(), flash.bytes.begin()),
+            "and the flash holds it exactly");
+      check(!flash.writeToUnerased, "without writing unerased flash");
+    }
+  }
+}
+
+static void testFlashFinishRefusesAPartialImage() {
+  const std::vector<uint8_t> image = testImage(5000);
+  RecordingFlash flash(8192);
+  FlashImageWriter w;
+  w.start(&flash, 5000, true);
+  eraseAll(w);
+  check(w.write(image.data(), 4999), "a short write is accepted");
+  check(!w.finish(), "finish() refuses an image one byte short");
+  check(firstBytesErased(flash, 16), "so the first bytes are never programmed");
+
+  w.start(&flash, 5000, true);
+  eraseAll(w);
+  const std::vector<uint8_t> longer = testImage(5001);
+  check(!w.write(longer.data(), longer.size()), "a write past the image is refused");
+  w.close();
+  check(!w.write(image.data(), 1) && !w.finish(), "a closed image refuses everything");
+}
+
+static void testFlashFailuresAreSticky() {
+  const std::vector<uint8_t> image = testImage(9000);
+  RecordingFlash flash(16384);
+  flash.failErase = true;
+  FlashImageWriter w;
+  w.start(&flash, 9000, true);
+  check(!w.eraseStep(), "a failed erase step reports failure");
+  check(w.failed() && !w.eraseDone(), "and the image is failed, not done");
+
+  RecordingFlash flash2(16384);
+  flash2.failWriteAt = 0;
+  w.start(&flash2, 9000, true);
+  eraseAll(w);
+  check(!w.write(image.data(), 4096), "a failed batch write fails the chunk that filled it");
+  check(!w.write(image.data() + 4096, 100), "and every write after it");
+  check(!w.finish(), "and finish()");
+  check(firstBytesErased(flash2, 16), "and the image is never made valid");
+
+  // 9000 bytes: batches at 0 and 4096, then the 808-byte tail in finish(),
+  // then the withheld bytes. Fail the tail, then separately the withheld write.
+  for (int at : {2, 3}) {
+    RecordingFlash flash3(16384);
+    flash3.failWriteAt = at;
+    w.start(&flash3, 9000, true);
+    eraseAll(w);
+    writeInChunks(w, image, 1440);
+    check(!w.finish(), "a failed final write fails finish()");
+    check(!w.finish(), "and a second finish()");
+  }
+
+  RecordingFlash flash4(16384);
+  flash4.failErase = true;
+  w.start(&flash4, 9000, false);
+  check(!w.write(image.data(), 4096), "a failed erase-as-you-go erase fails the write");
+  check(flash4.writeCalls.empty(), "and writes nothing");
+}
+
 int main() {
   testPrimitives();
   testUnarmedRefuses();
@@ -803,6 +1018,12 @@ int main() {
   testAbortAndTimeout();
   testBusy();
   testLostVerdictIsRepeated();
+  testFlashEraseFirstComesFirstInSteps();
+  testFlashEraseAsYouGoOnOtherPanels();
+  testFlashWritesBatchAndWithholdTheFirstBytes();
+  testFlashImageSizeEdges();
+  testFlashFinishRefusesAPartialImage();
+  testFlashFailuresAreSticky();
   if (failures != 0) {
     std::printf("test_stream_update: %d failure(s)\n", failures);
     return 1;

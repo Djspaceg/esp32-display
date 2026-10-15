@@ -22,10 +22,11 @@
 //   - Every chunk carries a CRC32 of its payload and its exact length; a
 //     mismatch is dropped unacknowledged, so the sender resends it.
 //   - The image's SHA-256 travels in BEGIN. Every byte written is hashed in
-//     order, and only a matching digest reaches Activate (Update.end, which
-//     is where the boot partition changes). A mismatch reaches Abort.
-//   - Update itself withholds the image's first byte until end() succeeds,
-//     so a transfer that stops anywhere short of Activate is never bootable.
+//     order, and only a matching digest reaches Activate (where the boot
+//     partition changes, after esp_image_verify). A mismatch reaches Abort.
+//   - The image's first byte is withheld until Activate
+//     (stream_update_flash.h), so a transfer that stops anywhere short of
+//     it is never bootable.
 //
 // Wire format, all integers little-endian, every packet "EUP?" + version 1:
 //
@@ -105,10 +106,10 @@ enum class Status : uint8_t {
   Busy = 3,            // another session owns the update
   NotConfigured = 4,   // no OTA password stored
   BadRequest = 5,      // size or chunk size refused; detail says which
-  BeginFailed = 6,     // Update.begin refused; detail is its error
+  BeginFailed = 6,     // begin or its erase refused; detail says why
   WriteFailed = 7,     // a flash write failed; detail is its error
   HashMismatch = 8,    // every byte arrived and the SHA-256 differed
-  ImageRefused = 9,    // Update.end refused the image; detail is its error
+  ImageRefused = 9,    // activation refused the image; detail says why
   Activated = 10,      // boot partition switched; restarting
   Aborted = 11,        // the sender aborted, or the session timed out
   UnknownSession = 12, // no such session here (restarted, or expired)
@@ -445,15 +446,16 @@ enum class Work : uint8_t {
   // PBKDF2 the stored hash against nonce/cnonce and compare with response,
   // then finishAuth(). Seconds of SHA-256; never on the receive path.
   VerifyAuth,
-  // Allocate `slots` slots of slotBytes and Update.begin(imageBytes), then
-  // finishBegin().
+  // Allocate `slots` slots of slotBytes and open (and erase) the inactive
+  // partition for imageBytes, then finishBegin().
   Begin,
-  // Update.write(data, len), then finishWrite(). The bytes are already
+  // Write (data, len) as the image's next bytes, then finishWrite(). The bytes are already
   // hashed; the slot is stable until finishWrite releases it.
   Write,
-  // Update.end(): the digest matched. Then finishActivate().
+  // Complete the image and make it the boot partition: the digest matched.
+  // Then finishActivate().
   Activate,
-  // Update.abort(), then finishAbort(). Reached from a digest mismatch, a
+  // Release the open image, then finishAbort(). Reached from a digest mismatch, a
   // failed write, a sender abort or a timeout, whenever begin succeeded.
   Abort,
 };
@@ -607,7 +609,10 @@ class Receiver {
       default:
         break;
     }
-    if (item.kind != Work::None) workInFlight_ = true;
+    if (item.kind != Work::None) {
+      workInFlight_ = true;
+      inFlightKind_ = item.kind;
+    }
     return item;
   }
 
@@ -638,8 +643,8 @@ class Receiver {
                    uint16_t slots, uint32_t nowMs) {
     workInFlight_ = false;
     if (phase_ != Phase::Beginning) {
-      // The session ended (an abort, a timeout) while Update.begin ran. If
-      // begin succeeded, Update is open and must be released, or every later
+      // The session ended (an abort, a timeout) while the begin ran. If it
+      // succeeded, the image is open and must be released, or every later
       // update - this path's and ArduinoOTA's - is refused until a reboot.
       if (ok) {
         sinkOpen_ = true;
@@ -687,7 +692,7 @@ class Receiver {
     if (phase_ != Phase::Finalizing) return;
     sinkOpen_ = false;
     if (!ok) {
-      // Update.end() failing resets the updater itself; nothing to abort.
+      // A refused activation has already released the image; nothing to abort.
       fail(Status::ImageRefused, error ? error : "image refused", nowMs);
       abortOwed_ = false;
       return;
@@ -707,10 +712,15 @@ class Receiver {
 
   Phase phase() const { return phase_; }
   /// True while an authenticated update owns the panel: frames are refused
-  /// and loop() does nothing but service the update.
+  /// and loop() does nothing but service the update. That includes flash
+  /// work the loop has taken and not yet finished, even after the session
+  /// ended around it: a begin is a multi-pass flash erase, and nothing else
+  /// may draw or start an update until it has answered. Not the password
+  /// check, which runs before anyone is authenticated.
   bool ownsPanel() const {
     return phase_ == Phase::Beginning || phase_ == Phase::Receiving ||
-           phase_ == Phase::Finalizing || rebootPending_ || abortOwed_;
+           phase_ == Phase::Finalizing || rebootPending_ || abortOwed_ ||
+           (workInFlight_ && inFlightKind_ != Work::VerifyAuth);
   }
   /// Whether slot memory is still referenced. Free it only when false.
   bool usingSlots() const {
@@ -917,7 +927,7 @@ class Receiver {
       return;
     }
     if (phase_ == Phase::Finalizing && digestMatched_) {
-      return;  // Update.end is already running; its verdict will answer
+      return;  // activation is already running; its verdict will answer
     }
     fail(Status::Aborted, "the sender cancelled the update", nowMs);
   }
@@ -946,7 +956,7 @@ class Receiver {
   }
 
   /// The session failed: record why, tell the sender, and owe an abort if
-  /// Update.begin had succeeded. Slot memory is dropped at once.
+  /// the begin had succeeded. Slot memory is dropped at once.
   void fail(Status why, const char *detail, uint32_t nowMs) {
     if (sinkOpen_) abortOwed_ = true;
     finish(why, bytesWritten_, detail, nowMs);
@@ -1125,6 +1135,7 @@ class Receiver {
 
   // Loop-side bookkeeping.
   bool workInFlight_ = false;
+  Work inFlightKind_ = Work::None;
   bool sinkOpen_ = false;
   bool abortOwed_ = false;
   bool rebootPending_ = false;
