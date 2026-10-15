@@ -74,10 +74,8 @@ final class MacAudioRouting {
     private(set) var driverAvailability: DisplayAudioDriverAvailability?
     /// The Install / Remove Audio Driver row.
     var setup = DisplayAudioDriverSetup(bundledDriver: false, signingTeam: nil)
-    var runner = PrivilegedRunner.appleScript
+    var runner = PrivilegedRunner.system
     private var timer: Timer?
-    private var keepAlive: DispatchSourceTimer?
-    private let keepAliveQueue = DispatchQueue(label: "espdisp.audio.driver-keepalive")
 
     /// Seconds between passes. Each pass is the driver's heartbeat, well
     /// inside its ten-second timeout.
@@ -104,33 +102,10 @@ final class MacAudioRouting {
         self.timer = timer
     }
 
-    /// The password prompt holds the main thread, and with it the pass that
-    /// is the driver's heartbeat; past ten seconds the driver would drop the
-    /// displays' devices and move the Mac's output. Until `endKeepAlive`, the
-    /// last registration is repeated from a background queue instead.
-    func beginKeepAlive() {
-        endKeepAlive()
-        guard let displays = router?.heartbeat, !displays.isEmpty else { return }
-        let bridge = bridge
-        let timer = DispatchSource.makeTimerSource(queue: keepAliveQueue)
-        timer.schedule(
-            deadline: .now() + Self.interval, repeating: Self.interval)
-        timer.setEventHandler { bridge.register(displays) }
-        timer.resume()
-        keepAlive = timer
-    }
-
-    /// Returns once no heartbeat is in flight, so none can land after the
-    /// next pass has said goodbye.
-    func endKeepAlive() {
-        guard let keepAlive else { return }
-        keepAlive.cancel()
-        self.keepAlive = nil
-        keepAliveQueue.sync {}
-    }
-
     func stop() {
-        endKeepAlive()
+        // A password dialog still up when the app quits must not install or
+        // remove anything once it is answered.
+        PrivilegedRunner.terminateRunning()
         timer?.invalidate()
         timer = nil
         router?.shutdown()
@@ -264,10 +239,11 @@ extension PanelManager {
             command = DisplayAudioDriverInstaller.removeCommand()
         }
         let runner = macAudio.runner
-        macAudio.beginKeepAlive()
+        let prompt = DisplayAudioDriverInstaller.prompt(for: action)
+        // The runner waits on the password dialog off the main thread, so the
+        // window and the two-second pass carry on; the outcome lands here.
         Task { @MainActor [weak self] in
-            let result = await runner.run(command)
-            self?.macAudio.endKeepAlive()
+            let result = await runner.run(command, prompt)
             guard let self else { return }
             self.macAudio.setup.finished(action, result, now: Date())
             self.objectWillChange.send()

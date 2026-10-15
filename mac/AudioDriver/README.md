@@ -21,13 +21,18 @@ The app carries a signed copy of the driver (built and signed into
 `Contents/Library/Audio` by `embed-driver.sh`, an Xcode build phase). While the
 driver is missing, each display's Audio section shows **Install Audio Driver…**;
 once it is there, **Remove Audio Driver…**. The click runs one root command
-through AppleScript's `do shell script ... with administrator privileges`, so
-macOS shows its own administrator prompt naming the app and no privileged helper
-is left behind. The command copies the driver into a root-owned staging folder,
-checks that copy is Apple-signed by the app's own team, moves it into
-`/Library/Audio/Plug-Ins/HAL` and restarts coreaudiod. The row follows the
-driver appearing on its own, and a cancelled prompt or a failure is shown as
-selectable text.
+through AppleScript's `do shell script ... with administrator privileges` in
+`/usr/bin/osascript`, waited on off the main thread so the window keeps working
+while the dialog is up. macOS shows its own administrator dialog (it names
+osascript; its text says it is ESPDisplaySender asking, and why), and no
+privileged helper is left behind. The command copies the driver into a
+root-owned staging folder, checks that copy is Apple-signed by the app's own
+team, moves it into `/Library/Audio/Plug-Ins/HAL` and restarts coreaudiod, all
+under the same lock `install-driver.sh` takes. The row follows the driver
+appearing on its own, and a cancelled prompt or a failure is shown as
+selectable text. Quitting the app while the dialog is up ends it unanswered. The
+lock is an empty root-only file, `.ESPDisplayAudio.lock`, left in the HAL folder;
+it is not a driver and macOS ignores it.
 
 ## Build, install, remove (developers)
 

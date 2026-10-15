@@ -25,6 +25,26 @@ if [[ "$(id -u)" != 0 ]]; then
   exit 1
 fi
 
+# The same lock the app's Install and Remove buttons hold, so this script and
+# the app never install or remove at the same time.
+# The lock file is root-only so no other user can hold it to stall an
+# install, and the wait for it is bounded.
+if [[ -z "${ESPDISP_INSTALL_LOCKED:-}" ]]; then
+  LOCK="$HAL/.ESPDisplayAudio.lock"
+  mkdir -p "$HAL"
+  (umask 077 && touch "$LOCK")
+  chown root:wheel "$LOCK"
+  chmod 600 "$LOCK"
+  status=0
+  /usr/bin/lockf -s -k -t 30 "$LOCK" \
+    /usr/bin/env ESPDISP_INSTALL_LOCKED=1 /bin/zsh "$0" "$@" || status=$?
+  if [[ $status == 75 ]]; then
+    echo "error: another install or removal of the audio driver is still running;" \
+      "try again in a minute" >&2
+  fi
+  exit $status
+fi
+
 restart_coreaudiod() {
   # launchd starts it again straight away.
   killall coreaudiod 2>/dev/null || true

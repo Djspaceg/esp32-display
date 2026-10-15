@@ -39,8 +39,10 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
             setup: DisplayAudioDriverSetup(bundledDriver: true, signingTeam: "T"))
         let ran = expectation(description: "the command ran")
         var commands: [String] = []
-        manager.macAudio.runner = PrivilegedRunner(run: { command in
+        var prompts: [String] = []
+        manager.macAudio.runner = PrivilegedRunner(run: { command, prompt in
             commands.append(command)
+            prompts.append(prompt)
             ran.fulfill()
             return .succeeded
         })
@@ -51,6 +53,7 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertEqual(commands, [DisplayAudioDriverInstaller.removeCommand()])
+        XCTAssertEqual(prompts, [DisplayAudioDriverInstaller.prompt(for: .remove)])
         XCTAssertTrue(
             manager.displayAudioDriverRow?.status.contains("waiting for macOS") == true,
             manager.displayAudioDriverRow?.status ?? "")
@@ -183,8 +186,58 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
 
     // MARK: - The privileged command
 
+    /// Install and removal both run under the one lock, which
+    /// install-driver.sh takes too, so two never interleave.
+    func testTheCommandsRunUnderTheInstallLock() {
+        let source = URL(fileURLWithPath: "/A b.app/Contents/Library/Audio/ESPDisplayAudio.driver")
+        let install = DisplayAudioDriverInstaller.installCommand(source: source, team: "T")
+        XCTAssertEqual(
+            install,
+            DisplayAudioDriverInstaller.locked(
+                DisplayAudioDriverInstaller.installScript(source: source, team: "T")))
+        XCTAssertEqual(
+            DisplayAudioDriverInstaller.removeCommand(),
+            DisplayAudioDriverInstaller.locked(DisplayAudioDriverInstaller.removeScript()))
+        let lock = "'/Library/Audio/Plug-Ins/HAL/.ESPDisplayAudio.lock'"
+        // Root-only before it is waited on, and the wait is bounded.
+        let created = install.range(of: "(umask 077 && /usr/bin/touch \(lock))")!.lowerBound
+        let chmod = install.range(of: "/bin/chmod 600 \(lock)")!.lowerBound
+        XCTAssertLessThan(created, chmod, "never readable, even before the chmod")
+        let wait = install.range(of: "/usr/bin/lockf -s -k -t 30 \(lock) /bin/sh -c ")!.lowerBound
+        XCTAssertLessThan(chmod, wait)
+        XCTAssertTrue(install.contains("another install or removal of the audio driver is still running"))
+    }
+
+    /// The body lockf runs keeps the script's `set -e`: a failing step stops
+    /// it and its failure comes back, rather than the steps after it running
+    /// and the whole reading as success. Its own exit 75 is passed on as 70,
+    /// so only lockf's timeout reads as "still running". Run as the user;
+    /// nothing here needs root.
+    func testTheLockedBodyKeepsTheScriptsFailures() throws {
+        func run(_ script: String) throws -> (status: Int32, output: String) {
+            let shell = Process()
+            shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+            shell.arguments = ["-c", DisplayAudioDriverInstaller.lockedBody(script)]
+            let output = Pipe()
+            shell.standardOutput = output
+            try shell.run()
+            shell.waitUntilExit()
+            let text = String(
+                data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            return (shell.terminationStatus, text)
+        }
+        let failed = try run("set -e; false; echo after")
+        XCTAssertNotEqual(failed.status, 0)
+        XCTAssertFalse(failed.output.contains("after"), "set -e stopped the script")
+        XCTAssertEqual(try run("set -e; echo fine").status, 0)
+        XCTAssertEqual(try run("exit 3").status, 3)
+        XCTAssertEqual(try run("exit 75").status, 70)
+        let trapped = try run("trap 'echo cleaned' EXIT; set -e; false")
+        XCTAssertTrue(trapped.output.contains("cleaned"), "the script's own trap still runs")
+    }
+
     func testTheInstallCommandVerifiesTheTeamOnTheRootOwnedCopy() {
-        let command = DisplayAudioDriverInstaller.installCommand(
+        let command = DisplayAudioDriverInstaller.installScript(
             source: URL(fileURLWithPath: "/Users/x/Applications/My App.app/Contents/Library/Audio/ESPDisplayAudio.driver"),
             team: "YSHQQLS73U")
         XCTAssertTrue(command.contains(
@@ -209,11 +262,12 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
     /// Both commands parse as shell, quotes in the path and all; parsing
     /// runs nothing.
     func testTheCommandsParseAsShell() throws {
+        let source = URL(fileURLWithPath: "/Users/o'brien/Applications/A b.app/Contents/Library/Audio/ESPDisplayAudio.driver")
         for command in [
-            DisplayAudioDriverInstaller.installCommand(
-                source: URL(fileURLWithPath: "/Users/o'brien/Applications/A b.app/Contents/Library/Audio/ESPDisplayAudio.driver"),
-                team: "YSHQQLS73U"),
+            DisplayAudioDriverInstaller.installCommand(source: source, team: "YSHQQLS73U"),
+            DisplayAudioDriverInstaller.installScript(source: source, team: "YSHQQLS73U"),
             DisplayAudioDriverInstaller.removeCommand(),
+            DisplayAudioDriverInstaller.removeScript(),
         ] {
             let shell = Process()
             shell.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -229,7 +283,7 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
     }
 
     func testTheRemoveCommandTouchesOnlyTheDriver() {
-        let command = DisplayAudioDriverInstaller.removeCommand()
+        let command = DisplayAudioDriverInstaller.removeScript()
         XCTAssertTrue(command.contains("/bin/rm -rf '/Library/Audio/Plug-Ins/HAL/ESPDisplayAudio.driver'"))
         XCTAssertTrue(command.contains("/usr/bin/killall coreaudiod"))
         XCTAssertFalse(command.contains("Plug-Ins/HAL'"), "never the HAL folder itself")
@@ -244,16 +298,142 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
         let command = DisplayAudioDriverInstaller.installCommand(
             source: URL(fileURLWithPath: #"/Users/a"b\c/X.app/Contents/Library/Audio/ESPDisplayAudio.driver"#),
             team: "YSHQQLS73U")
-        let script = try XCTUnwrap(
-            NSAppleScript(source: DisplayAudioDriverInstaller.appleScript(for: command)))
+        let script = try XCTUnwrap(NSAppleScript(source: DisplayAudioDriverInstaller.appleScript(
+            for: command, prompt: DisplayAudioDriverInstaller.prompt(for: .install))))
         var error: NSDictionary?
         XCTAssertTrue(script.compileAndReturnError(&error), "\(String(describing: error))")
     }
 
-    func testTheAppleScriptEscapesTheCommand() {
-        let script = DisplayAudioDriverInstaller.appleScript(for: #"echo "hi" \ there"#)
+    func testTheAppleScriptEscapesTheCommandAndThePrompt() {
+        let script = DisplayAudioDriverInstaller.appleScript(
+            for: #"echo "hi" \ there"#, prompt: #"Say "why""#)
         XCTAssertEqual(
             script,
-            #"do shell script "echo \"hi\" \\ there" with administrator privileges"#)
+            #"do shell script "echo \"hi\" \\ there" with prompt "Say \"why\"" with administrator privileges"#)
     }
+
+    /// osascript shows macOS's own dialog, which names osascript; the prompt
+    /// text says it is this app asking, and for what.
+    func testThePromptSaysWhoIsAskingAndWhy() {
+        XCTAssertTrue(DisplayAudioDriverInstaller.prompt(for: .install)
+            .contains("ESPDisplaySender wants to install its display audio driver"))
+        XCTAssertTrue(DisplayAudioDriverInstaller.prompt(for: .remove)
+            .contains("ESPDisplaySender wants to remove its display audio driver"))
+    }
+
+    // MARK: - Off the main thread
+
+    /// The password prompt can stay up for as long as the user takes. It is
+    /// waited on away from the main thread, so the window keeps drawing (the
+    /// busy row included) and the two-second pass keeps running meanwhile.
+    @MainActor
+    func testThePromptIsWaitedOnOffTheMainThread() async {
+        let release = DispatchSemaphore(value: 0)
+        let seen = OsascriptCall()
+        let runner = PrivilegedRunner.osascript(executor: { arguments in
+            seen.record(arguments: arguments, onMain: Thread.isMainThread)
+            // Bounded, so a regression onto the main thread fails rather
+            // than hanging the suite.
+            let released = release.wait(timeout: .now() + 5) == .success
+            return released ? (0, "") : (1, "never released")
+        })
+        var mainTurns = 0
+        let ticker = Task { @MainActor in
+            while !Task.isCancelled {
+                mainTurns += 1
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+        let run = Task { @MainActor in await runner.run("true", "Why") }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let turnsWhileWaiting = mainTurns
+        release.signal()
+        let result = await run.value
+        ticker.cancel()
+        XCTAssertEqual(result, .succeeded)
+        XCTAssertGreaterThan(turnsWhileWaiting, 5, "the main thread ran while the prompt was up")
+        XCTAssertEqual(seen.onMain, false)
+        XCTAssertEqual(seen.arguments, [
+            "-e", DisplayAudioDriverInstaller.appleScript(for: "true", prompt: "Why"),
+        ])
+    }
+
+    /// The real /usr/bin/osascript, with scripts that need no administrator
+    /// rights and raise no prompt: it runs, and its errors read back plainly.
+    func testTheRealOsascriptRunsAndItsErrorsReadBack() {
+        let fine = PrivilegedRunner.runOsascript(["-e", #"do shell script "true""#])
+        XCTAssertEqual(PrivilegedRunner.outcome(status: fine.status, error: fine.error), .succeeded)
+        let boom = PrivilegedRunner.runOsascript(["-e", #"error "boom" number 7"#])
+        XCTAssertEqual(
+            PrivilegedRunner.outcome(status: boom.status, error: boom.error), .failed("boom"))
+        let cancelled = PrivilegedRunner.runOsascript(["-e", #"error "User canceled." number -128"#])
+        XCTAssertEqual(
+            PrivilegedRunner.outcome(status: cancelled.status, error: cancelled.error), .cancelled)
+    }
+
+    /// Quitting ends an osascript still waiting (here on a harmless delay,
+    /// standing in for an unanswered password dialog), so nothing it was
+    /// asked to do runs after the app is gone.
+    func testQuittingEndsAWaitingOsascript() {
+        defer { PrivilegedRunner.reopenForTesting() }
+        let done = expectation(description: "osascript ended")
+        let result = OsascriptCall()
+        DispatchQueue.global().async {
+            let outcome = PrivilegedRunner.runOsascript(["-e", "delay 30"])
+            result.record(arguments: ["\(outcome.status)"], onMain: false)
+            done.fulfill()
+        }
+        let started = Date()
+        Thread.sleep(forTimeInterval: 0.5)
+        PrivilegedRunner.terminateRunning()
+        wait(for: [done], timeout: 5)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        XCTAssertNotEqual(result.arguments, ["0"], "it was ended, not left to finish")
+        // One asked for after the quit began never starts at all.
+        let late = PrivilegedRunner.runOsascript(["-e", "delay 30"])
+        XCTAssertEqual(late.status, -1)
+        XCTAssertTrue(late.error.contains("quitting"))
+    }
+
+    func testOsascriptOutcomesAreReadFromItsExit() {
+        XCTAssertEqual(PrivilegedRunner.outcome(status: 0, error: ""), .succeeded)
+        XCTAssertEqual(
+            PrivilegedRunner.outcome(
+                status: 1, error: "0:120: execution error: User canceled. (-128)\n"),
+            .cancelled)
+        XCTAssertEqual(
+            PrivilegedRunner.outcome(
+                status: 1,
+                error: "0:120: execution error: The administrator user name or password "
+                    + "was incorrect. (-60007)\n"),
+            .failed("The administrator user name or password was incorrect."))
+        XCTAssertEqual(
+            PrivilegedRunner.outcome(
+                status: 1,
+                error: "0:900: execution error: the driver is not signed by this app's team (3)\n"),
+            .failed("the driver is not signed by this app's team"))
+        XCTAssertEqual(
+            PrivilegedRunner.outcome(status: 1, error: ""),
+            .failed("osascript exited with status 1."))
+        // A line logged after the error does not hide a cancel.
+        XCTAssertEqual(
+            PrivilegedRunner.outcome(
+                status: 1,
+                error: "0:120: execution error: User canceled. (-128)\n"
+                    + "2026-10-14 objc[1]: some framework note\n"),
+            .cancelled)
+        XCTAssertEqual(
+            PrivilegedRunner.outcome(status: 1, error: "0:12: syntax error: Expected end of line."),
+            .failed("syntax error: Expected end of line."))
+    }
+}
+
+final class OsascriptCall: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: (arguments: [String], onMain: Bool)?
+    func record(arguments: [String], onMain: Bool) {
+        lock.withLock { recorded = (arguments, onMain) }
+    }
+    var arguments: [String]? { lock.withLock { recorded?.arguments } }
+    var onMain: Bool? { lock.withLock { recorded?.onMain } }
 }

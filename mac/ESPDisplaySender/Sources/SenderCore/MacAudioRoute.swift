@@ -165,9 +165,6 @@ final class MacAudioRouter {
     private var appliedDefaultUID: String?
     /// The display devices present at the last pass, by UID.
     private(set) var presentDevices: [String: AudioObjectID] = [:]
-    /// What the last pass registered, for a heartbeat sent while the main
-    /// thread waits on the macOS password prompt.
-    private(set) var heartbeat: [DisplayAudioDeviceSpec] = []
     /// Passes in a row that found the driver full with a display missing.
     private var fullPasses = 0
     /// The displays those passes were for.
@@ -200,9 +197,7 @@ final class MacAudioRouter {
             let accepted = bridge.register(displays)
             refused = !accepted
             registered = accepted || registered
-            heartbeat = accepted ? displays : []
         } else if registered {
-            heartbeat = []
             bridge.register([])
             registered = false
         }

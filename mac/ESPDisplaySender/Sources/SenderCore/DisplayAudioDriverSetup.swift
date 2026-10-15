@@ -191,6 +191,10 @@ enum DisplayAudioDriverInstaller {
     /// anything from it.
     static let staging = halFolder + "/.ESPDisplayAudio.installing"
     static let staged = staging + "/ESPDisplayAudio.driver"
+    /// Held for the whole of an install or removal, by this app and by
+    /// mac/AudioDriver/install-driver.sh alike, so two can never interleave
+    /// (a relaunched app's against one still pending, say).
+    static let lock = halFolder + "/.ESPDisplayAudio.lock"
 
     /// Where the app's build puts its driver (mac/AudioDriver/embed-driver.sh).
     static func bundledDriver(in bundle: Bundle = .main) -> URL? {
@@ -227,6 +231,40 @@ enum DisplayAudioDriverInstaller {
     /// can reach the copy between the check and the move. Absolute tool paths
     /// throughout: it runs as root.
     static func installCommand(source: URL, team: String) -> String {
+        locked(installScript(source: source, team: team))
+    }
+
+    static func removeCommand() -> String { locked(removeScript()) }
+
+    /// What lockf runs: `script` in a shell of its own, so its `set -e` holds
+    /// (a subshell on the left of `||` would switch it off). Exit 75 is
+    /// lockf's "timed out"; the script's own 75, should a tool ever return
+    /// it, is passed on as 70 so it is not read as one.
+    static func lockedBody(_ script: String) -> String {
+        "/bin/sh -c \(shellQuoted(script)) || { s=$?; if [ $s -eq 75 ]; then exit 70; fi; exit $s; }"
+    }
+
+    /// Seconds to wait for another install or removal to finish.
+    static let lockWaitSeconds = 30
+
+    /// `script` run by /bin/sh under the install lock. The lock file is made
+    /// root-only first, so no other user can hold it to stall an install, and
+    /// the wait for it is bounded and said plainly when it runs out.
+    static func locked(_ script: String) -> String {
+        let lockPath = shellQuoted(lock)
+        let inner = lockedBody(script)
+        return "/bin/mkdir -p \(shellQuoted(halFolder))"
+            + " && (umask 077 && /usr/bin/touch \(lockPath))"
+            + " && /usr/sbin/chown root:wheel \(lockPath)"
+            + " && /bin/chmod 600 \(lockPath)"
+            + " && { /usr/bin/lockf -s -k -t \(lockWaitSeconds) \(lockPath)"
+            + " /bin/sh -c \(shellQuoted(inner)) || { status=$?;"
+            + " if [ $status -eq 75 ]; then echo 'another install or removal of the"
+            + " audio driver is still running; try again in a minute' >&2; fi;"
+            + " exit $status; }; }"
+    }
+
+    static func installScript(source: URL, team: String) -> String {
         let requirement = "=anchor apple generic and identifier \""
             + DisplayAudioDriverProtocol.bundleID
             + "\" and certificate leaf[subject.OU] = \"\(team)\""
@@ -251,7 +289,7 @@ enum DisplayAudioDriverInstaller {
         ].joined(separator: "; ")
     }
 
-    static func removeCommand() -> String {
+    static func removeScript() -> String {
         [
             "set -e",
             "/bin/rm -rf \(shellQuoted(target))",
@@ -259,40 +297,151 @@ enum DisplayAudioDriverInstaller {
         ].joined(separator: "; ")
     }
 
+    /// What the macOS password dialog says. osascript runs the command, so
+    /// the dialog names osascript; this says who is asking, and for what.
+    static func prompt(for action: DisplayAudioDriverAction) -> String {
+        switch action {
+        case .install:
+            return "ESPDisplaySender wants to install its display audio driver, so "
+                + "your displays can be this Mac's sound output."
+        case .remove:
+            return "ESPDisplaySender wants to remove its display audio driver."
+        }
+    }
+
     /// The AppleScript that runs `command` as root behind the standard macOS
-    /// administrator prompt, which names this app.
-    static func appleScript(for command: String) -> String {
-        let escaped = command
-            .replacingOccurrences(of: "\\", with: "\\\\")
+    /// administrator prompt, showing `prompt`.
+    static func appleScript(for command: String, prompt: String) -> String {
+        "do shell script \"\(appleScriptEscaped(command))\" with prompt \""
+            + appleScriptEscaped(prompt) + "\" with administrator privileges"
+    }
+
+    private static func appleScriptEscaped(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
-        return "do shell script \"\(escaped)\" with administrator privileges"
     }
 }
 
 /// Runs a root command behind the macOS administrator prompt. Injectable so
 /// tests never raise the prompt.
 struct PrivilegedRunner: Sendable {
-    let run: @MainActor @Sendable (_ command: String) async -> PrivilegedRunResult
+    let run: @MainActor @Sendable (_ command: String, _ prompt: String) async
+        -> PrivilegedRunResult
 
-    /// AppleScript's `do shell script ... with administrator privileges`:
-    /// Authorization Services' own password prompt, naming this app, with no
-    /// helper left installed. NSAppleScript belongs on the main thread, and
-    /// the call waits there while the prompt is up; it is deferred one turn
-    /// of the run loop so the row shows "Installing…" first.
-    static let appleScript = PrivilegedRunner(run: { command in
-        await Task.yield()
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        let source = DisplayAudioDriverInstaller.appleScript(for: command)
-        guard let script = NSAppleScript(source: source) else {
-            return .failed("the install script could not be prepared.")
+    /// Runs osascript with the given arguments and returns its exit status and
+    /// standard error. Blocks until it exits, which is as long as the user
+    /// leaves the password dialog up.
+    typealias Executor = @Sendable (_ arguments: [String]) -> (status: Int32, error: String)
+
+    /// AppleScript's `do shell script ... with administrator privileges`, in
+    /// /usr/bin/osascript: Authorization Services' own password dialog, with
+    /// no helper left installed. A separate process waited on from a
+    /// background queue, so the main thread (the window, the busy row, the
+    /// driver's two-second heartbeat) carries on while the dialog is up, and
+    /// the outcome comes back on the main actor.
+    static let system = osascript(executor: runOsascript)
+
+    /// osascript processes still waiting on their dialog. Ended when the app
+    /// quits, so a dialog answered after the app is gone runs nothing.
+    private static let running = RunningProcesses()
+
+    static func terminateRunning() { running.terminateAll() }
+
+    /// For tests only: admit processes again after `terminateRunning`.
+    static func reopenForTesting() { running.reopen() }
+
+    static func osascript(executor: @escaping Executor) -> PrivilegedRunner {
+        PrivilegedRunner(run: { command, prompt in
+            let arguments = [
+                "-e", DisplayAudioDriverInstaller.appleScript(for: command, prompt: prompt),
+            ]
+            let (status, error) = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(returning: executor(arguments))
+                }
+            }
+            return outcome(status: status, error: error)
+        })
+    }
+
+    /// osascript prints "<range>: execution error: <message> (<number>)";
+    /// -128 is the user cancelling the dialog.
+    static func outcome(status: Int32, error: String) -> PrivilegedRunResult {
+        guard status != 0 else { return .succeeded }
+        var text = error.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Only the error line counts: anything a framework logs around it
+        // does not change what happened.
+        if let line = text.split(separator: "\n").last(where: { $0.contains("execution error: ") }) {
+            text = String(line)
         }
-        var error: NSDictionary?
-        script.executeAndReturnError(&error)
-        guard let error else { return .succeeded }
-        if (error[NSAppleScript.errorNumber] as? Int) == -128 { return .cancelled }
-        let text = (error[NSAppleScript.errorMessage] as? String)
-            ?? (error[NSAppleScript.errorBriefMessage] as? String)
-            ?? "error \(error[NSAppleScript.errorNumber] as? Int ?? 0)"
-        return .failed(text)
-    })
+        if text.hasSuffix("(-128)") { return .cancelled }
+        if let marker = text.range(of: "execution error: ") {
+            text = String(text[marker.upperBound...])
+        } else if let range = text.range(of: #"^\d+:\d+: "#, options: .regularExpression) {
+            text.removeSubrange(range)
+        }
+        if let open = text.range(of: " (", options: .backwards), text.hasSuffix(")"),
+           Int(text[open.upperBound..<text.index(before: text.endIndex)]) != nil {
+            text = String(text[..<open.lowerBound])
+        }
+        return .failed(text.isEmpty ? "osascript exited with status \(status)." : text)
+    }
+
+    static let runOsascript: Executor = { arguments in
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = arguments
+        let errors = Pipe()
+        process.standardError = errors
+        process.standardOutput = FileHandle.nullDevice
+        guard running.admits else { return (-1, "the app is quitting.") }
+        do {
+            try process.run()
+        } catch {
+            return (-1, "osascript could not be started: \(error.localizedDescription)")
+        }
+        // Registered before it starts, and ended at once if the app began
+        // quitting in between, so no window is left for a dialog to outlive it.
+        guard running.add(process) else {
+            process.terminate()
+            return (-1, "the app is quitting.")
+        }
+        let data = errors.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        running.remove(process)
+        return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+    }
+}
+
+/// The osascript processes PrivilegedRunner has running.
+final class RunningProcesses: @unchecked Sendable {
+    private let lock = NSLock()
+    private var processes: [ObjectIdentifier: Process] = [:]
+    private var closed = false
+
+    /// False once the app has begun quitting.
+    var admits: Bool { lock.withLock { !closed } }
+
+    /// Returns false, keeping nothing, once the app has begun quitting.
+    func add(_ process: Process) -> Bool {
+        lock.withLock {
+            guard !closed else { return false }
+            processes[ObjectIdentifier(process)] = process
+            return true
+        }
+    }
+
+    func remove(_ process: Process) { lock.withLock { processes[ObjectIdentifier(process)] = nil } }
+
+    /// Ends every process and admits no more.
+    func terminateAll() {
+        let all = lock.withLock {
+            closed = true
+            return Array(processes.values)
+        }
+        for process in all where process.isRunning { process.terminate() }
+    }
+
+    /// For tests, which quit more than once.
+    func reopen() { lock.withLock { closed = false } }
 }
