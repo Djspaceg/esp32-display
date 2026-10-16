@@ -15,7 +15,7 @@ final class FollowMacSoundTests: XCTestCase {
     private let follow = "Follow the Mac's Sound setting"
     private let alsoCopy = "Also copy the Mac's sound to the devices"
     private let speakers = MacOutputDevice(
-        uid: "BuiltInSpeakerDevice", name: "MacBook Pro Speakers", isBuiltIn: true)
+        uid: "BuiltInSpeakerDevice", name: "MacBook Pro Speakers")
     private let desk = DisplayAudioDeviceSpec(
         uid: "com.espdisplay.display.AAAA", name: "Desk", latencyFrames: 7_200)
 
@@ -48,25 +48,21 @@ final class FollowMacSoundTests: XCTestCase {
 
     // MARK: - Following the Mac's Sound setting
 
-    /// The app never picks the Mac's output when it follows the Sound
-    /// setting: the display device is made, and the human chooses it or not.
-    func testFollowingNeverChangesTheMacsOutput() throws {
+    /// Following the Sound setting, the app makes each ESP device's output
+    /// and leaves the choosing to the human: the router can read the Mac's
+    /// devices but has nothing that could change its output. Quitting
+    /// withdraws the outputs.
+    func testFollowingMakesTheOutputsAndQuittingWithdrawsThem() throws {
         let route = try stored(#"{"macAudioRoute": "displaysOnly"}"#)
         let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        let system = FakeMacOutputSystem(devices: [speakers])
         system.show([desk])
         let router = MacAudioRouter(bridge: driver, system: system)
         for _ in 0..<3 { router.update(route: route, displays: [desk]) }
-        XCTAssertEqual(driver.lastRegistration, [desk], "the display's device is made")
-        XCTAssertEqual(system.defaultChanges, [])
-        XCTAssertEqual(system.created.count, 0)
-        XCTAssertEqual(system.defaultUID, speakers.uid)
-        // Chosen in Sound settings, then the app quits: still not touched.
-        system.defaultUID = desk.uid
-        router.update(route: route, displays: [desk])
+        XCTAssertEqual(driver.lastRegistration, [desk], "the device's output is made")
+        XCTAssertEqual(driver.registrationCount, 3, "every pass is a heartbeat")
         router.shutdown()
-        XCTAssertEqual(system.defaultChanges, [])
-        XCTAssertEqual(system.defaultUID, desk.uid)
+        XCTAssertEqual(driver.lastRegistration, [], "the outputs are withdrawn")
     }
 
     /// Following the Mac never taps or copies its sound, even when the driver
@@ -76,7 +72,7 @@ final class FollowMacSoundTests: XCTestCase {
         let route = try stored(#"{"macAudioRoute": "displaysOnly"}"#)
         let driver = FakeDisplayAudioDriver()
         driver.state = .absent
-        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        let system = FakeMacOutputSystem(devices: [speakers])
         let router = MacAudioRouter(bridge: driver, system: system)
         let plan = router.update(route: route, displays: [desk])
         XCTAssertTrue(plan.note?.contains("Install Audio Driver") == true, plan.note ?? "")
@@ -84,13 +80,13 @@ final class FollowMacSoundTests: XCTestCase {
         downlinks.update(effective: plan.effective, identities: ["espdisp-desk": desk])
         let source = downlinks.source(for: "espdisp-desk")
         XCTAssertFalse(source.key.hasPrefix("tap"), "the Mac's sound is not copied: \(source.key)")
-        XCTAssertEqual(system.defaultChanges, [])
     }
 
-    /// While the display's device is not the Mac's output, macOS sends it
-    /// nothing, the driver has nothing to hand over, and the display's
-    /// speaker gets only the silence that keeps its microphone link alive.
-    func testADisplayThatIsNotTheMacsOutputGetsOnlySilence() throws {
+    /// With no frames from the driver, as for an output that is not the
+    /// Mac's (the driver's own test shows it hands over none), the device's
+    /// speaker gets only the silence that keeps its microphone link alive,
+    /// and frames that do arrive are what it plays.
+    func testNoFramesFromTheDriverMeansOnlySilence() throws {
         let route = try stored(#"{"macAudioRoute": "displaysOnly"}"#)
         let driver = FakeDisplayAudioDriver()
         driver.addDevice(uid: desk.uid, id: 7)
@@ -133,18 +129,24 @@ final class FollowMacSoundTests: XCTestCase {
         XCTAssertTrue(after.contains { pcm16Samples($0.samples).contains { $0 != 0 } })
     }
 
+    /// Before the first route pass, or with routing never started, a session
+    /// built now follows the Mac: it never opens the tap or its prompt.
+    func testAFreshDownlinkNeverTaps() {
+        let downlinks = PanelAudioDownlinks(bridge: FakeDisplayAudioDriver())
+        XCTAssertNotEqual(downlinks.source(for: "espdisp-desk").key, "tap")
+    }
+
     // MARK: - Also copying the Mac's sound
 
     func testCopyingTapsTheMacsSoundAndLeavesItsOutputAlone() throws {
         let route = try stored(#"{"macAudioRoute": "copy"}"#)
         let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
+        let system = FakeMacOutputSystem(devices: [speakers])
         let router = MacAudioRouter(bridge: driver, system: system)
         let plan = router.update(route: route, displays: [desk])
         let downlinks = PanelAudioDownlinks(bridge: driver)
         downlinks.update(effective: plan.effective, identities: ["espdisp-desk": desk])
         XCTAssertEqual(downlinks.source(for: "espdisp-desk").key, "tap")
-        XCTAssertEqual(system.defaultChanges, [])
         XCTAssertTrue(driver.registrations.allSatisfy(\.isEmpty), "no display device is made")
     }
 }

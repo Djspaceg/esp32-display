@@ -1015,9 +1015,9 @@ struct PanelDetailView: View {
         }
     }
 
-    /// Where sound plays, one choice for every display: the Mac has a single
-    /// default output. A plain line under it says what the choice does, and a
-    /// status line says why when the choice cannot be used yet.
+    /// What plays on the ESP devices, one choice for every device. A plain
+    /// line under it says what the choice does, and a status line says why
+    /// when the choice cannot be used yet.
     @ViewBuilder
     private var macAudioRouteRow: some View {
         LabeledContent("Play sound on") {

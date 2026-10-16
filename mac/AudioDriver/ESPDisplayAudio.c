@@ -98,6 +98,9 @@ typedef struct {
     // Guarded by ioMutex.
     pthread_mutex_t ioMutex;
     UInt64 ioRunCount;
+    // Whether macOS is running IO on the device, i.e. it is an output in use.
+    // Read without ioMutex by whichever HAL thread reads 'ESpc'.
+    _Atomic bool ioRunning;
     UInt64 anchorHostTime;
     UInt64 timestampCount;
 
@@ -323,6 +326,7 @@ static bool ApplyDesiredDevices(const DeviceSpec* desired, UInt32 count,
         // After the new IDs, so a late StartIO on the old ID cannot land in it.
         pthread_mutex_lock(&slot->ioMutex);
         slot->ioRunCount = 0;
+        atomic_store(&slot->ioRunning, false);
         atomic_store_explicit(&slot->writeHead, 0, memory_order_relaxed);
         atomic_fetch_add_explicit(&slot->generation, 1, memory_order_release);
         pthread_mutex_unlock(&slot->ioMutex);
@@ -546,6 +550,13 @@ static CFDataRef CopyPendingFrames(DeviceSlot* slot) {
     pthread_mutex_lock(&slot->readMutex);
     UInt64 generation = atomic_load_explicit(&slot->generation, memory_order_acquire);
     UInt64 head = atomic_load_explicit(&slot->writeHead, memory_order_acquire);
+    // A device macOS is not running IO on is not the Mac's output: whatever
+    // was mixed before it stopped and not yet read is dropped, so a device
+    // just switched away from hands over nothing, not its last 100 ms.
+    if (!atomic_load(&slot->ioRunning)) {
+        slot->readGeneration = generation;
+        slot->readCursor = head;
+    }
     if (generation != slot->readGeneration || slot->readCursor > head) {
         slot->readGeneration = generation;
         slot->readCursor = head > kMaxReadFrames ? head - kMaxReadFrames : 0;
@@ -1558,6 +1569,7 @@ static OSStatus StartIO(AudioServerPlugInDriverRef driver, AudioObjectID deviceI
         atomic_fetch_add_explicit(&slot->generation, 1, memory_order_release);
     }
     ++slot->ioRunCount;
+    atomic_store(&slot->ioRunning, true);
     pthread_mutex_unlock(&slot->ioMutex);
     return kAudioHardwareNoError;
 }
@@ -1574,6 +1586,7 @@ static OSStatus StopIO(AudioServerPlugInDriverRef driver, AudioObjectID deviceID
         status = kAudioHardwareIllegalOperationError;
     } else {
         --slot->ioRunCount;
+        if (slot->ioRunCount == 0) atomic_store(&slot->ioRunning, false);
     }
     pthread_mutex_unlock(&slot->ioMutex);
     return status;

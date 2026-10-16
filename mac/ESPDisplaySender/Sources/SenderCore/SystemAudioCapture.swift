@@ -138,7 +138,7 @@ final class CoreAudioProcessTap: SystemAudioTap {
         if let bundleID = Bundle.main.bundleIdentifier {
             description.bundleIDs = [bundleID]
         }
-        description.name = "ESPDisplaySender display speaker"
+        description.name = "ESPDisplaySender device speaker"
         description.uuid = UUID()
         description.isPrivate = true
         description.muteBehavior = .unmuted
@@ -172,7 +172,7 @@ final class CoreAudioProcessTap: SystemAudioTap {
             self.format = format
 
             let aggregate: [String: Any] = [
-                kAudioAggregateDeviceNameKey: "ESPDisplaySender display speaker",
+                kAudioAggregateDeviceNameKey: "ESPDisplaySender device speaker",
                 kAudioAggregateDeviceUIDKey:
                     SystemAudioTapIdentity.aggregateUIDPrefix + UUID().uuidString,
                 kAudioAggregateDeviceIsPrivateKey: true,

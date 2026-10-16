@@ -453,6 +453,13 @@ static void TestADeviceThatIsNotTheOutputGivesNothing(void) {
         free(samples);
         samples = NULL;
     }
+    // Played to and stopped before the app read it (the app was restarting,
+    // say): once another output is chosen, what was left is not handed over.
+    CHECK((*gDriver)->StartIO(gDriver, shelf, 1) == 0);
+    WriteFrames(shelf, Owned(shelf, 0), 0, 512, One);
+    CHECK((*gDriver)->StopIO(gDriver, shelf, 1) == 0);
+    CHECK(ReadFrames(shelf, &samples) == 0);
+    free(samples);
 }
 
 static void TestMixedAudioIsReadBackOnce(void) {

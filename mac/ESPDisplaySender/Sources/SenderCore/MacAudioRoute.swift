@@ -60,7 +60,6 @@ enum MacAudioRoute: String, Codable, CaseIterable, Identifiable, Sendable {
 struct MacOutputDevice: Equatable, Sendable {
     let uid: String
     let name: String
-    let isBuiltIn: Bool
 }
 
 /// What the router reads from CoreAudio. Read only: the app never changes
@@ -250,23 +249,8 @@ final class MacAudioRouter {
 @MainActor
 final class CoreAudioMacOutputSystem: MacOutputSystem {
     func outputDevices() -> [MacOutputDevice] {
-        CoreAudioDeviceCatalog.devices(includingOwnDevices: true)
+        CoreAudioDeviceCatalog.devices()
             .filter(\.option.supportsOutput)
-            .map {
-                MacOutputDevice(
-                    uid: $0.option.uid, name: $0.option.name,
-                    isBuiltIn: transportType($0.id) == kAudioDeviceTransportTypeBuiltIn)
-            }
-    }
-
-    private func transportType(_ device: AudioDeviceID) -> UInt32 {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyTransportType,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var value: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value)
-        return value
+            .map { MacOutputDevice(uid: $0.option.uid, name: $0.option.name) }
     }
 }

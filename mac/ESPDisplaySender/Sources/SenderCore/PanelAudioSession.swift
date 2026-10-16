@@ -122,7 +122,7 @@ struct PanelDownlinkSource: Sendable {
     let unavailableSourceName: String
     let unavailableLead: String
     /// The tap is rebuilt on every route change, since it depends on the
-    /// default output. A display's own device does not: when the driver
+    /// default output. An ESP device's own output does not: when the driver
     /// makes it again, its source's key (which carries the device's object
     /// ID) changes instead, so it restarts once rather than twice.
     var followsRouteChanges = true

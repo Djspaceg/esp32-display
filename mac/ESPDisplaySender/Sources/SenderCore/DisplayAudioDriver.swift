@@ -117,8 +117,8 @@ protocol DisplayAudioDriverBridge: AnyObject, Sendable {
     /// `uid` is the display's registered UID; the bridge finds the device
     /// macOS lists for it under this app's ownership.
     func deviceID(uid: String) -> AudioObjectID?
-    /// The UID macOS lists for this app's device for `uid`, as the default
-    /// output and Multi-Output devices name it.
+    /// The UID macOS lists for this app's device for `uid`, as Sound settings
+    /// and the device list name it.
     func deviceUID(for uid: String) -> String
     /// Whether a device for `uid` exists under another owner's suffix: one
     /// this app cannot find by its own UID, so it must look for it. Reads the
@@ -202,7 +202,7 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
 
     func isClaimedElsewhere(uid: String) -> Bool {
         let mine = deviceUID(for: uid)
-        return CoreAudioDeviceCatalog.devices(includingOwnDevices: true).contains {
+        return CoreAudioDeviceCatalog.devices().contains {
             $0.option.uid != mine
                 && DisplayAudioDriverProtocol.isDeviceUID($0.option.uid, of: uid)
         }

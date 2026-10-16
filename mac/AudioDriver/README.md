@@ -15,9 +15,8 @@ answers:
   whatever the Mac plays, wherever it plays it, to every device. Needs the
   System Audio Recording permission.
 
-Settings saved by earlier builds load as the nearest choice: "Copy this Mac's
-sound" and "Mirror to the displays" as the copy, "Displays only" as following
-the Mac.
+Choices saved by earlier builds load as the nearest one: the old copy and
+mirror choices as the copy, the old "only" choice as following the Mac.
 
 ## Installing from the app
 

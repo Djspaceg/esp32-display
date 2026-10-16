@@ -9,7 +9,9 @@ import SenderProtocol
 final class PanelAudioDownlinks: @unchecked Sendable {
     private let lock = NSLock()
     private let bridge: DisplayAudioDriverBridge
-    private var effective = MacAudioRoute.copy
+    /// Follows the Mac until the first route pass says otherwise, so a
+    /// session built before it never opens the tap or its prompt.
+    private var effective = MacAudioRoute.followMac
     /// Every display record, not only the ones with a device yet, so a
     /// session built before the next pass still gets its own device.
     private var identities: [String: DisplayAudioDeviceSpec] = [:]
@@ -64,7 +66,7 @@ final class PanelAudioDownlinks: @unchecked Sendable {
 
 /// The app's whole Mac-audio routing state. The router exists only once the
 /// app starts it, so a test that builds a `PanelManager` never registers
-/// devices or moves the default output of the Mac running it.
+/// devices with the driver of the Mac running it.
 @MainActor
 final class MacAudioRouting {
     let bridge: DisplayAudioDriverBridge
@@ -152,7 +154,8 @@ extension PanelManager {
         applyMacAudioRoute()
     }
 
-    /// Put the Mac's own output back and remove the displays' devices.
+    /// Withdraw the ESP devices' outputs; macOS moves the Mac's output off
+    /// one that goes away.
     func stopMacAudioRouting() {
         macAudio.stop()
     }
