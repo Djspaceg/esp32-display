@@ -34,6 +34,8 @@
 // CFString (refused otherwise): every frame mixed for the device since the
 // previous read, at most ESPDISP_AUDIO_MAX_READ_FRAMES of the newest, as
 // interleaved stereo native-endian Float32 at ESPDISP_AUDIO_SAMPLE_RATE.
+// Once macOS stops IO on the device (it is no longer an output in use),
+// frames not read within 100 ms are dropped and the read returns none.
 #define ESPDISP_AUDIO_SELECTOR_PCM 'ESpc'
 // Device object, read-only CFNumber 1 or 0, qualified the same way: whether
 // the token owns the device. Takes no frames.

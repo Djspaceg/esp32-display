@@ -453,11 +453,21 @@ static void TestADeviceThatIsNotTheOutputGivesNothing(void) {
         free(samples);
         samples = NULL;
     }
-    // Played to and stopped before the app read it (the app was restarting,
-    // say): once another output is chosen, what was left is not handed over.
+    // A sound that ends just before IO stops: its last frames, mixed since
+    // the previous 10 ms read, are still handed over right after the stop.
     CHECK((*gDriver)->StartIO(gDriver, shelf, 1) == 0);
     WriteFrames(shelf, Owned(shelf, 0), 0, 512, One);
     CHECK((*gDriver)->StopIO(gDriver, shelf, 1) == 0);
+    CHECK(ReadFrames(shelf, &samples) == 512);
+    free(samples);
+    samples = NULL;
+    // Played to and stopped long before the app read it (the app was
+    // restarting, say): once another output is chosen, what was left is
+    // not handed over.
+    CHECK((*gDriver)->StartIO(gDriver, shelf, 1) == 0);
+    WriteFrames(shelf, Owned(shelf, 0), 0, 512, One);
+    CHECK((*gDriver)->StopIO(gDriver, shelf, 1) == 0);
+    AdvanceSeconds(1);
     CHECK(ReadFrames(shelf, &samples) == 0);
     free(samples);
 }

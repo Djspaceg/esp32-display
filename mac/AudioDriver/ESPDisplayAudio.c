@@ -56,6 +56,8 @@ enum {
 static const Float64 kSampleRate = ESPDISP_AUDIO_SAMPLE_RATE;
 static const Float32 kMinimumDecibels = -96.0f;
 static const UInt64 kClientTimeoutSeconds = ESPDISP_AUDIO_CLIENT_TIMEOUT_SECONDS;
+// Ten of the app's 10 ms reads: enough for the last read before a stop.
+static const Float64 kStopGraceSeconds = 0.1;
 
 #pragma mark - State
 
@@ -101,6 +103,9 @@ typedef struct {
     // Whether macOS is running IO on the device, i.e. it is an output in use.
     // Read without ioMutex by whichever HAL thread reads 'ESpc'.
     _Atomic bool ioRunning;
+    // When IO last stopped, by gNow(): frames mixed before it are still
+    // handed over for kStopGraceSeconds, then dropped.
+    _Atomic UInt64 stoppedHostTime;
     UInt64 anchorHostTime;
     UInt64 timestampCount;
 
@@ -550,10 +555,13 @@ static CFDataRef CopyPendingFrames(DeviceSlot* slot) {
     pthread_mutex_lock(&slot->readMutex);
     UInt64 generation = atomic_load_explicit(&slot->generation, memory_order_acquire);
     UInt64 head = atomic_load_explicit(&slot->writeHead, memory_order_acquire);
-    // A device macOS is not running IO on is not the Mac's output: whatever
-    // was mixed before it stopped and not yet read is dropped, so a device
-    // just switched away from hands over nothing, not its last 100 ms.
-    if (!atomic_load(&slot->ioRunning)) {
+    // A device macOS is not running IO on is not the Mac's output. What was
+    // mixed just before it stopped is still handed over, so a sound's end
+    // is not clipped by the 10 ms between reads; past kStopGraceSeconds it
+    // is dropped, so a device switched away from long ago hands over nothing.
+    if (!atomic_load(&slot->ioRunning)
+        && gNow() - atomic_load(&slot->stoppedHostTime)
+            > (UInt64)(gHostTicksPerSecond * kStopGraceSeconds)) {
         slot->readGeneration = generation;
         slot->readCursor = head;
     }
@@ -1586,7 +1594,10 @@ static OSStatus StopIO(AudioServerPlugInDriverRef driver, AudioObjectID deviceID
         status = kAudioHardwareIllegalOperationError;
     } else {
         --slot->ioRunCount;
-        if (slot->ioRunCount == 0) atomic_store(&slot->ioRunning, false);
+        if (slot->ioRunCount == 0) {
+            atomic_store(&slot->stoppedHostTime, gNow());
+            atomic_store(&slot->ioRunning, false);
+        }
     }
     pthread_mutex_unlock(&slot->ioMutex);
     return status;
