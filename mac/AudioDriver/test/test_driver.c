@@ -470,6 +470,26 @@ static void TestADeviceThatIsNotTheOutputGivesNothing(void) {
     AdvanceSeconds(1);
     CHECK(ReadFrames(shelf, &samples) == 0);
     free(samples);
+    samples = NULL;
+    // Either side of the 100 ms grace.
+    CHECK((*gDriver)->StartIO(gDriver, shelf, 1) == 0);
+    WriteFrames(shelf, Owned(shelf, 0), 0, 128, One);
+    CHECK((*gDriver)->StopIO(gDriver, shelf, 1) == 0);
+    AdvanceSeconds(0.08);
+    CHECK(ReadFrames(shelf, &samples) == 128);
+    free(samples);
+    samples = NULL;
+    CHECK((*gDriver)->StartIO(gDriver, shelf, 1) == 0);
+    WriteFrames(shelf, Owned(shelf, 0), 0, 128, One);
+    CHECK((*gDriver)->StopIO(gDriver, shelf, 1) == 0);
+    AdvanceSeconds(0.12);
+    CHECK(ReadFrames(shelf, &samples) == 0);
+    free(samples);
+    samples = NULL;
+    // A write after the stop, which the HAL should never make, is ignored.
+    WriteFrames(shelf, Owned(shelf, 0), 128, 128, One);
+    CHECK(ReadFrames(shelf, &samples) == 0);
+    free(samples);
 }
 
 static void TestMixedAudioIsReadBackOnce(void) {

@@ -517,6 +517,9 @@ static CFDictionaryRef CopyRegistrationSummary(void) {
 // Called on the IO thread: no locks, no allocation.
 static void WriteMix(DeviceSlot* slot, Float64 sampleTime, UInt32 frames,
                      const Float32* buffer) {
+    // Only while macOS runs IO on the device: a write after it stopped is
+    // not part of what it played.
+    if (!atomic_load_explicit(&slot->ioRunning, memory_order_relaxed)) return;
     if (slot->ring == NULL || buffer == NULL || !(sampleTime >= 0)) return;
     if (frames > kRingFrames) frames = kRingFrames;
     UInt64 start = (UInt64)sampleTime;
@@ -559,9 +562,12 @@ static CFDataRef CopyPendingFrames(DeviceSlot* slot) {
     // mixed just before it stopped is still handed over, so a sound's end
     // is not clipped by the 10 ms between reads; past kStopGraceSeconds it
     // is dropped, so a device switched away from long ago hands over nothing.
-    if (!atomic_load(&slot->ioRunning)
-        && gNow() - atomic_load(&slot->stoppedHostTime)
-            > (UInt64)(gHostTicksPerSecond * kStopGraceSeconds)) {
+    bool stopped = !atomic_load(&slot->ioRunning);
+    UInt64 stoppedAt = atomic_load(&slot->stoppedHostTime);
+    UInt64 now = gNow();
+    if (stopped && (now < stoppedAt
+            ? false
+            : now - stoppedAt > (UInt64)(gHostTicksPerSecond * kStopGraceSeconds))) {
         slot->readGeneration = generation;
         slot->readCursor = head;
     }
