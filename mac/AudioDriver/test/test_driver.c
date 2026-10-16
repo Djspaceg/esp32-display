@@ -486,8 +486,11 @@ static void TestADeviceThatIsNotTheOutputGivesNothing(void) {
     CHECK(ReadFrames(shelf, &samples) == 0);
     free(samples);
     samples = NULL;
-    // A write after the stop, which the HAL should never make, is ignored.
-    WriteFrames(shelf, Owned(shelf, 0), 128, 128, One);
+    // A write after the stop, which the HAL should never make, is ignored,
+    // even inside the grace that still hands over what came before the stop.
+    CHECK((*gDriver)->StartIO(gDriver, shelf, 1) == 0);
+    CHECK((*gDriver)->StopIO(gDriver, shelf, 1) == 0);
+    WriteFrames(shelf, Owned(shelf, 0), 0, 128, One);
     CHECK(ReadFrames(shelf, &samples) == 0);
     free(samples);
 }
