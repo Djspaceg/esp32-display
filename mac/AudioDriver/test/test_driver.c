@@ -427,6 +427,34 @@ static void TestDevicesAppearWithTheirProperties(void) {
     CHECK(Counter(&gDeviceListChanges) == listChanges);
 }
 
+// A device that is not the Mac's output: macOS runs no IO on it, so the
+// driver has nothing to hand over and the app sends the ESP device only
+// silence. Once IO stops (another output chosen), nothing more comes either.
+static void TestADeviceThatIsNotTheOutputGivesNothing(void) {
+    AudioObjectID shelf = Translate("com.espdisplay.display.ddeeff");
+    CHECK(shelf != kAudioObjectUnknown);
+    Float32* samples = NULL;
+    for (int read = 0; read < 3; ++read) {
+        CHECK(ReadFrames(shelf, &samples) == 0);
+        free(samples);
+        samples = NULL;
+    }
+    CHECK(GetU32(shelf, kAudioDevicePropertyDeviceIsRunning, kAudioObjectPropertyScopeGlobal)
+          == 0);
+    // Chosen, played to, then another output chosen.
+    CHECK((*gDriver)->StartIO(gDriver, shelf, 1) == 0);
+    WriteFrames(shelf, Owned(shelf, 0), 0, 256, One);
+    CHECK(ReadFrames(shelf, &samples) == 256);
+    free(samples);
+    samples = NULL;
+    CHECK((*gDriver)->StopIO(gDriver, shelf, 1) == 0);
+    for (int read = 0; read < 3; ++read) {
+        CHECK(ReadFrames(shelf, &samples) == 0);
+        free(samples);
+        samples = NULL;
+    }
+}
+
 static void TestMixedAudioIsReadBackOnce(void) {
     AudioObjectID desk = Translate("com.espdisplay.display.aabbcc");
     AudioObjectID stream = Owned(desk, 0);
@@ -755,6 +783,7 @@ int main(void) {
     TestFactoryAndInitialize();
     TestRegistrationIsValidated();
     TestDevicesAppearWithTheirProperties();
+    TestADeviceThatIsNotTheOutputGivesNothing();
     TestMixedAudioIsReadBackOnce();
     TestVolumeAndMuteScaleWhatIsRead();
     TestConcurrentWriteAndRead();

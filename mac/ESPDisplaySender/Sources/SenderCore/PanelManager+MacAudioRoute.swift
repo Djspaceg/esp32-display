@@ -35,6 +35,8 @@ final class PanelAudioDownlinks: @unchecked Sendable {
 
     func source(for serviceName: String) -> PanelDownlinkSource {
         lock.withLock {
+            // Only the copy taps the Mac's sound; following the Mac plays a
+            // device's own output, or nothing.
             guard effective.usesDriver else { return .systemTap() }
             guard let device = identities[serviceName] else {
                 // Not a display this app knows yet (a probe of a new board):
@@ -45,7 +47,7 @@ final class PanelAudioDownlinks: @unchecked Sendable {
                         throw NSError(
                             domain: "ESPDisplaySender.Audio", code: 5,
                             userInfo: [NSLocalizedDescriptionKey:
-                                "the display is not known to this Mac yet."])
+                                "the device is not known to this Mac yet."])
                     }),
                     identity: "pending")
             }

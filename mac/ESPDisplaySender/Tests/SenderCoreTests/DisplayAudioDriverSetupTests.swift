@@ -316,9 +316,9 @@ final class DisplayAudioDriverSetupTests: XCTestCase {
     /// text says it is this app asking, and for what.
     func testThePromptSaysWhoIsAskingAndWhy() {
         XCTAssertTrue(DisplayAudioDriverInstaller.prompt(for: .install)
-            .contains("ESPDisplaySender wants to install its display audio driver"))
+            .contains("ESPDisplaySender wants to install its audio driver, so your ESP devices"))
         XCTAssertTrue(DisplayAudioDriverInstaller.prompt(for: .remove)
-            .contains("ESPDisplaySender wants to remove its display audio driver"))
+            .contains("ESPDisplaySender wants to remove its audio driver"))
     }
 
     // MARK: - Off the main thread

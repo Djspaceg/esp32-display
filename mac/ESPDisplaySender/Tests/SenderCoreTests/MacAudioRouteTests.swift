@@ -55,16 +55,6 @@ class FakeMacOutputSystem: MacOutputSystem {
     }
 }
 
-/// Refuses to make one UID the default, as the HAL can for a device it has
-/// not listed yet.
-@MainActor
-final class RefusingDefault: FakeMacOutputSystem {
-    var refuse: String?
-    override func setDefaultOutput(uid: String) -> Bool {
-        uid == refuse ? false : super.setDefaultOutput(uid: uid)
-    }
-}
-
 @MainActor
 final class MacAudioRouteTests: XCTestCase {
     private let speakers = MacOutputDevice(
@@ -82,17 +72,18 @@ final class MacAudioRouteTests: XCTestCase {
         let plan = MacAudioRoutePlan.make(
             chosen: .copy, driver: .absent, presentDisplayUIDs: [])
         XCTAssertEqual(plan.effective, .copy)
-        XCTAssertEqual(plan.target, .restore)
         XCTAssertNil(plan.note)
     }
 
-    func testAMissingDriverFallsBackToTheCopyAndSaysHowToInstall() {
-        for route in [MacAudioRoute.displaysOnly] {
+    /// Following the Mac without the driver never falls back to copying the
+    /// Mac's sound: the devices stay quiet, and the note says how to install.
+    func testAMissingDriverLeavesTheDevicesQuietAndSaysHowToInstall() {
+        for route in [MacAudioRoute.followMac] {
             let plan = MacAudioRoutePlan.make(
                 chosen: route, driver: .absent, presentDisplayUIDs: [])
             XCTAssertEqual(plan.chosen, route)
-            XCTAssertEqual(plan.effective, .copy)
-            XCTAssertEqual(plan.target, .restore)
+            XCTAssertEqual(plan.effective, .followMac)
+            XCTAssertTrue(plan.note?.contains("stay quiet") == true, plan.note ?? "")
             XCTAssertTrue(plan.note?.contains("not installed") == true, plan.note ?? "")
             XCTAssertTrue(
                 plan.note?.contains("Install Audio Driver") == true, plan.note ?? "")
@@ -101,215 +92,21 @@ final class MacAudioRouteTests: XCTestCase {
 
     func testADriverFromAnotherBuildIsNotUsed() {
         let plan = MacAudioRoutePlan.make(
-            chosen: .displaysOnly, driver: .incompatible(version: 2),
+            chosen: .followMac, driver: .incompatible(version: 2),
             presentDisplayUIDs: ["d"])
-        XCTAssertEqual(plan.effective, .copy)
+        XCTAssertEqual(plan.effective, .followMac)
+        XCTAssertTrue(plan.note?.contains("stay quiet") == true, plan.note ?? "")
         XCTAssertTrue(plan.note?.contains("version 2") == true, plan.note ?? "")
     }
 
-    func testDisplaysOnlyWithOneDisplayMakesItTheDefaultOutput() {
+    func testNoDeviceOutputYetIsAWait() {
         let plan = MacAudioRoutePlan.make(
-            chosen: .displaysOnly, driver: .ready, presentDisplayUIDs: ["d1"])
-        XCTAssertEqual(plan.effective, .displaysOnly)
-        XCTAssertEqual(plan.target, .device(uid: "d1"))
-        XCTAssertNil(plan.note)
-    }
-
-    func testDisplaysOnlyWithSeveralDisplaysPlaysThemTogether() {
-        let plan = MacAudioRoutePlan.make(
-            chosen: .displaysOnly, driver: .ready, presentDisplayUIDs: ["d1", "d2"])
-        XCTAssertEqual(plan.target, .multiOutput(
-            uid: MacAudioRoutePlan.displaysUID, name: "ESPDisplay Displays",
-            mainUID: "d1", members: ["d1", "d2"]))
-    }
-
-
-    func testNoDisplayDeviceYetLeavesTheMacOnItsOwnOutput() {
-        let plan = MacAudioRoutePlan.make(
-            chosen: .displaysOnly, driver: .ready, presentDisplayUIDs: [])
-        XCTAssertEqual(plan.effective, .displaysOnly)
-        XCTAssertEqual(plan.target, .restore)
-        XCTAssertNotNil(plan.note)
-    }
-
-    func testOurDevicesAreNeverTheMacsOwnOutput() {
-        XCTAssertTrue(MacAudioRoutePlan.isOurs(uid: desk.uid))
-        XCTAssertTrue(MacAudioRoutePlan.isOurs(uid: MacAudioRoutePlan.legacyMirrorUID))
-        XCTAssertTrue(MacAudioRoutePlan.isOurs(uid: MacAudioRoutePlan.displaysUID))
-        XCTAssertFalse(MacAudioRoutePlan.isOurs(uid: speakers.uid))
+            chosen: .followMac, driver: .ready, presentDisplayUIDs: [])
+        XCTAssertEqual(plan.effective, .followMac)
+        XCTAssertEqual(plan.note, MacAudioRoutePlan.waitingNote)
     }
 
     // MARK: - The router
-
-    func testDisplaysOnlyRegistersTheDevicesAndMakesTheDisplayTheOutput() {
-        let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
-        let router = MacAudioRouter(bridge: driver, system: system)
-        let first = router.update(route: .displaysOnly, displays: [desk])
-        XCTAssertEqual(driver.lastRegistration, [desk])
-        // The fake driver's device exists at once, but CoreAudio lists it a
-        // moment later: the first pass can already route to it.
-        XCTAssertEqual(first.target, .device(uid: desk.uid))
-        system.show([desk])
-        let plan = router.update(route: .displaysOnly, displays: [desk])
-        XCTAssertEqual(plan.target, .device(uid: desk.uid))
-        XCTAssertEqual(system.defaultUID, desk.uid)
-        XCTAssertEqual(router.macOutputUID, speakers.uid, "the speakers are remembered")
-    }
-
-    func testTheDefaultIsChangedOnceNotOnEveryHeartbeat() {
-        let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
-        system.show([desk])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk])
-        XCTAssertEqual(system.defaultChanges, [desk.uid])
-        // The user picks the speakers in Sound settings afterwards.
-        system.defaultUID = speakers.uid
-        router.update(route: .displaysOnly, displays: [desk])
-        router.update(route: .displaysOnly, displays: [desk])
-        XCTAssertEqual(system.defaultUID, speakers.uid, "the user's pick stands")
-        XCTAssertEqual(driver.registrationCount, 3, "every pass is a heartbeat")
-    }
-
-
-    /// Picking another output in Sound settings while two displays play as
-    /// one stands: their Multi-Output device is not rebuilt and made default
-    /// again.
-    func testAUsersOwnPickAloneStandsOverTheDisplaysMultiOutput() {
-        let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(
-            devices: [speakers, headphones], defaultUID: speakers.uid)
-        system.show([desk, shelf])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk, shelf])
-        XCTAssertEqual(system.defaultUID, MacAudioRoutePlan.displaysUID)
-        system.defaultUID = headphones.uid
-        for _ in 0..<3 { router.update(route: .displaysOnly, displays: [desk, shelf]) }
-        XCTAssertEqual(system.defaultUID, headphones.uid)
-        XCTAssertEqual(system.created.count, 1)
-        // Going back to this Mac and the displays afterwards keeps the pick too.
-        router.update(route: .copy, displays: [desk, shelf])
-        XCTAssertEqual(system.defaultUID, headphones.uid)
-    }
-
-
-    /// Three displays play as one Multi-Output device, the default; the first,
-    /// its clock, goes away. The device is rebuilt on the new first display,
-    /// and the default is never the device being destroyed.
-    func testTheDisplaysDeviceIsRebuiltWhileItIsTheDefault() {
-        let driver = FakeDisplayAudioDriver()
-        let third = DisplayAudioDeviceSpec(
-            uid: "com.espdisplay.display.CCCC", name: "Third", latencyFrames: 7_200)
-        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
-        system.show([desk, shelf, third])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk, shelf, third])
-        XCTAssertEqual(system.defaultUID, MacAudioRoutePlan.displaysUID)
-        XCTAssertEqual(system.created.last?.main, desk.uid)
-        router.update(route: .displaysOnly, displays: [shelf, third])
-        XCTAssertEqual(system.created.count, 2)
-        XCTAssertEqual(system.created.last?.main, shelf.uid)
-        XCTAssertEqual(system.created.last?.members, [shelf.uid, third.uid])
-        XCTAssertEqual(system.defaultUID, MacAudioRoutePlan.displaysUID)
-        XCTAssertEqual(system.destroyedWhileDefault, [])
-        XCTAssertEqual(system.defaultChanges, [
-            MacAudioRoutePlan.displaysUID, shelf.uid, MacAudioRoutePlan.displaysUID,
-        ])
-    }
-
-    /// An earlier build's Multi-Output "mirror" device left as the default:
-    /// moving to the displays' own device never destroys the default first,
-    /// and the old device goes.
-    func testALeftoverMirrorDeviceIsReplacedWithoutDestroyingTheDefault() {
-        let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(
-            devices: [speakers], defaultUID: MacAudioRoutePlan.legacyMirrorUID)
-        system.devices.append(MacOutputDevice(
-            uid: MacAudioRoutePlan.legacyMirrorUID, name: "old", isBuiltIn: false))
-        system.show([desk, shelf])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk, shelf])
-        XCTAssertEqual(system.defaultUID, MacAudioRoutePlan.displaysUID)
-        XCTAssertTrue(system.destroyed.contains(MacAudioRoutePlan.legacyMirrorUID))
-        router.update(route: .copy, displays: [desk, shelf])
-        XCTAssertEqual(system.defaultUID, speakers.uid)
-        XCTAssertEqual(system.destroyedWhileDefault, [])
-        // Parked on the first display before the old device went, then the
-        // displays' device, then this Mac's own output back.
-        XCTAssertEqual(system.defaultChanges, [
-            desk.uid, MacAudioRoutePlan.displaysUID, speakers.uid,
-        ])
-    }
-
-
-    /// The driver dropped the devices (a stalled heartbeat) and made them
-    /// again: the same route is applied again to the new devices.
-    func testDevicesThatComeBackAsNewOnesAreRoutedAgain() {
-        let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
-        system.show([desk])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk])
-        XCTAssertEqual(system.defaultUID, desk.uid)
-        // The HAL moved the default when the device went away.
-        system.defaultUID = speakers.uid
-        driver.idBase = 200
-        router.update(route: .displaysOnly, displays: [desk])
-        XCTAssertEqual(system.defaultUID, desk.uid)
-    }
-
-    /// A pass that could not make the device default tries again without
-    /// rebuilding a Multi-Output device that is already right.
-    func testARetryReusesAMatchingMultiOutputDevice() {
-        let driver = FakeDisplayAudioDriver()
-        let system = RefusingDefault(devices: [speakers], defaultUID: speakers.uid)
-        system.show([desk, shelf])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        system.refuse = MacAudioRoutePlan.displaysUID
-        router.update(route: .displaysOnly, displays: [desk, shelf])
-        router.update(route: .displaysOnly, displays: [desk, shelf])
-        XCTAssertEqual(system.created.count, 1)
-        system.refuse = nil
-        router.update(route: .displaysOnly, displays: [desk, shelf])
-        XCTAssertEqual(system.created.count, 1)
-        XCTAssertEqual(system.defaultUID, MacAudioRoutePlan.displaysUID)
-    }
-
-
-    /// An output picked outside the app is left alone, and the route says
-    /// where the sound went and how to send it back.
-    func testAnOutputPickedElsewhereIsNotedNotOverruled() {
-        let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(
-            devices: [speakers, headphones], defaultUID: speakers.uid)
-        system.show([desk])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        XCTAssertNil(router.update(route: .displaysOnly, displays: [desk]).note)
-        system.defaultUID = headphones.uid
-        let plan = router.update(route: .displaysOnly, displays: [desk])
-        XCTAssertEqual(system.defaultUID, headphones.uid)
-        XCTAssertTrue(plan.note?.contains("\"Headphones\"") == true, plan.note ?? "")
-        XCTAssertTrue(plan.note?.contains("\"Desk\"") == true, plan.note ?? "")
-        system.defaultUID = desk.uid
-        XCTAssertNil(router.update(route: .displaysOnly, displays: [desk]).note)
-    }
-
-    /// A Mac with no output of its own while one of ours is the default: the
-    /// copy waits quietly, and moves the Mac back once an output appears.
-    func testRestoreWaitsForAMacOutputAndThenUsesIt() {
-        let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(devices: [], defaultUID: desk.uid)
-        system.show([desk])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .copy, displays: [])
-        router.update(route: .copy, displays: [])
-        XCTAssertNil(router.macOutputUID)
-        XCTAssertEqual(system.defaultChanges, [])
-        system.devices.append(speakers)
-        router.update(route: .copy, displays: [])
-        XCTAssertEqual(system.defaultUID, speakers.uid)
-    }
 
     /// A display device another process registered first is never made the
     /// Mac's output: that process would get the Mac's sound.
@@ -321,27 +118,10 @@ final class MacAudioRouteTests: XCTestCase {
         system.devices.append(MacOutputDevice(
             uid: desk.uid + ".0123456789abcdef", name: "Desk", isBuiltIn: false))
         let router = MacAudioRouter(bridge: driver, system: system)
-        let plan = router.update(route: .displaysOnly, displays: [desk])
+        let plan = router.update(route: .followMac, displays: [desk])
         XCTAssertEqual(system.defaultUID, speakers.uid)
-        XCTAssertEqual(plan.target, .restore)
         XCTAssertTrue(plan.note?.contains("claimed") == true, plan.note ?? "")
         XCTAssertTrue(plan.note?.contains("\"Desk\"") == true, plan.note ?? "")
-    }
-
-    /// The default output and Multi-Output members are named by the UIDs
-    /// macOS lists, which carry this app's suffix, not as registered.
-    func testRoutesByTheDevicesMacOSUIDs() {
-        let driver = FakeDisplayAudioDriver()
-        driver.suffix = ".0123456789abcdef"
-        let listed = DisplayAudioDeviceSpec(
-            uid: desk.uid + driver.suffix, name: desk.name, latencyFrames: desk.latencyFrames)
-        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
-        system.show([listed])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        let plan = router.update(route: .displaysOnly, displays: [desk])
-        XCTAssertEqual(plan.target, .device(uid: listed.uid))
-        XCTAssertEqual(system.defaultUID, listed.uid)
-        XCTAssertEqual(driver.lastRegistration, [desk], "registered as the display's own UID")
     }
 
     /// Claims are found in the device list the pass has already read, not by
@@ -353,8 +133,8 @@ final class MacAudioRouteTests: XCTestCase {
         system.devices.append(MacOutputDevice(
             uid: desk.uid + ".ffffffffffffffff", name: "Desk", isBuiltIn: false))
         let router = MacAudioRouter(bridge: driver, system: system)
-        var plan = router.update(route: .displaysOnly, displays: [desk, shelf])
-        plan = router.update(route: .displaysOnly, displays: [desk, shelf])
+        var plan = router.update(route: .followMac, displays: [desk, shelf])
+        plan = router.update(route: .followMac, displays: [desk, shelf])
         XCTAssertEqual(driver.claimScans, 0)
         XCTAssertTrue(plan.note?.contains("claimed") == true, plan.note ?? "")
         XCTAssertTrue(plan.note?.contains("\"Desk\"") == true, plan.note ?? "")
@@ -370,9 +150,8 @@ final class MacAudioRouteTests: XCTestCase {
         let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
         system.show([desk])
         let router = MacAudioRouter(bridge: driver, system: system)
-        let plan = router.update(route: .displaysOnly, displays: [desk])
+        let plan = router.update(route: .followMac, displays: [desk])
         XCTAssertEqual(system.defaultUID, speakers.uid)
-        XCTAssertEqual(plan.target, .restore)
         XCTAssertTrue(plan.note?.contains("claimed") == true, plan.note ?? "")
     }
 
@@ -384,17 +163,17 @@ final class MacAudioRouteTests: XCTestCase {
         driver.heldDevices = DisplayAudioDriverProtocol.maxDevices
         let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
         let router = MacAudioRouter(bridge: driver, system: system)
-        let first = router.update(route: .displaysOnly, displays: [desk])
+        let first = router.update(route: .followMac, displays: [desk])
         XCTAssertFalse(
             first.note?.contains("no room") == true,
             "one pass is not enough: the driver may not have caught up")
-        let plan = router.update(route: .displaysOnly, displays: [desk])
+        let plan = router.update(route: .followMac, displays: [desk])
         XCTAssertTrue(plan.note?.contains("no room") == true, plan.note ?? "")
         XCTAssertTrue(plan.note?.contains("\"Desk\"") == true, plan.note ?? "")
-        XCTAssertTrue(plan.note?.contains("8 of its 8 devices are in use by other apps") == true,
+        XCTAssertTrue(plan.note?.contains("8 of its 8 outputs are in use by other apps") == true,
                       plan.note ?? "")
         driver.heldDevices = 3
-        let waiting = router.update(route: .displaysOnly, displays: [desk])
+        let waiting = router.update(route: .followMac, displays: [desk])
         XCTAssertFalse(waiting.note?.contains("no room") == true, waiting.note ?? "")
     }
 
@@ -406,18 +185,18 @@ final class MacAudioRouteTests: XCTestCase {
         driver.heldDevices = DisplayAudioDriverProtocol.maxDevices
         let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
         let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk, shelf])
-        XCTAssertTrue(router.update(route: .displaysOnly, displays: [desk, shelf])
+        router.update(route: .followMac, displays: [desk, shelf])
+        XCTAssertTrue(router.update(route: .followMac, displays: [desk, shelf])
             .note?.contains("no room") == true)
-        let changed = router.update(route: .displaysOnly, displays: [desk])
+        let changed = router.update(route: .followMac, displays: [desk])
         XCTAssertFalse(changed.note?.contains("no room") == true, changed.note ?? "")
-        XCTAssertTrue(router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertTrue(router.update(route: .followMac, displays: [desk])
             .note?.contains("no room") == true)
         driver.refuseRegistrations = true
-        XCTAssertTrue(router.update(route: .displaysOnly, displays: [desk])
+        XCTAssertTrue(router.update(route: .followMac, displays: [desk])
             .note?.contains("refused") == true)
         driver.refuseRegistrations = false
-        let back = router.update(route: .displaysOnly, displays: [desk])
+        let back = router.update(route: .followMac, displays: [desk])
         XCTAssertFalse(back.note?.contains("no room") == true, back.note ?? "")
     }
 
@@ -430,13 +209,12 @@ final class MacAudioRouteTests: XCTestCase {
         system.devices.append(MacOutputDevice(
             uid: desk.uid + ".0123456789abcdef", name: "Desk", isBuiltIn: false))
         let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk, shelf])
-        let plan = router.update(route: .displaysOnly, displays: [desk, shelf])
+        router.update(route: .followMac, displays: [desk, shelf])
+        let plan = router.update(route: .followMac, displays: [desk, shelf])
         XCTAssertTrue(plan.note?.contains("no room for \"Shelf\"") == true, plan.note ?? "")
-        XCTAssertTrue(plan.note?.contains("claimed the output device for \"Desk\"") == true,
+        XCTAssertTrue(plan.note?.contains("claimed the output for \"Desk\"") == true,
                       plan.note ?? "")
     }
-
 
     /// Every display claimed: no "waiting for the device to appear", since
     /// it has appeared, only not for this app.
@@ -447,7 +225,7 @@ final class MacAudioRouteTests: XCTestCase {
         system.devices.append(MacOutputDevice(
             uid: desk.uid + ".0123456789abcdef", name: "Desk", isBuiltIn: false))
         let router = MacAudioRouter(bridge: driver, system: system)
-        let plan = router.update(route: .displaysOnly, displays: [desk])
+        let plan = router.update(route: .followMac, displays: [desk])
         XCTAssertFalse(plan.note?.contains("Waiting") == true, plan.note ?? "")
         XCTAssertTrue(plan.note?.contains("claimed") == true, plan.note ?? "")
     }
@@ -459,38 +237,9 @@ final class MacAudioRouteTests: XCTestCase {
         driver.refuseRegistrations = true
         let router = MacAudioRouter(
             bridge: driver, system: FakeMacOutputSystem(devices: [], defaultUID: nil))
-        let plan = router.update(route: .displaysOnly, displays: [desk])
+        let plan = router.update(route: .followMac, displays: [desk])
         XCTAssertTrue(plan.note?.contains("refused") == true, plan.note ?? "")
         XCTAssertFalse(plan.note?.contains("Waiting") == true, plan.note ?? "")
-    }
-
-    /// While the driver is full, an output picked elsewhere is still said,
-    /// and the generic "waiting" note gives way to the no-room one.
-    func testAPickElsewhereIsStillSaidWhileTheDriverIsFull() {
-        let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(
-            devices: [speakers, headphones], defaultUID: speakers.uid)
-        system.show([desk])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk])
-        system.defaultUID = headphones.uid
-        driver.heldDevices = DisplayAudioDriverProtocol.maxDevices
-        driver.devicesAppearOnRegister = false
-        router.update(route: .displaysOnly, displays: [desk, shelf])
-        let plan = router.update(route: .displaysOnly, displays: [desk, shelf])
-        XCTAssertTrue(plan.note?.contains("no room for \"Shelf\"") == true, plan.note ?? "")
-        XCTAssertTrue(plan.note?.contains("picked outside this app") == true, plan.note ?? "")
-
-        let empty = FakeDisplayAudioDriver()
-        empty.devicesAppearOnRegister = false
-        empty.heldDevices = DisplayAudioDriverProtocol.maxDevices
-        let lone = MacAudioRouter(
-            bridge: empty,
-            system: FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid))
-        lone.update(route: .displaysOnly, displays: [desk])
-        let full = lone.update(route: .displaysOnly, displays: [desk])
-        XCTAssertFalse(full.note?.contains("Waiting") == true, full.note ?? "")
-        XCTAssertTrue(full.note?.contains("no room") == true, full.note ?? "")
     }
 
     /// Some of the full driver's devices are this app's own: the note counts
@@ -503,9 +252,9 @@ final class MacAudioRouteTests: XCTestCase {
         system.show([desk])
         driver.addDevice(uid: desk.uid, id: 300)
         let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk, shelf])
-        let some = router.update(route: .displaysOnly, displays: [desk, shelf])
-        XCTAssertTrue(some.note?.contains("7 of its 8 devices are in use by other apps") == true,
+        router.update(route: .followMac, displays: [desk, shelf])
+        let some = router.update(route: .followMac, displays: [desk, shelf])
+        XCTAssertTrue(some.note?.contains("7 of its 8 outputs are in use by other apps") == true,
                       some.note ?? "")
         XCTAssertTrue(some.note?.contains("\"Shelf\"") == true, some.note ?? "")
 
@@ -523,8 +272,8 @@ final class MacAudioRouteTests: XCTestCase {
         let crowded = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
         crowded.show(Array(many.prefix(8)))
         let own = MacAudioRouter(bridge: busy, system: crowded)
-        own.update(route: .displaysOnly, displays: many)
-        let all = own.update(route: .displaysOnly, displays: many)
+        own.update(route: .followMac, displays: many)
+        let all = own.update(route: .followMac, displays: many)
         XCTAssertTrue(all.note?.contains("already uses all 8") == true, all.note ?? "")
         XCTAssertTrue(all.note?.contains("\"D8\"") == true, all.note ?? "")
     }
@@ -536,51 +285,27 @@ final class MacAudioRouteTests: XCTestCase {
         driver.refuseRegistrations = true
         let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
         let router = MacAudioRouter(bridge: driver, system: system)
-        let plan = router.update(route: .displaysOnly, displays: [desk])
+        let plan = router.update(route: .followMac, displays: [desk])
         XCTAssertTrue(plan.note?.contains("refused") == true, plan.note ?? "")
         XCTAssertEqual(system.defaultUID, speakers.uid)
     }
 
-
-    func testGoingBackToTheCopyRestoresTheMacsOutputAndRemovesOurDevices() {
+    /// Switching to the copy withdraws the devices' outputs and leaves the
+    /// Mac's output where it is, ours included: macOS moves it off an output
+    /// that goes away.
+    func testSwitchingToTheCopyWithdrawsTheDevicesAndTouchesNoOutput() {
         let driver = FakeDisplayAudioDriver()
         let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
         system.show([desk, shelf])
         let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk, shelf])
-        XCTAssertEqual(system.defaultUID, MacAudioRoutePlan.displaysUID)
+        router.update(route: .followMac, displays: [desk, shelf])
+        XCTAssertEqual(driver.lastRegistration, [desk, shelf])
+        system.defaultUID = desk.uid
         let plan = router.update(route: .copy, displays: [desk, shelf])
         XCTAssertEqual(plan.effective, .copy)
-        XCTAssertEqual(system.defaultUID, speakers.uid)
-        XCTAssertTrue(system.destroyed.contains(MacAudioRoutePlan.displaysUID))
         XCTAssertEqual(driver.lastRegistration, [], "the devices are withdrawn")
-    }
-
-    func testQuittingPutsTheMacsOutputBack() {
-        let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
-        system.show([desk])
-        let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .displaysOnly, displays: [desk])
-        XCTAssertEqual(system.defaultUID, desk.uid)
-        router.shutdown()
-        XCTAssertEqual(system.defaultUID, speakers.uid)
-        XCTAssertEqual(driver.lastRegistration, [])
-    }
-
-    /// Started while a display was still the default, as after a crash: the
-    /// built-in output is the one to go back to.
-    func testAStartOnOneOfOurDevicesFindsTheBuiltInOutput() {
-        let driver = FakeDisplayAudioDriver()
-        let system = FakeMacOutputSystem(
-            devices: [headphones, speakers], defaultUID: MacAudioRoutePlan.legacyMirrorUID)
-        system.devices.append(MacOutputDevice(
-            uid: MacAudioRoutePlan.legacyMirrorUID, name: "stale", isBuiltIn: false))
-        let router = MacAudioRouter(bridge: driver, system: system)
-        router.update(route: .copy, displays: [])
-        XCTAssertEqual(router.macOutputUID, speakers.uid)
-        XCTAssertEqual(system.defaultUID, speakers.uid)
-        XCTAssertTrue(system.destroyed.contains(MacAudioRoutePlan.legacyMirrorUID))
+        XCTAssertEqual(system.defaultChanges, [])
+        XCTAssertEqual(system.created.count, 0)
     }
 
     func testAMissingDriverRegistersNothingAndTouchesNoOutput() {
@@ -588,8 +313,8 @@ final class MacAudioRouteTests: XCTestCase {
         driver.state = .absent
         let system = FakeMacOutputSystem(devices: [speakers], defaultUID: speakers.uid)
         let router = MacAudioRouter(bridge: driver, system: system)
-        let plan = router.update(route: .displaysOnly, displays: [desk])
-        XCTAssertEqual(plan.effective, .copy)
+        let plan = router.update(route: .followMac, displays: [desk])
+        XCTAssertEqual(plan.effective, .followMac)
         XCTAssertTrue(driver.registrations.allSatisfy(\.isEmpty))
         XCTAssertTrue(system.defaultChanges.isEmpty)
     }
@@ -600,14 +325,14 @@ final class MacAudioRouteTests: XCTestCase {
         let driver = FakeDisplayAudioDriver()
         let downlinks = PanelAudioDownlinks(bridge: driver)
         let devices = ["espdisp-desk": desk]
-        downlinks.update(effective: .displaysOnly, identities: devices)
+        downlinks.update(effective: .followMac, identities: devices)
         let device = downlinks.source(for: "espdisp-desk")
         XCTAssertTrue(device.key.hasPrefix("device|\(desk.uid)#absent|"), device.key)
         XCTAssertEqual(device.sourceName, "Mac output \"Desk\"")
         // A device the driver made again is a new source, so the session
         // reopens it rather than reading a dead object.
         downlinks.update(
-            effective: .displaysOnly, identities: devices, deviceIDs: [desk.uid: 300])
+            effective: .followMac, identities: devices, deviceIDs: [desk.uid: 300])
         let remade = downlinks.source(for: "espdisp-desk")
         XCTAssertNotEqual(remade.key, device.key)
         XCTAssertEqual(remade.key, downlinks.source(for: "espdisp-desk").key)
@@ -622,52 +347,32 @@ final class MacAudioRouteTests: XCTestCase {
 
     // MARK: - The setting
 
-    func testTheRouteIsSavedAndAnOldFileReadsAsTheCopy() throws {
+    func testTheRouteIsSavedAndAnUnreadableOneFollowsTheMac() throws {
         var settings = SenderSettings()
-        XCTAssertEqual(settings.macAudioRoute, .copy)
-        settings.macAudioRoute = .displaysOnly
+        XCTAssertEqual(settings.macAudioRoute, .followMac)
+        settings.macAudioRoute = .copy
         let data = try JSONEncoder().encode(settings)
         XCTAssertEqual(try JSONDecoder().decode(SenderSettings.self, from: data).macAudioRoute,
-                       .displaysOnly)
-        XCTAssertEqual(settings.validated.macAudioRoute, .displaysOnly)
-        let old = try JSONDecoder().decode(SenderSettings.self, from: Data("{\"fps\": 30}".utf8))
-        XCTAssertEqual(old.macAudioRoute, .copy)
+                       .copy)
+        XCTAssertEqual(settings.validated.macAudioRoute, .copy)
         let unknown = try JSONDecoder().decode(
             SenderSettings.self, from: Data("{\"macAudioRoute\": \"surround\"}".utf8))
-        XCTAssertEqual(unknown.macAudioRoute, .copy)
-    }
-
-    /// The menu asks where sound plays, with two answers. A setting saved as
-    /// the old "Mirror to the displays", which sounded the same as the copy
-    /// and broke the volume keys, loads as "This Mac and the displays".
-    func testTheChoiceIsWhereSoundPlaysAndAnOldMirrorLoadsAsBoth() throws {
-        XCTAssertEqual(MacAudioRoute.allCases.map(\.label),
-                       ["This Mac and the displays", "The displays only"])
-        // The route itself maps "mirror", not only the settings file's
-        // fallback for a value it cannot read.
+        XCTAssertEqual(unknown.macAudioRoute, .followMac)
+        // The route itself maps the old names, not only the file's fallback.
         XCTAssertEqual(
-            try JSONDecoder().decode([MacAudioRoute].self, from: Data(#"["mirror"]"#.utf8)),
-            [.copy])
+            try JSONDecoder().decode(
+                [MacAudioRoute].self, from: Data(#"["displaysOnly", "mirror", "copy"]"#.utf8)),
+            [.followMac, .copy, .copy])
         XCTAssertThrowsError(
             try JSONDecoder().decode([MacAudioRoute].self, from: Data(#"["surround"]"#.utf8)))
-        let mirror = try JSONDecoder().decode(
-            SenderSettings.self, from: Data(#"{"macAudioRoute": "mirror"}"#.utf8))
-        XCTAssertEqual(mirror.macAudioRoute.label, "This Mac and the displays")
-        XCTAssertEqual(mirror.macAudioRoute.usesDriver, false)
-        let only = try JSONDecoder().decode(
-            SenderSettings.self, from: Data(#"{"macAudioRoute": "displaysOnly"}"#.utf8))
-        XCTAssertEqual(only.macAudioRoute.label, "The displays only")
-        // Saved again, it is written as the choice it now is.
-        let written = String(data: try JSONEncoder().encode(mirror), encoding: .utf8) ?? ""
-        XCTAssertFalse(written.contains("mirror"), written)
     }
 
     func testAManagerNobodyStartedNeverRoutes() {
         let manager = PanelManager(
             previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
         XCTAssertNil(manager.macAudio.router)
-        manager.setMacAudioRoute(.displaysOnly)
+        manager.setMacAudioRoute(.copy)
         XCTAssertNil(manager.macAudioRoutePlan)
-        XCTAssertEqual(manager.settings.macAudioRoute, .displaysOnly)
+        XCTAssertEqual(manager.settings.macAudioRoute, .copy)
     }
 }

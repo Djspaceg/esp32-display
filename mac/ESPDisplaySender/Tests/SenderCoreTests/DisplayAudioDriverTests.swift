@@ -254,14 +254,15 @@ final class DisplayAudioDriverTests: XCTestCase {
 
         let tap = ConstantSystemAudioTap(levels: [0.5, -0.25], sampleRate: 48_000, interleaved: true)
         session.setDownlinkSource(PanelDownlinkSource.displayDevice(
-            name: "Desk Panel", route: .displaysOnly,
+            name: "Desk Panel", route: .followMac,
             capture: SystemAudioCaptureSource(open: { tap })))
         let streaming = snapshots.waitFor(timeoutSeconds: 4) {
             $0.state == .streaming && $0.sourceName.contains("Desk Panel")
         }
         XCTAssertNotNil(streaming, "last: \(snapshots.last?.message ?? "none")")
         XCTAssertTrue(
-            streaming?.message == "Playing what this Mac sends to the \"Desk Panel\" output.",
+            streaming?.message == "Plays what this Mac sends to the \"Desk Panel\" output while it "
+                + "is chosen in Sound settings; quiet otherwise.",
             streaming?.message ?? "")
         let packets = panel.receiveDownlink(timeoutSeconds: 3) { packets in
             packets.contains { pcm16Samples($0.samples).contains { $0 != 0 } }
@@ -283,7 +284,7 @@ final class DisplayAudioDriverTests: XCTestCase {
         let tap = ConstantSystemAudioTap(levels: [0.2, 0.2], sampleRate: 48_000, interleaved: true)
         func source(_ id: String) -> PanelDownlinkSource {
             .displayDevice(
-                name: "Desk Panel", route: .displaysOnly,
+                name: "Desk Panel", route: .followMac,
                 capture: SystemAudioCaptureSource(open: { tap }), identity: "u#" + id)
         }
         session.setDownlinkSource(source("7"))
@@ -298,7 +299,7 @@ final class DisplayAudioDriverTests: XCTestCase {
             "a route change does not reopen the display's device")
         session.setDownlinkSource(source("8"))
         XCTAssertNotNil(snapshots.waitFor(timeoutSeconds: 2) {
-            $0.state == .recovering && $0.message == "The display speaker's source changed."
+            $0.state == .recovering && $0.message == "The device speaker's source changed."
         }, "a device made again is reopened")
     }
 
@@ -331,7 +332,7 @@ final class DisplayAudioDriverTests: XCTestCase {
         let device = ConstantSystemAudioTap(
             levels: [0.2, 0.2], sampleRate: 48_000, interleaved: true)
         session.setDownlinkSource(PanelDownlinkSource.displayDevice(
-            name: "Desk Panel", route: .displaysOnly,
+            name: "Desk Panel", route: .followMac,
             capture: SystemAudioCaptureSource(open: { device })))
         XCTAssertNotNil(snapshots.waitFor(timeoutSeconds: 4) {
             $0.state == .streaming && $0.sourceName.contains("Desk Panel")
@@ -358,7 +359,7 @@ final class DisplayAudioDriverTests: XCTestCase {
             panel.close()
         }
         session.setDownlinkSource(PanelDownlinkSource.displayDevice(
-            name: "Desk Panel", route: .displaysOnly,
+            name: "Desk Panel", route: .followMac,
             capture: .displayDevice(uid: "missing", bridge: FakeDisplayAudioDriver())))
         let waiting = snapshots.waitFor(timeoutSeconds: 4) {
             $0.state == .streaming && $0.message.contains("has not appeared")

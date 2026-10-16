@@ -5,9 +5,9 @@ import XCTest
 @testable import SenderCore
 @testable import SenderProtocol
 
-/// Renders a display's Audio section offscreen with the Play sound on choice: the
-/// copy (the default), a driver route chosen with no driver installed, and
-/// the displays as the only output. Set ESPDISP_RENDER_DIR to keep the PNGs.
+/// Renders a device's Audio section offscreen with the Play sound on choice:
+/// following the Mac (the default) with and without the driver, the copy, and
+/// a failed install. Set ESPDISP_RENDER_DIR to keep the PNGs.
 @MainActor
 final class MacAudioRouteRenderTests: XCTestCase {
     override func setUp() {
@@ -21,7 +21,7 @@ final class MacAudioRouteRenderTests: XCTestCase {
         setup: DisplayAudioDriverSetup = DisplayAudioDriverSetup(
             bundledDriver: true, signingTeam: "YSHQQLS73U")
     ) throws -> Data {
-        var panel = PanelSnapshot(serviceName: "desk", displayName: "Desk Display")
+        var panel = PanelSnapshot(serviceName: "desk", displayName: "Desk")
         panel.audioStatus = PanelAudioSnapshot(
             state: .streaming, message: message, sourceName: source,
             uplinkDestination: PanelAudioSession.uplinkDestination,
@@ -55,10 +55,12 @@ final class MacAudioRouteRenderTests: XCTestCase {
             route: .copy, plan: nil, source: PanelAudioSession.tappedSourceName,
             message: PanelDownlinkSource.tapStreamingMessage)
         let absent = MacAudioRoutePlan.make(
-            chosen: .displaysOnly, driver: .absent, presentDisplayUIDs: [])
+            chosen: .followMac, driver: .absent, presentDisplayUIDs: [])
         let fallback = try render(
-            route: .displaysOnly, plan: absent, source: PanelAudioSession.tappedSourceName,
-            message: PanelDownlinkSource.tapStreamingMessage, driver: .absent)
+            route: .followMac, plan: absent, source: "Silence (the \"Desk\" output is not ready)",
+            message: "The device's speaker gets silence because the \"Desk\" output could "
+                + "not be read: the device's output has not appeared in macOS yet.",
+            driver: .absent)
         var refused = DisplayAudioDriverSetup(bundledDriver: true, signingTeam: "YSHQQLS73U")
         refused.begin(.install, now: Date())
         refused.finished(
@@ -69,12 +71,13 @@ final class MacAudioRouteRenderTests: XCTestCase {
             message: PanelDownlinkSource.tapStreamingMessage, driver: .absent,
             setup: refused)
         let only = try render(
-            route: .displaysOnly,
+            route: .followMac,
             plan: MacAudioRoutePlan.make(
-                chosen: .displaysOnly, driver: .ready,
+                chosen: .followMac, driver: .ready,
                 presentDisplayUIDs: ["com.espdisplay.display.AAAA"]),
-            source: "Mac output \"Desk Display\"",
-            message: "Playing what this Mac sends to the \"Desk Display\" output.",
+            source: "Mac output \"Desk\"",
+            message: "Plays what this Mac sends to the \"Desk\" output while it is "
+                + "chosen in Sound settings; quiet otherwise.",
             driver: .ready)
         XCTAssertGreaterThan(copy.count, 10_000, "the render came out empty")
         XCTAssertNotEqual(copy, fallback, "the fallback note is drawn")
@@ -85,7 +88,7 @@ final class MacAudioRouteRenderTests: XCTestCase {
             let url = URL(fileURLWithPath: dir)
             try copy.write(to: url.appendingPathComponent("mac-sound-copy.png"))
             try fallback.write(to: url.appendingPathComponent("mac-sound-driver-missing.png"))
-            try only.write(to: url.appendingPathComponent("mac-sound-displays-only.png"))
+            try only.write(to: url.appendingPathComponent("mac-sound-follow-mac.png"))
             try failed.write(to: url.appendingPathComponent("mac-sound-install-failed.png"))
         }
     }

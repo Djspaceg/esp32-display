@@ -144,7 +144,7 @@ struct DisplayAudioDriverSetup: Equatable, Sendable {
                 status: "Installed",
                 button: Button(
                     title: "Remove Audio Driver…", action: .remove, enabled: true,
-                    help: "Remove the display audio driver from this Mac"),
+                    help: "Remove the audio driver for ESP devices from this Mac"),
                 busy: false, message: message)
         case .incompatible(let version)?:
             let found = version.map { "version \($0)" } ?? "an unreadable version"
@@ -178,7 +178,7 @@ struct DisplayAudioDriverSetup: Equatable, Sendable {
         }
         return Button(
             title: title, action: .install, enabled: true,
-            help: "Install the display audio driver this app carries; macOS asks "
+            help: "Install the audio driver for ESP devices this app carries; macOS asks "
                 + "for your password")
     }
 }
@@ -302,10 +302,10 @@ enum DisplayAudioDriverInstaller {
     static func prompt(for action: DisplayAudioDriverAction) -> String {
         switch action {
         case .install:
-            return "ESPDisplaySender wants to install its display audio driver, so "
-                + "your displays can be this Mac's sound output."
+            return "ESPDisplaySender wants to install its audio driver, so your "
+                + "ESP devices can be this Mac's sound output."
         case .remove:
-            return "ESPDisplaySender wants to remove its display audio driver."
+            return "ESPDisplaySender wants to remove its audio driver."
         }
     }
 

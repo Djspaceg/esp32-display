@@ -373,7 +373,7 @@ final class DisplayAudioDeviceTap: SystemAudioTap, @unchecked Sendable {
         domain: "ESPDisplaySender.Audio",
         code: 6,
         userInfo: [NSLocalizedDescriptionKey:
-            "the display's output device belongs to another app on this Mac."])
+            "the device's output belongs to another app on this Mac."])
 
     init(bridge: DisplayAudioDriverBridge, uid: String) throws {
         guard let device = bridge.deviceID(uid: uid) else {
@@ -382,7 +382,7 @@ final class DisplayAudioDeviceTap: SystemAudioTap, @unchecked Sendable {
                 domain: "ESPDisplaySender.Audio",
                 code: 5,
                 userInfo: [NSLocalizedDescriptionKey:
-                    "the display's output device has not appeared in macOS yet."])
+                    "the device's output has not appeared in macOS yet."])
         }
         guard bridge.owns(device: device) else { throw Self.claimed }
         self.bridge = bridge

@@ -64,9 +64,10 @@ struct SenderSettings: Codable, Equatable {
     /// that finds nil seeds this from exactly that order, so a board receives
     /// the same slots it did before (`WifiPresetOrder.reconciled`).
     var wifiPresetOrder: [String]?
-    /// Where this Mac's sound goes, for every display at once (see
-    /// `MacAudioRoute`). The tap's copy unless the user picks the driver.
-    var macAudioRoute: MacAudioRoute = .copy
+    /// What plays on the displays, for every display at once (see
+    /// `MacAudioRoute`): following the Mac's Sound setting unless the user
+    /// asks for the tap's copy.
+    var macAudioRoute: MacAudioRoute = .followMac
 
     /// Default capture rate; see `fps` for why this is a named constant
     /// rather than three repeated literals.
@@ -79,7 +80,7 @@ struct SenderSettings: Codable, Equatable {
          audioDevices: AudioDevicePreferences = AudioDevicePreferences(),
          audioTuning: AudioRuntimeTuning = AudioRuntimeTuning(),
          wifiPresetOrder: [String]? = nil,
-         macAudioRoute: MacAudioRoute = .copy) {
+         macAudioRoute: MacAudioRoute = .followMac) {
         self.fps = fps
         self.spacingMicros = spacingMicros
         self.adaptivePacing = adaptivePacing
@@ -119,7 +120,7 @@ struct SenderSettings: Codable, Equatable {
         let order = try? c.decodeIfPresent([String].self, forKey: .wifiPresetOrder)
         wifiPresetOrder = order.flatMap { $0 }.map(WifiPresetOrder.cleaned)
         let route = try? c.decodeIfPresent(MacAudioRoute.self, forKey: .macAudioRoute)
-        macAudioRoute = route.flatMap { $0 } ?? .copy
+        macAudioRoute = route.flatMap { $0 } ?? .followMac
     }
 
     static let fpsRange = 5...60

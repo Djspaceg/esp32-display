@@ -990,8 +990,8 @@ struct PanelDetailView: View {
                 LabeledContent("Detail") {
                     Text(audio.message).textSelection(.enabled)
                 }
-                LabeledContent("Display speaker", value: audio.sourceName)
-                LabeledContent("Display microphone", value: audio.uplinkDestination)
+                LabeledContent("Device speaker", value: audio.sourceName)
+                LabeledContent("Device microphone", value: audio.uplinkDestination)
                 DisclosureGroup(isExpanded: $showAudioDiagnostics) {
                     audioDiagnosticRows(audio)
                 } label: {
@@ -1006,7 +1006,7 @@ struct PanelDetailView: View {
             if let audio = panel.audioStatus {
                 Text(Self.macAudioRouteFooter(manager.macAudioRoutePlan)
                     + " Volume scales what is sent; 100% is the loudest the "
-                    + "display plays. "
+                    + "device plays. "
                     + audioFooterText(audio.tuning))
             } else {
                 Text("Audio starts only after the panel advertises a complete "
@@ -1031,7 +1031,7 @@ struct PanelDetailView: View {
             }
             .labelsHidden()
             .fixedSize()
-            .help("Where this Mac's sound plays, for every display")
+            .help("What plays on the ESP devices, for every device")
         }
         LabeledContent("") {
             Text(manager.settings.macAudioRoute.explanation)
@@ -1079,25 +1079,15 @@ struct PanelDetailView: View {
     }
 
     static func macAudioRouteFooter(_ plan: MacAudioRoutePlan?) -> String {
-        // macOS gives a Multi-Output device no volume control of its own.
-        var multiOutput = false
-        if case .multiOutput? = plan?.target { multiOutput = true }
-        if let plan, plan.effective.usesDriver, plan.target == .restore {
-            return "Until the displays can play on their own, this Mac keeps "
-                + "playing as before; the status above says why. Play sound on "
-                + "applies to every display."
-        }
-        switch plan?.effective ?? .copy {
+        switch plan?.effective ?? .followMac {
         case .copy:
-            return "The display speaker plays this Mac's sound while this Mac's "
-                + "own speakers keep playing, and the volume keys work as usual."
-        case .displaysOnly:
-            return (multiOutput
-                ? "The displays play together as this Mac's only output, which "
-                    + "the volume keys do not control."
-                : "The display is this Mac's only output, so the volume keys set "
-                    + "its level.")
-                + " Play sound on applies to every display."
+            return "The device's speaker plays this Mac's sound while this Mac's "
+                + "own speakers keep playing, and the volume keys work as usual. "
+                + "Play sound on applies to every device."
+        case .followMac:
+            return "Each device is an output of its own in Sound settings; choose "
+                + "it there to play on it, and the volume keys set its level. "
+                + "Play sound on applies to every device."
         }
     }
 
@@ -1122,7 +1112,7 @@ struct PanelDetailView: View {
                     .frame(maxWidth: .infinity)
                     .labelsHidden()
                     .layoutPriority(1)
-                    .help("Set how loud this display plays this Mac's sound")
+                    .help("Set how loud this device plays")
                     .accessibilityLabel("Speaker volume")
                 Text("\(Int((panel.speakerVolume * 100).rounded()))%")
                     .foregroundStyle(.secondary)

@@ -1,25 +1,29 @@
 # ESPDisplayAudio.driver
 
-A CoreAudio HAL plug-in that gives each ESPDisplay panel an output device of
-its own in Sound settings. ESPDisplaySender's "Play sound on" choice (in each
-display's Audio section; it applies to every display) has two answers:
+A CoreAudio HAL plug-in that gives each ESP device an output of its own in
+Sound settings, named after the device. ESPDisplaySender's "Play sound on"
+choice (in each device's Audio section; it applies to every device) has two
+answers:
 
-- **This Mac and the displays** (no driver, the default): a process tap copies
-  whatever the Mac plays to every display, and the Mac's own output, volume
-  keys included, is left alone. Needs the System Audio Recording permission.
-- **The displays only** (through this driver): the display, or a Multi-Output
-  device of all of them, is the Mac's only output and the Mac's own speakers go
-  quiet. With one display the volume keys set its level.
+- **Follow the Mac's Sound setting** (the default, through this driver): a
+  device plays only while its output is the one chosen in Sound settings, or is
+  part of a Multi-Output device made in Audio MIDI Setup; otherwise it stays
+  quiet. The app never changes the Mac's output and never copies its sound.
+  Without the driver the devices stay quiet and the app points at its Install
+  button.
+- **Also copy the Mac's sound to the devices** (no driver): a process tap copies
+  whatever the Mac plays, wherever it plays it, to every device. Needs the
+  System Audio Recording permission.
 
-Without the driver, "The displays only" falls back to this Mac and the displays
-and says so, pointing at the Install button. A setting saved by an earlier build
-as "Mirror to the displays" loads as "This Mac and the displays".
+Settings saved by earlier builds load as the nearest choice: "Copy this Mac's
+sound" and "Mirror to the displays" as the copy, "Displays only" as following
+the Mac.
 
 ## Installing from the app
 
 The app carries a signed copy of the driver (built and signed into
 `Contents/Library/Audio` by `embed-driver.sh`, an Xcode build phase). While the
-driver is missing, each display's Audio section shows **Install Audio Driver…**;
+driver is missing, each device's Audio section shows **Install Audio Driver…**;
 once it is there, **Remove Audio Driver…**. The click runs one root command
 through AppleScript's `do shell script ... with administrator privileges` in
 `/usr/bin/osascript`, waited on off the main thread so the window keeps working
@@ -55,16 +59,16 @@ app keeps the UDP transport, pacer and drift correction it already uses for the
 tap. Two custom CoreAudio properties carry everything, defined in
 `ESPDisplayAudioProtocol.h`:
 
-- `'ESrg'` on the plug-in object: the app sets the list of displays it wants
+- `'ESrg'` on the plug-in object: the app sets the list of ESP devices it wants
   devices for, every two seconds. A list nobody repeats for ten seconds is
   dropped, so a quit or crashed app leaves no silent outputs.
 - `'ESpc'` on each device: the app reads the frames mixed for that device since
   its last read, every 10 ms.
 
 Each registration carries a per-launch secret token. The first live client to
-list a display owns its device, and `'ESpc'` answers only a read qualified with
+list an ESP device owns its output, and `'ESpc'` answers only a read qualified with
 the owner's token, so no other app can record the Mac's sound through the
-driver or take frames from the app. A process that registers a display's UID
+driver or take frames from the app. A process that registers an ESP device's UID
 before the app does would own that device instead (and the app gets silence);
 that is the one gap left, and it needs a process already running as the user.
 
@@ -73,5 +77,5 @@ the plug-in in the system launchd domain, where a service an app vends in the
 user's session cannot be looked up; that would need a second privileged install.
 
 The device is 48 kHz stereo Float32, output only, with a volume and a mute
-control applied to what the app reads, and reports the display's downlink
+control applied to what the app reads, and reports the ESP device's downlink
 buffer as its latency so video players delay their picture to match.

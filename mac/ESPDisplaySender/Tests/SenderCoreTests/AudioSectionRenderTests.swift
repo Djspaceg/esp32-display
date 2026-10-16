@@ -62,7 +62,7 @@ final class AudioSectionRenderTests: XCTestCase {
         let refused = try render(
             audio(
                 source: "Silence (no permission to record this Mac's sound)",
-                message: "The display speaker gets silence because "
+                message: "The device's speaker gets silence because "
                     + "ESPDisplaySender is not allowed to record this Mac's "
                     + "sound. To send it, turn on ESPDisplaySender in System "
                     + "Settings > Privacy & Security > Screen & System Audio "

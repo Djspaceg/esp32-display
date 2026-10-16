@@ -127,7 +127,7 @@ struct PanelDownlinkSource: Sendable {
     /// ID) changes instead, so it restarts once rather than twice.
     var followsRouteChanges = true
 
-    static let tapStreamingMessage = "Sending this Mac's sound to the display "
+    static let tapStreamingMessage = "Sending this Mac's sound to the device's "
         + "speaker. The Mac's own speakers keep playing."
 
     /// The process tap. When another route was chosen and cannot be used, the
@@ -155,11 +155,10 @@ struct PanelDownlinkSource: Sendable {
         identity: String = ""
     ) -> PanelDownlinkSource {
         let output = "the \"\(name)\" output"
-        // Only "the displays only" plays through a display's own device, on
-        // its own or with the other displays as one Multi-Output device.
-        // Says only what this session plays: whether the Mac also plays
-        // elsewhere (an output picked in Sound settings) is the route's note.
-        let streaming = "Playing what this Mac sends to \(output)."
+        // Following the Mac's Sound setting: the device plays only what macOS
+        // sends its own output, and is quiet while another output is chosen.
+        let streaming = "Plays what this Mac sends to \(output) while it is "
+            + "chosen in Sound settings; quiet otherwise."
         return PanelDownlinkSource(
             key: "device|\(identity)|\(name)|\(route.rawValue)",
             access: .notRequired,
@@ -365,7 +364,7 @@ final class PanelAudioSession: @unchecked Sendable {
             self.permissionRequestGeneration &+= 1
             self.refusal = nil
             self.sourceName = source.sourceName
-            self.restart(reason: "The display speaker's source changed.")
+            self.restart(reason: "The device speaker's source changed.")
         }
     }
 
@@ -505,7 +504,7 @@ final class PanelAudioSession: @unchecked Sendable {
             + "under System Audio Recording Only."
 
         func message(_ downlink: PanelDownlinkSource) -> String {
-            let lead = "The display speaker gets silence "
+            let lead = "The device's speaker gets silence "
             switch self {
             case .pending:
                 return lead + "until the macOS prompt asking to record this "
@@ -640,7 +639,7 @@ final class PanelAudioSession: @unchecked Sendable {
             throw audioError(
                 code: 2,
                 message: "This Mac's sound arrives in a format that cannot be "
-                    + "converted for the display.")
+                    + "converted for the device.")
         }
 
         let requestedInputFrames = max(
