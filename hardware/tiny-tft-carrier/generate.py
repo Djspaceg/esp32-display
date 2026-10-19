@@ -38,7 +38,7 @@ def mm(v):
 XIAO_PITCH = 2.54
 XIAO_ROW = 15.24
 XIAO_BODY = (-10.45, -8.9, 10.55, 8.9)  # USB-C end is +x
-XIAO_USB = (10.55, -4.5, 12.05, 4.5)
+XIAO_USB = (10.55, -4.5, 12.05, 4.5)  # overhang not published: estimate
 XIAO_EDGE_PAD_Y = 8.455
 XIAO_EDGE_PAD = (1.524, 2.432)
 
@@ -109,10 +109,10 @@ def font(size=1.0, thick=0.15):
     return f"(effects (font (size {mm(size)} {mm(size)}) (thickness {mm(thick)})))"
 
 
-def fp_prop(key, value, at, layer, hide=False, size=1.0, thick=0.15):
+def fp_prop(key, value, at, layer, hide=False, size=1.0, thick=0.15, tag=""):
     h = " (hide yes)" if hide else ""
     return (f'\t(property "{key}" "{value}" (at {mm(at[0])} {mm(at[1])} 0) '
-            f'(layer "{layer}"){h} (uuid "{uid("fp", key, value, layer)}") '
+            f'(layer "{layer}"){h} (uuid "{uid("fp", key, value, layer, tag)}") '
             f'{font(size, thick)})\n')
 
 
@@ -128,8 +128,8 @@ def fp_line(a, b, layer, width, tag):
             f'(layer "{layer}") (uuid "{uid("fpline", tag, layer)}"))\n')
 
 
-def fp_text(text, at, layer, tag, size=0.8, thick=0.12):
-    return (f'\t(fp_text user "{text}" (at {mm(at[0])} {mm(at[1])} 0) '
+def fp_text(text, at, layer, tag, size=0.8, thick=0.12, angle=0):
+    return (f'\t(fp_text user "{text}" (at {mm(at[0])} {mm(at[1])} {angle}) '
             f'(layer "{layer}") (uuid "{uid("fptext", tag)}") {font(size, thick)})\n')
 
 
@@ -163,12 +163,15 @@ PARTS = {
 }
 
 
-def fields(placed, ref, flip=False):
+FOOTPRINT = {"U1": "XIAO_ESP32_DIP14", "J1": "Questwise_TFT_042_96x54_2x4"}
+
+
+def fields(placed, ref):
     _, sheet, desc = PARTS[ref] if placed else ("", "", "")
-    layer = "B.Fab" if flip else "F.Fab"
-    s = fp_prop("Footprint", "", (0, 0), layer, hide=True, size=1.27)
-    s += fp_prop("Datasheet", sheet, (0, 0), layer, hide=True, size=1.27)
-    s += fp_prop("Description", desc, (0, 0), layer, hide=True, size=1.27)
+    foot = f"{LIB}:{FOOTPRINT[ref]}" if placed else ""
+    s = fp_prop("Footprint", foot, (0, 0), "F.Fab", hide=True, size=1.27, tag=ref)
+    s += fp_prop("Datasheet", sheet, (0, 0), "F.Fab", hide=True, size=1.27, tag=ref)
+    s += fp_prop("Description", desc, (0, 0), "F.Fab", hide=True, size=1.27, tag=ref)
     return s
 
 
@@ -181,21 +184,21 @@ def xiao_footprint(placed):
         s += '\t(layer "F.Cu")\n'
     s += '\t(descr "Seeed Studio XIAO (ESP32-S3 / ESP32-C6 / ESP32-C3), 2x7 2.54 mm, rows 15.24 mm, through holes plus edge pads for soldering flat")\n'
     s += '\t(tags "XIAO ESP32")\n'
-    s += fp_prop("Reference", "U1" if placed else "REF**", (0, -3.0), "F.SilkS")
-    s += fp_prop("Value", name, (0, 3.0), "F.Fab")
+    s += fp_prop("Reference", "U1" if placed else "REF**", (-6.5, -3.0), "F.SilkS", size=0.8, thick=0.12)
+    s += fp_prop("Value", name, (0, 0), "F.Fab", hide=True)
     s += fields(placed, "U1")
     s += '\t(attr through_hole)\n'
     x0, y0, x1, y1 = XIAO_BODY
     s += fp_rect((x0, y0), (x1, y1), "F.Fab", 0.1, "xiao-body")
     ux0, uy0, ux1, uy1 = XIAO_USB
     s += fp_rect((ux0, uy0), (ux1, uy1), "F.Fab", 0.1, "xiao-usb")
-    s += fp_text("USB-C", (8.0, 0), "F.Fab", "xiao-usb-fab", 0.8, 0.12)
+    s += fp_text("USB-C", (11.3, 0), "F.Fab", "xiao-usb-fab", 0.6, 0.1, 90)
     s += fp_rect((x0 - 0.25, -10.0), (x1 + 0.25, 10.0), "F.CrtYd", 0.05, "xiao-crt")
     # Silk: the end away from USB, and a pin-1 mark beside D0.
     s += fp_line((x0 - 0.15, -8.6), (x0 - 0.15, 8.6), "F.SilkS", 0.12, "xiao-silk-end")
     s += fp_line((8.9, -6.2), (6.3, -6.2), "F.SilkS", 0.12, "xiao-silk-pin1")
-    s += fp_text("XIAO S3/C6", (-2.0, -0.2), "F.SilkS", "xiao-silk-name", 0.8, 0.12)
-    s += fp_text("USB >", (5.5, 1.8), "F.SilkS", "xiao-silk-usb", 0.8, 0.12)
+    s += fp_text("XIAO S3/C6", (0, -3.0), "F.SilkS", "xiao-silk-name", 0.8, 0.12)
+    s += fp_text("USB >", (8.0, -3.0), "F.SilkS", "xiao-silk-usb", 0.8, 0.12)
     for n in range(1, 15):
         x, y = xiao_pad_xy(n)
         net = xiao_net(n) if placed else None
@@ -217,21 +220,22 @@ def screen_footprint(placed):
         s = f'(footprint "{name}" (version 20240108) (generator "pcbnew") (generator_version "8.0")\n\t(layer "F.Cu")\n'
     s += '\t(descr "Questwise 0.42 inch 96x54 TFT breakout, two rows of four pins. Row spacing and outline are photo estimates: measure before ordering")\n'
     s += '\t(tags "TFT ST7735")\n'
-    s += fp_prop("Reference", "J1" if placed else "REF**", (0, -1.5), "F.SilkS")
-    s += fp_prop("Value", PARTS["J1"][0] if placed else name, (0, 1.5), "F.Fab")
+    s += fp_prop("Reference", "J1" if placed else "REF**", (0, -1.2), "F.SilkS")
+    s += fp_prop("Value", PARTS["J1"][0] if placed else name, (0, 0), "F.Fab", hide=True)
     s += fields(placed, "J1")
     s += '\t(attr through_hole)\n'
     w, h = SCREEN_OUTLINE
     s += fp_rect((-w / 2, -h / 2), (w / 2, h / 2), "F.Fab", 0.1, "tft-body")
-    s += fp_text("outline TO MEASURE", (0, 4.0), "F.Fab", "tft-measure", 0.8, 0.12)
-    s += fp_text("flex cable end", (-w / 2 + 2.2, 0), "F.Fab", "tft-fpc", 0.6, 0.1)
+    s += fp_text("outline TO MEASURE", (0, 1.0), "F.Fab", "tft-measure", 0.6, 0.1)
+    s += fp_text("< flex cable end", (0, 2.4), "F.Fab", "tft-fpc", 0.6, 0.1)
     s += fp_rect((-w / 2 - 0.25, -h / 2 - 0.25), (w / 2 + 0.25, h / 2 + 0.25), "F.CrtYd", 0.05, "tft-crt")
-    # Silk labels outside each pin row, matching the screen's own printing.
+    # Silk labels outside each pin row, cut to three letters and turned on
+    # end so they fit the 2.54 mm pitch.
     r = SCREEN_ROW_SPACING / 2
     for n, label in SCREEN_PINS.items():
         x, y = screen_pad_xy(n)
-        ty = y + 2.2 if y > 0 else y - 2.2
-        s += fp_text(SILK_LABEL.get(label, label), (x, ty), "F.SilkS", f"tft-silk-{label}", 0.8, 0.12)
+        ty = y + 2.15 if y > 0 else y - 2.15
+        s += fp_text(SILK_LABEL.get(label, label), (x, ty), "F.SilkS", f"tft-silk-{label}", 0.8, 0.12, 90)
     s += fp_line((-w / 2 + 0.6, -r + 1.4), (-w / 2 + 0.6, r - 1.4), "F.SilkS", 0.12, "tft-silk-fpc")
     for n in range(1, 9):
         net = SCREEN_NET[n] if placed else None
@@ -264,15 +268,15 @@ def jumper_footprint(placed):
                 f'(layer "{side[layer]}"){h} (uuid "{uid("jp", key, placed)}") '
                 f'(effects (font (size {mm(size)} {mm(size)}) (thickness {mm(thick)})){just}))\n')
 
-    s += prop("Reference", "JP1" if placed else "REF**", (0, -1.7), "F.SilkS", size=0.8, thick=0.12)
-    s += prop("Value", name, (0, 1.9), "F.Fab")
-    s += prop("Footprint", "", (0, 0), "F.Fab", hide=True, size=1.27)
+    s += prop("Reference", "JP1" if placed else "REF**", (0, -2.0), "F.SilkS", size=0.8, thick=0.12)
+    s += prop("Value", name, (0, 0), "F.Fab", hide=True)
+    s += prop("Footprint", f"{LIB}:{name}" if placed else "", (0, 0), "F.Fab", hide=True, size=1.27)
     s += prop("Datasheet", "", (0, 0), "F.Fab", hide=True, size=1.27)
     s += prop("Description", PARTS["JP1"][2] if placed else "", (0, 0), "F.Fab", hide=True, size=1.27)
     s += '\t(attr smd exclude_from_pos_files exclude_from_bom)\n'
-    s += fp_rect((-1.4, -1.0), (1.4, 1.0), side["F.CrtYd"], 0.05, f"jp-crt-{placed}")
-    s += fp_line((-1.4, -0.95), (1.4, -0.95), side["F.SilkS"], 0.12, f"jp-silk-a-{placed}")
-    s += fp_line((-1.4, 0.95), (1.4, 0.95), side["F.SilkS"], 0.12, f"jp-silk-b-{placed}")
+    s += fp_rect((-1.4, -1.25), (1.4, 1.25), side["F.CrtYd"], 0.05, f"jp-crt-{placed}")
+    s += fp_line((-1.4, -1.05), (1.4, -1.05), side["F.SilkS"], 0.12, f"jp-silk-a-{placed}")
+    s += fp_line((-1.4, 1.05), (1.4, 1.05), side["F.SilkS"], 0.12, f"jp-silk-b-{placed}")
     for n, (x, y) in pads.items():
         net = JP1_NET[n] if placed else None
         s += pad_smd(n, (x, y * fy), (1.0, 1.5), [side["F.Cu"], side["F.Mask"]], net)
@@ -353,9 +357,9 @@ def write_board():
     out.append(f'\t(gr_rect (start {mm(x0)} {mm(y0)}) (end {mm(x1)} {mm(y1)}) '
                f'(stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts") (uuid "{uid("edge")}"))\n')
     texts = [
-        ("Tiny TFT carrier rev A", (103.0, 89.6), "B.SilkS"),
-        ("JP1 bridged: D1 drives BL", (108.0, 100.6), "B.SilkS"),
-        ("JP1 open: backlight always on", (108.0, 102.0), "B.SilkS"),
+        ("Tiny TFT carrier rev A", (119.0, 100.6), "B.SilkS"),
+        ("JP1 bridged: D1 drives BL", (119.0, 102.0), "B.SilkS"),
+        ("JP1 open: backlight on", (119.0, 103.4), "B.SilkS"),
     ]
     for text, (tx, ty), layer in texts:
         just = " (justify mirror)" if layer.startswith("B.") else ""

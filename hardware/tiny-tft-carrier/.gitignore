@@ -1,0 +1,6 @@
+# KiCad per-user and editor state
+*.kicad_prl
+.history/
+~*.lck
+*-backups/
+fp-info-cache

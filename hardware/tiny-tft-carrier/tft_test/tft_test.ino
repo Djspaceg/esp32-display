@@ -2,7 +2,7 @@
 // ESP32-C6 with the Questwise 0.42" 96x54 TFT breakout on the carrier.
 //
 // Needs the "GFX Library for Arduino" (Arduino_GFX) library. Board:
-// "XIAO_ESP32S3" or "XIAO_ESP32C6" in the esp32 core.
+// "XIAO_ESP32S3", "XIAO_ESP32C6" or "XIAO_ESP32C3" in the esp32 core.
 //
 // What you should see: a white one-pixel frame touching all four edges,
 // red / green / blue bars, and "96x54" text. A frame that is cut off or has a
@@ -25,8 +25,17 @@ static const int8_t PIN_DC = 21;   // D3
 static const int8_t PIN_RES = 22;  // D4
 static const int8_t PIN_CS = 23;   // D5
 static const int8_t PIN_BL = 1;    // D1, only connected when JP1 is bridged
+#elif CONFIG_IDF_TARGET_ESP32C3
+// Untested. D8 is GPIO8, a C3 strapping pin; the screen's SCLK input does not
+// pull it, so the board should still boot normally.
+static const int8_t PIN_SCLK = 8;  // D8
+static const int8_t PIN_SDIN = 10; // D10
+static const int8_t PIN_DC = 5;    // D3
+static const int8_t PIN_RES = 6;   // D4
+static const int8_t PIN_CS = 7;    // D5
+static const int8_t PIN_BL = 3;    // D1, only connected when JP1 is bridged
 #else
-#error "Build for a XIAO ESP32-S3 or XIAO ESP32-C6"
+#error "Build for a XIAO ESP32-S3, ESP32-C6 or ESP32-C3"
 #endif
 
 // Panel geometry from the seller's library (green-tab init, column offset 16,
@@ -50,7 +59,8 @@ Arduino_GFX *gfx = new Arduino_ST7735(bus, PIN_RES, 0 /* rotation */, false /* n
 
 // Power, frame-rate and gamma registers the seller's library sends for this
 // panel (its Rcmd1 and Rcmd3 tables). Arduino_GFX's own ST7735 init skips the
-// power settings, so send them after begin().
+// power settings. The seller sends them while the screen is still off, so turn
+// it off around them.
 static void sendSellerInit()
 {
   static const uint8_t seq[] = {
@@ -71,6 +81,7 @@ static void sendSellerInit()
       0x2E, 0x2E, 0x37, 0x3F, 0x00, 0x00, 0x02, 0x10,    // GMCTRN1
   };
   bus->beginWrite();
+  bus->writeCommand(0x28); // DISPOFF
   for (size_t i = 0; i < sizeof(seq);)
   {
     uint8_t cmd = seq[i++];
@@ -81,7 +92,9 @@ static void sendSellerInit()
       bus->write(seq[i++]);
     }
   }
+  bus->writeCommand(0x29); // DISPON
   bus->endWrite();
+  delay(100);
 }
 
 static void drawTestCard()

@@ -17,10 +17,10 @@ of four pins (3V3, SCLK, SDIN, GND on one row; BL, DC, RES, CS on the other), so
 Zero boards both put 5V, GND and 3V3 next to each other, so the screen cannot
 plug onto them. The carrier puts the pins in the right order.
 
-**A C3 would mean:** the XIAO ESP32-C3 also fits this carrier, but its D8
-(SCLK here) is GPIO8, a C3 strapping pin. The screen's SCLK input should not
-pull it, so it ought to boot, but that is untested. Our firmware does have a C3
-family already (the 2424S012 board).
+**A C3 would mean:** the XIAO ESP32-C3 also fits this carrier, and the test
+sketch builds for it, but its D8 (SCLK here) is GPIO8, a C3 strapping pin. The
+screen's SCLK input should not pull it, so it ought to boot, but that is
+untested. Our firmware does have a C3 family already (the 2424S012 board).
 
 ## Pin map
 
@@ -37,18 +37,28 @@ family already (the 2424S012 board).
 
 Left free on purpose: D0, D2 (GPIO3, an S3 strapping pin), D6 and D7 (UART0,
 which prints boot messages), D9, and 5V. None of the pins used is a strapping,
-boot or USB pin on the S3 or the C6. On a XIAO ESP32-S3 **Sense**, the add-on
-board's SD card shares D8/D9/D10; leave the SD card out or keep its CS high.
+boot or USB pin on the S3 or the C6.
+
+Use the plain XIAO ESP32-S3, not the **Sense**. The Sense's camera and SD card
+board plugs into a connector under the XIAO, and there is no room for it on
+this carrier. Its SD card would also share D8/D9/D10. The plain S3's underside
+has only flat pads (battery, USB, JTAG, EN, GND; Seeed's dimension drawing).
+They sit on solder mask, with no carrier copper under them.
 
 ## Board
 
-- Size **36.5 x 23.0 mm**, two layers, 1.6 mm thick. No vias. No copper fill,
-  so there is no antenna area to keep clear.
-- XIAO at the right-hand end. Its USB-C socket hangs 1.5 mm past the board
-  edge, so a cable plugs in freely. The reset and boot buttons stay on top.
+- Size **36.5 x 23.0 mm**, two layers, 1.6 mm thick. No vias, no copper fill.
+- Antenna: the XIAO ESP32-S3 uses its own external antenna on the U.FL
+  connector. The XIAO ESP32-C6 has a ceramic antenna on the module. Bottom-layer
+  traces run under the XIAO, including the end away from USB, so Wi-Fi range
+  on a C6 is untested. With no ground fill the effect should be small.
+- XIAO at the right-hand end. The board edge is flush with the XIAO's USB end,
+  so the USB-C socket (Seeed does not publish its overhang; about 1.5 mm
+  assumed) is never blocked. The reset and boot buttons stay on top.
 - Screen at the left-hand end, **face up, with its flex cable at the end away
-  from the XIAO** (silk marks that end with a line). Pin labels are printed
-  beside each screen hole.
+  from the XIAO** (silk marks that end with a line). A three-letter pin label
+  is printed on end beside each screen hole (SCK = SCLK, SDI = SDIN). The
+  screen covers these labels once fitted.
 - Every trace but one runs on the bottom layer. SCLK runs on the top layer,
   along the bottom edge, outside the XIAO.
 
@@ -103,9 +113,11 @@ kicad-cli 10.0.7, headless only (the KiCad app was never opened):
   issues (`checks/drc.log`).
 - Gerbers plus Excellon drill and drill map exported to `fab/`.
 - The exported netlist was checked against the pin map above.
-- The test sketch compiles for `esp32:esp32:XIAO_ESP32S3` and
-  `esp32:esp32:XIAO_ESP32C6` (`checks/sketch-compile.log`). It has not been
-  run on a board.
+- The test sketch compiles for `esp32:esp32:XIAO_ESP32S3`,
+  `XIAO_ESP32C6` and `XIAO_ESP32C3` (`checks/sketch-compile.log`). It has not
+  been run on a board.
+- A separate read-only review checked the pin map, nets, pins to avoid,
+  footprints, routing, sketch and silkscreen. Its findings are fixed.
 
 Not done: no board has been made, nothing has been fitted together, no 3D
 check. The XIAO footprint was drawn from Seeed's published pad positions, not
@@ -124,7 +136,7 @@ $K pcb export drill --generate-map --map-format pdf -o fab/ tiny-tft-carrier.kic
 `tft_test/tft_test.ino` uses Arduino_GFX with the seller's settings: rotation
 0, column offset 16, row offset 0, BGR, no inversion. It also sends the seller
 library's power and gamma registers, which Arduino_GFX's own ST7735 start-up
-skips. SPI runs at 15 MHz, the ST7735 datasheet limit. It draws a one-pixel
+skips, with the screen switched off around them, as the seller does. SPI runs at 15 MHz, the ST7735 datasheet limit. It draws a one-pixel
 white frame (if a side is missing, an offset is wrong), RGB bars and
 "96x54". With JP1 bridged it also blinks the backlight every 2 s. The offsets for
 the other rotations are worked out, not tested.
@@ -145,5 +157,6 @@ the other rotations are worked out, not tested.
 - XIAO ESP32-S3 pins, strapping pins, 21 x 17.8 mm, 3V3 700 mA: [Seeed wiki](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/).
 - XIAO ESP32-C6 pins: [Seeed wiki](https://wiki.seeedstudio.com/xiao_esp32c6_getting_started/).
 - XIAO ESP32-C3 pins and strapping pins: [Seeed wiki](https://wiki.seeedstudio.com/XIAO_ESP32C3_Getting_Started/).
+- XIAO ESP32-S3 underside pads: [Seeed dimension drawing](https://files.seeedstudio.com/wiki/SeeedStudio-XIAO-ESP32S3/res/XIAO_ESP32S3_v1.1_Dimensioning.dxf).
 - XIAO pad positions (2.54 mm pitch, rows 15.24 mm apart, edge pads): [Seeed XIAO KiCad footprints](https://files.seeedstudio.com/wiki/XIAO-KiCad-Library/New_XIAO_Series_Footprints.zip).
 - Waveshare ESP32-C6-Zero pins and 18 x 23.5 mm: [Waveshare wiki](https://www.waveshare.com/wiki/ESP32-C6-Zero) (pinout and dimension images).
