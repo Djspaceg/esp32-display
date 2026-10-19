@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "tiny-tft-carrier") (type "KiCad") (uri "${KIPRJMOD}/tiny-tft-carrier.pretty") (options "") (descr "Carrier footprints"))
+)
