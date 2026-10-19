@@ -290,6 +290,46 @@ inline void contentBox(int width, int height, bool round, int border,
   }
 }
 
+/// The last resort for glass too short for the board name (the 54-row
+/// ST7735): RESCUE, the profile token and the warning, all at single size with
+/// tight gaps, the warning on up to MAX_NAME_LINES lines. Empty when even that
+/// does not fit.
+inline Screen compactLayout(Screen screen, int boxH, const char *profile,
+                            const char *warning) {
+  int boxW = 0, unusedH = 0;
+  contentBox(screen.width, screen.height, screen.round, screen.border, boxW,
+             unusedH);
+  char warningLines[MAX_NAME_LINES][MAX_LINE_CHARS + 1] = {};
+  uint8_t warningCount = 0;
+  if (warning != nullptr) {
+    warningCount = wrap(warning, (uint8_t)((boxW + 1) / 6), warningLines);
+    if (warningCount > MAX_NAME_LINES) return screen;
+  }
+  const int gap = 2;
+  const int total = 7 + gap + 7 +
+                    (warningCount == 0 ? 0 : gap + warningCount * 8 - 1);
+  if (total > boxH || textWidth(strlen(profile), 1) > boxW) return screen;
+  int y = (screen.height - total) / 2;
+  auto add = [&](const char *text, uint16_t color) {
+    Line &line = screen.lines[screen.lineCount++];
+    strncpy(line.text, text, MAX_LINE_CHARS);
+    line.text[MAX_LINE_CHARS] = 0;
+    line.color = color;
+    line.scale = 1;
+    line.x = (screen.width - textWidth(strlen(line.text), 1)) / 2;
+    line.y = y;
+  };
+  add(TITLE, COLOR_TITLE);
+  y += 7 + gap;
+  add(profile, COLOR_PROFILE);
+  y += 7 + gap;
+  for (uint8_t i = 0; i < warningCount; ++i) {
+    add(warningLines[i], COLOR_WARNING);
+    y += 8;
+  }
+  return screen;
+}
+
 /// `warning`, when set, is one extra red line under the profile token.
 inline Screen layout(int width, int height, bool round, const char *name,
                      const char *profile, const char *warning = nullptr) {
@@ -326,7 +366,7 @@ inline Screen layout(int width, int height, bool round, const char *name,
             warning, (uint8_t)((boxW + warningScale) / (6 * warningScale)),
             warningLines);
         if (warningCount <= 2) break;
-        if (warningScale == 1) return screen;  // nothing honest fits
+        if (warningScale == 1) return compactLayout(screen, boxH, profile, warning);
       }
     }
     const int nameGap = 4 * nameScale;
@@ -338,6 +378,11 @@ inline Screen layout(int width, int height, bool round, const char *name,
                            : nameGap + warningCount * 8 * warningScale -
                                  warningScale);
     if (total > boxH && titleScale > 1) continue;
+    // Without a warning the name may use the margin, as it always has; a
+    // warning that would not fit beside it takes the name's place instead.
+    if (total > boxH && warning != nullptr) {
+      return compactLayout(screen, boxH, profile, warning);
+    }
 
     int y = (height - total) / 2;
     auto add = [&](const char *text, uint16_t color, int scale) {

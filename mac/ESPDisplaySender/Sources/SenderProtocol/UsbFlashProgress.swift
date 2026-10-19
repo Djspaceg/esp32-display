@@ -145,6 +145,10 @@ public struct EsptoolFlashTracker: Equatable, Sendable {
 
     public let parts: [Part]
     public private(set) var phase: UsbFlashPhase?
+    /// Parts esptool has reported `Wrote ... at` for. esptool hard-resets the
+    /// board on its way out of a failed write too, so its reset line means the
+    /// board is restarting on new firmware only once every part is here.
+    private var written: Set<Int> = []
 
     public init(parts: [Part]) {
         self.parts = parts.sorted { $0.address < $1.address }
@@ -163,9 +167,11 @@ public struct EsptoolFlashTracker: Equatable, Sendable {
                 .map(UsbFlashPhase.writing)
         } else if trimmed.hasPrefix("Wrote "),
                   let address = Self.address(after: " at 0x", in: trimmed) {
-            next = progress(at: address, percent: 100).map(UsbFlashPhase.verifying)
+            let written = progress(at: address, percent: 100)
+            if let written { self.written.insert(written.index) }
+            next = written.map(UsbFlashPhase.verifying)
         } else if trimmed.hasPrefix("Hard resetting") || trimmed.hasPrefix("Leaving") {
-            next = .restarting
+            next = written.count == parts.count ? .restarting : nil
         } else {
             next = nil
         }

@@ -392,6 +392,7 @@ void setup() {
   Serial.printf("board: %s\n", cfg->name);
   Serial.printf("  driver=%s sclk=%d mosi=%d cs=%d dc=%d rst=%d bl=%d\n",
                 cfg->panel->driver == board::PanelDriver::Gc9107 ? "GC9107"
+                : cfg->panel->driver == board::PanelDriver::St7735 ? "ST7735"
                 : cfg->panel->driver == board::PanelDriver::Co5300 ? "CO5300"
                 : cfg->panel->driver == board::PanelDriver::St77916 ? "ST77916"
                 : cfg->panel->driver == board::PanelDriver::St7703 ? "ST7703"

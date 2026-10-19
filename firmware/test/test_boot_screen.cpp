@@ -212,11 +212,17 @@ int main() {
       const int longest = bootscreenmodel::textWidth(
           bootscreenmodel::MAX_STATUS_CHARS, s);
       const int textX = (w - longest) / 2;
-      if (!onGlass(l, textX, l.textY, textX + longest, l.textY + 7 * s)) {
+      // Only a frame narrower than the longest line at single size (the
+      // 96x54 ST7735 on its side, 54 wide) clips it, as layout() documents.
+      const bool clips = bootscreenmodel::textWidth(
+                             bootscreenmodel::MAX_STATUS_CHARS, 1) > w;
+      if (!clips && !onGlass(l, textX, l.textY, textX + longest, l.textY + 7 * s)) {
         printf("  %s %dx%d status line leaves the glass\n", identity.profile, w,
                h);
       }
-      CHECK(onGlass(l, textX, l.textY, textX + longest, l.textY + 7 * s));
+      CHECK(clips ||
+            onGlass(l, textX, l.textY, textX + longest, l.textY + 7 * s));
+      CHECK(!clips || (s == 1 && l.textY >= 0 && l.textY + 7 <= h));
 
       // Pixels: background, the image unscaled where it is, bar fill.
       const bootscreenmodel::StageView join =
@@ -228,6 +234,8 @@ int main() {
       for (int iy = 0; iy < bootimage::HEIGHT; iy += 7) {
         for (int ix = 0; ix < bootimage::WIDTH; ix += 5) {
           const int x = l.image.x + ix, y = l.image.y + iy;
+          // Glass smaller than the image (the 96x54 ST7735) shows its middle.
+          if (x < 0 || y < 0 || x >= w || y >= h) continue;
           const bool underBar = y >= l.bar.y && y < l.bar.y + l.bar.h &&
                                 x >= l.bar.x && x < l.bar.x + l.bar.w;
           const bool underText = y >= l.textY - 1 && y <= l.textY + 7 * s + 1;
@@ -286,8 +294,9 @@ int main() {
       }
     }
   }
-  // The 128x128 panel and the 172-high landscape frames are the compact ones.
-  CHECK(compactLayouts == 4);
+  // The 128x128 panel, the 172-high landscape frames and both 96x54 frames
+  // are the compact ones.
+  CHECK(compactLayouts == 6);
   CHECK(bottomLayouts > 0);
   {
     const Layout small = bootscreenmodel::layout(128, 128, false);

@@ -57,6 +57,7 @@ final class RegionPresetTests: XCTestCase {
         let profiles: [(String, PanelGeometry)] = [
             ("c6 st7789", PanelGeometry(width: 172, height: 320)),
             ("c6 jd9853", PanelGeometry(width: 172, height: 320)),
+            ("s3 st7735-042", PanelGeometry(width: 96, height: 54)),
             ("s3 gc9107", PanelGeometry(width: 128, height: 128)),
             ("s3 st7789-130", PanelGeometry(width: 240, height: 240)),
             ("s3 st7789-154", PanelGeometry(width: 240, height: 240)),

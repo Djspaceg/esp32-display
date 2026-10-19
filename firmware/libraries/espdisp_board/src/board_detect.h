@@ -1,7 +1,8 @@
 // Runtime profile detection performed before any panel GPIO is configured.
 //
-// C6 probes its shared discriminator bus. S3 uses the 8 MiB flash identity for
-// the GC9107 carrier and profile-specific I2C buses on larger-flash hardware,
+// C6 probes its shared discriminator bus. S3 tells its two 8 MiB carriers apart
+// by the 0.85's codec bus (GC9107 when it answers, the XIAO ST7735 when it is
+// silent) and uses profile-specific I2C buses on larger-flash hardware,
 // plus input-only analog sense pins where two carriers share one I2C bus.
 // S3 accepts exactly one candidate; zero or multiple candidates remain Unknown
 // so the firmware can stay serial-only until an operator uses CFGBOARD. P4

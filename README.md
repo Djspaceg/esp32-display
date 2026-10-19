@@ -24,7 +24,7 @@ and internal build-target keys are not release names.
 | Family | Chip | Runtime profiles | Canonical partition |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-saves-ota` |
+| `s3` | `esp32s3` | `st7735-042`, `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-saves-ota` |
 | `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c`, `jd9365-34c` | `p4-32m-saves-ota` |
 
 The S3 image uses an 8 MiB common-denominator dual-OTA layout and contains all
@@ -55,6 +55,7 @@ orientations or only a 180-degree flip.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `st7789` | [ESP32-C6-LCD-1.47](https://www.waveshare.com/esp32-c6-lcd-1.47.htm) | `esp32c6` | ST7789 | 172x320 | 1.47" | No | No | None | 0/180 | None |
 | `jd9853` | [ESP32-C6-Touch-LCD-1.47](https://www.waveshare.com/esp32-c6-touch-lcd-1.47.htm) | `esp32c6` | JD9853 | 172x320 | 1.47" | No | Yes | Flip only (0/180) | 0/180 | None |
+| `st7735-042` | [Seeed XIAO ESP32-S3](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/) + [Questwise 0.42" 96x54 TFT](https://github.com/questwiseventures/TFT_ST7735_96x54_Color_TFT) | `esp32s3` | ST7735 | 96x54 | 0.42" | No | No | None | 0/90/180/270 | None |
 | `gc9107` | [ESP32-S3-LCD-0.85](https://www.waveshare.com/esp32-s3-lcd-0.85.htm) | `esp32s3` | GC9107 | 128x128 | 0.85" | Yes | No | None | 0/90/180/270 | Speaker + mic |
 | `st7789-130` | [ESP32-S3-LCD-1.3](https://www.waveshare.com/esp32-s3-lcd-1.3.htm) | `esp32s3` | ST7789V2 | 240x240 | 1.3" | Yes | Yes | Four-way | 0/90/180/270 | None |
 | `st7789-154` | [ESP32-S3-LCD-1.54](https://www.waveshare.com/esp32-s3-lcd-1.54.htm) | `esp32s3` | ST7789 | 240x240 | 1.54" | Yes | Yes | Four-way | 0/90/180/270 | Speaker + 2 mics |
@@ -108,8 +109,10 @@ Profile selection occurs before panel GPIO initialization.
 - C6 probes the shared GPIO18/19 I2C bus. A responding touch/motion path selects
   `jd9853`; a silent bus selects `st7789`. An inconclusive C6 probe uses the
   electrically safer profile.
-- S3 identifies the 8 MiB GC9107 carrier by flash capacity, then probes distinct
-  I2C buses on larger-flash carriers. The `st7789-130` profile uses the
+- On 8 MiB S3 parts the probe is the 0.85's codec bus (ES8311 `0x18`, ES7210
+  `0x40` on GPIO42/41): an answer selects `gc9107`, silence `st7735-042` (the
+  XIAO has nothing on those pads and its screen cannot be read back). S3 then
+  probes distinct I2C buses on larger-flash carriers. The `st7789-130` profile uses the
   QMI8658A at `0x6B` on GPIO47/48 and routes CFG commands through its CH343
   UART bridge; existing S3 profiles retain native USB CDC. The `st7789-190`
   carrier answers identically on GPIO47/48, so both profiles also read GPIO4

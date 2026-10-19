@@ -2809,8 +2809,20 @@ int main() {
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
                                     false, false, true) ==
           Variant::ElecrowKnob128);
-    // An 8 MiB part is the GC9107 carrier by flash alone; a knob bus answering
-    // there does not make a second candidate out of it.
+    // On 8 MiB flash the 0.85's codec bus decides: an answer is the GC9107
+    // carrier, silence the XIAO's ST7735, and the larger-flash buses never
+    // run there.
+    CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
+                                    false, false, false, -1,
+                                    /*codec085*/ false) == Variant::XiaoSt7735);
+    CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, true, true,
+                                    true, true, true, 560,
+                                    /*codec085*/ false) == Variant::XiaoSt7735);
+    CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                    false, false, false, -1,
+                                    /*codec085*/ false) == Variant::Unknown);
+    // A knob bus answering on an 8 MiB 0.85 does not make a second candidate
+    // out of it.
     CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
                                     false, false, true) == Variant::LcdGc9107);
     // The knob probe pulses a rail and is skipped once any bus has answered.
@@ -2854,33 +2866,42 @@ int main() {
         board::detectionPlanForPlatform(board::Platform::Esp32S3);
     CHECK(s3Plan.resolution == ResolutionPolicy::ExactlyOne);
     CHECK(board::GENERATED_MAX_PROBE_COUNT >= s3Plan.probeCount);
-    CHECK(s3Plan.probeCount == 5);
+    CHECK(s3Plan.probeCount == 6);
+    // The 0.85's codec bus (ES8311 0x18, ES7210 0x40) runs only on 8 MiB
+    // parts, where it is the one signal between the 0.85 and the XIAO.
+    CHECK(s3Plan.probes[0].sda == 42 && s3Plan.probes[0].scl == 41);
+    CHECK(s3Plan.probes[0].addressCount == 2);
+    CHECK(s3Plan.probes[0].addresses[0] == 0x18);
+    CHECK(s3Plan.probes[0].addresses[1] == 0x40);
+    CHECK(s3Plan.probes[0].flashMinExclusive == 0);
+    CHECK(s3Plan.probes[0].flashMaxInclusive == 8u * 1024u * 1024u);
+    CHECK(s3Plan.probes[0].resetPin == -1);
     // The 1.85C's bus comes first: the 1.75C's SDA (GPIO15) is the 1.85C V2's
     // amplifier enable, so that probe is quiet once a board has answered.
-    CHECK(s3Plan.probes[0].sda == 11 && s3Plan.probes[0].scl == 10);
-    CHECK(s3Plan.probes[0].addresses[0] == 0x15);
-    CHECK(s3Plan.probes[0].addresses[1] == 0x20);
-    CHECK(!s3Plan.probes[0].quietAfterMatch);
-    CHECK(s3Plan.probes[1].sda == 15 && s3Plan.probes[1].scl == 14);
-    CHECK(s3Plan.probes[1].addresses[0] == 0x5A);
-    CHECK(s3Plan.probes[1].addresses[1] == 0x34);
-    CHECK(s3Plan.probes[1].addresses[2] == 0x6A);
-    CHECK(s3Plan.probes[1].addresses[3] == 0x6B);
-    CHECK(s3Plan.probes[1].quietAfterMatch);
-    CHECK(s3Plan.probes[2].sda == 42 && s3Plan.probes[2].scl == 41);
-    CHECK(s3Plan.probes[2].addresses[0] == 0x15);
-    CHECK(s3Plan.probes[2].addresses[1] == 0x6A);
-    CHECK(s3Plan.probes[2].addresses[2] == 0x6B);
-    CHECK(s3Plan.probes[3].sda == 47 && s3Plan.probes[3].scl == 48);
-    CHECK(s3Plan.probes[3].addresses[0] == 0x6B);
+    CHECK(s3Plan.probes[1].sda == 11 && s3Plan.probes[1].scl == 10);
+    CHECK(s3Plan.probes[1].addresses[0] == 0x15);
+    CHECK(s3Plan.probes[1].addresses[1] == 0x20);
+    CHECK(!s3Plan.probes[1].quietAfterMatch);
+    CHECK(s3Plan.probes[2].sda == 15 && s3Plan.probes[2].scl == 14);
+    CHECK(s3Plan.probes[2].addresses[0] == 0x5A);
+    CHECK(s3Plan.probes[2].addresses[1] == 0x34);
+    CHECK(s3Plan.probes[2].addresses[2] == 0x6A);
+    CHECK(s3Plan.probes[2].addresses[3] == 0x6B);
+    CHECK(s3Plan.probes[2].quietAfterMatch);
+    CHECK(s3Plan.probes[3].sda == 42 && s3Plan.probes[3].scl == 41);
+    CHECK(s3Plan.probes[3].addresses[0] == 0x15);
+    CHECK(s3Plan.probes[3].addresses[1] == 0x6A);
+    CHECK(s3Plan.probes[3].addresses[2] == 0x6B);
+    CHECK(s3Plan.probes[4].sda == 47 && s3Plan.probes[4].scl == 48);
+    CHECK(s3Plan.probes[4].addresses[0] == 0x6B);
     // The knob's CST816D sits on the GPIO1-switched rail, so its probe "reset"
     // is a power cycle of that rail before addressing 0x15.
-    CHECK(s3Plan.probes[4].sda == 6 && s3Plan.probes[4].scl == 7);
-    CHECK(s3Plan.probes[4].addressCount == 1);
-    CHECK(s3Plan.probes[4].addresses[0] == 0x15);
-    CHECK(s3Plan.probes[4].resetPin == 1);
-    CHECK(s3Plan.probes[4].resetLowMs == 20);
-    CHECK(s3Plan.probes[4].resetReleaseWaitMs == 300);
+    CHECK(s3Plan.probes[5].sda == 6 && s3Plan.probes[5].scl == 7);
+    CHECK(s3Plan.probes[5].addressCount == 1);
+    CHECK(s3Plan.probes[5].addresses[0] == 0x15);
+    CHECK(s3Plan.probes[5].resetPin == 1);
+    CHECK(s3Plan.probes[5].resetLowMs == 20);
+    CHECK(s3Plan.probes[5].resetReleaseWaitMs == 300);
     {
       // A bus that acknowledges the reserved canary address is held low (the
       // knob's unpowered GC9A01 clamps GPIO11, which is the 1.85C's SDA), so
@@ -2902,43 +2923,43 @@ int main() {
       {
         unsigned transactions = 0;
         const ProbeEvidence glitched = boarddetectmodel::addressListEvidence(
-            s3Plan.probes[0], [&](uint8_t) { return ++transactions >= 2; });
+            s3Plan.probes[1], [&](uint8_t) { return ++transactions >= 2; });
         CHECK(glitched.status == ProbeStatus::Started);
         CHECK(glitched.ackCount == 0);
         const ProbeEvidence genuine = boarddetectmodel::addressListEvidence(
-            s3Plan.probes[0], [&](uint8_t address) {
+            s3Plan.probes[1], [&](uint8_t address) {
               return address == 0x15 || address == 0x20;
             });
         CHECK(genuine.ackCount == 2);
       }
-      ProbeEvidence knobBoard[5] = {};
-      knobBoard[0] = clamped;
-      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 4, knobBoard));
-      knobBoard[4] = {ProbeStatus::Started, 1};
+      ProbeEvidence knobBoard[6] = {};
+      knobBoard[1] = clamped;
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 5, knobBoard));
+      knobBoard[5] = {ProbeStatus::Started, 1};
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, knobBoard, 5)
+                                      16u * 1024u * 1024u, knobBoard, 6)
                 .variant == Variant::ElecrowKnob128);
     }
     {
       // The rail-pulsing knob probe runs only while nothing has answered, so
       // the other S3 boards never have their GPIO1 driven by it.
-      ProbeEvidence seen[5] = {};
-      for (uint8_t i = 0; i < 4; ++i) {
+      ProbeEvidence seen[6] = {};
+      for (uint8_t i = 0; i < 5; ++i) {
         CHECK(boarddetectmodel::shouldRunProbe(s3Plan, i, seen));
       }
-      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 4, seen));
-      seen[1] = {ProbeStatus::Started, 0};
-      seen[3] = {ProbeStatus::StartFailed, 0};
-      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 4, seen));
-      seen[2] = {ProbeStatus::Started, 1};
-      CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 4, seen));
-      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 3, seen));
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 5, seen));
+      seen[2] = {ProbeStatus::Started, 0};
+      seen[4] = {ProbeStatus::StartFailed, 0};
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 5, seen));
+      seen[3] = {ProbeStatus::Started, 1};
       CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 5, seen));
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 4, seen));
+      CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 6, seen));
       // Skipped evidence stays NotRun, so the knob candidate cannot match and
       // the board that answered still resolves on its own.
-      seen[4] = {};
+      seen[5] = {};
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, seen, 5)
+                                      16u * 1024u * 1024u, seen, 6)
                 .variant == Variant::TouchSt7789);
     }
     {
@@ -2961,7 +2982,7 @@ int main() {
         const board::AudioConfig *audio =
             board::generatedAudioConfig(simulated.variant);
         CHECK(audio != nullptr && audio->pinAmpEnable != board::NO_PIN);
-        ProbeEvidence evidence[5] = {};
+        ProbeEvidence evidence[6] = {};
         bool touchedAmp = false;
         boarddetectmodel::runI2cProbes(
             s3Plan, 16u * 1024u * 1024u, evidence,
@@ -2978,7 +2999,7 @@ int main() {
             [](uint8_t) {});
         CHECK(!touchedAmp);
         CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                        16u * 1024u * 1024u, evidence, 5)
+                                        16u * 1024u * 1024u, evidence, 6)
                   .variant == simulated.variant);
       }
     }
@@ -2995,24 +3016,24 @@ int main() {
       // A guarded candidate never matches without a reading, and the
       // evaluator never reads past the sense array it was given.
       const board::SenseEvidence unread[1] = {};
-      ProbeEvidence shared[4] = {};
-      shared[3] = {ProbeStatus::Started, 1};
+      ProbeEvidence shared[5] = {};
+      shared[4] = {ProbeStatus::Started, 1};
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, shared, 4,
+                                      16u * 1024u * 1024u, shared, 5,
                                       unread, 1)
                 .matchedCandidates == 0);
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, shared, 4)
+                                      16u * 1024u * 1024u, shared, 5)
                 .matchedCandidates == 0);
       // A sense index beyond the supplied array is refused, not read.
       const board::SenseEvidence noSenses[1] = {{true, 600}};
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, shared, 4,
+                                      16u * 1024u * 1024u, shared, 5,
                                       noSenses, 0)
                 .matchedCandidates == 0);
       const board::SenseEvidence railSense[1] = {{true, 600}};
       const board::DetectionResult rail = board::detectFromEvidence(
-          board::Platform::Esp32S3, 16u * 1024u * 1024u, shared, 4,
+          board::Platform::Esp32S3, 16u * 1024u * 1024u, shared, 5,
           railSense, 1);
       CHECK(rail.variant == Variant::LcdSt7789_190);
       CHECK(rail.matchedCandidates == 1);
@@ -3022,15 +3043,15 @@ int main() {
       // from raw counts, so the 1.3 keeps auto-detecting on such silicon and
       // the 1.9 still separates from it. Nominal 12 dB scale: about 0.757 mV
       // per count, so 20 counts is ~15 mV and 700 counts ~530 mV.
-      ProbeEvidence shared[4] = {};
-      shared[3] = {ProbeStatus::Started, 1};
+      ProbeEvidence shared[5] = {};
+      shared[4] = {ProbeStatus::Started, 1};
       const int bareHeader[5] = {18, 20, 22, 19, 21};
       const board::SenseEvidence low =
           board::senseEvidenceFromSamples(bareHeader, nullptr, 5);
       CHECK(low.read);
       CHECK(low.millivolts <= 150);
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, shared, 4, &low, 1)
+                                      16u * 1024u * 1024u, shared, 5, &low, 1)
                 .variant == Variant::LcdSt7789_130);
       const int railDivider[5] = {690, 705, 700, 698, 702};
       const board::SenseEvidence high =
@@ -3038,7 +3059,7 @@ int main() {
       CHECK(high.read);
       CHECK(high.millivolts >= 250 && high.millivolts <= 700);
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, shared, 4, &high, 1)
+                                      16u * 1024u * 1024u, shared, 5, &high, 1)
                 .variant == Variant::LcdSt7789_190);
       // Calibrated conversions win when present; a failed raw read or no
       // samples still leaves the evidence unread.
@@ -3088,22 +3109,45 @@ int main() {
       CHECK(geometry.valid());
     }
 
-    ProbeEvidence s3Evidence[5] = {};
+    ProbeEvidence s3Evidence[6] = {};
+    // An 8 MiB part whose codec probe never ran is neither 8 MiB carrier.
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 5);
-    CHECK(detected.variant == Variant::LcdGc9107);
-    CHECK(detected.matchedCandidates == 1);
-    detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 5);
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
     CHECK(detected.variant == Variant::Unknown);
     CHECK(detected.matchedCandidates == 0);
+    s3Evidence[0] = {ProbeStatus::Started, 2};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
+    CHECK(detected.variant == Variant::LcdGc9107);
+    CHECK(detected.matchedCandidates == 1);
+    s3Evidence[0] = {ProbeStatus::Started, 0};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
+    CHECK(detected.variant == Variant::XiaoSt7735);
+    CHECK(detected.matchedCandidates == 1);
+    // A codec bus that would not start is no evidence for either.
+    s3Evidence[0] = {ProbeStatus::StartFailed, 0};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
+    CHECK(detected.variant == Variant::Unknown);
+    s3Evidence[0] = {};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 6);
+    CHECK(detected.variant == Variant::Unknown);
+    CHECK(detected.matchedCandidates == 0);
+    // A silent codec bus on a 16 MiB part never makes it a XIAO.
+    s3Evidence[0] = {ProbeStatus::Started, 0};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 6);
+    CHECK(detected.variant == Variant::Unknown);
+    s3Evidence[0] = {};
+    s3Evidence[2] = {ProbeStatus::Started, 1};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 6);
+    CHECK(detected.variant == Variant::AmoledCo5300);
     s3Evidence[1] = {ProbeStatus::Started, 1};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 5);
-    CHECK(detected.variant == Variant::AmoledCo5300);
-    s3Evidence[0] = {ProbeStatus::Started, 1};
-    detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 5);
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 6);
     CHECK(detected.variant == Variant::Unknown);
     CHECK(detected.matchedCandidates == 2);
 
@@ -3384,18 +3428,18 @@ int main() {
 
     const auto &generatedS3Plan =
         board::detectionPlanForPlatform(board::Platform::Esp32S3);
-    CHECK(generatedS3Plan.probes[1].addressCount == 4);
-    CHECK(generatedS3Plan.probes[1].addresses[0] == 0x5A);
-    CHECK(generatedS3Plan.probes[1].addresses[1] == 0x34);
-    CHECK(generatedS3Plan.probes[1].addresses[2] == 0x6A);
-    CHECK(generatedS3Plan.probes[1].addresses[3] == 0x6B);
-    CHECK(generatedS3Plan.probes[0].addressCount == 2);
-    CHECK(generatedS3Plan.probes[0].addresses[0] == 0x15);
-    CHECK(generatedS3Plan.probes[0].addresses[1] == 0x20);
-    CHECK(generatedS3Plan.probes[2].addressCount == 3);
-    CHECK(generatedS3Plan.probes[2].addresses[0] == 0x15);
-    CHECK(generatedS3Plan.probes[2].addresses[1] == 0x6A);
-    CHECK(generatedS3Plan.probes[2].addresses[2] == 0x6B);
+    CHECK(generatedS3Plan.probes[2].addressCount == 4);
+    CHECK(generatedS3Plan.probes[2].addresses[0] == 0x5A);
+    CHECK(generatedS3Plan.probes[2].addresses[1] == 0x34);
+    CHECK(generatedS3Plan.probes[2].addresses[2] == 0x6A);
+    CHECK(generatedS3Plan.probes[2].addresses[3] == 0x6B);
+    CHECK(generatedS3Plan.probes[1].addressCount == 2);
+    CHECK(generatedS3Plan.probes[1].addresses[0] == 0x15);
+    CHECK(generatedS3Plan.probes[1].addresses[1] == 0x20);
+    CHECK(generatedS3Plan.probes[3].addressCount == 3);
+    CHECK(generatedS3Plan.probes[3].addresses[0] == 0x15);
+    CHECK(generatedS3Plan.probes[3].addresses[1] == 0x6A);
+    CHECK(generatedS3Plan.probes[3].addresses[2] == 0x6B);
 
     // AXP2101 PMU: shares the touch I2C bus. The touch C6 also has battery
     // telemetry, but through its GPIO0 divider rather than this PMU path.
@@ -3627,6 +3671,47 @@ int main() {
     CHECK(board::configFor(Variant::AmoledCo5300).panel->spiMode == 0);
     CHECK(board::configFor(Variant::LcdSt77916).panel->spiMode == 0);
     CHECK(board::configFor(Variant::LcdGc9107).panel->spiMode == 0);
+  }
+
+  // --- the XIAO ESP32-S3 + 0.42-inch ST7735 board entry -------------------
+  {
+    using board::Variant;
+    const board::Config &x = board::configFor(Variant::XiaoSt7735);
+    CHECK(x.variant == Variant::XiaoSt7735);
+    CHECK(strcmp(board::variantToken(Variant::XiaoSt7735), "st7735-042") == 0);
+    CHECK(board::variantFromName("st7735-042") == Variant::XiaoSt7735);
+    CHECK(strcmp(board::targetToken(Variant::XiaoSt7735), "s3") == 0);
+    CHECK(x.panel->driver == board::PanelDriver::St7735);
+    CHECK(x.panel->bus == board::PanelBus::Spi);
+    // The tiny TFT carrier's pin map, pin by pin.
+    CHECK(x.pinSclk == 7);
+    CHECK(x.pinMosi == 9);
+    CHECK(x.pinDc == 4);
+    CHECK(x.pinRst == 5);
+    CHECK(x.pinCs == 6);
+    CHECK(x.pinData1 == board::NO_PIN && x.pinData2 == board::NO_PIN &&
+          x.pinData3 == board::NO_PIN);
+    CHECK(x.pinBootButton == 0);
+    // The screen holds its backlight on; GPIO2 (D1) and the plain user LED on
+    // GPIO21 are never driven.
+    CHECK(x.pinBl == board::NO_PIN && !x.hasBacklightPin());
+    CHECK(x.pinBlEnable == board::NO_PIN);
+    CHECK(x.pinRgbLed == board::NO_PIN && !x.hasRgbLed());
+    CHECK(!x.hasTouch() && !x.hasBattery() && !x.hasMotion());
+    CHECK(x.serialTransport() == board::SerialTransport::NativeUsbCdc);
+    const int8_t used[] = {x.pinSclk, x.pinMosi, x.pinCs, x.pinDc, x.pinRst};
+    for (int8_t pin : used) CHECK(pin != 2 && pin != 19 && pin != 20 && pin != 21);
+    // The seller's green-tab geometry: 96x54 at column 16, row 0, in the
+    // MX|MY state (two quarter turns), BGR, no inversion; 4 MHz is the clock
+    // measured clean over jumper wires (15 MHz showed static).
+    CHECK(x.panel->width == 96 && x.panel->height == 54);
+    CHECK(x.panel->colOffset == 16 && x.panel->rowOffset == 0);
+    CHECK(x.panel->orientationOffset == 2);
+    CHECK(!x.panel->invertColor);
+    CHECK(x.panel->pixelClockHz == 4 * 1000 * 1000);
+    CHECK(x.panel->spiMode == 0);
+    CHECK(board::supportsDoom(Variant::XiaoSt7735));
+    CHECK(!board::supportsAudio(Variant::XiaoSt7735));
   }
 
   // --- the S3 0.85-inch GC9107 board entry --------------------------------
@@ -6958,8 +7043,8 @@ int main() {
     CHECK(board::formatProfileHint(board::Platform::Esp32S3, hint,
                                    sizeof(hint)));
     CHECK(strcmp(hint,
-                 "gc9107|st7789-130|st7789-154|st7789-190|co5300|st77916|"
-                 "gc9a01-knob-128|auto") == 0);
+                 "st7735-042|gc9107|st7789-130|st7789-154|st7789-190|co5300|"
+                 "st77916|gc9a01-knob-128|auto") == 0);
     CHECK(board::formatProfileHint(board::Platform::Esp32C6, hint,
                                    sizeof(hint)));
     CHECK(strcmp(hint, "st7789|jd9853|auto") == 0);

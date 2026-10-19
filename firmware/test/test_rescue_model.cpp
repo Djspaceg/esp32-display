@@ -163,7 +163,7 @@ int main() {
       }
       ++profiles;
     }
-    CHECK(profiles == 13);
+    CHECK(profiles == 14);
 
     board::Config onUsb = board::CONFIG_TOUCH_ST7789;
     onUsb.pinSclk = 19;
@@ -383,7 +383,12 @@ int main() {
       }
       // RESCUE is the largest thing on the glass.
       CHECK(screen.lines[0].scale >= screen.lines[1].scale);
-      CHECK(screen.lines[0].scale >= 2);
+      // Doubled wherever the glass has room for it; the 54-row ST7735 fits
+      // RESCUE, a two-line name and the profile only at single size.
+      const int shortSide = cfg.panel->width < cfg.panel->height
+                                ? cfg.panel->width
+                                : cfg.panel->height;
+      CHECK(screen.lines[0].scale >= (shortSide >= 100 ? 2 : 1));
     }
   }
 

@@ -200,19 +200,22 @@ selector = ""
 macros = []
 
 [detection]
+# The 0.85's ES8311 (0x18) and ES7210 (0x40) run from 3V3 with 4.7K pull-ups on
+# this bus (schematic above), so an answer identifies it among 8 MB S3 boards;
+# the XIAO ESP32-S3 TFT descriptor claims the same probe when nothing answers.
 order = 10
 resolution = "exactly_one"
 no_match = "unknown"
-kind = "flash_range"
+kind = "i2c_any_ack"
 flash_min_exclusive = 0
 flash_max_inclusive = 8388608
-sda = -1
-scl = -1
-frequency_hz = 0
+sda = 42
+scl = 41
+frequency_hz = 100000
 scan_first = 0
 scan_last = 0
-addresses = []
+addresses = [24, 64]
 reset_pin = -1
 reset_low_ms = 0
 reset_release_wait_ms = 0
-release = "never"
+release = "always"

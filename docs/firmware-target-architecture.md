@@ -33,7 +33,7 @@ ST7703 or JD9365 timing, GT911 behavior, or carrier GPIOs.
 | Family | Chip | Runtime profiles | Partition compatibility |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-saves-ota` |
+| `s3` | `esp32s3` | `st7735-042`, `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-saves-ota` |
 | `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c`, `jd9365-34c` | `p4-32m-saves-ota` |
 
 C6 probes its shared I2C bus before panel GPIO initialization. S3 uses 8 MiB
@@ -160,6 +160,7 @@ under motion, and odd-orientation touch corners remain unverified.
 | Profile | Current evidence | Residual gap |
 | --- | --- | --- |
 | `co5300` | Runtime detection, frame counters, two rotations, brightness, and power on attached hardware | No independent visual observer for the latest image |
+| `st7735-042` | Hand-wired XIAO ESP32-S3: detection, `CFGSHOW`, 96x54 window at column 16 and BGR order seen on the glass with a test sketch at 4 MHz | 15 MHz unproven over jumper wires; rotations other than 0 unchecked; no WiFi without the XIAO's antenna |
 | `gc9107` | Family compile and host profile tests | No attached carrier for current visible smoke testing |
 | `st7789-130` | Attached carrier chip/flash probe, unique QMI8658A detection on GPIO47/48, production `CFGSHOW` over CH343, motion initialization, and WiFi association | Visual RGB/offset/backlight/rotation, battery with an attached cell, and sustained streaming checks pending |
 | `st7789-154` | Family compile and host profile tests | No attached carrier for current runtime testing |

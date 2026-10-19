@@ -1,0 +1,223 @@
+schema = 1
+key = "s3-xiao-tft-042"
+catalog_order = 5
+name = "XIAO ESP32-S3 + 0.42-inch 96x54 screen"
+hardware = ["Seeed Studio XIAO ESP32S3", "Questwise 0.42in 96x54 TFT"]
+
+# A Seeed XIAO ESP32-S3 (ESP32-S3R8: 8 MB flash, 8 MB octal PSRAM, native USB)
+# with the Questwise 0.42" 96x54 ST7735 TFT breakout, wired to the tiny TFT
+# carrier's pin map (hardware/tiny-tft-carrier/DESIGN.md). XIAO pins:
+# https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/
+# Panel set-up (green-tab init, column offset 16, row offset 0, BGR):
+# https://github.com/questwiseventures/TFT_ST7735_96x54_Color_TFT
+
+[migration]
+firmware_config = "legacy"
+config_symbol = "CONFIG_XIAO_ST7735_042"
+
+[identity]
+target = "s3"
+chip = "esp32s3"
+profile = "st7735-042"
+partition = "universal-8m-doom-saves-ota"
+variant = "XiaoSt7735"
+variant_value = 14
+legacy_targets = []
+
+[family]
+platform_key = "s3"
+build_target = "s3-universal"
+fqbn = "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi,PartitionScheme=custom"
+partition_csv = "partitions_s3.csv"
+extra_flags = ["-DESPDISP_DOOM_RUNTIME"]
+extra_library_dirs = ["firmware"]
+fqbn_options = []
+flash_bytes = [8388608, 16777216, 33554432]
+common_layout_bytes = 8388608
+requires_doom_wad = true
+bootloader_address = 0
+partitions_address = 32768
+boot_app0_address = 57344
+app_address = 65536
+blurb = "Universal ESP32-S3 display firmware"
+
+[platform]
+use_psram_frame_buffers = true
+use_raw_lwip_receive_task = true
+wifi = "native"
+identity_source = "wifi_station_mac"
+serial = "native_usb_cdc"
+
+[capacity]
+minimum_flash_bytes = 8388608
+
+[panel]
+# The seller's rotation 0 is MADCTL MX|MY|BGR with the glass at column 16,
+# row 0; orientation_offset 2 is that same MX|MY state. Measured on a
+# hand-wired XIAO: at 4 MHz a whole-memory fill showed solid red, green, blue
+# in order (BGR), and a 96x54 white frame at column 16, row 0 touched all four
+# edges; the seller's 15 MHz showed only static over jumper wires. 4 MHz moves
+# a full frame in about 21 ms. Controller memory extents are unmeasured.
+symbol = "PANEL_ST7735_96X54"
+profile = "St7735_96x54"
+driver = "St7735"
+bus = "spi"
+width = 96
+height = 54
+memory_width = 0
+memory_height = 0
+pixel_clock_hz = 4000000
+spi_mode = 0
+col_offset = 16
+row_offset = 0
+orientation_offset = 2
+invert_color = false
+round_display = false
+supports_command_rotation = true
+color_order = "bgr"
+data_endian = "big"
+pixel_depth = 16
+dsi_data_lanes = 0
+dsi_lane_mbps = 0
+hsync_back_porch = 0
+hsync_pulse_width = 0
+hsync_front_porch = 0
+vsync_back_porch = 0
+vsync_pulse_width = 0
+vsync_front_porch = 0
+
+[carrier]
+# SCLK D8, SDIN D10, DC D3, RES D4, CS D5. The screen pulls its BL input high,
+# so the backlight is always on; BL reaches D1 (GPIO2) only through the
+# carrier's JP1, which is open as made. No backlight pin is declared, so GPIO2
+# is never driven. The XIAO's user LED (GPIO21) is a plain LED, not an
+# addressable one, and is left alone.
+pin_sclk = 7
+pin_mosi = 9
+pin_data1 = -1
+pin_data2 = -1
+pin_data3 = -1
+pin_cs = 6
+pin_dc = 4
+pin_rst = 5
+pin_bl = -1
+pin_boot = 0
+pin_rgb_led = -1
+
+[touch]
+controller = "none"
+sda = -1
+scl = -1
+reset = -1
+interrupt = -1
+addresses = []
+panel_short = 54
+panel_long = 96
+raw_x_mirrored = false
+raw_y_mirrored = false
+rotate_clockwise = true
+
+[led]
+channel_order = "rgb"
+pixel_count = 0
+
+[gesture]
+swipe_min_px = 24
+tap_max_move_px = 12
+tap_max_ms = 400
+long_press_ms = 600
+press_max_ms = 10000
+
+[orientation]
+offsets = [[16, 0], [0, 16], [16, 0], [0, 16]]
+mirror_x_supported = true
+quarter_turns = [0, 1, 2, 3]
+
+[motion]
+controller = "none"
+address = 0
+x_axis = 0
+x_sign = 1
+y_axis = 1
+y_sign = 1
+
+[reset]
+expander = "none"
+expander_address = 0
+panel_output = 0
+touch_output = 0
+
+[backlight]
+kind = "none"
+enable_pin = -1
+inverted = false
+
+[power]
+controller = "none"
+battery_adc = -1
+battery_adc_scale = 0
+battery_enable = -1
+charge_status = -1
+axp_address = 0
+
+[serial]
+transport = "native_usb_cdc"
+bridge = "none"
+rx = -1
+tx = -1
+
+[audio]
+# No speaker or microphone on the XIAO ESP32-S3 or the screen.
+amp = "none"
+codec = "none"
+mic = "none"
+speaker_bus = "none"
+mic_bus = "none"
+pin_playback_mclk = -1
+pin_playback_bclk = -1
+pin_playback_lrck = -1
+pin_dout = -1
+pin_capture_mclk = -1
+pin_capture_bclk = -1
+pin_capture_lrck = -1
+pin_din = -1
+pin_pdm_clock = -1
+pin_amp_enable = -1
+codec_i2c_address = 0
+mic_i2c_address = 0
+playback_rate_hz = 0
+playback_channels = 0
+capture_rate_hz = 0
+capture_channels = 0
+
+[capabilities]
+doom = true
+audio = false
+
+[compile]
+selector = ""
+macros = []
+
+[detection]
+# Nothing on the XIAO or the screen can be read back (the screen has no data
+# output), so no signal identifies this board itself. It is the 8 MB S3 on
+# which the ESP32-S3-LCD-0.85's two always-powered audio chips (ES8311 0x18,
+# ES7210 0x40, with 4.7K pull-ups on GPIO42/41) do not answer; the 0.85 claims
+# the same probe with i2c_any_ack. GPIO41/42 are the XIAO's unused D12/D11
+# pads.
+order = 80
+resolution = "exactly_one"
+no_match = "unknown"
+kind = "i2c_no_ack"
+flash_min_exclusive = 0
+flash_max_inclusive = 8388608
+sda = 42
+scl = 41
+frequency_hz = 100000
+scan_first = 0
+scan_last = 0
+addresses = [24, 64]
+reset_pin = -1
+reset_low_ms = 0
+reset_release_wait_ms = 0
+release = "always"

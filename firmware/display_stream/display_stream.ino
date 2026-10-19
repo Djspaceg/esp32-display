@@ -513,6 +513,7 @@ void setup() {
                 : bcfg->panel->driver == board::PanelDriver::Co5300 ? "CO5300"
                 : bcfg->panel->driver == board::PanelDriver::St77916 ? "ST77916"
                 : bcfg->panel->driver == board::PanelDriver::Gc9107  ? "GC9107"
+                : bcfg->panel->driver == board::PanelDriver::St7735  ? "ST7735"
                 : bcfg->panel->driver == board::PanelDriver::Jd9853  ? "JD9853"
                                                                     : "ST7789",
                 bcfg->isDsi() ? "mipi-dsi" : (bcfg->isQspi() ? "qspi" : "spi"),

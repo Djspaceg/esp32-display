@@ -1,7 +1,7 @@
 // Which supported board this binary is running on, and every board fact that
 // follows from that.
 //
-// Thirteen board profiles are supported across the c3, c6, s3, and p4 release
+// Fourteen board profiles are supported across the c3, c6, s3, and p4 release
 // families. Each family has one artifact; runtime profile selection keeps the
 // physical panel/controller token independent from that family identity:
 //
@@ -15,6 +15,8 @@
 //                              IMU
 //   ESP32-S3-LCD-0.85          GC9107 128x128 over SPI, BOOT on GPIO0,
 //                              battery ADC and eight addressable RGB LEDs
+//   XIAO ESP32-S3 + 0.42-inch  ST7735 96x54 over SPI, BOOT on GPIO0,
+//                              backlight always on, nothing else
 //   ESP32-S3-LCD-1.3           ST7789V2 240x240 over SPI, QMI8658A IMU on
 //                              I2C GPIO47/48, battery ADC and one RGB LED
 //   ESP32-S3-LCD-1.9           ST7789V2 170x320 over SPI, QMI8658 IMU on
@@ -36,10 +38,10 @@
 // The C6 and S3 families choose a profile before any panel GPIO is driven,
 // except that the CrowPanel knob probe pulses that board's panel supply rail
 // (GPIO1), and only when no earlier S3 probe has answered.
-// C6 distinguishes its two profiles on one shared I2C bus. S3 first uses the
-// 8 MiB flash identity for GC9107, then probes profile-specific I2C buses on
-// larger-flash hardware and accepts a result only when exactly one profile
-// matches. P4 carries two MIPI-DSI carriers whose I2C buses answer alike, so
+// C6 distinguishes its two profiles on one shared I2C bus. S3 probes the
+// 0.85's codec bus on 8 MiB hardware (an answer is the GC9107 carrier, silence
+// the XIAO's ST7735), then profile-specific I2C buses on larger-flash hardware,
+// and accepts a result only when exactly one profile matches. P4 carries two MIPI-DSI carriers whose I2C buses answer alike, so
 // it reads the panel controller's own ID over DSI before choosing one.
 //
 // Resolution is a panel-profile fact. The sketch derives frame geometry from
@@ -462,6 +464,47 @@ static const Config CONFIG_LCD_GC9107 = {
     /* backlightInverted */ false,
 };
 
+/// Seeed XIAO ESP32-S3 with the Questwise 0.42-inch 96x54 ST7735 TFT, wired to
+/// the tiny TFT carrier's pin map (hardware/tiny-tft-carrier/DESIGN.md). The
+/// screen pulls its BL input high, so the backlight is always on and no
+/// backlight pin is declared: GPIO2 (D1, bridged to BL only by the carrier's
+/// JP1) is never driven. The XIAO's user LED on GPIO21 is a plain LED and is
+/// left alone. No touch, IMU, battery or audio.
+static const Config CONFIG_XIAO_ST7735_042 = {
+    Variant::XiaoSt7735,
+    "XIAO ESP32-S3 + 0.42-inch 96x54 screen",
+    &PLATFORM_ESP32_S3,
+    &PANEL_ST7735_96X54,
+    /* sclk  */ 7,
+    /* mosi  */ 9,
+    /* data1 */ NO_PIN,
+    /* data2 */ NO_PIN,
+    /* data3 */ NO_PIN,
+    /* cs    */ 6,
+    /* dc    */ 4,
+    /* rst   */ 5,
+    /* bl    */ NO_PIN,
+    /* boot  */ 0,
+    /* led   */ NO_PIN,
+    TouchController::None,
+    /* touchSda */ NO_PIN,
+    /* touchScl */ NO_PIN,
+    /* touchRst */ NO_PIN,
+    /* touchInt */ NO_PIN,
+    PowerController::None,
+    /* batteryAdc */ NO_PIN,
+    /* adcScale */ 0,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
+    MotionController::None,
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
+    /* pinBlEnable */ NO_PIN,
+    /* backlightInverted */ false,
+};
+
 /// ESP32-S3-Touch-LCD-1.54: 240x240 ST7789 over 4-wire SPI, with a
 /// directly-reset CST816 touch controller and QMI8658 on I2C GPIO42/41.
 /// GPIO4/GPIO5 are auxiliary carrier buttons; only BOOT GPIO0 is assigned an
@@ -839,8 +882,9 @@ inline DetectionResult detectFromEvidence(
   return {(Variant)result.variantValue, result.matchedCandidates};
 }
 
-/// Resolve the S3 detector's independent profile signals. The 8 MiB carrier is
-/// identified by flash capacity; each larger-flash profile has a distinct I2C
+/// Resolve the S3 detector's independent profile signals. On 8 MiB flash an
+/// answer from the 0.85's codec bus is the GC9107 carrier and silence there is
+/// the XIAO's ST7735 (`codec085Bus`); each larger-flash profile has a distinct I2C
 /// bus, except that the 1.3-inch and 1.9-inch carriers share GPIO47/48 and are
 /// separated by the GPIO4 sense: the 1.9's system-rail divider versus the
 /// 1.3's bare header pin. A negative gpio4Millivolts means no reading. Exactly
@@ -851,12 +895,14 @@ inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
                                   bool st77916Bus, bool st7789Bus,
                                   bool qmi8658Bus47_48,
                                   bool knob128Bus = false,
-                                  int gpio4Millivolts = -1) {
-  // Generated probe order: the 1.85C bus runs before the 1.75C's, because the
-  // 1.75C's SDA is the 1.85C V2's amplifier enable. The answers go through the
-  // same probe loop the device runs, so its skip rules apply here too.
-  const bool answers[] = {st77916Bus, co5300Bus, st7789Bus, qmi8658Bus47_48,
-                          knob128Bus};
+                                  int gpio4Millivolts = -1,
+                                  bool codec085Bus = true) {
+  // Generated probe order: the 0.85's 8 MiB codec bus first, then the 1.85C
+  // bus before the 1.75C's, because the 1.75C's SDA is the 1.85C V2's
+  // amplifier enable. The answers go through the same probe loop the device
+  // runs, so its skip rules apply here too.
+  const bool answers[] = {codec085Bus, st77916Bus, co5300Bus, st7789Bus,
+                          qmi8658Bus47_48, knob128Bus};
   const auto &plan = detectionPlanForPlatform(Platform::Esp32S3);
   boarddetectmodel::ProbeEvidence evidence[GENERATED_MAX_PROBE_COUNT] = {};
   boarddetectmodel::runI2cProbes(

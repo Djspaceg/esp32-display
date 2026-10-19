@@ -10,19 +10,19 @@ public enum GeneratedBoardCatalog {
         public let bootloaderAddress: Int
     }
 
-    public static let sourceSHA256 = "f961c212702e356d7edd4901bb1b0e7361ca7e3aae68e3e2017d0ad22056daf8"
+    public static let sourceSHA256 = "368896dc400988b1484cee3526f7ad275c3a361840688c3b1fc41eedec1912a5"
     public static let requiredFamilies: Set<String> = ["c3", "c6", "s3", "p4"]
     public static let expected: [String: Expected] = [
         "c3": Expected(chip: "esp32c3", profiles: ["gc9a01a-240"], flashBytes: [4194304], partition: "c3-4m-ota", bootloaderAddress: 0),
         "c6": Expected(chip: "esp32c6", profiles: ["st7789", "jd9853"], flashBytes: [8388608], partition: "default-8m", bootloaderAddress: 0),
-        "s3": Expected(chip: "esp32s3", profiles: ["gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-saves-ota", bootloaderAddress: 0),
+        "s3": Expected(chip: "esp32s3", profiles: ["st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-saves-ota", bootloaderAddress: 0),
         "p4": Expected(chip: "esp32p4", profiles: ["st7703-4b", "jd9365-4c", "jd9365-34c"], flashBytes: [33554432], partition: "p4-32m-saves-ota", bootloaderAddress: 8192),
     ]
 
     public static let profilesByTarget: [String: Set<String>] = [
         "c3": Set(["gc9a01a-240"]),
         "c6": Set(["st7789", "jd9853"]),
-        "s3": Set(["gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"]),
+        "s3": Set(["st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"]),
         "p4": Set(["st7703-4b", "jd9365-4c", "jd9365-34c"]),
         "p4-4b": Set(["st7703-4b"]),
         "s3-085": Set(["gc9107"]),
@@ -35,6 +35,7 @@ public enum GeneratedBoardCatalog {
         "gc9a01a-240": PanelGeometry(width: 240, height: 240),
         "st7789": PanelGeometry(width: 172, height: 320),
         "jd9853": PanelGeometry(width: 172, height: 320),
+        "st7735-042": PanelGeometry(width: 96, height: 54),
         "gc9107": PanelGeometry(width: 128, height: 128),
         "st7789-130": PanelGeometry(width: 240, height: 240),
         "st7789-154": PanelGeometry(width: 240, height: 240),
@@ -51,6 +52,7 @@ public enum GeneratedBoardCatalog {
         "gc9a01a-240": "ESP32-2424S012C-Y(B) (GC9A01A)",
         "st7789": "ESP32-C6-LCD-1.47 (ST7789)",
         "jd9853": "ESP32-C6-Touch-LCD-1.47 (JD9853)",
+        "st7735-042": "XIAO ESP32-S3 + 0.42-inch 96x54 screen",
         "gc9107": "ESP32-S3-LCD-0.85 (GC9107)",
         "st7789-130": "ESP32-S3-LCD-1.3 (ST7789V2)",
         "st7789-154": "ESP32-S3-Touch-LCD-1.54 (ST7789)",
@@ -70,7 +72,7 @@ public enum GeneratedBoardCatalog {
         "p4": Set(["p4", "p4-4b"]),
     ]
 
-    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7789", "jd9853", "st7703-4b", "jd9365-4c", "jd9365-34c", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"])
+    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7789", "jd9853", "st7703-4b", "jd9365-4c", "jd9365-34c", "st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128"])
 
     public static let encoderProfiles: Set<String> = Set(["gc9a01-knob-128"])
 
@@ -82,6 +84,7 @@ public enum GeneratedBoardCatalog {
         "gc9a01a-240": ["ESP32-2424S012C-Y(B)", "ESP32-2424S012C"],
         "st7789": ["ESP32-C6-LCD-1.47"],
         "jd9853": ["ESP32-C6-Touch-LCD-1.47"],
+        "st7735-042": ["Seeed Studio XIAO ESP32S3", "Questwise 0.42in 96x54 TFT"],
         "gc9107": ["ESP32-S3-LCD-0.85"],
         "st7789-130": ["ESP32-S3-LCD-1.3", "ESP32-S3-LCD-1.3-B", "ESP32-S3-LCD-1.3-C"],
         "st7789-154": ["ESP32-S3-Touch-LCD-1.54"],

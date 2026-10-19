@@ -42,7 +42,8 @@ final class UsbFlashProgressTests: XCTestCase {
         XCTAssertEqual(app.partName, "the application")
         XCTAssertEqual(app.percent, 12)
 
-        XCTAssertEqual(tracker.consume("Hard resetting via RTS pin..."), .restarting)
+        // Two of four parts written: esptool's exit reset is not a restart.
+        XCTAssertNil(tracker.consume("Hard resetting via RTS pin..."))
     }
 
     func testEsptool4SpellingIsReadToo() {
@@ -51,6 +52,10 @@ final class UsbFlashProgressTests: XCTestCase {
         else { return XCTFail("4.x write line not read") }
         XCTAssertEqual(part.role, "partitions")
         XCTAssertEqual(part.percent, 100)
+        XCTAssertNil(tracker.consume("Leaving..."))
+        for address in ["0x00000000", "0x00008000", "0x0000e000", "0x00010000"] {
+            _ = tracker.consume("Wrote 1000 bytes (500 compressed) at \(address) in 0.1 seconds...")
+        }
         XCTAssertEqual(tracker.consume("Leaving..."), .restarting)
     }
 
@@ -122,6 +127,43 @@ final class UsbFlashProgressTests: XCTestCase {
         XCTAssertTrue(failure?.nextAction.contains("rewriting is safe") ?? false)
         XCTAssertTrue(session.transcript.text.contains(
             "FAILED during Writing the application (part 4 of 4)"))
+    }
+
+    /// esptool hard-resets the board on its way out of a failed write too, so
+    /// "Hard resetting" after a write that died part-way must not read as a
+    /// finished write: the human's run stopped at 78.7% of the app and was told
+    /// "The firmware is written" and to go on to Set Up WiFi.
+    func testAWriteThatDiesBeforeTheEndIsNotCalledWritten() {
+        for flow in [UsbFlashSession.Flow.onboarding, .update] {
+            var session = UsbFlashSession(flow: flow)
+            var tracker = EsptoolFlashTracker(parts: parts)
+            for line in [
+                "Connecting....",
+                "Wrote 20208 bytes (13062 compressed) at 0x00000000 in 0.3 seconds (604.9 kbit/s).",
+                "Hash of data verified.",
+                "Writing at 0x006dc4d4 [=====================>       ]  78.7% 1376256/1749840 bytes... ",
+                "Hard resetting via RTS pin...",
+                "A fatal error occurred: No more data to read from the serial port.",
+            ] {
+                session.apply(.log(.esptool, line), at: 1)
+                if let phase = tracker.consume(line) { session.apply(.phase(phase), at: 1) }
+            }
+            session.fail(title: "Flashing failed", message: "esptool exited with status 2.", at: 2)
+            let next = session.failure?.nextAction ?? ""
+            XCTAssertFalse(next.contains("firmware is written"), "\(flow): \(next)")
+            XCTAssertFalse(next.contains("Set Up WiFi"), "\(flow): \(next)")
+            XCTAssertTrue(next.contains("rewriting is safe"), "\(flow): \(next)")
+            XCTAssertEqual(session.failure?.step, "Writing the application (part 4 of 4)")
+        }
+    }
+
+    /// Only a reset after every part was written is the board restarting.
+    func testHardResetAfterEveryPartIsRestarting() {
+        var tracker = EsptoolFlashTracker(parts: parts)
+        for address in ["0x00000000", "0x00008000", "0x0000e000", "0x00010000"] {
+            _ = tracker.consume("Wrote 1000 bytes (500 compressed) at \(address) in 0.1 seconds.")
+        }
+        XCTAssertEqual(tracker.consume("Hard resetting via RTS pin..."), .restarting)
     }
 
     func testDownloadModeFailureSaysToHoldBoot() {

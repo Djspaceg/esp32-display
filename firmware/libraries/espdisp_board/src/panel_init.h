@@ -118,6 +118,48 @@ static const gc9107_lcd_init_cmd_t GC9107_WAVESHARE_INIT[] = {
 };
 #endif
 
+#if defined(ESPDISP_PANEL_S3_RUNTIME)
+// The Questwise 0.42-inch 96x54 ST7735 breakout, driven through the vendored
+// GC9107 driver: both controllers take the standard DCS window, pixel-format
+// and MADCTL commands, and that driver sends whatever controller-specific
+// table it is given, so no ST7735 dependency is needed. The table is the
+// seller library's green-tab Rcmd1 and Rcmd3 power, frame-rate and gamma
+// registers. SWRESET is left out (the reset GPIO is pulsed first), and so are
+// MADCTL and COLMOD, which the driver itself sends after SLPOUT and which
+// orientation rewrites; DISPON comes from esp_lcd_panel_disp_on_off.
+// https://github.com/questwiseventures/TFT_ST7735_96x54_Color_TFT
+static const uint8_t st7735_frmctr[] = {0x01, 0x2C, 0x2D};
+static const uint8_t st7735_frmctr3[] = {0x01, 0x2C, 0x2D, 0x01, 0x2C, 0x2D};
+static const uint8_t st7735_invctr[] = {0x07};
+static const uint8_t st7735_pwctr1[] = {0xA2, 0x02, 0x84};
+static const uint8_t st7735_pwctr2[] = {0xC5};
+static const uint8_t st7735_pwctr3[] = {0x0A, 0x00};
+static const uint8_t st7735_pwctr4[] = {0x8A, 0x2A};
+static const uint8_t st7735_pwctr5[] = {0x8A, 0xEE};
+static const uint8_t st7735_vmctr1[] = {0x0E};
+static const uint8_t st7735_gmctrp1[] = {0x02, 0x1C, 0x07, 0x12, 0x37, 0x32,
+                                         0x29, 0x2D, 0x29, 0x25, 0x2B, 0x39,
+                                         0x00, 0x01, 0x03, 0x10};
+static const uint8_t st7735_gmctrn1[] = {0x03, 0x1D, 0x07, 0x06, 0x2E, 0x2C,
+                                         0x29, 0x2D, 0x2E, 0x2E, 0x37, 0x3F,
+                                         0x00, 0x00, 0x02, 0x10};
+static const gc9107_lcd_init_cmd_t ST7735_QUESTWISE_INIT[] = {
+    {0xB1, st7735_frmctr, sizeof(st7735_frmctr), 0},
+    {0xB2, st7735_frmctr, sizeof(st7735_frmctr), 0},
+    {0xB3, st7735_frmctr3, sizeof(st7735_frmctr3), 0},
+    {0xB4, st7735_invctr, sizeof(st7735_invctr), 0},
+    {0xC0, st7735_pwctr1, sizeof(st7735_pwctr1), 0},
+    {0xC1, st7735_pwctr2, sizeof(st7735_pwctr2), 0},
+    {0xC2, st7735_pwctr3, sizeof(st7735_pwctr3), 0},
+    {0xC3, st7735_pwctr4, sizeof(st7735_pwctr4), 0},
+    {0xC4, st7735_pwctr5, sizeof(st7735_pwctr5), 0},
+    {0xC5, st7735_vmctr1, sizeof(st7735_vmctr1), 0},
+    {0xE0, st7735_gmctrp1, sizeof(st7735_gmctrp1), 0},
+    {0xE1, st7735_gmctrn1, sizeof(st7735_gmctrn1), 0},
+    {0x13, nullptr, 0, 10},  // NORON
+};
+#endif
+
 /// Bring up the SPI/QSPI bus and the panel described by cfg.
 ///
 /// The composed PanelConfig is the sole source for pixel clock, bus mode,
@@ -194,7 +236,8 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
   esp_lcd_panel_dev_config_t panel_config = {};
   panel_config.reset_gpio_num = cfg.pinRst;
   panel_config.rgb_ele_order =
-      cfg.panel->driver == board::PanelDriver::Gc9107
+      cfg.panel->driver == board::PanelDriver::Gc9107 ||
+              cfg.panel->driver == board::PanelDriver::St7735
           ? LCD_RGB_ELEMENT_ORDER_BGR
           : LCD_RGB_ELEMENT_ORDER_RGB;
   // The framebuffer arrives from the Mac already in panel byte order, so the
@@ -216,6 +259,18 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
           .init_cmds = GC9107_WAVESHARE_INIT,
           .init_cmds_size = sizeof(GC9107_WAVESHARE_INIT) /
                             sizeof(GC9107_WAVESHARE_INIT[0]),
+      };
+      panel_config.vendor_config = &vendor;
+      err = esp_lcd_new_panel_gc9107(io, &panel_config, &panel);
+      break;
+    }
+#endif
+#if defined(ESPDISP_PANEL_S3_RUNTIME)
+    case board::PanelDriver::St7735: {
+      gc9107_vendor_config_t vendor = {
+          .init_cmds = ST7735_QUESTWISE_INIT,
+          .init_cmds_size = sizeof(ST7735_QUESTWISE_INIT) /
+                            sizeof(ST7735_QUESTWISE_INIT[0]),
       };
       panel_config.vendor_config = &vendor;
       err = esp_lcd_new_panel_gc9107(io, &panel_config, &panel);

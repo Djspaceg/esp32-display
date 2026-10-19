@@ -24,6 +24,7 @@ static constexpr GeneratedBoardIdentity GENERATED_BOARD_IDENTITIES[] = {
     {Variant::ElecrowKnob128, Platform::Esp32S3, "s3", "esp32s3", "gc9a01-knob-128", "universal-8m-doom-saves-ota"},
     {Variant::P4_4C, Platform::Esp32P4, "p4", "esp32p4", "jd9365-4c", "p4-32m-saves-ota"},
     {Variant::P4_34C, Platform::Esp32P4, "p4", "esp32p4", "jd9365-34c", "p4-32m-saves-ota"},
+    {Variant::XiaoSt7735, Platform::Esp32S3, "s3", "esp32s3", "st7735-042", "universal-8m-doom-saves-ota"},
 };
 
 static constexpr GeneratedBoardIdentity GENERATED_BOARD_IDENTITIES_BY_CATALOG[] = {
@@ -33,6 +34,7 @@ static constexpr GeneratedBoardIdentity GENERATED_BOARD_IDENTITIES_BY_CATALOG[] 
     {Variant::P4_4B, Platform::Esp32P4, "p4", "esp32p4", "st7703-4b", "p4-32m-saves-ota"},
     {Variant::P4_4C, Platform::Esp32P4, "p4", "esp32p4", "jd9365-4c", "p4-32m-saves-ota"},
     {Variant::P4_34C, Platform::Esp32P4, "p4", "esp32p4", "jd9365-34c", "p4-32m-saves-ota"},
+    {Variant::XiaoSt7735, Platform::Esp32S3, "s3", "esp32s3", "st7735-042", "universal-8m-doom-saves-ota"},
     {Variant::LcdGc9107, Platform::Esp32S3, "s3", "esp32s3", "gc9107", "universal-8m-doom-saves-ota"},
     {Variant::LcdSt7789_130, Platform::Esp32S3, "s3", "esp32s3", "st7789-130", "universal-8m-doom-saves-ota"},
     {Variant::TouchSt7789, Platform::Esp32S3, "s3", "esp32s3", "st7789-154", "universal-8m-doom-saves-ota"},

@@ -4334,7 +4334,7 @@ def test_board_descriptor_validator():
         },
         "schema requires every descriptor section",
     )
-    check_equal(len(descriptors), 13, "all current boards have descriptors")
+    check_equal(len(descriptors), 14, "all current boards have descriptors")
     check_equal(
         sorted(
             descriptor["identity"]["profile"]
@@ -4567,14 +4567,18 @@ def test_board_descriptor_validator():
         "audio.pin_amp_enable GPIO15 is a detection line of earlier-ordered",
         "an audio board's amp enable cannot be an earlier probe's line",
     )
-    # An audio board with no probe of its own (the flash-identified 0.85) is
-    # protected only by flash ranges: a probe on its amp enable must not be
-    # able to run on it.
+    # An audio board with no probe of its own (the 0.85 as it was before its
+    # codec probe) is protected only by flash ranges: a probe on its amp
+    # enable must not be able to run on it.
+    probeless_085 = copy.deepcopy(lcd_085)
+    probeless_085["detection"].update(
+        kind="flash_range", sda=-1, scl=-1, frequency_hz=0, addresses=[],
+        release="never")
     knob_on_085 = copy.deepcopy(next(
         item for item in descriptors if item["key"] == "s3-elecrow-knob-128"))
     knob_on_085["detection"]["flash_min_exclusive"] = 0
     check_descriptor_fails(
-        [lcd_085, knob_on_085],
+        [probeless_085, knob_on_085],
         "audio.pin_amp_enable GPIO7 is a detection line of",
         "a probe on a probeless audio board's amp enable cannot share its "
         "flash range",
@@ -5210,8 +5214,8 @@ def test_universal_family_catalog_and_cli():
                 "C6 maps both runtime profiles")
     check_equal(
         espdisp.FAMILIES["s3"].profiles,
-        ("gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300",
-         "st77916", "gc9a01-knob-128"),
+        ("st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190",
+         "co5300", "st77916", "gc9a01-knob-128"),
         "S3 maps all runtime profiles into one family")
     check_equal(espdisp.FAMILIES["p4"].profiles,
                 ("st7703-4b", "jd9365-4c", "jd9365-34c"),
@@ -8042,14 +8046,24 @@ def test_bootstrap_refusals_and_color_controls():
         item for item in candidates
         if item["identity"]["target"] == "s3"
     ]
+    # On 8 MiB the 0.85's codec bus (GPIO42/41) decides: an answer at 0x18 is
+    # the 0.85, silence the XIAO ST7735.
     selected, safe = espdisp.bootstrap._choose_candidate(
-        s3, {}, set(), 8388608, None,
+        s3, {(42, 41): [0x18]}, set(), 8388608, None,
         BootstrapFakePrompter({}),
     )
     check_equal(selected["key"], "s3-lcd-085",
-                "flash-only S3 candidate selection is automatic")
+                "an answering 8 MiB codec bus selects the 0.85 automatically")
     check_equal([item["key"] for item in safe], ["s3-lcd-085"],
                 "automatic candidate resolution narrows the drive safety set")
+    selected, safe = espdisp.bootstrap._choose_candidate(
+        s3, {(42, 41): []}, set(), 8388608, None,
+        BootstrapFakePrompter({}),
+    )
+    check_equal(selected["key"], "s3-xiao-tft-042",
+                "a silent 8 MiB codec bus selects the XIAO ST7735 automatically")
+    check_equal([item["key"] for item in safe], ["s3-xiao-tft-042"],
+                "the XIAO resolution narrows the drive safety set")
 
     p4 = [
         item for item in candidates
