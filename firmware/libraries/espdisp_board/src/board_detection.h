@@ -319,25 +319,35 @@ inline ProbeEvidence addressListEvidence(const I2cProbePlan &plan,
 }
 
 /// How one address transaction ended. Only an ACK or a NACK says anything
-/// about the address; any other end (an arbitration loss, a timeout with SCL
-/// held low) says the bus itself cannot be trusted.
+/// about the address. On Arduino-ESP32 3.3 a zero-length probe ends in a
+/// timeout (SCL held low, or a device stretching past it) or a driver error
+/// otherwise, and either says the bus could not run the transaction.
 enum class AddressReply : uint8_t { Ack, Nack, BusError };
 
-/// addressListEvidence over transactions that may also fail outright: one
-/// BusError anywhere discards the probe, as an acknowledged canary does. A
-/// 0.85 codec bus with SCL stuck low times out on every address, the canary
-/// included, and without this would read as the XIAO's clean silence.
+/// addressListEvidence over transactions that may also fail outright. An
+/// error vetoes silence, never a real ACK: a 0.85 codec bus with SCL stuck
+/// low times out on every address, the canary included, and must not read as
+/// the XIAO's clean silence, while a stuck SCL can never produce an ACK, so a
+/// device that acked beside one that timed out (the 1.85C's TCA9554 beside a
+/// slow touch chip) is still evidence. An error on the canary itself discards
+/// the bus, like a canary that acked.
 template <typename Reply>
 inline ProbeEvidence addressReplyEvidence(const I2cProbePlan &plan,
                                           Reply reply) {
   bool busError = false;
+  bool canaryError = false;
   const ProbeEvidence evidence =
       addressListEvidence(plan, [&](uint8_t address) {
         const AddressReply answer = reply(address);
-        if (answer == AddressReply::BusError) busError = true;
+        if (answer == AddressReply::BusError) {
+          busError = true;
+          if (address == CANARY_ADDRESS) canaryError = true;
+        }
         return answer == AddressReply::Ack;
       });
-  if (busError) return {ProbeStatus::Discarded, 0};
+  if (canaryError || (busError && evidence.ackCount == 0)) {
+    return {ProbeStatus::Discarded, 0};
+  }
   return evidence;
 }
 

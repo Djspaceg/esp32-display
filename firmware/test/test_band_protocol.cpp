@@ -3167,6 +3167,32 @@ int main() {
             return address == 0x40 ? AddressReply::BusError : AddressReply::Nack;
           });
       CHECK(s3Evidence[0].status == ProbeStatus::Discarded);
+      // An error beside a real ACK leaves the ACK standing: a stuck SCL times
+      // out everywhere and can never ACK. On the 1.85C a touch chip that
+      // stretches past the timeout must not hide its TCA9554 at 0x20, or the
+      // 1.75C probe on its amp-enable GPIO15 would run.
+      {
+        ProbeEvidence busy[6] = {};
+        busy[1] = boarddetectmodel::addressReplyEvidence(
+            s3Plan.probes[1], [](uint8_t address) {
+              return address == 0x15 ? AddressReply::BusError
+                                     : address == 0x20 ? AddressReply::Ack
+                                                       : AddressReply::Nack;
+            });
+        CHECK(busy[1].status == ProbeStatus::Started && busy[1].ackCount == 1);
+        CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 2, busy));
+        CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                        16u * 1024u * 1024u, busy, 6)
+                  .variant == Variant::LcdSt77916);
+        // An error on the canary itself still discards the whole bus.
+        busy[1] = boarddetectmodel::addressReplyEvidence(
+            s3Plan.probes[1], [](uint8_t address) {
+              return address == boarddetectmodel::CANARY_ADDRESS
+                         ? AddressReply::BusError
+                         : AddressReply::Ack;
+            });
+        CHECK(busy[1].status == ProbeStatus::Discarded);
+      }
       // Clean NACKs everywhere are the XIAO's silence; an ACK is the 0.85.
       s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
           s3Plan.probes[0], [](uint8_t) { return AddressReply::Nack; });

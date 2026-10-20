@@ -67,8 +67,9 @@ inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
                     target, profile);
     }
   } else if (plan.addressCount > 0) {
-    // Wire's endTransmission: 0 ACK, 2/3 NACK on address/data, anything else
-    // (1, 4 other error, 5 timeout) a bus that could not run the transaction.
+    // Wire's endTransmission on core 3.3: 0 ACK, 2 NACK (3 on a data NACK);
+    // a zero-length probe otherwise ends in 5 (timeout) or 4 (driver error),
+    // a bus that could not run the transaction.
     addressEvidence = boarddetectmodel::addressReplyEvidence(
         plan, [&](uint8_t address) {
           using boarddetectmodel::AddressReply;
