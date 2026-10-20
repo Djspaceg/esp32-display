@@ -106,7 +106,7 @@ Artifacts are versioned and stored by family:
 
 ```text
 firmware-releases/c6/espdisp-c6-1.5.0.espdispfw
-firmware-releases/s3/espdisp-s3-1.5.0.espdispfw
+firmware-releases/s3/espdisp-s3-2.0.0.espdispfw
 firmware-releases/p4/espdisp-p4-1.5.0.espdispfw
 ```
 

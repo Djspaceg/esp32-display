@@ -318,6 +318,29 @@ inline ProbeEvidence addressListEvidence(const I2cProbePlan &plan,
   return addressProbeEvidence(true, found, trailingCanary);
 }
 
+/// How one address transaction ended. Only an ACK or a NACK says anything
+/// about the address; any other end (an arbitration loss, a timeout with SCL
+/// held low) says the bus itself cannot be trusted.
+enum class AddressReply : uint8_t { Ack, Nack, BusError };
+
+/// addressListEvidence over transactions that may also fail outright: one
+/// BusError anywhere discards the probe, as an acknowledged canary does. A
+/// 0.85 codec bus with SCL stuck low times out on every address, the canary
+/// included, and without this would read as the XIAO's clean silence.
+template <typename Reply>
+inline ProbeEvidence addressReplyEvidence(const I2cProbePlan &plan,
+                                          Reply reply) {
+  bool busError = false;
+  const ProbeEvidence evidence =
+      addressListEvidence(plan, [&](uint8_t address) {
+        const AddressReply answer = reply(address);
+        if (answer == AddressReply::BusError) busError = true;
+        return answer == AddressReply::Ack;
+      });
+  if (busError) return {ProbeStatus::Discarded, 0};
+  return evidence;
+}
+
 /// Whether probe `index` should run given the evidence gathered so far. A probe
 /// with a reset line drives that GPIO push-pull (on the CrowPanel knob it is the
 /// panel supply rail), and a quietAfterMatch probe pulls up a line that is

@@ -3150,6 +3150,37 @@ int main() {
                                       8u * 1024u * 1024u, s3Evidence, 6)
                 .variant == Variant::Unknown);
     }
+    // A codec bus whose SCL is held low times out on every address, so the
+    // canary never acks either: a transaction that errored (not a NACK) also
+    // discards the probe, and its silence is not the XIAO's.
+    {
+      using boarddetectmodel::AddressReply;
+      s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
+          s3Plan.probes[0], [](uint8_t) { return AddressReply::BusError; });
+      CHECK(s3Evidence[0].status == ProbeStatus::Discarded);
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      8u * 1024u * 1024u, s3Evidence, 6)
+                .variant == Variant::Unknown);
+      // One errored transaction anywhere in the list is enough.
+      s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
+          s3Plan.probes[0], [](uint8_t address) {
+            return address == 0x40 ? AddressReply::BusError : AddressReply::Nack;
+          });
+      CHECK(s3Evidence[0].status == ProbeStatus::Discarded);
+      // Clean NACKs everywhere are the XIAO's silence; an ACK is the 0.85.
+      s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
+          s3Plan.probes[0], [](uint8_t) { return AddressReply::Nack; });
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      8u * 1024u * 1024u, s3Evidence, 6)
+                .variant == Variant::XiaoSt7735);
+      s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
+          s3Plan.probes[0], [](uint8_t address) {
+            return address == 0x18 ? AddressReply::Ack : AddressReply::Nack;
+          });
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      8u * 1024u * 1024u, s3Evidence, 6)
+                .variant == Variant::LcdGc9107);
+    }
     // A codec bus that would not start is no evidence for either.
     s3Evidence[0] = {ProbeStatus::StartFailed, 0};
     detected = board::detectFromEvidence(

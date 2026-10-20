@@ -67,11 +67,25 @@ inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
                     target, profile);
     }
   } else if (plan.addressCount > 0) {
-    addressEvidence = boarddetectmodel::addressListEvidence(
+    // Wire's endTransmission: 0 ACK, 2/3 NACK on address/data, anything else
+    // (1, 4 other error, 5 timeout) a bus that could not run the transaction.
+    addressEvidence = boarddetectmodel::addressReplyEvidence(
         plan, [&](uint8_t address) {
+          using boarddetectmodel::AddressReply;
           Wire.beginTransmission(address);
-          if (Wire.endTransmission() != 0) return false;
-          if (!verbose) return true;
+          const uint8_t result = Wire.endTransmission();
+          if (result == 2 || result == 3) return AddressReply::Nack;
+          if (result != 0) {
+            if (verbose) {
+              Serial.printf(
+                  "board: WARN %s %s bus SDA=%d SCL=%d error %u at 0x%02X; "
+                  "ignoring the bus\n",
+                  target, profile, plan.sda, plan.scl, (unsigned)result,
+                  address);
+            }
+            return AddressReply::BusError;
+          }
+          if (!verbose) return AddressReply::Ack;
           if (address == boarddetectmodel::CANARY_ADDRESS) {
             Serial.printf(
                 "board: WARN %s %s bus SDA=%d SCL=%d acknowledged reserved "
@@ -82,7 +96,7 @@ inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
                 "board: %s %s signal at 0x%02X on SDA=%d SCL=%d\n",
                 target, profile, address, plan.sda, plan.scl);
           }
-          return true;
+          return boarddetectmodel::AddressReply::Ack;
         });
     found = addressEvidence.ackCount;
   } else {
