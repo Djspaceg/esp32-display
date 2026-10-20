@@ -67,9 +67,9 @@ inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
                     target, profile);
     }
   } else if (plan.addressCount > 0) {
-    // Wire's endTransmission on core 3.3: 0 ACK, 2 NACK (3 on a data NACK);
-    // a zero-length probe otherwise ends in 5 (timeout) or 4 (driver error),
-    // a bus that could not run the transaction.
+    // Wire's endTransmission on core 3.3: 0 ACK, 2 NACK; a zero-length probe
+    // otherwise ends in 5 (timeout) or 4 (driver error), a transaction the bus
+    // could not run.
     addressEvidence = boarddetectmodel::addressReplyEvidence(
         plan, [&](uint8_t address) {
           using boarddetectmodel::AddressReply;
@@ -80,7 +80,7 @@ inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
             if (verbose) {
               Serial.printf(
                   "board: WARN %s %s bus SDA=%d SCL=%d error %u at 0x%02X; "
-                  "ignoring the bus\n",
+                  "not evidence\n",
                   target, profile, plan.sda, plan.scl, (unsigned)result,
                   address);
             }
@@ -121,6 +121,11 @@ inline boarddetectmodel::ProbeEvidence collectI2cEvidence(
     pinMode(plan.sda, INPUT);
     pinMode(plan.scl, INPUT);
     if (plan.resetPin != board::NO_PIN) pinMode(plan.resetPin, INPUT);
+  }
+  if (verbose && busOk && plan.addressCount > 0 &&
+      addressEvidence.status == ProbeStatus::Discarded) {
+    Serial.printf("board: WARN %s %s bus SDA=%d SCL=%d discarded as stuck\n",
+                  target, profile, plan.sda, plan.scl);
   }
   if (plan.addressCount > 0) {
     return busOk ? addressEvidence

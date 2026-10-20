@@ -29,8 +29,9 @@ enum class ProbeStatus : uint8_t {
   NotRun,
   Started,
   StartFailed,
-  /// The bus started but also acknowledged CANARY_ADDRESS, so it is stuck or
-  /// back-powered: neither its answers nor its silence are evidence.
+  /// The bus started but cannot be trusted: CANARY_ADDRESS acknowledged or
+  /// errored, or transactions errored and nothing acknowledged. It is stuck
+  /// or back-powered, so neither its answers nor its silence are evidence.
   Discarded,
 };
 

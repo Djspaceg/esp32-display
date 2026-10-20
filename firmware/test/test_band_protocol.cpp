@@ -3192,6 +3192,19 @@ int main() {
                          : AddressReply::Ack;
             });
         CHECK(busy[1].status == ProbeStatus::Discarded);
+        // Only the trailing canary errors: the leading one NACKed and both
+        // listed devices acked, and the bus is still discarded.
+        unsigned canaries = 0;
+        busy[1] = boarddetectmodel::addressReplyEvidence(
+            s3Plan.probes[1], [&](uint8_t address) {
+              if (address != boarddetectmodel::CANARY_ADDRESS) {
+                return AddressReply::Ack;
+              }
+              return ++canaries == 1 ? AddressReply::Nack
+                                     : AddressReply::BusError;
+            });
+        CHECK(canaries == 2);
+        CHECK(busy[1].status == ProbeStatus::Discarded);
       }
       // Clean NACKs everywhere are the XIAO's silence; an ACK is the 0.85.
       s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
