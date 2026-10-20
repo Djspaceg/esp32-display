@@ -12,6 +12,13 @@ enum DeviceReachabilityText {
         + "itself as soon as the device is back."
     /// Frames wait until the device confirms which board it is.
     static let awaitingIdentity = "Waiting for the device to confirm its identity."
+    /// The parked device answered again and mirroring restarts.
+    static let answeredAgain = "The device answered again. Restarting mirroring\u{2026}"
+    /// The device stopped answering, and its session is retried on a schedule.
+    static let retrying =
+        "This device did not answer, so nothing is being sent. "
+        + "It is tried again every few minutes while it is listed on the "
+        + "network, and as soon as it reappears."
     /// No session exists for this device.
     static let noSession =
         "No session is running for this device, so nothing is being sent."

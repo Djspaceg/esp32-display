@@ -9,6 +9,8 @@ final class DeviceReachabilityTextTests: XCTestCase {
             DeviceReachabilityText.suspended,
             DeviceReachabilityText.awaitingIdentity,
             DeviceReachabilityText.noSession,
+            DeviceReachabilityText.answeredAgain,
+            DeviceReachabilityText.retrying,
         ]
         for message in messages {
             let lower = message.lowercased()

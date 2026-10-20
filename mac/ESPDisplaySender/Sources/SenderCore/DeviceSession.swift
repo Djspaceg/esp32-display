@@ -1306,7 +1306,7 @@ final class DeviceSession {
         setAudioEnabled(AudioSessionActivationPolicy.isEnabled(
             paused: sender.paused || sender.updateHold, parked: false))
         guard !isStopped else { return }
-        setCaptureStatus(.waiting("The panel answered again. Restarting mirroring…"))
+        setCaptureStatus(.waiting(DeviceReachabilityText.answeredAgain))
         print("[\(name)] display answered again - resuming capture")
     }
 

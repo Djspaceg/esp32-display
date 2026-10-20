@@ -188,9 +188,7 @@ extension PanelManager {
             // Said as a schedule, because it is one: `SessionRegistry` offers
             // the name again after its cooldown even if discovery never
             // reports a change.
-            panel.lastError = "This display did not answer, so nothing is being sent. "
-                + "It is tried again every few minutes while it is listed on the "
-                + "network, and as soon as it reappears."
+            panel.lastError = DeviceReachabilityText.retrying
         }
     }
 
