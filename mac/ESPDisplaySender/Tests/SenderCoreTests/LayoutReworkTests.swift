@@ -54,14 +54,14 @@ final class LayoutReworkTests: XCTestCase {
         let installed = InstalledFirmware.make(
             version: "1.5.0",
             source: FirmwareSourceIdentity(reported: Self.shippedCommit),
-            family: "s3-185", releases: releases)
+            family: "p4-4b", releases: releases)
         guard case .bundled(let revision) = installed.match else {
-            return XCTFail("the shipped s3 build should match: \(installed.match)")
+            return XCTFail("the shipped p4 build should match: \(installed.match)")
         }
-        XCTAssertEqual(revision.family, "s3")
+        XCTAssertEqual(revision.family, "p4")
         XCTAssertEqual(
             installed.runningText, "1.5.0 · build \(Self.shippedCommit.prefix(12))")
-        XCTAssertTrue(installed.matchText.hasPrefix("The bundled s3 1.5.0 release, built 2026-"),
+        XCTAssertTrue(installed.matchText.hasPrefix("The bundled p4 1.5.0 release, built 2026-"),
                       installed.matchText)
     }
 
