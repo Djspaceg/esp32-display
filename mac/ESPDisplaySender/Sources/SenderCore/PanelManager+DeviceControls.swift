@@ -146,7 +146,7 @@ extension PanelManager {
            geometry.width != geometry.height {
             guard let region = panels.first(
                 where: { $0.serviceName == serviceName })?.source.region,
-                region.isLandscape != (next % 2 != 0)
+                region.streamsLandscape(on: geometry) != (next % 2 != 0)
             else { return }
         }
         rotateRegion(for: serviceName)
@@ -161,7 +161,7 @@ extension PanelManager {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }),
               let geometry = panel.geometry, geometry.width != geometry.height,
               let region = panel.source.region,
-              region.isLandscape != (panel.rotation % 2 != 0)
+              region.streamsLandscape(on: geometry) != (panel.rotation % 2 != 0)
         else { return }
         rotateRegion(for: serviceName)
     }

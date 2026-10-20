@@ -93,7 +93,8 @@ extension PanelManager {
         let existing = panel?.source.region
         let reusable = existing.flatMap { region -> RegionSpec? in
             guard region.matchesAspect(of: geometry) else { return nil }
-            guard rectangular, region.isLandscape != startLandscape,
+            guard rectangular,
+                  region.streamsLandscape(on: geometry) != startLandscape,
                   let screen = DisplayCapture.screen(named: region.display)
             else { return region }
             return region.rotated(in: screen.frame.size)

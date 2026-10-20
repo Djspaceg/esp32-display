@@ -48,6 +48,16 @@ extension RegionSpec {
         return spec.clamped(to: displaySize)
     }
 
+    /// Whether this region streams landscape frames to a panel of `geometry`:
+    /// frames are the panel's native shape, turned on their side at 90 and 270.
+    /// Every other panel is taller than wide, so there a wide region is a
+    /// landscape one; the 96x54 ST7735 is natively wide, so there a wide region
+    /// is its native frame and a tall one the turned frame.
+    func streamsLandscape(on geometry: PanelGeometry) -> Bool {
+        guard geometry.width != geometry.height else { return false }
+        return isLandscape != (geometry.width > geometry.height)
+    }
+
     /// This region resized to a multiplier, keeping its centre where it is.
     ///
     /// Keeping the centre is what makes the preset buttons feel like a zoom
@@ -56,7 +66,8 @@ extension RegionSpec {
         to scale: Int, geometry: PanelGeometry, in displaySize: CGSize
     ) -> RegionSpec {
         let size = Self.panelSize(
-            geometry: geometry, scale: scale, landscape: isLandscape)
+            geometry: geometry, scale: scale,
+            landscape: streamsLandscape(on: geometry))
         let centerX = x + width / 2
         let centerY = y + height / 2
         let resized = RegionSpec(
@@ -87,7 +98,8 @@ extension RegionSpec {
     func matchingScale(geometry: PanelGeometry) -> Int? {
         Self.scalePresets.first { scale in
             let size = Self.panelSize(
-                geometry: geometry, scale: scale, landscape: isLandscape)
+                geometry: geometry, scale: scale,
+                landscape: streamsLandscape(on: geometry))
             return abs(size.width - width) < 1 && abs(size.height - height) < 1
         }
     }
@@ -101,7 +113,7 @@ extension RegionSpec {
     func matchesAspect(of geometry: PanelGeometry) -> Bool {
         guard width > 0, height > 0 else { return false }
         let panel = Self.panelSize(
-            geometry: geometry, scale: 1, landscape: isLandscape)
+            geometry: geometry, scale: 1, landscape: streamsLandscape(on: geometry))
         return abs(width / height - panel.width / panel.height) < 0.001
     }
 

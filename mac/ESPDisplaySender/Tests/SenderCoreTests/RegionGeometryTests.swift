@@ -53,6 +53,30 @@ final class RegionPresetTests: XCTestCase {
         XCTAssertEqual(scaled, CGSize(width: 932, height: 932))
     }
 
+    /// The 96x54 ST7735 is the one natively wide panel: there a wide region is
+    /// its rotation-0 frame and a tall one the turned frame, the reverse of
+    /// every other rectangular panel.
+    func testAWideNativePanelStreamsItsWideRegionUpright() {
+        let wide = PanelGeometry(width: 96, height: 54)
+        let tall = PanelGeometry(width: 172, height: 320)
+        let wideRegion = RegionSpec(display: "S", x: 0, y: 0, width: 192, height: 108)
+        let tallRegion = RegionSpec(display: "S", x: 0, y: 0, width: 108, height: 192)
+        XCTAssertFalse(wideRegion.streamsLandscape(on: wide))
+        XCTAssertTrue(tallRegion.streamsLandscape(on: wide))
+        XCTAssertTrue(wideRegion.streamsLandscape(on: tall))
+        XCTAssertFalse(tallRegion.streamsLandscape(on: tall))
+        XCTAssertFalse(wideRegion.streamsLandscape(on: PanelGeometry(width: 240, height: 240)))
+        XCTAssertEqual(wideRegion.matchingScale(geometry: wide), 2)
+        XCTAssertEqual(tallRegion.matchingScale(geometry: wide), 2)
+        let upright = RegionSpec.centered(
+            on: "S", geometry: wide, scale: 2,
+            landscape: DisplayCapture.streamsLandscape(geometry: wide, rotation: 0),
+            in: CGSize(width: 1000, height: 1000))
+        XCTAssertEqual(upright.width, 192)
+        XCTAssertEqual(upright.height, 108)
+        XCTAssertFalse(upright.streamsLandscape(on: wide))
+    }
+
     func testSavedRegionsMatchingEveryShippingProfileAreReusable() {
         let profiles: [(String, PanelGeometry)] = [
             ("c6 st7789", PanelGeometry(width: 172, height: 320)),
