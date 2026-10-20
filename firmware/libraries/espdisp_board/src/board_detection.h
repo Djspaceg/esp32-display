@@ -29,6 +29,9 @@ enum class ProbeStatus : uint8_t {
   NotRun,
   Started,
   StartFailed,
+  /// The bus started but also acknowledged CANARY_ADDRESS, so it is stuck or
+  /// back-powered: neither its answers nor its silence are evidence.
+  Discarded,
 };
 
 enum class ProbeRelease : uint8_t {
@@ -287,12 +290,14 @@ constexpr bool flashMatches(uint32_t flashBytes, uint32_t minExclusive,
 /// is meaningless.
 static const uint8_t CANARY_ADDRESS = 0x7F;
 
-/// Evidence from one address-list probe, discarding acknowledgements from a
-/// bus that also acknowledged CANARY_ADDRESS.
+/// Evidence from one address-list probe. A bus that also acknowledged
+/// CANARY_ADDRESS is Discarded rather than silent: an i2c_no_ack candidate
+/// (the XIAO, against the 0.85's stuck codec bus) must not match it.
 inline ProbeEvidence addressProbeEvidence(bool busStarted, uint8_t ackCount,
                                           bool canaryAcked) {
   if (!busStarted) return {ProbeStatus::StartFailed, 0};
-  return {ProbeStatus::Started, canaryAcked ? (uint8_t)0 : ackCount};
+  if (canaryAcked) return {ProbeStatus::Discarded, 0};
+  return {ProbeStatus::Started, ackCount};
 }
 
 /// One address-list probe on a started bus, with each address transaction

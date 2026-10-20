@@ -145,10 +145,13 @@ public struct EsptoolFlashTracker: Equatable, Sendable {
 
     public let parts: [Part]
     public private(set) var phase: UsbFlashPhase?
-    /// Parts esptool has reported `Wrote ... at` for. esptool hard-resets the
+    /// Parts esptool has written and hash-checked. esptool hard-resets the
     /// board on its way out of a failed write too, so its reset line means the
-    /// board is restarting on new firmware only once every part is here.
+    /// board is restarting on new firmware only once every part is here. It
+    /// prints `Wrote ... at` before the check, so a part counts only when
+    /// `Hash of data verified` follows it.
     private var written: Set<Int> = []
+    private var awaitingHash: Int?
 
     public init(parts: [Part]) {
         self.parts = parts.sorted { $0.address < $1.address }
@@ -168,8 +171,12 @@ public struct EsptoolFlashTracker: Equatable, Sendable {
         } else if trimmed.hasPrefix("Wrote "),
                   let address = Self.address(after: " at 0x", in: trimmed) {
             let written = progress(at: address, percent: 100)
-            if let written { self.written.insert(written.index) }
+            awaitingHash = written?.index
             next = written.map(UsbFlashPhase.verifying)
+        } else if trimmed.hasPrefix("Hash of data verified") {
+            if let index = awaitingHash { written.insert(index) }
+            awaitingHash = nil
+            next = nil
         } else if trimmed.hasPrefix("Hard resetting") || trimmed.hasPrefix("Leaving") {
             next = written.count == parts.count ? .restarting : nil
         } else {

@@ -55,6 +55,7 @@ final class UsbFlashProgressTests: XCTestCase {
         XCTAssertNil(tracker.consume("Leaving..."))
         for address in ["0x00000000", "0x00008000", "0x0000e000", "0x00010000"] {
             _ = tracker.consume("Wrote 1000 bytes (500 compressed) at \(address) in 0.1 seconds...")
+            _ = tracker.consume("Hash of data verified.")
         }
         XCTAssertEqual(tracker.consume("Leaving..."), .restarting)
     }
@@ -157,13 +158,38 @@ final class UsbFlashProgressTests: XCTestCase {
         }
     }
 
-    /// Only a reset after every part was written is the board restarting.
+    /// Only a reset after every part was written and hash-checked is the board
+    /// restarting.
     func testHardResetAfterEveryPartIsRestarting() {
         var tracker = EsptoolFlashTracker(parts: parts)
         for address in ["0x00000000", "0x00008000", "0x0000e000", "0x00010000"] {
             _ = tracker.consume("Wrote 1000 bytes (500 compressed) at \(address) in 0.1 seconds.")
+            _ = tracker.consume("Hash of data verified.")
         }
         XCTAssertEqual(tracker.consume("Hard resetting via RTS pin..."), .restarting)
+    }
+
+    /// esptool prints "Wrote" before its hash check, so a last part whose check
+    /// fails is not written, and the reset on the way out is not a restart.
+    func testAFailedHashOnTheLastPartIsNotCalledWritten() {
+        var session = UsbFlashSession(flow: .onboarding)
+        var tracker = EsptoolFlashTracker(parts: parts)
+        var lines: [String] = ["Connecting...."]
+        for address in ["0x00000000", "0x00008000", "0x0000e000"] {
+            lines += ["Wrote 1000 bytes (500 compressed) at \(address) in 0.1 seconds.",
+                      "Hash of data verified."]
+        }
+        lines += ["Wrote 1832512 bytes (1000000 compressed) at 0x00010000 in 20.0 seconds.",
+                  "Hard resetting via RTS pin...",
+                  "A fatal error occurred: MD5 of file does not match data in flash!"]
+        for line in lines {
+            session.apply(.log(.esptool, line), at: 1)
+            if let phase = tracker.consume(line) { session.apply(.phase(phase), at: 1) }
+        }
+        session.fail(title: "Flashing failed", message: "esptool exited with status 2.", at: 2)
+        let next = session.failure?.nextAction ?? ""
+        XCTAssertFalse(next.contains("firmware is written"), next)
+        XCTAssertTrue(next.contains("rewriting is safe"), next)
     }
 
     func testDownloadModeFailureSaysToHoldBoot() {

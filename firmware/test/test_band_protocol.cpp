@@ -2909,7 +2909,7 @@ int main() {
       CHECK(boarddetectmodel::CANARY_ADDRESS == 0x7F);
       const ProbeEvidence clamped =
           boarddetectmodel::addressProbeEvidence(true, 2, true);
-      CHECK(clamped.status == ProbeStatus::Started && clamped.ackCount == 0);
+      CHECK(clamped.status == ProbeStatus::Discarded && clamped.ackCount == 0);
       const ProbeEvidence clean =
           boarddetectmodel::addressProbeEvidence(true, 2, false);
       CHECK(clean.status == ProbeStatus::Started && clean.ackCount == 2);
@@ -2924,7 +2924,7 @@ int main() {
         unsigned transactions = 0;
         const ProbeEvidence glitched = boarddetectmodel::addressListEvidence(
             s3Plan.probes[1], [&](uint8_t) { return ++transactions >= 2; });
-        CHECK(glitched.status == ProbeStatus::Started);
+        CHECK(glitched.status == ProbeStatus::Discarded);
         CHECK(glitched.ackCount == 0);
         const ProbeEvidence genuine = boarddetectmodel::addressListEvidence(
             s3Plan.probes[1], [&](uint8_t address) {
@@ -3125,6 +3125,31 @@ int main() {
         board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
     CHECK(detected.variant == Variant::XiaoSt7735);
     CHECK(detected.matchedCandidates == 1);
+    // A codec bus that answered the reserved canary is held low or
+    // back-powered (a 0.85 whose SDA is stuck): its silence is not the XIAO's,
+    // whichever end of the address list the canary answered at.
+    s3Evidence[0] = boarddetectmodel::addressProbeEvidence(true, 0, true);
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
+    CHECK(detected.variant == Variant::Unknown);
+    CHECK(detected.matchedCandidates == 0);
+    {
+      const ProbeEvidence leading = boarddetectmodel::addressListEvidence(
+          s3Plan.probes[0], [](uint8_t address) {
+            return address == boarddetectmodel::CANARY_ADDRESS;
+          });
+      s3Evidence[0] = leading;
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      8u * 1024u * 1024u, s3Evidence, 6)
+                .variant == Variant::Unknown);
+      unsigned transactions = 0;
+      const ProbeEvidence trailing = boarddetectmodel::addressListEvidence(
+          s3Plan.probes[0], [&](uint8_t) { return ++transactions >= 2; });
+      s3Evidence[0] = trailing;
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      8u * 1024u * 1024u, s3Evidence, 6)
+                .variant == Variant::Unknown);
+    }
     // A codec bus that would not start is no evidence for either.
     s3Evidence[0] = {ProbeStatus::StartFailed, 0};
     detected = board::detectFromEvidence(
