@@ -1293,9 +1293,7 @@ final class DeviceSession {
             + "waiting for the display to come back")
         reportProgress(force: true)
 
-        setCaptureStatus(.suspended(
-            "The panel stopped answering, so mirroring is paused. It resumes by "
-                + "itself as soon as the panel is back."))
+        setCaptureStatus(.suspended(DeviceReachabilityText.suspended))
 
         while !isStopped && !Self.hasDeviceReturned(
             repliesNow: sender.deviceRepliesReceived,

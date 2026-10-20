@@ -140,7 +140,7 @@ extension PanelManager {
                 // The hold, or a status built during it: say what capture is
                 // really doing instead of the session's "Paused".
                 panel.captureStatus = awaitingIdentity
-                    ? .waiting("Waiting for the display to confirm its identity.")
+                    ? .waiting(DeviceReachabilityText.awaitingIdentity)
                     : liveCapture ?? status.captureStatus
             } else {
                 panel.captureStatus = status.captureStatus
@@ -149,8 +149,7 @@ extension PanelManager {
             // A parked session is alive but deliberately not capturing, which
             // otherwise looks identical to a panel that is simply idle.
             panel.lastError = status.parked
-                ? "Not reachable, so capture is stopped for this display. It resumes "
-                    + "automatically as soon as the panel answers again."
+                ? DeviceReachabilityText.parked
                 : nil
             if let address = status.resolvedAddress { panel.address = address }
             // The session's last EINF, replayed every status tick. Its

@@ -183,8 +183,7 @@ extension PanelManager {
             panel.discovered = false
             panel.awaitingIdentity = false
             panel.displayFPS = 0
-            panel.captureStatus = .failed(
-                "No session is running for this display, so nothing is being sent.")
+            panel.captureStatus = .failed(DeviceReachabilityText.noSession)
             panel.audioStatus = nil
             // Said as a schedule, because it is one: `SessionRegistry` offers
             // the name again after its cooldown even if discovery never
