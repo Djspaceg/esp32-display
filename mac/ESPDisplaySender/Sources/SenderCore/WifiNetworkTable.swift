@@ -360,8 +360,8 @@ final class NetworkCell: NSTableCellView {
             ? .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
             : .systemFont(ofSize: NSFont.smallSystemFontSize)
         slotLabel.toolTip = copied
-            ? "The preset slot this network fills on every display"
-            : "Displays have \(slots) preset slots; drag this network up to copy it"
+            ? "The preset slot this network fills on every device"
+            : "Devices have \(slots) preset slots; drag this network up to copy it"
         nameLabel.stringValue = row.ssid
         nameLabel.textColor = copied ? .labelColor : .secondaryLabelColor
         openLabel.isHidden = !row.isOpen

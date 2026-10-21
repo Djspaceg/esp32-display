@@ -320,7 +320,7 @@ final class CocoaScriptingHandler {
         guard !name.isEmpty else {
             throw CocoaScriptingFailure(
                 code: .missingArgument,
-                message: "A display service name or unique display name is required.")
+                message: "A device service name or unique device name is required.")
         }
         if let exact = manager.panels.first(where: { $0.serviceName == name }) {
             return exact
@@ -331,13 +331,13 @@ final class CocoaScriptingHandler {
         guard !matches.isEmpty else {
             throw CocoaScriptingFailure(
                 code: .displayNotFound,
-                message: "No display is named \"\(name)\".")
+                message: "No device is named \"\(name)\".")
         }
         guard matches.count == 1 else {
             let services = matches.map(\.serviceName).sorted().joined(separator: ", ")
             throw CocoaScriptingFailure(
                 code: .ambiguousDisplay,
-                message: "The display name \"\(name)\" is ambiguous; use one of these service names: \(services).")
+                message: "The device name \"\(name)\" is ambiguous; use one of these service names: \(services).")
         }
         return matches[0]
     }
@@ -429,7 +429,7 @@ public class ESPDisplayScriptCommand: NSScriptCommand {
     }
 
     fileprivate func requiredDirectString() throws -> String {
-        try requiredString(directParameter, name: "display")
+        try requiredString(directParameter, name: "device")
     }
 
     fileprivate func requiredStringArgument(_ key: String) throws -> String {

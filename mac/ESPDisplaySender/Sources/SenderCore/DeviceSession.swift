@@ -1290,7 +1290,7 @@ final class DeviceSession {
         sender.setParked(true)
         setAudioEnabled(false)
         print("[\(name)] no reply for \(Int(Self.parkAfterSilence))s - capture stopped, "
-            + "waiting for the display to come back")
+            + "waiting for the device to come back")
         reportProgress(force: true)
 
         setCaptureStatus(.suspended(DeviceReachabilityText.suspended))
@@ -1307,7 +1307,7 @@ final class DeviceSession {
             paused: sender.paused || sender.updateHold, parked: false))
         guard !isStopped else { return }
         setCaptureStatus(.waiting(DeviceReachabilityText.answeredAgain))
-        print("[\(name)] display answered again - resuming capture")
+        print("[\(name)] device answered again - resuming capture")
     }
 
     /// How long the watchdog waits between checks, and how finely it slices

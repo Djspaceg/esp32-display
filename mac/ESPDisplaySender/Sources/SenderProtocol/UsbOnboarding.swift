@@ -262,7 +262,7 @@ public enum UsbOnboarding {
             steps.append(ConfigStep(
                 kind: .name,
                 command: ConfigCommands.setName(trimmedName),
-                label: "Naming the display \"\(trimmedName)\"…"))
+                label: "Naming the device \"\(trimmedName)\"…"))
         }
         steps.append(ConfigStep(
             kind: .wifi,
@@ -389,7 +389,7 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
         if let name = request.alreadyAddedAs {
             return UsbOnboardingPlan(
                 headline: "Already added as \"\(name)\"",
-                detail: "This board already has a display in the sidebar. Select "
+                detail: "This board is already in the sidebar. Select "
                     + "\"\(name)\" there to change its WiFi or its firmware, or "
                     + "choose another USB device here.",
                 action: .alreadyAdded)
@@ -404,7 +404,7 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                 action: .readingBoard)
         }
         guard !request.hardwareIDKnown else { return plan }
-        var detail = "Every display is recorded under the board's own hardware "
+        var detail = "Every device is recorded under its own hardware "
             + "ID, and neither the board's firmware nor esptool has reported one. "
         if case .failed(let reason) = request.detection {
             detail += "esptool could not read the board: \(reason) "
@@ -545,7 +545,7 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                     return UsbOnboardingPlan(
                         headline: "Choose which board this is",
                         detail: "esptool read an \(chip), and the chip alone does "
-                            + "not say which board's display this is, so the board "
+                            + "not say which board this is, so the board "
                             + "is named before anything is written. "
                             + "Choose it under Board model: "
                             + boards.joined(separator: ", ") + ".",
@@ -583,9 +583,9 @@ public struct UsbOnboardingPlan: Equatable, Sendable {
                     target = "c6"
                 } else {
                     return UsbOnboardingPlan(
-                        headline: "Choose the exact display target",
+                        headline: "Choose the exact firmware target",
                         detail: "esptool identified the \(chip), but that does not "
-                            + "distinguish its attached display and pin layout. "
+                            + "distinguish its attached screen and pin layout. "
                             + "Choose \(compatibleTargets.joined(separator: " or ")) "
                             + "before anything is written.",
                         action: .chooseTarget)

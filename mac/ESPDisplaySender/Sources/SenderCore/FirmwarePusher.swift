@@ -113,10 +113,10 @@ final class FirmwarePusher {
         var errorDescription: String? {
             switch self {
             case .couldNotListen(let reason):
-                return "This Mac could not open a port for the panel to connect "
+                return "This Mac could not open a port for the device to connect "
                     + "back to: \(reason)"
             case .noReplyToInvitation(let attempts):
-                return "The panel did not answer \(attempts) update invitations. "
+                return "The device did not answer \(attempts) update invitations. "
                     + "Check that it is on this network and that OTA is enabled."
             case .invitationTransportFailed(let reason):
                 return "This Mac could not send the update invitation over the "
@@ -124,59 +124,59 @@ final class FirmwarePusher {
                     + "and that Local Network access is allowed for this app in "
                     + "System Settings > Privacy & Security."
             case .panelRefusedInvitation(let text):
-                return "The panel refused the update: "
+                return "The device refused the update: "
                     + "\(Self.quote(text, whenEmpty: "it replied with nothing"))"
             case .passwordRequired:
-                return "The panel asked for a password and none was given."
+                return "The device asked for a password and none was given."
             case .legacyMD5Firmware:
-                return "This panel is running firmware older than ESP32 core "
+                return "This device is running firmware older than ESP32 core "
                     + "3.3.1, which authenticates updates with MD5. This app only "
                     + "speaks the newer PBKDF2 exchange. Update it over USB with "
                     + "tools/espdisp.py flash."
             case .malformedChallenge(let length):
-                return "The panel sent a \(length)-character challenge, which is "
+                return "The device sent a \(length)-character challenge, which is "
                     + "neither of the two lengths its firmware can produce."
             case .couldNotComputeResponse:
                 return "The authentication response could not be computed on this "
                     + "Mac. This is a bug in the app rather than a wrong password."
             case .noReplyToAuthentication:
-                return "The panel did not answer the password."
+                return "The device did not answer the password."
             case .authenticationTransportFailed(let reason):
                 return "This Mac could not send the password over the network: "
                     + "\(reason). Check this Mac's network connection and that "
                     + "Local Network access is allowed for this app in System "
                     + "Settings > Privacy & Security."
             case .authenticationFailed(let text):
-                return "The panel rejected the password"
+                return "The device rejected the password"
                     + (text == "Authentication Failed"
                         ? "." : ": \(Self.quote(text, whenEmpty: "it replied with nothing"))")
             case .panelNeverConnected(let seconds):
-                return "The panel accepted the update invitation but did not "
+                return "The device accepted the update invitation but did not "
                     + "establish its return connection within \(seconds) seconds. "
                     + "That is the only fact the app can observe here. Network "
-                    + "isolation, routing, Local Network permission, a panel-side "
+                    + "isolation, routing, Local Network permission, a device-side "
                     + "connection failure, or a Mac firewall can all cause it."
             case .transferFailed(let sent, let total, let reason):
                 return "The transfer stopped after \(sent) of \(total) bytes: "
-                    + "\(reason). The panel keeps running the firmware it booted."
+                    + "\(reason). The device keeps running the firmware it booted."
             case .unexpectedReply(let text):
-                return "The panel sent something unexpected during the transfer: "
+                return "The device sent something unexpected during the transfer: "
                     + "\(Self.quote(text, whenEmpty: "nothing at all"))"
             case .panelRefusedImage(let text):
-                return "The panel received the whole image and then refused it: "
+                return "The device received the whole image and then refused it: "
                     + "\(Self.quote(text, whenEmpty: "it did not say why")). It is "
                     + "still running the firmware it booted, so nothing was lost. "
                     + "An image built for a different chip is refused this way, "
                     + "and so is one that arrived corrupted."
             case .unconfirmedResult(let text):
-                return "Every byte was sent, and the panel answered "
+                return "Every byte was sent, and the device answered "
                     + "\(Self.quote(text, whenEmpty: "nothing")) rather than "
                     + "confirming the update. It may still have worked - check its "
                     + "version once it comes back."
             case .replyTimedOut(let waitingFor):
-                return "The panel stopped answering while \(waitingFor)."
+                return "The device stopped answering while \(waitingFor)."
             case .noResultAfterUpload:
-                return "Every byte was sent, but the panel never confirmed it "
+                return "Every byte was sent, but the device never confirmed it "
                     + "wrote them. It may have rebooted onto the new firmware "
                     + "anyway - check its version once it comes back."
             }
@@ -519,7 +519,7 @@ final class FirmwarePusher {
                 // which describes neither what happened nor what to do.
                 throw Failure.transferFailed(
                     bytesSent: sent, of: total,
-                    reason: "the panel closed the connection")
+                    reason: "the device closed the connection")
             }
             tail += reply.text
             panelHungUp = reply.isClosed

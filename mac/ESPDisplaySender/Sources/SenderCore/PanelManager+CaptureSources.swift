@@ -75,8 +75,8 @@ extension PanelManager {
         let panel = panels.first { $0.serviceName == serviceName }
         guard let geometry = panel?.geometry else {
             operationOutcome = .failure(
-                "Panel size unknown",
-                "Connect this display over USB or wait for its network advertisement "
+                "Screen size unknown",
+                "Connect this device over USB or wait for its network advertisement "
                     + "to report a usable resolution before choosing a region.")
             return
         }
@@ -284,7 +284,7 @@ extension PanelManager {
         // turns out not to be capturable.
         updatePanel(name) { panel in
             panel.captureStatus = .suspended(
-                "Previewing on this Mac. The display is offline, so nothing "
+                "Previewing on this Mac. The device is offline, so nothing "
                     + "is being sent to it yet.")
         }
     }

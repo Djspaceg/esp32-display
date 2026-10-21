@@ -29,11 +29,11 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     var summary: String {
         switch self {
         case .general:
-            return "How the display list is ordered and how long Identify lasts."
+            return "How the device list is ordered and how long Identify lasts."
         case .streaming:
-            return "Frame rate, packet pacing and tile compression for every display."
+            return "Frame rate, packet pacing and tile compression for every device."
         case .wifiNetworks:
-            return "The networks this Mac copies to every display's preset slots."
+            return "The networks this Mac copies to every device's preset slots."
         }
     }
 
@@ -58,7 +58,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     var keywords: [String] {
         switch self {
         case .general:
-            return ["sort", "order", "display list", "sidebar", "identify", "led"]
+            return ["sort", "order", "device list", "display list", "sidebar", "identify", "led"]
         case .streaming:
             return ["frame rate", "fps", "pacing", "packet", "tile", "quality",
                     "compression", "lossless", "lossy"]
@@ -297,7 +297,7 @@ private struct GeneralSettingsPane: View {
     var body: some View {
         SettingsForm(pane: .general) {
             Section {
-                Picker("Sort displays by", selection: Binding(
+                Picker("Sort devices by", selection: Binding(
                     get: { manager.settings.deviceListSortOrder },
                     set: { manager.updateDeviceListSortOrder($0) })
                 ) {
@@ -306,9 +306,9 @@ private struct GeneralSettingsPane: View {
                     }
                 }
             } header: {
-                Text("Display List")
+                Text("Device List")
             } footer: {
-                Text("The same choice as the sort button under the display list.")
+                Text("The same choice as the sort button under the device list.")
             }
 
             Section {
@@ -338,7 +338,7 @@ private struct GeneralSettingsPane: View {
             } header: {
                 Text("Identify")
             } footer: {
-                Text("How long Identify lights the panel's LED.")
+                Text("How long Identify lights the device's LED.")
             }
         }
     }
@@ -381,7 +381,7 @@ private struct StreamingSettingsPane: View {
             } header: {
                 Text("Frame Rate")
             } footer: {
-                Text("The panel's SPI bus and WiFi link set the real ceiling, not the Mac. Changing this restarts capture.")
+                Text("The device's SPI bus and WiFi link set the real ceiling, not the Mac. Changing this restarts capture.")
             }
 
             Section {
@@ -407,7 +407,7 @@ private struct StreamingSettingsPane: View {
             } header: {
                 Text("Pacing")
             } footer: {
-                Text("Sleep between packet chunks. Longer means fewer frames dropped by the panel and a lower peak rate. Automatic tuning follows the panel's reported drop rate.")
+                Text("Sleep between packet chunks. Longer means fewer frames dropped by the device and a lower peak rate. Automatic tuning follows the device's reported drop rate.")
             }
 
             Section {
@@ -424,7 +424,7 @@ private struct StreamingSettingsPane: View {
             } header: {
                 Text("Tile quality")
             } footer: {
-                Text("Panels streaming the tile protocol can compress busy regions 4:1 with slight loss, like a high-quality JPEG. Automatic keeps flat colors and gradients pixel-perfect and compresses only textured content; Aggressive compresses whenever it is smaller; Lossless never does, trading frame rate on photos and video. Other panels are unaffected.")
+                Text("Devices streaming the tile protocol can compress busy regions 4:1 with slight loss, like a high-quality JPEG. Automatic keeps flat colors and gradients pixel-perfect and compresses only textured content; Aggressive compresses whenever it is smaller; Lossless never does, trading frame rate on photos and video. Other devices are unaffected.")
             }
 
             Section {

@@ -136,10 +136,10 @@ final class PortSelectionTests: XCTestCase {
     func testNoPortsFails() {
         let result = select(expectedName: "studio-display", availablePorts: [])
 
-        let failure = expectFailure(result, title: "No device found")
+        let failure = expectFailure(result, title: "No board found")
         XCTAssertEqual(
             failure?.message,
-            "Connect the display board to this Mac with a USB cable, then try again.")
+            "Connect the board to this Mac with a USB cable, then try again.")
     }
 
     // MARK: one port
@@ -178,7 +178,7 @@ final class PortSelectionTests: XCTestCase {
             failure?.message,
             "The connected USB device at /dev/cu.usbmodem-1 reports \"travel-display\", "
                 + "not \"studio-display\". Assign the correct port under Connection "
-                + "before changing the display.")
+                + "before changing the board.")
     }
 
     func testSinglePortThatDoesNotAnswerFails() {
@@ -205,7 +205,7 @@ final class PortSelectionTests: XCTestCase {
         let failure = expectFailure(result, title: "Select a USB device")
         XCTAssertEqual(
             failure?.message,
-            "More than one USB serial device is connected. Select a display in the "
+            "More than one USB serial device is connected. Select a board in the "
                 + "manager and assign its USB device under Connection.")
     }
 
@@ -250,7 +250,7 @@ final class PortSelectionTests: XCTestCase {
         XCTAssertEqual(
             failure?.message,
             "More than one USB device reports the name \"studio-display\". Assign the "
-                + "correct port under Connection before changing the display.")
+                + "correct port under Connection before changing the board.")
     }
 
     func testNoMatchingNameFails() {
@@ -262,11 +262,11 @@ final class PortSelectionTests: XCTestCase {
                 "/dev/cu.usbserial-2": .named("desk-display"),
             ])
 
-        let failure = expectFailure(result, title: "Display not found")
+        let failure = expectFailure(result, title: "Board not found")
         XCTAssertEqual(
             failure?.message,
             "No connected USB device reports the name \"studio-display\". Assign its "
-                + "port under Connection, or reconnect the display and try again.")
+                + "port under Connection, or reconnect the board and try again.")
     }
 
     // MARK: probe timeouts

@@ -86,7 +86,7 @@ final class LayoutCaptureTests: XCTestCase {
 
         var off = panel
         off.manuallyOff = true
-        off.lastError = "Gave up trying to reach this display. It is retried "
+        off.lastError = "Gave up trying to reach this device. It is retried "
             + "automatically once it reappears on the network."
         let offManager = manager([off])
         // A build this app does not carry, as the board would report it.

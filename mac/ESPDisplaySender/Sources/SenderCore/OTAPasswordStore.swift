@@ -58,13 +58,13 @@ enum OTAPasswordPolicy {
         case .accept:
             return nil
         case .tooShort(let bytes):
-            return "The panel needs at least \(minimumBytes) bytes; this is "
+            return "The device needs at least \(minimumBytes) bytes; this is "
                 + "\(bytes)."
         case .tooLong(let bytes):
-            return "The panel takes at most \(maximumBytes) bytes; this is "
+            return "The device takes at most \(maximumBytes) bytes; this is "
                 + "\(bytes)."
         case .embeddedNul:
-            return "The panel cannot store a password containing a zero byte."
+            return "The device cannot store a password containing a zero byte."
         }
     }
 }

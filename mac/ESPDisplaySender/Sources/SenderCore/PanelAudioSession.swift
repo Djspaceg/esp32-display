@@ -259,7 +259,7 @@ final class PanelAudioSession: @unchecked Sendable {
     private var downlinkResampler = AudioVariableRateResampler()
 
     private var sourceName = PanelAudioSession.tappedSourceName
-    private var message = "Waiting for the panel audio socket."
+    private var message = "Waiting for the device's audio socket."
     private var state = PanelAudioState.waiting
     private var panelStatus: AudioProtocol.Status?
     private var downlinkQueueDrops: UInt64 = 0
@@ -525,14 +525,14 @@ final class PanelAudioSession: @unchecked Sendable {
         let peer = peerAddress.snapshot
         guard let address = peer.address, !address.isEmpty else {
             state = .waiting
-            message = "Waiting for the panel network address."
+            message = "Waiting for the device's network address."
             publish()
             scheduleRestart()
             return
         }
         guard let port = NWEndpoint.Port(rawValue: descriptor.port) else {
             state = .failed
-            message = "The panel advertised an invalid audio port."
+            message = "The device advertised an invalid audio port."
             publish()
             return
         }
@@ -544,7 +544,7 @@ final class PanelAudioSession: @unchecked Sendable {
         self.connection = connection
         connectedPeer = peer
         state = .waiting
-        message = "Connecting panel audio."
+        message = "Connecting the device's audio."
         publish()
         connection.stateUpdateHandler = { [weak self, weak connection] newState in
             guard let self, let connection else { return }
@@ -1070,7 +1070,7 @@ final class PanelAudioSession: @unchecked Sendable {
             peer.generation != connectedPeer.generation
                 || peer.address != connectedPeer.address
         {
-            restart(reason: "The panel video path resolved a new address.")
+            restart(reason: "The device's video path resolved a new address.")
             return
         }
 
@@ -1078,7 +1078,7 @@ final class PanelAudioSession: @unchecked Sendable {
         let responseBase = lastValidInboundNanos ?? connectionReadyNanos
         let timeout = UInt64(tuning.responseTimeoutMilliseconds * 1_000_000)
         if let responseBase, now - responseBase > timeout {
-            restart(reason: "The panel audio socket stopped responding.")
+            restart(reason: "The device's audio socket stopped responding.")
             return
         }
 

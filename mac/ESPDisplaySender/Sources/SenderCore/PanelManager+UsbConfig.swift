@@ -37,7 +37,7 @@ extension PanelManager {
             persistIfNeeded(force: true)
             operationOutcome = .success(
                 "Name saved",
-                "The display is restarting as \"\(appliedName)\". Streaming "
+                "The device is restarting as \"\(appliedName)\". Streaming "
                     + "reconnects automatically.")
         case .failure(let failure):
             operationOutcome = .failure(failure)
@@ -81,7 +81,7 @@ extension PanelManager {
             }
             operationOutcome = .success(
                 "OTA password saved",
-                "The OTA password was saved and the display is restarting. "
+                "The OTA password was saved and the device is restarting. "
                     + "Wireless updates become available after it rejoins WiFi "
                     + "and reports that its OTA listener is active." + keychainNote)
         case .failure(let failure):
@@ -110,7 +110,7 @@ extension PanelManager {
             }
             operationOutcome = .success(
                 "OTA password cleared",
-                "The display is restarting with OTA disabled.")
+                "The device is restarting with OTA disabled.")
         case .failure(let failure):
             operationOutcome = .failure(failure)
         }
@@ -168,7 +168,7 @@ extension PanelManager {
         else {
             operationOutcome = .failure(
                 "Could not identify this board",
-                "A permanent display record needs the board's hardware ID. Refresh "
+                "A permanent device record needs the board's hardware ID. Refresh "
                     + "the USB devices and select it again before continuing.")
             return false
         }
@@ -178,7 +178,7 @@ extension PanelManager {
         if let existing = panelAssociated(withHardwareID: stableID) {
             selectedServiceName = existing.serviceName
             operationOutcome = .failure(
-                "Display already added",
+                "Device already added",
                 "\(existing.displayName) is already represented in the sidebar.")
             return false
         }
@@ -194,7 +194,7 @@ extension PanelManager {
                 && stableHardwareID(of: $0) != stableID
         }) {
             operationOutcome = .failure(
-                "Display name already in use",
+                "Device name already in use",
                 "\(collision.displayName) already owns the name \"\(recordName)\". "
                     + "Enter a unique name for this board before adding it.")
             return false
@@ -205,7 +205,7 @@ extension PanelManager {
             operationOutcome = .failure(
                 "USB device changed",
                 "The selected serial port was unplugged, renumbered, or reused. "
-                    + "Refresh the device list and select the board again.")
+                    + "Refresh the USB device list and select the board again.")
             return false
         }
 
@@ -328,7 +328,7 @@ extension PanelManager {
         if let existing = panelAssociated(withHardwareID: stableID) {
             selectedServiceName = existing.serviceName
             operationOutcome = .success(
-                "Display already recorded",
+                "Device already recorded",
                 "\(existing.displayName) was configured and its existing record is selected.")
             return true
         }

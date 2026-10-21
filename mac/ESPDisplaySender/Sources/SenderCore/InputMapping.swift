@@ -97,7 +97,7 @@ enum BoardFunction: CaseIterable, Hashable, Sendable {
         case .wifiSelector: return "Open the WiFi selector"
         case .bootMenu: return "Open the boot menu (restarts)"
         case .rotate180: return "Turn the picture 180\u{00B0}"
-        case .displayPower: return "Turn the display off or on"
+        case .displayPower: return "Turn the screen off or on"
         }
     }
 

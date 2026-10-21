@@ -83,55 +83,55 @@ final class StreamFirmwarePusher: @unchecked Sendable {
         var errorDescription: String? {
             switch self {
             case .noReplyToBegin(let attempts):
-                return "The panel did not answer \(attempts) update requests. Check "
+                return "The device did not answer \(attempts) update requests. Check "
                     + "that it is still streaming from this Mac."
             case .notConfigured:
-                return "The panel has no OTA password set, so it refuses updates "
+                return "The device has no OTA password set, so it refuses updates "
                     + "over WiFi. Set one over USB."
             case .busy(let detail):
-                return "The panel is busy with another update: \(detail)."
+                return "The device is busy with another update: \(detail)."
             case .refused(let detail):
-                return "The panel refused the update: \(detail)."
+                return "The device refused the update: \(detail)."
             case .couldNotComputeResponse:
                 return "The authentication response could not be computed on this "
                     + "Mac. This is a bug in the app rather than a wrong password."
             case .noReplyToAuthentication:
-                return "The panel did not answer the password."
+                return "The device did not answer the password."
             case .authenticationFailed:
-                return "The panel rejected the password."
+                return "The device rejected the password."
             case .couldNotBegin(let detail):
-                return "The panel could not start writing the update: \(detail). "
+                return "The device could not start writing the update: \(detail). "
                     + "Nothing was written."
             case .writeFailed(let detail):
-                return "The panel could not write the update to flash: \(detail). "
+                return "The device could not write the update to flash: \(detail). "
                     + "It keeps running the firmware it booted."
             case .transferStalled(let acked, let total):
                 return "The transfer stopped after \(acked) of \(total) bytes: the "
-                    + "panel stopped answering. It keeps running the firmware it booted."
+                    + "device stopped answering. It keeps running the firmware it booted."
             case .panelForgotSession:
-                return "The panel stopped knowing this update before every byte was "
+                return "The device stopped knowing this update before every byte was "
                     + "acknowledged: it may have restarted, or the link to it was "
                     + "reopened. It activates only a complete image whose SHA-256 "
                     + "matched, so check its version once it comes back."
             case .panelAborted(let detail):
-                return "The panel ended the update: \(detail). It keeps running the "
+                return "The device ended the update: \(detail). It keeps running the "
                     + "firmware it booted."
             case .hashMismatch:
                 return "Every byte arrived, but the image's SHA-256 did not match, so "
-                    + "the panel discarded it. It keeps running the firmware it booted."
+                    + "the device discarded it. It keeps running the firmware it booted."
             case .panelRefusedImage(let detail):
-                return "The panel received the whole image and then refused it: "
+                return "The device received the whole image and then refused it: "
                     + "\(detail). It keeps running the firmware it booted."
             case .noResult:
-                return "Every byte was sent and acknowledged, but the panel never "
+                return "Every byte was sent and acknowledged, but the device never "
                     + "said whether it activated the image. Check its version once "
                     + "it comes back."
             case .restartedBeforeConfirming:
-                return "Every byte was acknowledged, but the panel stopped knowing this "
+                return "Every byte was acknowledged, but the device stopped knowing this "
                     + "update before its verdict reached this Mac. It may be running "
                     + "either firmware; check its version once it comes back."
             case .cancelled:
-                return "The update was cancelled. The panel keeps running the "
+                return "The update was cancelled. The device keeps running the "
                     + "firmware it booted."
             }
         }

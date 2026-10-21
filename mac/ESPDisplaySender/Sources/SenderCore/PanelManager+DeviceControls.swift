@@ -60,7 +60,7 @@ extension PanelManager {
         _ serviceName: String, operation: Operation
     ) -> OperationAvailability {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
-            return .unavailable("This display is not known yet.")
+            return .unavailable("This device is not known yet.")
         }
         let requirement = Self.requirement(for: operation)
         let paths = availablePaths(
@@ -355,7 +355,7 @@ extension PanelManager {
         if (operation == .brightness || operation == .brightnessLevel),
            case .verified = usbSerialState(for: serviceName) {
             return "Brightness over USB needs firmware support that this "
-                + "display does not report."
+                + "device does not report."
         }
 
         if operation == .firmwareUpdate,
@@ -369,19 +369,19 @@ extension PanelManager {
             switch usbSerialState(for: serviceName) {
             case .enumeratedUnverified:
                 return "USB is connected, but the app has not verified this "
-                    + "display's hardware ID yet."
+                    + "board's hardware ID yet."
             case .mismatch:
-                return "The connected USB device does not match this display."
+                return "The connected USB device does not match this board."
             case .ambiguous:
-                return "More than one USB device matches this display. Refresh "
+                return "More than one USB device matches this board. Refresh "
                     + "USB devices and choose the correct one."
             case .restarting:
-                return "The display is restarting; USB controls will return when "
+                return "The device is restarting; USB controls will return when "
                     + "it answers CFGSHOW."
             case .verified(let device):
                 if operation == .brightness || operation == .brightnessLevel {
                     return "Brightness over USB needs firmware support that this "
-                        + "display does not report."
+                        + "device does not report."
                 }
                 if operation == .automaticRotation {
                     return "Automatic orientation needs a motion sensor and "
@@ -415,10 +415,10 @@ extension PanelManager {
                         return "Wireless updating needs WiFi and an active OTA "
                             + "password. Connect over USB to set one."
                     }
-                    return "This display does not report support for "
+                    return "This device does not report support for "
                         + "\(Self.describe(capability))."
                 }
-                return "The display is visible on WiFi but has not started a "
+                return "The device is visible on WiFi but has not started a "
                     + "control session yet."
             }
             if !Self.includesUSB(requirement) {
@@ -426,14 +426,14 @@ extension PanelManager {
                     return "Wireless updating needs WiFi and an active OTA password. "
                         + "Connect over USB to set one."
                 }
-                return "This control needs the display to be connected over WiFi."
+                return "This control needs the device to be connected over WiFi."
             }
         }
 
         if Self.includesUSB(requirement) && !Self.includesNetwork(requirement) {
-            return "Connect this display to this Mac over USB."
+            return "Connect this device to this Mac over USB."
         }
-        return "Connect this display over USB or let it rejoin WiFi."
+        return "Connect this device over USB or let it rejoin WiFi."
     }
 
     private static func includesNetwork(_ requirement: OperationRequirement) -> Bool {
@@ -544,7 +544,7 @@ extension PanelManager {
         guard generation == usbPathGeneration(path) else {
             operationOutcome = .failure(
                 "USB control unavailable",
-                "The display is restarting; USB controls will return when it "
+                "The device is restarting; USB controls will return when it "
                     + "answers CFGSHOW.")
             return
         }

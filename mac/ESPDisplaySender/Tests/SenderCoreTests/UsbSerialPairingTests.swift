@@ -52,7 +52,7 @@ final class UsbSerialPairingTests: XCTestCase {
             "a port the display's USB serial is on was let go")
         XCTAssertEqual(
             manager.wifiSwitchUnavailableReason(for: "big-round"),
-            "Connected by USB. Waiting for this display to answer.")
+            "Connected by USB. Waiting for this device to answer.")
     }
 
     /// The P4's JTAG port reports the board's MAC as its serial and carries
@@ -116,7 +116,7 @@ final class UsbSerialPairingTests: XCTestCase {
         XCTAssertNil(manager.usbIdentifyRetries[board.path])
         XCTAssertEqual(
             manager.wifiSwitchUnavailableReason(for: "big-round"),
-            "This display answers over USB without reporting its hardware ID, so "
+            "This device answers over USB without reporting its hardware ID, so "
                 + "it cannot be paired. Update its firmware, then unplug it and "
                 + "plug it in again.")
 
@@ -125,6 +125,6 @@ final class UsbSerialPairingTests: XCTestCase {
         manager.updateUSBPorts([board.path])
         XCTAssertEqual(
             manager.wifiSwitchUnavailableReason(for: "big-round"),
-            "Connected by USB. Waiting for this display to answer.")
+            "Connected by USB. Waiting for this device to answer.")
     }
 }

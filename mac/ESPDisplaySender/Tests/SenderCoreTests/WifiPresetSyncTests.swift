@@ -588,7 +588,7 @@ final class WifiPresetSyncTests: XCTestCase {
         }
         XCTAssertEqual(
             failure.message,
-            "\"net11\" did not fit in this display's slots. "
+            "\"net11\" did not fit in this device's slots. "
                 + "Drag it higher in Settings.")
         XCTAssertFalse(device.commands.contains { $0.hasPrefix("CFGWIFIUSE") })
     }
@@ -622,7 +622,7 @@ final class WifiPresetSyncTests: XCTestCase {
         else { return XCTFail("the switch stopped showing before the board reported") }
         XCTAssertEqual(
             manager.wifiSwitchUnavailableReason(for: "studio-display"),
-            "This display is restarting.")
+            "This device is restarting.")
         // A board that never reports the network stops showing as switching
         // once the wait is over.
         XCTAssertNil(manager.wifiSwitchState(
@@ -648,7 +648,7 @@ final class WifiPresetSyncTests: XCTestCase {
         manager.wifiPresetSyncTasks["020000123456"] = held
         XCTAssertEqual(
             manager.wifiSwitchUnavailableReason(for: "studio-display"),
-            "Copying the saved networks to this display.")
+            "Copying the saved networks to this device.")
         held.cancel()
         manager.wifiPresetSyncTasks["020000123456"] = nil
         XCTAssertNil(manager.wifiSwitchUnavailableReason(for: "studio-display"))
@@ -685,8 +685,8 @@ final class WifiPresetSyncTests: XCTestCase {
 
         XCTAssertEqual(
             manager.wifiSwitchUnavailableReason(for: "studio-display"),
-            "Connect this display to the Mac by USB to switch its network. "
-                + "Over WiFi the display has no command for it.")
+            "Connect this device to the Mac by USB to switch its network. "
+                + "Over WiFi the device has no command for it.")
         manager.switchWifi(to: "Home", for: "studio-display")
         try await waitForSyncToSettle(manager)
 

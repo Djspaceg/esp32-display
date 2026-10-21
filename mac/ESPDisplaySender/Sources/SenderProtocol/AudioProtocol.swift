@@ -275,9 +275,9 @@ public enum AudioProtocolError: Error, LocalizedError, Equatable {
         case .badMagic:
             return "The audio datagram has the wrong magic."
         case .versionMismatch(let version):
-            return "The panel sent unsupported audio version \(version)."
+            return "The device sent unsupported audio version \(version)."
         case .unknownKind(let kind):
-            return "The panel sent unknown audio datagram kind \(kind)."
+            return "The device sent unknown audio datagram kind \(kind)."
         case .badFormat:
             return "The audio datagram has an invalid PCM or status format."
         case .badLength(let declared, let actual):

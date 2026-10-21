@@ -166,9 +166,9 @@ public enum ESPDisplaySenderApp {
             // only in Settings, and a board gets one by the Add Display sheet.
             FileHandle.standardError.write(Data((
                 "--configure is no longer available. Add WiFi networks in the app's "
-                    + "Settings > WiFi Networks; every display connected by USB "
+                    + "Settings > WiFi Networks; every device connected by USB "
                     + "receives them as presets. To give a board its network, use "
-                    + "File > Add Display over USB.\n").utf8))
+                    + "File > Add Device over USB.\n").utf8))
             exit(64)
         }
 
@@ -393,7 +393,7 @@ public enum ESPDisplaySenderApp {
                 await MainActor.run {
                     panelManager.report(.screenRecording, detail:
                         "Allow ESPDisplaySender under System Settings > Privacy & Security > "
-                        + "Screen & System Audio Recording, then relaunch. Displays stay "
+                        + "Screen & System Audio Recording, then relaunch. Devices stay "
                         + "connected and controllable, but no picture can be sent "
                         + "(\(error.localizedDescription)).")
                 }
@@ -431,7 +431,7 @@ public enum ESPDisplaySenderApp {
                     // app ignoring them for no reason.
                     await MainActor.run {
                         panelManager.report(.deviceConfig, detail:
-                            "\(configPath) could not be read, so every display is using "
+                            "\(configPath) could not be read, so every device is using "
                             + "automatic source selection: \(error.localizedDescription)")
                     }
                 }
@@ -443,7 +443,7 @@ public enum ESPDisplaySenderApp {
                 + ", identify \(streaming.identifySeconds)s")
             let namedSources = savedSources.filter { $0.value != .automatic }
             if !namedSources.isEmpty {
-                print("saved per-display sources: "
+                print("saved per-device sources: "
                     + namedSources.keys.sorted().joined(separator: ", "))
             }
             let audioDownlinks = await MainActor.run { panelManager.macAudio.downlinks }
@@ -571,7 +571,7 @@ public enum ESPDisplaySenderApp {
                             ?? device.geometry
                         else {
                             print("not streaming discovered device \"\(device.name)\""
-                                + " because its panel size is unknown")
+                                + " because its screen size is unknown")
                             continue
                         }
                         let sessionID = UUID()

@@ -102,14 +102,14 @@ struct ManagerView: View {
             }
         }
         .confirmationDialog(
-            pendingDeletion.map { "Remove \($0.displayName)?" } ?? "Remove display?",
+            pendingDeletion.map { "Remove \($0.displayName)?" } ?? "Remove device?",
             isPresented: Binding(
                 get: { pendingDeletion != nil },
                 set: { if !$0 { pendingDeletion = nil } }
             ),
             titleVisibility: .visible
         ) {
-            Button("Remove Display", role: .destructive) {
+            Button("Remove Device", role: .destructive) {
                 if let panel = pendingDeletion {
                     manager.forget(panel.serviceName)
                 }
@@ -117,8 +117,8 @@ struct ManagerView: View {
             }
             Button("Cancel", role: .cancel) { pendingDeletion = nil }
         } message: {
-            Text("This removes the hardware record and its saved display settings "
-                + "from this Mac. It does not change the physical display, its "
+            Text("This removes the hardware record and its saved settings "
+                + "from this Mac. It does not change the device itself, its "
                 + "firmware, or its saved WiFi credentials.")
         }
         .onReceive(
@@ -162,7 +162,7 @@ struct ManagerView: View {
                             }
                     }
                 } header: {
-                    Text("Displays")
+                    Text("Devices")
                 }
             }
             // The system sidebar style carries the Liquid Glass sidebar
@@ -179,13 +179,13 @@ struct ManagerView: View {
                 // The empty state is also the new-user state, so it offers the one
                 // action that works with nothing in the sidebar.
                 ContentUnavailableView {
-                    Label("No Display Selected", systemImage: "display")
+                    Label("No Device Selected", systemImage: "display")
                 } description: {
-                    Text("Discovered and previously known panels appear in the "
+                    Text("Discovered and previously known devices appear in the "
                         + "sidebar. A board that has never joined a network is not "
                         + "discovered yet - add it over its USB cable.")
                 } actions: {
-                    Button("Add a Display over USB…") { showingAddDevice = true }
+                    Button("Add Device over USB…") { showingAddDevice = true }
                         .buttonStyle(.glassProminent)
                 }
             }
@@ -230,8 +230,8 @@ private struct DisplayListFooter: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
-            .help("Add a display connected to this Mac by USB")
-            .accessibilityLabel("Add a display over USB")
+            .help("Add a device connected to this Mac by USB")
+            .accessibilityLabel("Add device over USB")
             .accessibilityIdentifier("add-display-over-usb")
 
             Button(action: onRemove) {
@@ -241,8 +241,8 @@ private struct DisplayListFooter: View {
             }
             .buttonStyle(.borderless)
             .disabled(!canRemove)
-            .help(canRemove ? "Remove the selected display record" : "Select a display to remove")
-            .accessibilityLabel("Remove selected display")
+            .help(canRemove ? "Remove the selected device record" : "Select a device to remove")
+            .accessibilityLabel("Remove selected device")
             .accessibilityIdentifier("remove-display-record")
 
             Spacer(minLength: 0)
@@ -266,8 +266,8 @@ private struct DisplayListFooter: View {
             .menuStyle(.borderlessButton)
             .controlSize(.small)
             .fixedSize()
-            .help("Sort displays by \(sortOrder.sidebarTitle.lowercased())")
-            .accessibilityLabel("Sort displays")
+            .help("Sort devices by \(sortOrder.sidebarTitle.lowercased())")
+            .accessibilityLabel("Sort devices")
             .accessibilityValue(sortOrder.sidebarTitle)
             .accessibilityIdentifier("display-list-sort-order")
         }
@@ -463,7 +463,7 @@ struct PanelDetailView: View {
                     beginNameEdit()
                 }
                 .disabled(!manager.canPerform(.rename, for: panel.serviceName))
-                .help(operationHelp(.rename, "Rename this display"))
+                .help(operationHelp(.rename, "Rename this device"))
                 .popover(isPresented: $isEditingName, arrowEdge: .bottom) {
                     renamePopover
                 }
@@ -490,7 +490,7 @@ struct PanelDetailView: View {
                     manager.identify(panel.serviceName)
                 }
                 .disabled(!manager.canControl(panel.serviceName, capability: .identify))
-                .help(controlHelp(.identify, "Flash this panel so you can spot it"))
+                .help(controlHelp(.identify, "Blink this device so you can spot it"))
             }
         }
         .onAppear {
@@ -513,7 +513,7 @@ struct PanelDetailView: View {
                 manager.restart(panel.serviceName)
             }
         } message: {
-            Text("Streaming will reconnect automatically after the panel rejoins WiFi.")
+            Text("Streaming will reconnect automatically after the device rejoins WiFi.")
         }
         .sheet(item: $updateTarget) { target in
             FirmwareUpdateSheet(manager: manager, target: target)
@@ -637,7 +637,7 @@ struct PanelDetailView: View {
                     }
                     .labelsHidden()
                     .fixedSize()
-                    .help("Which screen this panel mirrors")
+                    .help("Which screen this device mirrors")
                 }
             }
             LabeledContent("Currently showing", value: panel.sourceDescription)
@@ -651,10 +651,10 @@ struct PanelDetailView: View {
         } header: {
             Text("Source")
         } footer: {
-            Text("A region streams a rectangle of one screen, locked to the panel's "
+            Text("A region streams a rectangle of one screen, locked to the device's "
                 + (panel.shapeDescription.map { "\($0) shape" } ?? "shape")
                 + " — 1× sends one "
-                + "screen point per panel pixel, higher multiples frame more and "
+                + "screen point per pixel on the device's screen, higher multiples frame more and "
                 + "scale it down. Choosing a display, window, or application "
                 + "instead uses the macOS picker. Either choice is remembered and "
                 + "reapplied when the sender restarts.")
@@ -681,8 +681,8 @@ struct PanelDetailView: View {
                     }
                 }
                 .help("Drag an aspect-locked rectangle over your screen to "
-                    + "choose what this panel shows; its size presets (and, "
-                    + "on square panels, rotation) are on the rectangle itself")
+                    + "choose what this device shows; its size presets (and, "
+                    + "on devices with square screens, rotation) are on the rectangle itself")
                 if let region = panel.source.region {
                     Text(region.sizeDescription)
                         .font(.caption)
@@ -747,7 +747,7 @@ struct PanelDetailView: View {
                 .disabled(!manager.canControl(panel.serviceName, capability: .rotate))
                 .help(controlHelp(
                     .rotate,
-                    "Turn the image clockwise to match how the panel is mounted"))
+                    "Turn the image clockwise to match how the device is mounted"))
             }
         } else {
             LabeledContent("Orientation") {
@@ -757,7 +757,7 @@ struct PanelDetailView: View {
                     .toggleStyle(.switch)
                     .fixedSize()
                     .disabled(!manager.canControl(panel.serviceName, capability: .flip))
-                    .help(controlHelp(.flip, "Rotate the image on the panel"))
+                    .help(controlHelp(.flip, "Rotate the image on the device"))
             }
         }
         if let status = manager.automaticRotationStatus(panel.serviceName),
@@ -803,13 +803,13 @@ struct PanelDetailView: View {
                     .foregroundStyle(.secondary)
             }
         } header: {
-            Text("Display")
+            Text("Screen")
         } footer: {
-            Text("Turning the screen off turns its backlight off, and blanks the "
-                + "panel too where the panel supports that, while the board stays "
+            Text("Turning the screen off turns its backlight off, and puts the "
+                + "screen itself to sleep where the device supports that, while the device stays "
                 + "on WiFi and keeps receiving. A "
                 + "touch does not wake it. It stays off across restarts until it is "
-                + "turned back on here, or on a board with a button by holding it "
+                + "turned back on here, or on a device with a button by holding it "
                 + "for three seconds (a shorter hold rotates the picture).")
         }
     }
@@ -857,7 +857,7 @@ struct PanelDetailView: View {
                         .disabled(panel.manuallyOff || !manager.canControl(
                             panel.serviceName, capability: .brightnessLevel))
                         .help(controlHelp(
-                            .brightnessLevel, "Set the panel backlight"))
+                            .brightnessLevel, "Set the screen backlight"))
                         .accessibilityLabel("Brightness level")
                     Text(panel.manuallyOff ? "Off" : "\(brightnessPercent)%")
                         .foregroundStyle(.secondary)
@@ -874,7 +874,7 @@ struct PanelDetailView: View {
                         .fixedSize()
                         .disabled(panel.manuallyOff || !manager.canControl(
                             panel.serviceName, capability: .brightness))
-                        .help(controlHelp(.brightness, "Set the panel backlight"))
+                        .help(controlHelp(.brightness, "Set the screen backlight"))
                     Spacer(minLength: 0)
                 }
             }
@@ -974,7 +974,7 @@ struct PanelDetailView: View {
         } header: {
             Text("Network Connection")
         } footer: {
-            Text("Switching networks restarts the display, and needs it "
+            Text("Switching networks restarts the device, and needs it "
                 + "connected to this Mac by USB.")
         }
     }
@@ -1009,7 +1009,7 @@ struct PanelDetailView: View {
                     + "device plays. "
                     + audioFooterText(audio.tuning))
             } else {
-                Text("Audio starts only after the panel advertises a complete "
+                Text("Audio starts only after the device advertises a complete "
                     + "EAUD descriptor and its audio capability bits.")
             }
         }
@@ -1125,7 +1125,7 @@ struct PanelDetailView: View {
     @ViewBuilder
     private func audioDiagnosticRows(_ audio: PanelAudioSnapshot) -> some View {
         LabeledContent(
-            "Panel format",
+            "Device format",
             value: "\(audio.descriptor.sampleRateHz) Hz, "
                 + "\(audio.descriptor.playbackChannels) down / "
                 + "\(audio.descriptor.captureChannels) up channels")
@@ -1144,7 +1144,7 @@ struct PanelDetailView: View {
 
         if let status = audio.panelStatus {
             LabeledContent(
-                "Panel buffer",
+                "Device buffer",
                 value: "\(status.fillFrames) / \(status.targetFrames) frames")
             LabeledContent(
                 "Minimum fill",
@@ -1164,7 +1164,7 @@ struct PanelDetailView: View {
             LabeledContent(
                 "Capture overruns", value: "\(status.captureOverruns)")
         } else {
-            LabeledContent("Panel diagnostics", value: "Waiting for status")
+            LabeledContent("Device diagnostics", value: "Waiting for status")
         }
     }
 
@@ -1222,8 +1222,8 @@ struct PanelDetailView: View {
         } footer: {
             Text(panel.gesturePreset.summary
                 + " A preset sets every input; change any one of them after. "
-                + "Directions follow what is on the panel, so they stay correct "
-                + "when it is rotated or flipped. Screens the display opens itself "
+                + "Directions follow what is on the screen, so they stay correct "
+                + "when it is rotated or flipped. Screens the device opens itself "
                 + "- the WiFi status screen, the WiFi selector, the boot menu - "
                 + "and the games keep their own controls.")
         }
@@ -1263,7 +1263,7 @@ struct PanelDetailView: View {
                 }
             }
             if !panel.availableBoardFunctions.isEmpty {
-                Section("On the Display") {
+                Section("On the Device") {
                     ForEach(panel.availableBoardFunctions, id: \.self) { function in
                         menuItem(.board(function), current: current, choose: choose)
                     }
@@ -1300,25 +1300,25 @@ struct PanelDetailView: View {
         if panel.gesturePreset.usesLongPress, !panel.hasCustomAssignments,
            panel.capabilities.contains(.touch),
            !panel.capabilities.contains(.touchLongPress) {
-            return "Press and hold needs newer firmware on this panel. The other "
+            return "Press and hold needs newer firmware on this device. The other "
                 + "gestures work now."
         }
         if !panel.capabilities.contains(.inputMap) {
             return panel.capabilitiesRaw == 0
                 ? nil
-                : "This panel's firmware cannot store assignments, so its buttons "
+                : "This device's firmware cannot store assignments, so its buttons "
                     + "keep their own jobs and only gestures can be assigned, to "
                     + "this Mac's functions. Update the firmware to assign the rest."
         }
         if panel.inputReport != nil, !panel.boardMapIsNameable {
-            return "This panel's firmware is newer than this app and uses "
+            return "This device's firmware is newer than this app and uses "
                 + "assignments it cannot name, so changes here are not sent. "
-                + "Update the app to change this panel's assignments."
+                + "Update the app to change this device's assignments."
         }
         if panel.inputReport != nil, !panel.boardMapIsCurrent {
             return panel.isOnline
-                ? "Sending these assignments to the panel\u{2026}"
-                : "These assignments are sent when the panel next connects."
+                ? "Sending these assignments to the device\u{2026}"
+                : "These assignments are sent when the device next connects."
         }
         return nil
     }
@@ -1354,11 +1354,11 @@ struct PanelDetailView: View {
         switch (panel.hasKnob, glass) {
         case (true, true):
             return "The knob's volume and mute, and playback and key presses "
-                + "from the panel, need Accessibility permission."
+                + "from the device, need Accessibility permission."
         case (true, false):
             return "The knob's volume and mute need Accessibility permission."
         case (false, _):
-            return "Playback and key presses from the panel need Accessibility "
+            return "Playback and key presses from the device need Accessibility "
                 + "permission."
         }
     }
@@ -1396,7 +1396,7 @@ struct PanelDetailView: View {
                     }
                 }
             }
-            LabeledContent("On the panel") {
+            LabeledContent("On the device") {
                 ScreensaverPanelPreview(expansion: livePreview)
             }
             if !livePreview.unknownTokens.isEmpty {
@@ -1416,7 +1416,7 @@ struct PanelDetailView: View {
                 + "\"\(ScreensaverTemplate.tokens[0].placeholder)\". Write \"{{\" for a "
                 + "literal brace. Up to \(IdleText.maxLines) lines of "
                 + "\(IdleText.maxLineBytes) characters, shown with how long ago they were "
-                + "sent. The panel's font is plain ASCII, so anything else is dropped.")
+                + "sent. The device's font is plain ASCII, so anything else is dropped.")
         }
     }
 
@@ -1457,7 +1457,7 @@ struct PanelDetailView: View {
                         updateTarget = manager.beginFirmwareUpdate(panel.serviceName)
                     }
                     .help(updateUnavailable
-                        ?? "Update this display over WiFi or a matched USB connection")
+                        ?? "Update this device over WiFi or a matched USB connection")
                     if let updateUnavailable {
                         Text(updateUnavailable)
                             .font(.caption)
@@ -1569,11 +1569,11 @@ struct PanelDetailView: View {
 
     private var dangerSection: some View {
         Section {
-            Button("Restart Display…", role: .destructive) {
+            Button("Restart Device…", role: .destructive) {
                 confirmRestart = true
             }
             .disabled(!manager.canControl(panel.serviceName, capability: .restart))
-            .help(controlHelp(.restart, "Reboot the panel"))
+            .help(controlHelp(.restart, "Reboot the device"))
         }
     }
 
@@ -1667,7 +1667,7 @@ struct PanelDetailView: View {
     /// popover keeps the commit explicit.
     private var renamePopover: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Rename Display")
+            Text("Rename Device")
                 .font(.headline)
             TextField("Device name", text: $editedName)
                 .textFieldStyle(.roundedBorder)
@@ -1675,7 +1675,7 @@ struct PanelDetailView: View {
                 .focused($nameIsFocused)
                 .onSubmit(saveName)
                 .onExitCommand(perform: cancelNameEdit)
-            Text("Written over USB to the connected display, which then restarts and "
+            Text("Written over USB to the connected device, which then restarts and "
                 + "reconnects on its own.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1742,7 +1742,7 @@ struct PanelDetailView: View {
                     .frame(width: 260, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("Written over USB. The display restarts; wireless updates "
+                Text("Written over USB. The device restarts; wireless updates "
                     + "become available only after it rejoins WiFi and reports "
                     + "that its OTA listener is active.")
                     .font(.caption)
@@ -2025,7 +2025,7 @@ private struct ScreensaverPanelPreview: View {
 
     var body: some View {
         if expansion.lines.isEmpty {
-            Text("Nothing sent, so the panel draws its own card: "
+            Text("Nothing sent, so the device draws its own card: "
                 + "name, address, and signal.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

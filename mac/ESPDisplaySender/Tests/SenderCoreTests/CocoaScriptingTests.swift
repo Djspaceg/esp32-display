@@ -154,7 +154,7 @@ final class CocoaScriptingHandlerTests: XCTestCase {
                 error as? CocoaScriptingFailure,
                 CocoaScriptingFailure(
                     code: .ambiguousDisplay,
-                    message: "The display name \"STUDIO\" is ambiguous; use one of these service names: panel-a, panel-b."))
+                    message: "The device name \"STUDIO\" is ambiguous; use one of these service names: panel-a, panel-b."))
         }
         XCTAssertThrowsError(try handler.selectDisplay("Missing")) { error in
             XCTAssertEqual((error as? CocoaScriptingFailure)?.code, .displayNotFound)

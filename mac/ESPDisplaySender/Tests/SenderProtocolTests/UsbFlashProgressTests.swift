@@ -227,7 +227,7 @@ final class UsbFlashProgressTests: XCTestCase {
     func testAFailureBeforeWritingSaysNothingWasWritten() {
         var session = UsbFlashSession(flow: .onboarding)
         session.apply(.phase(.findingBoard), at: 0)
-        session.fail(title: "Display name already in use", message: "m", at: 1)
+        session.fail(title: "Device name already in use", message: "m", at: 1)
         XCTAssertEqual(session.failure?.step, "Checking the board before writing")
         XCTAssertTrue(session.failure?.nextAction.hasPrefix("Nothing was written.") ?? false)
     }

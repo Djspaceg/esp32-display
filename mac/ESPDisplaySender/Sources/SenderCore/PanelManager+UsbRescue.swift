@@ -42,7 +42,7 @@ extension PanelManager {
                .contains(carrier ?? "") {
             return .failure(WifiConfigUI.ConfigFailure(
                 title: "Choose the board first",
-                message: "\(family.displayName) images drive the display pins of "
+                message: "\(family.displayName) images drive the screen pins of "
                     + "whatever board they land on, so name which board this is "
                     + "before anything is written."))
         }
@@ -242,7 +242,7 @@ extension PanelManager {
                 return "The rescue image could not identify this board (it reported "
                     + "profile \(profile ?? "none") and target \(target ?? "none")), so "
                     + "no firmware is installed. \(family) was chosen, but the chip "
-                    + "family alone does not say which display this is."
+                    + "family alone does not say which board this is."
             case .carrierMismatch(let chosen, let reported):
                 guard let chosen else {
                     return "No board was named for this chip family, so no firmware is "

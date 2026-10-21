@@ -31,7 +31,7 @@ struct GamesDataRow: View {
                     target = manager.beginGameDataInstall(panel.serviceName)
                 }
                 .help(unavailable
-                    ?? "Put Doom WADs and Quake paks on this display over USB")
+                    ?? "Put Doom WADs and Quake paks on this device over USB")
                 if let unavailable {
                     Text(unavailable)
                         .font(.caption)
@@ -101,8 +101,8 @@ struct GameDataSheet: View {
 
     var body: some View {
         Form {
-            Section("Display") {
-                LabeledContent("Display", value: target.displayName)
+            Section("Device") {
+                LabeledContent("Name", value: target.displayName)
                 LabeledContent("Chip", value: target.chip ?? "Not reported")
                 LabeledContent("USB device") {
                     Text(target.usbDevice?.path ?? "Not connected")

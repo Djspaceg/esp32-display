@@ -111,7 +111,7 @@ final class StreamFirmwarePusherTests: XCTestCase {
             XCTFail("a wrong password must not succeed")
         } catch {
             XCTAssertEqual(error as? StreamFirmwarePusher.Failure, .authenticationFailed)
-            XCTAssertEqual(error.localizedDescription, "The panel rejected the password.")
+            XCTAssertEqual(error.localizedDescription, "The device rejected the password.")
         }
         XCTAssertTrue(panel.flashed.isEmpty)
     }

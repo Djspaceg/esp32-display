@@ -32,12 +32,12 @@ public enum ScreensaverTemplate {
 
     /// Every token a template may use, in the order the UI lists them.
     public static let tokens: [Token] = [
-        Token(name: "name", summary: "Display name", example: "blakes-teeny-touch"),
+        Token(name: "name", summary: "Device name", example: "blakes-teeny-touch"),
         Token(name: "address", summary: "IP address", example: "192.168.1.69"),
         Token(name: "signal", summary: "Signal strength in words", example: "Good"),
         Token(name: "rssi", summary: "Signal strength in dBm", example: "-59 dBm"),
         Token(name: "version", summary: "Firmware version", example: "1.1.0"),
-        Token(name: "uptime", summary: "How long the panel has been up", example: "10m"),
+        Token(name: "uptime", summary: "How long the device has been up", example: "10m"),
     ]
 
     /// The app's default card. A panel that was never given a template of its

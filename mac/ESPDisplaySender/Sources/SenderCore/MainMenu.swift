@@ -76,7 +76,7 @@ final class MainMenuController: NSObject {
         // that has to work when the sidebar is empty.
         let menu = NSMenu(title: "File")
         let add = menu.addItem(
-            withTitle: "Add Display over USB\u{2026}", action: #selector(addDevice(_:)),
+            withTitle: "Add Device over USB\u{2026}", action: #selector(addDevice(_:)),
             keyEquivalent: "n")
         add.target = self
         // For a board the list does not show, or shows as not connected: the

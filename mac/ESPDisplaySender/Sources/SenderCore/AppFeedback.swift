@@ -41,8 +41,8 @@ enum AppIssue: String, CaseIterable, Sendable {
     var title: String {
         switch self {
         case .screenRecording: return "Screen Recording permission needed"
-        case .deviceConfig: return "Per-display source file ignored"
-        case .persistence: return "Display settings could not be saved"
+        case .deviceConfig: return "Per-device source file ignored"
+        case .persistence: return "Device settings could not be saved"
         case .wifiPresetSync: return "WiFi presets could not be copied"
         case .accessibility: return "Accessibility permission needed"
         }

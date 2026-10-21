@@ -93,7 +93,7 @@ extension PanelManager {
         case .ambiguous:
             return USBAttachment(
                 port: nil,
-                detail: "Two USB devices report this display's ID", isVerified: false)
+                detail: "Two USB devices report this board's ID", isVerified: false)
         case .absent, .mismatch, .enumeratedUnverified:
             guard let panel = panels.first(where: { $0.serviceName == serviceName }),
                   let expected = stableHardwareID(of: panel),

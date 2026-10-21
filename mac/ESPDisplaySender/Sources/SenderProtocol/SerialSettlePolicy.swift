@@ -101,7 +101,7 @@ public enum SerialSettlePolicy {
             return "After the restart, \(ports.count) USB serial devices were "
                 + "connected and \(flashedPort) was not one of them, so there is "
                 + "no way to tell which one is this board. Unplug the others and "
-                + "try again, or set the network from the display's own "
+                + "try again, or set the network from the board's own "
                 + "Connection section once it appears."
         case .giveUp where !wroteFirmware && sentName:
             return "The board did not answer within "

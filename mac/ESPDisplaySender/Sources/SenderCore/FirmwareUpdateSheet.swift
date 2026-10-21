@@ -85,28 +85,28 @@ struct FirmwareUpdatePlan: Equatable {
         case .updateAvailable(let image, let bundleVersion, let panelVersion):
             return FirmwareUpdatePlan(
                 headline: "Upgrade to \(bundleVersion)",
-                detail: "This panel is running \(panelVersion). The bundle's "
+                detail: "This device is running \(panelVersion). The bundle's "
                     + "\(image.chip) image is \(bundleVersion)." + caveat,
                 action: .update)
         case .upToDate(let image, let version):
             return FirmwareUpdatePlan(
                 headline: "Already running \(version)",
                 detail: "The bundle's \(image.chip) image is the same version "
-                    + "this panel reports. Pushing it reinstalls the same "
-                    + "firmware, which is a way to recover a panel that is "
+                    + "this device reports. Pushing it reinstalls the same "
+                    + "firmware, which is a way to recover a device that is "
                     + "misbehaving." + caveat,
                 action: .reinstall)
         case .bundleIsOlder(let image, let bundleVersion, let panelVersion):
             return FirmwareUpdatePlan(
                 headline: "This bundle is older",
-                detail: "This panel is running \(panelVersion); the bundle's "
+                detail: "This device is running \(panelVersion); the bundle's "
                     + "\(image.chip) image is \(bundleVersion). Pushing it is a "
                     + "downgrade." + caveat,
                 action: .downgrade)
         case .versionsIncomparable(let image, let bundleVersion, let panelVersion):
             return FirmwareUpdatePlan(
                 headline: "Cannot tell which is newer",
-                detail: "This panel reports \(panelVersion) and the bundle's "
+                detail: "This device reports \(panelVersion) and the bundle's "
                     + "\(image.chip) image says \(bundleVersion). At least one of "
                     + "those is not a dotted version number, so which one is "
                     + "newer cannot be worked out here." + caveat,
@@ -114,13 +114,13 @@ struct FirmwareUpdatePlan: Equatable {
         case .noImageForTarget(let target, let bundleTargets):
             return FirmwareUpdatePlan(
                 headline: "Nothing in this bundle for this target",
-                detail: "This panel reports exact target \(target). This bundle "
+                detail: "This device reports exact target \(target). This bundle "
                     + "carries \(describeTargets(bundleTargets)).",
                 action: .blocked)
         case .targetUnknown(let bundleTargets):
             return FirmwareUpdatePlan(
                 headline: "Exact firmware target not reported",
-                detail: "ESP32-S3 boards can use different displays and pin maps "
+                detail: "ESP32-S3 boards can use different screens and pin maps "
                     + "while reporting the same chip. This bundle carries "
                     + "\(describeTargets(bundleTargets)); reconnect over USB to "
                     + "read CFGSHOW target metadata. C6 can use its unique c6 target.",
@@ -128,25 +128,25 @@ struct FirmwareUpdatePlan: Equatable {
         case .targetChipMismatch(let target, let imageChip, let panelChip):
             return FirmwareUpdatePlan(
                 headline: "Target and chip disagree",
-                detail: "Target \(target) selects a \(imageChip) image, but the panel "
+                detail: "Target \(target) selects a \(imageChip) image, but the device "
                     + "reports \(panelChip). Nothing can be sent safely.",
                 action: .blocked)
         case .chipUnknownForTarget(let target, let expectedChip):
             return FirmwareUpdatePlan(
                 headline: "Chip metadata not reported",
                 detail: "Target \(target) selects a \(expectedChip) image, but the "
-                    + "panel did not independently report that chip.",
+                    + "device did not independently report that chip.",
                 action: .blocked)
         case .noImageForChip(let chip, let bundleChips):
             return FirmwareUpdatePlan(
-                headline: "Nothing in this bundle for this panel",
-                detail: "This panel is an \(chip). This bundle carries "
+                headline: "Nothing in this bundle for this device",
+                detail: "This device is an \(chip). This bundle carries "
                     + "\(describe(bundleChips)). Build one that includes "
                     + "\(chip), or pick a different file.",
                 action: .blocked)
         case .chipUnknown(let bundleChips):
             return FirmwareUpdatePlan(
-                headline: "This panel did not say which chip it is",
+                headline: "This device did not say which chip it is",
                 detail: "Firmware older than the chip record does not advertise "
                     + "one, and a build that cannot name its own chip says "
                     + "\"unknown\". This bundle carries \(describe(bundleChips)), "
@@ -500,8 +500,8 @@ struct FirmwareUpdateSheet: View {
     // MARK: sections
 
     private var panelSection: some View {
-        Section("Panel") {
-            LabeledContent("Display", value: target.displayName)
+        Section("Device") {
+            LabeledContent("Name", value: target.displayName)
             LabeledContent("Running") {
                 Text(FirmwareRevisionPresentation.running(
                     version: target.firmwareVersion, source: target.firmwareSource))
@@ -782,9 +782,9 @@ struct FirmwareUpdateSheet: View {
         } header: {
             Text("Password")
         } footer: {
-            Text("The password set on this panel with tools/espdisp.py "
+            Text("The password set on this device with tools/espdisp.py "
                 + "set-password. Remembering it keeps it in this Mac's Keychain, "
-                + "filed under the panel's hardware ID so a rename does not lose "
+                + "filed under the device's hardware ID so a rename does not lose "
                 + "it.")
         }
     }
@@ -961,7 +961,7 @@ struct FirmwareUpdateSheet: View {
             guard let image = bundle.payloadImage(forTarget: effectiveTarget) else {
                 return ""
             }
-            return "\(byteCount(image.byteCount)) will be written to the panel's "
+            return "\(byteCount(image.byteCount)) will be written to the device's "
                 + "inactive firmware slot, and it will restart onto it."
         case .usb:
             if let migration = usbPartitionMigration(bundle) {
@@ -1002,16 +1002,16 @@ struct FirmwareUpdateSheet: View {
             return "Starting…"
         case .inviting(let attempt, let total):
             return attempt == 1
-                ? "Inviting the panel…"
-                : "Inviting the panel (attempt \(attempt) of \(total))…"
+                ? "Inviting the device…"
+                : "Inviting the device (attempt \(attempt) of \(total))…"
         case .authenticating:
             return "Sending the password…"
         case .waitingForPanel:
-            return "Waiting for the panel to connect back…"
+            return "Waiting for the device to connect back…"
         case .sending(let sent, let total):
             return "Sending \(byteCount(sent)) of \(byteCount(total))"
         case .finishing:
-            return "Waiting for the panel to finish writing…"
+            return "Waiting for the device to finish writing…"
         }
     }
 
@@ -1049,7 +1049,7 @@ struct FirmwareUpdateSheet: View {
         let short = String(commit.prefix(12))
         let built = bundle.sourceDirty ? "\(short) (uncommitted changes)" : short
         return target.firmwareSource?.isExactly(bundle) == true
-            ? "\(built) - the build this panel is running" : built
+            ? "\(built) - the build this device is running" : built
     }
 
     private func byteCount(_ bytes: Int) -> String {

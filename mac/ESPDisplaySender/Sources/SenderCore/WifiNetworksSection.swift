@@ -123,9 +123,9 @@ struct WifiNetworksSection: View {
         } header: {
             Text("Saved Networks")
         } footer: {
-            Text("Every display connected by USB receives the first \(slotCount) "
-                + "networks, in this order, as the presets its on-device picker "
-                + "offers; drag a network to change its slot. A display's active "
+            Text("Every device connected by USB receives the first \(slotCount) "
+                + "networks, in this order, as the presets its own picker "
+                + "offers; drag a network to change its slot. A device's active "
                 + "network stays in its slot, so a copy never restarts it. "
                 + "Passwords are kept in your login Keychain, and changes here "
                 + "take effect immediately.")
@@ -238,11 +238,11 @@ struct WifiNetworksSection: View {
         let keychain = "This deletes the saved password from your login Keychain"
         if manager.savedNetworkNames.count <= 1 {
             return keychain + ". It is the last saved network, so nothing is "
-                + "copied to the displays afterwards and each keeps the presets "
+                + "copied to the devices afterwards and each keeps the presets "
                 + "it already holds, this one included."
         }
-        return keychain + " and clears the network from each display's presets "
-            + "the next time it is connected by USB. A display joined through it "
+        return keychain + " and clears the network from each device's presets "
+            + "the next time it is connected by USB. A device joined through it "
             + "keeps it."
     }
 

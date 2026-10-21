@@ -73,7 +73,7 @@ struct InstalledFirmware: Equatable {
             return "Firmware this old does not report its version. Any bundled "
                 + "release installed from here does."
         case .unknown:
-            return "Waiting for the panel to report its firmware."
+            return "Waiting for the device to report its firmware."
         }
     }
 

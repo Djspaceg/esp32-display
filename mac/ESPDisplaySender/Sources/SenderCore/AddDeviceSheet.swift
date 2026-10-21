@@ -172,7 +172,7 @@ struct AddDeviceSheet: View {
                     .labelsHidden()
                     .fixedSize()
                     .disabled(running)
-                    .help(port.isEmpty ? "Choose a connected display" : port)
+                    .help(port.isEmpty ? "Choose a connected board" : port)
                     .onChange(of: port) { _, _ in
                         work?.cancel()
                         inspect()
@@ -223,7 +223,7 @@ struct AddDeviceSheet: View {
             }
             if requiresFirmwareForStableIdentity {
                 Text("Set up WiFi only is unavailable for this board: its firmware "
-                    + "does not report a hardware ID this app can record a display "
+                    + "does not report a hardware ID this app can record it "
                     + "under, so it is flashed first.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -239,9 +239,9 @@ struct AddDeviceSheet: View {
             Text("Device")
         } footer: {
             Text("The chip is read from the board. The C6 and S3 families each "
-                + "ship one universal image that serves every display in the "
+                + "ship one universal image that serves every board in the "
                 + "family, so the chip picks it on its own. A P4 image drives the "
-                + "display pins of whatever P4 it lands on, so its board must be "
+                + "screen pins of whatever P4 it lands on, so its board must be "
                 + "known - from what the board reports or by choosing it - "
                 + "before its image is offered.")
         }
@@ -369,7 +369,7 @@ struct AddDeviceSheet: View {
                 .textSelection(.disabled)
                 .disabled(running)
             }
-            TextField("Name for this display (optional)", text: $name)
+            TextField("Name for this device (optional)", text: $name)
                 .disabled(running)
         } header: {
             Text("WiFi")
@@ -692,7 +692,7 @@ struct AddDeviceSheet: View {
             case .silent:
                 return "Nothing answered on this port"
             case .notChecked:
-                return port.isEmpty ? "No device chosen" : "Not read yet"
+                return port.isEmpty ? "No board chosen" : "Not read yet"
             }
         }
     }

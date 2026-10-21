@@ -32,13 +32,13 @@ enum GesturePreset: String, CaseIterable, Identifiable, Codable, Sendable {
     var summary: String {
         switch self {
         case .sourceCycling:
-            return "Freeze what the panel is showing, or step through the screens "
+            return "Freeze what the device is showing, or step through the screens "
                 + "it can mirror."
         case .multimedia:
-            return "Use the panel as a media remote for whatever is playing on "
+            return "Use the device as a media remote for whatever is playing on "
                 + "this Mac."
         case .windowCycling:
-            return "Step the panel through open windows, and hold to go back to "
+            return "Step the device through open windows, and hold to go back to "
                 + "the whole screen."
         }
     }

@@ -118,9 +118,9 @@ final class SettingsWindowTests: XCTestCase {
         let unavailable = WifiNetworkRows.model(
             current: "Home", currentDescription: "Home",
             savedNetworks: ["Home"], report: nil, switchState: nil,
-            unavailableReason: "Connect this display to the Mac by USB.")
+            unavailableReason: "Connect this device to the Mac by USB.")
         XCTAssertEqual(
-            unavailable.disabledNote, "Connect this display to the Mac by USB.",
+            unavailable.disabledNote, "Connect this device to the Mac by USB.",
             "a disabled pop-up says why on the row, not only in a tooltip")
         XCTAssertEqual(
             WifiNetworkRows.model(
@@ -131,12 +131,12 @@ final class SettingsWindowTests: XCTestCase {
         let switching = model(.switching("Guest", since: Date()))
         XCTAssertEqual(switching.selection, "Guest")
         XCTAssertNil(switching.problem)
-        XCTAssertEqual(model(.failed("The display refused it.")).problem,
-            "The display refused it.")
+        XCTAssertEqual(model(.failed("The device refused it.")).problem,
+            "The device refused it.")
         XCTAssertEqual(
             model(nil).problem,
             "The password for \"Office\" could not be read from the Keychain, "
-                + "so it is not on this display. Enter it again in Settings.")
+                + "so it is not on this device. Enter it again in Settings.")
         XCTAssertNil(WifiNetworkRows.model(
             current: "Home", currentDescription: "Home",
             savedNetworks: ["Home", "Guest"],
@@ -174,7 +174,7 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(
             row(unreadableReport(unusable: ["Office", "Guest", "Lab"])),
             "The passwords for \"Office\", \"Guest\" and \"Lab\" could not be "
-                + "read from the Keychain, so they are not on this display. Enter "
+                + "read from the Keychain, so they are not on this device. Enter "
                 + "them again in Settings.")
     }
 
@@ -188,7 +188,7 @@ final class SettingsWindowTests: XCTestCase {
             WifiNetworkRows.unreadableDescription(
                 report, savedNetworkNames: ["Home", "Office", "Guest"]),
             "The password for \"Office\" could not be read from the Keychain, "
-                + "so it is not on this display. Enter it again in Settings.")
+                + "so it is not on this device. Enter it again in Settings.")
         XCTAssertNil(WifiNetworkRows.unreadableDescription(
             report, savedNetworkNames: ["Home", "Guest"]))
     }

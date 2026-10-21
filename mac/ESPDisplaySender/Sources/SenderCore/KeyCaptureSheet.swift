@@ -46,7 +46,7 @@ struct KeyCaptureSheet: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
-            Text("Pressing it from the display needs Accessibility permission, "
+            Text("Pressing it from the device needs Accessibility permission, "
                 + "like the media keys.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

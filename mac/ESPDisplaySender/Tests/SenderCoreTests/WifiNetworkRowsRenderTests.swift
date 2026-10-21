@@ -153,7 +153,7 @@ final class WifiNetworkRowsRenderTests: XCTestCase {
         other.current = "Guest"
         XCTAssertNotEqual(a, try render(other))
         var failed = base
-        failed.problem = "The display refused it."
+        failed.problem = "The device refused it."
         XCTAssertNotEqual(a, try render(failed))
         // The item for a selection the saved list lacks is drawn too, rather
         // than the pop-up coming out blank.

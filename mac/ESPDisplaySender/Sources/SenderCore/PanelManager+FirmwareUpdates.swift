@@ -129,7 +129,7 @@ extension PanelManager {
     /// write. A remembered IP or serial path is never enough.
     func firmwareUpdateReadiness(_ serviceName: String) -> FirmwareUpdateReadiness {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
-            return .notReady("This display is not known yet.")
+            return .notReady("This device is not known yet.")
         }
         let usbCandidate = usbUpdateDevice(for: serviceName)
         let usbDevice = usbCandidate.flatMap {
@@ -139,8 +139,8 @@ extension PanelManager {
                 ?? usbDevice?.hardwareID
         else {
             return .notReady(
-                "This panel has not reported its hardware ID yet, so an update "
-                    + "cannot be tied to the correct device.")
+                "This device has not reported its hardware ID yet, so an update "
+                    + "cannot be tied to the right board over USB.")
         }
         let version =
             panel.firmwareVersion ?? usbCandidate?.serialStatus?.firmwareVersion
@@ -163,19 +163,19 @@ extension PanelManager {
             }
             if version == nil {
                 return .notReady(
-                    "This panel has not reported its firmware version yet, so "
+                    "This device has not reported its firmware version yet, so "
                         + "there is nothing to compare a bundle against.")
             }
             if otaReason == nil {
                 return .notReady(
-                    "This panel's live network address has not been resolved yet, "
+                    "This board's live network address has not been resolved yet, "
                         + "and no connected USB device is positively matched to it.")
             }
             return .notReady(
                 operationUnavailableReason(
                     serviceName, operation: .firmwareUpdate)
                     ?? otaReason
-                    ?? "Connect this display over USB or let it rejoin WiFi.")
+                    ?? "Connect this device over USB or let it rejoin WiFi.")
         }
 
         return .ready(FirmwareUpdateTarget(
@@ -228,7 +228,7 @@ extension PanelManager {
         guard let address = target.address else {
             return .failure(
                 "WiFi update unavailable",
-                "This panel no longer has a live resolved address. Choose USB, "
+                "This device no longer has a live resolved address. Choose USB, "
                     + "or wait for it to reconnect and try again.")
         }
         if let panel = panels.first(where: { $0.serviceName == target.serviceName }),
@@ -433,14 +433,14 @@ extension PanelManager {
         else {
             return .failure(
                 "USB update unavailable",
-                "No connected USB device was positively matched to this display.")
+                "No connected USB device was positively matched to this board.")
         }
         let path = device.path
         let expectedID = ConfigCommands.canonicalHardwareID(target.hardwareID)
         guard let expectedID else {
             return .failure(
                 "USB identity unavailable",
-                "This display's hardware ID is not a six-byte MAC address, so the "
+                "This device's hardware ID is not a six-byte MAC address, so the "
                     + "app cannot prove which connected board is safe to write.")
         }
         beginUSBFlash(hardwareID: expectedID)
@@ -474,7 +474,7 @@ extension PanelManager {
         switch await probeUSBDevice(path, timeout: 3) {
         case .unavailable(let reason):
             return .failure(
-                "Could not verify the USB display",
+                "Could not verify the board over USB",
                 "CFGSHOW did not verify \(path): \(reason)")
         case .identified(let identity):
             let reportedID = ConfigCommands.canonicalHardwareID(identity.hardwareID)
@@ -495,8 +495,8 @@ extension PanelManager {
                liveTarget != reportedTarget {
                 return .failure(
                     "USB target mismatch",
-                    "The live panel reports target \(liveTarget), but CFGSHOW now "
-                        + "reports \(reportedTarget). Nothing was written.")
+                    "Over the network, the device reports target \(liveTarget), but "
+                        + "CFGSHOW now reports \(reportedTarget). Nothing was written.")
             }
         }
         if let exactTarget = cfgTarget ?? target.target,
@@ -530,8 +530,8 @@ extension PanelManager {
                    liveTarget != reportedTarget {
                     return .failure(
                         "USB target mismatch",
-                        "The live panel reports target \(liveTarget), but CFGSHOW now "
-                            + "reports \(reportedTarget). Nothing was written.")
+                        "Over the network, the device reports target \(liveTarget), but "
+                            + "CFGSHOW now reports \(reportedTarget). Nothing was written.")
                 }
                 cfgTarget = identity.target
                 cfgBoard = identity.board
@@ -593,7 +593,7 @@ extension PanelManager {
            expectedChip != detectedChip {
             return .failure(
                 "USB chip mismatch",
-                "The display reported \(expectedChip), but esptool read "
+                "The device reported \(expectedChip), but esptool read "
                     + "\(detectedChip). Nothing was written.")
         }
         let exactTarget = cfgTarget ?? target.target
@@ -702,7 +702,7 @@ extension PanelManager {
             "Firmware written over USB",
             "\(bundle.firmwareVersion) was written to \(target.displayName) "
                 + "without erasing the chip, and the board answered on "
-                + "\(answered.port) after restarting. Its saved WiFi, name, display "
+                + "\(answered.port) after restarting. Its saved WiFi, name, screen "
                 + "settings and OTA password remain.")
     }
 

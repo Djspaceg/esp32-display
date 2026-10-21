@@ -206,7 +206,7 @@ final class FirmwareUpdateTests: XCTestCase {
     // it: an invalid password never reaches the serial layer at all, and a
     // successful set/clear keeps the Keychain copy in sync with what was
     // just sent. `WifiConfigUI.setOTAPassword`/`clearOTAPassword` fail with
-    // "No device found" in this environment (no USB device is attached to a
+    // "No board found" in this environment (no USB device is attached to a
     // test run), which is itself useful signal - it proves validation ran
     // and failed the way an unreachable panel fails, not the way a rejected
     // password fails.
@@ -1036,7 +1036,7 @@ final class FirmwareUpdateTests: XCTestCase {
             chipConfirmed: false)
         XCTAssertEqual(missing.action, .chooseImage)
         XCTAssertFalse(missing.canPush)
-        XCTAssertTrue(missing.detail.contains("different displays"))
+        XCTAssertTrue(missing.detail.contains("different screens"))
 
         let mismatch = FirmwareUpdatePlan.make(
             bundle.availability(

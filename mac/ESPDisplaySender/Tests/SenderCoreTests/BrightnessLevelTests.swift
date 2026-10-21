@@ -131,7 +131,7 @@ final class BrightnessLevelControlTests: XCTestCase {
         XCTAssertEqual(manager.operationOutcome?.kind, .failure)
         XCTAssertEqual(
             manager.operationOutcome?.message,
-            "This display does not report support for brightness levels.")
+            "This device does not report support for brightness levels.")
     }
 
     /// The high/low switch still has to work for firmware that only offers it.

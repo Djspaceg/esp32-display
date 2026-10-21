@@ -309,7 +309,7 @@ final class PanelManager: ObservableObject {
         refreshAudioDevices()
         if let failure = loaded.failure {
             report(.persistence, source: Self.panelRecordsReadIssueSource,
-                   detail: "Saved display settings could not be read "
+                   detail: "Saved device settings could not be read "
                 + "from \(url?.path ?? "disk"): \(failure)")
         }
         if let failure = loadedSettings.failure {
@@ -724,7 +724,7 @@ final class PanelManager: ObservableObject {
             resolve(.persistence, source: Self.panelRecordsIssueSource)
         } catch {
             report(.persistence, source: Self.panelRecordsIssueSource,
-                   detail: "Display names and USB assignments could not "
+                   detail: "Device names and USB assignments could not "
                 + "be written to \(url.path): \(error.localizedDescription)")
         }
     }
@@ -786,7 +786,7 @@ extension PanelManager {
                     capabilitiesRaw: controls.rawValue,
                     brightness: 255,
                     sourceDescription: "Automatic",
-                    lastError: "Gave up trying to reach this display. It is retried "
+                    lastError: "Gave up trying to reach this device. It is retried "
                         + "automatically once it reappears on the network.",
                     captureStatus: .failed(
                         "The content being mirrored is no longer available. Choose "

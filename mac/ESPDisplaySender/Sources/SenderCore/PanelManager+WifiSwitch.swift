@@ -31,30 +31,30 @@ extension PanelManager {
         if let device = wifiPresetSyncDevice(for: serviceName) {
             if let hardwareID = ConfigCommands.canonicalHardwareID(device.hardwareID),
                wifiPresetSyncTasks[hardwareID] != nil {
-                return "Copying the saved networks to this display."
+                return "Copying the saved networks to this device."
             }
             return nil
         }
         if usbRestartingServices.contains(serviceName) {
-            return "This display is restarting."
+            return "This device is restarting."
         }
         if let device = verifiedUSBDevice(for: serviceName) {
             if !Self.runsStreamFirmware(device.serialStatus) {
-                return "This display is running its rescue firmware, which "
+                return "This device is running its rescue firmware, which "
                     + "cannot switch networks."
             }
-            return "This display is busy over USB. Try again in a moment."
+            return "This device is busy over USB. Try again in a moment."
         }
         if let device = usbSerialPairedDevice(for: serviceName) {
             if usbPortAnswersWithoutID(device.path) {
-                return "This display answers over USB without reporting its hardware "
+                return "This device answers over USB without reporting its hardware "
                     + "ID, so it cannot be paired. Update its firmware, then unplug it "
                     + "and plug it in again."
             }
-            return "Connected by USB. Waiting for this display to answer."
+            return "Connected by USB. Waiting for this device to answer."
         }
-        return "Connect this display to the Mac by USB to switch its network. "
-            + "Over WiFi the display has no command for it."
+        return "Connect this device to the Mac by USB to switch its network. "
+            + "Over WiFi the device has no command for it."
     }
 
     /// Copy the saved networks to the board, then choose `ssid`'s slot, which
@@ -76,7 +76,7 @@ extension PanelManager {
         }
         guard wifiPresetSyncTasks[hardwareID] == nil else {
             setWifiSwitchState(
-                .failed("Still copying networks to this display. Try again in a moment."),
+                .failed("Still copying networks to this device. Try again in a moment."),
                 for: serviceName)
             return
         }

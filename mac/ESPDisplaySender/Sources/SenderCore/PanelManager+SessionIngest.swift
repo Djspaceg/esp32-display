@@ -229,8 +229,8 @@ extension PanelManager {
             }
             if !acknowledgement.succeeded {
                 operationOutcome = .failure(
-                    "Display command failed",
-                    "The display rejected the \(acknowledgement.opcode) "
+                    "Device command failed",
+                    "The device rejected the \(acknowledgement.opcode) "
                         + "command (status \(acknowledgement.status)).")
             }
         case .touch(let touch):

@@ -90,7 +90,7 @@ struct WifiNetworkRows: View {
                     if model.switchingTo != nil {
                         ProgressView()
                             .controlSize(.small)
-                            .help("The display is restarting onto this network")
+                            .help("The device is restarting onto this network")
                     }
                     Spacer(minLength: 8)
                     Button("WiFi Settings…", action: onOpenSettings)
@@ -167,11 +167,11 @@ struct WifiNetworkRows: View {
         guard let last = skipped.last else { return nil }
         if skipped.count == 1 {
             return "The password for \"\(last)\" could not be read from the "
-                + "Keychain, so it is not on this display. Enter it again in Settings."
+                + "Keychain, so it is not on this device. Enter it again in Settings."
         }
         let names = skipped.dropLast().map { "\"\($0)\"" }.joined(separator: ", ")
             + " and \"\(last)\""
         return "The passwords for \(names) could not be read from the Keychain, "
-            + "so they are not on this display. Enter them again in Settings."
+            + "so they are not on this device. Enter them again in Settings."
     }
 }

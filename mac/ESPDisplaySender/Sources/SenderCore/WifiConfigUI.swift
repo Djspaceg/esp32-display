@@ -508,18 +508,18 @@ enum WifiConfigUI {
             if preferredMismatch, let preferredPort {
                 return .failure(ConfigFailure(
                     title: "Assigned USB device mismatch",
-                    message: "The device at \(preferredPort) is not the saved hardware device."))
+                    message: "The USB device at \(preferredPort) is not this board."))
             }
             return .failure(ConfigFailure(
-                title: "No device found",
-                message: "Connect the display board to this Mac with a USB cable, then try again."))
+                title: "No board found",
+                message: "Connect the board to this Mac with a USB cable, then try again."))
         }
 
         if preferredPort == nil, expectedHardwareID == nil,
            expectedName?.isEmpty != false, candidates.count > 1 {
             return .failure(ConfigFailure(
                 title: "Select a USB device",
-                message: "More than one USB serial device is connected. Select a display in the manager and assign its USB device under Connection."))
+                message: "More than one USB serial device is connected. Select a board in the manager and assign its USB device under Connection."))
         }
 
         let timeout: TimeInterval = preferredPort == nil && candidates.count == 1 ? 3 : 2
@@ -534,11 +534,11 @@ enum WifiConfigUI {
             if let expectedHardwareID {
                 return .failure(ConfigFailure(
                     title: "USB device is ambiguous",
-                    message: "More than one USB device reports hardware ID \"\(expectedHardwareID)\". Assign the correct device under Connection before changing the display."))
+                    message: "More than one USB device reports hardware ID \"\(expectedHardwareID)\". Assign the correct USB device under Connection before changing the board."))
             }
             return .failure(ConfigFailure(
                 title: "USB device is ambiguous",
-                message: "More than one USB device reports the name \"\(expectedName ?? "")\". Assign the correct port under Connection before changing the display."))
+                message: "More than one USB device reports the name \"\(expectedName ?? "")\". Assign the correct port under Connection before changing the board."))
         }
 
         if preferredPort == nil, candidates.count == 1,
@@ -547,7 +547,7 @@ enum WifiConfigUI {
            expectedHardwareID == nil {
             return .failure(ConfigFailure(
                 title: "USB device mismatch",
-                message: "The connected USB device at \(candidates[0]) reports \"\(identity.name)\", not \"\(expectedName)\". Assign the correct port under Connection before changing the display."))
+                message: "The connected USB device at \(candidates[0]) reports \"\(identity.name)\", not \"\(expectedName)\". Assign the correct port under Connection before changing the board."))
         }
         if preferredPort == nil, candidates.count == 1,
            case .unavailable(let reason) = checked(candidates[0], timeout: timeout) {
@@ -558,12 +558,12 @@ enum WifiConfigUI {
 
         if let expectedHardwareID {
             return .failure(ConfigFailure(
-                title: "Display not found",
-                message: "No connected USB device reports hardware ID \"\(expectedHardwareID)\". Reconnect the display and try again."))
+                title: "Board not found",
+                message: "No connected USB device reports hardware ID \"\(expectedHardwareID)\". Reconnect the board and try again."))
         }
         return .failure(ConfigFailure(
-            title: "Display not found",
-            message: "No connected USB device reports the name \"\(expectedName ?? "")\". Assign its port under Connection, or reconnect the display and try again."))
+            title: "Board not found",
+            message: "No connected USB device reports the name \"\(expectedName ?? "")\". Assign its port under Connection, or reconnect the board and try again."))
     }
 
     // MARK: direct manager actions

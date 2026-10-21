@@ -32,13 +32,13 @@
 		<string>_espdisp._udp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>ESPDisplaySender discovers and streams to display panels on your local network.</string>
+	<string>ESPDisplaySender discovers and streams to ESP devices on your local network.</string>
 	<!-- The display speaker plays this Mac's sound through a Core Audio process
 	     tap, which asks for System Audio Recording Only. Nothing captures the
 	     Mac microphone, so there is no microphone usage string or
 	     audio-input entitlement. -->
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>ESPDisplaySender plays this Mac's sound on your display panels' speakers.</string>
+	<string>ESPDisplaySender plays this Mac's sound on your ESP devices' speakers.</string>
 	<!-- Background by default; the manager opts into Dock/menu presence only while visible. -->
 	<key>LSUIElement</key>
 	<true/>

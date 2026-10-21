@@ -428,7 +428,7 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertEqual(
             manager.controlUnavailableReason(
                 panel.serviceName, capability: .brightnessLevel),
-            "Brightness over USB needs firmware support that this display "
+            "Brightness over USB needs firmware support that this device "
                 + "does not report.")
         XCTAssertTrue(
             manager.supportsBrightnessLevel(panel.serviceName),
@@ -464,7 +464,7 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertEqual(
             manager.controlUnavailableReason(
                 panel.serviceName, capability: .power),
-            "USB is connected, but the app has not verified this display's "
+            "USB is connected, but the app has not verified this board's "
                 + "hardware ID yet.")
     }
 
@@ -488,7 +488,7 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertEqual(
             manager.controlUnavailableReason(
                 panel.serviceName, capability: .power),
-            "The display is restarting; USB controls will return when it "
+            "The device is restarting; USB controls will return when it "
                 + "answers CFGSHOW.")
 
         manager.usbDevices = []
@@ -648,7 +648,7 @@ final class PanelManagerTests: XCTestCase {
         let reason = try XCTUnwrap(
             manager.controlUnavailableReason("studio-display", capability: .restart))
         XCTAssertEqual(
-            reason, "This display does not report support for remote restart.")
+            reason, "This device does not report support for remote restart.")
         XCTAssertFalse(reason.contains("set-password"))
     }
 

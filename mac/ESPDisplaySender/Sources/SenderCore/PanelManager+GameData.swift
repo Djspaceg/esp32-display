@@ -17,7 +17,7 @@ extension PanelManager {
     /// The same target the firmware sheet gathers, but only with a matched USB
     /// device: there is no WiFi path for the data.
     func gameDataReadiness(_ serviceName: String) -> FirmwareUpdateReadiness {
-        let noUSB = "Game data is written over USB. Connect this display to "
+        let noUSB = "Game data is written over USB. Connect this device to "
             + "this Mac with a data cable."
         switch firmwareUpdateReadiness(serviceName) {
         case .ready(let target) where target.usbDevice != nil:
@@ -82,7 +82,7 @@ extension PanelManager {
         else {
             return .stop(.failure(
                 "USB unavailable",
-                "No connected USB device was positively matched to this display."))
+                "No connected USB device was positively matched to this board."))
         }
         let path = device.path
         guard usbPathGeneration(path) == expectedGeneration,
@@ -107,7 +107,7 @@ extension PanelManager {
         switch await probeUSBDevice(path, timeout: 3) {
         case .unavailable(let reason):
             return .stop(.failure(
-                "Could not verify the USB display",
+                "Could not verify the board over USB",
                 "CFGSHOW did not verify \(path): \(reason)"))
         case .identified(let identity):
             let reportedID = ConfigCommands.canonicalHardwareID(identity.hardwareID)
@@ -164,7 +164,7 @@ extension PanelManager {
            expectedChip != detectedChip {
             return .stop(.failure(
                 "USB chip mismatch",
-                "The display reported \(expectedChip), but esptool read "
+                "The device reported \(expectedChip), but esptool read "
                     + "\(detectedChip). Nothing was read or written."))
         }
         guard detectedChip == QuakePak.p4Chip || detectedChip == QuakePak.s3Chip else {
@@ -282,7 +282,7 @@ extension PanelManager {
         guard let expectedID = ConfigCommands.canonicalHardwareID(target.hardwareID) else {
             return .stop(.failure(
                 "USB identity unavailable",
-                "This display's hardware ID is not a six-byte MAC address, so the "
+                "This device's hardware ID is not a six-byte MAC address, so the "
                     + "app cannot prove which connected board to read."))
         }
         beginUSBFlash(hardwareID: expectedID)
@@ -347,7 +347,7 @@ extension PanelManager {
         guard let expectedID = ConfigCommands.canonicalHardwareID(target.hardwareID) else {
             return .failure(
                 "USB identity unavailable",
-                "This display's hardware ID is not a six-byte MAC address, so the "
+                "This device's hardware ID is not a six-byte MAC address, so the "
                     + "app cannot prove which connected board is safe to write.")
         }
         beginUSBFlash(hardwareID: expectedID)
@@ -439,7 +439,7 @@ extension PanelManager {
                 return .failure(
                     "USB device mismatch",
                     "esptool read \(mac ?? "no MAC address") from \(board.path) after the "
-                        + "directory was cleared, not this display's board, so no game "
+                        + "directory was cleared, which is not this board's MAC address, so no game "
                         + "files were written.")
             case .failed(let reason):
                 return .failure("Could not read the USB board", reason)
@@ -643,7 +643,7 @@ extension PanelManager {
         else { return nil }
         return .failure(
             "USB device mismatch",
-            "esptool read \(mac) from \(port) rather than this display's board, so "
+            "esptool read \(mac) from \(port) rather than this board's MAC address, so "
                 + "nothing more was done.")
     }
 }

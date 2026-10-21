@@ -391,10 +391,10 @@ extension WifiConfigUI {
                 reason = "The password for \"\(ssid)\" could not be read from "
                     + "the Keychain. Enter it again in Settings."
             } else if report.omitted.contains(ssid) {
-                reason = "\"\(ssid)\" did not fit in this display's slots. "
+                reason = "\"\(ssid)\" did not fit in this device's slots. "
                     + "Drag it higher in Settings."
             } else {
-                reason = "\"\(ssid)\" is not on this display."
+                reason = "\"\(ssid)\" is not on this device."
             }
             return .failure(ConfigFailure(title: "Could not switch WiFi", message: reason))
         }
@@ -404,7 +404,7 @@ extension WifiConfigUI {
         case .failure(let reason):
             return .failure(ConfigFailure(
                 title: "Could not switch WiFi",
-                message: "The display refused \"\(ssid)\": \(reason)"))
+                message: "The device refused \"\(ssid)\": \(reason)"))
         }
     }
 
@@ -468,7 +468,7 @@ extension WifiConfigUI {
                     title: "WiFi preset sync stopped",
                     message: "Command \(index + 1) of \(commands.count) "
                         + "(\(presetCommandSummary(command))) failed: \(reason). "
-                        + "The display may contain part of the requested collection; "
+                        + "The device may contain part of the requested collection; "
                         + "reload it before retrying."))
             }
         }
@@ -498,9 +498,9 @@ extension WifiConfigUI {
         else {
             return .failure(ConfigFailure(
                 title: "WiFi preset verification failed",
-                message: "The display's active network changed during "
+                message: "The device's active network changed during "
                     + "synchronization. Reload the presets and confirm the "
-                    + "display is still joined to the network you expect."))
+                    + "device is still joined to the network you expect."))
         }
         return .success((after, commands.count))
     }
@@ -548,9 +548,9 @@ extension WifiConfigUI {
         case .activeSlotRewrite(let slot):
             return ConfigFailure(
                 title: "Active WiFi preset protected",
-                message: "Slot \(slot) is the network this display is currently "
+                message: "Slot \(slot) is the network this device is currently "
                     + "joined through, so it was left alone and nothing was sent. "
-                    + "Choose a different network on the display first.")
+                    + "Choose a different network on the device first.")
         }
     }
 }

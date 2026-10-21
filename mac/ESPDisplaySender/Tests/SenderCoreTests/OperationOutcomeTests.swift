@@ -60,7 +60,7 @@ final class ControlAvailabilityTests: XCTestCase {
 
         XCTAssertEqual(
             manager.controlUnavailableReason("studio-display", capability: .brightness),
-            "This control needs the display to be connected over WiFi.")
+            "This control needs the device to be connected over WiFi.")
     }
 
     func testOfflinePanelHasAReason() {
@@ -71,7 +71,7 @@ final class ControlAvailabilityTests: XCTestCase {
 
         XCTAssertEqual(
             manager.controlUnavailableReason("studio-display", capability: .brightness),
-            "The display is visible on WiFi but has not started a control session yet.")
+            "The device is visible on WiFi but has not started a control session yet.")
     }
 
     func testStaleFirmwareHasAReason() {
@@ -100,7 +100,7 @@ final class ControlAvailabilityTests: XCTestCase {
             let reason = manager.controlUnavailableReason(
                 "studio-display", capability: capability)
             XCTAssertEqual(
-                reason, "This display does not report support for \(description).")
+                reason, "This device does not report support for \(description).")
         }
     }
 
@@ -118,7 +118,7 @@ final class ControlAvailabilityTests: XCTestCase {
         XCTAssertEqual(manager.operationOutcome?.kind, .failure)
         XCTAssertEqual(
             manager.operationOutcome?.message,
-            "This display does not report support for brightness control.")
+            "This device does not report support for brightness control.")
     }
 
     func testRefusalTitleNamesTheControl() {
@@ -215,7 +215,7 @@ final class OperationOutcomeTests: XCTestCase {
         manager.update(.acknowledgement(ack), for: "studio-display")
 
         XCTAssertEqual(manager.operationOutcome?.kind, .failure)
-        XCTAssertEqual(manager.operationOutcome?.title, "Display command failed")
+        XCTAssertEqual(manager.operationOutcome?.title, "Device command failed")
     }
 
     func testAcceptedAcknowledgementReportsNothing() throws {
