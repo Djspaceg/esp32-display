@@ -1,5 +1,9 @@
 # Release Notes
 
+## 2.1.0
+
+- Added support for the LilyGO T-Watch-S3: its ST7789V3 screen, FT6336U touch, AXP2101 battery reading and crown button, detected automatically.
+
 ## 2.0.0
 
 - Added an early boot menu that chooses Streaming, Doom, or Quake when a runtime exists, by touch or by the BOOT button.
