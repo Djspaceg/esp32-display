@@ -315,6 +315,13 @@ struct Config {
   /// carrier whose vendor sets a lower one keeps the vendor's.
   uint16_t pmuInputLimitMilliamps = 1500;
 
+  /// Whether some units of this carrier have no BOOT key to press although
+  /// pinBootButton is wired (the T-Watch-S3's earlier batches: the switch
+  /// pad is there, the key on the back cover is not). Doom then takes its
+  /// menu key from the PWR key instead of firing with it, since nothing else
+  /// can open the menu mid-game; touch still fires.
+  bool bootButtonOptional = false;
+
   bool hasPmuBus() const {
     return pinPmuSda != NO_PIN && pinPmuScl != NO_PIN;
   }
@@ -785,6 +792,7 @@ static const Config CONFIG_LILYGO_TWATCH_S3 = {
     /* pmuScl */ 11,
     /* pmuPanelAldoMask */ 0x06,  // ALDO2 | ALDO3
     /* pmuInputLimitMilliamps */ 900,
+    /* bootButtonOptional */ true,
 };
 
 /// Waveshare ESP32-P4-WIFI6-Touch-LCD-4C: JD9365 720x720 round IPS over

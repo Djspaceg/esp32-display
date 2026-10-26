@@ -236,6 +236,9 @@ OPTIONAL_FIELDS = {
     "power.panel_rails": [],
     # The VBUS input current limit an AXP2101 is raised to when it holds less.
     "power.input_limit_ma": 1500,
+    # Some units of the carrier lack a BOOT key on the wired pin; see
+    # Config::bootButtonOptional.
+    "carrier.boot_button_optional": False,
 }
 # Carrier wiring only some boards have. Absent means -1 (no such line), so a
 # descriptor written before a field existed stays valid without restating it.
@@ -309,6 +312,29 @@ def pmu_input_limit_ma(descriptor: Dict[str, Any]) -> int:
     """The VBUS input limit an AXP2101 is raised to; 1500 when absent."""
     return descriptor["power"].get(
         "input_limit_ma", OPTIONAL_FIELDS["power.input_limit_ma"])
+
+
+def boot_button_optional(descriptor: Dict[str, Any]) -> bool:
+    """Whether some units lack a BOOT key on carrier.pin_boot."""
+    return descriptor["carrier"].get(
+        "boot_button_optional",
+        OPTIONAL_FIELDS["carrier.boot_button_optional"])
+
+
+def _validate_boot_optional(descriptor: Dict[str, Any]) -> None:
+    source = _source_name(descriptor)
+    optional = boot_button_optional(descriptor)
+    if not isinstance(optional, bool):
+        raise DescriptorError(
+            "%s: carrier.boot_button_optional must be bool" % source)
+    if optional and descriptor["carrier"]["pin_boot"] < 0:
+        raise DescriptorError(
+            "%s: carrier.boot_button_optional needs a carrier.pin_boot" % source)
+    if optional and descriptor["power"]["controller"] != "axp2101":
+        # The PWR key is what stands in for the missing BOOT key.
+        raise DescriptorError(
+            "%s: carrier.boot_button_optional needs an axp2101 PWR key"
+            % source)
 
 
 def _validate_pmu(descriptor: Dict[str, Any]) -> None:
@@ -1386,6 +1412,7 @@ def validate_descriptors(
         _validate_audio(descriptor)
         _validate_optional_pins(descriptor)
         _validate_pmu(descriptor)
+        _validate_boot_optional(descriptor)
         _validate_backlight_floor(descriptor)
         panel_symbol = descriptor["panel"]["symbol"]
         if panel_symbol in panels:

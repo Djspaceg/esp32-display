@@ -3658,6 +3658,12 @@ int main() {
       CHECK(watch.pinRst == board::NO_PIN);
       CHECK(watch.pinBl == 45 && !watch.backlightInverted);
       CHECK(watch.pinBootButton == 0);
+      // Earlier batches have no BOOT key, so Doom's menu key is the crown.
+      CHECK(watch.bootButtonOptional);
+      for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+        if (identity.variant == board::Variant::LilygoTwatchS3) continue;
+        CHECK(!board::configFor(identity.variant).bootButtonOptional);
+      }
       CHECK(!watch.hasMotion());
       // An FT6336 with no interrupt has nothing to wake it.
       board::Config noInt = watch;
@@ -7111,6 +7117,57 @@ int main() {
                                      400) == DOOM_GAMEPLAY_SWIPE_NONE);
     CHECK(doom_gameplay_swipe_action(DOOM_TOUCH_GESTURE_NONE, 200, 400) ==
           DOOM_GAMEPLAY_SWIPE_NONE);
+
+    // Where the PWR key is the menu key (the T-Watch-S3, whose earlier units
+    // have no BOOT key), every press is exactly one Escape, whatever the
+    // bounce or the order of its latched bits.
+    {
+      typedef doom_power_key_bits_t B;
+      const B none = {false, false, false, false};
+      const B down = {true, false, false, false};
+      const B up = {false, true, false, false};
+      const B both = {true, true, false, false};
+      const B shortOnly = {false, false, true, false};
+      const B longOnly = {false, false, false, true};
+      doom_power_key_t key = {};
+      int escapes = 0;
+      auto poll = [&](B bits) {
+        const bool wasHeld = key.held;
+        const bool missed = doom_power_key_step(&key, bits);
+        if (doom_power_key_press_ended(wasHeld, &key, missed)) ++escapes;
+      };
+      poll(none);
+      CHECK_EQ(escapes, 0);
+      // Down then up: one Escape, on the release, and none while held.
+      poll(down);
+      poll(none);
+      CHECK_EQ(escapes, 0);
+      poll(up);
+      CHECK_EQ(escapes, 1);
+      // Its short-press bit a poll late is not a second press.
+      poll(shortOnly);
+      CHECK_EQ(escapes, 1);
+      // A whole press inside one poll: one.
+      poll(both);
+      CHECK_EQ(escapes, 2);
+      poll(shortOnly);
+      CHECK_EQ(escapes, 2);
+      // A press only the short-press bit reports: one.
+      poll(shortOnly);
+      CHECK_EQ(escapes, 3);
+      // A long hold (the PMU's long-press bit) still ends as one, on release.
+      poll(down);
+      poll(longOnly);
+      CHECK_EQ(escapes, 3);
+      poll(up);
+      CHECK_EQ(escapes, 4);
+      // A bouncy release is still one.
+      poll(down);
+      poll(both);
+      CHECK_EQ(escapes, 5);
+      poll(none);
+      CHECK_EQ(escapes, 5);
+    }
 
     // The PWR key fires while held: its down edge holds Fire, its up edge
     // lets go. No sequence of latched bits may leave Fire held after the key

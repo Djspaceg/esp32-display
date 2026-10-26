@@ -381,6 +381,7 @@ def _config_initializer(descriptor: Dict[str, Any]) -> str:
           for key in ("sda", "scl")),
         "0x%02X" % board_descriptor.pmu_panel_aldo_mask(descriptor),
         str(board_descriptor.pmu_input_limit_ma(descriptor)),
+        _bool(board_descriptor.boot_button_optional(descriptor)),
     ]
     rendered = []
     for index in range(0, len(values), 6):

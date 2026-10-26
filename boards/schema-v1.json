@@ -255,7 +255,11 @@
         "pin_rgb_led": {"$ref": "#/$defs/pin"},
         "pin_panel_power": {"$ref": "#/$defs/pin"},
         "pin_encoder_a": {"$ref": "#/$defs/pin"},
-        "pin_encoder_b": {"$ref": "#/$defs/pin"}
+        "pin_encoder_b": {"$ref": "#/$defs/pin"},
+        "boot_button_optional": {
+          "type": "boolean",
+          "description": "Some units have no BOOT key on pin_boot; Doom then takes its menu key from the AXP2101 PWR key. Absent means false."
+        }
       }
     },
     "touch": {

@@ -23,6 +23,8 @@
 //     - Second finger: run modifier
 //
 // The 1.75C's large side button (the AXP2101 PWR key): fire while held.
+// On a carrier that may have no BOOT key (the T-Watch-S3's crown) the PWR
+// key is Escape instead: each press opens or closes the menu.
 //
 // USB keyboard and mouse (carriers whose USB port can host a device):
 //   W/A/S/D or arrows move and turn, Ctrl fires, Space uses, Shift runs,
@@ -65,6 +67,7 @@ extern bool doom_motion_available(void);
 extern void doom_imu_init(void);
 extern void doom_imu_read(float* pitch, float* roll);
 extern bool doom_power_key_init(void);
+extern bool doom_power_key_is_menu(void);
 extern bool doom_power_key_read(doom_power_key_bits_t* bits);
 
 // Touch state layout and doom_touch_init/sample/poll declarations. Shared with
@@ -130,6 +133,7 @@ static uint32_t dg_fire_due_at = 0;
 // The PWR key holds Fire down for as long as it is held during play, so a
 // touch Fire pulse ending under it must not let go of Fire.
 static bool dg_power_key_available = false;
+static bool dg_power_key_menu = false;
 static doom_power_key_t dg_power_key = {false, false};
 static bool dg_power_fire_held = false;
 static bool dg_power_shot_pending = false;
@@ -437,6 +441,7 @@ static void process_power_key_input(void) {
     if (!gameplay) dg_power_shot_pending = false;
 
     doom_power_key_bits_t bits = {false, false, false, false};
+    const bool was_held = dg_power_key.held;
     if (!doom_power_key_read(&bits)) {
         if (dg_power_read_failures < POWER_KEY_READ_FAILURE_LIMIT &&
             ++dg_power_read_failures == POWER_KEY_READ_FAILURE_LIMIT &&
@@ -457,8 +462,20 @@ static void process_power_key_input(void) {
                      : missed_press    ? "shot"
                                        : "released");
         }
+        if (dg_power_key_menu) {
+            // A press ends on its release (or came and went between two
+            // polls): one Escape, in any context, like BOOT's short press.
+            if (doom_power_key_press_ended(was_held, &dg_power_key,
+                                           missed_press)) {
+                doom_log("pwr key: press -> escape");
+                push_key(KEY_ESCAPE, 1);
+                push_key(KEY_ESCAPE, 0);
+            }
+            return;
+        }
         if (missed_press && gameplay) dg_power_shot_pending = true;
     }
+    if (dg_power_key_menu) return;
 
     const bool want_fire = gameplay && dg_power_key.held;
     if (want_fire != dg_power_fire_held) {
@@ -552,6 +569,7 @@ void DG_Init() {
     doom_log_stage("motion");
     // The 1.75C's PWR key, on the same bus; every other board skips it.
     dg_power_key_available = doom_power_key_init();
+    dg_power_key_menu = dg_power_key_available && doom_power_key_is_menu();
     doom_log_stage("power key");
     // Never fatal: a carrier that cannot host, or a session with nothing
     // plugged in, keeps touch and BOOT exactly as before.

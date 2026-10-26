@@ -116,9 +116,11 @@ window_follows_mirror = true
 # LilyGO says only later batches bring BOOT out on the back cover ("The
 # version with BOOT button and RST on the back cover", [L]
 # LilyGoWatchS3.cpp#L507-L513); on an earlier one GPIO0 just reads high
-# through the pull-up, so declaring it drives nothing, and the BOOT actions
-# (Doom's menu among them) have no key there. The crown is the AXP2101 PWR
-# key, which this firmware reads as the PWR key input. No addressable LED.
+# through the pull-up, so declaring it drives nothing, but the BOOT actions
+# have no key there (boot_button_optional): Doom then opens its menu from the
+# crown, the AXP2101 PWR key, and fires from touch, and its menu's Quit Game
+# returns to streaming. The streaming firmware reads the crown as the PWR key
+# input, assignable in the input map. No addressable LED.
 [carrier]
 pin_sclk = 18
 pin_mosi = 13
@@ -131,6 +133,7 @@ pin_rst = -1
 pin_bl = 45
 pin_boot = 0
 pin_rgb_led = -1
+boot_button_optional = true
 
 # FT6336U at 0x38 alone on SDA GPIO39 / SCL GPIO40, INT GPIO16 falling, no
 # reset line ([L] doc #L81-L84, #L121; [T] utilities.h#L128-L131). LilyGO

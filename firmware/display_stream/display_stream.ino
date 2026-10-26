@@ -595,6 +595,30 @@ void setup() {
     bootscreen::advance(bootscreen::Stage::WifiLink);
     Serial.println("WiFi: starting ESP-Hosted link to the carrier C6 coprocessor");
   }
+  // Why a join failed, which the timeout line below cannot say: a wrong
+  // password (handshake timeout, auth fail) and a network the radio never
+  // heard (no AP found) end the same way otherwise. Native radios only; the
+  // P4's hosted link is left exactly as it was.
+  if (bcfg->platform->wifi == board::WifiTopology::Native) {
+    WiFi.onEvent(
+        [](WiFiEvent_t, WiFiEventInfo_t info) {
+          // The reasons that tell a join apart (esp_wifi_types.h
+          // wifi_err_reason_t); anything else is logged by number.
+          const uint16_t reason = info.wifi_sta_disconnected.reason;
+          const char *name = reason == 2     ? "auth expired"
+                             : reason == 15  ? "4-way handshake timeout"
+                             : reason == 201 ? "no AP found"
+                             : reason == 202 ? "auth failed"
+                             : reason == 203 ? "assoc failed"
+                             : reason == 204 ? "handshake timeout"
+                             : reason == 205 ? "connection failed"
+                                             : "other";
+          Serial.printf("WiFi: disconnected, reason %u (%s), rssi %d\n",
+                        (unsigned)reason, name,
+                        (int)info.wifi_sta_disconnected.rssi);
+        },
+        ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  }
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(false);  // the loop owns the bounded retry backoff
   WiFi.setSleep(false);         // latency: don't doze between beacons

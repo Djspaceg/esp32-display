@@ -4977,6 +4977,30 @@ def test_board_descriptor_validator():
             [int(value) for value in written],
             [board_descriptor.backlight_floor_permille(item)],
             "%s's hand-written floor matches its descriptor" % symbol)
+    watch = next(item for item in descriptors
+                 if item["key"] == "s3-lilygo-twatch-s3")
+    check_equal(board_descriptor.boot_button_optional(watch), True,
+                "the watch's earlier batches have no BOOT key")
+    check_equal(
+        sorted(item["key"] for item in descriptors
+               if board_descriptor.boot_button_optional(item)),
+        ["s3-lilygo-twatch-s3"],
+        "only the watch may lack its BOOT key")
+    no_pin = copy.deepcopy(watch)
+    no_pin["carrier"]["pin_boot"] = -1
+    check_descriptor_fails(
+        [no_pin], "carrier.boot_button_optional needs a carrier.pin_boot",
+        "an optional BOOT key still names its pin")
+    no_pwr = copy.deepcopy(p4_4b)
+    no_pwr["carrier"]["boot_button_optional"] = True
+    check_descriptor_fails(
+        [no_pwr], "carrier.boot_button_optional needs an axp2101 PWR key",
+        "without a PWR key nothing stands in for a missing BOOT key")
+    not_bool = copy.deepcopy(watch)
+    not_bool["carrier"]["boot_button_optional"] = 1
+    check_descriptor_fails(
+        [not_bool], "carrier.boot_button_optional must be bool",
+        "the flag is a bool")
     floor_too_high = copy.deepcopy(p4_4b)
     floor_too_high["backlight"]["floor_permille"] = 1000
     check_descriptor_fails(

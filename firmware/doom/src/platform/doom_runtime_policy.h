@@ -165,3 +165,15 @@ static inline bool doom_power_key_step(doom_power_key_t* key,
     if (bits.short_press && !key->held) key->served = false;
     return fire_once;
 }
+
+// Where the PWR key is the menu key rather than Fire (a carrier some of whose
+// units have no BOOT key): whether the poll just folded by doom_power_key_step
+// ended a press, given whether the key was held before it and what the step
+// returned. One press is one Escape: its release, or a whole press that came
+// and went between two polls; a short-press bit landing a poll after the
+// release is not a second press, because the hold already served it.
+static inline bool doom_power_key_press_ended(bool was_held,
+                                              const doom_power_key_t* key,
+                                              bool missed_press) {
+    return (was_held && !key->held) || missed_press;
+}
