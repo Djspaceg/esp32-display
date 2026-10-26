@@ -243,7 +243,7 @@ public struct SettleWait: Equatable, Sendable {
         case .reappear(let port):
             return "the board's USB serial device to come back (it was \(port))"
         case .answer(let port):
-            return "the firmware on \(port) to answer CFGSHOW"
+            return "the firmware on \(port) to answer over USB"
         case .identify(let ports):
             return "one of \(ports.count) USB serial devices to report this board's ID"
         }
@@ -425,8 +425,9 @@ public struct UsbFlashSession: Equatable, Sendable {
         switch phase {
         case .findingBoard, nil:
             return "Nothing was written. Fix what the message says and try again; "
-                + "if the board is not answering, unplug it, plug it back in with "
-                + "a data cable (not a charge-only one) and press Refresh."
+                + "if the board is not answering, check that it is on and on a data "
+                + "cable (not a charge-only one), restart it with its power or reset "
+                + "button, and press Refresh."
         case .enteringDownloadMode:
             return "Hold the board's BOOT button while plugging it in (or hold BOOT "
                 + "and tap RESET), release it, then try again."
@@ -442,8 +443,8 @@ public struct UsbFlashSession: Equatable, Sendable {
                 return "Unplug the board, plug it back in, and run Set Up WiFi "
                     + "only again."
             case .update, .repair:
-                return "The firmware is written. Unplug the board and plug it back "
-                    + "in; it should answer within a minute."
+                return "The write is done. Restart the board with its power or reset "
+                    + "button; it should answer within a minute."
             }
         case .rescue(.rescued), .rescue(.readingBoard):
             return "The rescue firmware is on the board and keeps its USB up. "

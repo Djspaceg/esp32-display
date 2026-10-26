@@ -74,6 +74,17 @@ final class GameDataCaptureTests: XCTestCase {
                           selection: tooMuch,
                           board: (s3Area, .legacy(legacyPak0Bytes: nil))),
             to: output, name: "game-data-s3-does-not-fit")
+
+        let flashing = target("silver-round-2", chip: "esp32s3", path: "/dev/cu.usbmodem12301")
+        var doom = GameDataSelection(quakeOffered: true)
+        doom.add(mini, source: .chosen(URL(fileURLWithPath: "/Users/me/Downloads/miniwad.wad")))
+        try capture(
+            GameDataSheet(manager: manager, target: flashing, quakeOffered: true, cache: nil,
+                          selection: doom,
+                          failure: UsbBoardCheck.flashingMode(
+                              path: "/dev/cu.usbmodem12301",
+                              nothingDone: "nothing was read or written")),
+            to: output, name: "game-data-s3-flashing-mode")
     }
 
     private func capture<V: View>(_ view: V, to directory: URL, name: String) throws {

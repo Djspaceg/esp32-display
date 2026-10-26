@@ -106,9 +106,9 @@ extension PanelManager {
         progress(.phase(.findingBoard))
         switch await probeUSBDevice(path, timeout: 3) {
         case .unavailable(let reason):
-            return .stop(.failure(
-                "Could not verify the board over USB",
-                "CFGSHOW did not verify \(path): \(reason)"))
+            return .stop(await explainUnansweredBoard(
+                path: path, expectedID: expectedID, reason: reason,
+                nothingDone: "nothing was read or written"))
         case .identified(let identity):
             let reportedID = ConfigCommands.canonicalHardwareID(identity.hardwareID)
             guard reportedID == expectedID
@@ -498,8 +498,8 @@ extension PanelManager {
             var outcome = OperationOutcome.failure(
                 "The game store did not read back",
                 "The directory read back from \(board.path) is not the one written.")
-            outcome.nextAction = "Unplug the board and plug it back in, then write its "
-                + "game data again; rewriting is safe."
+            outcome.nextAction = "Restart the board with its power or reset button, then write "
+                + "its game data again; rewriting is safe."
             return outcome
         case .stop(let failure):
             return writtenButUnchecked(failure)
@@ -519,10 +519,10 @@ extension PanelManager {
             var outcome = OperationOutcome.failure(
                 "Written, but the board did not answer",
                 "The game data was written to \(target.displayName) and checked, but the "
-                    + "board did not answer CFGSHOW with its hardware ID within "
+                    + "board did not answer over USB with its hardware ID within "
                     + "\(Int(SerialSettlePolicy.budgetSeconds)) seconds of restarting.")
-            outcome.nextAction = "The game data is written. Unplug the board and plug it "
-                + "back in; it should answer within a minute."
+            outcome.nextAction = "The game data is written. Restart the board with its power "
+                + "or reset button; it should answer within a minute."
             return outcome
         }
         refreshUSBPorts()
@@ -548,8 +548,8 @@ extension PanelManager {
             "Written, but not checked",
             "The game data was written, but the board could not be read back to confirm "
                 + "it: \(failure.message)")
-        outcome.nextAction = "Unplug the board and plug it back in, then write its game "
-            + "data again; rewriting is safe."
+        outcome.nextAction = "Restart the board with its power or reset button, then write its "
+            + "game data again; rewriting is safe."
         return outcome
     }
 

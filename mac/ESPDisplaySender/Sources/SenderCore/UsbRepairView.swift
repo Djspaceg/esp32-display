@@ -224,7 +224,11 @@ final class UsbRepairModel: ObservableObject {
             switch result {
             case .success(let board): rescued(board)
             case .failure(let failure):
-                monitor.fail(.failure(failure))
+                var outcome = OperationOutcome.failure(failure)
+                if failure.title == UsbRescue.storageFailureTitle {
+                    outcome.nextAction = UsbRescue.storageFailureNextAction
+                }
+                monitor.fail(outcome)
                 stage = .failed(nil)
                 if Task.isCancelled { noteStopped() }
             }
@@ -476,7 +480,8 @@ final class UsbRepairModel: ObservableObject {
         guard stage == .catching else { return false }
         switch monitor.session.phase {
         case nil, .rescue(.startingEsptool), .rescue(.plugIn), .rescue(.missed),
-             .rescue(.seenWhileStarting), .rescue(.tooManyPorts), .rescue(.couldNotConnect):
+             .rescue(.seenWhileStarting), .rescue(.tooManyPorts), .rescue(.severalRestarting),
+             .rescue(.couldNotConnect):
             return true
         default:
             return false

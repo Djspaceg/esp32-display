@@ -85,6 +85,11 @@ extension PanelManager {
                     identifyPort: { UsbRescuer.usbDevice(forPort: $0) },
                     adopted: { choice.port },
                     adoptedGeneration: { choice.generation },
+                    probeFlash: { port in
+                        await Self.silentRescueFlash(
+                            port: port, family: family, tool: EsptoolCommand.Tool(path: toolPath),
+                            progress: progress)
+                    },
                     spawn: spawn,
                     now: { ProcessInfo.processInfo.systemUptime },
                     sleep: { try? await Task.sleep(for: .seconds($0)) },
@@ -114,6 +119,53 @@ extension PanelManager {
             await run.value
         } onCancel: {
             run.cancel()
+        }
+    }
+
+    /// Ask the flash chip of a board a rescue write failed on for its ID,
+    /// read-only and without resetting it, and return what
+    /// `EsptoolOutput.silentFlashChip` makes of it when two readings
+    /// `UsbRescue.flashProbeRepeatDelay` apart are both blank: a flash still
+    /// busy with an erase reads blank for a moment too. nil when the chip
+    /// answered, or when `flash-id` could not run or took longer than
+    /// `UsbRescue.flashProbeTimeout`, so the loop goes on as before.
+    ///
+    /// No reset afterwards: a hard reset would boot a board whose firmware
+    /// drops off USB out of the download mode the next esptool reaches it in.
+    nonisolated static func silentRescueFlash(
+        port: String, family: UsbRescue.Family, tool: EsptoolCommand.Tool,
+        progress: @escaping @Sendable (UsbFlashEvent) -> Void
+    ) async -> String? {
+        guard let command = try? EsptoolCommand.flashID(
+            tool: tool, chip: family.chip, port: port, baud: family.baud,
+            after: EsptoolCommand.noReset)
+        else { return nil }
+        func readOnce() async -> String? {
+            await withTaskGroup(of: String??.self) { group in
+                group.addTask {
+                    guard let outcome = try? await EsptoolRunner.run(
+                        command, onLine: { progress(.log(.esptool, $0)) })
+                    else { return .some(nil) }
+                    return .some(EsptoolOutput.silentFlashChip(in: outcome.output))
+                }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(UsbRescue.flashProbeTimeout))
+                    return nil
+                }
+                // The first to finish wins; cancelling the other stops esptool.
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                if first == nil {
+                    progress(.log(.app, "esptool did not read the flash chip's ID within "
+                        + "\(Int(UsbRescue.flashProbeTimeout)) s."))
+                }
+                return first ?? nil
+            }
+        }
+        progress(.log(.app, "Asking the flash chip on \(port) for its ID."))
+        return await UsbRescue.confirmedSilentFlash(read: readOnce) { seconds in
+            progress(.log(.app, "No ID; asking once more."))
+            try? await Task.sleep(for: .seconds(seconds))
         }
     }
 

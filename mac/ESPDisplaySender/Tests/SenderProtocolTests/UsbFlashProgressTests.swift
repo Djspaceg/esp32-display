@@ -84,7 +84,7 @@ final class UsbFlashProgressTests: XCTestCase {
             attempt: 3, elapsed: 7.6, budget: 45)
         XCTAssertEqual(
             wait.summary,
-            "Waiting for the firmware on /dev/cu.usbmodem1312201 to answer CFGSHOW "
+            "Waiting for the firmware on /dev/cu.usbmodem1312201 to answer over USB "
                 + "· attempt 3 · 7 of 45 s")
         XCTAssertEqual(UsbFlashPhase.waitingForBoard(wait).fraction ?? 0, 7.6 / 45, accuracy: 0.001)
         XCTAssertTrue(SettleWait(

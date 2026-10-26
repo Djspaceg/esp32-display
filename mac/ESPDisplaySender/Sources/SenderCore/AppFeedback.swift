@@ -15,6 +15,9 @@ struct OperationOutcome: Equatable, Sendable {
     /// What to do about a failure, when the step that failed does not already
     /// say it. USB runs fill this from the phase that was running.
     var nextAction: String? = nil
+    /// The port of a board found in flashing mode, which the sheet offers to
+    /// restart into its firmware (`PanelManager.restartBoardFromFlashingMode`).
+    var restartPort: String? = nil
 
     static func failure(_ failure: WifiConfigUI.ConfigFailure) -> OperationOutcome {
         OperationOutcome(kind: .failure, title: failure.title, message: failure.message)

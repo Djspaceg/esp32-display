@@ -26,8 +26,11 @@ protocol RescueWorker: AnyObject {
 ///
 /// NO PORT IS EVER OPENED BY THIS CODE while it waits. Ports are listed from
 /// /dev by name and devices are read from the IORegistry. The only thing that
-/// opens the board is esptool, through its link, and only after exactly one
-/// port has appeared that was not there when the user was told to plug in.
+/// opens the board is esptool, through its link, and only on one port: the
+/// one the user chose, else the one new port, else the one attached at Start
+/// that keeps restarting. After a failed write, a read-only `flash-id` asks
+/// that same port's flash chip for its ID. The CLI's `run_rescue` in
+/// tools/espdisp.py has neither of the last two.
 enum UsbRescuer {
 
     /// Everything the loop touches outside itself, so a test can drive it with
@@ -43,6 +46,11 @@ enum UsbRescuer {
         var adopted: () -> String? = { nil }
         /// Counts the user's choices, the same port chosen again included.
         var adoptedGeneration: () -> Int = { 0 }
+        /// After a failed write on a port still attached: what a read-only
+        /// `flash-id` there read when no flash chip answered
+        /// (`EsptoolOutput.silentFlashChip`), nil when one did or it could not
+        /// be asked.
+        var probeFlash: (String) async -> String? = { _ in nil }
         var spawn: () throws -> RescueWorker
         var now: () -> Double
         var sleep: (Double) async -> Void
@@ -72,10 +80,15 @@ enum UsbRescuer {
     /// Wait for one new USB port and let the waiting esptool rescue it.
     ///
     /// Returns the port once esptool has written the image. A port attached
-    /// before "Plug the board in now" is never touched, even when it drops off
-    /// and comes back, and neither is a new port whose USB device (by location
-    /// or serial) was attached then. Runs until then, a failure, or cancel;
-    /// whatever esptool is running is killed on every way out.
+    /// before "Plug the board in now" is not touched when it drops off and
+    /// comes back once, and neither is a new port whose USB device (by location
+    /// or serial) was attached then. One that keeps leaving USB briefly and
+    /// coming back (`UsbRescue.RestartWatch`) is a board restarting because it
+    /// cannot boot, and is taken as the board when it is the only such port,
+    /// nothing is chosen and no new port has appeared: esptool resets it into
+    /// download mode over USB, so nothing is pressed. Runs until then, a
+    /// failure, or cancel; whatever esptool is running is killed on every way
+    /// out.
     static func run(
         family: UsbRescue.Family,
         regions: [UsbRescue.Region],
@@ -101,7 +114,8 @@ enum UsbRescuer {
         say("Starting esptool; this takes a few seconds. The board can be put in "
             + "download mode now.")
         if !baseline.isEmpty {
-            say("Attached now, so left alone unless one is chosen as the board: "
+            say("Attached now, so left alone unless one is chosen as the board, or "
+                + "keeps restarting as a board that cannot boot does: "
                 + baseline.sorted().joined(separator: ", ") + ".")
         }
         var worker = try io.spawn()
@@ -115,6 +129,49 @@ enum UsbRescuer {
         /// Failed writes in a row per port, while it stays attached.
         var failures: [String: Int] = [:]
         var gone = Set<String>()
+        /// Which ports attached at Start keep restarting.
+        var restarts = UsbRescue.RestartWatch()
+        /// Once a new port has appeared, it is the board: no port attached at
+        /// Start is taken for restarting while that one is briefly away.
+        var newPortSeen = false
+        /// Ports taken for restarting, and how often each dropped off before
+        /// esptool reached it: one that never connects is let go, not reset
+        /// every time it comes back.
+        var takenForRestarting = Set<String>()
+        /// Misses and failed or hung writes per port taken for restarting.
+        /// Not cleared when it leaves USB, as `failures` is: a restarting
+        /// board is off USB between every try.
+        var restartTries: [String: Int] = [:]
+        var toldRestarting = Set<String>()
+        /// Every port ever refused. `refused` forgets a port that leaves USB;
+        /// a restarting one would then be reset again each time it is back.
+        var givenUp = Set<String>()
+        func refuse(_ port: String) {
+            refused.insert(port)
+            givenUp.insert(port)
+        }
+        /// A try on a port taken for restarting that did not write it. Not
+        /// counted once the person has chosen that port: misses are normal
+        /// for a board on USB only briefly.
+        func noteRestartTry(_ port: String, chosen: String?) {
+            guard takenForRestarting.contains(port), port != chosen else { return }
+            restartTries[port, default: 0] += 1
+            if restartTries[port, default: 0] >= UsbRescue.failuresBeforeRefusal {
+                refuse(port)
+                say("esptool did not write \(port) in \(restartTries[port, default: 0]) "
+                    + "tries, so it is left alone. If it is the board, choose its port.")
+            }
+        }
+        func stopIfFlashIsSilent(_ port: String) async throws {
+            guard let silent = await io.probeFlash(port) else { return }
+            say("The flash storage on \(port) gives no ID (\(silent)).")
+            throw WifiConfigUI.ConfigFailure(
+                title: UsbRescue.storageFailureTitle,
+                message: "esptool reached the board on \(port), but its flash storage "
+                    + "did not answer (\(silent)), so nothing was written. Check its "
+                    + "power or battery: a failing or shorted battery can starve the "
+                    + "storage. Then try again.")
+        }
         var toldIgnored = Set<String>()
         var toldCrowd = false
         var toldWait: String?
@@ -144,6 +201,9 @@ enum UsbRescuer {
             }
             let now = io.now()
             let present = Set(io.ports())
+            // Every pass, linked or not, so a return is counted while esptool
+            // is busy with another port too.
+            restarts.observe(baseline: baseline, present: present, now: now)
             let chosen = io.adopted()
             if let chosen, present.contains(chosen) {
                 let generation = io.adoptedGeneration()
@@ -151,6 +211,8 @@ enum UsbRescuer {
                     recordedChoice = (chosen, generation)
                     chosenDevice = device(of: chosen)
                     refused.remove(chosen)
+                    takenForRestarting.remove(chosen)
+                    restartTries[chosen] = nil
                 }
             }
             let code = worker.poll()
@@ -173,12 +235,20 @@ enum UsbRescuer {
                 let reason = worker.lastError()
                 if !reason.isEmpty { say("esptool: \(reason)") }
                 if present.contains(port) {
+                    let wrongChip = UsbRescue.isWrongChip(reason)
+                    // A board esptool reached and could not write may have a
+                    // flash chip that does not answer at all: every erase then
+                    // waits on a busy bit that never clears, and no number of
+                    // retries, resets or restarts writes it.
+                    // Only when esptool connected: one that never did learned
+                    // nothing about the flash, and asking costs seconds.
+                    if !wrongChip, worker.isConnected { try await stopIfFlashIsSilent(port) }
+                    noteRestartTry(port, chosen: chosen)
                     // A board of another family fails at once and every time;
                     // relaunching would reset it every few seconds for good.
                     failures[port, default: 0] += 1
-                    let wrongChip = UsbRescue.isWrongChip(reason)
                     if wrongChip || failures[port, default: 0] >= UsbRescue.failuresBeforeRefusal {
-                        refused.insert(port)
+                        refuse(port)
                         say("esptool could not write \(port) ("
                             + (wrongChip ? "it is another chip"
                                 : "\(failures[port, default: 0]) failed attempts")
@@ -192,6 +262,7 @@ enum UsbRescuer {
                         + "waiting for it again.")
                     missed = true
                     report(.missed(esptoolReady: false))
+                    noteRestartTry(port, chosen: chosen)
                 }
                 try relaunch()
                 continue
@@ -215,9 +286,12 @@ enum UsbRescuer {
                     try relaunch()
                     linked = nil
                     echo.finish(onProgress)
+                    // The new esptool is not linked, so the port is free to ask.
+                    if present.contains(current.port) { try await stopIfFlashIsSilent(current.port) }
+                    noteRestartTry(current.port, chosen: chosen)
                     failures[current.port, default: 0] += 1
                     if failures[current.port, default: 0] >= UsbRescue.failuresBeforeRefusal {
-                        refused.insert(current.port)
+                        refuse(current.port)
                         say("esptool stopped writing to \(current.port) \(failures[current.port, default: 0]) "
                             + "times; is it an \(family.displayName) board? It is left alone.")
                         report(.couldNotConnect(port: current.port, family: family.key))
@@ -232,6 +306,7 @@ enum UsbRescuer {
                     say("The board dropped off before esptool reached it; esptool is "
                         + "waiting for it again.")
                     report(.missed(esptoolReady: true))
+                    noteRestartTry(current.port, chosen: chosen)
                 } else if present.contains(current.port), !worker.isConnected,
                           now - current.since > UsbRescue.connectTimeout {
                     // Killed, not just unlinked: an esptool part-way through a
@@ -239,7 +314,7 @@ enum UsbRescuer {
                     // write a board it was just told to give up.
                     try relaunch()
                     linked = nil
-                    refused.insert(current.port)
+                    refuse(current.port)
                     say("esptool could not connect to \(current.port) in "
                         + "\(Int(UsbRescue.connectTimeout)) s; is it an "
                         + "\(family.displayName) board? It is left alone.")
@@ -259,8 +334,9 @@ enum UsbRescuer {
                         gone.insert(port)
                     } else if gone.contains(port), !toldIgnored.contains(port) {
                         toldIgnored.insert(port)
-                        say("Ignoring \(port): it was attached before the repair started. "
-                            + "If it is the board, choose it as the board's port.")
+                        say("Ignoring \(port) for now: it was attached before the repair "
+                            + "started. If it is the board, choose it as the board's port; "
+                            + "a board that keeps restarting is taken by itself.")
                     }
                 }
                 var fresh = UsbRescue.newPorts(baseline: baseline, present: present)
@@ -272,7 +348,7 @@ enum UsbRescuer {
                     if !fresh.isEmpty, worker.isReady, linked == nil,
                        let was = chosenDevice, let now = device(of: chosen),
                        !UsbRescue.isSameDevice(now, was) {
-                        refused.insert(chosen)
+                        refuse(chosen)
                         fresh = []
                         say("\(chosen) is now another USB device than the one chosen, so it is "
                             + "left alone. If that is the board, choose its port again.")
@@ -287,7 +363,42 @@ enum UsbRescuer {
                         + "attached before the repair started.")
                     fresh = []
                 }
-                if fresh.count > 1 {
+                if chosen == nil, !UsbRescue.newPorts(baseline: baseline, present: present).isEmpty {
+                    newPortSeen = true
+                }
+                // Nothing new, ever, and nothing chosen: a port attached at
+                // Start that keeps leaving USB briefly and coming back is the
+                // board that cannot boot. Counted whether attached at this
+                // moment or not, so two boards restarting out of step are never
+                // taken one at a time; taken only when it is the only one.
+                var restarting: [String] = []
+                if chosen == nil, fresh.isEmpty, !newPortSeen {
+                    // A port already taken stays the board until given up: one
+                    // left in download mode by a failed try restarts no more.
+                    restarting = restarts.restarting(now: now).union(takenForRestarting)
+                        .intersection(baseline).subtracting(givenUp).sorted()
+                    let coming = restarts.returning(atLeast: 1, now: now)
+                        .union(takenForRestarting)
+                        .intersection(baseline).subtracting(givenUp)
+                    if !restarting.isEmpty, coming.count > 1 {
+                        restarting = coming.sorted()
+                    }
+                    if restarting.count > 1 {
+                        if !toldCrowd {
+                            say("\(restarting.count) devices attached at Start keep restarting "
+                                + "(\(restarting.joined(separator: ", "))); touching none of "
+                                + "them. Choose the board's port to go on.")
+                            toldCrowd = true
+                            report(.severalRestarting(restarting))
+                        }
+                    } else if let port = restarting.first, present.contains(port),
+                              !refused.contains(port) {
+                        fresh = [port]
+                    }
+                }
+                if restarting.count > 1 {
+                    // Reported above; nothing is touched.
+                } else if fresh.count > 1 {
                     if !toldCrowd {
                         say("\(fresh.count) new ports appeared (\(fresh.joined(separator: ", "))); "
                             + "touching none of them. Choose the board's port to go on.")
@@ -296,9 +407,13 @@ enum UsbRescuer {
                     }
                 } else if let port = fresh.first {
                     toldCrowd = false
+                    let isRestarting = restarting == [port]
                     if !worker.isReady {
                         if toldWait != port {
-                            say("Board seen on \(port); esptool reaches it in a moment.")
+                            say(isRestarting
+                                ? "\(port) keeps restarting, as a board that cannot boot "
+                                    + "does; esptool reaches it in a moment."
+                                : "Board seen on \(port); esptool reaches it in a moment.")
                             toldWait = port
                             report(.seenWhileStarting(port: port))
                         }
@@ -308,9 +423,18 @@ enum UsbRescuer {
                         toldWait = nil
                         missed = false
                         echo = Echo(regions: regions)
-                        say(port == chosen
-                            ? "Using \(port), chosen as the board; resetting it into download mode."
-                            : "Board seen on \(port); resetting it into download mode.")
+                        if isRestarting { takenForRestarting.insert(port) }
+                        if port == chosen {
+                            say("Using \(port), chosen as the board; resetting it into "
+                                + "download mode.")
+                        } else if isRestarting, !toldRestarting.contains(port) {
+                            toldRestarting.insert(port)
+                            say("\(port) keeps restarting, as a board that cannot boot does; "
+                                + "taking it as the board and resetting it into download "
+                                + "mode over USB.")
+                        } else if !isRestarting {
+                            say("Board seen on \(port); resetting it into download mode.")
+                        }
                         report(.caught(port: port))
                     }
                 } else {

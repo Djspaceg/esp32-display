@@ -85,6 +85,10 @@ public struct EsptoolCommand: Equatable, Sendable {
     /// bootloader.
     public static let beforeReset = "default-reset"
     public static let afterReset = "hard-reset"
+    /// Leave the chip as it is: for a read-only probe that must not restart a
+    /// board into firmware that drops off USB, or take one out of download
+    /// mode it is being checked for.
+    public static let noReset = "no-reset"
 
     // MARK: - the tool
 
@@ -123,6 +127,12 @@ public struct EsptoolCommand: Equatable, Sendable {
         var chipIDSubcommand: String { isPythonScript ? "chip_id" : "chip-id" }
         var readFlashSubcommand: String { isPythonScript ? "read_flash" : "read-flash" }
         var flashIDSubcommand: String { isPythonScript ? "flash_id" : "flash-id" }
+        /// A reset mode in this tool's spelling: 4.x took only `no_reset`.
+        /// Applied to the modes the read-only probes pass; the write's
+        /// `default-reset` and `hard-reset` stay as the core's recipe has them.
+        func resetMode(_ mode: String) -> String {
+            isPythonScript ? mode.replacingOccurrences(of: "-", with: "_") : mode
+        }
     }
 
     /// One payload staged on disk, ready to be named in the argv. esptool takes
@@ -274,8 +284,12 @@ public struct EsptoolCommand: Equatable, Sendable {
     /// Same `--port` rule, and for the same reason: without it esptool picks a
     /// board for you, and a probe that silently talked to the wrong one would
     /// then choose the image for a flash of the right one.
+    ///
+    /// `before` and `after`, when given, replace esptool's own defaults (reset
+    /// into download mode first, hard reset after).
     public static func chipID(
-        tool: Tool, port: String, connectAttempts: Int = 2
+        tool: Tool, port: String, connectAttempts: Int = 2,
+        before: String? = nil, after: String? = nil
     ) throws -> EsptoolCommand {
         let port = port.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !tool.path.isEmpty else { throw EsptoolCommandError.noTool }
@@ -287,8 +301,10 @@ public struct EsptoolCommand: Equatable, Sendable {
         arguments += [
             "--port", port,
             "--connect-attempts", String(connectAttempts),
-            tool.chipIDSubcommand,
         ]
+        if let before { arguments += ["--before", tool.resetMode(before)] }
+        if let after { arguments += ["--after", tool.resetMode(after)] }
+        arguments.append(tool.chipIDSubcommand)
         return EsptoolCommand(executable: tool.executable, arguments: arguments)
     }
 
@@ -296,7 +312,7 @@ public struct EsptoolCommand: Equatable, Sendable {
     /// refusals included: a tool, a chip that is never `auto`, a port that is
     /// never empty, and a usable speed.
     private static func pinnedArguments(
-        tool: Tool, chip: String, port: String, baud: Int
+        tool: Tool, chip: String, port: String, baud: Int, after: String = afterReset
     ) throws -> [String] {
         let chip = chip.trimmingCharacters(in: .whitespacesAndNewlines)
         let port = port.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -309,7 +325,7 @@ public struct EsptoolCommand: Equatable, Sendable {
             "--port", port,
             "--baud", String(baud),
             "--before", beforeReset,
-            "--after", afterReset,
+            "--after", after,
         ]
     }
 
@@ -348,10 +364,12 @@ public struct EsptoolCommand: Equatable, Sendable {
         tool: Tool,
         chip: String,
         port: String,
-        baud: Int = defaultBaud
+        baud: Int = defaultBaud,
+        after: String = afterReset
     ) throws -> EsptoolCommand {
         var arguments = try pinnedArguments(
-            tool: tool, chip: chip, port: port, baud: baud)
+            tool: tool, chip: chip, port: port, baud: baud,
+            after: after == afterReset ? after : tool.resetMode(after))
         arguments.append(tool.flashIDSubcommand)
         return EsptoolCommand(executable: tool.executable, arguments: arguments)
     }

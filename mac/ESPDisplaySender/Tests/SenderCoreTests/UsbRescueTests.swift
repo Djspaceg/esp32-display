@@ -38,6 +38,9 @@ final class UsbRescueTests: XCTestCase {
         var alwaysFails: Set<String> = []
         /// Ports where esptool connects and then never finishes the write.
         var hangsAfterConnect: Set<String> = []
+        /// Ports whose board's flash chip does not answer `flash-id`.
+        var silentFlash: Set<String> = []
+        var probed: [String] = []
         var identities: [String: UsbRescue.USBIdentity] = [:]
         /// What the IORegistry says publishes a port, whatever its name.
         var registry: [String: UsbRescue.USBIdentity] = [:]
@@ -63,7 +66,7 @@ final class UsbRescueTests: XCTestCase {
         }
 
         var io: UsbRescuer.IO {
-            UsbRescuer.IO(
+            var io = UsbRescuer.IO(
                 ports: { self.ports() },
                 identify: { self.identify() },
                 identifyPort: { self.registry[$0] },
@@ -76,6 +79,11 @@ final class UsbRescueTests: XCTestCase {
                 now: { self.t },
                 sleep: { seconds in self.t = ((self.t + seconds) * 1e6).rounded() / 1e6 },
                 isCancelled: { self.t > self.limit })
+            io.probeFlash = { port in
+                self.probed.append(port)
+                return self.silentFlash.contains(port) ? "manufacturer 1f, device ffff" : nil
+            }
+            return io
         }
 
         var messages: [String] {
@@ -440,6 +448,309 @@ final class UsbRescueTests: XCTestCase {
         XCTAssertTrue(world.links.isEmpty)
         XCTAssertTrue(world.said("choose it"),
                       "the way to take it is to choose it, not to replug it")
+    }
+
+    /// A board that cannot boot restarts every few seconds, so the board
+    /// attached at Start leaves USB and comes back again and again. Taken
+    /// once it has come back twice, with nothing chosen and nothing pressed:
+    /// esptool resets it into download mode over USB.
+    func testAnAttachedBoardThatKeepsRestartingIsTakenWithNothingPressed() async {
+        let world = World(
+            baseline: [other, (board, 0, 2.5), (board, 3, 5.5), (board, 6, 8.5), (board, 9, 1e9)],
+            windows: [])
+        let result = await world.run()
+        XCTAssertEqual(result, board)
+        XCTAssertEqual(world.links, [board])
+        XCTAssertTrue(world.said("keeps restarting"))
+        XCTAssertTrue(world.steps.contains(.caught(port: board)))
+    }
+
+    func testTwoAttachedBoardsThatKeepRestartingAreNeitherTaken() async {
+        let second = "/dev/cu.usbmodemC"
+        let world = World(
+            baseline: [other, (board, 0, 2.5), (board, 3, 5.5), (board, 6, 1e9),
+                       (second, 0, 2.5), (second, 3, 5.5), (second, 6, 1e9)],
+            windows: [])
+        world.limit = 20
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertTrue(world.links.isEmpty)
+        XCTAssertTrue(world.steps.contains(.severalRestarting([board, second])))
+    }
+
+    /// Refused once, never taken again for restarting: a boot-looping board of
+    /// another family would otherwise be reset every time it comes back.
+    func testARestartingBoardOfAnotherFamilyIsResetOnce() async {
+        let world = World(
+            baseline: [other, (board, 0, 2.5), (board, 3, 5.5), (board, 6, 8.5),
+                       (board, 9, 11.5), (board, 12, 14.5), (board, 15, 1e9)],
+            windows: [])
+        world.wrongChip = [board]
+        world.limit = 40
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertEqual(world.links, [board])
+    }
+
+    /// Two boards restarting out of step: whichever is up while the other is
+    /// away is still one of two, and neither is taken.
+    func testTwoBoardsRestartingOutOfStepAreNeitherTaken() async {
+        let second = "/dev/cu.usbmodemC"
+        let world = World(
+            baseline: [other, (board, 0, 2.5), (board, 3, 5.5), (board, 6, 1e9),
+                       (second, 0, 2), (second, 2.5, 4), (second, 4.5, 5.8),
+                       (second, 6.5, 1e9)],
+            windows: [])
+        world.limit = 20
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertTrue(world.links.isEmpty)
+        XCTAssertTrue(world.steps.contains(.severalRestarting([board, second])))
+    }
+
+    /// A restarting board whose write hangs is left in download mode and
+    /// restarts no more: it stays the board, is tried again, and is let go
+    /// after a few tries rather than the run stalling.
+    func testARestartTakenBoardWhoseWritesHangIsRetriedThenLetGo() async {
+        let world = World(
+            baseline: [other, (board, 0, 2.5), (board, 3, 5.5), (board, 6, 8.5), (board, 9, 1e9)],
+            windows: [])
+        world.hangsAfterConnect = [board]
+        world.limit = UsbRescue.writeTimeout * 4 + 60
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertEqual(world.links.count, UsbRescue.failuresBeforeRefusal)
+    }
+
+    /// Choosing a port that was taken for restarting starts its count again:
+    /// misses on a brief USB window do not refuse the port the person chose.
+    func testChoosingARestartTakenPortForgetsItsMisses() async {
+        var cycles: [World.Window] = [other]
+        for second in 0..<60 { cycles.append((board, Double(second), Double(second) + 0.2)) }
+        let world = World(baseline: cycles, windows: [])
+        world.adopted = { $0 >= 5.5 ? self.board : nil }
+        world.limit = 60
+        _ = await world.run()
+        XCTAssertGreaterThan(world.links.count, UsbRescue.failuresBeforeRefusal + 2)
+        XCTAssertFalse(world.said("did not write \(board)"))
+    }
+
+    /// The flash is called silent only on two blank readings in a row.
+    func testTheFlashIsSilentOnlyWhenReadBlankTwice() async {
+        func run(_ answers: [String?]) async -> (String?, Int) {
+            var left = answers
+            var reads = 0
+            let verdict = await UsbRescue.confirmedSilentFlash(
+                read: { reads += 1; return left.removeFirst() }, wait: { _ in })
+            return (verdict, reads)
+        }
+        let blankThenAnswer = await run(["manufacturer 1f, device ffff", nil])
+        XCTAssertNil(blankThenAnswer.0)
+        let blankTwice = await run(["manufacturer 1f, device ffff", "manufacturer 00, device 0000"])
+        XCTAssertEqual(blankTwice.0, "manufacturer 00, device 0000")
+        let answered = await run([nil])
+        XCTAssertNil(answered.0)
+        XCTAssertEqual(answered.1, 1, "a chip that answers is asked once")
+    }
+
+    /// Unplugged and plugged in again twice, far apart or after a long time
+    /// away: that is the person, not a board restarting, and it is not taken.
+    func testReplugsFarApartOrLongAwayAreNotRestarts() async {
+        let farApart = World(
+            baseline: [other, (board, 0, 5), (board, 7, 45), (board, 47, 1e9)], windows: [])
+        let longAway = World(
+            baseline: [other, (board, 0, 3), (board, 10, 12), (board, 19, 1e9)], windows: [])
+        for world in [farApart, longAway] {
+            world.limit = 60
+            let result = await world.run()
+            XCTAssertEqual(result, "STOPPED")
+            XCTAssertTrue(world.links.isEmpty)
+        }
+    }
+
+    /// A restarting board esptool never reaches before it drops off again is
+    /// let go after a few tries, not reset every time it is back.
+    func testARestartingPortEsptoolNeverReachesIsLetGo() async {
+        var cycles: [World.Window] = [other]
+        for second in 0..<60 { cycles.append((board, Double(second), Double(second) + 0.2)) }
+        let world = World(baseline: cycles, windows: [])
+        world.limit = 60
+        let result = await world.run()
+        XCTAssertEqual(result, "STOPPED")
+        XCTAssertEqual(world.links.count, UsbRescue.failuresBeforeRefusal)
+        XCTAssertTrue(world.said("did not write \(board)"))
+    }
+
+    /// A port is chosen: nothing else is taken, restarting or not.
+    func testARestartingPortIsNotTakenWhileAnotherIsChosen() async {
+        let world = World(
+            baseline: [other, (board, 0, 2.5), (board, 3, 5.5), (board, 6, 8.5), (board, 9, 1e9)],
+            windows: [])
+        world.adopted = { _ in "/dev/cu.usbmodemCHOSEN" }
+        world.limit = 20
+        _ = await world.run()
+        XCTAssertTrue(world.links.isEmpty)
+    }
+
+    /// Once a new port has appeared, that is the board: a restarting port
+    /// attached at Start is not taken while the new one is briefly away.
+    func testANewPortWinsOverARestartingAttachedOne() async {
+        let fresh = "/dev/cu.usbmodemNEW"
+        let world = World(
+            baseline: [other, (board, 0, 2.5), (board, 3, 5.5), (board, 6, 8.5),
+                       (board, 9, 11.5), (board, 12, 1e9)],
+            windows: [(fresh, 5.0, 5.2)])
+        world.limit = 30
+        _ = await world.run()
+        XCTAssertFalse(world.links.contains(board))
+    }
+
+    /// The board esptool reached but could not write, whose flash chip then
+    /// gives no ID: the repair stops and says so, instead of retrying and
+    /// asking whether it is the right family.
+    func testABoardWhoseFlashChipDoesNotAnswerStopsWithThatDiagnosis() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 1e9)])
+        world.alwaysFails = [board]
+        world.silentFlash = [board]
+        world.limit = 120
+        let result = await world.run()
+        XCTAssertEqual(result, "FAIL: The board's storage isn't answering")
+        XCTAssertEqual(world.links, [board], "written once, never retried")
+        XCTAssertEqual(world.probed, [board])
+        XCTAssertFalse(world.said("is it an ESP32-S3 board?"))
+    }
+
+    /// The same when the write hangs instead of failing: probed once the hung
+    /// esptool is killed, and stopped there.
+    func testAHungWriteOnASilentFlashChipStopsWithThatDiagnosis() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 1e9)])
+        world.hangsAfterConnect = [board]
+        world.silentFlash = [board]
+        world.limit = UsbRescue.writeTimeout * 3 + 60
+        let result = await world.run()
+        XCTAssertEqual(result, "FAIL: The board's storage isn't answering")
+        XCTAssertEqual(world.links, [board])
+        XCTAssertEqual(world.probed, [board])
+    }
+
+    /// A hung write on a board that then left USB: nothing to ask.
+    func testAHungWriteOnABoardThatLeftIsNotProbed() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 100), (board, 1e8, 1e9)])
+        world.hangsAfterConnect = [board]
+        world.silentFlash = [board]
+        world.limit = UsbRescue.writeTimeout + 20
+        _ = await world.run()
+        XCTAssertTrue(world.probed.isEmpty)
+    }
+
+    /// What the storage failure tells the person: plain, and pointing at power.
+    func testTheStorageFailureSaysToCheckPowerOrBattery() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 1e9)])
+        world.alwaysFails = [board]
+        world.silentFlash = [board]
+        world.limit = 60
+        do {
+            _ = try await UsbRescuer.run(
+                family: .named("s3")!, regions: Self.regions, io: world.io) { _ in }
+            XCTFail("expected the storage failure")
+        } catch let failure as WifiConfigUI.ConfigFailure {
+            XCTAssertEqual(failure.title, "The board's storage isn't answering")
+            XCTAssertTrue(failure.message.contains("Check its power or battery"))
+        } catch {
+            XCTFail("\(error)")
+        }
+    }
+
+    /// A wrong chip is not probed: esptool already said what it is.
+    func testAWrongChipIsNotProbedForItsFlash() async {
+        let world = World(baseline: [other], windows: [(board, 6.0, 1e9)])
+        world.wrongChip = [board]
+        world.limit = 30
+        _ = await world.run()
+        XCTAssertTrue(world.probed.isEmpty)
+    }
+
+    /// `flash-id` as esptool 5.3.1 printed it on a 1.75C whose flash chip
+    /// does not answer (USB serial 80:45:6B:33:AF:F0), and on a healthy board.
+    func testFlashIDNamesAFlashChipThatDoesNotAnswer() {
+        let silent = """
+            Flash Memory Information:
+            =========================
+            Manufacturer: 1f
+            Device: ffff
+            Detected flash size: Unknown
+            Flash type set in eFuse: quad (4 data lines)
+            """
+        XCTAssertEqual(EsptoolOutput.silentFlashChip(in: silent), "manufacturer 1f, device ffff")
+        XCTAssertEqual(EsptoolOutput.silentFlashChip(
+            in: "Manufacturer: 00\nDevice: 0000\nDetected flash size: Unknown\n"),
+            "manufacturer 00, device 0000")
+        XCTAssertNil(EsptoolOutput.silentFlashChip(
+            in: "Manufacturer: c8\nDevice: 4018\nDetected flash size: 16MB\n"))
+        XCTAssertNil(EsptoolOutput.silentFlashChip(in: "A fatal error occurred: could not open port"))
+        XCTAssertNil(EsptoolOutput.silentFlashChip(
+            in: "Manufacturer: 1f\nDevice: ffff\nDetected flash size: 16MB\n"),
+            "a size esptool made out means a part answered")
+    }
+
+    /// The same board with its shorted battery taken out.
+    func testFlashIDOfTheSameBoardWithItsBatteryOutIsNotSilent() {
+        XCTAssertNil(EsptoolOutput.silentFlashChip(
+            in: "Manufacturer: c8\nDevice: 4019\nDetected flash size: 32MB\n"))
+    }
+
+    // MARK: - a board in flashing mode
+
+    func testAFlashingModeBoardIsNamedPlainlyAndOfferedARestart() {
+        let outcome = UsbBoardCheck.flashingMode(
+            path: board, nothingDone: "nothing was read or written")
+        XCTAssertEqual(outcome.title, "The board is in flashing mode")
+        XCTAssertEqual(outcome.restartPort, board)
+        XCTAssertTrue(outcome.message.contains("Restart it"))
+        for text in [outcome.title, outcome.message] {
+            XCTAssertNil(text.range(of: "CFG|display_stream", options: .regularExpression), text)
+        }
+    }
+
+    /// What the footer shows under either failure: never an unplug, which does
+    /// not restart a board on a battery.
+    func testTheBoardCheckFailuresNeverAskForAReplug() {
+        for outcome in [
+            UsbBoardCheck.flashingMode(path: board, nothingDone: "nothing was written"),
+            UsbBoardCheck.unanswered(path: board, reason: "timeout", nothingDone: "nothing was written"),
+            OperationOutcome.failure("Some other check", "It failed."),
+        ] {
+            var session = UsbFlashSession(flow: .update)
+            session.fail(title: outcome.title, message: outcome.message,
+                         nextAction: outcome.nextAction, at: 1)
+            let next = session.failure?.nextAction ?? ""
+            XCTAssertFalse(next.isEmpty)
+            XCTAssertNil(next.range(of: "unplug|plug it", options: [.regularExpression, .caseInsensitive]),
+                         next)
+        }
+    }
+
+    func testAnUnansweredBoardNamesNoFirmwareCommands() {
+        let outcome = UsbBoardCheck.unanswered(
+            path: board, reason: "no response from the device (is display_stream flashed?)",
+            nothingDone: "nothing was written")
+        XCTAssertNil(outcome.restartPort)
+        XCTAssertTrue(outcome.message.contains("did not answer (no response from the device)"))
+        XCTAssertNil(outcome.message.range(of: "CFG|display_stream", options: .regularExpression))
+        XCTAssertFalse(UsbBoardCheck.unanswered(
+            path: board, reason: "CFGERR busy", nothingDone: "x").message.contains("CFG"))
+    }
+
+    func testFlashingModeIsAConnectToTheExpectedBoard() {
+        let connected = "Connecting...\nConnected to ESP32-S3 on \(board):\nMAC:                80:45:6b:33:af:f0\n"
+        XCTAssertTrue(UsbBoardCheck.isInFlashingMode(
+            .init(exitCode: 0, output: connected), expectedID: "80:45:6B:33:AF:F0"))
+        XCTAssertFalse(UsbBoardCheck.isInFlashingMode(
+            .init(exitCode: 0, output: connected), expectedID: "7C:0C:5F:42:39:A4"),
+            "another board in download mode is not this one")
+        XCTAssertFalse(UsbBoardCheck.isInFlashingMode(
+            .init(exitCode: 2, output: "A fatal error occurred: Failed to connect"),
+            expectedID: "80:45:6B:33:AF:F0"))
     }
 
     // MARK: - one physical action

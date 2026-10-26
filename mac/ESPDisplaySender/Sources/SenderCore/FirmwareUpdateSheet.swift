@@ -376,6 +376,8 @@ struct FirmwareUpdateSheet: View {
     /// A sheet-owned failure appears immediately above the action bar. Routing
     /// this through the manager window's alert defers it behind this sheet.
     @State private var updateFailure: OperationOutcome?
+    /// A restart out of flashing mode is running; the sheet's USB actions wait.
+    @State private var isRestartingBoard = false
     @State private var isPushing = false
     @State private var sheetIsVisible = false
     /// Showing the repair flow in place of the form, for this display's board
@@ -540,7 +542,7 @@ struct FirmwareUpdateSheet: View {
     }
 
     private func refreshUSBDevice() {
-        guard !isPushing, !isRefreshingUSBDevices else { return }
+        guard !isPushing, !isRefreshingUSBDevices, !isRestartingBoard else { return }
         isRefreshingUSBDevices = true
         updateFailure = nil
         manager.refreshUSBDevices()
@@ -826,6 +828,21 @@ struct FirmwareUpdateSheet: View {
 
     private var actionButtons: some View {
         HStack(spacing: 10) {
+            if !isPushing, let port = updateFailure?.restartPort {
+                RestartFromFlashingModeButton(
+                    manager: manager, port: port, hardwareID: target.hardwareID,
+                    expectedGeneration: target.usbPathGeneration,
+                    isRestarting: $isRestartingBoard
+                ) { outcome in
+                    usbFlash.reset()
+                    updateFailure = outcome.kind == .success ? nil : outcome
+                    if outcome.kind == .success {
+                        manager.presentOperationOutcome(outcome)
+                        // The restart renumbers the board's USB device.
+                        refreshUSBDevice()
+                    }
+                }
+            }
             Spacer()
             Button(dismissTitle, role: .cancel) { dismiss() }
                 .keyboardShortcut(.cancelAction)
@@ -930,7 +947,9 @@ struct FirmwareUpdateSheet: View {
     }
 
     private var canBeginPush: Bool {
-        guard !isPushing, !isRefreshingUSBDevices, let bundle else { return false }
+        guard !isPushing, !isRefreshingUSBDevices, !isRestartingBoard, let bundle else {
+            return false
+        }
         switch selectedTransport {
         case .wifi:
             return plan(bundle).canPush && !password.isEmpty

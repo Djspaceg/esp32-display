@@ -37,6 +37,78 @@ public enum UsbRescue {
     /// that never connects is: a board of another family fails at once, every
     /// time, and relaunching resets it every few seconds for nothing.
     public static let failuresBeforeRefusal = 3
+    /// How often a port attached at Start must leave USB and come back, each
+    /// time briefly and all within `restartWindow`, before it is taken as the
+    /// board with nothing chosen: a board that cannot boot restarts every few
+    /// seconds, and a board unplugged and plugged in once, or reset once,
+    /// comes back only once.
+    public static let returnsToTake = 2
+    /// The returns that count are the ones in the last this many seconds.
+    public static let restartWindow = 30.0
+    /// A return after a longer absence than this is a replug, not a restart.
+    public static let restartAbsenceLimit = 5.0
+    /// The repair failure for a board whose flash storage gives no ID, and
+    /// what to do about it.
+    public static let storageFailureTitle = "The board's storage isn't answering"
+    public static let storageFailureNextAction = "Check the board's power or battery, "
+        + "then press Start again. Nothing was written."
+    /// How long the read-only `flash-id` after a failed write may take.
+    public static let flashProbeTimeout = 30.0
+    /// The second `flash-id` waits this long: a flash still busy with an
+    /// erase esptool was killed during reads blank for a moment too.
+    public static let flashProbeRepeatDelay = 1.5
+
+    /// The flash is taken as silent only when two readings
+    /// `flashProbeRepeatDelay` apart are both blank; `read` returns
+    /// `EsptoolOutput.silentFlashChip`'s answer, nil when a chip answered or
+    /// nothing could be read. The second reading's words are the ones kept.
+    public static func confirmedSilentFlash(
+        read: () async -> String?, wait: (Double) async -> Void
+    ) async -> String? {
+        guard await read() != nil else { return nil }
+        await wait(flashProbeRepeatDelay)
+        return await read()
+    }
+
+    /// Which ports attached at Start keep restarting, from the /dev listing
+    /// alone: `observe` every pass, then `restarting`.
+    public struct RestartWatch: Equatable, Sendable {
+        private var awaySince: [String: Double] = [:]
+        private var returns: [String: [Double]] = [:]
+
+        public init() {}
+
+        public mutating func observe(
+            baseline: Set<String>, present: Set<String>, now: Double
+        ) {
+            for port in baseline {
+                if !present.contains(port) {
+                    if awaySince[port] == nil { awaySince[port] = now }
+                } else if let since = awaySince.removeValue(forKey: port) {
+                    returns[port] = now - since <= UsbRescue.restartAbsenceLimit
+                        ? (returns[port] ?? []).filter { now - $0 <= UsbRescue.restartWindow }
+                            + [now]
+                        : []
+                }
+            }
+        }
+
+        /// The ports that came back `returnsToTake` times within
+        /// `restartWindow` of `now`, attached at the moment or not.
+        public func restarting(now: Double) -> Set<String> {
+            returning(atLeast: UsbRescue.returnsToTake, now: now)
+        }
+
+        /// The ports that came back briefly at least `count` times within
+        /// `restartWindow` of `now`. With `count` 1, every port that is coming
+        /// and going at all: a second board restarting out of step with the
+        /// first has always come back once by the time the first counts.
+        public func returning(atLeast count: Int, now: Double) -> Set<String> {
+            Set(returns.filter { _, times in
+                times.filter { now - $0 <= UsbRescue.restartWindow }.count >= count
+            }.keys)
+        }
+    }
     /// How long esptool may take once it has said "Connected to". The rescue
     /// image is under half a megabyte, written in seconds even at 460800 baud.
     public static let writeTimeout = 120.0
@@ -375,6 +447,8 @@ public enum UsbRescueStep: Equatable, Sendable {
     case couldNotConnect(port: String, family: String)
     /// More than one new port appeared; none is touched.
     case tooManyPorts([String])
+    /// More than one port attached at Start keeps restarting; none is touched.
+    case severalRestarting([String])
     /// The rescue image is written and running on this port.
     case rescued(port: String)
     /// The rescue image has been asked what board it is on.
@@ -396,6 +470,8 @@ public enum UsbRescueStep: Equatable, Sendable {
             return "Could not reach the board"
         case .tooManyPorts:
             return "More than one new USB device appeared"
+        case .severalRestarting:
+            return "More than one device keeps restarting"
         case .rescued, .readingBoard:
             return "Rescue firmware is on"
         }
@@ -405,7 +481,7 @@ public enum UsbRescueStep: Equatable, Sendable {
     public var activity: String {
         switch self {
         case .startingEsptool: return "Starting esptool"
-        case .plugIn, .missed, .seenWhileStarting, .tooManyPorts:
+        case .plugIn, .missed, .seenWhileStarting, .tooManyPorts, .severalRestarting:
             return "Waiting for the board"
         case .caught: return "Resetting the board into download mode"
         case .couldNotConnect: return "Connecting to the board"
@@ -435,6 +511,10 @@ public enum UsbRescueStep: Equatable, Sendable {
                 + "an ESP32-\(family.uppercased()) board?"
         case .tooManyPorts(let ports):
             return "\(ports.count) new USB serial devices appeared "
+                + "(\(ports.joined(separator: ", "))); none of them is touched. Choose "
+                + "the board's port to go on."
+        case .severalRestarting(let ports):
+            return "\(ports.count) USB devices attached at Start keep restarting "
                 + "(\(ports.joined(separator: ", "))); none of them is touched. Choose "
                 + "the board's port to go on."
         case .rescued(let port):

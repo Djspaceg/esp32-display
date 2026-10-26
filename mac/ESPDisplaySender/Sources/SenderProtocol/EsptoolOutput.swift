@@ -102,6 +102,34 @@ public enum EsptoolOutput {
         return megabytes * 0x100000
     }
 
+    /// What `flash-id` read when no flash chip answered it, as
+    /// "manufacturer 1f, device ffff", or nil when a chip gave its ID or
+    /// esptool printed none.
+    ///
+    /// A device ID of all ones or all zeros is not a part number: it is the
+    /// data line read back with nothing driving it. Measured on a 1.75C whose
+    /// shorted battery starved its flash (USB serial 80:45:6B:33:AF:F0):
+    /// `Manufacturer: 1f`, `Device: ffff`, `Detected flash size: Unknown`, its
+    /// status register reading 0x1f so its busy bit never cleared and every
+    /// erase hung there. With the battery out it read c8/4019, 32MB.
+    public static func silentFlashChip(in output: String) -> String? {
+        func last(_ label: String) -> String? {
+            guard let regex = try? NSRegularExpression(
+                pattern: "^[ \\t]*\(label):[ \\t]*([0-9a-fA-F]+)[ \\t\\r]*$",
+                options: .anchorsMatchLines)
+            else { return nil }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            guard let match = regex.matches(in: output, range: range).last,
+                  let valueRange = Range(match.range(at: 1), in: output)
+            else { return nil }
+            return output[valueRange].lowercased()
+        }
+        guard let device = last("Device"), device == "ffff" || device == "0000" else { return nil }
+        // A size esptool did make out means a part answered after all.
+        guard detectedFlashBytes(in: output) == nil else { return nil }
+        return "manufacturer \(last("Manufacturer") ?? "?"), device \(device)"
+    }
+
     // MARK: - progress
 
     /// A percentage esptool put in a line, 0...100, or nil.

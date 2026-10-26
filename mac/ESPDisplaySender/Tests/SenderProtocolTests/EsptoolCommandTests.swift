@@ -390,6 +390,29 @@ final class EsptoolCommandTests: XCTestCase {
         ])
     }
 
+    /// The flashing-mode check: no reset either side, options before the
+    /// subcommand where esptool reads them.
+    func testChipIDCanLeaveTheChipAsItIs() throws {
+        let command = try EsptoolCommand.chipID(
+            tool: tool, port: port, connectAttempts: 1,
+            before: EsptoolCommand.noReset, after: EsptoolCommand.noReset)
+        XCTAssertEqual(command.arguments, [
+            "--port", port, "--connect-attempts", "1",
+            "--before", "no-reset", "--after", "no-reset", "chip-id",
+        ])
+    }
+
+    /// The repair's flash probe must not boot the board out of download mode.
+    func testFlashIDCanSkipTheHardResetAfter() throws {
+        let command = try EsptoolCommand.flashID(
+            tool: tool, chip: "esp32s3", port: port, after: EsptoolCommand.noReset)
+        let after = command.arguments.firstIndex(of: "--after").map { command.arguments[$0 + 1] }
+        XCTAssertEqual(after, "no-reset")
+        XCTAssertEqual(command.arguments.last, "flash-id")
+        let normal = try EsptoolCommand.flashID(tool: tool, chip: "esp32s3", port: port)
+        XCTAssertTrue(normal.arguments.contains("hard-reset"))
+    }
+
     // MARK: - a 4.x esptool.py
 
     /// UNVERIFIED against a real 4.x install; what is asserted is the shape, which

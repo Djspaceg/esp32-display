@@ -364,17 +364,17 @@ extension PanelManager {
         var message: String {
             switch self {
             case .missingChip(let expected):
-                return "CFGSHOW did not report a chip; this bundle requires \(expected)."
+                return "The board did not report its chip; this bundle requires \(expected)."
             case .chipMismatch(let reported, let expected):
-                return "CFGSHOW reported chip \(reported), but this bundle requires \(expected)."
+                return "The board reported chip \(reported), but this bundle requires \(expected)."
             case .missingProfile(let accepted):
-                return "CFGSHOW did not report a board profile; this bundle accepts "
+                return "The board did not report its board profile; this bundle accepts "
                     + "\(accepted.joined(separator: ", "))."
             case .profileMismatch(let reported, let accepted):
-                return "CFGSHOW reported board profile \(reported), but this bundle accepts "
+                return "The board reported board profile \(reported), but this bundle accepts "
                     + "\(accepted.joined(separator: ", "))."
             case .missingPartition:
-                return "CFGSHOW did not report the board's partition layout."
+                return "The board did not report its partition layout."
             case .bundlePartitionMissing:
                 return "The selected current-family image does not declare its required "
                     + "partition layout."
@@ -473,9 +473,9 @@ extension PanelManager {
         var cfgPartition: String?
         switch await probeUSBDevice(path, timeout: 3) {
         case .unavailable(let reason):
-            return .failure(
-                "Could not verify the board over USB",
-                "CFGSHOW did not verify \(path): \(reason)")
+            return await explainUnansweredBoard(
+                path: path, expectedID: expectedID, reason: reason,
+                nothingDone: "nothing was written")
         case .identified(let identity):
             let reportedID = ConfigCommands.canonicalHardwareID(identity.hardwareID)
             guard reportedID == expectedID
@@ -496,7 +496,7 @@ extension PanelManager {
                 return .failure(
                     "USB target mismatch",
                     "Over the network, the device reports target \(liveTarget), but "
-                        + "CFGSHOW now reports \(reportedTarget). Nothing was written.")
+                        + "over USB it now reports \(reportedTarget). Nothing was written.")
             }
         }
         if let exactTarget = cfgTarget ?? target.target,
@@ -511,7 +511,7 @@ extension PanelManager {
            ) {
             print(
                 "USB firmware compatibility probe incomplete: "
-                    + "\(firstIssue.message) Retrying CFGSHOW.")
+                    + "\(firstIssue.message) Asking the board again.")
             switch await probeUSBDevice(path, timeout: 3) {
             case .unavailable(let reason):
                 print("USB firmware compatibility retry failed: \(reason)")
@@ -531,7 +531,7 @@ extension PanelManager {
                     return .failure(
                         "USB target mismatch",
                         "Over the network, the device reports target \(liveTarget), but "
-                            + "CFGSHOW now reports \(reportedTarget). Nothing was written.")
+                            + "over USB it now reports \(reportedTarget). Nothing was written.")
                 }
                 cfgTarget = identity.target
                 cfgBoard = identity.board
@@ -583,7 +583,7 @@ extension PanelManager {
            !Self.physicalBoard(physicalBoard, isCompatibleWith: reportedTarget) {
             return .failure(
                 "USB board profile mismatch",
-                "CFGSHOW reports physical board \(physicalBoard) with target "
+                "The board reports physical board \(physicalBoard) with target "
                     + "\(reportedTarget), which is not a supported composition. "
                     + "Nothing was written.")
         }
@@ -600,7 +600,7 @@ extension PanelManager {
         guard let exactTarget else {
             return .failure(
                 "Firmware family unavailable",
-                "CFGSHOW did not report a firmware family, so nothing was written.")
+                "The board did not report a firmware family, so nothing was written.")
         }
         guard let selectedImage = bundle.image(forTarget: exactTarget) else {
             return .failure(
@@ -679,7 +679,7 @@ extension PanelManager {
             return .failure(
                 "Written, but the board did not answer",
                 "\(bundle.firmwareVersion) was written to \(target.displayName), "
-                    + "but the board did not answer CFGSHOW with its hardware ID "
+                    + "but the board did not answer over USB with its hardware ID "
                     + "within \(Int(SerialSettlePolicy.budgetSeconds)) seconds of "
                     + "restarting.")
         }

@@ -59,7 +59,8 @@ struct GamesDataRow: View {
 struct GameDataSheet: View {
     @ObservedObject var manager: PanelManager
     @Environment(\.dismiss) private var dismiss
-    let target: PanelManager.FirmwareUpdateTarget
+    /// Resolved again after a restart, which renumbers the board's USB device.
+    @State private var target: PanelManager.FirmwareUpdateTarget
     let quakeOffered: Bool
     private let cache: GameDataCache?
 
@@ -78,6 +79,9 @@ struct GameDataSheet: View {
     @State private var confirmWrite = false
     @State private var isWriting = false
     @State private var writeFailure: OperationOutcome?
+    /// The port of a board the last read or write found in flashing mode.
+    @State private var restartPort: String?
+    @State private var isRestartingBoard = false
     @State private var sheetIsVisible = false
     @StateObject private var usbFlash = UsbFlashMonitor(flow: .update)
 
@@ -87,16 +91,19 @@ struct GameDataSheet: View {
         manager: PanelManager, target: PanelManager.FirmwareUpdateTarget,
         quakeOffered: Bool, cache: GameDataCache? = .standard,
         selection: GameDataSelection? = nil,
-        board: (area: GameStore.Area, contents: GameStore.Contents)? = nil
+        board: (area: GameStore.Area, contents: GameStore.Contents)? = nil,
+        failure: OperationOutcome? = nil
     ) {
         self.manager = manager
-        self.target = target
+        _target = State(initialValue: target)
         self.quakeOffered = quakeOffered
         self.cache = cache
         var initial = selection ?? GameDataSelection(quakeOffered: quakeOffered)
         if let board { initial.noteBoard(board.contents) }
         _selection = State(initialValue: initial)
         _board = State(initialValue: board)
+        _writeFailure = State(initialValue: failure)
+        _restartPort = State(initialValue: failure?.restartPort)
     }
 
     var body: some View {
@@ -375,6 +382,25 @@ struct GameDataSheet: View {
     private var actionBar: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
+                if !isBusy || isRestartingBoard, let port = restartPort {
+                    RestartFromFlashingModeButton(
+                        manager: manager, port: port, hardwareID: target.hardwareID,
+                        expectedGeneration: target.usbPathGeneration,
+                        isRestarting: Binding(
+                            get: { isRestartingBoard },
+                            set: { isRestartingBoard = $0; isBusy = $0 })
+                    ) { outcome in
+                        restartPort = nil
+                        boardFailure = nil
+                        usbFlash.reset()
+                        if case .ready(let refreshed) = manager.gameDataReadiness(
+                            target.serviceName) {
+                            target = refreshed
+                        }
+                        writeFailure = outcome.kind == .success ? nil : outcome
+                        if outcome.kind == .success { manager.presentOperationOutcome(outcome) }
+                    }
+                }
                 Spacer()
                 Button(isWriting ? "Close" : "Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -512,6 +538,7 @@ struct GameDataSheet: View {
         isBusy = true
         isReadingBoard = true
         boardFailure = nil
+        restartPort = nil
         usbFlash.reset()
         let monitor = usbFlash
         Task {
@@ -526,6 +553,7 @@ struct GameDataSheet: View {
                 selection.noteBoard(read.contents)
             case .stop(let outcome):
                 boardFailure = outcome.title + ": " + outcome.message
+                restartPort = outcome.restartPort
             }
         }
     }
@@ -534,6 +562,7 @@ struct GameDataSheet: View {
         isBusy = true
         isWriting = true
         writeFailure = nil
+        restartPort = nil
         usbFlash.reset()
         let monitor = usbFlash
         let chosen = selection
@@ -542,6 +571,7 @@ struct GameDataSheet: View {
             let outcome = await manager.writeGameDataOverUSB(chosen, to: target) { update in
                 monitor.record(update)
             }
+            restartPort = outcome.restartPort
             if outcome.kind == .failure {
                 monitor.fail(outcome)
                 // The write may have changed the board before it stopped, so
