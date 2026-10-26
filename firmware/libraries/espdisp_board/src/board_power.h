@@ -193,20 +193,13 @@ inline bool beginBus(const board::Config &cfg) {
 /// enabling it (LilyGoWatch2022::initPMU, setVoltage(CH_ALDO2/CH_ALDO3,
 /// 3300)); this firmware never sets another value.
 static const uint16_t PMU_PANEL_RAIL_MILLIVOLTS = 3300;
-// LDO_ONOFF_CTRL0: bits 0-3 switch ALDO1-ALDO4. ALDO1-ALDO4 voltage live in
-// 92H-95H, bits 4:0 = (millivolts - 500) / 100, bits 7:5 reserved and kept.
-// XPowersLib AXP2101Constants.h (LDO_ONOFF_CTRL0, LDO_VOL0..3_CTRL) and
-// setALDO2Voltage/enableALDO2:
-// https://github.com/lewisxhe/XPowersLib/blob/d6997586e68f65afd51baa775903df930db39821/src/REG/AXP2101Constants.h#L117-L122
-// https://github.com/lewisxhe/XPowersLib/blob/d6997586e68f65afd51baa775903df930db39821/src/XPowersAXP2101.hpp#L1810-L1892
+// LDO_ONOFF_CTRL0 (90H) and the ALDO1-ALDO4 voltage registers (92H-95H);
+// their bit layout and the value arithmetic are in axp2101_status.h.
 static const uint8_t REG_LDO_ONOFF_CTRL0 = 0x90;
 static const uint8_t REG_ALDO1_VOLTAGE = 0x92;
 static const uint8_t ALDO_COUNT = 4;
-static const uint8_t ALDO_VOLTAGE_MASK = 0x1F;
-
-constexpr uint8_t aldoVoltageCode(uint16_t millivolts) {
-  return (uint8_t)((millivolts - 500) / 100);
-}
+static_assert(axp2101::aldoVoltageCode(PMU_PANEL_RAIL_MILLIVOLTS) == 0x1C,
+              "LilyGO's 3300 mV is ALDO code 0x1C");
 
 /// Raise the AXP2101 ALDOs a carrier's panel hangs off (cfg.pmuPanelAldoMask)
 /// before the panel bus starts: each is set to PMU_PANEL_RAIL_MILLIVOLTS when
@@ -233,8 +226,8 @@ inline bool enablePanelRails(const board::Config &cfg, bool verbose = true) {
     }
     return false;
   }
-  const uint8_t mask = (uint8_t)(cfg.pmuPanelAldoMask & 0x0F);
-  const uint8_t code = aldoVoltageCode(PMU_PANEL_RAIL_MILLIVOLTS);
+  const uint8_t mask =
+      (uint8_t)(cfg.pmuPanelAldoMask & axp2101::ALDO_ONOFF_MASK);
   uint8_t onoff = 0;
   if (!readRegister(REG_LDO_ONOFF_CTRL0, onoff)) {
     if (verbose) {
@@ -247,23 +240,24 @@ inline bool enablePanelRails(const board::Config &cfg, bool verbose = true) {
     if ((mask & (1u << i)) == 0) continue;
     uint8_t voltage = 0;
     if (!readRegister((uint8_t)(REG_ALDO1_VOLTAGE + i), voltage)) return false;
-    if ((voltage & ALDO_VOLTAGE_MASK) == code) continue;
-    const uint8_t set = (uint8_t)((voltage & ~ALDO_VOLTAGE_MASK) | code);
+    const uint8_t set =
+        axp2101::aldoVoltageWrite(voltage, PMU_PANEL_RAIL_MILLIVOLTS);
+    if (set == voltage) continue;
     if (!writeRegister((uint8_t)(REG_ALDO1_VOLTAGE + i), set)) return false;
     if (verbose) {
-      Serial.printf("power: AXP2101 ALDO%u %u mV -> %u mV\n", i + 1,
-                    (unsigned)((voltage & ALDO_VOLTAGE_MASK) * 100 + 500),
+      Serial.printf("power: AXP2101 ALDO%u %d mV -> %u mV\n",
+                    (unsigned)(i + 1), axp2101::aldoMillivolts(voltage),
                     (unsigned)PMU_PANEL_RAIL_MILLIVOLTS);
     }
   }
   const bool wereOn = (onoff & mask) == mask;
-  if (!wereOn &&
-      !writeRegister(REG_LDO_ONOFF_CTRL0, (uint8_t)(onoff | mask))) {
+  if (!wereOn && !writeRegister(REG_LDO_ONOFF_CTRL0,
+                                axp2101::aldoEnableWrite(onoff, mask))) {
     return false;
   }
   if (verbose) {
     Serial.printf("power: AXP2101 panel ALDOs 0x%X at %u mV, %s (90H=0x%02X)\n",
-                  mask, (unsigned)PMU_PANEL_RAIL_MILLIVOLTS,
+                  (unsigned)mask, (unsigned)PMU_PANEL_RAIL_MILLIVOLTS,
                   wereOn ? "already on" : "switched on", onoff);
   }
   if (!wereOn) delay(120);

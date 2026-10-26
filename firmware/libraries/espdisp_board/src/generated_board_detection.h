@@ -24,8 +24,8 @@ static constexpr FamilyDetectionPlan GENERATED_C6_DETECTION = {
 static constexpr I2cProbePlan GENERATED_S3_PROBES[] = {
     {0, 8388608, 42, 41, 100000, 0, 0, {0x18, 0x40, 0x00, 0x00}, 2, -1, 0, 0, ProbeRelease::Always, false},
     {8388608, 0, 11, 10, 100000, 0, 0, {0x15, 0x20, 0x00, 0x00}, 2, -1, 0, 0, ProbeRelease::Always, false},
-    {8388608, 0, 10, 11, 100000, 0, 0, {0x34, 0x19, 0x51, 0x00}, 3, -1, 0, 0, ProbeRelease::Always, false},
     {8388608, 0, 15, 14, 100000, 0, 0, {0x5A, 0x34, 0x6A, 0x6B}, 4, -1, 0, 0, ProbeRelease::Always, true},
+    {8388608, 0, 10, 11, 100000, 0, 0, {0x34, 0x19, 0x51, 0x00}, 3, -1, 0, 0, ProbeRelease::Always, false},
     {8388608, 0, 42, 41, 100000, 0, 0, {0x15, 0x6A, 0x6B, 0x00}, 3, -1, 0, 0, ProbeRelease::Always, false},
     {8388608, 0, 47, 48, 100000, 0, 0, {0x6B, 0x00, 0x00, 0x00}, 1, -1, 0, 0, ProbeRelease::Always, false},
     {8388608, 0, 6, 7, 100000, 0, 0, {0x15, 0x00, 0x00, 0x00}, 1, 1, 20, 300, ProbeRelease::Always, true},
@@ -34,8 +34,8 @@ static constexpr int8_t GENERATED_S3_SENSE_PINS[] = {4};
 static constexpr CandidateRule GENERATED_S3_CANDIDATES[] = {
     {5, CandidateMatch::I2cAnyAck, 0, 0, 8388608},
     {4, CandidateMatch::I2cAnyAck, 1, 8388608, 0},
-    {15, CandidateMatch::I2cAnyAck, 2, 8388608, 0},
-    {3, CandidateMatch::I2cAnyAck, 3, 8388608, 0},
+    {3, CandidateMatch::I2cAnyAck, 2, 8388608, 0},
+    {15, CandidateMatch::I2cAnyAck, 3, 8388608, 0},
     {6, CandidateMatch::I2cAnyAck, 4, 8388608, 0},
     {8, CandidateMatch::I2cAnyAck, 5, 8388608, 0, 0, 0, 150},
     {10, CandidateMatch::I2cAnyAck, 5, 8388608, 0, 0, 250, 0},

@@ -996,10 +996,10 @@ inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
                                   bool twatchBus = false) {
   // Generated probe order: the 0.85's 8 MiB codec bus first, then the 1.85C
   // bus before the 1.75C's, because the 1.75C's SDA is the 1.85C V2's
-  // amplifier enable, with the T-Watch-S3's main bus between them so its own
-  // answer quiets the later probes on its pins. The answers go through the
-  // same probe loop the device runs, so its skip rules apply here too.
-  const bool answers[] = {codec085Bus, st77916Bus, twatchBus, co5300Bus,
+  // amplifier enable, then the T-Watch-S3's main bus, after both buses it
+  // shares pins with. The answers go through the same probe loop the device
+  // runs, so its skip rules apply here too.
+  const bool answers[] = {codec085Bus, st77916Bus, co5300Bus, twatchBus,
                           st7789Bus, qmi8658Bus47_48, knob128Bus};
   const auto &plan = detectionPlanForPlatform(Platform::Esp32S3);
   boarddetectmodel::ProbeEvidence evidence[GENERATED_MAX_PROBE_COUNT] = {};

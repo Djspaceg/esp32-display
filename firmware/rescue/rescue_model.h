@@ -354,13 +354,16 @@ inline Screen layout(int width, int height, bool round, const char *name,
     int nameScale = titleScale / 2 > 1 ? titleScale / 2 : 1;
     uint8_t nameCount = MAX_NAME_LINES + 1;
     // The profile token shares the name's scale and is never wrapped, so the
-    // scale must fit it on one line too (st7789-twatch at 3x is wider than
-    // 240-pixel glass).
+    // scale must also keep it inside the glass (st7789-twatch at 3x is wider
+    // than 240-pixel glass). Inside the border, not the name's box: on round
+    // glass the box is narrower than the line the token sits on, and every
+    // existing layout keeps its scale.
     for (; nameScale >= 1; --nameScale) {
       nameCount = wrap(name, (uint8_t)((boxW + nameScale) / (6 * nameScale)),
                        nameLines);
       if (nameCount <= MAX_NAME_LINES &&
-          (nameScale == 1 || textWidth(strlen(profile), nameScale) <= boxW)) {
+          (nameScale == 1 || textWidth(strlen(profile), nameScale) <=
+                                 width - 2 * screen.border)) {
         break;
       }
     }

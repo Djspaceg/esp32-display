@@ -113,8 +113,12 @@ window_follows_mirror = true
 # Backlight GPIO45, LEDC PWM ([L] LilyGoDispInterface.cpp#L692-L709), into
 # the base of NPN Q14 with a 10K pull-down, so active high ([S]). BOOT is
 # GPIO0 (switch S1, 10K pull-up, [S]; [W] "POWER ... + BOOT (built-in)").
-# The crown is the AXP2101 PWR key, which this firmware reads as the PWR
-# key input. No addressable LED.
+# LilyGO says only later batches bring BOOT out on the back cover ("The
+# version with BOOT button and RST on the back cover", [L]
+# LilyGoWatchS3.cpp#L507-L513); on an earlier one GPIO0 just reads high
+# through the pull-up, so declaring it drives nothing, and the BOOT actions
+# (Doom's menu among them) have no key there. The crown is the AXP2101 PWR
+# key, which this firmware reads as the PWR key input. No addressable LED.
 [carrier]
 pin_sclk = 18
 pin_mosi = 13
@@ -191,7 +195,11 @@ inverted = false
 # used (the PWR key is polled). Rails ([L] LilyGoWatchS3.cpp#L446-L466 and
 # [S]): DC1 the ESP32-S3 and the main-bus sensors; ALDO2 the backlight LED
 # anode (LCD_VDD); ALDO3 the panel logic, the FT6336U and its pull-ups;
-# ALDO4 the radio; BLDO2 the DRV2605 enable; DLDO1 the speaker amplifier.
+# ALDO4 the radio; BLDO2 the DRV2605 enable. LilyGoLib's own table calls
+# DLDO1 "Unused" and initPMU switches it off (#L529), but its audio path
+# switches DLDO1 on for the speaker (#L711-L716), and [T] enables it as
+# "Speaker" ([T] LilyGoLib.cpp#L441); [S] shows it as SPK_VDD, the
+# MAX98357A's supply.
 # LilyGO sets ALDO2 and ALDO3 to 3300 mV and enables them
 # (LilyGoWatchS3.cpp#L493-L498); panel bring-up does exactly that and touches
 # no other rail. LilyGO sets the VBUS input limit to 900 mA (#L487), so the
@@ -217,7 +225,7 @@ tx = -1
 
 [audio]
 # A MAX98357A I2S amplifier (BCLK GPIO48, LRCK GPIO15, DOUT GPIO46; no
-# enable GPIO, powered from DLDO1) and an SPM1423 PDM microphone (CLK GPIO44,
+# enable GPIO, powered from DLDO1, see [power]) and an SPM1423 PDM microphone (CLK GPIO44,
 # DATA GPIO47, 16 kHz) ([T] utilities.h#L147-L164; [S]). This firmware's
 # audio backend drives ES8311/ES7210 codecs only, so no audio is declared and
 # DLDO1 stays as LilyGO left it.
@@ -255,12 +263,15 @@ macros = []
 # (0x51) run from the PMU's DC1, so they answer with every ALDO off. No other
 # S3 carrier puts a device on SDA GPIO10 / SCL GPIO11 (the 1.85C's bus is
 # those pins the other way round, SDA GPIO11 / SCL GPIO10, which its own
-# earlier probe already drives on every board). Ordered right after the
-# 1.85C and before the 1.75C and the knob, so once the watch answers, the
-# quiet probes that would pull up its GPIO14/15 and pulse its GPIO1 are
-# skipped.
+# earlier probe already drives on every board). Ordered after the 1.85C's
+# and the 1.75C's own buses, so a stray acknowledgement here on either of
+# those boards makes two candidates (Unknown) rather than skipping their
+# probe and taking them for the watch; and before the knob's, whose rail
+# pulse on GPIO1 (the watch's radio MOSI) is then skipped on the watch. On
+# the watch the 1.75C's quiet probe still runs, as it did on 2.0.0: its SCL
+# (GPIO14, the IMU interrupt) reads low and the bus is discarded.
 [detection]
-order = 17
+order = 25
 resolution = "exactly_one"
 no_match = "unknown"
 kind = "i2c_any_ack"

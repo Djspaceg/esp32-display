@@ -103,6 +103,42 @@ inline uint8_t raisedInputLimit(uint8_t reg16, int targetMilliamps = 1500) {
   return (uint8_t)((reg16 & (uint8_t)~INPUT_LIMIT_MASK) | target);
 }
 
+// REG 92H-95H: ALDO1-ALDO4 output voltage, bits 4:0 = (mV - 500) / 100, bits
+// 7:5 reserved. REG 90H (LDO_ONOFF_CTRL0): bits 0-3 switch ALDO1-ALDO4.
+// XPowersLib AXP2101Constants.h and setALDO2Voltage/enableALDO2:
+// https://github.com/lewisxhe/XPowersLib/blob/d6997586e68f65afd51baa775903df930db39821/src/REG/AXP2101Constants.h#L117-L122
+// https://github.com/lewisxhe/XPowersLib/blob/d6997586e68f65afd51baa775903df930db39821/src/XPowersAXP2101.hpp#L1810-L1892
+static const uint8_t ALDO_VOLTAGE_MASK = 0x1F;
+static const uint8_t ALDO_ONOFF_MASK = 0x0F;
+
+/// The 92H-95H code for a millivolt value; 0xFF outside ALDO's 500-3500 mV
+/// in 100 mV steps, so a caller can never write a voltage it did not mean.
+constexpr uint8_t aldoVoltageCode(int millivolts) {
+  return millivolts < 500 || millivolts > 3500 || millivolts % 100 != 0
+             ? 0xFF
+             : (uint8_t)((millivolts - 500) / 100);
+}
+
+/// The millivolts a 92H-95H value sets.
+constexpr int aldoMillivolts(uint8_t reg) {
+  return (reg & ALDO_VOLTAGE_MASK) * 100 + 500;
+}
+
+/// A 92H-95H value set to `millivolts` with the reserved bits kept, or the
+/// value unchanged when it already holds it or the target is invalid.
+constexpr uint8_t aldoVoltageWrite(uint8_t reg, int millivolts) {
+  return aldoVoltageCode(millivolts) == 0xFF
+             ? reg
+             : (uint8_t)((reg & (uint8_t)~ALDO_VOLTAGE_MASK) |
+                         aldoVoltageCode(millivolts));
+}
+
+/// REG 90H with the ALDOs in `mask` (bit 0 ALDO1 .. bit 3 ALDO4) switched
+/// on and every other bit kept; other LDOs share the register.
+constexpr uint8_t aldoEnableWrite(uint8_t reg90, uint8_t mask) {
+  return (uint8_t)(reg90 | (mask & ALDO_ONOFF_MASK));
+}
+
 // REG 41H (INTEN2) and REG 49H (INTSTS2): the PWR key's interrupts. Bit 2 is
 // a long press (held past REG 27H's IRQ time), bit 3 a short press, bit 1 the
 // key's negative edge and bit 0 its positive edge (XPowersLib

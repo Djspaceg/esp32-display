@@ -36,6 +36,7 @@
 #include "../libraries/espdisp_board/src/backlight_curve.h"
 #include "../libraries/espdisp_board/src/battery_estimate.h"
 #include "../libraries/espdisp_board/src/board_config.h"
+#include "../libraries/espdisp_board/src/ft6336_protocol.h"
 #include "../libraries/espdisp_board/src/gt911_protocol.h"
 #include "../libraries/espdisp_board/src/motion_orientation.h"
 #include "../libraries/espdisp_board/src/panel_transfer_plan.h"
@@ -2446,12 +2447,19 @@ int main() {
               (uint8_t)(0 + watch.orientationOffset), false),
           false);
       CHECK_EQ(upright, 2);
-      // An installation mirror flips MX, which carries no gap on a 240-wide
-      // memory, so only the row axis ever moves.
-      const panelorient::WindowGap mirrored = panelorient::windowGap(
-          240, 240, 240, 320, 0, 0, 0, true, true);
-      CHECK_EQ(mirrored.x, 0);
-      CHECK_EQ(mirrored.y, 0);
+      // An installation mirror reflects framebuffer X: MX in the even
+      // quadrants (no gap on a 240-wide memory), MY in the odd ones, where it
+      // moves the 80 to the quadrant whose MY it turned on.
+      const uint16_t mirroredX[4] = {0, 80, 0, 0};
+      const uint16_t mirroredY[4] = {0, 0, 80, 0};
+      for (uint8_t q = 0; q < 4; q++) {
+        const panelorient::WindowGap gap = panelorient::windowGap(
+            240, 240, 240, 320, 0, 0, q, true, true);
+        CHECK_EQ(gap.x, mirroredX[q]);
+        CHECK_EQ(gap.y, mirroredY[q]);
+        CHECK_EQ(gap.x, panelorient::mirrorY(q, true) && panelorient::swapXY(q)
+                            ? 80 : 0);
+      }
     }
 
     const panelorient::WindowGap centeredWindow[] = {
@@ -2914,24 +2922,24 @@ int main() {
     CHECK(s3Plan.probes[1].addresses[0] == 0x15);
     CHECK(s3Plan.probes[1].addresses[1] == 0x20);
     CHECK(!s3Plan.probes[1].quietAfterMatch);
+    CHECK(s3Plan.probes[2].sda == 15 && s3Plan.probes[2].scl == 14);
+    CHECK(s3Plan.probes[2].addresses[0] == 0x5A);
+    CHECK(s3Plan.probes[2].addresses[1] == 0x34);
+    CHECK(s3Plan.probes[2].addresses[2] == 0x6A);
+    CHECK(s3Plan.probes[2].addresses[3] == 0x6B);
+    CHECK(s3Plan.probes[2].quietAfterMatch);
     // The T-Watch-S3's always-powered main bus, SDA GPIO10 / SCL GPIO11 (the
-    // 1.85C's pins the other way round): AXP2101, BMA4xx, PCF8563. Ahead of
-    // the 1.75C's and the knob's quiet probes, so a watch that answers never
-    // has its GPIO14/15 pulled up or its GPIO1 pulsed.
-    CHECK(s3Plan.probes[2].sda == 10 && s3Plan.probes[2].scl == 11);
-    CHECK(s3Plan.probes[2].addressCount == 3);
-    CHECK(s3Plan.probes[2].addresses[0] == 0x34);
-    CHECK(s3Plan.probes[2].addresses[1] == 0x19);
-    CHECK(s3Plan.probes[2].addresses[2] == 0x51);
-    CHECK(s3Plan.probes[2].flashMinExclusive == 8u * 1024u * 1024u);
-    CHECK(s3Plan.probes[2].resetPin == -1);
-    CHECK(!s3Plan.probes[2].quietAfterMatch);
-    CHECK(s3Plan.probes[3].sda == 15 && s3Plan.probes[3].scl == 14);
-    CHECK(s3Plan.probes[3].addresses[0] == 0x5A);
-    CHECK(s3Plan.probes[3].addresses[1] == 0x34);
-    CHECK(s3Plan.probes[3].addresses[2] == 0x6A);
-    CHECK(s3Plan.probes[3].addresses[3] == 0x6B);
-    CHECK(s3Plan.probes[3].quietAfterMatch);
+    // 1.85C's pins the other way round): AXP2101, BMA4xx, PCF8563. After the
+    // 1.85C's and the 1.75C's own buses, which share its pins, and before the
+    // knob's rail-pulsing probe.
+    CHECK(s3Plan.probes[3].sda == 10 && s3Plan.probes[3].scl == 11);
+    CHECK(s3Plan.probes[3].addressCount == 3);
+    CHECK(s3Plan.probes[3].addresses[0] == 0x34);
+    CHECK(s3Plan.probes[3].addresses[1] == 0x19);
+    CHECK(s3Plan.probes[3].addresses[2] == 0x51);
+    CHECK(s3Plan.probes[3].flashMinExclusive == 8u * 1024u * 1024u);
+    CHECK(s3Plan.probes[3].resetPin == -1);
+    CHECK(!s3Plan.probes[3].quietAfterMatch);
     CHECK(s3Plan.probes[4].sda == 42 && s3Plan.probes[4].scl == 41);
     CHECK(s3Plan.probes[4].addresses[0] == 0x15);
     CHECK(s3Plan.probes[4].addresses[1] == 0x6A);
@@ -2992,7 +3000,7 @@ int main() {
         CHECK(boarddetectmodel::shouldRunProbe(s3Plan, i, seen));
       }
       CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 6, seen));
-      seen[3] = {ProbeStatus::Started, 0};
+      seen[2] = {ProbeStatus::Started, 0};
       seen[5] = {ProbeStatus::StartFailed, 0};
       CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 6, seen));
       seen[4] = {ProbeStatus::Started, 1};
@@ -3007,19 +3015,38 @@ int main() {
                 .variant == Variant::TouchSt7789);
     }
     {
-      // The watch's own bus answering quiets the two probes that would drive
-      // its other pins: the 1.75C's (GPIO15 is its I2S word clock, GPIO14 its
-      // IMU interrupt) and the knob's (GPIO1 is its radio MOSI).
+      // The watch as it boots: the 1.85C bus NACKs, the 1.75C's quiet probe
+      // is discarded (its SCL is the watch's IMU interrupt, held low), its own
+      // bus answers, and the knob's rail pulse on GPIO1 (the watch's radio
+      // MOSI) is then skipped.
       ProbeEvidence watch[7] = {};
       watch[1] = {ProbeStatus::Started, 0};
-      watch[2] = {ProbeStatus::Started, 3};
-      CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 3, watch));
+      watch[2] = {ProbeStatus::Discarded, 0};
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 3, watch));
+      watch[3] = {ProbeStatus::Started, 3};
       CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 6, watch));
       watch[4] = {ProbeStatus::Started, 0};
       watch[5] = {ProbeStatus::Started, 0};
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
                                       16u * 1024u * 1024u, watch, 7)
                 .variant == Variant::LilygoTwatchS3);
+      // A stray acknowledgement on the watch's pins of a 1.75C or a 1.85C,
+      // whose own buses run first and answer, is a second candidate: Unknown,
+      // never the watch's pin map on the wrong board.
+      ProbeEvidence amoled[7] = {};
+      amoled[1] = {ProbeStatus::Started, 0};
+      amoled[2] = {ProbeStatus::Started, 4};
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 3, amoled));
+      amoled[3] = {ProbeStatus::Started, 1};
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      16u * 1024u * 1024u, amoled, 7)
+                .variant == Variant::Unknown);
+      ProbeEvidence round185[7] = {};
+      round185[1] = {ProbeStatus::Started, 2};
+      round185[3] = {ProbeStatus::Started, 1};
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      16u * 1024u * 1024u, round185, 7)
+                .variant == Variant::Unknown);
       // The boot log the watch printed on 2.0.0: both quiet probes timed out
       // and were discarded, and with no probe of its own nothing matched.
       CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
@@ -3253,7 +3280,7 @@ int main() {
                                                        : AddressReply::Nack;
             });
         CHECK(busy[1].status == ProbeStatus::Started && busy[1].ackCount == 1);
-        CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 3, busy));
+        CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 2, busy));
         CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
                                         16u * 1024u * 1024u, busy, 7)
                   .variant == Variant::LcdSt77916);
@@ -3309,7 +3336,7 @@ int main() {
         board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::Unknown);
     s3Evidence[0] = {};
-    s3Evidence[3] = {ProbeStatus::Started, 1};
+    s3Evidence[2] = {ProbeStatus::Started, 1};
     detected = board::detectFromEvidence(
         board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::AmoledCo5300);
@@ -3596,11 +3623,11 @@ int main() {
 
     const auto &generatedS3Plan =
         board::detectionPlanForPlatform(board::Platform::Esp32S3);
-    CHECK(generatedS3Plan.probes[3].addressCount == 4);
-    CHECK(generatedS3Plan.probes[3].addresses[0] == 0x5A);
-    CHECK(generatedS3Plan.probes[3].addresses[1] == 0x34);
-    CHECK(generatedS3Plan.probes[3].addresses[2] == 0x6A);
-    CHECK(generatedS3Plan.probes[3].addresses[3] == 0x6B);
+    CHECK(generatedS3Plan.probes[2].addressCount == 4);
+    CHECK(generatedS3Plan.probes[2].addresses[0] == 0x5A);
+    CHECK(generatedS3Plan.probes[2].addresses[1] == 0x34);
+    CHECK(generatedS3Plan.probes[2].addresses[2] == 0x6A);
+    CHECK(generatedS3Plan.probes[2].addresses[3] == 0x6B);
     CHECK(generatedS3Plan.probes[1].addressCount == 2);
     CHECK(generatedS3Plan.probes[1].addresses[0] == 0x15);
     CHECK(generatedS3Plan.probes[1].addresses[1] == 0x20);
@@ -4150,6 +4177,27 @@ int main() {
     CHECK_EQ((int)axp2101::raisedInputLimit(0x04), 0x04);
     CHECK_EQ((int)axp2101::raisedInputLimit(0x05), 0x05);  // 2000 mA kept
     CHECK_EQ((int)axp2101::raisedInputLimit(0x07), 0x04);  // reserved -> 1500
+    // ALDO arithmetic for the T-Watch-S3's panel rails: LilyGO's 3300 mV is
+    // code 0x1C, the reserved bits 7:5 survive, an already-correct register
+    // is left alone, and nothing outside 500-3500 mV in 100 mV steps is ever
+    // written.
+    CHECK_EQ((int)axp2101::aldoVoltageCode(3300), 0x1C);
+    CHECK_EQ((int)axp2101::aldoVoltageCode(500), 0x00);
+    CHECK_EQ((int)axp2101::aldoVoltageCode(3500), 0x1E);
+    CHECK_EQ((int)axp2101::aldoVoltageCode(3600), 0xFF);
+    CHECK_EQ((int)axp2101::aldoVoltageCode(3350), 0xFF);
+    CHECK_EQ((int)axp2101::aldoVoltageCode(400), 0xFF);
+    CHECK_EQ(axp2101::aldoMillivolts(0x1C), 3300);
+    CHECK_EQ(axp2101::aldoMillivolts(0xFC), 3300);
+    CHECK_EQ((int)axp2101::aldoVoltageWrite(0x0D, 3300), 0x1C);
+    CHECK_EQ((int)axp2101::aldoVoltageWrite(0xA0, 3300), 0xBC);
+    CHECK_EQ((int)axp2101::aldoVoltageWrite(0x1C, 3300), 0x1C);
+    CHECK_EQ((int)axp2101::aldoVoltageWrite(0x0D, 3900), 0x0D);
+    // 90H: the ALDO bits are switched on and every other LDO bit kept. The
+    // watch read 0x3E (ALDO2-4, BLDO1, BLDO2 on) and needs nothing written.
+    CHECK_EQ((int)axp2101::aldoEnableWrite(0x30, 0x06), 0x36);
+    CHECK_EQ((int)axp2101::aldoEnableWrite(0x3E, 0x06), 0x3E);
+    CHECK_EQ((int)axp2101::aldoEnableWrite(0x80, 0xF6), 0x86);
     // The T-Watch-S3 asks for LilyGO's 900 mA: raised from 100 or 500 mA,
     // never lowered from above it, never raised past it.
     CHECK_EQ((int)axp2101::raisedInputLimit(0x00, 900), 0x02);
@@ -6953,6 +7001,52 @@ int main() {
                                    x, y, points));
     CHECK(!gt911proto::parseReport(0x81, point, 4, pressed,
                                    x, y, points));
+  }
+
+  // --- FT6336U report contract (LilyGO T-Watch-S3) ------------------------
+  {
+    CHECK(ft6336proto::ADDRESS == 0x38);
+    CHECK(ft6336proto::REGISTER_STATUS == 0x02);
+    CHECK(ft6336proto::REGISTER_INT_MODE == 0xA4);
+    CHECK(ft6336proto::INT_TRIGGER == 0x01);
+    bool pressed = false;
+    uint16_t x = 0, y = 0;
+    uint8_t points = 0;
+    // One point, event "contact" (2) in XH 7:6: X 0x0EF = 239, Y 0x000 = 0,
+    // the top bits of each high byte masked off (YH 7:4 is the touch ID).
+    const uint8_t contact[5] = {0x01, 0x80, 0xEF, 0x30, 0x00};
+    CHECK(ft6336proto::parseReport(contact, sizeof(contact), pressed, x, y,
+                                   points));
+    CHECK(pressed && points == 1 && x == 239 && y == 0);
+    // Press down (0) with a 12-bit coordinate.
+    const uint8_t down[5] = {0x01, 0x01, 0x23, 0x02, 0x45};
+    CHECK(ft6336proto::parseReport(down, sizeof(down), pressed, x, y, points));
+    CHECK(pressed && x == 0x123 && y == 0x245);
+    // Lift up (1) and no event (3) are releases even with a count of one, so
+    // a lift reported in the same frame as its point ends the press at once.
+    const uint8_t lift[5] = {0x01, 0x40, 0x10, 0x00, 0x10};
+    CHECK(ft6336proto::parseReport(lift, sizeof(lift), pressed, x, y, points));
+    CHECK(!pressed && points == 0);
+    pressed = true;
+    const uint8_t none[5] = {0x01, 0xC0, 0x10, 0x00, 0x10};
+    CHECK(ft6336proto::parseReport(none, sizeof(none), pressed, x, y, points));
+    CHECK(!pressed);
+    // No points, and the idle 0x0F a settling controller can read, release.
+    pressed = true;
+    const uint8_t empty[5] = {0x00, 0x80, 0x10, 0x00, 0x10};
+    CHECK(ft6336proto::parseReport(empty, sizeof(empty), pressed, x, y, points));
+    CHECK(!pressed);
+    pressed = true;
+    const uint8_t idle[5] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    CHECK(ft6336proto::parseReport(idle, sizeof(idle), pressed, x, y, points));
+    CHECK(!pressed);
+    // Two fingers still report the first.
+    const uint8_t two[5] = {0x02, 0x80, 0x05, 0x00, 0x06};
+    CHECK(ft6336proto::parseReport(two, sizeof(two), pressed, x, y, points));
+    CHECK(pressed && points == 2 && x == 5 && y == 6);
+    // A short read or no buffer is no report at all.
+    CHECK(!ft6336proto::parseReport(contact, 4, pressed, x, y, points));
+    CHECK(!ft6336proto::parseReport(nullptr, 5, pressed, x, y, points));
   }
 
   // --- Doom runtime geometry and board-neutral touch policy --------------

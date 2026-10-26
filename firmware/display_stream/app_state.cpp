@@ -30,7 +30,7 @@ bool wifiLegacyMirrorPending = false;
 // resolving a hardcoded hostname. Default is unique per board
 // (espdisplay-XXXX from the MAC); changeable via CFGNAME over USB.
 String cfgName;
-const char *FW_VERSION = "2.0.0";
+const char *FW_VERSION = "2.1.0";
 // Which build of FW_VERSION this is: "<40 hex>" or "<40 hex>-dirty". FW_VERSION
 // only moves at a release, so without this every image built between two
 // releases reports the same thing. Reported as CFGINFO src= and mDNS TXT src,
